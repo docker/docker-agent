@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/openai/openai-go/v3"
+
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -79,6 +81,14 @@ func (r *LocalRuntime) handleStream(ctx context.Context, stream chat.MessageStre
 			break
 		}
 		if err != nil {
+			var apiErr *openai.Error
+			if errors.As(err, &apiErr) {
+				slog.Debug("Stream API error details",
+					"agent", a.Name(),
+					"status_code", apiErr.StatusCode,
+					"response_body", string(apiErr.DumpResponse(true)),
+				)
+			}
 			return streamResult{Stopped: true}, fmt.Errorf("error receiving from stream: %w", err)
 		}
 

@@ -237,6 +237,7 @@ func TestCustomProvider_WithoutTokenKey(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	// SDK sends "Bearer" with empty key - that's effectively no auth
-	assert.Equal(t, "Bearer", receivedAuth, "Should send empty bearer token when no token_key")
+	// When no token_key is set, our middleware strips the Authorization header
+	// to prevent empty Bearer tokens from being sent to custom providers
+	assert.Equal(t, "", receivedAuth, "Should strip Authorization header when no token_key")
 }
