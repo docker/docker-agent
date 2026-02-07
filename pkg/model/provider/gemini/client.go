@@ -98,6 +98,50 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			httpClient = httpclient.NewHTTPClient()
 		}
 
+		// Expand environment variables in base URL (e.g., ${VAR_NAME})
+		baseURL := cfg.BaseURL
+		if baseURL != "" {
+			expanded, err := environment.Expand(ctx, baseURL, env)
+			if err != nil {
+				return nil, fmt.Errorf("expanding base_url: %w", err)
+			}
+			baseURL = expanded
+		}
+
+		// Build custom headers from provider config
+		httpHeaders := make(http.Header)
+		if cfg.ProviderOpts != nil {
+			if headers, exists := cfg.ProviderOpts["headers"]; exists {
+				headersMap := make(map[string]string)
+
+				switch h := headers.(type) {
+				case map[string]string:
+					headersMap = h
+				case map[interface{}]interface{}:
+					for k, v := range h {
+						keyStr, okKey := k.(string)
+						valStr, okVal := v.(string)
+						if !okKey || !okVal {
+							return nil, fmt.Errorf("invalid header key/value type: key=%T, value=%T", k, v)
+						}
+						headersMap[keyStr] = valStr
+					}
+				default:
+					return nil, fmt.Errorf("invalid headers configuration: expected map[string]string, got %T", headers)
+				}
+
+				for key, value := range headersMap {
+					expandedValue, err := environment.Expand(ctx, value, env)
+					if err != nil {
+						return nil, fmt.Errorf("expanding header %q: %w", key, err)
+					}
+					httpHeaders.Set(key, expandedValue)
+					slog.Debug("Applied custom header", "header", key, "provider", cfg.Provider)
+				}
+				slog.Debug("Applying custom headers", "count", len(headersMap), "provider", cfg.Provider)
+			}
+		}
+
 		client, err := genai.NewClient(ctx, &genai.ClientConfig{
 			APIKey:     apiKey,
 			Project:    project,
@@ -105,7 +149,8 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			Backend:    backend,
 			HTTPClient: httpClient,
 			HTTPOptions: genai.HTTPOptions{
-				BaseURL: cfg.BaseURL,
+				BaseURL: baseURL,
+				Headers: httpHeaders,
 			},
 		})
 		if err != nil {

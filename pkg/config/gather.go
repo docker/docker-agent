@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -120,6 +121,36 @@ func addEnvVarsForModelConfig(model *latest.ModelConfig, customProviders map[str
 					requiredEnv["GOOGLE_API_KEY"] = true
 				}
 			}
+		}
+	}
+
+	// Gather env vars from headers (model-level and provider-level)
+	gatherEnvVarsFromHeaders(model.Headers, requiredEnv)
+	if customProviders != nil {
+		if provCfg, exists := customProviders[model.Provider]; exists {
+			gatherEnvVarsFromHeaders(provCfg.Headers, requiredEnv)
+			gatherEnvVarsFromString(provCfg.BaseURL, requiredEnv)
+		}
+	}
+}
+
+// envVarPattern matches ${VAR} and $VAR references in strings.
+var envVarPattern = regexp.MustCompile(`\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// gatherEnvVarsFromHeaders extracts environment variable names referenced in header values.
+func gatherEnvVarsFromHeaders(headers map[string]string, requiredEnv map[string]bool) {
+	for _, value := range headers {
+		gatherEnvVarsFromString(value, requiredEnv)
+	}
+}
+
+// gatherEnvVarsFromString extracts environment variable names from a string containing $VAR or ${VAR}.
+func gatherEnvVarsFromString(s string, requiredEnv map[string]bool) {
+	for _, match := range envVarPattern.FindAllStringSubmatch(s, -1) {
+		if match[1] != "" {
+			requiredEnv[match[1]] = true
+		} else if match[2] != "" {
+			requiredEnv[match[2]] = true
 		}
 	}
 }

@@ -153,8 +153,43 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			option.WithHTTPClient(httpclient.NewHTTPClient()),
 		}
 		if cfg.BaseURL != "" {
-			requestOptions = append(requestOptions, option.WithBaseURL(cfg.BaseURL))
+			expandedBaseURL, err := environment.Expand(ctx, cfg.BaseURL, env)
+			if err != nil {
+				return nil, fmt.Errorf("expanding base_url: %w", err)
+			}
+			requestOptions = append(requestOptions, option.WithBaseURL(expandedBaseURL))
 		}
+
+		// Apply custom headers from provider config if present
+		if cfg.ProviderOpts != nil {
+			if headers, exists := cfg.ProviderOpts["headers"]; exists {
+				headersMap := make(map[string]string)
+				switch h := headers.(type) {
+				case map[string]string:
+					headersMap = h
+				case map[interface{}]interface{}:
+					for k, v := range h {
+						keyStr, okKey := k.(string)
+						valStr, okVal := v.(string)
+						if !okKey || !okVal {
+							return nil, fmt.Errorf("invalid header key/value type: key=%T, value=%T", k, v)
+						}
+						headersMap[keyStr] = valStr
+					}
+				default:
+					return nil, fmt.Errorf("invalid headers configuration: expected map[string]string, got %T", headers)
+				}
+				for key, value := range headersMap {
+					expandedValue, err := environment.Expand(ctx, value, env)
+					if err != nil {
+						return nil, fmt.Errorf("expanding header %s: %w", key, err)
+					}
+					requestOptions = append(requestOptions, option.WithHeader(key, expandedValue))
+					slog.Debug("Applied custom header", "header", key, "provider", cfg.Provider)
+				}
+			}
+		}
+
 		client := anthropic.NewClient(requestOptions...)
 		anthropicClient.clientFn = func(context.Context) (anthropic.Client, error) {
 			return client, nil

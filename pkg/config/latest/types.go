@@ -395,6 +395,9 @@ type ModelConfig struct {
 	BaseURL           string   `json:"base_url,omitempty"`
 	ParallelToolCalls *bool    `json:"parallel_tool_calls,omitempty"`
 	TokenKey          string   `json:"token_key,omitempty"`
+	// Headers allows custom HTTP headers to be included in requests to this model's provider.
+	// Header values can reference environment variables using ${VAR_NAME} syntax.
+	Headers map[string]string `json:"headers,omitempty"`
 	// ProviderOpts allows provider-specific options.
 	ProviderOpts map[string]any `json:"provider_opts,omitempty"`
 	TrackUsage   *bool          `json:"track_usage,omitempty"`
