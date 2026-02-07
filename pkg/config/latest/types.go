@@ -135,6 +135,9 @@ type ProviderConfig struct {
 	BaseURL string `json:"base_url"`
 	// TokenKey is the environment variable name containing the API token
 	TokenKey string `json:"token_key,omitempty"`
+	// Headers allows custom HTTP headers to be included in requests.
+	// Header values can reference environment variables using ${VAR_NAME} syntax.
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // FallbackConfig represents fallback model configuration for an agent.

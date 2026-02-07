@@ -6,45 +6,31 @@
 
 # Define custom providers with reusable configuration
 providers:
-  # Example: A custom OpenAI Chat Completions compatible API gateway
-  my_gateway:
-    api_type: openai_chatcompletions  # Use the Chat Completions API schema
-    base_url: https://api.example.com/
-    token_key: API_KEY_ENV_VAR_NAME  # Environment variable containing the API token
 
-  # Example: A custom OpenAI Responses compatible API gateway
-  responses_provider:
-    api_type: openai_responses
-    base_url: https://responses.example.com/
-    token_key: API_KEY_ENV_VAR_NAME
+  # Example: Cloudflare AI Gateway with custom headers
+  cloudflare_gateway:
+    api_type: openai_chatcompletions
+    base_url: https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/compat
+    token_key: GOOGLE_API_KEY  # Standard Authorization header for provider auth
+    headers:
+      # Custom header for gateway authentication with environment variable expansion
+      cf-aig-authorization: Bearer ${CLOUDFLARE_AI_GATEWAY_TOKEN}
 
 # Define models that use the custom providers
 models:
-  # Model using the custom gateway provider
-  gateway_gpt4o:
-    provider: my_gateway
-    model: gpt-4o
-    max_tokens: 32768
-    temperature: 0.7
 
-  # Model using the responses provider
-  responses_model:
-    provider: responses_provider
-    model: gpt-5
-    max_tokens: 16000
+  # Model using Cloudflare AI Gateway with custom headers
+  gemini_via_cloudflare:
+    provider: cloudflare_gateway
+    model: google-ai-studio/gemini-3-flash-preview
+    max_tokens: 8000
+    temperature: 0.7
 
 # Define agents that use the models
 agents:
   root:
-    model: responses_model
+    model: gemini_via_cloudflare
     description: Main assistant using the custom gateway
     instruction: |
       You are a helpful AI assistant. Be concise and helpful in your responses.
 
-  # Example using shorthand syntax: provider_name/model_name
-  # The provider defaults (base_url, token_key, api_type) are automatically applied
-  subagent:
-    model: my_gateway/gpt-4o-mini
-    description: Sub-agent for specialized tasks
-    instruction: |
-      You are a specialized assistant for specific tasks.

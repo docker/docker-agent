@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -58,11 +59,23 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 				return nil, fmt.Errorf("%s environment variable is required", cfg.TokenKey)
 			}
 			clientOptions = append(clientOptions, option.WithAPIKey(authToken))
-		} else if isCustomProvider(cfg) {
-			// Custom provider (has api_type in ProviderOpts) without token_key - no auth
-			slog.Debug("Custom provider with no token_key, sending requests without authentication",
+		} else if !isCustomProvider(cfg) {
+			// Not a custom provider - use default OpenAI behavior (OPENAI_API_KEY from env)
+			// The OpenAI SDK will automatically look for OPENAI_API_KEY if no key is set
+		} else {
+			// Custom provider without token_key - prevent SDK from using OPENAI_API_KEY env var
+			// We need to explicitly set the API key to prevent the SDK from reading OPENAI_API_KEY
+			// but we don't want to send an Authorization header. The SDK doesn't send the header
+			// if we use option.WithAPIKey with a specific marker value and then remove it via middleware.
+			slog.Debug("Custom provider with no token_key, disabling OpenAI SDK authentication",
 				"provider", cfg.Provider, "base_url", cfg.BaseURL)
-			clientOptions = append(clientOptions, option.WithAPIKey(""))
+
+			// Use a custom HTTP client that removes the Authorization header
+			clientOptions = append(clientOptions, option.WithMiddleware(func(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+				// Remove Authorization header for custom providers without token_key
+				req.Header.Del("Authorization")
+				return next(req)
+			}))
 		}
 		// Otherwise let the OpenAI SDK use its default behavior (OPENAI_API_KEY from env)
 
@@ -83,6 +96,60 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			}
 		} else if cfg.BaseURL != "" {
 			clientOptions = append(clientOptions, option.WithBaseURL(cfg.BaseURL))
+		}
+
+
+		// Apply custom headers from provider config if present
+		if cfg.ProviderOpts != nil {
+			if headers, exists := cfg.ProviderOpts["headers"]; exists {
+				// Handle both map[string]string and map[interface{}]interface{} from YAML parsing
+				headersMap := make(map[string]string)
+
+				switch h := headers.(type) {
+				case map[string]string:
+					// Direct map[string]string - use as-is
+					headersMap = h
+				case map[interface{}]interface{}:
+					// YAML parsed as map[interface{}]interface{} - convert
+					for k, v := range h {
+						keyStr, okKey := k.(string)
+						valStr, okVal := v.(string)
+						if !okKey || !okVal {
+							slog.Error("Invalid header key/value type",
+								"key_type", fmt.Sprintf("%T", k),
+								"value_type", fmt.Sprintf("%T", v),
+								"provider", cfg.Provider)
+							return nil, fmt.Errorf("invalid header key/value type: key=%T, value=%T", k, v)
+						}
+						headersMap[keyStr] = valStr
+					}
+				default:
+					slog.Error("Invalid headers configuration - expected map[string]string or map[interface{}]interface{}",
+						"type", fmt.Sprintf("%T", headers),
+						"provider", cfg.Provider)
+					return nil, fmt.Errorf("invalid headers configuration: expected map[string]string, got %T", headers)
+				}
+
+				if len(headersMap) > 0 {
+					slog.Debug("Applying custom headers", "count", len(headersMap), "provider", cfg.Provider)
+					for key, value := range headersMap {
+						// Expand environment variables in header values (e.g., ${VAR_NAME})
+						expandedValue, err := environment.Expand(ctx, value, env)
+						if err != nil {
+							slog.Error("Failed to expand environment variable in header",
+								"header", key,
+								"value", value,
+								"error", err,
+								"provider", cfg.Provider)
+							return nil, fmt.Errorf("expanding header %s: %w", key, err)
+						}
+						clientOptions = append(clientOptions, option.WithHeader(key, expandedValue))
+						slog.Debug("Applied custom header",
+							"header", key,
+							"provider", cfg.Provider)
+					}
+				}
+			}
 		}
 
 		httpClient := httpclient.NewHTTPClient()

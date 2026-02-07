@@ -334,6 +334,13 @@ func applyProviderDefaults(cfg *latest.ModelConfig, customProviders map[string]l
 				enhancedCfg.ProviderOpts["api_type"] = apiType
 			}
 
+			// Copy custom headers from provider config if not already set
+			if _, hasHeaders := enhancedCfg.ProviderOpts["headers"]; !hasHeaders {
+				if len(providerCfg.Headers) > 0 {
+					enhancedCfg.ProviderOpts["headers"] = providerCfg.Headers
+				}
+			}
+
 			applyModelDefaults(&enhancedCfg)
 			return &enhancedCfg
 		}

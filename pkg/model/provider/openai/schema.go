@@ -144,3 +144,58 @@ func fixSchemaArrayItems(schema shared.FunctionParameters) shared.FunctionParame
 
 	return schema
 }
+
+// normalizeUnionTypes converts union types like ["array", "null"] back to simple types
+// for compatibility with AI gateways that don't support JSON Schema union types.
+// This is needed for Cloudflare AI Gateway and similar proxies.
+func normalizeUnionTypes(schema shared.FunctionParameters) shared.FunctionParameters {
+	if schema == nil {
+		return schema
+	}
+
+	// Convert union types at the current level
+	if typeArray, ok := schema["type"].([]any); ok {
+		if len(typeArray) == 2 {
+			// Find the non-null type
+			for _, t := range typeArray {
+				if tStr, ok := t.(string); ok && tStr != "null" {
+					schema["type"] = tStr
+					break
+				}
+			}
+		}
+	} else if typeArray, ok := schema["type"].([]string); ok {
+		if len(typeArray) == 2 {
+			// Find the non-null type
+			for _, t := range typeArray {
+				if t != "null" {
+					schema["type"] = t
+					break
+				}
+			}
+		}
+	}
+
+	// Recursively handle properties
+	if propertiesValue, ok := schema["properties"]; ok {
+		if properties, ok := propertiesValue.(map[string]any); ok {
+			for _, propValue := range properties {
+				if prop, ok := propValue.(map[string]any); ok {
+					normalizeUnionTypes(prop)
+				}
+			}
+		}
+	}
+
+	// Recursively handle items (for arrays)
+	if items, ok := schema["items"].(map[string]any); ok {
+		normalizeUnionTypes(items)
+	}
+
+	// Recursively handle additionalProperties
+	if addProps, ok := schema["additionalProperties"].(map[string]any); ok {
+		normalizeUnionTypes(addProps)
+	}
+
+	return schema
+}
