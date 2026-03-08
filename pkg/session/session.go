@@ -14,16 +14,6 @@ import (
 	"github.com/docker/cagent/pkg/tools"
 )
 
-const (
-	// MaxToolCallTokens is the maximum number of tokens to keep from tool call
-	// arguments and results. Older tool calls beyond this budget will have their
-	// content replaced with a placeholder. Tokens are approximated as len/4.
-	MaxToolCallTokens = 40000
-
-	// toolContentPlaceholder is the text used to replace truncated tool content
-	toolContentPlaceholder = "[content truncated]"
-)
-
 // Item represents either a message or a sub-session
 type Item struct {
 	// Message holds a regular conversation message
@@ -769,8 +759,6 @@ func (s *Session) GetMessages(a *agent.Agent) []chat.Message {
 		messages = trimMessages(messages, maxItems)
 	}
 
-	messages = truncateOldToolContent(messages, MaxToolCallTokens)
-
 	systemCount := 0
 	conversationCount := 0
 	for i := range messages {
@@ -861,37 +849,6 @@ func trimMessages(messages []chat.Message, maxItems int) []chat.Message {
 		}
 
 		result = append(result, msg)
-	}
-
-	return result
-}
-
-// truncateOldToolContent replaces tool results with placeholders for older
-// messages that exceed the token budget. It processes messages from newest to
-// oldest, keeping recent tool content intact while truncating older content
-// once the budget is exhausted.
-func truncateOldToolContent(messages []chat.Message, maxTokens int) []chat.Message {
-	if len(messages) == 0 || maxTokens <= 0 {
-		return messages
-	}
-
-	result := make([]chat.Message, len(messages))
-	copy(result, messages)
-
-	tokenBudget := maxTokens
-
-	for i := len(result) - 1; i >= 0; i-- {
-		msg := &result[i]
-
-		if msg.Role == chat.MessageRoleTool {
-			tokens := len(msg.Content) / 4
-			if tokenBudget >= tokens {
-				tokenBudget -= tokens
-			} else {
-				msg.Content = toolContentPlaceholder
-				tokenBudget = 0
-			}
-		}
 	}
 
 	return result

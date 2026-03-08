@@ -480,20 +480,31 @@ func convertMessagesToResponseInput(messages []chat.Message) []responses.Respons
 					},
 				}
 			} else {
-				// Assistant message with tool calls - convert to response input item with function calls
+				// Preserve assistant text content as a separate message so the
+				// model retains conversational context across tool-call rounds.
+				if strings.TrimSpace(msg.Content) != "" {
+					input = append(input, responses.ResponseInputItemUnionParam{
+						OfMessage: &responses.EasyInputMessageParam{
+							Role: responses.EasyInputMessageRoleAssistant,
+							Content: responses.EasyInputMessageContentUnionParam{
+								OfString: param.NewOpt(msg.Content),
+							},
+						},
+					})
+				}
+
 				for _, toolCall := range msg.ToolCalls {
 					if toolCall.Type == "function" {
-						funcCallItem := responses.ResponseInputItemUnionParam{
+						input = append(input, responses.ResponseInputItemUnionParam{
 							OfFunctionCall: &responses.ResponseFunctionToolCallParam{
 								CallID:    toolCall.ID,
 								Name:      toolCall.Function.Name,
 								Arguments: toolCall.Function.Arguments,
 							},
-						}
-						input = append(input, funcCallItem)
+						})
 					}
 				}
-				continue // Don't add the assistant message itself
+				continue
 			}
 
 		case chat.MessageRoleSystem:

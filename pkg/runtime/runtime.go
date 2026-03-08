@@ -1145,7 +1145,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 
 			if m != nil && r.sessionCompaction {
 				contextLength := sess.InputTokens + sess.OutputTokens
-				if contextLength > int64(float64(contextLimit)*0.9) {
+				if contextLength > int64(float64(contextLimit)*0.8) {
 					r.Summarize(ctx, sess, "", events)
 				}
 			}
