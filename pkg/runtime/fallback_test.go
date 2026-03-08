@@ -202,6 +202,21 @@ func TestIsRetryableModelError(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "context overflow - prompt too long",
+			err:      errors.New("prompt is too long: 226360 tokens > 200000 maximum"),
+			expected: false, // Context overflow should not be retried
+		},
+		{
+			name:     "context overflow - thinking budget",
+			err:      errors.New("max_tokens must be greater than thinking.budget_tokens"),
+			expected: false, // Context overflow should not be retried
+		},
+		{
+			name:     "context overflow - wrapped",
+			err:      &ContextOverflowError{Underlying: errors.New("test")},
+			expected: false, // Context overflow should not be retried
+		},
+		{
 			name:     "unknown error",
 			err:      errors.New("something weird happened"),
 			expected: false,
@@ -901,6 +916,113 @@ func TestFallbackModelsClonedWithThinkingEnabled(t *testing.T) {
 		assert.True(t, gotContent, "should receive content from fallback")
 		assert.GreaterOrEqual(t, fallback.baseConfigCalls, 1,
 			"BaseConfig() should be called on fallback provider when thinking is enabled")
+	})
+}
+
+func TestIsContextOverflowError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		{name: "nil error", err: nil, expected: false},
+		{name: "generic error", err: errors.New("something went wrong"), expected: false},
+		{name: "anthropic prompt too long", err: errors.New(`prompt is too long: 226360 tokens > 200000 maximum`), expected: true},
+		{name: "openai context length exceeded", err: errors.New(`maximum context length is 128000 tokens`), expected: true},
+		{name: "context_length_exceeded code", err: errors.New(`error code: context_length_exceeded`), expected: true},
+		{name: "thinking budget error", err: errors.New(`max_tokens must be greater than thinking.budget_tokens`), expected: true},
+		{name: "request too large", err: errors.New(`request too large for model`), expected: true},
+		{name: "input is too long", err: errors.New(`input is too long`), expected: true},
+		{name: "reduce your prompt", err: errors.New(`please reduce your prompt`), expected: true},
+		{name: "reduce the length", err: errors.New(`please reduce the length of the messages`), expected: true},
+		{name: "token limit", err: errors.New(`token limit exceeded`), expected: true},
+		{name: "wrapped ContextOverflowError", err: &ContextOverflowError{Underlying: errors.New("test")}, expected: true},
+		{name: "errors.As wrapped", err: fmt.Errorf("all models failed: %w", &ContextOverflowError{Underlying: errors.New("test")}), expected: true},
+		{name: "500 internal server error (not overflow)", err: errors.New(`500 Internal Server Error`), expected: false},
+		{name: "429 rate limit (not overflow)", err: errors.New(`429 too many requests`), expected: false},
+		{name: "network timeout (not overflow)", err: errors.New(`connection timeout`), expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := isContextOverflowError(tt.err)
+			assert.Equal(t, tt.expected, result, "isContextOverflowError(%v)", tt.err)
+		})
+	}
+}
+
+func TestContextOverflowError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("wraps underlying error", func(t *testing.T) {
+		t.Parallel()
+		underlying := errors.New("prompt is too long: 226360 tokens > 200000 maximum")
+		ctxErr := &ContextOverflowError{Underlying: underlying}
+
+		assert.Contains(t, ctxErr.Error(), "context window overflow")
+		assert.Contains(t, ctxErr.Error(), "prompt is too long")
+		assert.ErrorIs(t, ctxErr, underlying)
+	})
+
+	t.Run("errors.As works", func(t *testing.T) {
+		t.Parallel()
+		underlying := errors.New("test error")
+		wrapped := fmt.Errorf("all models failed: %w", &ContextOverflowError{Underlying: underlying})
+
+		var ctxErr *ContextOverflowError
+		assert.ErrorAs(t, wrapped, &ctxErr)
+	})
+}
+
+func TestIsRetryableModelError_ContextOverflow(t *testing.T) {
+	t.Parallel()
+
+	// Context overflow errors should NOT be retryable — the context hasn't changed,
+	// so retrying the same oversized payload will always fail.
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "prompt too long", err: errors.New(`prompt is too long: 226360 tokens > 200000 maximum`)},
+		{name: "thinking budget cascade", err: errors.New(`max_tokens must be greater than thinking.budget_tokens`)},
+		{name: "context length exceeded", err: errors.New(`maximum context length is 128000 tokens`)},
+		{name: "wrapped ContextOverflowError", err: &ContextOverflowError{Underlying: errors.New("test")}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.False(t, isRetryableModelError(tt.err),
+				"context overflow errors should not be retryable: %v", tt.err)
+		})
+	}
+}
+
+func TestFormatModelError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil error", func(t *testing.T) {
+		t.Parallel()
+		assert.Empty(t, formatModelError(nil))
+	})
+
+	t.Run("context overflow shows user-friendly message", func(t *testing.T) {
+		t.Parallel()
+		err := &ContextOverflowError{Underlying: errors.New("prompt is too long")}
+		msg := formatModelError(err)
+		assert.Contains(t, msg, "context window")
+		assert.Contains(t, msg, "/compact")
+		assert.NotContains(t, msg, "prompt is too long")
+	})
+
+	t.Run("generic error preserves message", func(t *testing.T) {
+		t.Parallel()
+		err := errors.New("authentication failed")
+		msg := formatModelError(err)
+		assert.Equal(t, "authentication failed", msg)
 	})
 }
 

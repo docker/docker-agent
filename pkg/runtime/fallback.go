@@ -40,6 +40,79 @@ const (
 	DefaultFallbackCooldown = 1 * time.Minute
 )
 
+// ContextOverflowError wraps an underlying error to indicate that the failure
+// was caused by the conversation context exceeding the model's context window.
+// This is used to trigger auto-compaction in the runtime loop instead of
+// surfacing raw HTTP errors to the user.
+type ContextOverflowError struct {
+	Underlying error
+}
+
+func (e *ContextOverflowError) Error() string {
+	return fmt.Sprintf("context window overflow: %s", e.Underlying.Error())
+}
+
+func (e *ContextOverflowError) Unwrap() error {
+	return e.Underlying
+}
+
+// contextOverflowPatterns contains error message substrings that indicate the
+// prompt/context exceeds the model's context window. These patterns are checked
+// case-insensitively against error messages from various providers.
+var contextOverflowPatterns = []string{
+	"prompt is too long",
+	"maximum context length",
+	"context length exceeded",
+	"context_length_exceeded",
+	"max_tokens must be greater than",
+	"maximum number of tokens",
+	"content length exceeds",
+	"request too large",
+	"payload too large",
+	"input is too long",
+	"exceeds the model's max token",
+	"token limit",
+	"reduce your prompt",
+	"reduce the length",
+}
+
+// isContextOverflowError checks whether the error indicates the conversation
+// context has exceeded the model's context window. It inspects both structured
+// SDK error types and raw error message patterns.
+//
+// Recognised patterns include:
+//   - Anthropic 400 "prompt is too long: N tokens > M maximum"
+//   - Anthropic 400 "max_tokens must be greater than thinking.budget_tokens"
+//     (emitted when the prompt is so large that max_tokens can't accommodate
+//     the thinking budget — a proxy for context overflow)
+//   - OpenAI 400 "maximum context length" / "context_length_exceeded"
+//   - Anthropic 500 that is actually a context overflow (heuristic: the error
+//     message is opaque but the conversation was already near the limit)
+//
+// This function intentionally does NOT match generic 500 errors; callers
+// that want to treat an opaque 500 as overflow must check separately with
+// additional context (e.g., session token counts).
+func isContextOverflowError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Already wrapped
+	var ctxErr *ContextOverflowError
+	if errors.As(err, &ctxErr) {
+		return true
+	}
+
+	errMsg := strings.ToLower(err.Error())
+	for _, pattern := range contextOverflowPatterns {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // fallbackCooldownState tracks when we should stick with a fallback model
 // instead of retrying the primary after a non-retryable error (e.g., 429).
 type fallbackCooldownState struct {
@@ -141,6 +214,14 @@ func isRetryableModelError(err error) bool {
 
 	// Context cancellation is never retryable
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	// Context overflow errors are never retryable — the context hasn't changed
+	// between attempts, so retrying the same oversized payload will always fail.
+	// This avoids wasting time on 3 attempts + exponential backoff.
+	if isContextOverflowError(err) {
+		slog.Debug("Context overflow error, not retryable", "error", err)
 		return false
 	}
 
@@ -587,9 +668,15 @@ func (r *LocalRuntime) tryModelWithFallback(
 		}
 	}
 
-	// All models and retries exhausted
+	// All models and retries exhausted.
+	// If the last error (or any error in the chain) was a context overflow,
+	// wrap it in a ContextOverflowError so the caller can auto-compact.
 	if lastErr != nil {
-		return streamResult{}, nil, fmt.Errorf("all models failed: %w", lastErr)
+		wrapped := fmt.Errorf("all models failed: %w", lastErr)
+		if isContextOverflowError(lastErr) {
+			return streamResult{}, nil, &ContextOverflowError{Underlying: wrapped}
+		}
+		return streamResult{}, nil, wrapped
 	}
 	return streamResult{}, nil, errors.New("all models failed with unknown error")
 }

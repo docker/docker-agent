@@ -1169,12 +1169,38 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 					streamSpan.End()
 					return
 				}
+
+				// Auto-recovery: if the error is a context overflow and
+				// session compaction is enabled, compact the conversation
+				// and retry the request instead of surfacing raw errors.
+				var ctxOverflow *ContextOverflowError
+				if errors.As(err, &ctxOverflow) && r.sessionCompaction {
+					slog.Warn("Context window overflow detected, attempting auto-compaction",
+						"agent", a.Name(),
+						"session_id", sess.ID,
+						"input_tokens", sess.InputTokens,
+						"output_tokens", sess.OutputTokens,
+						"context_limit", contextLimit,
+					)
+					events <- Warning(
+						"The conversation has exceeded the model's context window. Automatically compacting the conversation history...",
+						r.CurrentAgentName(),
+					)
+					r.Summarize(ctx, sess, "", events)
+
+					// After compaction, loop back to retry with the
+					// compacted context. The next iteration will re-fetch
+					// messages from the (now compacted) session.
+					streamSpan.End()
+					continue
+				}
+
 				streamSpan.RecordError(err)
 				streamSpan.SetStatus(codes.Error, "error handling stream")
 				slog.Error("All models failed", "agent", a.Name(), "error", err)
 				// Track error in telemetry
 				telemetry.RecordError(ctx, err.Error())
-				events <- Error(err.Error())
+				events <- Error(formatModelError(err))
 				streamSpan.End()
 				return
 			}
@@ -1258,11 +1284,42 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 			usage.LastMessage = msgUsage
 			events <- NewTokenUsageEvent(sess.ID, r.CurrentAgentName(), usage)
 
+			// Record the message count before tool calls so we can
+			// measure how much content was added by tool results.
+			messageCountBeforeTools := len(sess.GetAllMessages())
+
 			r.processToolCalls(ctx, sess, res.Calls, agentTools, events)
 
 			if res.Stopped {
 				slog.Debug("Conversation stopped", "agent", a.Name())
 				break
+			}
+
+			// Root-cause fix for stale token counts (issue #1750):
+			// After tool calls, sess.InputTokens still reflects the
+			// *previous* API response and doesn't account for the
+			// (potentially large) tool results just added. Estimate
+			// the additional tokens and compact proactively to prevent
+			// the oversized request from ever being sent.
+			if m != nil && r.sessionCompaction && contextLimit > 0 {
+				newMessages := sess.GetAllMessages()[messageCountBeforeTools:]
+				var addedTokens int64
+				for _, msg := range newMessages {
+					addedTokens += estimateMessageTokens(&msg.Message)
+				}
+
+				estimatedTotal := sess.InputTokens + sess.OutputTokens + addedTokens
+				if estimatedTotal > int64(float64(contextLimit)*0.9) {
+					slog.Info("Proactive compaction: tool results pushed estimated context past 90%% threshold",
+						"agent", a.Name(),
+						"input_tokens", sess.InputTokens,
+						"output_tokens", sess.OutputTokens,
+						"added_estimated_tokens", addedTokens,
+						"estimated_total", estimatedTotal,
+						"context_limit", contextLimit,
+					)
+					r.Summarize(ctx, sess, "", events)
+				}
 			}
 		}
 	}()
@@ -2388,4 +2445,66 @@ func stripImageContent(messages []chat.Message) []chat.Message {
 		}
 	}
 	return result
+}
+
+// charsPerToken is the average number of characters per token used for
+// estimation. A value of 4 is a widely-used heuristic for English text;
+// it slightly overestimates token counts for code/JSON (which is ~3.5),
+// making compaction trigger earlier — the safe direction.
+const charsPerToken = 4
+
+// estimateMessageTokens returns a rough token-count estimate for a single
+// chat message based on its text length. This is intentionally conservative
+// (overestimates) so that proactive compaction fires before we hit the limit.
+// The estimate includes the message content, multi-content text parts, and
+// a small overhead per message for role/metadata tokens.
+func estimateMessageTokens(msg *chat.Message) int64 {
+	var chars int
+
+	// Primary text content.
+	chars += len(msg.Content)
+
+	// Multi-content parts (e.g., tool results with image descriptions).
+	for _, part := range msg.MultiContent {
+		chars += len(part.Text)
+	}
+
+	// Reasoning / thinking content.
+	chars += len(msg.ReasoningContent)
+
+	// Tool call arguments (they count toward input tokens on the next turn).
+	for _, tc := range msg.ToolCalls {
+		chars += len(tc.Function.Arguments)
+		chars += len(tc.Function.Name)
+	}
+
+	// Per-message overhead: role, ToolCallID, delimiters, etc.
+	// Models typically use 3-7 tokens for message framing.
+	const perMessageOverhead = 5
+
+	if chars == 0 {
+		return perMessageOverhead
+	}
+
+	return int64(chars/charsPerToken) + perMessageOverhead
+}
+
+// formatModelError produces a user-friendly error message from a model error.
+// Raw HTTP errors with request IDs, JSON payloads, and API URLs are replaced
+// with actionable guidance. Context overflow errors receive a dedicated
+// message; other errors are cleaned up to remove noise while preserving the
+// essential failure reason.
+func formatModelError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	// Context overflow gets a dedicated, actionable message.
+	var ctxOverflow *ContextOverflowError
+	if errors.As(err, &ctxOverflow) {
+		return "The conversation has exceeded the model's context window and automatic compaction is not enabled. " +
+			"Try running /compact to reduce the conversation size, or start a new session."
+	}
+
+	return err.Error()
 }
