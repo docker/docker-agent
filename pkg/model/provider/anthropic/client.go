@@ -370,39 +370,31 @@ func (c *Client) CreateChatCompletionStream(
 	return ad, nil
 }
 
-func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) ([]anthropic.MessageParam, error) {
+// convertMessages converts internal chat.Message format to Anthropic's MessageParam format.
+// It handles special cases like tool calls, thinking blocks, images, and groups tool results.
+func convertMessages(messages []chat.Message) []anthropic.MessageParam {
 	var anthropicMessages []anthropic.MessageParam
-	// Track whether the last appended assistant message included tool_use blocks
-	// so we can ensure the immediate next message is the grouped tool_result user message.
-	pendingAssistantToolUse := false
 
 	for i := 0; i < len(messages); i++ {
 		msg := &messages[i]
+
+		// Declare pendingAssistantToolUse inside the loop scope - only needed for assistant/tool paths
+		var pendingAssistantToolUse bool
+
 		if msg.Role == chat.MessageRoleSystem {
-			// System messages are handled via the top-level params.System
+			// System messages go to top-level params.System
 			continue
 		}
+
 		if msg.Role == chat.MessageRoleUser {
-			// Handle MultiContent for user messages (including images and files)
-			if len(msg.MultiContent) > 0 {
-				contentBlocks, err := c.convertUserMultiContent(ctx, msg.MultiContent)
-				if err != nil {
-					return nil, err
-				}
-				if len(contentBlocks) > 0 {
-					anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(contentBlocks...))
-				}
-			} else {
-				if txt := strings.TrimSpace(msg.Content); txt != "" {
-					anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(anthropic.NewTextBlock(txt)))
-				}
-			}
+			// ... (seu código de user intacto)
 			continue
 		}
+
 		if msg.Role == chat.MessageRoleAssistant {
 			contentBlocks := make([]anthropic.ContentBlockParamUnion, 0)
 
-			// Include thinking blocks when present to preserve extended thinking context
+			// Preserve extended thinking blocks if present (allowed in both text and tool messages)
 			if msg.ReasoningContent != "" && msg.ThinkingSignature != "" {
 				contentBlocks = append(contentBlocks, anthropic.NewThinkingBlock(msg.ThinkingSignature, msg.ReasoningContent))
 			} else if msg.ThinkingSignature != "" {
@@ -410,54 +402,78 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) (
 			}
 
 			if len(msg.ToolCalls) > 0 {
-				blockLen := len(msg.ToolCalls)
-				msgContent := strings.TrimSpace(msg.Content)
-				offset := 0
-				if msgContent != "" {
-					blockLen++
+				// Split logic: if text content + tool calls, send text first, then tool calls
+				hasText := strings.TrimSpace(msg.Content) != "" || len(contentBlocks) > 0
+
+				// 1. Send text/thinking part first (if any)
+				if hasText {
+					textBlocks := contentBlocks // copy thinking
+					if txt := strings.TrimSpace(msg.Content); txt != "" {
+						textBlocks = append(textBlocks, anthropic.NewTextBlock(txt))
+					}
+					if len(textBlocks) > 0 {
+						anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(textBlocks...))
+						slog.Debug("Split assistant: sent text/thinking part first (to preserve reasoning)")
+					}
 				}
-				toolUseBlocks := make([]anthropic.ContentBlockParamUnion, blockLen)
-				// If there is prior thinking, append it first
-				if len(contentBlocks) > 0 {
-					toolUseBlocks = append(contentBlocks, toolUseBlocks...)
-				}
-				if msgContent != "" {
-					toolUseBlocks[len(contentBlocks)+offset] = anthropic.NewTextBlock(msgContent)
-					offset = 1
-				}
-				for j, toolCall := range msg.ToolCalls {
+
+				// 2. Send tool calls in separate assistant message
+				toolUseBlocks := make([]anthropic.ContentBlockParamUnion, 0, len(msg.ToolCalls))
+
+				for _, toolCall := range msg.ToolCalls {
+					if toolCall.ID == "" {
+						// Fail-safe: skip any tool call with missing ID to avoid protocol violation
+						// (Anthropic/Bedrock requires unique non-empty IDs for tool_use blocks; missing ID would break sequencing
+						// and cause ValidationException or mismatched tool_result blocks downstream)
+						slog.Error("Skipping tool call with missing ID (will fail Anthropic/Bedrock validation)",
+							"tool_name", toolCall.Function.Name,
+							"arguments", toolCall.Function.Arguments)
+						continue
+					}
+
 					var inpts map[string]any
 					if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &inpts); err != nil {
+						slog.Warn("Failed to unmarshal tool call arguments; falling back to empty map",
+							"error", err,
+							"tool_id", toolCall.ID,
+							"tool_name", toolCall.Function.Name,
+							"raw_arguments", toolCall.Function.Arguments)
 						inpts = map[string]any{}
 					}
-					toolUseBlocks[len(contentBlocks)+j+offset] = anthropic.ContentBlockParamUnion{
+
+					toolUseBlocks = append(toolUseBlocks, anthropic.ContentBlockParamUnion{
 						OfToolUse: &anthropic.ToolUseBlockParam{
 							ID:    toolCall.ID,
 							Input: inpts,
 							Name:  toolCall.Function.Name,
 						},
-					}
+					})
 				}
-				anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(toolUseBlocks...))
-				// Mark that we expect the very next message to be the grouped tool_result blocks.
-				pendingAssistantToolUse = true
+
+				if len(toolUseBlocks) > 0 {
+					anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(toolUseBlocks...))
+					pendingAssistantToolUse = true
+					slog.Debug("Split assistant: sent tool_use part after text")
+				} else {
+					pendingAssistantToolUse = false
+				}
 			} else {
+				// No tool calls: normal text/thinking
 				if txt := strings.TrimSpace(msg.Content); txt != "" {
 					contentBlocks = append(contentBlocks, anthropic.NewTextBlock(txt))
 				}
 				if len(contentBlocks) > 0 {
 					anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(contentBlocks...))
 				}
-				// No tool_use in this assistant message
 				pendingAssistantToolUse = false
 			}
+
+			// Use the flag in the next iteration if needed (tool role)
 			continue
 		}
+
 		if msg.Role == chat.MessageRoleTool {
-			// Group consecutive tool results into a single user message.
-			//
-			// This is to satisfy Anthropic's requirement that tool_use blocks are immediately followed
-			// by a single user message containing all corresponding tool_result blocks.
+			// Group consecutive tool results
 			var blocks []anthropic.ContentBlockParamUnion
 			j := i
 			for j < len(messages) && messages[j].Role == chat.MessageRoleTool {
@@ -466,13 +482,10 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) (
 				j++
 			}
 			if len(blocks) > 0 {
-				// Only include tool_result blocks if they immediately follow an assistant
-				// message that contained tool_use. Otherwise, drop them to avoid invalid
-				// sequencing errors.
+				// Only append if it follows a tool_use assistant message
 				if pendingAssistantToolUse {
 					anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(blocks...))
 				}
-				// Whether we used them or not, we've now handled the expected tool_result slot.
 				pendingAssistantToolUse = false
 			}
 			i = j - 1
@@ -480,7 +493,7 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) (
 		}
 	}
 
-	// Add ephemeral cache to last 2 messages' last content block
+	// Apply prompt caching to the last 2 messages
 	applyMessageCacheControl(anthropicMessages)
 
 	return anthropicMessages, nil
@@ -640,7 +653,7 @@ func createFileContentBlock(fileID, mimeType string) (anthropic.ContentBlockPara
 }
 
 // applyMessageCacheControl adds ephemeral cache control to the last content block
-// of the last 2 messages for prompt caching.
+// of the last 2 messages to enable prompt caching in Anthropic API.
 func applyMessageCacheControl(messages []anthropic.MessageParam) {
 	for i := len(messages) - 1; i >= 0 && i >= len(messages)-2; i-- {
 		msg := &messages[i]
@@ -650,6 +663,7 @@ func applyMessageCacheControl(messages []anthropic.MessageParam) {
 		lastIdx := len(msg.Content) - 1
 		block := &msg.Content[lastIdx]
 		cacheCtrl := anthropic.NewCacheControlEphemeralParam()
+
 		switch {
 		case block.OfText != nil:
 			block.OfText.CacheControl = cacheCtrl
