@@ -3,9 +3,12 @@ package teamloader
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -135,6 +138,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 
 	// Create RAG managers
 	parentDir := cmp.Or(agentSource.ParentDir(), runConfig.WorkingDir)
+	configName := configNameFromSource(agentSource.Name())
 	ragManagers, err := rag.NewManagers(ctx, cfg, rag.ManagersBuildConfig{
 		ParentDir:     parentDir,
 		ModelsGateway: runConfig.ModelsGateway,
@@ -214,7 +218,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			)
 		}
 
-		agentTools, warnings := getToolsForAgent(ctx, &agentConfig, parentDir, runConfig, loadOpts.toolsetRegistry)
+		agentTools, warnings := getToolsForAgent(ctx, &agentConfig, parentDir, runConfig, loadOpts.toolsetRegistry, configName)
 		if len(warnings) > 0 {
 			opts = append(opts, agent.WithLoadTimeWarnings(warnings))
 		}
@@ -421,7 +425,7 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 }
 
 // getToolsForAgent returns the tool definitions for an agent based on its configuration
-func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir string, runConfig *config.RuntimeConfig, registry *ToolsetRegistry) ([]tools.ToolSet, []string) {
+func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir string, runConfig *config.RuntimeConfig, registry *ToolsetRegistry, configName string) ([]tools.ToolSet, []string) {
 	var (
 		toolSets []tools.ToolSet
 		warnings []string
@@ -432,7 +436,7 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 	for i := range a.Toolsets {
 		toolset := a.Toolsets[i]
 
-		tool, err := registry.CreateTool(ctx, toolset, parentDir, runConfig)
+		tool, err := registry.CreateTool(ctx, toolset, parentDir, runConfig, configName)
 		if err != nil {
 			// Collect error but continue loading other toolsets
 			slog.Warn("Toolset configuration failed; skipping", "type", toolset.Type, "ref", toolset.Ref, "command", toolset.Command, "error", err)
@@ -478,6 +482,24 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 	}
 
 	return toolSets, warnings
+}
+
+// configNameFromSource extracts a clean config name from a source name.
+// The result is "<basename>-<hash>" where basename comes from the file name
+// (e.g. "memory_agent" from "/path/to/memory_agent.yaml") and hash is a short
+// SHA-256 of the full source name to prevent collisions between identically
+// named configs in different directories.
+func configNameFromSource(sourceName string) string {
+	base := filepath.Base(sourceName)
+	ext := filepath.Ext(base)
+	if ext != "" {
+		base = base[:len(base)-len(ext)]
+	}
+	if base == "" || base == "." || base == ".." {
+		base = "default"
+	}
+	h := sha256.Sum256([]byte(sourceName))
+	return base + "-" + hex.EncodeToString(h[:4])
 }
 
 // resolveAgentRefs resolves a list of agent references to agent instances.

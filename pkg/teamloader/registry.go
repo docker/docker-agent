@@ -14,6 +14,7 @@ import (
 	"github.com/docker/cagent/pkg/js"
 	"github.com/docker/cagent/pkg/memory/database/sqlite"
 	"github.com/docker/cagent/pkg/path"
+	"github.com/docker/cagent/pkg/paths"
 	"github.com/docker/cagent/pkg/toolinstall"
 	"github.com/docker/cagent/pkg/tools"
 	"github.com/docker/cagent/pkg/tools/a2a"
@@ -21,8 +22,9 @@ import (
 	"github.com/docker/cagent/pkg/tools/mcp"
 )
 
-// ToolsetCreator is a function that creates a toolset based on the provided configuration
-type ToolsetCreator func(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig) (tools.ToolSet, error)
+// ToolsetCreator is a function that creates a toolset based on the provided configuration.
+// configName identifies the agent config file (e.g. "memory_agent" from "memory_agent.yaml").
+type ToolsetCreator func(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error)
 
 // ToolsetRegistry manages the registration of toolset creators by type
 type ToolsetRegistry struct {
@@ -48,12 +50,12 @@ func (r *ToolsetRegistry) Get(toolsetType string) (ToolsetCreator, bool) {
 }
 
 // CreateTool creates a toolset using the registered creator for the given type
-func (r *ToolsetRegistry) CreateTool(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func (r *ToolsetRegistry) CreateTool(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, agentName string) (tools.ToolSet, error) {
 	creator, ok := r.Get(toolset.Type)
 	if !ok {
 		return nil, fmt.Errorf("unknown toolset type: %s", toolset.Type)
 	}
-	return creator(ctx, toolset, parentDir, runConfig)
+	return creator(ctx, toolset, parentDir, runConfig, agentName)
 }
 
 func NewDefaultToolsetRegistry() *ToolsetRegistry {
@@ -77,14 +79,14 @@ func NewDefaultToolsetRegistry() *ToolsetRegistry {
 	return r
 }
 
-func createTodoTool(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig) (tools.ToolSet, error) {
+func createTodoTool(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	if toolset.Shared {
 		return builtin.NewSharedTodoTool(), nil
 	}
 	return builtin.NewTodoTool(), nil
 }
 
-func createTasksTool(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func createTasksTool(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	toolsetPath := toolset.Path
 	if toolsetPath == "" {
 		toolsetPath = "tasks.json"
@@ -110,20 +112,33 @@ func createTasksTool(_ context.Context, toolset latest.Toolset, parentDir string
 	return builtin.NewTasksTool(validatedPath), nil
 }
 
-func createMemoryTool(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
-	var memoryPath string
-	if filepath.IsAbs(toolset.Path) {
-		memoryPath = ""
-	} else if wd := runConfig.WorkingDir; wd != "" {
-		memoryPath = wd
+func createMemoryTool(_ context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
+	var validatedMemoryPath string
+
+	if toolset.Path != "" {
+		// Explicit path provided - resolve relative to working dir or parent dir
+		var basePath string
+		if filepath.IsAbs(toolset.Path) {
+			basePath = ""
+		} else if wd := runConfig.WorkingDir; wd != "" {
+			basePath = wd
+		} else {
+			basePath = parentDir
+		}
+
+		var err error
+		validatedMemoryPath, err = path.ValidatePathInDirectory(toolset.Path, basePath)
+		if err != nil {
+			return nil, fmt.Errorf("invalid memory database path: %w", err)
+		}
 	} else {
-		memoryPath = parentDir
+		// Default: ~/.cagent/memory/<configName>/memory.db
+		if configName == "" {
+			configName = "default"
+		}
+		validatedMemoryPath = filepath.Join(paths.GetDataDir(), "memory", configName, "memory.db")
 	}
 
-	validatedMemoryPath, err := path.ValidatePathInDirectory(toolset.Path, memoryPath)
-	if err != nil {
-		return nil, fmt.Errorf("invalid memory database path: %w", err)
-	}
 	if err := os.MkdirAll(filepath.Dir(validatedMemoryPath), 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create memory database directory: %w", err)
 	}
@@ -136,11 +151,11 @@ func createMemoryTool(_ context.Context, toolset latest.Toolset, parentDir strin
 	return builtin.NewMemoryToolWithPath(db, validatedMemoryPath), nil
 }
 
-func createThinkTool(_ context.Context, _ latest.Toolset, _ string, _ *config.RuntimeConfig) (tools.ToolSet, error) {
+func createThinkTool(_ context.Context, _ latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	return builtin.NewThinkTool(), nil
 }
 
-func createShellTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func createShellTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	env, err := environment.ExpandAll(ctx, environment.ToValues(toolset.Env), runConfig.EnvProvider())
 	if err != nil {
 		return nil, fmt.Errorf("failed to expand the tool's environment variables: %w", err)
@@ -150,7 +165,7 @@ func createShellTool(ctx context.Context, toolset latest.Toolset, _ string, runC
 	return builtin.NewShellTool(env, runConfig), nil
 }
 
-func createScriptTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func createScriptTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	if len(toolset.Shell) == 0 {
 		return nil, fmt.Errorf("shell is required for script toolset")
 	}
@@ -163,7 +178,7 @@ func createScriptTool(ctx context.Context, toolset latest.Toolset, _ string, run
 	return builtin.NewScriptShellTool(toolset.Shell, env)
 }
 
-func createFilesystemTool(_ context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func createFilesystemTool(_ context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	wd := runConfig.WorkingDir
 	if wd == "" {
 		var err error
@@ -197,7 +212,7 @@ func createFilesystemTool(_ context.Context, toolset latest.Toolset, _ string, r
 	return builtin.NewFilesystemTool(wd, opts...), nil
 }
 
-func createAPITool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func createAPITool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	if toolset.APIConfig.Endpoint == "" {
 		return nil, fmt.Errorf("api tool requires an endpoint in api_config")
 	}
@@ -209,7 +224,7 @@ func createAPITool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 	return builtin.NewAPITool(toolset.APIConfig, expander), nil
 }
 
-func createFetchTool(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig) (tools.ToolSet, error) {
+func createFetchTool(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	var opts []builtin.FetchToolOption
 	if toolset.Timeout > 0 {
 		timeout := time.Duration(toolset.Timeout) * time.Second
@@ -218,7 +233,7 @@ func createFetchTool(_ context.Context, toolset latest.Toolset, _ string, _ *con
 	return builtin.NewFetchTool(opts...), nil
 }
 
-func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	envProvider := runConfig.EnvProvider()
 
 	switch {
@@ -280,7 +295,7 @@ func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 	}
 }
 
-func createA2ATool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func createA2ATool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
 	headers := expander.ExpandMap(ctx, toolset.Headers)
@@ -288,7 +303,7 @@ func createA2ATool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 	return a2a.NewToolset(toolset.Name, toolset.URL, headers), nil
 }
 
-func createLSPTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func createLSPTool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	// Auto-install missing command binary if needed
 	resolvedCommand, err := toolinstall.EnsureCommand(ctx, toolset.Command, toolset.Version)
 	if err != nil {
@@ -312,11 +327,11 @@ func createLSPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 	return tool, nil
 }
 
-func createUserPromptTool(_ context.Context, _ latest.Toolset, _ string, _ *config.RuntimeConfig) (tools.ToolSet, error) {
+func createUserPromptTool(_ context.Context, _ latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	return builtin.NewUserPromptTool(), nil
 }
 
-func createOpenAPITool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+func createOpenAPITool(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
 	specURL := expander.Expand(ctx, toolset.URL, nil)
@@ -325,7 +340,7 @@ func createOpenAPITool(ctx context.Context, toolset latest.Toolset, _ string, ru
 	return builtin.NewOpenAPITool(specURL, headers), nil
 }
 
-func createModelPickerTool(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig) (tools.ToolSet, error) {
+func createModelPickerTool(_ context.Context, toolset latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 	if len(toolset.Models) == 0 {
 		return nil, fmt.Errorf("model_picker toolset requires at least one model")
 	}

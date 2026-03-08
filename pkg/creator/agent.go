@@ -120,7 +120,7 @@ func createToolsetRegistry(workingDir string) *teamloader.ToolsetRegistry {
 	}
 
 	registry := teamloader.NewDefaultToolsetRegistry()
-	registry.Register("filesystem", func(context.Context, latest.Toolset, string, *config.RuntimeConfig) (tools.ToolSet, error) {
+	registry.Register("filesystem", func(context.Context, latest.Toolset, string, *config.RuntimeConfig, string) (tools.ToolSet, error) {
 		return tracker, nil
 	})
 

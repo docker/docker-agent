@@ -101,17 +101,29 @@ toolsets:
 
 ### Memory
 
-Persistent key-value storage backed by SQLite. Data survives across sessions, letting agents remember context, user preferences, and past decisions.
+Persistent key-value storage backed by SQLite. Data survives across sessions, letting agents remember context, user preferences, and past decisions. Memories can be organized with categories and searched by keyword.
+
+Each agent gets its own database at `~/.cagent/memory/<agent-name>/memory.db` by default.
 
 ```yaml
 toolsets:
   - type: memory
-    path: ./agent_memory.db # optional: custom database path
+    path: ./agent_memory.db # optional: override the default location
 ```
 
-| Property | Type   | Default   | Description                                                            |
-| -------- | ------ | --------- | ---------------------------------------------------------------------- |
-| `path`   | string | automatic | Path to the SQLite database file. If omitted, uses a default location. |
+| Property | Type   | Default                                      | Description                          |
+| -------- | ------ | -------------------------------------------- | ------------------------------------ |
+| `path`   | string | `~/.cagent/memory/<agent-name>/memory.db`    | Path to the SQLite database file     |
+
+| Operation          | Description                                                         |
+| ------------------ | ------------------------------------------------------------------- |
+| `add_memory`       | Store a new memory with optional category                           |
+| `get_memories`     | Retrieve all stored memories                                        |
+| `delete_memory`    | Delete a specific memory by ID                                      |
+| `search_memories`  | Search memories by keywords and/or category (more efficient than get_all) |
+| `update_memory`    | Update an existing memory's content and/or category by ID           |
+
+Memories support an optional `category` field (e.g., `preference`, `fact`, `project`, `decision`) for organization and filtering.
 
 ### Fetch
 

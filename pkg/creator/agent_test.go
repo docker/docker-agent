@@ -158,7 +158,7 @@ func TestFileWriteTracker(t *testing.T) {
 	require.NotNil(t, registry)
 
 	// Create the toolset through the registry
-	toolset, err := registry.CreateTool(ctx, latest.Toolset{Type: "filesystem"}, runConfig.WorkingDir, runConfig)
+	toolset, err := registry.CreateTool(ctx, latest.Toolset{Type: "filesystem"}, runConfig.WorkingDir, runConfig, "test-agent")
 	require.NoError(t, err)
 	require.NotNil(t, toolset)
 

@@ -22,7 +22,7 @@ func TestCreateShellTool(t *testing.T) {
 		EnvProviderForTests: environment.NewOsEnvProvider(),
 	}
 
-	tool, err := registry.CreateTool(t.Context(), toolset, ".", runConfig)
+	tool, err := registry.CreateTool(t.Context(), toolset, ".", runConfig, "test-agent")
 	require.NoError(t, err)
 	require.NotNil(t, tool)
 }

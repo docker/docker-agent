@@ -66,7 +66,7 @@ func TestGetToolsForAgent_ContinuesOnCreateToolError(t *testing.T) {
 		EnvProviderForTests: &noEnvProvider{},
 	}
 
-	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, NewToolsetRegistry())
+	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, NewToolsetRegistry(), "test-config")
 
 	require.Empty(t, got)
 	require.NotEmpty(t, warnings)
