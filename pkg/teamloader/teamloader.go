@@ -423,8 +423,9 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 // getToolsForAgent returns the tool definitions for an agent based on its configuration
 func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir string, runConfig *config.RuntimeConfig, registry *ToolsetRegistry) ([]tools.ToolSet, []string) {
 	var (
-		toolSets []tools.ToolSet
-		warnings []string
+		toolSets    []tools.ToolSet
+		warnings    []string
+		lspBackends []builtin.LSPBackend
 	)
 
 	deferredToolset := builtin.NewDeferredToolset()
@@ -456,7 +457,27 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 			}
 		}
 
+		// Collect LSP backends for multiplexing when there are multiple.
+		// Instead of adding them individually (which causes duplicate tool names),
+		// they are combined into a single LSPMultiplexer after the loop.
+		if toolset.Type == "lsp" {
+			if lspTool, ok := tool.(*builtin.LSPTool); ok {
+				lspBackends = append(lspBackends, builtin.LSPBackend{LSP: lspTool, Toolset: wrapped})
+				continue
+			}
+			slog.Warn("Toolset configured as type 'lsp' but registry returned unexpected type; treating as regular toolset",
+				"type", fmt.Sprintf("%T", tool), "command", toolset.Command)
+		}
+
 		toolSets = append(toolSets, wrapped)
+	}
+
+	// Merge LSP backends: if there are multiple, combine them into a single
+	// multiplexer so the LLM sees one set of lsp_* tools instead of duplicates.
+	if len(lspBackends) > 1 {
+		toolSets = append(toolSets, builtin.NewLSPMultiplexer(lspBackends))
+	} else if len(lspBackends) == 1 {
+		toolSets = append(toolSets, lspBackends[0].Toolset)
 	}
 
 	if deferredToolset.HasSources() {

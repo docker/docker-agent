@@ -386,6 +386,85 @@ agents:
 	assert.Equal(t, expected, rootAgent.AddPromptFiles())
 }
 
+func TestGetToolsForAgent_MultipleLSPToolsetsAreCombined(t *testing.T) {
+	t.Parallel()
+
+	a := &latest.AgentConfig{
+		Instruction: "test",
+		Toolsets: []latest.Toolset{
+			{
+				Type:      "lsp",
+				Command:   "gopls",
+				FileTypes: []string{".go"},
+			},
+			{
+				Type:      "lsp",
+				Command:   "gopls",
+				FileTypes: []string{".mod"},
+			},
+		},
+	}
+
+	runConfig := config.RuntimeConfig{
+		EnvProviderForTests: &noEnvProvider{},
+	}
+
+	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, NewDefaultToolsetRegistry())
+	require.Empty(t, warnings)
+
+	// Should have exactly one toolset (the multiplexer)
+	require.Len(t, got, 1)
+
+	// Verify that we get no duplicate tool names
+	allTools, err := got[0].Tools(t.Context())
+	require.NoError(t, err)
+
+	seen := make(map[string]bool)
+	for _, tool := range allTools {
+		assert.False(t, seen[tool.Name], "duplicate tool name: %s", tool.Name)
+		seen[tool.Name] = true
+	}
+
+	// Verify LSP tools are present
+	assert.True(t, seen["lsp_hover"])
+	assert.True(t, seen["lsp_definition"])
+}
+
+func TestGetToolsForAgent_SingleLSPToolsetNotWrapped(t *testing.T) {
+	t.Parallel()
+
+	a := &latest.AgentConfig{
+		Instruction: "test",
+		Toolsets: []latest.Toolset{
+			{
+				Type:      "lsp",
+				Command:   "gopls",
+				FileTypes: []string{".go"},
+			},
+		},
+	}
+
+	runConfig := config.RuntimeConfig{
+		EnvProviderForTests: &noEnvProvider{},
+	}
+
+	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, NewDefaultToolsetRegistry())
+	require.Empty(t, warnings)
+
+	// Should have exactly one toolset that provides LSP tools.
+	require.Len(t, got, 1)
+
+	allTools, err := got[0].Tools(t.Context())
+	require.NoError(t, err)
+
+	var names []string
+	for _, tool := range allTools {
+		names = append(names, tool.Name)
+	}
+	assert.Contains(t, names, "lsp_hover")
+	assert.Contains(t, names, "lsp_definition")
+}
+
 func TestExternalDepthContext(t *testing.T) {
 	t.Parallel()
 
