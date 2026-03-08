@@ -212,6 +212,9 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 				agent.WithFallbackRetries(agentConfig.GetFallbackRetries()),
 				agent.WithFallbackCooldown(agentConfig.GetFallbackCooldown()),
 			)
+			if codes := agentConfig.GetNoFallbackStatusCodes(); len(codes) > 0 {
+				opts = append(opts, agent.WithNoFallbackStatusCodes(codes))
+			}
 		}
 
 		agentTools, warnings := getToolsForAgent(ctx, &agentConfig, parentDir, runConfig, loadOpts.toolsetRegistry)

@@ -25,6 +25,7 @@ type Agent struct {
 	fallbackModels          []provider.Provider                 // Fallback models to try if primary fails
 	fallbackRetries         int                                 // Number of retries per fallback model with exponential backoff
 	fallbackCooldown        time.Duration                       // Duration to stick with fallback after non-retryable error
+	noFallbackStatusCodes   []int                               // Status codes that skip fallback when using a gateway
 	modelOverrides          atomic.Pointer[[]provider.Provider] // Optional model override(s) set at runtime (supports alloy)
 	subAgents               []*Agent
 	handoffs                []*Agent
@@ -185,6 +186,12 @@ func (a *Agent) FallbackRetries() int {
 // model before retrying the primary. Returns 0 if not configured.
 func (a *Agent) FallbackCooldown() time.Duration {
 	return a.fallbackCooldown
+}
+
+// NoFallbackStatusCodes returns the HTTP status codes for which fallback should
+// be skipped when using a models gateway.
+func (a *Agent) NoFallbackStatusCodes() []int {
+	return a.noFallbackStatusCodes
 }
 
 // Commands returns the named commands configured for this agent.

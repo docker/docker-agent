@@ -127,6 +127,9 @@ type FallbackConfig struct {
 	// retrying the primary. Only applies after a non-retryable error (e.g., 429).
 	// Default is 1 minute. Use Go duration format (e.g., "1m", "30s", "2m30s").
 	Cooldown Duration `json:"cooldown"`
+	// NoFallbackStatusCodes is a list of HTTP status codes for which the fallback
+	// chain should be skipped entirely when using a models gateway.
+	NoFallbackStatusCodes []int `json:"no_fallback_status_codes,omitempty"`
 }
 
 // Duration is a wrapper around time.Duration that supports YAML/JSON unmarshaling

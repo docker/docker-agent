@@ -362,6 +362,17 @@
             "2m30s",
             "5m"
           ]
+        },
+        "no_fallback_status_codes": {
+          "type": "array",
+          "description": "HTTP status codes for which the fallback chain should be skipped entirely when using a models gateway (--models-gateway). If the primary model returns one of these codes, the error is returned immediately without trying fallback models. Useful with gateways that perform their own routing.",
+          "items": {
+            "type": "integer"
+          },
+          "examples": [
+            [401, 403],
+            [429]
+          ]
         }
       },
       "additionalProperties": false

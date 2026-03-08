@@ -160,3 +160,11 @@ func WithThinkingConfigured(configured bool) Opt {
 		a.thinkingConfigured = configured
 	}
 }
+
+// WithNoFallbackStatusCodes sets the HTTP status codes for which the fallback
+// chain should be skipped entirely when using a models gateway.
+func WithNoFallbackStatusCodes(codes []int) Opt {
+	return func(a *Agent) {
+		a.noFallbackStatusCodes = codes
+	}
+}

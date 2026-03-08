@@ -53,6 +53,12 @@ func (a *AgentConfig) validateFallback() error {
 		return errors.New("fallback.cooldown must be non-negative")
 	}
 
+	for _, code := range a.Fallback.NoFallbackStatusCodes {
+		if code < 400 || code > 599 {
+			return errors.New("fallback.no_fallback_status_codes must contain HTTP error codes (400-599)")
+		}
+	}
+
 	return nil
 }
 

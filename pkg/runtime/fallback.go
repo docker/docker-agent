@@ -398,6 +398,18 @@ func getEffectiveRetries(a *agent.Agent) int {
 	return retries
 }
 
+// isNoFallbackStatusCode returns true if the given status code is in the
+// agent's configured no-fallback set. Used with models gateways to short-circuit
+// the fallback chain for specific error codes.
+func isNoFallbackStatusCode(statusCode int, codes []int) bool {
+	for _, c := range codes {
+		if c == statusCode {
+			return true
+		}
+	}
+	return false
+}
+
 // tryModelWithFallback attempts to create a stream and get a response using the primary model,
 // falling back to configured fallback models if the primary fails.
 //
@@ -449,6 +461,13 @@ func (r *LocalRuntime) tryModelWithFallback(
 			"start_from_fallback_index", cooldownState.fallbackIndex,
 			"cooldown_until", cooldownState.until.Format(time.RFC3339))
 	}
+
+	// When using a models gateway, check if this error's status code should
+	// skip the entire fallback chain. The gateway handles its own routing,
+	// so certain status codes (e.g., auth errors) won't resolve by trying
+	// a different client-side fallback model.
+	useGateway := r.modelSwitcherCfg != nil && r.modelSwitcherCfg.ModelsGateway != ""
+	noFallbackCodes := a.NoFallbackStatusCodes()
 
 	var lastErr error
 	primaryFailedWithNonRetryable := false
@@ -517,6 +536,16 @@ func (r *LocalRuntime) tryModelWithFallback(
 						"model", modelEntry.provider.ID(),
 						"error", err)
 
+					if useGateway && len(noFallbackCodes) > 0 {
+						if sc := extractHTTPStatusCode(err); sc != 0 && isNoFallbackStatusCode(sc, noFallbackCodes) {
+							slog.Warn("Gateway no-fallback status code, skipping entire fallback chain",
+								"agent", a.Name(),
+								"status_code", sc,
+								"error", err)
+							return streamResult{}, nil, err
+						}
+					}
+
 					// Track if primary failed with non-retryable error
 					if !modelEntry.isFallback {
 						primaryFailedWithNonRetryable = true
@@ -552,6 +581,16 @@ func (r *LocalRuntime) tryModelWithFallback(
 						"agent", a.Name(),
 						"model", modelEntry.provider.ID(),
 						"error", err)
+
+					if useGateway && len(noFallbackCodes) > 0 {
+						if sc := extractHTTPStatusCode(err); sc != 0 && isNoFallbackStatusCode(sc, noFallbackCodes) {
+							slog.Warn("Gateway no-fallback status code, skipping entire fallback chain",
+								"agent", a.Name(),
+								"status_code", sc,
+								"error", err)
+							return streamResult{}, nil, err
+						}
+					}
 
 					// Track if primary failed with non-retryable error
 					if !modelEntry.isFallback {

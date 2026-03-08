@@ -151,6 +151,13 @@ type FallbackConfig struct {
 	// retrying the primary. Only applies after a non-retryable error (e.g., 429).
 	// Default is 1 minute. Use Go duration format (e.g., "1m", "30s", "2m30s").
 	Cooldown Duration `json:"cooldown"`
+	// NoFallbackStatusCodes is a list of HTTP status codes for which the fallback
+	// chain should be skipped entirely when using a models gateway. If the primary
+	// model returns one of these status codes, the error is returned immediately
+	// without trying fallback models. This is useful with gateways that perform
+	// their own routing and return specific codes (e.g., 401, 403) that should
+	// not trigger client-side fallback.
+	NoFallbackStatusCodes []int `json:"no_fallback_status_codes,omitempty"`
 }
 
 // Duration is a wrapper around time.Duration that supports YAML/JSON unmarshaling
@@ -373,6 +380,15 @@ func (a *AgentConfig) GetFallbackCooldown() time.Duration {
 		return a.Fallback.Cooldown.Duration
 	}
 	return 0
+}
+
+// GetNoFallbackStatusCodes returns the status codes for which fallback should be
+// skipped when using a models gateway.
+func (a *AgentConfig) GetNoFallbackStatusCodes() []int {
+	if a.Fallback != nil {
+		return a.Fallback.NoFallbackStatusCodes
+	}
+	return nil
 }
 
 // ModelConfig represents the configuration for a model

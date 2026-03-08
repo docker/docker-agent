@@ -904,6 +904,202 @@ func TestFallbackModelsClonedWithThinkingEnabled(t *testing.T) {
 	})
 }
 
+func TestIsNoFallbackStatusCode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		codes      []int
+		expected   bool
+	}{
+		{
+			name:       "empty codes list",
+			statusCode: 401,
+			codes:      nil,
+			expected:   false,
+		},
+		{
+			name:       "status code in list",
+			statusCode: 401,
+			codes:      []int{401, 403},
+			expected:   true,
+		},
+		{
+			name:       "status code not in list",
+			statusCode: 429,
+			codes:      []int{401, 403},
+			expected:   false,
+		},
+		{
+			name:       "single code match",
+			statusCode: 429,
+			codes:      []int{429},
+			expected:   true,
+		},
+		{
+			name:       "zero status code",
+			statusCode: 0,
+			codes:      []int{401, 403},
+			expected:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := isNoFallbackStatusCode(tt.statusCode, tt.codes)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestGatewayNoFallbackStatusCodes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Primary fails with 401 (configured as no-fallback when using gateway)
+		primary := &failingProvider{id: "primary/auth-fail", err: errors.New("401 unauthorized")}
+
+		// Fallback should NOT be tried because 401 is in no_fallback_status_codes
+		fallback := &countingProvider{
+			id:        "fallback/should-not-be-called",
+			failCount: 0,
+			stream: newStreamBuilder().
+				AddContent("Fallback content").
+				AddStopWithUsage(5, 2).
+				Build(),
+		}
+
+		root := agent.New("root", "test",
+			agent.WithModel(primary),
+			agent.WithFallbackModel(fallback),
+			agent.WithFallbackRetries(2),
+			agent.WithNoFallbackStatusCodes([]int{401, 403}),
+		)
+
+		tm := team.New(team.WithAgents(root))
+		rt, err := NewLocalRuntime(tm,
+			WithSessionCompaction(false),
+			WithModelStore(mockModelStore{}),
+			WithModelSwitcherConfig(&ModelSwitcherConfig{
+				ModelsGateway: "https://gateway.example.com",
+			}),
+		)
+		require.NoError(t, err)
+
+		sess := session.New(session.WithUserMessage("test"))
+		sess.Title = "Gateway No-Fallback Test"
+
+		events := rt.RunStream(t.Context(), sess)
+
+		var gotError bool
+		var gotFallbackContent bool
+		for ev := range events {
+			if _, ok := ev.(*ErrorEvent); ok {
+				gotError = true
+			}
+			if choice, ok := ev.(*AgentChoiceEvent); ok {
+				if choice.Content == "Fallback content" {
+					gotFallbackContent = true
+				}
+			}
+		}
+
+		assert.True(t, gotError, "should get an error since 401 is in no-fallback codes")
+		assert.False(t, gotFallbackContent, "fallback should not be tried for no-fallback status code")
+		assert.Equal(t, 0, fallback.callCount, "fallback provider should not be called")
+	})
+}
+
+func TestGatewayNoFallbackStatusCodes_AllowsFallbackForOtherCodes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Primary fails with 429 (NOT in the no-fallback list)
+		primary := &failingProvider{id: "primary/rate-limited", err: errors.New("429 too many requests")}
+
+		// Fallback should be tried since 429 is not in no_fallback_status_codes
+		successStream := newStreamBuilder().
+			AddContent("Fallback success").
+			AddStopWithUsage(10, 5).
+			Build()
+		fallback := &mockProvider{id: "fallback/success", stream: successStream}
+
+		root := agent.New("root", "test",
+			agent.WithModel(primary),
+			agent.WithFallbackModel(fallback),
+			agent.WithFallbackRetries(0),
+			agent.WithNoFallbackStatusCodes([]int{401, 403}), // Only 401 and 403 block fallback
+		)
+
+		tm := team.New(team.WithAgents(root))
+		rt, err := NewLocalRuntime(tm,
+			WithSessionCompaction(false),
+			WithModelStore(mockModelStore{}),
+			WithModelSwitcherConfig(&ModelSwitcherConfig{
+				ModelsGateway: "https://gateway.example.com",
+			}),
+		)
+		require.NoError(t, err)
+
+		sess := session.New(session.WithUserMessage("test"))
+		sess.Title = "Gateway Allows Fallback Test"
+
+		events := rt.RunStream(t.Context(), sess)
+
+		var gotFallbackContent bool
+		for ev := range events {
+			if choice, ok := ev.(*AgentChoiceEvent); ok {
+				if choice.Content == "Fallback success" {
+					gotFallbackContent = true
+				}
+			}
+		}
+
+		assert.True(t, gotFallbackContent, "should receive fallback content since 429 is not in no-fallback list")
+	})
+}
+
+func TestGatewayNoFallbackStatusCodes_NoEffectWithoutGateway(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// Primary fails with 401
+		primary := &failingProvider{id: "primary/auth-fail", err: errors.New("401 unauthorized")}
+
+		// Even though 401 is in no_fallback_status_codes, without a gateway
+		// the fallback chain should proceed normally
+		successStream := newStreamBuilder().
+			AddContent("Fallback success without gateway").
+			AddStopWithUsage(10, 5).
+			Build()
+		fallback := &mockProvider{id: "fallback/success", stream: successStream}
+
+		root := agent.New("root", "test",
+			agent.WithModel(primary),
+			agent.WithFallbackModel(fallback),
+			agent.WithFallbackRetries(0),
+			agent.WithNoFallbackStatusCodes([]int{401, 403}),
+		)
+
+		tm := team.New(team.WithAgents(root))
+		// No WithModelSwitcherConfig — no gateway
+		rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+		require.NoError(t, err)
+
+		sess := session.New(session.WithUserMessage("test"))
+		sess.Title = "No Gateway Test"
+
+		events := rt.RunStream(t.Context(), sess)
+
+		var gotFallbackContent bool
+		for ev := range events {
+			if choice, ok := ev.(*AgentChoiceEvent); ok {
+				if choice.Content == "Fallback success without gateway" {
+					gotFallbackContent = true
+				}
+			}
+		}
+
+		assert.True(t, gotFallbackContent, "fallback should proceed normally without a gateway")
+	})
+}
+
 // Verify interface compliance
 var (
 	_ provider.Provider = (*mockProvider)(nil)
