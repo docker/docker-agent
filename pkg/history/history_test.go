@@ -417,3 +417,28 @@ func TestHistory_SetCurrent(t *testing.T) {
 	h.SetCurrent(2)
 	assert.Empty(t, h.Next())
 }
+
+func TestHistory_VeryLongMessage(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	h, err := New(WithBaseDir(tmpDir))
+	require.NoError(t, err)
+
+	// Create a message longer than bufio.Scanner's default 64KB limit
+	longMessage := make([]byte, 100*1024) // 100KB
+	for i := range longMessage {
+		longMessage[i] = 'a' + byte(i%26)
+	}
+	longStr := string(longMessage)
+
+	require.NoError(t, h.Add(longStr))
+	require.NoError(t, h.Add("short message after"))
+
+	// Reload history from disk
+	h2, err := New(WithBaseDir(tmpDir))
+	require.NoError(t, err)
+
+	require.Len(t, h2.Messages, 2)
+	assert.Equal(t, longStr, h2.Messages[0])
+	assert.Equal(t, "short message after", h2.Messages[1])
+}

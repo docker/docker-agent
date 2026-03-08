@@ -1,8 +1,8 @@
 package history
 
 import (
-	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -215,22 +215,16 @@ func (h *History) load() error {
 	defer f.Close()
 
 	var all []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-
+	dec := json.NewDecoder(f)
+	for {
 		var message string
-		if err := json.Unmarshal([]byte(line), &message); err != nil {
+		if err := dec.Decode(&message); err != nil {
+			if err == io.EOF {
+				break
+			}
 			continue
 		}
 		all = append(all, message)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return err
 	}
 
 	// Deduplicate keeping the latest occurrence of each message
