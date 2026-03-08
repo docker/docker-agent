@@ -969,7 +969,7 @@ func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.S
 
 // RunStream starts the agent's interaction loop and returns a channel of events
 func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan Event {
-	slog.Debug("Starting runtime stream", "agent", r.CurrentAgentName(), "session_id", sess.ID)
+	slog.Debug("Starting runtime stream", "agent", r.CurrentAgentName(), "session_agent", sess.AgentName, "session_id", sess.ID)
 	events := make(chan Event, 128)
 
 	go func() {
@@ -1039,9 +1039,6 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 		runtimeMaxIterations := sess.MaxIterations
 
 		for {
-			// Set elicitation handler on all MCP toolsets before getting tools
-			a := r.CurrentAgent()
-
 			r.emitAgentWarnings(a, events)
 			r.configureToolsetHandlers(a, events)
 

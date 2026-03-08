@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/docker/cagent/pkg/tools"
@@ -104,9 +105,9 @@ func (c *codeModeTool) Tools(ctx context.Context) ([]tools.Tool, error) {
 
 func (c *codeModeTool) Start(ctx context.Context) error {
 	for _, t := range c.toolsets {
-		if startable, ok := t.(tools.Startable); ok {
+		if startable, ok := tools.As[tools.Startable](t); ok {
 			if err := startable.Start(ctx); err != nil {
-				return err
+				slog.Warn("Code mode: toolset start failed; continuing", "toolset", fmt.Sprintf("%T", t), "error", err)
 			}
 		}
 	}
@@ -118,7 +119,7 @@ func (c *codeModeTool) Stop(ctx context.Context) error {
 	var errs []error
 
 	for _, t := range c.toolsets {
-		if startable, ok := t.(tools.Startable); ok {
+		if startable, ok := tools.As[tools.Startable](t); ok {
 			if err := startable.Stop(ctx); err != nil {
 				errs = append(errs, err)
 			}

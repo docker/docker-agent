@@ -213,6 +213,30 @@ func (t *testToolSet) Stop(context.Context) error {
 	return nil
 }
 
+// failingToolSet always returns an error on Start.
+type failingToolSet struct {
+	testToolSet
+}
+
+func (f *failingToolSet) Start(context.Context) error {
+	f.start++
+	return assert.AnError
+}
+
+// wrappingToolSet wraps another ToolSet without implementing Startable,
+// but implements Unwrapper so tools.As can find the inner Startable.
+type wrappingToolSet struct {
+	inner tools.ToolSet
+}
+
+func (w *wrappingToolSet) Tools(ctx context.Context) ([]tools.Tool, error) {
+	return w.inner.Tools(ctx)
+}
+
+func (w *wrappingToolSet) Unwrap() tools.ToolSet {
+	return w.inner
+}
+
 // TestCodeModeTool_SuccessNoToolCalls verifies that successful execution does not include tool calls.
 func TestCodeModeTool_SuccessNoToolCalls(t *testing.T) {
 	tool := Wrap(&testToolSet{
@@ -372,4 +396,33 @@ func TestCodeModeTool_FailureIncludesToolArguments(t *testing.T) {
 	assert.Equal(t, "tool_with_args", scriptResult.ToolCalls[0].Name)
 	assert.Equal(t, map[string]any{"value": "test123"}, scriptResult.ToolCalls[0].Arguments)
 	assert.Equal(t, "result", scriptResult.ToolCalls[0].Result)
+}
+
+func TestCodeModeTool_Start_ContinuesOnFailure(t *testing.T) {
+	first := &testToolSet{}
+	failing := &failingToolSet{}
+	third := &testToolSet{}
+
+	tool := Wrap(first, failing, third)
+
+	startable := tool.(tools.Startable)
+	err := startable.Start(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, first.start, "first toolset should be started")
+	assert.Equal(t, 1, failing.start, "failing toolset should have been attempted")
+	assert.Equal(t, 1, third.start, "third toolset should be started despite earlier failure")
+}
+
+func TestCodeModeTool_Start_UnwrapsToFindStartable(t *testing.T) {
+	inner := &testToolSet{}
+	wrapped := &wrappingToolSet{inner: inner}
+
+	tool := Wrap(wrapped)
+
+	startable := tool.(tools.Startable)
+	err := startable.Start(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, inner.start, "should unwrap to find the Startable inner toolset")
 }

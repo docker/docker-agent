@@ -62,6 +62,7 @@ type lspHandler struct {
 	stdout      *bufio.Reader
 	initialized atomic.Bool
 	requestID   atomic.Int64
+	done        chan struct{} // closed by stop() to signal background goroutines
 
 	// Configuration
 	command    string
@@ -501,11 +502,21 @@ func (h *lspHandler) start(ctx context.Context) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	return h.startLocked(ctx)
+}
+
+// startLocked starts the LSP server process. The caller must hold h.mu.
+func (h *lspHandler) startLocked(ctx context.Context) error {
 	if h.cmd != nil {
-		return errors.New("LSP server already running")
+		return nil
 	}
 
 	slog.Debug("Starting LSP server", "command", h.command, "args", h.args)
+
+	// Detach from the caller's context so the LSP process outlives the
+	// request or sub-session that triggered the start. The process is
+	// explicitly terminated by stop().
+	ctx = context.WithoutCancel(ctx)
 
 	cmd := exec.CommandContext(ctx, h.command, h.args...)
 	cmd.Env = append(os.Environ(), h.env...)
@@ -533,8 +544,9 @@ func (h *lspHandler) start(ctx context.Context) error {
 	h.cmd = cmd
 	h.stdin = stdin
 	h.stdout = bufio.NewReader(stdout)
+	h.done = make(chan struct{})
 
-	go h.readNotifications(ctx, &stderrBuf)
+	go h.readNotifications(h.done, &stderrBuf)
 
 	slog.Debug("LSP server started successfully")
 	return nil
@@ -549,6 +561,8 @@ func (h *lspHandler) stop(_ context.Context) error {
 	}
 
 	slog.Debug("Stopping LSP server")
+
+	close(h.done)
 
 	if h.initialized.Load() {
 		_, _ = h.sendRequestLocked("shutdown", nil)
@@ -590,12 +604,9 @@ func (h *lspHandler) ensureInitialized(ctx context.Context) error {
 	}
 
 	if h.cmd == nil {
-		h.mu.Unlock()
-		if err := h.start(ctx); err != nil {
-			h.mu.Lock()
+		if err := h.startLocked(ctx); err != nil {
 			return fmt.Errorf("failed to start LSP server: %w", err)
 		}
-		h.mu.Lock()
 	}
 
 	if !h.initialized.Load() {
@@ -1455,13 +1466,13 @@ func (h *lspHandler) readMessageLocked() ([]byte, error) {
 	return body, nil
 }
 
-func (h *lspHandler) readNotifications(ctx context.Context, stderrBuf *bytes.Buffer) {
+func (h *lspHandler) readNotifications(done <-chan struct{}, stderrBuf *bytes.Buffer) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			return
 		case <-ticker.C:
 			if stderrBuf.Len() > 0 {
