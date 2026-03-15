@@ -206,7 +206,11 @@ func (m *Model) UpdateToolCall(toolCallID string, status types.ToolStatus, args 
 		}
 		entry.msg.ToolStatus = status
 		if args != "" {
-			entry.msg.ToolCall.Function.Arguments = args
+			if status == types.ToolStatusPending {
+				entry.msg.ToolCall.Function.Arguments += args
+			} else {
+				entry.msg.ToolCall.Function.Arguments = args
+			}
 		}
 		m.toolEntries[i] = entry
 		return
