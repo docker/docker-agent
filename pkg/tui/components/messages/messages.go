@@ -1301,7 +1301,11 @@ func (m *model) AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, t
 		if msg.Type == types.MessageTypeToolCall && msg.ToolCall.ID == toolCall.ID {
 			msg.ToolStatus = status
 			if toolCall.Function.Arguments != "" {
-				msg.ToolCall.Function.Arguments = toolCall.Function.Arguments
+				if status == types.ToolStatusPending {
+					msg.ToolCall.Function.Arguments += toolCall.Function.Arguments
+				} else {
+					msg.ToolCall.Function.Arguments = toolCall.Function.Arguments
+				}
 			}
 			m.invalidateItem(i)
 			return nil

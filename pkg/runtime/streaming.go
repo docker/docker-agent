@@ -152,10 +152,21 @@ func (r *LocalRuntime) handleStream(ctx context.Context, stream chat.MessageStre
 					tc.Function.Arguments += delta.Function.Arguments
 				}
 
-				// Emit PartialToolCall once we have a name, and on subsequent argument deltas
+				// Emit PartialToolCall once we have a name, and on subsequent argument deltas.
+				// Only the current token (delta.Function.Arguments) is sent, not the
+				// full accumulated arguments, to avoid re-transmitting the entire
+				// payload on every token.
 				if tc.Function.Name != "" && (learningName || delta.Function.Arguments != "") {
 					if !emittedPartial[delta.ID] || delta.Function.Arguments != "" {
-						events <- PartialToolCall(*tc, toolDefMap[tc.Function.Name], a.Name())
+						partial := tools.ToolCall{
+							ID:   tc.ID,
+							Type: tc.Type,
+							Function: tools.FunctionCall{
+								Name:      tc.Function.Name,
+								Arguments: delta.Function.Arguments,
+							},
+						}
+						events <- PartialToolCall(partial, toolDefMap[tc.Function.Name], a.Name())
 						emittedPartial[delta.ID] = true
 					}
 				}

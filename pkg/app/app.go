@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -997,12 +998,24 @@ func (a *App) mergeEvents(events []tea.Msg) []tea.Msg {
 			result = append(result, merged)
 
 		case *runtime.PartialToolCallEvent:
-			// For PartialToolCallEvent, keep only the latest one per tool call ID
-			// Only merge consecutive events with the same ID
+			// For PartialToolCallEvent, merge consecutive events with the same tool call ID
+			// by concatenating argument deltas
 			latest := ev
 			for i+1 < len(events) {
 				if next, ok := events[i+1].(*runtime.PartialToolCallEvent); ok && next.ToolCall.ID == ev.ToolCall.ID {
-					latest = next
+					latest = &runtime.PartialToolCallEvent{
+						Type: ev.Type,
+						ToolCall: tools.ToolCall{
+							ID:   ev.ToolCall.ID,
+							Type: ev.ToolCall.Type,
+							Function: tools.FunctionCall{
+								Name:      cmp.Or(next.ToolCall.Function.Name, latest.ToolCall.Function.Name),
+								Arguments: latest.ToolCall.Function.Arguments + next.ToolCall.Function.Arguments,
+							},
+						},
+						ToolDefinition: next.ToolDefinition,
+						AgentContext:   ev.AgentContext,
+					}
 					i++
 				} else {
 					break
