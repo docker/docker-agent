@@ -46,7 +46,7 @@ func newAPICmd() *cobra.Command {
 	return cmd
 }
 
-func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) error {
+func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (retErr error) {
 	telemetry.TrackCommand("serve", append([]string{"api"}, args...))
 
 	ctx := cmd.Context()
@@ -65,6 +65,10 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) error {
 	defer func() {
 		if err := cleanup(); err != nil {
 			slog.Error("Failed to cleanup fake proxy", "error", err)
+			// Only set return error if no other error occurred
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to cleanup fake proxy: %w", err)
+			}
 		}
 	}()
 
@@ -76,6 +80,10 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) error {
 	defer func() {
 		if err := recordCleanup(); err != nil {
 			slog.Error("Failed to cleanup recording proxy", "error", err)
+			// Only set return error if no other error occurred
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to cleanup recording proxy: %w", err)
+			}
 		}
 	}()
 
@@ -87,7 +95,14 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer lnCleanup()
+	defer func() {
+		if err := lnCleanup(); err != nil {
+			slog.Error("Failed to cleanup listener", "error", err)
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to cleanup listener: %w", err)
+			}
+		}
+	}()
 
 	out.Println("Listening on", ln.Addr().String())
 
@@ -106,6 +121,9 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) error {
 	defer func() {
 		if err := sessionStore.Close(); err != nil {
 			slog.Error("Failed to close session store", "error", err)
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to close session store: %w", err)
+			}
 		}
 	}()
 
