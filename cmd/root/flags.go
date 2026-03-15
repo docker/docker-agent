@@ -133,9 +133,8 @@ func parseModelShorthand(s string) *latest.ModelConfig {
 }
 
 // newListener creates a TCP listener and returns a cleanup function that
-// must be deferred by the caller. The cleanup function closes the listener.
-// The listener is also closed if the context is cancelled, which unblocks
-// any in-progress Serve call.
+// must be deferred by the caller. The cleanup function triggers the
+// context.AfterFunc to close the listener.
 func newListener(ctx context.Context, addr string) (net.Listener, func(), error) {
 	ln, err := server.Listen(ctx, addr)
 	if err != nil {
@@ -146,7 +145,6 @@ func newListener(ctx context.Context, addr string) (net.Listener, func(), error)
 	})
 	cleanup := func() {
 		stop()
-		_ = ln.Close()
 	}
 	return ln, cleanup, nil
 }
