@@ -390,3 +390,50 @@ func TestFixSchemaArrayItems(t *testing.T) {
   "type": "object"
 }`, string(buf))
 }
+
+func TestNormalizeUnionTypes_AnyOfPattern(t *testing.T) {
+	t.Parallel()
+
+	// Simulate the anyOf pattern from MCP tool schemas (e.g., Optional[str] in Python)
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"source": map[string]any{
+				"anyOf": []any{
+					map[string]any{"type": "string"},
+					map[string]any{"type": "null"},
+				},
+				"default": nil,
+				"title":   "Source",
+			},
+			"days": map[string]any{
+				"anyOf": []any{
+					map[string]any{"type": "integer"},
+					map[string]any{"type": "null"},
+				},
+				"default": nil,
+				"title":   "Days",
+			},
+			"name": map[string]any{
+				"type":  "string",
+				"title": "Name",
+			},
+		},
+	}
+
+	result := normalizeUnionTypes(schema)
+	props := result["properties"].(map[string]any)
+
+	// anyOf should be converted to simple type
+	source := props["source"].(map[string]any)
+	assert.Equal(t, "string", source["type"])
+	assert.Nil(t, source["anyOf"], "anyOf should be removed after normalization")
+
+	days := props["days"].(map[string]any)
+	assert.Equal(t, "integer", days["type"])
+	assert.Nil(t, days["anyOf"], "anyOf should be removed after normalization")
+
+	// Regular type should be unchanged
+	name := props["name"].(map[string]any)
+	assert.Equal(t, "string", name["type"])
+}

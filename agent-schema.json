@@ -106,6 +106,19 @@
           "examples": [
             "CUSTOM_PROVIDER_API_KEY"
           ]
+        },
+        "headers": {
+          "type": "object",
+          "description": "Custom HTTP headers to include in requests. Header values can reference environment variables using ${VAR_NAME} syntax.",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "examples": [
+            {
+              "cf-aig-authorization": "Bearer ${CLOUDFLARE_AI_GATEWAY_TOKEN}",
+              "x-custom-header": "value"
+            }
+          ]
         }
       },
       "required": [
@@ -524,6 +537,19 @@
         "token_key": {
           "type": "string",
           "description": "Token key for authentication"
+        },
+        "headers": {
+          "type": "object",
+          "description": "Custom HTTP headers to include in requests to this model's provider. Header values can reference environment variables using ${VAR_NAME} syntax.",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "examples": [
+            {
+              "cf-aig-authorization": "Bearer ${CLOUDFLARE_AI_GATEWAY_TOKEN}",
+              "x-custom-header": "value"
+            }
+          ]
         },
         "provider_opts": {
           "type": "object",

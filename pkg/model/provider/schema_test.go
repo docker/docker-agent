@@ -220,20 +220,20 @@ func TestSchemaForOpenai(t *testing.T) {
 		"direction": {
 			"description": "Order",
 			"enum": ["ASC", "DESC"],
-			"type": ["string", "null"]
+			"type": "string"
 		},
 		"labels": {
 			"description": "Filter",
 			"items": {
 				"type": "string"
 			},
-			"type": ["array", "null"]
+			"type": "array"
 		},
 		"perPage": {
 			"description": "Results",
 			"maximum": 100,
 			"minimum": 1,
-			"type": ["number", "null"]
+			"type": "number"
 		},
 		"repo": {
 			"description": "Repository",

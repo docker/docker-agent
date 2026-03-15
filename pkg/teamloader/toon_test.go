@@ -70,3 +70,49 @@ func TestToon(t *testing.T) {
 		})
 	}
 }
+
+func TestWithToon_ForwardsStartToStartableInner(t *testing.T) {
+	t.Parallel()
+
+	inner := &startableToolSet{
+		mockToolSet: mockToolSet{
+			toolsFunc: func(ctx context.Context) ([]tools.Tool, error) {
+				return []tools.Tool{{Name: "tool1"}}, nil
+			},
+		},
+	}
+
+	wrapped := WithToon(inner, "tool1")
+
+	startable, ok := wrapped.(tools.Startable)
+	require.True(t, ok, "toonTools should implement tools.Startable")
+
+	err := startable.Start(t.Context())
+	require.NoError(t, err)
+	assert.True(t, inner.started, "Start() should have been forwarded to inner toolset")
+
+	err = startable.Stop(t.Context())
+	require.NoError(t, err)
+	assert.False(t, inner.started, "Stop() should have been forwarded to inner toolset")
+}
+
+func TestWithToon_StartNoOpForNonStartableInner(t *testing.T) {
+	t.Parallel()
+
+	inner := &mockToolSet{
+		toolsFunc: func(ctx context.Context) ([]tools.Tool, error) {
+			return []tools.Tool{{Name: "tool1"}}, nil
+		},
+	}
+
+	wrapped := WithToon(inner, "tool1")
+
+	startable, ok := wrapped.(tools.Startable)
+	require.True(t, ok, "toonTools should implement tools.Startable")
+
+	err := startable.Start(t.Context())
+	require.NoError(t, err)
+
+	err = startable.Stop(t.Context())
+	require.NoError(t, err)
+}

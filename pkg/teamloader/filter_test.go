@@ -23,6 +23,23 @@ func (m *mockToolSet) Tools(ctx context.Context) ([]tools.Tool, error) {
 	return nil, nil
 }
 
+// startableToolSet is a mock that implements both ToolSet and Startable,
+// like the real MCP toolset does.
+type startableToolSet struct {
+	mockToolSet
+	started bool
+}
+
+func (s *startableToolSet) Start(context.Context) error {
+	s.started = true
+	return nil
+}
+
+func (s *startableToolSet) Stop(context.Context) error {
+	s.started = false
+	return nil
+}
+
 func TestWithToolsFilter_NilToolNames(t *testing.T) {
 	inner := &mockToolSet{}
 
@@ -166,4 +183,89 @@ func TestWithToolsFilter_NonInstructableInner(t *testing.T) {
 	// Verify instructions are empty for non-instructable inner toolset
 	instructions := tools.GetInstructions(wrapped)
 	assert.Empty(t, instructions)
+}
+
+func TestWithToolsFilter_ForwardsStartToStartableInner(t *testing.T) {
+	t.Parallel()
+
+	inner := &startableToolSet{
+		mockToolSet: mockToolSet{
+			toolsFunc: func(context.Context) ([]tools.Tool, error) {
+				return []tools.Tool{{Name: "tool1"}, {Name: "tool2"}}, nil
+			},
+		},
+	}
+
+	wrapped := WithToolsFilter(inner, "tool1")
+
+	// Verify the inner toolset is not started yet
+	assert.False(t, inner.started)
+
+	// The wrapped filterTools should satisfy Startable
+	startable, ok := wrapped.(tools.Startable)
+	require.True(t, ok, "filterTools should implement tools.Startable")
+
+	// Start should forward to the inner toolset
+	err := startable.Start(t.Context())
+	require.NoError(t, err)
+	assert.True(t, inner.started, "Start() should have been forwarded to inner toolset")
+
+	// Stop should also forward
+	err = startable.Stop(t.Context())
+	require.NoError(t, err)
+	assert.False(t, inner.started, "Stop() should have been forwarded to inner toolset")
+}
+
+func TestWithToolsFilter_StartNoOpForNonStartableInner(t *testing.T) {
+	t.Parallel()
+
+	inner := &mockToolSet{
+		toolsFunc: func(context.Context) ([]tools.Tool, error) {
+			return []tools.Tool{{Name: "tool1"}}, nil
+		},
+	}
+
+	wrapped := WithToolsFilter(inner, "tool1")
+
+	// Should still implement Startable
+	startable, ok := wrapped.(tools.Startable)
+	require.True(t, ok, "filterTools should implement tools.Startable")
+
+	// Start/Stop should be no-ops without error
+	err := startable.Start(t.Context())
+	require.NoError(t, err)
+
+	err = startable.Stop(t.Context())
+	require.NoError(t, err)
+}
+
+func TestWithToolsFilter_StartableToolSetIntegration(t *testing.T) {
+	t.Parallel()
+
+	// This test simulates the real wrapping: MCP → filterTools → StartableToolSet
+	inner := &startableToolSet{
+		mockToolSet: mockToolSet{
+			toolsFunc: func(context.Context) ([]tools.Tool, error) {
+				return []tools.Tool{{Name: "tool1"}, {Name: "tool2"}}, nil
+			},
+		},
+	}
+
+	// Wrap in filterTools (like teamloader does)
+	filtered := WithToolsFilter(inner, "tool1")
+
+	// Wrap in StartableToolSet (like agent.WithToolSets does)
+	startable := tools.NewStartable(filtered)
+
+	// Start should propagate through: StartableToolSet → filterTools → startableToolSet
+	err := startable.Start(t.Context())
+	require.NoError(t, err)
+	assert.True(t, startable.IsStarted(), "StartableToolSet should be started")
+	assert.True(t, inner.started, "Inner startable toolset should have been started")
+
+	// Tools should work through the whole chain
+	result, err := startable.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "tool1", result[0].Name)
 }

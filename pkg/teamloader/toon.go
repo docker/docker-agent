@@ -19,6 +19,22 @@ type toonTools struct {
 // Verify interface compliance
 var _ tools.Unwrapper = (*toonTools)(nil)
 
+// Start forwards the Start call to the inner toolset if it implements Startable.
+func (f *toonTools) Start(ctx context.Context) error {
+	if startable, ok := f.ToolSet.(tools.Startable); ok {
+		return startable.Start(ctx)
+	}
+	return nil
+}
+
+// Stop forwards the Stop call to the inner toolset if it implements Startable.
+func (f *toonTools) Stop(ctx context.Context) error {
+	if startable, ok := f.ToolSet.(tools.Startable); ok {
+		return startable.Stop(ctx)
+	}
+	return nil
+}
+
 func (f *toonTools) Tools(ctx context.Context) ([]tools.Tool, error) {
 	allTools, err := f.ToolSet.Tools(ctx)
 	if err != nil {
