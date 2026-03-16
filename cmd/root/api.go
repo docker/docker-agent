@@ -127,7 +127,6 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Close session store on successful completion
 	if err := sessionStore.Close(); err != nil {
 		slog.Error("Failed to close session store", "error", err)
 	}
