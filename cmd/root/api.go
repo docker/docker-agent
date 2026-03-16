@@ -103,21 +103,33 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating session store: %w", err)
 	}
-	defer func() {
-		if err := sessionStore.Close(); err != nil {
-			slog.Error("Failed to close session store", "error", err)
-		}
-	}()
 
 	sources, err := config.ResolveSources(agentsPath, f.runConfig.EnvProvider())
 	if err != nil {
+		if closeErr := sessionStore.Close(); closeErr != nil {
+			slog.Error("Failed to close session store", "error", closeErr)
+		}
 		return fmt.Errorf("resolving agent sources: %w", err)
 	}
 
 	s, err := server.New(ctx, sessionStore, &f.runConfig, time.Duration(f.pullIntervalMins)*time.Minute, sources)
 	if err != nil {
+		if closeErr := sessionStore.Close(); closeErr != nil {
+			slog.Error("Failed to close session store", "error", closeErr)
+		}
 		return fmt.Errorf("creating server: %w", err)
 	}
 
-	return s.Serve(ctx, ln)
+	if err := s.Serve(ctx, ln); err != nil {
+		if closeErr := sessionStore.Close(); closeErr != nil {
+			slog.Error("Failed to close session store", "error", closeErr)
+		}
+		return err
+	}
+
+	// Close session store on successful completion
+	if err := sessionStore.Close(); err != nil {
+		slog.Error("Failed to close session store", "error", err)
+	}
+	return nil
 }
