@@ -260,6 +260,74 @@ func TestFilesystemTool_EditFile(t *testing.T) {
 	assert.Contains(t, result.Output, "old text not found")
 }
 
+func TestEditFileArgs_UnmarshalJSON(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		input     string
+		wantPath  string
+		wantEdits []Edit
+		wantErr   bool
+	}{
+		{
+			name:     "normal array edits",
+			input:    `{"path": "test.txt", "edits": [{"oldText": "hello", "newText": "world"}]}`,
+			wantPath: "test.txt",
+			wantEdits: []Edit{
+				{OldText: "hello", NewText: "world"},
+			},
+		},
+		{
+			name:     "double-serialized string edits",
+			input:    `{"path": "test.txt", "edits": "[{\"oldText\": \"hello\", \"newText\": \"world\"}]"}`,
+			wantPath: "test.txt",
+			wantEdits: []Edit{
+				{OldText: "hello", NewText: "world"},
+			},
+		},
+		{
+			name:     "double-serialized multiple edits",
+			input:    `{"path": "f.go", "edits": "[{\"oldText\": \"a\", \"newText\": \"b\"}, {\"oldText\": \"c\", \"newText\": \"d\"}]"}`,
+			wantPath: "f.go",
+			wantEdits: []Edit{
+				{OldText: "a", NewText: "b"},
+				{OldText: "c", NewText: "d"},
+			},
+		},
+		{
+			name:    "invalid JSON",
+			input:   `not json at all`,
+			wantErr: true,
+		},
+		{
+			name:    "edits is neither array nor string",
+			input:   `{"path": "test.txt", "edits": 42}`,
+			wantErr: true,
+		},
+		{
+			name:    "double-serialized but inner JSON is invalid",
+			input:   `{"path": "test.txt", "edits": "not valid json"}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var args EditFileArgs
+			err := json.Unmarshal([]byte(tc.input), &args)
+			if tc.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPath, args.Path)
+			assert.Equal(t, tc.wantEdits, args.Edits)
+		})
+	}
+}
+
 func TestFilesystemTool_SearchFilesContent(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()

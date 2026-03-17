@@ -165,6 +165,46 @@ type EditFileArgs struct {
 	Edits []Edit `json:"edits" jsonschema:"Array of edit operations"`
 }
 
+// UnmarshalJSON handles LLM-generated arguments where "edits" may be
+// a JSON string instead of a JSON array (double-serialized).
+func (a *EditFileArgs) UnmarshalJSON(data []byte) error {
+	// First, try standard unmarshaling.
+	type Alias EditFileArgs
+	var std Alias
+	if err := json.Unmarshal(data, &std); err == nil {
+		*a = EditFileArgs(std)
+		return nil
+	}
+
+	// If that failed, the "edits" field may be a JSON string.
+	// Parse it as a raw message and attempt double-deserialization.
+	var raw struct {
+		Path  string          `json:"path"`
+		Edits json.RawMessage `json:"edits"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("failed to parse edit_file arguments: %w", err)
+	}
+
+	a.Path = raw.Path
+
+	// Try parsing edits as an array first (normal case).
+	if err := json.Unmarshal(raw.Edits, &a.Edits); err == nil {
+		return nil
+	}
+
+	// Try unwrapping a double-serialized JSON string.
+	var editsStr string
+	if err := json.Unmarshal(raw.Edits, &editsStr); err != nil {
+		return fmt.Errorf("edits field is neither an array nor a JSON string: %w", err)
+	}
+	if err := json.Unmarshal([]byte(editsStr), &a.Edits); err != nil {
+		return fmt.Errorf("failed to parse double-serialized edits string: %w", err)
+	}
+
+	return nil
+}
+
 func (t *FilesystemTool) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
