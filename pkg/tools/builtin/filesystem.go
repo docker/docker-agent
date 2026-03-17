@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/fsx"
@@ -187,6 +188,9 @@ func (a *EditFileArgs) UnmarshalJSON(data []byte) error {
 	}
 
 	a.Path = raw.Path
+	if a.Path == "" {
+		return errors.New("path field is required")
+	}
 
 	// Try parsing edits as an array first (normal case).
 	if err := json.Unmarshal(raw.Edits, &a.Edits); err == nil {
@@ -570,8 +574,8 @@ func normalizedReplace(content, oldText, newText string, normalize func(string) 
 	return content[:origStart] + newText + content[origEnd:], true
 }
 
-// mapNormToOrig finds the smallest position in the original string whose
-// normalized prefix has at least normIdx characters.
+// mapNormToOrig finds the smallest rune-aligned position in the original
+// string whose normalized prefix has at least normIdx characters.
 func mapNormToOrig(original string, normIdx int, normalize func(string) string) int {
 	lo, hi := 0, len(original)
 	for lo < hi {
@@ -582,17 +586,28 @@ func mapNormToOrig(original string, normIdx int, normalize func(string) string) 
 			hi = mid
 		}
 	}
+	// Snap to the start of the rune at position lo to avoid splitting
+	// a multi-byte UTF-8 character. When lo == len(original) we are past
+	// the end of the string and no adjustment is needed.
+	for lo > 0 && lo < len(original) && !utf8.RuneStart(original[lo]) {
+		lo--
+	}
 	return lo
 }
 
 // mapNormToOrigEnd is like mapNormToOrig but then advances past any
 // trailing characters that were consumed by the normalization (e.g. the
 // quote in \" → "). This ensures the entire original text corresponding
-// to the normalized match is included.
+// to the normalized match is included. Advances by whole runes to
+// preserve UTF-8 integrity.
 func mapNormToOrigEnd(original string, normIdx int, normalize func(string) string) int {
 	pos := mapNormToOrig(original, normIdx, normalize)
-	for pos < len(original) && len(normalize(original[:pos+1])) == len(normalize(original[:pos])) {
-		pos++
+	for pos < len(original) {
+		_, size := utf8.DecodeRuneInString(original[pos:])
+		if len(normalize(original[:pos+size])) != len(normalize(original[:pos])) {
+			break
+		}
+		pos += size
 	}
 	return pos
 }
@@ -613,12 +628,26 @@ func stripLeadingWhitespacePerLine(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+// lineContinuationRE matches shell-style line continuations: optional
+// whitespace, a backslash, optional whitespace, a newline, and optional
+// leading whitespace on the next line. This is intentionally
+// context-unaware — it does not distinguish continuations inside string
+// literals from those in code. This is acceptable because the fuzzy
+// strategies are only attempted after an exact match has already failed,
+// making a false positive unlikely in practice.
 var lineContinuationRE = regexp.MustCompile(`\s*\\\s*\n\s*`)
 
 func collapseLineContinuations(s string) string {
 	return lineContinuationRE.ReplaceAllString(s, " ")
 }
 
+// normalizeEscapedQuotes replaces escaped quotes (\" → ") so that the
+// LLM's unescaped version can match the file's escaped version.
+//
+// This strategy is only reached after the exact match (Strategy 1)
+// fails, meaning the literal oldText does not appear in the content.
+// A false positive would require the content to contain both the escaped
+// and unescaped forms of the same text, which is rare in practice.
 func normalizeEscapedQuotes(s string) string {
 	return strings.ReplaceAll(s, `\"`, `"`)
 }

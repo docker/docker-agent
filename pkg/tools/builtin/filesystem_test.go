@@ -310,6 +310,11 @@ func TestEditFileArgs_UnmarshalJSON(t *testing.T) {
 			input:   `{"path": "test.txt", "edits": "not valid json"}`,
 			wantErr: true,
 		},
+		{
+			name:    "missing path in double-serialized fallback",
+			input:   `{"edits": "[{\"oldText\": \"a\", \"newText\": \"b\"}]"}`,
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -415,6 +420,30 @@ func TestFindAndReplace(t *testing.T) {
 			name:    "exact match preferred over fuzzy",
 			content: "hello world",
 			oldText: "hello world",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "overlapping collapsed sequences",
+			content: "cmd \\\n    --flag1 \\\n    --flag2 \\\n    --flag3",
+			oldText: "cmd --flag1 --flag2 --flag3",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "utf8 content with whitespace normalization",
+			content: "greeting = \"héllo   wörld\"",
+			oldText: "greeting = \"héllo wörld\"",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "utf8 content with leading whitespace",
+			content: "msg := \"日本語テスト\"",
+			oldText: "    msg := \"日本語テスト\"",
 			newText: "REPLACED",
 			wantOK:  true,
 			want:    "REPLACED",
