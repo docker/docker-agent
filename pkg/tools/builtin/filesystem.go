@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/fsx"
@@ -477,10 +478,11 @@ func (t *FilesystemTool) handleEditFile(ctx context.Context, args EditFileArgs) 
 
 	var changes []string
 	for i, edit := range args.Edits {
-		if !strings.Contains(modifiedContent, edit.OldText) {
+		replaced, ok := FindAndReplace(modifiedContent, edit.OldText, edit.NewText)
+		if !ok {
 			return tools.ResultError(fmt.Sprintf("Edit %d failed: old text not found", i+1)), nil
 		}
-		modifiedContent = strings.Replace(modifiedContent, edit.OldText, edit.NewText, 1)
+		modifiedContent = replaced
 		changes = append(changes, fmt.Sprintf("Edit %d: Replaced %d characters", i+1, len(edit.OldText)))
 	}
 
@@ -497,6 +499,156 @@ func (t *FilesystemTool) handleEditFile(ctx context.Context, args EditFileArgs) 
 	}
 
 	return tools.ResultSuccess("File edited successfully. Changes:\n" + strings.Join(changes, "\n")), nil
+}
+
+// FindAndReplace tries to find oldText in content and replace the first
+// occurrence with newText. It tries an exact match first, then falls back
+// through progressively looser normalization strategies to handle common
+// LLM mistakes (extra/missing whitespace, collapsed line continuations,
+// escaped quotes).
+//
+// When a fuzzy strategy matches, the replacement is applied to the
+// original (un-normalized) content so that surrounding text is preserved.
+func FindAndReplace(content, oldText, newText string) (string, bool) {
+	// Strategy 1: exact match.
+	if strings.Contains(content, oldText) {
+		return strings.Replace(content, oldText, newText, 1), true
+	}
+
+	// Strategy 2: line-trimmed match (strip trailing whitespace per line).
+	if result, ok := normalizedReplace(content, oldText, newText, trimTrailingWhitespacePerLine); ok {
+		return result, true
+	}
+
+	// Strategy 3: indentation-flexible match (strip leading whitespace per line).
+	if result, ok := normalizedReplace(content, oldText, newText, stripLeadingWhitespacePerLine); ok {
+		return result, true
+	}
+
+	// Strategy 4: line-continuation normalization (collapse "\" + newline + spaces into a single space).
+	if result, ok := normalizedReplace(content, oldText, newText, collapseLineContinuations); ok {
+		return result, true
+	}
+
+	// Strategy 5: escape-normalized match (\" ↔ ").
+	if result, ok := normalizedReplace(content, oldText, newText, normalizeEscapedQuotes); ok {
+		return result, true
+	}
+
+	// Strategy 6: whitespace-collapsed match (collapse all runs of whitespace to single space).
+	if result, ok := normalizedReplace(content, oldText, newText, collapseWhitespace); ok {
+		return result, true
+	}
+
+	return content, false
+}
+
+// normalizedReplace applies a normalization function to both the content
+// and the search text. If the normalized search text is found in the
+// normalized content, it locates the corresponding range in the original
+// content and performs the replacement there.
+func normalizedReplace(content, oldText, newText string, normalize func(string) string) (string, bool) {
+	normContent := normalize(content)
+	normOld := normalize(oldText)
+
+	if normOld == "" {
+		return content, false
+	}
+
+	idx := strings.Index(normContent, normOld)
+	if idx == -1 {
+		return content, false
+	}
+
+	// Map the normalized indices back to the original content.
+	origStart := mapNormToOrig(content, idx, normalize)
+	origEnd := mapNormToOrigEnd(content, idx+len(normOld), normalize)
+
+	return content[:origStart] + newText + content[origEnd:], true
+}
+
+// mapNormToOrig finds the smallest rune-aligned position in the original
+// string whose normalized prefix has at least normIdx characters.
+func mapNormToOrig(original string, normIdx int, normalize func(string) string) int {
+	lo, hi := 0, len(original)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if len(normalize(original[:mid])) < normIdx {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	// Snap to the start of the rune at position lo to avoid splitting
+	// a multi-byte UTF-8 character. When lo == len(original) we are past
+	// the end of the string and no adjustment is needed.
+	for lo > 0 && lo < len(original) && !utf8.RuneStart(original[lo]) {
+		lo--
+	}
+	return lo
+}
+
+// mapNormToOrigEnd is like mapNormToOrig but then advances past any
+// trailing characters that were consumed by the normalization (e.g. the
+// quote in \" → "). This ensures the entire original text corresponding
+// to the normalized match is included. Advances by whole runes to
+// preserve UTF-8 integrity.
+func mapNormToOrigEnd(original string, normIdx int, normalize func(string) string) int {
+	pos := mapNormToOrig(original, normIdx, normalize)
+	for pos < len(original) {
+		_, size := utf8.DecodeRuneInString(original[pos:])
+		if len(normalize(original[:pos+size])) != len(normalize(original[:pos])) {
+			break
+		}
+		pos += size
+	}
+	return pos
+}
+
+func trimTrailingWhitespacePerLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimRight(line, " \t")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func stripLeadingWhitespacePerLine(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimLeft(line, " \t")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// lineContinuationRE matches shell-style line continuations: optional
+// whitespace, a backslash, optional whitespace, a newline, and optional
+// leading whitespace on the next line. This is intentionally
+// context-unaware — it does not distinguish continuations inside string
+// literals from those in code. This is acceptable because the fuzzy
+// strategies are only attempted after an exact match has already failed,
+// making a false positive unlikely in practice.
+var lineContinuationRE = regexp.MustCompile(`\s*\\\s*\n\s*`)
+
+func collapseLineContinuations(s string) string {
+	return lineContinuationRE.ReplaceAllString(s, " ")
+}
+
+// normalizeEscapedQuotes replaces escaped quotes (\" → ") so that the
+// LLM's unescaped version can match the file's escaped version.
+//
+// This strategy is only reached after the exact match (Strategy 1)
+// fails, meaning the literal oldText does not appear in the content.
+// A false positive would require the content to contain both the escaped
+// and unescaped forms of the same text, which is rare in practice.
+func normalizeEscapedQuotes(s string) string {
+	return strings.ReplaceAll(s, `\"`, `"`)
+}
+
+var whitespaceRE = regexp.MustCompile(`\s+`)
+
+func collapseWhitespace(s string) string {
+	return whitespaceRE.ReplaceAllString(s, " ")
 }
 
 func (t *FilesystemTool) handleListDirectory(_ context.Context, args ListDirectoryArgs) (*tools.ToolCallResult, error) {

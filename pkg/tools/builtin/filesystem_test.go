@@ -357,6 +357,162 @@ func TestEditFileArgs_UnmarshalJSON(t *testing.T) {
 	}
 }
 
+func TestFindAndReplace(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		oldText string
+		newText string
+		wantOK  bool
+		want    string
+	}{
+		{
+			name:    "exact match",
+			content: "hello world",
+			oldText: "hello",
+			newText: "hi",
+			wantOK:  true,
+			want:    "hi world",
+		},
+		{
+			name:    "no match at all",
+			content: "hello world",
+			oldText: "xyz",
+			newText: "abc",
+			wantOK:  false,
+			want:    "hello world",
+		},
+		{
+			name:    "trailing whitespace mismatch",
+			content: "line one   \nline two\n",
+			oldText: "line one\nline two",
+			newText: "replaced",
+			wantOK:  true,
+			want:    "replaced\n",
+		},
+		{
+			name:    "leading whitespace (indentation) mismatch",
+			content: "# Install deps\nRUN yarn install",
+			oldText: "    # Install deps\nRUN yarn install",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "line continuation collapsed by LLM",
+			content: "RUN apt-get update && \\\n    apt-get install -y curl",
+			oldText: "RUN apt-get update && apt-get install -y curl",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "escaped quotes vs unescaped",
+			content: `echo \"hello world\"`,
+			oldText: `echo "hello world"`,
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "whitespace collapsed (multiple spaces to one)",
+			content: "foo   bar\tbaz",
+			oldText: "foo bar baz",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "multi-line continuation Dockerfile",
+			content: "RUN --mount=type=cache,target=/var/cache/apt \\\n    --mount=type=cache,target=/var/lib/apt \\\n    apt-get update",
+			oldText: "RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/apt apt-get update",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "preserves surrounding content",
+			content: "before\nhello world\nafter",
+			oldText: "hello  world",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "before\nREPLACED\nafter",
+		},
+		{
+			name:    "exact match preferred over fuzzy",
+			content: "hello world",
+			oldText: "hello world",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "overlapping collapsed sequences",
+			content: "cmd \\\n    --flag1 \\\n    --flag2 \\\n    --flag3",
+			oldText: "cmd --flag1 --flag2 --flag3",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "utf8 content with whitespace normalization",
+			content: "greeting = \"héllo   wörld\"",
+			oldText: "greeting = \"héllo wörld\"",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "utf8 content with leading whitespace",
+			content: "msg := \"日本語テスト\"",
+			oldText: "    msg := \"日本語テスト\"",
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := FindAndReplace(tc.content, tc.oldText, tc.newText)
+			assert.Equal(t, tc.wantOK, ok)
+			if tc.wantOK {
+				assert.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestFilesystemTool_EditFile_FuzzyMatch(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tool := NewFilesystemTool(tmpDir)
+
+	// File has line continuations; LLM sends collapsed version.
+	original := "FROM node:22\n\nRUN apt-get update && \\\n    apt-get install -y curl && \\\n    rm -rf /var/lib/apt/lists/*\n"
+	testFile := "Dockerfile"
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, testFile), []byte(original), 0o644))
+
+	result, err := tool.handleEditFile(t.Context(), EditFileArgs{
+		Path: testFile,
+		Edits: []Edit{
+			{
+				OldText: "RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*",
+				NewText: "RUN apt-get update && \\\n    apt-get install -y curl wget && \\\n    rm -rf /var/lib/apt/lists/*",
+			},
+		},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "File edited successfully")
+
+	edited, err := os.ReadFile(filepath.Join(tmpDir, testFile))
+	require.NoError(t, err)
+	assert.Contains(t, string(edited), "curl wget")
+}
+
 func TestFilesystemTool_SearchFilesContent(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
