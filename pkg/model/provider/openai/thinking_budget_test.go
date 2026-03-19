@@ -40,6 +40,11 @@ func TestIsOpenAIReasoningModel(t *testing.T) {
 		{"gpt-5-turbo", "gpt-5-turbo", true},
 		{"GPT-5 uppercase", "GPT-5", true},
 
+		// GPT-5 -chat-latest variants - should NOT support reasoning
+		{"gpt-5-chat-latest", "gpt-5-chat-latest", false},
+		{"gpt-5-chat-latest with suffix", "gpt-5-chat-latest-2025-10-01", false},
+		{"GPT-5-CHAT-LATEST uppercase", "GPT-5-CHAT-LATEST", false},
+
 		// GPT-4 series models - should NOT support reasoning
 		{"gpt-4", "gpt-4", false},
 		{"gpt-4o", "gpt-4o", false},

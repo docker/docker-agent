@@ -903,6 +903,10 @@ func isResponsesModel(model string) bool {
 
 func isOpenAIReasoningModel(model string) bool {
 	m := strings.ToLower(model)
+	// Exclude -chat-latest variants which don't support reasoning parameters
+	if strings.Contains(m, "-chat-latest") {
+		return false
+	}
 	return strings.HasPrefix(m, "o1") ||
 		strings.HasPrefix(m, "o3") ||
 		strings.HasPrefix(m, "o4") ||
