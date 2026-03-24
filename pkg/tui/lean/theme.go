@@ -1,0 +1,31 @@
+package lean
+
+import "charm.land/lipgloss/v2"
+
+var (
+	accent       = lipgloss.Color("#8b5cf6")
+	blue         = lipgloss.Color("#3b82f6")
+	cyan         = lipgloss.Color("#38bdf8")
+	green        = lipgloss.Color("#34d399")
+	yellow       = lipgloss.Color("#fbbf24")
+	red          = lipgloss.Color("#f87171")
+	magenta      = lipgloss.Color("#c084fc")
+	muted        = lipgloss.Color("#94a3b8")
+	dim          = lipgloss.Color("#64748b")
+	textColor    = lipgloss.Color("#e2e8f0")
+	userBG       = lipgloss.Color("#1f2942")
+	toolBG       = lipgloss.Color("#111827")
+	infoBG       = lipgloss.Color("#172554")
+	errorBG      = lipgloss.Color("#3f1d1d")
+	promptBG     = lipgloss.Color("#1e293b")
+	subAgentBG   = lipgloss.Color("#0f172a")
+	baseStyle    = lipgloss.NewStyle().Foreground(textColor)
+	accentStyle  = lipgloss.NewStyle().Foreground(accent)
+	blueStyle    = lipgloss.NewStyle().Foreground(blue)
+	cyanStyle    = lipgloss.NewStyle().Foreground(cyan)
+	yellowStyle  = lipgloss.NewStyle().Foreground(yellow)
+	magentaStyle = lipgloss.NewStyle().Foreground(magenta)
+	mutedStyle   = lipgloss.NewStyle().Foreground(muted)
+	dimStyle     = lipgloss.NewStyle().Foreground(dim)
+	userBGStyle  = lipgloss.NewStyle().Background(userBG).Foreground(textColor)
+)

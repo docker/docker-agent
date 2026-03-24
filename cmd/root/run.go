@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tui"
+	"github.com/docker/docker-agent/pkg/tui/lean"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -49,6 +50,7 @@ type runExecFlags struct {
 	cpuProfile        string
 	memProfile        string
 	forceTUI          bool
+	lean              bool
 	sandbox           bool
 	sandboxTemplate   string
 
@@ -112,6 +114,7 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	_ = cmd.PersistentFlags().MarkHidden("memprofile")
 	cmd.PersistentFlags().BoolVar(&flags.forceTUI, "force-tui", false, "Force TUI mode even when not in a terminal")
 	_ = cmd.PersistentFlags().MarkHidden("force-tui")
+	cmd.PersistentFlags().BoolVar(&flags.lean, "lean", false, "Use the lean terminal UI")
 	cmd.PersistentFlags().BoolVar(&flags.sandbox, "sandbox", false, "Run the agent inside a Docker sandbox (requires Docker Desktop with sandbox support)")
 	cmd.PersistentFlags().StringVar(&flags.sandboxTemplate, "template", "", "Template image for the sandbox (passed to docker sandbox create -t)")
 	cmd.MarkFlagsMutuallyExclusive("fake", "record")
@@ -120,6 +123,7 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().BoolVar(&flags.exec, "exec", false, "Execute without a TUI")
 	cmd.PersistentFlags().BoolVar(&flags.hideToolCalls, "hide-tool-calls", false, "Hide the tool calls in the output")
 	cmd.PersistentFlags().BoolVar(&flags.outputJSON, "json", false, "Output results in JSON format")
+	cmd.MarkFlagsMutuallyExclusive("exec", "lean")
 }
 
 func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) error {
@@ -137,7 +141,7 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
 	out := cli.NewPrinter(cmd.OutOrStdout())
 
-	useTUI := !f.exec && (f.forceTUI || isatty.IsTerminal(os.Stdout.Fd()))
+	useTUI := !f.exec && (f.lean || f.forceTUI || isatty.IsTerminal(os.Stdout.Fd()))
 	return f.runOrExec(ctx, out, args, useTUI)
 }
 
@@ -256,6 +260,14 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 
 	if !useTUI {
 		return f.handleExecMode(ctx, out, rt, sess, args)
+	}
+
+	if f.lean {
+		opts, err := f.buildLeanOptions(args)
+		if err != nil {
+			return err
+		}
+		return lean.Run(ctx, rt, sess, opts)
 	}
 
 	applyTheme()
@@ -420,10 +432,6 @@ func readInitialMessage(args []string) (*string, error) {
 }
 
 func (f *runExecFlags) launchTUI(ctx context.Context, out *cli.Printer, rt runtime.Runtime, sess *session.Session, args []string, useTUI bool) error {
-	if useTUI {
-		applyTheme()
-	}
-
 	if f.dryRun {
 		out.Println("Dry run mode enabled. Agent initialized but will not execute.")
 		return nil
@@ -433,6 +441,15 @@ func (f *runExecFlags) launchTUI(ctx context.Context, out *cli.Printer, rt runti
 		return f.handleExecMode(ctx, out, rt, sess, args)
 	}
 
+	if f.lean {
+		opts, err := f.buildLeanOptions(args)
+		if err != nil {
+			return err
+		}
+		return lean.Run(ctx, rt, sess, opts)
+	}
+
+	applyTheme()
 	opts, err := f.buildAppOpts(args)
 	if err != nil {
 		return err
@@ -459,6 +476,25 @@ func (f *runExecFlags) buildAppOpts(args []string) ([]app.Opt, error) {
 	}
 	if f.exitAfterResponse {
 		opts = append(opts, app.WithExitAfterFirstResponse())
+	}
+	return opts, nil
+}
+
+func (f *runExecFlags) buildLeanOptions(args []string) (lean.Options, error) {
+	firstMessage, err := readInitialMessage(args)
+	if err != nil {
+		return lean.Options{}, err
+	}
+
+	opts := lean.Options{
+		FirstMessageAttachment: f.attachmentPath,
+		ExitAfterFirstResponse: f.exitAfterResponse,
+	}
+	if firstMessage != nil {
+		opts.FirstMessage = *firstMessage
+	}
+	if len(args) > 2 {
+		opts.QueuedMessages = append(opts.QueuedMessages, args[2:]...)
 	}
 	return opts, nil
 }
