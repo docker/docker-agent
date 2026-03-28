@@ -24,21 +24,21 @@ func TestToolsetDescribe_StdioNoArgs(t *testing.T) {
 func TestToolsetDescribe_RemoteHostAndPort(t *testing.T) {
 	t.Parallel()
 
-	ts := NewRemoteToolset("", "http://example.com:8443/mcp/v1?key=secret", "sse", nil)
+	ts := NewRemoteToolset("", "http://example.com:8443/mcp/v1?key=secret", "sse", nil, nil)
 	assert.Check(t, is.Equal(ts.Describe(), "mcp(remote host=example.com:8443 transport=sse)"))
 }
 
 func TestToolsetDescribe_RemoteDefaultPort(t *testing.T) {
 	t.Parallel()
 
-	ts := NewRemoteToolset("", "https://api.example.com/mcp", "streamable", nil)
+	ts := NewRemoteToolset("", "https://api.example.com/mcp", "streamable", nil, nil)
 	assert.Check(t, is.Equal(ts.Describe(), "mcp(remote host=api.example.com transport=streamable)"))
 }
 
 func TestToolsetDescribe_RemoteInvalidURL(t *testing.T) {
 	t.Parallel()
 
-	ts := NewRemoteToolset("", "://bad-url", "sse", nil)
+	ts := NewRemoteToolset("", "://bad-url", "sse", nil, nil)
 	assert.Check(t, is.Equal(ts.Describe(), "mcp(remote transport=sse)"))
 }
 

@@ -16,6 +16,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -128,18 +129,18 @@ func validateAndFillDefaults(metadata *AuthorizationServerMetadata, authServerUR
 
 	metadata.AuthorizationEndpoint = cmp.Or(metadata.AuthorizationEndpoint, authServerURL+"/authorize")
 	metadata.TokenEndpoint = cmp.Or(metadata.TokenEndpoint, authServerURL+"/token")
-	metadata.RegistrationEndpoint = cmp.Or(metadata.RegistrationEndpoint, authServerURL+"/register")
 
 	return metadata
 }
 
-// createDefaultMetadata creates minimal metadata when discovery fails
+// createDefaultMetadata creates minimal metadata when discovery fails.
+// RegistrationEndpoint is intentionally omitted — since discovery failed
+// we cannot know whether the server supports dynamic client registration.
 func createDefaultMetadata(authServerURL string) *AuthorizationServerMetadata {
 	return &AuthorizationServerMetadata{
 		Issuer:                                 authServerURL,
 		AuthorizationEndpoint:                  authServerURL + "/authorize",
 		TokenEndpoint:                          authServerURL + "/token",
-		RegistrationEndpoint:                   authServerURL + "/register",
 		ResponseTypesSupported:                 []string{"code"},
 		ResponseModesSupported:                 []string{"query", "fragment"},
 		GrantTypesSupported:                    []string{"authorization_code"},
@@ -161,10 +162,11 @@ func resourceMetadataFromWWWAuth(wwwAuth string) string {
 type oauthTransport struct {
 	base http.RoundTripper
 	// TODO(rumpl): remove client reference, we need to find a better way to send elicitation requests
-	client     *remoteMCPClient
-	tokenStore OAuthTokenStore
-	baseURL    string
-	managed    bool
+	client      *remoteMCPClient
+	tokenStore  OAuthTokenStore
+	baseURL     string
+	managed     bool
+	oauthConfig *latest.RemoteOAuthConfig
 }
 
 func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -180,8 +182,13 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	reqClone := req.Clone(req.Context())
 
-	if token, err := t.tokenStore.GetToken(t.baseURL); err == nil && !token.IsExpired() {
-		reqClone.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	if token, err := t.tokenStore.GetToken(t.baseURL); err == nil {
+		if token.UserDeclined {
+			return nil, errors.New("OAuth authorization was declined for this session")
+		}
+		if !token.IsExpired() {
+			reqClone.Header.Set("Authorization", "Bearer "+token.AccessToken)
+		}
 	}
 
 	resp, err := t.base.RoundTrip(reqClone)
@@ -212,7 +219,9 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // handleOAuthFlow performs the OAuth flow when a 401 response is received
 func (t *oauthTransport) handleOAuthFlow(ctx context.Context, authServer, wwwAuth string) error {
-	if t.managed {
+	// When explicit OAuth credentials are configured, always use the managed flow
+	// regardless of the managed flag — we have everything needed to drive it ourselves.
+	if t.managed || (t.oauthConfig != nil && t.oauthConfig.ClientID != "") {
 		return t.handleManagedOAuthFlow(ctx, authServer, wwwAuth)
 	}
 
@@ -253,7 +262,16 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	slog.Debug("Creating OAuth callback server")
-	callbackServer, err := NewCallbackServer()
+	var callbackServer *CallbackServer
+	var callbackOpts []CallbackServerOption
+	if t.oauthConfig != nil && t.oauthConfig.TLS {
+		callbackOpts = append(callbackOpts, WithTLS())
+	}
+	if t.oauthConfig != nil && t.oauthConfig.CallbackPort > 0 {
+		callbackServer, err = NewCallbackServerWithOptions(t.oauthConfig.CallbackPort, callbackOpts...)
+	} else {
+		callbackServer, err = NewCallbackServerWithOptions(0, callbackOpts...)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create callback server: %w", err)
 	}
@@ -275,17 +293,21 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	var clientID string
 	var clientSecret string
 
-	if authServerMetadata.RegistrationEndpoint != "" {
+	switch {
+	case t.oauthConfig != nil && t.oauthConfig.ClientID != "":
+		// Use pre-registered credentials — skip dynamic registration entirely.
+		clientID = t.oauthConfig.ClientID
+		clientSecret = t.oauthConfig.ClientSecret
+		slog.Debug("Using explicit OAuth client credentials")
+	case authServerMetadata.RegistrationEndpoint != "":
 		slog.Debug("Attempting dynamic client registration")
 		clientID, clientSecret, err = RegisterClient(ctx, authServerMetadata, redirectURI, nil)
 		if err != nil {
-			slog.Debug("Dynamic registration failed", "error", err)
-			// TODO(rumpl): fall back to requesting client ID from user
-			return err
+			slog.Debug("Dynamic registration failed, provide explicit oauth.clientId in config", "error", err)
+			return fmt.Errorf("dynamic client registration failed; set remote.oauth.clientId in your config: %w", err)
 		}
-	} else {
-		// TODO(rumpl): fall back to requesting client ID from user
-		return errors.New("authorization server does not support dynamic client registration")
+	default:
+		return errors.New("authorization server does not support dynamic client registration; set remote.oauth.clientId in your config")
 	}
 
 	state, err := GenerateState()
@@ -296,6 +318,11 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	callbackServer.SetExpectedState(state)
 	verifier := GeneratePKCEVerifier()
 
+	scopes := authServerMetadata.ScopesSupported
+	if t.oauthConfig != nil && len(t.oauthConfig.Scopes) > 0 {
+		scopes = t.oauthConfig.Scopes
+	}
+
 	authURL := BuildAuthorizationURL(
 		authServerMetadata.AuthorizationEndpoint,
 		clientID,
@@ -303,6 +330,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		state,
 		oauth2.S256ChallengeFromVerifier(verifier),
 		t.baseURL,
+		scopes,
 	)
 
 	result, err := t.client.requestElicitation(ctx, &mcpsdk.ElicitParams{
@@ -320,6 +348,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	slog.Debug("Elicitation response received", "result", result)
 
 	if result.Action != tools.ElicitationActionAccept {
+		_ = t.tokenStore.StoreToken(t.baseURL, &OAuthToken{UserDeclined: true})
 		return errors.New("user declined OAuth authorization")
 	}
 
@@ -415,6 +444,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	slog.Debug("Received elicitation response from client", "action", result.Action)
 
 	if result.Action != tools.ElicitationActionAccept {
+		_ = t.tokenStore.StoreToken(t.baseURL, &OAuthToken{UserDeclined: true})
 		return errors.New("OAuth flow declined or cancelled by client")
 	}
 	if result.Content == nil {

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ type CallbackServer struct {
 	server   *http.Server
 	listener net.Listener
 	mu       sync.Mutex
+	useTLS   bool
 
 	// Channels for communicating the authorization code and state
 	codeCh  chan string
@@ -26,12 +28,47 @@ type CallbackServer struct {
 	expectedState string
 }
 
-// NewCallbackServer creates a new OAuth callback server
-func NewCallbackServer() (*CallbackServer, error) {
-	// Find an available port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+// CallbackServerOption configures a CallbackServer.
+type CallbackServerOption func(*CallbackServer)
+
+// WithTLS enables HTTPS on the callback server using an in-memory self-signed
+// certificate. Use this when the OAuth provider requires an https redirect_uri
+// even for loopback addresses (e.g. Slack).
+func WithTLS() CallbackServerOption {
+	return func(cs *CallbackServer) {
+		cs.useTLS = true
+	}
+}
+
+// NewCallbackServer creates a new OAuth callback server.
+// An optional port can be provided to bind to a specific local port.
+// When no port is given, or port is 0, a random available port is used.
+func NewCallbackServer(port ...int) (*CallbackServer, error) {
+	return newCallbackServer(port, nil)
+}
+
+// NewCallbackServerWithOptions creates a new OAuth callback server with functional options.
+// An optional port can be provided as the first argument.
+func NewCallbackServerWithOptions(port int, opts ...CallbackServerOption) (*CallbackServer, error) {
+	var ports []int
+	if port > 0 {
+		ports = []int{port}
+	}
+	return newCallbackServer(ports, opts)
+}
+
+func newCallbackServer(port []int, opts []CallbackServerOption) (*CallbackServer, error) {
+	addr := "127.0.0.1:0"
+	if len(port) > 0 && port[0] > 0 {
+		addr = fmt.Sprintf("127.0.0.1:%d", port[0])
+	}
+
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find available port: %w", err)
+		if len(port) > 0 && port[0] > 0 {
+			return nil, fmt.Errorf("callback port %d is already in use: %w", port[0], err)
+		}
+		return nil, fmt.Errorf("failed to find available port for callback: %w", err)
 	}
 
 	cs := &CallbackServer{
@@ -41,6 +78,10 @@ func NewCallbackServer() (*CallbackServer, error) {
 		errCh:    make(chan error, 1),
 	}
 
+	for _, opt := range opts {
+		opt(cs)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", cs.handleCallback)
 
@@ -48,6 +89,15 @@ func NewCallbackServer() (*CallbackServer, error) {
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
+	}
+
+	if cs.useTLS {
+		tlsCfg, tlsErr := selfSignedTLSConfig()
+		if tlsErr != nil {
+			_ = listener.Close()
+			return nil, fmt.Errorf("failed to generate self-signed certificate: %w", tlsErr)
+		}
+		cs.listener = tls.NewListener(listener, tlsCfg)
 	}
 
 	return cs, nil
@@ -66,7 +116,11 @@ func (cs *CallbackServer) Start() error {
 
 func (cs *CallbackServer) GetRedirectURI() string {
 	addr := cs.listener.Addr().String()
-	return fmt.Sprintf("http://%s/callback", addr)
+	scheme := "http"
+	if cs.useTLS {
+		scheme = "https"
+	}
+	return fmt.Sprintf("%s://%s/callback", scheme, addr)
 }
 
 func (cs *CallbackServer) SetExpectedState(state string) {

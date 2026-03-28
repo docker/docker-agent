@@ -900,8 +900,16 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 
 		isLast := i == totalToolsets-1
 
-		// Start the toolset if needed
+		// Start the toolset if needed.
+		// OAuth-protected toolsets are deferred — they require a live elicitation
+		// handler and events channel, which are only available once RunStream is
+		// active. They will start lazily on the first tool call.
 		if startable, ok := toolset.(*tools.StartableToolSet); ok {
+			if mcpTS, isMCP := tools.As[*mcptools.Toolset](startable); isMCP && mcpTS.RequiresOAuth() {
+				slog.Debug("Deferring OAuth toolset start until first use", "toolset", tools.DescribeToolSet(startable))
+				continue
+			}
+
 			if !startable.IsStarted() {
 				if err := startable.Start(ctx); err != nil {
 					slog.Warn("Toolset start failed; skipping", "agent", a.Name(), "toolset", fmt.Sprintf("%T", startable.ToolSet), "error", err)

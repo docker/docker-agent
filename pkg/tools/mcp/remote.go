@@ -8,6 +8,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/upstream"
 )
 
@@ -19,9 +20,10 @@ type remoteMCPClient struct {
 	headers       map[string]string
 	tokenStore    OAuthTokenStore
 	managed       bool
+	oauthConfig   *latest.RemoteOAuthConfig
 }
 
-func newRemoteClient(url, transportType string, headers map[string]string, tokenStore OAuthTokenStore) *remoteMCPClient {
+func newRemoteClient(url, transportType string, headers map[string]string, tokenStore OAuthTokenStore, oauthConfig *latest.RemoteOAuthConfig) *remoteMCPClient {
 	slog.Debug("Creating remote MCP client", "url", url, "transport", transportType, "headers", headers)
 
 	if tokenStore == nil {
@@ -33,6 +35,7 @@ func newRemoteClient(url, transportType string, headers map[string]string, token
 		transportType: transportType,
 		headers:       headers,
 		tokenStore:    tokenStore,
+		oauthConfig:   oauthConfig,
 	}
 }
 
@@ -102,11 +105,12 @@ func (c *remoteMCPClient) createHTTPClient() *http.Client {
 
 	// Then wrap with OAuth support
 	transport = &oauthTransport{
-		base:       transport,
-		client:     c,
-		tokenStore: c.tokenStore,
-		baseURL:    c.url,
-		managed:    c.managed,
+		base:        transport,
+		client:      c,
+		tokenStore:  c.tokenStore,
+		baseURL:     c.url,
+		managed:     c.managed,
+		oauthConfig: c.oauthConfig,
 	}
 
 	return &http.Client{

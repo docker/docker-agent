@@ -42,7 +42,7 @@ func TestRemoteClientCustomHeaders(t *testing.T) {
 		"Authorization": "Bearer custom-token",
 	}
 
-	client := newRemoteClient(server.URL, "sse", expectedHeaders, NewInMemoryTokenStore())
+	client := newRemoteClient(server.URL, "sse", expectedHeaders, NewInMemoryTokenStore(), nil)
 
 	// Try to initialize (which will make the HTTP request)
 	// We don't care if it succeeds or fails, we just need it to make the request
@@ -91,7 +91,7 @@ func TestRemoteClientHeadersWithStreamable(t *testing.T) {
 		"X-Custom-Auth": "custom-auth-value",
 	}
 
-	client := newRemoteClient(server.URL, "streamable", expectedHeaders, NewInMemoryTokenStore())
+	client := newRemoteClient(server.URL, "streamable", expectedHeaders, NewInMemoryTokenStore(), nil)
 
 	// Try to initialize
 	_, _ = client.Initialize(t.Context(), nil)
@@ -131,7 +131,7 @@ func TestRemoteClientNoHeaders(t *testing.T) {
 	defer server.Close()
 
 	// Create remote client without custom headers (nil)
-	client := newRemoteClient(server.URL, "sse", nil, NewInMemoryTokenStore())
+	client := newRemoteClient(server.URL, "sse", nil, NewInMemoryTokenStore(), nil)
 
 	_, _ = client.Initialize(t.Context(), nil)
 
@@ -167,7 +167,7 @@ func TestRemoteClientEmptyHeaders(t *testing.T) {
 	defer server.Close()
 
 	// Create remote client with empty headers map
-	client := newRemoteClient(server.URL, "sse", map[string]string{}, NewInMemoryTokenStore())
+	client := newRemoteClient(server.URL, "sse", map[string]string{}, NewInMemoryTokenStore(), nil)
 
 	_, _ = client.Initialize(t.Context(), nil)
 

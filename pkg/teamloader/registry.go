@@ -253,7 +253,7 @@ func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 
 		// TODO(dga): until the MCP Gateway supports oauth with docker agent, we fetch the remote url and directly connect to it.
 		if serverSpec.Type == "remote" {
-			return mcp.NewRemoteToolset(toolset.Name, serverSpec.Remote.URL, serverSpec.Remote.TransportType, nil), nil
+			return mcp.NewRemoteToolset(toolset.Name, serverSpec.Remote.URL, serverSpec.Remote.TransportType, nil, nil), nil
 		}
 
 		env, err := environment.ExpandAll(ctx, environment.ToValues(toolset.Env), envProvider)
@@ -294,7 +294,7 @@ func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 		headers := expander.ExpandMap(ctx, toolset.Remote.Headers)
 		url := expander.Expand(ctx, toolset.Remote.URL, nil)
 
-		return mcp.NewRemoteToolset(toolset.Name, url, toolset.Remote.TransportType, headers), nil
+		return mcp.NewRemoteToolset(toolset.Name, url, toolset.Remote.TransportType, headers, toolset.Remote.OAuth), nil
 
 	default:
 		return nil, errors.New("mcp toolset requires either ref, command, or remote configuration")

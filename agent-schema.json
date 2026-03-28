@@ -1191,10 +1191,48 @@
           "additionalProperties": {
             "type": "string"
           }
+        },
+        "oauth": {
+          "$ref": "#/definitions/RemoteOAuthConfig",
+          "description": "Explicit OAuth configuration for servers that do not support Dynamic Client Registration"
         }
       },
       "required": [
         "url"
+      ],
+      "additionalProperties": false
+    },
+    "RemoteOAuthConfig": {
+      "type": "object",
+      "description": "Explicit OAuth client credentials for remote MCP servers that do not support Dynamic Client Registration (RFC 7591)",
+      "properties": {
+        "clientId": {
+          "type": "string",
+          "description": "Pre-registered OAuth client identifier"
+        },
+        "clientSecret": {
+          "type": "string",
+          "description": "OAuth client secret (only needed for confidential clients)"
+        },
+        "callbackPort": {
+          "type": "integer",
+          "description": "Port for the local OAuth redirect server. When zero, a random available port is used.",
+          "minimum": 0
+        },
+        "scopes": {
+          "type": "array",
+          "description": "Scopes to request during the authorization flow, overriding server defaults",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tls": {
+          "type": "boolean",
+          "description": "Enable HTTPS on the local OAuth callback server using a self-signed certificate. Required for providers (e.g. Slack) that reject http redirect URIs even for loopback addresses."
+        }
+      },
+      "required": [
+        "clientId"
       ],
       "additionalProperties": false
     },

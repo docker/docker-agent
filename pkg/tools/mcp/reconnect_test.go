@@ -121,7 +121,7 @@ func TestRemoteReconnectAfterServerRestart(t *testing.T) {
 	// --- Step 1–2: Start first server, connect toolset ---
 	shutdown1 := startServer(t)
 
-	ts := NewRemoteToolset("test", fmt.Sprintf("http://%s/mcp", addr), "streamable-http", nil)
+	ts := NewRemoteToolset("test", fmt.Sprintf("http://%s/mcp", addr), "streamable-http", nil, nil)
 	require.NoError(t, ts.Start(t.Context()))
 
 	toolList, err := ts.Tools(t.Context())
@@ -184,7 +184,7 @@ func TestRemoteReconnectRefreshesTools(t *testing.T) {
 	// --- Start server v1 with tools "alpha" + "shared" ---
 	shutdown1 := startMCPServer(t, addr, alphaTool, sharedTool)
 
-	ts := NewRemoteToolset("ns", fmt.Sprintf("http://%s/mcp", addr), "streamable-http", nil)
+	ts := NewRemoteToolset("ns", fmt.Sprintf("http://%s/mcp", addr), "streamable-http", nil, nil)
 
 	// Track toolsChangedHandler invocations.
 	toolsChangedCh := make(chan struct{}, 1)

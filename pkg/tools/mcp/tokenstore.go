@@ -24,6 +24,10 @@ type OAuthToken struct {
 	RefreshToken string    `json:"refresh_token,omitempty"`
 	Scope        string    `json:"scope,omitempty"`
 	ExpiresAt    time.Time `json:"expires_at"`
+	// UserDeclined is set to true when the user explicitly declines the OAuth
+	// authorization prompt. It acts as a session-scoped sentinel that prevents
+	// the flow from being re-triggered on subsequent requests.
+	UserDeclined bool `json:"user_declined,omitempty"`
 }
 
 // IsExpired checks if the token is expired

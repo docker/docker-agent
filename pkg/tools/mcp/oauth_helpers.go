@@ -2,12 +2,20 @@ package mcp
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,7 +36,7 @@ func GenerateState() (string, error) {
 }
 
 // BuildAuthorizationURL builds the OAuth authorization URL with PKCE
-func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChallenge, resourceURL string) string {
+func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChallenge, resourceURL string, scopes []string) string {
 	params := url.Values{}
 	params.Set("response_type", "code")
 	params.Set("client_id", clientID)
@@ -37,6 +45,9 @@ func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChall
 	params.Set("code_challenge", codeChallenge)
 	params.Set("code_challenge_method", "S256")
 	params.Set("resource", resourceURL) // RFC 8707: Resource Indicators
+	if len(scopes) > 0 {
+		params.Set("scope", strings.Join(scopes, " "))
+	}
 	return authEndpoint + "?" + params.Encode()
 }
 
@@ -158,4 +169,47 @@ func RegisterClient(ctx context.Context, authMetadata *AuthorizationServerMetada
 // GeneratePKCEVerifier generates a PKCE code verifier using oauth2 library
 func GeneratePKCEVerifier() string {
 	return oauth2.GenerateVerifier()
+}
+
+// selfSignedTLSConfig generates an in-memory self-signed TLS certificate for
+// 127.0.0.1 / localhost. The cert is valid for 24 hours — long enough for any
+// OAuth flow but short enough to limit exposure if somehow leaked.
+func selfSignedTLSConfig() (*tls.Config, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		DNSNames:     []string{"localhost"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+
+	pub := key.Public()
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, pub, key)
+	if err != nil {
+		return nil, err
+	}
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, err
+	}
+
+	cert, err := tls.X509KeyPair(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }

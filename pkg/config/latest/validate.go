@@ -96,6 +96,20 @@ func (t *Toolset) validate() error {
 	if (t.Remote.URL != "" || t.Remote.TransportType != "") && t.Type != "mcp" {
 		return errors.New("remote can only be used with type 'mcp'")
 	}
+	if t.Remote.OAuth != nil {
+		if t.Type != "mcp" {
+			return errors.New("remote.oauth can only be used with type 'mcp'")
+		}
+		if t.Remote.URL == "" {
+			return errors.New("remote.oauth requires remote.url to be set")
+		}
+		if t.Remote.OAuth.ClientID == "" {
+			return errors.New("remote.oauth.clientId must be set when oauth is configured")
+		}
+		if t.Remote.OAuth.CallbackPort < 0 {
+			return errors.New("remote.oauth.callbackPort must be >= 0")
+		}
+	}
 	if (len(t.Remote.Headers) > 0) && (t.Type != "mcp" && t.Type != "a2a") {
 		return errors.New("remote headers can only be used with type 'mcp' or 'a2a'")
 	}

@@ -714,10 +714,33 @@ func (t *Toolset) UnmarshalYAML(unmarshal func(any) error) error {
 	return t.validate()
 }
 
+// RemoteOAuthConfig holds explicit OAuth client credentials for remote MCP servers
+// that do not support Dynamic Client Registration (RFC 7591).
+// https://datatracker.ietf.org/doc/html/rfc7591
+type RemoteOAuthConfig struct {
+	// ClientID is the pre-registered OAuth client identifier.
+	ClientID string `json:"clientId,omitempty" yaml:"clientId,omitempty"`
+	// ClientSecret is optional; only needed for confidential clients.
+	ClientSecret string `json:"clientSecret,omitempty" yaml:"clientSecret,omitempty"`
+	// CallbackPort pins the local OAuth redirect server to a specific port.
+	// When zero, a random available port is used.
+	CallbackPort int `json:"callbackPort,omitempty" yaml:"callbackPort,omitempty"`
+	// Scopes overrides the default scopes requested during the authorization flow.
+	Scopes []string `json:"scopes,omitempty" yaml:"scopes,omitempty"`
+	// TLS enables HTTPS on the local OAuth callback server using an in-memory
+	// self-signed certificate. Required for providers (e.g. Slack) that reject
+	// http redirect URIs even for loopback addresses.
+	TLS bool `json:"tls,omitempty" yaml:"tls,omitempty"`
+}
+
 type Remote struct {
 	URL           string            `json:"url"`
 	TransportType string            `json:"transport_type,omitempty"`
 	Headers       map[string]string `json:"headers,omitempty"`
+	// OAuth holds explicit OAuth configuration for servers that do not support
+	// Dynamic Client Registration. When set, the agent uses the provided
+	// ClientID/ClientSecret instead of attempting dynamic registration.
+	OAuth *RemoteOAuthConfig `json:"oauth,omitempty" yaml:"oauth,omitempty"`
 }
 
 // DeferConfig represents the deferred loading configuration for a toolset.

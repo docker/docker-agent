@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
+	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
 type stubToolSet struct {
@@ -818,6 +819,89 @@ func TestProcessToolCalls_UnknownTool_ReturnsErrorResponse(t *testing.T) {
 	}
 	require.NotEmpty(t, toolContent, "expected an error tool response for unknown tools")
 	assert.Contains(t, toolContent, "not available")
+}
+
+func TestEmitStartupInfo_OAuthToolsetDeferred(t *testing.T) {
+	// An MCP toolset with an explicit oauthConfig must not be started eagerly
+	// during EmitStartupInfo — the OAuth flow requires a live elicitation
+	// handler and events channel that are only available once RunStream is active.
+	// The toolset should be skipped and reported as 0 tools without loading.
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	oauthToolset := mcptools.NewRemoteToolset(
+		"slack",
+		"https://mcp.slack.com/mcp",
+		"streamable",
+		nil,
+		&latest.RemoteOAuthConfig{ClientID: "my-client-id"},
+	)
+	startable := tools.NewStartable(oauthToolset)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(startable),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := make(chan Event, 10)
+	rt.EmitStartupInfo(t.Context(), nil, events)
+	close(events)
+
+	var toolsetEvents []*ToolsetInfoEvent
+	for ev := range events {
+		if te, ok := ev.(*ToolsetInfoEvent); ok {
+			toolsetEvents = append(toolsetEvents, te)
+		}
+	}
+
+	// The toolset must not have been started.
+	require.False(t, startable.IsStarted(), "OAuth toolset must not be started during EmitStartupInfo")
+
+	// Must have emitted at least one ToolsetInfoEvent with 0 tools and not loading.
+	require.NotEmpty(t, toolsetEvents, "expected at least one ToolsetInfoEvent")
+	last := toolsetEvents[len(toolsetEvents)-1]
+	assert.Equal(t, 0, last.AvailableTools, "OAuth toolset should report 0 tools at startup")
+	assert.False(t, last.Loading, "OAuth toolset should not leave the UI in loading state")
+}
+
+func TestEmitStartupInfo_NonOAuthToolsetStartedEagerly(t *testing.T) {
+	// A regular (non-OAuth) MCP toolset must still be started eagerly during
+	// EmitStartupInfo so its tools are available immediately.
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	stub := newStubToolSet(nil, []tools.Tool{{Name: "my_tool", Parameters: map[string]any{}}}, nil)
+	startable := tools.NewStartable(stub)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(startable),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm, WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := make(chan Event, 10)
+	rt.EmitStartupInfo(t.Context(), nil, events)
+	close(events)
+
+	// The regular toolset must have been started.
+	require.True(t, startable.IsStarted(), "non-OAuth toolset must be started eagerly during EmitStartupInfo")
+
+	var toolsetEvents []*ToolsetInfoEvent
+	for ev := range events {
+		if te, ok := ev.(*ToolsetInfoEvent); ok {
+			toolsetEvents = append(toolsetEvents, te)
+		}
+	}
+
+	require.NotEmpty(t, toolsetEvents)
+	last := toolsetEvents[len(toolsetEvents)-1]
+	assert.Equal(t, 1, last.AvailableTools, "non-OAuth toolset tools should be counted at startup")
+	assert.False(t, last.Loading)
 }
 
 func TestEmitStartupInfo(t *testing.T) {

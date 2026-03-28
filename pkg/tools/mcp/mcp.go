@@ -18,6 +18,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -105,13 +106,13 @@ func NewToolsetCommand(name, command string, args, env []string, cwd string) *To
 }
 
 // NewRemoteToolset creates a new MCP toolset from a remote MCP Server.
-func NewRemoteToolset(name, urlString, transport string, headers map[string]string) *Toolset {
+func NewRemoteToolset(name, urlString, transport string, headers map[string]string, oauthConfig *latest.RemoteOAuthConfig) *Toolset {
 	slog.Debug("Creating Remote MCP toolset", "url", urlString, "transport", transport, "headers", headers)
 
 	desc := buildRemoteDescription(urlString, transport)
 	return &Toolset{
 		name:        name,
-		mcpClient:   newRemoteClient(urlString, transport, headers, NewInMemoryTokenStore()),
+		mcpClient:   newRemoteClient(urlString, transport, headers, NewInMemoryTokenStore(), oauthConfig),
 		logID:       urlString,
 		description: desc,
 	}
@@ -588,6 +589,17 @@ func encodeMedia(data []byte, mimeType string) tools.MediaContent {
 		Data:     base64.StdEncoding.EncodeToString(data),
 		MimeType: mimeType,
 	}
+}
+
+// RequiresOAuth reports whether this toolset has explicit OAuth credentials
+// configured. When true, the toolset must not be started eagerly at startup
+// because the OAuth flow requires a live elicitation handler and events channel,
+// which are only available once RunStream is active.
+func (ts *Toolset) RequiresOAuth() bool {
+	if c, ok := ts.mcpClient.(*remoteMCPClient); ok {
+		return c.oauthConfig != nil
+	}
+	return false
 }
 
 func (ts *Toolset) SetElicitationHandler(handler tools.ElicitationHandler) {
