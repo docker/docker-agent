@@ -1,0 +1,96 @@
+# Example Docker Agent configuration with explicit OAuth for remote MCP servers
+# This demonstrates how to configure OAuth for servers that do not support
+# Dynamic Client Registration (RFC 7591), such as the Slack MCP server.
+#
+# Related issue: #2248
+
+metadata:
+  author: "Your Name"
+  description: "Agent with explicit OAuth configuration for Slack MCP"
+  version: "1.0.0"
+
+models:
+  default:
+    provider: openai
+    model: gpt-4o
+
+agents:
+  slack-agent:
+    model: default
+    description: "An agent with Slack MCP integration using explicit OAuth"
+    instruction: |
+      You are a helpful assistant with access to Slack.
+      You can read messages, search channels, and send messages.
+    toolsets:
+      # Slack MCP server with explicit OAuth configuration
+      # This is required because Slack does not support Dynamic Client Registration
+      - type: mcp
+        remote:
+          url: https://mcp.slack.com/mcp
+          transport_type: streamable
+          oauth:
+            # Client ID from your Slack app registration
+            # Get this from https://api.slack.com/apps
+            client_id: "3660753192626.8903469228982"
+            
+            # Client secret (optional, for confidential clients)
+            # Leave empty for public clients
+            client_secret: ""
+            
+            # Fixed callback port (optional)
+            # Some OAuth servers require a specific redirect URI port
+            # Default: random available port
+            callback_port: 3118
+            
+            # Scopes to request (optional)
+            # If not specified, server defaults are used
+            scopes:
+              - search:read.public
+              - chat:write
+              - channels:read
+              - users:read
+
+# Alternative: GitHub MCP Server with explicit OAuth
+# Uncomment and configure for GitHub integration
+#
+# agents:
+#   github-agent:
+#     model: default
+#     description: "An agent with GitHub MCP integration"
+#     instruction: |
+#       You are a helpful assistant with access to GitHub.
+#     toolsets:
+#       - type: mcp
+#         remote:
+#           url: https://api.githubcopilot.com/mcp
+#           transport_type: streamable
+#           oauth:
+#             client_id: "your-github-client-id"
+#             client_secret: "your-github-client-secret"
+#             scopes:
+#               - read:user
+#               - repo
+
+# How to use:
+# 1. Register your OAuth application with the MCP server provider
+#    - For Slack: https://api.slack.com/apps
+#    - For GitHub: https://github.com/settings/applications/new
+#
+# 2. Get your Client ID and Client Secret from the provider
+#
+# 3. Configure the OAuth settings in your agent YAML as shown above
+#
+# 4. Run the agent:
+#    docker-agent run ./slack-oauth-example.yaml
+#
+# 5. When the agent needs to access the MCP server, it will:
+#    - Use your configured Client ID for the OAuth flow
+#    - Open your browser for authorization
+#    - Exchange the authorization code for tokens
+#    - Store tokens for subsequent requests
+#
+# Notes:
+# - OAuth tokens are stored in memory for the session
+# - The callback server runs on localhost at the configured port (or random)
+# - User authorization is required for the initial OAuth flow
+# - Subsequent requests use the stored access token automatically

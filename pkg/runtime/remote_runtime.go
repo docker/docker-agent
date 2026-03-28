@@ -362,6 +362,7 @@ func (r *RemoteRuntime) handleOAuthElicitation(ctx context.Context, req *Elicita
 		state,
 		oauth2.S256ChallengeFromVerifier(verifier),
 		serverURL,
+		nil, // scopes - use server defaults
 	)
 
 	slog.Debug("Authorization URL built", "url", authURL)

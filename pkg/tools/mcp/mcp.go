@@ -20,6 +20,22 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
+// RemoteOAuthConfig represents explicit OAuth configuration for remote MCP servers.
+// This allows using pre-registered OAuth clients with servers that do not support
+// Dynamic Client Registration (RFC 7591), such as the Slack MCP server.
+type RemoteOAuthConfig struct {
+	// ClientID is the OAuth client ID (required for explicit OAuth)
+	ClientID string
+	// ClientSecret is the OAuth client secret (optional, for confidential clients)
+	ClientSecret string
+	// CallbackPort is the fixed port for the OAuth callback server (optional)
+	// When not specified, a random available port is used
+	CallbackPort int
+	// Scopes is the list of OAuth scopes to request (optional)
+	// When not specified, default scopes from the server are used
+	Scopes []string
+}
+
 type mcpClient interface {
 	Initialize(ctx context.Context, request *mcp.InitializeRequest) (*mcp.InitializeResult, error)
 	ListTools(ctx context.Context, request *mcp.ListToolsParams) iter.Seq2[*mcp.Tool, error]
@@ -102,6 +118,20 @@ func NewRemoteToolset(name, urlString, transport string, headers map[string]stri
 	return &Toolset{
 		name:        name,
 		mcpClient:   newRemoteClient(urlString, transport, headers, NewInMemoryTokenStore()),
+		logID:       urlString,
+		description: desc,
+	}
+}
+
+// NewRemoteToolsetWithOAuth creates a new MCP toolset from a remote MCP Server with explicit OAuth configuration.
+func NewRemoteToolsetWithOAuth(name, urlString, transport string, headers map[string]string, oauthConfig *RemoteOAuthConfig) *Toolset {
+	slog.Debug("Creating Remote MCP toolset with OAuth", "url", urlString, "transport", transport, "headers", headers)
+
+	desc := buildRemoteDescription(urlString, transport)
+	client := newRemoteClient(urlString, transport, headers, NewInMemoryTokenStore()).WithOAuthConfig(oauthConfig)
+	return &Toolset{
+		name:        name,
+		mcpClient:   client,
 		logID:       urlString,
 		description: desc,
 	}

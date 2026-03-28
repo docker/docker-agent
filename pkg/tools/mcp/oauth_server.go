@@ -24,6 +24,9 @@ type CallbackServer struct {
 
 	// Expected state parameter for CSRF protection
 	expectedState string
+
+	// Port for the callback server (0 for random port)
+	port int
 }
 
 // NewCallbackServer creates a new OAuth callback server
@@ -39,6 +42,7 @@ func NewCallbackServer() (*CallbackServer, error) {
 		codeCh:   make(chan string, 1),
 		stateCh:  make(chan string, 1),
 		errCh:    make(chan error, 1),
+		port:     0, // Random port by default
 	}
 
 	mux := http.NewServeMux()
@@ -53,7 +57,33 @@ func NewCallbackServer() (*CallbackServer, error) {
 	return cs, nil
 }
 
+// SetPort sets the port for the callback server.
+// This must be called before Start() to take effect.
+// If the port is already in use, Start() will fail.
+func (cs *CallbackServer) SetPort(port int) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.port = port
+}
+
 func (cs *CallbackServer) Start() error {
+	cs.mu.Lock()
+	port := cs.port
+	cs.mu.Unlock()
+
+	// If a specific port is configured, recreate the listener with that port
+	if port > 0 {
+		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return fmt.Errorf("failed to bind to configured port %d: %w", port, err)
+		}
+		// Close the original listener if it exists
+		if cs.listener != nil {
+			cs.listener.Close()
+		}
+		cs.listener = listener
+	}
+
 	go func() {
 		if err := cs.server.Serve(cs.listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("Callback server error", "error", err)

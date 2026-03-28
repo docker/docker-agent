@@ -18,6 +18,7 @@ type remoteMCPClient struct {
 	headers       map[string]string
 	tokenStore    OAuthTokenStore
 	managed       bool
+	oauthConfig   *RemoteOAuthConfig
 }
 
 func newRemoteClient(url, transportType string, headers map[string]string, tokenStore OAuthTokenStore) *remoteMCPClient {
@@ -33,6 +34,12 @@ func newRemoteClient(url, transportType string, headers map[string]string, token
 		headers:       headers,
 		tokenStore:    tokenStore,
 	}
+}
+
+// WithOAuthConfig sets the explicit OAuth configuration for this client
+func (c *remoteMCPClient) WithOAuthConfig(cfg *RemoteOAuthConfig) *remoteMCPClient {
+	c.oauthConfig = cfg
+	return c
 }
 
 func (c *remoteMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequest) (*gomcp.InitializeResult, error) {
@@ -101,11 +108,12 @@ func (c *remoteMCPClient) createHTTPClient() *http.Client {
 
 	// Then wrap with OAuth support
 	transport = &oauthTransport{
-		base:       transport,
-		client:     c,
-		tokenStore: c.tokenStore,
-		baseURL:    c.url,
-		managed:    c.managed,
+		base:        transport,
+		client:      c,
+		tokenStore:  c.tokenStore,
+		baseURL:     c.url,
+		managed:     c.managed,
+		oauthConfig: c.oauthConfig,
 	}
 
 	return &http.Client{

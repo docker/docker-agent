@@ -250,6 +250,16 @@ func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 
 		// TODO(dga): until the MCP Gateway supports oauth with docker agent, we fetch the remote url and directly connect to it.
 		if serverSpec.Type == "remote" {
+			// Check if explicit OAuth config is provided in the toolset
+			if toolset.Remote.OAuth != nil {
+				oauthConfig := &mcp.RemoteOAuthConfig{
+					ClientID:     toolset.Remote.OAuth.ClientID,
+					ClientSecret: toolset.Remote.OAuth.ClientSecret,
+					CallbackPort: toolset.Remote.OAuth.CallbackPort,
+					Scopes:       toolset.Remote.OAuth.Scopes,
+				}
+				return mcp.NewRemoteToolsetWithOAuth(toolset.Name, serverSpec.Remote.URL, serverSpec.Remote.TransportType, nil, oauthConfig), nil
+			}
 			return mcp.NewRemoteToolset(toolset.Name, serverSpec.Remote.URL, serverSpec.Remote.TransportType, nil), nil
 		}
 
@@ -290,6 +300,17 @@ func createMCPTool(ctx context.Context, toolset latest.Toolset, _ string, runCon
 
 		headers := expander.ExpandMap(ctx, toolset.Remote.Headers)
 		url := expander.Expand(ctx, toolset.Remote.URL, nil)
+
+		// Use explicit OAuth config if provided
+		if toolset.Remote.OAuth != nil {
+			oauthConfig := &mcp.RemoteOAuthConfig{
+				ClientID:     toolset.Remote.OAuth.ClientID,
+				ClientSecret: toolset.Remote.OAuth.ClientSecret,
+				CallbackPort: toolset.Remote.OAuth.CallbackPort,
+				Scopes:       toolset.Remote.OAuth.Scopes,
+			}
+			return mcp.NewRemoteToolsetWithOAuth(toolset.Name, url, toolset.Remote.TransportType, headers, oauthConfig), nil
+		}
 
 		return mcp.NewRemoteToolset(toolset.Name, url, toolset.Remote.TransportType, headers), nil
 

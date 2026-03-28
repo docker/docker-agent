@@ -28,7 +28,7 @@ func GenerateState() (string, error) {
 }
 
 // BuildAuthorizationURL builds the OAuth authorization URL with PKCE
-func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChallenge, resourceURL string) string {
+func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChallenge, resourceURL string, scopes []string) string {
 	params := url.Values{}
 	params.Set("response_type", "code")
 	params.Set("client_id", clientID)
@@ -37,6 +37,9 @@ func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChall
 	params.Set("code_challenge", codeChallenge)
 	params.Set("code_challenge_method", "S256")
 	params.Set("resource", resourceURL) // RFC 8707: Resource Indicators
+	if len(scopes) > 0 {
+		params.Set("scope", strings.Join(scopes, " "))
+	}
 	return authEndpoint + "?" + params.Encode()
 }
 
