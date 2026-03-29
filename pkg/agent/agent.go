@@ -240,6 +240,21 @@ func (a *Agent) collectTools(ctx context.Context) ([]tools.Tool, error) {
 
 	agentTools = append(agentTools, a.tools...)
 
+	// Deduplicate tools by name, keeping the first occurrence.
+	// Duplicate tool names cause provider API errors (e.g. Anthropic 400).
+	seen := make(map[string]struct{}, len(agentTools))
+	deduped := make([]tools.Tool, 0, len(agentTools))
+	for _, t := range agentTools {
+		if _, exists := seen[t.Name]; exists {
+			slog.Warn("Duplicate tool name; keeping first occurrence",
+				"agent", a.Name(), "tool", t.Name)
+			continue
+		}
+		seen[t.Name] = struct{}{}
+		deduped = append(deduped, t)
+	}
+	agentTools = deduped
+
 	if a.addDescriptionParameter {
 		agentTools = tools.AddDescriptionParameter(agentTools)
 	}
