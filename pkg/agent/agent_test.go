@@ -75,6 +75,21 @@ func TestAgentTools(t *testing.T) {
 			wantToolCount: 0,
 			wantWarnings:  0,
 		},
+		{
+			name: "duplicate tool names are deduplicated",
+			toolsets: []tools.ToolSet{
+				newStubToolSet(nil, []tools.Tool{
+					{Name: "read_file", Parameters: map[string]any{}},
+					{Name: "write_file", Parameters: map[string]any{}},
+				}, nil),
+				newStubToolSet(nil, []tools.Tool{
+					{Name: "read_file", Parameters: map[string]any{}},
+					{Name: "shell", Parameters: map[string]any{}},
+				}, nil),
+			},
+			wantToolCount: 3,
+			wantWarnings:  0,
+		},
 	}
 
 	for _, tt := range tests {
