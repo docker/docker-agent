@@ -88,7 +88,7 @@ func TestAgentTools(t *testing.T) {
 				}, nil),
 			},
 			wantToolCount: 3,
-			wantWarnings:  0,
+			wantWarnings:  1,
 		},
 	}
 

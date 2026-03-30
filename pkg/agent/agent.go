@@ -248,6 +248,7 @@ func (a *Agent) collectTools(ctx context.Context) ([]tools.Tool, error) {
 		if _, exists := seen[t.Name]; exists {
 			slog.Warn("Duplicate tool name; keeping first occurrence",
 				"agent", a.Name(), "tool", t.Name)
+			a.addToolWarning(fmt.Sprintf("duplicate tool %q: keeping first occurrence", t.Name))
 			continue
 		}
 		seen[t.Name] = struct{}{}
