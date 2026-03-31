@@ -553,6 +553,22 @@ func TestFindAndReplace(t *testing.T) {
 			wantOK:  true,
 			want:    "REPLACED",
 		},
+		{
+			name:    "mixed escaped and unescaped quotes",
+			content: `if [ ! -x "${DIR}/bin" ]; then echo \"install failed\"; exit 1; fi`,
+			oldText: `if [ ! -x "${DIR}/bin" ]; then echo "install failed"; exit 1; fi`,
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
+		{
+			name:    "mixed escaping in Dockerfile brew block",
+			content: `if [ ! -x "${BREW_DIR}/bin/brew" ]; then echo \"brew install failed\"; exit 1; fi`,
+			oldText: `if [ ! -x "${BREW_DIR}/bin/brew" ]; then echo "brew install failed"; exit 1; fi`,
+			newText: "REPLACED",
+			wantOK:  true,
+			want:    "REPLACED",
+		},
 	}
 
 	for _, tc := range tests {

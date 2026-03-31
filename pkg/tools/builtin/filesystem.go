@@ -530,11 +530,11 @@ func FindAndReplace(content, oldText, newText string) (string, bool) {
 
 	for _, replacer := range replacers {
 		for _, candidate := range replacer(content, oldText) {
-			idx := strings.Index(content, candidate)
-			if idx == -1 {
+			before, after, found := strings.Cut(content, candidate)
+			if !found {
 				continue
 			}
-			return content[:idx] + newText + content[idx+len(candidate):], true
+			return before + newText + after, true
 		}
 	}
 
@@ -558,9 +558,9 @@ func lineTrimmedCandidates(content, find string) []string {
 	}
 
 	var candidates []string
-	for i := 0; i <= len(contentLines)-len(searchLines); i++ {
+	for i := range len(contentLines) - len(searchLines) + 1 {
 		match := true
-		for j := 0; j < len(searchLines); j++ {
+		for j := range searchLines {
 			if strings.TrimSpace(contentLines[i+j]) != strings.TrimSpace(searchLines[j]) {
 				match = false
 				break
@@ -586,7 +586,7 @@ func indentFlexibleCandidates(content, find string) []string {
 	normalizedFind := stripCommonIndent(searchLines)
 
 	var candidates []string
-	for i := 0; i <= len(contentLines)-len(searchLines); i++ {
+	for i := range len(contentLines) - len(searchLines) + 1 {
 		block := contentLines[i : i+len(searchLines)]
 		if stripCommonIndent(block) == normalizedFind {
 			candidates = append(candidates, joinOriginalLines(contentLines, i, len(searchLines)))
@@ -601,7 +601,7 @@ func stripCommonIndent(lines []string) string {
 	minIndent := -1
 	for _, line := range lines {
 		trimmed := strings.TrimLeft(line, " \t")
-		if len(trimmed) == 0 {
+		if trimmed == "" {
 			continue
 		}
 		indent := len(line) - len(trimmed)
@@ -614,11 +614,12 @@ func stripCommonIndent(lines []string) string {
 	}
 	out := make([]string, len(lines))
 	for i, line := range lines {
-		if len(strings.TrimSpace(line)) == 0 {
+		switch {
+		case strings.TrimSpace(line) == "":
 			out[i] = line
-		} else if minIndent < len(line) {
+		case minIndent < len(line):
 			out[i] = line[minIndent:]
-		} else {
+		default:
 			out[i] = ""
 		}
 	}
@@ -645,15 +646,20 @@ func lineContinuationCandidates(content, find string) []string {
 	return flexibleWhitespaceMatch(content, find, `(?:\s*\\\s*\n\s*|\s+)`)
 }
 
-// escapeNormalizedCandidates handles the case where the LLM dropped
-// backslash escapes (e.g., sent "hello" when the file has \"hello\").
-// It tries two approaches:
-//  1. Unescape \" → " in the search text and look for it directly.
-//  2. Escape " → \" in the search text and look for it directly.
+// escapeNormalizedCandidates handles the case where the LLM dropped or
+// added backslash escapes on double quotes. It handles three scenarios:
+//  1. All quotes need escaping (" → \")
+//  2. All escaped quotes need unescaping (\" → ")
+//  3. Mixed: some quotes are escaped in the file and some aren't —
+//     builds a regex where each " can optionally be preceded by \.
 func escapeNormalizedCandidates(content, find string) []string {
+	if !strings.Contains(find, `"`) && !strings.Contains(find, `\"`) {
+		return nil
+	}
+
 	var candidates []string
 
-	// LLM sent unescaped quotes, file has escaped quotes.
+	// Case 1: LLM sent unescaped quotes, file has escaped quotes.
 	if strings.Contains(find, `"`) && strings.Contains(content, `\"`) {
 		escaped := strings.ReplaceAll(find, `"`, `\"`)
 		if strings.Contains(content, escaped) {
@@ -661,7 +667,7 @@ func escapeNormalizedCandidates(content, find string) []string {
 		}
 	}
 
-	// LLM sent escaped quotes, file has unescaped quotes.
+	// Case 2: LLM sent escaped quotes, file has unescaped quotes.
 	if strings.Contains(find, `\"`) {
 		unescaped := strings.ReplaceAll(find, `\"`, `"`)
 		if strings.Contains(content, unescaped) {
@@ -669,10 +675,28 @@ func escapeNormalizedCandidates(content, find string) []string {
 		}
 	}
 
+	// Case 3: mixed escaping — file has both " and \".
+	// Build a regex where each " matches an optional preceding \.
+	if len(candidates) == 0 &&
+		strings.Contains(content, `"`) && strings.Contains(content, `\"`) {
+		normalized := strings.ReplaceAll(find, `\"`, `"`)
+		parts := strings.Split(normalized, `"`)
+		if len(parts) > 1 {
+			escaped := make([]string, len(parts))
+			for i, p := range parts {
+				escaped[i] = regexp.QuoteMeta(p)
+			}
+			pattern := strings.Join(escaped, `\\?"`)
+			if re, err := regexp.Compile(pattern); err == nil {
+				if m := re.FindString(content); m != "" {
+					candidates = append(candidates, m)
+				}
+			}
+		}
+	}
+
 	return candidates
 }
-
-var whitespaceRE = regexp.MustCompile(`\s+`)
 
 // whitespaceCollapsedCandidates matches when the only difference is
 // whitespace quantity. It splits find into non-whitespace tokens and
