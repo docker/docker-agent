@@ -14,7 +14,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"unicode/utf8"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/fsx"
@@ -507,148 +506,222 @@ func (t *FilesystemTool) handleEditFile(ctx context.Context, args EditFileArgs) 
 // LLM mistakes (extra/missing whitespace, collapsed line continuations,
 // escaped quotes).
 //
-// When a fuzzy strategy matches, the replacement is applied to the
-// original (un-normalized) content so that surrounding text is preserved.
+// Inspired by the approach in OpenCode (github.com/anomalyco/opencode),
+// each fuzzy strategy finds matching regions and returns the verbatim
+// original text at those regions. This avoids error-prone reverse mapping
+// from normalized positions back to original positions.
 func FindAndReplace(content, oldText, newText string) (string, bool) {
 	// Strategy 1: exact match.
 	if strings.Contains(content, oldText) {
 		return strings.Replace(content, oldText, newText, 1), true
 	}
 
-	// Strategy 2: line-trimmed match (strip trailing whitespace per line).
-	if result, ok := normalizedReplace(content, oldText, newText, trimTrailingWhitespacePerLine); ok {
-		return result, true
+	// Strategies 2–6: each replacer yields candidate substrings of the
+	// original content that match oldText under some normalization. We
+	// verify each candidate with strings.Index and replace the first
+	// unique match.
+	replacers := []func(string, string) []string{
+		lineTrimmedCandidates,
+		indentFlexibleCandidates,
+		lineContinuationCandidates,
+		escapeNormalizedCandidates,
+		whitespaceCollapsedCandidates,
 	}
 
-	// Strategy 3: indentation-flexible match (strip leading whitespace per line).
-	if result, ok := normalizedReplace(content, oldText, newText, stripLeadingWhitespacePerLine); ok {
-		return result, true
-	}
-
-	// Strategy 4: line-continuation normalization (collapse "\" + newline + spaces into a single space).
-	if result, ok := normalizedReplace(content, oldText, newText, collapseLineContinuations); ok {
-		return result, true
-	}
-
-	// Strategy 5: escape-normalized match (\" ↔ ").
-	if result, ok := normalizedReplace(content, oldText, newText, normalizeEscapedQuotes); ok {
-		return result, true
-	}
-
-	// Strategy 6: whitespace-collapsed match (collapse all runs of whitespace to single space).
-	if result, ok := normalizedReplace(content, oldText, newText, collapseWhitespace); ok {
-		return result, true
+	for _, replacer := range replacers {
+		for _, candidate := range replacer(content, oldText) {
+			idx := strings.Index(content, candidate)
+			if idx == -1 {
+				continue
+			}
+			return content[:idx] + newText + content[idx+len(candidate):], true
+		}
 	}
 
 	return content, false
 }
 
-// normalizedReplace applies a normalization function to both the content
-// and the search text. If the normalized search text is found in the
-// normalized content, it locates the corresponding range in the original
-// content and performs the replacement there.
-func normalizedReplace(content, oldText, newText string, normalize func(string) string) (string, bool) {
-	normContent := normalize(content)
-	normOld := normalize(oldText)
+// lineTrimmedCandidates finds blocks in content where each line matches
+// the corresponding line of find after trimming whitespace on both sides.
+// Returns the original (untrimmed) text at each matching position.
+func lineTrimmedCandidates(content, find string) []string {
+	contentLines := strings.Split(content, "\n")
+	searchLines := strings.Split(find, "\n")
 
-	if normOld == "" {
-		return content, false
+	// Drop trailing empty line (common when oldText ends with a newline).
+	if len(searchLines) > 0 && searchLines[len(searchLines)-1] == "" {
+		searchLines = searchLines[:len(searchLines)-1]
 	}
 
-	idx := strings.Index(normContent, normOld)
-	if idx == -1 {
-		return content, false
+	if len(searchLines) == 0 || len(searchLines) > len(contentLines) {
+		return nil
 	}
 
-	// Map the normalized indices back to the original content.
-	origStart := mapNormToOrig(content, idx, normalize)
-	origEnd := mapNormToOrigEnd(content, idx+len(normOld), normalize)
-
-	return content[:origStart] + newText + content[origEnd:], true
+	var candidates []string
+	for i := 0; i <= len(contentLines)-len(searchLines); i++ {
+		match := true
+		for j := 0; j < len(searchLines); j++ {
+			if strings.TrimSpace(contentLines[i+j]) != strings.TrimSpace(searchLines[j]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			candidates = append(candidates, joinOriginalLines(contentLines, i, len(searchLines)))
+		}
+	}
+	return candidates
 }
 
-// mapNormToOrig finds the smallest rune-aligned position in the original
-// string whose normalized prefix has at least normIdx characters.
-func mapNormToOrig(original string, normIdx int, normalize func(string) string) int {
-	lo, hi := 0, len(original)
-	for lo < hi {
-		mid := (lo + hi) / 2
-		if len(normalize(original[:mid])) < normIdx {
-			lo = mid + 1
+// indentFlexibleCandidates strips the minimum common indentation from
+// both the search text and candidate blocks in content, then compares.
+func indentFlexibleCandidates(content, find string) []string {
+	contentLines := strings.Split(content, "\n")
+	searchLines := strings.Split(find, "\n")
+
+	if len(searchLines) > len(contentLines) {
+		return nil
+	}
+
+	normalizedFind := stripCommonIndent(searchLines)
+
+	var candidates []string
+	for i := 0; i <= len(contentLines)-len(searchLines); i++ {
+		block := contentLines[i : i+len(searchLines)]
+		if stripCommonIndent(block) == normalizedFind {
+			candidates = append(candidates, joinOriginalLines(contentLines, i, len(searchLines)))
+		}
+	}
+	return candidates
+}
+
+// stripCommonIndent removes the shortest leading whitespace prefix shared
+// by all non-empty lines.
+func stripCommonIndent(lines []string) string {
+	minIndent := -1
+	for _, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if len(trimmed) == 0 {
+			continue
+		}
+		indent := len(line) - len(trimmed)
+		if minIndent < 0 || indent < minIndent {
+			minIndent = indent
+		}
+	}
+	if minIndent <= 0 {
+		return strings.Join(lines, "\n")
+	}
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		if len(strings.TrimSpace(line)) == 0 {
+			out[i] = line
+		} else if minIndent < len(line) {
+			out[i] = line[minIndent:]
 		} else {
-			hi = mid
+			out[i] = ""
 		}
 	}
-	// Snap to the start of the rune at position lo to avoid splitting
-	// a multi-byte UTF-8 character. When lo == len(original) we are past
-	// the end of the string and no adjustment is needed.
-	for lo > 0 && lo < len(original) && !utf8.RuneStart(original[lo]) {
-		lo--
-	}
-	return lo
-}
-
-// mapNormToOrigEnd is like mapNormToOrig but then advances past any
-// trailing characters that were consumed by the normalization (e.g. the
-// quote in \" → "). This ensures the entire original text corresponding
-// to the normalized match is included. Advances by whole runes to
-// preserve UTF-8 integrity.
-func mapNormToOrigEnd(original string, normIdx int, normalize func(string) string) int {
-	pos := mapNormToOrig(original, normIdx, normalize)
-	for pos < len(original) {
-		_, size := utf8.DecodeRuneInString(original[pos:])
-		if len(normalize(original[:pos+size])) != len(normalize(original[:pos])) {
-			break
-		}
-		pos += size
-	}
-	return pos
-}
-
-func trimTrailingWhitespacePerLine(s string) string {
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimRight(line, " \t")
-	}
-	return strings.Join(lines, "\n")
-}
-
-func stripLeadingWhitespacePerLine(s string) string {
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimLeft(line, " \t")
-	}
-	return strings.Join(lines, "\n")
+	return strings.Join(out, "\n")
 }
 
 // lineContinuationRE matches shell-style line continuations: optional
 // whitespace, a backslash, optional whitespace, a newline, and optional
-// leading whitespace on the next line. This is intentionally
-// context-unaware — it does not distinguish continuations inside string
-// literals from those in code. This is acceptable because the fuzzy
-// strategies are only attempted after an exact match has already failed,
-// making a false positive unlikely in practice.
+// leading whitespace on the next line.
 var lineContinuationRE = regexp.MustCompile(`\s*\\\s*\n\s*`)
 
-func collapseLineContinuations(s string) string {
-	return lineContinuationRE.ReplaceAllString(s, " ")
+// lineContinuationCandidates handles the case where the LLM collapsed
+// shell-style line continuations (\ + newline) into single lines.
+// It builds a regex from the whitespace-split tokens of find, allowing
+// either line continuations or plain whitespace between tokens, and
+// matches against the original content. The regex match returns verbatim
+// original text.
+func lineContinuationCandidates(content, find string) []string {
+	// Only useful when find doesn't itself contain continuations but
+	// the content does.
+	if lineContinuationRE.MatchString(find) || !lineContinuationRE.MatchString(content) {
+		return nil
+	}
+	return flexibleWhitespaceMatch(content, find, `(?:\s*\\\s*\n\s*|\s+)`)
 }
 
-// normalizeEscapedQuotes replaces escaped quotes (\" → ") so that the
-// LLM's unescaped version can match the file's escaped version.
-//
-// This strategy is only reached after the exact match (Strategy 1)
-// fails, meaning the literal oldText does not appear in the content.
-// A false positive would require the content to contain both the escaped
-// and unescaped forms of the same text, which is rare in practice.
-func normalizeEscapedQuotes(s string) string {
-	return strings.ReplaceAll(s, `\"`, `"`)
+// escapeNormalizedCandidates handles the case where the LLM dropped
+// backslash escapes (e.g., sent "hello" when the file has \"hello\").
+// It tries two approaches:
+//  1. Unescape \" → " in the search text and look for it directly.
+//  2. Escape " → \" in the search text and look for it directly.
+func escapeNormalizedCandidates(content, find string) []string {
+	var candidates []string
+
+	// LLM sent unescaped quotes, file has escaped quotes.
+	if strings.Contains(find, `"`) && strings.Contains(content, `\"`) {
+		escaped := strings.ReplaceAll(find, `"`, `\"`)
+		if strings.Contains(content, escaped) {
+			candidates = append(candidates, escaped)
+		}
+	}
+
+	// LLM sent escaped quotes, file has unescaped quotes.
+	if strings.Contains(find, `\"`) {
+		unescaped := strings.ReplaceAll(find, `\"`, `"`)
+		if strings.Contains(content, unescaped) {
+			candidates = append(candidates, unescaped)
+		}
+	}
+
+	return candidates
 }
 
 var whitespaceRE = regexp.MustCompile(`\s+`)
 
-func collapseWhitespace(s string) string {
-	return whitespaceRE.ReplaceAllString(s, " ")
+// whitespaceCollapsedCandidates matches when the only difference is
+// whitespace quantity. It splits find into non-whitespace tokens and
+// builds a regex that allows flexible whitespace between them.
+func whitespaceCollapsedCandidates(content, find string) []string {
+	return flexibleWhitespaceMatch(content, find, `\s+`)
+}
+
+// flexibleWhitespaceMatch splits find on whitespace, escapes each token
+// for use in a regex, joins them with the provided separator pattern,
+// and returns all matches found in content.
+func flexibleWhitespaceMatch(content, find, separator string) []string {
+	tokens := strings.Fields(strings.TrimSpace(find))
+	if len(tokens) == 0 {
+		return nil
+	}
+
+	escaped := make([]string, len(tokens))
+	for i, t := range tokens {
+		escaped[i] = regexp.QuoteMeta(t)
+	}
+	pattern := strings.Join(escaped, separator)
+
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
+
+	matches := re.FindAllString(content, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	// Deduplicate.
+	seen := make(map[string]bool, len(matches))
+	var unique []string
+	for _, m := range matches {
+		if !seen[m] {
+			seen[m] = true
+			unique = append(unique, m)
+		}
+	}
+	return unique
+}
+
+// joinOriginalLines joins count lines from lines starting at index start,
+// preserving the original content exactly.
+func joinOriginalLines(lines []string, start, count int) string {
+	return strings.Join(lines[start:start+count], "\n")
 }
 
 func (t *FilesystemTool) handleListDirectory(_ context.Context, args ListDirectoryArgs) (*tools.ToolCallResult, error) {
