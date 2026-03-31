@@ -477,11 +477,16 @@ func (t *FilesystemTool) handleEditFile(ctx context.Context, args EditFileArgs) 
 
 	var changes []string
 	for i, edit := range args.Edits {
-		if !strings.Contains(modifiedContent, edit.OldText) {
-			return tools.ResultError(fmt.Sprintf("Edit %d failed: old text not found", i+1)), nil
+		match, err := FindMatch(modifiedContent, edit.OldText)
+		if err != nil {
+			return tools.ResultError(fmt.Sprintf("Edit %d failed: %s", i+1, err)), nil
 		}
-		modifiedContent = strings.Replace(modifiedContent, edit.OldText, edit.NewText, 1)
-		changes = append(changes, fmt.Sprintf("Edit %d: Replaced %d characters", i+1, len(edit.OldText)))
+		modifiedContent = strings.Replace(modifiedContent, match.SearchText, edit.NewText, 1)
+		detail := fmt.Sprintf("Edit %d: Replaced %d characters", i+1, len(match.SearchText))
+		if match.Strategy != "exact" {
+			detail += fmt.Sprintf(" (matched via %s)", match.Strategy)
+		}
+		changes = append(changes, detail)
 	}
 
 	if err := os.WriteFile(resolvedPath, []byte(modifiedContent), 0o644); err != nil {

@@ -173,10 +173,11 @@ func (t *FilesystemToolset) handleEditFile(ctx context.Context, toolCall tools.T
 	modifiedContent := resp.Content
 
 	for i, edit := range args.Edits {
-		if !strings.Contains(modifiedContent, edit.OldText) {
-			return tools.ResultError(fmt.Sprintf("Edit %d failed: old text not found", i+1)), nil
+		match, err := builtin.FindMatch(modifiedContent, edit.OldText)
+		if err != nil {
+			return tools.ResultError(fmt.Sprintf("Edit %d failed: %s", i+1, err)), nil
 		}
-		modifiedContent = strings.Replace(modifiedContent, edit.OldText, edit.NewText, 1)
+		modifiedContent = strings.Replace(modifiedContent, match.SearchText, edit.NewText, 1)
 	}
 
 	_, err = t.agent.conn.WriteTextFile(ctx, acp.WriteTextFileRequest{
