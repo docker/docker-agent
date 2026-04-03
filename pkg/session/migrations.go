@@ -96,14 +96,15 @@ func (m *MigrationManager) isMigrationApplied(ctx context.Context, name string) 
 }
 
 // applyMigration applies a single migration
-func (m *MigrationManager) applyMigration(ctx context.Context, migration *Migration) error {
+func (m *MigrationManager) applyMigration(ctx context.Context, migration *Migration) (retErr error) {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		// TODO: handle error
-		_ = tx.Rollback()
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			retErr = errors.Join(retErr, fmt.Errorf("failed to rollback migration transaction: %w", rbErr))
+		}
 	}()
 
 	// Execute SQL migration if present

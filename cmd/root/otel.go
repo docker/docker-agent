@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/docker/cagent/pkg/version"
@@ -35,10 +36,11 @@ func initOTelSDK(ctx context.Context) (err error) {
 
 	// Only initialize if endpoint is configured
 	if endpoint != "" {
-		traceExporter, err = otlptracehttp.New(ctx,
-			otlptracehttp.WithEndpoint(endpoint),
-			otlptracehttp.WithInsecure(), // TODO: make configurable
-		)
+		opts := []otlptracehttp.Option{otlptracehttp.WithEndpoint(endpoint)}
+		if strings.HasPrefix(endpoint, "http://") {
+			opts = append(opts, otlptracehttp.WithInsecure())
+		}
+		traceExporter, err = otlptracehttp.New(ctx, opts...)
 		if err != nil {
 			return fmt.Errorf("failed to create trace exporter: %w", err)
 		}
