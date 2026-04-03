@@ -15,6 +15,7 @@ import (
 
 	"github.com/docker/cagent/pkg/app"
 	"github.com/docker/cagent/pkg/audio/transcribe"
+	"github.com/docker/cagent/pkg/environment"
 	"github.com/docker/cagent/pkg/runtime"
 	"github.com/docker/cagent/pkg/tui/animation"
 	"github.com/docker/cagent/pkg/tui/commands"
@@ -117,6 +118,11 @@ func DefaultKeyMap() KeyMap {
 	}
 }
 
+func getEnvVar(key string) string {
+	val, _ := environment.NewOsEnvProvider().Get(context.Background(), key)
+	return val
+}
+
 // New creates and initializes a new TUI application model
 func New(ctx context.Context, a *app.App) tea.Model {
 	sessionState := service.NewSessionState(a.Session())
@@ -131,7 +137,7 @@ func New(ctx context.Context, a *app.App) tea.Model {
 		completions:  completion.New(),
 		application:  a,
 		sessionState: sessionState,
-		transcriber:  transcribe.New(os.Getenv("OPENAI_API_KEY")), // TODO(dga): should use envProvider
+		transcriber:  transcribe.New(getEnvVar("OPENAI_API_KEY")),
 		// Set up theme subscription using the subscription package
 		themeSubscription: subscription.NewChannelSubscription(themeEventCh, func(themeRef string) tea.Msg {
 			return messages.ThemeFileChangedMsg{ThemeRef: themeRef}
