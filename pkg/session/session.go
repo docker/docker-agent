@@ -148,7 +148,7 @@ type PermissionsConfig struct {
 type Message struct {
 	// ID is the database ID of the message (used for persistence tracking)
 	ID        int64        `json:"-"`
-	AgentName string       `json:"agentName"` // TODO: rename to agent_name
+	AgentName string       `json:"agent_name"`
 	Message   chat.Message `json:"message"`
 	// Implicit is an optional field to indicate if the message shouldn't be shown to the user. It's needed for special  situations
 	// like when an agent transfers a task to another agent - new session is created with a default user message, but this shouldn't be shown to the user.
