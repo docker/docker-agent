@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/docker/cagent/pkg/version"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -22,7 +23,7 @@ func initOTelSDK(ctx context.Context) (err error) {
 		resource.NewWithAttributes(
 			semconv.SchemaURL,
 			semconv.ServiceName(AppName),
-			semconv.ServiceVersion("dev"), // TODO: use actual version
+			semconv.ServiceVersion(version.Version),
 		),
 	)
 	if err != nil {
