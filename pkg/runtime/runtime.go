@@ -1614,7 +1614,7 @@ func (r *LocalRuntime) executeToolWithHandler(
 	a *agent.Agent,
 	spanName string,
 	execute func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error),
-) {
+) *tools.ToolCallResult {
 	ctx, span := r.startSpan(ctx, spanName, trace.WithAttributes(
 		attribute.String("tool.name", toolCall.Function.Name),
 		attribute.String("agent", a.Name()),
@@ -1660,6 +1660,7 @@ func (r *LocalRuntime) executeToolWithHandler(
 		CreatedAt:  time.Now().Format(time.RFC3339),
 	}
 	addAgentMessage(sess, a, &toolResponseMsg, events)
+	return res
 }
 
 // runTool executes agent tools from toolsets (MCP, filesystem, etc.).
@@ -1693,7 +1694,7 @@ func (r *LocalRuntime) runTool(ctx context.Context, tool tools.Tool, toolCall to
 		}
 	}
 
-	r.executeToolWithHandler(ctx, toolCall, tool, events, sess, a, "runtime.tool.handler",
+	toolResult := r.executeToolWithHandler(ctx, toolCall, tool, events, sess, a, "runtime.tool.handler",
 		func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
 			res, err := tool.Handler(ctx, toolCall)
 			return res, 0, err
@@ -1702,13 +1703,17 @@ func (r *LocalRuntime) runTool(ctx context.Context, tool tools.Tool, toolCall to
 	// Execute post-tool hooks if configured
 	if hooksExec != nil && hooksExec.HasPostToolUseHooks() {
 		toolInput := parseToolInput(toolCall.Function.Arguments)
+		var toolResponse any
+		if toolResult != nil {
+			toolResponse = toolResult.Output
+		}
 		input := &hooks.Input{
 			SessionID:    sess.ID,
 			Cwd:          r.workingDir,
 			ToolName:     toolCall.Function.Name,
 			ToolUseID:    toolCall.ID,
 			ToolInput:    toolInput,
-			ToolResponse: nil, // TODO: pass actual tool response if needed
+			ToolResponse: toolResponse,
 		}
 
 		result, err := hooksExec.ExecutePostToolUse(ctx, input)
