@@ -102,7 +102,6 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 
 			case *runtime.StreamStoppedEvent:
 				// Send final complete event with all accumulated content
-
 				if contentBuilder.Len() > 0 {
 					finalEvent := &adksession.Event{
 						Author: agentName,

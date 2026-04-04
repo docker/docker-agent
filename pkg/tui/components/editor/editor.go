@@ -639,7 +639,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	case completion.SelectedMsg:
 		// If the item has an Execute function, run it instead of inserting text
-		if msg.Execute != nil {
+		if msg.Execute != nil && msg.AutoSubmit {
 			// Remove the trigger character and any typed completion word from the textarea
 			// before executing. For example, typing "@" then selecting "Browse files..."
 			// should remove the "@" so AttachFile doesn't produce a double "@@".
@@ -654,7 +654,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			e.clearSuggestion()
 			return e, msg.Execute()
 		}
-		if e.currentCompletion.AutoSubmit() {
+		if msg.AutoSubmit {
 			// For auto-submit completions (like commands), use the selected
 			// command value (e.g., "/exit") instead of what the user typed
 			// (e.g., "/e"). Append any extra text after the trigger word

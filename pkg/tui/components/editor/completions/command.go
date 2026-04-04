@@ -20,10 +20,6 @@ func NewCommandCompletion(a *app.App) Completion {
 	}
 }
 
-func (c *commandCompletion) AutoSubmit() bool {
-	return true // Commands auto-submit: selecting inserts command text and sends it
-}
-
 func (c *commandCompletion) RequiresEmptyEditor() bool {
 	return true
 }

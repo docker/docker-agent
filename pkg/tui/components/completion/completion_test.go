@@ -1,8 +1,10 @@
 package completion
 
 import (
+	"reflect"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -333,5 +335,81 @@ func TestCompletionManagerPinnedItems(t *testing.T) {
 		assert.Len(t, m.filteredItems, 2, "pinned + matching item")
 		assert.Equal(t, "Browse files…", m.filteredItems[0].Label, "pinned should be first")
 		assert.Equal(t, "main.go", m.filteredItems[1].Label, "matching item should be second")
+	})
+}
+
+// extractSequenceCmds extracts the slice of commands from a tea.SequenceMsg using reflection,
+// since tea.sequenceMsg is unexported.
+func extractSequenceCmds(c tea.Cmd) []tea.Cmd {
+	if c == nil {
+		return nil
+	}
+	seqMsg := c()
+	v := reflect.ValueOf(seqMsg)
+	var cmds []tea.Cmd
+	if v.Kind() == reflect.Slice {
+		for i := range v.Len() {
+			cmd, ok := v.Index(i).Interface().(tea.Cmd)
+			if ok {
+				cmds = append(cmds, cmd)
+			}
+		}
+	}
+	return cmds
+}
+
+func TestCompletionManagerAutoSubmit(t *testing.T) {
+	t.Parallel()
+
+	t.Run("enter triggers auto submit", func(t *testing.T) {
+		t.Parallel()
+
+		m := New().(*manager)
+
+		m.Update(OpenMsg{
+			Items: []Item{
+				{Label: "option", Value: "/option"},
+			},
+		})
+
+		_, c := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+
+		cmds := extractSequenceCmds(c)
+
+		assert.False(t, m.visible, "completion view should close")
+		assert.Len(t, cmds, 2, "should return a sequence of 2 commands")
+
+		if len(cmds) > 0 {
+			msg0 := cmds[0]()
+			selectedMsg, ok := msg0.(SelectedMsg)
+			assert.True(t, ok, "first message should be SelectedMsg")
+			assert.True(t, selectedMsg.AutoSubmit, "should have auto submit true")
+		}
+	})
+
+	t.Run("tab disables auto submit", func(t *testing.T) {
+		t.Parallel()
+
+		m := New().(*manager)
+
+		m.Update(OpenMsg{
+			Items: []Item{
+				{Label: "option", Value: "/option"},
+			},
+		})
+
+		_, c := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+
+		cmds := extractSequenceCmds(c)
+
+		assert.False(t, m.visible, "completion view should close")
+		assert.Len(t, cmds, 2, "should return a sequence of 2 commands")
+
+		if len(cmds) > 0 {
+			msg0 := cmds[0]()
+			selectedMsg, ok := msg0.(SelectedMsg)
+			assert.True(t, ok, "first message should be SelectedMsg")
+			assert.False(t, selectedMsg.AutoSubmit, "should have auto submit false")
+		}
 	})
 }
