@@ -380,8 +380,8 @@ github.com/patrickmn/go-cache v2.1.0+incompatible h1:HRMgzkcYKYpi3C8ajMPV8OFXaaR
 github.com/patrickmn/go-cache v2.1.0+incompatible/go.mod h1:3Qf8kWWT7OJRJbdiICTKqZju1ZixQ/KpMGzzAfe6+WQ=
 github.com/pb33f/jsonpath v0.8.2 h1:Ou4C7zjYClBm97dfZjDCjdZGusJoynv/vrtiEKNfj2Y=
 github.com/pb33f/jsonpath v0.8.2/go.mod h1:zBV5LJW4OQOPatmQE2QdKpGQJvhDTlE5IEj6ASaRNTo=
-github.com/pb33f/libopenapi v0.34.4 h1:BWWXA3U4SlsHEvfczk+DJHu2O38ktgKw+zBEYaDZ2uI=
-github.com/pb33f/libopenapi v0.34.4/go.mod h1:MsDdUlQ1CdrIDO5v26JfgBxQs7kcaOUEpMP3EqU6bI4=
+github.com/pb33f/libopenapi v0.35.1 h1:5BiA6RuBGprosQKyLkG14Q3SHjslarEolbYcx8o8jZ8=
+github.com/pb33f/libopenapi v0.35.1/go.mod h1:MsDdUlQ1CdrIDO5v26JfgBxQs7kcaOUEpMP3EqU6bI4=
 github.com/pb33f/ordered-map/v2 v2.3.1 h1:5319HDO0aw4DA4gzi+zv4FXU9UlSs3xGZ40wcP1nBjY=
 github.com/pb33f/ordered-map/v2 v2.3.1/go.mod h1:qxFQgd0PkVUtOMCkTapqotNgzRhMPL7VvaHKbd1HnmQ=
 github.com/pjbgf/sha1cd v0.3.2 h1:a9wb0bp1oC2TGwStyn0Umc/IGKQnEgF0vVaZ8QF8eo4=
