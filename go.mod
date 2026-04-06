@@ -12,7 +12,7 @@ require (
 	github.com/a2aproject/a2a-go v0.3.13
 	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/alpkeskin/gotoon v0.1.1
-	github.com/anthropics/anthropic-sdk-go v1.27.1
+	github.com/anthropics/anthropic-sdk-go v1.30.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.13
