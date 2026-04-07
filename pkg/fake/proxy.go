@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -207,6 +208,21 @@ func RemoveHeadersHook(i *cassette.Interaction) error {
 	return nil
 }
 
+// canonicalizeJSON parses a JSON string and re-serializes it with sorted map keys.
+// This ensures that semantically identical JSON objects match regardless of property ordering.
+// Returns the original string if parsing fails (non-JSON bodies pass through unchanged).
+func canonicalizeJSON(s string) string {
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return s
+	}
+	canonical, err := json.Marshal(v)
+	if err != nil {
+		return s
+	}
+	return string(canonical)
+}
+
 // DefaultMatcher creates a matcher that normalizes dynamic fields for consistent matching.
 // The onError callback is called if reading the request body fails (nil logs and returns false).
 func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
@@ -249,6 +265,11 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 		normalizedCassette := callIDRegex.ReplaceAllString(i.Body, "call_ID")
 		normalizedCassette = maxTokensRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = thinkingConfigRegex.ReplaceAllString(normalizedCassette, "")
+
+		// Canonicalize JSON to handle property ordering differences
+		// (e.g. tool definitions serialized in different key order by different SDK versions)
+		normalizedReq = canonicalizeJSON(normalizedReq)
+		normalizedCassette = canonicalizeJSON(normalizedCassette)
 
 		return normalizedReq == normalizedCassette
 	}
