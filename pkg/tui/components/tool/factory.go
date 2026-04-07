@@ -6,6 +6,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/tool/defaulttool"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/directorytree"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/globfiles"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/handoff"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/listdirectory"
 	"github.com/docker/docker-agent/pkg/tui/components/tool/readfile"
@@ -71,6 +72,7 @@ func newDefaultRegistry() *Registry {
 		{[]string{builtin.ToolNameListDirectory}, listdirectory.New},
 		{[]string{builtin.ToolNameDirectoryTree}, directorytree.New},
 		{[]string{builtin.ToolNameSearchFilesContent}, searchfilescontent.New},
+		{[]string{builtin.ToolNameGlobFiles}, globfiles.New},
 		{[]string{builtin.ToolNameShell}, shell.New},
 		{[]string{builtin.ToolNameFetch, "category:api"}, api.New},
 		{

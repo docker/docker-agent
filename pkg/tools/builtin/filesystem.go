@@ -12,9 +12,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/fsx"
 	"github.com/docker/docker-agent/pkg/shellpath"
@@ -31,6 +33,7 @@ const (
 	ToolNameSearchFilesContent = "search_files_content"
 	ToolNameMkdir              = "create_directory"
 	ToolNameRmdir              = "remove_directory"
+	ToolNameGlobFiles          = "glob_files"
 )
 
 // PostEditConfig represents a post-edit command configuration
@@ -87,6 +90,7 @@ func (t *FilesystemTool) Instructions() string {
 
 - Relative paths resolve from the working directory; absolute paths and ".." work as expected
 - Prefer read_multiple_files over sequential read_file calls
+- Use glob_files to find files by name pattern (e.g. **/*.go, src/**/*.ts)
 - Use search_files_content to locate code or text across files
 - Use exclude patterns in searches and max_depth in directory_tree to limit output`
 }
@@ -123,6 +127,16 @@ type SearchFilesContentMeta struct {
 
 type ListDirectoryArgs struct {
 	Path string `json:"path" jsonschema:"The directory path to list"`
+}
+
+type GlobFilesArgs struct {
+	Pattern string `json:"pattern" jsonschema:"The glob pattern to match files against (e.g. **/*.go, src/**/*.ts)"`
+	Path    string `json:"path,omitempty" jsonschema:"The directory to search in (defaults to working directory)"`
+}
+
+type GlobFilesMeta struct {
+	FileCount int  `json:"fileCount"`
+	Truncated bool `json:"truncated"`
 }
 
 type CreateDirectoryArgs struct {
@@ -335,6 +349,19 @@ func (t *FilesystemTool) Tools(context.Context) ([]tools.Tool, error) {
 			Annotations: tools.ToolAnnotations{
 				Title: "Remove Directory",
 			},
+		},
+		{
+			Name:         ToolNameGlobFiles,
+			Category:     "filesystem",
+			Description:  "Find files by glob pattern. Returns matching file paths sorted by modification time. Supports patterns like **/*.go, src/**/*.ts, *.json.",
+			Parameters:   tools.MustSchemaFor[GlobFilesArgs](),
+			OutputSchema: tools.MustSchemaFor[string](),
+			Handler:      tools.NewHandler(t.handleGlobFiles),
+			Annotations: tools.ToolAnnotations{
+				ReadOnlyHint: true,
+				Title:        "Glob Files",
+			},
+			AddDescriptionParameter: true,
 		},
 	}, nil
 }
@@ -807,6 +834,88 @@ func (t *FilesystemTool) handleSearchFilesContent(_ context.Context, args Search
 
 	return &tools.ToolCallResult{
 		Output: strings.Join(results, "\n"),
+		Meta:   meta,
+	}, nil
+}
+
+func (t *FilesystemTool) handleGlobFiles(_ context.Context, args GlobFilesArgs) (*tools.ToolCallResult, error) {
+	searchDir := t.resolvePath(args.Path)
+
+	info, err := os.Stat(searchDir)
+	if err != nil {
+		return tools.ResultError(fmt.Sprintf("Error accessing directory: %s", err)), nil
+	}
+	if !info.IsDir() {
+		return tools.ResultError(fmt.Sprintf("Path is not a directory: %s", args.Path)), nil
+	}
+
+	// Build the full glob pattern relative to the search directory
+	fullPattern := filepath.Join(searchDir, args.Pattern)
+
+	matches, err := doublestar.FilepathGlob(fullPattern)
+	if err != nil {
+		return tools.ResultError(fmt.Sprintf("Invalid glob pattern: %s", err)), nil
+	}
+
+	// Filter ignored paths and collect file info for sorting
+	type fileEntry struct {
+		relPath string
+		modTime int64
+	}
+	var entries []fileEntry
+
+	for _, match := range matches {
+		if t.shouldIgnorePath(match) {
+			continue
+		}
+
+		fi, err := os.Stat(match)
+		if err != nil {
+			continue
+		}
+		// Only return files, not directories
+		if fi.IsDir() {
+			continue
+		}
+
+		relPath, err := filepath.Rel(searchDir, match)
+		if err != nil {
+			relPath = match
+		}
+
+		entries = append(entries, fileEntry{relPath: relPath, modTime: fi.ModTime().UnixNano()})
+	}
+
+	// Sort by modification time, most recent first
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].modTime > entries[j].modTime
+	})
+
+	truncated := false
+	if len(entries) > maxFiles {
+		entries = entries[:maxFiles]
+		truncated = true
+	}
+
+	meta := GlobFilesMeta{
+		FileCount: len(entries),
+		Truncated: truncated,
+	}
+
+	if len(entries) == 0 {
+		return &tools.ToolCallResult{
+			Output: "No files matched the pattern",
+			Meta:   meta,
+		}, nil
+	}
+
+	var result strings.Builder
+	for _, e := range entries {
+		fmt.Fprintln(&result, e.relPath)
+	}
+
+	return &tools.ToolCallResult{
+		Output: result.String(),
 		Meta:   meta,
 	}, nil
 }
