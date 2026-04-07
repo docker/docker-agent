@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/bmatcuk/doublestar/v4"
+
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/fsx"
 	"github.com/docker/docker-agent/pkg/shellpath"
@@ -846,7 +847,7 @@ func (t *FilesystemTool) handleGlobFiles(_ context.Context, args GlobFilesArgs) 
 		return tools.ResultError(fmt.Sprintf("Error accessing directory: %s", err)), nil
 	}
 	if !info.IsDir() {
-		return tools.ResultError(fmt.Sprintf("Path is not a directory: %s", args.Path)), nil
+		return tools.ResultError("Path is not a directory: " + args.Path), nil
 	}
 
 	// Build the full glob pattern relative to the search directory
