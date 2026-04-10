@@ -222,6 +222,26 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 	case "response.done", "response.completed":
 		slog.Info("Response done received", "event_type", event.Type)
+		if len(event.Response.Output) > 0 {
+			for _, output := range event.Response.Output {
+				if output.Type != "message" || a.itemHasContent[output.ID] {
+					continue
+				}
+				for _, content := range output.Content {
+					if content.Type != "text" || content.Text == "" {
+						continue
+					}
+					response.Choices = append(response.Choices, chat.MessageStreamChoice{
+						Delta: chat.MessageDelta{
+							Content: content.Text,
+							Role:    "assistant",
+						},
+					})
+					a.itemHasContent[output.ID] = true
+					break
+				}
+			}
+		}
 		// Extract usage
 		u := event.Response.Usage
 		if u.TotalTokens > 0 {
@@ -244,11 +264,7 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if hasToolCalls {
 			finishReason = chat.FinishReasonToolCalls
 		}
-		response.Choices = []chat.MessageStreamChoice{
-			{
-				FinishReason: finishReason,
-			},
-		}
+		response.Choices = append(response.Choices, chat.MessageStreamChoice{FinishReason: finishReason})
 	default:
 		slog.Info("Unhandled stream event type", "type", event.Type)
 	}

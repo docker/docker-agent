@@ -134,6 +134,64 @@ func TestWSStream_TextDelta(t *testing.T) {
 	assert.ErrorIs(t, err, io.EOF)
 }
 
+func TestWSStream_CompletedResponseIncludesFinalMessageText(t *testing.T) {
+	t.Parallel()
+
+	events := []map[string]any{
+		{
+			"type": "response.completed",
+			"response": map[string]any{
+				"id": "resp_789",
+				"output": []any{
+					map[string]any{
+						"type": "message",
+						"id":   "item_3",
+						"content": []any{
+							map[string]any{
+								"type": "text",
+								"text": "Generated title",
+							},
+						},
+					},
+				},
+				"usage": map[string]any{
+					"input_tokens":  7,
+					"output_tokens": 3,
+					"total_tokens":  10,
+					"input_tokens_details": map[string]any{
+						"cached_tokens": 0,
+					},
+					"output_tokens_details": map[string]any{
+						"reasoning_tokens": 0,
+					},
+				},
+			},
+		},
+	}
+
+	srv := testWSServer(t, events)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	stream, err := dialWebSocket(t.Context(), wsURL, http.Header{}, defaultTestParams())
+	require.NoError(t, err)
+	defer stream.Close()
+
+	adapter := newResponseStreamAdapter(stream, true)
+
+	resp, err := adapter.Recv()
+	require.NoError(t, err)
+	require.Len(t, resp.Choices, 2)
+	assert.Equal(t, "Generated title", resp.Choices[0].Delta.Content)
+	assert.Equal(t, chat.FinishReasonStop, resp.Choices[1].FinishReason)
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, int64(7), resp.Usage.InputTokens)
+	assert.Equal(t, int64(3), resp.Usage.OutputTokens)
+
+	_, err = adapter.Recv()
+	assert.ErrorIs(t, err, io.EOF)
+}
+
 func TestWSStream_ToolCall(t *testing.T) {
 	t.Parallel()
 
