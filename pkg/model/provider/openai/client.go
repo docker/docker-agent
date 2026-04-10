@@ -272,6 +272,14 @@ func (c *Client) CreateChatCompletionStream(
 		if c.ModelConfig.ParallelToolCalls != nil {
 			params.ParallelToolCalls = openai.Bool(*c.ModelConfig.ParallelToolCalls)
 		}
+
+		// Apply tool_choice from agent config
+		if toolChoice := c.ModelOptions.ToolChoice(); toolChoice != "" {
+			params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+				OfAuto: openai.Opt(toolChoice),
+			}
+			slog.Debug("OpenAI request using tool_choice", "tool_choice", toolChoice)
+		}
 	}
 
 	// Apply thinking budget: set reasoning_effort for reasoning models (o-series, gpt-5)
@@ -380,6 +388,14 @@ func (c *Client) CreateResponseStream(
 
 		if c.ModelConfig.ParallelToolCalls != nil {
 			params.ParallelToolCalls = param.NewOpt(*c.ModelConfig.ParallelToolCalls)
+		}
+
+		// Apply tool_choice from agent config
+		if toolChoice := c.ModelOptions.ToolChoice(); toolChoice != "" {
+			params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{
+				OfToolChoiceMode: param.NewOpt(responses.ToolChoiceOptions(toolChoice)),
+			}
+			slog.Debug("OpenAI responses request using tool_choice", "tool_choice", toolChoice)
 		}
 	}
 

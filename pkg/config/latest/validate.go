@@ -23,6 +23,11 @@ func (t *Config) validate() error {
 			return err
 		}
 
+		// Validate tool_choice
+		if err := agent.validateToolChoice(); err != nil {
+			return err
+		}
+
 		for j := range agent.Toolsets {
 			if err := agent.Toolsets[j].validate(); err != nil {
 				return err
@@ -36,6 +41,19 @@ func (t *Config) validate() error {
 	}
 
 	return nil
+}
+
+// validateToolChoice validates the tool_choice configuration for an agent
+func (a *AgentConfig) validateToolChoice() error {
+	if a.ToolChoice == "" {
+		return nil
+	}
+	switch a.ToolChoice {
+	case "auto", "required", "none":
+		return nil
+	default:
+		return errors.New("tool_choice must be one of: auto, required, none")
+	}
 }
 
 // validateFallback validates the fallback configuration for an agent

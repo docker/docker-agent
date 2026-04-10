@@ -115,6 +115,12 @@ func WithAddDescriptionParameter(addDescriptionParameter bool) Opt {
 	}
 }
 
+func WithToolChoice(toolChoice string) Opt {
+	return func(a *Agent) {
+		a.toolChoice = toolChoice
+	}
+}
+
 func WithAddPromptFiles(addPromptFiles []string) Opt {
 	return func(a *Agent) {
 		a.addPromptFiles = addPromptFiles

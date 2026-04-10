@@ -365,6 +365,15 @@
           "type": "boolean",
           "description": "Whether to add a 'description' parameter to tool calls, allowing the LLM to provide context about why it is calling a tool"
         },
+        "tool_choice": {
+          "type": "string",
+          "description": "Controls how the model selects tools. 'auto' (default) lets the model decide, 'required' forces the model to always call a tool, 'none' prevents tool use.",
+          "enum": [
+            "auto",
+            "required",
+            "none"
+          ]
+        },
         "hooks": {
           "$ref": "#/definitions/HooksConfig",
           "description": "Lifecycle hooks for executing shell commands at various points in the agent's execution"

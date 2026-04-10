@@ -109,6 +109,19 @@ func (c *Client) createBetaStream(
 
 	if len(requestTools) > 0 {
 		slog.Debug("Anthropic Beta API: Adding tools to request", "tool_count", len(requestTools))
+
+		// Apply tool_choice from agent config
+		if toolChoice := c.ModelOptions.ToolChoice(); toolChoice != "" {
+			switch toolChoice {
+			case "required":
+				params.ToolChoice = anthropic.BetaToolChoiceUnionParam{OfAny: &anthropic.BetaToolChoiceAnyParam{}}
+			case "none":
+				params.ToolChoice = anthropic.BetaToolChoiceUnionParam{OfNone: &anthropic.BetaToolChoiceNoneParam{}}
+			default: // "auto" or any other value
+				params.ToolChoice = anthropic.BetaToolChoiceUnionParam{OfAuto: &anthropic.BetaToolChoiceAutoParam{}}
+			}
+			slog.Debug("Anthropic Beta API request using tool_choice", "tool_choice", toolChoice)
+		}
 	}
 
 	slog.Debug("Anthropic Beta API chat completion stream request",

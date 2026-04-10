@@ -32,6 +32,7 @@ type Agent struct {
 	addDate                 bool
 	addEnvironmentInfo      bool
 	addDescriptionParameter bool
+	toolChoice              string
 	maxIterations           int
 	maxConsecutiveToolCalls int
 	maxOldToolCallTokens    int
@@ -204,6 +205,11 @@ func (a *Agent) Commands() types.Commands {
 // Hooks returns the hooks configuration for this agent.
 func (a *Agent) Hooks() *latest.HooksConfig {
 	return a.hooks
+}
+
+// ToolChoice returns the tool choice mode for this agent (e.g., "auto", "required", "none").
+func (a *Agent) ToolChoice() string {
+	return a.toolChoice
 }
 
 // Tools returns the tools available to this agent

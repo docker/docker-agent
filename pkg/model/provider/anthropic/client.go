@@ -330,6 +330,19 @@ func (c *Client) CreateChatCompletionStream(
 
 	if len(requestTools) > 0 {
 		slog.Debug("Adding tools to Anthropic request", "tool_count", len(requestTools))
+
+		// Apply tool_choice from agent config
+		if toolChoice := c.ModelOptions.ToolChoice(); toolChoice != "" {
+			switch toolChoice {
+			case "required":
+				params.ToolChoice = anthropic.ToolChoiceUnionParam{OfAny: &anthropic.ToolChoiceAnyParam{}}
+			case "none":
+				params.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
+			default: // "auto" or any other value
+				params.ToolChoice = anthropic.ToolChoiceUnionParam{OfAuto: &anthropic.ToolChoiceAutoParam{}}
+			}
+			slog.Debug("Anthropic request using tool_choice", "tool_choice", toolChoice)
+		}
 	}
 
 	// Log the request details for debugging

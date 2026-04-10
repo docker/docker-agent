@@ -128,7 +128,7 @@ func TestConvertToolConfig(t *testing.T) {
 		},
 	}}
 
-	config := convertToolConfig(requestTools, false)
+	config := convertToolConfig(requestTools, false, "")
 
 	require.NotNil(t, config)
 	require.Len(t, config.Tools, 1)
@@ -142,10 +142,10 @@ func TestConvertToolConfig(t *testing.T) {
 func TestConvertToolConfig_Empty(t *testing.T) {
 	t.Parallel()
 
-	config := convertToolConfig(nil, false)
+	config := convertToolConfig(nil, false, "")
 	assert.Nil(t, config)
 
-	config = convertToolConfig([]tools.Tool{}, false)
+	config = convertToolConfig([]tools.Tool{}, false, "")
 	assert.Nil(t, config)
 }
 
@@ -1179,7 +1179,7 @@ func TestConvertToolConfig_WithCaching(t *testing.T) {
 		Description: "A test tool",
 	}}
 
-	config := convertToolConfig(requestTools, true)
+	config := convertToolConfig(requestTools, true, "")
 
 	require.NotNil(t, config)
 	require.Len(t, config.Tools, 2) // tool spec + cache point
@@ -1197,10 +1197,40 @@ func TestConvertToolConfig_WithoutCaching(t *testing.T) {
 		Description: "A test tool",
 	}}
 
-	config := convertToolConfig(requestTools, false)
+	config := convertToolConfig(requestTools, false, "")
 
 	require.NotNil(t, config)
 	require.Len(t, config.Tools, 1) // just tool spec, no cache point
+}
+
+func TestConvertToolConfig_ToolChoiceRequired(t *testing.T) {
+	t.Parallel()
+
+	requestTools := []tools.Tool{{
+		Name:        "test_tool",
+		Description: "A test tool",
+	}}
+
+	config := convertToolConfig(requestTools, false, "required")
+
+	require.NotNil(t, config)
+	_, isAny := config.ToolChoice.(*types.ToolChoiceMemberAny)
+	assert.True(t, isAny, "expected ToolChoiceMemberAny for required")
+}
+
+func TestConvertToolConfig_ToolChoiceAuto(t *testing.T) {
+	t.Parallel()
+
+	requestTools := []tools.Tool{{
+		Name:        "test_tool",
+		Description: "A test tool",
+	}}
+
+	config := convertToolConfig(requestTools, false, "auto")
+
+	require.NotNil(t, config)
+	_, isAuto := config.ToolChoice.(*types.ToolChoiceMemberAuto)
+	assert.True(t, isAuto, "expected ToolChoiceMemberAuto for auto")
 }
 
 func TestPromptCachingEnabled_TypeMismatch(t *testing.T) {

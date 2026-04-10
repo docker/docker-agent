@@ -1,0 +1,11 @@
+agents:
+  root:
+    model: anthropic/claude-opus-4-6
+    instruction: >
+      You are a coding agent. Use your tools to read, write, and modify files,
+      and to run shell commands. Always use tools to accomplish tasks rather than
+      just describing what to do.
+    tool_choice: required
+    toolsets:
+      - type: filesystem
+      - type: shell

@@ -247,7 +247,7 @@ func mapToDocument(m map[string]any) document.Interface {
 	return document.NewLazyDocument(m)
 }
 
-func convertToolConfig(requestTools []tools.Tool, enableCaching bool) *types.ToolConfiguration {
+func convertToolConfig(requestTools []tools.Tool, enableCaching bool, toolChoice string) *types.ToolConfiguration {
 	if len(requestTools) == 0 {
 		return nil
 	}
@@ -273,9 +273,21 @@ func convertToolConfig(requestTools []tools.Tool, enableCaching bool) *types.Too
 		})
 	}
 
+	var choice types.ToolChoice
+	switch toolChoice {
+	case "required":
+		choice = &types.ToolChoiceMemberAny{Value: types.AnyToolChoice{}}
+	case "none":
+		// Bedrock does not have a "none" tool choice; omit tool config entirely
+		// would be ideal, but if tools are present we default to auto.
+		choice = &types.ToolChoiceMemberAuto{Value: types.AutoToolChoice{}}
+	default: // "auto" or empty
+		choice = &types.ToolChoiceMemberAuto{Value: types.AutoToolChoice{}}
+	}
+
 	return &types.ToolConfiguration{
 		Tools:      toolSpecs,
-		ToolChoice: &types.ToolChoiceMemberAuto{Value: types.AutoToolChoice{}},
+		ToolChoice: choice,
 	}
 }
 

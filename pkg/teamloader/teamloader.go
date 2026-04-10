@@ -160,6 +160,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithAddDate(agentConfig.AddDate),
 			agent.WithAddEnvironmentInfo(agentConfig.AddEnvironmentInfo),
 			agent.WithAddDescriptionParameter(agentConfig.AddDescriptionParameter),
+			agent.WithToolChoice(agentConfig.ToolChoice),
 			agent.WithAddPromptFiles(promptFiles),
 			agent.WithMaxIterations(agentConfig.MaxIterations),
 			agent.WithMaxConsecutiveToolCalls(agentConfig.MaxConsecutiveToolCalls),
@@ -302,6 +303,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 		opts := []options.Opt{
 			options.WithGateway(runConfig.ModelsGateway),
 			options.WithStructuredOutput(a.StructuredOutput),
+			options.WithToolChoice(a.ToolChoice),
 			options.WithProviders(cfg.Providers),
 		}
 		if maxTokens != nil {
@@ -362,6 +364,7 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 		opts := []options.Opt{
 			options.WithGateway(runConfig.ModelsGateway),
 			options.WithStructuredOutput(a.StructuredOutput),
+			options.WithToolChoice(a.ToolChoice),
 			options.WithProviders(cfg.Providers),
 		}
 		if maxTokens != nil {

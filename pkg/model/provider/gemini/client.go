@@ -569,9 +569,22 @@ func (c *Client) CreateChatCompletionStream(
 		config.Tools = append(config.Tools, allTools...)
 
 		// Enable function calling
+		mode := genai.FunctionCallingConfigModeAuto
+		if toolChoice := c.ModelOptions.ToolChoice(); toolChoice != "" {
+			switch toolChoice {
+			case "required":
+				mode = genai.FunctionCallingConfigModeAny
+			case "none":
+				mode = genai.FunctionCallingConfigModeNone
+			default: // "auto"
+				mode = genai.FunctionCallingConfigModeAuto
+			}
+			slog.Debug("Gemini request using tool_choice", "tool_choice", toolChoice, "mode", mode)
+		}
+
 		config.ToolConfig = &genai.ToolConfig{
 			FunctionCallingConfig: &genai.FunctionCallingConfig{
-				Mode: genai.FunctionCallingConfigModeAuto,
+				Mode: mode,
 			},
 		}
 

@@ -115,3 +115,79 @@ agents:
 		})
 	}
 }
+
+func TestAgentConfig_Validate_ToolChoice(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		config  string
+		wantErr string
+	}{
+		{
+			name: "valid tool_choice auto",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    tool_choice: auto
+`,
+			wantErr: "",
+		},
+		{
+			name: "valid tool_choice required",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    tool_choice: required
+`,
+			wantErr: "",
+		},
+		{
+			name: "valid tool_choice none",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    tool_choice: none
+`,
+			wantErr: "",
+		},
+		{
+			name: "no tool_choice set",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+`,
+			wantErr: "",
+		},
+		{
+			name: "invalid tool_choice value",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    tool_choice: force
+`,
+			wantErr: "tool_choice must be one of: auto, required, none",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var cfg Config
+			err := yaml.Unmarshal([]byte(tt.config), &cfg)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

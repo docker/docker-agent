@@ -11,6 +11,7 @@ type ModelOptions struct {
 	noThinking       bool
 	maxTokens        int64
 	providers        map[string]latest.ProviderConfig
+	toolChoice       string
 }
 
 func (c *ModelOptions) Gateway() string {
@@ -35,6 +36,10 @@ func (c *ModelOptions) NoThinking() bool {
 
 func (c *ModelOptions) Providers() map[string]latest.ProviderConfig {
 	return c.providers
+}
+
+func (c *ModelOptions) ToolChoice() string {
+	return c.toolChoice
 }
 
 type Opt func(*ModelOptions)
@@ -75,6 +80,12 @@ func WithProviders(providers map[string]latest.ProviderConfig) Opt {
 	}
 }
 
+func WithToolChoice(toolChoice string) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.toolChoice = toolChoice
+	}
+}
+
 // FromModelOptions converts a concrete ModelOptions value into a slice of
 // Opt configuration functions. Later Opts override earlier ones when applied.
 func FromModelOptions(m ModelOptions) []Opt {
@@ -96,6 +107,9 @@ func FromModelOptions(m ModelOptions) []Opt {
 	}
 	if len(m.providers) > 0 {
 		out = append(out, WithProviders(m.providers))
+	}
+	if m.toolChoice != "" {
+		out = append(out, WithToolChoice(m.toolChoice))
 	}
 	return out
 }

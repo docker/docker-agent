@@ -249,7 +249,7 @@ func (c *Client) buildConverseStreamInput(messages []chat.Message, requestTools 
 
 	// Convert and set tools
 	if len(requestTools) > 0 {
-		input.ToolConfig = convertToolConfig(requestTools, enableCaching)
+		input.ToolConfig = convertToolConfig(requestTools, enableCaching, c.ModelOptions.ToolChoice())
 	}
 
 	return input

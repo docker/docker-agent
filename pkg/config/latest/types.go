@@ -366,6 +366,7 @@ type AgentConfig struct {
 	AddEnvironmentInfo      bool              `json:"add_environment_info,omitempty"`
 	CodeModeTools           bool              `json:"code_mode_tools,omitempty"`
 	AddDescriptionParameter bool              `json:"add_description_parameter,omitempty"`
+	ToolChoice              string            `json:"tool_choice,omitempty"`
 	MaxIterations           int               `json:"max_iterations,omitempty"`
 	MaxConsecutiveToolCalls int               `json:"max_consecutive_tool_calls,omitempty"`
 	MaxOldToolCallTokens    int               `json:"max_old_tool_call_tokens,omitempty"`

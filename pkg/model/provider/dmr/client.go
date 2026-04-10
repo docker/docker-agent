@@ -212,6 +212,14 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 		if c.ModelConfig.ParallelToolCalls != nil {
 			params.ParallelToolCalls = openai.Bool(*c.ModelConfig.ParallelToolCalls)
 		}
+
+		// Apply tool_choice from agent config
+		if toolChoice := c.ModelOptions.ToolChoice(); toolChoice != "" {
+			params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+				OfAuto: openai.Opt(toolChoice),
+			}
+			slog.Debug("DMR request using tool_choice", "tool_choice", toolChoice)
+		}
 	}
 
 	// Log the request in JSON format for debugging
