@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/model/provider/gemini"
 	"github.com/docker/docker-agent/pkg/model/provider/openai"
+	"github.com/docker/docker-agent/pkg/model/provider/openaicodex"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/rulebased"
 	"github.com/docker/docker-agent/pkg/model/provider/vertexai"
@@ -35,6 +36,7 @@ type Alias struct {
 // These are the provider types that have direct implementations (not aliases).
 var CoreProviders = []string{
 	"openai",
+	"openai-codex",
 	"anthropic",
 	"google",
 	"dmr",
@@ -240,6 +242,8 @@ func createDirectProvider(ctx context.Context, cfg *latest.ModelConfig, env envi
 	switch providerType {
 	case "openai", "openai_chatcompletions", "openai_responses":
 		return openai.NewClient(ctx, enhancedCfg, env, opts...)
+	case "openai-codex":
+		return openaicodex.NewClient(ctx, enhancedCfg, env, opts...)
 	case "anthropic":
 		return anthropic.NewClient(ctx, enhancedCfg, env, opts...)
 	case "google":

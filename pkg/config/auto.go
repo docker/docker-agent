@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/codexauth"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 )
@@ -36,6 +37,11 @@ var cloudProviders = []providerConfig{
 	}, "AWS_ACCESS_KEY_ID (or AWS_PROFILE, AWS_ROLE_ARN, AWS_BEARER_TOKEN_BEDROCK)"},
 }
 
+var hasCodexChatGPTAuth = func() bool {
+	auth, err := codexauth.Load()
+	return err == nil && auth.HasChatGPTAuth()
+}
+
 // AutoModelFallbackError is returned when auto model selection fails because
 // no providers are available (no API keys configured and DMR not installed).
 type AutoModelFallbackError struct{}
@@ -54,6 +60,7 @@ func (e *AutoModelFallbackError) Error() string {
 
 var DefaultModels = map[string]string{
 	"openai":         "gpt-5-mini",
+	"openai-codex":   "gpt-5.4",
 	"anthropic":      "claude-sonnet-4-5",
 	"google":         "gemini-2.5-flash",
 	"dmr":            "ai/qwen3:latest",
@@ -62,6 +69,14 @@ var DefaultModels = map[string]string{
 }
 
 func AvailableProviders(ctx context.Context, modelsGateway string, env environment.Provider) []string {
+	return availableProviders(ctx, modelsGateway, env, hasCodexChatGPTAuth)
+}
+
+func AutoModelConfig(ctx context.Context, modelsGateway string, env environment.Provider, defaultModel *latest.ModelConfig) latest.ModelConfig {
+	return autoModelConfig(ctx, modelsGateway, env, defaultModel, hasCodexChatGPTAuth)
+}
+
+func availableProviders(ctx context.Context, modelsGateway string, env environment.Provider, codexAuthFn func() bool) []string {
 	if modelsGateway != "" {
 		// Default to anthropic when using a gateway
 		return []string{"anthropic"}
@@ -78,13 +93,17 @@ func AvailableProviders(ctx context.Context, modelsGateway string, env environme
 		}
 	}
 
+	if codexAuthFn != nil && codexAuthFn() {
+		providers = append(providers, "openai-codex")
+	}
+
 	// DMR is always the final fallback
 	providers = append(providers, "dmr")
 
 	return providers
 }
 
-func AutoModelConfig(ctx context.Context, modelsGateway string, env environment.Provider, defaultModel *latest.ModelConfig) latest.ModelConfig {
+func autoModelConfig(ctx context.Context, modelsGateway string, env environment.Provider, defaultModel *latest.ModelConfig, codexAuthFn func() bool) latest.ModelConfig {
 	// If user specified a default model config, use it (with defaults for unset fields)
 	if defaultModel != nil && defaultModel.Provider != "" && defaultModel.Model != "" {
 		result := *defaultModel
@@ -94,7 +113,7 @@ func AutoModelConfig(ctx context.Context, modelsGateway string, env environment.
 		return result
 	}
 
-	availableProviders := AvailableProviders(ctx, modelsGateway, env)
+	availableProviders := availableProviders(ctx, modelsGateway, env, codexAuthFn)
 	firstAvailable := availableProviders[0]
 
 	return latest.ModelConfig{
