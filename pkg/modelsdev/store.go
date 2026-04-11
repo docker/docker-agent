@@ -3,6 +3,7 @@ package modelsdev
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,6 +23,9 @@ const (
 	CacheFileName   = "models_dev.json"
 	refreshInterval = 24 * time.Hour
 )
+
+// ErrProviderNotFound is returned when a requested provider is not found in the database.
+var ErrProviderNotFound = errors.New("provider not found")
 
 // Store manages access to the models.dev data.
 // All methods are safe for concurrent use.
@@ -91,7 +95,7 @@ func (s *Store) getProvider(ctx context.Context, providerID string) (*Provider, 
 
 	provider, exists := db.Providers[providerID]
 	if !exists {
-		return nil, fmt.Errorf("provider %q not found", providerID)
+		return nil, fmt.Errorf("%w: %q", ErrProviderNotFound, providerID)
 	}
 
 	return &provider, nil
