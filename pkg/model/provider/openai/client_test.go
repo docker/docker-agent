@@ -7,6 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -82,7 +84,7 @@ func TestConvertMessagesToResponseInput_AssistantTextWithToolCalls(t *testing.T)
 }
 
 func TestConvertMessagesToResponseInput_NoOrphans(t *testing.T) {
-	// All tool calls have matching results — no placeholder needed.
+	// All tool calls have matching results - no placeholder needed.
 	messages := []chat.Message{
 		{Role: chat.MessageRoleUser, Content: "hello"},
 		{
@@ -103,4 +105,38 @@ func TestConvertMessagesToResponseInput_NoOrphans(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, outputCount, "should not inject extra outputs when all calls have results")
+}
+
+func TestConvertMessages_MergesConsecutiveSystemMessagesForCustomProviders(t *testing.T) {
+	cfg := &latest.ModelConfig{
+		ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"},
+	}
+	messages := []chat.Message{
+		{Role: chat.MessageRoleSystem, Content: "You are Bob, a coding expert"},
+		{Role: chat.MessageRoleSystem, Content: "## Custom Shell Tools\n\n### execute_command"},
+		{Role: chat.MessageRoleSystem, Content: "<available_skills>\n  <skill>what-time-is-it</skill>\n</available_skills>"},
+		{Role: chat.MessageRoleUser, Content: "what is your favourite colour?"},
+	}
+
+	result := convertMessages(t.Context(), cfg, modelsdev.ID{}, nil, messages)
+	require.Len(t, result, 2)
+	require.NotNil(t, result[0].OfSystem)
+	assert.Contains(t, result[0].OfSystem.Content.OfString.Value, "You are Bob, a coding expert")
+	assert.Contains(t, result[0].OfSystem.Content.OfString.Value, "Custom Shell Tools")
+	assert.Contains(t, result[0].OfSystem.Content.OfString.Value, "available_skills")
+	assert.NotNil(t, result[1].OfUser)
+}
+
+func TestConvertMessages_PreservesConsecutiveSystemMessagesForOpenAIProvider(t *testing.T) {
+	messages := []chat.Message{
+		{Role: chat.MessageRoleSystem, Content: "System 1"},
+		{Role: chat.MessageRoleSystem, Content: "System 2"},
+		{Role: chat.MessageRoleUser, Content: "hello"},
+	}
+
+	result := convertMessages(t.Context(), &latest.ModelConfig{}, modelsdev.ID{}, nil, messages)
+	require.Len(t, result, 3)
+	assert.NotNil(t, result[0].OfSystem)
+	assert.NotNil(t, result[1].OfSystem)
+	assert.NotNil(t, result[2].OfUser)
 }

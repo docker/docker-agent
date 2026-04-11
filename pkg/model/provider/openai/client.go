@@ -26,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelinfo"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/rag/prompts"
 	"github.com/docker/docker-agent/pkg/rag/types"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -183,10 +184,20 @@ func (c *Client) Close() {
 	}
 }
 
-// convertMessages converts chat.Message to openai.ChatCompletionMessageParamUnion
-// using the shared oaistream implementation.
+// convertMessages converts chat.Message to OpenAI chat-completions message params.
+// Custom OpenAI-compatible providers may target local model runners that reject
+// consecutive system or user messages, so we normalize those prompts to match
+// the DMR provider behavior.
+func convertMessages(ctx context.Context, cfg *latest.ModelConfig, id modelsdev.ID, store *modelsdev.Store, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
+	openaiMessages := oaistream.ConvertMessages(ctx, messages, id, store)
+	if isCustomProvider(cfg) {
+		return oaistream.MergeConsecutiveMessages(openaiMessages)
+	}
+	return openaiMessages
+}
+
 func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
-	return oaistream.ConvertMessages(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore())
+	return convertMessages(ctx, &c.ModelConfig, c.ID(), c.ModelOptions.ModelsDevStore(), messages)
 }
 
 // CreateChatCompletionStream creates a streaming chat completion request
