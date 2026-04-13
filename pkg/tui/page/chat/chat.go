@@ -125,9 +125,6 @@ type queuedMessage struct {
 	attachments []msgtypes.Attachment
 }
 
-// maxQueuedMessages is the maximum number of messages that can be queued
-const maxQueuedMessages = 5
-
 // chatPage implements Page
 type chatPage struct {
 	width, height int
@@ -406,10 +403,10 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, p.messages.ScrollToBottom())
 
-		// Process next queued message after cancel (queue is preserved)
-		if queueCmd := p.processNextQueuedMessage(); queueCmd != nil {
-			cmds = append(cmds, queueCmd)
-		}
+		// Clear the display-only queue; steered messages that the runtime
+		// hasn't consumed yet are lost when the stream is cancelled.
+		p.messageQueue = nil
+		p.syncQueueToSidebar()
 
 		return p, tea.Batch(cmds...)
 
@@ -687,22 +684,20 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, cmd
 	}
 
-	// If queue is full, reject the message
-	if len(p.messageQueue) >= maxQueuedMessages {
-		return p, notification.WarningCmd(fmt.Sprintf("Queue full (max %d messages). Please wait.", maxQueuedMessages))
+	// Steer the message into the running agent loop. The runtime injects it
+	// at the next tool-round boundary so the model sees it mid-turn.
+	if err := p.app.Steer(msg.Content); err != nil {
+		return p, notification.WarningCmd("Steer queue full (max 5). Please wait for the agent to catch up.")
 	}
 
-	// Add to queue
+	// Track for sidebar display; cleared when the stream stops.
 	p.messageQueue = append(p.messageQueue, queuedMessage{
 		content:     msg.Content,
 		attachments: msg.Attachments,
 	})
 	p.syncQueueToSidebar()
 
-	queueLen := len(p.messageQueue)
-	notifyMsg := fmt.Sprintf("Message queued (%d waiting) · Ctrl+X to clear", queueLen)
-
-	return p, notification.InfoCmd(notifyMsg)
+	return p, notification.InfoCmd("Message steered · agent will see it at the next step")
 }
 
 func (p *chatPage) handleEditUserMessage(msg msgtypes.EditUserMessageMsg) (layout.Model, tea.Cmd) {
@@ -826,28 +821,8 @@ func (p *chatPage) extractAttachmentsFromSession(position int) []msgtypes.Attach
 	return attachments
 }
 
-// processNextQueuedMessage pops the next message from the queue and processes it.
-// Returns nil if the queue is empty.
-func (p *chatPage) processNextQueuedMessage() tea.Cmd {
-	if len(p.messageQueue) == 0 {
-		return nil
-	}
-
-	// Pop the first message from the queue
-	queued := p.messageQueue[0]
-	p.messageQueue[0] = queuedMessage{} // zero out to allow GC
-	p.messageQueue = p.messageQueue[1:]
-	p.syncQueueToSidebar()
-
-	msg := msgtypes.SendMsg{
-		Content:     queued.content,
-		Attachments: queued.attachments,
-	}
-
-	return p.processMessage(msg)
-}
-
-// handleClearQueue clears all queued messages and shows a notification.
+// handleClearQueue clears the display-only queue of steered messages and shows a notification.
+// Note: messages already delivered to the runtime's steer queue cannot be recalled.
 func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
 	count := len(p.messageQueue)
 	if count == 0 {
