@@ -2201,7 +2201,7 @@ func (m *appModel) renderLeanWorkingIndicator() string {
 	innerWidth := m.width - appPaddingHorizontal
 	workingText := "Working\u2026"
 	if queueLen := m.chatPage.QueueLength(); queueLen > 0 {
-		workingText = fmt.Sprintf("Working\u2026 (%d queued)", queueLen)
+		workingText = fmt.Sprintf("Working\u2026 (%d steered)", queueLen)
 	}
 	line := m.workingSpinner.View() + " " + styles.SpinnerDotsHighlightStyle.Render(workingText)
 	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Width(innerWidth + appPaddingHorizontal).Render(line)
@@ -2238,7 +2238,7 @@ func (m *appModel) renderResizeHandle(width int) string {
 		// Truncate right side and append spinner (handle stays centered)
 		workingText := "Working…"
 		if queueLen := m.chatPage.QueueLength(); queueLen > 0 {
-			workingText = fmt.Sprintf("Working… (%d queued)", queueLen)
+			workingText = fmt.Sprintf("Working… (%d steered)", queueLen)
 		}
 		suffix := " " + m.workingSpinner.View() + " " + styles.SpinnerDotsHighlightStyle.Render(workingText)
 		cancelKeyPart := styles.HighlightWhiteStyle.Render("Esc")
@@ -2247,7 +2247,7 @@ func (m *appModel) renderResizeHandle(width int) string {
 		result = lipgloss.NewStyle().MaxWidth(innerWidth-suffixWidth).Render(fullLine) + suffix
 
 	case m.chatPage.QueueLength() > 0:
-		queueText := fmt.Sprintf("%d queued", m.chatPage.QueueLength())
+		queueText := fmt.Sprintf("%d steered", m.chatPage.QueueLength())
 		suffix := " " + styles.WarningStyle.Render(queueText) + " "
 		suffixWidth := lipgloss.Width(suffix)
 		result = lipgloss.NewStyle().MaxWidth(innerWidth-suffixWidth).Render(fullLine) + suffix

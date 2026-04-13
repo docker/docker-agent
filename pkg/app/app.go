@@ -340,6 +340,13 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 	}()
 }
 
+// Steer enqueues a user message for mid-turn injection into the running agent
+// loop. The agent will see the message at the next tool-round boundary. Returns
+// an error if the steer queue is full.
+func (a *App) Steer(content string) error {
+	return a.runtime.Steer(runtime.QueuedMessage{Content: content})
+}
+
 // processFileAttachment reads a file from disk, classifies it, and either
 // appends its text content to textBuilder or adds a binary part to binaryParts.
 func (a *App) processFileAttachment(ctx context.Context, att messages.Attachment, textBuilder *strings.Builder, binaryParts *[]chat.MessagePart) {

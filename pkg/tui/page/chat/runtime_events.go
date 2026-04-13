@@ -256,7 +256,11 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	p.streamCancelled = false
 	spinnerCmd := p.setWorking(false)
 	p.setPendingResponse(false)
-	queueCmd := p.processNextQueuedMessage()
+
+	// Clear the display-only shadow queue; all steered messages have been
+	// consumed by the runtime loop at this point.
+	p.messageQueue = nil
+	p.syncQueueToSidebar()
 
 	var exitCmd tea.Cmd
 	if p.app.ShouldExitAfterFirstResponse() && p.hasReceivedAssistantContent {
@@ -266,7 +270,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		})
 	}
 
-	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, queueCmd, exitCmd)
+	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, exitCmd)
 }
 
 // handlePartialToolCall processes partial tool call events by rendering each
