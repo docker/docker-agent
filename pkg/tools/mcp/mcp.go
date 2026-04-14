@@ -118,9 +118,11 @@ func NewRemoteToolset(name, urlString, transport string, headers map[string]stri
 }
 
 // errServerUnavailable is returned by doStart when the MCP server could not be
-// reached but the error is non-fatal (e.g. EOF). The toolset is considered
-// "started" so the agent can proceed, but watchConnection must not be spawned
-// because there is no live connection to monitor.
+// reached but the error is non-fatal (e.g. EOF during stdio exec). Start()
+// propagates this error so the caller (StartableToolSet) does not mark the
+// toolset as started. The agent runtime calls ensureToolSetsAreStarted() at
+// the beginning of every conversation turn, which will retry Start() and
+// pick up the binary once it becomes available—no background goroutine needed.
 var errServerUnavailable = errors.New("MCP server unavailable")
 
 // Describe returns a short, user-visible description of this toolset instance.
@@ -158,13 +160,11 @@ func (ts *Toolset) Start(ctx context.Context) error {
 	ts.restarted = make(chan struct{})
 
 	if err := ts.doStart(ctx); err != nil {
-		if errors.Is(err, errServerUnavailable) {
-			// The server is unreachable but the error is non-fatal.
-			// Mark as started so the agent can proceed; tools will simply
-			// be empty. Don't spawn a watcher — there's nothing to watch.
-			ts.started = true
-			return nil
-		}
+		// errServerUnavailable is non-fatal: the binary is missing but may
+		// appear later. We propagate the error so that StartableToolSet does
+		// not mark us as started. The agent runtime retries Start() at the
+		// beginning of every conversation turn, which will pick up the
+		// binary once it is installed.
 		return err
 	}
 

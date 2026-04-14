@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"io"
+	"iter"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -55,6 +57,154 @@ func allocateAddr(t *testing.T) string {
 	addr := ln.Addr().String()
 	ln.Close()
 	return addr
+}
+
+// unavailableThenAvailableMock is a mock client that returns io.EOF from
+// Initialize for a configurable number of calls, then starts succeeding.
+// This simulates a binary that is not installed at agent startup but later
+// becomes available on PATH.
+type unavailableThenAvailableMock struct {
+	reconnectableMockClient
+
+	initCount     atomic.Int32
+	availableFrom int32 // Initialize succeeds starting at this call number (1-based)
+	listToolsFn   func(context.Context, *gomcp.ListToolsParams) iter.Seq2[*gomcp.Tool, error]
+}
+
+func newUnavailableThenAvailableMock(availableFrom int32) *unavailableThenAvailableMock {
+	m := &unavailableThenAvailableMock{
+		availableFrom: availableFrom,
+	}
+	m.waitCh = make(chan struct{})
+	return m
+}
+
+func (m *unavailableThenAvailableMock) Initialize(ctx context.Context, req *gomcp.InitializeRequest) (*gomcp.InitializeResult, error) {
+	n := m.initCount.Add(1)
+	if n < m.availableFrom {
+		return nil, io.EOF
+	}
+	return m.reconnectableMockClient.Initialize(ctx, req)
+}
+
+func (m *unavailableThenAvailableMock) ListTools(ctx context.Context, req *gomcp.ListToolsParams) iter.Seq2[*gomcp.Tool, error] {
+	if m.listToolsFn != nil {
+		return m.listToolsFn(ctx, req)
+	}
+	return m.reconnectableMockClient.ListTools(ctx, req)
+}
+
+// TestStartReturnsErrorWhenBinaryUnavailable verifies that Start() returns
+// errServerUnavailable when the MCP binary is not found (EOF from Initialize).
+// The toolset must NOT be marked as started so the caller can retry later.
+func TestStartReturnsErrorWhenBinaryUnavailable(t *testing.T) {
+	t.Parallel()
+
+	mock := newUnavailableThenAvailableMock(1_000_000) // never available
+
+	ts := &Toolset{
+		mcpClient: mock,
+		logID:     "test-unavailable",
+	}
+
+	err := ts.Start(t.Context())
+	require.ErrorIs(t, err, errServerUnavailable)
+
+	ts.mu.Lock()
+	assert.False(t, ts.started, "should not be started when binary is unavailable")
+	ts.mu.Unlock()
+}
+
+// TestLazyRetryStartSucceedsWhenBinaryAppears verifies the lazy retry
+// pattern: Start() fails on the first call because the binary is missing,
+// then succeeds on a subsequent call once the binary is installed.
+// This mirrors the agent runtime's ensureToolSetsAreStarted() which calls
+// Start() at the beginning of every conversation turn.
+func TestLazyRetryStartSucceedsWhenBinaryAppears(t *testing.T) {
+	t.Parallel()
+
+	expectedTool := &gomcp.Tool{Name: "greet", InputSchema: &jsonschema.Schema{Type: "object"}}
+
+	mock := newUnavailableThenAvailableMock(2) // succeed from 2nd Initialize call
+	mock.listToolsFn = func(_ context.Context, _ *gomcp.ListToolsParams) iter.Seq2[*gomcp.Tool, error] {
+		return func(yield func(*gomcp.Tool, error) bool) {
+			yield(expectedTool, nil)
+		}
+	}
+
+	ts := &Toolset{
+		mcpClient: mock,
+		logID:     "test-lazy-retry",
+	}
+
+	// Turn 1: binary not installed yet — Start fails.
+	err := ts.Start(t.Context())
+	require.ErrorIs(t, err, errServerUnavailable)
+
+	ts.mu.Lock()
+	assert.False(t, ts.started)
+	ts.mu.Unlock()
+
+	// Turn 2: binary is now installed — Start succeeds.
+	err = ts.Start(t.Context())
+	require.NoError(t, err)
+
+	ts.mu.Lock()
+	assert.True(t, ts.started)
+	ts.mu.Unlock()
+
+	// Tools are now available.
+	toolList, toolErr := ts.Tools(t.Context())
+	require.NoError(t, toolErr)
+	require.Len(t, toolList, 1)
+	assert.Equal(t, "greet", toolList[0].Name)
+
+	_ = ts.Stop(t.Context())
+}
+
+// TestStartableToolSetRetryOnNextTurn verifies the full integration with
+// StartableToolSet: when the inner MCP Start() fails with errServerUnavailable,
+// StartableToolSet does not mark itself as started. On the next turn
+// (simulated by calling Start() again), the retry succeeds and tools appear.
+func TestStartableToolSetRetryOnNextTurn(t *testing.T) {
+	t.Parallel()
+
+	expectedTool := &gomcp.Tool{Name: "hello", InputSchema: &jsonschema.Schema{Type: "object"}}
+
+	mock := newUnavailableThenAvailableMock(3) // succeed from 3rd Initialize call
+	mock.listToolsFn = func(_ context.Context, _ *gomcp.ListToolsParams) iter.Seq2[*gomcp.Tool, error] {
+		return func(yield func(*gomcp.Tool, error) bool) {
+			yield(expectedTool, nil)
+		}
+	}
+
+	inner := &Toolset{
+		mcpClient: mock,
+		logID:     "test-startable",
+	}
+	startable := tools.NewStartable(inner)
+
+	// Turn 1: unavailable.
+	err := startable.Start(t.Context())
+	require.Error(t, err)
+	assert.False(t, startable.IsStarted())
+
+	// Turn 2: still unavailable.
+	err = startable.Start(t.Context())
+	require.Error(t, err)
+	assert.False(t, startable.IsStarted())
+
+	// Turn 3: binary appeared.
+	err = startable.Start(t.Context())
+	require.NoError(t, err)
+	assert.True(t, startable.IsStarted())
+
+	toolList, toolErr := startable.Tools(t.Context())
+	require.NoError(t, toolErr)
+	require.Len(t, toolList, 1)
+	assert.Equal(t, "hello", toolList[0].Name)
+
+	_ = startable.Stop(t.Context())
 }
 
 // TestRemoteReconnectAfterServerRestart verifies that a Toolset backed by a
