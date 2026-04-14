@@ -157,7 +157,9 @@ func (ts *Toolset) Start(ctx context.Context) error {
 		return nil
 	}
 
-	ts.restarted = make(chan struct{})
+	if ts.restarted == nil {
+		ts.restarted = make(chan struct{})
+	}
 
 	if err := ts.doStart(ctx); err != nil {
 		// errServerUnavailable is non-fatal: the binary is missing but may
@@ -242,7 +244,7 @@ func (ts *Toolset) doStart(ctx context.Context) error {
 		if !isInitNotificationSendError(err) {
 			if errors.Is(err, io.EOF) {
 				slog.Debug(
-					"MCP client unavailable (EOF), skipping MCP toolset",
+					"MCP client unavailable (EOF), will retry on next conversation turn",
 					"server", ts.logID,
 				)
 				return errServerUnavailable
