@@ -5,13 +5,12 @@ package sessiontitle
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/ai"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -67,7 +66,8 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 		return "", nil
 	}
 
-	slog.Debug("Generating title for session", "session_id", sessionID, "message_count", len(userMessages))
+	lg := slog.With("session_id", sessionID)
+	lg.Debug("Generating title for session", "message_count", len(userMessages))
 
 	// Format messages for the prompt
 	var formattedMessages strings.Builder
@@ -88,11 +88,8 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 		},
 	}
 
-	var lastErr error
-	for idx, baseModel := range g.models {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
+	models := make([]provider.Provider, 0, len(g.models))
+	for _, baseModel := range g.models {
 		if baseModel == nil {
 			continue
 		}
@@ -108,65 +105,22 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 			options.WithGeneratingTitle(),
 		)
 
-		// Call the provider directly (no tools needed for title generation)
-		stream, err := titleModel.CreateChatCompletionStream(ctx, messages, nil)
-		if err != nil {
-			lastErr = err
-			slog.Error("Failed to create title generation stream",
-				"session_id", sessionID,
-				"model", baseModel.ID(),
-				"attempt", idx+1,
-				"error", err)
-			continue
-		}
-
-		// Drain the stream to collect the full title
-		var title strings.Builder
-		var streamErr error
-		for {
-			response, err := stream.Recv()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				streamErr = err
-				break
-			}
-			if len(response.Choices) > 0 {
-				title.WriteString(response.Choices[0].Delta.Content)
-			}
-		}
-		stream.Close()
-
-		if streamErr != nil {
-			lastErr = streamErr
-			slog.Error("Error receiving from title stream",
-				"session_id", sessionID,
-				"model", baseModel.ID(),
-				"attempt", idx+1,
-				"error", streamErr)
-			continue
-		}
-
-		result := sanitizeTitle(title.String())
-		if result == "" {
-			// Empty/invalid title output - treat as a failure and try fallbacks.
-			lastErr = fmt.Errorf("empty title output from model %q", baseModel.ID())
-			slog.Debug("Generated empty title, trying next model",
-				"session_id", sessionID,
-				"model", baseModel.ID(),
-				"attempt", idx+1)
-			continue
-		}
-
-		slog.Debug("Generated session title", "session_id", sessionID, "title", result, "model", baseModel.ID())
-		return result, nil
+		models = append(models, titleModel)
 	}
 
-	if lastErr != nil {
-		return "", fmt.Errorf("generating title failed: %w", lastErr)
+	str, err := ai.GenerateText(
+		ctx,
+		ai.WithModels(models...),
+		ai.WithMessages(messages...),
+		ai.WithRequireContent(),
+		ai.WithLogger(lg),
+	)
+	if err != nil {
+		return "", fmt.Errorf("generating title failed: %w", err)
 	}
-	return "", nil
+
+	lg.Debug("Generated session title", "title", str)
+	return sanitizeTitle(str), nil
 }
 
 // sanitizeTitle ensures the title is a single line by taking only the first

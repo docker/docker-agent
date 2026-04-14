@@ -1,0 +1,15 @@
+[
+  {
+    "choices": [{ "delta": { "content": "Hello" } }]
+  },
+  {
+    "choices": [{ "delta": { "content": " world" } }]
+  },
+  {
+    "choices": [{ "delta": { "content": "!" } }]
+  },
+  {
+    "choices": [{ "finish_reason": "stop" }],
+    "usage": { "input_tokens": 10, "output_tokens": 3 }
+  }
+]

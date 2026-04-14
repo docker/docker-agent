@@ -1,0 +1,13 @@
+{
+  "Calls": null,
+  "FinishReason": "length",
+  "Usage": { "input_tokens": 50, "output_tokens": 100, "cached_input_tokens": 0, "cached_write_tokens": 0 },
+  "ThoughtSignature": null,
+  "Stopped": true,
+  "Content": "This response is truncated due to",
+  "ReasoningContent": "",
+  "ThinkingSignature": "",
+  "Model": "mock",
+  "Turns": 0,
+  "Messages": null
+}

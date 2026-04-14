@@ -1,0 +1,5 @@
+[
+  {
+    "choices": [{ "delta": { "content": "No tools here." }, "finish_reason": "tool_calls" }]
+  }
+]

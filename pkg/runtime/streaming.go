@@ -3,12 +3,11 @@ package runtime
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io"
+	"iter"
 	"log/slog"
-	"strings"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/ai"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
@@ -28,142 +27,97 @@ type streamResult struct {
 	Stopped           bool
 	FinishReason      chat.FinishReason
 	Usage             *chat.Usage
+	Model             string
 }
 
-// handleStream reads a chat.MessageStream to completion, emitting streaming
+// handleStream consumes an ai.GenerateStream sequence, emitting per-chunk
 // events (content deltas, partial tool calls, reasoning tokens) and returning
-// the aggregated streamResult. The caller is responsible for adding the
-// resulting assistant message to the session.
-func (r *LocalRuntime) handleStream(ctx context.Context, stream chat.MessageStream, a *agent.Agent, agentTools []tools.Tool, sess *session.Session, m *modelsdev.Model, events chan Event) (streamResult, error) {
-	defer stream.Close()
-
-	var fullContent strings.Builder
-	var fullReasoningContent strings.Builder
-	var thinkingSignature string
-	var thoughtSignature []byte
-	var toolCalls []tools.ToolCall
-	var messageUsage *chat.Usage
-	var providerFinishReason chat.FinishReason
-
-	toolCallIndex := make(map[string]int)   // toolCallID -> index in toolCalls slice
-	emittedPartial := make(map[string]bool) // toolCallID -> whether we've emitted a partial event
+// the aggregated streamResult. Stream aggregation (content, tool calls, finish
+// reason) is handled by pkg/ai; this method only handles event emission and
+// telemetry recording.
+func (r *LocalRuntime) handleStream(
+	ctx context.Context,
+	seq iter.Seq2[*ai.ModelStreamValue, error],
+	a *agent.Agent,
+	agentTools []tools.Tool,
+	sess *session.Session,
+	m *modelsdev.Model,
+	events chan Event,
+) (streamResult, error) {
+	emittedPartial := make(map[string]bool)
 	toolDefMap := make(map[string]tools.Tool, len(agentTools))
 	for _, t := range agentTools {
 		toolDefMap[t.Name] = t
 	}
 
-	// recordUsage persists the final token counts and emits telemetry exactly
-	// once per stream, after we have the most accurate usage snapshot.
-	usageRecorded := false
-	recordUsage := func() {
-		if usageRecorded || messageUsage == nil {
-			return
-		}
-		usageRecorded = true
+	// Track partial tool call names for event emission
+	toolNames := make(map[string]string)
 
-		sess.InputTokens = messageUsage.InputTokens + messageUsage.CachedInputTokens + messageUsage.CacheWriteTokens
-		sess.OutputTokens = messageUsage.OutputTokens
-
-		modelName := "unknown"
-		if m != nil {
-			modelName = m.Name
-		}
-		telemetry.RecordTokenUsage(ctx, modelName, sess.InputTokens, sess.OutputTokens, sess.TotalCost())
-	}
-
-	for {
-		response, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			break
-		}
+	for sv, err := range seq {
 		if err != nil {
-			return streamResult{Stopped: true}, fmt.Errorf("error receiving from stream: %w", err)
+			return streamResult{Stopped: true}, err
 		}
 
-		if response.Usage != nil {
-			// Always keep the latest usage snapshot; some providers (e.g.
-			// Gemini) emit updated usage on every chunk with cumulative
-			// token counts, so the last value is the most accurate.
-			messageUsage = response.Usage
-		}
+		if sv.Done {
+			res := sv.Response
 
-		if len(response.Choices) == 0 {
-			continue
-		}
-		choice := response.Choices[0]
+			// Record usage and telemetry
+			if res.Usage != nil {
+				sess.InputTokens = res.Usage.InputTokens + res.Usage.CachedInputTokens + res.Usage.CacheWriteTokens
+				sess.OutputTokens = res.Usage.OutputTokens
 
-		if len(choice.Delta.ThoughtSignature) > 0 {
-			thoughtSignature = choice.Delta.ThoughtSignature
-		}
+				modelName := "unknown"
+				if m != nil {
+					modelName = m.Name
+				}
+				telemetry.RecordTokenUsage(ctx, modelName, sess.InputTokens, sess.OutputTokens, sess.TotalCost())
+			}
 
-		if choice.FinishReason == chat.FinishReasonStop || choice.FinishReason == chat.FinishReasonLength {
-			recordUsage()
 			return streamResult{
-				Calls:             toolCalls,
-				Content:           fullContent.String(),
-				ReasoningContent:  fullReasoningContent.String(),
-				ThinkingSignature: thinkingSignature,
-				ThoughtSignature:  thoughtSignature,
-				Stopped:           true,
-				FinishReason:      choice.FinishReason,
-				Usage:             messageUsage,
+				Calls:             res.Calls,
+				Content:           res.Content,
+				ReasoningContent:  res.ReasoningContent,
+				ThinkingSignature: res.ThinkingSignature,
+				ThoughtSignature:  res.ThoughtSignature,
+				Stopped:           res.Stopped,
+				FinishReason:      res.FinishReason,
+				Usage:             res.Usage,
+				Model:             res.Model,
 			}, nil
 		}
 
-		// Track the provider's explicit finish reason (e.g. tool_calls) so we
-		// can prefer it over inference after the loop.  stop/length are already
-		// handled by the early return above.
-		if choice.FinishReason != "" {
-			providerFinishReason = choice.FinishReason
+		// Process chunk — emit events
+		chunk := sv.Chunk
+
+		if len(chunk.Choices) == 0 {
+			continue
 		}
 
-		// Handle tool calls
+		choice := chunk.Choices[0]
+
+		// Emit partial tool calls
 		if len(choice.Delta.ToolCalls) > 0 {
-			// Process each tool call delta
 			for _, delta := range choice.Delta.ToolCalls {
-				idx, exists := toolCallIndex[delta.ID]
-				if !exists {
-					idx = len(toolCalls)
-					toolCallIndex[delta.ID] = idx
-					toolCalls = append(toolCalls, tools.ToolCall{
-						ID:   delta.ID,
-						Type: delta.Type,
-					})
-				}
+				learningName := delta.Function.Name != "" && toolNames[delta.ID] == ""
 
-				tc := &toolCalls[idx]
-
-				// Track if we're learning the name for the first time
-				learningName := delta.Function.Name != "" && tc.Function.Name == ""
-
-				// Update fields from delta
-				if delta.Type != "" {
-					tc.Type = delta.Type
-				}
 				if delta.Function.Name != "" {
-					tc.Function.Name = delta.Function.Name
-				}
-				if delta.Function.Arguments != "" {
-					tc.Function.Arguments += delta.Function.Arguments
+					toolNames[delta.ID] = delta.Function.Name
 				}
 
-				// Emit PartialToolCall once we have a name, and on subsequent argument deltas.
-				// Only the newly received argument bytes are sent, not the full
-				// accumulated arguments, to avoid re-transmitting the entire payload
-				// on every token.
-				if tc.Function.Name != "" && (learningName || delta.Function.Arguments != "") {
+				name := toolNames[delta.ID]
+				if name != "" && (learningName || delta.Function.Arguments != "") {
 					if !emittedPartial[delta.ID] || delta.Function.Arguments != "" {
 						partial := tools.ToolCall{
-							ID:   tc.ID,
-							Type: tc.Type,
+							ID:   delta.ID,
+							Type: delta.Type,
 							Function: tools.FunctionCall{
-								Name:      tc.Function.Name,
+								Name:      name,
 								Arguments: delta.Function.Arguments,
 							},
 						}
 						toolDef := tools.Tool{}
 						if !emittedPartial[delta.ID] {
-							toolDef = toolDefMap[tc.Function.Name]
+							toolDef = toolDefMap[name]
 						}
 						events <- PartialToolCall(partial, toolDef, a.Name())
 						emittedPartial[delta.ID] = true
@@ -175,61 +129,14 @@ func (r *LocalRuntime) handleStream(ctx context.Context, stream chat.MessageStre
 
 		if choice.Delta.ReasoningContent != "" {
 			events <- AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent)
-			fullReasoningContent.WriteString(choice.Delta.ReasoningContent)
-		}
-
-		// Capture thinking signature for Anthropic extended thinking
-		if choice.Delta.ThinkingSignature != "" {
-			thinkingSignature = choice.Delta.ThinkingSignature
 		}
 
 		if choice.Delta.Content != "" {
 			events <- AgentChoice(a.Name(), sess.ID, choice.Delta.Content)
-			fullContent.WriteString(choice.Delta.Content)
 		}
 	}
 
-	recordUsage()
-
-	// If the stream completed without producing any content or tool calls, likely because of a token limit, stop to avoid breaking the request loop
-	// NOTE(krissetto): this can likely be removed once compaction works properly with all providers (aka dmr)
-	stoppedDueToNoOutput := fullContent.Len() == 0 && len(toolCalls) == 0
-
-	// Prefer the provider's explicit finish reason when available (e.g.
-	// tool_calls).  Only fall back to inference when no explicit reason was
-	// received (stream ended with bare EOF):
-	//   - tool calls present        → tool_calls  (model was requesting tools)
-	//   - content but no tool calls → stop         (natural completion)
-	//   - no output at all          → null          (unknown; likely token limit)
-	finishReason := providerFinishReason
-	if finishReason == "" {
-		switch {
-		case len(toolCalls) > 0:
-			finishReason = chat.FinishReasonToolCalls
-		case fullContent.Len() > 0:
-			finishReason = chat.FinishReasonStop
-		default:
-			finishReason = chat.FinishReasonNull
-		}
-	}
-	// Ensure finish reason agrees with the actual stream output.
-	switch {
-	case finishReason == chat.FinishReasonToolCalls && len(toolCalls) == 0:
-		finishReason = chat.FinishReasonNull
-	case finishReason == chat.FinishReasonStop && len(toolCalls) > 0:
-		finishReason = chat.FinishReasonToolCalls
-	}
-
-	return streamResult{
-		Calls:             toolCalls,
-		Content:           fullContent.String(),
-		ReasoningContent:  fullReasoningContent.String(),
-		ThinkingSignature: thinkingSignature,
-		ThoughtSignature:  thoughtSignature,
-		Stopped:           stoppedDueToNoOutput,
-		FinishReason:      finishReason,
-		Usage:             messageUsage,
-	}, nil
+	return streamResult{Stopped: true}, errors.New("stream ended without final response")
 }
 
 // stripImageContent returns a copy of messages with all image-related content

@@ -1,0 +1,28 @@
+[
+  {
+    "Calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": { "name": "greet", "arguments": "{\"name\": \"Alice\"}" }
+      }
+    ],
+    "FinishReason": "tool_calls",
+    "Usage": { "input_tokens": 10, "output_tokens": 5 },
+    "Model": "test",
+    "Content": ""
+  },
+  {
+    "Calls": [
+      {
+        "id": "call_2",
+        "type": "function",
+        "function": { "name": "greet", "arguments": "{\"name\": \"Bob\"}" }
+      }
+    ],
+    "FinishReason": "tool_calls",
+    "Usage": { "input_tokens": 20, "output_tokens": 5 },
+    "Model": "test",
+    "Content": ""
+  }
+]

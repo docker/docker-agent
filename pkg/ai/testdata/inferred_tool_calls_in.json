@@ -1,0 +1,9 @@
+[
+  {
+    "choices": [{
+      "delta": {
+        "tool_calls": [{ "id": "call_5", "type": "function", "function": { "name": "echo", "arguments": "{\"msg\": \"hi\"}" } }]
+      }
+    }]
+  }
+]

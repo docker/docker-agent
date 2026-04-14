@@ -1,0 +1,23 @@
+[
+  {
+    "Calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": { "name": "screenshot", "arguments": "{}" }
+      }
+    ],
+    "FinishReason": "tool_calls",
+    "Usage": { "input_tokens": 10, "output_tokens": 5 },
+    "Model": "test",
+    "Content": ""
+  },
+  {
+    "Calls": null,
+    "FinishReason": "stop",
+    "Usage": { "input_tokens": 30, "output_tokens": 10 },
+    "Stopped": true,
+    "Content": "I can see the screenshot.",
+    "Model": "test"
+  }
+]

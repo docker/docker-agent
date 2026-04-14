@@ -1,0 +1,15 @@
+[
+  {
+    "choices": [{ "delta": { "reasoning_content": "Let me think" } }]
+  },
+  {
+    "choices": [{ "delta": { "reasoning_content": " about this..." } }]
+  },
+  {
+    "choices": [{ "delta": { "content": "The answer is 42." } }]
+  },
+  {
+    "choices": [{ "finish_reason": "stop" }],
+    "usage": { "input_tokens": 20, "output_tokens": 10 }
+  }
+]

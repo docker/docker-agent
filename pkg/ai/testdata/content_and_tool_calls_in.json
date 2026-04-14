@@ -1,0 +1,23 @@
+[
+  {
+    "choices": [{ "delta": { "content": "Let me check that file." } }]
+  },
+  {
+    "choices": [{
+      "delta": {
+        "tool_calls": [{ "id": "call_2", "type": "function", "function": { "name": "read_file" } }]
+      }
+    }]
+  },
+  {
+    "choices": [{
+      "delta": {
+        "tool_calls": [{ "id": "call_2", "type": "function", "function": { "arguments": "{\"path\": \"/tmp\"}" } }]
+      }
+    }]
+  },
+  {
+    "choices": [],
+    "usage": { "input_tokens": 25, "output_tokens": 12 }
+  }
+]

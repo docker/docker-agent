@@ -1,0 +1,12 @@
+[
+  {
+    "choices": [{ "delta": { "content": "This response is trun" } }]
+  },
+  {
+    "choices": [{ "delta": { "content": "cated due to" } }]
+  },
+  {
+    "choices": [{ "finish_reason": "length" }],
+    "usage": { "input_tokens": 50, "output_tokens": 100 }
+  }
+]

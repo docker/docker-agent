@@ -1,0 +1,33 @@
+[
+  {
+    "Calls": [
+      {
+        "id": "call_1",
+        "type": "function",
+        "function": { "name": "greet", "arguments": "{\"name\": \"Alice\"}" }
+      },
+      {
+        "id": "call_2",
+        "type": "function",
+        "function": { "name": "unknown_tool", "arguments": "{}" }
+      },
+      {
+        "id": "call_3",
+        "type": "function",
+        "function": { "name": "failing_tool", "arguments": "{}" }
+      }
+    ],
+    "FinishReason": "tool_calls",
+    "Usage": { "input_tokens": 20, "output_tokens": 10 },
+    "Model": "test",
+    "Content": ""
+  },
+  {
+    "Calls": null,
+    "FinishReason": "stop",
+    "Usage": { "input_tokens": 50, "output_tokens": 15 },
+    "Stopped": true,
+    "Content": "Hello! I greeted Alice for you.",
+    "Model": "test"
+  }
+]

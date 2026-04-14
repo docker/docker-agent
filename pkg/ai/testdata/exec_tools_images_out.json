@@ -1,0 +1,13 @@
+{
+  "Calls": null,
+  "FinishReason": "stop",
+  "Usage": { "input_tokens": 40, "output_tokens": 15, "cached_input_tokens": 0, "cached_write_tokens": 0 },
+  "ThoughtSignature": null,
+  "Stopped": true,
+  "Content": "I can see the screenshot.",
+  "ReasoningContent": "",
+  "ThinkingSignature": "",
+  "Model": "test",
+  "Turns": 1,
+  "Messages": null
+}

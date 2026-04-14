@@ -1,0 +1,13 @@
+{
+  "Calls": null,
+  "FinishReason": "stop",
+  "Usage": null,
+  "ThoughtSignature": null,
+  "Stopped": false,
+  "Content": "Just some text.",
+  "ReasoningContent": "",
+  "ThinkingSignature": "",
+  "Model": "mock",
+  "Turns": 0,
+  "Messages": null
+}

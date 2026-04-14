@@ -1,0 +1,18 @@
+[
+  {
+    "choices": [{ "delta": { "thinking_signature": "sig_abc123" } }]
+  },
+  {
+    "choices": [{ "delta": { "thought_signature": "dGhvdWdodA==" } }]
+  },
+  {
+    "choices": [{ "delta": { "reasoning_content": "Deep thought..." } }]
+  },
+  {
+    "choices": [{ "delta": { "content": "Result." } }]
+  },
+  {
+    "choices": [{ "finish_reason": "stop" }],
+    "usage": { "input_tokens": 30, "output_tokens": 15 }
+  }
+]

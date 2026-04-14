@@ -1,0 +1,13 @@
+{
+  "Calls": null,
+  "FinishReason": "stop",
+  "Usage": { "input_tokens": 10, "output_tokens": 3, "cached_input_tokens": 0, "cached_write_tokens": 0 },
+  "ThoughtSignature": null,
+  "Stopped": true,
+  "Content": "Hello world!",
+  "ReasoningContent": "",
+  "ThinkingSignature": "",
+  "Model": "mock",
+  "Turns": 0,
+  "Messages": null
+}

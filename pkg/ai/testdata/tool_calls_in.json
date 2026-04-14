@@ -1,0 +1,27 @@
+[
+  {
+    "choices": [{
+      "delta": {
+        "tool_calls": [{ "id": "call_1", "type": "function", "function": { "name": "read_file" } }]
+      }
+    }]
+  },
+  {
+    "choices": [{
+      "delta": {
+        "tool_calls": [{ "id": "call_1", "type": "function", "function": { "arguments": "{\"path\":" } }]
+      }
+    }]
+  },
+  {
+    "choices": [{
+      "delta": {
+        "tool_calls": [{ "id": "call_1", "type": "function", "function": { "arguments": " \"/root\"}" } }]
+      }
+    }]
+  },
+  {
+    "choices": [{ "finish_reason": "tool_calls" }],
+    "usage": { "input_tokens": 15, "output_tokens": 8 }
+  }
+]
