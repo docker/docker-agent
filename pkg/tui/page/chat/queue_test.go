@@ -22,8 +22,9 @@ import (
 
 // steerRuntime is a minimal runtime.Runtime for testing steer behaviour.
 type steerRuntime struct {
-	steered []runtime.QueuedMessage
-	steerFn func(runtime.QueuedMessage) error // optional override
+	steered      []runtime.QueuedMessage
+	steerFn      func(runtime.QueuedMessage) error // optional override
+	steerCleared int                               // number of ClearSteerQueue calls
 }
 
 func (r *steerRuntime) Steer(msg runtime.QueuedMessage) error {
@@ -32,6 +33,10 @@ func (r *steerRuntime) Steer(msg runtime.QueuedMessage) error {
 	}
 	r.steered = append(r.steered, msg)
 	return nil
+}
+
+func (r *steerRuntime) ClearSteerQueue() {
+	r.steerCleared++
 }
 
 // Remaining interface methods — no-ops for this test.
@@ -171,10 +176,10 @@ func TestSteer_QueueFull_RejectsMessage(t *testing.T) {
 	assert.Len(t, p.messageQueue, 3)
 }
 
-func TestSteer_ClearQueue(t *testing.T) {
+func TestSteer_ClearQueue_AlsoClearsRuntime(t *testing.T) {
 	t.Parallel()
 
-	p, _ := newTestChatPage(t)
+	p, rt := newTestChatPage(t)
 
 	// Steer some messages
 	p.handleSendMsg(messages.SendMsg{Content: "first"})
@@ -183,15 +188,41 @@ func TestSteer_ClearQueue(t *testing.T) {
 
 	require.Len(t, p.messageQueue, 3)
 
-	// Clear the display queue
+	// Clear the display queue — should also drain the runtime steer queue
 	_, cmd := p.handleClearQueue()
 	assert.Empty(t, p.messageQueue)
-	assert.NotNil(t, cmd) // Success notification
+	assert.NotNil(t, cmd)               // Success notification
+	assert.Equal(t, 1, rt.steerCleared) // runtime queue was drained
 
-	// Clearing empty queue
+	// Clearing empty queue should NOT call ClearSteerQueue
 	_, cmd = p.handleClearQueue()
 	assert.Empty(t, p.messageQueue)
-	assert.NotNil(t, cmd) // Info notification
+	assert.NotNil(t, cmd)               // Info notification
+	assert.Equal(t, 1, rt.steerCleared) // unchanged — no extra drain
+}
+
+func TestSteer_BusyAgent_PassesAttachments(t *testing.T) {
+	t.Parallel()
+
+	p, rt := newTestChatPage(t)
+
+	// Send a message with an inline (pasted text) attachment while busy.
+	// File-reference attachments require real files on disk so we only
+	// test inline content here.
+	msg := messages.SendMsg{
+		Content: "check this",
+		Attachments: []messages.Attachment{
+			{Name: "paste-1", Content: "some pasted text"},
+		},
+	}
+	_, cmd := p.handleSendMsg(msg)
+	assert.NotNil(t, cmd)
+
+	// The runtime should have received the steered message with the
+	// inline attachment text appended to Content.
+	require.Len(t, rt.steered, 1)
+	assert.Contains(t, rt.steered[0].Content, "check this")
+	assert.Contains(t, rt.steered[0].Content, "some pasted text")
 }
 
 func TestSteer_IdleAgent_ProcessesImmediately(t *testing.T) {
