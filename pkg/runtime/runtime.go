@@ -143,6 +143,9 @@ type Runtime interface {
 	// running agent loop. Returns an error if the queue is full or steering
 	// is not available.
 	Steer(msg QueuedMessage) error
+	// ClearSteerQueue drains all pending messages from the steer queue,
+	// discarding them. Used when the user explicitly clears the queue.
+	ClearSteerQueue()
 	// FollowUp enqueues a message for end-of-turn processing. Each follow-up
 	// gets a full undivided agent turn. Returns an error if the queue is full.
 	FollowUp(msg QueuedMessage) error
@@ -1057,6 +1060,12 @@ func (r *LocalRuntime) Steer(msg QueuedMessage) error {
 		return errors.New("steer queue full")
 	}
 	return nil
+}
+
+// ClearSteerQueue drains all pending messages from the steer queue,
+// discarding them. This is safe to call concurrently with the agent loop.
+func (r *LocalRuntime) ClearSteerQueue() {
+	r.steerQueue.Drain(context.Background())
 }
 
 // FollowUp enqueues a message to be processed after the current agent turn

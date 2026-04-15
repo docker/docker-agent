@@ -342,9 +342,41 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 
 // Steer enqueues a user message for mid-turn injection into the running agent
 // loop. The agent will see the message at the next tool-round boundary. Returns
-// an error if the steer queue is full.
-func (a *App) Steer(content string) error {
-	return a.runtime.Steer(runtime.QueuedMessage{Content: content})
+// an error if the steer queue is full. Attachments are processed into
+// MultiContent parts so the model can see images/PDFs alongside the text.
+func (a *App) Steer(content string, attachments []messages.Attachment) error {
+	msg := runtime.QueuedMessage{Content: content}
+
+	if len(attachments) > 0 {
+		ctx := context.Background()
+		var textBuilder strings.Builder
+		textBuilder.WriteString(content)
+
+		var binaryParts []chat.MessagePart
+
+		for _, att := range attachments {
+			switch {
+			case att.FilePath != "":
+				a.processFileAttachment(ctx, att, &textBuilder, &binaryParts)
+			case att.Content != "":
+				a.processInlineAttachment(att, &textBuilder)
+			default:
+				slog.Debug("skipping attachment with no file path or content", "name", att.Name)
+			}
+		}
+
+		msg.Content = textBuilder.String()
+		if len(binaryParts) > 0 {
+			msg.MultiContent = binaryParts
+		}
+	}
+
+	return a.runtime.Steer(msg)
+}
+
+// ClearSteerQueue drains all pending messages from the runtime's steer queue.
+func (a *App) ClearSteerQueue() {
+	a.runtime.ClearSteerQueue()
 }
 
 // processFileAttachment reads a file from disk, classifies it, and either

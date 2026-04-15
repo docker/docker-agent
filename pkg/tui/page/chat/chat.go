@@ -686,7 +686,7 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 
 	// Steer the message into the running agent loop. The runtime injects it
 	// at the next tool-round boundary so the model sees it mid-turn.
-	if err := p.app.Steer(msg.Content); err != nil {
+	if err := p.app.Steer(msg.Content, msg.Attachments); err != nil {
 		return p, notification.WarningCmd("Steer queue full (max 5). Please wait for the agent to catch up.")
 	}
 
@@ -821,8 +821,8 @@ func (p *chatPage) extractAttachmentsFromSession(position int) []msgtypes.Attach
 	return attachments
 }
 
-// handleClearQueue clears the display-only queue of steered messages and shows a notification.
-// Note: messages already delivered to the runtime's steer queue cannot be recalled.
+// handleClearQueue clears both the display queue and the runtime's steer
+// queue so no pending messages are injected into the agent loop.
 func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
 	count := len(p.messageQueue)
 	if count == 0 {
@@ -831,6 +831,7 @@ func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
 
 	p.messageQueue = nil
 	p.syncQueueToSidebar()
+	p.app.ClearSteerQueue()
 
 	var msg string
 	if count == 1 {

@@ -75,6 +75,10 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 	events := make(chan Event, 128)
 
 	go func() {
+		// Drain any orphaned steer messages from a previous cancelled run
+		// so they don't leak into this new stream.
+		r.steerQueue.Drain(context.Background())
+
 		telemetry.RecordSessionStart(ctx, r.CurrentAgentName(), sess.ID)
 
 		ctx, sessionSpan := r.startSpan(ctx, "runtime.session", trace.WithAttributes(

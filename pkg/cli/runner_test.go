@@ -61,6 +61,7 @@ func (m *mockRuntime) UpdateSessionTitle(context.Context, *session.Session, stri
 func (m *mockRuntime) TitleGenerator() *sessiontitle.Generator                               { return nil }
 func (m *mockRuntime) Close() error                                                          { return nil }
 func (m *mockRuntime) Steer(runtime.QueuedMessage) error                                     { return nil }
+func (m *mockRuntime) ClearSteerQueue()                                                      {}
 func (m *mockRuntime) FollowUp(runtime.QueuedMessage) error                                  { return nil }
 func (m *mockRuntime) RegenerateTitle(context.Context, *session.Session, chan runtime.Event) {}
 
