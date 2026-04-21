@@ -898,6 +898,9 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.ToggleSplitDiffMsg:
 		return m.handleToggleSplitDiff()
 
+	case messages.SetFollowupBehaviorMsg:
+		return m.handleSetFollowupBehavior(msg.Mode)
+
 	case messages.ClearQueueMsg:
 		updated, cmd := m.chatPage.Update(msg)
 		m.chatPage = updated.(chat.Page)
@@ -2196,12 +2199,22 @@ func (m *appModel) handleEditorResize(y int) tea.Cmd {
 	return nil
 }
 
+// queueLabelForMode returns the word shown after a queue count in the working
+// indicator. Matches the active follow-up behavior so it's truthful about
+// what's actually happening to pending messages.
+func queueLabelForMode() string {
+	if userconfig.Get().GetFollowupBehavior() == userconfig.FollowupBehaviorFollowUp {
+		return "queued"
+	}
+	return "steered"
+}
+
 // renderLeanWorkingIndicator renders a single-line working indicator for lean mode.
 func (m *appModel) renderLeanWorkingIndicator() string {
 	innerWidth := m.width - appPaddingHorizontal
 	workingText := "Working\u2026"
 	if queueLen := m.chatPage.QueueLength(); queueLen > 0 {
-		workingText = fmt.Sprintf("Working\u2026 (%d steered)", queueLen)
+		workingText = fmt.Sprintf("Working\u2026 (%d %s)", queueLen, queueLabelForMode())
 	}
 	line := m.workingSpinner.View() + " " + styles.SpinnerDotsHighlightStyle.Render(workingText)
 	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Width(innerWidth + appPaddingHorizontal).Render(line)
@@ -2238,7 +2251,7 @@ func (m *appModel) renderResizeHandle(width int) string {
 		// Truncate right side and append spinner (handle stays centered)
 		workingText := "Working…"
 		if queueLen := m.chatPage.QueueLength(); queueLen > 0 {
-			workingText = fmt.Sprintf("Working… (%d steered)", queueLen)
+			workingText = fmt.Sprintf("Working… (%d %s)", queueLen, queueLabelForMode())
 		}
 		suffix := " " + m.workingSpinner.View() + " " + styles.SpinnerDotsHighlightStyle.Render(workingText)
 		cancelKeyPart := styles.HighlightWhiteStyle.Render("Esc")
@@ -2247,7 +2260,7 @@ func (m *appModel) renderResizeHandle(width int) string {
 		result = lipgloss.NewStyle().MaxWidth(innerWidth-suffixWidth).Render(fullLine) + suffix
 
 	case m.chatPage.QueueLength() > 0:
-		queueText := fmt.Sprintf("%d steered", m.chatPage.QueueLength())
+		queueText := fmt.Sprintf("%d %s", m.chatPage.QueueLength(), queueLabelForMode())
 		suffix := " " + styles.WarningStyle.Render(queueText) + " "
 		suffixWidth := lipgloss.Width(suffix)
 		result = lipgloss.NewStyle().MaxWidth(innerWidth-suffixWidth).Render(fullLine) + suffix

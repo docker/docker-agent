@@ -351,6 +351,54 @@ func (m *appModel) handleToggleSplitDiff() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// handleSetFollowupBehavior sets the follow-up behavior persistently. When
+// called with an empty mode it reports the current value. Invalid modes
+// produce a warning notification listing the accepted values.
+func (m *appModel) handleSetFollowupBehavior(mode string) (tea.Model, tea.Cmd) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+
+	current := userconfig.Get().GetFollowupBehavior()
+	if mode == "" {
+		return m, notification.InfoCmd(fmt.Sprintf(
+			"Follow-up behavior: %s · usage: /followup-behavior steer|followup", current))
+	}
+
+	if mode != userconfig.FollowupBehaviorSteer && mode != userconfig.FollowupBehaviorFollowUp {
+		return m, notification.WarningCmd(fmt.Sprintf(
+			"Unknown follow-up behavior %q. Valid values: %s, %s",
+			mode, userconfig.FollowupBehaviorSteer, userconfig.FollowupBehaviorFollowUp))
+	}
+
+	if mode == current {
+		return m, notification.InfoCmd(fmt.Sprintf("Follow-up behavior already set to %q", mode))
+	}
+
+	// Persist to global userconfig (fire-and-forget, matching the split-diff pattern).
+	go func() {
+		cfg, err := userconfig.Load()
+		if err != nil {
+			slog.Warn("Failed to load userconfig for follow-up behavior change", "error", err)
+			return
+		}
+		if cfg.Settings == nil {
+			cfg.Settings = &userconfig.Settings{}
+		}
+		cfg.Settings.FollowupBehavior = mode
+		if err := cfg.Save(); err != nil {
+			slog.Warn("Failed to persist follow-up behavior to userconfig", "error", err)
+		}
+	}()
+
+	var description string
+	switch mode {
+	case userconfig.FollowupBehaviorSteer:
+		description = "messages sent while working will be injected mid-turn"
+	case userconfig.FollowupBehaviorFollowUp:
+		description = "messages sent while working will queue as their own turn"
+	}
+	return m, notification.SuccessCmd(fmt.Sprintf("Follow-up behavior set to %q · %s", mode, description))
+}
+
 // --- Dialogs ---
 
 func (m *appModel) handleShowCostDialog() (tea.Model, tea.Cmd) {

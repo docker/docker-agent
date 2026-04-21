@@ -226,6 +226,10 @@ func (r *RemoteRuntime) Steer(msg QueuedMessage) error {
 // forwarded to the server and there is no local queue to drain.
 func (r *RemoteRuntime) ClearSteerQueue() {}
 
+// ClearFollowUpQueue is a no-op for remote runtimes — follow-up messages are
+// forwarded to the server and there is no local queue to drain.
+func (r *RemoteRuntime) ClearFollowUpQueue() {}
+
 // FollowUp enqueues a message for end-of-turn processing on the remote server.
 func (r *RemoteRuntime) FollowUp(msg QueuedMessage) error {
 	if r.sessionID == "" {

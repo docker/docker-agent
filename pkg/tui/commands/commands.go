@@ -313,6 +313,17 @@ func builtInSettingsCommands() []Item {
 				return core.CmdHandler(messages.OpenThemePickerMsg{})
 			},
 		},
+		{
+			ID:           "settings.followup-behavior",
+			Label:        "Follow-up Behavior",
+			SlashCommand: "/followup-behavior",
+			Description:  "Set behavior for messages sent while agent is working (usage: /followup-behavior steer|followup)",
+			Category:     "Settings",
+			Immediate:    true,
+			Execute: func(arg string) tea.Cmd {
+				return core.CmdHandler(messages.SetFollowupBehaviorMsg{Mode: strings.TrimSpace(arg)})
+			},
+		},
 	}
 }
 

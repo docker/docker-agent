@@ -340,43 +340,62 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 	}()
 }
 
-// Steer enqueues a user message for mid-turn injection into the running agent
-// loop. The agent will see the message at the next tool-round boundary. Returns
-// an error if the steer queue is full. Attachments are processed into
+// buildQueuedMessage processes a text/attachment pair into a runtime.QueuedMessage
+// suitable for either steering or follow-up. Attachments are rendered into
 // MultiContent parts so the model can see images/PDFs alongside the text.
-func (a *App) Steer(content string, attachments []messages.Attachment) error {
+func (a *App) buildQueuedMessage(content string, attachments []messages.Attachment) runtime.QueuedMessage {
 	msg := runtime.QueuedMessage{Content: content}
 
-	if len(attachments) > 0 {
-		ctx := context.Background()
-		var textBuilder strings.Builder
-		textBuilder.WriteString(content)
+	if len(attachments) == 0 {
+		return msg
+	}
 
-		var binaryParts []chat.MessagePart
+	ctx := context.Background()
+	var textBuilder strings.Builder
+	textBuilder.WriteString(content)
 
-		for _, att := range attachments {
-			switch {
-			case att.FilePath != "":
-				a.processFileAttachment(ctx, att, &textBuilder, &binaryParts)
-			case att.Content != "":
-				a.processInlineAttachment(att, &textBuilder)
-			default:
-				slog.Debug("skipping attachment with no file path or content", "name", att.Name)
-			}
-		}
+	var binaryParts []chat.MessagePart
 
-		msg.Content = textBuilder.String()
-		if len(binaryParts) > 0 {
-			msg.MultiContent = binaryParts
+	for _, att := range attachments {
+		switch {
+		case att.FilePath != "":
+			a.processFileAttachment(ctx, att, &textBuilder, &binaryParts)
+		case att.Content != "":
+			a.processInlineAttachment(att, &textBuilder)
+		default:
+			slog.Debug("skipping attachment with no file path or content", "name", att.Name)
 		}
 	}
 
-	return a.runtime.Steer(msg)
+	msg.Content = textBuilder.String()
+	if len(binaryParts) > 0 {
+		msg.MultiContent = binaryParts
+	}
+	return msg
+}
+
+// Steer enqueues a user message for mid-turn injection into the running agent
+// loop. The agent will see the message at the next tool-round boundary. Returns
+// an error if the steer queue is full.
+func (a *App) Steer(content string, attachments []messages.Attachment) error {
+	return a.runtime.Steer(a.buildQueuedMessage(content, attachments))
 }
 
 // ClearSteerQueue drains all pending messages from the runtime's steer queue.
 func (a *App) ClearSteerQueue() {
 	a.runtime.ClearSteerQueue()
+}
+
+// FollowUp enqueues a user message for end-of-turn processing. Each follow-up
+// gets a full undivided agent turn after the current turn completes. Returns
+// an error if the follow-up queue is full.
+func (a *App) FollowUp(content string, attachments []messages.Attachment) error {
+	return a.runtime.FollowUp(a.buildQueuedMessage(content, attachments))
+}
+
+// ClearFollowUpQueue drains all pending messages from the runtime's follow-up queue.
+func (a *App) ClearFollowUpQueue() {
+	a.runtime.ClearFollowUpQueue()
 }
 
 // processFileAttachment reads a file from disk, classifies it, and either

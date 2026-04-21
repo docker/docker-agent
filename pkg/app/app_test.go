@@ -70,6 +70,7 @@ func (m *mockRuntime) Stop()                                   {}
 func (m *mockRuntime) Steer(_ runtime.QueuedMessage) error     { return nil }
 func (m *mockRuntime) ClearSteerQueue()                        {}
 func (m *mockRuntime) FollowUp(_ runtime.QueuedMessage) error  { return nil }
+func (m *mockRuntime) ClearFollowUpQueue()                     {}
 
 // Verify mockRuntime implements runtime.Runtime
 var _ runtime.Runtime = (*mockRuntime)(nil)

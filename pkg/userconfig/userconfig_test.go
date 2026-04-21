@@ -890,3 +890,28 @@ func TestConfig_PermissionsRoundTrip(t *testing.T) {
 	assert.Equal(t, original.Settings.Permissions.Deny, loaded.Settings.Permissions.Deny)
 	assert.Equal(t, original.Settings.Permissions.Ask, loaded.Settings.Permissions.Ask)
 }
+
+func TestGetFollowupBehavior(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		settings *Settings
+		want     string
+	}{
+		{"nil settings default to steer", nil, FollowupBehaviorSteer},
+		{"empty settings default to steer", &Settings{}, FollowupBehaviorSteer},
+		{"unset field defaults to steer", &Settings{FollowupBehavior: ""}, FollowupBehaviorSteer},
+		{"explicit steer", &Settings{FollowupBehavior: FollowupBehaviorSteer}, FollowupBehaviorSteer},
+		{"explicit followup", &Settings{FollowupBehavior: FollowupBehaviorFollowUp}, FollowupBehaviorFollowUp},
+		{"typo falls back to steer", &Settings{FollowupBehavior: "steeer"}, FollowupBehaviorSteer},
+		{"case-sensitive: FOLLOWUP does not match", &Settings{FollowupBehavior: "FOLLOWUP"}, FollowupBehaviorSteer},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, tt.settings.GetFollowupBehavior())
+		})
+	}
+}

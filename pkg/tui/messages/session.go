@@ -80,6 +80,12 @@ type (
 	// ToggleSplitDiffMsg toggles split diff view mode.
 	ToggleSplitDiffMsg struct{}
 
+	// SetFollowupBehaviorMsg sets the follow-up behavior (how messages
+	// submitted while the agent is working are dispatched). Mode is the raw
+	// user-supplied value; empty string means "show current value". Unknown
+	// values are rejected by the handler.
+	SetFollowupBehaviorMsg struct{ Mode string }
+
 	// SendMsg contains the content sent to the agent.
 	SendMsg struct {
 		Content     string       // Full content sent to the agent (with file contents expanded)

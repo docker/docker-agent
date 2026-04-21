@@ -72,6 +72,7 @@ func (m *mockRuntime) Close() error                            { return nil }
 func (m *mockRuntime) Steer(QueuedMessage) error               { return nil }
 func (m *mockRuntime) ClearSteerQueue()                        {}
 func (m *mockRuntime) FollowUp(QueuedMessage) error            { return nil }
+func (m *mockRuntime) ClearFollowUpQueue()                     {}
 
 func (m *mockRuntime) RegenerateTitle(context.Context, *session.Session, chan Event) {
 }

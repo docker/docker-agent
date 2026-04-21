@@ -149,6 +149,9 @@ type Runtime interface {
 	// FollowUp enqueues a message for end-of-turn processing. Each follow-up
 	// gets a full undivided agent turn. Returns an error if the queue is full.
 	FollowUp(msg QueuedMessage) error
+	// ClearFollowUpQueue drains all pending messages from the follow-up queue,
+	// discarding them. Used when the user explicitly clears the queue.
+	ClearFollowUpQueue()
 
 	// Close releases resources held by the runtime (e.g., session store connections).
 	Close() error
@@ -1076,6 +1079,12 @@ func (r *LocalRuntime) FollowUp(msg QueuedMessage) error {
 		return errors.New("follow-up queue full")
 	}
 	return nil
+}
+
+// ClearFollowUpQueue drains all pending messages from the follow-up queue,
+// discarding them. This is safe to call concurrently with the agent loop.
+func (r *LocalRuntime) ClearFollowUpQueue() {
+	r.followUpQueue.Drain(context.Background())
 }
 
 // Run starts the agent's interaction loop

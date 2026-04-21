@@ -61,11 +61,27 @@ type Settings struct {
 	// SoundThreshold is the minimum duration in seconds a task must run
 	// before a success sound is played. Defaults to 5 seconds.
 	SoundThreshold int `yaml:"sound_threshold,omitempty"`
+	// FollowupBehavior controls what happens when the user sends a message
+	// while the agent is still working. Valid values are "steer" (inject the
+	// message mid-turn via <system-reminder> at the next tool-round boundary)
+	// and "followup" (enqueue the message as its own undivided turn after the
+	// current turn completes). Defaults to "steer".
+	FollowupBehavior string `yaml:"followup_behavior,omitempty"`
 	// Permissions defines global permission patterns applied across all sessions
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.
 	Permissions *latest.PermissionsConfig `yaml:"permissions,omitempty"`
 }
+
+// FollowupBehavior values accepted by Settings.FollowupBehavior.
+const (
+	// FollowupBehaviorSteer injects messages mid-turn via runtime.Steer at the
+	// next tool-round boundary. This is the default.
+	FollowupBehaviorSteer = "steer"
+	// FollowupBehaviorFollowUp enqueues messages via runtime.FollowUp. Each
+	// queued message gets its own undivided turn after the current one completes.
+	FollowupBehaviorFollowUp = "followup"
+)
 
 // DefaultTabTitleMaxLength is the default maximum tab title length when not configured.
 const DefaultTabTitleMaxLength = 20
@@ -87,6 +103,20 @@ func (s *Settings) GetSound() bool {
 		return false
 	}
 	return s.Sound
+}
+
+// GetFollowupBehavior returns the configured follow-up behavior, normalizing
+// unset or invalid values to FollowupBehaviorSteer (the default).
+func (s *Settings) GetFollowupBehavior() string {
+	if s == nil {
+		return FollowupBehaviorSteer
+	}
+	switch s.FollowupBehavior {
+	case FollowupBehaviorFollowUp:
+		return FollowupBehaviorFollowUp
+	default:
+		return FollowupBehaviorSteer
+	}
 }
 
 // GetSoundThreshold returns the minimum duration for sound notifications, defaulting to 10s.

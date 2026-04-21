@@ -26,6 +26,7 @@ import (
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 const (
@@ -684,10 +685,27 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 		return p, cmd
 	}
 
-	// Steer the message into the running agent loop. The runtime injects it
-	// at the next tool-round boundary so the model sees it mid-turn.
-	if err := p.app.Steer(msg.Content, msg.Attachments); err != nil {
-		return p, notification.WarningCmd("Steer queue full (max 5). Please wait for the agent to catch up.")
+	// Dispatch the message according to the configured follow-up behavior.
+	// "steer" (default) injects it mid-turn via <system-reminder> at the next
+	// tool-round boundary. "followup" enqueues it as its own undivided turn
+	// after the current one completes.
+	var (
+		dispatchErr error
+		errNotice   string
+		okNotice    string
+	)
+	switch userconfig.Get().GetFollowupBehavior() {
+	case userconfig.FollowupBehaviorFollowUp:
+		dispatchErr = p.app.FollowUp(msg.Content, msg.Attachments)
+		errNotice = "Follow-up queue full. Please wait for the agent to catch up."
+		okNotice = "Message queued · will run as its own turn"
+	default:
+		dispatchErr = p.app.Steer(msg.Content, msg.Attachments)
+		errNotice = "Steer queue full (max 5). Please wait for the agent to catch up."
+		okNotice = "Message steered · agent will see it at the next step"
+	}
+	if dispatchErr != nil {
+		return p, notification.WarningCmd(errNotice)
 	}
 
 	// Track for sidebar display; cleared when the stream stops.
@@ -697,7 +715,7 @@ func (p *chatPage) handleSendMsg(msg msgtypes.SendMsg) (layout.Model, tea.Cmd) {
 	})
 	p.syncQueueToSidebar()
 
-	return p, notification.InfoCmd("Message steered · agent will see it at the next step")
+	return p, notification.InfoCmd(okNotice)
 }
 
 func (p *chatPage) handleEditUserMessage(msg msgtypes.EditUserMessageMsg) (layout.Model, tea.Cmd) {
@@ -821,8 +839,10 @@ func (p *chatPage) extractAttachmentsFromSession(position int) []msgtypes.Attach
 	return attachments
 }
 
-// handleClearQueue clears both the display queue and the runtime's steer
-// queue so no pending messages are injected into the agent loop.
+// handleClearQueue clears the display queue and both runtime queues (steer and
+// follow-up) so no pending messages are injected into the agent loop. Both are
+// drained unconditionally because the user may have switched modes after
+// queueing, or a session may hold pending messages of either kind.
 func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
 	count := len(p.messageQueue)
 	if count == 0 {
@@ -832,6 +852,7 @@ func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
 	p.messageQueue = nil
 	p.syncQueueToSidebar()
 	p.app.ClearSteerQueue()
+	p.app.ClearFollowUpQueue()
 
 	var msg string
 	if count == 1 {
