@@ -373,6 +373,13 @@ func (m *appModel) handleSetFollowupBehavior(mode string) (tea.Model, tea.Cmd) {
 		return m, notification.InfoCmd(fmt.Sprintf("Follow-up behavior already set to %q", mode))
 	}
 
+	// Apply the change in-memory synchronously so userconfig.Get returns the
+	// new value immediately. Without this the send-dispatch and
+	// working-indicator readers below would race the background file write
+	// and keep returning the old mode until it commits — meaning a message
+	// sent right after the command could be dispatched under the old mode.
+	userconfig.SetFollowupBehaviorOverride(mode)
+
 	// Persist to global userconfig (fire-and-forget, matching the split-diff pattern).
 	go func() {
 		cfg, err := userconfig.Load()

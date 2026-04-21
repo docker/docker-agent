@@ -83,6 +83,32 @@ const (
 	FollowupBehaviorFollowUp = "followup"
 )
 
+// followupBehaviorOverride is an in-memory override applied by Get so that
+// runtime changes to FollowupBehavior (via SetFollowupBehaviorOverride) are
+// visible immediately, even while the on-disk config is being updated
+// asynchronously by a background save. An empty string means no override.
+var (
+	followupBehaviorOverrideMu sync.RWMutex
+	followupBehaviorOverride   string
+)
+
+// SetFollowupBehaviorOverride sets an in-memory override for the follow-up
+// behavior that is returned by subsequent calls to Get. Callers changing the
+// setting at runtime should invoke this synchronously before persisting to
+// disk so the new value is visible immediately, without racing the
+// background file write. Pass an empty string to clear the override.
+func SetFollowupBehaviorOverride(mode string) {
+	followupBehaviorOverrideMu.Lock()
+	followupBehaviorOverride = mode
+	followupBehaviorOverrideMu.Unlock()
+}
+
+func getFollowupBehaviorOverride() string {
+	followupBehaviorOverrideMu.RLock()
+	defer followupBehaviorOverrideMu.RUnlock()
+	return followupBehaviorOverride
+}
+
 // DefaultTabTitleMaxLength is the default maximum tab title length when not configured.
 const DefaultTabTitleMaxLength = 20
 
@@ -371,10 +397,20 @@ func (c *Config) GetSettings() *Settings {
 
 // Get returns the global user settings from the config file.
 // Returns an empty Settings if the config file doesn't exist or has no settings.
+//
+// Any in-memory override set via SetFollowupBehaviorOverride is applied on
+// top of the on-disk value so runtime changes are visible immediately, even
+// when the disk write is still in flight.
 func Get() *Settings {
+	var s *Settings
 	cfg, err := Load()
 	if err != nil {
-		return &Settings{}
+		s = &Settings{}
+	} else {
+		s = cfg.GetSettings()
 	}
-	return cfg.GetSettings()
+	if ov := getFollowupBehaviorOverride(); ov != "" {
+		s.FollowupBehavior = ov
+	}
+	return s
 }

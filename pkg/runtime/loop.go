@@ -75,9 +75,12 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 	events := make(chan Event, 128)
 
 	go func() {
-		// Drain any orphaned steer messages from a previous cancelled run
-		// so they don't leak into this new stream.
+		// Drain any orphaned messages from a previous cancelled run so
+		// they don't leak into this new stream. Both queues are drained:
+		// the user may have switched modes between sessions, or pending
+		// messages of either kind may have survived a cancel boundary.
 		r.steerQueue.Drain(context.Background())
+		r.followUpQueue.Drain(context.Background())
 
 		telemetry.RecordSessionStart(ctx, r.CurrentAgentName(), sess.ID)
 

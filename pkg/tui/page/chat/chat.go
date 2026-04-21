@@ -404,10 +404,13 @@ func (p *chatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, p.messages.ScrollToBottom())
 
-		// Clear the display-only queue; steered messages that the runtime
-		// hasn't consumed yet are lost when the stream is cancelled.
-		p.messageQueue = nil
-		p.syncQueueToSidebar()
+		// Clear the display queue and both runtime queues so pending
+		// messages from the cancelled session can't leak into the next
+		// one. Follow-up messages in particular survive the cancel
+		// boundary inside the runtime's in-memory queue, so without an
+		// explicit drain they would be dequeued and executed as the
+		// first messages of the next RunStream call.
+		p.clearPendingQueues()
 
 		return p, tea.Batch(cmds...)
 
@@ -849,10 +852,7 @@ func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
 		return p, notification.InfoCmd("No messages queued")
 	}
 
-	p.messageQueue = nil
-	p.syncQueueToSidebar()
-	p.app.ClearSteerQueue()
-	p.app.ClearFollowUpQueue()
+	p.clearPendingQueues()
 
 	var msg string
 	if count == 1 {
@@ -861,6 +861,17 @@ func (p *chatPage) handleClearQueue() (layout.Model, tea.Cmd) {
 		msg = fmt.Sprintf("Cleared %d queued messages", count)
 	}
 	return p, notification.SuccessCmd(msg)
+}
+
+// clearPendingQueues drops the display queue and drains both runtime
+// queues (steer and follow-up). Used by the explicit clear-queue action
+// and by the stream-cancel handler so messages left over from a
+// cancelled session cannot leak into the next run.
+func (p *chatPage) clearPendingQueues() {
+	p.messageQueue = nil
+	p.syncQueueToSidebar()
+	p.app.ClearSteerQueue()
+	p.app.ClearFollowUpQueue()
 }
 
 // syncQueueToSidebar updates the sidebar with truncated previews of queued messages.

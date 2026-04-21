@@ -915,3 +915,43 @@ func TestGetFollowupBehavior(t *testing.T) {
 		})
 	}
 }
+
+// TestSetFollowupBehaviorOverride verifies that setting the in-memory override
+// makes Get return the new value without waiting for a disk write. This is
+// the guarantee /followup-behavior relies on so messages sent right after
+// the command are dispatched under the new mode instead of racing the
+// asynchronous file save.
+//
+// Cannot run in parallel because it mutates the package-level override and
+// HOME (via the test's config isolation).
+func TestSetFollowupBehaviorOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Ensure a clean override at both the start and end of the test so it
+	// doesn't leak into other non-parallel tests.
+	SetFollowupBehaviorOverride("")
+	t.Cleanup(func() { SetFollowupBehaviorOverride("") })
+
+	// Baseline: no config, no override -> default steer.
+	assert.Equal(t, FollowupBehaviorSteer, Get().GetFollowupBehavior())
+
+	// Override to followup without touching disk — Get should return it.
+	SetFollowupBehaviorOverride(FollowupBehaviorFollowUp)
+	assert.Equal(t, FollowupBehaviorFollowUp, Get().GetFollowupBehavior())
+
+	// On-disk value set to steer, but override still wins.
+	cfg, err := Load()
+	require.NoError(t, err)
+	if cfg.Settings == nil {
+		cfg.Settings = &Settings{}
+	}
+	cfg.Settings.FollowupBehavior = FollowupBehaviorSteer
+	require.NoError(t, cfg.Save())
+	assert.Equal(t, FollowupBehaviorFollowUp, Get().GetFollowupBehavior(),
+		"override should take precedence over on-disk value")
+
+	// Clearing the override returns Get to reading from disk.
+	SetFollowupBehaviorOverride("")
+	assert.Equal(t, FollowupBehaviorSteer, Get().GetFollowupBehavior())
+}

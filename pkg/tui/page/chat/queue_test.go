@@ -338,6 +338,32 @@ func TestClearQueue_DrainsBothRuntimeQueues(t *testing.T) {
 	assert.Equal(t, 1, rt.followUpCleared)
 }
 
+// TestClearPendingQueues_StreamCancelled verifies the stream-cancel path
+// drains both runtime queues so pending messages from the cancelled
+// session cannot leak into the next RunStream call. Without this, a
+// follow-up enqueued via FollowUp before Cancel would sit in the
+// runtime's in-memory queue and be dequeued as the first action of the
+// user's next session.
+func TestClearPendingQueues_StreamCancelled(t *testing.T) {
+	t.Parallel()
+
+	p, rt := newTestChatPage(t)
+
+	// Simulate: the user dispatched messages while the agent was busy
+	// and then cancelled the stream.
+	p.handleSendMsg(messages.SendMsg{Content: "first"})
+	p.handleSendMsg(messages.SendMsg{Content: "second"})
+	require.Len(t, p.messageQueue, 2)
+
+	p.clearPendingQueues()
+
+	assert.Empty(t, p.messageQueue)
+	assert.Equal(t, 1, rt.steerCleared,
+		"cancel path must drain runtime steer queue")
+	assert.Equal(t, 1, rt.followUpCleared,
+		"cancel path must drain runtime follow-up queue")
+}
+
 func TestFollowUp_BusyAgent_PassesAttachments(t *testing.T) {
 	setFollowupBehavior(t, userconfig.FollowupBehaviorFollowUp)
 
