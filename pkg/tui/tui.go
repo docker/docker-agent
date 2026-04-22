@@ -162,6 +162,9 @@ type appModel struct {
 	// leanMode enables a simplified TUI with minimal chrome.
 	leanMode bool
 
+	// showGitignored determines whether gitignored files are shown in the file picker.
+	showGitignored bool
+
 	// buildCommandCategories is a function that returns the list of command categories.
 	buildCommandCategories func(context.Context, tea.Model) []commands.Category
 
@@ -171,6 +174,13 @@ type appModel struct {
 
 // Option configures the TUI.
 type Option func(*appModel)
+
+// WithShowGitignored enables showing gitignored files in the file picker.
+func WithShowGitignored() Option {
+	return func(m *appModel) {
+		m.showGitignored = true
+	}
+}
 
 // WithLeanMode enables a simplified TUI with minimal chrome:
 // no sidebar, no tab bar, no overlays, no resize handle.

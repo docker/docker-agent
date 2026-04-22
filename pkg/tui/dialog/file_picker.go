@@ -34,20 +34,22 @@ const (
 type filePickerDialog struct {
 	BaseDialog
 
-	textInput  textinput.Model
-	currentDir string
-	entries    []fileEntry
-	filtered   []fileEntry
-	selected   int
-	scrollview *scrollview.Model
-	keyMap     commandPaletteKeyMap
-	err        error
+	textInput      textinput.Model
+	currentDir     string
+	entries        []fileEntry
+	filtered       []fileEntry
+	selected       int
+	scrollview     *scrollview.Model
+	keyMap         commandPaletteKeyMap
+	err            error
+	showGitignored bool
 }
 
 // NewFilePickerDialog creates a new file picker dialog for attaching files.
 // If initialPath is provided and is a directory, it starts in that directory.
 // If initialPath is a file, it starts in the file's directory with the file pre-selected.
-func NewFilePickerDialog(initialPath string) Dialog {
+// If showGitignored is true, gitignored files will be shown in the picker.
+func NewFilePickerDialog(initialPath string, showGitignored bool) Dialog {
 	ti := textinput.New()
 	ti.Placeholder = "Type to filter files…"
 	ti.Focus()
@@ -84,10 +86,11 @@ func NewFilePickerDialog(initialPath string) Dialog {
 	}
 
 	d := &filePickerDialog{
-		textInput:  ti,
-		currentDir: startDir,
-		scrollview: scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
-		keyMap:     defaultCommandPaletteKeyMap(),
+		textInput:      ti,
+		currentDir:     startDir,
+		scrollview:     scrollview.New(scrollview.WithReserveScrollbarSpace(true)),
+		keyMap:         defaultCommandPaletteKeyMap(),
+		showGitignored: showGitignored,
 	}
 
 	d.loadDirectory()
@@ -120,8 +123,10 @@ func (d *filePickerDialog) loadDirectory() {
 	}
 
 	var shouldIgnore func(string) bool
-	if vcsMatcher, err := fsx.NewVCSMatcher(d.currentDir); err == nil && vcsMatcher != nil {
-		shouldIgnore = vcsMatcher.ShouldIgnore
+	if !d.showGitignored {
+		if vcsMatcher, err := fsx.NewVCSMatcher(d.currentDir); err == nil && vcsMatcher != nil {
+			shouldIgnore = vcsMatcher.ShouldIgnore
+		}
 	}
 
 	dirEntries, err := os.ReadDir(d.currentDir)

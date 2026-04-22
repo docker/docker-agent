@@ -555,7 +555,7 @@ func (m *appModel) handleAttachFile(filePath string) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(
 				notification.ErrorCmd("Failed to attach "+filePath),
 				core.CmdHandler(dialog.OpenDialogMsg{
-					Model: dialog.NewFilePickerDialog(filePath),
+					Model: dialog.NewFilePickerDialog(filePath, m.showGitignored),
 				}),
 			)
 		}
@@ -564,7 +564,7 @@ func (m *appModel) handleAttachFile(filePath string) (tea.Model, tea.Cmd) {
 
 	// No path provided — open the file picker dialog
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewFilePickerDialog(filePath),
+		Model: dialog.NewFilePickerDialog(filePath, m.showGitignored),
 	})
 }
 
