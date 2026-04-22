@@ -380,7 +380,7 @@ func (m *appModel) editorOpts() []editor.Option {
 	return []editor.Option{
 		editor.WithCompletions(
 			completions.NewCommandCompletion(m.commandCategories()),
-			completions.NewFileCompletion(),
+			completions.NewFileCompletion(m.showGitignored),
 		),
 	}
 }

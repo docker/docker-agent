@@ -16,13 +16,16 @@ const (
 )
 
 type fileCompletion struct {
-	mu     sync.Mutex
-	items  []completion.Item
-	loaded bool
+	mu             sync.Mutex
+	items          []completion.Item
+	loaded         bool
+	showGitignored bool
 }
 
-func NewFileCompletion() Completion {
-	return &fileCompletion{}
+func NewFileCompletion(showGitignored bool) Completion {
+	return &fileCompletion{
+		showGitignored: showGitignored,
+	}
 }
 
 func (c *fileCompletion) AutoSubmit() bool {
@@ -47,12 +50,11 @@ func (c *fileCompletion) Items() []completion.Item {
 	}
 
 	// Try to create VCS matcher for current directory
-	vcsMatcher, _ := fsx.NewVCSMatcher(".")
-
-	// Prepare shouldIgnore function
 	var shouldIgnore func(string) bool
-	if vcsMatcher != nil {
-		shouldIgnore = vcsMatcher.ShouldIgnore
+	if !c.showGitignored {
+		if vcsMatcher, _ := fsx.NewVCSMatcher("."); vcsMatcher != nil {
+			shouldIgnore = vcsMatcher.ShouldIgnore
+		}
 	}
 
 	// Use bounded walker to avoid scanning huge directories
@@ -103,11 +105,11 @@ func (c *fileCompletion) LoadInitialItemsAsync(ctx context.Context) <-chan []com
 		c.mu.Unlock()
 
 		// Try to create VCS matcher for current directory
-		vcsMatcher, _ := fsx.NewVCSMatcher(".")
-
 		var shouldIgnore func(string) bool
-		if vcsMatcher != nil {
-			shouldIgnore = vcsMatcher.ShouldIgnore
+		if !c.showGitignored {
+			if vcsMatcher, _ := fsx.NewVCSMatcher("."); vcsMatcher != nil {
+				shouldIgnore = vcsMatcher.ShouldIgnore
+			}
 		}
 
 		// Shallow scan: 2 levels deep, max 100 files
@@ -167,12 +169,11 @@ func (c *fileCompletion) LoadItemsAsync(ctx context.Context) <-chan []completion
 		c.mu.Unlock()
 
 		// Try to create VCS matcher for current directory
-		vcsMatcher, _ := fsx.NewVCSMatcher(".")
-
-		// Prepare shouldIgnore function
 		var shouldIgnore func(string) bool
-		if vcsMatcher != nil {
-			shouldIgnore = vcsMatcher.ShouldIgnore
+		if !c.showGitignored {
+			if vcsMatcher, _ := fsx.NewVCSMatcher("."); vcsMatcher != nil {
+				shouldIgnore = vcsMatcher.ShouldIgnore
+			}
 		}
 
 		// Full scan with default limits
