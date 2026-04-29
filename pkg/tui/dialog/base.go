@@ -153,9 +153,9 @@ func RenderHelpKeys(contentWidth int, bindings ...string) string {
 	return styles.BaseStyle.Width(contentWidth).Align(lipgloss.Center).Render(strings.Join(parts, "  "))
 }
 
-// HandleQuit checks for ctrl+c and returns tea.Quit if matched.
+// HandleQuit checks for the quit key and returns tea.Quit if matched.
 func HandleQuit(msg tea.KeyPressMsg) tea.Cmd {
-	if msg.String() == "ctrl+c" {
+	if key.Matches(msg, core.GetKeys().Quit) {
 		return tea.Quit
 	}
 	return nil

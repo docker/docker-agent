@@ -73,6 +73,13 @@ type Settings struct {
 	// and agents. These act as user-wide defaults; session-level and agent-level
 	// permissions override them.
 	Permissions *latest.PermissionsConfig `yaml:"permissions,omitempty"`
+	// Keybindings allows users to configure custom keybindings for TUI actions.
+	Keybindings *[]Keybindings `yaml:"keybindings,omitempty"`
+}
+
+type Keybindings struct {
+	Action string   `yaml:"action"`
+	Keys   []string `yaml:"keys"`
 }
 
 // DefaultTabTitleMaxLength is the default maximum tab title length when not configured.

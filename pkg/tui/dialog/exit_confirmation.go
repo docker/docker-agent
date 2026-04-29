@@ -21,7 +21,7 @@ type exitConfirmationKeyMap struct {
 func defaultExitConfirmationKeyMap() exitConfirmationKeyMap {
 	return exitConfirmationKeyMap{
 		Yes: key.NewBinding(
-			key.WithKeys("y", "Y", "ctrl+c"),
+			key.WithKeys("y", "Y", core.GetKeys().Quit.Keys()[0]),
 			key.WithHelp("Y", "yes"),
 		),
 		No: key.NewBinding(
