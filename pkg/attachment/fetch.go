@@ -9,11 +9,14 @@ import (
 )
 
 // fetchTimeout is the maximum time allowed for a URL fetch.
+// TODO: make fetchTimeout per-runtime-configurable in Phase 2.
 const fetchTimeout = 10 * time.Second
 
 // FetchURL fetches a public URL with a 10-second timeout.
 // Returns the raw response body bytes on success.
 // Returns an error if the request fails or the server responds with a non-2xx status.
+//
+// TODO: consider bounding redirects / restricting schemes for user-supplied URLs (SSRF) in Phase 2.
 func FetchURL(ctx context.Context, url string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()

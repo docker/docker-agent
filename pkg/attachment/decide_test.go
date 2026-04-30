@@ -46,6 +46,7 @@ func TestDecide(t *testing.T) {
 		},
 
 		// ── 3a. URL + no URL cap + B64 cap → FetchAsB64 ──────────────────────
+		// Non-empty reason is intentional: signals an automatic fallback for logging/UI.
 		{
 			name: "url source + no URL cap + B64 → FetchAsB64",
 			doc: chat.Document{
@@ -57,6 +58,7 @@ func TestDecide(t *testing.T) {
 		},
 
 		// ── 3b. URL + no URL cap + no B64 + TXT cap → FetchAsTXT ─────────────
+		// Non-empty reason is intentional: signals an automatic fallback for logging/UI.
 		{
 			name: "url source + no URL cap + TXT → FetchAsTXT",
 			doc: chat.Document{
@@ -78,12 +80,22 @@ func TestDecide(t *testing.T) {
 			wantReasonSubs: "provider cannot handle",
 		},
 
-		// ── 4. InlineData + B64 cap → B64 ────────────────────────────────────
+		// ── 4. InlineData (non-nil) + B64 cap → B64 ──────────────────────────
 		{
 			name: "inline binary + B64 cap → B64",
 			doc: chat.Document{
 				MimeType: "image/png",
 				Source:   chat.DocumentSource{InlineData: []byte("\x89PNG\r\n\x1a\n")},
+			},
+			wantStrategy: attachment.StrategyB64,
+		},
+
+		// ── 4b. InlineData non-nil but zero-length → B64 (spec: nil check, not len) ──
+		{
+			name: "inline binary (empty slice, non-nil) + B64 cap → B64",
+			doc: chat.Document{
+				MimeType: "image/png",
+				Source:   chat.DocumentSource{InlineData: []byte{}},
 			},
 			wantStrategy: attachment.StrategyB64,
 		},
@@ -103,7 +115,8 @@ func TestDecide(t *testing.T) {
 			name: "inline binary but only TXT cap → Drop",
 			doc: chat.Document{
 				MimeType: "text/plain",
-				Source:   chat.DocumentSource{InlineData: []byte("binary-data")},
+				// validates step-6 fall-through: B64 variant present but provider only supports TXT
+				Source: chat.DocumentSource{InlineData: []byte("binary-data")},
 			},
 			wantStrategy:   attachment.StrategyDrop,
 			wantReasonSubs: "no supported variant",
@@ -152,7 +165,7 @@ func TestDecide(t *testing.T) {
 				t.Errorf("Decide() reason = %q, want substring %q", reason, tc.wantReasonSubs)
 			}
 			if tc.wantReasonSubs == "" && reason != "" {
-				// For happy-path strategies the reason should be empty.
+				// For happy-path strategies (URL, B64, TXT) the reason should be empty.
 				t.Errorf("Decide() reason = %q, want empty", reason)
 			}
 		})
@@ -164,8 +177,8 @@ func TestTXTEnvelope(t *testing.T) {
 	if !strings.Contains(got, `name="readme.md"`) {
 		t.Errorf("TXTEnvelope missing name attribute: %s", got)
 	}
-	if !strings.Contains(got, `type="text/markdown"`) {
-		t.Errorf("TXTEnvelope missing type attribute: %s", got)
+	if !strings.Contains(got, `mime-type="text/markdown"`) {
+		t.Errorf("TXTEnvelope missing mime-type attribute: %s", got)
 	}
 	if !strings.Contains(got, "# Hello\nworld") {
 		t.Errorf("TXTEnvelope missing body: %s", got)

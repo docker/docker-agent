@@ -41,35 +41,41 @@ type CapabilityTable map[string]Capability
 // capability table. It returns the chosen strategy and, when the strategy is
 // a fallback or a drop, a human-readable reason string.
 //
+// When multiple source fields are set, URL takes priority over InlineData,
+// which takes priority over InlineText.
+//
 // Decision order (exact — do not deviate):
 //  1. MIME type not in table → Drop
-//  2. Source is URL + provider supports URL → URL
+//  2. Source is URL + provider supports URL → URL (reason: "")
 //  3. Source is URL + provider does NOT support URL:
-//     a. provider supports B64 → FetchAsB64
-//     b. provider supports TXT → FetchAsTXT
+//     a. provider supports B64 → FetchAsB64 (reason: "url not supported, will fetch as b64")
+//     b. provider supports TXT → FetchAsTXT (reason: "url not supported, will fetch as text")
 //     c. otherwise → Drop
-//  4. Source is InlineData + provider supports B64 → B64
-//  5. Source is InlineText + provider supports TXT → TXT
+//  4. Source is InlineData (non-nil) + provider supports B64 → B64 (reason: "")
+//  5. Source is InlineText (non-empty) + provider supports TXT → TXT (reason: "")
 //  6. → Drop
+//
+// Note: FetchAsB64 and FetchAsTXT carry non-empty reason strings intentionally —
+// they signal an automatic fallback that callers may want to surface in logs or UI.
 func Decide(doc chat.Document, table CapabilityTable) (Strategy, string) {
 	capability, ok := table[doc.MimeType]
 	if !ok {
 		return StrategyDrop, "mime not in provider table"
 	}
 
-	if doc.Source.URL != "" && capability.URL {
-		return StrategyURL, ""
-	}
-	if doc.Source.URL != "" && !capability.URL {
-		if capability.B64 {
+	if doc.Source.URL != "" {
+		switch {
+		case capability.URL:
+			return StrategyURL, ""
+		case capability.B64:
 			return StrategyFetchAsB64, "url not supported, will fetch as b64"
-		}
-		if capability.TXT {
+		case capability.TXT:
 			return StrategyFetchAsTXT, "url not supported, will fetch as text"
+		default:
+			return StrategyDrop, "provider cannot handle url or inline for this mime"
 		}
-		return StrategyDrop, "provider cannot handle url or inline for this mime"
 	}
-	if len(doc.Source.InlineData) > 0 && capability.B64 {
+	if doc.Source.InlineData != nil && capability.B64 {
 		return StrategyB64, ""
 	}
 	if doc.Source.InlineText != "" && capability.TXT {
@@ -84,9 +90,9 @@ func Decide(doc chat.Document, table CapabilityTable) (Strategy, string) {
 //
 // Example output:
 //
-//	<document name="foo.md" type="text/markdown">
+//	<document name="foo.md" mime-type="text/markdown">
 //	...content...
 //	</document>
 func TXTEnvelope(name, mimeType, body string) string {
-	return fmt.Sprintf("<document name=%q type=%q>\n%s\n</document>", name, mimeType, body)
+	return fmt.Sprintf("<document name=%q mime-type=%q>\n%s\n</document>", name, mimeType, body)
 }
