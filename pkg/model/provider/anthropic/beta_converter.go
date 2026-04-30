@@ -237,6 +237,16 @@ func (c *Client) convertBetaUserMultiContent(ctx context.Context, parts []chat.M
 				})
 			}
 
+		case chat.MessagePartTypeDocument:
+			if part.Document == nil {
+				continue
+			}
+			docBlocks, err := c.convertBetaDocument(ctx, *part.Document)
+			if err != nil {
+				return nil, err
+			}
+			contentBlocks = append(contentBlocks, docBlocks...)
+
 		case chat.MessagePartTypeFile:
 			if part.File == nil {
 				continue

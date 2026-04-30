@@ -215,7 +215,11 @@ func (c *Client) CreateChatCompletionStream(
 	}
 
 	// Build Converse input
-	input := c.buildConverseStreamInput(messages, requestTools)
+	input, err := c.buildConverseStreamInput(ctx, messages, requestTools)
+	if err != nil {
+		slog.Error("Failed to convert messages for Bedrock request", "error", err)
+		return nil, err
+	}
 
 	// Call ConverseStream
 	output, err := c.bedrockClient.ConverseStream(ctx, input)
@@ -228,15 +232,19 @@ func (c *Client) CreateChatCompletionStream(
 	return newStreamAdapter(output.GetStream(), c.ModelConfig.Model, trackUsage), nil
 }
 
-func (c *Client) buildConverseStreamInput(messages []chat.Message, requestTools []tools.Tool) *bedrockruntime.ConverseStreamInput {
+func (c *Client) buildConverseStreamInput(ctx context.Context, messages []chat.Message, requestTools []tools.Tool) (*bedrockruntime.ConverseStreamInput, error) {
 	input := &bedrockruntime.ConverseStreamInput{
 		ModelId: aws.String(c.ModelConfig.Model),
 	}
 
 	enableCaching := c.promptCachingEnabled()
 
-	// Convert and set messages (excluding system)
-	input.Messages, input.System = convertMessages(messages, enableCaching)
+	// Convert messages; document parts are expanded context-awarely.
+	var err error
+	input.Messages, input.System, err = c.convertMessagesCtx(ctx, messages, enableCaching)
+	if err != nil {
+		return nil, err
+	}
 
 	// Compute thinking fields first — its presence drives the inference config.
 	additionalFields := c.buildAdditionalModelRequestFields()
@@ -252,7 +260,7 @@ func (c *Client) buildConverseStreamInput(messages []chat.Message, requestTools 
 		input.ToolConfig = convertToolConfig(requestTools, enableCaching)
 	}
 
-	return input
+	return input, nil
 }
 
 func (c *Client) buildInferenceConfig(thinkingEnabled bool) *types.InferenceConfiguration {

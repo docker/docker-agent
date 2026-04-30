@@ -177,12 +177,6 @@ func (c *Client) Close() {
 	}
 }
 
-// convertMessages converts chat.Message to openai.ChatCompletionMessageParamUnion
-// using the shared oaistream implementation.
-func convertMessages(messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
-	return oaistream.ConvertMessages(messages)
-}
-
 // CreateChatCompletionStream creates a streaming chat completion request
 // It returns a stream that can be iterated over to get completion chunks
 func (c *Client) CreateChatCompletionStream(
@@ -222,9 +216,15 @@ func (c *Client) CreateChatCompletionStream(
 
 	trackUsage := c.ModelConfig.TrackUsage == nil || *c.ModelConfig.TrackUsage
 
+	convertedMessages, err := c.convertMessagesCtx(ctx, messages)
+	if err != nil {
+		slog.Error("Failed to convert messages with documents for OpenAI request", "error", err)
+		return nil, err
+	}
+
 	params := openai.ChatCompletionNewParams{
 		Model:    c.ModelConfig.Model,
-		Messages: convertMessages(messages),
+		Messages: convertedMessages,
 		StreamOptions: openai.ChatCompletionStreamOptionsParam{
 			IncludeUsage: openai.Bool(trackUsage),
 		},
@@ -363,7 +363,11 @@ func (c *Client) CreateResponseStream(
 		return nil, errors.New("at least one message is required")
 	}
 
-	input := convertMessagesToResponseInput(messages)
+	input, err := c.convertMessagesToResponseInputCtx(ctx, messages)
+	if err != nil {
+		slog.Error("Failed to convert messages with documents for OpenAI responses request", "error", err)
+		return nil, err
+	}
 
 	params := responses.ResponseNewParams{
 		Model: c.ModelConfig.Model,

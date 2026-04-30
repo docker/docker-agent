@@ -191,8 +191,9 @@ func thoughtSignatureOrDefault(sig []byte) []byte {
 	return defaultThoughtSignature
 }
 
-// convertMessagesToGemini converts chat.Messages into Gemini Contents
-func convertMessagesToGemini(messages []chat.Message) []*genai.Content {
+// convertMessagesToGemini converts chat.Messages into Gemini Contents.
+// It requires a context because document parts may need to fetch remote URLs.
+func (c *Client) convertMessagesToGemini(ctx context.Context, messages []chat.Message) ([]*genai.Content, error) {
 	contents := make([]*genai.Content, 0, len(messages))
 	for i := range messages {
 		msg := &messages[i]
@@ -257,7 +258,10 @@ func convertMessagesToGemini(messages []chat.Message) []*genai.Content {
 
 		// Handle regular messages
 		if len(msg.MultiContent) > 0 {
-			parts := convertMultiContent(msg.MultiContent, msg.ThoughtSignature)
+			parts, err := c.convertMultiContent(ctx, msg.MultiContent, msg.ThoughtSignature)
+			if err != nil {
+				return nil, err
+			}
 			if len(parts) > 0 {
 				contents = append(contents, genai.NewContentFromParts(parts, role))
 			}
@@ -266,7 +270,7 @@ func convertMessagesToGemini(messages []chat.Message) []*genai.Content {
 			contents = append(contents, genai.NewContentFromParts([]*genai.Part{part}, role))
 		}
 	}
-	return contents
+	return contents, nil
 }
 
 // messageRoleToGemini converts chat.MessageRole to genai.Role
@@ -286,8 +290,9 @@ func newTextPartWithSignature(text string, signature []byte) *genai.Part {
 	return part
 }
 
-// convertMultiContent converts multi-part content to Gemini parts
-func convertMultiContent(multiContent []chat.MessagePart, thoughtSignature []byte) []*genai.Part {
+// convertMultiContent converts multi-part content to Gemini parts.
+// It requires a context because document parts may need to fetch remote URLs.
+func (c *Client) convertMultiContent(ctx context.Context, multiContent []chat.MessagePart, thoughtSignature []byte) ([]*genai.Part, error) {
 	parts := make([]*genai.Part, 0, len(multiContent))
 	for _, part := range multiContent {
 		switch part.Type {
@@ -297,9 +302,18 @@ func convertMultiContent(multiContent []chat.MessagePart, thoughtSignature []byt
 			if imgPart := convertImageURLToPart(part.ImageURL); imgPart != nil {
 				parts = append(parts, imgPart)
 			}
+		case chat.MessagePartTypeDocument:
+			if part.Document == nil {
+				continue
+			}
+			docParts, err := c.convertDocument(ctx, *part.Document)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, docParts...)
 		}
 	}
-	return parts
+	return parts, nil
 }
 
 // convertImageURLToPart converts an image URL to a Gemini Part
@@ -589,7 +603,11 @@ func (c *Client) CreateChatCompletionStream(
 		}
 	}
 
-	contents := convertMessagesToGemini(messages)
+	contents, err := c.convertMessagesToGemini(ctx, messages)
+	if err != nil {
+		slog.Error("Failed to convert messages to Gemini format", "error", err)
+		return nil, err
+	}
 
 	// Debug: Log the messages we're sending
 	slog.Debug("Gemini messages", "count", len(contents))
