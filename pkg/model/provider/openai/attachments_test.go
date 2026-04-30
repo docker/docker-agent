@@ -46,8 +46,10 @@ func TestOpenAI_SupportedMIMETypes_ByProvider(t *testing.T) {
 		},
 		{
 			provider: "mistral",
-			mustHave: []string{"image/jpeg", "application/pdf", "text/plain"},
-			mustMiss: []string{"image/gif"}, // Mistral has no gif
+			mustHave: []string{"image/jpeg", "text/plain"},
+			// application/pdf removed: Mistral requires document_url (Phase 2)
+			// image/gif not in Mistral table
+			mustMiss: []string{"image/gif", "application/pdf"},
 		},
 		{
 			provider: "xai",
@@ -159,25 +161,27 @@ func TestOpenAI_ConvertDocument_TXT(t *testing.T) {
 	}
 }
 
+// TestOpenAI_ConvertDocument_FetchAsB64 verifies that a URL source document
+// for a MIME type that has B64-only capability (no URL) triggers StrategyFetchAsB64:
+// the URL is fetched and the bytes are returned as a base64 data-URL part.
+//
+// We use the "ollama" provider profile because its table has image/jpeg:{B64:true}
+// with no URL capability, so a URL source → FetchAsB64.
 func TestOpenAI_ConvertDocument_FetchAsB64(t *testing.T) {
 	t.Parallel()
 
-	// For openai: application/pdf is excluded from Phase 1 (requires Files API).
-	// Any MIME not in the table → Drop; verify that via a URL source of an
-	// unknown MIME type to exercise the soft-drop path.
-	pngBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	jpegBytes := []byte{0xff, 0xd8, 0xff, 0xe0} // JPEG magic
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "image/png")
-		_, _ = w.Write(pngBytes)
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write(jpegBytes)
 	}))
 	defer srv.Close()
 
-	// image/png has B64 and URL; use URL source so it returns StrategyURL
-	// (openai supports URL for images).
-	c := buildTestClient("openai")
+	// ollama: image/jpeg has B64 only (no URL) → URL source triggers FetchAsB64.
+	c := buildTestClient("ollama")
 	doc := chat.Document{
-		Name:     "photo.png",
-		MimeType: "image/png",
+		Name:     "photo.jpg",
+		MimeType: "image/jpeg",
 		Source:   chat.DocumentSource{URL: srv.URL},
 	}
 	parts, err := c.convertDocument(t.Context(), doc)
@@ -185,24 +189,13 @@ func TestOpenAI_ConvertDocument_FetchAsB64(t *testing.T) {
 		t.Fatalf("convertDocument: %v", err)
 	}
 	if len(parts) != 1 {
-		t.Fatalf("want 1 part via URL, got %d", len(parts))
+		t.Fatalf("want 1 part, got %d", len(parts))
 	}
 	if parts[0].OfImageURL == nil {
-		t.Fatal("expected OfImageURL part")
+		t.Fatal("expected OfImageURL part (fetched as base64 data URL)")
 	}
-
-	// application/pdf is dropped in Phase 1 (requires Files API)
-	docPDF := chat.Document{
-		Name:     "doc.pdf",
-		MimeType: "application/pdf",
-		Source:   chat.DocumentSource{URL: srv.URL},
-	}
-	partsDropped, err := c.convertDocument(t.Context(), docPDF)
-	if err != nil {
-		t.Fatalf("convertDocument PDF: %v", err)
-	}
-	if len(partsDropped) != 0 {
-		t.Errorf("expected PDF to be dropped in Phase 1, got %d parts", len(partsDropped))
+	if !strings.HasPrefix(parts[0].OfImageURL.ImageURL.URL, "data:image/jpeg;base64,") {
+		t.Errorf("expected base64 data URL, got: %s", parts[0].OfImageURL.ImageURL.URL)
 	}
 }
 

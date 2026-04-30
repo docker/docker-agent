@@ -12,49 +12,59 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 )
 
+// Shared capability tables referenced by multiple providers (reduces drift).
+
+// capabilityTableImageURLB64 is the image-URL+B64 table for OpenAI-compatible
+// providers that support image URLs: openai, azure, requesty.
+// Note: application/pdf is absent in Phase 1 — these providers require the
+// Files API for PDFs (Phase 2).
+var capabilityTableImageURLB64 = attachment.CapabilityTable{
+	"image/jpeg":    {B64: true, URL: true},
+	"image/png":     {B64: true, URL: true},
+	"image/gif":     {B64: true, URL: true},
+	"image/webp":    {B64: true, URL: true},
+	"text/plain":    {TXT: true},
+	"text/markdown": {TXT: true},
+	"text/html":     {TXT: true},
+	"text/csv":      {TXT: true},
+}
+
+// capabilityTableImageB64Only is the image-B64-only table for providers that
+// do not support image URLs: ollama, nebius, minimax, github-copilot.
+var capabilityTableImageB64Only = attachment.CapabilityTable{
+	"image/jpeg":    {B64: true},
+	"image/png":     {B64: true},
+	"text/plain":    {TXT: true},
+	"text/markdown": {TXT: true},
+	"text/html":     {TXT: true},
+	"text/csv":      {TXT: true},
+}
+
 // capabilityTableByProvider maps provider names (from ModelConfig.Provider) to
-// their MIME-type capability tables. The openai and azure tables are identical;
-// per-provider aliases (mistral, xai, ollama, nebius, minimax, github-copilot)
-// each have their own entry.
+// their MIME-type capability tables.
 //
 // Phase 1: TXT / B64 / URL only — no Files API.
 var capabilityTableByProvider = map[string]attachment.CapabilityTable{
-	// OpenAI Chat Completions / Responses API
-	// Note: application/pdf is intentionally absent in Phase 1.
-	// OpenAI requires the Files API (not inline base64) for PDFs, which is Phase 2.
-	"openai": {
-		"image/jpeg":    {B64: true, URL: true},
-		"image/png":     {B64: true, URL: true},
-		"image/gif":     {B64: true, URL: true},
-		"image/webp":    {B64: true, URL: true},
-		"text/plain":    {TXT: true},
-		"text/markdown": {TXT: true},
-		"text/html":     {TXT: true},
-		"text/csv":      {TXT: true},
-	},
+	// OpenAI Chat Completions / Responses API.
+	"openai": capabilityTableImageURLB64,
 	// Azure OpenAI — same capabilities as OpenAI (Phase 1).
-	"azure": {
+	"azure": capabilityTableImageURLB64,
+	// Requesty — acts as an OpenAI-compatible proxy (Phase 1).
+	"requesty": capabilityTableImageURLB64,
+
+	// Mistral — images via B64 or URL; no gif.
+	// application/pdf: Mistral requires document_url content type (not image_url) — Phase 2.
+	"mistral": {
 		"image/jpeg":    {B64: true, URL: true},
 		"image/png":     {B64: true, URL: true},
-		"image/gif":     {B64: true, URL: true},
 		"image/webp":    {B64: true, URL: true},
 		"text/plain":    {TXT: true},
 		"text/markdown": {TXT: true},
 		"text/html":     {TXT: true},
 		"text/csv":      {TXT: true},
 	},
-	// Mistral — PDF via URL only (document_url); images via B64 or URL; no gif
-	"mistral": {
-		"image/jpeg":      {B64: true, URL: true},
-		"image/png":       {B64: true, URL: true},
-		"image/webp":      {B64: true, URL: true},
-		"application/pdf": {URL: true},
-		"text/plain":      {TXT: true},
-		"text/markdown":   {TXT: true},
-		"text/html":       {TXT: true},
-		"text/csv":        {TXT: true},
-	},
-	// xAI (Grok) — images B64/URL; text only; no PDF
+
+	// xAI (Grok) — images B64/URL; text only; no PDF.
 	"xai": {
 		"image/jpeg":    {B64: true, URL: true},
 		"image/png":     {B64: true, URL: true},
@@ -63,53 +73,12 @@ var capabilityTableByProvider = map[string]attachment.CapabilityTable{
 		"text/html":     {TXT: true},
 		"text/csv":      {TXT: true},
 	},
-	// Ollama — images B64 only; text only; no PDF, no URL images
-	"ollama": {
-		"image/jpeg":    {B64: true},
-		"image/png":     {B64: true},
-		"text/plain":    {TXT: true},
-		"text/markdown": {TXT: true},
-		"text/html":     {TXT: true},
-		"text/csv":      {TXT: true},
-	},
-	// Nebius — same as ollama
-	"nebius": {
-		"image/jpeg":    {B64: true},
-		"image/png":     {B64: true},
-		"text/plain":    {TXT: true},
-		"text/markdown": {TXT: true},
-		"text/html":     {TXT: true},
-		"text/csv":      {TXT: true},
-	},
-	// MiniMax — same as ollama
-	"minimax": {
-		"image/jpeg":    {B64: true},
-		"image/png":     {B64: true},
-		"text/plain":    {TXT: true},
-		"text/markdown": {TXT: true},
-		"text/html":     {TXT: true},
-		"text/csv":      {TXT: true},
-	},
-	// GitHub Copilot — same as ollama
-	"github-copilot": {
-		"image/jpeg":    {B64: true},
-		"image/png":     {B64: true},
-		"text/plain":    {TXT: true},
-		"text/markdown": {TXT: true},
-		"text/html":     {TXT: true},
-		"text/csv":      {TXT: true},
-	},
-	// Requesty — same as openai (acts as a proxy). No PDF in Phase 1.
-	"requesty": {
-		"image/jpeg":    {B64: true, URL: true},
-		"image/png":     {B64: true, URL: true},
-		"image/gif":     {B64: true, URL: true},
-		"image/webp":    {B64: true, URL: true},
-		"text/plain":    {TXT: true},
-		"text/markdown": {TXT: true},
-		"text/html":     {TXT: true},
-		"text/csv":      {TXT: true},
-	},
+
+	// Ollama, Nebius, MiniMax, GitHub Copilot — images B64 only; no PDF; no URL images.
+	"ollama":         capabilityTableImageB64Only,
+	"nebius":         capabilityTableImageB64Only,
+	"minimax":        capabilityTableImageB64Only,
+	"github-copilot": capabilityTableImageB64Only,
 }
 
 // capabilityTable returns the capability table for this client's provider,
@@ -118,7 +87,7 @@ func (c *Client) capabilityTable() attachment.CapabilityTable {
 	if table, ok := capabilityTableByProvider[c.ModelConfig.Provider]; ok {
 		return table
 	}
-	return capabilityTableByProvider["openai"]
+	return capabilityTableImageURLB64
 }
 
 // SupportedMIMETypes implements attachment.Advisor.
@@ -171,6 +140,9 @@ func (c *Client) convertDocument(
 }
 
 // convertViaURL builds a part that passes the document URL directly to the model.
+// Only called for image MIMEs in Phase 1 (the capability tables only grant URL
+// to image types). If a future table entry adds URL to a non-image MIME, this
+// function will need to branch on MIME type.
 func (c *Client) convertViaURL(doc chat.Document) []openai.ChatCompletionContentPartUnionParam {
 	return []openai.ChatCompletionContentPartUnionParam{
 		openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
@@ -180,6 +152,7 @@ func (c *Client) convertViaURL(doc chat.Document) []openai.ChatCompletionContent
 }
 
 // convertViaB64 encodes inline binary as a base64 data-URL image part.
+// Only called for image MIMEs in Phase 1 (PDFs use the Files API — Phase 2).
 func (c *Client) convertViaB64(doc chat.Document) []openai.ChatCompletionContentPartUnionParam {
 	encoded := base64.StdEncoding.EncodeToString(doc.Source.InlineData)
 	dataURL := "data:" + doc.MimeType + ";base64," + encoded

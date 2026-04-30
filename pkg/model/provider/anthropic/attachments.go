@@ -85,7 +85,10 @@ func (c *Client) convertDocument(
 }
 
 // convertDocViaURL builds a content block that passes the URL directly.
-// For images: image block with URL source. Not used for PDFs (no URL cap).
+// NOTE: this function assumes URL is only set for image MIMEs per the capability
+// table. If application/pdf:{URL:true} is ever added, use
+// NewDocumentBlock(URLPDFSourceParam{URL: doc.Source.URL}) instead of
+// NewImageBlock — the Anthropic API rejects an image block for a PDF URL.
 func convertDocViaURL(doc chat.Document) []anthropic.ContentBlockParamUnion {
 	return []anthropic.ContentBlockParamUnion{
 		anthropic.NewImageBlock(anthropic.URLImageSourceParam{
