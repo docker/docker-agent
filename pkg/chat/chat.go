@@ -32,6 +32,7 @@ const (
 	MessagePartTypeText     MessagePartType = "text"
 	MessagePartTypeImageURL MessagePartType = "image_url"
 	MessagePartTypeFile     MessagePartType = "file"
+	MessagePartTypeDocument MessagePartType = "document"
 )
 
 type ImageURLDetail string
@@ -110,6 +111,7 @@ type MessagePart struct {
 	Text     string           `json:"text,omitempty"`
 	ImageURL *MessageImageURL `json:"image_url,omitempty"`
 	File     *MessageFile     `json:"file,omitempty"`
+	Document *Document        `json:"document,omitempty"`
 }
 
 // FinishReason represents the reason why the model finished generating a response
