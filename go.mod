@@ -13,7 +13,7 @@ require (
 	github.com/a2aproject/a2a-go v0.3.15
 	github.com/alecthomas/chroma/v2 v2.24.1
 	github.com/alpkeskin/gotoon v0.1.1
-	github.com/anthropics/anthropic-sdk-go v1.38.0
+	github.com/anthropics/anthropic-sdk-go v1.39.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
@@ -28,11 +28,11 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0
 	github.com/clipperhouse/uax29/v2 v2.7.0
 	github.com/coder/acp-go-sdk v0.12.2
-	github.com/docker/cli v29.4.1+incompatible
+	github.com/docker/cli v29.4.2+incompatible
 	github.com/docker/go-units v0.5.0
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
 	github.com/fatih/color v1.19.0
-	github.com/fsnotify/fsnotify v1.10.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-git/go-git/v5 v5.18.0
 	github.com/goccy/go-yaml v1.19.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -40,16 +40,16 @@ require (
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/hashicorp/hcl/v2 v2.20.1
+	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/junegunn/fzf v0.72.0
 	github.com/k3a/html2text v1.4.0
 	github.com/kofalt/go-memoize v0.0.0-20240506050413-9e5eb99a0f2a
-	github.com/labstack/echo/v4 v4.15.1
+	github.com/labstack/echo/v4 v4.15.2
 	github.com/mattn/go-isatty v0.0.22
 	github.com/mattn/go-runewidth v0.0.23
 	github.com/modelcontextprotocol/go-sdk v1.6.0
 	github.com/natefinch/atomic v1.0.1
-	github.com/openai/openai-go/v3 v3.33.0
+	github.com/openai/openai-go/v3 v3.34.0
 	github.com/pb33f/libopenapi v0.36.3
 	github.com/rivo/uniseg v0.4.7
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
@@ -59,7 +59,7 @@ require (
 	github.com/wk8/go-ordered-map/v2 v2.1.9-0.20250401010720-46d686821e33
 	github.com/xeipuuv/gojsonschema v1.2.0
 	github.com/yuin/goldmark v1.8.2
-	github.com/zclconf/go-cty v1.13.0
+	github.com/zclconf/go-cty v1.18.1
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
 	go.opentelemetry.io/otel/sdk v1.43.0
@@ -70,7 +70,7 @@ require (
 	golang.org/x/sys v0.43.0
 	golang.org/x/term v0.42.0
 	google.golang.org/adk v1.2.0
-	google.golang.org/genai v1.55.0
+	google.golang.org/genai v1.56.0
 	gopkg.in/dnaeon/go-vcr.v4 v4.0.6
 	gotest.tools/v3 v3.5.2
 	modernc.org/sqlite v1.50.0
@@ -80,7 +80,6 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/agext/levenshtein v1.2.1 // indirect
-	github.com/apparentlymart/go-textseg/v13 v13.0.0 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.24 // indirect
 	github.com/blevesearch/zapx/v17 v17.1.2 // indirect
@@ -90,7 +89,7 @@ require (
 	github.com/gsterjov/go-libsecret v0.0.0-20161001094733-a6f4afe4910c // indirect
 	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/junegunn/go-shellwords v0.0.0-20250127100254-2aa3b3277741 // indirect
-	github.com/mitchellh/go-wordwrap v0.0.0-20150314170334-ad45545899c7 // indirect
+	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/mtibben/percent v0.2.1 // indirect
 	github.com/pb33f/jsonpath v0.8.2 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
@@ -185,7 +184,7 @@ require (
 	github.com/json-iterator/go v1.1.7 // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
-	github.com/labstack/gommon v0.4.2 // indirect
+	github.com/labstack/gommon v0.5.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
