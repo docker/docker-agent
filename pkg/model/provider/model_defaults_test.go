@@ -13,12 +13,14 @@ func TestApplyModelDefaults(t *testing.T) {
 	t.Parallel()
 
 	boolPtr := func(v bool) *bool { return &v }
+	strPtr := func(v string) *string { return &v }
 
 	tests := []struct {
 		name            string
 		config          *latest.ModelConfig
 		wantBudget      *latest.ThinkingBudget // nil means no thinking
 		wantInterleaved *bool                  // nil means key must not exist
+		wantAPIType     *string                // nil means key must not exist
 	}{
 		// --- OpenAI: only o-series gets defaults ---
 		{
@@ -138,6 +140,28 @@ func TestApplyModelDefaults(t *testing.T) {
 			config: &latest.ModelConfig{Provider: "openai", Model: "gpt-4o", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
 		},
 
+		// --- GitHub Copilot: api_type defaults and overrides ---
+		{
+			name:        "github-copilot: responses model defaults to openai_responses",
+			config:      &latest.ModelConfig{Provider: "github-copilot", Model: "gpt-5.3-codex"},
+			wantAPIType: strPtr("openai_responses"),
+		},
+		{
+			name:        "github-copilot: responses model overrides openai_chatcompletions",
+			config:      &latest.ModelConfig{Provider: "github-copilot", Model: "gpt-5.3-codex", ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"}},
+			wantAPIType: strPtr("openai_responses"),
+		},
+		{
+			name:        "github-copilot: responses model preserves explicit openai_responses",
+			config:      &latest.ModelConfig{Provider: "github-copilot", Model: "gpt-5.3-codex", ProviderOpts: map[string]any{"api_type": "openai_responses"}},
+			wantAPIType: strPtr("openai_responses"),
+		},
+		{
+			name:        "github-copilot: responses model preserves custom api_type",
+			config:      &latest.ModelConfig{Provider: "github-copilot", Model: "gpt-5.3-codex", ProviderOpts: map[string]any{"api_type": "custom_hypothetical_type"}},
+			wantAPIType: strPtr("custom_hypothetical_type"),
+		},
+
 		// --- Unknown / other providers: no effect ---
 		{
 			name:   "unknown provider: no effect",
@@ -172,6 +196,12 @@ func TestApplyModelDefaults(t *testing.T) {
 			} else {
 				require.NotNil(t, tt.config.ProviderOpts)
 				assert.Equal(t, *tt.wantInterleaved, tt.config.ProviderOpts["interleaved_thinking"])
+			}
+
+			// Check api_type if wantAPIType is specified.
+			if tt.wantAPIType != nil {
+				require.NotNil(t, tt.config.ProviderOpts)
+				assert.Equal(t, *tt.wantAPIType, tt.config.ProviderOpts["api_type"])
 			}
 		})
 	}
@@ -263,6 +293,18 @@ func TestApplyProviderDefaults_DoesNotModifyOriginal(t *testing.T) {
 
 	// Original custom key must still be there.
 	assert.Equal(t, "original_value", original.ProviderOpts["custom_key"])
+}
+
+func TestIsCopilotResponsesModel(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, isCopilotResponsesModel("gpt-5.3-codex"))
+	assert.True(t, isCopilotResponsesModel("gpt-5.2-codex"))
+	assert.True(t, isCopilotResponsesModel("gpt-5.4-mini"))
+	assert.True(t, isCopilotResponsesModel("gpt-5.4-nano"))
+	assert.False(t, isCopilotResponsesModel("gpt-4o"))
+	assert.False(t, isCopilotResponsesModel("claude-sonnet-4-5"))
+	assert.False(t, isCopilotResponsesModel(""))
 }
 
 // TestApplyProviderDefaults_InheritsAuthFromProviderConfig verifies that a

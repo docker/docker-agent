@@ -414,3 +414,35 @@ func TestApplyProviderDefaults_AliasFallback(t *testing.T) {
 	assert.Empty(t, cfg.BaseURL)
 	assert.Empty(t, cfg.TokenKey)
 }
+
+func TestIsGithubCopilotProvider(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, isGithubCopilotProvider("github-copilot"))
+	assert.False(t, isGithubCopilotProvider("openai"))
+	assert.False(t, isGithubCopilotProvider(""))
+}
+
+func TestGithubCopilotApiType(t *testing.T) {
+	t.Parallel()
+
+	cfg := &latest.ModelConfig{
+		Provider: "github-copilot",
+		Model:    "gpt-5.3-codex",
+	}
+	enhancedCfg := applyProviderDefaults(cfg, nil)
+	apiType := resolveProviderType(enhancedCfg)
+
+	assert.Equal(t, "openai_responses", apiType)
+
+	// test when it is a custom provider
+	customProviders := map[string]latest.ProviderConfig{
+		"github-copilot": {
+			Provider: "github-copilot",
+		},
+	}
+	enhancedCfg2 := applyProviderDefaults(cfg, customProviders)
+	apiType2 := resolveProviderType(enhancedCfg2)
+
+	assert.Equal(t, "openai_responses", apiType2)
+}

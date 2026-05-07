@@ -43,6 +43,11 @@ func isOpenAICompatibleProvider(providerType string) bool {
 	return exists && alias.APIType == "openai"
 }
 
+// isGithubCopilotProvider returns true if the provider type is "github-copilot".
+func isGithubCopilotProvider(providerType string) bool {
+	return providerType == "github-copilot"
+}
+
 // ---------------------------------------------------------------------------
 // Provider defaults
 // ---------------------------------------------------------------------------
@@ -191,6 +196,9 @@ func cloneModelConfig(cfg *latest.ModelConfig) *latest.ModelConfig {
 //
 // NOTE: max_tokens is NOT set here; see teamloader and runtime/model_switcher.
 func applyModelDefaults(cfg *latest.ModelConfig) {
+	// Set appropriate github copilot api_type.
+	applyGithubCopilotAPIType(cfg)
+
 	// Explicitly disabled → normalise to nil so providers never see it.
 	if cfg.ThinkingBudget.IsDisabled() {
 		cfg.ThinkingBudget = nil
@@ -239,6 +247,19 @@ func ensureInterleavedThinking(cfg *latest.ModelConfig, providerType string) {
 	}
 }
 
+func applyGithubCopilotAPIType(cfg *latest.ModelConfig) {
+	if isGithubCopilotProvider(cfg.Provider) && isCopilotResponsesModel(cfg.Model) {
+		if cfg.ProviderOpts == nil {
+			cfg.ProviderOpts = make(map[string]any)
+		}
+		// If it's not set, or was set to openai_chatcompletions by the generic fallback, override it.
+		// User explicit openai_chatcompletions is unsupported for these models.
+		if apiType, ok := cfg.ProviderOpts["api_type"].(string); !ok || apiType == "" || apiType == "openai_chatcompletions" {
+			cfg.ProviderOpts["api_type"] = "openai_responses"
+		}
+	}
+}
+
 // needsInterleavedThinking reports whether a (provider, model) pair refers to
 // a Claude model on a host that supports the interleaved-thinking beta.
 func needsInterleavedThinking(providerType, model string) bool {
@@ -247,6 +268,15 @@ func needsInterleavedThinking(providerType, model string) bool {
 		return true
 	case "amazon-bedrock":
 		return modelinfo.IsBedrockClaudeID(model)
+	}
+	return false
+}
+
+// isCopilotResponsesModel returns true if the model is a GitHub Copilot model that requires the openai_responses API type.
+func isCopilotResponsesModel(model string) bool {
+	switch model {
+	case "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.4-mini", "gpt-5.4-nano":
+		return true
 	}
 	return false
 }
