@@ -74,10 +74,10 @@ type Settings struct {
 	// permissions override them.
 	Permissions *latest.PermissionsConfig `yaml:"permissions,omitempty"`
 	// Keybindings allows users to configure custom keybindings for TUI actions.
-	Keybindings *[]Keybindings `yaml:"keybindings,omitempty"`
+	Keybindings *[]Keybinding `yaml:"keybindings,omitempty"`
 }
 
-type Keybindings struct {
+type Keybinding struct {
 	Action string   `yaml:"action"`
 	Keys   []string `yaml:"keys"`
 }

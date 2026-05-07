@@ -31,7 +31,7 @@ func TestBuildKeys_Defaults(t *testing.T) {
 
 func TestBuildKeys_Overrides(t *testing.T) {
 	settings := &userconfig.Settings{
-		Keybindings: &[]userconfig.Keybindings{
+		Keybindings: &[]userconfig.Keybinding{
 			{Action: "quit", Keys: []string{"ctrl+q"}},
 			{Action: "switch_focus", Keys: []string{"ctrl+t"}},
 			{Action: "commands", Keys: []string{"f2", "ctrl+k"}},
@@ -72,7 +72,7 @@ func TestBuildKeys_EmptySettings(t *testing.T) {
 
 func TestBuildKeys_EmptyKey(t *testing.T) {
 	settings := &userconfig.Settings{
-		Keybindings: &[]userconfig.Keybindings{
+		Keybindings: &[]userconfig.Keybinding{
 			{Action: "quit", Keys: []string{}}, // Should be ignored
 		},
 	}
@@ -80,6 +80,21 @@ func TestBuildKeys_EmptyKey(t *testing.T) {
 
 	// Verify defaults remain
 	assert.Equal(t, []string{"ctrl+c"}, keys.Quit.Keys())
+}
+
+func TestBuildKeys_InvalidKeysAndConflicts(t *testing.T) {
+	settings := &userconfig.Settings{
+		Keybindings: &[]userconfig.Keybinding{
+			{Action: "quit", Keys: []string{"ctrl+q", " ", ""}}, // spaces and empty should be ignored
+			{Action: "suspend", Keys: []string{"ctrl+q"}},       // conflict with quit
+		},
+	}
+
+	keys := buildKeys(settings)
+
+	// Valid keys should still be applied
+	assert.Equal(t, []string{"ctrl+q"}, keys.Quit.Keys())
+	assert.Equal(t, []string{"ctrl+q"}, keys.Suspend.Keys())
 }
 
 func TestBuildKeys_FromYAML(t *testing.T) {

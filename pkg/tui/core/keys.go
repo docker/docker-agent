@@ -1,6 +1,8 @@
 package core
 
 import (
+	"log/slog"
+	"strings"
 	"sync"
 
 	"charm.land/bubbles/v2/key"
@@ -49,49 +51,77 @@ func DefaultKeyMap() KeyMap {
 	}
 }
 
+type keyField struct {
+	binding *key.Binding
+	help    string
+}
+
+func validateKeys(keys []string, action string, boundKeys map[string]string) []string {
+	var validKeys []string
+	for _, k := range keys {
+		kStr := strings.TrimSpace(k)
+		if kStr == "" || strings.Contains(kStr, " ") {
+			slog.Warn("Invalid key string ignored", "action", action, "key", k)
+			continue
+		}
+
+		if existingAction, exists := boundKeys[kStr]; exists {
+			slog.Warn("Keybinding conflict detected", "key", kStr, "action", action, "conflicts_with", existingAction)
+		} else {
+			boundKeys[kStr] = action
+		}
+
+		validKeys = append(validKeys, kStr)
+	}
+	return validKeys
+}
+
+// applyUserKeybindings loops through user-defined keybindings and overrides the defaults.
+// Basic string validation and key conflict detection is applied, any issues are logged.
+func applyUserKeybindings(bindings []userconfig.Keybinding, actionMap map[string]keyField) {
+	boundKeys := make(map[string]string)
+
+	for _, b := range bindings {
+		if len(b.Keys) == 0 {
+			slog.Warn("Keybinding ignored: no keys specified", "action", b.Action)
+			continue
+		}
+
+		if f, ok := actionMap[b.Action]; ok {
+			validKeys := validateKeys(b.Keys, b.Action, boundKeys)
+
+			if len(validKeys) > 0 {
+				*f.binding = key.NewBinding(key.WithKeys(validKeys...), key.WithHelp(validKeys[0], f.help))
+			}
+		} else {
+			slog.Warn("Unrecognized keybinding action", "action", b.Action)
+		}
+	}
+}
+
 // buildKeys merges user config overrides with the defaults to produce a KeyMap.
 // This is separated from GetKeys() to allow testing with mock settings.
 func buildKeys(settings *userconfig.Settings) KeyMap {
 	keys := DefaultKeyMap()
 
 	if settings != nil && settings.Keybindings != nil {
-		for _, b := range *settings.Keybindings {
-			if len(b.Keys) == 0 {
-				continue
-			}
-
-			usrKeys := b.Keys
-			keyName := usrKeys[0]
-
-			switch b.Action {
-			case "quit":
-				keys.Quit = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "quit"))
-			case "switch_focus":
-				keys.SwitchFocus = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "switch focus"))
-			case "commands":
-				keys.Commands = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "commands"))
-			case "help":
-				keys.Help = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "help"))
-			case "toggle_yolo":
-				keys.ToggleYolo = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "toggle yolo mode"))
-			case "toggle_hide_tool_results":
-				keys.ToggleHideToolResults = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "toggle hide tool results"))
-			case "cycle_agent":
-				keys.CycleAgent = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "cycle agent"))
-			case "model_picker":
-				keys.ModelPicker = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "model picker"))
-			case "clear_queue":
-				keys.ClearQueue = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "clear queue"))
-			case "suspend":
-				keys.Suspend = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "suspend"))
-			case "toggle_sidebar":
-				keys.ToggleSidebar = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "toggle sidebar"))
-			case "edit_external":
-				keys.EditExternal = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "edit in external editor"))
-			case "history_search":
-				keys.HistorySearch = key.NewBinding(key.WithKeys(usrKeys...), key.WithHelp(keyName, "history search"))
-			}
+		actionMap := map[string]keyField{
+			"quit":                     {&keys.Quit, "quit"},
+			"switch_focus":             {&keys.SwitchFocus, "switch focus"},
+			"commands":                 {&keys.Commands, "commands"},
+			"help":                     {&keys.Help, "help"},
+			"toggle_yolo":              {&keys.ToggleYolo, "toggle yolo mode"},
+			"toggle_hide_tool_results": {&keys.ToggleHideToolResults, "toggle hide tool results"},
+			"cycle_agent":              {&keys.CycleAgent, "cycle agent"},
+			"model_picker":             {&keys.ModelPicker, "model picker"},
+			"clear_queue":              {&keys.ClearQueue, "clear queue"},
+			"suspend":                  {&keys.Suspend, "suspend"},
+			"toggle_sidebar":           {&keys.ToggleSidebar, "toggle sidebar"},
+			"edit_external":            {&keys.EditExternal, "edit in external editor"},
+			"history_search":           {&keys.HistorySearch, "history search"},
 		}
+
+		applyUserKeybindings(*settings.Keybindings, actionMap)
 	}
 
 	return keys
