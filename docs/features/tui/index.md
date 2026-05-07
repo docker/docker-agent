@@ -173,6 +173,8 @@ Customize session titles to make them more meaningful and easier to find. By def
 
 ## Keyboard Shortcuts
 
+The table below lists the default keybindings. These shortcuts can be overridden via `~/.config/cagent/config.yaml`.
+
 | Shortcut   | Action                                          |
 | ---------- | ----------------------------------------------- |
 | Ctrl+K     | Open command palette                            |
@@ -193,8 +195,42 @@ Customize session titles to make them more meaningful and easier to find. By def
 | Escape     | Cancel current operation                        |
 | Enter      | Send message (or newline with Shift+Enter)      |
 | Up/Down    | Navigate message history                        |
+| Ctrl+C     | Quit                                            |
 
 Press <kbd>Ctrl</kbd>+<kbd>H</kbd> to view the complete list of all available keyboard shortcuts.
+
+### Custom Keybindings
+
+You can override the default keyboard shortcuts by specifying `keybindings` in your `~/.config/cagent/config.yaml` file under the `settings` block. 
+
+For each action you wish to remap, provide the action name and a list of key combinations (using Bubbles key format, e.g. `ctrl+q`, `f2`).
+
+**Example Configuration:**
+
+```yaml
+settings:
+  keybindings:
+    - action: "quit"
+      keys: ["ctrl+q"]
+    - action: "commands"
+      keys: ["f2", "ctrl+k"]
+```
+
+**Valid Action Names:**
+
+* `quit`
+* `switch_focus`
+* `commands`
+* `help`
+* `toggle_yolo`
+* `toggle_hide_tool_results`
+* `cycle_agent`
+* `model_picker`
+* `clear_queue`
+* `suspend`
+* `toggle_sidebar`
+* `edit_external`
+* `history_search`
 
 ## History Search
 
