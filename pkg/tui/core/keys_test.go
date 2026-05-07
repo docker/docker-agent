@@ -3,6 +3,7 @@ package core
 import (
 	"testing"
 
+	"charm.land/bubbles/v2/key"
 	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -123,4 +124,27 @@ settings:
 	// Verify defaults are preserved for missing YAML fields
 	assert.Equal(t, []string{"tab"}, keys.SwitchFocus.Keys())
 	assert.Equal(t, []string{"ctrl+h", "f1", "ctrl+?"}, keys.Help.Keys())
+}
+
+func TestResetKeys(t *testing.T) {
+	// Call GetKeys to initialize sync.Once
+	_ = GetKeys()
+
+	// Keep a copy of original to restore later
+	originalCached := cachedKeys
+
+	// Modify cachedKeys to a bogus value
+	cachedKeys.Quit = key.NewBinding(key.WithKeys("bogus"))
+
+	// Calling GetKeys again should still return the bogus value because sync.Once isn't reset
+	assert.Equal(t, []string{"bogus"}, GetKeys().Quit.Keys())
+
+	// Reset keys
+	ResetKeys()
+
+	// Calling GetKeys now should re-initialize from default/config
+	assert.NotEqual(t, []string{"bogus"}, GetKeys().Quit.Keys())
+
+	// Clean up
+	cachedKeys = originalCached
 }

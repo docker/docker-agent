@@ -136,3 +136,9 @@ func GetKeys() KeyMap {
 
 	return cachedKeys
 }
+
+// ResetKeys clears the cached keybindings, allowing them to be reloaded.
+// This is primarily useful for testing or future hot-reload support.
+func ResetKeys() {
+	keysOnce = sync.Once{}
+}
