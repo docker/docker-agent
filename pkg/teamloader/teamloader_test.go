@@ -103,7 +103,7 @@ func TestLoadExamples(t *testing.T) {
 			// Use a bytes source (ParentDir == "") plus a temp WorkingDir so
 			// toolsets that write to disk (memory, RAG, cache, ...) land in
 			// the temp dir instead of the examples/ tree.
-			agentSource := config.NewBytesSource(agentFilename, data)
+			agentSource := config.NewBytesSource(agentFilename, data, nil)
 			runConfig := &config.RuntimeConfig{}
 			runConfig.WorkingDir = t.TempDir()
 
@@ -229,7 +229,7 @@ func TestInstructionExpansion(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "dummy")
 	t.Setenv("USER", "alice")
 
-	agentSource, err := config.Resolve("testdata/instruction-expansion.yaml", nil)
+	agentSource, err := config.Resolve("testdata/instruction-expansion.yaml", environment.NewDefaultProvider())
 	require.NoError(t, err)
 
 	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{})
@@ -538,7 +538,7 @@ agents:
 `
 	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0o600))
 
-	source := config.NewFileSource(configPath)
+	source := config.NewFileSource(configPath, nil)
 	runConfig := &config.RuntimeConfig{}
 	runConfig.WorkingDir = tmpDir
 

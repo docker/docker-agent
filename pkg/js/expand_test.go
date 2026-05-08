@@ -1,7 +1,6 @@
 package js
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -136,11 +135,4 @@ func TestExpandString(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-type testEnvProvider map[string]string
-
-func (p *testEnvProvider) Get(_ context.Context, name string) (string, bool) {
-	val, found := (*p)[name]
-	return val, found
 }

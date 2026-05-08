@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/environment"
 )
 
 type mockSource struct {
@@ -37,6 +39,10 @@ func (m *mockSource) Read(context.Context) ([]byte, error) {
 		return nil, m.err
 	}
 	return m.data, nil
+}
+
+func (m *mockSource) EnvProvider() environment.Provider {
+	return nil
 }
 
 func (m *mockSource) setData(data []byte) {

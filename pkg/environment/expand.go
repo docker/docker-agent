@@ -32,7 +32,7 @@ func ExpandAll(ctx context.Context, values []string, env Provider) ([]string, er
 // It accepts three equivalent syntaxes: $VAR, ${VAR}, and ${env.VAR}.
 // ~ expansion is intentionally excluded; use path.ExpandHome for path fields.
 //
-// If a referenced variable is not set, Expand returns an ErrMissingVars error
+// If a referenced variable is not set, Expand returns an ErrMissingVarsError error
 // wrapping all missing names, but still returns the partially-expanded string
 // so callers can decide whether to hard-fail or warn.
 func Expand(ctx context.Context, value string, env Provider) (string, error) {
@@ -40,7 +40,8 @@ func Expand(ctx context.Context, value string, env Provider) (string, error) {
 		return value, nil
 	}
 
-	// Normalize ${env.VAR} → ${VAR} so os.Expand handles both uniformly.
+	// Normalize ${env.VAR} → ${VAR} so os.Expand handles both uniformly,
+	// but only for simple cases without additional JS logic.
 	normalized := envDotPattern.ReplaceAllString(value, `${$1}`)
 
 	var missing []string
@@ -51,6 +52,14 @@ func Expand(ctx context.Context, value string, env Provider) (string, error) {
 		if name == "$" {
 			return "$"
 		}
+
+		// If it's a complex JS expression (contains spaces, dots, quotes, etc),
+		// we leave it untouched for Layer 2 (JS engine) to handle.
+		// Valid POSIX env names only contain alphanumeric characters and underscores.
+		if strings.ContainsAny(name, " .|'\"(){}[],+-*/=!<>?^&%@~`\\#") {
+			return "${" + name + "}"
+		}
+
 		v, found := env.Get(ctx, name)
 		if !found {
 			missing = append(missing, name)
@@ -60,20 +69,20 @@ func Expand(ctx context.Context, value string, env Provider) (string, error) {
 	})
 
 	if len(missing) > 0 {
-		return expanded, &ErrMissingVars{Names: missing}
+		return expanded, &ErrMissingVarsError{Names: missing}
 	}
 
 	return expanded, nil
 }
 
-// ErrMissingVars is returned when one or more referenced variables are not set.
+// ErrMissingVarsError is returned when one or more referenced variables are not set.
 // It is a distinct type so callers can decide severity (hard fail vs warn).
-type ErrMissingVars struct {
+type ErrMissingVarsError struct {
 	Names []string
 }
 
-func (e *ErrMissingVars) Error() string {
-	return fmt.Sprintf("environment variables not set: %s", strings.Join(e.Names, ", "))
+func (e *ErrMissingVarsError) Error() string {
+	return "environment variables not set: " + strings.Join(e.Names, ", ")
 }
 
 func ToValues(envMap map[string]string) []string {

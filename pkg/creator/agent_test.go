@@ -19,7 +19,7 @@ func TestBuildCreatorConfigYAML(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify it can be loaded by the config loader
-	cfg, err := config.Load(t.Context(), config.NewBytesSource("test", data))
+	cfg, err := config.Load(t.Context(), config.NewBytesSource("test", data, nil))
 	require.NoError(t, err)
 
 	// Verify the config structure
@@ -113,7 +113,7 @@ func TestBuildCreatorConfigYAML_MultilineStrings(t *testing.T) {
 	t.Logf("YAML output:\n%s", yamlStr)
 
 	// Verify the YAML can be parsed
-	cfg, err := config.Load(t.Context(), config.NewBytesSource("test", data))
+	cfg, err := config.Load(t.Context(), config.NewBytesSource("test", data, nil))
 	require.NoError(t, err)
 
 	// Verify the instruction is preserved correctly

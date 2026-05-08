@@ -29,7 +29,6 @@ func newURLSourceForTest(rawURL string, envProvider environment.Provider) Source
 	return &urlSource{
 		url:         rawURL,
 		envProvider: envProvider,
-		unsafe:      true,
 	}
 }
 

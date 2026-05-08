@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/environment"
 )
 
 type sourceLoader struct {
@@ -44,6 +45,10 @@ func (sl *sourceLoader) Name() string {
 
 func (sl *sourceLoader) ParentDir() string {
 	return sl.inner.ParentDir()
+}
+
+func (sl *sourceLoader) EnvProvider() environment.Provider {
+	return sl.inner.EnvProvider()
 }
 
 func (sl *sourceLoader) Read(_ context.Context) ([]byte, error) {

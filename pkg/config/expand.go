@@ -19,7 +19,7 @@ func ExpandConfig(ctx context.Context, v any, env environment.Provider) error {
 
 func walkStrings(ctx context.Context, v reflect.Value, env environment.Provider) error {
 	// Dereference pointer.
-	for v.Kind() == reflect.Ptr {
+	for v.Kind() == reflect.Pointer {
 		if v.IsNil() {
 			return nil
 		}
@@ -29,7 +29,7 @@ func walkStrings(ctx context.Context, v reflect.Value, env environment.Provider)
 	switch v.Kind() {
 	case reflect.Struct:
 		t := v.Type()
-		for i := 0; i < v.NumField(); i++ {
+		for i := range v.NumField() {
 			field := t.Field(i)
 			// Skip unexported fields.
 			if !field.IsExported() {
@@ -52,7 +52,7 @@ func walkStrings(ctx context.Context, v reflect.Value, env environment.Provider)
 		v.SetString(expanded)
 
 	case reflect.Slice:
-		for i := 0; i < v.Len(); i++ {
+		for i := range v.Len() {
 			if err := walkStrings(ctx, v.Index(i), env); err != nil {
 				return fmt.Errorf("[%d]: %w", i, err)
 			}
