@@ -44,7 +44,7 @@ func Agent(ctx context.Context, runConfig *config.RuntimeConfig, modelNameOverri
 
 	return teamloader.Load(
 		ctx,
-		config.NewBytesSource("creator", configYAML),
+		config.NewBytesSource("creator", configYAML, nil),
 		runConfig,
 		teamloader.WithModelOverrides([]string{modelNameOverride}),
 	)
