@@ -21,11 +21,11 @@ agents:
 	err := tmpRoot.WriteFile("valid.yaml", []byte(validConfig), 0o644)
 	require.NoError(t, err)
 
-	cfg, err := Load(t.Context(), NewFileSource(filepath.Join(tmp, "valid.yaml")))
+	cfg, err := Load(t.Context(), NewFileSource(filepath.Join(tmp, "valid.yaml"), nil))
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
-	_, err = Load(t.Context(), NewFileSource(filepath.Join(tmp, "../../../etc/passwd"))) //nolint: gocritic // testing invalid path
+	_, err = Load(t.Context(), NewFileSource(filepath.Join(tmp, "../../../etc/passwd"), nil)) //nolint: gocritic // testing invalid path
 	require.Error(t, err)
 }
 
@@ -58,7 +58,7 @@ func TestValidationErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := Load(t.Context(), NewFileSource(filepath.Join("testdata", tt.path)))
+			_, err := Load(t.Context(), NewFileSource(filepath.Join("testdata", tt.path), nil))
 			require.Error(t, err)
 		})
 	}
@@ -72,7 +72,7 @@ agents:
   root:
     model: openai/gpt-4
 `
-	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfg)))
+	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfg), nil))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported config version: 99")
 	assert.Contains(t, err.Error(), "valid versions")
@@ -114,53 +114,26 @@ func TestValidSkillsConfiguration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := Load(t.Context(), NewFileSource(filepath.Join("testdata", tt.path)))
+			cfg, err := Load(t.Context(), NewFileSource(filepath.Join("testdata", tt.path), nil))
 			require.NoError(t, err)
 			require.NotNil(t, cfg)
 		})
 	}
 }
 
-func TestSkillsConfigRejectsEmptyEntry(t *testing.T) {
+func TestInvalidSkillsSources(t *testing.T) {
 	t.Parallel()
 
-	// Empty entries in the skills list should be rejected.
 	cfgStr := `version: "5"
 agents:
   root:
     model: openai/gpt-4o
     skills:
-      - local
-      - ""
+      - invalid_source
     toolsets:
       - type: filesystem
 `
-	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfgStr)))
+	_, err := Load(t.Context(), NewBytesSource("test", []byte(cfgStr), nil))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "empty skills entry")
-}
-
-func TestSkillsNameFilter(t *testing.T) {
-	t.Parallel()
-
-	// A string that is not "local" and not a URL is interpreted as a skill
-	// name to include. This must load successfully — the filter simply keeps
-	// only matching skills at runtime.
-	cfgStr := `version: "7"
-agents:
-  root:
-    model: openai/gpt-4o
-    skills:
-      - git
-      - docker
-    toolsets:
-      - type: filesystem
-`
-	cfg, err := Load(t.Context(), NewBytesSource("test", []byte(cfgStr)))
-	require.NoError(t, err)
-	agent, ok := cfg.Agents.Lookup("root")
-	require.True(t, ok)
-	require.True(t, agent.Skills.Enabled())
-	require.True(t, agent.Skills.HasLocal())
-	assert.Equal(t, []string{"git", "docker"}, agent.Skills.Include)
+	assert.Contains(t, err.Error(), "unknown skills source")
 }

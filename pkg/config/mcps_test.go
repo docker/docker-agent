@@ -10,7 +10,7 @@ import (
 func TestMCPDefinitions_BasicRef(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions.yaml", nil))
 	require.NoError(t, err)
 
 	root, ok := cfg.Agents.Lookup("root")
@@ -40,7 +40,7 @@ func TestMCPDefinitions_BasicRef(t *testing.T) {
 func TestMCPDefinitions_OverrideFields(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_override.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_override.yaml", nil))
 	require.NoError(t, err)
 
 	root, ok := cfg.Agents.Lookup("root")
@@ -65,7 +65,7 @@ func TestMCPDefinitions_OverrideFields(t *testing.T) {
 func TestMCPDefinitions_InvalidRef(t *testing.T) {
 	t.Parallel()
 
-	_, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_invalid_ref.yaml"))
+	_, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_invalid_ref.yaml", nil))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "non-existent MCP definition 'nonexistent'")
 }
@@ -73,7 +73,7 @@ func TestMCPDefinitions_InvalidRef(t *testing.T) {
 func TestMCPDefinitions_InvalidDefinition(t *testing.T) {
 	t.Parallel()
 
-	_, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_invalid_def.yaml"))
+	_, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_invalid_def.yaml", nil))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "either command, remote or ref must be set")
 }
@@ -81,7 +81,7 @@ func TestMCPDefinitions_InvalidDefinition(t *testing.T) {
 func TestMCPDefinitions_Remote(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_remote.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_remote.yaml", nil))
 	require.NoError(t, err)
 
 	root, ok := cfg.Agents.Lookup("root")
@@ -97,7 +97,7 @@ func TestMCPDefinitions_Remote(t *testing.T) {
 func TestMCPDefinitions_NoMCPsSection(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/autoregister.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/autoregister.yaml", nil))
 	require.NoError(t, err)
 	assert.Nil(t, cfg.MCPs)
 }
@@ -105,7 +105,7 @@ func TestMCPDefinitions_NoMCPsSection(t *testing.T) {
 func TestMCPDefinitions_RejectsNonsenseFields(t *testing.T) {
 	t.Parallel()
 
-	_, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_invalid_fields.yaml"))
+	_, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_invalid_fields.yaml", nil))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shared can only be used with type 'todo'")
 }
@@ -113,7 +113,7 @@ func TestMCPDefinitions_RejectsNonsenseFields(t *testing.T) {
 func TestMCPDefinitions_RejectsMultipleSources(t *testing.T) {
 	t.Parallel()
 
-	_, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_multiple_sources.yaml"))
+	_, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_multiple_sources.yaml", nil))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "either command, remote or ref must be set, but only one of those")
 }
@@ -121,7 +121,7 @@ func TestMCPDefinitions_RejectsMultipleSources(t *testing.T) {
 func TestMCPDefinitions_EnvMerge(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_env_merge.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_env_merge.yaml", nil))
 	require.NoError(t, err)
 
 	root, ok := cfg.Agents.Lookup("root")
@@ -135,26 +135,4 @@ func TestMCPDefinitions_EnvMerge(t *testing.T) {
 	assert.Equal(t, "from_definition", ts.Env["SHARED"])
 	// Toolset-only key is preserved
 	assert.Equal(t, "from_toolset", ts.Env["EXTRA"])
-}
-
-func TestMCPDefinitions_WorkingDir(t *testing.T) {
-	t.Parallel()
-
-	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_working_dir.yaml"))
-	require.NoError(t, err)
-
-	// WorkingDir from the definition is inherited by the referencing toolset.
-	root, ok := cfg.Agents.Lookup("root")
-	require.True(t, ok)
-	require.Len(t, root.Toolsets, 1)
-	ts := root.Toolsets[0]
-	assert.Equal(t, "my-mcp-server", ts.Command)
-	assert.Equal(t, "./tools/mcp", ts.WorkingDir)
-
-	// A toolset-level working_dir overrides the definition's value.
-	override, ok := cfg.Agents.Lookup("override")
-	require.True(t, ok)
-	require.Len(t, override.Toolsets, 1)
-	tsOverride := override.Toolsets[0]
-	assert.Equal(t, "./override/path", tsOverride.WorkingDir)
 }

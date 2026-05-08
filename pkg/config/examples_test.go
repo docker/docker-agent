@@ -2,9 +2,7 @@ package config
 
 import (
 	"io/fs"
-	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/goccy/go-yaml"
@@ -23,11 +21,8 @@ func collectExamples(t *testing.T) []string {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() {
-			ext := filepath.Ext(path)
-			if ext == ".yaml" || ext == ".hcl" {
-				files = append(files, path)
-			}
+		if !d.IsDir() && filepath.Ext(path) == ".yaml" {
+			files = append(files, path)
 		}
 		return nil
 	})
@@ -45,7 +40,7 @@ func TestParseExamples(t *testing.T) {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := Load(t.Context(), NewFileSource(file))
+			cfg, err := Load(t.Context(), NewFileSource(file, nil))
 
 			require.NoError(t, err)
 			require.Equal(t, latest.Version, cfg.Version, "Version should be %d in %s", latest.Version, file)
@@ -86,7 +81,8 @@ func TestParseExamplesAfterMarshalling(t *testing.T) {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := Load(t.Context(), NewFileSource(file))
+			src := NewFileSource(file, nil)
+			cfg, err := Load(t.Context(), NewFileSource(file, nil))
 			require.NoError(t, err)
 
 			// Make sure that a config can be marshalled and parsed again.
@@ -94,36 +90,8 @@ func TestParseExamplesAfterMarshalling(t *testing.T) {
 			buf, err := yaml.Marshal(cfg)
 			require.NoError(t, err)
 
-			// The marshalled bytes are always YAML, so re-load them under a
-			// .yaml-named source even when the original example was HCL.
-			name := strings.TrimSuffix(file, filepath.Ext(file)) + ".yaml"
-			_, err = Load(t.Context(), NewBytesSource(name, buf))
+			_, err = Load(t.Context(), NewBytesSource(src.Name(), buf, nil))
 			require.NoError(t, err)
-		})
-	}
-}
-
-// TestHCLExamplesMatchYAML verifies that every .hcl example file produces a
-// configuration identical to its .yaml sibling, ensuring the HCL surface
-// stays in sync with the YAML schema.
-func TestHCLExamplesMatchYAML(t *testing.T) {
-	for _, file := range collectExamples(t) {
-		if filepath.Ext(file) != ".hcl" {
-			continue
-		}
-		yamlFile := strings.TrimSuffix(file, ".hcl") + ".yaml"
-		if _, err := os.Stat(yamlFile); err != nil {
-			continue
-		}
-		t.Run(file, func(t *testing.T) {
-			t.Parallel()
-
-			cfgHCL, err := Load(t.Context(), NewFileSource(file))
-			require.NoError(t, err)
-			cfgYAML, err := Load(t.Context(), NewFileSource(yamlFile))
-			require.NoError(t, err)
-
-			require.Equal(t, cfgYAML, cfgHCL, "HCL config %s differs from YAML sibling %s", file, yamlFile)
 		})
 	}
 }

@@ -15,7 +15,7 @@ import (
 func TestAutoRegisterModels(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/autoregister.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/autoregister.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Models, 2)
@@ -28,7 +28,7 @@ func TestAutoRegisterModels(t *testing.T) {
 func TestAutoRegisterAlloy(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/autoregister_alloy.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/autoregister_alloy.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Models, 2)
@@ -41,7 +41,7 @@ func TestAutoRegisterAlloy(t *testing.T) {
 func TestAlloyModelComposition(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/alloy_model_composition.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/alloy_model_composition.yaml", nil))
 	require.NoError(t, err)
 
 	// The alloy model should be expanded to its constituent models
@@ -57,7 +57,7 @@ func TestAlloyModelComposition(t *testing.T) {
 func TestAlloyModelNestedComposition(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/alloy_model_nested.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/alloy_model_nested.yaml", nil))
 	require.NoError(t, err)
 
 	// The nested alloy should be fully expanded to all constituent models
@@ -72,7 +72,7 @@ func TestAlloyModelNestedComposition(t *testing.T) {
 func TestMigrate_v0_v1_provider(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v0.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Equal(t, "openai", cfg.Models["gpt"].Provider)
@@ -81,7 +81,7 @@ func TestMigrate_v0_v1_provider(t *testing.T) {
 func TestMigrate_v1_provider(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v1.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Equal(t, "openai", cfg.Models["gpt"].Provider)
@@ -90,7 +90,7 @@ func TestMigrate_v1_provider(t *testing.T) {
 func TestMigrate_v0_v1_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v0.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -102,7 +102,7 @@ func TestMigrate_v0_v1_todo(t *testing.T) {
 func TestMigrate_v1_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v1.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -114,7 +114,7 @@ func TestMigrate_v1_todo(t *testing.T) {
 func TestMigrate_v0_v1_shared_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v0.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -126,7 +126,7 @@ func TestMigrate_v0_v1_shared_todo(t *testing.T) {
 func TestMigrate_v1_shared_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v1.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -138,7 +138,7 @@ func TestMigrate_v1_shared_todo(t *testing.T) {
 func TestMigrate_v0_v1_think(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v0.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -149,7 +149,7 @@ func TestMigrate_v0_v1_think(t *testing.T) {
 func TestMigrate_v1_think(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v1.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -160,7 +160,7 @@ func TestMigrate_v1_think(t *testing.T) {
 func TestMigrate_v0_v1_memory(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v0.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -172,7 +172,7 @@ func TestMigrate_v0_v1_memory(t *testing.T) {
 func TestMigrate_v1_memory(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v1.yaml", nil))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -184,7 +184,7 @@ func TestMigrate_v1_memory(t *testing.T) {
 func TestMigrate_v1(t *testing.T) {
 	t.Parallel()
 
-	_, err := Load(t.Context(), NewFileSource("testdata/v1.yaml"))
+	_, err := Load(t.Context(), NewFileSource("testdata/v1.yaml", nil))
 	require.NoError(t, err)
 }
 
@@ -271,7 +271,7 @@ func TestCheckRequiredEnvVars(t *testing.T) {
 		t.Run(test.yaml, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := Load(t.Context(), NewFileSource("testdata/env/"+test.yaml))
+			cfg, err := Load(t.Context(), NewFileSource("testdata/env/"+test.yaml, nil))
 			require.NoError(t, err)
 
 			err = CheckRequiredEnvVars(t.Context(), cfg, "", &noEnvProvider{})
@@ -294,7 +294,7 @@ func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 	t.Run("with token", func(t *testing.T) {
 		t.Parallel()
 
-		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml", nil))
 		require.NoError(t, err)
 
 		env := &fakeEnvProvider{vars: map[string]string{
@@ -308,7 +308,7 @@ func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 	t.Run("without token", func(t *testing.T) {
 		t.Parallel()
 
-		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml", nil))
 		require.NoError(t, err)
 
 		err = CheckRequiredEnvVars(t.Context(), cfg, "gateway:8080", &noEnvProvider{})
@@ -679,46 +679,6 @@ func TestProviders_Validation(t *testing.T) {
 				},
 			},
 			wantErr: "name cannot contain '/'",
-		},
-		{
-			name: "valid anthropic provider without base_url",
-			providers: map[string]latest.ProviderConfig{
-				"my_anthropic": {
-					Provider: "anthropic",
-					TokenKey: "MY_ANTHROPIC_KEY",
-				},
-			},
-			wantErr: "",
-		},
-		{
-			name: "valid google provider with defaults",
-			providers: map[string]latest.ProviderConfig{
-				"my_google": {
-					Provider: "google",
-				},
-			},
-			wantErr: "",
-		},
-		{
-			name: "openai provider without base_url requires it",
-			providers: map[string]latest.ProviderConfig{
-				"my_openai": {
-					Provider: "openai",
-				},
-			},
-			wantErr: "base_url is required",
-		},
-		{
-			name: "provider with model defaults",
-			providers: map[string]latest.ProviderConfig{
-				"my_anthropic": {
-					Provider:    "anthropic",
-					TokenKey:    "MY_KEY",
-					MaxTokens:   new(int64),
-					Temperature: new(float64),
-				},
-			},
-			wantErr: "",
 		},
 	}
 

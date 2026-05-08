@@ -8,13 +8,11 @@ import (
 	"log/slog"
 	"maps"
 	"net/url"
-	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/goccy/go-yaml"
 
-	hclconv "github.com/docker/docker-agent/pkg/config/hcl"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 )
@@ -23,17 +21,6 @@ func Load(ctx context.Context, source Source) (*latest.Config, error) {
 	data, err := source.Read(ctx)
 	if err != nil {
 		return nil, err
-	}
-
-	// Configurations may be authored in HCL as an alternative to YAML.
-	// Detect the format from the source name extension or, when no hint is
-	// available (OCI artifacts, etc.), from the content itself, then
-	// transparently convert to YAML for the rest of the pipeline.
-	if isHCLSource(source.Name(), data) {
-		data, err = hclconv.ToYAML(data, source.Name())
-		if err != nil {
-			return nil, fmt.Errorf("parsing HCL config file: %w", err)
-		}
 	}
 
 	var raw struct {
@@ -56,6 +43,10 @@ func Load(ctx context.Context, source Source) (*latest.Config, error) {
 
 	config.Version = raw.Version
 
+	if err := ExpandConfig(ctx, &config, source.EnvProvider()); err != nil {
+		return nil, fmt.Errorf("expanding config: %w", err)
+	}
+
 	if err := validateConfig(&config); err != nil {
 		return nil, err
 	}
@@ -76,7 +67,7 @@ func CheckRequiredEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway
 	missing, err := gatherMissingEnvVars(ctx, cfg, modelsGateway, env)
 	if err != nil {
 		// If there's a tool preflight error, log it but continue
-		slog.WarnContext(ctx, "Failed to preflight toolset environment variables; continuing", "error", err)
+		slog.Warn("Failed to preflight toolset environment variables; continuing", "error", err)
 	}
 
 	// Return error if there are missing environment variables
@@ -179,16 +170,6 @@ func validateConfig(cfg *latest.Config) error {
 	return nil
 }
 
-// isHCLSource reports whether the configuration data should be parsed as HCL
-// rather than YAML. The decision is based first on the source name extension,
-// and then on a content-based heuristic when no extension hint is available.
-func isHCLSource(name string, data []byte) bool {
-	if strings.EqualFold(filepath.Ext(name), ".hcl") {
-		return true
-	}
-	return hclconv.LooksLikeHCL(data)
-}
-
 // providerAPITypes are the allowed values for api_type in provider configs
 var providerAPITypes = map[string]bool{
 	"":                       true, // empty is allowed (defaults to openai_chatcompletions)
@@ -208,37 +189,23 @@ func validateProviders(cfg *latest.Config) error {
 			return fmt.Errorf("provider '%s': %w", name, err)
 		}
 
-		// Validate api_type if set
+		// Validate api_type
 		if !providerAPITypes[provCfg.APIType] {
 			return fmt.Errorf("provider '%s': invalid api_type '%s' (must be one of: openai_chatcompletions, openai_responses)", name, provCfg.APIType)
 		}
 
-		// base_url is required for OpenAI-compatible providers (the default)
-		// but optional for native providers like anthropic, google, amazon-bedrock
-		if provCfg.BaseURL != "" {
-			if _, err := url.Parse(provCfg.BaseURL); err != nil {
-				return fmt.Errorf("provider '%s': invalid base_url '%s': %w", name, provCfg.BaseURL, err)
-			}
-		} else if isOpenAICustomProvider(provCfg) {
-			return fmt.Errorf("provider '%s': base_url is required for OpenAI-compatible providers", name)
+		// base_url is required for custom providers
+		if provCfg.BaseURL == "" {
+			return fmt.Errorf("provider '%s': base_url is required", name)
+		}
+		if _, err := url.Parse(provCfg.BaseURL); err != nil {
+			return fmt.Errorf("provider '%s': invalid base_url '%s': %w", name, provCfg.BaseURL, err)
 		}
 
 		// token_key is optional - if not set, requests will be sent without bearer token
 	}
 
 	return nil
-}
-
-// isOpenAICustomProvider returns true if the provider config describes an OpenAI-compatible
-// custom provider (i.e., Provider is empty or "openai", or api_type is explicitly set to an
-// OpenAI schema). These providers require a base_url because they don't have a built-in default.
-func isOpenAICustomProvider(cfg latest.ProviderConfig) bool {
-	// If api_type is explicitly set, it's an OpenAI-compatible provider
-	if cfg.APIType != "" {
-		return true
-	}
-	// If provider is empty (defaults to openai) or explicitly "openai"
-	return cfg.Provider == "" || cfg.Provider == "openai"
 }
 
 // validateProviderName validates that a provider name is valid
@@ -268,11 +235,6 @@ func validateSkillsConfiguration(_ string, agent *latest.AgentConfig) error {
 			}
 		default:
 			return fmt.Errorf("agent '%s' has unknown skills source '%s' (must be 'local' or an HTTP/HTTPS URL)", agent.Name, source)
-		}
-	}
-	for _, name := range agent.Skills.Include {
-		if strings.TrimSpace(name) == "" {
-			return fmt.Errorf("agent '%s' has an empty skills entry", agent.Name)
 		}
 	}
 	return nil

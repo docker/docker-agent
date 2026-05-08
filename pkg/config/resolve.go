@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -64,7 +63,7 @@ func ResolveSources(agentsPath string, envProvider environment.Provider) (Source
 		// resolve() only fails for non-OCI, non-URL, non-builtin references
 		// that can't be made absolute. Try OCI as last resort.
 		if IsOCIReference(agentsPath) {
-			return singleSource(reference.OciRefToFilename(agentsPath), NewOCISource(agentsPath)), nil
+			return singleSource(reference.OciRefToFilename(agentsPath), NewOCISource(agentsPath, envProvider)), nil
 		}
 		return nil, err
 	}
@@ -87,7 +86,7 @@ func Resolve(agentFilename string, envProvider environment.Provider) (Source, er
 	resolvedPath, err := resolve(agentFilename)
 	if err != nil {
 		if IsOCIReference(agentFilename) {
-			return NewOCISource(agentFilename), nil
+			return NewOCISource(agentFilename, envProvider), nil
 		}
 		return nil, err
 	}
@@ -103,14 +102,13 @@ func Resolve(agentFilename string, envProvider environment.Provider) (Source, er
 func resolveOne(resolvedPath string, envProvider environment.Provider) (string, Source) {
 	switch {
 	case builtinAgents[resolvedPath] != nil:
-		return resolvedPath, NewBytesSource(resolvedPath, builtinAgents[resolvedPath])
+		return resolvedPath, NewBytesSource(resolvedPath, builtinAgents[resolvedPath], envProvider)
 	case IsURLReference(resolvedPath):
-		// URL-encode the URL to make it safe for use as a map key
-		return url.QueryEscape(resolvedPath), NewURLSource(resolvedPath, envProvider)
+		return resolvedPath, NewURLSource(resolvedPath, envProvider)
 	case isLocalFile(resolvedPath):
-		return fileNameWithoutExt(resolvedPath), NewFileSource(resolvedPath)
+		return fileNameWithoutExt(resolvedPath), NewFileSource(resolvedPath, envProvider)
 	default:
-		return reference.OciRefToFilename(resolvedPath), NewOCISource(resolvedPath)
+		return reference.OciRefToFilename(resolvedPath), NewOCISource(resolvedPath, envProvider)
 	}
 }
 
@@ -127,7 +125,7 @@ func resolveDirectory(dirPath string, envProvider environment.Provider) (Sources
 			continue
 		}
 		ext := strings.ToLower(filepath.Ext(entry.Name()))
-		if ext != ".yaml" && ext != ".yml" && ext != ".hcl" {
+		if ext != ".yaml" && ext != ".yml" {
 			continue
 		}
 		a := filepath.Join(dirPath, entry.Name())
@@ -200,8 +198,8 @@ func IsOCIReference(input string) bool {
 // isLocalFile checks if the input is a local file
 func isLocalFile(input string) bool {
 	ext := strings.ToLower(filepath.Ext(input))
-	// Check for known config file extensions or file descriptors
-	if ext == ".yaml" || ext == ".yml" || ext == ".hcl" || strings.HasPrefix(input, "/dev/fd/") {
+	// Check for YAML file extensions or file descriptors
+	if ext == ".yaml" || ext == ".yml" || strings.HasPrefix(input, "/dev/fd/") {
 		return true
 	}
 	// Check if it exists as a file on disk
