@@ -120,6 +120,16 @@ func WithRedactSecrets(redactSecrets bool) Opt {
 	}
 }
 
+// WithHandleLargeToolOutput configures automatic handling of large tool
+// responses. When enabled, tool responses exceeding the threshold are saved
+// to disk and replaced with a pointer that the agent can read back using shell
+// tools.
+func WithHandleLargeToolOutput(cfg *latest.HandleLargeToolOutputConfig) Opt {
+	return func(a *Agent) {
+		a.handleLargeToolOutput = cfg
+	}
+}
+
 func WithAddDescriptionParameter(addDescriptionParameter bool) Opt {
 	return func(a *Agent) {
 		a.addDescriptionParameter = addDescriptionParameter

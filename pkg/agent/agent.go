@@ -44,6 +44,7 @@ type Agent struct {
 	commands                types.Commands
 	hooks                   *latest.HooksConfig
 	cache                   *cache.Cache
+	handleLargeToolOutput   *latest.HandleLargeToolOutputConfig
 
 	// warningsMu guards pendingWarnings. AddToolWarning and DrainWarnings
 	// may be called concurrently from the runtime loop, the MCP server,
@@ -93,6 +94,12 @@ func (a *Agent) AddEnvironmentInfo() bool {
 // input, or the next LLM call).
 func (a *Agent) RedactSecrets() bool {
 	return a.redactSecrets
+}
+
+// HandleLargeToolOutput returns the configuration for large tool output
+// handling, or nil if not configured.
+func (a *Agent) HandleLargeToolOutput() *latest.HandleLargeToolOutputConfig {
+	return a.handleLargeToolOutput
 }
 
 func (a *Agent) MaxIterations() int {

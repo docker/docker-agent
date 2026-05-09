@@ -391,19 +391,39 @@ type AgentConfig struct {
 	// hook entries by hand — the runtime auto-injects them when this
 	// flag is true. See pkg/hooks/builtins/redact_secrets.go for the
 	// hook-side implementation.
-	RedactSecrets           bool              `json:"redact_secrets,omitempty"`
-	CodeModeTools           bool              `json:"code_mode_tools,omitempty"`
-	AddDescriptionParameter bool              `json:"add_description_parameter,omitempty"`
-	MaxIterations           int               `json:"max_iterations,omitempty"`
-	MaxConsecutiveToolCalls int               `json:"max_consecutive_tool_calls,omitempty"`
-	MaxOldToolCallTokens    int               `json:"max_old_tool_call_tokens,omitempty"`
-	NumHistoryItems         int               `json:"num_history_items,omitempty"`
-	AddPromptFiles          []string          `json:"add_prompt_files,omitempty" yaml:"add_prompt_files,omitempty"`
-	Commands                types.Commands    `json:"commands,omitempty"`
-	StructuredOutput        *StructuredOutput `json:"structured_output,omitempty"`
-	Skills                  SkillsConfig      `json:"skills,omitzero"`
-	Hooks                   *HooksConfig      `json:"hooks,omitempty"`
-	Cache                   *CacheConfig      `json:"cache,omitempty"`
+	RedactSecrets           bool                         `json:"redact_secrets,omitempty"`
+	CodeModeTools           bool                         `json:"code_mode_tools,omitempty"`
+	AddDescriptionParameter bool                         `json:"add_description_parameter,omitempty"`
+	MaxIterations           int                          `json:"max_iterations,omitempty"`
+	MaxConsecutiveToolCalls int                          `json:"max_consecutive_tool_calls,omitempty"`
+	MaxOldToolCallTokens    int                          `json:"max_old_tool_call_tokens,omitempty"`
+	NumHistoryItems         int                          `json:"num_history_items,omitempty"`
+	AddPromptFiles          []string                     `json:"add_prompt_files,omitempty" yaml:"add_prompt_files,omitempty"`
+	Commands                types.Commands               `json:"commands,omitempty"`
+	StructuredOutput        *StructuredOutput            `json:"structured_output,omitempty"`
+	Skills                  SkillsConfig                 `json:"skills,omitzero"`
+	Hooks                   *HooksConfig                 `json:"hooks,omitempty"`
+	Cache                   *CacheConfig                 `json:"cache,omitempty"`
+	HandleLargeToolOutput   *HandleLargeToolOutputConfig `json:"handle_large_tool_output,omitempty"`
+}
+
+// HandleLargeToolOutputConfig configures automatic handling of large tool
+// responses. When enabled, tool responses exceeding the threshold are saved
+// to disk and replaced with a pointer that the agent can read back using shell
+// tools. This prevents large MCP tool responses from exhausting the model's
+// context window while still allowing the agent to access the full data.
+type HandleLargeToolOutputConfig struct {
+	// Enabled controls whether large tool output handling is active.
+	Enabled bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// Threshold is the character count above which tool output is saved
+	// to disk. Default: 5000.
+	Threshold int `json:"threshold,omitempty" yaml:"threshold,omitempty"`
+	// OutputDir is the directory where large outputs are saved. Default:
+	// system temp directory.
+	OutputDir string `json:"output_dir,omitempty" yaml:"output_dir,omitempty"`
+	// PreviewSize is the number of characters to include in the preview
+	// shown to the agent. Default: 3000.
+	PreviewSize int `json:"preview_size,omitempty" yaml:"preview_size,omitempty"`
 }
 
 // CacheConfig configures the agent's response cache. When set and Enabled

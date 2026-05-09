@@ -35,10 +35,11 @@ func (r *LocalRuntime) buildHooksExecutors() {
 			continue
 		}
 		cfg := builtins.ApplyAgentDefaults(a.Hooks(), builtins.AgentDefaults{
-			AddDate:            a.AddDate(),
-			AddEnvironmentInfo: a.AddEnvironmentInfo(),
-			AddPromptFiles:     a.AddPromptFiles(),
-			RedactSecrets:      a.RedactSecrets(),
+			AddDate:               a.AddDate(),
+			AddEnvironmentInfo:    a.AddEnvironmentInfo(),
+			AddPromptFiles:        a.AddPromptFiles(),
+			RedactSecrets:         a.RedactSecrets(),
+			HandleLargeToolOutput: a.HandleLargeToolOutput(),
 		})
 		cfg = applyAutoInjectors(cfg, r.autoInjectors)
 		cfg = applyCacheDefault(cfg, a)

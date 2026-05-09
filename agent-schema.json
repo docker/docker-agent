@@ -434,6 +434,30 @@
           "type": "boolean",
           "description": "When true, the runtime auto-installs the redact_secrets builtin on all three of pre_tool_use (scrubs detected secrets from tool arguments), before_llm_call (scrubs the messages sent to the LLM), and tool_response_transform (scrubs tool output before it reaches event consumers, the persisted session, the post_tool_use hook input, or the next LLM call). The same hook entries can be authored directly in YAML for finer-grained control — see the hooks.tool_response_transform / hooks.before_llm_call / hooks.pre_tool_use sections. Detection uses the docker-agent secretsscan ruleset (GitHub PATs, AWS keys, Stripe / Slack / GitLab tokens, JWTs, private keys, etc.). Each detected span is replaced with the literal '[REDACTED]'."
         },
+        "handle_large_tool_output": {
+          "type": "object",
+          "description": "When enabled, tool responses exceeding the threshold are saved to disk and replaced with a pointer that the agent can read back using shell tools (e.g. cat). This prevents large MCP tool responses from exhausting the model's context window while still allowing the agent to access the full data.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Whether to enable large tool output handling. Default: false."
+            },
+            "threshold": {
+              "type": "integer",
+              "description": "Character count threshold above which tool output is saved to disk. Default: 5000.",
+              "minimum": 0
+            },
+            "output_dir": {
+              "type": "string",
+              "description": "Directory where large outputs are saved. Default: system temp directory."
+            },
+            "preview_size": {
+              "type": "integer",
+              "description": "Number of characters to include in the preview shown to the agent. Default: 3000.",
+              "minimum": 0
+            }
+          }
+        },
         "max_iterations": {
           "type": "integer",
           "description": "Maximum number of iterations",

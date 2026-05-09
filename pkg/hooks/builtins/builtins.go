@@ -49,8 +49,10 @@
 package builtins
 
 import (
+	"encoding/json"
 	"errors"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 )
 
@@ -71,6 +73,7 @@ func Register(r *hooks.Registry) error {
 		r.RegisterBuiltin(AddRecentCommits, addRecentCommits),
 		r.RegisterBuiltin(MaxIterations, maxIterations),
 		r.RegisterBuiltin(RedactSecrets, redactSecrets),
+		r.RegisterBuiltin(HandleLargeToolOutput, handleLargeToolOutput),
 		r.RegisterBuiltin(HTTPPost, httpPost),
 	)
 }
@@ -88,6 +91,9 @@ type AgentDefaults struct {
 	// makes the auto-injection idempotent against an explicit YAML
 	// entry that already names the same builtin.
 	RedactSecrets bool
+	// HandleLargeToolOutput auto-injects the handle_large_tool_output
+	// builtin under tool_response_transform when configured.
+	HandleLargeToolOutput *latest.HandleLargeToolOutputConfig
 }
 
 // AutoInjector adds default hooks to an agent's hook configuration.
@@ -140,6 +146,13 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 		cfg.ToolResponseTransform = append(cfg.ToolResponseTransform, hooks.MatcherConfig{
 			Matcher: "*",
 			Hooks:   []hooks.Hook{builtinHook(RedactSecrets)},
+		})
+	}
+	if d.HandleLargeToolOutput != nil && d.HandleLargeToolOutput.Enabled {
+		cfgBytes, _ := json.Marshal(d.HandleLargeToolOutput)
+		cfg.ToolResponseTransform = append(cfg.ToolResponseTransform, hooks.MatcherConfig{
+			Matcher: "*",
+			Hooks:   []hooks.Hook{builtinHook(HandleLargeToolOutput, string(cfgBytes))},
 		})
 	}
 	if cfg.IsEmpty() {
