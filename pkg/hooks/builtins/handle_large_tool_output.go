@@ -29,7 +29,7 @@ func handleLargeToolOutput(ctx context.Context, in *hooks.Input, args []string) 
 	cfg := parseArgs(args)
 	threshold := cfg.Threshold
 	if threshold == 0 {
-		threshold = 5000
+		threshold = 30000
 	}
 
 	if len(response) <= threshold {

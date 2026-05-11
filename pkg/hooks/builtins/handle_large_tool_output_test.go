@@ -17,7 +17,7 @@ import (
 func TestHandleLargeToolOutputPassThroughUnderThreshold(t *testing.T) {
 	t.Parallel()
 
-	cfg := toolOutputConfig{Threshold: 5000}
+	cfg := toolOutputConfig{Threshold: 10000}
 	args, _ := json.Marshal(cfg)
 
 	out, err := handleLargeToolOutput(t.Context(), &hooks.Input{
@@ -72,10 +72,10 @@ func TestHandleLargeToolOutputNoArgsUsesDefaultThreshold(t *testing.T) {
 		ToolName:      "mcp_tool",
 		ToolUseID:     "use_123",
 		SessionID:     "session_456",
-		ToolResponse:  strings.Repeat("x", 10000),
+		ToolResponse:  strings.Repeat("x", 50000),
 	}, nil)
 	require.NoError(t, err)
-	assert.NotNil(t, out, "no args means default threshold (5000) is used — response 10000 > 5000, so it must be processed")
+	assert.NotNil(t, out, "no args means default threshold (30000) is used — response 50000 > 30000, so it must be processed")
 }
 
 func TestHandleLargeToolOutputFallsBackToTempDir(t *testing.T) {
