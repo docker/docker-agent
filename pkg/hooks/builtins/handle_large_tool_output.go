@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/docker/docker-agent/pkg/hooks"
 )
@@ -45,7 +46,9 @@ func handleLargeToolOutput(ctx context.Context, in *hooks.Input, args []string) 
 		return nil, fmt.Errorf("create output directory: %w", err)
 	}
 
-	filename := fmt.Sprintf("%s_%s.txt", in.SessionID, in.ToolUseID)
+	filename := fmt.Sprintf("%s_%s.txt",
+		sanitizeFilename(in.SessionID),
+		sanitizeFilename(in.ToolUseID))
 	path := filepath.Join(outputDir, filename)
 
 	if err := os.WriteFile(path, []byte(response), 0o600); err != nil {
@@ -88,4 +91,11 @@ func parseArgs(args []string) toolOutputConfig {
 		return toolOutputConfig{}
 	}
 	return cfg
+}
+
+func sanitizeFilename(name string) string {
+	name = strings.ReplaceAll(name, "..", "__")
+	name = strings.ReplaceAll(name, "/", "_")
+	name = strings.ReplaceAll(name, "\\", "_")
+	return name
 }

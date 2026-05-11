@@ -249,3 +249,55 @@ func TestApplyAgentDefaultsDoesNotInjectWhenNil(t *testing.T) {
 	})
 	assert.Nil(t, cfg, "nil config must return nil (no hooks to inject)")
 }
+
+func TestHandleLargeToolOutputPathTraversalIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	cfg := toolOutputConfig{Threshold: 50, OutputDir: tmpDir}
+	args, _ := json.Marshal(cfg)
+
+	out, err := handleLargeToolOutput(t.Context(), &hooks.Input{
+		HookEventName: hooks.EventToolResponseTransform,
+		ToolName:      "mcp_tool",
+		ToolUseID:     "../../../etc/cron.d/malicious",
+		SessionID:     "session_../../../tmp",
+		ToolResponse:  strings.Repeat("z", 500),
+	}, []string{string(args)})
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	require.NotNil(t, out.HookSpecificOutput)
+	require.NotNil(t, out.HookSpecificOutput.UpdatedToolResponse)
+
+	pointer := *out.HookSpecificOutput.UpdatedToolResponse
+	assert.Contains(t, pointer, tmpDir, "path must resolve to configured output directory")
+	assert.Contains(t, pointer, "__", ".. must be replaced to prevent traversal")
+
+	parentDir, err := filepath.Abs("..")
+	require.NoError(t, err)
+	_ = parentDir
+	assert.NotContains(t, pointer, "/../", "no path traversal sequences allowed")
+}
+
+func TestSanitizeFilename(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"simple", "session123", "session123"},
+		{"with slash", "session/123", "session_123"},
+		{"with backslash", "session\\123", "session_123"},
+		{"path traversal", "../../../etc/passwd", "__etc_passwd"},
+		{"mixed", "path/to/../../../etc", "path_to____etc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeFilename(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
