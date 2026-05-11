@@ -48,7 +48,7 @@ func handleLargeToolOutput(ctx context.Context, in *hooks.Input, args []string) 
 	filename := fmt.Sprintf("%s_%s.txt", in.SessionID, in.ToolUseID)
 	path := filepath.Join(outputDir, filename)
 
-	if err := os.WriteFile(path, []byte(response), 0o640); err != nil {
+	if err := os.WriteFile(path, []byte(response), 0o600); err != nil {
 		return nil, fmt.Errorf("write output file: %w", err)
 	}
 
