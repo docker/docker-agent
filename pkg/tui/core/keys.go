@@ -28,8 +28,8 @@ type KeyMap struct {
 }
 
 var (
-	cachedKeys KeyMap
-	keysOnce   sync.Once
+	ckMutex    sync.RWMutex
+	cachedKeys *KeyMap
 )
 
 // DefaultKeyMap returns the default keybindings
@@ -67,7 +67,7 @@ func validateKeys(keys []string, action string, boundKeys map[string]string) []s
 
 		if existingAction, exists := boundKeys[kStr]; exists {
 			slog.Warn("Keybinding conflict detected", "key", kStr, "action", action, "conflicts_with", existingAction)
-			continue  // skip this key
+			continue // skip this key
 		} else {
 			boundKeys[kStr] = action
 		}
@@ -131,15 +131,25 @@ func buildKeys(settings *userconfig.Settings) KeyMap {
 // GetKeys returns the current keybindings, merging user config overrides with defaults.
 // The result is cached after the first call.
 func GetKeys() KeyMap {
-	keysOnce.Do(func() {
-		cachedKeys = buildKeys(userconfig.Get())
-	})
-
-	return cachedKeys
+	ckMutex.RLock()
+	k := cachedKeys
+	ckMutex.RUnlock()
+	if k != nil {
+		return *k
+	}
+	ckMutex.Lock()
+	defer ckMutex.Unlock()
+	if cachedKeys == nil {
+		built := buildKeys(userconfig.Get())
+		cachedKeys = &built
+	}
+	return *cachedKeys
 }
 
 // ResetKeys clears the cached keybindings, allowing them to be reloaded.
 // This is primarily useful for testing or future hot-reload support.
 func ResetKeys() {
-	keysOnce = sync.Once{}
+	ckMutex.Lock()
+	cachedKeys = nil
+	ckMutex.Unlock()
 }

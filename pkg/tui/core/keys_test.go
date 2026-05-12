@@ -95,7 +95,7 @@ func TestBuildKeys_InvalidKeysAndConflicts(t *testing.T) {
 
 	// Valid keys should still be applied
 	assert.Equal(t, []string{"ctrl+q"}, keys.Quit.Keys())
-	assert.Equal(t, []string{"ctrl+q"}, keys.Suspend.Keys())
+	assert.Equal(t, []string{"ctrl+z"}, keys.Suspend.Keys())
 }
 
 func TestBuildKeys_FromYAML(t *testing.T) {
