@@ -183,8 +183,9 @@ func (d *ElicitationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 func (d *ElicitationDialog) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, core.GetKeys().Quit):
-		cmd := d.close(tools.ElicitationActionDecline, nil)
-		return d, tea.Sequence(cmd, tea.Quit)
+		return d, core.CmdHandler(OpenDialogMsg{
+			Model: NewExitConfirmationDialog(),
+		})
 	case key.Matches(msg, d.keyMap.Space) && !d.isTextInputField() && !d.hasFreeFormInput():
 		// Space cycles forward through options, same as down arrow
 		d.moveSelection(1)
