@@ -1740,11 +1740,9 @@ func (m *appModel) AllBindings() []key.Binding {
 		keys.Suspend,
 	)
 
-<<<<<<< HEAD
 	// leanMode already returned above, so only hideSidebar matters here.
 	if !m.hideSidebar {
 		bindings = append(bindings, keys.ToggleSidebar)
-	}
 	}
 
 	// Show newline help based on keyboard enhancement support
@@ -1832,15 +1830,17 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Ctrl+c is intercepted before any dialog handling so that every dialog
+	keys := core.GetKeys()
+
+	// The Quit key is intercepted before any dialog handling so that every dialog
 	// reacts to it consistently:
 	//   - With no dialog open: open the exit confirmation dialog.
 	//   - With any other dialog open: stack the exit confirmation on top so
-	//     that the user can confirm exit (a second ctrl+c or Y exits) or
+	//     that the user can confirm exit (a second Quit key or Y exits) or
 	//     cancel it (N/Esc) and return to the original dialog.
 	//   - With the exit confirmation already on top: forward the key so it
 	//     can exit the program via its own Yes binding.
-	if msg.String() == "ctrl+c" {
+	if key.Matches(msg, keys.Quit) {
 		if m.dialogMgr.TopIsExitConfirmation() {
 			return m.forwardDialog(msg)
 		}
@@ -1883,13 +1883,7 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Global keyboard shortcuts (active even during history search)
-	keys := core.GetKeys()
 	switch {
-	case key.Matches(msg, keys.Quit):
-		return m, core.CmdHandler(dialog.OpenDialogMsg{
-			Model: dialog.NewExitConfirmationDialog(),
-		})
-
 	case key.Matches(msg, keys.Suspend):
 		return m, tea.Suspend
 
