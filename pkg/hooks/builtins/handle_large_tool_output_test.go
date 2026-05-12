@@ -290,8 +290,8 @@ func TestSanitizeFilename(t *testing.T) {
 		{"simple", "session123", "session123"},
 		{"with slash", "session/123", "session_123"},
 		{"with backslash", "session\\123", "session_123"},
-		{"path traversal", "../../../etc/passwd", "__etc_passwd"},
-		{"mixed", "path/to/../../../etc", "path_to____etc"},
+		{"path traversal", "../../../etc/passwd", "_________etc_passwd"},
+		{"mixed", "path/to/../../../etc", "path_to__________etc"},
 	}
 
 	for _, tt := range tests {
