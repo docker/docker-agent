@@ -67,6 +67,7 @@ func validateKeys(keys []string, action string, boundKeys map[string]string) []s
 
 		if existingAction, exists := boundKeys[kStr]; exists {
 			slog.Warn("Keybinding conflict detected", "key", kStr, "action", action, "conflicts_with", existingAction)
+			continue  // skip this key
 		} else {
 			boundKeys[kStr] = action
 		}
