@@ -1,0 +1,3 @@
+{"type":"step_start","part":{"type":"step-start","sessionID":"sess-abc","messageID":"msg-001"}}
+{"type":"text","part":{"type":"text","text":"I'll help you with that.","time":{"start":1000,"end":2000}}}
+{"type":"step_finish","part":{"type":"step-finish","reason":"end_turn","cost":0.001,"tokens":{"input":100,"output":20,"reasoning":0,"cache":{"read":0,"write":0}}}}

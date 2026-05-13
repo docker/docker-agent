@@ -1,0 +1,4 @@
+{"type":"step_start","part":{"type":"step-start","sessionID":"sess-def","messageID":"msg-001"}}
+{"type":"tool_use","part":{"type":"tool","id":"tool-001","tool":"bash","callID":"call-001","state":{"status":"completed","input":{"command":"ls /tmp"},"output":"file.txt\n","title":"bash","time":{"start":1000,"end":1500}}}}
+{"type":"text","part":{"type":"text","text":"The directory contains: file.txt","time":{"start":1500,"end":2000}}}
+{"type":"step_finish","part":{"type":"step-finish","reason":"end_turn","cost":0.002,"tokens":{"input":150,"output":25,"reasoning":0,"cache":{"read":0,"write":0}}}}
