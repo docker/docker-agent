@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"thread-ghi789","model":"codex-mini"}
+{"type":"turn.failed","error":{"code":"context_window_exceeded","message":"context window exceeded"}}
