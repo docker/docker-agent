@@ -158,9 +158,17 @@ func (b *BaseAdapter) runACP(ctx context.Context, req harness.SubSessionRequest,
 // safeEnvKeys are environment variables passed through to ACP subprocesses.
 // This is an allowlist: only these keys are inherited from the parent process.
 var safeEnvKeys = []string{
+	// System
 	"HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "TEMP", "TMP",
 	"LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM",
 	"XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+	// AI provider API keys
+	"ANTHROPIC_API_KEY",
+	"OPENAI_API_KEY",
+	"GEMINI_API_KEY", "GOOGLE_API_KEY",
+	"GITHUB_TOKEN", "GH_TOKEN",
+	// Node/npm
+	"NODE_PATH", "NPM_CONFIG_PREFIX",
 }
 
 // buildEnv constructs the environment for the ACP subprocess.

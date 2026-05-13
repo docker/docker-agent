@@ -165,12 +165,19 @@ func (a *Agent) HasSubAgents() bool {
 // Pass [context.TODO] from callers that don't have a request context
 // (configuration validation, debug commands).
 func (a *Agent) Model(ctx context.Context) provider.Provider {
+	// Harness-backed agents have no model; callers must check for nil.
+	if a.harness != nil {
+		return nil
+	}
+
 	var selected provider.Provider
 	var poolSize int
 	// Check for model override first (set via TUI model switching)
 	if overrides := a.modelOverrides.Load(); overrides != nil && len(*overrides) > 0 {
 		selected = (*overrides)[rand.Intn(len(*overrides))]
 		poolSize = len(*overrides)
+	} else if len(a.models) == 0 {
+		return nil
 	} else {
 		selected = a.models[rand.Intn(len(a.models))]
 		poolSize = len(a.models)

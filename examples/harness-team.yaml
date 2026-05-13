@@ -1,5 +1,3 @@
-version: "10"
-
 # Example: cross-harness team
 #
 # This team demonstrates harness-backed subagents. The orchestrator is a

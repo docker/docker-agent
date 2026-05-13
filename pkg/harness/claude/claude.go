@@ -206,10 +206,17 @@ func buildArgs(req harness.SubSessionRequest) ([]string, func()) {
 // This is an allowlist: only these keys are inherited from the parent process.
 // Additional keys can be injected via SubSessionRequest.Env.
 var safeEnvKeys = []string{
+	// System
 	"HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "TEMP", "TMP",
 	"LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM",
 	"XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-	// API keys for the harness itself (user must explicitly pass these via Env).
+	// AI provider API keys (harnesses need these to authenticate)
+	"ANTHROPIC_API_KEY",
+	"OPENAI_API_KEY",
+	"GEMINI_API_KEY", "GOOGLE_API_KEY",
+	"GITHUB_TOKEN", "GH_TOKEN",
+	// Node/npm (harnesses are typically npm-installed CLIs)
+	"NODE_PATH", "NPM_CONFIG_PREFIX",
 }
 
 // buildEnv constructs the environment for the claude subprocess.

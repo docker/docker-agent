@@ -204,6 +204,13 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	a := r.resolveSessionAgent(sess)
 
+	// Harness-backed agents bypass the model loop entirely. Dispatch
+	// directly through the harness path and return when done.
+	if a.HasHarness() {
+		r.runHarnessRoot(ctx, sess, a, sink)
+		return
+	}
+
 	// session_start fires once per RunStream. Its AdditionalContext
 	// (typically the AddEnvironmentInfo env block) is held as transient
 	// extras and threaded into every model call below — never persisted,

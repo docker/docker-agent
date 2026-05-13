@@ -550,7 +550,9 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		return nil, err
 	}
 
-	if defaultAgent.Model(context.TODO()) == nil {
+	// Harness-backed agents have no model; that's valid. Only reject
+	// model-backed agents with an empty models slice (misconfiguration).
+	if !defaultAgent.HasHarness() && defaultAgent.Model(context.TODO()) == nil {
 		return nil, fmt.Errorf("agent %s has no valid model", defaultAgent.Name())
 	}
 

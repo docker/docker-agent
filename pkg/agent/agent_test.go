@@ -468,3 +468,25 @@ func TestAgentWarningsConcurrentAccess(t *testing.T) {
 	// specific number of warnings drained because drainers run concurrently
 	// with writers.
 }
+
+// TestHarnessAgentModelReturnsNil is a regression test for the panic that
+// occurred when AgentsInfo called Model() on a harness-backed agent with an
+// empty models slice. Model() must return nil for harness agents, not panic.
+func TestHarnessAgentModelReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	spec := &HarnessSpec{Type: "claude-code", Command: "claude"}
+	a := New("coder", "write code", WithHarness(spec))
+
+	// Must not panic.
+	model := a.Model(t.Context())
+	assert.Nil(t, model, "harness-backed agent should return nil from Model()")
+
+	// HasHarness must be true.
+	assert.True(t, a.HasHarness())
+
+	// Harness spec must round-trip.
+	got, ok := a.Harness()
+	assert.True(t, ok)
+	assert.Equal(t, "claude-code", got.Type)
+}

@@ -19,6 +19,107 @@ import (
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 )
 
+// runHarnessRoot drives a harness-backed root agent directly from RunStream.
+// It is called when the current agent (not a subagent) has a harness spec.
+// Unlike runHarnessForwarding (which wraps a sub-session), this path owns
+// the top-level session and emits events directly to the TUI event sink.
+func (r *LocalRuntime) runHarnessRoot(ctx context.Context, sess *session.Session, a *agent.Agent, evts EventSink) {
+	spec, ok := a.Harness()
+	if !ok {
+		evts.Emit(Error("agent has no harness spec"))
+		return
+	}
+
+	// Apply timeout.
+	if spec.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, spec.Timeout)
+		defer cancel()
+	}
+
+	// Emit startup events.
+	evts.Emit(TeamInfo(r.agentDetailsFromTeam(), a.Name()))
+	evts.Emit(ToolsetInfo(0, false, a.Name()))
+
+	// Emit the user message event.
+	msgs := sess.GetMessages(a)
+	if sess.SendUserMessage && len(msgs) > 0 {
+		last := msgs[len(msgs)-1]
+		evts.Emit(UserMessage(last.Content, sess.ID, last.MultiContent, len(sess.Messages)-1))
+	}
+
+	evts.Emit(StreamStarted(sess.ID, a.Name()))
+
+	// Acquire resume token.
+	resumeToken := sess.GetHarnessToken(a.Name())
+	if err := harness.AcquireToken(resumeToken); err != nil {
+		evts.Emit(ErrorWithCode(string(harness.ErrCodeCapabilityMismatch), err.Error()))
+		evts.Emit(StreamStopped(sess.ID, a.Name(), "token_conflict"))
+		return
+	}
+	defer harness.ReleaseToken(resumeToken)
+
+	adapter, err := harness.Lookup(spec.Type)
+	if err != nil {
+		evts.Emit(Error(err.Error()))
+		evts.Emit(StreamStopped(sess.ID, a.Name(), "adapter_not_found"))
+		return
+	}
+
+	hReq := buildHarnessRequest(sess, sess, a, spec, resumeToken, delegationRequest{
+		SubSessionConfig: SubSessionConfig{
+			Task:      sess.GetLastUserMessageContent(),
+			AgentName: a.Name(),
+		},
+	})
+
+	sink := &translateSink{
+		evts:      evts,
+		sess:      sess,
+		agentName: a.Name(),
+	}
+	hReq.Events = sink
+
+	permReq := &runtimePermissionRequester{
+		evts:      evts,
+		sess:      sess,
+		agentName: a.Name(),
+		autoAllow: spec.PermissionPolicy != nil && spec.PermissionPolicy.Mode == agent.PermissionModeAutoAllow,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if acpAdapter, ok := adapter.(harness.ACPAdapter); ok {
+			r.runAdapterACP(ctx, acpAdapter, hReq, harness.ACPCallbacks{
+				ToolExecutor: &noopToolExecutor{},
+				Permission:   permReq,
+			})
+		} else {
+			r.runAdapter(ctx, adapter, hReq)
+		}
+	}()
+	<-done
+
+	// Persist the final assistant message.
+	if content := sink.finalText.String(); content != "" {
+		msg := session.NewAgentMessage(a.Name(), &chat.Message{
+			Role:      chat.MessageRoleAssistant,
+			Content:   content,
+			CreatedAt: time.Now().Format(time.RFC3339),
+		})
+		sess.AddMessage(msg)
+		evts.Emit(MessageAdded(sess.ID, msg, a.Name()))
+	}
+
+	// Store resume token.
+	if sink.harnessRunID != "" {
+		sess.SetHarnessToken(a.Name(), sink.harnessRunID)
+	}
+
+	evts.Emit(StreamStopped(sess.ID, a.Name(), sink.stopReason))
+}
+
 // runHarnessForwarding is the harness-backed equivalent of runForwarding.
 // It dispatches a sub-session to an external harness process, translates
 // canonical harness events to runtime events, and returns the final
