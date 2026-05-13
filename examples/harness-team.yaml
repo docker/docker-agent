@@ -1,0 +1,50 @@
+version: "10"
+
+# Example: cross-harness team
+#
+# This team demonstrates harness-backed subagents. The orchestrator is a
+# model-backed agent that delegates coding tasks to external harness runtimes.
+# Each harness runs in its own subprocess and executes tools internally.
+#
+# Prerequisites:
+#   claude-code: npm install -g @anthropic-ai/claude-code
+#   codex:       npm install -g @openai/codex
+#   opencode:    npm install -g opencode-ai
+#
+# Usage:
+#   docker-agent run examples/harness-team.yaml
+
+agents:
+  root:
+    description: "Orchestrator that routes coding tasks to the best harness"
+    model: anthropic/claude-sonnet-4-5
+    instruction: |
+      You are a coding orchestrator. Route tasks to the appropriate specialist:
+      - Use @claude-coder for large refactors, architecture changes, and complex reasoning
+      - Use @codex-coder for greenfield code generation and test scaffolding
+    sub_agents:
+      - claude-coder
+      - codex-coder
+
+  claude-coder:
+    description: "Claude Code CLI -- best for refactors and complex reasoning"
+    instruction: |
+      You are a senior software engineer. Be precise and thorough.
+    harness:
+      type: claude-code
+      args:
+        - --model
+        - claude-sonnet-4-5
+        - --max-turns
+        - "30"
+      # env:
+      #   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+
+  codex-coder:
+    description: "Codex CLI -- best for greenfield generation and test scaffolding"
+    instruction: |
+      You are a software engineer focused on clean, well-tested code.
+    harness:
+      type: codex
+      config:
+        sandbox: workspace-write
