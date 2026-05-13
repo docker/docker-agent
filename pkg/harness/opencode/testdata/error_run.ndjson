@@ -1,0 +1,2 @@
+{"type":"step_start","part":{"type":"step-start","sessionID":"sess-ghi","messageID":"msg-001"}}
+{"type":"error","error":{"type":"context_length","message":"context window exceeded"}}
