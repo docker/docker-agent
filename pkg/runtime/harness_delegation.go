@@ -66,6 +66,13 @@ func (r *LocalRuntime) runHarnessForwarding(ctx context.Context, parent *session
 	}
 	defer harness.ReleaseToken(resumeToken)
 
+	// Apply the per-harness timeout to the context.
+	if spec.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, spec.Timeout)
+		defer cancel()
+	}
+
 	// Build the harness request.
 	hReq := buildHarnessRequest(s, parent, child, spec, resumeToken, req)
 
@@ -86,6 +93,14 @@ func (r *LocalRuntime) runHarnessForwarding(ctx context.Context, parent *session
 	// Emit StreamStarted before the adapter runs.
 	evts.Emit(StreamStarted(s.ID, req.AgentName))
 
+	// Build permission requester respecting the agent's permission policy.
+	permReq := &runtimePermissionRequester{
+		evts:       evts,
+		sess:       s,
+		agentName:  req.AgentName,
+		autoAllow:  spec.PermissionPolicy != nil && spec.PermissionPolicy.Mode == agent.PermissionModeAutoAllow,
+	}
+
 	// Run the adapter (with panic recovery).
 	done := make(chan struct{})
 	go func() {
@@ -93,7 +108,7 @@ func (r *LocalRuntime) runHarnessForwarding(ctx context.Context, parent *session
 		if acpAdapter, ok := adapter.(harness.ACPAdapter); ok {
 			r.runAdapterACP(ctx, acpAdapter, hReq, harness.ACPCallbacks{
 				ToolExecutor: &noopToolExecutor{},
-				Permission:   &runtimePermissionRequester{evts: evts, sess: s, agentName: req.AgentName},
+				Permission:   permReq,
 			})
 		} else {
 			r.runAdapter(ctx, adapter, hReq)
@@ -112,10 +127,7 @@ func (r *LocalRuntime) runHarnessForwarding(ctx context.Context, parent *session
 		evts.Emit(MessageAdded(s.ID, msg, req.AgentName))
 	}
 
-	// Emit SubSessionCompleted and StreamStopped.
-	parent.ToolsApproved = s.ToolsApproved
-	parent.AddSubSession(s)
-	evts.Emit(SubSessionCompleted(parent.ID, s, callerAgent.Name()))
+	// StreamStopped must always be emitted (balances StreamStarted for TUI depth counter).
 	evts.Emit(StreamStopped(s.ID, req.AgentName, sink.stopReason))
 
 	// Store the harness session token for multi-turn resumption.
@@ -128,6 +140,12 @@ func (r *LocalRuntime) runHarnessForwarding(ctx context.Context, parent *session
 		span.SetStatus(codes.Error, "harness sub-session error")
 		return nil, sink.runErr
 	}
+
+	// Only record the sub-session and emit SubSessionCompleted on success,
+	// matching the behavior of the model-backed runForwarding.
+	parent.ToolsApproved = s.ToolsApproved
+	parent.AddSubSession(s)
+	evts.Emit(SubSessionCompleted(parent.ID, s, callerAgent.Name()))
 
 	span.SetStatus(codes.Ok, "harness sub-session completed")
 	return tools.ResultSuccess(s.GetLastAssistantMessageContent()), nil
@@ -281,6 +299,10 @@ type translateSink struct {
 	harnessRunID string
 	stopReason   string
 	runErr       error
+	// activeToolArgs tracks ToolCallStart.Args by ToolCallID so ToolCallEnd
+	// can emit a complete PartialToolCall + ToolCall event pair with args.
+	activeToolArgs map[string]string
+	activeToolName map[string]string
 }
 
 func (t *translateSink) Emit(e harness.Event) {
@@ -311,17 +333,34 @@ func (t *translateSink) Emit(e harness.Event) {
 		// No direct runtime equivalent.
 
 	case harness.ToolCallStart:
-		tc := tools.ToolCall{ID: ev.ToolCallID, Function: tools.FunctionCall{Name: ev.ToolName}}
+		// Cache args and name for use when ToolCallEnd arrives.
+		if t.activeToolArgs == nil {
+			t.activeToolArgs = make(map[string]string)
+			t.activeToolName = make(map[string]string)
+		}
+		t.activeToolArgs[ev.ToolCallID] = ev.Args
+		t.activeToolName[ev.ToolCallID] = ev.ToolName
+		tc := tools.ToolCall{ID: ev.ToolCallID, Function: tools.FunctionCall{Name: ev.ToolName, Arguments: ev.Args}}
 		td := tools.Tool{Name: ev.ToolName}
 		t.evts.Emit(PartialToolCall(tc, td, t.agentName))
 
 	case harness.ToolCallArgsDelta:
-		// Partial args delta -- emit as partial tool call update.
-		// No direct runtime event for arg deltas; absorbed silently.
+		// Accumulate streaming args delta.
+		if t.activeToolArgs != nil {
+			t.activeToolArgs[ev.ToolCallID] += ev.Delta
+		}
 
 	case harness.ToolCallEnd:
-		tc := tools.ToolCall{ID: ev.ToolCallID}
-		td := tools.Tool{}
+		args := ""
+		name := ""
+		if t.activeToolArgs != nil {
+			args = t.activeToolArgs[ev.ToolCallID]
+			name = t.activeToolName[ev.ToolCallID]
+			delete(t.activeToolArgs, ev.ToolCallID)
+			delete(t.activeToolName, ev.ToolCallID)
+		}
+		tc := tools.ToolCall{ID: ev.ToolCallID, Function: tools.FunctionCall{Name: name, Arguments: args}}
+		td := tools.Tool{Name: name}
 		t.evts.Emit(ToolCall(tc, td, t.agentName))
 
 	case harness.ToolCallResult:
@@ -398,18 +437,32 @@ type runtimePermissionRequester struct {
 	evts      EventSink
 	sess      *session.Session
 	agentName string
+	// autoAllow is true only when the agent's permission_policy.mode is auto_allow
+	// AND i_understand_the_risk is true. Default is deny.
+	autoAllow bool
 }
 
 func (p *runtimePermissionRequester) Request(_ context.Context, toolCallID, toolName, description string, _ []string) (bool, string, error) {
-	// v1: auto-allow ACP permission requests and emit the resolved event.
-	// Full TUI integration (blocking for user input) is deferred to v1.1.
+	tc := tools.ToolCall{ID: toolCallID, Function: tools.FunctionCall{Name: toolName}}
+	td := tools.Tool{Name: toolName, Description: description}
+
 	if p.evts != nil {
-		tc := tools.ToolCall{ID: toolCallID, Function: tools.FunctionCall{Name: toolName}}
-		td := tools.Tool{Name: toolName, Description: description}
 		p.evts.Emit(ToolCallConfirmation(tc, td, p.agentName))
+	}
+
+	if !p.autoAllow {
+		// Default: deny. The user must explicitly configure auto_allow with
+		// i_understand_the_risk: true to enable automatic permission grants.
+		if p.evts != nil {
+			p.evts.Emit(Authorization(tools.ElicitationActionDecline, p.agentName))
+		}
+		return false, "policy_deny", nil
+	}
+
+	if p.evts != nil {
 		p.evts.Emit(Authorization(tools.ElicitationActionAccept, p.agentName))
 	}
-	return true, "auto", nil
+	return true, "auto_allow", nil
 }
 
 // --- noopToolExecutor ---

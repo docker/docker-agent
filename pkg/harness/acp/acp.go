@@ -8,15 +8,18 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/docker/docker-agent/pkg/harness"
+	"github.com/docker/docker-agent/pkg/harness/sandbox"
 )
 
 // Config holds ACP adapter-specific configuration shared by all ACP adapters.
@@ -89,9 +92,10 @@ func (b *BaseAdapter) runACP(ctx context.Context, req harness.SubSessionRequest,
 
 	// Build the ACP client.
 	client := &acpClient{
-		runID:     req.RunID,
-		events:    req.Events,
-		callbacks: callbacks,
+		runID:       req.RunID,
+		sandboxRoot: req.WorkingDir,
+		events:      req.Events,
+		callbacks:   callbacks,
 	}
 
 	conn := acpsdk.NewClientSideConnection(client, stdin, stdout)
@@ -151,9 +155,32 @@ func (b *BaseAdapter) runACP(ctx context.Context, req harness.SubSessionRequest,
 	return nil
 }
 
+// safeEnvKeys are environment variables passed through to ACP subprocesses.
+// This is an allowlist: only these keys are inherited from the parent process.
+var safeEnvKeys = []string{
+	"HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "TEMP", "TMP",
+	"LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM",
+	"XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+}
+
 // buildEnv constructs the environment for the ACP subprocess.
+// Only safeEnvKeys are inherited; additional vars come from SubSessionRequest.Env.
 func buildEnv(req harness.SubSessionRequest) []string {
-	env := os.Environ()
+	safe := make(map[string]bool, len(safeEnvKeys))
+	for _, k := range safeEnvKeys {
+		safe[k] = true
+	}
+
+	var env []string
+	for _, kv := range os.Environ() {
+		idx := strings.IndexByte(kv, '=')
+		if idx < 0 {
+			continue
+		}
+		if safe[kv[:idx]] {
+			env = append(env, kv)
+		}
+	}
 	for k, v := range req.Env {
 		env = append(env, k+"="+v)
 	}
@@ -176,10 +203,11 @@ func drainStderr(r interface{ Read([]byte) (int, error) }) {
 // --- acpClient implements acp.Client ---
 
 type acpClient struct {
-	runID     string
-	sessionID string
-	events    harness.EventSink
-	callbacks harness.ACPCallbacks
+	runID       string
+	sessionID   string
+	sandboxRoot string // working directory; all fs/* paths are confined to this
+	events      harness.EventSink
+	callbacks   harness.ACPCallbacks
 }
 
 // SessionUpdate translates ACP session notifications to canonical harness events.
@@ -310,47 +338,56 @@ func (c *acpClient) RequestPermission(ctx context.Context, params acpsdk.Request
 	}, nil
 }
 
-// ReadTextFile delegates to the ToolExecutor.
-func (c *acpClient) ReadTextFile(ctx context.Context, params acpsdk.ReadTextFileRequest) (acpsdk.ReadTextFileResponse, error) {
-	if c.callbacks.ToolExecutor == nil {
-		return acpsdk.ReadTextFileResponse{}, fmt.Errorf("no ToolExecutor configured")
+// ReadTextFile reads a file, confining the path to the sandbox root.
+func (c *acpClient) ReadTextFile(_ context.Context, params acpsdk.ReadTextFileRequest) (acpsdk.ReadTextFileResponse, error) {
+	resolved, err := sandbox.Resolve(c.sandboxRoot, params.Path)
+	if err != nil {
+		if errors.Is(err, sandbox.ErrEscape) {
+			return acpsdk.ReadTextFileResponse{}, fmt.Errorf("read denied: %w", err)
+		}
+		return acpsdk.ReadTextFileResponse{}, err
 	}
-	// Simple implementation: read the file directly.
-	data, err := os.ReadFile(params.Path)
+	data, err := os.ReadFile(resolved)
 	if err != nil {
 		return acpsdk.ReadTextFileResponse{}, err
 	}
 	return acpsdk.ReadTextFileResponse{Content: string(data)}, nil
 }
 
-// WriteTextFile delegates to the ToolExecutor.
-func (c *acpClient) WriteTextFile(ctx context.Context, params acpsdk.WriteTextFileRequest) (acpsdk.WriteTextFileResponse, error) {
-	if c.callbacks.ToolExecutor == nil {
-		return acpsdk.WriteTextFileResponse{}, fmt.Errorf("no ToolExecutor configured")
+// WriteTextFile writes a file, confining the path to the sandbox root.
+func (c *acpClient) WriteTextFile(_ context.Context, params acpsdk.WriteTextFileRequest) (acpsdk.WriteTextFileResponse, error) {
+	resolved, err := sandbox.Resolve(c.sandboxRoot, params.Path)
+	if err != nil {
+		if errors.Is(err, sandbox.ErrEscape) {
+			return acpsdk.WriteTextFileResponse{}, fmt.Errorf("write denied: %w", err)
+		}
+		return acpsdk.WriteTextFileResponse{}, err
 	}
-	if err := os.WriteFile(params.Path, []byte(params.Content), 0o644); err != nil {
+	if err := os.WriteFile(resolved, []byte(params.Content), 0o600); err != nil {
 		return acpsdk.WriteTextFileResponse{}, err
 	}
 	return acpsdk.WriteTextFileResponse{}, nil
 }
 
-// Terminal methods -- stub implementations for v1.
+// Terminal methods are not supported in v1. Returning an error (not nil) so
+// the harness knows the operation did not execute, preventing false-positive
+// reasoning about command outcomes.
 func (c *acpClient) CreateTerminal(_ context.Context, _ acpsdk.CreateTerminalRequest) (acpsdk.CreateTerminalResponse, error) {
-	return acpsdk.CreateTerminalResponse{TerminalId: "stub-terminal"}, nil
+	return acpsdk.CreateTerminalResponse{}, fmt.Errorf("terminal execution not supported in this host; upgrade to a version with terminal/* support")
 }
 
 func (c *acpClient) KillTerminal(_ context.Context, _ acpsdk.KillTerminalRequest) (acpsdk.KillTerminalResponse, error) {
-	return acpsdk.KillTerminalResponse{}, nil
+	return acpsdk.KillTerminalResponse{}, fmt.Errorf("terminal execution not supported in this host")
 }
 
 func (c *acpClient) TerminalOutput(_ context.Context, _ acpsdk.TerminalOutputRequest) (acpsdk.TerminalOutputResponse, error) {
-	return acpsdk.TerminalOutputResponse{Output: "", Truncated: false}, nil
+	return acpsdk.TerminalOutputResponse{}, fmt.Errorf("terminal execution not supported in this host")
 }
 
 func (c *acpClient) ReleaseTerminal(_ context.Context, _ acpsdk.ReleaseTerminalRequest) (acpsdk.ReleaseTerminalResponse, error) {
-	return acpsdk.ReleaseTerminalResponse{}, nil
+	return acpsdk.ReleaseTerminalResponse{}, fmt.Errorf("terminal execution not supported in this host")
 }
 
 func (c *acpClient) WaitForTerminalExit(_ context.Context, _ acpsdk.WaitForTerminalExitRequest) (acpsdk.WaitForTerminalExitResponse, error) {
-	return acpsdk.WaitForTerminalExitResponse{}, nil
+	return acpsdk.WaitForTerminalExitResponse{}, fmt.Errorf("terminal execution not supported in this host")
 }

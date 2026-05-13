@@ -37,6 +37,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/harness"
@@ -89,7 +90,8 @@ func (a *Adapter) run(ctx context.Context, req harness.SubSessionRequest) error 
 		binary = cfg.Command
 	}
 
-	args := buildArgs(req)
+	args, cleanup := buildArgs(req)
+	defer cleanup()
 
 	cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec
 	cmd.Dir = req.WorkingDir
@@ -149,15 +151,16 @@ func (a *Adapter) run(ctx context.Context, req harness.SubSessionRequest) error 
 }
 
 // buildArgs constructs the claude CLI arguments for a sub-session.
-func buildArgs(req harness.SubSessionRequest) []string {
+// Returns the args slice and a cleanup function that removes any temp files.
+func buildArgs(req harness.SubSessionRequest) ([]string, func()) {
+	cleanup := func() {}
+
 	args := []string{
 		"--print",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--bare",
 		"--no-session-persistence",
-		"--permission-mode", "bypassPermissions",
-		"--dangerously-skip-permissions",
 		"--input-format", "stream-json",
 		"--max-turns", "50",
 	}
@@ -168,6 +171,7 @@ func buildArgs(req harness.SubSessionRequest) []string {
 		// Write system prompt to a temp file to avoid shell-escaping issues.
 		if f, err := writeTempPrompt(req.SystemPrompt); err == nil {
 			args = append(args, "--system-prompt-file", f)
+			cleanup = func() { os.Remove(f) } //nolint:errcheck
 		}
 	}
 
@@ -186,14 +190,52 @@ func buildArgs(req harness.SubSessionRequest) []string {
 				}
 			}
 		}
+		// Honor permission policy from agent config.
+		if cfg.PermissionMode != "" {
+			args = append(args, "--permission-mode", cfg.PermissionMode)
+			if cfg.PermissionMode == "bypassPermissions" {
+				args = append(args, "--dangerously-skip-permissions")
+			}
+		}
 	}
 
-	return args
+	return args, cleanup
+}
+
+// safeEnvKeys are environment variables passed through to harness subprocesses.
+// This is an allowlist: only these keys are inherited from the parent process.
+// Additional keys can be injected via SubSessionRequest.Env.
+var safeEnvKeys = []string{
+	"HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "TEMP", "TMP",
+	"LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM",
+	"XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+	// API keys for the harness itself (user must explicitly pass these via Env).
 }
 
 // buildEnv constructs the environment for the claude subprocess.
+// Only safeEnvKeys are inherited from the parent process; all other parent
+// env vars are dropped to prevent credential leakage to the subprocess.
+// Additional vars can be injected via SubSessionRequest.Env.
 func buildEnv(req harness.SubSessionRequest) []string {
-	env := os.Environ()
+	// Build allowlist from parent env.
+	safe := make(map[string]bool, len(safeEnvKeys))
+	for _, k := range safeEnvKeys {
+		safe[k] = true
+	}
+
+	var env []string
+	for _, kv := range os.Environ() {
+		idx := strings.IndexByte(kv, '=')
+		if idx < 0 {
+			continue
+		}
+		k := kv[:idx]
+		if safe[k] {
+			env = append(env, kv)
+		}
+	}
+
+	// Inject caller-specified env vars (these are explicitly opted-in).
 	for k, v := range req.Env {
 		env = append(env, k+"="+v)
 	}
@@ -217,10 +259,14 @@ func writeTempPrompt(prompt string) (string, error) {
 
 // Config holds Claude Code adapter-specific configuration.
 type Config struct {
-	Command  string   `yaml:"command"`
-	Model    string   `yaml:"model"`
-	Args     []string `yaml:"args"`
-	MaxTurns int      `yaml:"max_turns"`
+	Command        string   `yaml:"command"`
+	Model          string   `yaml:"model"`
+	Args           []string `yaml:"args"`
+	MaxTurns       int      `yaml:"max_turns"`
+	// PermissionMode maps to Claude Code's --permission-mode flag.
+	// Valid values: acceptEdits (default), bypassPermissions.
+	// bypassPermissions requires i_understand_the_risk: true in the agent config.
+	PermissionMode string   `yaml:"permission_mode"`
 }
 
 func parseConfig(raw json.RawMessage) *Config {
@@ -416,13 +462,9 @@ func translateAssistant(ev *claudeEvent, state *translatorState, now time.Time) 
 				args = string(c.Input)
 			}
 			events = append(events,
-				harness.ToolCallStart{ToolCallID: c.ID, ToolName: c.Name, At: now},
+				harness.ToolCallStart{ToolCallID: c.ID, ToolName: c.Name, Args: args, At: now},
 				harness.ToolCallEnd{ToolCallID: c.ID, At: now},
 			)
-			_ = args // args are in the ToolCallStart; ToolCallEnd closes it
-			// Re-emit ToolCallStart with args embedded via a ToolCallResult placeholder.
-			// The runtime translator uses ToolCallStart + ToolCallEnd as the pair.
-			_ = events // already appended
 		}
 	}
 	return events

@@ -53,7 +53,10 @@ func TestParseExamples(t *testing.T) {
 			require.NotEmpty(t, cfg.Agents.First().Description, "Description should not be empty in %s", file)
 
 			for _, agent := range cfg.Agents {
-				require.NotEmpty(t, agent.Model)
+				// Harness-backed agents have no model; model-backed agents must have one.
+				if agent.Harness == nil {
+					require.NotEmpty(t, agent.Model)
+				}
 				require.NotEmpty(t, agent.Instruction, "Instruction should not be empty in %s", file)
 			}
 

@@ -82,8 +82,20 @@ func (a *AgentConfig) validateHarness() error {
 	if len(a.SubAgents) > 0 || len(a.Handoffs) > 0 {
 		return fmt.Errorf("agent %q: harness-backed agents cannot have sub_agents or handoffs in v1", a.Name)
 	}
+	// Reject command paths containing separators to prevent injection via config files.
+	// The binary must be a plain name (resolved via PATH) or an absolute path.
+	if a.Harness.Command != "" {
+		for _, ch := range []string{";", "&", "|", "`", "$", "(", ")", "<", ">", "\n", "\r"} {
+			if strings.Contains(a.Harness.Command, ch) {
+				return fmt.Errorf("agent %q: harness.command contains invalid character %q", a.Name, ch)
+			}
+		}
+	}
 	if a.Harness.PermissionPolicy != nil {
 		pp := a.Harness.PermissionPolicy
+		if pp.Mode != "" && pp.Mode != "ask" && pp.Mode != "auto_allow" && pp.Mode != "deny_all" {
+			return fmt.Errorf("agent %q: permission_policy.mode %q is invalid; must be ask, auto_allow, or deny_all", a.Name, pp.Mode)
+		}
 		if pp.Mode == "auto_allow" && !pp.IUnderstandTheRisk {
 			return fmt.Errorf("agent %q: permission_policy.auto_allow requires i_understand_the_risk: true", a.Name)
 		}

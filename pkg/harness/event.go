@@ -85,10 +85,12 @@ func (ReasoningEnd) isHarnessEvent()        {}
 func (e ReasoningEnd) EventTime() time.Time { return e.At }
 
 // ToolCallStart opens a tool call. Args may follow as ToolCallArgsDelta events
-// when AdapterFeatures.StreamingArgs is true.
+// when AdapterFeatures.StreamingArgs is true. For non-streaming harnesses,
+// Args contains the complete tool arguments as a JSON string.
 type ToolCallStart struct {
 	ToolCallID string
 	ToolName   string
+	Args       string // JSON-encoded tool arguments; may be empty for streaming harnesses
 	At         time.Time
 }
 
