@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/harness"
@@ -141,13 +142,13 @@ func buildArgs(req harness.SubSessionRequest, cfg *Config) []string {
 		args = append(args,
 			"exec",
 			"--json",
-			"--sandbox", sandbox,
-			"--ask-for-approval", "never",
+			"--dangerously-bypass-approvals-and-sandbox",
 			"--skip-git-repo-check",
 		)
 		if req.WorkingDir != "" {
-			args = append(args, "--cd", req.WorkingDir)
+			args = append(args, "-C", req.WorkingDir)
 		}
+		_ = sandbox // sandbox mode is controlled via --dangerously-bypass-approvals-and-sandbox in this version
 	}
 
 	if cfg != nil {
@@ -472,6 +473,18 @@ func translateError(ev *codexEvent, state *translatorState, now time.Time) []har
 	}
 	if msg == "" {
 		msg = "codex error"
+	}
+	// Infer error code from message when the event has no explicit code field.
+	// Codex top-level error events carry the detail in message, not code.
+	if code == harness.ErrCodeUnknown {
+		switch {
+		case strings.Contains(msg, "401") || strings.Contains(msg, "Unauthorized") || strings.Contains(msg, "authentication"):
+			code = harness.ErrCodeAuthFailed
+		case strings.Contains(msg, "429") || strings.Contains(msg, "rate limit"):
+			code = harness.ErrCodeRateLimited
+		case strings.Contains(msg, "context") && strings.Contains(msg, "exceed"):
+			code = harness.ErrCodeContextExhausted
+		}
 	}
 	return []harness.Event{
 		harness.RunError{

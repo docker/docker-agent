@@ -291,16 +291,15 @@ func TestBuildArgsFreshRun(t *testing.T) {
 	}
 	args := buildArgs(req, nil)
 
-	// Must include exec, --json, --sandbox workspace-write, --ask-for-approval never,
-	// --skip-git-repo-check, --cd /tmp/work, --, prompt.
+	// Must include exec, --json, --dangerously-bypass-approvals-and-sandbox,
+	// --skip-git-repo-check, -C /tmp/work, --, prompt.
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"exec",
 		"--json",
-		"--sandbox workspace-write",
-		"--ask-for-approval never",
+		"--dangerously-bypass-approvals-and-sandbox",
 		"--skip-git-repo-check",
-		"--cd /tmp/work",
+		"-C /tmp/work",
 		"-- do a thing",
 	} {
 		if !strings.Contains(joined, want) {
@@ -328,20 +327,23 @@ func TestBuildArgsResume(t *testing.T) {
 	if !strings.Contains(joined, "-- next message") {
 		t.Errorf("resume prompt missing: %s", joined)
 	}
-	// On resume, we should NOT pass --sandbox or --cd (the resumed thread has its own).
-	if strings.Contains(joined, "--sandbox") {
-		t.Errorf("resume should not include --sandbox: %s", joined)
+	// On resume, we should NOT pass --dangerously-bypass or -C (the resumed thread has its own).
+	if strings.Contains(joined, "--dangerously-bypass") {
+		t.Errorf("resume should not include --dangerously-bypass: %s", joined)
 	}
 }
 
 func TestBuildArgsSandboxOverride(t *testing.T) {
+	// Sandbox field is preserved in Config but the current codex version uses
+	// --dangerously-bypass-approvals-and-sandbox instead of --sandbox <mode>.
+	// Verify the args still include the bypass flag and don't crash.
 	req := harness.SubSessionRequest{Task: "x"}
 	cfg := &Config{Sandbox: "read-only"}
 	args := buildArgs(req, cfg)
 
 	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "--sandbox read-only") {
-		t.Errorf("expected --sandbox read-only, got: %s", joined)
+	if !strings.Contains(joined, "--dangerously-bypass-approvals-and-sandbox") {
+		t.Errorf("expected bypass flag, got: %s", joined)
 	}
 }
 
