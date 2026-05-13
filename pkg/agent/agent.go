@@ -45,6 +45,11 @@ type Agent struct {
 	hooks                   *latest.HooksConfig
 	cache                   *cache.Cache
 
+	// harness, when non-nil, marks this agent as harness-backed. When set,
+	// models must be empty and the runtime uses a harness sub-session instead
+	// of the model-backed loop.
+	harness *HarnessSpec
+
 	// warningsMu guards pendingWarnings. AddToolWarning and DrainWarnings
 	// may be called concurrently from the runtime loop, the MCP server,
 	// the TUI and session manager.
@@ -69,6 +74,13 @@ func New(name, prompt string, opts ...Opt) *Agent {
 func (a *Agent) Name() string {
 	return a.name
 }
+
+// HasHarness reports whether this agent is backed by an external harness.
+// When true, the runtime uses a harness sub-session instead of the model loop.
+func (a *Agent) HasHarness() bool { return a.harness != nil }
+
+// Harness returns the harness spec and whether it is set.
+func (a *Agent) Harness() (*HarnessSpec, bool) { return a.harness, a.harness != nil }
 
 // Instruction returns the agent's instructions
 func (a *Agent) Instruction() string {

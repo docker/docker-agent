@@ -11,7 +11,12 @@ import (
 	v6 "github.com/docker/docker-agent/pkg/config/v6"
 	v7 "github.com/docker/docker-agent/pkg/config/v7"
 	v8 "github.com/docker/docker-agent/pkg/config/v8"
+	v9 "github.com/docker/docker-agent/pkg/config/v9"
 )
+
+// v9 is the snapshot of the config schema before the harness feature (version "9").
+// latest is version "10" which adds the harness: key to AgentConfig.
+var _ = v9.Version // ensure v9 is used
 
 func versions() (map[string]func([]byte) (any, error), []func(any, []byte) (any, error)) {
 	parsers := map[string]func([]byte) (any, error){}
@@ -26,6 +31,7 @@ func versions() (map[string]func([]byte) (any, error), []func(any, []byte) (any,
 	v6.Register(parsers, &upgraders)
 	v7.Register(parsers, &upgraders)
 	v8.Register(parsers, &upgraders)
+	v9.Register(parsers, &upgraders)
 	latest.Register(parsers, &upgraders)
 
 	return parsers, upgraders

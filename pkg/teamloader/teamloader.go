@@ -182,50 +182,60 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			opts = append(opts, agent.WithCache(c))
 		}
 
-		models, err := getModelsForAgent(ctx, cfg, &agentConfig, autoModel, runConfig)
-		if err != nil {
-			// Return auto model fallback errors and DMR not installed errors directly
-			// without wrapping to provide cleaner messages
-			if _, ok := errors.AsType[*config.AutoModelFallbackError](err); ok || errors.Is(err, dmr.ErrNotInstalled) {
-				return nil, err
-			}
-			return nil, fmt.Errorf("failed to get models: %w", err)
-		}
-		for _, model := range models {
-			opts = append(opts, agent.WithModel(model))
-		}
-
-		// Load fallback models if configured
-		fallbackModelRefs := agentConfig.GetFallbackModels()
-		if len(fallbackModelRefs) > 0 {
-			fallbackModels, err := getFallbackModelsForAgent(ctx, cfg, &agentConfig, runConfig)
+		if agentConfig.Harness != nil {
+			// Harness-backed agents skip model resolution, fallback, and toolset
+			// construction -- the harness process owns all of that.
+			spec, err := buildHarnessSpec(agentConfig.Harness)
 			if err != nil {
-				return nil, fmt.Errorf("failed to get fallback models: %w", err)
+				return nil, fmt.Errorf("agent %q: %w", agentConfig.Name, err)
 			}
-			for _, model := range fallbackModels {
-				opts = append(opts, agent.WithFallbackModel(model))
+			opts = append(opts, agent.WithHarness(spec))
+		} else {
+			models, err := getModelsForAgent(ctx, cfg, &agentConfig, autoModel, runConfig)
+			if err != nil {
+				// Return auto model fallback errors and DMR not installed errors directly
+				// without wrapping to provide cleaner messages
+				if _, ok := errors.AsType[*config.AutoModelFallbackError](err); ok || errors.Is(err, dmr.ErrNotInstalled) {
+					return nil, err
+				}
+				return nil, fmt.Errorf("failed to get models: %w", err)
 			}
-			opts = append(opts,
-				agent.WithFallbackRetries(agentConfig.GetFallbackRetries()),
-				agent.WithFallbackCooldown(agentConfig.GetFallbackCooldown()),
-			)
-		}
-
-		agentTools, warnings := getToolsForAgent(ctx, &agentConfig, parentDir, runConfig, loadOpts.toolsetRegistry, configName, expander)
-		if len(warnings) > 0 {
-			opts = append(opts, agent.WithLoadTimeWarnings(warnings))
-		}
-
-		// Add skills toolset if skills are enabled
-		if agentConfig.Skills.Enabled() {
-			loadedSkills := skills.Load(agentConfig.Skills.Sources)
-			loadedSkills = filterSkillsByName(loadedSkills, agentConfig.Skills.Include)
-			if len(loadedSkills) > 0 {
-				agentTools = append(agentTools, skillstool.NewSkillsToolset(loadedSkills, runConfig.WorkingDir))
+			for _, model := range models {
+				opts = append(opts, agent.WithModel(model))
 			}
-		}
 
-		opts = append(opts, agent.WithToolSets(agentTools...))
+			// Load fallback models if configured
+			fallbackModelRefs := agentConfig.GetFallbackModels()
+			if len(fallbackModelRefs) > 0 {
+				fallbackModels, err := getFallbackModelsForAgent(ctx, cfg, &agentConfig, runConfig)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get fallback models: %w", err)
+				}
+				for _, model := range fallbackModels {
+					opts = append(opts, agent.WithFallbackModel(model))
+				}
+				opts = append(opts,
+					agent.WithFallbackRetries(agentConfig.GetFallbackRetries()),
+					agent.WithFallbackCooldown(agentConfig.GetFallbackCooldown()),
+				)
+			}
+
+			agentTools, warnings := getToolsForAgent(ctx, &agentConfig, parentDir, runConfig, loadOpts.toolsetRegistry, configName, expander)
+			if len(warnings) > 0 {
+				opts = append(opts, agent.WithLoadTimeWarnings(warnings))
+			}
+
+			// Add skills toolset if skills are enabled
+			if agentConfig.Skills.Enabled() {
+				loadedSkills := skills.Load(agentConfig.Skills.Sources)
+				loadedSkills = filterSkillsByName(loadedSkills, agentConfig.Skills.Include)
+				if len(loadedSkills) > 0 {
+					agentTools = append(agentTools, skillstool.NewSkillsToolset(loadedSkills, runConfig.WorkingDir))
+				}
+			}
+
+			opts = append(opts, agent.WithToolSets(agentTools...))
+		}
 
 		ag := agent.New(agentConfig.Name, expander.Expand(ctx, agentConfig.Instruction, nil), opts...)
 		agents = append(agents, ag)

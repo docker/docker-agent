@@ -1,4 +1,4 @@
-package latest
+package v9
 
 import (
 	"errors"
@@ -33,11 +33,6 @@ func (t *Config) Validate() error {
 	for i := range t.Agents {
 		agent := &t.Agents[i]
 
-		// Validate harness config
-		if err := agent.validateHarness(); err != nil {
-			return err
-		}
-
 		// Validate fallback config
 		if err := agent.validateFallback(); err != nil {
 			return err
@@ -55,42 +50,6 @@ func (t *Config) Validate() error {
 		}
 	}
 
-	return nil
-}
-
-// validateHarness validates the harness configuration for an agent.
-func (a *AgentConfig) validateHarness() error {
-	if a.Harness == nil {
-		return nil
-	}
-	if a.Model != "" {
-		return fmt.Errorf("agent %q: model and harness are mutually exclusive", a.Name)
-	}
-	if a.Harness.Type == "" {
-		return fmt.Errorf("agent %q: harness.type is required", a.Name)
-	}
-	validTypes := map[string]bool{
-		"claude-code": true,
-		"codex":       true,
-		"opencode":    true,
-		"copilot":     true,
-		"openclaw":    true,
-	}
-	if !validTypes[a.Harness.Type] {
-		return fmt.Errorf("agent %q: harness.type %q is not supported; valid values: claude-code, codex, opencode, copilot, openclaw", a.Name, a.Harness.Type)
-	}
-	if len(a.SubAgents) > 0 || len(a.Handoffs) > 0 {
-		return fmt.Errorf("agent %q: harness-backed agents cannot have sub_agents or handoffs in v1", a.Name)
-	}
-	if a.Harness.PermissionPolicy != nil {
-		pp := a.Harness.PermissionPolicy
-		if pp.Mode == "auto_allow" && !pp.IUnderstandTheRisk {
-			return fmt.Errorf("agent %q: permission_policy.auto_allow requires i_understand_the_risk: true", a.Name)
-		}
-		if pp.IUnderstandTheRisk && pp.Mode != "auto_allow" {
-			return fmt.Errorf("agent %q: i_understand_the_risk: true has no effect without permission_policy.mode: auto_allow", a.Name)
-		}
-	}
 	return nil
 }
 

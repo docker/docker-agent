@@ -190,3 +190,12 @@ func WithCache(c *cache.Cache) Opt {
 		a.cache = c
 	}
 }
+
+// WithHarness marks the agent as harness-backed. Mutually exclusive with WithModel.
+// When set, the runtime dispatches sub-sessions to the external harness process
+// instead of the model-backed agent loop.
+func WithHarness(spec *HarnessSpec) Opt {
+	return func(a *Agent) {
+		a.harness = spec
+	}
+}

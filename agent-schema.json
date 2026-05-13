@@ -84,12 +84,16 @@
       "properties": {
         "profile": {
           "type": "string",
-          "description": "Shorthand that picks defaults for all the other fields. 'resilient' (default): auto-restart on failure with exponential backoff. 'strict': fail fast — the agent refuses to start when the toolset is unavailable. 'best-effort': single attempt, no auto-restart.",
-          "enum": ["resilient", "strict", "best-effort"]
+          "description": "Shorthand that picks defaults for all the other fields. 'resilient' (default): auto-restart on failure with exponential backoff. 'strict': fail fast \u2014 the agent refuses to start when the toolset is unavailable. 'best-effort': single attempt, no auto-restart.",
+          "enum": [
+            "resilient",
+            "strict",
+            "best-effort"
+          ]
         },
         "required": {
           "type": "boolean",
-          "description": "Marks the toolset as critical to the agent. NOTE: not yet enforced — a planned eager-startup phase will refuse to start the agent when a required toolset cannot reach Ready within startup_timeout. Defaults to true under the 'strict' profile, false otherwise."
+          "description": "Marks the toolset as critical to the agent. NOTE: not yet enforced \u2014 a planned eager-startup phase will refuse to start the agent when a required toolset cannot reach Ready within startup_timeout. Defaults to true under the 'strict' profile, false otherwise."
         },
         "startup_timeout": {
           "type": "string",
@@ -102,7 +106,11 @@
         "restart": {
           "type": "string",
           "description": "How the supervisor reacts to an unexpected disconnect.",
-          "enum": ["never", "on_failure", "always"]
+          "enum": [
+            "never",
+            "on_failure",
+            "always"
+          ]
         },
         "max_restarts": {
           "type": "integer",
@@ -244,7 +252,7 @@
           ]
         },
         "task_budget": {
-          "description": "Default total-token budget for an agentic task (forwarded to Anthropic as `output_config.task_budget`, with the required `task-budgets-2026-03-13` beta header attached automatically). Configurable on any Claude model — docker-agent does not gate by model name — but at the time of writing only Claude Opus 4.7 honors it. Accepts an integer token count or an object {type: tokens, total: N}.",
+          "description": "Default total-token budget for an agentic task (forwarded to Anthropic as `output_config.task_budget`, with the required `task-budgets-2026-03-13` beta header attached automatically). Configurable on any Claude model \u2014 docker-agent does not gate by model name \u2014 but at the time of writing only Claude Opus 4.7 honors it. Accepts an integer token count or an object {type: tokens, total: N}.",
           "oneOf": [
             {
               "type": "integer",
@@ -256,7 +264,9 @@
               "properties": {
                 "type": {
                   "type": "string",
-                  "enum": ["tokens"],
+                  "enum": [
+                    "tokens"
+                  ],
                   "description": "Budget kind. Only \"tokens\" is supported today."
                 },
                 "total": {
@@ -265,7 +275,9 @@
                   "description": "Total budget value."
                 }
               },
-              "required": ["total"],
+              "required": [
+                "total"
+              ],
               "additionalProperties": false
             }
           ]
@@ -283,7 +295,9 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["workload_identity_federation"],
+          "enum": [
+            "workload_identity_federation"
+          ],
           "description": "Authentication scheme discriminator."
         },
         "workload_identity_federation": {
@@ -291,12 +305,24 @@
           "description": "Parameters for the Anthropic OIDC federation flow. Required when type is workload_identity_federation."
         }
       },
-      "required": ["type"],
+      "required": [
+        "type"
+      ],
       "additionalProperties": false,
       "allOf": [
         {
-          "if": {"properties": {"type": {"const": "workload_identity_federation"}}},
-          "then": {"required": ["workload_identity_federation"]}
+          "if": {
+            "properties": {
+              "type": {
+                "const": "workload_identity_federation"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "workload_identity_federation"
+            ]
+          }
         }
       ]
     },
@@ -323,7 +349,11 @@
           "description": "How to obtain a fresh JWT identity token for each token exchange."
         }
       },
-      "required": ["federation_rule_id", "organization_id", "identity_token"],
+      "required": [
+        "federation_rule_id",
+        "organization_id",
+        "identity_token"
+      ],
       "additionalProperties": false
     },
     "IdentityTokenSourceConfig": {
@@ -340,7 +370,9 @@
         },
         "command": {
           "type": "array",
-          "items": {"type": "string"},
+          "items": {
+            "type": "string"
+          },
           "minItems": 1,
           "description": "Subprocess to execute; stdout is used as the JWT. Re-run on every token exchange."
         },
@@ -350,7 +382,9 @@
         },
         "headers": {
           "type": "object",
-          "additionalProperties": {"type": "string"},
+          "additionalProperties": {
+            "type": "string"
+          },
           "description": "HTTP headers sent with the URL request. Values support ${VAR} expansion. Only valid with 'url'."
         },
         "response_field": {
@@ -359,10 +393,102 @@
         }
       },
       "oneOf": [
-        {"required": ["file"], "not": {"anyOf": [{"required": ["env"]}, {"required": ["command"]}, {"required": ["url"]}]}},
-        {"required": ["env"], "not": {"anyOf": [{"required": ["file"]}, {"required": ["command"]}, {"required": ["url"]}]}},
-        {"required": ["command"], "not": {"anyOf": [{"required": ["file"]}, {"required": ["env"]}, {"required": ["url"]}]}},
-        {"required": ["url"], "not": {"anyOf": [{"required": ["file"]}, {"required": ["env"]}, {"required": ["command"]}]}}
+        {
+          "required": [
+            "file"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "env"
+                ]
+              },
+              {
+                "required": [
+                  "command"
+                ]
+              },
+              {
+                "required": [
+                  "url"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "env"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "file"
+                ]
+              },
+              {
+                "required": [
+                  "command"
+                ]
+              },
+              {
+                "required": [
+                  "url"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "command"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "file"
+                ]
+              },
+              {
+                "required": [
+                  "env"
+                ]
+              },
+              {
+                "required": [
+                  "url"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "url"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "file"
+                ]
+              },
+              {
+                "required": [
+                  "env"
+                ]
+              },
+              {
+                "required": [
+                  "command"
+                ]
+              }
+            ]
+          }
+        }
       ],
       "additionalProperties": false
     },
@@ -432,7 +558,7 @@
         },
         "redact_secrets": {
           "type": "boolean",
-          "description": "When true, the runtime auto-installs the redact_secrets builtin on all three of pre_tool_use (scrubs detected secrets from tool arguments), before_llm_call (scrubs the messages sent to the LLM), and tool_response_transform (scrubs tool output before it reaches event consumers, the persisted session, the post_tool_use hook input, or the next LLM call). The same hook entries can be authored directly in YAML for finer-grained control — see the hooks.tool_response_transform / hooks.before_llm_call / hooks.pre_tool_use sections. Detection uses the portcullis ruleset (GitHub PATs, AWS keys, Stripe / Slack / GitLab tokens, JWTs, private keys, etc.). Each detected span is replaced with the literal '[REDACTED]'."
+          "description": "When true, the runtime auto-installs the redact_secrets builtin on all three of pre_tool_use (scrubs detected secrets from tool arguments), before_llm_call (scrubs the messages sent to the LLM), and tool_response_transform (scrubs tool output before it reaches event consumers, the persisted session, the post_tool_use hook input, or the next LLM call). The same hook entries can be authored directly in YAML for finer-grained control \u2014 see the hooks.tool_response_transform / hooks.before_llm_call / hooks.pre_tool_use sections. Detection uses the portcullis ruleset (GitHub PATs, AWS keys, Stripe / Slack / GitLab tokens, JWTs, private keys, etc.). Each detected span is replaced with the literal '[REDACTED]'."
         },
         "max_iterations": {
           "type": "integer",
@@ -582,13 +708,28 @@
                 "type": "string"
               },
               "examples": [
-                ["local"],
-                ["local", "https://skills.example.com"],
-                ["git", "docker"],
-                ["local", "docker-build"]
+                [
+                  "local"
+                ],
+                [
+                  "local",
+                  "https://skills.example.com"
+                ],
+                [
+                  "git",
+                  "docker"
+                ],
+                [
+                  "local",
+                  "docker-build"
+                ]
               ]
             }
           ]
+        },
+        "harness": {
+          "$ref": "#/definitions/HarnessConfig",
+          "description": "External agent harness. Mutually exclusive with model."
         }
       },
       "additionalProperties": false
@@ -689,7 +830,7 @@
         },
         "post_tool_use": {
           "type": "array",
-          "description": "Hooks that run after a tool completes (both success and failure). The result is delivered in tool_response (failed calls carry an is_error flag and any error text). Returning decision=block or exit code 2 stops the run loop after the current tool batch — useful for circuit-breaker patterns.",
+          "description": "Hooks that run after a tool completes (both success and failure). The result is delivered in tool_response (failed calls carry an is_error flag and any error text). Returning decision=block or exit code 2 stops the run loop after the current tool batch \u2014 useful for circuit-breaker patterns.",
           "items": {
             "$ref": "#/definitions/HookMatcherConfig"
           }
@@ -717,21 +858,21 @@
         },
         "turn_start": {
           "type": "array",
-          "description": "Hooks that run at the start of every agent turn (each model call). Their AdditionalContext is appended as transient system messages for that turn only — it is NOT persisted to the session, so per-turn signals (date, prompt files) are recomputed every turn instead of bloating message history on every resume.",
+          "description": "Hooks that run at the start of every agent turn (each model call). Their AdditionalContext is appended as transient system messages for that turn only \u2014 it is NOT persisted to the session, so per-turn signals (date, prompt files) are recomputed every turn instead of bloating message history on every resume.",
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
         },
         "turn_end": {
           "type": "array",
-          "description": "Hooks that run once per agent turn when the turn finishes — the symmetric counterpart of turn_start. Fires no matter why the turn ended: a normal stop, an error, a hook-driven shutdown, the loop detector, or context cancellation. The reason is reported via the hook input's reason field ('normal', 'continue', 'steered', 'error', 'canceled', 'hook_blocked', 'loop_detected'). Observational; output is ignored.",
+          "description": "Hooks that run once per agent turn when the turn finishes \u2014 the symmetric counterpart of turn_start. Fires no matter why the turn ended: a normal stop, an error, a hook-driven shutdown, the loop detector, or context cancellation. The reason is reported via the hook input's reason field ('normal', 'continue', 'steered', 'error', 'canceled', 'hook_blocked', 'loop_detected'). Observational; output is ignored.",
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
         },
         "before_llm_call": {
           "type": "array",
-          "description": "Hooks that run just before each model call (after turn_start has assembled the messages). Use for observability, cost guardrails, or auditing without contributing system messages — turn_start is the right event for the latter.",
+          "description": "Hooks that run just before each model call (after turn_start has assembled the messages). Use for observability, cost guardrails, or auditing without contributing system messages \u2014 turn_start is the right event for the latter.",
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
@@ -752,7 +893,7 @@
         },
         "pre_compact": {
           "type": "array",
-          "description": "Hooks that run just before the runtime compacts the session transcript into a summary. The trigger is reported in source: 'manual' (user-initiated /compact), 'auto' (proactive threshold), 'overflow' (context-overflow recovery), or 'tool_overflow' (proactive after tool results pushed past the threshold). Hooks may block compaction (decision=block / continue=false / exit code 2) or contribute additional_context that is appended to the compaction prompt — useful for steering the summary without modifying the agent's instruction.",
+          "description": "Hooks that run just before the runtime compacts the session transcript into a summary. The trigger is reported in source: 'manual' (user-initiated /compact), 'auto' (proactive threshold), 'overflow' (context-overflow recovery), or 'tool_overflow' (proactive after tool results pushed past the threshold). Hooks may block compaction (decision=block / continue=false / exit code 2) or contribute additional_context that is appended to the compaction prompt \u2014 useful for steering the summary without modifying the agent's instruction.",
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
@@ -829,14 +970,14 @@
         },
         "after_compaction": {
           "type": "array",
-          "description": "Hooks that run after a successful compaction (a summary was applied to the session). Receives the final summary text in Input.summary alongside input_tokens, output_tokens, context_limit and compaction_reason. Purely observational — hook output is ignored.",
+          "description": "Hooks that run after a successful compaction (a summary was applied to the session). Receives the final summary text in Input.summary alongside input_tokens, output_tokens, context_limit and compaction_reason. Purely observational \u2014 hook output is ignored.",
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
         },
         "tool_response_transform": {
           "type": "array",
-          "description": "Hooks that fire between a tool's execution and the runtime's emission/record of the response, with the rewrite reaching event consumers, the persisted session, the post_tool_use hook input, and the next LLM call. A hook may rewrite the tool's textual output by setting hookSpecificOutput.updated_tool_response — the symmetric counterpart of pre_tool_use's updated_input, applied to tool RESULTS instead of tool ARGUMENTS. The redact_secrets builtin uses this event for the third leg of the redact_secrets feature; custom rewriters can also truncate excessive output, scrub PII, or normalise tool dialects. Tool-matched, like pre_tool_use / post_tool_use.",
+          "description": "Hooks that fire between a tool's execution and the runtime's emission/record of the response, with the rewrite reaching event consumers, the persisted session, the post_tool_use hook input, and the next LLM call. A hook may rewrite the tool's textual output by setting hookSpecificOutput.updated_tool_response \u2014 the symmetric counterpart of pre_tool_use's updated_input, applied to tool RESULTS instead of tool ARGUMENTS. The redact_secrets builtin uses this event for the third leg of the redact_secrets feature; custom rewriters can also truncate excessive output, scrub PII, or normalise tool dialects. Tool-matched, like pre_tool_use / post_tool_use.",
           "items": {
             "$ref": "#/definitions/HookMatcherConfig"
           }
@@ -881,7 +1022,7 @@
         },
         "type": {
           "type": "string",
-          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime; 'model' asks an LLM and translates its reply into the hook's native output (used for LLM-as-a-judge pre_tool_use, summarizers, etc., with no Go code). The docker-agent runtime ships these builtins: 'add_date' (turn_start: today's date), 'add_environment_info' (session_start: cwd, git, OS, arch), 'add_prompt_files' (turn_start: contents of named files looked up in the workdir hierarchy and the home directory), 'add_git_status' (turn_start: `git status --short --branch`), 'add_git_diff' (turn_start: `git diff --stat`, or full diff with args=['full']), 'add_directory_listing' (session_start: top-level entries of cwd), 'add_user_info' (session_start: current OS user and hostname), 'add_recent_commits' (session_start: `git log --oneline -n N`, default N=10, override via args=['<N>']), 'max_iterations' (before_llm_call: hard stop after N model calls; args=['<N>'] required), 'redact_secrets' (pre_tool_use / before_llm_call / tool_response_transform: scrubs detected secrets from tool arguments, outgoing chat content, and tool output — the same builtin handles all three legs and dispatches on the event; the matching agent-level 'redact_secrets: true' flag auto-injects the entries for all three), 'unload' (on_agent_switch: POSTs `{\"model\": \"<id>\"}` to the previous agent's DMR model endpoints — e.g. asks Docker Model Runner to release the GPU/RAM held by the just-departing model so the next agent's model can claim it. Pure HTTP, no provider-specific runtime coupling; non-DMR providers are silently skipped. Opt in by adding the entry to the agent's hooks.on_agent_switch list).",
+          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime; 'model' asks an LLM and translates its reply into the hook's native output (used for LLM-as-a-judge pre_tool_use, summarizers, etc., with no Go code). The docker-agent runtime ships these builtins: 'add_date' (turn_start: today's date), 'add_environment_info' (session_start: cwd, git, OS, arch), 'add_prompt_files' (turn_start: contents of named files looked up in the workdir hierarchy and the home directory), 'add_git_status' (turn_start: `git status --short --branch`), 'add_git_diff' (turn_start: `git diff --stat`, or full diff with args=['full']), 'add_directory_listing' (session_start: top-level entries of cwd), 'add_user_info' (session_start: current OS user and hostname), 'add_recent_commits' (session_start: `git log --oneline -n N`, default N=10, override via args=['<N>']), 'max_iterations' (before_llm_call: hard stop after N model calls; args=['<N>'] required), 'redact_secrets' (pre_tool_use / before_llm_call / tool_response_transform: scrubs detected secrets from tool arguments, outgoing chat content, and tool output \u2014 the same builtin handles all three legs and dispatches on the event; the matching agent-level 'redact_secrets: true' flag auto-injects the entries for all three), 'unload' (on_agent_switch: POSTs `{\"model\": \"<id>\"}` to the previous agent's DMR model endpoints \u2014 e.g. asks Docker Model Runner to release the GPU/RAM held by the just-departing model so the next agent's model can claim it. Pure HTTP, no provider-specific runtime coupling; non-DMR providers are silently skipped. Opt in by adding the entry to the agent's hooks.on_agent_switch list).",
           "enum": [
             "command",
             "builtin",
@@ -945,16 +1086,56 @@
       "additionalProperties": false,
       "allOf": [
         {
-          "if": {"properties": {"type": {"const": "command"}}, "required": ["type"]},
-          "then": {"required": ["command"]}
+          "if": {
+            "properties": {
+              "type": {
+                "const": "command"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "command"
+            ]
+          }
         },
         {
-          "if": {"properties": {"type": {"const": "builtin"}}, "required": ["type"]},
-          "then": {"required": ["command"]}
+          "if": {
+            "properties": {
+              "type": {
+                "const": "builtin"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "command"
+            ]
+          }
         },
         {
-          "if": {"properties": {"type": {"const": "model"}}, "required": ["type"]},
-          "then": {"required": ["model", "prompt"]}
+          "if": {
+            "properties": {
+              "type": {
+                "const": "model"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "model",
+              "prompt"
+            ]
+          }
         }
       ]
     },
@@ -1065,7 +1246,7 @@
           ]
         },
         "task_budget": {
-          "description": "Total-token budget for a full agentic task (forwarded to Anthropic as `output_config.task_budget`, with the required `task-budgets-2026-03-13` beta header attached automatically). Limits the combined tokens spent on thinking, tool calls, and output across the whole task. Configurable on any Claude model — docker-agent does not gate by model name — but at the time of writing only Claude Opus 4.7 honors it. Accepts an integer token count or an object {type: tokens, total: N}.",
+          "description": "Total-token budget for a full agentic task (forwarded to Anthropic as `output_config.task_budget`, with the required `task-budgets-2026-03-13` beta header attached automatically). Limits the combined tokens spent on thinking, tool calls, and output across the whole task. Configurable on any Claude model \u2014 docker-agent does not gate by model name \u2014 but at the time of writing only Claude Opus 4.7 honors it. Accepts an integer token count or an object {type: tokens, total: N}.",
           "oneOf": [
             {
               "type": "integer",
@@ -1077,7 +1258,9 @@
               "properties": {
                 "type": {
                   "type": "string",
-                  "enum": ["tokens"],
+                  "enum": [
+                    "tokens"
+                  ],
                   "description": "Budget kind. Only \"tokens\" is supported today."
                 },
                 "total": {
@@ -1086,14 +1269,19 @@
                   "description": "Total budget value."
                 }
               },
-              "required": ["total"],
+              "required": [
+                "total"
+              ],
               "additionalProperties": false
             }
           ],
           "examples": [
             64000,
             128000,
-            { "type": "tokens", "total": 128000 }
+            {
+              "type": "tokens",
+              "total": 128000
+            }
           ]
         },
         "routing": {
@@ -1485,9 +1673,17 @@
             "type": "string"
           },
           "examples": [
-            ["."],
-            [".", "~/projects"],
-            ["/srv/data", "~/scratch"]
+            [
+              "."
+            ],
+            [
+              ".",
+              "~/projects"
+            ],
+            [
+              "/srv/data",
+              "~/scratch"
+            ]
           ]
         },
         "deny_list": {
@@ -1497,8 +1693,14 @@
             "type": "string"
           },
           "examples": [
-            ["~/.ssh", "~/.aws"],
-            ["/etc", "/var/lib"]
+            [
+              "~/.ssh",
+              "~/.aws"
+            ],
+            [
+              "/etc",
+              "/var/lib"
+            ]
           ]
         },
         "defer": {
@@ -1536,9 +1738,17 @@
             "type": "string"
           },
           "examples": [
-            ["docker.com", "docs.docker.com"],
-            ["github.com", "raw.githubusercontent.com"],
-            ["*.example.com"]
+            [
+              "docker.com",
+              "docs.docker.com"
+            ],
+            [
+              "github.com",
+              "raw.githubusercontent.com"
+            ],
+            [
+              "*.example.com"
+            ]
           ]
         },
         "blocked_domains": {
@@ -1548,14 +1758,21 @@
             "type": "string"
           },
           "examples": [
-            ["internal.example.com"],
-            ["169.254.169.254"],
-            ["169.254.0.0/16", "10.0.0.0/8"]
+            [
+              "internal.example.com"
+            ],
+            [
+              "169.254.169.254"
+            ],
+            [
+              "169.254.0.0/16",
+              "10.0.0.0/8"
+            ]
           ]
         },
         "allow_private_ips": {
           "type": "boolean",
-          "description": "Opt in to dialling non-public IP addresses (only valid for type 'fetch'). By default the fetch tool refuses connections — after DNS resolution, so DNS rebinding is also blocked — to loopback, RFC1918 private ranges, link-local (including the cloud metadata endpoint at 169.254.169.254), multicast and the unspecified address. Set this to true when an agent legitimately needs to call internal services. 'allowed_domains' / 'blocked_domains' are evaluated independently and still apply."
+          "description": "Opt in to dialling non-public IP addresses (only valid for type 'fetch'). By default the fetch tool refuses connections \u2014 after DNS resolution, so DNS rebinding is also blocked \u2014 to loopback, RFC1918 private ranges, link-local (including the cloud metadata endpoint at 169.254.169.254), multicast and the unspecified address. Set this to true when an agent legitimately needs to call internal services. 'allowed_domains' / 'blocked_domains' are evaluated independently and still apply."
         },
         "url": {
           "type": "string",
@@ -1564,7 +1781,7 @@
         },
         "headers": {
           "type": "object",
-          "description": "HTTP headers (supports ${env.VAR} interpolation). Valid for type 'openapi', 'a2a', and 'fetch'. For 'fetch', the headers are sent on every request the toolset issues — typical use is supplying API tokens (e.g. Authorization: Bearer ${env.MY_TOKEN}). Caller-supplied values override the format-driven Accept header and the default User-Agent.",
+          "description": "HTTP headers (supports ${env.VAR} interpolation). Valid for type 'openapi', 'a2a', and 'fetch'. For 'fetch', the headers are sent on every request the toolset issues \u2014 typical use is supplying API tokens (e.g. Authorization: Bearer ${env.MY_TOKEN}). Caller-supplied values override the format-driven Accept header and the default User-Agent.",
           "additionalProperties": {
             "type": "string"
           }
@@ -2240,6 +2457,79 @@
       "required": [
         "clientId"
       ]
+    },
+    "HarnessConfig": {
+      "type": "object",
+      "description": "External agent harness configuration. When set, the runtime builds a harness-backed sub-session instead of a model-backed one. Mutually exclusive with model.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "Harness provider type.",
+          "enum": [
+            "claude-code",
+            "codex",
+            "opencode",
+            "copilot",
+            "openclaw"
+          ]
+        },
+        "command": {
+          "type": "string",
+          "description": "Override the harness binary path."
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra arguments appended to the provider default args."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Environment variables for the spawned process."
+        },
+        "working_dir": {
+          "type": "string",
+          "description": "Override the spawned process working directory."
+        },
+        "timeout": {
+          "description": "Maximum wall-clock time for a single sub-session run."
+        },
+        "config": {
+          "type": "object",
+          "description": "Adapter-specific configuration knobs."
+        },
+        "permission_policy": {
+          "$ref": "#/definitions/PermissionPolicyConfig"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "PermissionPolicyConfig": {
+      "type": "object",
+      "description": "Controls how a harness-backed agent handles tool permissions.",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Permission mode: ask (default), auto_allow, deny_all.",
+          "enum": [
+            "ask",
+            "auto_allow",
+            "deny_all"
+          ]
+        },
+        "i_understand_the_risk": {
+          "type": "boolean",
+          "description": "Must be true when mode is auto_allow."
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

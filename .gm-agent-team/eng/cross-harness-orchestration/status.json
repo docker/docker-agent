@@ -1,0 +1,30 @@
+{
+  "feature": "cross-harness-orchestration",
+  "task": "Cross-harness orchestration layer: dispatch tasks to Claude Code, Codex, OpenCode, Copilot CLI, OpenClaw as subagents from docker-agent orchestrator",
+  "branch": "gm/cross-harness-orchestration",
+  "is_git": true,
+  "repo_root": "/Users/mcavage/dev/docker-agent",
+  "baseline": {
+    "builds": true,
+    "tests_pass": false,
+    "pre_existing_failures": ["pkg/config TestCheckRequiredEnvVars", "pkg/teamloader TestLoadExamples (dmr/unload_on_switch)"],
+    "test_count_approx": 800
+  },
+  "stages": {
+    "prd":          { "status": "complete", "artifact": "prd-v2.md" },
+    "arch-review":  { "status": "complete", "artifact": "arch-review.md", "verdict": "revise" },
+    "dx-review":    { "status": "complete", "artifact": "dx-review.md", "verdict": "suggestions" },
+    "prd-v2":       { "status": "complete", "artifact": "prd-v2.md" },
+    "arch-spec":    { "status": "complete", "artifact": "arch-spec-v2.md" },
+    "impl-plan":    { "status": "complete", "artifact": "impl-plan-v2.md" },
+    "consistency":  { "status": "complete", "artifact": "consistency-check.md", "verdict": "pass-after-revision" },
+    "dx-review-2":  { "status": "complete", "artifact": "dx-review-arch.md", "verdict": "suggestions-incorporated" },
+    "impl":         { "status": "pending", "units_done": 0, "units_total": null },
+    "code-review":  { "status": "pending", "verdict": null },
+    "qa":           { "status": "pending", "verdict": null },
+    "security":     { "status": "pending", "verdict": null },
+    "verification": { "status": "pending" }
+  },
+  "escalated": false,
+  "pr_url": null
+}

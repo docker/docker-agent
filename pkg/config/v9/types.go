@@ -1,4 +1,4 @@
-package latest
+package v9
 
 import (
 	"cmp"
@@ -16,7 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/effort"
 )
 
-const Version = "10"
+const Version = "9"
 
 // Config represents the entire configuration file
 type Config struct {
@@ -368,43 +368,10 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(d.String())
 }
 
-// HarnessConfig declares an external agent harness that owns the agent loop.
-// When set on AgentConfig, the runtime builds a harness-backed sub-session
-// instead of a model-backed one. Mutually exclusive with Model.
-type HarnessConfig struct {
-	// Type names the harness provider. Supported: claude-code, codex, opencode, copilot, openclaw.
-	Type string `json:"type" yaml:"type"`
-	// Command overrides the harness binary path. Defaults to the provider default.
-	Command string `json:"command,omitempty" yaml:"command,omitempty"`
-	// Args are extra arguments appended to the provider's default invocation.
-	Args []string `json:"args,omitempty" yaml:"args,omitempty"`
-	// Env adds or overrides environment variables for the spawned process.
-	Env map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	// WorkingDir overrides the spawned process CWD. Defaults to the session working dir.
-	WorkingDir string `json:"working_dir,omitempty" yaml:"working_dir,omitempty"`
-	// Timeout is the maximum wall-clock time for a single sub-session run.
-	Timeout Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-	// Config holds adapter-specific knobs. Unknown keys are rejected at load time.
-	// Error format: unknown field "<key>" in harness config for agent "<name>"
-	//   valid fields: type, command, args, env, working_dir, timeout, config, permission_policy
-	Config map[string]any `json:"config,omitempty" yaml:"config,omitempty"`
-	// PermissionPolicy configures how the harness handles tool permissions.
-	PermissionPolicy *PermissionPolicyConfig `json:"permission_policy,omitempty" yaml:"permission_policy,omitempty"`
-}
-
-// PermissionPolicyConfig controls how a harness-backed agent handles tool permissions.
-type PermissionPolicyConfig struct {
-	// Mode is one of: ask (default), auto_allow, deny_all.
-	Mode string `json:"mode,omitempty" yaml:"mode,omitempty"`
-	// IUnderstandTheRisk must be true when Mode is auto_allow.
-	IUnderstandTheRisk bool `json:"i_understand_the_risk,omitempty" yaml:"i_understand_the_risk,omitempty"`
-}
-
 // AgentConfig represents a single agent configuration
 type AgentConfig struct {
 	Name           string
 	Model          string          `json:"model,omitempty"`
-	Harness        *HarnessConfig  `json:"harness,omitempty" yaml:"harness,omitempty"`
 	Fallback       *FallbackConfig `json:"fallback,omitempty"`
 	Description    string          `json:"description,omitempty"`
 	WelcomeMessage string          `json:"welcome_message,omitempty"`

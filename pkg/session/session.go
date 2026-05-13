@@ -167,6 +167,11 @@ type Session struct {
 	// concurrently on different agents.
 	AgentName string `json:"-"`
 
+	// HarnessSession stores per-agent harness session tokens for multi-turn
+	// harness sub-sessions. Key is the agent name; value is the adapter-opaque
+	// resume token (e.g. Claude Code session ID, Codex thread ID).
+	HarnessSession map[string]string `json:"harness_session,omitempty"`
+
 	// ParentID indicates this is a sub-session created by task transfer.
 	// Sub-sessions are not persisted as standalone entries; they are embedded
 	// within the parent session's Messages array.
@@ -781,6 +786,26 @@ func New(opts ...Opt) *Session {
 
 	slog.Debug("Creating new session", "session_id", s.ID)
 	return s
+}
+
+// GetHarnessToken returns the harness resume token for the named agent, or "".
+func (s *Session) GetHarnessToken(agentName string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.HarnessSession == nil {
+		return ""
+	}
+	return s.HarnessSession[agentName]
+}
+
+// SetHarnessToken stores a harness resume token for the named agent.
+func (s *Session) SetHarnessToken(agentName, token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.HarnessSession == nil {
+		s.HarnessSession = make(map[string]string)
+	}
+	s.HarnessSession[agentName] = token
 }
 
 func markLastMessageAsCacheControl(messages []chat.Message) {
