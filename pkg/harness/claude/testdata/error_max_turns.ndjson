@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","uuid":"evt-001","session_id":"sess-ghi789","model":"claude-sonnet-4-5","tools":[]}
+{"type":"result","subtype":"error_max_turns","uuid":"evt-002","session_id":"sess-ghi789","is_error":true,"errors":["max turns reached"],"duration_ms":5000,"total_cost_usd":0.01,"usage":{"input_tokens":500,"output_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}

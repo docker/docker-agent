@@ -246,13 +246,23 @@ func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, f
 // building the sub-session, driving RunStream, and recording the
 // sub-session on the parent.
 func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Session, evts EventSink, req delegationRequest) (*tools.ToolCallResult, error) {
+	// Harness-backed agents use a separate execution path that drives an
+	// external process instead of the model-backed loop.
+	child, err := r.team.Agent(req.AgentName)
+	if err != nil {
+		return nil, err
+	}
+	if child.HasHarness() {
+		return r.runHarnessForwarding(ctx, parent, evts, req)
+	}
+
 	span := trace.SpanFromContext(ctx)
 
 	callerAgent, err := r.team.Agent(r.CurrentAgentName())
 	if err != nil {
 		return nil, fmt.Errorf("current agent not found: %w", err)
 	}
-	child, err := r.team.Agent(req.AgentName)
+	child, err = r.team.Agent(req.AgentName)
 	if err != nil {
 		return nil, err
 	}
@@ -311,6 +321,11 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	child, err := r.team.Agent(cfg.AgentName)
 	if err != nil {
 		return &agenttool.RunResult{ErrMsg: fmt.Sprintf("agent %q not found: %s", cfg.AgentName, err)}
+	}
+
+	// Harness-backed agents use a separate execution path.
+	if child.HasHarness() {
+		return r.runHarnessCollecting(ctx, parent, cfg, onContent)
 	}
 
 	s := newSubSession(parent, cfg, child)

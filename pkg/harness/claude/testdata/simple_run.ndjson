@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","uuid":"evt-001","session_id":"sess-abc123","model":"claude-sonnet-4-5","tools":[{"name":"Read"},{"name":"Bash"}]}
+{"type":"assistant","uuid":"evt-002","session_id":"sess-abc123","message":{"id":"msg-001","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"I'll help you with that."}],"stop_reason":"end_turn"}}
+{"type":"result","subtype":"success","uuid":"evt-003","session_id":"sess-abc123","result":"I'll help you with that.","is_error":false,"duration_ms":1234,"total_cost_usd":0.001,"usage":{"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}
