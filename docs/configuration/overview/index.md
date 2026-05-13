@@ -225,10 +225,10 @@ For YAML editor autocompletion and validation, use the [Docker Agent JSON Schema
 
 ## Config Versioning
 
-docker-agent configs are versioned. The current version is `8`. Add the version at the top of your config:
+docker-agent configs are versioned. The current version is `10`. Add the version at the top of your config:
 
 ```yaml
-version: 8
+version: "10"
 
 agents:
   root:

@@ -3,6 +3,20 @@
 All notable changes to this project will be documented in this file.
 
 
+## [Unreleased]
+
+### Added
+
+- **Cross-harness orchestration.** Agents can now be backed by external agent runtimes instead of a model. Declare `harness: { type: claude-code }` on any subagent and the orchestrator dispatches tasks to the Claude Code CLI, Codex CLI, OpenCode, Copilot CLI, or OpenClaw — getting results back through docker-agent's normal event stream, TUI, and session model.
+  - Supported harnesses: `claude-code`, `codex`, `opencode`, `copilot` (via ACP), `openclaw` (via ACP).
+  - Config version bumped to `10`. Version `9` configs upgrade automatically.
+  - New `harness:` key on agent config, mutually exclusive with `model:`.
+  - Multi-turn sessions: native resume for Claude Code; simulated history prepend for Codex/OpenCode.
+  - Sandbox: ACP file operations confined to the session working directory.
+  - Permission policy: `ask` (default), `auto_allow` (requires `i_understand_the_risk: true`), `deny_all`.
+  - See `examples/harness-team.yaml` and [Agent Configuration docs](docs/configuration/agents/index.md#harness-backed-agents).
+
+
 ## [v1.59.0] - 2026-05-13
 
 This release adds XML tool call parsing for better model compatibility, performance improvements for TUI rendering, and enhanced remote runtime capabilities.

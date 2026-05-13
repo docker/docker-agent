@@ -14,7 +14,20 @@ _Complete reference for defining agents in your YAML configuration._
 ```yaml
 agents:
   agent_name:
-    model: string # Required: model reference
+    model: string # Required (unless harness is set): model reference
+    harness: # Optional: external harness runtime (mutually exclusive with model)
+      type: string # Required: claude-code | codex | opencode | copilot | openclaw
+      command: string # Optional: override binary path
+      args: [list] # Optional: extra CLI arguments
+      env: # Optional: environment variables injected into the subprocess
+        KEY: value
+      working_dir: string # Optional: override working directory (default: session working dir)
+      timeout: duration # Optional: max wall-clock time per run (default: 10m)
+      config: # Optional: adapter-specific knobs (see harness docs)
+        key: value
+      permission_policy: # Optional: how the harness handles tool permissions
+        mode: ask | auto_allow | deny_all # default: ask (deny for ACP)
+        i_understand_the_risk: boolean # Required when mode is auto_allow
     description: string # Required: what this agent does
     instruction: string # Required: system prompt
     sub_agents: [list] # Optional: local or external sub-agent references
@@ -68,7 +81,8 @@ agents:
 
 | Property                    | Type    | Required | Description                                                                                                                                                                   |
 | --------------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`                     | string  | ✓        | Model reference. Either inline (`openai/gpt-5-mini`) or a named model from the `models` section.                                                                              |
+| `model`                     | string  | ✓*       | Model reference. Either inline (`openai/gpt-5-mini`) or a named model from the `models` section. Required unless `harness` is set.                                            |
+| `harness`                   | object  | ✗        | External harness runtime. When set, the agent delegates to an external CLI (Claude Code, Codex, etc.) instead of calling a model directly. Mutually exclusive with `model`. See [Harness-Backed Agents](#harness-backed-agents). |
 | `description`               | string  | ✓        | Brief description of the agent's purpose. Used by coordinators to decide delegation.                                                                                          |
 | `instruction`               | string  | ✓        | System prompt that defines the agent's behavior, personality, and constraints.                                                                                                |
 | `sub_agents`                | array   | ✗        | List of agent names or external OCI references this agent can delegate to. Supports local agents, registry references (e.g., `agentcatalog/pirate`), and named references (`name:reference`). Automatically enables the `transfer_task` tool. See [External Sub-Agents]({{ '/concepts/multi-agent/#external-sub-agents-from-registries' | relative_url }}). |
@@ -328,3 +342,62 @@ agents:
       - type: memory
         path: ./research.db
 ```
+
+## Harness-Backed Agents
+
+A harness-backed agent delegates its work to an external agent CLI instead of calling a model directly. The external process owns its own agent loop, tool execution, and context management. docker-agent orchestrates it as a subagent: the orchestrator sends a task, the harness runs it, and the result comes back through docker-agent's normal event stream.
+
+**Supported harnesses:**
+
+| `type` | Binary | Install |
+|---|---|---|
+| `claude-code` | `claude` | `npm install -g @anthropic-ai/claude-code` |
+| `codex` | `codex` | `npm install -g @openai/codex` |
+| `opencode` | `opencode` | `npm install -g opencode-ai` |
+| `copilot` | `copilot` | `npm install -g @github/copilot-cli` |
+| `openclaw` | `openclaw` | `npm install -g openclaw` |
+
+**Harness agents are subagents only.** Only model-backed agents can be orchestrators in v1. Harness agents cannot have `sub_agents` or `handoffs`.
+
+### Example
+
+```yaml
+version: "10"
+agents:
+  root:
+    model: anthropic/claude-sonnet-4-5
+    description: Orchestrator that routes coding tasks
+    instruction: Route coding tasks to the appropriate specialist.
+    sub_agents:
+      - claude-coder
+
+  claude-coder:
+    description: Claude Code CLI for complex refactors
+    instruction: You are a senior software engineer. Be precise.
+    harness:
+      type: claude-code
+      args:
+        - --model
+        - claude-sonnet-4-5
+      env:
+        ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+```
+
+### Permission policy
+
+By default, ACP harnesses (copilot, openclaw) deny tool permission requests. To auto-allow:
+
+```yaml
+harness:
+  type: copilot
+  permission_policy:
+    mode: auto_allow
+    i_understand_the_risk: true
+```
+
+### Known limitations (v1)
+
+- `opencode` CLI does not support per-call system prompts. The `instruction` is prepended to the task as a workaround.
+- Cursor is not supported in v1 (output schema not stable).
+- ACP terminal execution (`terminal/*`) is not supported in v1; harnesses that require it will receive an error.
+- Multi-turn sessions are supported for `claude-code` (native resume) and simulated for `codex`/`opencode` (history prepend).
