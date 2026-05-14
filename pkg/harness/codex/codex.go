@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 
 	extharness "github.com/rumpl/harness"
 
@@ -83,6 +84,10 @@ func (a *Adapter) RunStreaming(ctx context.Context, req harness.SubSessionReques
 	cmd := exec.CommandContext(ctx, "codex", args...) //nolint:gosec
 	cmd.Dir = req.WorkingDir
 	cmd.Env = buildEnv(req)
+	// Put the harness subprocess (and any bash/tool children it spawns) in
+	// its own process group so they cannot interact with docker-agent's
+	// controlling terminal and corrupt the TUI state.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
