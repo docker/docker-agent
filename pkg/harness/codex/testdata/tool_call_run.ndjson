@@ -1,4 +1,5 @@
 {"type":"thread.started","thread_id":"thread-def456","model":"codex-mini"}
+{"type":"item.started","item":{"type":"command_execution","id":"item-001","command":"ls /tmp"}}
 {"type":"item.completed","item":{"type":"command_execution","id":"item-001","command":"ls /tmp","output":"file.txt\n","exit_code":0}}
-{"type":"item.completed","item":{"type":"message","id":"item-002","content":"The directory contains: file.txt","role":"assistant"}}
-{"type":"turn.completed","usage":{"input_tokens":150,"output_tokens":25},"cost_usd":0.002}
+{"type":"item.completed","item":{"type":"agent_message","id":"item-002","text":"The directory contains: file.txt"}}
+{"type":"turn.completed","usage":{"input_tokens":150,"output_tokens":25,"cached_input_tokens":0}}

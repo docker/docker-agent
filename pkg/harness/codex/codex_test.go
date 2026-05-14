@@ -5,294 +5,192 @@ import (
 	"strings"
 	"testing"
 
+	extharness "github.com/rumpl/harness"
+
 	"github.com/docker/docker-agent/pkg/harness"
 )
 
-// collectSink collects all emitted events for test assertions.
-type collectSink struct {
-	events []harness.Event
-}
-
-func (c *collectSink) Emit(e harness.Event) {
-	c.events = append(c.events, e)
-}
-
-func (c *collectSink) ofType(t string) []harness.Event {
+// parseFixture parses every JSONL line in path through the stateless stream
+// parser and returns the collected events.
+func parseFixture(t *testing.T, path string) []harness.Event {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
 	var out []harness.Event
-	for _, e := range c.events {
-		switch e.(type) {
-		case harness.RunStart:
-			if t == "RunStart" {
-				out = append(out, e)
-			}
-		case harness.TextStart:
-			if t == "TextStart" {
-				out = append(out, e)
-			}
-		case harness.TextDelta:
-			if t == "TextDelta" {
-				out = append(out, e)
-			}
-		case harness.TextEnd:
-			if t == "TextEnd" {
-				out = append(out, e)
-			}
-		case harness.ReasoningStart:
-			if t == "ReasoningStart" {
-				out = append(out, e)
-			}
-		case harness.ReasoningDelta:
-			if t == "ReasoningDelta" {
-				out = append(out, e)
-			}
-		case harness.ReasoningEnd:
-			if t == "ReasoningEnd" {
-				out = append(out, e)
-			}
-		case harness.ToolCallStart:
-			if t == "ToolCallStart" {
-				out = append(out, e)
-			}
-		case harness.ToolCallEnd:
-			if t == "ToolCallEnd" {
-				out = append(out, e)
-			}
-		case harness.ToolCallResult:
-			if t == "ToolCallResult" {
-				out = append(out, e)
-			}
-		case harness.RunEnd:
-			if t == "RunEnd" {
-				out = append(out, e)
-			}
-		case harness.RunError:
-			if t == "RunError" {
-				out = append(out, e)
-			}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		out = append(out, parseStreamLine(line)...)
+	}
+	return out
+}
+
+func eventsOfType(events []harness.Event, t extharness.EventType) []harness.Event {
+	var out []harness.Event
+	for _, e := range events {
+		if e.Type == t {
+			out = append(out, e)
 		}
 	}
 	return out
 }
 
-func translateFixture(t *testing.T, path string) *collectSink {
-	t.Helper()
-	f, err := os.Open(path)
+func TestParseSimpleRun(t *testing.T) {
+	events := parseFixture(t, "testdata/simple_run.ndjson")
+
+	// agent_message yields EventText + EventResult; turn.completed yields a
+	// second EventResult carrying usage.
+	texts := eventsOfType(events, extharness.EventText)
+	if len(texts) != 1 {
+		t.Fatalf("expected 1 EventText, got %d", len(texts))
+	}
+	if texts[0].Text != "I'll help you." {
+		t.Errorf("Text = %q, want assistant message", texts[0].Text)
+	}
+
+	results := eventsOfType(events, extharness.EventResult)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 EventResult (agent_message + turn.completed), got %d", len(results))
+	}
+	// First result mirrors the agent message text.
+	if results[0].Result != "I'll help you." {
+		t.Errorf("results[0].Result = %q, want assistant message", results[0].Result)
+	}
+	// Second result carries usage.
+	if results[1].Usage == nil {
+		t.Fatal("results[1].Usage is nil; expected usage from turn.completed")
+	}
+	if results[1].Usage.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", results[1].Usage.InputTokens)
+	}
+	if results[1].Usage.OutputTokens != 20 {
+		t.Errorf("OutputTokens = %d, want 20", results[1].Usage.OutputTokens)
+	}
+}
+
+func TestParseToolCallRun(t *testing.T) {
+	events := parseFixture(t, "testdata/tool_call_run.ndjson")
+
+	calls := eventsOfType(events, extharness.EventToolCall)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 EventToolCall, got %d", len(calls))
+	}
+	if calls[0].ToolName != "Bash" {
+		t.Errorf("ToolName = %q, want Bash", calls[0].ToolName)
+	}
+	if calls[0].ToolArgs != "ls /tmp" {
+		t.Errorf("ToolArgs = %q, want %q", calls[0].ToolArgs, "ls /tmp")
+	}
+
+	// item.completed for command_execution is ignored by the parser;
+	// only agent_message produces EventText. So we should see exactly one
+	// EventText (the assistant message after the tool call).
+	texts := eventsOfType(events, extharness.EventText)
+	if len(texts) != 1 {
+		t.Fatalf("expected 1 EventText, got %d", len(texts))
+	}
+	if !strings.Contains(texts[0].Text, "The directory contains") {
+		t.Errorf("Text = %q, want assistant message", texts[0].Text)
+	}
+}
+
+func TestParseStreamLineThreadStartedIsNoEvent(t *testing.T) {
+	events := parseStreamLine(`{"type":"thread.started","thread_id":"thread-xxx","model":"codex-mini"}`)
+	if len(events) != 0 {
+		t.Errorf("thread.started produced %d events, want 0 (stateless parser)", len(events))
+	}
+}
+
+func TestParseStreamLineErrorIsNoEvent(t *testing.T) {
+	// The error event is captured in RunStreaming and threaded into
+	// RunResult.Err; ParseStreamLine does not surface it as an event.
+	events := parseStreamLine(`{"type":"error","code":"unauthorized","message":"401 Unauthorized"}`)
+	if len(events) != 0 {
+		t.Errorf("error produced %d events from stateless parser, want 0", len(events))
+	}
+}
+
+func TestParseStreamLineBadJSON(t *testing.T) {
+	if events := parseStreamLine("not json"); events != nil {
+		t.Errorf("non-JSON input produced %v, want nil", events)
+	}
+	if events := parseStreamLine(""); events != nil {
+		t.Errorf("empty input produced %v, want nil", events)
+	}
+}
+
+func TestAdapterName(t *testing.T) {
+	a := New()
+	if a.Name() != "codex" {
+		t.Errorf("Name = %q, want codex", a.Name())
+	}
+}
+
+func TestAdapterPrintCommand(t *testing.T) {
+	a := New()
+	got := a.PrintCommand("hello world")
+	want := "codex exec --json --dangerously-bypass-approvals-and-sandbox -- 'hello world'"
+	if got != want {
+		t.Errorf("PrintCommand =\n  %s\nwant:\n  %s", got, want)
+	}
+}
+
+func TestAdapterPrintCommandEscapesQuotes(t *testing.T) {
+	a := New()
+	got := a.PrintCommand("it's complicated")
+	// Single quote must be escaped as '\''.
+	if !strings.Contains(got, `'it'\''s complicated'`) {
+		t.Errorf("PrintCommand did not shell-escape single quote: %s", got)
+	}
+}
+
+func TestAdapterInteractiveArgs(t *testing.T) {
+	a := New()
+	args := a.InteractiveArgs("ignored")
+	want := []string{"codex"}
+	if len(args) != len(want) || args[0] != want[0] {
+		t.Errorf("InteractiveArgs = %v, want %v", args, want)
+	}
+}
+
+func TestAdapterParseStreamLineStateless(t *testing.T) {
+	a := New()
+	line := `{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`
+	events := a.ParseStreamLine(line)
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (text + result), got %d", len(events))
+	}
+	if events[0].Type != extharness.EventText || events[0].Text != "ok" {
+		t.Errorf("events[0] = %+v, want EventText('ok')", events[0])
+	}
+	if events[1].Type != extharness.EventResult || events[1].Result != "ok" {
+		t.Errorf("events[1] = %+v, want EventResult('ok')", events[1])
+	}
+}
+
+func TestAdapterImplementsProvider(t *testing.T) {
+	var _ extharness.Provider = New()
+}
+
+func TestRegistryContainsCodex(t *testing.T) {
+	p, err := harness.Lookup("codex")
 	if err != nil {
-		t.Fatalf("open fixture %s: %v", path, err)
+		t.Fatalf("Lookup codex: %v", err)
 	}
-	defer f.Close()
-
-	sink := &collectSink{}
-	state := &translatorState{
-		runID:     "test-run",
-		agentName: "test-agent",
-	}
-	translateStream(f, state, sink)
-	return sink
-}
-
-func TestTranslateSimpleRun(t *testing.T) {
-	sink := translateFixture(t, "testdata/simple_run.ndjson")
-
-	// Must start with RunStart carrying the thread_id.
-	starts := sink.ofType("RunStart")
-	if len(starts) != 1 {
-		t.Fatalf("expected 1 RunStart, got %d", len(starts))
-	}
-	rs := starts[0].(harness.RunStart)
-	if rs.HarnessRunID != "thread-abc123" {
-		t.Errorf("HarnessRunID = %q, want thread-abc123", rs.HarnessRunID)
-	}
-	if rs.ThreadID != "thread-abc123" {
-		t.Errorf("ThreadID = %q, want thread-abc123", rs.ThreadID)
-	}
-
-	// Must have text content.
-	deltas := sink.ofType("TextDelta")
-	if len(deltas) == 0 {
-		t.Fatal("expected TextDelta events, got none")
-	}
-	var text strings.Builder
-	for _, d := range deltas {
-		text.WriteString(d.(harness.TextDelta).Delta)
-	}
-	if !strings.Contains(text.String(), "I'll help you.") {
-		t.Errorf("text = %q, want to contain assistant message", text.String())
-	}
-
-	// TextStart + TextEnd pair.
-	if len(sink.ofType("TextStart")) != 1 {
-		t.Errorf("expected 1 TextStart, got %d", len(sink.ofType("TextStart")))
-	}
-	if len(sink.ofType("TextEnd")) != 1 {
-		t.Errorf("expected 1 TextEnd, got %d", len(sink.ofType("TextEnd")))
-	}
-
-	// Must end with RunEnd (not RunError).
-	ends := sink.ofType("RunEnd")
-	if len(ends) != 1 {
-		t.Fatalf("expected 1 RunEnd, got %d; errors: %v", len(ends), sink.ofType("RunError"))
-	}
-	re := ends[0].(harness.RunEnd)
-	if re.StopReason != "success" {
-		t.Errorf("StopReason = %q, want success", re.StopReason)
-	}
-	if re.HarnessRunID != "thread-abc123" {
-		t.Errorf("RunEnd.HarnessRunID = %q, want thread-abc123 (for resume)", re.HarnessRunID)
-	}
-	if re.Usage == nil {
-		t.Fatal("RunEnd.Usage is nil")
-	}
-	if re.Usage.InputTokens != 100 {
-		t.Errorf("InputTokens = %d, want 100", re.Usage.InputTokens)
-	}
-	if re.Usage.OutputTokens != 20 {
-		t.Errorf("OutputTokens = %d, want 20", re.Usage.OutputTokens)
-	}
-	if re.Usage.CostUSD != 0.001 {
-		t.Errorf("CostUSD = %f, want 0.001", re.Usage.CostUSD)
+	if p.Name() != "codex" {
+		t.Errorf("Name = %q, want codex", p.Name())
 	}
 }
 
-func TestTranslateToolCallRun(t *testing.T) {
-	sink := translateFixture(t, "testdata/tool_call_run.ndjson")
-
-	// Atomic tool call: ToolCallStart + ToolCallResult, NO ToolCallEnd.
-	starts := sink.ofType("ToolCallStart")
-	ends := sink.ofType("ToolCallEnd")
-	results := sink.ofType("ToolCallResult")
-
-	if len(starts) != 1 {
-		t.Fatalf("expected 1 ToolCallStart, got %d", len(starts))
-	}
-	if len(ends) != 0 {
-		t.Errorf("expected 0 ToolCallEnd (atomic harness), got %d", len(ends))
-	}
-	if len(results) != 1 {
-		t.Fatalf("expected 1 ToolCallResult, got %d", len(results))
-	}
-
-	ts := starts[0].(harness.ToolCallStart)
-	if ts.ToolName != "shell" {
-		t.Errorf("ToolName = %q, want shell", ts.ToolName)
-	}
-	if ts.ToolCallID != "item-001" {
-		t.Errorf("ToolCallID = %q, want item-001", ts.ToolCallID)
-	}
-
-	tr := results[0].(harness.ToolCallResult)
-	if tr.Result != "file.txt\n" {
-		t.Errorf("Result = %q, want file.txt\\n", tr.Result)
-	}
-	if tr.IsError {
-		t.Error("IsError = true, want false")
-	}
-	if tr.ToolCallID != ts.ToolCallID {
-		t.Errorf("Result.ToolCallID = %q, want %q", tr.ToolCallID, ts.ToolCallID)
-	}
-
-	// Verify Start precedes Result with no intervening events of other kinds.
-	var startIdx, resultIdx int = -1, -1
-	for i, e := range sink.events {
-		switch e.(type) {
-		case harness.ToolCallStart:
-			if startIdx < 0 {
-				startIdx = i
-			}
-		case harness.ToolCallResult:
-			if resultIdx < 0 {
-				resultIdx = i
-			}
-		}
-	}
-	if startIdx < 0 || resultIdx < 0 {
-		t.Fatal("missing ToolCallStart or ToolCallResult")
-	}
-	if resultIdx != startIdx+1 {
-		t.Errorf("ToolCallResult should be adjacent to ToolCallStart (start=%d, result=%d)", startIdx, resultIdx)
-	}
-
-	// Also must have the message after the tool call.
-	if len(sink.ofType("TextDelta")) == 0 {
-		t.Error("expected TextDelta after tool call")
-	}
-
-	// Must end with RunEnd.
-	if len(sink.ofType("RunEnd")) != 1 {
-		t.Fatal("expected RunEnd")
-	}
-}
-
-func TestTranslateErrorTurnFailed(t *testing.T) {
-	sink := translateFixture(t, "testdata/error_turn_failed.ndjson")
-
-	errors := sink.ofType("RunError")
-	if len(errors) != 1 {
-		t.Fatalf("expected 1 RunError, got %d", len(errors))
-	}
-	re := errors[0].(harness.RunError)
-	if re.Code != harness.ErrCodeContextExhausted {
-		t.Errorf("Code = %q, want context_exhausted", re.Code)
-	}
-	if !strings.Contains(re.Message, "context window") {
-		t.Errorf("Message = %q, want to contain 'context window'", re.Message)
-	}
-
-	// Must NOT have RunEnd.
-	if len(sink.ofType("RunEnd")) != 0 {
-		t.Error("expected no RunEnd on error")
-	}
-
-	// Must have RunStart (thread.started came before turn.failed).
-	if len(sink.ofType("RunStart")) != 1 {
-		t.Error("expected RunStart before turn.failed")
-	}
-}
-
-func TestMapErrorCode(t *testing.T) {
-	cases := map[string]harness.ErrorCode{
-		"context_window_exceeded": harness.ErrCodeContextExhausted,
-		"rate_limit":              harness.ErrCodeRateLimited,
-		"rate_limited":            harness.ErrCodeRateLimited,
-		"authentication":          harness.ErrCodeAuthFailed,
-		"auth_failed":             harness.ErrCodeAuthFailed,
-		"unauthorized":            harness.ErrCodeAuthFailed,
-		"something_else":          harness.ErrCodeUnknown,
-		"":                        harness.ErrCodeUnknown,
-	}
-	for in, want := range cases {
-		if got := mapErrorCode(in); got != want {
-			t.Errorf("mapErrorCode(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-func TestStreamWithoutTurnEvent(t *testing.T) {
-	// A stream that ends before any turn.completed or turn.failed must yield
-	// a synthetic RunError(harness_crashed).
-	input := strings.NewReader(`{"type":"thread.started","thread_id":"thread-xxx","model":"codex-mini"}` + "\n")
-	sink := &collectSink{}
-	state := &translatorState{runID: "test-run"}
-	translateStream(input, state, sink)
-
-	errors := sink.ofType("RunError")
-	if len(errors) != 1 {
-		t.Fatalf("expected synthetic RunError when stream ends abruptly, got %d", len(errors))
-	}
-	if errors[0].(harness.RunError).Code != harness.ErrCodeHarnessCrashed {
-		t.Errorf("Code = %q, want harness_crashed", errors[0].(harness.RunError).Code)
-	}
-}
-
-func TestBuildArgsFreshRun(t *testing.T) {
+func TestBuildRunArgsFreshRun(t *testing.T) {
 	req := harness.SubSessionRequest{
 		Task:       "do a thing",
 		WorkingDir: "/tmp/work",
 	}
-	args := buildArgs(req, nil)
-
-	// Must include exec, --json, --dangerously-bypass-approvals-and-sandbox,
-	// --skip-git-repo-check, -C /tmp/work, --, prompt.
+	args := buildRunArgs(req)
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
 		"exec",
@@ -306,20 +204,18 @@ func TestBuildArgsFreshRun(t *testing.T) {
 			t.Errorf("args missing %q; got: %s", want, joined)
 		}
 	}
-	// Prompt is the last arg.
 	if args[len(args)-1] != "do a thing" {
 		t.Errorf("last arg = %q, want prompt", args[len(args)-1])
 	}
 }
 
-func TestBuildArgsResume(t *testing.T) {
+func TestBuildRunArgsResume(t *testing.T) {
 	req := harness.SubSessionRequest{
 		Task:        "next message",
 		ResumeToken: "thread-abc123",
 		WorkingDir:  "/tmp/work",
 	}
-	args := buildArgs(req, nil)
-
+	args := buildRunArgs(req)
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "exec resume thread-abc123 --json") {
 		t.Errorf("resume args wrong: %s", joined)
@@ -327,33 +223,20 @@ func TestBuildArgsResume(t *testing.T) {
 	if !strings.Contains(joined, "-- next message") {
 		t.Errorf("resume prompt missing: %s", joined)
 	}
-	// On resume, we should NOT pass --dangerously-bypass or -C (the resumed thread has its own).
 	if strings.Contains(joined, "--dangerously-bypass") {
 		t.Errorf("resume should not include --dangerously-bypass: %s", joined)
 	}
-}
-
-func TestBuildArgsSandboxOverride(t *testing.T) {
-	// Sandbox field is preserved in Config but the current codex version uses
-	// --dangerously-bypass-approvals-and-sandbox instead of --sandbox <mode>.
-	// Verify the args still include the bypass flag and don't crash.
-	req := harness.SubSessionRequest{Task: "x"}
-	cfg := &Config{Sandbox: "read-only"}
-	args := buildArgs(req, cfg)
-
-	joined := strings.Join(args, " ")
-	if !strings.Contains(joined, "--dangerously-bypass-approvals-and-sandbox") {
-		t.Errorf("expected bypass flag, got: %s", joined)
+	if strings.Contains(joined, "-C ") {
+		t.Errorf("resume should not include -C: %s", joined)
 	}
 }
 
-func TestBuildArgsSystemPromptPrepended(t *testing.T) {
+func TestBuildRunArgsSystemPromptPrepended(t *testing.T) {
 	req := harness.SubSessionRequest{
 		Task:         "do the work",
 		SystemPrompt: "you are a careful agent",
 	}
-	args := buildArgs(req, nil)
-
+	args := buildRunArgs(req)
 	prompt := args[len(args)-1]
 	if !strings.Contains(prompt, "you are a careful agent") {
 		t.Errorf("system prompt not prepended: %q", prompt)
@@ -363,72 +246,68 @@ func TestBuildArgsSystemPromptPrepended(t *testing.T) {
 	}
 }
 
-func TestAdapterCapabilities(t *testing.T) {
-	a := &Adapter{}
-	caps := a.Capabilities()
-	if caps.Protocol != harness.ProtocolStream {
-		t.Errorf("Protocol = %q, want stream", caps.Protocol)
+func TestBuildRunArgsResumeIgnoresSystemPrompt(t *testing.T) {
+	// On resume the thread already carries instructions; we should not
+	// prepend the system prompt to the user message.
+	req := harness.SubSessionRequest{
+		Task:         "continue",
+		SystemPrompt: "you are a careful agent",
+		ResumeToken:  "thread-xyz",
 	}
-	if caps.Features.SystemPrompt {
-		t.Error("expected SystemPrompt = false (codex exec has no flag)")
+	args := buildRunArgs(req)
+	prompt := args[len(args)-1]
+	if strings.Contains(prompt, "careful agent") {
+		t.Errorf("resume should not prepend system prompt, got: %q", prompt)
 	}
-	if !caps.Features.Reasoning {
-		t.Error("expected Reasoning = true")
-	}
-	if caps.Features.TextDeltas {
-		t.Error("expected TextDeltas = false")
-	}
-	if !caps.Features.MultiTurn {
-		t.Error("expected MultiTurn = true")
-	}
-	if caps.Features.StreamingArgs {
-		t.Error("expected StreamingArgs = false")
-	}
-	if caps.Requires.ToolExecutor {
-		t.Error("expected ToolExecutor = false for stream adapter")
-	}
-	if len(caps.BuiltInTools) == 0 {
-		t.Error("expected non-empty BuiltInTools")
+	if prompt != "continue" {
+		t.Errorf("prompt = %q, want 'continue'", prompt)
 	}
 }
 
-func TestAdapterName(t *testing.T) {
-	a := &Adapter{}
-	if a.Name() != "codex" {
-		t.Errorf("Name = %q, want codex", a.Name())
+func TestClassifyErrorMessage(t *testing.T) {
+	cases := map[string]harness.ErrorCode{
+		"401 Unauthorized":                   harness.ErrCodeAuthFailed,
+		"authentication failed":              harness.ErrCodeAuthFailed,
+		"auth_failed: bad key":               harness.ErrCodeAuthFailed,
+		"429 Too Many Requests":              harness.ErrCodeRateLimited,
+		"rate limit exceeded":                harness.ErrCodeRateLimited,
+		"context_window_exceeded: too long": harness.ErrCodeContextExhausted,
+		"the context window was exceeded":    harness.ErrCodeContextExhausted,
+		"something else went wrong":          harness.ErrCodeUnknown,
+		"":                                   harness.ErrCodeUnknown,
+	}
+	for in, want := range cases {
+		if got := classifyErrorMessage(in); got != want {
+			t.Errorf("classifyErrorMessage(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
-func TestRegistryContainsCodex(t *testing.T) {
-	adapter, err := harness.Lookup("codex")
-	if err != nil {
-		t.Fatalf("Lookup codex: %v", err)
+func TestBuildEnvAllowlist(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "secret-openai")
+	t.Setenv("SHOULD_BE_DROPPED", "leak-me")
+	req := harness.SubSessionRequest{
+		Env: map[string]string{"CUSTOM_KEY": "custom-value"},
 	}
-	if adapter.Name() != "codex" {
-		t.Errorf("adapter.Name() = %q, want codex", adapter.Name())
-	}
-}
+	env := buildEnv(req)
 
-func TestParseConfig(t *testing.T) {
-	raw := []byte(`{"command":"/usr/local/bin/codex","sandbox":"read-only","args":["--verbose"]}`)
-	cfg := parseConfig(raw)
-	if cfg == nil {
-		t.Fatal("parseConfig returned nil")
+	hasOpenAI := false
+	hasCustom := false
+	for _, kv := range env {
+		if kv == "OPENAI_API_KEY=secret-openai" {
+			hasOpenAI = true
+		}
+		if kv == "CUSTOM_KEY=custom-value" {
+			hasCustom = true
+		}
+		if strings.HasPrefix(kv, "SHOULD_BE_DROPPED=") {
+			t.Errorf("buildEnv leaked SHOULD_BE_DROPPED through allowlist")
+		}
 	}
-	if cfg.Command != "/usr/local/bin/codex" {
-		t.Errorf("Command = %q", cfg.Command)
+	if !hasOpenAI {
+		t.Error("OPENAI_API_KEY not in env")
 	}
-	if cfg.Sandbox != "read-only" {
-		t.Errorf("Sandbox = %q", cfg.Sandbox)
-	}
-	if len(cfg.Args) != 1 || cfg.Args[0] != "--verbose" {
-		t.Errorf("Args = %v", cfg.Args)
-	}
-
-	if parseConfig(nil) != nil {
-		t.Error("parseConfig(nil) should return nil")
-	}
-	if parseConfig([]byte("not json")) != nil {
-		t.Error("parseConfig(invalid) should return nil")
+	if !hasCustom {
+		t.Error("CUSTOM_KEY (from req.Env) not in env")
 	}
 }
