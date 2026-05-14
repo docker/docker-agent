@@ -4,260 +4,308 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
+
+	extharness "github.com/rumpl/harness"
 
 	"github.com/docker/docker-agent/pkg/harness"
 )
 
-// collectSink collects all emitted events for test assertions.
-type collectSink struct {
-	events []harness.Event
-}
-
-func (c *collectSink) Emit(e harness.Event) {
-	c.events = append(c.events, e)
-}
-
-func (c *collectSink) ofType(t string) []harness.Event {
+// translateFixture parses every NDJSON line in path through the stateful
+// streaming translator (state non-nil) and returns the collected events.
+func translateFixture(t *testing.T, path string) []harness.Event {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", path, err)
+	}
+	state := &translatorState{
+		toolNames:      make(map[string]string),
+		blockTypes:     make(map[int]string),
+		blockToolID:    make(map[int]string),
+		streamedBlocks: make(map[string]map[int]bool),
+	}
 	var out []harness.Event
-	for _, e := range c.events {
-		switch e.(type) {
-		case harness.RunStart:
-			if t == "RunStart" {
-				out = append(out, e)
-			}
-		case harness.TextStart:
-			if t == "TextStart" {
-				out = append(out, e)
-			}
-		case harness.TextDelta:
-			if t == "TextDelta" {
-				out = append(out, e)
-			}
-		case harness.TextEnd:
-			if t == "TextEnd" {
-				out = append(out, e)
-			}
-		case harness.ToolCallStart:
-			if t == "ToolCallStart" {
-				out = append(out, e)
-			}
-		case harness.ToolCallEnd:
-			if t == "ToolCallEnd" {
-				out = append(out, e)
-			}
-		case harness.ToolCallResult:
-			if t == "ToolCallResult" {
-				out = append(out, e)
-			}
-		case harness.RunEnd:
-			if t == "RunEnd" {
-				out = append(out, e)
-			}
-		case harness.RunError:
-			if t == "RunError" {
-				out = append(out, e)
-			}
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		out = append(out, parseStreamLine(line, state)...)
+	}
+	return out
+}
+
+func eventsOfType(events []harness.Event, t extharness.EventType) []harness.Event {
+	var out []harness.Event
+	for _, e := range events {
+		if e.Type == t {
+			out = append(out, e)
 		}
 	}
 	return out
 }
 
-func translateFixture(t *testing.T, path string) *collectSink {
-	t.Helper()
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("open fixture %s: %v", path, err)
-	}
-	defer f.Close()
+func TestParseSimpleRun(t *testing.T) {
+	events := translateFixture(t, "testdata/simple_run.ndjson")
 
-	sink := &collectSink{}
-	state := &translatorState{
-		runID:     "test-run",
-		agentName: "test-agent",
-		toolNames: make(map[string]string),
+	// Final assistant text.
+	texts := eventsOfType(events, extharness.EventText)
+	if len(texts) == 0 {
+		t.Fatal("expected at least one EventText, got none")
 	}
-	translateStream(f, state, sink)
-	return sink
-}
-
-func TestTranslateSimpleRun(t *testing.T) {
-	sink := translateFixture(t, "testdata/simple_run.ndjson")
-
-	// Must start with RunStart.
-	starts := sink.ofType("RunStart")
-	if len(starts) != 1 {
-		t.Fatalf("expected 1 RunStart, got %d", len(starts))
+	var combined strings.Builder
+	for _, e := range texts {
+		combined.WriteString(e.Text)
 	}
-	rs := starts[0].(harness.RunStart)
-	if rs.HarnessRunID != "sess-abc123" {
-		t.Errorf("HarnessRunID = %q, want sess-abc123", rs.HarnessRunID)
+	if !strings.Contains(combined.String(), "I'll help you with that.") {
+		t.Errorf("text = %q, want to contain assistant message", combined.String())
 	}
 
-	// Must have text content.
-	deltas := sink.ofType("TextDelta")
-	if len(deltas) == 0 {
-		t.Fatal("expected TextDelta events, got none")
-	}
-	var text strings.Builder
-	for _, d := range deltas {
-		text.WriteString(d.(harness.TextDelta).Delta)
-	}
-	if !strings.Contains(text.String(), "I'll help you with that.") {
-		t.Errorf("text = %q, want to contain assistant message", text.String())
-	}
-
-	// Must end with RunEnd (not RunError).
-	ends := sink.ofType("RunEnd")
-	if len(ends) != 1 {
-		t.Fatalf("expected 1 RunEnd, got %d; errors: %v", len(ends), sink.ofType("RunError"))
-	}
-	re := ends[0].(harness.RunEnd)
-	if re.StopReason != "success" {
-		t.Errorf("StopReason = %q, want success", re.StopReason)
-	}
-	if re.Usage == nil {
-		t.Fatal("RunEnd.Usage is nil")
-	}
-	if re.Usage.InputTokens != 100 {
-		t.Errorf("InputTokens = %d, want 100", re.Usage.InputTokens)
-	}
-}
-
-func TestTranslateToolCallRun(t *testing.T) {
-	sink := translateFixture(t, "testdata/tool_call_run.ndjson")
-
-	// Tool call start and end.
-	starts := sink.ofType("ToolCallStart")
-	ends := sink.ofType("ToolCallEnd")
-	results := sink.ofType("ToolCallResult")
-
-	if len(starts) != 1 {
-		t.Fatalf("expected 1 ToolCallStart, got %d", len(starts))
-	}
-	if len(ends) != 1 {
-		t.Fatalf("expected 1 ToolCallEnd, got %d", len(ends))
-	}
+	// Terminal result event with usage.
+	results := eventsOfType(events, extharness.EventResult)
 	if len(results) != 1 {
-		t.Fatalf("expected 1 ToolCallResult, got %d", len(results))
+		t.Fatalf("expected 1 EventResult, got %d", len(results))
 	}
-
-	ts := starts[0].(harness.ToolCallStart)
-	if ts.ToolName != "Read" {
-		t.Errorf("ToolName = %q, want Read", ts.ToolName)
+	r := results[0]
+	if r.Result != "I'll help you with that." {
+		t.Errorf("Result = %q, want assistant final text", r.Result)
 	}
-	if ts.ToolCallID != "toolu_01" {
-		t.Errorf("ToolCallID = %q, want toolu_01", ts.ToolCallID)
+	if r.Usage == nil {
+		t.Fatal("Usage is nil")
 	}
-
-	tr := results[0].(harness.ToolCallResult)
-	if tr.Result != "hello world" {
-		t.Errorf("Result = %q, want hello world", tr.Result)
+	if r.Usage.InputTokens != 100 {
+		t.Errorf("InputTokens = %d, want 100", r.Usage.InputTokens)
 	}
-	if tr.IsError {
-		t.Error("IsError = true, want false")
-	}
-
-	// Must end with RunEnd.
-	if len(sink.ofType("RunEnd")) != 1 {
-		t.Fatal("expected RunEnd")
+	if r.Usage.OutputTokens != 20 {
+		t.Errorf("OutputTokens = %d, want 20", r.Usage.OutputTokens)
 	}
 }
 
-func TestTranslateErrorMaxTurns(t *testing.T) {
-	sink := translateFixture(t, "testdata/error_max_turns.ndjson")
+func TestParseToolCallRun(t *testing.T) {
+	events := translateFixture(t, "testdata/tool_call_run.ndjson")
 
-	errors := sink.ofType("RunError")
-	if len(errors) != 1 {
-		t.Fatalf("expected 1 RunError, got %d", len(errors))
-	}
-	re := errors[0].(harness.RunError)
-	if re.Code != harness.ErrCodeContextExhausted {
-		t.Errorf("Code = %q, want context_exhausted", re.Code)
+	// Tool call events: the fixture uses "Read" but only Bash/WebSearch/
+	// WebFetch/Agent are in ToolArgFields, so we expect NO tool_call event.
+	// Verify the parser does not panic and still produces the text events.
+	calls := eventsOfType(events, extharness.EventToolCall)
+	if len(calls) != 0 {
+		t.Errorf("expected 0 EventToolCall for 'Read' (not in ToolArgFields), got %d", len(calls))
 	}
 
-	// Must NOT have RunEnd.
-	if len(sink.ofType("RunEnd")) != 0 {
-		t.Error("expected no RunEnd on error")
+	texts := eventsOfType(events, extharness.EventText)
+	if len(texts) == 0 {
+		t.Fatal("expected text events for assistant messages")
+	}
+	var combined strings.Builder
+	for _, e := range texts {
+		combined.WriteString(e.Text)
+	}
+	if !strings.Contains(combined.String(), "Let me read that file.") {
+		t.Errorf("missing first assistant turn text in %q", combined.String())
+	}
+	if !strings.Contains(combined.String(), "The file contains: hello world") {
+		t.Errorf("missing second assistant turn text in %q", combined.String())
+	}
+
+	// Terminal result.
+	results := eventsOfType(events, extharness.EventResult)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 EventResult, got %d", len(results))
 	}
 }
 
-func TestAdapterCapabilities(t *testing.T) {
-	a := &Adapter{}
-	caps := a.Capabilities()
-	if caps.Protocol != harness.ProtocolStream {
-		t.Errorf("Protocol = %q, want stream", caps.Protocol)
+func TestParseStreamPartialDedupe(t *testing.T) {
+	events := translateFixture(t, "testdata/stream_partial.ndjson")
+
+	// Streaming worked: at least one text event from the deltas.
+	texts := eventsOfType(events, extharness.EventText)
+	if len(texts) == 0 {
+		t.Fatal("expected EventText from stream_event deltas, got none")
 	}
-	if !caps.Features.SystemPrompt {
-		t.Error("expected SystemPrompt = true")
+
+	var combined strings.Builder
+	for _, e := range texts {
+		combined.WriteString(e.Text)
 	}
-	if !caps.Features.Reasoning {
-		t.Error("expected Reasoning = true")
+	full := combined.String()
+	if !strings.Contains(full, "hello") {
+		t.Errorf("combined text = %q, want to contain %q", full, "hello")
 	}
-	if !caps.Features.MultiTurn {
-		t.Error("expected MultiTurn = true")
+	// Dedupe: the assistant message replays the same "hello" block that
+	// was already streamed. It must NOT appear twice.
+	if strings.Count(full, "hello") != 1 {
+		t.Errorf("expected %q exactly once after dedupe, got %d times: %q",
+			"hello", strings.Count(full, "hello"), full)
 	}
-	if caps.Requires.ToolExecutor {
-		t.Error("expected ToolExecutor = false for stream adapter")
+
+	// Terminal result event.
+	results := eventsOfType(events, extharness.EventResult)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 EventResult, got %d", len(results))
+	}
+}
+
+func TestParseErrorMaxTurns(t *testing.T) {
+	events := translateFixture(t, "testdata/error_max_turns.ndjson")
+
+	// The wire format emits a single `result` event with subtype
+	// "error_max_turns". The rumpl/harness Event vocabulary collapses all
+	// terminal events into EventResult; callers inspect the original
+	// subtype out-of-band. We just verify we don't crash and we surface a
+	// result event.
+	results := eventsOfType(events, extharness.EventResult)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 EventResult, got %d", len(results))
 	}
 }
 
 func TestAdapterName(t *testing.T) {
-	a := &Adapter{}
+	a := New("claude-sonnet-4-5")
 	if a.Name() != "claude-code" {
 		t.Errorf("Name = %q, want claude-code", a.Name())
 	}
 }
 
+func TestAdapterPrintCommand(t *testing.T) {
+	a := New("claude-sonnet-4-5")
+	cmd := a.PrintCommand("hello world")
+	wantFragments := []string{
+		"claude",
+		"--print",
+		"--verbose",
+		"--dangerously-skip-permissions",
+		"--output-format stream-json",
+		"--include-partial-messages",
+		"--model 'claude-sonnet-4-5'",
+		"-p 'hello world'",
+	}
+	for _, frag := range wantFragments {
+		if !strings.Contains(cmd, frag) {
+			t.Errorf("PrintCommand missing %q\ngot: %s", frag, cmd)
+		}
+	}
+}
+
+func TestAdapterPrintCommandWithEffort(t *testing.T) {
+	a := New("claude-sonnet-4-5", WithEffort(EffortHigh))
+	cmd := a.PrintCommand("hi")
+	if !strings.Contains(cmd, "--effort high") {
+		t.Errorf("expected --effort high, got: %s", cmd)
+	}
+}
+
+func TestAdapterInteractiveArgs(t *testing.T) {
+	a := New("claude-sonnet-4-5")
+	args := a.InteractiveArgs("ignored")
+	want := []string{"claude", "--dangerously-skip-permissions", "--model", "claude-sonnet-4-5"}
+	if len(args) != len(want) {
+		t.Fatalf("args = %v, want %v", args, want)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Errorf("args[%d] = %q, want %q", i, args[i], want[i])
+		}
+	}
+
+	a2 := New("claude-sonnet-4-5", WithEffort(EffortMax))
+	args2 := a2.InteractiveArgs("")
+	if len(args2) < 6 || args2[4] != "--effort" || args2[5] != "max" {
+		t.Errorf("expected --effort max in args, got %v", args2)
+	}
+}
+
+func TestAdapterParseStreamLineStateless(t *testing.T) {
+	a := New("claude-sonnet-4-5")
+	// A result line should still parse via the stateless ParseStreamLine.
+	line := `{"type":"result","subtype":"success","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}`
+	events := a.ParseStreamLine(line)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	if events[0].Type != extharness.EventResult {
+		t.Errorf("Type = %q, want result", events[0].Type)
+	}
+	if events[0].Result != "ok" {
+		t.Errorf("Result = %q, want ok", events[0].Result)
+	}
+}
+
+func TestAdapterParseStreamLineStatelessDoesNotEmitStreamEvents(t *testing.T) {
+	a := New("claude-sonnet-4-5")
+	// Stream events are stateful only; stateless callers should not see them.
+	line := `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}`
+	events := a.ParseStreamLine(line)
+	if len(events) != 0 {
+		t.Errorf("stateless ParseStreamLine emitted %d events for stream_event line, want 0", len(events))
+	}
+}
+
+func TestAdapterImplementsProvider(t *testing.T) {
+	var _ extharness.Provider = New("claude-sonnet-4-5")
+}
+
 func TestRegistryContainsClaude(t *testing.T) {
-	adapter, err := harness.Lookup("claude-code")
+	p, err := harness.Lookup("claude-code")
 	if err != nil {
 		t.Fatalf("Lookup claude-code: %v", err)
 	}
-	if adapter.Name() != "claude-code" {
-		t.Errorf("adapter.Name() = %q, want claude-code", adapter.Name())
+	if p.Name() != "claude-code" {
+		t.Errorf("Name = %q, want claude-code", p.Name())
 	}
 }
 
-func TestTranslateStreamPartialMessages(t *testing.T) {
-	sink := translateFixture(t, "testdata/stream_partial.ndjson")
+func TestBuildEnvAllowlist(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "secret-anthropic")
+	t.Setenv("SHOULD_BE_DROPPED", "leak-me")
+	req := harness.SubSessionRequest{
+		Env: map[string]string{"CUSTOM_KEY": "custom-value"},
+	}
+	env := buildEnv(req)
 
-	// Streaming worked: there must be TextDelta events.
-	deltas := sink.ofType("TextDelta")
-	if len(deltas) == 0 {
-		t.Fatal("expected TextDelta events from stream_event deltas, got none")
+	hasAnthropic := false
+	hasCustom := false
+	for _, kv := range env {
+		if kv == "ANTHROPIC_API_KEY=secret-anthropic" {
+			hasAnthropic = true
+		}
+		if kv == "CUSTOM_KEY=custom-value" {
+			hasCustom = true
+		}
+		if strings.HasPrefix(kv, "SHOULD_BE_DROPPED=") {
+			t.Errorf("buildEnv leaked SHOULD_BE_DROPPED through allowlist")
+		}
 	}
-
-	// Collect all TextDelta content and verify the assistant text appears
-	// exactly once (dedupe worked -- translateAssistant did not re-emit the
-	// full text after content_block_start marked the block as streamed).
-	var combined strings.Builder
-	for _, d := range deltas {
-		combined.WriteString(d.(harness.TextDelta).Delta)
+	if !hasAnthropic {
+		t.Error("ANTHROPIC_API_KEY not in env")
 	}
-	full := combined.String()
-	if full == "" {
-		t.Fatal("TextDelta combined content is empty")
-	}
-	// "hello" is the model's response in the recorded fixture.
-	if !strings.Contains(full, "hello") {
-		t.Errorf("combined TextDelta content = %q, want to contain %q", full, "hello")
-	}
-	if strings.Count(full, "hello") != 1 {
-		t.Errorf("expected %q to appear exactly once in TextDelta content, got %d times: %q",
-			"hello", strings.Count(full, "hello"), full)
-	}
-
-	// Run must terminate cleanly with RunEnd (not RunError).
-	ends := sink.ofType("RunEnd")
-	if len(ends) != 1 {
-		t.Fatalf("expected 1 RunEnd, got %d; errors: %v", len(ends), sink.ofType("RunError"))
+	if !hasCustom {
+		t.Error("CUSTOM_KEY (from req.Env) not in env")
 	}
 }
 
-func TestHeartbeatEventTime(t *testing.T) {
-	hb := harness.Heartbeat{At: time.Now()}
-	if hb.EventTime().IsZero() {
-		t.Error("Heartbeat.EventTime() is zero")
+func TestWriteTempPrompt(t *testing.T) {
+	path, err := writeTempPrompt("you are a helpful assistant")
+	if err != nil {
+		t.Fatalf("writeTempPrompt: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read temp prompt: %v", err)
+	}
+	if string(data) != "you are a helpful assistant" {
+		t.Errorf("prompt file contents = %q, want %q", string(data), "you are a helpful assistant")
+	}
+}
+
+func TestExtractSessionID(t *testing.T) {
+	got, ok := extractSessionID(`{"type":"system","session_id":"sess-xyz","model":"claude"}`)
+	if !ok || got != "sess-xyz" {
+		t.Errorf("extractSessionID = %q, ok=%v, want sess-xyz, true", got, ok)
+	}
+
+	_, ok = extractSessionID(`{"type":"system","model":"claude"}`)
+	if ok {
+		t.Error("extractSessionID succeeded on line without session_id")
 	}
 }

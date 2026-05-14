@@ -1,121 +1,176 @@
-// Package claude implements the Claude Code CLI harness adapter for docker-agent.
-// It spawns `claude --print --output-format stream-json` as a subprocess and
-// translates its NDJSON event stream into canonical harness events.
+// Package claude implements the [github.com/rumpl/harness.Provider]
+// interface for the Claude Code CLI, plus a docker-agent-specific
+// [Adapter.RunStreaming] entry point that spawns `claude` as a subprocess and
+// streams parsed events back to a callback.
 //
-// # Invocation
+// # Invocation (print mode)
 //
-//	claude \
-//	  --print \
-//	  --output-format stream-json \
-//	  --verbose \
-//	  --bare \
-//	  --no-session-persistence \
-//	  --permission-mode bypassPermissions \
-//	  --dangerously-skip-permissions \
-//	  --session-id <uuid> \
-//	  --system-prompt-file <path> \
-//	  --max-turns 50
+//	claude --print --verbose --dangerously-skip-permissions \
+//	    --output-format stream-json --include-partial-messages \
+//	    --model <model> -p <prompt>
 //
-// User messages are written to stdin as NDJSON SDKUserMessage records
-// (--input-format stream-json). Multi-turn sessions keep the process alive
-// and write subsequent messages to stdin.
+// # Invocation (RunStreaming)
 //
-// # Wire format
-//
-// Claude Code emits NDJSON on stdout. Each line is a JSON object with a
-// "type" discriminator. See the Anthropic Claude Code SDK documentation for
-// the full event catalog.
+// RunStreaming uses --input-format stream-json so user messages can be
+// written to stdin as NDJSON, supports a system prompt via temp file, and
+// honours ResumeToken via --resume. It emits text, tool_call, and result
+// events to the supplied callback, deduping content blocks that arrive both
+// as stream_event deltas and inside the final assistant message.
 package claude
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
+	"sync"
+
+	extharness "github.com/rumpl/harness"
 
 	"github.com/docker/docker-agent/pkg/harness"
 )
 
 const adapterName = "claude-code"
 
-// Adapter implements harness.HarnessAdapter for the Claude Code CLI.
-type Adapter struct{}
+// Effort mirrors [claudecode.Effort] for parity with the rumpl/harness
+// reference implementation. The value is passed through as --effort.
+type Effort string
+
+const (
+	EffortLow    Effort = "low"
+	EffortMedium Effort = "medium"
+	EffortHigh   Effort = "high"
+	EffortMax    Effort = "max"
+)
+
+// Adapter is the Claude Code provider. It implements
+// [github.com/rumpl/harness.Provider] and adds [Adapter.RunStreaming] for
+// docker-agent's sub-session orchestrator.
+type Adapter struct {
+	model  string
+	effort Effort
+}
+
+// Option configures a Claude [Adapter].
+type Option func(*Adapter)
+
+// WithEffort sets the --effort flag.
+func WithEffort(e Effort) Option {
+	return func(a *Adapter) { a.effort = e }
+}
+
+// WithModel overrides the default model.
+func WithModel(m string) Option {
+	return func(a *Adapter) {
+		if m != "" {
+			a.model = m
+		}
+	}
+}
+
+// New constructs a Claude Code [Adapter] for the given model.
+func New(model string, opts ...Option) *Adapter {
+	a := &Adapter{model: model}
+	for _, o := range opts {
+		o(a)
+	}
+	return a
+}
 
 func init() {
-	harness.Register(&Adapter{})
+	harness.Register(&Adapter{model: "claude-sonnet-4-5"})
 }
 
-// Name returns the harness type identifier.
+// Name implements [extharness.Provider].
 func (a *Adapter) Name() string { return adapterName }
 
-// Capabilities returns the static capability declaration.
-func (a *Adapter) Capabilities() harness.AdapterCapabilities {
-	return harness.AdapterCapabilities{
-		Protocol: harness.ProtocolStream,
-		Requires: harness.HostRequirements{},
-		Features: harness.AdapterFeatures{
-			SystemPrompt:  true,
-			Reasoning:     true,
-			TextDeltas:    true,  // --include-partial-messages enables token streaming
-			MultiTurn:     true,
-			StreamingArgs: true,  // input_json_delta events stream tool args
-		},
-		BuiltInTools: []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "LS"},
+// PrintCommand implements [extharness.Provider]. It mirrors the rumpl/harness
+// claudecode provider and adds --include-partial-messages so callers can pick
+// up partial text deltas if they want to.
+func (a *Adapter) PrintCommand(prompt string) string {
+	effortFlag := ""
+	if a.effort != "" {
+		effortFlag = fmt.Sprintf(" --effort %s", a.effort)
 	}
+	return fmt.Sprintf(
+		"claude --print --verbose --dangerously-skip-permissions --output-format stream-json --include-partial-messages --model %s%s -p %s",
+		extharness.ShellEscape(a.model),
+		effortFlag,
+		extharness.ShellEscape(prompt),
+	)
 }
 
-// Run executes one sub-session against the Claude Code CLI.
-// All terminal states flow through req.Events as RunEnd or RunError.
-func (a *Adapter) Run(ctx context.Context, req harness.SubSessionRequest) {
-	if err := a.run(ctx, req); err != nil {
-		req.Events.Emit(harness.RunError{
-			RunID:   req.RunID,
-			Code:    harness.ErrCodeHarnessCrashed,
-			Message: err.Error(),
-			At:      time.Now(),
-		})
+// InteractiveArgs implements [extharness.Provider].
+func (a *Adapter) InteractiveArgs(_ string) []string {
+	args := []string{"claude", "--dangerously-skip-permissions", "--model", a.model}
+	if a.effort != "" {
+		args = append(args, "--effort", string(a.effort))
 	}
+	return args
 }
 
-func (a *Adapter) run(ctx context.Context, req harness.SubSessionRequest) error {
-	binary := "claude"
-	if cfg := parseConfig(req.Config); cfg != nil && cfg.Command != "" {
-		binary = cfg.Command
+// ParseStreamLine implements [extharness.Provider]. It is stateless: dedupe
+// against stream_event content blocks is only meaningful within a live
+// streaming session, and stateless callers receive both the deltas and the
+// final assistant message exactly as the wire format delivers them.
+func (a *Adapter) ParseStreamLine(line string) []harness.Event {
+	return parseStreamLine(line, nil)
+}
+
+// --- RunStreaming ---
+
+// RunStreaming spawns `claude` as a subprocess, pipes the user message in via
+// stdin (NDJSON), parses NDJSON events from stdout, and invokes fn for each
+// canonical event. It returns when the subprocess exits or ctx is cancelled.
+//
+// When req.ResumeToken is set the subprocess is started with --resume;
+// otherwise req.SystemPrompt is written to a temp file and passed via
+// --system-prompt-file. The streaming translator dedupes content blocks that
+// appear both as stream_event deltas and inside the final assistant message
+// so callers see each block exactly once.
+func (a *Adapter) RunStreaming(ctx context.Context, req harness.SubSessionRequest, fn func(harness.Event)) harness.RunResult {
+	if fn == nil {
+		fn = func(harness.Event) {}
 	}
 
-	args, cleanup := buildArgs(req)
+	args, cleanup, err := a.buildRunArgs(req)
+	if err != nil {
+		return harness.RunResult{Err: err, ErrCode: harness.ErrCodeHarnessCrashed}
+	}
 	defer cleanup()
 
-	cmd := exec.CommandContext(ctx, binary, args...) //nolint:gosec
+	cmd := exec.CommandContext(ctx, "claude", args...) //nolint:gosec
 	cmd.Dir = req.WorkingDir
 	cmd.Env = buildEnv(req)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return fmt.Errorf("claude stdin pipe: %w", err)
+		return harness.RunResult{Err: fmt.Errorf("claude stdin pipe: %w", err), ErrCode: harness.ErrCodeHarnessCrashed}
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("claude stdout pipe: %w", err)
+		return harness.RunResult{Err: fmt.Errorf("claude stdout pipe: %w", err), ErrCode: harness.ErrCodeHarnessCrashed}
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("claude stderr pipe: %w", err)
+		return harness.RunResult{Err: fmt.Errorf("claude stderr pipe: %w", err), ErrCode: harness.ErrCodeHarnessCrashed}
 	}
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("claude start: %w", err)
+		return harness.RunResult{Err: fmt.Errorf("claude start: %w", err), ErrCode: harness.ErrCodeHarnessCrashed}
 	}
 
-	// Write the user message to stdin and close it (single-turn mode).
+	// Write user message to stdin then close so claude knows the turn is
+	// complete. Multi-turn is handled by re-spawning with --resume.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		defer stdin.Close()
 		msg := map[string]any{
 			"type": "user",
@@ -131,110 +186,427 @@ func (a *Adapter) run(ctx context.Context, req harness.SubSessionRequest) error 
 		}
 	}()
 
-	// Drain stderr to debug log.
+	// Drain stderr into slog.Debug.
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		scanner := bufio.NewScanner(stderr)
+		scanner.Buffer(make([]byte, 256*1024), 1024*1024)
 		for scanner.Scan() {
 			slog.Debug("claude stderr", "line", scanner.Text())
 		}
 	}()
 
-	// Read and translate NDJSON events from stdout.
+	// Read stdout NDJSON, translate to canonical events, accumulate result.
 	state := &translatorState{
-		runID:     req.RunID,
-		agentName: req.RunID, // use RunID as agent name for sub-session events
-		toolNames: make(map[string]string),
+		toolNames:      make(map[string]string),
+		blockTypes:     make(map[int]string),
+		blockToolID:    make(map[int]string),
+		streamedBlocks: make(map[string]map[int]bool),
 	}
-	translateStream(stdout, state, req.Events)
 
-	return cmd.Wait()
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+
+	result := harness.RunResult{}
+	sawResult := false
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		// Capture HarnessRunID from the system/init event for session
+		// resumption. We do this by snooping the raw line so the typed
+		// Event vocabulary stays consistent with rumpl/harness.
+		if id, ok := extractSessionID(line); ok && result.HarnessRunID == "" {
+			result.HarnessRunID = id
+		}
+		for _, ev := range parseStreamLine(line, state) {
+			fn(ev)
+			if ev.Type == extharness.EventResult {
+				sawResult = true
+				if result.FinalText == "" && ev.Result != "" {
+					result.FinalText = ev.Result
+				}
+				if ev.Usage != nil {
+					result.Usage = ev.Usage
+				}
+			}
+			if ev.Type == extharness.EventText && ev.Text != "" {
+				// Track running text in case the result event omits it.
+				if !sawResult {
+					result.FinalText = ev.Text
+				}
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Debug("claude stdout scan error", "error", err)
+	}
+
+	waitErr := cmd.Wait()
+	wg.Wait()
+
+	if waitErr != nil {
+		// Preserve any result we already captured; just annotate the
+		// terminal error.
+		result.Err = fmt.Errorf("claude exited: %w", waitErr)
+		result.ErrCode = classifyExitError(waitErr, ctx)
+		return result
+	}
+	if !sawResult {
+		result.Err = errors.New("claude subprocess exited without a result event")
+		result.ErrCode = harness.ErrCodeHarnessCrashed
+	}
+	return result
 }
 
-// buildArgs constructs the claude CLI arguments for a sub-session.
-// Returns the args slice and a cleanup function that removes any temp files.
-func buildArgs(req harness.SubSessionRequest) ([]string, func()) {
-	cleanup := func() {}
-
+// buildRunArgs assembles the CLI arguments for a RunStreaming invocation and
+// returns a cleanup func that removes any temp files.
+func (a *Adapter) buildRunArgs(req harness.SubSessionRequest) ([]string, func(), error) {
 	args := []string{
 		"--print",
-		"--output-format", "stream-json",
 		"--verbose",
-		"--bare",
-		"--no-session-persistence",
+		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--include-partial-messages",
-		"--max-turns", "50",
+		"--model", a.model,
 	}
+	if a.effort != "" {
+		args = append(args, "--effort", string(a.effort))
+	}
+
+	cleanup := func() {}
 
 	if req.ResumeToken != "" {
 		args = append(args, "--resume", req.ResumeToken)
 	} else if req.SystemPrompt != "" {
-		// Write system prompt to a temp file to avoid shell-escaping issues.
-		if f, err := writeTempPrompt(req.SystemPrompt); err == nil {
-			args = append(args, "--system-prompt-file", f)
-			cleanup = func() { os.Remove(f) } //nolint:errcheck
+		f, err := writeTempPrompt(req.SystemPrompt)
+		if err != nil {
+			return nil, cleanup, fmt.Errorf("write system prompt: %w", err)
 		}
+		args = append(args, "--system-prompt-file", f)
+		cleanup = func() { _ = os.Remove(f) }
 	}
 
-	cfg := parseConfig(req.Config)
-	if cfg != nil {
-		// Allow opt-out of partial messages streaming.
-		if cfg.IncludePartialMessages != nil && !*cfg.IncludePartialMessages {
-			for i, a := range args {
-				if a == "--include-partial-messages" {
-					args = append(args[:i], args[i+1:]...)
-					break
-				}
-			}
-		}
-		args = append(args, cfg.Args...)
-		if cfg.Model != "" {
-			args = append(args, "--model", cfg.Model)
-		}
-		if cfg.MaxTurns > 0 {
-			// Override the default --max-turns.
-			for i, a := range args {
-				if a == "--max-turns" && i+1 < len(args) {
-					args[i+1] = fmt.Sprintf("%d", cfg.MaxTurns)
-					break
-				}
-			}
-		}
-		// Honor permission policy from agent config.
-		if cfg.PermissionMode != "" {
-			args = append(args, "--permission-mode", cfg.PermissionMode)
-			if cfg.PermissionMode == "bypassPermissions" {
-				args = append(args, "--dangerously-skip-permissions")
-			}
-		}
-	}
-
-	return args, cleanup
+	return args, cleanup, nil
 }
 
-// safeEnvKeys are environment variables passed through to harness subprocesses.
-// This is an allowlist: only these keys are inherited from the parent process.
-// Additional keys can be injected via SubSessionRequest.Env.
+// classifyExitError maps subprocess failures onto the canonical ErrorCode
+// vocabulary. Context cancellation wins over signal/exit codes.
+func classifyExitError(err error, ctx context.Context) harness.ErrorCode {
+	if ctx.Err() != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return harness.ErrCodeHarnessTimeout
+		}
+		return harness.ErrCodeUserCanceled
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return harness.ErrCodeHarnessCrashed
+	}
+	return harness.ErrCodeUnknown
+}
+
+// --- Stream parser ---
+
+// translatorState carries cross-line state for the streaming dedupe used by
+// --include-partial-messages. Each Anthropic message ID maps to the set of
+// block indices already delivered via stream_event content_block_start so the
+// final `assistant` event that mirrors the same content can be filtered.
+type translatorState struct {
+	streamingMsgID string
+	blockTypes     map[int]string // content_block index -> "text"|"thinking"|"tool_use"
+	blockToolID    map[int]string // content_block index -> tool_use id
+	toolNames      map[string]string
+	streamedBlocks map[string]map[int]bool
+}
+
+// parseStreamLine parses one NDJSON line emitted by `claude --output-format
+// stream-json`. When state is non-nil the parser dedupes content blocks that
+// appeared as stream_event deltas; when state is nil every block in the
+// assistant message is emitted as-is (stateless mode for ParseStreamLine).
+func parseStreamLine(line string, state *translatorState) []harness.Event {
+	obj, ok := extharness.ParseJSON(line)
+	if !ok {
+		return nil
+	}
+	typ, _ := obj["type"].(string)
+	switch typ {
+	case "stream_event":
+		if state == nil {
+			return nil
+		}
+		return parseStreamEvent(obj, state)
+	case "assistant":
+		return parseAssistant(obj, state)
+	case "result":
+		return parseResult(obj)
+	}
+	return nil
+}
+
+// parseStreamEvent translates a `--include-partial-messages` stream_event
+// into canonical events. Text deltas become EventText events; tool_use blocks
+// are emitted as EventToolCall on content_block_start using whatever
+// argFields are populated. Stateful: marks blocks as already-delivered so a
+// later `assistant` event can skip them.
+func parseStreamEvent(obj map[string]any, state *translatorState) []harness.Event {
+	inner, ok := obj["event"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	innerType, _ := inner["type"].(string)
+
+	switch innerType {
+	case "message_start":
+		msg, ok := inner["message"].(map[string]any)
+		if !ok {
+			return nil
+		}
+		if id, _ := msg["id"].(string); id != "" {
+			state.streamingMsgID = id
+			if state.streamedBlocks == nil {
+				state.streamedBlocks = make(map[string]map[int]bool)
+			}
+			state.streamedBlocks[id] = make(map[int]bool)
+		}
+		return nil
+
+	case "content_block_start":
+		idx := intField(inner, "index")
+		block, ok := inner["content_block"].(map[string]any)
+		if !ok {
+			return nil
+		}
+		blockType, _ := block["type"].(string)
+		state.blockTypes[idx] = blockType
+
+		// Mark this block as streamed so the corresponding `assistant`
+		// event can skip re-emitting it. We mark on _start because Claude
+		// Code can interleave assistant events mid-stream.
+		if msgID := state.streamingMsgID; msgID != "" {
+			if state.streamedBlocks[msgID] == nil {
+				state.streamedBlocks[msgID] = make(map[int]bool)
+			}
+			state.streamedBlocks[msgID][idx] = true
+		}
+
+		if blockType == "tool_use" {
+			toolID, _ := block["id"].(string)
+			toolName, _ := block["name"].(string)
+			if toolID != "" {
+				state.blockToolID[idx] = toolID
+				if toolName != "" {
+					state.toolNames[toolID] = toolName
+				}
+			}
+			// Defer emitting EventToolCall until content_block_stop when
+			// the args are fully buffered; we don't have them yet and
+			// rumpl/harness models tool_call as a single event.
+		}
+		return nil
+
+	case "content_block_delta":
+		delta, ok := inner["delta"].(map[string]any)
+		if !ok {
+			return nil
+		}
+		dtype, _ := delta["type"].(string)
+		switch dtype {
+		case "text_delta":
+			text, _ := delta["text"].(string)
+			if text == "" {
+				return nil
+			}
+			return []harness.Event{{Type: extharness.EventText, Text: text}}
+		}
+		return nil
+
+	case "content_block_stop":
+		// Currently no canonical event is emitted on stop; tool_use is
+		// surfaced via the final assistant message because that's the
+		// only place args are guaranteed to be fully assembled.
+		return nil
+	}
+	return nil
+}
+
+// parseAssistant translates a final `assistant` event from the wire format.
+// When state is non-nil it skips blocks that were already streamed via
+// stream_event deltas (so callers do not see "hello" twice).
+func parseAssistant(obj map[string]any, state *translatorState) []harness.Event {
+	msg, ok := obj["message"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	content, ok := msg["content"].([]any)
+	if !ok {
+		return nil
+	}
+	msgID, _ := msg["id"].(string)
+
+	var streamed map[int]bool
+	if state != nil && msgID != "" {
+		streamed = state.streamedBlocks[msgID]
+		delete(state.streamedBlocks, msgID)
+	}
+
+	var events []harness.Event
+	var texts []string
+
+	flush := func() {
+		if len(texts) > 0 {
+			events = append(events, harness.Event{Type: extharness.EventText, Text: joinStrings(texts)})
+			texts = texts[:0]
+		}
+	}
+
+	for i, raw := range content {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		blockType, _ := block["type"].(string)
+		// Always record tool names for downstream use even if streamed.
+		if blockType == "tool_use" && state != nil {
+			if id, _ := block["id"].(string); id != "" {
+				if name, _ := block["name"].(string); name != "" {
+					state.toolNames[id] = name
+				}
+			}
+		}
+		if streamed != nil && streamed[i] {
+			// Block already emitted via stream_event deltas. For tool_use
+			// we still need to surface the EventToolCall here because the
+			// stream_event path defers it; the args are only complete in
+			// the final assistant message.
+			if blockType != "tool_use" {
+				continue
+			}
+		}
+
+		switch blockType {
+		case "text":
+			if t, _ := block["text"].(string); t != "" {
+				texts = append(texts, t)
+			}
+		case "tool_use":
+			name, _ := block["name"].(string)
+			if name == "" {
+				continue
+			}
+			argField, ok := extharness.ToolArgFields[name]
+			if !ok {
+				continue
+			}
+			input, ok := block["input"].(map[string]any)
+			if !ok {
+				continue
+			}
+			argValue, ok := input[argField].(string)
+			if !ok {
+				continue
+			}
+			flush()
+			events = append(events, harness.Event{
+				Type:     extharness.EventToolCall,
+				ToolName: name,
+				ToolArgs: argValue,
+			})
+		}
+	}
+	flush()
+	return events
+}
+
+// parseResult translates a terminal `result` event into a single EventResult.
+func parseResult(obj map[string]any) []harness.Event {
+	result, _ := obj["result"].(string)
+	return []harness.Event{{
+		Type:   extharness.EventResult,
+		Result: result,
+		Usage:  extharness.ExtractUsage(obj),
+	}}
+}
+
+// extractSessionID pulls session_id out of a raw NDJSON line for HarnessRunID
+// tracking. Returns ("", false) if absent.
+func extractSessionID(line string) (string, bool) {
+	if !strings.Contains(line, `"session_id"`) {
+		return "", false
+	}
+	obj, ok := extharness.ParseJSON(line)
+	if !ok {
+		return "", false
+	}
+	id, ok := obj["session_id"].(string)
+	if !ok || id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// joinStrings is a tiny helper to avoid the strings.Builder overhead on the
+// hot path. Equivalent to strings.Join(ss, "") without an allocation when
+// len(ss)==1.
+func joinStrings(ss []string) string {
+	if len(ss) == 1 {
+		return ss[0]
+	}
+	n := 0
+	for _, s := range ss {
+		n += len(s)
+	}
+	var b strings.Builder
+	b.Grow(n)
+	for _, s := range ss {
+		b.WriteString(s)
+	}
+	return b.String()
+}
+
+func intField(m map[string]any, key string) int {
+	v, ok := m[key]
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			return 0
+		}
+		return int(i)
+	}
+	return 0
+}
+
+// --- Env allowlist ---
+
+// safeEnvKeys are environment variables passed through to the claude
+// subprocess. This is an explicit allowlist; everything else from the
+// parent env is dropped to prevent credential leakage. Additional vars
+// can be injected via SubSessionRequest.Env.
 var safeEnvKeys = []string{
 	// System
 	"HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "TEMP", "TMP",
 	"LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM",
 	"XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-	// AI provider API keys (harnesses need these to authenticate)
+	// AI provider credentials
 	"ANTHROPIC_API_KEY",
 	"OPENAI_API_KEY",
 	"GEMINI_API_KEY", "GOOGLE_API_KEY",
 	"GITHUB_TOKEN", "GH_TOKEN",
-	// Node/npm (harnesses are typically npm-installed CLIs)
+	// Node/npm (claude is an npm-installed CLI)
 	"NODE_PATH", "NPM_CONFIG_PREFIX",
 }
 
-// buildEnv constructs the environment for the claude subprocess.
-// Only safeEnvKeys are inherited from the parent process; all other parent
-// env vars are dropped to prevent credential leakage to the subprocess.
-// Additional vars can be injected via SubSessionRequest.Env.
 func buildEnv(req harness.SubSessionRequest) []string {
-	// Build allowlist from parent env.
 	safe := make(map[string]bool, len(safeEnvKeys))
 	for _, k := range safeEnvKeys {
 		safe[k] = true
@@ -246,20 +618,17 @@ func buildEnv(req harness.SubSessionRequest) []string {
 		if idx < 0 {
 			continue
 		}
-		k := kv[:idx]
-		if safe[k] {
+		if safe[kv[:idx]] {
 			env = append(env, kv)
 		}
 	}
-
-	// Inject caller-specified env vars (these are explicitly opted-in).
 	for k, v := range req.Env {
 		env = append(env, k+"="+v)
 	}
 	return env
 }
 
-// writeTempPrompt writes the system prompt to a temp file and returns its path.
+// writeTempPrompt writes prompt to a temp file and returns its path.
 func writeTempPrompt(prompt string) (string, error) {
 	f, err := os.CreateTemp("", "claude-prompt-*.txt")
 	if err != nil {
@@ -272,476 +641,5 @@ func writeTempPrompt(prompt string) (string, error) {
 	return f.Name(), nil
 }
 
-// --- Config ---
-
-// Config holds Claude Code adapter-specific configuration.
-type Config struct {
-	Command        string `yaml:"command"`
-	Model          string `yaml:"model"`
-	Args           []string `yaml:"args"`
-	MaxTurns       int    `yaml:"max_turns"`
-	// PermissionMode maps to Claude Code's --permission-mode flag.
-	// Valid values: acceptEdits (default), bypassPermissions.
-	// bypassPermissions requires i_understand_the_risk: true in the agent config.
-	PermissionMode string `yaml:"permission_mode"`
-	// IncludePartialMessages controls --include-partial-messages (default true).
-	// Set to false to disable token streaming and revert to complete-message mode.
-	IncludePartialMessages *bool `yaml:"include_partial_messages"`
-}
-
-func parseConfig(raw json.RawMessage) *Config {
-	if len(raw) == 0 {
-		return nil
-	}
-	var cfg Config
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return nil
-	}
-	return &cfg
-}
-
-// --- Translator ---
-
-type translatorState struct {
-	runID     string
-	agentName string
-	toolNames map[string]string // tool_use_id -> tool name
-	lastModel string
-
-	// Streaming state for --include-partial-messages.
-	// streamingMsgID is the Anthropic message ID currently being streamed.
-	streamingMsgID string
-	// blockTypes maps content_block index -> block type ("text"|"thinking"|"tool_use")
-	blockTypes map[int]string
-	// blockToolID maps content_block index -> tool_use id (for tool_use blocks)
-	blockToolID map[int]string
-	// streamedBlocks maps msgID -> set of block indices already delivered via
-	// stream_event, so translateAssistant can skip re-emitting them.
-	streamedBlocks map[string]map[int]bool
-}
-
-// translateStream reads NDJSON lines from r and emits canonical events to sink.
-func translateStream(r io.Reader, state *translatorState, sink harness.EventSink) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-
-	streamStopped := false
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		var ev claudeEvent
-		if err := json.Unmarshal(line, &ev); err != nil {
-			if rs, ok := sink.(harness.RawEventSink); ok {
-				rs.OnHarnessRaw(adapterName, "parse_error", line)
-			}
-			continue
-		}
-
-		events := translateEvent(&ev, state)
-		for _, e := range events {
-			if _, ok := e.(harness.RunEnd); ok {
-				streamStopped = true
-			}
-			if _, ok := e.(harness.RunError); ok {
-				streamStopped = true
-			}
-			sink.Emit(e)
-		}
-	}
-
-	if !streamStopped {
-		// Process exited without a result event -- treat as crash.
-		sink.Emit(harness.RunError{
-			RunID:   state.runID,
-			Code:    harness.ErrCodeHarnessCrashed,
-			Message: "claude subprocess exited without a result event",
-			At:      time.Now(),
-		})
-	}
-}
-
-// --- Claude Code NDJSON event types ---
-
-type claudeEvent struct {
-	Type    string          `json:"type"`
-	Subtype string          `json:"subtype,omitempty"`
-	UUID    string          `json:"uuid,omitempty"`
-	// system/init fields
-	SessionID string        `json:"session_id,omitempty"`
-	Model     string        `json:"model,omitempty"`
-	Tools     []claudeTool  `json:"tools,omitempty"`
-	// assistant/user message
-	Message json.RawMessage `json:"message,omitempty"`
-	// result fields
-	Result       string       `json:"result,omitempty"`
-	IsError      bool         `json:"is_error,omitempty"`
-	Usage        *claudeUsage `json:"usage,omitempty"`
-	TotalCostUSD float64      `json:"total_cost_usd,omitempty"`
-	DurationMS   int64        `json:"duration_ms,omitempty"`
-	Errors       []string     `json:"errors,omitempty"`
-	// stream_event fields (--include-partial-messages)
-	Event           json.RawMessage `json:"event,omitempty"`
-	ParentToolUseID string          `json:"parent_tool_use_id,omitempty"`
-}
-
-// anthropicSSEEvent is the embedded Anthropic API streaming event inside a stream_event.
-type anthropicSSEEvent struct {
-	Type         string            `json:"type"`
-	Index        int               `json:"index"`
-	Message      *anthropicMsgInit `json:"message,omitempty"`
-	ContentBlock *anthropicBlock   `json:"content_block,omitempty"`
-	Delta        *anthropicDelta   `json:"delta,omitempty"`
-}
-
-type anthropicMsgInit struct {
-	ID    string `json:"id"`
-	Model string `json:"model"`
-}
-
-type anthropicBlock struct {
-	Type     string `json:"type"`     // "text" | "thinking" | "tool_use"
-	ID       string `json:"id"`       // tool_use id
-	Name     string `json:"name"`     // tool name
-}
-
-type anthropicDelta struct {
-	Type        string `json:"type"`         // "text_delta" | "input_json_delta" | "thinking_delta"
-	Text        string `json:"text"`
-	PartialJSON string `json:"partial_json"`
-	Thinking    string `json:"thinking"`
-}
-
-type claudeTool struct {
-	Name string `json:"name"`
-}
-
-type claudeUsage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-}
-
-type claudeMessage struct {
-	ID      string          `json:"id"`
-	Model   string          `json:"model"`
-	Content []claudeContent `json:"content"`
-}
-
-type claudeContent struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	Thinking  string          `json:"thinking,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
-}
-
-// translateEvent converts one parsed Claude event into zero or more canonical events.
-func translateEvent(ev *claudeEvent, state *translatorState) []harness.Event {
-	now := time.Now()
-	switch ev.Type {
-	case "system":
-		return translateSystem(ev, state, now)
-	case "assistant":
-		return translateAssistant(ev, state, now)
-	case "user":
-		return translateUser(ev, state, now)
-	case "result":
-		return translateResult(ev, state, now)
-	case "stream_event":
-		return translateStreamEvent(ev, state, now)
-	default:
-		return nil
-	}
-}
-
-// translateStreamEvent handles the stream_event type emitted by
-// --include-partial-messages. It unwraps the embedded Anthropic SSE event
-// and emits canonical streaming events (TextDelta, ReasoningDelta,
-// ToolCallStart, ToolCallArgsDelta, ToolCallEnd).
-func translateStreamEvent(ev *claudeEvent, state *translatorState, now time.Time) []harness.Event {
-	if len(ev.Event) == 0 {
-		return nil
-	}
-	var inner anthropicSSEEvent
-	if err := json.Unmarshal(ev.Event, &inner); err != nil {
-		return nil
-	}
-
-	switch inner.Type {
-	case "message_start":
-		if inner.Message != nil && inner.Message.ID != "" {
-			state.streamingMsgID = inner.Message.ID
-			if state.blockTypes == nil {
-				state.blockTypes = make(map[int]string)
-				state.blockToolID = make(map[int]string)
-				state.streamedBlocks = make(map[string]map[int]bool)
-			}
-			state.streamedBlocks[state.streamingMsgID] = make(map[int]bool)
-		}
-		return nil
-
-	case "content_block_start":
-		if inner.ContentBlock == nil {
-			return nil
-		}
-		if state.blockTypes == nil {
-			state.blockTypes = make(map[int]string)
-			state.blockToolID = make(map[int]string)
-		}
-		state.blockTypes[inner.Index] = inner.ContentBlock.Type
-		msgID := state.streamingMsgID
-		// Mark this block as streamed so when the final `assistant` event
-		// arrives (which may arrive before content_block_stop), translateAssistant
-		// knows to skip re-emitting it. Claude Code interleaves `assistant`
-		// events mid-stream, so marking only on content_block_stop is too late.
-		if msgID != "" {
-			if state.streamedBlocks == nil {
-				state.streamedBlocks = make(map[string]map[int]bool)
-			}
-			if state.streamedBlocks[msgID] == nil {
-				state.streamedBlocks[msgID] = make(map[int]bool)
-			}
-			state.streamedBlocks[msgID][inner.Index] = true
-		}
-		switch inner.ContentBlock.Type {
-		case "text":
-			return []harness.Event{harness.TextStart{MessageID: msgID, Role: "assistant", At: now}}
-		case "thinking":
-			return []harness.Event{harness.ReasoningStart{MessageID: msgID, At: now}}
-		case "tool_use":
-			state.toolNames[inner.ContentBlock.ID] = inner.ContentBlock.Name
-			state.blockToolID[inner.Index] = inner.ContentBlock.ID
-			return []harness.Event{harness.ToolCallStart{
-				ToolCallID: inner.ContentBlock.ID,
-				ToolName:   inner.ContentBlock.Name,
-				At:         now,
-			}}
-		}
-		return nil
-
-	case "content_block_delta":
-		if inner.Delta == nil {
-			return nil
-		}
-		msgID := state.streamingMsgID
-		switch inner.Delta.Type {
-		case "text_delta":
-			if inner.Delta.Text == "" {
-				return nil
-			}
-			return []harness.Event{harness.TextDelta{MessageID: msgID, Delta: inner.Delta.Text, At: now}}
-		case "thinking_delta":
-			if inner.Delta.Thinking == "" {
-				return nil
-			}
-			return []harness.Event{harness.ReasoningDelta{MessageID: msgID, Delta: inner.Delta.Thinking, At: now}}
-		case "input_json_delta":
-			id := state.blockToolID[inner.Index]
-			if id == "" || inner.Delta.PartialJSON == "" {
-				return nil
-			}
-			return []harness.Event{harness.ToolCallArgsDelta{ToolCallID: id, Delta: inner.Delta.PartialJSON, At: now}}
-		}
-		return nil
-
-	case "content_block_stop":
-		msgID := state.streamingMsgID
-		typ := state.blockTypes[inner.Index]
-		// Block already marked as streamed in content_block_start; the
-		// `assistant` event may have already arrived and consumed the entry.
-		switch typ {
-		case "text":
-			return []harness.Event{harness.TextEnd{MessageID: msgID, At: now}}
-		case "thinking":
-			return []harness.Event{harness.ReasoningEnd{MessageID: msgID, At: now}}
-		case "tool_use":
-			id := state.blockToolID[inner.Index]
-			if id == "" {
-				return nil
-			}
-			return []harness.Event{harness.ToolCallEnd{ToolCallID: id, At: now}}
-		}
-		return nil
-
-	case "message_delta", "message_stop", "ping":
-		return nil
-	}
-	return nil
-}
-
-func translateSystem(ev *claudeEvent, state *translatorState, now time.Time) []harness.Event {
-	if ev.Subtype != "init" {
-		return nil
-	}
-	if ev.Model != "" {
-		state.lastModel = ev.Model
-	}
-	sessionID := ev.SessionID
-	if sessionID == "" {
-		sessionID = state.runID
-	}
-	return []harness.Event{
-		harness.RunStart{
-			RunID:        state.runID,
-			HarnessRunID: sessionID,
-			Model:        ev.Model,
-			At:           now,
-		},
-	}
-}
-
-func translateAssistant(ev *claudeEvent, state *translatorState, now time.Time) []harness.Event {
-	if len(ev.Message) == 0 {
-		return nil
-	}
-	var msg claudeMessage
-	if err := json.Unmarshal(ev.Message, &msg); err != nil {
-		return nil
-	}
-	if msg.Model != "" {
-		state.lastModel = msg.Model
-	}
-
-	msgID := msg.ID
-	if msgID == "" {
-		msgID = fmt.Sprintf("msg-%d", now.UnixNano())
-	}
-
-	// streamed is the set of block indices already delivered via stream_event.
-	// The Anthropic API guarantees content_block.index matches msg.Content[i].
-	streamed := state.streamedBlocks[msgID]
-	// Free per-message tracking now that the complete message has arrived.
-	delete(state.streamedBlocks, msgID)
-
-	var events []harness.Event
-	for i, c := range msg.Content {
-		if streamed[i] {
-			// Already delivered via stream_event deltas.
-			// Still need to record tool names for upcoming tool_result events.
-			if c.Type == "tool_use" {
-				state.toolNames[c.ID] = c.Name
-			}
-			continue
-		}
-		// Block was NOT streamed (e.g. --include-partial-messages disabled,
-		// or this is a non-streaming turn). Emit the complete block now.
-		switch c.Type {
-		case "text":
-			if c.Text != "" {
-				events = append(events,
-					harness.TextStart{MessageID: msgID, Role: "assistant", At: now},
-					harness.TextDelta{MessageID: msgID, Delta: c.Text, At: now},
-					harness.TextEnd{MessageID: msgID, At: now},
-				)
-			}
-		case "thinking":
-			if c.Thinking != "" {
-				events = append(events,
-					harness.ReasoningStart{MessageID: msgID, At: now},
-					harness.ReasoningDelta{MessageID: msgID, Delta: c.Thinking, At: now},
-					harness.ReasoningEnd{MessageID: msgID, At: now},
-				)
-			}
-		case "tool_use":
-			state.toolNames[c.ID] = c.Name
-			args := "{}"
-			if len(c.Input) > 0 {
-				args = string(c.Input)
-			}
-			events = append(events,
-				harness.ToolCallStart{ToolCallID: c.ID, ToolName: c.Name, Args: args, At: now},
-				harness.ToolCallEnd{ToolCallID: c.ID, At: now},
-			)
-		}
-	}
-	return events
-}
-
-func translateUser(ev *claudeEvent, state *translatorState, now time.Time) []harness.Event {
-	if len(ev.Message) == 0 {
-		return nil
-	}
-	var msg claudeMessage
-	if err := json.Unmarshal(ev.Message, &msg); err != nil {
-		return nil
-	}
-
-	var events []harness.Event
-	for _, c := range msg.Content {
-		if c.Type != "tool_result" {
-			continue
-		}
-		toolName := state.toolNames[c.ToolUseID]
-		events = append(events, harness.ToolCallResult{
-			ToolCallID: c.ToolUseID,
-			ToolName:   toolName,
-			Result:     c.Content,
-			IsError:    c.IsError,
-			At:         now,
-		})
-	}
-	return events
-}
-
-func translateResult(ev *claudeEvent, state *translatorState, now time.Time) []harness.Event {
-	switch ev.Subtype {
-	case "success":
-		usage := &harness.UsageSummary{
-			CostUSD:    ev.TotalCostUSD,
-			DurationMS: ev.DurationMS,
-		}
-		if ev.Usage != nil {
-			usage.InputTokens = int(ev.Usage.InputTokens)
-			usage.OutputTokens = int(ev.Usage.OutputTokens)
-			usage.CacheCreationTokens = int(ev.Usage.CacheCreationInputTokens)
-			usage.CacheReadTokens = int(ev.Usage.CacheReadInputTokens)
-		}
-		return []harness.Event{
-			harness.RunEnd{
-				RunID:      state.runID,
-				Usage:      usage,
-				StopReason: "success",
-				At:         now,
-			},
-		}
-	case "error_max_turns":
-		return []harness.Event{
-			harness.RunError{
-				RunID:   state.runID,
-				Code:    harness.ErrCodeContextExhausted,
-				Message: "max turns reached",
-				At:      now,
-			},
-		}
-	default:
-		msg := ev.Result
-		if len(ev.Errors) > 0 {
-			msg = ev.Errors[0]
-		}
-		code := harness.ErrCodeUnknown
-		if ev.Subtype == "error_max_budget_usd" {
-			code = harness.ErrCodeRateLimited
-		}
-		return []harness.Event{
-			harness.RunError{
-				RunID:   state.runID,
-				Code:    code,
-				Message: fmt.Sprintf("%s: %s", ev.Subtype, msg),
-				At:      now,
-			},
-		}
-	}
-}
-
-// tempPromptDir returns the directory for temp system prompt files.
-func tempPromptDir() string {
-	return filepath.Join(os.TempDir(), "docker-agent-harness")
-}
+// Ensure compile-time conformance with the rumpl/harness Provider interface.
+var _ extharness.Provider = (*Adapter)(nil)
