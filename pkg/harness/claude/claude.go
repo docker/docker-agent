@@ -61,11 +61,11 @@ func (a *Adapter) Capabilities() harness.AdapterCapabilities {
 		Protocol: harness.ProtocolStream,
 		Requires: harness.HostRequirements{},
 		Features: harness.AdapterFeatures{
-			SystemPrompt: true,
-			Reasoning:    true,
-			TextDeltas:   false, // stream-json emits complete assistant messages by default
-			MultiTurn:    true,
-			StreamingArgs: false,
+			SystemPrompt:  true,
+			Reasoning:     true,
+			TextDeltas:    true,  // --include-partial-messages enables token streaming
+			MultiTurn:     true,
+			StreamingArgs: true,  // input_json_delta events stream tool args
 		},
 		BuiltInTools: []string{"Read", "Write", "Edit", "Bash", "Glob", "Grep", "LS"},
 	}
@@ -162,6 +162,7 @@ func buildArgs(req harness.SubSessionRequest) ([]string, func()) {
 		"--bare",
 		"--no-session-persistence",
 		"--input-format", "stream-json",
+		"--include-partial-messages",
 		"--max-turns", "50",
 	}
 
@@ -177,6 +178,15 @@ func buildArgs(req harness.SubSessionRequest) ([]string, func()) {
 
 	cfg := parseConfig(req.Config)
 	if cfg != nil {
+		// Allow opt-out of partial messages streaming.
+		if cfg.IncludePartialMessages != nil && !*cfg.IncludePartialMessages {
+			for i, a := range args {
+				if a == "--include-partial-messages" {
+					args = append(args[:i], args[i+1:]...)
+					break
+				}
+			}
+		}
 		args = append(args, cfg.Args...)
 		if cfg.Model != "" {
 			args = append(args, "--model", cfg.Model)
@@ -266,14 +276,17 @@ func writeTempPrompt(prompt string) (string, error) {
 
 // Config holds Claude Code adapter-specific configuration.
 type Config struct {
-	Command        string   `yaml:"command"`
-	Model          string   `yaml:"model"`
+	Command        string `yaml:"command"`
+	Model          string `yaml:"model"`
 	Args           []string `yaml:"args"`
-	MaxTurns       int      `yaml:"max_turns"`
+	MaxTurns       int    `yaml:"max_turns"`
 	// PermissionMode maps to Claude Code's --permission-mode flag.
 	// Valid values: acceptEdits (default), bypassPermissions.
 	// bypassPermissions requires i_understand_the_risk: true in the agent config.
-	PermissionMode string   `yaml:"permission_mode"`
+	PermissionMode string `yaml:"permission_mode"`
+	// IncludePartialMessages controls --include-partial-messages (default true).
+	// Set to false to disable token streaming and revert to complete-message mode.
+	IncludePartialMessages *bool `yaml:"include_partial_messages"`
 }
 
 func parseConfig(raw json.RawMessage) *Config {
@@ -294,6 +307,17 @@ type translatorState struct {
 	agentName string
 	toolNames map[string]string // tool_use_id -> tool name
 	lastModel string
+
+	// Streaming state for --include-partial-messages.
+	// streamingMsgID is the Anthropic message ID currently being streamed.
+	streamingMsgID string
+	// blockTypes maps content_block index -> block type ("text"|"thinking"|"tool_use")
+	blockTypes map[int]string
+	// blockToolID maps content_block index -> tool_use id (for tool_use blocks)
+	blockToolID map[int]string
+	// streamedBlocks maps msgID -> set of block indices already delivered via
+	// stream_event, so translateAssistant can skip re-emitting them.
+	streamedBlocks map[string]map[int]bool
 }
 
 // translateStream reads NDJSON lines from r and emits canonical events to sink.
@@ -358,6 +382,36 @@ type claudeEvent struct {
 	TotalCostUSD float64      `json:"total_cost_usd,omitempty"`
 	DurationMS   int64        `json:"duration_ms,omitempty"`
 	Errors       []string     `json:"errors,omitempty"`
+	// stream_event fields (--include-partial-messages)
+	Event           json.RawMessage `json:"event,omitempty"`
+	ParentToolUseID string          `json:"parent_tool_use_id,omitempty"`
+}
+
+// anthropicSSEEvent is the embedded Anthropic API streaming event inside a stream_event.
+type anthropicSSEEvent struct {
+	Type         string            `json:"type"`
+	Index        int               `json:"index"`
+	Message      *anthropicMsgInit `json:"message,omitempty"`
+	ContentBlock *anthropicBlock   `json:"content_block,omitempty"`
+	Delta        *anthropicDelta   `json:"delta,omitempty"`
+}
+
+type anthropicMsgInit struct {
+	ID    string `json:"id"`
+	Model string `json:"model"`
+}
+
+type anthropicBlock struct {
+	Type     string `json:"type"`     // "text" | "thinking" | "tool_use"
+	ID       string `json:"id"`       // tool_use id
+	Name     string `json:"name"`     // tool name
+}
+
+type anthropicDelta struct {
+	Type        string `json:"type"`         // "text_delta" | "input_json_delta" | "thinking_delta"
+	Text        string `json:"text"`
+	PartialJSON string `json:"partial_json"`
+	Thinking    string `json:"thinking"`
 }
 
 type claudeTool struct {
@@ -401,9 +455,119 @@ func translateEvent(ev *claudeEvent, state *translatorState) []harness.Event {
 		return translateUser(ev, state, now)
 	case "result":
 		return translateResult(ev, state, now)
+	case "stream_event":
+		return translateStreamEvent(ev, state, now)
 	default:
 		return nil
 	}
+}
+
+// translateStreamEvent handles the stream_event type emitted by
+// --include-partial-messages. It unwraps the embedded Anthropic SSE event
+// and emits canonical streaming events (TextDelta, ReasoningDelta,
+// ToolCallStart, ToolCallArgsDelta, ToolCallEnd).
+func translateStreamEvent(ev *claudeEvent, state *translatorState, now time.Time) []harness.Event {
+	if len(ev.Event) == 0 {
+		return nil
+	}
+	var inner anthropicSSEEvent
+	if err := json.Unmarshal(ev.Event, &inner); err != nil {
+		return nil
+	}
+
+	switch inner.Type {
+	case "message_start":
+		if inner.Message != nil && inner.Message.ID != "" {
+			state.streamingMsgID = inner.Message.ID
+			if state.blockTypes == nil {
+				state.blockTypes = make(map[int]string)
+				state.blockToolID = make(map[int]string)
+				state.streamedBlocks = make(map[string]map[int]bool)
+			}
+			state.streamedBlocks[state.streamingMsgID] = make(map[int]bool)
+		}
+		return nil
+
+	case "content_block_start":
+		if inner.ContentBlock == nil {
+			return nil
+		}
+		if state.blockTypes == nil {
+			state.blockTypes = make(map[int]string)
+			state.blockToolID = make(map[int]string)
+		}
+		state.blockTypes[inner.Index] = inner.ContentBlock.Type
+		msgID := state.streamingMsgID
+		switch inner.ContentBlock.Type {
+		case "text":
+			return []harness.Event{harness.TextStart{MessageID: msgID, Role: "assistant", At: now}}
+		case "thinking":
+			return []harness.Event{harness.ReasoningStart{MessageID: msgID, At: now}}
+		case "tool_use":
+			state.toolNames[inner.ContentBlock.ID] = inner.ContentBlock.Name
+			state.blockToolID[inner.Index] = inner.ContentBlock.ID
+			return []harness.Event{harness.ToolCallStart{
+				ToolCallID: inner.ContentBlock.ID,
+				ToolName:   inner.ContentBlock.Name,
+				At:         now,
+			}}
+		}
+		return nil
+
+	case "content_block_delta":
+		if inner.Delta == nil {
+			return nil
+		}
+		msgID := state.streamingMsgID
+		switch inner.Delta.Type {
+		case "text_delta":
+			if inner.Delta.Text == "" {
+				return nil
+			}
+			return []harness.Event{harness.TextDelta{MessageID: msgID, Delta: inner.Delta.Text, At: now}}
+		case "thinking_delta":
+			if inner.Delta.Thinking == "" {
+				return nil
+			}
+			return []harness.Event{harness.ReasoningDelta{MessageID: msgID, Delta: inner.Delta.Thinking, At: now}}
+		case "input_json_delta":
+			id := state.blockToolID[inner.Index]
+			if id == "" || inner.Delta.PartialJSON == "" {
+				return nil
+			}
+			return []harness.Event{harness.ToolCallArgsDelta{ToolCallID: id, Delta: inner.Delta.PartialJSON, At: now}}
+		}
+		return nil
+
+	case "content_block_stop":
+		msgID := state.streamingMsgID
+		typ := state.blockTypes[inner.Index]
+		// Mark block as streamed so translateAssistant skips re-emitting it.
+		if state.streamedBlocks == nil {
+			state.streamedBlocks = make(map[string]map[int]bool)
+		}
+		if state.streamedBlocks[msgID] == nil {
+			state.streamedBlocks[msgID] = make(map[int]bool)
+		}
+		state.streamedBlocks[msgID][inner.Index] = true
+		switch typ {
+		case "text":
+			return []harness.Event{harness.TextEnd{MessageID: msgID, At: now}}
+		case "thinking":
+			return []harness.Event{harness.ReasoningEnd{MessageID: msgID, At: now}}
+		case "tool_use":
+			id := state.blockToolID[inner.Index]
+			if id == "" {
+				return nil
+			}
+			return []harness.Event{harness.ToolCallEnd{ToolCallID: id, At: now}}
+		}
+		return nil
+
+	case "message_delta", "message_stop", "ping":
+		return nil
+	}
+	return nil
 }
 
 func translateSystem(ev *claudeEvent, state *translatorState, now time.Time) []harness.Event {
