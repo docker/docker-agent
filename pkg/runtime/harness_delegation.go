@@ -101,11 +101,13 @@ func (r *LocalRuntime) runHarnessRoot(ctx context.Context, sess *session.Session
 	}()
 	<-done
 
-	// Persist the final assistant message.
+	// Persist the final assistant message with cost attached so the
+	// session's OwnCost() / TotalCost() reflect the harness run cost.
 	if content := sink.finalText.String(); content != "" {
 		msg := session.NewAgentMessage(a.Name(), &chat.Message{
 			Role:      chat.MessageRoleAssistant,
 			Content:   content,
+			Cost:      sink.harnessRunCost,
 			CreatedAt: time.Now().Format(time.RFC3339),
 		})
 		sess.AddMessage(msg)
@@ -218,10 +220,13 @@ func (r *LocalRuntime) runHarnessForwarding(ctx context.Context, parent *session
 	<-done
 
 	// Persist the final assistant message if the harness produced one.
+	// Attach the run cost to the message so OwnCost() / TotalCost() pick it
+	// up when the parent session walks sub-sessions after SubSessionCompleted.
 	if content := sink.finalText.String(); content != "" {
 		msg := session.NewAgentMessage(req.AgentName, &chat.Message{
 			Role:      chat.MessageRoleAssistant,
 			Content:   content,
+			Cost:      sink.harnessRunCost,
 			CreatedAt: time.Now().Format(time.RFC3339),
 		})
 		s.AddMessage(msg)
@@ -396,10 +401,11 @@ type translateSink struct {
 	sess      *session.Session
 	agentName string
 
-	finalText    strings.Builder
-	harnessRunID string
-	stopReason   string
-	runErr       error
+	finalText      strings.Builder
+	harnessRunID   string
+	harnessRunCost float64 // cost from RunEnd, stored on the final message
+	stopReason     string
+	runErr         error
 	// activeToolArgs tracks ToolCallStart.Args by ToolCallID so ToolCallEnd
 	// can emit a complete PartialToolCall + ToolCall event pair with args.
 	activeToolArgs map[string]string
@@ -411,6 +417,8 @@ func (t *translateSink) Emit(e harness.Event) {
 	case harness.RunStart:
 		t.harnessRunID = ev.HarnessRunID
 		// StreamStarted already emitted by runHarnessForwarding before the adapter runs.
+		// Emit AgentInfo so the sidebar shows the harness agent name and model.
+		t.evts.Emit(AgentInfo(t.agentName, ev.Model, "", ""))
 
 	case harness.TextStart:
 		// No direct runtime equivalent; text accumulates via TextDelta/TextEnd.
@@ -494,11 +502,23 @@ func (t *translateSink) Emit(e harness.Event) {
 		}
 		t.stopReason = ev.StopReason
 		if ev.Usage != nil {
+			input := int64(ev.Usage.InputTokens)
+			output := int64(ev.Usage.OutputTokens)
+			cost := ev.Usage.CostUSD
+
+			// Write token counts onto the sub-session so that
+			// SubSessionCompletedEvent → AddSubSession persists them, and
+			// the parent's TotalCost() walk picks them up correctly.
+			t.sess.SetUsage(input, output)
+			// Store cost so OwnCost() picks it up when TotalCost() walks sub-sessions.
+			t.harnessRunCost = cost
+
+			// Emit the event so the TUI sidebar updates immediately.
 			t.evts.Emit(NewTokenUsageEvent(t.sess.ID, t.agentName, &Usage{
-				InputTokens:   int64(ev.Usage.InputTokens),
-				OutputTokens:  int64(ev.Usage.OutputTokens),
-				ContextLength: int64(ev.Usage.InputTokens + ev.Usage.OutputTokens),
-				Cost:          ev.Usage.CostUSD,
+				InputTokens:   input,
+				OutputTokens:  output,
+				ContextLength: input + output,
+				Cost:          cost,
 			}))
 		}
 

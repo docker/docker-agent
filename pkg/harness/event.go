@@ -19,7 +19,9 @@ type RunStart struct {
 	HarnessRunID string
 	// ThreadID is the harness-native thread/conversation ID (e.g. Codex thread_id).
 	ThreadID string
-	At       time.Time
+	// Model is the model the harness is using, if known at startup (e.g. from system/init).
+	Model string
+	At    time.Time
 }
 
 func (RunStart) isHarnessEvent()        {}

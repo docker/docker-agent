@@ -343,6 +343,7 @@ func translateThreadStarted(ev *codexEvent, state *translatorState, now time.Tim
 			RunID:        state.runID,
 			HarnessRunID: ev.ThreadID,
 			ThreadID:     ev.ThreadID,
+			Model:        ev.Model,
 			At:           now,
 		},
 	}

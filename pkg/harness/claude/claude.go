@@ -421,6 +421,7 @@ func translateSystem(ev *claudeEvent, state *translatorState, now time.Time) []h
 		harness.RunStart{
 			RunID:        state.runID,
 			HarnessRunID: sessionID,
+			Model:        ev.Model,
 			At:           now,
 		},
 	}
