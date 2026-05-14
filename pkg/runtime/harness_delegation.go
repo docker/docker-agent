@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	extharness "github.com/rumpl/harness"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -18,6 +20,19 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 )
+
+// streamingAdapter is the local view of an adapter that implements the
+// new RunStreaming entry point. Detected via type assertion against the
+// harness.Provider returned from the registry.
+type streamingAdapter interface {
+	RunStreaming(ctx context.Context, req harness.SubSessionRequest, fn func(harness.Event)) harness.RunResult
+}
+
+// acpAdapter is the local view of an ACP-based adapter. Detected via type
+// assertion against the harness.Provider returned from the registry.
+type acpAdapter interface {
+	RunACP(ctx context.Context, req harness.SubSessionRequest, callbacks harness.ACPCallbacks) harness.RunResult
+}
 
 // runHarnessRoot drives a harness-backed root agent directly from RunStream.
 // It is called when the current agent (not a subagent) has a harness spec.
@@ -78,7 +93,6 @@ func (r *LocalRuntime) runHarnessRoot(ctx context.Context, sess *session.Session
 		sess:      sess,
 		agentName: a.Name(),
 	}
-	hReq.Events = sink
 
 	permReq := &runtimePermissionRequester{
 		evts:      evts,
@@ -90,14 +104,10 @@ func (r *LocalRuntime) runHarnessRoot(ctx context.Context, sess *session.Session
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if acpAdapter, ok := adapter.(harness.ACPAdapter); ok {
-			r.runAdapterACP(ctx, acpAdapter, hReq, harness.ACPCallbacks{
-				ToolExecutor: &noopToolExecutor{},
-				Permission:   permReq,
-			})
-		} else {
-			r.runAdapter(ctx, adapter, hReq)
-		}
+		r.dispatchAdapter(ctx, adapter, hReq, sink, harness.ACPCallbacks{
+			ToolExecutor: &noopToolExecutor{},
+			Permission:   permReq,
+		})
 	}()
 	<-done
 
@@ -191,31 +201,26 @@ func (r *LocalRuntime) runHarnessForwarding(ctx context.Context, parent *session
 		sess:      s,
 		agentName: req.AgentName,
 	}
-	hReq.Events = sink
 
 	// Emit StreamStarted before the adapter runs.
 	evts.Emit(StreamStarted(s.ID, req.AgentName))
 
 	// Build permission requester respecting the agent's permission policy.
 	permReq := &runtimePermissionRequester{
-		evts:       evts,
-		sess:       s,
-		agentName:  req.AgentName,
-		autoAllow:  spec.PermissionPolicy != nil && spec.PermissionPolicy.Mode == agent.PermissionModeAutoAllow,
+		evts:      evts,
+		sess:      s,
+		agentName: req.AgentName,
+		autoAllow: spec.PermissionPolicy != nil && spec.PermissionPolicy.Mode == agent.PermissionModeAutoAllow,
 	}
 
 	// Run the adapter (with panic recovery).
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if acpAdapter, ok := adapter.(harness.ACPAdapter); ok {
-			r.runAdapterACP(ctx, acpAdapter, hReq, harness.ACPCallbacks{
-				ToolExecutor: &noopToolExecutor{},
-				Permission:   permReq,
-			})
-		} else {
-			r.runAdapter(ctx, adapter, hReq)
-		}
+		r.dispatchAdapter(ctx, adapter, hReq, sink, harness.ACPCallbacks{
+			ToolExecutor: &noopToolExecutor{},
+			Permission:   permReq,
+		})
 	}()
 	<-done
 
@@ -290,19 +295,14 @@ func (r *LocalRuntime) runHarnessCollecting(ctx context.Context, parent *session
 
 	// Collecting sink: captures text, discards other events.
 	sink := &collectingSink{onContent: onContent}
-	hReq.Events = sink
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if acpAdapter, ok := adapter.(harness.ACPAdapter); ok {
-			r.runAdapterACP(ctx, acpAdapter, hReq, harness.ACPCallbacks{
-				ToolExecutor: &noopToolExecutor{},
-				Permission:   &runtimePermissionRequester{sess: s, agentName: cfg.AgentName},
-			})
-		} else {
-			r.runAdapter(ctx, adapter, hReq)
-		}
+		r.dispatchAdapterCollecting(ctx, adapter, hReq, sink, harness.ACPCallbacks{
+			ToolExecutor: &noopToolExecutor{},
+			Permission:   &runtimePermissionRequester{sess: s, agentName: cfg.AgentName},
+		})
 	}()
 	<-done
 
@@ -327,36 +327,64 @@ func (r *LocalRuntime) runHarnessCollecting(ctx context.Context, parent *session
 	return &agenttool.RunResult{Result: s.GetLastAssistantMessageContent()}
 }
 
-// runAdapter calls a non-ACP adapter's Run with panic recovery.
-// A panic is converted to a synthetic RunError so a buggy adapter cannot
-// crash the orchestrator process.
-func (r *LocalRuntime) runAdapter(ctx context.Context, adapter harness.HarnessAdapter, req harness.SubSessionRequest) {
+// dispatchAdapter runs the adapter with a translating sink, recovering from
+// panics so a buggy adapter cannot crash the orchestrator. The adapter type
+// is detected via type assertion: streamingAdapter for the streaming surface,
+// acpAdapter for ACP-based adapters, and extharness.Run as a fallback for
+// rumpl/harness providers that only implement the Provider streaming surface.
+func (r *LocalRuntime) dispatchAdapter(ctx context.Context, adapter harness.Provider, req harness.SubSessionRequest, sink *translateSink, acp harness.ACPCallbacks) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			req.Events.Emit(harness.RunError{
-				RunID:   req.RunID,
-				Code:    harness.ErrCodeHarnessCrashed,
-				Message: fmt.Sprintf("adapter panic: %v\n%s", rec, debug.Stack()),
-				At:      time.Now(),
-			})
+			err := fmt.Errorf("adapter panic: %v\n%s", rec, debug.Stack())
+			sink.runErr = err
+			sink.stopReason = string(harness.ErrCodeHarnessCrashed)
+			sink.evts.Emit(ErrorWithCode(string(harness.ErrCodeHarnessCrashed), err.Error()))
 		}
 	}()
-	adapter.Run(ctx, req)
+
+	fn := sink.translateFn()
+
+	if sa, ok := adapter.(streamingAdapter); ok {
+		result := sa.RunStreaming(ctx, req, fn)
+		sink.applyResult(result)
+		return
+	}
+	if aa, ok := adapter.(acpAdapter); ok {
+		result := aa.RunACP(ctx, req, acp)
+		sink.applyResult(result)
+		return
+	}
+	// Fallback: drive the Provider via extharness.Run.
+	if err := extharness.Run(ctx, adapter, req.Task, fn); err != nil {
+		sink.runErr = err
+		sink.stopReason = string(harness.ErrCodeHarnessCrashed)
+		sink.evts.Emit(ErrorWithCode(string(harness.ErrCodeHarnessCrashed), err.Error()))
+	}
 }
 
-// runAdapterACP is the ACP equivalent of runAdapter.
-func (r *LocalRuntime) runAdapterACP(ctx context.Context, adapter harness.ACPAdapter, req harness.SubSessionRequest, acp harness.ACPCallbacks) {
+// dispatchAdapterCollecting is the collectingSink variant of dispatchAdapter.
+func (r *LocalRuntime) dispatchAdapterCollecting(ctx context.Context, adapter harness.Provider, req harness.SubSessionRequest, sink *collectingSink, acp harness.ACPCallbacks) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			req.Events.Emit(harness.RunError{
-				RunID:   req.RunID,
-				Code:    harness.ErrCodeHarnessCrashed,
-				Message: fmt.Sprintf("ACP adapter panic: %v\n%s", rec, debug.Stack()),
-				At:      time.Now(),
-			})
+			sink.runErr = fmt.Errorf("adapter panic: %v\n%s", rec, debug.Stack())
 		}
 	}()
-	adapter.RunACP(ctx, req, acp)
+
+	fn := sink.translateFn()
+
+	if sa, ok := adapter.(streamingAdapter); ok {
+		result := sa.RunStreaming(ctx, req, fn)
+		sink.applyResult(result)
+		return
+	}
+	if aa, ok := adapter.(acpAdapter); ok {
+		result := aa.RunACP(ctx, req, acp)
+		sink.applyResult(result)
+		return
+	}
+	if err := extharness.Run(ctx, adapter, req.Task, fn); err != nil {
+		sink.runErr = err
+	}
 }
 
 // buildHarnessRequest constructs a harness.SubSessionRequest from the
@@ -392,10 +420,12 @@ func buildHarnessRequest(s, parent *session.Session, child *agent.Agent, spec *a
 
 // --- translateSink ---
 
-// translateSink converts canonical harness.Event values to runtime.Event
-// values and forwards them to the underlying EventSink. It also accumulates
-// the final assistant text and captures the harness run ID for session
-// resumption.
+// translateSink accumulates harness event state and translates the new
+// 3-type rumpl/harness event vocabulary (EventText / EventToolCall /
+// EventResult) into runtime events emitted to the underlying EventSink.
+//
+// State is written by the closure returned by translateFn (invoked from the
+// adapter goroutine) and by applyResult (invoked when the adapter returns).
 type translateSink struct {
 	evts      EventSink
 	sess      *session.Session
@@ -403,140 +433,76 @@ type translateSink struct {
 
 	finalText      strings.Builder
 	harnessRunID   string
-	harnessRunCost float64 // cost from RunEnd, stored on the final message
+	harnessRunCost float64 // cost from RunResult, stored on the final message
 	stopReason     string
 	runErr         error
-	// activeToolArgs tracks ToolCallStart.Args by ToolCallID so ToolCallEnd
-	// can emit a complete PartialToolCall + ToolCall event pair with args.
-	activeToolArgs map[string]string
-	activeToolName map[string]string
 }
 
-func (t *translateSink) Emit(e harness.Event) {
-	switch ev := e.(type) {
-	case harness.RunStart:
-		t.harnessRunID = ev.HarnessRunID
-		// StreamStarted already emitted by runHarnessForwarding before the adapter runs.
-		// Emit AgentInfo so the sidebar shows the harness agent name and model.
-		t.evts.Emit(AgentInfo(t.agentName, ev.Model, "", ""))
-
-	case harness.TextStart:
-		// No direct runtime equivalent; text accumulates via TextDelta/TextEnd.
-
-	case harness.TextDelta:
-		t.finalText.WriteString(ev.Delta)
-		t.evts.Emit(AgentChoice(t.agentName, t.sess.ID, ev.Delta))
-
-	case harness.TextEnd:
-		// TextEnd with no prior deltas means the harness emitted the full text here.
-		// (Non-streaming harnesses like Codex emit one TextEnd with all content.)
-		// Nothing to emit -- AgentChoice events already sent via TextDelta.
-
-	case harness.ReasoningStart:
-		// No direct runtime equivalent.
-
-	case harness.ReasoningDelta:
-		t.evts.Emit(AgentChoiceReasoning(t.agentName, t.sess.ID, ev.Delta))
-
-	case harness.ReasoningEnd:
-		// No direct runtime equivalent.
-
-	case harness.ToolCallStart:
-		// Cache args and name for use when ToolCallEnd arrives.
-		if t.activeToolArgs == nil {
-			t.activeToolArgs = make(map[string]string)
-			t.activeToolName = make(map[string]string)
-		}
-		t.activeToolArgs[ev.ToolCallID] = ev.Args
-		t.activeToolName[ev.ToolCallID] = ev.ToolName
-		tc := tools.ToolCall{ID: ev.ToolCallID, Function: tools.FunctionCall{Name: ev.ToolName, Arguments: ev.Args}}
-		td := tools.Tool{Name: ev.ToolName}
-		t.evts.Emit(PartialToolCall(tc, td, t.agentName))
-
-	case harness.ToolCallArgsDelta:
-		// Accumulate streaming args delta.
-		if t.activeToolArgs != nil {
-			t.activeToolArgs[ev.ToolCallID] += ev.Delta
-		}
-
-	case harness.ToolCallEnd:
-		args := ""
-		name := ""
-		if t.activeToolArgs != nil {
-			args = t.activeToolArgs[ev.ToolCallID]
-			name = t.activeToolName[ev.ToolCallID]
-			delete(t.activeToolArgs, ev.ToolCallID)
-			delete(t.activeToolName, ev.ToolCallID)
-		}
-		tc := tools.ToolCall{ID: ev.ToolCallID, Function: tools.FunctionCall{Name: name, Arguments: args}}
-		td := tools.Tool{Name: name}
-		t.evts.Emit(ToolCall(tc, td, t.agentName))
-
-	case harness.ToolCallResult:
-		tc := tools.ToolCall{ID: ev.ToolCallID, Function: tools.FunctionCall{Name: ev.ToolName}}
-		td := tools.Tool{Name: ev.ToolName}
-		result := &tools.ToolCallResult{Output: ev.Result, IsError: ev.IsError}
-		t.evts.Emit(ToolCallResponse(ev.ToolCallID, td, result, ev.Result, t.agentName))
-		_ = tc
-
-	case harness.PermissionPending:
-		// Surface as a ToolCallConfirmation so the TUI renders the same dialog
-		// as model-backed permission prompts.
-		tc := tools.ToolCall{ID: ev.ToolCallID, Function: tools.FunctionCall{Name: ev.Description}}
-		td := tools.Tool{Name: ev.Description}
-		t.evts.Emit(ToolCallConfirmation(tc, td, t.agentName))
-
-	case harness.PermissionResolved:
-		action := tools.ElicitationActionDecline
-		if ev.Allowed {
-			action = tools.ElicitationActionAccept
-		}
-		t.evts.Emit(Authorization(action, t.agentName))
-
-	case harness.Heartbeat:
-		// No direct runtime equivalent; absorbed silently.
-
-	case harness.RunEnd:
-		if ev.HarnessRunID != "" {
-			t.harnessRunID = ev.HarnessRunID
-		}
-		t.stopReason = ev.StopReason
-		if ev.Usage != nil {
-			input := int64(ev.Usage.InputTokens)
-			output := int64(ev.Usage.OutputTokens)
-
-			// Write token counts onto the sub-session so that
-			// SubSessionCompletedEvent → AddSubSession persists them, and
-			// the parent's TotalCost() walk picks them up correctly.
-			t.sess.SetUsage(input, output)
-
-			// When the harness reports cost as unknown (e.g. Codex), use a
-			// negative sentinel in the TokenUsageEvent so the sidebar renders
-			// "--" instead of "$0.00". Persisted session cost stays at 0 so
-			// totals across the run aren't corrupted by the sentinel.
-			cost := ev.Usage.CostUSD
-			displayCost := cost
-			if ev.Usage.CostUnknown {
-				displayCost = -1
-				cost = 0
+// translateFn returns a closure suitable for passing to RunStreaming /
+// extharness.Run. It translates each canonical harness.Event into the
+// corresponding runtime events and accumulates final text.
+func (t *translateSink) translateFn() func(harness.Event) {
+	return func(ev harness.Event) {
+		switch ev.Type {
+		case harness.EventText:
+			t.finalText.WriteString(ev.Text)
+			t.evts.Emit(AgentChoice(t.agentName, t.sess.ID, ev.Text))
+		case harness.EventToolCall:
+			id := uuid.New().String()
+			tc := tools.ToolCall{ID: id, Function: tools.FunctionCall{Name: ev.ToolName, Arguments: ev.ToolArgs}}
+			td := tools.Tool{Name: ev.ToolName}
+			t.evts.Emit(PartialToolCall(tc, td, t.agentName))
+			t.evts.Emit(ToolCall(tc, td, t.agentName))
+		case harness.EventResult:
+			if ev.Usage != nil {
+				t.recordUsage(ev.Usage)
 			}
-			// Store cost so OwnCost() picks it up when TotalCost() walks sub-sessions.
-			t.harnessRunCost = cost
-
-			// Emit the event so the TUI sidebar updates immediately.
-			t.evts.Emit(NewTokenUsageEvent(t.sess.ID, t.agentName, &Usage{
-				InputTokens:   input,
-				OutputTokens:  output,
-				ContextLength: input + output,
-				Cost:          displayCost,
-			}))
 		}
-
-	case harness.RunError:
-		t.runErr = fmt.Errorf("[%s] %s", ev.Code, ev.Message)
-		t.evts.Emit(ErrorWithCode(string(ev.Code), ev.Message))
-		t.stopReason = string(ev.Code)
 	}
+}
+
+// applyResult merges the terminal RunResult into the sink's accumulated state.
+func (t *translateSink) applyResult(result harness.RunResult) {
+	if result.HarnessRunID != "" {
+		t.harnessRunID = result.HarnessRunID
+	}
+	if result.Usage != nil {
+		t.recordUsage(result.Usage)
+	}
+	// If the adapter emitted FinalText only on the result (no streaming
+	// EventText events), pick it up here so the assistant message is
+	// non-empty.
+	if t.finalText.Len() == 0 && result.FinalText != "" {
+		t.finalText.WriteString(result.FinalText)
+		t.evts.Emit(AgentChoice(t.agentName, t.sess.ID, result.FinalText))
+	}
+	if result.Err != nil {
+		t.runErr = fmt.Errorf("[%s] %s", result.ErrCode, result.Err.Error())
+		t.evts.Emit(ErrorWithCode(string(result.ErrCode), result.Err.Error()))
+		t.stopReason = string(result.ErrCode)
+	}
+}
+
+func (t *translateSink) recordUsage(u *harness.Usage) {
+	input := int64(u.InputTokens)
+	output := int64(u.OutputTokens)
+
+	// Write token counts onto the sub-session so that
+	// SubSessionCompletedEvent → AddSubSession persists them, and the
+	// parent's TotalCost() walk picks them up correctly.
+	t.sess.SetUsage(input, output)
+
+	cost := u.TotalCostUSD
+	// Store cost so OwnCost() picks it up when TotalCost() walks sub-sessions.
+	t.harnessRunCost = cost
+
+	// Emit the event so the TUI sidebar updates immediately.
+	t.evts.Emit(NewTokenUsageEvent(t.sess.ID, t.agentName, &Usage{
+		InputTokens:   input,
+		OutputTokens:  output,
+		ContextLength: input + output,
+		Cost:          cost,
+	}))
 }
 
 // --- collectingSink ---
@@ -548,17 +514,30 @@ type collectingSink struct {
 	runErr       error
 }
 
-func (c *collectingSink) Emit(e harness.Event) {
-	switch ev := e.(type) {
-	case harness.TextDelta:
-		c.finalText.WriteString(ev.Delta)
-		if c.onContent != nil {
-			c.onContent(ev.Delta)
+// translateFn returns a closure that records text events for collection.
+func (c *collectingSink) translateFn() func(harness.Event) {
+	return func(ev harness.Event) {
+		if ev.Type == harness.EventText {
+			c.finalText.WriteString(ev.Text)
+			if c.onContent != nil {
+				c.onContent(ev.Text)
+			}
 		}
-	case harness.RunEnd:
-		c.harnessRunID = ev.HarnessRunID
-	case harness.RunError:
-		c.runErr = fmt.Errorf("[%s] %s", ev.Code, ev.Message)
+	}
+}
+
+func (c *collectingSink) applyResult(result harness.RunResult) {
+	if result.HarnessRunID != "" {
+		c.harnessRunID = result.HarnessRunID
+	}
+	if c.finalText.Len() == 0 && result.FinalText != "" {
+		c.finalText.WriteString(result.FinalText)
+		if c.onContent != nil {
+			c.onContent(result.FinalText)
+		}
+	}
+	if result.Err != nil {
+		c.runErr = fmt.Errorf("[%s] %s", result.ErrCode, result.Err.Error())
 	}
 }
 
