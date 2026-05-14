@@ -219,6 +219,42 @@ func TestRegistryContainsClaude(t *testing.T) {
 	}
 }
 
+func TestTranslateStreamPartialMessages(t *testing.T) {
+	sink := translateFixture(t, "testdata/stream_partial.ndjson")
+
+	// Streaming worked: there must be TextDelta events.
+	deltas := sink.ofType("TextDelta")
+	if len(deltas) == 0 {
+		t.Fatal("expected TextDelta events from stream_event deltas, got none")
+	}
+
+	// Collect all TextDelta content and verify the assistant text appears
+	// exactly once (dedupe worked -- translateAssistant did not re-emit the
+	// full text after content_block_start marked the block as streamed).
+	var combined strings.Builder
+	for _, d := range deltas {
+		combined.WriteString(d.(harness.TextDelta).Delta)
+	}
+	full := combined.String()
+	if full == "" {
+		t.Fatal("TextDelta combined content is empty")
+	}
+	// "hello" is the model's response in the recorded fixture.
+	if !strings.Contains(full, "hello") {
+		t.Errorf("combined TextDelta content = %q, want to contain %q", full, "hello")
+	}
+	if strings.Count(full, "hello") != 1 {
+		t.Errorf("expected %q to appear exactly once in TextDelta content, got %d times: %q",
+			"hello", strings.Count(full, "hello"), full)
+	}
+
+	// Run must terminate cleanly with RunEnd (not RunError).
+	ends := sink.ofType("RunEnd")
+	if len(ends) != 1 {
+		t.Fatalf("expected 1 RunEnd, got %d; errors: %v", len(ends), sink.ofType("RunError"))
+	}
+}
+
 func TestHeartbeatEventTime(t *testing.T) {
 	hb := harness.Heartbeat{At: time.Now()}
 	if hb.EventTime().IsZero() {

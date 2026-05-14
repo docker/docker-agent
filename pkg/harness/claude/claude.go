@@ -498,6 +498,19 @@ func translateStreamEvent(ev *claudeEvent, state *translatorState, now time.Time
 		}
 		state.blockTypes[inner.Index] = inner.ContentBlock.Type
 		msgID := state.streamingMsgID
+		// Mark this block as streamed so when the final `assistant` event
+		// arrives (which may arrive before content_block_stop), translateAssistant
+		// knows to skip re-emitting it. Claude Code interleaves `assistant`
+		// events mid-stream, so marking only on content_block_stop is too late.
+		if msgID != "" {
+			if state.streamedBlocks == nil {
+				state.streamedBlocks = make(map[string]map[int]bool)
+			}
+			if state.streamedBlocks[msgID] == nil {
+				state.streamedBlocks[msgID] = make(map[int]bool)
+			}
+			state.streamedBlocks[msgID][inner.Index] = true
+		}
 		switch inner.ContentBlock.Type {
 		case "text":
 			return []harness.Event{harness.TextStart{MessageID: msgID, Role: "assistant", At: now}}
@@ -542,14 +555,8 @@ func translateStreamEvent(ev *claudeEvent, state *translatorState, now time.Time
 	case "content_block_stop":
 		msgID := state.streamingMsgID
 		typ := state.blockTypes[inner.Index]
-		// Mark block as streamed so translateAssistant skips re-emitting it.
-		if state.streamedBlocks == nil {
-			state.streamedBlocks = make(map[string]map[int]bool)
-		}
-		if state.streamedBlocks[msgID] == nil {
-			state.streamedBlocks[msgID] = make(map[int]bool)
-		}
-		state.streamedBlocks[msgID][inner.Index] = true
+		// Block already marked as streamed in content_block_start; the
+		// `assistant` event may have already arrived and consumed the entry.
 		switch typ {
 		case "text":
 			return []harness.Event{harness.TextEnd{MessageID: msgID, At: now}}
@@ -603,13 +610,29 @@ func translateAssistant(ev *claudeEvent, state *translatorState, now time.Time) 
 		state.lastModel = msg.Model
 	}
 
-	var events []harness.Event
 	msgID := msg.ID
 	if msgID == "" {
 		msgID = fmt.Sprintf("msg-%d", now.UnixNano())
 	}
 
-	for _, c := range msg.Content {
+	// streamed is the set of block indices already delivered via stream_event.
+	// The Anthropic API guarantees content_block.index matches msg.Content[i].
+	streamed := state.streamedBlocks[msgID]
+	// Free per-message tracking now that the complete message has arrived.
+	delete(state.streamedBlocks, msgID)
+
+	var events []harness.Event
+	for i, c := range msg.Content {
+		if streamed[i] {
+			// Already delivered via stream_event deltas.
+			// Still need to record tool names for upcoming tool_result events.
+			if c.Type == "tool_use" {
+				state.toolNames[c.ID] = c.Name
+			}
+			continue
+		}
+		// Block was NOT streamed (e.g. --include-partial-messages disabled,
+		// or this is a non-streaming turn). Emit the complete block now.
 		switch c.Type {
 		case "text":
 			if c.Text != "" {

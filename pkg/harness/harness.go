@@ -93,6 +93,10 @@ type UsageSummary struct {
 	ReasoningTokens     int     // o1/Codex
 	CostUSD             float64 // when available
 	DurationMS          int64
+	// CostUnknown is set by harnesses that do not report cost (e.g. Codex).
+	// Downstream consumers should render cost as unknown (e.g. "--") rather
+	// than $0.00. When true, CostUSD should be ignored.
+	CostUnknown bool
 }
 
 // SubSessionRequest is the input to HarnessAdapter.Run and ACPAdapter.RunACP.

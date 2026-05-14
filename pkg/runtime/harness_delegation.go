@@ -504,12 +504,22 @@ func (t *translateSink) Emit(e harness.Event) {
 		if ev.Usage != nil {
 			input := int64(ev.Usage.InputTokens)
 			output := int64(ev.Usage.OutputTokens)
-			cost := ev.Usage.CostUSD
 
 			// Write token counts onto the sub-session so that
 			// SubSessionCompletedEvent → AddSubSession persists them, and
 			// the parent's TotalCost() walk picks them up correctly.
 			t.sess.SetUsage(input, output)
+
+			// When the harness reports cost as unknown (e.g. Codex), use a
+			// negative sentinel in the TokenUsageEvent so the sidebar renders
+			// "--" instead of "$0.00". Persisted session cost stays at 0 so
+			// totals across the run aren't corrupted by the sentinel.
+			cost := ev.Usage.CostUSD
+			displayCost := cost
+			if ev.Usage.CostUnknown {
+				displayCost = -1
+				cost = 0
+			}
 			// Store cost so OwnCost() picks it up when TotalCost() walks sub-sessions.
 			t.harnessRunCost = cost
 
@@ -518,7 +528,7 @@ func (t *translateSink) Emit(e harness.Event) {
 				InputTokens:   input,
 				OutputTokens:  output,
 				ContextLength: input + output,
-				Cost:          cost,
+				Cost:          displayCost,
 			}))
 		}
 

@@ -487,6 +487,10 @@ func formatTokenCount(count int64) string {
 	return strconv.FormatInt(count, 10)
 }
 
+// costUnknownDisplay is shown when the harness does not report cost
+// (e.g. Codex CLI). A negative cost is used as the sentinel.
+const costUnknownDisplay = "--"
+
 func formatCost(cost float64) string {
 	return fmt.Sprintf("%.2f", cost)
 }
@@ -1068,18 +1072,36 @@ type usageStats struct {
 	tokens       int64
 	contextPct   string
 	totalCost    float64
+	costUnknown  bool // true when one or more sessions have unknown cost (Codex)
 	sessionCount int
 }
 
 func (m *model) computeUsageStats() usageStats {
 	var s usageStats
 	for _, usage := range m.sessionUsage {
-		s.totalCost += usage.Cost
+		// Negative cost is the "unknown" sentinel emitted by harnesses that
+		// don't report cost (Codex). Don't add it to the total, but flag the
+		// summary so the renderer can show "--" if no other cost is known.
+		if usage.Cost < 0 {
+			s.costUnknown = true
+		} else {
+			s.totalCost += usage.Cost
+		}
 		s.sessionCount++
 	}
 	s.tokens, _ = m.currentSessionTokens()
 	s.contextPct = m.contextPercent()
 	return s
+}
+
+// formatTotalCost renders the aggregate cost respecting the "unknown" sentinel.
+// When every session has unknown cost the result is "--"; when some sessions
+// report cost the known total is shown unmodified to match the prior behavior.
+func (s usageStats) formatTotalCost() string {
+	if s.costUnknown && s.totalCost == 0 {
+		return costUnknownDisplay
+	}
+	return "$" + formatCost(s.totalCost)
 }
 
 func (m *model) tokenUsage(contentWidth int) string {
@@ -1089,7 +1111,7 @@ func (m *model) tokenUsage(contentWidth int) string {
 	if s.contextPct != "" {
 		line += " (" + s.contextPct + ")"
 	}
-	line += " " + styles.TabAccentStyle.Render("$"+formatCost(s.totalCost))
+	line += " " + styles.TabAccentStyle.Render(s.formatTotalCost())
 	if s.sessionCount > 1 {
 		line += " " + styles.MutedStyle.Render(fmt.Sprintf("(%d sub-sessions)", s.sessionCount-1))
 	}
@@ -1110,9 +1132,9 @@ func (m *model) tokenUsageSummary() string {
 		if s.contextPct != "" {
 			parts = append(parts, "Context: "+s.contextPct)
 		}
-		parts = append(parts, "Cost: $"+formatCost(s.totalCost), fmt.Sprintf("%d sub-sessions", s.sessionCount-1))
+		parts = append(parts, "Cost: "+s.formatTotalCost(), fmt.Sprintf("%d sub-sessions", s.sessionCount-1))
 	} else {
-		parts = append(parts, "Cost: $"+formatCost(s.totalCost))
+		parts = append(parts, "Cost: "+s.formatTotalCost())
 		if s.contextPct != "" {
 			parts = append(parts, "Context: "+s.contextPct)
 		}

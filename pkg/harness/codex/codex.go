@@ -428,7 +428,13 @@ func defaultRole(r string) string {
 }
 
 func translateTurnCompleted(ev *codexEvent, state *translatorState, now time.Time) []harness.Event {
-	usage := &harness.UsageSummary{CostUSD: ev.CostUSD}
+	// Codex CLI does not report cost in its JSONL stream. Mark cost as unknown
+	// so downstream consumers (sidebar, persistence) render "--" instead of
+	// pretending the run was free at $0.00.
+	usage := &harness.UsageSummary{
+		CostUSD:     ev.CostUSD,
+		CostUnknown: ev.CostUSD == 0,
+	}
 	if ev.Usage != nil {
 		usage.InputTokens = int(ev.Usage.InputTokens)
 		usage.OutputTokens = int(ev.Usage.OutputTokens)
