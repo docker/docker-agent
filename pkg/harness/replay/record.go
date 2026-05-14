@@ -1,6 +1,3 @@
-// Package replay provides recording and playback of harness event streams.
-// Used by adapter integration tests to generate fixture files that can be
-// replayed without the real harness binary.
 package replay
 
 import (
@@ -12,35 +9,30 @@ import (
 	"github.com/docker/docker-agent/pkg/harness"
 )
 
-// Recorder wraps an EventSink and writes all events to a NDJSON file.
-// Each line is a JSON object with fields: t (type name), at (timestamp), data (event).
-// Use NewRecorder in adapter integration tests to generate testdata/ fixtures.
+// Recorder wraps a func(harness.Event) callback and writes all events to a
+// NDJSON file. Used by adapter integration tests to generate fixture files.
 type Recorder struct {
-	inner harness.EventSink
+	inner func(harness.Event)
 	mu    sync.Mutex
 	w     io.Writer
 }
 
+type record struct {
+	T    string        `json:"t"`
+	At   time.Time     `json:"at"`
+	Data harness.Event `json:"data"`
+}
+
 // NewRecorder creates a Recorder that forwards events to inner and writes
 // NDJSON records to w.
-func NewRecorder(inner harness.EventSink, w io.Writer) *Recorder {
+func NewRecorder(inner func(harness.Event), w io.Writer) *Recorder {
 	return &Recorder{inner: inner, w: w}
 }
 
-type record struct {
-	T    string          `json:"t"`
-	At   time.Time       `json:"at"`
-	Data json.RawMessage `json:"data"`
-}
-
-// Emit implements harness.EventSink.
+// Emit forwards the event and writes it to the NDJSON file.
 func (r *Recorder) Emit(e harness.Event) {
-	r.inner.Emit(e)
-	data, err := json.Marshal(e)
-	if err != nil {
-		return
-	}
-	rec := record{T: eventTypeName(e), At: e.EventTime(), Data: data}
+	r.inner(e)
+	rec := record{T: string(e.Type), At: time.Now(), Data: e}
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return
@@ -48,43 +40,4 @@ func (r *Recorder) Emit(e harness.Event) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, _ = r.w.Write(append(line, '\n'))
-}
-
-func eventTypeName(e harness.Event) string {
-	switch e.(type) {
-	case harness.RunStart:
-		return "RunStart"
-	case harness.TextStart:
-		return "TextStart"
-	case harness.TextDelta:
-		return "TextDelta"
-	case harness.TextEnd:
-		return "TextEnd"
-	case harness.ReasoningStart:
-		return "ReasoningStart"
-	case harness.ReasoningDelta:
-		return "ReasoningDelta"
-	case harness.ReasoningEnd:
-		return "ReasoningEnd"
-	case harness.ToolCallStart:
-		return "ToolCallStart"
-	case harness.ToolCallArgsDelta:
-		return "ToolCallArgsDelta"
-	case harness.ToolCallEnd:
-		return "ToolCallEnd"
-	case harness.ToolCallResult:
-		return "ToolCallResult"
-	case harness.PermissionPending:
-		return "PermissionPending"
-	case harness.PermissionResolved:
-		return "PermissionResolved"
-	case harness.Heartbeat:
-		return "Heartbeat"
-	case harness.RunEnd:
-		return "RunEnd"
-	case harness.RunError:
-		return "RunError"
-	default:
-		return "Unknown"
-	}
 }
