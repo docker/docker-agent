@@ -34,9 +34,3 @@ type Model interface {
 	View() string
 	Sizeable
 }
-
-// CollapsedViewer is implemented by components that provide a simplified view
-// for use in collapsed reasoning blocks.
-type CollapsedViewer interface {
-	CollapsedView() string
-}

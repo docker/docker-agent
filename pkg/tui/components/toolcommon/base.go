@@ -15,9 +15,6 @@ import (
 // Note: Uses SessionStateReader interface for read-only access to session state.
 type Renderer func(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, height int) string
 
-// CollapsedRenderer is a function that renders a simplified view for collapsed reasoning blocks.
-type CollapsedRenderer func(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, height int) string
-
 // Base provides common boilerplate for tool components.
 // It handles spinner management, sizing, and delegates rendering to a custom function.
 type Base struct {
@@ -27,7 +24,6 @@ type Base struct {
 	height            int
 	sessionState      service.SessionStateReader // read-only access to session state
 	render            Renderer
-	collapsedRenderer CollapsedRenderer
 	spinnerRegistered bool // tracks whether spinner is registered with coordinator
 }
 
@@ -41,20 +37,6 @@ func NewBase(msg *types.Message, sessionState service.SessionStateReader, render
 		height:       1,
 		sessionState: sessionState,
 		render:       render,
-	}
-}
-
-// NewBaseWithCollapsed creates a new base tool component with both regular and collapsed renderers.
-// Accepts SessionStateReader for read-only access (also accepts *SessionState which implements it).
-func NewBaseWithCollapsed(msg *types.Message, sessionState service.SessionStateReader, render Renderer, collapsedRender CollapsedRenderer) *Base {
-	return &Base{
-		message:           msg,
-		spinner:           spinner.New(spinner.ModeSpinnerOnly, styles.SpinnerDotsAccentStyle),
-		width:             80,
-		height:            1,
-		sessionState:      sessionState,
-		render:            render,
-		collapsedRenderer: collapsedRender,
 	}
 }
 
@@ -100,15 +82,6 @@ func (b *Base) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 func (b *Base) View() string {
 	return b.render(b.message, b.spinner, b.sessionState, b.width, b.height)
-}
-
-// CollapsedView returns a simplified view for use in collapsed reasoning blocks.
-// Falls back to the regular View() if no collapsed renderer is provided.
-func (b *Base) CollapsedView() string {
-	if b.collapsedRenderer != nil {
-		return b.collapsedRenderer(b.message, b.spinner, b.sessionState, b.width, b.height)
-	}
-	return b.View()
 }
 
 // StopAnimation stops the spinner animation and unregisters from the animation coordinator.

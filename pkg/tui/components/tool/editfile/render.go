@@ -27,11 +27,6 @@ const (
 )
 
 type toolRenderCache struct {
-	// Line counts - computed once, never change
-	added       int
-	removed     int
-	lineCounted bool
-
 	// Rendered output - invalidated when width/splitView/status changes
 	rendered       string
 	renderCached   bool
@@ -141,56 +136,6 @@ func renderEditFileUncached(toolCall tools.ToolCall, width int, splitView bool, 
 	}
 
 	return output.String()
-}
-
-// countDiffLines returns the number of added and removed lines for the edit.
-// Results are cached per tool call since arguments are immutable.
-func countDiffLines(toolCall tools.ToolCall, _ types.ToolStatus) (added, removed int) {
-	c := getOrCreateCache(toolCall.ID)
-
-	cacheMu.RLock()
-	if c.lineCounted {
-		added, removed = c.added, c.removed
-		cacheMu.RUnlock()
-		return added, removed
-	}
-	cacheMu.RUnlock()
-
-	added, removed = countDiffLinesUncached(toolCall)
-
-	cacheMu.Lock()
-	c.added = added
-	c.removed = removed
-	c.lineCounted = true
-	cacheMu.Unlock()
-
-	return added, removed
-}
-
-func countDiffLinesUncached(toolCall tools.ToolCall) (added, removed int) {
-	args, err := filesystem.ParseEditFileArgs([]byte(toolCall.Function.Arguments))
-	if err != nil {
-		return 0, 0
-	}
-
-	for _, edit := range args.Edits {
-		edits := udiff.Strings(edit.OldText, edit.NewText)
-		diff, err := udiff.ToUnifiedDiff("old", "new", edit.OldText, edits, 0)
-		if err != nil {
-			continue
-		}
-		for _, hunk := range diff.Hunks {
-			for _, line := range hunk.Lines {
-				switch line.Kind {
-				case udiff.Insert:
-					added++
-				case udiff.Delete:
-					removed++
-				}
-			}
-		}
-	}
-	return added, removed
 }
 
 func computeDiff(path, oldText, newText string, toolStatus types.ToolStatus) []*udiff.Hunk {
