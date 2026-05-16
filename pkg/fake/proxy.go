@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -106,7 +107,7 @@ func StartStreamingRecordingProxy(
 		case err := <-stopDone:
 			return err
 		case <-ctx.Done():
-			slog.Warn("Recording proxy cleanup timed out, cassette may be incomplete")
+			slog.WarnContext(ctx, "Recording proxy cleanup timed out, cassette may be incomplete")
 			return nil
 		}
 	}
@@ -191,7 +192,7 @@ func StartProxyWithOptions(
 		case err := <-stopDone:
 			return err
 		case <-ctx.Done():
-			slog.Warn("Recording proxy cleanup timed out, cassette may be incomplete")
+			slog.WarnContext(ctx, "Recording proxy cleanup timed out, cassette may be incomplete")
 			return nil
 		}
 	}
@@ -214,6 +215,11 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 	// Normalize max_tokens/max_output_tokens/maxOutputTokens field (varies based on models.dev
 	// cache state and provider cloning behavior). Handles both snake_case and camelCase variants.
 	maxTokensRegex := regexp.MustCompile(`"(?:max_(?:output_)?tokens|maxOutputTokens)":\d+,?`)
+	// Normalize Gemini thinkingConfig (varies based on provider defaults for thinking budget).
+	// This handles both camelCase (API) variants of the thinkingConfig field.
+	thinkingConfigRegex := regexp.MustCompile(`"thinkingConfig":\{[^}]*\},?`)
+	// Normalize OpenAI reasoning config (varies based on NoThinking flag and thinking budget).
+	reasoningRegex := regexp.MustCompile(`"reasoning":\{[^}]*\},?`)
 
 	return func(r *http.Request, i cassette.Request) bool {
 		if r.Body == nil || r.Body == http.NoBody {
@@ -241,8 +247,12 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 		// Normalize dynamic fields for matching
 		normalizedReq := callIDRegex.ReplaceAllString(string(reqBody), "call_ID")
 		normalizedReq = maxTokensRegex.ReplaceAllString(normalizedReq, "")
+		normalizedReq = thinkingConfigRegex.ReplaceAllString(normalizedReq, "")
+		normalizedReq = reasoningRegex.ReplaceAllString(normalizedReq, "")
 		normalizedCassette := callIDRegex.ReplaceAllString(i.Body, "call_ID")
 		normalizedCassette = maxTokensRegex.ReplaceAllString(normalizedCassette, "")
+		normalizedCassette = thinkingConfigRegex.ReplaceAllString(normalizedCassette, "")
+		normalizedCassette = reasoningRegex.ReplaceAllString(normalizedCassette, "")
 
 		return normalizedReq == normalizedCassette
 	}
@@ -311,7 +321,7 @@ func Handle(transport http.RoundTripper, headerUpdater func(host string, req *ht
 
 		resp, err := client.Do(req)
 		if err != nil {
-			slog.Error("VCR proxy request failed", "url", targetURL, "error", err)
+			slog.ErrorContext(ctx, "VCR proxy request failed", "url", targetURL, "error", err)
 			return echo.NewHTTPError(http.StatusInternalServerError, "Failed to run request: "+err.Error())
 		}
 		defer resp.Body.Close()
@@ -423,7 +433,7 @@ func StreamCopy(c echo.Context, resp *http.Response) error {
 			}
 			if result.err != nil {
 				// io.EOF or context canceled means normal completion
-				if result.err == io.EOF || ctx.Err() != nil {
+				if errors.Is(result.err, io.EOF) || ctx.Err() != nil {
 					return nil
 				}
 				slog.ErrorContext(ctx, "stream read error", "error", result.err)

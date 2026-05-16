@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -8,11 +9,12 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/cagent/pkg/tui/core"
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 const (
+	closeButton          = " [x]"
 	defaultDuration      = 3 * time.Second
 	notificationPadding  = 2
 	maxNotificationWidth = 80 // Maximum width to prevent covering too much screen
@@ -30,6 +32,25 @@ const (
 	TypeError
 )
 
+// persistent returns true for notification types that stay until manually dismissed.
+func (t Type) persistent() bool {
+	return t == TypeWarning || t == TypeError
+}
+
+// style returns the lipgloss style for this notification type.
+func (t Type) style() lipgloss.Style {
+	switch t {
+	case TypeError:
+		return styles.NotificationErrorStyle
+	case TypeWarning:
+		return styles.NotificationWarningStyle
+	case TypeInfo:
+		return styles.NotificationInfoStyle
+	default:
+		return styles.NotificationStyle
+	}
+}
+
 type ShowMsg struct {
 	Text string
 	Type Type // Defaults to TypeSuccess for backward compatibility
@@ -40,39 +61,41 @@ type HideMsg struct {
 }
 
 func SuccessCmd(text string) tea.Cmd {
-	return core.CmdHandler(ShowMsg{
-		Text: text,
-		Type: TypeSuccess,
-	})
+	return core.CmdHandler(ShowMsg{Text: text, Type: TypeSuccess})
 }
 
 func WarningCmd(text string) tea.Cmd {
-	return core.CmdHandler(ShowMsg{
-		Text: text,
-		Type: TypeWarning,
-	})
+	return core.CmdHandler(ShowMsg{Text: text, Type: TypeWarning})
 }
 
 func InfoCmd(text string) tea.Cmd {
-	return core.CmdHandler(ShowMsg{
-		Text: text,
-		Type: TypeInfo,
-	})
+	return core.CmdHandler(ShowMsg{Text: text, Type: TypeInfo})
 }
 
 func ErrorCmd(text string) tea.Cmd {
-	return core.CmdHandler(ShowMsg{
-		Text: text,
-		Type: TypeError,
-	})
+	return core.CmdHandler(ShowMsg{Text: text, Type: TypeError})
 }
 
 // notificationItem represents a single notification
 type notificationItem struct {
-	ID       uint64
-	Text     string
-	Type     Type
-	TimerCmd tea.Cmd
+	ID   uint64
+	Text string
+	Type Type
+}
+
+// render returns the styled view string for this notification item,
+// including a close button for persistent notifications.
+func (item notificationItem) render(maxWidth int) string {
+	text := item.Text
+	if item.Type.persistent() {
+		text += closeButton
+	}
+
+	style := item.Type.style()
+	if lipgloss.Width(text) > maxWidth {
+		return style.Width(maxWidth).Render(text)
+	}
+	return style.Render(text)
 }
 
 // Manager represents a notification manager that displays
@@ -110,19 +133,17 @@ func (n *Manager) Update(msg tea.Msg) (Manager, tea.Cmd) {
 				notifType = TypeError
 			}
 		}
-		item := notificationItem{
-			ID:   id,
-			Text: msg.Text,
-			Type: notifType,
-		}
 
-		item.TimerCmd = tea.Tick(defaultDuration, func(t time.Time) tea.Msg {
-			return HideMsg{ID: id}
-		})
-
+		item := notificationItem{ID: id, Text: msg.Text, Type: notifType}
 		n.items = append([]notificationItem{item}, n.items...)
 
-		return *n, item.TimerCmd
+		var cmd tea.Cmd
+		if !notifType.persistent() {
+			cmd = tea.Tick(defaultDuration, func(t time.Time) tea.Msg {
+				return HideMsg{ID: id}
+			})
+		}
+		return *n, cmd
 
 	case HideMsg:
 		if msg.ID == 0 {
@@ -143,49 +164,24 @@ func (n *Manager) Update(msg tea.Msg) (Manager, tea.Cmd) {
 	return *n, nil
 }
 
+// maxWidth returns the effective maximum width for notification text.
+func (n *Manager) maxWidth() int {
+	if n.width > 0 {
+		return max(1, min(maxNotificationWidth, n.width-notificationPadding*2))
+	}
+	return maxNotificationWidth
+}
+
 func (n *Manager) View() string {
 	if len(n.items) == 0 {
 		return ""
 	}
 
-	var views []string
-	for i := len(n.items) - 1; i >= 0; i-- {
-		item := n.items[i]
-
-		// Select style based on notification type
-		var style lipgloss.Style
-		switch item.Type {
-		case TypeError:
-			style = styles.NotificationErrorStyle
-		case TypeWarning:
-			style = styles.NotificationWarningStyle
-		case TypeInfo:
-			style = styles.NotificationInfoStyle
-		default:
-			style = styles.NotificationStyle
-		}
-
-		// Apply max width constraint and word wrapping
-		text := item.Text
-		maxWidth := maxNotificationWidth
-		if n.width > 0 {
-			// Use smaller of maxNotificationWidth or available width minus padding
-			maxWidth = min(maxNotificationWidth, n.width-notificationPadding*2)
-		}
-
-		// Only constrain width if text actually exceeds maxWidth
-		textWidth := lipgloss.Width(text)
-		var view string
-		if textWidth > maxWidth {
-			// Wrap text using lipgloss Width style - lipgloss will automatically wrap
-			view = style.Width(maxWidth).Render(text)
-		} else {
-			// Use natural width for short text
-			view = style.Render(text)
-		}
-		views = append(views, view)
+	mw := n.maxWidth()
+	views := make([]string, 0, len(n.items))
+	for _, item := range slices.Backward(n.items) {
+		views = append(views, item.render(mw))
 	}
-
 	return lipgloss.JoinVertical(lipgloss.Right, views...)
 }
 
@@ -214,4 +210,34 @@ func (n *Manager) position() (row, col int) {
 
 func (n *Manager) Open() bool {
 	return len(n.items) > 0
+}
+
+// HandleClick checks if the given screen coordinates hit a persistent
+// notification and dismisses it. Returns a command if a notification
+// was dismissed, nil otherwise.
+func (n *Manager) HandleClick(x, y int) tea.Cmd {
+	if len(n.items) == 0 {
+		return nil
+	}
+
+	row, col := n.position()
+	mw := n.maxWidth()
+	notifY := row
+
+	// Walk items bottom-to-top (same render order as View)
+	for _, item := range slices.Backward(n.items) {
+		view := item.render(mw)
+		viewHeight := lipgloss.Height(view)
+
+		if item.Type.persistent() {
+			viewWidth := lipgloss.Width(view)
+			if y >= notifY && y < notifY+viewHeight && x >= col && x < col+viewWidth {
+				return core.CmdHandler(HideMsg{ID: item.ID})
+			}
+		}
+
+		notifY += viewHeight
+	}
+
+	return nil
 }

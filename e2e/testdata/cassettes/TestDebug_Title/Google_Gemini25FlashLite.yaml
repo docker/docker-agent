@@ -1,0 +1,27 @@
+---
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: generativelanguage.googleapis.com
+        body: |
+            {"contents":[{"parts":[{"text":"You are a helpful AI assistant that generates concise, descriptive titles for conversations. You will be given up to 2 recent user messages and asked to create a single-line title that captures the main topic. Never use newlines or line breaks in your response."}],"role":"user"},{"parts":[{"text":"Based on the following recent user messages from a conversation with an AI assistant, generate a short, descriptive title (maximum 50 characters) that captures the main topic or purpose of the conversation. Return ONLY the title text on a single line, nothing else. Do not include any newlines, explanations, or formatting.\n\nRecent user messages:\n1. What can you do?\n\n\n"}],"role":"user"}],"generationConfig":{"maxOutputTokens":20}}
+        form:
+            alt:
+                - sse
+        url: https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:streamGenerateContent?alt=sse
+        method: POST
+      response:
+        proto: HTTP/2.0
+        proto_major: 2
+        proto_minor: 0
+        content_length: -1
+        body: "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"AI capabilities\"}],\"role\": \"model\"},\"index\": 0}],\"usageMetadata\": {\"promptTokenCount\": 132,\"candidatesTokenCount\": 2,\"totalTokenCount\": 134,\"promptTokensDetails\": [{\"modality\": \"TEXT\",\"tokenCount\": 132}]},\"modelVersion\": \"gemini-2.5-flash-lite\",\"responseId\": \"z-27afmlJeaCvdIPj66MwQ0\"}\r\n\r\ndata: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \" overview\"}],\"role\": \"model\"},\"finishReason\": \"STOP\",\"index\": 0}],\"usageMetadata\": {\"promptTokenCount\": 132,\"candidatesTokenCount\": 3,\"totalTokenCount\": 135,\"promptTokensDetails\": [{\"modality\": \"TEXT\",\"tokenCount\": 132}]},\"modelVersion\": \"gemini-2.5-flash-lite\",\"responseId\": \"z-27afmlJeaCvdIPj66MwQ0\"}\r\n\r\n"
+        headers: {}
+        status: 200 OK
+        code: 200
+        duration: 967.5585ms

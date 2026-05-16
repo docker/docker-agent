@@ -7,8 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestBuildConfig_Gemini25_ThinkingBudget(t *testing.T) {
@@ -25,35 +28,35 @@ func TestBuildConfig_Gemini25_ThinkingBudget(t *testing.T) {
 			name:                 "gemini-2.5-flash with dynamic thinking (-1)",
 			model:                "gemini-2.5-flash",
 			thinkingBudget:       &latest.ThinkingBudget{Tokens: -1},
-			expectThinkingBudget: ptr(int32(-1)),
+			expectThinkingBudget: new(int32(-1)),
 			expectThinkingLevel:  "",
 		},
 		{
 			name:                 "gemini-2.5-pro with dynamic thinking (-1)",
 			model:                "gemini-2.5-pro",
 			thinkingBudget:       &latest.ThinkingBudget{Tokens: -1},
-			expectThinkingBudget: ptr(int32(-1)),
+			expectThinkingBudget: new(int32(-1)),
 			expectThinkingLevel:  "",
 		},
 		{
 			name:                 "gemini-2.5-flash with specific token budget",
 			model:                "gemini-2.5-flash",
 			thinkingBudget:       &latest.ThinkingBudget{Tokens: 8192},
-			expectThinkingBudget: ptr(int32(8192)),
+			expectThinkingBudget: new(int32(8192)),
 			expectThinkingLevel:  "",
 		},
 		{
 			name:                 "gemini-2.5-flash with thinking disabled (0)",
 			model:                "gemini-2.5-flash",
 			thinkingBudget:       &latest.ThinkingBudget{Tokens: 0},
-			expectThinkingBudget: ptr(int32(0)),
+			expectThinkingBudget: new(int32(0)),
 			expectThinkingLevel:  "",
 		},
 		{
 			name:                 "gemini-2.5-flash-lite with dynamic thinking",
 			model:                "gemini-2.5-flash-lite",
 			thinkingBudget:       &latest.ThinkingBudget{Tokens: -1},
-			expectThinkingBudget: ptr(int32(-1)),
+			expectThinkingBudget: new(int32(-1)),
 			expectThinkingLevel:  "",
 		},
 	}
@@ -135,6 +138,18 @@ func TestBuildConfig_Gemini3_ThinkingLevel(t *testing.T) {
 		{
 			name:                "gemini-3-flash-preview with medium thinking level",
 			model:               "gemini-3-flash-preview",
+			thinkingBudget:      &latest.ThinkingBudget{Effort: "medium"},
+			expectThinkingLevel: genai.ThinkingLevelMedium,
+		},
+		{
+			name:                "gemini-3.1-pro-preview with high thinking level",
+			model:               "gemini-3.1-pro-preview",
+			thinkingBudget:      &latest.ThinkingBudget{Effort: "high"},
+			expectThinkingLevel: genai.ThinkingLevelHigh,
+		},
+		{
+			name:                "gemini-3.1-flash-preview with medium thinking level",
+			model:               "gemini-3.1-flash-preview",
 			thinkingBudget:      &latest.ThinkingBudget{Effort: "medium"},
 			expectThinkingLevel: genai.ThinkingLevelMedium,
 		},
@@ -279,7 +294,202 @@ func TestBuildConfig_CaseInsensitiveModel(t *testing.T) {
 	}
 }
 
-// ptr is a helper to create a pointer to an int32 value.
-func ptr(v int32) *int32 {
-	return &v
+func TestConvertMessagesToGemini_ThoughtSignature(t *testing.T) {
+	t.Parallel()
+
+	defaultSig := thoughtSignatureOrDefault(nil) // the well-known skip sentinel
+	realSig := []byte("real-thought-signature-from-gemini")
+
+	tests := []struct {
+		name      string
+		message   chat.Message
+		wantParts int
+		wantSig   []byte
+	}{
+		{
+			name: "preserves existing signature",
+			message: chat.Message{
+				Role:             chat.MessageRoleAssistant,
+				ThoughtSignature: realSig,
+				ToolCalls: []tools.ToolCall{{
+					ID:       "call-1",
+					Function: tools.FunctionCall{Name: "my_tool", Arguments: `{"key":"value"}`},
+				}},
+			},
+			wantParts: 1,
+			wantSig:   realSig,
+		},
+		{
+			name: "uses default when signature is nil (cross-model)",
+			message: chat.Message{
+				Role: chat.MessageRoleAssistant,
+				ToolCalls: []tools.ToolCall{{
+					ID:       "call-1",
+					Function: tools.FunctionCall{Name: "my_tool", Arguments: `{"key":"value"}`},
+				}},
+			},
+			wantParts: 1,
+			wantSig:   defaultSig,
+		},
+		{
+			name: "uses default when signature is empty (non-nil)",
+			message: chat.Message{
+				Role:             chat.MessageRoleAssistant,
+				ThoughtSignature: []byte{},
+				ToolCalls: []tools.ToolCall{{
+					ID:       "call-1",
+					Function: tools.FunctionCall{Name: "my_tool", Arguments: `{"key":"value"}`},
+				}},
+			},
+			wantParts: 1,
+			wantSig:   defaultSig,
+		},
+		{
+			name: "applies to text and all function call parts",
+			message: chat.Message{
+				Role:    chat.MessageRoleAssistant,
+				Content: "calling tools",
+				ToolCalls: []tools.ToolCall{
+					{ID: "call-1", Function: tools.FunctionCall{Name: "tool_a", Arguments: `{}`}},
+					{ID: "call-2", Function: tools.FunctionCall{Name: "tool_b", Arguments: `{"x":1}`}},
+				},
+			},
+			wantParts: 3, // text + 2 function calls
+			wantSig:   defaultSig,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			contents := convertMessagesToGemini(t.Context(), []chat.Message{
+				{Role: chat.MessageRoleUser, Content: "go"},
+				tt.message,
+			}, modelsdev.ID{}, modelsdev.NewDatabaseStore(&modelsdev.Database{}))
+
+			require.Len(t, contents, 2)
+			assistant := contents[1]
+			assert.Equal(t, genai.RoleModel, assistant.Role)
+			require.Len(t, assistant.Parts, tt.wantParts)
+
+			for i, p := range assistant.Parts {
+				assert.Equal(t, tt.wantSig, p.ThoughtSignature, "part %d", i)
+			}
+		})
+	}
+}
+
+func TestBuiltInTools(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		providerOpts map[string]any
+		wantCount    int
+		wantSearch   bool
+		wantMaps     bool
+		wantCodeExec bool
+	}{
+		{
+			name:         "no built-in tools by default",
+			providerOpts: nil,
+			wantCount:    0,
+		},
+		{
+			name:         "google_search enabled",
+			providerOpts: map[string]any{"google_search": true},
+			wantCount:    1,
+			wantSearch:   true,
+		},
+		{
+			name:         "google_maps enabled",
+			providerOpts: map[string]any{"google_maps": true},
+			wantCount:    1,
+			wantMaps:     true,
+		},
+		{
+			name:         "both enabled",
+			providerOpts: map[string]any{"google_search": true, "google_maps": true},
+			wantCount:    2,
+			wantSearch:   true,
+			wantMaps:     true,
+		},
+		{
+			name:         "explicitly disabled",
+			providerOpts: map[string]any{"google_search": false, "google_maps": false},
+			wantCount:    0,
+		},
+		{
+			name:         "code_execution enabled",
+			providerOpts: map[string]any{"code_execution": true},
+			wantCount:    1,
+			wantCodeExec: true,
+		},
+		{
+			name:         "all three enabled",
+			providerOpts: map[string]any{"google_search": true, "google_maps": true, "code_execution": true},
+			wantCount:    3,
+			wantSearch:   true,
+			wantMaps:     true,
+			wantCodeExec: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := &Client{
+				Config: base.Config{
+					ModelConfig: latest.ModelConfig{
+						Provider:     "google",
+						Model:        "gemini-2.5-flash",
+						ProviderOpts: tt.providerOpts,
+					},
+				},
+			}
+
+			result := client.builtInTools()
+			assert.Len(t, result, tt.wantCount)
+
+			var hasSearch, hasMaps, hasCodeExec bool
+			for _, tool := range result {
+				if tool.GoogleSearch != nil {
+					hasSearch = true
+				}
+				if tool.GoogleMaps != nil {
+					hasMaps = true
+				}
+				if tool.CodeExecution != nil {
+					hasCodeExec = true
+				}
+			}
+			assert.Equal(t, tt.wantSearch, hasSearch, "GoogleSearch")
+			assert.Equal(t, tt.wantMaps, hasMaps, "GoogleMaps")
+			assert.Equal(t, tt.wantCodeExec, hasCodeExec, "CodeExecution")
+		})
+	}
+}
+
+func TestBuildConfig_ThinkingFromBudget(t *testing.T) {
+	t.Parallel()
+
+	// Test that thinking configuration is driven by ThinkingBudget in the model config
+	client := &Client{
+		Config: base.Config{
+			ModelConfig: latest.ModelConfig{
+				Provider:       "google",
+				Model:          "gemini-3-flash",
+				ThinkingBudget: &latest.ThinkingBudget{Effort: "high"},
+			},
+		},
+	}
+
+	config := client.buildConfig()
+
+	// ThinkingConfig should be set from ThinkingBudget
+	require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set from ThinkingBudget")
+	assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
+	assert.Equal(t, genai.ThinkingLevelHigh, config.ThinkingConfig.ThinkingLevel, "ThinkingLevel should match ThinkingBudget")
 }

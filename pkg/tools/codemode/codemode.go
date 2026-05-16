@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 const prompt = `Run a Javascript script to call MCP tools.
@@ -35,9 +35,14 @@ func Wrap(toolsets ...tools.ToolSet) tools.ToolSet {
 }
 
 type codeModeTool struct {
-	tools.BaseToolSet
 	toolsets []tools.ToolSet
 }
+
+// Verify interface compliance
+var (
+	_ tools.ToolSet   = (*codeModeTool)(nil)
+	_ tools.Startable = (*codeModeTool)(nil)
+)
 
 type RunToolsWithJavascriptArgs struct {
 	Script string `json:"script" jsonschema:"Script to execute"`
@@ -98,23 +103,36 @@ func (c *codeModeTool) Tools(ctx context.Context) ([]tools.Tool, error) {
 }
 
 func (c *codeModeTool) Start(ctx context.Context) error {
+	var started []tools.Startable
+	var errs []error
 	for _, t := range c.toolsets {
-		if err := t.Start(ctx); err != nil {
-			return err
+		if s, ok := tools.As[tools.Startable](t); ok {
+			if err := s.Start(ctx); err != nil {
+				errs = append(errs, err)
+			} else {
+				started = append(started, s)
+			}
 		}
 	}
-
+	if len(errs) > 0 {
+		// Roll back successfully-started toolsets so we don't leave
+		// the system in a partially-started state.
+		for _, s := range started {
+			errs = append(errs, s.Stop(ctx))
+		}
+		return errors.Join(errs...)
+	}
 	return nil
 }
 
 func (c *codeModeTool) Stop(ctx context.Context) error {
 	var errs []error
-
 	for _, t := range c.toolsets {
-		if err := t.Stop(ctx); err != nil {
-			errs = append(errs, err)
+		if s, ok := tools.As[tools.Startable](t); ok {
+			if err := s.Stop(ctx); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
-
 	return errors.Join(errs...)
 }

@@ -1,9 +1,9 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 models:
   claude:
     provider: anthropic
-    model: claude-opus-4-5
+    model: claude-opus-4-6
   haiku:
     provider: anthropic
     model: claude-haiku-4-5
@@ -12,6 +12,7 @@ agents:
   root:
     model: claude
     description: Expert Golang Developer specialized in implementing features and improving code quality.
+    skills: true
     instruction: |
       **Goal:**
       Help with Go code-related tasks by examining, modifying, and validating code changes.
@@ -64,6 +65,7 @@ agents:
       - type: todo
       - type: mcp
         command: gopls
+        version: "golang/tools@v0.21.0"
         args: ["mcp"]
     commands:
       fix-lint:
@@ -84,17 +86,17 @@ agents:
       commit:
         description: "Commit local changes"
         instruction: |
-            Based on the below changes: create a single commit with an appropriate message.
+          Based on the below changes: create a single commit with an appropriate message.
 
-            - Current git status: !shell(cmd="git status")
-            - Current git diff (staged and unstaged changes): !shell(cmd="git diff HEAD")
-            - Current branch: !shell(cmd="git branch --show-current")
+          - Current git status: !shell(cmd="git status")
+          - Current git diff (staged and unstaged changes): !shell(cmd="git diff HEAD")
+          - Current branch: !shell(cmd="git branch --show-current")
       simplify: "Look at the local changes and try to simplify the code and architecture but don't remove any feature. I just want the code to be easier to read and maintain."
       init: |
         Create an AGENTS.md file for this project by inspecting the codebase. The AGENTS.md should help AI coding agents understand how to work with this project effectively.
 
         Analyze the project structure and include:
-        1. **Development Commands**: Build, test, lint, and run commands (check Makefile, Taskfile, package.json, Cargo.toml, etc.)
+        1. **Development Commands**: Build, test, lint, and run commands (check Makefile, Taskfile.yml, package.json, Cargo.toml, etc.)
         2. **Architecture Overview**: Key packages/modules, their responsibilities, and how they interact
         3. **Code Style and Conventions**: Patterns used, error handling approaches, naming conventions
         4. **Testing Guidelines**: How to run tests, test patterns used, any special testing setup
@@ -140,8 +142,10 @@ agents:
       Always ask clarifying questions to ensure you fully understand the user's needs before creating the plan.
       Once you have a clear understanding, analyze the existing code and create a detailed development plan in a markdown file. Do not write any code yourself.
       Once the plan is created, you will delegate tasks to the root agent. Make sure to provide the file name of the plan when delegating. Write the plan in the current directory.
+      Use the `user_prompt` tool to ask questions to the user. Prefer Multiple Choice Questions.
     toolsets:
       - type: filesystem
+      - type: user_prompt
     sub_agents:
       - root
 
@@ -161,6 +165,7 @@ agents:
       - type: shell
       - type: mcp
         command: gopls
+        version: "golang/tools@v0.21.0"
         args: ["mcp"]
 
   librarian:
@@ -170,6 +175,7 @@ agents:
       You are the librarian, your job is to look for relevant documentation to help the golang developer agent.
       When given a query, search the internet for relevant documentation, articles, or resources that can assist in completing the task.
       Use context7 for searching documentation and brave for general web searches.
+      A good source of information available to agents is https://deepwiki.com/.
     toolsets:
       - type: mcp
         ref: docker:context7

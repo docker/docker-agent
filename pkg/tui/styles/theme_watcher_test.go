@@ -47,9 +47,6 @@ colors:
 	err := watcher.Watch("test-theme")
 	require.NoError(t, err)
 
-	// Give the watcher time to start
-	time.Sleep(100 * time.Millisecond)
-
 	// Modify the theme file
 	updatedContent := `version: 1
 name: Updated Theme
@@ -58,11 +55,10 @@ colors:
 `
 	require.NoError(t, os.WriteFile(themePath, []byte(updatedContent), 0o644))
 
-	// Wait for the debounce timer and callback
-	time.Sleep(1 * time.Second)
-
-	// Verify callback was called with the correct themeRef
-	assert.GreaterOrEqual(t, callbackCount.Load(), int32(1), "callback should have been called at least once")
+	// Wait for the watcher to detect the change and fire the callback
+	require.Eventually(t, func() bool {
+		return callbackCount.Load() >= 1
+	}, 5*time.Second, 50*time.Millisecond, "callback should have been called at least once")
 	ref, ok := lastThemeRef.Load().(string)
 	assert.True(t, ok)
 	assert.Equal(t, "test-theme", ref, "callback should receive the correct theme ref")
@@ -205,14 +201,11 @@ func TestThemeWatcher_SignalsOnAnyFileChange(t *testing.T) {
 	err := watcher.Watch("signal-test")
 	require.NoError(t, err)
 
-	time.Sleep(100 * time.Millisecond)
-
 	// Write any content (even invalid YAML) - watcher just signals, doesn't validate
 	require.NoError(t, os.WriteFile(themePath, []byte("this is: [not: valid yaml"), 0o644))
 
-	// Wait for debounce
-	time.Sleep(1 * time.Second)
-
-	// Callback SHOULD be called because watcher only signals - validation is TUI's job
-	assert.GreaterOrEqual(t, callbackCount.Load(), int32(1), "callback should be called for any file change")
+	// Wait for the watcher to detect the change and fire the callback
+	require.Eventually(t, func() bool {
+		return callbackCount.Load() >= 1
+	}, 5*time.Second, 50*time.Millisecond, "callback should be called for any file change")
 }

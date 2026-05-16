@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/cagent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config"
 )
 
 type sourceLoader struct {
@@ -60,7 +60,7 @@ func (sl *sourceLoader) load(ctx context.Context) {
 
 	if err != nil {
 		// Only log errors, keep previous data if available
-		slog.Warn("Failed to refresh source",
+		slog.WarnContext(ctx, "Failed to refresh source",
 			"source", sl.inner.Name(),
 			"error", err)
 		// Only update error if we don't have data yet

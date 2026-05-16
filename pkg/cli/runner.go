@@ -3,8 +3,8 @@ package cli
 import (
 	"cmp"
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/input"
-	"github.com/docker/cagent/pkg/runtime"
-	"github.com/docker/cagent/pkg/session"
-	"github.com/docker/cagent/pkg/telemetry"
+	"github.com/mattn/go-isatty"
+
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/input"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/telemetry"
 )
 
 // RuntimeError wraps runtime errors to distinguish them from usage errors
@@ -32,6 +34,39 @@ func (e RuntimeError) Unwrap() error {
 	return e.Err
 }
 
+// maxAutoExtensions is the maximum number of times --yolo mode will
+// auto-continue when max iterations is reached, to prevent infinite loops.
+const maxAutoExtensions = 5
+
+// maxIterAction describes what the caller should do after a MaxIterationsReachedEvent.
+type maxIterAction int
+
+const (
+	maxIterContinue maxIterAction = iota // auto-approved, keep running
+	maxIterStop                          // safety cap reached, caller should stop
+	maxIterPrompt                        // not in yolo mode, caller should prompt the user
+)
+
+// handleMaxIterationsAutoApprove decides whether to auto-extend iterations in
+// --yolo mode. Returns maxIterContinue (approved), maxIterStop (cap reached),
+// or maxIterPrompt (not in auto-approve mode, caller should ask the user).
+func handleMaxIterationsAutoApprove(autoApprove bool, autoExtensions *int, maxIter int) maxIterAction {
+	if !autoApprove {
+		return maxIterPrompt
+	}
+	*autoExtensions++
+	if *autoExtensions <= maxAutoExtensions {
+		slog.Info("Auto-extending iterations in yolo mode",
+			"extension", *autoExtensions,
+			"max_extensions", maxAutoExtensions,
+			"current_max", maxIter)
+		return maxIterContinue
+	}
+	slog.Warn("Max auto-extensions reached in yolo mode, stopping",
+		"total_extensions", *autoExtensions)
+	return maxIterStop
+}
+
 // Config holds configuration for running an agent in CLI mode
 type Config struct {
 	AppName        string
@@ -41,15 +76,17 @@ type Config struct {
 	OutputJSON     bool
 }
 
-// Run executes an agent in non-TUI mode, handling user input and runtime events
-func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess *session.Session, args []string) error {
+// Run executes an agent in non-TUI mode, handling user input and runtime events.
+// userMessages contains the user messages to send. If a single message is "-",
+// input is read from stdin. If empty, an interactive prompt loop is started.
+func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess *session.Session, userMessages []string) error {
 	// Create a cancellable context for this agentic loop and wire Ctrl+C to cancel it
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// Ensure telemetry is initialized and add to context so runtime can access it
-	telemetry.EnsureGlobalTelemetryInitialized()
-	if telemetryClient := telemetry.GetGlobalTelemetryClient(); telemetryClient != nil {
+	telemetry.EnsureGlobalTelemetryInitialized(ctx)
+	if telemetryClient := telemetry.GetGlobalTelemetryClient(ctx); telemetryClient != nil {
 		ctx = telemetry.WithClient(ctx, telemetryClient)
 	}
 
@@ -59,12 +96,16 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 	var lastErr error
 
 	oneLoop := func(text string, rd io.Reader) error {
+		autoExtensions := 0
+
 		userInput := strings.TrimSpace(text)
 		if userInput == "" {
 			return nil
 		}
 
-		sess.AddMessage(PrepareUserMessage(ctx, rt, userInput, cfg.AttachmentPath))
+		userMsg, attachedPath := PrepareUserMessage(ctx, rt, userInput, cfg.AttachmentPath)
+		sess.AddMessage(userMsg)
+		sess.AddAttachedFile(attachedPath)
 
 		if cfg.OutputJSON {
 			for event := range rt.RunStream(ctx, sess) {
@@ -72,6 +113,16 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				case *runtime.ToolCallConfirmationEvent:
 					if !cfg.AutoApprove {
 						rt.Resume(ctx, runtime.ResumeReject(""))
+					}
+				case *runtime.ElicitationRequestEvent:
+					_ = rt.ResumeElicitation(ctx, "decline", nil)
+				case *runtime.MaxIterationsReachedEvent:
+					switch handleMaxIterationsAutoApprove(cfg.AutoApprove, &autoExtensions, e.MaxIterations) {
+					case maxIterContinue:
+						rt.Resume(ctx, runtime.ResumeApprove())
+					default: // maxIterStop or maxIterPrompt (no interactive prompt in JSON mode)
+						rt.Resume(ctx, runtime.ResumeReject(""))
+						return nil
 					}
 				case *runtime.ErrorEvent:
 					return fmt.Errorf("%s", e.Error)
@@ -138,9 +189,9 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				if cfg.HideToolCalls {
 					continue
 				}
-				out.PrintToolCallResponse(e.ToolCall, e.Response)
+				out.PrintToolCallResponse(e.ToolDefinition.Name, e.Response)
 				// Clear the confirmed ID after the tool completes
-				if e.ToolCall.ID == lastConfirmedToolCallID {
+				if e.ToolCallID == lastConfirmedToolCallID {
 					lastConfirmedToolCallID = ""
 				}
 			case *runtime.ErrorEvent:
@@ -152,28 +203,45 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 					out.PrintError(lastErr)
 				}
 			case *runtime.MaxIterationsReachedEvent:
-				result := out.PromptMaxIterationsContinue(ctx, e.MaxIterations)
-				switch result {
-				case ConfirmationApprove:
+				switch handleMaxIterationsAutoApprove(cfg.AutoApprove, &autoExtensions, e.MaxIterations) {
+				case maxIterContinue:
 					rt.Resume(ctx, runtime.ResumeApprove())
-				case ConfirmationReject:
+				case maxIterStop:
 					rt.Resume(ctx, runtime.ResumeReject(""))
 					return nil
-				case ConfirmationAbort:
-					rt.Resume(ctx, runtime.ResumeReject(""))
-					return nil
+				case maxIterPrompt:
+					result := out.PromptMaxIterationsContinue(ctx, e.MaxIterations)
+					switch result {
+					case ConfirmationApprove:
+						rt.Resume(ctx, runtime.ResumeApprove())
+					case ConfirmationReject:
+						rt.Resume(ctx, runtime.ResumeReject(""))
+						return nil
+					case ConfirmationAbort:
+						rt.Resume(ctx, runtime.ResumeReject(""))
+						return nil
+					}
 				}
 			case *runtime.ElicitationRequestEvent:
-				serverURL := e.Meta["cagent/server_url"].(string)
-				result := out.PromptOAuthAuthorization(ctx, serverURL)
-				switch {
-				case ctx.Err() != nil:
-					return ctx.Err()
-				case result == ConfirmationApprove:
-					_ = rt.ResumeElicitation(ctx, "accept", nil)
-				case result == ConfirmationReject:
+				serverURL, ok := e.Meta["cagent/server_url"].(string)
+				if !ok || serverURL == "" {
+					slog.WarnContext(ctx, "Skipping elicitation: missing or invalid server_url (non-interactive session?)")
 					_ = rt.ResumeElicitation(ctx, "decline", nil)
-					return fmt.Errorf("OAuth authorization rejected by user")
+					return nil
+				}
+
+				result := out.PromptOAuthAuthorization(ctx, serverURL)
+
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+
+				switch result {
+				case ConfirmationApprove:
+					_ = rt.ResumeElicitation(ctx, "accept", nil)
+				case ConfirmationReject:
+					_ = rt.ResumeElicitation(ctx, "decline", nil)
+					return errors.New("OAuth authorization rejected by user")
 				}
 			}
 		}
@@ -185,22 +253,36 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 		return nil
 	}
 
-	if len(args) == 2 {
-		if args[1] == "-" {
-			buf, err := io.ReadAll(os.Stdin)
-			if err != nil {
-				return fmt.Errorf("failed to read from stdin: %w", err)
-			}
+	switch {
+	case len(userMessages) == 1 && userMessages[0] == "-":
+		// Single "-" argument: read from stdin
+		buf, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("failed to read from stdin: %w", err)
+		}
 
-			if err := oneLoop(string(buf), os.Stdin); err != nil {
-				return err
-			}
-		} else {
-			if err := oneLoop(args[1], os.Stdin); err != nil {
+		if err := oneLoop(string(buf), os.Stdin); err != nil {
+			return err
+		}
+	case len(userMessages) > 0:
+		// One or more messages: multi-turn conversation
+		for _, msg := range userMessages {
+			if err := oneLoop(msg, os.Stdin); err != nil {
 				return err
 			}
 		}
-	} else {
+	case !isatty.IsTerminal(os.Stdin.Fd()):
+		// Stdin is not a terminal: read all input from stdin
+		buf, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return fmt.Errorf("failed to read from stdin: %w", err)
+		}
+
+		if err := oneLoop(string(buf), os.Stdin); err != nil {
+			return err
+		}
+	default:
+		// No messages: interactive prompt loop
 		out.PrintWelcomeMessage(cfg.AppName)
 		firstQuestion := true
 		for {
@@ -239,8 +321,11 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 //   - userInput: the raw user input (may contain /commands and /attach directives)
 //   - globalAttachPath: attachment path from --attach flag (can be empty)
 //
-// Returns the prepared session.Message ready to be added to the session.
-func PrepareUserMessage(ctx context.Context, rt runtime.Runtime, userInput, globalAttachPath string) *session.Message {
+// Returns the prepared session.Message ready to be added to the session, plus
+// the absolute path of the file that was actually attached (empty when no
+// attachment was used). Callers should pass that path to
+// session.Session.AddAttachedFile so sub-agents inherit the file context.
+func PrepareUserMessage(ctx context.Context, rt runtime.Runtime, userInput, globalAttachPath string) (*session.Message, string) {
 	// Resolve any /command to its prompt text
 	resolvedContent := runtime.ResolveCommand(ctx, rt, userInput)
 
@@ -250,7 +335,7 @@ func PrepareUserMessage(ctx context.Context, rt runtime.Runtime, userInput, glob
 	// Use either the per-message attachment or the global one
 	finalAttachPath := cmp.Or(attachPath, globalAttachPath)
 
-	return CreateUserMessageWithAttachment(messageText, finalAttachPath)
+	return CreateUserMessageWithAttachment(ctx, messageText, finalAttachPath)
 }
 
 // ParseAttachCommand parses user input for /attach commands
@@ -307,78 +392,80 @@ func ParseAttachCommand(userInput string) (messageText, attachPath string) {
 	return messageText, attachPath
 }
 
-// CreateUserMessageWithAttachment creates a user message with optional image attachment
-func CreateUserMessageWithAttachment(userContent, attachmentPath string) *session.Message {
+// CreateUserMessageWithAttachment creates a user message with optional file attachment.
+// All attachment processing (MIME detection, image resize, text inlining) is delegated
+// to [chat.ProcessAttachment], which runs once at message-assembly time.
+//
+// Returns the prepared session.Message and the absolute path of the file that
+// was actually attached. The returned path is empty when no attachment was
+// produced (no path supplied, file unreadable, type unsupported, file too
+// large to inline, etc.). Callers should record successful attachments via
+// session.Session.AddAttachedFile so sub-agents inherit the file context.
+func CreateUserMessageWithAttachment(ctx context.Context, userContent, attachmentPath string) (*session.Message, string) {
+	// noAttachment returns the message without any attachment.
+	noAttachment := func() (*session.Message, string) {
+		return session.UserMessage(userContent), ""
+	}
+
 	if attachmentPath == "" {
-		return session.UserMessage(userContent)
+		return noAttachment()
 	}
 
-	// Convert file to data URL
-	dataURL, err := fileToDataURL(attachmentPath)
+	absPath, err := filepath.Abs(attachmentPath)
 	if err != nil {
-		slog.Warn("Failed to attach file", "path", attachmentPath, "error", err)
-		return session.UserMessage(userContent)
+		slog.WarnContext(ctx, "Failed to get absolute path for attachment", "path", attachmentPath, "error", err)
+		return noAttachment()
 	}
 
-	// Ensure we have some text content when attaching a file
+	fi, err := os.Stat(absPath)
+	if err != nil {
+		slog.WarnContext(ctx, "Attachment file not accessible", "path", absPath, "error", err)
+		return noAttachment()
+	}
+
+	// Ensure we have some text content when attaching a file.
 	textContent := cmp.Or(strings.TrimSpace(userContent), "Please analyze this attached file.")
 
-	// Create message with multi-content including text and image
 	multiContent := []chat.MessagePart{
-		{
+		{Type: chat.MessagePartTypeText, Text: textContent},
+	}
+
+	switch {
+	case chat.IsTextFile(absPath):
+		// Text files are inlined directly as text content.
+		if fi.Size() > chat.MaxInlineFileSize {
+			slog.WarnContext(ctx, "Attachment text file too large to inline", "path", absPath, "size", fi.Size())
+			return noAttachment()
+		}
+		content, err := chat.ReadFileForInline(absPath)
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to read attachment file", "path", absPath, "error", err)
+			return noAttachment()
+		}
+		multiContent = append(multiContent, chat.MessagePart{
 			Type: chat.MessagePartTypeText,
-			Text: textContent,
-		},
-		{
-			Type: chat.MessagePartTypeImageURL,
-			ImageURL: &chat.MessageImageURL{
-				URL:    dataURL,
-				Detail: chat.ImageURLDetailAuto,
-			},
-		},
-	}
+			Text: content,
+		})
 
-	return session.UserMessage("", multiContent...)
-}
-
-// fileToDataURL converts a file to a data URL
-func fileToDataURL(filePath string) (string, error) {
-	// Check if file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return "", fmt.Errorf("file does not exist: %s", filePath)
-	}
-
-	// Read file content
-	fileBytes, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to read file: %w", err)
-	}
-
-	// Determine MIME type based on file extension
-	ext := strings.ToLower(filepath.Ext(filePath))
-	var mimeType string
-	switch ext {
-	case ".jpg", ".jpeg":
-		mimeType = "image/jpeg"
-	case ".png":
-		mimeType = "image/png"
-	case ".gif":
-		mimeType = "image/gif"
-	case ".webp":
-		mimeType = "image/webp"
-	case ".bmp":
-		mimeType = "image/bmp"
-	case ".svg":
-		mimeType = "image/svg+xml"
 	default:
-		return "", fmt.Errorf("unsupported image format: %s", ext)
+		// Binary files (images, PDFs, etc.) — delegate to ProcessAttachment.
+		if !chat.IsSupportedMimeType(chat.DetectMimeType(absPath)) {
+			slog.WarnContext(ctx, "Unsupported attachment file type", "path", absPath)
+			return noAttachment()
+		}
+		doc, _, procErr := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
+			Type: chat.MessagePartTypeFile,
+			File: &chat.MessageFile{Path: absPath},
+		})
+		if procErr != nil {
+			slog.WarnContext(ctx, "Failed to process attachment", "path", absPath, "error", procErr)
+			return noAttachment()
+		}
+		multiContent = append(multiContent, chat.MessagePart{
+			Type:     chat.MessagePartTypeDocument,
+			Document: &doc,
+		})
 	}
 
-	// Encode to base64
-	encoded := base64.StdEncoding.EncodeToString(fileBytes)
-
-	// Create data URL
-	dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, encoded)
-
-	return dataURL, nil
+	return session.UserMessage(textContent, multiContent...), absPath
 }

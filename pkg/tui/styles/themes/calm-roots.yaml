@@ -1,0 +1,99 @@
+version: 1
+name: "Calm Roots"
+colors:
+  # Text colors - warm white palette (shifted hierarchy)
+  text_bright: "#D4D4D8"     # Warm white (Tier 1) - was cool white
+  text_primary: "#C0C0C0"    # Light gray (Tier 2) - standard body
+  text_secondary: "#9A9A9A"  # Medium gray (Tier 3) - de-emphasized
+  text_muted: "#D4D4D8"      # Warm white - used for thinking/reasoning text
+  text_faint: "#6A6A6A"      # Dim gray (Tier 5) - was darker
+  
+  # Accent colors
+  accent: "#D4D4D8"          # Warm white - Links, buttons, cursor, focused elements
+  accent_muted: "#D4D4D8"    # Warm white
+  
+  # Background colors
+  background: "#282c34"      # Ghostty default gray background
+  background_alt: "#363640"  # Lighter background
+  
+  # Border colors
+  border_secondary: "#D4D4D8"  # Warm white - dialogs, resize handle, separators
+  
+  # Status colors
+  success: "#A0D4B4"         # Mint green
+  error: "#F7768E"           # Error red
+  warning: "#D4D4D8"         # Warm white
+  info: "#9ECAB8"            # Sage green
+  highlight: "#98C379"       # Highlight green
+  
+  # Brand colors
+  brand: "#4A4540"           # Dark warm brown - selection backgrounds, brand elements
+  brand_bg: "#363640"        # Warm gray - Brand background areas
+  
+  # Error colors
+  error_strong: "#d74532"
+  error_dark: "#4a2523"
+  
+  # Spinner colors
+  spinner_dim: "#D4D4D8"     # Warm white
+  spinner_bright: "#E0E0E0"  # Lighter warm white
+  spinner_brightest: "#ECECEC" # Brightest warm white
+  
+  # Diff colors
+  diff_add_bg: "#20303B"
+  diff_remove_bg: "#3C2A2A"
+  
+  # UI element colors
+  line_number: "#565F89"
+  separator: "#414868"
+  selected: "#2A3B5C"        # Darker blue-gray - selected items background (for warm white text)
+  selected_fg: "#D4D4D8"     # Warm white - text on selected items, menu highlights
+  suggestion_ghost: "#6B6B6B"
+  tab_bg: "#25252c"
+  tab_active_bg: "#363640"   # User message background
+  tab_active_fg: "#D4D4D8"   # Warm white
+  tab_inactive_fg: "#808080"
+  tab_border: "#9A88C0"      # Lavender border
+  placeholder: "#808080"
+  
+  # Badge colors
+  badge_accent: "#D4D4D8"    # Warm white
+  badge_info: "#9ECAB8"      # Sage green
+  badge_success: "#9ECE6A"
+  
+  # Agent colors (hue values 0-360 for dynamic palette generation)
+  agent_hues: [220, 280, 170, 30, 330, 140, 200, 260, 50, 0, 185, 20, 235, 295, 155, 340]
+
+chroma:
+  # Syntax highlighting colors
+  error_fg: "#F1F1F1"
+  error_bg: "#F05B5B"
+  success: "#A0D4B4"        # Mint green (matching theme success)
+  comment: "#808080"        # Muted gray
+  comment_preproc: "#D4D4D8" # Warm white
+  keyword: "#D4D4D8"        # Warm white
+  keyword_reserved: "#D4D4D8"
+  keyword_namespace: "#D4D4D8"
+  keyword_type: "#D4D4D8"
+  operator: "#D4D4D8"       # Warm white
+  punctuation: "#C0C0C0"    # Light gray
+  name_builtin: "#D4D4D8"   # Warm white
+  name_tag: "#D4D4D8"       # Warm white
+  name_attribute: "#D4D4D8" # Warm white
+  name_decorator: "#D4D4D8" # Warm white
+  literal_number: "#9ECAB8" # Sage green
+  literal_string: "#C69669" # Brown (keep)
+  literal_string_escape: "#D4D4D8" # Warm white
+  generic_deleted: "#FD5B5B"
+  generic_subheading: "#808080"
+  background: "#363640"     # Match background_alt
+
+markdown:
+  heading: "#F2D4D8"         # Soft pinky white
+  link: "#7AA2F7"            # Blue for links
+  strong: "#D4D4D8"          # Warm white for strong
+  code: "#C0C0C0"
+  code_bg: "#363640"         # User message background
+  blockquote: "#808080"
+  list: "#C0C0C0"
+  hr: "#E8C4BE"

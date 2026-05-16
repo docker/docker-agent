@@ -125,3 +125,25 @@ func TestRunSecretsProvider_PathTraversal(t *testing.T) {
 	assert.Equal(t, "SUB_VALUE", result, "Subdirectory access should work")
 	assert.True(t, found)
 }
+
+func TestRunSecretsProvider_SymlinkEscape(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	secretsDir := filepath.Join(tmpDir, "secrets")
+	require.NoError(t, os.Mkdir(secretsDir, 0o755))
+
+	// A sensitive file living outside the secrets directory.
+	sensitive := filepath.Join(tmpDir, "sensitive.txt")
+	require.NoError(t, os.WriteFile(sensitive, []byte("SENSITIVE_DATA"), 0o644))
+
+	// Plant a symlink inside the secrets directory pointing at it.
+	require.NoError(t, os.Symlink(sensitive, filepath.Join(secretsDir, "escape")))
+
+	provider := &RunSecretsProvider{root: secretsDir}
+
+	result, found := provider.Get(t.Context(), "escape")
+	assert.Empty(t, result, "Symlink escaping the secrets root must not resolve")
+	assert.False(t, found)
+}

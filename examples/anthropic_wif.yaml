@@ -1,0 +1,113 @@
+# Example: Anthropic Workload Identity Federation (WIF)
+#
+# Use Anthropic Workload Identity Federation to authenticate Claude API
+# requests with short-lived tokens minted from your own OIDC identity
+# provider, instead of a long-lived ANTHROPIC_API_KEY.
+#
+# Background:
+#   https://platform.claude.com/docs/en/build-with-claude/workload-identity-federation
+#
+# How it works (short version):
+#   1. Configure an "OIDC Federation Rule" on your Anthropic organization.
+#   2. Have your runtime (GitHub Actions, Kubernetes, GCP/Azure metadata, etc.)
+#      hand docker-agent a JWT identity token.
+#   3. The Anthropic Go SDK exchanges that JWT for a short-lived
+#      "sk-ant-oat01-..." access token and refreshes it transparently.
+#
+# docker-agent supports four ways to obtain the JWT — pick the one that
+# matches your runtime. The examples below all share the same federation
+# parameters; they only differ in the `identity_token` block.
+
+providers:
+  # ---------------------------------------------------------------------
+  # 1. file: read the JWT from a file on disk.
+  #
+  # Best for Kubernetes (projected service account tokens), SPIFFE / SPIRE
+  # workload helpers, Vault sidecars, and any other "rotating credential
+  # in a file" pattern. The file is re-read on every token exchange.
+  # ---------------------------------------------------------------------
+  anthropic-wif-k8s:
+    provider: anthropic
+    auth:
+      type: workload_identity_federation
+      workload_identity_federation:
+        federation_rule_id: fdrl_REPLACE_ME
+        organization_id: 00000000-0000-0000-0000-000000000000
+        # Optional: only required for target_type=SERVICE_ACCOUNT rules.
+        service_account_id: svac_REPLACE_ME
+        identity_token:
+          file: /var/run/secrets/anthropic.com/token
+
+  # ---------------------------------------------------------------------
+  # 2. env: read the JWT from an environment variable.
+  #
+  # Useful when a previous build step has already exported the token (for
+  # example, an OIDC bootstrapper that writes ANTHROPIC_OIDC_ID_TOKEN).
+  # ---------------------------------------------------------------------
+  anthropic-wif-env:
+    provider: anthropic
+    auth:
+      type: workload_identity_federation
+      workload_identity_federation:
+        federation_rule_id: fdrl_REPLACE_ME
+        organization_id: 00000000-0000-0000-0000-000000000000
+        identity_token:
+          env: ANTHROPIC_OIDC_ID_TOKEN
+
+  # ---------------------------------------------------------------------
+  # 3. command: shell out for the JWT on every refresh.
+  #
+  # Handy with cloud-vendor CLIs (`gcloud auth print-identity-token`,
+  # `az account get-access-token`, etc.) or one-off scripts.
+  # ---------------------------------------------------------------------
+  anthropic-wif-gcloud:
+    provider: anthropic
+    auth:
+      type: workload_identity_federation
+      workload_identity_federation:
+        federation_rule_id: fdrl_REPLACE_ME
+        organization_id: 00000000-0000-0000-0000-000000000000
+        identity_token:
+          command:
+            - gcloud
+            - auth
+            - print-identity-token
+            - --audiences=https://api.anthropic.com
+
+  # ---------------------------------------------------------------------
+  # 4. url: fetch the JWT over HTTP(S).
+  #
+  # The example below targets the GitHub Actions OIDC token endpoint.
+  # Both the URL and the header values are passed through ${VAR} expansion
+  # against the runtime environment, so secrets like
+  # ACTIONS_ID_TOKEN_REQUEST_TOKEN are never written to the YAML.
+  #
+  # GitHub Actions returns {"value": "<jwt>"}, so we ask the URL source
+  # to read the "value" field.
+  # ---------------------------------------------------------------------
+  anthropic-wif-github-actions:
+    provider: anthropic
+    auth:
+      type: workload_identity_federation
+      workload_identity_federation:
+        federation_rule_id: fdrl_REPLACE_ME
+        organization_id: 00000000-0000-0000-0000-000000000000
+        identity_token:
+          url: ${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://api.anthropic.com
+          headers:
+            Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}
+          response_field: value
+
+models:
+  # All four providers above behave identically once configured; pick one.
+  claude:
+    provider: anthropic-wif-k8s
+    model: claude-sonnet-4-5
+
+agents:
+  root:
+    model: claude
+    description: Anthropic Claude using Workload Identity Federation.
+    instruction: |
+      You are a helpful AI assistant authenticated via Anthropic Workload
+      Identity Federation — no long-lived API key needed.

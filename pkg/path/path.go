@@ -1,6 +1,7 @@
 package path
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -8,25 +9,25 @@ import (
 
 func ValidatePathInDirectory(path, allowedDir string) (string, error) {
 	if path == "" {
-		return "", fmt.Errorf("empty path")
+		return "", errors.New("empty path")
 	}
 
 	cleanPath := filepath.Clean(path)
 
 	if cleanPath == "" || cleanPath == "." {
-		return "", fmt.Errorf("empty or invalid path")
+		return "", errors.New("empty or invalid path")
 	}
 
 	if filepath.IsAbs(cleanPath) && allowedDir == "" {
 		if strings.Contains(path, "..") {
-			return "", fmt.Errorf("path contains directory traversal sequences")
+			return "", errors.New("path contains directory traversal sequences")
 		}
 		return cleanPath, nil
 	}
 
 	if allowedDir == "" {
 		if strings.HasPrefix(cleanPath, "..") {
-			return "", fmt.Errorf("path contains directory traversal sequences")
+			return "", errors.New("path contains directory traversal sequences")
 		}
 		return cleanPath, nil
 	}

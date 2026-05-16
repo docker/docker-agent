@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 func TestToolCallF1Score(t *testing.T) {
@@ -124,53 +126,37 @@ func TestGetResponseSize(t *testing.T) {
 	}
 }
 
-func TestCountHandoffs(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		toolCalls []string
-		want      int
-	}{
-		{"no tool calls", []string{}, 0},
-		{"no handoffs", []string{"search", "read_file"}, 0},
-		{"one handoff", []string{"handoff", "read_file"}, 1},
-		{"one transfer_task", []string{"transfer_task", "read_file"}, 0},
-		{"multiple handoffs", []string{"handoff", "transfer_task", "handoff"}, 2},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := countHandoffs(tt.toolCalls)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func TestParseJudgeResponse(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		text string
-		want bool
+		name       string
+		text       string
+		wantPassed bool
+		wantReason string
+		wantErr    bool
 	}{
-		{"simple pass", `{"result": "pass", "reason": "good"}`, true},
-		{"simple fail", `{"result": "fail", "reason": "bad"}`, false},
-		{"pass uppercase", `{"result": "PASS", "reason": "good"}`, true},
-		{"fail uppercase", `{"result": "FAIL", "reason": "bad"}`, false},
-		{"pass mixed case", `{"result": "Pass", "reason": "good"}`, true},
-		{"invalid json returns false", `not json at all`, false},
-		{"empty result returns false", `{"result": "", "reason": "empty"}`, false},
-		{"missing result field", `{"reason": "no result field"}`, false},
+		{"simple pass", `{"result": "pass", "reason": "good"}`, true, "good", false},
+		{"simple fail", `{"result": "fail", "reason": "bad"}`, false, "bad", false},
+		{"pass uppercase", `{"result": "PASS", "reason": "good"}`, true, "good", false},
+		{"fail uppercase", `{"result": "FAIL", "reason": "bad"}`, false, "bad", false},
+		{"pass mixed case", `{"result": "Pass", "reason": "good"}`, true, "good", false},
+		{"invalid json returns error", `not json at all`, false, "", true},
+		{"empty result returns false", `{"result": "", "reason": "empty"}`, false, "empty", false},
+		{"missing result field", `{"reason": "no result field"}`, false, "no result field", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := parseJudgeResponse(tt.text)
-			assert.Equal(t, tt.want, got)
+			passed, reason, err := parseJudgeResponse(tt.text)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantPassed, passed)
+				assert.Equal(t, tt.wantReason, reason)
+			}
 		})
 	}
 }
@@ -192,33 +178,27 @@ func TestResultCheckResults(t *testing.T) {
 		},
 		{
 			name:         "all checks pass",
-			result:       Result{SizeExpected: "M", Size: "M", ToolCallsExpected: 1, ToolCallsScore: 1.0, HandoffsMatch: true, RelevanceExpected: 2, RelevancePassed: 2},
-			wantSuccess:  []string{"size M", "tool calls", "handoffs", "relevance 2/2"},
+			result:       Result{SizeExpected: "M", Size: "M", ToolCallsExpected: 1, ToolCallsScore: 1.0, RelevanceExpected: 2, RelevancePassed: 2},
+			wantSuccess:  []string{"size M", "tool calls", "relevance 2/2"},
 			wantFailures: nil,
 		},
 		{
 			name:         "size mismatch",
-			result:       Result{SizeExpected: "M", Size: "S", HandoffsMatch: true},
-			wantSuccess:  []string{"handoffs"},
+			result:       Result{SizeExpected: "M", Size: "S"},
+			wantSuccess:  nil,
 			wantFailures: []string{"size expected M, got S"},
 		},
 		{
 			name:         "tool calls failed",
-			result:       Result{ToolCallsExpected: 1, ToolCallsScore: 0.5, HandoffsMatch: true},
-			wantSuccess:  []string{"handoffs"},
+			result:       Result{ToolCallsExpected: 1, ToolCallsScore: 0.5},
+			wantSuccess:  nil,
 			wantFailures: []string{"tool calls score 0.50"},
 		},
 		{
-			name:         "handoffs mismatch",
-			result:       Result{HandoffsMatch: false},
-			wantSuccess:  nil,
-			wantFailures: []string{"handoffs mismatch"},
-		},
-		{
 			name:         "relevance failures listed",
-			result:       Result{HandoffsMatch: true, RelevanceExpected: 2, RelevancePassed: 0, FailedRelevance: []string{"check A", "check B"}},
-			wantSuccess:  []string{"handoffs"},
-			wantFailures: []string{"relevance: check A", "relevance: check B"},
+			result:       Result{RelevanceExpected: 2, RelevancePassed: 0, RelevanceResults: []RelevanceResult{{Criterion: "check A", Passed: false, Reason: "reason A"}, {Criterion: "check B", Passed: false, Reason: "reason B"}}},
+			wantSuccess:  nil,
+			wantFailures: []string{"relevance: check A (reason: reason A)", "relevance: check B (reason: reason B)"},
 		},
 	}
 
@@ -242,73 +222,61 @@ func TestComputeSummary(t *testing.T) {
 		wantTotalEvals     int
 		wantSizesPassed    int
 		wantSizesTotal     int
-		wantHandoffs       int
-		wantHandoffsTotal  int
 		wantRelevance      float64
 		wantRelevanceTotal float64
 	}{
 		{
-			name:              "no results",
-			results:           []Result{},
-			wantTotalCost:     0,
-			wantTotalEvals:    0,
-			wantSizesPassed:   0,
-			wantSizesTotal:    0,
-			wantHandoffs:      0,
-			wantHandoffsTotal: 0,
+			name:            "no results",
+			results:         []Result{},
+			wantTotalCost:   0,
+			wantTotalEvals:  0,
+			wantSizesPassed: 0,
+			wantSizesTotal:  0,
 		},
 		{
 			name: "all passed",
 			results: []Result{
 				{
-					Title:         "session1",
-					Cost:          0.01,
-					SizeExpected:  "M",
-					Size:          "M",
-					HandoffsMatch: true,
+					Title:        "session1",
+					Cost:         0.01,
+					SizeExpected: "M",
+					Size:         "M",
 				},
 			},
-			wantTotalCost:     0.01,
-			wantTotalEvals:    1,
-			wantSizesPassed:   1,
-			wantSizesTotal:    1,
-			wantHandoffs:      1,
-			wantHandoffsTotal: 1,
+			wantTotalCost:   0.01,
+			wantTotalEvals:  1,
+			wantSizesPassed: 1,
+			wantSizesTotal:  1,
 		},
 		{
 			name: "size mismatch",
 			results: []Result{
 				{
-					Title:         "session1",
-					SizeExpected:  "M",
-					Size:          "S",
-					HandoffsMatch: true,
+					Title:        "session1",
+					SizeExpected: "M",
+					Size:         "S",
 				},
 			},
-			wantTotalEvals:    1,
-			wantSizesPassed:   0,
-			wantSizesTotal:    1,
-			wantHandoffs:      1,
-			wantHandoffsTotal: 1,
+			wantTotalEvals:  1,
+			wantSizesPassed: 0,
+			wantSizesTotal:  1,
 		},
 		{
 			name: "multiple sessions",
 			results: []Result{
-				{Title: "session1", Cost: 0.01, SizeExpected: "M", Size: "M", HandoffsMatch: true},
-				{Title: "session2", Cost: 0.02, SizeExpected: "L", Size: "S", HandoffsMatch: false},
-				{Title: "session3", Cost: 0.03, HandoffsMatch: true},
+				{Title: "session1", Cost: 0.01, SizeExpected: "M", Size: "M"},
+				{Title: "session2", Cost: 0.02, SizeExpected: "L", Size: "S"},
+				{Title: "session3", Cost: 0.03},
 			},
-			wantTotalCost:     0.06,
-			wantTotalEvals:    3,
-			wantSizesPassed:   1,
-			wantSizesTotal:    2,
-			wantHandoffs:      2,
-			wantHandoffsTotal: 3,
+			wantTotalCost:   0.06,
+			wantTotalEvals:  3,
+			wantSizesPassed: 1,
+			wantSizesTotal:  2,
 		},
 		{
 			name: "errored results excluded from totals",
 			results: []Result{
-				{Title: "session1", Cost: 0.01, SizeExpected: "M", Size: "M", HandoffsMatch: true, RelevanceExpected: 2, RelevancePassed: 2},
+				{Title: "session1", Cost: 0.01, SizeExpected: "M", Size: "M", RelevanceExpected: 2, RelevancePassed: 2},
 				{Title: "session2", Cost: 0.02, Error: "docker build failed", SizeExpected: "L", RelevanceExpected: 2},
 				{Title: "session3", Cost: 0.00, Error: "timeout", RelevanceExpected: 3},
 			},
@@ -316,8 +284,6 @@ func TestComputeSummary(t *testing.T) {
 			wantTotalEvals:     3,
 			wantSizesPassed:    1,
 			wantSizesTotal:     1, // only non-errored results count
-			wantHandoffs:       1,
-			wantHandoffsTotal:  1, // only non-errored results count
 			wantRelevance:      2,
 			wantRelevanceTotal: 2, // only non-errored results count
 		},
@@ -331,8 +297,6 @@ func TestComputeSummary(t *testing.T) {
 			assert.InDelta(t, tt.wantTotalCost, summary.TotalCost, 0.0001)
 			assert.Equal(t, tt.wantSizesPassed, summary.SizesPassed)
 			assert.Equal(t, tt.wantSizesTotal, summary.SizesTotal)
-			assert.Equal(t, tt.wantHandoffs, summary.HandoffsPassed)
-			assert.Equal(t, tt.wantHandoffsTotal, summary.HandoffsTotal)
 			assert.InDelta(t, tt.wantRelevance, summary.RelevancePassed, 0.0001)
 			assert.InDelta(t, tt.wantRelevanceTotal, summary.RelevanceTotal, 0.0001)
 		})
@@ -367,14 +331,12 @@ func TestSaveRunJSON(t *testing.T) {
 		Timestamp: time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC),
 		Duration:  5 * time.Minute,
 		Results: []Result{
-			{Title: "test1", Cost: 0.01, HandoffsMatch: true},
+			{Title: "test1", Cost: 0.01},
 			{Title: "test2", Cost: 0.02, Error: "failed"},
 		},
 		Summary: Summary{
-			TotalEvals:     2,
-			TotalCost:      0.03,
-			HandoffsPassed: 1,
-			HandoffsTotal:  1,
+			TotalEvals: 2,
+			TotalCost:  0.03,
 		},
 	}
 
@@ -571,15 +533,12 @@ func TestPrintSummary(t *testing.T) {
 				TotalEvals:      10,
 				FailedEvals:     5,
 				TotalCost:       0.05,
-				HandoffsPassed:  3,
-				HandoffsTotal:   5,
 				RelevancePassed: 8,
 				RelevanceTotal:  10,
 			},
 			duration: 2 * time.Minute,
 			wantContains: []string{
 				"Errors: 5/10 evaluations failed",
-				"Handoffs: 3/5 passed",
 				"Relevance: 8/10 passed",
 				"Total Cost: $0.050000",
 				"Total Time: 2m0s",
@@ -592,15 +551,12 @@ func TestPrintSummary(t *testing.T) {
 				TotalCost:       0.1,
 				SizesPassed:     4,
 				SizesTotal:      5,
-				HandoffsPassed:  5,
-				HandoffsTotal:   5,
 				RelevancePassed: 10,
 				RelevanceTotal:  10,
 			},
 			duration: 1 * time.Minute,
 			wantContains: []string{
 				"Sizes: 4/5 passed",
-				"Handoffs: 5/5 passed",
 				"Relevance: 10/10 passed",
 				"Total Cost: $0.100000",
 			},
@@ -673,14 +629,12 @@ func TestProgressBarPrintResult(t *testing.T) {
 		{
 			name: "successful result",
 			result: Result{
-				Title:         "test-session",
-				Cost:          0.005,
-				HandoffsMatch: true,
+				Title: "test-session",
+				Cost:  0.005,
 			},
 			wantContains: []string{
 				"✓ test-session",
 				"$0.005000",
-				"✓ handoffs",
 			},
 		},
 		{
@@ -702,16 +656,14 @@ func TestProgressBarPrintResult(t *testing.T) {
 				Cost:              0.01,
 				SizeExpected:      "M",
 				Size:              "S",
-				HandoffsMatch:     true,
 				RelevanceExpected: 2,
 				RelevancePassed:   1,
-				FailedRelevance:   []string{"check failed"},
+				RelevanceResults:  []RelevanceResult{{Criterion: "check failed", Passed: false, Reason: "did not meet criteria"}},
 			},
 			wantContains: []string{
 				"✗ mixed-session", // overall failed
-				"✓ handoffs",
 				"✗ size expected M, got S",
-				"✗ relevance: check failed",
+				"✗ relevance: check failed (reason: did not meet criteria)",
 			},
 		},
 	}
@@ -769,6 +721,153 @@ func TestStatusIcon(t *testing.T) {
 		t.Run(strings.ReplaceAll(string(rune(int(tt.ratio*100))), "%", "pct"), func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, statusIcon(tt.ratio))
+		})
+	}
+}
+
+func TestBuildTranscript(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		events       []map[string]any
+		wantContains []string
+		wantOrder    []string // substrings that must appear in this order
+	}{
+		{
+			name:         "empty events",
+			events:       []map[string]any{},
+			wantContains: nil,
+		},
+		{
+			name: "text before tool call",
+			events: []map[string]any{
+				{"type": "agent_choice", "content": "I'll search for that.", "agent_name": "root"},
+				{
+					"type":       "tool_call",
+					"agent_name": "root",
+					"tool_call": map[string]any{
+						"function": map[string]any{
+							"name":      "search",
+							"arguments": `{"query": "test"}`,
+						},
+					},
+				},
+			},
+			wantContains: []string{
+				"[Agent root says]",
+				"I'll search for that.",
+				`[Agent root calls tool "search" with arguments:`,
+			},
+			wantOrder: []string{"I'll search for that.", "calls tool"},
+		},
+		{
+			name: "tool call before text (wrong order)",
+			events: []map[string]any{
+				{
+					"type":       "tool_call",
+					"agent_name": "Coding agent",
+					"tool_call": map[string]any{
+						"function": map[string]any{
+							"name":      "shell",
+							"arguments": `{"cmd": "ls"}`,
+						},
+					},
+				},
+				{"type": "agent_choice", "content": "I ran the command.", "agent_name": "Coding agent"},
+			},
+			wantContains: []string{
+				`[Agent Coding agent calls tool "shell" with arguments:`,
+				"[Agent Coding agent says]",
+				"I ran the command.",
+			},
+			wantOrder: []string{"calls tool", "I ran the command."},
+		},
+		{
+			name: "tool call response included",
+			events: []map[string]any{
+				{
+					"type": "tool_call",
+					"tool_call": map[string]any{
+						"function": map[string]any{
+							"name":      "read_file",
+							"arguments": `{"path": "test.txt"}`,
+						},
+					},
+				},
+				{
+					"type":         "tool_call_response",
+					"response":     "file contents here",
+					"tool_call_id": "call_123",
+					"tool_definition": map[string]any{
+						"name": "read_file",
+					},
+				},
+			},
+			wantContains: []string{
+				`calls tool "read_file" with arguments:`,
+				`[Tool "read_file" returns: file contents here]`,
+			},
+		},
+		{
+			name: "long tool response truncated",
+			events: []map[string]any{
+				{
+					"type":         "tool_call_response",
+					"response":     strings.Repeat("x", 600),
+					"tool_call_id": "call_789",
+					"tool_definition": map[string]any{
+						"name": "shell",
+					},
+				},
+			},
+			wantContains: []string{
+				"...(truncated)",
+			},
+		},
+		{
+			name: "agent switch flushes text",
+			events: []map[string]any{
+				{"type": "agent_choice", "content": "Handing off.", "agent_name": "root"},
+				{
+					"type":       "tool_call",
+					"agent_name": "root",
+					"tool_call": map[string]any{
+						"function": map[string]any{
+							"name":      "handoff",
+							"arguments": `{}`,
+						},
+					},
+				},
+				{"type": "agent_choice", "content": "I'll help.", "agent_name": "Coding agent"},
+			},
+			wantContains: []string{
+				"[Agent root says]",
+				"Handing off.",
+				"[Agent Coding agent says]",
+				"I'll help.",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			transcript := buildTranscript(tt.events)
+
+			for _, want := range tt.wantContains {
+				assert.Contains(t, transcript, want)
+			}
+
+			// Verify ordering
+			if len(tt.wantOrder) > 1 {
+				lastIdx := -1
+				for _, substr := range tt.wantOrder {
+					idx := strings.Index(transcript, substr)
+					assert.Greater(t, idx, lastIdx, "expected %q to appear after previous substring in transcript", substr)
+					lastIdx = idx
+				}
+			}
 		})
 	}
 }
@@ -848,6 +947,61 @@ func TestMatchesAnyPattern(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := matchesAnyPattern(tt.fileName, tt.patterns)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestNeedsJudge(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		evals []InputSession
+		want  bool
+	}{
+		{
+			name:  "no evals",
+			evals: nil,
+			want:  false,
+		},
+		{
+			name: "evals without relevance criteria",
+			evals: []InputSession{
+				{Session: &session.Session{Evals: &session.EvalCriteria{Size: "M"}}},
+				{Session: &session.Session{Evals: &session.EvalCriteria{}}},
+			},
+			want: false,
+		},
+		{
+			name: "evals with nil Evals field",
+			evals: []InputSession{
+				{Session: &session.Session{}},
+			},
+			want: false,
+		},
+		{
+			name: "some evals with relevance criteria",
+			evals: []InputSession{
+				{Session: &session.Session{Evals: &session.EvalCriteria{}}},
+				{Session: &session.Session{Evals: &session.EvalCriteria{Relevance: []string{"criterion1"}}}},
+			},
+			want: true,
+		},
+		{
+			name: "all evals with relevance criteria",
+			evals: []InputSession{
+				{Session: &session.Session{Evals: &session.EvalCriteria{Relevance: []string{"a", "b"}}}},
+				{Session: &session.Session{Evals: &session.EvalCriteria{Relevance: []string{"c"}}}},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := needsJudge(tt.evals)
 			assert.Equal(t, tt.want, got)
 		})
 	}

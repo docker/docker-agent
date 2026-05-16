@@ -5,11 +5,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 type toolSet struct {
 	tools.ToolSet
+
 	instruction string
 }
 
@@ -32,7 +33,7 @@ func TestWithInstructions_replace(t *testing.T) {
 
 	wrapped := WithInstructions(inner, "New instructions")
 
-	assert.Equal(t, "New instructions", wrapped.Instructions())
+	assert.Equal(t, "New instructions", tools.GetInstructions(wrapped))
 }
 
 func TestWithInstructions_add(t *testing.T) {
@@ -42,5 +43,5 @@ func TestWithInstructions_add(t *testing.T) {
 
 	wrapped := WithInstructions(inner, "{ORIGINAL_INSTRUCTIONS}\nMore instructions")
 
-	assert.Equal(t, "Existing instructions\nMore instructions", wrapped.Instructions())
+	assert.Equal(t, "Existing instructions\nMore instructions", tools.GetInstructions(wrapped))
 }

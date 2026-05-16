@@ -7,9 +7,31 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/tools"
 )
+
+func TestApproximateTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"empty", "", 0},
+		{"shorter than divisor", "abc", 0},
+		{"exact divisor", "abcd", 1},
+		{"twice divisor", "abcdefgh", 2},
+		{"rounds down", "abcdefg", 1},
+		{"large input", strings.Repeat("x", 4000), 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := approximateTokens(tt.in); got != tt.want {
+				t.Errorf("approximateTokens(%d chars) = %d, want %d", len(tt.in), got, tt.want)
+			}
+		})
+	}
+}
 
 func TestTruncateOldToolContent(t *testing.T) {
 	t.Run("keeps recent tool content within budget", func(t *testing.T) {

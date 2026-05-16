@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/session"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 func PlainText(sess *session.Session) string {
@@ -34,7 +34,70 @@ func PlainText(sess *session.Session) string {
 }
 
 func writeUserMessage(builder *strings.Builder, msg session.Message) {
-	fmt.Fprintf(builder, "\n## User\n\n%s\n", msg.Message.Content)
+	builder.WriteString("\n## User\n")
+
+	// When MultiContent is present, render text and attachment chips.
+	// The text part reflects what was actually sent to the model (the user's
+	// original typed text, plus any dimension notes from image resizing and
+	// inlined file headers from ReadFileForInline). This is intentional: a
+	// transcript should show what the model received, not just what the user
+	// typed into the prompt box. Callers wanting just the raw typed text
+	// should read msg.Message.Content directly.
+	if len(msg.Message.MultiContent) > 0 {
+		for _, part := range msg.Message.MultiContent {
+			switch part.Type {
+			case chat.MessagePartTypeText:
+				if part.Text != "" {
+					fmt.Fprintf(builder, "\n%s\n", part.Text)
+				}
+			case chat.MessagePartTypeDocument:
+				if part.Document != nil {
+					doc := part.Document
+					switch {
+					case chat.IsImageMimeType(doc.MimeType):
+						size := doc.Size
+						if size == 0 {
+							size = int64(len(doc.Source.InlineData))
+						}
+						fmt.Fprintf(builder, "\n[image: %s (%s, %s)]\n", doc.Name, doc.MimeType, formatBytes(size))
+					case doc.Source.InlineText != "":
+						fmt.Fprintf(builder, "\n[attachment: %s (%s)]\n", doc.Name, doc.MimeType)
+					default:
+						size := doc.Size
+						if size == 0 {
+							size = int64(len(doc.Source.InlineData))
+						}
+						fmt.Fprintf(builder, "\n[attachment: %s (%s, %s)]\n", doc.Name, doc.MimeType, formatBytes(size))
+					}
+				}
+			// Note: superseded types kept for backward-compat with stored sessions.
+			case chat.MessagePartTypeImageURL:
+				if part.ImageURL != nil {
+					fmt.Fprintf(builder, "\n[image: %s]\n", part.ImageURL.URL[:min(len(part.ImageURL.URL), 60)])
+				}
+			case chat.MessagePartTypeFile:
+				if part.File != nil {
+					fmt.Fprintf(builder, "\n[file: %s]\n", part.File.Path)
+				}
+			}
+		}
+		return
+	}
+	fmt.Fprintf(builder, "\n%s\n", msg.Message.Content)
+}
+
+// formatBytes returns a human-readable byte size string (e.g. "1.2 MB").
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 func writeAssistantMessage(builder *strings.Builder, msg session.Message) {
@@ -87,7 +150,7 @@ func toJSONString(builder *strings.Builder, in string) {
 	if err := json.Unmarshal([]byte(in), &content); err == nil {
 		if formatted, err := json.MarshalIndent(content, "", "  "); err == nil {
 			builder.WriteString("```json\n")
-			builder.WriteString(string(formatted))
+			builder.Write(formatted)
 			builder.WriteString("\n```\n")
 		} else {
 			builder.WriteString(in)

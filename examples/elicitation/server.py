@@ -5,8 +5,8 @@ MCP Server demonstrating elicitation capabilities.
 This server provides tools that use MCP elicitation to request additional
 information from the user during tool execution.
 
-Usage with cagent:
-    ./bin/cagent run examples/elicitation/agent.yaml
+Usage with docker-agent:
+    docker agent run examples/elicitation/agent.yaml
 
 Usage standalone:
     uvx --with "mcp[cli]" mcp run examples/elicitation/server.py

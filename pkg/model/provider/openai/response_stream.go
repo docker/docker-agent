@@ -8,19 +8,24 @@ import (
 	"github.com/openai/openai-go/v3/packages/ssestream"
 	"github.com/openai/openai-go/v3/responses"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// ResponseStreamAdapter adapts the OpenAI responses stream to our interface
+// Compile-time check: ssestream.Stream satisfies responseEventStream.
+var _ responseEventStream = (*ssestream.Stream[responses.ResponseStreamEventUnion])(nil)
+
+// ResponseStreamAdapter adapts the OpenAI responses stream to our interface.
+// It works with any responseEventStream implementation (SSE or WebSocket).
 type ResponseStreamAdapter struct {
-	stream         *ssestream.Stream[responses.ResponseStreamEventUnion]
+	stream         responseEventStream
 	trackUsage     bool
 	itemCallIDMap  map[string]string
 	itemHasContent map[string]bool
 }
 
-func newResponseStreamAdapter(stream *ssestream.Stream[responses.ResponseStreamEventUnion], trackUsage bool) *ResponseStreamAdapter {
+func newResponseStreamAdapter(stream responseEventStream, trackUsage bool) *ResponseStreamAdapter {
 	return &ResponseStreamAdapter{
 		stream:         stream,
 		trackUsage:     trackUsage,
@@ -33,7 +38,7 @@ func newResponseStreamAdapter(stream *ssestream.Stream[responses.ResponseStreamE
 func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	if !a.stream.Next() {
 		if err := a.stream.Err(); err != nil {
-			return chat.MessageStreamResponse{}, err
+			return chat.MessageStreamResponse{}, oaistream.WrapOpenAIError(err)
 		}
 		return chat.MessageStreamResponse{}, io.EOF
 	}
@@ -253,5 +258,5 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 // Close closes the stream
 func (a *ResponseStreamAdapter) Close() {
-	a.stream.Close()
+	_ = a.stream.Close()
 }

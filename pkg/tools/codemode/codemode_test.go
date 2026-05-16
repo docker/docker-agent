@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestCodeModeTool_Tools(t *testing.T) {
@@ -95,7 +95,7 @@ func TestCodeModeTool_Tools(t *testing.T) {
 func TestCodeModeTool_Instructions(t *testing.T) {
 	tool := &codeModeTool{}
 
-	instructions := tool.Instructions()
+	instructions := tools.GetInstructions(tool)
 
 	assert.Empty(t, instructions)
 }
@@ -108,12 +108,13 @@ func TestCodeModeTool_StartStop(t *testing.T) {
 	assert.Equal(t, 0, inner.start)
 	assert.Equal(t, 0, inner.stop)
 
-	err := tool.Start(t.Context())
+	startable := tool.(tools.Startable)
+	err := startable.Start(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, 1, inner.start)
 	assert.Equal(t, 0, inner.stop)
 
-	err = tool.Stop(t.Context())
+	err = startable.Stop(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, 1, inner.start)
 	assert.Equal(t, 1, inner.stop)
@@ -186,13 +187,50 @@ func TestCodeModeTool_CallEcho(t *testing.T) {
 	require.Empty(t, scriptResult.StdOut)
 }
 
-type testToolSet struct {
-	tools.BaseToolSet
+// TestCodeModeTool_StartRollsBackOnError verifies that when one toolset fails
+// to start, all successfully-started toolsets are stopped (rolled back).
+func TestCodeModeTool_StartRollsBackOnError(t *testing.T) {
+	failing := &testToolSet{startErr: assert.AnError}
+	healthy := &testToolSet{}
 
-	tools []tools.Tool
-	start int
-	stop  int
+	tool := Wrap(healthy, failing).(tools.Startable)
+
+	err := tool.Start(t.Context())
+	require.ErrorIs(t, err, assert.AnError)
+	assert.Equal(t, 1, failing.start, "failing toolset should have attempted start")
+	assert.Equal(t, 1, healthy.start, "healthy toolset should have attempted start")
+	assert.Equal(t, 1, healthy.stop, "healthy toolset should be rolled back after failure")
 }
+
+// TestCodeModeTool_StartStopWrappedToolSet verifies that Start/Stop find
+// Startable through a StartableToolSet wrapper via tools.As.
+func TestCodeModeTool_StartStopWrappedToolSet(t *testing.T) {
+	inner := &testToolSet{}
+	wrapped := tools.NewStartable(inner)
+
+	tool := Wrap(wrapped).(tools.Startable)
+
+	err := tool.Start(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, inner.start)
+
+	err = tool.Stop(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 1, inner.stop)
+}
+
+type testToolSet struct {
+	tools    []tools.Tool
+	start    int
+	stop     int
+	startErr error
+}
+
+// Verify interface compliance
+var (
+	_ tools.ToolSet   = (*testToolSet)(nil)
+	_ tools.Startable = (*testToolSet)(nil)
+)
 
 func (t *testToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return t.tools, nil
@@ -200,7 +238,7 @@ func (t *testToolSet) Tools(context.Context) ([]tools.Tool, error) {
 
 func (t *testToolSet) Start(context.Context) error {
 	t.start++
-	return nil
+	return t.startErr
 }
 
 func (t *testToolSet) Stop(context.Context) error {

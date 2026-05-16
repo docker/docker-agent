@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"slices"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // WithToolsFilter creates a toolset that only includes the specified tools.
@@ -38,8 +38,25 @@ func WithToolsExcludeFilter(inner tools.ToolSet, toolNames ...string) tools.Tool
 
 type filterTools struct {
 	tools.ToolSet
+
 	toolNames []string
 	exclude   bool
+}
+
+// Verify interface compliance
+var (
+	_ tools.Instructable = (*filterTools)(nil)
+	_ tools.Unwrapper    = (*filterTools)(nil)
+)
+
+// Unwrap implements tools.Unwrapper.
+func (f *filterTools) Unwrap() tools.ToolSet {
+	return f.ToolSet
+}
+
+// Instructions implements tools.Instructable by delegating to the inner toolset.
+func (f *filterTools) Instructions() string {
+	return tools.GetInstructions(f.ToolSet)
 }
 
 func (f *filterTools) Tools(ctx context.Context) ([]tools.Tool, error) {
@@ -55,7 +72,7 @@ func (f *filterTools) Tools(ctx context.Context) ([]tools.Tool, error) {
 		// Exclude mode: keep only tools NOT in the list
 		// Include mode: keep only tools in the list
 		if (f.exclude && contains) || (!f.exclude && !contains) {
-			slog.Debug("Filtering out tool", "tool", tool.Name)
+			slog.DebugContext(ctx, "Filtering out tool", "tool", tool.Name)
 			continue
 		}
 

@@ -1,0 +1,4 @@
+version: "2"
+agents:
+  root:
+    model: openai/gpt-4o

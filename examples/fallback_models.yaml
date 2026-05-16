@@ -1,0 +1,48 @@
+#!/usr/bin/env docker agent run
+
+# Example: Fallback Models for High Availability
+#
+# This configuration demonstrates how to set up fallback models for agents.
+# The fallback system handles different error types:
+#
+# - Retryable errors (e.g. 5xx, timeouts): Retry the same model with exponential backoff + jitter
+# - Non-retryable errors (e.g. 429 rate limit, 4xx client errors): Skip to next model immediately
+#
+# After a non-retryable error triggers a fallback, the runtime "sticks" with
+# the successful fallback model for the cooldown duration before retrying the primary.
+#
+# Sensible defaults are included, most users only need to specify fallback models
+
+agents:
+  # Minimal fallback configuration - just specify models, defaults handle the rest
+  root:
+    model: anthropic/claude-sonnet-4-0
+    fallback:
+      models:
+        - openai/gpt-4o
+        - openai/gpt-5-mini
+    description: A reliable assistant with automatic failover
+    instruction: |
+      You are a helpful assistant. Your responses should be clear and concise.
+      You have built-in resilience - if one model provider is unavailable,
+      the system will automatically try alternative providers.
+    toolsets:
+      - type: think
+
+# You can also use named models from the models section as fallbacks
+# models:
+#   fast_backup:
+#     provider: openai
+#     model: gpt-5-mini
+
+# Example with explicit configuration (for power users):
+# agents:
+#   root:
+#     model: anthropic/claude-sonnet-4-0
+#     fallback:
+#       models:
+#         - fast_backup
+#         - google/gemini-2.5-flash
+#       retries: 3       # More retries for flaky networks
+#       cooldown: 5m     # Longer cooldown for persistent rate limits
+#       # Use retries: -1 to disable retries (try each model only once)

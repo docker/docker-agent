@@ -3,15 +3,15 @@ package searchfilescontent
 import (
 	"testing"
 
-	"github.com/docker/cagent/pkg/tools"
-	"github.com/docker/cagent/pkg/tools/builtin"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 func TestExtractResult(t *testing.T) {
 	tests := []struct {
 		name     string
-		meta     *builtin.SearchFilesContentMeta
+		meta     *filesystem.SearchFilesContentMeta
 		expected string
 	}{
 		{
@@ -21,27 +21,27 @@ func TestExtractResult(t *testing.T) {
 		},
 		{
 			name:     "zero matches",
-			meta:     &builtin.SearchFilesContentMeta{MatchCount: 0, FileCount: 0},
+			meta:     &filesystem.SearchFilesContentMeta{MatchCount: 0, FileCount: 0},
 			expected: "no matches",
 		},
 		{
 			name:     "single match in single file",
-			meta:     &builtin.SearchFilesContentMeta{MatchCount: 1, FileCount: 1},
+			meta:     &filesystem.SearchFilesContentMeta{MatchCount: 1, FileCount: 1},
 			expected: "1 match in 1 file",
 		},
 		{
 			name:     "multiple matches in single file",
-			meta:     &builtin.SearchFilesContentMeta{MatchCount: 5, FileCount: 1},
+			meta:     &filesystem.SearchFilesContentMeta{MatchCount: 5, FileCount: 1},
 			expected: "5 matches in 1 file",
 		},
 		{
 			name:     "single match in multiple files",
-			meta:     &builtin.SearchFilesContentMeta{MatchCount: 1, FileCount: 3},
+			meta:     &filesystem.SearchFilesContentMeta{MatchCount: 1, FileCount: 3},
 			expected: "1 match in 3 files",
 		},
 		{
 			name:     "multiple matches in multiple files",
-			meta:     &builtin.SearchFilesContentMeta{MatchCount: 42, FileCount: 7},
+			meta:     &filesystem.SearchFilesContentMeta{MatchCount: 42, FileCount: 7},
 			expected: "42 matches in 7 files",
 		},
 	}

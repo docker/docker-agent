@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/dnaeon/go-vcr.v4/pkg/recorder"
 
-	"github.com/docker/cagent/pkg/config"
-	"github.com/docker/cagent/pkg/environment"
-	"github.com/docker/cagent/pkg/fake"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/fake"
 )
 
 func startRecordingAIProxy(t *testing.T) (*httptest.Server, *config.RuntimeConfig) {

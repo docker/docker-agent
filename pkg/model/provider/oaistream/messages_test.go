@@ -7,8 +7,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestConvertMultiContent(t *testing.T) {
@@ -41,18 +42,28 @@ func TestConvertMultiContent(t *testing.T) {
 			wantCount: 2,
 		},
 		{
-			name: "image without URL",
+			name: "image with nil URL produces no part",
 			multiContent: []chat.MessagePart{
 				{Type: chat.MessagePartTypeImageURL, ImageURL: nil},
 			},
-			wantCount: 1,
+			wantCount: 0,
+		},
+		{
+			// The converter forwards all parts as-is; normalizeMessageContent in the
+			// session layer strips whitespace-only text parts before real usage.
+			name: "whitespace-only text part forwarded as-is",
+			multiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeText, Text: "   "},
+				{Type: chat.MessagePartTypeText, Text: "hello"},
+			},
+			wantCount: 2,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := ConvertMultiContent(tt.multiContent)
+			result := ConvertMultiContent(t.Context(), tt.multiContent, modelsdev.ID{}, modelsdev.NewDatabaseStore(&modelsdev.Database{}))
 			assert.Len(t, result, tt.wantCount)
 		})
 	}
@@ -127,7 +138,7 @@ func TestConvertMessages(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := ConvertMessages(tt.messages)
+			result := ConvertMessages(t.Context(), tt.messages, modelsdev.ID{}, modelsdev.NewDatabaseStore(&modelsdev.Database{}))
 			assert.Len(t, result, tt.want)
 		})
 	}

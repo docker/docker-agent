@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
 func TestNewChecker(t *testing.T) {
@@ -35,6 +35,15 @@ func TestNewChecker(t *testing.T) {
 		require.NotNil(t, checker)
 		assert.False(t, checker.IsEmpty())
 	})
+
+	t.Run("with only ask patterns", func(t *testing.T) {
+		t.Parallel()
+		checker := NewChecker(&latest.PermissionsConfig{
+			Ask: []string{"fetch"},
+		})
+		require.NotNil(t, checker)
+		assert.False(t, checker.IsEmpty())
+	})
 }
 
 func TestChecker_Check(t *testing.T) {
@@ -43,6 +52,7 @@ func TestChecker_Check(t *testing.T) {
 	tests := []struct {
 		name     string
 		allow    []string
+		ask      []string
 		deny     []string
 		toolName string
 		want     Decision
@@ -138,6 +148,27 @@ func TestChecker_Check(t *testing.T) {
 			toolName: "read_file",
 			want:     Allow,
 		},
+		// Ask patterns
+		{
+			name:     "ask pattern returns ForceAsk",
+			ask:      []string{"fetch"},
+			toolName: "fetch",
+			want:     ForceAsk,
+		},
+		{
+			name:     "deny takes priority over ask",
+			ask:      []string{"fetch"},
+			deny:     []string{"fetch"},
+			toolName: "fetch",
+			want:     Deny,
+		},
+		{
+			name:     "allow takes priority over ask",
+			allow:    []string{"fetch"},
+			ask:      []string{"fetch"},
+			toolName: "fetch",
+			want:     Allow,
+		},
 	}
 
 	for _, tt := range tests {
@@ -145,6 +176,7 @@ func TestChecker_Check(t *testing.T) {
 			t.Parallel()
 			checker := NewChecker(&latest.PermissionsConfig{
 				Allow: tt.allow,
+				Ask:   tt.ask,
 				Deny:  tt.deny,
 			})
 			got := checker.Check(tt.toolName)
@@ -383,6 +415,7 @@ func TestDecision_String(t *testing.T) {
 		{Ask, "ask"},
 		{Allow, "allow"},
 		{Deny, "deny"},
+		{ForceAsk, "force_ask"},
 		{Decision(99), "unknown"},
 	}
 
@@ -390,6 +423,38 @@ func TestDecision_String(t *testing.T) {
 		t.Run(tt.want, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, tt.decision.String())
+		})
+	}
+}
+
+func TestChecker_ForceAsk(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		allow    []string
+		ask      []string
+		deny     []string
+		toolName string
+		want     Decision
+	}{
+		{name: "no patterns returns Ask", toolName: "fetch", want: Ask},
+		{name: "ask pattern returns ForceAsk", ask: []string{"fetch"}, toolName: "fetch", want: ForceAsk},
+		{name: "ask glob returns ForceAsk", ask: []string{"fetch*"}, toolName: "fetch_url", want: ForceAsk},
+		{name: "ask pattern does not match other tool", ask: []string{"fetch"}, toolName: "shell", want: Ask},
+		{name: "deny takes priority over ask", ask: []string{"fetch"}, deny: []string{"fetch"}, toolName: "fetch", want: Deny},
+		{name: "allow takes priority over ask", ask: []string{"fetch"}, allow: []string{"fetch"}, toolName: "fetch", want: Allow},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			checker := NewChecker(&latest.PermissionsConfig{
+				Allow: tt.allow,
+				Ask:   tt.ask,
+				Deny:  tt.deny,
+			})
+			assert.Equal(t, tt.want, checker.Check(tt.toolName))
 		})
 	}
 }
@@ -515,4 +580,54 @@ func TestArgToString(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestMerge(t *testing.T) {
+	t.Parallel()
+
+	t.Run("both nil", func(t *testing.T) {
+		t.Parallel()
+		merged := Merge(nil, nil)
+		assert.True(t, merged.IsEmpty())
+	})
+
+	t.Run("one nil", func(t *testing.T) {
+		t.Parallel()
+		c := NewChecker(&latest.PermissionsConfig{Allow: []string{"tool_a"}})
+		merged := Merge(c, nil)
+		assert.Equal(t, []string{"tool_a"}, merged.AllowPatterns())
+	})
+
+	t.Run("combines patterns", func(t *testing.T) {
+		t.Parallel()
+		team := NewChecker(&latest.PermissionsConfig{
+			Allow: []string{"team_tool"},
+			Deny:  []string{"team_deny"},
+		})
+		global := NewChecker(&latest.PermissionsConfig{
+			Allow: []string{"global_tool"},
+			Ask:   []string{"global_ask"},
+		})
+		merged := Merge(team, global)
+		assert.Equal(t, []string{"team_tool", "global_tool"}, merged.AllowPatterns())
+		assert.Equal(t, []string{"team_deny"}, merged.DenyPatterns())
+		assert.Equal(t, []string{"global_ask"}, merged.AskPatterns())
+	})
+
+	t.Run("deny from either source blocks", func(t *testing.T) {
+		t.Parallel()
+		team := NewChecker(&latest.PermissionsConfig{Allow: []string{"tool_a"}})
+		global := NewChecker(&latest.PermissionsConfig{Deny: []string{"tool_a"}})
+		merged := Merge(team, global)
+		// Deny is checked first, so global deny overrides team allow
+		assert.Equal(t, Deny, merged.Check("tool_a"))
+	})
+
+	t.Run("skips empty checkers", func(t *testing.T) {
+		t.Parallel()
+		empty := NewChecker(&latest.PermissionsConfig{})
+		actual := NewChecker(&latest.PermissionsConfig{Deny: []string{"bad"}})
+		merged := Merge(empty, nil, actual, empty)
+		assert.Equal(t, []string{"bad"}, merged.DenyPatterns())
+	})
 }

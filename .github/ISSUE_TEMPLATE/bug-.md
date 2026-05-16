@@ -1,42 +1,53 @@
 ---
-name: Bug!
-about: Create a report to help us squash the bugs
-title: "<short bug description>"
-labels: kind/bug
+name: Bug Report
+about: Report a defect, crash, or unexpected behavior
+title: "<short description>"
+type: Bug
 assignees: ""
 ---
 
-**Describe the bug**
+## Description
 
 A clear and concise description of what the bug is.
 
-**Version affected**
+## Expected Behavior
 
-Please include the version of the software that you are using.  
-(paste the output of the `version` command)
+What you expected to happen.
 
-**How To Reproduce**
+## Actual Behavior
 
-Detailed steps to reproduce the behavior:
+What actually happened instead.
 
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+## Steps to Reproduce
 
-**Expectation**
+Detailed steps to reproduce the bug:
 
-A clear and concise description of what you expected to see/happen.
+1. 
+2. 
+3. 
 
-**Screenshots**
+## Environment
 
-If applicable, add screenshots to help explain your problem.
-Especially useful if the problem is visual (rendering issues etc.) or you're not totally sure how to explain the problem and need to show it to us
+- **Docker Agent Version**: (output of `docker agent --version`)
+- **OS & Terminal**: macOS / Linux / Windows + terminal app
+- **Model Used**: (e.g., claude-opus-4-1, gpt-4, etc.)
 
-**OS and Terminal type**
+## Error Output
 
-Please include what OS and terminal you are using
+If applicable, paste the full error message or stack trace:
 
-**Additional context**
+```
+<error output>
+```
 
-Any other info you consider useful can be included here
+## Screenshots
+
+If this is a visual issue (TUI rendering, output formatting, etc.), add screenshots.
+
+## Additional Context
+
+Any other information that might help us debug:
+- Recent changes you made to your agent config
+- Tools or MCPs being used
+- Whether this is a regression (used to work in a previous version)
+- Links to related issues

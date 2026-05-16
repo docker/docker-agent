@@ -5,7 +5,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // TruncateText truncates text to fit within maxWidth, adding an ellipsis if needed.
@@ -130,6 +130,76 @@ func wrapTextWithIndent(text string, firstLineWidth, subsequentLineWidth int) st
 	}
 
 	return result.String()
+}
+
+// WrapLinesWords wraps text to fit within the given width, preferring to break
+// at word boundaries (spaces). If a single word exceeds the width, it falls
+// back to splitting at rune boundaries.
+func WrapLinesWords(text string, width int) []string {
+	if width <= 0 {
+		return strings.Split(text, "\n")
+	}
+
+	var lines []string
+	for inputLine := range strings.SplitSeq(text, "\n") {
+		if lipgloss.Width(inputLine) <= width {
+			lines = append(lines, inputLine)
+			continue
+		}
+
+		words := strings.Fields(inputLine)
+		if len(words) == 0 {
+			lines = append(lines, inputLine)
+			continue
+		}
+
+		var current strings.Builder
+		currentWidth := 0
+
+		for _, word := range words {
+			wWidth := lipgloss.Width(word)
+
+			// Word itself exceeds width — split it at rune boundaries
+			if wWidth > width {
+				if currentWidth > 0 {
+					lines = append(lines, current.String())
+					current.Reset()
+					currentWidth = 0
+				}
+				runes := []rune(word)
+				start := 0
+				for start < len(runes) {
+					end := takeRunesThatFit(runes, start, width)
+					lines = append(lines, string(runes[start:end]))
+					start = end
+				}
+				continue
+			}
+
+			needed := wWidth
+			if currentWidth > 0 {
+				needed++ // space separator
+			}
+
+			if currentWidth+needed > width {
+				lines = append(lines, current.String())
+				current.Reset()
+				currentWidth = 0
+			}
+
+			if currentWidth > 0 {
+				current.WriteByte(' ')
+				currentWidth++
+			}
+			current.WriteString(word)
+			currentWidth += wWidth
+		}
+
+		if current.Len() > 0 {
+			lines = append(lines, current.String())
+		}
+	}
+	return lines
 }
 
 // WrapLines wraps text to fit within the given width.

@@ -4,10 +4,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 func TestResolveModelAliases(t *testing.T) {
@@ -17,8 +16,6 @@ func TestResolveModelAliases(t *testing.T) {
 	mockData := &modelsdev.Database{
 		Providers: map[string]modelsdev.Provider{
 			"anthropic": {
-				ID:   "anthropic",
-				Name: "Anthropic",
 				Models: map[string]modelsdev.Model{
 					"claude-sonnet-4-5":          {Name: "Claude Sonnet 4.5 (latest)"},
 					"claude-sonnet-4-5-20250929": {Name: "Claude Sonnet 4.5"},
@@ -27,11 +24,7 @@ func TestResolveModelAliases(t *testing.T) {
 		},
 	}
 
-	store, err := modelsdev.NewStore(modelsdev.WithCacheDir(t.TempDir()))
-	require.NoError(t, err)
-	store.SetDatabaseForTesting(mockData)
-
-	ctx := t.Context()
+	store := modelsdev.NewDatabaseStore(mockData)
 
 	tests := []struct {
 		name     string
@@ -47,12 +40,12 @@ func TestResolveModelAliases(t *testing.T) {
 			},
 			expected: &latest.Config{
 				Models: map[string]latest.ModelConfig{
-					"my_model": {Provider: "anthropic", Model: "claude-sonnet-4-5-20250929"},
+					"my_model": {Provider: "anthropic", Model: "claude-sonnet-4-5-20250929", DisplayModel: "claude-sonnet-4-5"},
 				},
 			},
 		},
 		{
-			name: "resolves inline model in agent",
+			name: "does not resolve inline model in agent",
 			cfg: &latest.Config{
 				Models: map[string]latest.ModelConfig{},
 				Agents: []latest.AgentConfig{
@@ -62,7 +55,7 @@ func TestResolveModelAliases(t *testing.T) {
 			expected: &latest.Config{
 				Models: map[string]latest.ModelConfig{},
 				Agents: []latest.AgentConfig{
-					{Name: "root", Model: "anthropic/claude-sonnet-4-5-20250929"},
+					{Name: "root", Model: "anthropic/claude-sonnet-4-5"},
 				},
 			},
 		},
@@ -78,7 +71,7 @@ func TestResolveModelAliases(t *testing.T) {
 			},
 			expected: &latest.Config{
 				Models: map[string]latest.ModelConfig{
-					"my_model": {Provider: "anthropic", Model: "claude-sonnet-4-5-20250929"},
+					"my_model": {Provider: "anthropic", Model: "claude-sonnet-4-5-20250929", DisplayModel: "claude-sonnet-4-5"},
 				},
 				Agents: []latest.AgentConfig{
 					{Name: "root", Model: "my_model"},
@@ -114,7 +107,7 @@ func TestResolveModelAliases(t *testing.T) {
 			},
 		},
 		{
-			name: "handles comma-separated models",
+			name: "does not resolve comma-separated inline models in agent",
 			cfg: &latest.Config{
 				Models: map[string]latest.ModelConfig{},
 				Agents: []latest.AgentConfig{
@@ -124,7 +117,7 @@ func TestResolveModelAliases(t *testing.T) {
 			expected: &latest.Config{
 				Models: map[string]latest.ModelConfig{},
 				Agents: []latest.AgentConfig{
-					{Name: "root", Model: "anthropic/claude-sonnet-4-5-20250929,my_ref"},
+					{Name: "root", Model: "anthropic/claude-sonnet-4-5,my_ref"},
 				},
 			},
 		},
@@ -144,8 +137,9 @@ func TestResolveModelAliases(t *testing.T) {
 			expected: &latest.Config{
 				Models: map[string]latest.ModelConfig{
 					"router": {
-						Provider: "anthropic",
-						Model:    "claude-sonnet-4-5-20250929",
+						Provider:     "anthropic",
+						Model:        "claude-sonnet-4-5-20250929",
+						DisplayModel: "claude-sonnet-4-5",
 						Routing: []latest.RoutingRule{
 							{Model: "anthropic/claude-sonnet-4-5-20250929", Examples: []string{"example"}},
 						},
@@ -242,7 +236,7 @@ func TestResolveModelAliases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ResolveModelAliases(ctx, tt.cfg)
+			ResolveModelAliases(t.Context(), tt.cfg, store)
 			assert.Equal(t, tt.expected, tt.cfg)
 		})
 	}

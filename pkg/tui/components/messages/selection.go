@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // selectionState encapsulates all state related to text selection
@@ -136,7 +136,8 @@ func (m *model) autoScroll() tea.Cmd {
 
 // selectWordAt selects the word at the given line and column position
 func (m *model) selectWordAt(line, col int) {
-	lines := strings.Split(m.rendered, "\n")
+	m.ensureAllItemsRendered()
+	lines := m.renderedLines
 	if line < 0 || line >= len(lines) {
 		return
 	}
@@ -184,7 +185,8 @@ func (m *model) selectWordAt(line, col int) {
 
 // selectLineAt selects the entire line at the given line position
 func (m *model) selectLineAt(line int) {
-	lines := strings.Split(m.rendered, "\n")
+	m.ensureAllItemsRendered()
+	lines := m.renderedLines
 	if line < 0 || line >= len(lines) {
 		return
 	}
@@ -253,24 +255,7 @@ func (m *model) applySelectionHighlight(lines []string, viewportStartLine int) [
 
 // highlightLine applies selection highlighting to a portion of a line
 func (m *model) highlightLine(line string, startCol, endCol int) string {
-	// Get plain text for boundary checks
-	plainLine := ansi.Strip(line)
-	plainWidth := runewidth.StringWidth(plainLine)
-
-	// Validate and normalize boundaries
-	if startCol >= plainWidth || startCol >= endCol {
-		return line
-	}
-	endCol = min(endCol, plainWidth)
-
-	// Extract the three parts while preserving ANSI codes
-	before := ansi.Cut(line, 0, startCol)
-	selectedText := ansi.Cut(line, startCol, endCol)
-	selectedPlain := ansi.Strip(selectedText)
-	selected := styles.SelectionStyle.Render(selectedPlain)
-	after := ansi.Cut(line, endCol, plainWidth)
-
-	return before + selected + after
+	return styleLineSegment(line, startCol, endCol, styles.SelectionStyle)
 }
 
 // clearSelection resets the selection state

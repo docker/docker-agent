@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
@@ -10,8 +10,8 @@ agents:
       Your responses should be clear, concise, and focused on providing accurate information about Python programming,
       libraries, and best practices.
     toolsets:
-    - type: filesystem
-    - type: shell
+      - type: filesystem
+      - type: shell
 
 models:
   claude:

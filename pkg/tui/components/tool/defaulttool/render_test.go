@@ -16,8 +16,8 @@ func TestFormatValue_String(t *testing.T) {
 func TestFormatValue_SingleElementArray(t *testing.T) {
 	t.Parallel()
 
-	result := formatValue([]any{"/Users/dgageot/src/cagent/main/cmd/root/run.go"})
-	assert.Equal(t, `["/Users/dgageot/src/cagent/main/cmd/root/run.go"]`, result)
+	result := formatValue([]any{"/src/main/cmd/root/run.go"})
+	assert.Equal(t, `["/src/main/cmd/root/run.go"]`, result)
 }
 
 func TestFormatValue_MultiElementArray(t *testing.T) {

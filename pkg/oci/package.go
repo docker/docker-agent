@@ -14,10 +14,10 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/static"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
-	"github.com/docker/cagent/pkg/config"
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/content"
-	"github.com/docker/cagent/pkg/version"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/content"
+	"github.com/docker/docker-agent/pkg/version"
 )
 
 // PackageFileAsOCIToStore creates an OCI artifact from a file and stores it in the content store
@@ -55,8 +55,9 @@ func PackageFileAsOCIToStore(ctx context.Context, agentSource config.Source, art
 	// Prepare OCI annotations
 	annotations := map[string]string{
 		"io.docker.cagent.version":             version.Version,
+		"io.docker.agent.version":              version.Version,
 		"org.opencontainers.image.created":     time.Now().Format(time.RFC3339),
-		"org.opencontainers.image.description": fmt.Sprintf("OCI artifact containing %s", filepath.Base(agentSource.Name())),
+		"org.opencontainers.image.description": "OCI artifact containing " + filepath.Base(agentSource.Name()),
 	}
 	if author := cfg.Metadata.Author; author != "" {
 		annotations["org.opencontainers.image.authors"] = author
@@ -76,7 +77,7 @@ func PackageFileAsOCIToStore(ctx context.Context, agentSource config.Source, art
 
 	// Convert to OCI manifest format to support annotations
 	img = mutate.MediaType(img, types.OCIManifestSchema1)
-	img = mutate.ConfigMediaType(img, "application/vnd.docker.cagent.config.v1+json")
+	img = mutate.ConfigMediaType(img, "application/vnd.docker.agent.config.v1+json")
 	img = mutate.Annotations(img, annotations).(v1.Image)
 
 	digest, err := store.StoreArtifact(img, artifactRef)

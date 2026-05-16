@@ -1,19 +1,19 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
     description: "Podcast Director - Orchestrates the entire podcast creation workflow and generates text file"
     instruction: |
-     You are the Podcast Director responsible for coordinating the entire podcast creation process.
+      You are the Podcast Director responsible for coordinating the entire podcast creation process.
 
-      Your workflow:
-      1. Analyze input requirements (topic, length, style, target audience)
-      2. Delegate research to the research agent which can open duck duck go browser for researching
-      3. Pass the researched information to the scriptwriter for script creation
-      4. Output is generated as a text file which can be saved to file or printed out
-      5. Ensure quality control throughout the process
+       Your workflow:
+       1. Analyze input requirements (topic, length, style, target audience)
+       2. Delegate research to the research agent which can open duck duck go browser for researching
+       3. Pass the researched information to the scriptwriter for script creation
+       4. Output is generated as a text file which can be saved to file or printed out
+       5. Ensure quality control throughout the process
 
-      Always maintain a professional, engaging tone and ensure the final podcast meets broadcast standards.
+       Always maintain a professional, engaging tone and ensure the final podcast meets broadcast standards.
     model: github-model
     toolsets:
       - type: mcp
@@ -36,9 +36,9 @@ agents:
 
       Always provide well-sourced, current, and engaging research that will make for compelling podcast content.
     toolsets:
-        - type: mcp
-          command: docker
-          args: ["mcp", "gateway", "run", "--servers=duckduckgo"]
+      - type: mcp
+        command: docker
+        args: ["mcp", "gateway", "run", "--servers=duckduckgo"]
   scriptwriter:
     model: github-model
     description: "Podcast Scriptwriter - Creates engaging, professional podcast scripts"

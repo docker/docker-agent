@@ -8,14 +8,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
 )
 
 func TestAutoRegisterModels(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/autoregister.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/autoregister.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Models, 2)
@@ -28,7 +28,7 @@ func TestAutoRegisterModels(t *testing.T) {
 func TestAutoRegisterAlloy(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/autoregister_alloy.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/autoregister_alloy.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Models, 2)
@@ -41,7 +41,7 @@ func TestAutoRegisterAlloy(t *testing.T) {
 func TestAlloyModelComposition(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/alloy_model_composition.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/alloy_model_composition.yaml"))
 	require.NoError(t, err)
 
 	// The alloy model should be expanded to its constituent models
@@ -57,7 +57,7 @@ func TestAlloyModelComposition(t *testing.T) {
 func TestAlloyModelNestedComposition(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/alloy_model_nested.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/alloy_model_nested.yaml"))
 	require.NoError(t, err)
 
 	// The nested alloy should be fully expanded to all constituent models
@@ -72,7 +72,7 @@ func TestAlloyModelNestedComposition(t *testing.T) {
 func TestMigrate_v0_v1_provider(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/provider_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v0.yaml"))
 	require.NoError(t, err)
 
 	assert.Equal(t, "openai", cfg.Models["gpt"].Provider)
@@ -81,7 +81,7 @@ func TestMigrate_v0_v1_provider(t *testing.T) {
 func TestMigrate_v1_provider(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/provider_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v1.yaml"))
 	require.NoError(t, err)
 
 	assert.Equal(t, "openai", cfg.Models["gpt"].Provider)
@@ -90,7 +90,7 @@ func TestMigrate_v1_provider(t *testing.T) {
 func TestMigrate_v0_v1_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/todo_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v0.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -102,7 +102,7 @@ func TestMigrate_v0_v1_todo(t *testing.T) {
 func TestMigrate_v1_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/todo_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v1.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -114,7 +114,7 @@ func TestMigrate_v1_todo(t *testing.T) {
 func TestMigrate_v0_v1_shared_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/shared_todo_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v0.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -126,7 +126,7 @@ func TestMigrate_v0_v1_shared_todo(t *testing.T) {
 func TestMigrate_v1_shared_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/shared_todo_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v1.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -138,7 +138,7 @@ func TestMigrate_v1_shared_todo(t *testing.T) {
 func TestMigrate_v0_v1_think(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/think_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v0.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -149,7 +149,7 @@ func TestMigrate_v0_v1_think(t *testing.T) {
 func TestMigrate_v1_think(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/think_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v1.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -160,7 +160,7 @@ func TestMigrate_v1_think(t *testing.T) {
 func TestMigrate_v0_v1_memory(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/memory_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v0.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -172,7 +172,7 @@ func TestMigrate_v0_v1_memory(t *testing.T) {
 func TestMigrate_v1_memory(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/memory_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v1.yaml"))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -184,7 +184,7 @@ func TestMigrate_v1_memory(t *testing.T) {
 func TestMigrate_v1(t *testing.T) {
 	t.Parallel()
 
-	_, err := Load(t.Context(), testfileSource("testdata/v1.yaml"))
+	_, err := Load(t.Context(), NewFileSource("testdata/v1.yaml"))
 	require.NoError(t, err)
 }
 
@@ -201,6 +201,15 @@ func openRoot(t *testing.T, dir string) *os.Root {
 type noEnvProvider struct{}
 
 func (p *noEnvProvider) Get(context.Context, string) (string, bool) { return "", false }
+
+type fakeEnvProvider struct {
+	vars map[string]string
+}
+
+func (p *fakeEnvProvider) Get(_ context.Context, name string) (string, bool) {
+	v, ok := p.vars[name]
+	return v, ok
+}
 
 func TestCheckRequiredEnvVars(t *testing.T) {
 	t.Parallel()
@@ -262,7 +271,7 @@ func TestCheckRequiredEnvVars(t *testing.T) {
 		t.Run(test.yaml, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := Load(t.Context(), testfileSource("testdata/env/"+test.yaml))
+			cfg, err := Load(t.Context(), NewFileSource("testdata/env/"+test.yaml))
 			require.NoError(t, err)
 
 			err = CheckRequiredEnvVars(t.Context(), cfg, "", &noEnvProvider{})
@@ -271,7 +280,9 @@ func TestCheckRequiredEnvVars(t *testing.T) {
 				require.NoError(t, err)
 			} else {
 				require.Error(t, err)
-				assert.Equal(t, test.expectedMissing, err.(*environment.RequiredEnvError).Missing)
+				var reqErr *environment.RequiredEnvError
+				require.ErrorAs(t, err, &reqErr)
+				assert.Equal(t, test.expectedMissing, reqErr.Missing)
 			}
 		})
 	}
@@ -280,12 +291,29 @@ func TestCheckRequiredEnvVars(t *testing.T) {
 func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), testfileSource("testdata/env/all.yaml"))
-	require.NoError(t, err)
+	t.Run("with token", func(t *testing.T) {
+		t.Parallel()
 
-	err = CheckRequiredEnvVars(t.Context(), cfg, "gateway:8080", &noEnvProvider{})
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		require.NoError(t, err)
 
-	require.NoError(t, err)
+		env := &fakeEnvProvider{vars: map[string]string{
+			environment.DockerDesktopTokenEnv: "some-jwt-token",
+		}}
+
+		err = CheckRequiredEnvVars(t.Context(), cfg, "gateway:8080", env)
+		require.NoError(t, err)
+	})
+
+	t.Run("without token", func(t *testing.T) {
+		t.Parallel()
+
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		require.NoError(t, err)
+
+		err = CheckRequiredEnvVars(t.Context(), cfg, "gateway:8080", &noEnvProvider{})
+		require.ErrorContains(t, err, "sign in Docker Desktop")
+	})
 }
 
 func TestApplyModelOverrides(t *testing.T) {
@@ -438,6 +466,153 @@ func TestApplyModelOverrides(t *testing.T) {
 	}
 }
 
+func TestValidateConfig_ExternalSubAgentReferences(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		cfg     *latest.Config
+		wantErr string
+	}{
+		{
+			name: "OCI reference in sub_agents is allowed",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", SubAgents: []string{"agentcatalog/pirate"}},
+				},
+			},
+		},
+		{
+			name: "OCI reference with tag in sub_agents is allowed",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", SubAgents: []string{"docker.io/myorg/myagent:v1"}},
+				},
+			},
+		},
+		{
+			name: "mix of local and external sub_agents",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", SubAgents: []string{"helper", "agentcatalog/pirate"}},
+					{Name: "helper", Model: "openai/gpt-4o"},
+				},
+			},
+		},
+		{
+			name: "non-existent local sub_agent still fails",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", SubAgents: []string{"does_not_exist"}},
+				},
+			},
+			wantErr: "non-existent sub-agent 'does_not_exist'",
+		},
+		{
+			name: "URL reference in sub_agents is allowed",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", SubAgents: []string{"https://example.com/agent.yaml"}},
+				},
+			},
+		},
+		{
+			name: "OCI reference in handoffs is allowed",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", Handoffs: []string{"agentcatalog/pirate"}},
+				},
+			},
+		},
+		{
+			name: "non-existent local handoff fails",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", Handoffs: []string{"does_not_exist"}},
+				},
+			},
+			wantErr: "non-existent handoff agent 'does_not_exist'",
+		},
+		{
+			name: "named OCI reference in sub_agents is allowed",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", SubAgents: []string{"reviewer:agentcatalog/review-pr"}},
+				},
+			},
+		},
+		{
+			name: "named URL reference in sub_agents is allowed",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", SubAgents: []string{"myagent:https://example.com/agent.yaml"}},
+				},
+			},
+		},
+		{
+			name: "named OCI reference in handoffs is allowed",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", Handoffs: []string{"reviewer:agentcatalog/review-pr"}},
+				},
+			},
+		},
+		{
+			name: "external sub-agent name collides with local agent",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", SubAgents: []string{"pirate", "agentcatalog/pirate"}},
+					{Name: "pirate", Model: "openai/gpt-4o"},
+				},
+			},
+			wantErr: "conflicts with a locally-defined agent",
+		},
+		{
+			name: "named external sub-agent collides with local agent",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", SubAgents: []string{"helper", "helper:agentcatalog/review-pr"}},
+					{Name: "helper", Model: "openai/gpt-4o"},
+				},
+			},
+			wantErr: "conflicts with a locally-defined agent",
+		},
+		{
+			name: "external handoff name collides with local agent",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", Handoffs: []string{"agentcatalog/pirate"}},
+					{Name: "pirate", Model: "openai/gpt-4o"},
+				},
+			},
+			wantErr: "conflicts with a locally-defined agent",
+		},
+		{
+			name: "local handoff to another agent passes",
+			cfg: &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4o", Handoffs: []string{"helper"}},
+					{Name: "helper", Model: "openai/gpt-4o"},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateConfig(tt.cfg)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestProviders_Validation(t *testing.T) {
 	t.Parallel()
 
@@ -504,6 +679,46 @@ func TestProviders_Validation(t *testing.T) {
 				},
 			},
 			wantErr: "name cannot contain '/'",
+		},
+		{
+			name: "valid anthropic provider without base_url",
+			providers: map[string]latest.ProviderConfig{
+				"my_anthropic": {
+					Provider: "anthropic",
+					TokenKey: "MY_ANTHROPIC_KEY",
+				},
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid google provider with defaults",
+			providers: map[string]latest.ProviderConfig{
+				"my_google": {
+					Provider: "google",
+				},
+			},
+			wantErr: "",
+		},
+		{
+			name: "openai provider without base_url requires it",
+			providers: map[string]latest.ProviderConfig{
+				"my_openai": {
+					Provider: "openai",
+				},
+			},
+			wantErr: "base_url is required",
+		},
+		{
+			name: "provider with model defaults",
+			providers: map[string]latest.ProviderConfig{
+				"my_anthropic": {
+					Provider:    "anthropic",
+					TokenKey:    "MY_KEY",
+					MaxTokens:   new(int64),
+					Temperature: new(float64),
+				},
+			},
+			wantErr: "",
 		},
 	}
 

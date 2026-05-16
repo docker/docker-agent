@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/docker/docker-agent/pkg/version"
 )
 
 // Migration represents a database migration
@@ -25,12 +28,25 @@ type Migration struct {
 
 // MigrationManager handles database migrations
 type MigrationManager struct {
-	db *sql.DB
+	db         *sql.DB
+	migrations []Migration
 }
 
-// NewMigrationManager creates a new migration manager
+// NewMigrationManager creates a migration manager that runs the production
+// migration list against db. Tests that need to drive the manager with a
+// synthetic migration list should use NewMigrationManagerWithMigrations
+// instead.
 func NewMigrationManager(db *sql.DB) *MigrationManager {
-	return &MigrationManager{db: db}
+	return NewMigrationManagerWithMigrations(db, getAllMigrations())
+}
+
+// NewMigrationManagerWithMigrations creates a migration manager bound to the
+// supplied migration list. The list is treated as ordered by ID; callers must
+// not mutate it after construction. Intended primarily for tests that want to
+// exercise specific migration paths without dragging in the full production
+// list.
+func NewMigrationManagerWithMigrations(db *sql.DB, migrations []Migration) *MigrationManager {
+	return &MigrationManager{db: db, migrations: migrations}
 }
 
 // InitializeMigrations sets up the migrations table and runs pending migrations
@@ -39,6 +55,11 @@ func (m *MigrationManager) InitializeMigrations(ctx context.Context) error {
 	err := m.createMigrationsTable(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create migrations table: %w", err)
+	}
+
+	// Check if the database was created by a newer version of the application
+	if err := m.checkForUnknownMigrations(ctx); err != nil {
+		return err
 	}
 
 	// Run all pending migrations
@@ -63,11 +84,35 @@ func (m *MigrationManager) createMigrationsTable(ctx context.Context) error {
 	return err
 }
 
+// checkForUnknownMigrations checks if the database has migrations that this binary
+// doesn't know about, which indicates the database was created by a newer version.
+// This produces a clear error instead of cryptic SQL failures from schema mismatches.
+func (m *MigrationManager) checkForUnknownMigrations(ctx context.Context) error {
+	if len(m.migrations) == 0 {
+		return nil
+	}
+	maxKnownID := m.migrations[len(m.migrations)-1].ID
+
+	var maxAppliedID int
+	err := m.db.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM migrations").Scan(&maxAppliedID)
+	if err != nil {
+		return fmt.Errorf("failed to check applied migrations: %w", err)
+	}
+
+	if maxAppliedID > maxKnownID {
+		return fmt.Errorf(
+			"%w: you are running docker-agent %s which supports migrations up to %d, "+
+				"but the session database has migration %d from a newer version; "+
+				"please upgrade docker-agent to the latest version",
+			ErrNewerDatabase, version.Version, maxKnownID, maxAppliedID)
+	}
+
+	return nil
+}
+
 // RunPendingMigrations executes all migrations that haven't been applied yet
 func (m *MigrationManager) RunPendingMigrations(ctx context.Context) error {
-	migrations := getAllMigrations()
-
-	for _, migration := range migrations {
+	for _, migration := range m.migrations {
 		applied, err := m.isMigrationApplied(ctx, migration.Name)
 		if err != nil {
 			return fmt.Errorf("failed to check if migration %s is applied: %w", migration.Name, err)
@@ -159,6 +204,10 @@ func (m *MigrationManager) GetAppliedMigrations(ctx context.Context) ([]Migratio
 		}
 
 		migrations = append(migrations, migration)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return migrations, nil
@@ -300,12 +349,63 @@ func getAllMigrations() []Migration {
 			Description: "Migrate existing messages JSON data to session_items table",
 			UpFunc:      migrateMessagesToSessionItems,
 		},
+		{
+			ID:          16,
+			Name:        "016_add_branching_columns",
+			Description: "Add branch metadata columns for session branching",
+			UpSQL: `
+				ALTER TABLE sessions ADD COLUMN branch_parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL;
+				ALTER TABLE sessions ADD COLUMN branch_parent_position INTEGER;
+				ALTER TABLE sessions ADD COLUMN branch_created_at TEXT;
+				CREATE INDEX IF NOT EXISTS idx_sessions_branch_parent ON sessions(branch_parent_session_id);
+			`,
+			DownSQL: `
+				DROP INDEX IF EXISTS idx_sessions_branch_parent;
+				-- SQLite doesn't support DROP COLUMN directly in older versions
+			`,
+		},
+		{
+			ID:          17,
+			Name:        "017_add_split_diff_view_column",
+			Description: "Add split_diff_view column to sessions table for persisting split diff toggle",
+			UpSQL:       `ALTER TABLE sessions ADD COLUMN split_diff_view BOOLEAN`,
+		},
+		{
+			ID:          18,
+			Name:        "018_add_session_items_type_index",
+			Description: "Add index on session_items(session_id, item_type) to speed up session summary message counts",
+			UpSQL:       `CREATE INDEX IF NOT EXISTS idx_session_items_session_type ON session_items(session_id, item_type)`,
+		},
+		{
+			ID:          19,
+			Name:        "019_drop_branch_and_split_diff_columns",
+			Description: "Drop unused branch metadata columns and split_diff_view column",
+			UpSQL: `
+				DROP INDEX IF EXISTS idx_sessions_branch_parent;
+				ALTER TABLE sessions DROP COLUMN branch_parent_session_id;
+				ALTER TABLE sessions DROP COLUMN branch_parent_position;
+				ALTER TABLE sessions DROP COLUMN branch_created_at;
+				ALTER TABLE sessions DROP COLUMN split_diff_view;
+			`,
+		},
+		{
+			ID:          20,
+			Name:        "020_drop_messages_column",
+			Description: "Drop the legacy messages JSON column now that all data lives in session_items",
+			UpSQL:       `ALTER TABLE sessions DROP COLUMN messages`,
+		},
+		{
+			ID:          21,
+			Name:        "021_add_first_kept_entry_column",
+			Description: "Add first_kept_entry column to session_items for compaction-preserved messages",
+			UpSQL:       `ALTER TABLE session_items ADD COLUMN first_kept_entry INTEGER DEFAULT 0`,
+		},
 	}
 }
 
 // migrateMessagesToSessionItems migrates data from the messages JSON column to the session_items table
 func migrateMessagesToSessionItems(ctx context.Context, db *sql.DB) error {
-	slog.Info("Starting migration of messages to session_items")
+	slog.InfoContext(ctx, "Starting migration of messages to session_items")
 
 	// Get all sessions that have messages but no items yet
 	rows, err := db.QueryContext(ctx, `
@@ -340,17 +440,17 @@ func migrateMessagesToSessionItems(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("iterating sessions: %w", err)
 	}
 
-	slog.Info("Found sessions to migrate", "count", len(sessionsToMigrate))
+	slog.InfoContext(ctx, "Found sessions to migrate", "count", len(sessionsToMigrate))
 
 	// Migrate each session
 	for _, sess := range sessionsToMigrate {
 		if err := migrateSessionMessages(ctx, db, sess.id, sess.messages, ""); err != nil {
-			slog.Warn("Failed to migrate session, skipping", "session_id", sess.id, "error", err)
+			slog.WarnContext(ctx, "Failed to migrate session, skipping", "session_id", sess.id, "error", err)
 			continue
 		}
 	}
 
-	slog.Info("Completed migration of messages to session_items")
+	slog.InfoContext(ctx, "Completed migration of messages to session_items")
 	return nil
 }
 
@@ -406,7 +506,7 @@ func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int
 		var exists int
 		err := db.QueryRowContext(ctx, "SELECT 1 FROM sessions WHERE id = ?", subSessionID).Scan(&exists)
 		switch {
-		case err == sql.ErrNoRows:
+		case errors.Is(err, sql.ErrNoRows):
 			// Create the sub-session
 			subMessagesJSON, jsonErr := json.Marshal(item.SubSession.Messages)
 			if jsonErr != nil {
@@ -416,13 +516,13 @@ func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int
 			_, execErr := db.ExecContext(ctx,
 				`INSERT INTO sessions (id, messages, tools_approved, input_tokens, output_tokens, title, cost, 
 				 send_user_message, max_iterations, working_dir, created_at, starred, permissions, 
-				 agent_model_overrides, custom_models_used, thinking, parent_id)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 agent_model_overrides, custom_models_used, parent_id)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				subSessionID, string(subMessagesJSON), item.SubSession.ToolsApproved,
 				item.SubSession.InputTokens, item.SubSession.OutputTokens, item.SubSession.Title,
 				item.SubSession.Cost, item.SubSession.SendUserMessage, item.SubSession.MaxIterations,
 				item.SubSession.WorkingDir, item.SubSession.CreatedAt.Format(time.RFC3339),
-				item.SubSession.Starred, "", "{}", "[]", item.SubSession.Thinking, sessionID)
+				item.SubSession.Starred, "", "{}", "[]", sessionID)
 			if execErr != nil {
 				return fmt.Errorf("inserting sub-session: %w", execErr)
 			}

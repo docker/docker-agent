@@ -3,16 +3,16 @@ package v0
 import (
 	"errors"
 
-	"github.com/docker/cagent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/config/types"
 )
 
 const Version = "0"
 
-// Toolset represents a tool configuration
+// Toolset represents a tool configuration.
 type Toolset struct {
 	Type     string             `json:"type,omitempty" yaml:"type,omitempty"`
 	Command  string             `json:"command,omitempty" yaml:"command,omitempty"`
-	Remote   Remote             `json:"remote,omitempty" yaml:"remote,omitempty"`
+	Remote   Remote             `json:"remote" yaml:"remote,omitempty"`
 	Args     []string           `json:"args,omitempty" yaml:"args,omitempty"`
 	Env      map[string]string  `json:"env,omitempty" yaml:"env,omitempty"`
 	Envfiles types.StringOrList `json:"env_file,omitempty" yaml:"env_file,omitempty"`
@@ -25,7 +25,7 @@ type Remote struct {
 	Headers       map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
 }
 
-// Ensure that either Command or Remote is set, but not both empty
+// Ensure that either Command or Remote is set, but not both empty.
 func (t *Toolset) validate() error {
 	if t.Type != "mcp" {
 		return nil
@@ -87,8 +87,8 @@ type AgentConfig struct {
 	SubAgents       []string       `json:"sub_agents,omitempty" yaml:"sub_agents,omitempty"`
 	AddDate         bool           `json:"add_date,omitempty" yaml:"add_date,omitempty"`
 	Think           bool           `json:"think,omitempty" yaml:"think,omitempty"`
-	Todo            TodoConfig     `json:"todo,omitempty" yaml:"todo,omitempty"`
-	MemoryConfig    MemoryConfig   `json:"memory,omitempty" yaml:"memory,omitempty"`
+	Todo            TodoConfig     `json:"todo" yaml:"todo,omitempty"`
+	MemoryConfig    MemoryConfig   `json:"memory" yaml:"memory,omitempty"`
 	NumHistoryItems int            `json:"num_history_items,omitempty" yaml:"num_history_items,omitempty"`
 	Commands        types.Commands `json:"commands,omitempty" yaml:"commands,omitempty"`
 }

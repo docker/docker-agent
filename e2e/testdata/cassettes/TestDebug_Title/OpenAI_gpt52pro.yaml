@@ -1,0 +1,50 @@
+---
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: api.openai.com
+        body: '{"max_output_tokens":20,"input":[{"content":[{"text":"You are a helpful AI assistant that generates concise, descriptive titles for conversations. You will be given up to 2 recent user messages and asked to create a single-line title that captures the main topic. Never use newlines or line breaks in your response.","type":"input_text"}],"role":"system"},{"content":"Based on the following recent user messages from a conversation with an AI assistant, generate a short, descriptive title (maximum 50 characters) that captures the main topic or purpose of the conversation. Return ONLY the title text on a single line, nothing else. Do not include any newlines, explanations, or formatting.\n\nRecent user messages:\n1. What can you do?\n\n\n","role":"user"}],"model":"gpt-5.2-pro","stream":true}'
+        url: https://api.openai.com/v1/responses
+        method: POST
+      response:
+        proto: HTTP/2.0
+        proto_major: 2
+        proto_minor: 0
+        content_length: -1
+        body: |+
+            event: response.created
+            data: {"type":"response.created","response":{"id":"resp_0d2bb1f9a07c98c6006985dec235dc819ab451fb14ee7c8feb","object":"response","created_at":1770380994,"status":"in_progress","background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"incomplete_details":null,"instructions":null,"max_output_tokens":20,"max_tool_calls":null,"model":"gpt-5.2-pro-2025-12-11","output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"medium","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":0}
+
+            event: response.in_progress
+            data: {"type":"response.in_progress","response":{"id":"resp_0d2bb1f9a07c98c6006985dec235dc819ab451fb14ee7c8feb","object":"response","created_at":1770380994,"status":"in_progress","background":false,"completed_at":null,"error":null,"frequency_penalty":0.0,"incomplete_details":null,"instructions":null,"max_output_tokens":20,"max_tool_calls":null,"model":"gpt-5.2-pro-2025-12-11","output":[],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"medium","summary":null},"safety_identifier":null,"service_tier":"auto","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":null,"user":null,"metadata":{}},"sequence_number":1}
+
+            event: response.output_item.added
+            data: {"type":"response.output_item.added","item":{"id":"msg_0d2bb1f9a07c98c6006985dec914cc819a96a2fed8dbf74777","type":"message","status":"completed","content":[],"role":"assistant"},"output_index":0,"sequence_number":2}
+
+            event: response.content_part.added
+            data: {"type":"response.content_part.added","content_index":0,"item_id":"msg_0d2bb1f9a07c98c6006985dec914cc819a96a2fed8dbf74777","output_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":""},"sequence_number":3}
+
+            event: response.output_text.delta
+            data: {"type":"response.output_text.delta","content_index":0,"delta":"Assistant Capabilities Overview","item_id":"msg_0d2bb1f9a07c98c6006985dec914cc819a96a2fed8dbf74777","logprobs":[],"obfuscation":"4","output_index":0,"sequence_number":4}
+
+            event: response.output_text.done
+            data: {"type":"response.output_text.done","content_index":0,"item_id":"msg_0d2bb1f9a07c98c6006985dec914cc819a96a2fed8dbf74777","logprobs":[],"output_index":0,"sequence_number":5,"text":"Assistant Capabilities Overview"}
+
+            event: response.content_part.done
+            data: {"type":"response.content_part.done","content_index":0,"item_id":"msg_0d2bb1f9a07c98c6006985dec914cc819a96a2fed8dbf74777","output_index":0,"part":{"type":"output_text","annotations":[],"logprobs":[],"text":"Assistant Capabilities Overview"},"sequence_number":6}
+
+            event: response.output_item.done
+            data: {"type":"response.output_item.done","item":{"id":"msg_0d2bb1f9a07c98c6006985dec914cc819a96a2fed8dbf74777","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Assistant Capabilities Overview"}],"role":"assistant"},"output_index":0,"sequence_number":7}
+
+            event: response.completed
+            data: {"type":"response.completed","response":{"id":"resp_0d2bb1f9a07c98c6006985dec235dc819ab451fb14ee7c8feb","object":"response","created_at":1770380994,"status":"completed","background":false,"completed_at":1770381001,"error":null,"frequency_penalty":0.0,"incomplete_details":null,"instructions":null,"max_output_tokens":20,"max_tool_calls":null,"model":"gpt-5.2-pro-2025-12-11","output":[{"id":"msg_0d2bb1f9a07c98c6006985dec914cc819a96a2fed8dbf74777","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":"Assistant Capabilities Overview"}],"role":"assistant"}],"parallel_tool_calls":true,"presence_penalty":0.0,"previous_response_id":null,"prompt_cache_key":null,"prompt_cache_retention":null,"reasoning":{"effort":"medium","summary":null},"safety_identifier":null,"service_tier":"default","store":true,"temperature":1.0,"text":{"format":{"type":"text"},"verbosity":"medium"},"tool_choice":"auto","tools":[],"top_logprobs":0,"top_p":0.98,"truncation":"disabled","usage":{"input_tokens":135,"input_tokens_details":{"cached_tokens":0},"output_tokens":8,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":143},"user":null,"metadata":{}},"sequence_number":8}
+
+        headers: {}
+        status: 200 OK
+        code: 200
+        duration: 569.464833ms

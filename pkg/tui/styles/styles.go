@@ -7,9 +7,9 @@ import (
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/glamour/v2/ansi"
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
-	"github.com/charmbracelet/glamour/v2/ansi"
 )
 
 const (
@@ -25,11 +25,13 @@ var (
 	BackgroundAlt color.Color
 
 	// Primary accent colors
+
 	White    color.Color
 	MobyBlue color.Color
 	Accent   color.Color
 
 	// Status colors
+
 	Success   color.Color
 	Error     color.Color
 	Warning   color.Color
@@ -37,33 +39,39 @@ var (
 	Highlight color.Color
 
 	// Text hierarchy
+
 	TextPrimary   color.Color
 	TextSecondary color.Color
 	TextMuted     color.Color
 	TextMutedGray color.Color
 
 	// Border colors
+
 	BorderPrimary   color.Color
 	BorderSecondary color.Color
 	BorderMuted     color.Color
 	BorderWarning   color.Color
 
 	// Diff colors
+
 	DiffAddBg    color.Color
 	DiffRemoveBg color.Color
 	DiffAddFg    color.Color
 	DiffRemoveFg color.Color
 
 	// UI element colors
+
 	LineNumber color.Color
 	Separator  color.Color
 
 	// Interactive element colors
+
 	Selected         color.Color
 	SelectedFg       color.Color
 	PlaceholderColor color.Color
 
 	// Badge colors
+
 	AgentBadgeFg color.Color
 	AgentBadgeBg color.Color
 	BadgePurple  color.Color
@@ -71,21 +79,28 @@ var (
 	BadgeGreen   color.Color
 
 	// Error colors (extended)
+
 	ErrorStrong color.Color
 	ErrorDark   color.Color
 
 	// Additional muted colors
+
 	FadedGray color.Color
 
 	// Tabs
-	TabBg        color.Color
-	TabPrimaryFg color.Color
-	TabAccentFg  color.Color
+
+	TabBg         color.Color
+	TabPrimaryFg  color.Color
+	TabAccentFg   color.Color
+	TabActiveBg   color.Color
+	TabActiveFg   color.Color
+	TabInactiveFg color.Color
+	TabBorder     color.Color
 )
 
 // Base Styles
 const (
-	AppPaddingLeft = 1 // Keep in sync with AppStyle padding
+	AppPadding = 1 // Symmetric left/right padding used by AppStyle and EditorStyle
 
 	// DoubleClickThreshold is the maximum time between clicks to register as a double-click
 	DoubleClickThreshold = 400 * time.Millisecond
@@ -94,7 +109,7 @@ const (
 var (
 	NoStyle   = lipgloss.NewStyle()
 	BaseStyle = NoStyle.Foreground(TextPrimary)
-	AppStyle  = BaseStyle.Padding(0, 1, 0, AppPaddingLeft)
+	AppStyle  = BaseStyle.Padding(0, AppPadding, 0, AppPadding)
 )
 
 // Text Styles
@@ -152,6 +167,10 @@ var (
 	SelectedMessageStyle = AssistantMessageStyle.
 				BorderStyle(lipgloss.NormalBorder()).
 				BorderForeground(Success)
+
+	SelectedUserMessageStyle = UserMessageStyle.
+					BorderStyle(lipgloss.ThickBorder()).
+					BorderForeground(Success)
 )
 
 // Dialog Styles
@@ -240,6 +259,7 @@ var (
 					Foreground(White)
 
 	// Badge styles for model picker - use color vars set by ApplyTheme()
+
 	BadgeAlloyStyle = BaseStyle.
 			Foreground(BadgePurple)
 
@@ -354,7 +374,7 @@ var (
 			Color: Accent,
 		},
 	}
-	EditorStyle = BaseStyle.Padding(1, 0, 0, 0)
+	EditorStyle = BaseStyle.Padding(1, AppPadding, 0, AppPadding)
 	// SuggestionGhostStyle renders inline auto-complete hints in a muted tone.
 	// Use a distinct grey so suggestion text is visually separate from the user's input.
 	// NOTE: Rebuilt by ApplyTheme() using theme's suggestion_ghost color.
@@ -365,6 +385,7 @@ var (
 	SuggestionCursorStyle = BaseStyle.Background(Accent).Foreground(TextMutedGray)
 
 	// Attachment banner styles - polished look with subtle border
+
 	AttachmentBannerStyle = BaseStyle.
 				Foreground(TextSecondary)
 
@@ -383,8 +404,8 @@ var (
 // Scrollbar
 var (
 	TrackStyle       = lipgloss.NewStyle().Foreground(BorderSecondary)
-	ThumbStyle       = lipgloss.NewStyle().Foreground(Info).Background(BackgroundAlt).Bold(true)
-	ThumbActiveStyle = lipgloss.NewStyle().Foreground(White).Background(BackgroundAlt).Bold(true)
+	ThumbStyle       = lipgloss.NewStyle().Foreground(Info).Background(BackgroundAlt)
+	ThumbActiveStyle = lipgloss.NewStyle().Foreground(White).Background(BackgroundAlt)
 )
 
 // Resize Handle Style
@@ -687,13 +708,13 @@ func MarkdownStyle() ansi.StyleConfig {
 				BlockSuffix: "",
 				Color:       &textColor,
 			},
-			Margin: uintPtr(0),
+			Margin: new(uint(0)),
 		},
 		BlockQuote: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				Color: &blockquoteColor,
 			},
-			Indent:      uintPtr(1),
+			Indent:      new(uint(1)),
 			IndentToken: nil,
 		},
 		List: ansi.StyleList{
@@ -703,14 +724,14 @@ func MarkdownStyle() ansi.StyleConfig {
 			StylePrimitive: ansi.StylePrimitive{
 				BlockSuffix: "\n",
 				Color:       &headingColor,
-				Bold:        boolPtr(true),
+				Bold:        new(true),
 			},
 		},
 		H1: ansi.StyleBlock{
 			StylePrimitive: ansi.StylePrimitive{
 				Prefix: "## ",
 				Color:  &headingColor,
-				Bold:   boolPtr(true),
+				Bold:   new(true),
 			},
 		},
 		H2: ansi.StyleBlock{
@@ -744,14 +765,14 @@ func MarkdownStyle() ansi.StyleConfig {
 			},
 		},
 		Strikethrough: ansi.StylePrimitive{
-			CrossedOut: boolPtr(true),
+			CrossedOut: new(true),
 		},
 		Emph: ansi.StylePrimitive{
-			Italic: boolPtr(true),
+			Italic: new(true),
 		},
 		Strong: ansi.StylePrimitive{
 			Color: &strongColor,
-			Bold:  boolPtr(true),
+			Bold:  new(true),
 		},
 		HorizontalRule: ansi.StylePrimitive{
 			Color:  &hrColor,
@@ -770,15 +791,15 @@ func MarkdownStyle() ansi.StyleConfig {
 		},
 		Link: ansi.StylePrimitive{
 			Color:     &linkColor,
-			Underline: boolPtr(true),
+			Underline: new(true),
 		},
 		LinkText: ansi.StylePrimitive{
 			Color: &linkColor,
-			Bold:  boolPtr(true),
+			Bold:  new(true),
 		},
 		Image: ansi.StylePrimitive{
 			Color:     &linkColor,
-			Underline: boolPtr(true),
+			Underline: new(true),
 		},
 		ImageText: ansi.StylePrimitive{
 			Color:  &textSecondary,
@@ -797,7 +818,7 @@ func MarkdownStyle() ansi.StyleConfig {
 				StylePrimitive: ansi.StylePrimitive{
 					Color: &textSecondary,
 				},
-				Margin: uintPtr(defaultMargin),
+				Margin: new(uint(defaultMargin)),
 			},
 			Theme: "monokai",
 			Chroma: &ansi.Chroma{
@@ -846,8 +867,8 @@ func MarkdownStyle() ansi.StyleConfig {
 				},
 				NameClass: ansi.StylePrimitive{
 					Color:     &chromaErrorFg,
-					Underline: boolPtr(true),
-					Bold:      boolPtr(true),
+					Underline: new(true),
+					Bold:      new(true),
 				},
 				NameDecorator: ansi.StylePrimitive{
 					Color: &chromaNameDecorator,
@@ -868,13 +889,13 @@ func MarkdownStyle() ansi.StyleConfig {
 					Color: &chromaGenericDeleted,
 				},
 				GenericEmph: ansi.StylePrimitive{
-					Italic: boolPtr(true),
+					Italic: new(true),
 				},
 				GenericInserted: ansi.StylePrimitive{
 					Color: &chromaSuccess,
 				},
 				GenericStrong: ansi.StylePrimitive{
-					Bold: boolPtr(true),
+					Bold: new(true),
 				},
 				GenericSubheading: ansi.StylePrimitive{
 					Color: &chromaGenericSubheading,
@@ -898,12 +919,4 @@ func MarkdownStyle() ansi.StyleConfig {
 	customDarkStyle.CodeBlock.BackgroundColor = &codeBgColor
 
 	return customDarkStyle
-}
-
-func uintPtr(u uint) *uint {
-	return &u
-}
-
-func boolPtr(b bool) *bool {
-	return &b
 }

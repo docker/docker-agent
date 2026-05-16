@@ -3,7 +3,7 @@ package environment
 import (
 	"context"
 
-	"github.com/docker/cagent/pkg/desktop"
+	"github.com/docker/docker-agent/pkg/desktop"
 )
 
 const (

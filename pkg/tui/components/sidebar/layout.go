@@ -1,6 +1,6 @@
 package sidebar
 
-import "github.com/docker/cagent/pkg/tui/components/scrollbar"
+import "github.com/docker/docker-agent/pkg/tui/components/scrollbar"
 
 // Layout constants for sidebar elements.
 const (

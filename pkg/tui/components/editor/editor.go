@@ -1,16 +1,19 @@
 package editor
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
@@ -18,15 +21,14 @@ import (
 	"github.com/mattn/go-runewidth"
 	"github.com/rivo/uniseg"
 
-	"github.com/docker/cagent/pkg/app"
-	"github.com/docker/cagent/pkg/history"
-	"github.com/docker/cagent/pkg/paths"
-	"github.com/docker/cagent/pkg/tui/components/completion"
-	"github.com/docker/cagent/pkg/tui/components/editor/completions"
-	"github.com/docker/cagent/pkg/tui/core"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/messages"
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/history"
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/tui/components/completion"
+	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
+	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // ansiRegexp matches ANSI escape sequences so they can be removed when
@@ -63,6 +65,7 @@ type Editor interface {
 	layout.Focusable
 	SetWorking(working bool) tea.Cmd
 	AcceptSuggestion() tea.Cmd
+	ScrollByWheel(delta int)
 	// Value returns the current editor content
 	Value() string
 	// SetValue updates the editor content
@@ -70,7 +73,7 @@ type Editor interface {
 	// InsertText inserts text at the current cursor position
 	InsertText(text string)
 	// AttachFile adds a file as an attachment and inserts @filepath into the editor
-	AttachFile(filePath string)
+	AttachFile(filePath string) error
 	Cleanup()
 	GetSize() (width, height int)
 	BannerHeight() int
@@ -79,8 +82,30 @@ type Editor interface {
 	SetRecording(recording bool) tea.Cmd
 	// IsRecording returns true if the editor is in recording mode
 	IsRecording() bool
+	// IsHistorySearchActive returns true if the editor is in history search mode
+	IsHistorySearchActive() bool
+	// EnterHistorySearch activates incremental history search
+	EnterHistorySearch() (layout.Model, tea.Cmd)
 	// SendContent triggers sending the current editor content
 	SendContent() tea.Cmd
+}
+
+// fileLoadResultMsg is sent when async file loading completes.
+type fileLoadResultMsg struct {
+	loadID     uint64
+	items      []completion.Item
+	isFullLoad bool // true for full load, false for initial shallow load
+}
+
+// historySearchState holds the state for incremental history search.
+type historySearchState struct {
+	active                   bool
+	query                    string
+	origTextValue            string
+	origTextPlaceholderValue string
+	match                    string
+	matchIndex               int
+	failing                  bool
 }
 
 // editor implements [Editor]
@@ -116,10 +141,34 @@ type editor struct {
 	recording bool
 	// recordingDotPhase tracks the animation phase for the recording dots cursor
 	recordingDotPhase int
+
+	// fileLoadID is incremented each time we start a new file load to ignore stale results
+	fileLoadID uint64
+	// fileLoadStarted tracks whether we've started initial loading for the current completion
+	fileLoadStarted bool
+	// fileFullLoadStarted tracks whether we've started full file loading (triggered by typing)
+	fileFullLoadStarted bool
+	// fileLoadCancel cancels any in-progress file loading
+	fileLoadCancel context.CancelFunc
+
+	// historySearch holds state for history search mode
+	historySearch historySearchState
+	// searchInput is the input field for history search queries
+	searchInput textinput.Model
+}
+
+// Option configures the Editor.
+type Option func(*editor)
+
+// WithCompletions sets the available completions for the editor.
+func WithCompletions(comps ...completions.Completion) Option {
+	return func(e *editor) {
+		e.completions = comps
+	}
 }
 
 // New creates a new editor component
-func New(a *app.App, hist *history.History) Editor {
+func New(hist *history.History, opts ...Option) Editor {
 	ta := textarea.New()
 	ta.SetStyles(styles.InputStyle)
 	ta.Placeholder = "Type your message here…"
@@ -130,12 +179,29 @@ func New(a *app.App, hist *history.History) Editor {
 	ta.Focus()
 	ta.ShowLineNumbers = false
 
+	si := textinput.New()
+	si.Prompt = ""
+	si.Placeholder = "Type to search..."
+
+	// Customize styles for search input
+	s := styles.DialogInputStyle
+	s.Focused.Text = styles.MutedStyle
+	s.Focused.Placeholder = styles.MutedStyle
+	s.Blurred.Text = styles.MutedStyle
+	s.Blurred.Placeholder = styles.MutedStyle
+	si.SetStyles(s)
+
 	e := &editor{
 		textarea:                      ta,
+		searchInput:                   si,
 		hist:                          hist,
-		completions:                   completions.Completions(a),
 		keyboardEnhancementsSupported: false,
 		banner:                        newAttachmentBanner(),
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		opt(e)
 	}
 
 	e.configureNewlineKeybinding()
@@ -240,7 +306,7 @@ func (e *editor) applySuggestionOverlay(view string) string {
 		// Cursor is on the line after the last content line.
 		// Find the first empty line after content.
 		contentLine := -1
-		for i := len(lines) - 1; i >= 0; i-- {
+		for i := range slices.Backward(lines) {
 			if lineHasContent(lines[i], e.textarea.Prompt) {
 				contentLine = i
 				break
@@ -264,7 +330,7 @@ func (e *editor) applySuggestionOverlay(view string) string {
 
 		// First, find the last visual line with content
 		lastContentLine := -1
-		for i := len(lines) - 1; i >= 0; i-- {
+		for i := range slices.Backward(lines) {
 			if lineHasContent(lines[i], e.textarea.Prompt) {
 				lastContentLine = i
 				break
@@ -365,8 +431,8 @@ func (e *editor) applySuggestionOverlay(view string) string {
 	allLayers = append(allLayers, baseLayer)
 	allLayers = append(allLayers, overlays...)
 
-	canvas := lipgloss.NewCanvas(allLayers...)
-	return canvas.Render()
+	compositor := lipgloss.NewCompositor(allLayers...)
+	return compositor.Render()
 }
 
 // splitFirstRune splits a string into its first rune and the rest.
@@ -399,46 +465,26 @@ func deleteLastGraphemeCluster(s string) string {
 // refreshSuggestion updates the cached suggestion to reflect the current
 // textarea value and available history entries.
 func (e *editor) refreshSuggestion() {
-	if e.hist == nil {
-		e.clearSuggestion()
-		return
-	}
-
-	// Don't show history suggestions when completion popup is active.
-	// The completion's selected item takes precedence.
+	// Don't overwrite completion-managed suggestions with history suggestions.
 	if e.currentCompletion != nil {
 		return
 	}
 
+	e.clearSuggestion()
+
 	current := e.textarea.Value()
-	if current == "" {
-		e.clearSuggestion()
+	if e.hist == nil || current == "" || !e.isCursorAtEnd() {
 		return
 	}
 
-	// Only show suggestions when cursor is at the end of the text.
-	// If cursor is not at the end, moving left/right would cause the
-	// suggestion overlay to overwrite existing characters.
-	if !e.isCursorAtEnd() {
-		e.clearSuggestion()
-		return
-	}
-
+	// Only show a suggestion when history has a longer match.
 	match := e.hist.LatestMatch(current)
-
-	if match == "" || match == current || len(match) <= len(current) {
-		e.clearSuggestion()
+	if len(match) <= len(current) {
 		return
 	}
 
 	e.suggestion = match[len(current):]
-	if e.suggestion == "" {
-		e.clearSuggestion()
-		return
-	}
-
 	e.hasSuggestion = true
-	// Keep cursor visible - suggestion is rendered as overlay after cursor position
 }
 
 // clearSuggestion removes any pending suggestion.
@@ -495,16 +541,57 @@ func (e *editor) AcceptSuggestion() tea.Cmd {
 	return e.updateCompletionQuery()
 }
 
+func (e *editor) ScrollByWheel(delta int) {
+	if delta == 0 {
+		return
+	}
+
+	steps := delta
+	if steps < 0 {
+		steps = -steps
+		for range steps {
+			e.textarea.CursorUp()
+		}
+		return
+	}
+
+	for range steps {
+		e.textarea.CursorDown()
+	}
+}
+
 // resetAndSend prepares a message for sending: processes pending file refs,
 // collects attachments, resets editor state, and returns the SendMsg command.
 func (e *editor) resetAndSend(content string) tea.Cmd {
 	e.tryAddFileRef(e.pendingFileRef)
 	e.pendingFileRef = ""
 	attachments := e.collectAttachments(content)
+
+	var finalAttachments []messages.Attachment
+	var pastes []messages.Attachment
+
+	for _, att := range attachments {
+		if att.Content != "" && strings.HasPrefix(att.Name, "paste-") {
+			pastes = append(pastes, att)
+		} else {
+			finalAttachments = append(finalAttachments, att)
+		}
+	}
+
+	// Sort pastes by name length descending to avoid partial matches
+	// e.g., replacing @paste-1 before @paste-10 would corrupt @paste-10.
+	slices.SortFunc(pastes, func(a, b messages.Attachment) int {
+		return len(b.Name) - len(a.Name)
+	})
+
+	for _, att := range pastes {
+		content = strings.ReplaceAll(content, "@"+att.Name, att.Content)
+	}
+
 	e.textarea.Reset()
 	e.userTyped = false
 	e.clearSuggestion()
-	return core.CmdHandler(messages.SendMsg{Content: content, Attachments: attachments})
+	return core.CmdHandler(messages.SendMsg{Content: content, Attachments: finalAttachments})
 }
 
 // configureNewlineKeybinding sets up the appropriate newline keybinding
@@ -557,20 +644,6 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		e.textarea.SetWidth(msg.Width - 2)
 		return e, nil
 
-	// Handle mouse events
-	case tea.MouseWheelMsg:
-		// Forward mouse wheel as cursor movements to textarea for scrolling
-		// This bypasses history navigation and allows viewport scrolling
-		switch msg.Button.String() {
-		case "wheelup":
-			// Move cursor up (scrolls viewport if needed)
-			e.textarea.CursorUp()
-		case "wheeldown":
-			// Move cursor down (scrolls viewport if needed)
-			e.textarea.CursorDown()
-		}
-		return e, nil
-
 	case tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg:
 		var cmd tea.Cmd
 		e.textarea, cmd = e.textarea.Update(msg)
@@ -581,54 +654,102 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return e, cmd
 
 	case completion.SelectedMsg:
-		if e.currentCompletion.AutoSubmit() {
-			// For auto-submit completions (like commands), use the selected
-			// command value (e.g., "/exit") instead of what the user typed
-			// (e.g., "/e"). Append any extra text after the trigger word
-			// to preserve arguments (e.g., "/export /tmp/file").
-			triggerWord := e.currentCompletion.Trigger() + e.completionWord
+		if e.currentCompletion == nil {
+			return e, nil
+		}
+
+		atCompletion := e.currentCompletion.Trigger() == "@" && !strings.HasPrefix(msg.Value, "@paste-")
+		triggerWord := e.currentCompletion.Trigger() + e.completionWord
+		currentValue := e.textarea.Value()
+		idx := strings.LastIndex(currentValue, triggerWord)
+
+		// Handle Execute functions (e.g., "Browse files...")
+		// There is an execute function AND you hit enter, or there is an @ directive
+		if msg.Execute != nil && (msg.AutoSubmit || atCompletion) {
+			if idx >= 0 {
+				e.textarea.SetValue(currentValue[:idx] + currentValue[idx+len(triggerWord):])
+				e.textarea.MoveToEnd()
+			}
+			e.clearSuggestion()
+			return e, msg.Execute()
+		}
+
+		// Handle Auto-Submit items (e.g., commands like "/exit")
+		if msg.AutoSubmit && !atCompletion {
 			extraText := ""
-			if _, after, found := strings.Cut(e.textarea.Value(), triggerWord); found {
-				extraText = after
+			if idx >= 0 {
+				extraText = currentValue[idx+len(triggerWord):]
 			}
 			cmd := e.resetAndSend(msg.Value + extraText)
 			return e, cmd
 		}
-		// For non-auto-submit completions (like file paths), replace the completion word
-		currentValue := e.textarea.Value()
-		if lastIdx := strings.LastIndex(currentValue, e.completionWord); lastIdx >= 0 {
-			newValue := currentValue[:lastIdx-1] + msg.Value + currentValue[lastIdx+len(e.completionWord):]
+
+		// Insert standard completions (e.g., file paths or text pastes)
+		if idx >= 0 {
+			newValue := currentValue[:idx] + msg.Value + " " + currentValue[idx+len(triggerWord):]
 			e.textarea.SetValue(newValue)
 			e.textarea.MoveToEnd()
 		}
-		// Track file references when using @ completion (but not paste placeholders)
-		if e.currentCompletion != nil && e.currentCompletion.Trigger() == "@" && !strings.HasPrefix(msg.Value, "@paste-") {
-			e.addFileAttachment(msg.Value)
+
+		// Track valid file references
+		if atCompletion {
+			if err := e.addFileAttachment(msg.Value); err != nil {
+				slog.Warn("failed to add file attachment from completion", "value", msg.Value, "error", err)
+			}
 		}
+
 		e.clearSuggestion()
 		return e, nil
 	case completion.ClosedMsg:
 		e.completionWord = ""
 		e.currentCompletion = nil
-		e.clearSuggestion()
 		e.refreshSuggestion()
+		// Reset file loading state
+		e.fileLoadStarted = false
+		e.fileFullLoadStarted = false
+		if e.fileLoadCancel != nil {
+			e.fileLoadCancel()
+			e.fileLoadCancel = nil
+		}
 		return e, e.textarea.Focus()
+
+	case fileLoadResultMsg:
+		// Ignore stale results from older loads.
+		if msg.loadID != e.fileLoadID {
+			return e, nil
+		}
+
+		// Always stop the loading indicator for the active load, even if it was cancelled/errored.
+		if msg.items == nil {
+			return e, core.CmdHandler(completion.SetLoadingMsg{Loading: false})
+		}
+		// For full load, replace items (keeping pinned); for initial, append
+		var itemsCmd tea.Cmd
+		if msg.isFullLoad {
+			itemsCmd = core.CmdHandler(completion.ReplaceItemsMsg{Items: msg.items})
+		} else {
+			itemsCmd = core.CmdHandler(completion.AppendItemsMsg{Items: msg.items})
+		}
+		return e, tea.Batch(
+			core.CmdHandler(completion.SetLoadingMsg{Loading: false}),
+			itemsCmd,
+		)
 	case completion.SelectionChangedMsg:
-		// Show the selected completion item as a suggestion in the editor
+		// Show the selected completion item as a suggestion in the editor.
+		e.clearSuggestion()
 		if msg.Value != "" && e.currentCompletion != nil {
-			// Calculate the suggestion: what needs to be added after current text
 			currentText := e.textarea.Value()
 			if strings.HasPrefix(msg.Value, currentText) {
 				e.suggestion = msg.Value[len(currentText):]
 				e.hasSuggestion = e.suggestion != ""
-			} else {
-				e.clearSuggestion()
 			}
-		} else {
-			e.clearSuggestion()
 		}
 		return e, nil
 	case tea.KeyPressMsg:
+		if e.historySearch.active {
+			return e.handleHistorySearchKey(msg)
+		}
+
 		if key.Matches(msg, e.textarea.KeyMap.Paste) {
 			return e.handleClipboardPaste()
 		}
@@ -847,11 +968,13 @@ func (e *editor) handleGraphemeBackspace() (layout.Model, tea.Cmd) {
 	textBeforeCursor := strings.Join(beforeParts, "\n")
 
 	// Build text after cursor position (after cursor on current line + remaining lines)
-	var textAfterCursor string
-	textAfterCursor = afterCursor
+	var textAfterCursorSb strings.Builder
+	textAfterCursorSb.WriteString(afterCursor)
 	for i := currentLine + 1; i < len(lines); i++ {
-		textAfterCursor += "\n" + lines[i]
+		textAfterCursorSb.WriteByte('\n')
+		textAfterCursorSb.WriteString(lines[i])
 	}
+	textAfterCursor := textAfterCursorSb.String()
 
 	// Set the text before cursor and move to end
 	e.textarea.SetValue(textBeforeCursor)
@@ -881,29 +1004,145 @@ func (e *editor) updateCompletionQuery() tea.Cmd {
 
 	if e.currentCompletion != nil && strings.HasPrefix(currentWord, e.currentCompletion.Trigger()) {
 		e.completionWord = strings.TrimPrefix(currentWord, e.currentCompletion.Trigger())
-		return core.CmdHandler(completion.QueryMsg{Query: e.completionWord})
+
+		// For @ completion, start full file loading when user starts typing (if not already started)
+		var loadCmd tea.Cmd
+		if e.currentCompletion.Trigger() == "@" && e.completionWord != "" && !e.fileFullLoadStarted {
+			loadCmd = e.startFullFileLoad()
+		}
+
+		queryCmd := core.CmdHandler(completion.QueryMsg{Query: e.completionWord})
+		if loadCmd != nil {
+			return tea.Batch(queryCmd, loadCmd)
+		}
+		return queryCmd
 	}
 
 	e.completionWord = ""
+	e.clearSuggestion()
 	return core.CmdHandler(completion.CloseMsg{})
+}
+
+// startFullFileLoad starts full background file loading and returns a command that will
+// emit a fileLoadResultMsg when complete. This is triggered when the user starts typing.
+func (e *editor) startFullFileLoad() tea.Cmd {
+	e.fileFullLoadStarted = true
+	e.fileLoadID++
+	loadID := e.fileLoadID
+
+	// Cancel any previous load
+	if e.fileLoadCancel != nil {
+		e.fileLoadCancel()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	e.fileLoadCancel = cancel
+
+	// Find the file completion that supports async loading
+	var asyncLoader completions.AsyncLoader
+	for _, c := range e.completions {
+		if c.Trigger() == "@" {
+			if al, ok := c.(completions.AsyncLoader); ok {
+				asyncLoader = al
+				break
+			}
+		}
+	}
+
+	if asyncLoader == nil {
+		return nil
+	}
+
+	// Set loading state
+	loadingCmd := core.CmdHandler(completion.SetLoadingMsg{Loading: true})
+
+	// Start full async load
+	asyncCmd := func() tea.Msg {
+		ch := asyncLoader.LoadItemsAsync(ctx)
+		items := <-ch
+		return fileLoadResultMsg{loadID: loadID, items: items, isFullLoad: true}
+	}
+
+	return tea.Batch(loadingCmd, asyncCmd)
 }
 
 func (e *editor) startCompletion(c completions.Completion) tea.Cmd {
 	e.currentCompletion = c
-	items := c.Items()
 
-	// Prepend paste placeholders for @ trigger so users can easily reference them
+	// For @ trigger, open instantly with paste items + "Browse files…" and start async file loading
 	if c.Trigger() == "@" {
-		pasteItems := e.getPasteCompletionItems()
-		if len(pasteItems) > 0 {
-			items = append(pasteItems, items...)
-		}
+		items := e.getPasteCompletionItems()
+		// Add "Browse files…" action that opens the file picker dialog
+		items = append(items, completion.Item{
+			Label:       "Browse files…",
+			Description: "Open file picker",
+			Value:       "", // No value to insert
+			Execute: func() tea.Cmd {
+				return core.CmdHandler(messages.AttachFileMsg{FilePath: ""})
+			},
+			Pinned: true,
+		})
+
+		openCmd := core.CmdHandler(completion.OpenMsg{
+			Items:     items,
+			MatchMode: c.MatchMode(),
+		})
+
+		// Start initial shallow file loading immediately
+		loadCmd := e.startInitialFileLoad()
+
+		return tea.Batch(openCmd, loadCmd)
 	}
+
+	items := c.Items()
 
 	return core.CmdHandler(completion.OpenMsg{
 		Items:     items,
 		MatchMode: c.MatchMode(),
 	})
+}
+
+// startInitialFileLoad starts a shallow file scan for immediate display.
+// It loads ~100 files from 2 levels deep for a snappy initial UX.
+func (e *editor) startInitialFileLoad() tea.Cmd {
+	e.fileLoadStarted = true
+	e.fileLoadID++
+	loadID := e.fileLoadID
+
+	// Cancel any previous load
+	if e.fileLoadCancel != nil {
+		e.fileLoadCancel()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	e.fileLoadCancel = cancel
+
+	// Find the file completion that supports async loading
+	var asyncLoader completions.AsyncLoader
+	for _, c := range e.completions {
+		if c.Trigger() == "@" {
+			if al, ok := c.(completions.AsyncLoader); ok {
+				asyncLoader = al
+				break
+			}
+		}
+	}
+
+	if asyncLoader == nil {
+		return nil
+	}
+
+	// Set loading state
+	loadingCmd := core.CmdHandler(completion.SetLoadingMsg{Loading: true})
+
+	// Start initial shallow load
+	asyncCmd := func() tea.Msg {
+		ch := asyncLoader.LoadInitialItemsAsync(ctx)
+		items := <-ch
+		return fileLoadResultMsg{loadID: loadID, items: items, isFullLoad: false}
+	}
+
+	return tea.Batch(loadingCmd, asyncCmd)
 }
 
 // getPasteCompletionItems returns completion items for paste attachments only.
@@ -928,14 +1167,17 @@ func (e *editor) getPasteCompletionItems() []completion.Item {
 func (e *editor) View() string {
 	view := e.textarea.View()
 
-	if e.hasSuggestion && e.suggestion != "" {
+	if e.textarea.Focused() && e.hasSuggestion && e.suggestion != "" {
 		view = e.applySuggestionOverlay(view)
 	}
 
 	bannerView := e.banner.View()
 	if bannerView != "" {
-		// Banner is shown - no extra top padding needed
 		view = lipgloss.JoinVertical(lipgloss.Left, bannerView, view)
+	}
+
+	if e.historySearch.active {
+		view = lipgloss.JoinVertical(lipgloss.Left, view, e.searchInput.View())
 	}
 
 	return styles.RenderComposite(styles.EditorStyle.MarginBottom(1), view)
@@ -947,6 +1189,7 @@ func (e *editor) SetSize(width, height int) tea.Cmd {
 	e.height = max(height, 1)
 
 	e.textarea.SetWidth(max(width, 10))
+	e.searchInput.SetWidth(max(width, 10))
 	e.updateTextareaHeight()
 
 	return nil
@@ -956,6 +1199,9 @@ func (e *editor) updateTextareaHeight() {
 	available := e.height
 	if e.banner != nil {
 		available -= e.banner.Height()
+	}
+	if e.historySearch.active {
+		available--
 	}
 
 	available = max(available, 1)
@@ -1016,6 +1262,7 @@ func (e *editor) Focus() tea.Cmd {
 // Blur removes focus from the component
 func (e *editor) Blur() tea.Cmd {
 	e.textarea.Blur()
+	e.clearSuggestion()
 	return nil
 }
 
@@ -1045,14 +1292,17 @@ func (e *editor) InsertText(text string) {
 }
 
 // AttachFile adds a file as an attachment and inserts @filepath into the editor
-func (e *editor) AttachFile(filePath string) {
+func (e *editor) AttachFile(filePath string) error {
 	placeholder := "@" + filePath
-	e.addFileAttachment(placeholder)
+	if err := e.addFileAttachment(placeholder); err != nil {
+		return fmt.Errorf("failed to attach %s: %w", filePath, err)
+	}
 	currentValue := e.textarea.Value()
 	e.textarea.SetValue(currentValue + placeholder + " ")
 	e.textarea.MoveToEnd()
 	e.userTyped = true
 	e.updateAttachmentBanner()
+	return nil
 }
 
 // tryAddFileRef checks if word is a valid @filepath and adds it as attachment.
@@ -1073,43 +1323,65 @@ func (e *editor) tryAddFileRef(word string) {
 		return // not a path-like reference (e.g., @username)
 	}
 
-	e.addFileAttachment(word)
+	if err := e.addFileAttachment(word); err != nil {
+		slog.Debug("speculative file ref not valid", "word", word, "error", err)
+	}
 }
 
 // addFileAttachment adds a file reference as an attachment if valid.
-func (e *editor) addFileAttachment(placeholder string) {
+// The path is resolved to an absolute path so downstream consumers
+// (e.g. processFileAttachment) always receive a fully qualified path.
+func (e *editor) addFileAttachment(placeholder string) error {
 	path := strings.TrimPrefix(placeholder, "@")
 
-	// Check if it's an existing file (not directory)
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return
+	// Resolve to absolute path so the attachment carries a fully qualified
+	// path regardless of the working directory at send time.
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("cannot resolve path %s: %w", path, err)
+	}
+
+	info, err := validateFilePath(absPath)
+	if err != nil {
+		return fmt.Errorf("invalid file path %s: %w", absPath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("path is a directory: %s", absPath)
+	}
+
+	const maxFileSize = 5 * 1024 * 1024
+	if info.Size() >= maxFileSize {
+		return fmt.Errorf("file too large: %s (%s)", absPath, units.HumanSize(float64(info.Size())))
 	}
 
 	// Avoid duplicates
 	for _, att := range e.attachments {
 		if att.placeholder == placeholder {
-			return
+			return nil
 		}
 	}
 
 	e.attachments = append(e.attachments, attachment{
-		path:        path,
+		path:        absPath,
 		placeholder: placeholder,
-		label:       fmt.Sprintf("%s (%s)", filepath.Base(path), units.HumanSize(float64(info.Size()))),
+		label:       fmt.Sprintf("%s (%s)", filepath.Base(absPath), units.HumanSize(float64(info.Size()))),
 		sizeBytes:   int(info.Size()),
 		isTemp:      false,
 	})
+	return nil
 }
 
-// collectAttachments returns a map of placeholder to file content for all attachments
-// referenced in content. Unreferenced attachments are cleaned up.
-func (e *editor) collectAttachments(content string) map[string]string {
+// collectAttachments returns structured attachments for all items referenced in
+// content. For paste attachments the content is read into memory (the backing
+// temp file is removed). For file-reference attachments the path is preserved
+// so the consumer can read and classify the file (e.g. detect MIME type).
+// Unreferenced attachments are cleaned up.
+func (e *editor) collectAttachments(content string) []messages.Attachment {
 	if len(e.attachments) == 0 {
 		return nil
 	}
 
-	attachments := make(map[string]string)
+	var result []messages.Attachment
 	for _, att := range e.attachments {
 		if !strings.Contains(content, att.placeholder) {
 			if att.isTemp {
@@ -1118,24 +1390,29 @@ func (e *editor) collectAttachments(content string) map[string]string {
 			continue
 		}
 
-		data, err := os.ReadFile(att.path)
-		if err != nil {
-			slog.Warn("failed to read attachment", "path", att.path, "error", err)
-			if att.isTemp {
-				_ = os.Remove(att.path)
-			}
-			continue
-		}
-
-		attachments[att.placeholder] = string(data)
-
 		if att.isTemp {
+			// Paste attachment: read into memory and remove the temp file.
+			data, err := os.ReadFile(att.path)
 			_ = os.Remove(att.path)
+			if err != nil {
+				slog.Warn("failed to read paste attachment", "path", att.path, "error", err)
+				continue
+			}
+			result = append(result, messages.Attachment{
+				Name:    strings.TrimPrefix(att.placeholder, "@"),
+				Content: string(data),
+			})
+		} else {
+			// File-reference attachment: keep the path for later processing.
+			result = append(result, messages.Attachment{
+				Name:     filepath.Base(att.path),
+				FilePath: att.path,
+			})
 		}
 	}
 	e.attachments = nil
 
-	return attachments
+	return result
 }
 
 // Cleanup removes any temporary paste files that haven't been sent yet.
@@ -1176,6 +1453,11 @@ func (e *editor) IsRecording() bool {
 	return e.recording
 }
 
+// IsHistorySearchActive returns true if the editor is in history search mode
+func (e *editor) IsHistorySearchActive() bool {
+	return e.historySearch.active
+}
+
 // SendContent triggers sending the current editor content
 func (e *editor) SendContent() tea.Cmd {
 	value := e.textarea.Value()
@@ -1186,6 +1468,28 @@ func (e *editor) SendContent() tea.Cmd {
 }
 
 func (e *editor) handlePaste(content string) bool {
+	// First, try to parse as file paths (drag-and-drop)
+	filePaths := ParsePastedFiles(content)
+	if len(filePaths) > 0 {
+		var attached int
+		for _, path := range filePaths {
+			if !IsSupportedFileType(path) {
+				break
+			}
+			if err := e.AttachFile(path); err != nil {
+				slog.Debug("paste path not attachable, treating as text", "path", path, "error", err)
+				break
+			}
+			attached++
+		}
+		if attached == len(filePaths) {
+			return true
+		}
+		// Not all files could be attached; undo partial attachments and fall through to text paste
+		e.removeLastNAttachments(attached)
+	}
+
+	// Not file paths, handle as text paste
 	// Count lines (newlines + 1 for content without trailing newline)
 	lines := strings.Count(content, "\n") + 1
 	if strings.HasSuffix(content, "\n") {
@@ -1210,6 +1514,27 @@ func (e *editor) handlePaste(content string) bool {
 	e.attachments = append(e.attachments, att)
 
 	return true
+}
+
+// removeLastNAttachments removes the last n non-temp attachments and their
+// placeholder text from the textarea. Used to roll back partial file-drop
+// attachments when not all files in a paste are valid.
+func (e *editor) removeLastNAttachments(n int) {
+	if n <= 0 {
+		return
+	}
+	value := e.textarea.Value()
+	removed := 0
+	for i := len(e.attachments) - 1; i >= 0 && removed < n; i-- {
+		if !e.attachments[i].isTemp {
+			// Strip the placeholder text ("@/path/file.png ") that AttachFile inserted
+			value = strings.Replace(value, e.attachments[i].placeholder+" ", "", 1)
+			e.attachments = slices.Delete(e.attachments, i, i+1)
+			removed++
+		}
+	}
+	e.textarea.SetValue(value)
+	e.textarea.MoveToEnd()
 }
 
 func (e *editor) updateAttachmentBanner() {
@@ -1257,4 +1582,118 @@ func createPasteAttachment(content string, num int) (attachment, error) {
 		sizeBytes:   len(content),
 		isTemp:      true,
 	}, nil
+}
+
+func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
+	e.historySearch = historySearchState{
+		active:                   true,
+		origTextValue:            e.textarea.Value(),
+		origTextPlaceholderValue: e.textarea.Placeholder,
+		matchIndex:               -1,
+	}
+
+	e.searchInput.SetValue("")
+	e.textarea.SetValue("")
+	e.textarea.Placeholder = ""
+	e.textarea.Blur()
+	e.clearSuggestion()
+	return e, tea.Batch(
+		e.searchInput.Focus(),
+		core.CmdHandler(completion.CloseMsg{}),
+	)
+}
+
+func (e *editor) handleHistorySearchKey(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, e.searchInput.KeyMap.PrevSuggestion):
+		e.cycleMatch(e.hist.FindPrevContains, len(e.hist.Messages))
+		return e, nil
+
+	case key.Matches(msg, e.searchInput.KeyMap.NextSuggestion):
+		e.cycleMatch(e.hist.FindNextContains, -1)
+		return e, nil
+
+	case msg.String() == "enter":
+		value := e.textarea.Value()
+		matchIdx := e.historySearch.matchIndex
+		cmd := e.exitHistorySearch()
+		if value != "" {
+			e.textarea.SetValue(value)
+			e.textarea.MoveToEnd()
+			if matchIdx >= 0 {
+				e.hist.SetCurrent(matchIdx)
+			}
+			e.userTyped = false
+		}
+		e.refreshSuggestion()
+		return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}))
+
+	case msg.String() == "esc" || msg.String() == "ctrl+g":
+		cmd := e.exitHistorySearch()
+		e.refreshSuggestion()
+		return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}))
+	}
+
+	var cmd tea.Cmd
+	e.searchInput, cmd = e.searchInput.Update(msg)
+
+	newQuery := e.searchInput.Value()
+	if newQuery != e.historySearch.query {
+		e.historySearch.query = newQuery
+		e.historySearchComputeMatch()
+	}
+
+	return e, cmd
+}
+
+// cycleMatch searches history using findFn starting from the current match.
+// If no match is found, it wraps around using wrapFrom as the starting point.
+func (e *editor) cycleMatch(findFn func(string, int) (string, int, bool), wrapFrom int) {
+	if e.historySearch.matchIndex < 0 {
+		return
+	}
+	m, idx, ok := findFn(e.historySearch.query, e.historySearch.matchIndex)
+	if !ok {
+		m, idx, ok = findFn(e.historySearch.query, wrapFrom)
+	}
+	if ok {
+		e.historySearch.match = m
+		e.historySearch.matchIndex = idx
+		e.historySearch.failing = false
+		e.textarea.SetValue(m)
+		e.textarea.MoveToEnd()
+	}
+}
+
+func (e *editor) historySearchComputeMatch() {
+	if e.historySearch.query == "" {
+		e.historySearch.match = ""
+		e.historySearch.matchIndex = -1
+		e.historySearch.failing = false
+		e.textarea.SetValue("")
+		e.textarea.Placeholder = ""
+		return
+	}
+
+	m, idx, ok := e.hist.FindPrevContains(e.historySearch.query, len(e.hist.Messages))
+	if ok {
+		e.historySearch.match = m
+		e.historySearch.matchIndex = idx
+		e.historySearch.failing = false
+		e.textarea.SetValue(m)
+		e.textarea.MoveToEnd()
+	} else {
+		e.historySearch.failing = true
+		e.historySearch.match = ""
+		e.historySearch.matchIndex = -1
+		e.textarea.SetValue("")
+		e.textarea.Placeholder = "No matching entry in history"
+	}
+}
+
+func (e *editor) exitHistorySearch() tea.Cmd {
+	e.textarea.SetValue(e.historySearch.origTextValue)
+	e.textarea.Placeholder = e.historySearch.origTextPlaceholderValue
+	e.historySearch = historySearchState{matchIndex: -1}
+	return e.textarea.Focus()
 }

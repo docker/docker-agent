@@ -1,19 +1,18 @@
 package directorytree
 
 import (
-	"fmt"
 	"strings"
 
-	"github.com/docker/cagent/pkg/tools/builtin"
-	"github.com/docker/cagent/pkg/tui/components/toolcommon"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-func New(msg *types.Message, sessionState *service.SessionState) layout.Model {
+func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
 	return toolcommon.NewBase(msg, sessionState, toolcommon.SimpleRendererWithResult(
-		toolcommon.ExtractField(func(a builtin.DirectoryTreeArgs) string { return toolcommon.ShortenPath(a.Path) }),
+		toolcommon.ExtractField(func(a filesystem.DirectoryTreeArgs) string { return toolcommon.ShortenPath(a.Path) }),
 		extractResult,
 	))
 }
@@ -22,23 +21,21 @@ func extractResult(msg *types.Message) string {
 	if msg.ToolResult == nil || msg.ToolResult.Meta == nil {
 		return ""
 	}
-	meta, ok := msg.ToolResult.Meta.(builtin.DirectoryTreeMeta)
+	meta, ok := msg.ToolResult.Meta.(filesystem.DirectoryTreeMeta)
 	if !ok {
 		return ""
 	}
 
-	fileCount := meta.FileCount
-	dirCount := meta.DirCount
-	if fileCount+dirCount == 0 {
+	if meta.FileCount+meta.DirCount == 0 {
 		return "empty"
 	}
 
 	var parts []string
-	if fileCount > 0 {
-		parts = append(parts, formatCount(fileCount, "file", "files"))
+	if meta.FileCount > 0 {
+		parts = append(parts, toolcommon.Pluralize(meta.FileCount, "file", "files"))
 	}
-	if dirCount > 0 {
-		parts = append(parts, formatCount(dirCount, "dir", "dirs"))
+	if meta.DirCount > 0 {
+		parts = append(parts, toolcommon.Pluralize(meta.DirCount, "dir", "dirs"))
 	}
 
 	result := strings.Join(parts, ", ")
@@ -46,11 +43,4 @@ func extractResult(msg *types.Message) string {
 		result += " (truncated)"
 	}
 	return result
-}
-
-func formatCount(count int, singular, plural string) string {
-	if count == 1 {
-		return fmt.Sprintf("%d %s", count, singular)
-	}
-	return fmt.Sprintf("%d %s", count, plural)
 }

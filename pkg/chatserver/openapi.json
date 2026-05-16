@@ -1,0 +1,315 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "docker-agent chat completions",
+    "summary": "OpenAI-compatible HTTP API exposing a docker-agent agent.",
+    "description": "Implements a small subset of OpenAI's REST API (chat completions and models) so any tool that already speaks OpenAI's protocol can drive a docker-agent agent without a custom integration.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8083",
+      "description": "Default loopback bind"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Static token configured via --api-key. When --api-key is not set the server is unauthenticated."
+      }
+    },
+    "schemas": {
+      "Model": {
+        "type": "object",
+        "required": ["id", "object", "owned_by"],
+        "properties": {
+          "id": { "type": "string", "description": "Agent name." },
+          "object": { "type": "string", "const": "model" },
+          "created": { "type": "integer", "format": "int64" },
+          "owned_by": { "type": "string", "const": "docker-agent" }
+        }
+      },
+      "ModelsResponse": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": { "type": "string", "const": "list" },
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Model" }
+          }
+        }
+      },
+      "ChatCompletionMessage": {
+        "type": "object",
+        "required": ["role"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["system", "user", "assistant", "tool", "developer"]
+          },
+          "content": {
+            "description": "Either a plain string or an array of typed content parts (text or image_url).",
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/ContentPart" }
+              }
+            ]
+          },
+          "name": { "type": "string" },
+          "tool_call_id": { "type": "string" },
+          "tool_calls": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ToolCallReference" }
+          }
+        }
+      },
+      "ContentPart": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string", "enum": ["text", "image_url"] },
+          "text": { "type": "string" },
+          "image_url": {
+            "type": "object",
+            "required": ["url"],
+            "properties": {
+              "url": { "type": "string" },
+              "detail": { "type": "string", "enum": ["auto", "low", "high"] }
+            }
+          }
+        }
+      },
+      "ToolCallReference": {
+        "type": "object",
+        "required": ["function"],
+        "properties": {
+          "index": { "type": "integer" },
+          "id": { "type": "string" },
+          "type": { "type": "string", "const": "function" },
+          "function": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string" },
+              "arguments": {
+                "type": "string",
+                "description": "JSON-encoded arguments object."
+              }
+            }
+          }
+        }
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "required": ["messages"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "Agent name to invoke. Defaults to the team's default agent when missing or unknown."
+          },
+          "messages": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/components/schemas/ChatCompletionMessage" }
+          },
+          "stream": { "type": "boolean", "default": false },
+          "stream_options": {
+            "type": "object",
+            "properties": {
+              "include_usage": {
+                "type": "boolean",
+                "description": "When true and stream=true, emit an extra final chunk with usage and empty choices before [DONE]."
+              }
+            }
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2,
+            "description": "Validated; full runtime plumbing is in progress."
+          },
+          "top_p": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "maximum": 1
+          },
+          "max_tokens": { "type": "integer", "minimum": 1 },
+          "stop": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          }
+        }
+      },
+      "ChatCompletionChoice": {
+        "type": "object",
+        "required": ["index", "message"],
+        "properties": {
+          "index": { "type": "integer" },
+          "message": { "$ref": "#/components/schemas/ChatCompletionMessage" },
+          "finish_reason": {
+            "type": "string",
+            "enum": ["stop", "tool_calls", "error", "length"]
+          }
+        }
+      },
+      "ChatCompletionUsage": {
+        "type": "object",
+        "properties": {
+          "prompt_tokens": { "type": "integer", "format": "int64" },
+          "completion_tokens": { "type": "integer", "format": "int64" },
+          "total_tokens": { "type": "integer", "format": "int64" }
+        }
+      },
+      "ChatCompletionResponse": {
+        "type": "object",
+        "required": ["id", "object", "created", "model", "choices"],
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "type": "string", "const": "chat.completion" },
+          "created": { "type": "integer", "format": "int64" },
+          "model": { "type": "string" },
+          "choices": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ChatCompletionChoice" }
+          },
+          "usage": { "$ref": "#/components/schemas/ChatCompletionUsage" }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["message", "type"],
+            "properties": {
+              "message": { "type": "string" },
+              "type": {
+                "type": "string",
+                "enum": ["invalid_request_error", "internal_error"]
+              },
+              "code": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/v1/models": {
+      "get": {
+        "summary": "List the agents this server exposes.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ModelsResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token (only when --api-key is set).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Create a chat completion.",
+        "description": "Set `stream: true` to receive Server-Sent Events instead of a single JSON response. The optional `X-Conversation-Id` request header reuses a server-side session across turns when --conversations-max is non-zero.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Conversation-Id",
+            "schema": { "type": "string" },
+            "description": "Stable identifier used to look up a cached session."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ChatCompletionRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK. Either a JSON ChatCompletion or a `text/event-stream` of `chat.completion.chunk` events.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ChatCompletionResponse" }
+              },
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request (malformed JSON, missing user message, invalid sampling parameters).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "413": { "description": "Request body exceeds --max-request-size." },
+          "409": {
+            "description": "Another request with the same X-Conversation-Id is in flight. Retry sequentially.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "500": {
+            "description": "Agent execution failed.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "Returns this OpenAPI document.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -5,36 +5,36 @@ import "time"
 // Database represents the complete models.dev database
 type Database struct {
 	Providers map[string]Provider `json:"providers"`
-	UpdatedAt time.Time           `json:"updated_at"`
 }
 
 // Provider represents an AI model provider
 type Provider struct {
-	ID     string           `json:"id"`
-	Name   string           `json:"name"`
-	Doc    string           `json:"doc,omitempty"`
-	API    string           `json:"api,omitempty"`
-	NPM    string           `json:"npm,omitempty"`
-	Env    []string         `json:"env,omitempty"`
 	Models map[string]Model `json:"models"`
 }
 
-// Model represents an AI model with its specifications and capabilities
+// Model represents an AI model with its specifications and capabilities.
+//
+// Fields are sourced from https://models.dev/api.json. Boolean capability
+// fields default to false when absent from the source data.
 type Model struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Family      string     `json:"family,omitempty"`
-	Attachment  bool       `json:"attachment"`
-	Reasoning   bool       `json:"reasoning"`
-	Temperature bool       `json:"temperature"`
-	ToolCall    bool       `json:"tool_call"`
-	Knowledge   string     `json:"knowledge,omitempty"`
-	ReleaseDate string     `json:"release_date"`
-	LastUpdated string     `json:"last_updated"`
-	OpenWeights bool       `json:"open_weights"`
-	Cost        *Cost      `json:"cost,omitempty"`
-	Limit       Limit      `json:"limit"`
-	Modalities  Modalities `json:"modalities"`
+	Name       string     `json:"name"`
+	Family     string     `json:"family,omitempty"`
+	Cost       *Cost      `json:"cost,omitempty"`
+	Limit      Limit      `json:"limit"`
+	Modalities Modalities `json:"modalities"`
+
+	// Reasoning is true when the model supports internal reasoning.
+	Reasoning bool `json:"reasoning,omitempty"`
+	// ToolCall is true when the model supports tool/function calls.
+	ToolCall bool `json:"tool_call,omitempty"`
+	// Temperature is true when the API accepts the temperature parameter.
+	Temperature bool `json:"temperature,omitempty"`
+	// Attachment is true when the model accepts file/image attachments.
+	Attachment bool `json:"attachment,omitempty"`
+	// OpenWeights is true when the model has openly-released weights.
+	OpenWeights bool `json:"open_weights,omitempty"`
+	// ReleaseDate is the model's public release date (YYYY-MM-DD).
+	ReleaseDate string `json:"release_date,omitempty"`
 }
 
 // Cost represents the pricing information for a model
@@ -60,6 +60,6 @@ type Modalities struct {
 // CachedData represents the cached models.dev data with metadata
 type CachedData struct {
 	Database    Database  `json:"database"`
-	CachedAt    time.Time `json:"cached_at"`
 	LastRefresh time.Time `json:"last_refresh"`
+	ETag        string    `json:"etag,omitempty"`
 }

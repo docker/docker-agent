@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/fsx"
-	"github.com/docker/cagent/pkg/paths"
-	"github.com/docker/cagent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/fsx"
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/rag/types"
 )
 
 // Helper functions for common operations
@@ -60,6 +60,14 @@ func ResolveDatabasePath(dbCfg latest.RAGDatabaseConfig, parentDir, defaultName 
 
 	// If it's a relative file path, make it absolute
 	if !filepath.IsAbs(dbStr) {
+		if parentDir == "" {
+			slog.Debug("Resolving relative database path with empty parentDir, using working directory", "path", dbStr)
+			abs, err := filepath.Abs(dbStr)
+			if err != nil {
+				return "", fmt.Errorf("failed to resolve absolute path for %q: %w", dbStr, err)
+			}
+			return abs, nil
+		}
 		return filepath.Join(parentDir, dbStr), nil
 	}
 
@@ -86,7 +94,7 @@ func GetParam[T any](params map[string]any, key string, defaultValue T) T {
 		case int64:
 			return any(int(v)).(T)
 		case uint64:
-			return any(int(v)).(T)
+			return any(int(v)).(T) //nolint:gosec // value comes from validated config; bounds enforced upstream
 		case float64:
 			return any(int(v)).(T)
 		default:
@@ -132,7 +140,7 @@ func GetParamPtr[T any](params map[string]any, key string) *T {
 			val := any(int(v)).(T)
 			return &val
 		case uint64:
-			val := any(int(v)).(T)
+			val := any(int(v)).(T) //nolint:gosec // value comes from validated config; bounds enforced upstream
 			return &val
 		case float64:
 			val := any(int(v)).(T)
@@ -165,12 +173,23 @@ func GetParamPtr[T any](params map[string]any, key string) *T {
 	}
 }
 
-// makeAbsolute makes a path absolute relative to parentDir
-func makeAbsolute(path, parentDir string) string {
-	if filepath.IsAbs(path) {
-		return path
+// makeAbsolute makes a path absolute relative to parentDir.
+// If parentDir is empty (e.g. for OCI/URL sources), the path is resolved
+// against the current working directory.
+func makeAbsolute(p, parentDir string) string {
+	if filepath.IsAbs(p) {
+		return p
 	}
-	return filepath.Join(parentDir, path)
+	if parentDir == "" {
+		slog.Debug("Resolving relative path with empty parentDir, using working directory", "path", p)
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			slog.Warn("Failed to resolve absolute path, using as-is", "path", p, "error", err)
+			return p
+		}
+		return abs
+	}
+	return filepath.Join(parentDir, p)
 }
 
 // EmitEvent sends an event to the events channel using non-blocking send

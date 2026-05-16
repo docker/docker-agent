@@ -17,8 +17,9 @@ agents:
     instruction: |
       You are a helpful coding assistant with access to semantic code search.
       Use the search tool to find relevant code based on meaning, not just keywords.
-    rag:
-      - codebase
+    toolsets:
+      - type: rag
+        ref: codebase
 
 rag:
   codebase:
@@ -78,7 +79,7 @@ rag:
         chunking:
           size: 1000
           respect_word_boundaries: true
-          code_aware: true  # Use tree-sitter for AST-aware chunking
+          code_aware: true  # Use tree-sitter for AST-based chunking
 
     results:
       # Optional: rerank results using an LLM for better relevance
@@ -94,4 +95,3 @@ rag:
       deduplicate: true
       return_full_content: false # return full document content instead of just the matched chunks
       limit: 5
-

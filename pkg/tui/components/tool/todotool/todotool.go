@@ -3,7 +3,7 @@ package todotool
 import (
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 func renderTodoIcon(status string) (string, lipgloss.Style) {

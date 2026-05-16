@@ -1,16 +1,18 @@
 package options
 
 import (
-	"github.com/docker/cagent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 type ModelOptions struct {
 	gateway          string
 	structuredOutput *latest.StructuredOutput
 	generatingTitle  bool
+	noThinking       bool
 	maxTokens        int64
 	providers        map[string]latest.ProviderConfig
-	thinking         *bool
+	modelsDevStore   *modelsdev.Store
 }
 
 func (c *ModelOptions) Gateway() string {
@@ -29,12 +31,16 @@ func (c *ModelOptions) MaxTokens() int64 {
 	return c.maxTokens
 }
 
+func (c *ModelOptions) NoThinking() bool {
+	return c.noThinking
+}
+
 func (c *ModelOptions) Providers() map[string]latest.ProviderConfig {
 	return c.providers
 }
 
-func (c *ModelOptions) Thinking() *bool {
-	return c.thinking
+func (c *ModelOptions) ModelsDevStore() *modelsdev.Store {
+	return c.modelsDevStore
 }
 
 type Opt func(*ModelOptions)
@@ -63,15 +69,21 @@ func WithMaxTokens(maxTokens int64) Opt {
 	}
 }
 
+func WithNoThinking() Opt {
+	return func(cfg *ModelOptions) {
+		cfg.noThinking = true
+	}
+}
+
 func WithProviders(providers map[string]latest.ProviderConfig) Opt {
 	return func(cfg *ModelOptions) {
 		cfg.providers = providers
 	}
 }
 
-func WithThinking(enabled bool) Opt {
+func WithModelsDevStore(store *modelsdev.Store) Opt {
 	return func(cfg *ModelOptions) {
-		cfg.thinking = &enabled
+		cfg.modelsDevStore = store
 	}
 }
 
@@ -88,11 +100,17 @@ func FromModelOptions(m ModelOptions) []Opt {
 	if m.generatingTitle {
 		out = append(out, WithGeneratingTitle())
 	}
+	if m.noThinking {
+		out = append(out, WithNoThinking())
+	}
 	if m.maxTokens != 0 {
 		out = append(out, WithMaxTokens(m.maxTokens))
 	}
 	if len(m.providers) > 0 {
 		out = append(out, WithProviders(m.providers))
+	}
+	if m.modelsDevStore != nil {
+		out = append(out, WithModelsDevStore(m.modelsDevStore))
 	}
 	return out
 }

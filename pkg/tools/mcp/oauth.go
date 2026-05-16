@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -11,12 +12,14 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/oauth2"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // resourceMetadataFromWWWAuth extracts resource metadata URL from WWW-Authenticate header
@@ -78,22 +81,28 @@ func (o *oauth) getAuthorizationServerMetadata(ctx context.Context, authServerUR
 	if resp.StatusCode == http.StatusNotFound {
 		// Try OpenID Connect discovery as fallback
 		openIDURL := strings.Replace(metadataURL, "/.well-known/oauth-authorization-server", "/.well-known/openid-configuration", 1)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, openIDURL, http.NoBody)
+		oidcReq, err := http.NewRequestWithContext(ctx, http.MethodGet, openIDURL, http.NoBody)
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Accept", "application/json")
+		oidcReq.Header.Set("Accept", "application/json")
 
-		resp, err := o.metadataClient.Do(req)
+		oidcResp, err := o.metadataClient.Do(oidcReq)
 		if err != nil {
 			return nil, err
 		}
-		defer resp.Body.Close()
+		defer oidcResp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
+		if oidcResp.StatusCode != http.StatusOK {
 			// Return default metadata if all discovery fails
 			return createDefaultMetadata(authServerURL), nil
 		}
+
+		var metadata AuthorizationServerMetadata
+		if err := json.NewDecoder(oidcResp.Body).Decode(&metadata); err != nil {
+			return nil, fmt.Errorf("failed to decode metadata from %s: %w", openIDURL, err)
+		}
+		return validateAndFillDefaults(&metadata, authServerURL), nil
 	} else if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status %d from %s", resp.StatusCode, metadataURL)
 	}
@@ -128,7 +137,8 @@ func validateAndFillDefaults(metadata *AuthorizationServerMetadata, authServerUR
 
 	metadata.AuthorizationEndpoint = cmp.Or(metadata.AuthorizationEndpoint, authServerURL+"/authorize")
 	metadata.TokenEndpoint = cmp.Or(metadata.TokenEndpoint, authServerURL+"/token")
-	metadata.RegistrationEndpoint = cmp.Or(metadata.RegistrationEndpoint, authServerURL+"/register")
+	// Do NOT fabricate a registration_endpoint — if the server doesn't
+	// advertise one, dynamic client registration is not supported.
 
 	return metadata
 }
@@ -139,7 +149,6 @@ func createDefaultMetadata(authServerURL string) *AuthorizationServerMetadata {
 		Issuer:                                 authServerURL,
 		AuthorizationEndpoint:                  authServerURL + "/authorize",
 		TokenEndpoint:                          authServerURL + "/token",
-		RegistrationEndpoint:                   authServerURL + "/register",
 		ResponseTypesSupported:                 []string{"code"},
 		ResponseModesSupported:                 []string{"query", "fragment"},
 		GrantTypesSupported:                    []string{"authorization_code"},
@@ -157,17 +166,51 @@ func resourceMetadataFromWWWAuth(wwwAuth string) string {
 	return ""
 }
 
+// callbackRedirectURLFrom is a nil-safe accessor for the optional
+// CallbackRedirectURL field on a RemoteOAuthConfig.
+func callbackRedirectURLFrom(c *latest.RemoteOAuthConfig) string {
+	if c == nil {
+		return ""
+	}
+	return c.CallbackRedirectURL
+}
+
 // oauthTransport wraps an HTTP transport with OAuth support
 type oauthTransport struct {
 	base http.RoundTripper
 	// TODO(rumpl): remove client reference, we need to find a better way to send elicitation requests
-	client     *remoteMCPClient
-	tokenStore OAuthTokenStore
-	baseURL    string
-	managed    bool
+	client      *remoteMCPClient
+	tokenStore  OAuthTokenStore
+	baseURL     string
+	managed     bool
+	oauthConfig *latest.RemoteOAuthConfig
+
+	// mu protects refreshFailedAt and lastErr* from concurrent access.
+	mu sync.Mutex
+	// refreshFailedAt tracks the last time a silent token refresh failed,
+	// so we avoid retrying on every request.
+	refreshFailedAt time.Time
+	// lastErrStatus and lastErrBody capture the status code and (truncated)
+	// response body of the most recent non-2xx HTTP response received by the
+	// transport. They're read by callers of Initialize() to enrich bubbled-up
+	// errors with the server's own explanation, which the MCP SDK otherwise
+	// swallows in favor of a bare http.StatusText.
+	lastErrStatus int
+	lastErrBody   []byte
+	// lastAuthRequired records when the transport short-circuited an
+	// interactive OAuth flow because the request context disallowed
+	// prompts (see WithoutInteractivePrompts). The MCP SDK wraps transport
+	// errors with %v, breaking errors.As, so callers must use this field
+	// instead of unwrapping to know that OAuth was deferred rather than
+	// failed for some other reason.
+	lastAuthRequired bool
 }
 
 func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.roundTrip(req, false)
+}
+
+func (t *oauthTransport) roundTrip(req *http.Request, isRetry bool) (*http.Response, error) {
 	var bodyBytes []byte
 	if req.Body != nil && req.Body != http.NoBody {
 		var err error
@@ -180,8 +223,9 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	reqClone := req.Clone(req.Context())
 
-	if token, err := t.tokenStore.GetToken(t.baseURL); err == nil && !token.IsExpired() {
-		reqClone.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token.AccessToken))
+	// Attach a valid token if available, silently refreshing if expired.
+	if token := t.getValidToken(req.Context()); token != nil {
+		reqClone.Header.Set("Authorization", "Bearer "+token.AccessToken)
 	}
 
 	resp, err := t.base.RoundTrip(reqClone)
@@ -189,13 +233,49 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
-	if resp.StatusCode == http.StatusUnauthorized {
+	if resp.StatusCode == http.StatusUnauthorized && !isRetry {
 		wwwAuth := resp.Header.Get("WWW-Authenticate")
 		if wwwAuth != "" {
+			// If the caller asked for non-interactive operation (e.g. the
+			// runtime is populating sidebar tool counts during startup),
+			// don't block on an OAuth elicitation that the TUI is not yet
+			// ready to surface. Surface a recognisable error instead so
+			// the toolset can be flagged "needs auth" without freezing
+			// the agent and without making Ctrl-C wait for a user response
+			// that will never come.
+			if !interactivePromptsAllowed(req.Context()) {
+				slog.Debug("Skipping OAuth elicitation in non-interactive context", "url", t.baseURL)
+				resp.Body.Close()
+				t.mu.Lock()
+				t.lastAuthRequired = true
+				t.mu.Unlock()
+				return nil, &AuthorizationRequiredError{URL: t.baseURL}
+			}
+
 			resp.Body.Close()
 
 			authServer := req.URL.Scheme + "://" + req.URL.Host
 			if err := t.handleOAuthFlow(req.Context(), authServer, wwwAuth); err != nil {
+				// requestElicitation surfaces a bare AuthorizationRequiredError
+				// when the runtime hasn't wired up the elicitation bridge yet,
+				// which normally means OAuth was triggered too early (the
+				// WithoutInteractivePrompts marker would have caught this case
+				// at the top of roundTrip, but a missing marker shouldn't
+				// translate into a scary "no elicitation handler configured"
+				// for the user). Treat the same as the explicit non-interactive
+				// path: flag the toolset as needing auth and let it retry on
+				// the next conversation turn with a properly-wired bridge.
+				var authErr *AuthorizationRequiredError
+				if errors.As(err, &authErr) {
+					slog.Debug("OAuth flow deferred: elicitation bridge not ready", "url", t.baseURL)
+					if authErr.URL == "" {
+						authErr.URL = t.baseURL
+					}
+					t.mu.Lock()
+					t.lastAuthRequired = true
+					t.mu.Unlock()
+					return nil, authErr
+				}
 				return nil, fmt.Errorf("OAuth flow failed: %w", err)
 			}
 
@@ -203,11 +283,266 @@ func (t *oauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 				req.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
 			}
 
-			return t.RoundTrip(req)
+			return t.roundTrip(req, true)
 		}
 	}
 
+	// On the authenticated retry, log the response body when the server
+	// rejects us with an error status. Otherwise the failure bubbles up as
+	// a generic "Bad Request" / "Forbidden" / ... with no detail, making it
+	// very hard to understand why the server refused the token we just
+	// obtained (e.g. a scope mismatch, insufficient permissions, or
+	// provider-specific payload complaints).
+	//
+	// We also log on the first attempt when the status is something other
+	// than a plain 401 we're going to handle via OAuth. In particular, some
+	// servers return a non-standard 400 instead of 401 when a stored token
+	// is no longer accepted (for example, Slack's MCP endpoint answers
+	// `400 Bad Request` with a JSON-RPC error payload when the app has
+	// lost access — "App is not enabled for Slack MCP server access"),
+	// and surfacing the body is the only way to see the real cause.
+	if resp.StatusCode >= 400 {
+		t.logErrorResponse(req, resp)
+	}
+
 	return resp, nil
+}
+
+// logErrorResponse peeks at an error response body (up to a reasonable cap)
+// and logs it so the user can see what the server is actually complaining
+// about, without preventing the caller from reading the body themselves.
+//
+// Many MCP server failures come back as short JSON-RPC error envelopes
+// (e.g. `{"error":{"code":-32000,"message":"insufficient_scope"}}`) that
+// are invaluable for diagnosis but are otherwise swallowed by the MCP SDK
+// which only surfaces `http.StatusText(resp.StatusCode)`.
+func (t *oauthTransport) logErrorResponse(req *http.Request, resp *http.Response) {
+	const maxBody = 2048
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		slog.Warn("Authenticated MCP request failed; could not read response body",
+			"url", req.URL.String(),
+			"status", resp.StatusCode,
+			"error", err,
+		)
+		// Ensure the body reader is in a usable state for the caller.
+		resp.Body = io.NopCloser(bytes.NewReader(nil))
+		return
+	}
+
+	// Drain and replace the body so downstream consumers can still read it.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+
+	// Remember the last server-side failure so higher layers (Initialize /
+	// doStart) can enrich their error with a human-readable explanation
+	// rather than the SDK's bare "Bad Request".
+	t.mu.Lock()
+	t.lastErrStatus = resp.StatusCode
+	t.lastErrBody = body
+	t.mu.Unlock()
+
+	slog.Warn("Authenticated MCP request was rejected by the server",
+		"url", req.URL.String(),
+		"status", resp.StatusCode,
+		"www_authenticate", resp.Header.Get("WWW-Authenticate"),
+		"content_type", resp.Header.Get("Content-Type"),
+		"body", string(body),
+	)
+}
+
+// lastServerError returns the status code and a short, human-readable
+// explanation drawn from the most recent non-2xx response seen by this
+// transport. The string is empty when no such response has been captured
+// or when the body yielded no useful text.
+//
+// This is how the transport surfaces provider-specific errors (e.g. Slack's
+// "App is not enabled for Slack MCP server access") that would otherwise
+// be hidden behind the MCP SDK's generic http.StatusText-derived messages.
+func (t *oauthTransport) lastServerError() (int, string) {
+	t.mu.Lock()
+	status := t.lastErrStatus
+	body := t.lastErrBody
+	t.mu.Unlock()
+	if status == 0 {
+		return 0, ""
+	}
+	return status, extractServerMessage(body)
+}
+
+// authorizationRequired reports whether the transport short-circuited an
+// interactive OAuth flow because the request context disallowed prompts.
+// Callers can use this to recognise the deferred-OAuth case even though
+// the MCP SDK destroys the underlying error chain by wrapping with %v.
+func (t *oauthTransport) authorizationRequired() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastAuthRequired
+}
+
+// extractServerMessage extracts a short, human-readable message from a
+// server response body. It tries, in order:
+//
+//  1. A JSON-RPC envelope: {"error":{"message":"..."}}
+//  2. A Slack-style envelope: {"error":"some_code"}
+//  3. A top-level {"message":"..."}
+//  4. The raw body, trimmed and collapsed to a single line.
+//
+// Returns "" when the body is empty or contains only whitespace.
+func extractServerMessage(body []byte) string {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return ""
+	}
+
+	var envelope struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil {
+		// Nested object: {"error":{"message":"..."}}.
+		var nested struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(envelope.Error, &nested) == nil && nested.Message != "" {
+			return nested.Message
+		}
+		// Plain string: {"error":"some_code"}.
+		var s string
+		if json.Unmarshal(envelope.Error, &s) == nil && s != "" {
+			return s
+		}
+		if envelope.Message != "" {
+			return envelope.Message
+		}
+	}
+
+	// Fall back to the raw body, collapsed to a single line so it's safe
+	// to embed in an error message. Caps the length conservatively.
+	const maxLen = 400
+	text := strings.Join(strings.Fields(string(body)), " ")
+	if len(text) > maxLen {
+		text = text[:maxLen] + "\u2026"
+	}
+	return text
+}
+
+// getValidToken returns a non-expired token for the server, silently refreshing
+// an expired token when a refresh token is available. Returns nil if no usable
+// token can be obtained.
+//
+// If the stored token's recorded RequestedScopes no longer cover the scopes
+// currently requested by the config, the stored token is discarded so that
+// the next request triggers a fresh OAuth flow. This keeps us from reusing a
+// token that was provisioned with too-narrow (or entirely wrong) scopes
+// — typically after the user edits the scope list in their agent config.
+func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
+	token, err := t.tokenStore.GetToken(t.baseURL)
+	if err != nil {
+		return nil
+	}
+
+	if !t.tokenCoversConfiguredScopes(token) {
+		slog.DebugContext(ctx, "Stored token scopes no longer cover configured scopes; discarding to force re-auth",
+			"url", t.baseURL,
+			"stored", token.RequestedScopes,
+			"configured", configuredScopes(t.oauthConfig),
+		)
+		if err := t.tokenStore.RemoveToken(t.baseURL); err != nil {
+			slog.DebugContext(ctx, "Failed to remove stale token", "url", t.baseURL, "error", err)
+		}
+		return nil
+	}
+
+	if !token.IsExpired() {
+		return token
+	}
+
+	if token.RefreshToken == "" {
+		return nil
+	}
+
+	// Avoid hammering the token endpoint if a recent refresh already failed.
+	const refreshBackoff = 30 * time.Second
+	t.mu.Lock()
+	failedAt := t.refreshFailedAt
+	t.mu.Unlock()
+	if !failedAt.IsZero() && time.Since(failedAt) < refreshBackoff {
+		return nil
+	}
+
+	slog.DebugContext(ctx, "Attempting silent token refresh", "url", t.baseURL)
+
+	o := &oauth{metadataClient: &http.Client{Timeout: 5 * time.Second}}
+	authServer := cmp.Or(token.AuthServer, t.baseURL)
+	metadata, err := o.getAuthorizationServerMetadata(ctx, authServer)
+	if err != nil {
+		slog.DebugContext(ctx, "Failed to fetch auth server metadata for refresh", "auth_server", authServer, "error", err)
+		return nil
+	}
+
+	newToken, err := RefreshAccessToken(ctx, metadata.TokenEndpoint, token.RefreshToken, token.ClientID, token.ClientSecret)
+	if err != nil {
+		slog.DebugContext(ctx, "Token refresh failed, will require interactive auth", "error", err)
+		t.mu.Lock()
+		t.refreshFailedAt = time.Now()
+		t.mu.Unlock()
+		return nil
+	}
+	newToken.AuthServer = authServer
+	newToken.RequestedScopes = token.RequestedScopes
+
+	t.mu.Lock()
+	t.refreshFailedAt = time.Time{} // reset on success
+	t.mu.Unlock()
+
+	if err := t.tokenStore.StoreToken(t.baseURL, newToken); err != nil {
+		slog.WarnContext(ctx, "Failed to store refreshed token", "error", err)
+	}
+
+	slog.DebugContext(ctx, "Token refreshed successfully", "url", t.baseURL)
+	return newToken
+}
+
+// tokenCoversConfiguredScopes reports whether the stored token was obtained
+// with a scope set that still satisfies the config.
+//
+// Scoping rules (kept deliberately simple):
+//   - If the config declares no scopes, any token is considered sufficient.
+//   - If the stored token has no RequestedScopes (legacy tokens stored before
+//     this field was introduced), it is treated as sufficient to avoid
+//     forcing a re-auth on upgrade.
+//   - Otherwise, every configured scope must appear in the token's
+//     RequestedScopes.
+func (t *oauthTransport) tokenCoversConfiguredScopes(token *OAuthToken) bool {
+	configured := configuredScopes(t.oauthConfig)
+	if len(configured) == 0 {
+		return true
+	}
+	if len(token.RequestedScopes) == 0 {
+		return true
+	}
+	stored := make(map[string]struct{}, len(token.RequestedScopes))
+	for _, s := range token.RequestedScopes {
+		stored[s] = struct{}{}
+	}
+	for _, s := range configured {
+		if _, ok := stored[s]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// configuredScopes is a nil-safe accessor for the Scopes slice on the
+// optional RemoteOAuthConfig.
+func configuredScopes(c *latest.RemoteOAuthConfig) []string {
+	if c == nil {
+		return nil
+	}
+	return c.Scopes
 }
 
 // handleOAuthFlow performs the OAuth flow when a 401 response is received
@@ -220,11 +555,15 @@ func (t *oauthTransport) handleOAuthFlow(ctx context.Context, authServer, wwwAut
 }
 
 func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer, wwwAuth string) error {
-	slog.Debug("Starting OAuth flow for server", "url", t.baseURL)
+	slog.DebugContext(ctx, "Starting OAuth flow for server", "url", t.baseURL)
 
 	resourceURL := cmp.Or(resourceMetadataFromWWWAuth(wwwAuth), authServer+"/.well-known/oauth-protected-resource")
 
-	resp, err := http.Get(resourceURL)
+	resourceReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, http.NoBody)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(resourceReq)
 	if err != nil {
 		return err
 	}
@@ -242,7 +581,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	if len(resourceMetadata.AuthorizationServers) == 0 {
-		slog.Debug("No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
+		slog.DebugContext(ctx, "No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
 		resourceMetadata.AuthorizationServers = []string{authServer}
 	}
 
@@ -252,8 +591,12 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)
 	}
 
-	slog.Debug("Creating OAuth callback server")
-	callbackServer, err := NewCallbackServer()
+	slog.DebugContext(ctx, "Creating OAuth callback server")
+	var callbackPort int
+	if t.oauthConfig != nil {
+		callbackPort = t.oauthConfig.CallbackPort
+	}
+	callbackServer, err := NewCallbackServerOnPort(callbackPort)
 	if err != nil {
 		return fmt.Errorf("failed to create callback server: %w", err)
 	}
@@ -261,7 +604,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := callbackServer.Shutdown(shutdownCtx); err != nil {
-			slog.Error("Failed to shutdown callback server", "error", err)
+			slog.ErrorContext(ctx, "Failed to shutdown callback server", "error", err)
 		}
 	}()
 
@@ -269,23 +612,31 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		return fmt.Errorf("failed to start callback server: %w", err)
 	}
 
-	redirectURI := callbackServer.GetRedirectURI()
-	slog.Debug("Using redirect URI", "uri", redirectURI)
+	redirectURI := callbackServer.resolveRedirectURI(callbackRedirectURLFrom(t.oauthConfig))
+	slog.DebugContext(ctx, "Using redirect URI", "uri", redirectURI)
 
-	clientID := ""
-	clientSecret := ""
+	var clientID string
+	var clientSecret string
+	var scopes []string
 
-	if authServerMetadata.RegistrationEndpoint != "" {
-		slog.Debug("Attempting dynamic client registration")
+	switch {
+	case t.oauthConfig != nil && t.oauthConfig.ClientID != "":
+		// Use explicit credentials from config
+		slog.DebugContext(ctx, "Using explicit OAuth credentials from config")
+		clientID = t.oauthConfig.ClientID
+		clientSecret = t.oauthConfig.ClientSecret
+		scopes = t.oauthConfig.Scopes
+	case authServerMetadata.RegistrationEndpoint != "":
+		slog.DebugContext(ctx, "Attempting dynamic client registration")
 		clientID, clientSecret, err = RegisterClient(ctx, authServerMetadata, redirectURI, nil)
 		if err != nil {
-			slog.Debug("Dynamic registration failed", "error", err)
+			slog.DebugContext(ctx, "Dynamic registration failed", "error", err)
 			// TODO(rumpl): fall back to requesting client ID from user
 			return err
 		}
-	} else {
+	default:
 		// TODO(rumpl): fall back to requesting client ID from user
-		return errors.New("authorization server does not support dynamic client registration")
+		return errors.New("authorization server does not support dynamic client registration and no explicit OAuth credentials configured")
 	}
 
 	state, err := GenerateState()
@@ -303,6 +654,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		state,
 		oauth2.S256ChallengeFromVerifier(verifier),
 		t.baseURL,
+		scopes,
 	)
 
 	result, err := t.client.requestElicitation(ctx, &mcpsdk.ElicitParams{
@@ -317,13 +669,13 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		return fmt.Errorf("failed to send elicitation request: %w", err)
 	}
 
-	slog.Debug("Elicitation response received", "result", result)
+	slog.DebugContext(ctx, "Elicitation response received", "result", result)
 
 	if result.Action != tools.ElicitationActionAccept {
-		return fmt.Errorf("user declined OAuth authorization")
+		return errors.New("user declined OAuth authorization")
 	}
 
-	slog.Debug("Requesting authorization code", "url", authURL)
+	slog.DebugContext(ctx, "Requesting authorization code", "url", authURL)
 
 	code, receivedState, err := RequestAuthorizationCode(ctx, authURL, callbackServer, state)
 	if err != nil {
@@ -331,10 +683,10 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	if receivedState != state {
-		return fmt.Errorf("state mismatch in authorization response")
+		return errors.New("state mismatch in authorization response")
 	}
 
-	slog.Debug("Exchanging authorization code for token")
+	slog.DebugContext(ctx, "Exchanging authorization code for token")
 	token, err := ExchangeCodeForToken(
 		ctx,
 		authServerMetadata.TokenEndpoint,
@@ -348,6 +700,11 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		return fmt.Errorf("failed to exchange code for token: %w", err)
 	}
 
+	token.ClientID = clientID
+	token.ClientSecret = clientSecret
+	token.AuthServer = resourceMetadata.AuthorizationServers[0]
+	token.RequestedScopes = scopes
+
 	if err := t.tokenStore.StoreToken(t.baseURL, token); err != nil {
 		return fmt.Errorf("failed to store token: %w", err)
 	}
@@ -355,19 +712,23 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	// Notify the runtime that the OAuth flow was successful
 	t.client.oauthSuccess()
 
-	slog.Debug("OAuth flow completed successfully")
+	slog.DebugContext(ctx, "OAuth flow completed successfully")
 	return nil
 }
 
 // handleUnmanagedOAuthFlow performs the OAuth flow for remote/unmanaged scenarios
 // where the client handles the OAuth interaction instead of us
 func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServer, wwwAuth string) error {
-	slog.Debug("Starting unmanaged OAuth flow for server", "url", t.baseURL)
+	slog.DebugContext(ctx, "Starting unmanaged OAuth flow for server", "url", t.baseURL)
 
 	// Extract resource URL from WWW-Authenticate header
 	resourceURL := cmp.Or(resourceMetadataFromWWWAuth(wwwAuth), authServer+"/.well-known/oauth-protected-resource")
 
-	resp, err := http.Get(resourceURL)
+	resourceReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, http.NoBody)
+	if err != nil {
+		return err
+	}
+	resp, err := http.DefaultClient.Do(resourceReq)
 	if err != nil {
 		return err
 	}
@@ -385,7 +746,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	}
 
 	if len(resourceMetadata.AuthorizationServers) == 0 {
-		slog.Debug("No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
+		slog.DebugContext(ctx, "No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
 		resourceMetadata.AuthorizationServers = []string{authServer}
 	}
 
@@ -395,10 +756,10 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)
 	}
 
-	slog.Debug("Sending OAuth elicitation request to client")
+	slog.DebugContext(ctx, "Sending OAuth elicitation request to client")
 
 	result, err := t.client.requestElicitation(ctx, &mcpsdk.ElicitParams{
-		Message:         fmt.Sprintf("OAuth authorization required for %s", t.baseURL),
+		Message:         "OAuth authorization required for " + t.baseURL,
 		RequestedSchema: nil,
 		Meta: map[string]any{
 			"cagent/type":          "oauth_flow",
@@ -412,13 +773,13 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 		return fmt.Errorf("failed to send elicitation request: %w", err)
 	}
 
-	slog.Debug("Received elicitation response from client", "action", result.Action)
+	slog.DebugContext(ctx, "Received elicitation response from client", "action", result.Action)
 
 	if result.Action != tools.ElicitationActionAccept {
-		return fmt.Errorf("OAuth flow declined or cancelled by client")
+		return errors.New("OAuth flow declined or cancelled by client")
 	}
 	if result.Content == nil {
-		return fmt.Errorf("no token received from client")
+		return errors.New("no token received from client")
 	}
 
 	tokenData := result.Content
@@ -428,7 +789,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	if accessToken, ok := tokenData["access_token"].(string); ok {
 		token.AccessToken = accessToken
 	} else {
-		return fmt.Errorf("access_token missing or invalid in client response")
+		return errors.New("access_token missing or invalid in client response")
 	}
 
 	if tokenType, ok := tokenData["token_type"].(string); ok {
@@ -439,9 +800,13 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 		token.ExpiresIn = int(expiresIn)
 		token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 	}
+	token.AuthServer = resourceMetadata.AuthorizationServers[0]
 
 	if refreshToken, ok := tokenData["refresh_token"].(string); ok {
 		token.RefreshToken = refreshToken
+	}
+	if t.oauthConfig != nil {
+		token.RequestedScopes = t.oauthConfig.Scopes
 	}
 	if err := t.tokenStore.StoreToken(t.baseURL, token); err != nil {
 		return fmt.Errorf("failed to store token: %w", err)
@@ -450,6 +815,6 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	// Notify the runtime that the OAuth flow was successful
 	t.client.oauthSuccess()
 
-	slog.Debug("Managed OAuth flow completed successfully")
+	slog.DebugContext(ctx, "Managed OAuth flow completed successfully")
 	return nil
 }

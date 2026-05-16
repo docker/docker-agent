@@ -1,6 +1,9 @@
 package concurrent
 
-import "sync"
+import (
+	"slices"
+	"sync"
+)
 
 type Slice[V any] struct {
 	mu     sync.RWMutex
@@ -51,7 +54,7 @@ func (s *Slice[V]) All() []V {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return append([]V(nil), s.values...)
+	return slices.Clone(s.values)
 }
 
 func (s *Slice[V]) Range(f func(index int, value V) bool) {

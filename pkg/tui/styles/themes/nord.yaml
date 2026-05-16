@@ -50,7 +50,12 @@ colors:
   selected: "#434c5e"
   selected_fg: "#ffffff"
   suggestion_ghost: "#616e88"
-  tab_bg: "#3b4252"
+  tab_bg: "#2e3440"
+  tab_active_bg: "#434c5e"
+  tab_active_fg: "#eceff4"
+  tab_inactive_fg: "#616e88"
+  tab_border: "#88c0d0"
+
   placeholder: "#616e88"
   
   # Badge colors
@@ -86,7 +91,7 @@ markdown:
   heading: "#81a1c1"
   link: "#88c0d0"
   strong: "#eceff4"
-  code: "#d08770"
+  code: "#88c0d0"
   code_bg: "#3b4252"
   blockquote: "#616e88"
   list: "#d8dee9"

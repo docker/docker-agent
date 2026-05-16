@@ -5,13 +5,16 @@ This file contains shared message conversion utilities for OpenAI-compatible pro
 */
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/param"
 
-	"github.com/docker/cagent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 // JSONSchema is a helper type that implements json.Marshaler for map[string]any.
@@ -23,28 +26,47 @@ func (j JSONSchema) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]any(j))
 }
 
-// ConvertMultiContent converts chat.MessagePart slices to OpenAI content parts.
-func ConvertMultiContent(multiContent []chat.MessagePart) []openai.ChatCompletionContentPartUnionParam {
-	parts := make([]openai.ChatCompletionContentPartUnionParam, len(multiContent))
-	for i, part := range multiContent {
+// ConvertMultiContent converts chat.MessagePart slices to OpenAI content
+// parts using the provided modelsdev.Store for capability lookups.
+func ConvertMultiContent(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store) []openai.ChatCompletionContentPartUnionParam {
+	return convertMultiContentWithStore(ctx, multiContent, id, store)
+}
+
+// ConvertMessages converts chat.Message slices to OpenAI message params
+// using the provided modelsdev.Store for capability lookups.
+func ConvertMessages(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store) []openai.ChatCompletionMessageParamUnion {
+	return convertMessagesWithStore(ctx, messages, id, store)
+}
+
+func convertMultiContentWithStore(ctx context.Context, multiContent []chat.MessagePart, id modelsdev.ID, store *modelsdev.Store) []openai.ChatCompletionContentPartUnionParam {
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(multiContent))
+	for _, part := range multiContent {
 		switch part.Type {
 		case chat.MessagePartTypeText:
-			parts[i] = openai.TextContentPart(part.Text)
+			parts = append(parts, openai.TextContentPart(part.Text))
 		case chat.MessagePartTypeImageURL:
+			// Note: superseded by MessagePartTypeDocument.
 			if part.ImageURL != nil {
-				parts[i] = openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+				parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
 					URL:    part.ImageURL.URL,
 					Detail: string(part.ImageURL.Detail),
-				})
+				}))
+			}
+		case chat.MessagePartTypeDocument:
+			if part.Document != nil {
+				docParts, err := convertDocument(ctx, *part.Document, id, store)
+				if err != nil {
+					slog.WarnContext(ctx, "failed to convert document attachment", "error", err, "doc", part.Document.Name)
+					continue
+				}
+				parts = append(parts, docParts...)
 			}
 		}
 	}
 	return parts
 }
 
-// ConvertMessages converts chat.Message slices to OpenAI message params.
-// This is the base conversion without any provider-specific post-processing.
-func ConvertMessages(messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
+func convertMessagesWithStore(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store) []openai.ChatCompletionMessageParamUnion {
 	openaiMessages := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
 	for i := range messages {
 		msg := &messages[i]
@@ -77,7 +99,7 @@ func ConvertMessages(messages []chat.Message) []openai.ChatCompletionMessagePara
 			if len(msg.MultiContent) == 0 {
 				openaiMessage = openai.UserMessage(msg.Content)
 			} else {
-				openaiMessage = openai.UserMessage(ConvertMultiContent(msg.MultiContent))
+				openaiMessage = openai.UserMessage(convertMultiContentWithStore(ctx, msg.MultiContent, id, store))
 			}
 
 		case chat.MessageRoleAssistant:
@@ -105,8 +127,8 @@ func ConvertMessages(messages []chat.Message) []openai.ChatCompletionMessagePara
 			}
 
 			if msg.FunctionCall != nil {
-				assistantParam.FunctionCall.Name = msg.FunctionCall.Name           //nolint:staticcheck // deprecated but still needed for compatibility
-				assistantParam.FunctionCall.Arguments = msg.FunctionCall.Arguments //nolint:staticcheck // deprecated but still needed for compatibility
+				assistantParam.FunctionCall.Name = msg.FunctionCall.Name
+				assistantParam.FunctionCall.Arguments = msg.FunctionCall.Arguments
 			}
 
 			if len(msg.ToolCalls) > 0 {
@@ -135,7 +157,7 @@ func ConvertMessages(messages []chat.Message) []openai.ChatCompletionMessagePara
 			if len(msg.MultiContent) == 0 {
 				toolParam.Content.OfString = param.NewOpt(msg.Content)
 			} else {
-				// Convert multi-content for tool messages
+				// Convert multi-content for tool messages — only text parts go in the tool message
 				textParts := make([]openai.ChatCompletionContentPartTextParam, 0)
 				for _, part := range msg.MultiContent {
 					if part.Type == chat.MessagePartTypeText {
@@ -151,6 +173,26 @@ func ConvertMessages(messages []chat.Message) []openai.ChatCompletionMessagePara
 		}
 
 		openaiMessages = append(openaiMessages, openaiMessage)
+
+		// For tool messages with image content, inject a follow-up user message
+		// with the images since OpenAI tool messages only support text.
+		if msg.Role == chat.MessageRoleTool && len(msg.MultiContent) > 0 {
+			var imageParts []openai.ChatCompletionContentPartUnionParam
+			for _, part := range msg.MultiContent {
+				if part.Type == chat.MessagePartTypeImageURL && part.ImageURL != nil {
+					imageParts = append(imageParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+						URL:    part.ImageURL.URL,
+						Detail: string(part.ImageURL.Detail),
+					}))
+				}
+			}
+			if len(imageParts) > 0 {
+				// Prepend a text label so the model knows these images came from a tool result
+				label := openai.TextContentPart("Attached image(s) from tool result:")
+				allParts := append([]openai.ChatCompletionContentPartUnionParam{label}, imageParts...)
+				openaiMessages = append(openaiMessages, openai.UserMessage(allParts))
+			}
+		}
 	}
 	return openaiMessages
 }

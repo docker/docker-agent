@@ -3,58 +3,65 @@ package dialog
 import (
 	"cmp"
 	"fmt"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/session"
-	"github.com/docker/cagent/pkg/tui/components/notification"
-	"github.com/docker/cagent/pkg/tui/core"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollview"
+	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-// costDialog displays detailed cost breakdown for a session.
+// ---------------------------------------------------------------------------
+// costDialog – TUI dialog displaying session cost breakdown
+// ---------------------------------------------------------------------------
+
 type costDialog struct {
 	BaseDialog
-	session *session.Session
-	keyMap  costDialogKeyMap
-	offset  int
+
+	session    *session.Session
+	keyMap     costDialogKeyMap
+	scrollview *scrollview.Model
 }
 
 type costDialogKeyMap struct {
-	Close, Copy, Up, Down, PageUp, PageDown key.Binding
+	Close, Copy key.Binding
 }
 
 func NewCostDialog(sess *session.Session) Dialog {
 	return &costDialog{
 		session: sess,
+		scrollview: scrollview.New(
+			scrollview.WithKeyMap(scrollview.ReadOnlyScrollKeyMap()),
+			scrollview.WithReserveScrollbarSpace(true),
+		),
 		keyMap: costDialogKeyMap{
-			Close:    key.NewBinding(key.WithKeys("esc", "enter", "q"), key.WithHelp("Esc", "close")),
-			Copy:     key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy")),
-			Up:       key.NewBinding(key.WithKeys("up", "k")),
-			Down:     key.NewBinding(key.WithKeys("down", "j")),
-			PageUp:   key.NewBinding(key.WithKeys("pgup")),
-			PageDown: key.NewBinding(key.WithKeys("pgdown")),
+			Close: key.NewBinding(key.WithKeys("esc", "enter", "q"), key.WithHelp("Esc", "close")),
+			Copy:  key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy")),
 		},
 	}
 }
 
-func (d *costDialog) Init() tea.Cmd {
-	return nil
-}
+func (d *costDialog) Init() tea.Cmd { return nil }
 
 func (d *costDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+	if handled, cmd := d.scrollview.Update(msg); handled {
+		return d, cmd
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
-
 	case tea.KeyPressMsg:
 		switch {
 		case key.Matches(msg, d.keyMap.Close):
@@ -62,22 +69,6 @@ func (d *costDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		case key.Matches(msg, d.keyMap.Copy):
 			_ = clipboard.WriteAll(d.renderPlainText())
 			return d, notification.SuccessCmd("Cost details copied to clipboard.")
-		case key.Matches(msg, d.keyMap.Up):
-			d.offset = max(0, d.offset-1)
-		case key.Matches(msg, d.keyMap.Down):
-			d.offset++
-		case key.Matches(msg, d.keyMap.PageUp):
-			d.offset = max(0, d.offset-d.pageSize())
-		case key.Matches(msg, d.keyMap.PageDown):
-			d.offset += d.pageSize()
-		}
-
-	case tea.MouseWheelMsg:
-		switch msg.Button.String() {
-		case "wheelup":
-			d.offset = max(0, d.offset-1)
-		case "wheeldown":
-			d.offset++
 		}
 	}
 	return d, nil
@@ -86,13 +77,8 @@ func (d *costDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 func (d *costDialog) dialogSize() (dialogWidth, maxHeight, contentWidth int) {
 	dialogWidth = d.ComputeDialogWidth(70, 50, 80)
 	maxHeight = min(d.Height()*70/100, 40)
-	contentWidth = d.ContentWidth(dialogWidth, 2)
+	contentWidth = d.ContentWidth(dialogWidth, 2) - d.scrollview.ReservedCols()
 	return dialogWidth, maxHeight, contentWidth
-}
-
-func (d *costDialog) pageSize() int {
-	_, maxHeight, _ := d.dialogSize()
-	return max(1, maxHeight-10)
 }
 
 func (d *costDialog) Position() (row, col int) {
@@ -106,10 +92,17 @@ func (d *costDialog) View() string {
 	return styles.DialogStyle.Padding(1, 2).Width(dialogWidth).Render(content)
 }
 
+// ---------------------------------------------------------------------------
+// totalUsage – per-model / per-message cost record
+// ---------------------------------------------------------------------------
+
 type totalUsage struct {
 	chat.Usage
-	label string
-	cost  float64
+
+	label  string
+	model  string // model name (only set for per-message entries)
+	cost   float64
+	marker bool // true for visual separators (sub-session boundaries)
 }
 
 func (u *totalUsage) add(cost float64, usage *chat.Usage) {
@@ -118,72 +111,175 @@ func (u *totalUsage) add(cost float64, usage *chat.Usage) {
 	u.OutputTokens += usage.OutputTokens
 	u.CachedInputTokens += usage.CachedInputTokens
 	u.CacheWriteTokens += usage.CacheWriteTokens
+	u.ReasoningTokens += usage.ReasoningTokens
 }
 
 func (u *totalUsage) totalInput() int64 {
 	return u.InputTokens + u.CachedInputTokens + u.CacheWriteTokens
 }
 
-// costData holds aggregated cost data for display.
+func (u *totalUsage) totalTokens() int64 {
+	return u.totalInput() + u.OutputTokens
+}
+
+func (u *totalUsage) isSubSessionMarker() bool { return u.marker }
+
+// plainTextLine returns a fixed-width plain-text representation used by the
+// clipboard-copy output. An optional suffix (e.g. model name) is appended.
+func (u *totalUsage) plainTextLine(suffix string) string {
+	line := fmt.Sprintf("%-8s  input: %-8s  output: %-8s  %s",
+		formatCostPadded(u.cost),
+		formatTokenCount(u.totalInput()),
+		formatTokenCount(u.OutputTokens),
+		u.label)
+	if suffix != "" {
+		line += "  " + suffix
+	}
+	return line
+}
+
+// ---------------------------------------------------------------------------
+// stat – a label/value pair used in the Total section
+// ---------------------------------------------------------------------------
+
+type stat struct {
+	label string
+	value string
+}
+
+// ---------------------------------------------------------------------------
+// costData – aggregated cost data for a session
+// ---------------------------------------------------------------------------
+
 type costData struct {
 	total             totalUsage
 	models            []totalUsage
 	messages          []totalUsage
 	hasPerMessageData bool
+	duration          time.Duration
+	messageCount      int
 }
+
+// actualMessageCount returns the number of real usage entries, excluding
+// sub-session markers and other visual separators.
+func (d *costData) actualMessageCount() int {
+	n := 0
+	for _, m := range d.messages {
+		if !m.isSubSessionMarker() {
+			n++
+		}
+	}
+	return n
+}
+
+// totalStats computes the summary statistics shown in the Total section.
+// Both the styled and plain-text renderers consume the same slice.
+func (d *costData) totalStats() []stat {
+	var stats []stat
+
+	if d.total.ReasoningTokens > 0 {
+		stats = append(stats, stat{"reasoning:", formatTokenCount(d.total.ReasoningTokens)})
+	}
+	if tok := d.total.totalTokens(); tok > 0 && d.total.cost > 0 {
+		stats = append(stats, stat{"avg cost/1K tokens:", formatCost(d.total.cost / float64(tok) * 1000)})
+	}
+	if candidateIn := d.total.CachedInputTokens + d.total.InputTokens; candidateIn > 0 && d.total.CachedInputTokens > 0 {
+		stats = append(stats, stat{"cache hit rate:", fmt.Sprintf("%.0f%%", float64(d.total.CachedInputTokens)/float64(candidateIn)*100)})
+	}
+	if actual := d.actualMessageCount(); actual > 1 && d.total.cost > 0 {
+		stats = append(stats, stat{"avg cost/message:", formatCost(d.total.cost / float64(actual))})
+	}
+	return stats
+}
+
+// ---------------------------------------------------------------------------
+// Data gathering
+// ---------------------------------------------------------------------------
 
 func (d *costDialog) gatherCostData() costData {
 	var data costData
+	data.duration = d.session.Duration()
+	data.messageCount = d.session.MessageCount()
 	modelMap := make(map[string]*totalUsage)
+	msgCounter := 0
 
-	// Helper to add a usage record to the aggregated data
 	addRecord := func(agentName, model string, cost float64, usage *chat.Usage) {
 		data.hasPerMessageData = true
 		data.total.add(cost, usage)
 
-		// Per-model usage
 		model = cmp.Or(model, "unknown")
 		if modelMap[model] == nil {
 			modelMap[model] = &totalUsage{label: model}
 		}
 		modelMap[model].add(cost, usage)
 
-		// Per-message usage
-		msgLabel := fmt.Sprintf("#%d", len(data.messages)+1)
+		msgCounter++
+		msgLabel := fmt.Sprintf("#%d", msgCounter)
 		if agentName != "" {
-			msgLabel = fmt.Sprintf("#%d [%s]", len(data.messages)+1, agentName)
+			msgLabel = fmt.Sprintf("#%d [%s]", msgCounter, agentName)
 		}
 		data.messages = append(data.messages, totalUsage{
 			label: msgLabel,
+			model: model,
 			cost:  cost,
 			Usage: *usage,
 		})
 	}
 
-	// Try session messages first (local mode), then MessageUsageHistory (remote mode)
-	for _, msg := range d.session.GetAllMessages() {
-		if msg.Message.Usage != nil {
-			addRecord(msg.AgentName, msg.Message.Model, msg.Message.Cost, msg.Message.Usage)
+	addCompactionCost := func(cost float64) {
+		data.hasPerMessageData = true
+		data.total.cost += cost
+		data.messages = append(data.messages, totalUsage{label: "compaction", cost: cost})
+	}
+
+	addMarker := func(label string) {
+		data.messages = append(data.messages, totalUsage{label: label, marker: true})
+	}
+
+	var walkSession func(sess *session.Session)
+	walkSession = func(sess *session.Session) {
+		for _, item := range sess.Messages {
+			switch {
+			case item.IsMessage():
+				msg := item.Message
+				if msg.Message.Role != chat.MessageRoleSystem && msg.Message.Usage != nil {
+					addRecord(msg.AgentName, msg.Message.Model, msg.Message.Cost, msg.Message.Usage)
+				}
+			case item.IsSubSession():
+				addMarker("── sub-session start ──")
+				walkSession(item.SubSession)
+				if subCost := item.SubSession.TotalCost(); subCost > 0 {
+					addMarker(fmt.Sprintf("── sub-session end (%s) ──", formatCost(subCost)))
+				} else {
+					addMarker("── sub-session end ──")
+				}
+			}
+			if item.Summary != "" && item.Cost > 0 {
+				addCompactionCost(item.Cost)
+			}
 		}
 	}
+
+	walkSession(d.session)
+
+	// Fall back to remote mode if no per-message data was found.
 	if !data.hasPerMessageData {
 		for _, record := range d.session.MessageUsageHistory {
 			addRecord(record.AgentName, record.Model, record.Cost, &record.Usage)
 		}
 	}
 
-	// Convert model map to sorted slice (by cost descending)
 	for _, m := range modelMap {
 		data.models = append(data.models, *m)
 	}
-	sort.Slice(data.models, func(i, j int) bool {
-		return data.models[i].cost > data.models[j].cost
+	slices.SortFunc(data.models, func(a, b totalUsage) int {
+		return cmp.Compare(b.cost, a.cost)
 	})
 
-	// Fall back to session-level totals if no per-message data (e.g., past sessions)
+	// Fall back to session-level totals (e.g. past sessions without per-message data).
 	if !data.hasPerMessageData {
 		data.total = totalUsage{
-			cost: d.session.Cost,
+			cost: d.session.TotalCost(),
 			Usage: chat.Usage{
 				InputTokens:  d.session.InputTokens,
 				OutputTokens: d.session.OutputTokens,
@@ -194,48 +290,84 @@ func (d *costDialog) gatherCostData() costData {
 	return data
 }
 
+// ---------------------------------------------------------------------------
+// Styled rendering (TUI view)
+// ---------------------------------------------------------------------------
+
 func (d *costDialog) renderContent(contentWidth, maxHeight int) string {
 	data := d.gatherCostData()
 
-	// Build all lines
+	// Header
+	header := RenderTitle("Session Cost Details", contentWidth, styles.DialogTitleStyle)
+	if meta := d.headerMeta(data); meta != "" {
+		header += "\n" + styles.DialogOptionsStyle.Width(contentWidth).Render(meta)
+	}
+
 	lines := []string{
-		RenderTitle("Session Cost Details", contentWidth, styles.DialogTitleStyle),
+		header,
 		RenderSeparator(contentWidth),
 		"",
 		sectionStyle().Render("Total"),
 		"",
 		accentStyle().Render(formatCost(data.total.cost)),
+		styledStat("tokens:", formatTokenCount(data.total.totalTokens())),
 		d.renderInputLine(data.total, true),
-		fmt.Sprintf("%s %s", labelStyle().Render("output:"), valueStyle().Render(formatTokenCount(data.total.OutputTokens))),
-		"",
+		styledStat("output:", formatTokenCount(data.total.OutputTokens)),
 	}
+	for _, s := range data.totalStats() {
+		lines = append(lines, styledStat(s.label, s.value))
+	}
+	lines = append(lines, "")
 
-	// By Model Section
+	// By Model
 	if len(data.models) > 0 {
 		lines = append(lines, sectionStyle().Render("By Model"), "")
 		for _, m := range data.models {
-			lines = append(lines, d.renderUsageLine(m))
+			lines = append(lines, d.renderUsageLine(m, data.total.cost))
 		}
 		lines = append(lines, "")
 	}
 
-	// By Message Section
+	// By Message
 	if len(data.messages) > 0 {
 		lines = append(lines, sectionStyle().Render("By Message"), "")
 		for _, m := range data.messages {
-			lines = append(lines, d.renderUsageLine(m))
+			if m.isSubSessionMarker() {
+				lines = append(lines, styles.MutedStyle.Render(m.label))
+			} else {
+				lines = append(lines, d.renderUsageLine(m, data.total.cost))
+			}
 		}
 		lines = append(lines, "")
 	} else if !data.hasPerMessageData && data.total.cost > 0 {
 		lines = append(lines, styles.MutedStyle.Render("Per-message breakdown not available for this session."), "")
 	}
 
-	// Apply scrolling
 	return d.applyScrolling(lines, contentWidth, maxHeight)
 }
 
+// headerMeta returns the duration/message-count line, or "" if empty.
+func (d *costDialog) headerMeta(data costData) string {
+	var parts []string
+	if data.duration > 0 {
+		parts = append(parts, "duration: "+formatDuration(data.duration))
+	}
+	if data.messageCount > 0 {
+		parts = append(parts, fmt.Sprintf("messages: %d", data.messageCount))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "  •  ")
+}
+
+// styledStat renders a single "label: value" line for the Total section.
+func styledStat(label, value string) string {
+	return fmt.Sprintf("%s %s", labelStyle().Render(label), valueStyle().Render(value))
+}
+
 func (d *costDialog) renderInputLine(u totalUsage, showBreakdown bool) string {
-	line := fmt.Sprintf("%s %s", labelStyle().Render("input:"), valueStyle().Render(formatTokenCount(u.totalInput())))
+	line := styledStat("input:", formatTokenCount(u.totalInput()))
 	if showBreakdown && (u.CachedInputTokens > 0 || u.CacheWriteTokens > 0) {
 		line += valueStyle().Render(fmt.Sprintf(" (%s new + %s cached + %s cache write)",
 			formatTokenCount(u.InputTokens),
@@ -245,14 +377,29 @@ func (d *costDialog) renderInputLine(u totalUsage, showBreakdown bool) string {
 	return line
 }
 
-func (d *costDialog) renderUsageLine(u totalUsage) string {
-	return fmt.Sprintf("%s  %s %s  %s %s  %s",
+func (d *costDialog) renderUsageLine(u totalUsage, totalCost float64) string {
+	var extras []string
+	if totalCost > 0 && u.cost > 0 {
+		if pct := u.cost / totalCost * 100; pct >= 0.1 {
+			extras = append(extras, fmt.Sprintf("%.0f%%", pct))
+		}
+	}
+	if u.CachedInputTokens > 0 {
+		extras = append(extras, "cached: "+formatTokenCount(u.CachedInputTokens))
+	}
+
+	suffix := ""
+	if len(extras) > 0 {
+		suffix = "  " + valueStyle().Render(strings.Join(extras, "  "))
+	}
+	return fmt.Sprintf("%s  %s %s  %s %s  %s%s",
 		accentStyle().Render(padRight(formatCostPadded(u.cost))),
 		labelStyle().Render("input:"),
 		valueStyle().Render(padRight(formatTokenCount(u.totalInput()))),
 		labelStyle().Render("output:"),
 		valueStyle().Render(padRight(formatTokenCount(u.OutputTokens))),
-		accentStyle().Render(u.label))
+		accentStyle().Render(u.label),
+		suffix)
 }
 
 func (d *costDialog) applyScrolling(allLines []string, contentWidth, maxHeight int) string {
@@ -261,38 +408,30 @@ func (d *costDialog) applyScrolling(allLines []string, contentWidth, maxHeight i
 
 	visibleLines := max(1, maxHeight-headerLines-footerLines-4)
 	contentLines := allLines[headerLines:]
-	totalContentLines := len(contentLines)
 
-	// Clamp offset
-	maxOffset := max(0, totalContentLines-visibleLines)
-	d.offset = min(d.offset, maxOffset)
+	regionWidth := contentWidth + d.scrollview.ReservedCols()
+	d.scrollview.SetSize(regionWidth, visibleLines)
 
-	// Extract visible portion
-	endIdx := min(d.offset+visibleLines, totalContentLines)
-	parts := append(allLines[:headerLines], contentLines[d.offset:endIdx]...)
+	dialogRow, dialogCol := d.Position()
+	d.scrollview.SetPosition(dialogCol+3, dialogRow+2+headerLines)
+	d.scrollview.SetContent(contentLines, len(contentLines))
 
-	// Scroll indicator
-	if totalContentLines > visibleLines {
-		scrollInfo := fmt.Sprintf("[%d-%d of %d]", d.offset+1, endIdx, totalContentLines)
-		if d.offset > 0 {
-			scrollInfo = "↑ " + scrollInfo
-		}
-		if endIdx < totalContentLines {
-			scrollInfo += " ↓"
-		}
-		parts = append(parts, styles.MutedStyle.Render(scrollInfo))
-	}
-
-	parts = append(parts, "", RenderHelpKeys(contentWidth, "↑↓", "scroll", "c", "copy", "Esc", "close"))
+	// Build final output. Use slices.Clone to avoid mutating allLines.
+	parts := slices.Clone(allLines[:headerLines])
+	parts = append(parts, d.scrollview.View(), "", RenderHelpKeys(regionWidth, "↑↓", "scroll", "c", "copy", "Esc", "close"))
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
+
+// ---------------------------------------------------------------------------
+// Plain-text rendering (clipboard copy)
+// ---------------------------------------------------------------------------
 
 func (d *costDialog) renderPlainText() string {
 	data := d.gatherCostData()
 	var lines []string
 
-	// Build input line with optional breakdown
-	inputLine := fmt.Sprintf("input: %s", formatTokenCount(data.total.totalInput()))
+	// Total section
+	inputLine := "input: " + formatTokenCount(data.total.totalInput())
 	if data.total.CachedInputTokens > 0 || data.total.CacheWriteTokens > 0 {
 		inputLine += fmt.Sprintf(" (%s new + %s cached + %s cache write)",
 			formatTokenCount(data.total.InputTokens),
@@ -301,36 +440,55 @@ func (d *costDialog) renderPlainText() string {
 	}
 
 	lines = append(lines, "Session Cost Details", "", "Total", formatCost(data.total.cost),
-		inputLine, fmt.Sprintf("output: %s", formatTokenCount(data.total.OutputTokens)), "")
+		"tokens: "+formatTokenCount(data.total.totalTokens()),
+		inputLine, "output: "+formatTokenCount(data.total.OutputTokens))
 
+	for _, s := range data.totalStats() {
+		lines = append(lines, s.label+" "+s.value)
+	}
+	lines = append(lines, "")
+
+	// By Model
 	if len(data.models) > 0 {
 		lines = append(lines, "By Model")
 		for _, m := range data.models {
-			lines = append(lines, fmt.Sprintf("%-8s  input: %-8s  output: %-8s  %s",
-				formatCostPadded(m.cost), formatTokenCount(m.totalInput()), formatTokenCount(m.OutputTokens), m.label))
+			suffix := ""
+			if m.CachedInputTokens > 0 {
+				suffix = "cached: " + formatTokenCount(m.CachedInputTokens)
+			}
+			lines = append(lines, m.plainTextLine(suffix))
 		}
 		lines = append(lines, "")
 	}
 
+	// By Message
 	if len(data.messages) > 0 {
 		lines = append(lines, "By Message")
 		for _, m := range data.messages {
-			lines = append(lines, fmt.Sprintf("%-8s  input: %-8s  output: %-8s  %s",
-				formatCostPadded(m.cost), formatTokenCount(m.totalInput()), formatTokenCount(m.OutputTokens), m.label))
+			if m.isSubSessionMarker() {
+				lines = append(lines, m.label)
+			} else {
+				suffix := ""
+				if m.model != "" {
+					suffix = "(" + m.model + ")"
+				}
+				lines = append(lines, m.plainTextLine(suffix))
+			}
 		}
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-// Style getters - use functions to pick up theme changes dynamically
+// ---------------------------------------------------------------------------
+// Style helpers (functions so they pick up theme changes dynamically)
+// ---------------------------------------------------------------------------
+
 func sectionStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Bold(true).Foreground(styles.TextSecondary)
 }
 
-func labelStyle() lipgloss.Style {
-	return lipgloss.NewStyle().Bold(true)
-}
+func labelStyle() lipgloss.Style { return lipgloss.NewStyle().Bold(true) }
 
 func valueStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(styles.TextSecondary)
@@ -340,7 +498,14 @@ func accentStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(styles.Highlight)
 }
 
+// ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
+
 func formatCost(cost float64) string {
+	if cost < 0 {
+		return "-" + formatCost(-cost)
+	}
 	if cost < 0.0001 {
 		return "$0.00"
 	}
@@ -351,6 +516,9 @@ func formatCost(cost float64) string {
 }
 
 func formatCostPadded(cost float64) string {
+	if cost < 0 {
+		return "-" + formatCostPadded(-cost)
+	}
 	if cost < 0.0001 {
 		return "$0.0000"
 	}
@@ -367,8 +535,31 @@ func formatTokenCount(count int64) string {
 	case count >= 1_000:
 		return fmt.Sprintf("%.1fK", float64(count)/1_000)
 	default:
-		return fmt.Sprintf("%d", count)
+		return strconv.FormatInt(count, 10)
 	}
+}
+
+func formatDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) % 60
+		if s == 0 {
+			return fmt.Sprintf("%dm", m)
+		}
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh %dm", h, m)
 }
 
 func padRight(s string) string {

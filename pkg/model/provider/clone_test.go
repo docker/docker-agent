@@ -9,9 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/environment"
-	"github.com/docker/cagent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
 type cloneTestEnvProvider struct {
@@ -33,8 +33,7 @@ func TestCloneWithOptions_RouterWithModelReferences(t *testing.T) {
 	// This test verifies that cloning a router with model references works correctly.
 	// Previously, CloneWithOptions would fail silently because it called New() instead
 	// of NewWithModels(), which meant the models map was nil and model references
-	// like "fast" couldn't be resolved. The clone would fail and return the original
-	// provider, causing options like WithThinking(false) to have no effect.
+	// like "fast" couldn't be resolved.
 
 	// Create a mock server that returns a minimal valid response
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -85,19 +84,14 @@ func TestCloneWithOptions_RouterWithModelReferences(t *testing.T) {
 	baseConfig := router.BaseConfig()
 	require.NotNil(t, baseConfig.Models, "Router should store models map in base config")
 
-	// Clone with thinking disabled - this should succeed and not fall back to original
-	cloned := CloneWithOptions(t.Context(), router, options.WithThinking(false))
+	// Clone with max tokens option - this should succeed and not fall back to original
+	newMaxTokens := int64(4096)
+	cloned := CloneWithOptions(t.Context(), router, options.WithMaxTokens(newMaxTokens))
 
-	// The clone should have the thinking option applied
-	// We verify this by checking that the clone's base config has nil ThinkingBudget
-	// (since WithThinking(false) clears thinking configuration)
+	// The clone should have the option applied
 	clonedConfig := cloned.BaseConfig()
-
-	// The key assertion: ThinkingBudget should be nil because WithThinking(false) was applied
-	// If the clone failed silently, this would still have the default "medium" from applyOpenAIDefaults
-	assert.Nil(t, clonedConfig.ModelConfig.ThinkingBudget,
-		"ThinkingBudget should be nil after cloning with WithThinking(false); "+
-			"if it's not nil, the clone may have failed silently and returned the original provider")
+	require.NotNil(t, clonedConfig.ModelConfig.MaxTokens)
+	assert.Equal(t, newMaxTokens, *clonedConfig.ModelConfig.MaxTokens)
 
 	// Also verify the models map is preserved in the clone
 	assert.NotNil(t, clonedConfig.Models, "Cloned router should preserve models map")
@@ -115,12 +109,11 @@ func TestCloneWithOptions_DirectProvider(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Test that cloning a non-router provider still works correctly
+	// Test that cloning a non-router provider works correctly
 	cfg := &latest.ModelConfig{
-		Provider:       "openai",
-		Model:          "gpt-4o",
-		BaseURL:        server.URL,
-		ThinkingBudget: &latest.ThinkingBudget{Effort: "medium"},
+		Provider: "openai",
+		Model:    "gpt-4o",
+		BaseURL:  server.URL,
 	}
 
 	env := newCloneTestEnv(map[string]string{
@@ -130,20 +123,20 @@ func TestCloneWithOptions_DirectProvider(t *testing.T) {
 	provider, err := New(t.Context(), cfg, env)
 	require.NoError(t, err)
 
-	// Clone with thinking disabled
-	cloned := CloneWithOptions(t.Context(), provider, options.WithThinking(false))
+	// Clone with max tokens
+	newMaxTokens := int64(2048)
+	cloned := CloneWithOptions(t.Context(), provider, options.WithMaxTokens(newMaxTokens))
 
 	clonedConfig := cloned.BaseConfig()
-	assert.Nil(t, clonedConfig.ModelConfig.ThinkingBudget,
-		"ThinkingBudget should be nil after cloning with WithThinking(false)")
+	require.NotNil(t, clonedConfig.ModelConfig.MaxTokens)
+	assert.Equal(t, newMaxTokens, *clonedConfig.ModelConfig.MaxTokens)
 }
 
 func TestCloneWithOptions_PreservesMaxTokens(t *testing.T) {
 	t.Parallel()
 
 	// This test verifies that max_tokens is preserved when cloning a provider
-	// with options that don't explicitly set max_tokens. Previously, options
-	// that didn't set max_tokens would accidentally clear it to 0.
+	// with options that don't explicitly set max_tokens.
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -167,8 +160,8 @@ func TestCloneWithOptions_PreservesMaxTokens(t *testing.T) {
 	provider, err := New(t.Context(), cfg, env, options.WithMaxTokens(maxTokens))
 	require.NoError(t, err)
 
-	// Clone with an option that doesn't affect max_tokens (e.g., WithThinking)
-	cloned := CloneWithOptions(t.Context(), provider, options.WithThinking(false))
+	// Clone with an option that doesn't affect max_tokens (e.g., WithGeneratingTitle)
+	cloned := CloneWithOptions(t.Context(), provider, options.WithGeneratingTitle())
 
 	clonedConfig := cloned.BaseConfig()
 

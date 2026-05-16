@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin || no_audio
 
 // Package capture provides audio capture functionality.
 // This is a stub implementation for non-macOS platforms.

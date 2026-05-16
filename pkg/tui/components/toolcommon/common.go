@@ -3,15 +3,17 @@ package toolcommon
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
+	"time"
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/cagent/pkg/paths"
-	"github.com/docker/cagent/pkg/tools"
-	"github.com/docker/cagent/pkg/tui/components/spinner"
-	"github.com/docker/cagent/pkg/tui/styles"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/spinner"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 // ParseArgs unmarshals JSON arguments into a typed struct.
@@ -81,8 +83,8 @@ func tryFixPartialJSON(s string) (string, bool) {
 		result.WriteByte('"')
 	}
 
-	for i := len(stack) - 1; i >= 0; i-- {
-		result.WriteByte(stack[i])
+	for _, closeChar := range slices.Backward(stack) {
+		result.WriteByte(closeChar)
 	}
 
 	return result.String(), true
@@ -101,13 +103,24 @@ func ExtractField[T any](field func(T) string) func(string) string {
 	}
 }
 
+// LongRunningThreshold is the duration after which a running tool call
+// displays a warning hint that it may be blocked on external input.
+const LongRunningThreshold = 60 * time.Second
+
 func Icon(msg *types.Message, inProgress spinner.Spinner) string {
 	switch msg.ToolStatus {
 	case types.ToolStatusRunning, types.ToolStatusPending:
 		// Animated spinner for both executing and streaming tool calls.
 		// With centralized animation ticks, all spinners share a single tick
 		// so there's no performance penalty for multiple animated spinners.
-		return styles.NoStyle.MarginLeft(2).Render(inProgress.View())
+		icon := styles.NoStyle.MarginLeft(2).Render(inProgress.View())
+		if msg.StartedAt != nil {
+			elapsed := time.Since(*msg.StartedAt)
+			if elapsed >= time.Second {
+				icon += " " + styles.ToolMessageStyle.Render(formatDuration(elapsed))
+			}
+		}
+		return icon
 	case types.ToolStatusCompleted:
 		return styles.ToolCompletedIcon.Render("✓")
 	case types.ToolStatusError:
@@ -117,6 +130,35 @@ func Icon(msg *types.Message, inProgress spinner.Spinner) string {
 	default:
 		return styles.WarningStyle.Render("?")
 	}
+}
+
+// LongRunningWarning returns a warning string if the tool call has been
+// running longer than LongRunningThreshold, or empty string otherwise.
+func LongRunningWarning(msg *types.Message) string {
+	if msg.StartedAt == nil {
+		return ""
+	}
+	if msg.ToolStatus != types.ToolStatusRunning {
+		return ""
+	}
+	if time.Since(*msg.StartedAt) < LongRunningThreshold {
+		return ""
+	}
+	return "⚠ Tool call running for over 60s. The tool may be waiting for external input. Press Esc to cancel."
+}
+
+// formatDuration formats a duration as a human-readable string like "5s", "1m30s", "2m15s".
+func formatDuration(d time.Duration) string {
+	d = d.Truncate(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	m := int(d.Minutes())
+	s := int(d.Seconds()) % 60
+	if s == 0 {
+		return fmt.Sprintf("%dm", m)
+	}
+	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
 func FormatToolResult(content string, width int) string {
@@ -153,6 +195,8 @@ func RenderTool(msg *types.Message, inProgress spinner.Spinner, args, result str
 	icon := Icon(msg, inProgress)
 	name := nameStyle.Render(msg.ToolDefinition.DisplayName())
 
+	warning := LongRunningWarning(msg)
+
 	if header, ok := RenderFriendlyHeader(msg, inProgress); ok {
 		content := header
 		if args != "" {
@@ -172,6 +216,9 @@ func RenderTool(msg *types.Message, inProgress spinner.Spinner, args, result str
 				}
 				content += " " + renderedResult
 			}
+		}
+		if warning != "" {
+			content += "\n" + styles.WarningStyle.MarginLeft(styles.ToolCompletedIcon.GetMarginLeft()).Render(warning)
 		}
 		return styles.RenderComposite(styles.ToolMessageStyle.Width(width), content)
 	}
@@ -198,6 +245,9 @@ func RenderTool(msg *types.Message, inProgress spinner.Spinner, args, result str
 			}
 			content += " " + renderedResult
 		}
+	}
+	if warning != "" {
+		content += "\n" + styles.WarningStyle.MarginLeft(styles.ToolCompletedIcon.GetMarginLeft()).Render(warning)
 	}
 
 	return styles.RenderComposite(styles.ToolMessageStyle.Width(width), content)

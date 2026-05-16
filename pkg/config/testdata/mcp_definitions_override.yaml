@@ -1,0 +1,26 @@
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+
+mcps:
+  github:
+    ref: docker:github
+    env:
+      GITHUB_TOKEN: "token123"
+    tools:
+      - create_issue
+      - list_issues
+    instruction: "Use this for GitHub operations"
+    name: "GitHub MCP"
+
+agents:
+  root:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: github
+        tools:
+          - create_issue
+        env:
+          EXTRA_VAR: "extra"

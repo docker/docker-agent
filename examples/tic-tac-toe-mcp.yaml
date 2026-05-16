@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 metadata:
   readme: |
@@ -10,9 +10,9 @@ metadata:
     The Game master talks to both players over MCP.
 
     To run the demo:
-    cagent mcp --http --port 8080 ./examples/tic-tac-toe-mcp.yaml --agent player_blue
-    cagent mcp --http --port 8081 ./examples/tic-tac-toe-mcp.yaml --agent player_red
-    cagent run --yolo ./examples/tic-tac-toe-mcp.yaml 'Go!'
+    docker agent serve mcp --http --listen 127.0.0.1:8080 ./examples/tic-tac-toe-mcp.yaml --agent player_blue
+    docker agent serve mcp --http --listen 127.0.0.1:8081 ./examples/tic-tac-toe-mcp.yaml --agent player_red
+    docker agent run --yolo ./examples/tic-tac-toe-mcp.yaml 'Go!'
 
 agents:
   # Game Master

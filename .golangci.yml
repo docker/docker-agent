@@ -3,30 +3,71 @@ run:
   tests: true
 linters:
   enable:
+    - asasalint
+    - asciicheck
+    - bidichk
     - containedctx
     - copyloopvar
+    - decorder
     - depguard
+    - dogsled
+    - durationcheck
+    - embeddedstructfieldcheck
     - errcheck
+    - errname
+    - errorlint
+    - exptostd
+    - fatcontext
+    - forbidigo
     - ginkgolinter
+    - gocheckcompilerdirectives
+    - godoclint
+    - gochecknoinits
+    - gochecksumtype
     - gocritic
+    - gosec
+    - gomoddirectives
+    - gomodguard_v2
+    - goprintffuncname
     - govet
+    - grouper
+    - iface
     - importas # Enforces consistent import aliases.
+    - inamedparam
     - ineffassign
     - intrange
+    - iotamixing
+    - loggercheck
     - misspell
+    - mirror
+    - modernize
     - nakedret
+    - noctx
     - nolintlint
+    - nosprintfhostport
+    - nilnesserr
+    - perfsprint
+    - predeclared
+    - reassign
+    - recvcheck
     - revive
+    - rowserrcheck
+    - sloglint
     - staticcheck
+    - testableexamples
     - testifylint
     - thelper
     - unconvert
     - unparam
     - unused
     - usestdlibvars
-    - forbidigo
-    - iotamixing
-    - gochecknoinits
+    - unqueryvet
+    - usetesting
+    - whitespace
+    - wastedassign
+    - bodyclose
+    - makezero
+    - sqlclosecheck
   settings:
     forbidigo:
       forbid:
@@ -48,7 +89,7 @@ linters:
           files:
             - "**/*.go"
           deny:
-            - pkg: github.com/docker/cagent/internal
+            - pkg: github.com/docker/docker-agent/internal
               desc: don't use /internal/ from /pkg/
         old_yaml:
           files:
@@ -63,6 +104,10 @@ linters:
           deny:
             - pkg: github.com/stretchr/testify
               desc: don't use testify in production code
+    gomoddirectives:
+      replace-allow-list:
+        - github.com/charmbracelet/ultraviolet
+        - github.com/cyphar/filepath-securejoin
     gocritic:
       disabled-checks:
         - dupImport
@@ -84,6 +129,31 @@ linters:
     staticcheck:
       checks:
         - all
+    gosec:
+      excludes:
+        # Errors-unhandled is covered better by errcheck (already enabled);
+        # gosec's pattern matches many legitimate Close-on-error-path callsites.
+        - G104
+        # Hardcoded-credentials matches constant names like ToolNameLSPWorkspace*
+        # and intentionally-public client telemetry keys; portcullis covers real cases.
+        - G101
+        # Subprocess-with-variable: docker-agent intentionally launches user-configured
+        # commands (LSP servers, hooks, agents, editors).
+        - G204
+        # File-inclusion-via-variable: paths come from CLI flags, config, and validated
+        # destinations throughout the codebase.
+        - G304
+        # Weak-RNG: math/rand is used for jitter, model selection, spinner animations —
+        # never for security.
+        - G404
+        # Slice-bounds: false positive on dynamically-validated indices.
+        - G602
+        # Path-traversal/SSRF/command-injection taint analysis: paths, URLs, and
+        # commands are derived from validated config (resolveToolsetPath, configured
+        # OAuth providers, user-set $EDITOR/$VISUAL).
+        - G702
+        - G703
+        - G704
   exclusions:
     generated: lax
     presets:
@@ -93,6 +163,13 @@ linters:
       - path-except: _test\.go
         linters:
           - forbidigo
+      - path: _test\.go
+        linters:
+          - gosec
+      - path: pkg/model/provider/oaistream/
+        linters:
+          - staticcheck
+        text: "SA1019:.*FunctionCall.*deprecated"
 issues:
   max-same-issues: 3
 formatters:
@@ -106,7 +183,7 @@ formatters:
       sections:
         - standard
         - default
-        - prefix(github.com/docker/cagent)
+        - prefix(github.com/docker/docker-agent)
     gofmt:
       rewrite-rules:
         - pattern: 'interface{}'

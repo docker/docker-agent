@@ -1,11 +1,11 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 metadata:
   readme: |
     This is a simple echo agent configuration file.
     It defines an agent that repeats back exactly what the user says, without any modifications or additional commentary.
 
-    For example, run it with `echo "TEST" | cagent run echo-agent.yaml -`
+    For example, run it with `echo "TEST" | docker agent run echo-agent.yaml -`
 
 agents:
   root:
@@ -35,6 +35,6 @@ agents:
 models:
   claude:
     provider: anthropic
-    model: claude-3-7-sonnet-latest
+    model: claude-sonnet-4-6
     temperature: 0.0
     max_tokens: 1000

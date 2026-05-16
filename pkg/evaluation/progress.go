@@ -13,19 +13,22 @@ import (
 
 // progressBar provides a live-updating progress display for evaluation runs.
 type progressBar struct {
-	ttyOut    io.Writer // output for progress bar rendering (TTY only)
-	resultOut io.Writer // output for results (can be tee'd to log)
-	fd        int       // file descriptor for terminal size queries
-	total     int
-	completed atomic.Int32
-	passed    atomic.Int32
-	failed    atomic.Int32
-	running   sync.Map // map[string]bool for currently running evals
-	done      chan struct{}
-	stopped   chan struct{} // signals that the goroutine has finished
-	ticker    *time.Ticker
-	isTTY     bool
-	mu        sync.Mutex // protects output
+	ttyOut          io.Writer // output for progress bar rendering (TTY only)
+	resultOut       io.Writer // output for results (can be tee'd to log)
+	fd              int       // file descriptor for terminal size queries
+	total           int
+	completed       atomic.Int32
+	passed          atomic.Int32
+	failed          atomic.Int32
+	relevanceFailed atomic.Int32 // count of evals with relevance failures
+	sizeFailed      atomic.Int32 // count of evals with size failures
+	toolCallsFailed atomic.Int32 // count of evals with tool call failures
+	running         sync.Map     // map[string]bool for currently running evals
+	done            chan struct{}
+	stopped         chan struct{} // signals that the goroutine has finished
+	ticker          *time.Ticker
+	isTTY           bool
+	mu              sync.Mutex // protects output
 }
 
 func newProgressBar(ttyOut, resultOut io.Writer, fd, total int, isTTY bool) *progressBar {
@@ -89,6 +92,20 @@ func (p *progressBar) printResult(result Result) {
 	successes, failures := result.checkResults()
 	success := len(failures) == 0
 
+	// Track failure categories
+	if !success {
+		for _, f := range failures {
+			switch {
+			case strings.HasPrefix(f, "relevance"):
+				p.relevanceFailed.Add(1)
+			case strings.HasPrefix(f, "size"):
+				p.sizeFailed.Add(1)
+			case strings.HasPrefix(f, "tool calls"):
+				p.toolCallsFailed.Add(1)
+			}
+		}
+	}
+
 	// Print session title with icon (to result output, which may be tee'd to log)
 	if success {
 		fmt.Fprintf(p.resultOut, "%s %s ($%.6f)\n", p.green("✓"), result.Title, result.Cost)
@@ -138,13 +155,16 @@ func (p *progressBar) render(final bool) {
 	completed := int(p.completed.Load())
 	passed := int(p.passed.Load())
 	failed := int(p.failed.Load())
+	relevanceFailed := int(p.relevanceFailed.Load())
+	sizeFailed := int(p.sizeFailed.Load())
+	toolCallsFailed := int(p.toolCallsFailed.Load())
 
 	// Get current terminal width for dynamic sizing
 	termWidth := p.getTerminalWidth()
 
 	// Calculate bar width based on terminal size
 	// Reserve space for: "[" + "]" + " 100% (999/999) " + counts (~20) + running info (~30)
-	barWidth := min(max(termWidth-60, 10), 50)
+	barWidth := min(max(termWidth-80, 10), 10)
 
 	filledWidth := 0
 	if p.total > 0 {
@@ -170,6 +190,24 @@ func (p *progressBar) render(final bool) {
 
 	// Build status line
 	counts := fmt.Sprintf("%s %s", p.green(fmt.Sprintf("✓%d", passed)), p.red(fmt.Sprintf("✗%d", failed)))
+
+	// Add detailed failure breakdown if there are failures (show during run, not just at end)
+	if failed > 0 {
+		breakdown := []string{}
+		if relevanceFailed > 0 {
+			breakdown = append(breakdown, "relv "+p.red(fmt.Sprintf("✗%d", relevanceFailed)))
+		}
+		if sizeFailed > 0 {
+			breakdown = append(breakdown, "size "+p.red(fmt.Sprintf("✗%d", sizeFailed)))
+		}
+		if toolCallsFailed > 0 {
+			breakdown = append(breakdown, "tools "+p.red(fmt.Sprintf("✗%d", toolCallsFailed)))
+		}
+		if len(breakdown) > 0 {
+			counts += fmt.Sprintf(" (%s)", strings.Join(breakdown, ", "))
+		}
+	}
+
 	status := fmt.Sprintf("[%s] %3d%% (%d/%d) %s", bar, percent, completed, p.total, counts)
 
 	if runningCount > 0 {
@@ -180,7 +218,7 @@ func (p *progressBar) render(final bool) {
 			name = name[:availableForName-1] + "…"
 		}
 		if runningCount == 1 {
-			status += fmt.Sprintf(" | %s", name)
+			status += " | " + name
 		} else {
 			status += fmt.Sprintf(" | %s +%d more", name, runningCount-1)
 		}

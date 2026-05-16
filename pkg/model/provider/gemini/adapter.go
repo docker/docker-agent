@@ -10,8 +10,8 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/genai"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // Pre-compiled regex for extracting text from error messages (performance optimization).
@@ -143,7 +143,7 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	}
 
 	if res.err != nil {
-		return chat.MessageStreamResponse{}, res.err
+		return chat.MessageStreamResponse{}, wrapGeminiError(res.err)
 	}
 
 	// Build response
@@ -171,15 +171,15 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if res.resp.UsageMetadata != nil && g.trackUsage {
 			resp.Usage = &chat.Usage{
 				InputTokens:       int64(res.resp.UsageMetadata.PromptTokenCount - res.resp.UsageMetadata.CachedContentTokenCount),
-				OutputTokens:      int64(res.resp.UsageMetadata.CandidatesTokenCount),
+				OutputTokens:      int64(res.resp.UsageMetadata.CandidatesTokenCount + res.resp.UsageMetadata.ThoughtsTokenCount),
 				CachedInputTokens: int64(res.resp.UsageMetadata.CachedContentTokenCount),
 				ReasoningTokens:   int64(res.resp.UsageMetadata.ThoughtsTokenCount),
 			}
 		}
 
 		// Handle text and thoughts separately so TUI can render them distinctly
-		var textContent string
-		var reasoningText string
+		var reasoningTextSb strings.Builder
+		var textContentSb strings.Builder
 		var thoughtSignature []byte
 		for _, candidate := range res.resp.Candidates {
 			if candidate.Content != nil {
@@ -190,14 +190,16 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 					if part.Text != "" {
 						if part.Thought {
-							reasoningText += part.Text
+							reasoningTextSb.WriteString(part.Text)
 						} else {
-							textContent += part.Text
+							textContentSb.WriteString(part.Text)
 						}
 					}
 				}
 			}
 		}
+		reasoningText := reasoningTextSb.String()
+		textContent := textContentSb.String()
 		if reasoningText != "" {
 			resp.Choices[0].Delta.ReasoningContent = reasoningText
 		}

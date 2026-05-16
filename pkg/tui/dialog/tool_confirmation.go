@@ -1,17 +1,23 @@
 package dialog
 
 import (
+	"encoding/json"
+	"strings"
+
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
-	"github.com/docker/cagent/pkg/runtime"
-	"github.com/docker/cagent/pkg/tui/components/messages"
-	"github.com/docker/cagent/pkg/tui/core"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/styles"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/messages"
+	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	tuimessages "github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 // Layout constants for tool confirmation dialog.
@@ -36,10 +42,12 @@ type ToolConfirmationResponse struct {
 
 type toolConfirmationDialog struct {
 	BaseDialog
-	msg          *runtime.ToolCallConfirmationEvent
-	keyMap       toolConfirmationKeyMap
-	sessionState *service.SessionState
-	scrollView   messages.Model
+
+	msg               *runtime.ToolCallConfirmationEvent
+	keyMap            toolConfirmationKeyMap
+	sessionState      *service.SessionState
+	scrollView        messages.Model
+	permissionPattern string // cached permission pattern for this tool call
 }
 
 // dialogDimensions returns computed dialog width and content width.
@@ -68,7 +76,7 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	question := styles.DialogQuestionStyle.Width(contentWidth).Render("Do you want to allow this tool call?")
 	questionHeight := lipgloss.Height(question)
 
-	options := RenderHelpKeys(contentWidth, "Y", "yes", "N", "no", "A", "all (approve all tools this session)")
+	options := RenderHelpKeys(contentWidth, "Y", "yes", "N", "no", "T", d.alwaysAllowHelpText(), "A", "all tools")
 	optionsHeight := lipgloss.Height(options)
 
 	// Calculate available height for scroll view
@@ -85,11 +93,29 @@ func (d *toolConfirmationDialog) renderSeparator(contentWidth int) string {
 	return RenderSeparator(contentWidth)
 }
 
+// alwaysAllowHelpText returns a descriptive help text for the "always allow" option.
+// For shell commands, it shows the command pattern (e.g., "always allow ls*").
+// For other tools, it shows "always allow <toolname>".
+func (d *toolConfirmationDialog) alwaysAllowHelpText() string {
+	pattern := d.permissionPattern
+	toolName := d.msg.ToolCall.Function.Name
+
+	// For shell with a command pattern, show a more descriptive label
+	if toolName == "shell" {
+		if _, cmdPattern, ok := strings.Cut(pattern, ":cmd="); ok {
+			return "always allow " + cmdPattern
+		}
+	}
+
+	return "always allow " + toolName
+}
+
 // toolConfirmationKeyMap defines key bindings for tool confirmation dialog
 type toolConfirmationKeyMap struct {
-	Yes key.Binding
-	No  key.Binding
-	All key.Binding
+	Yes      key.Binding
+	No       key.Binding
+	All      key.Binding
+	ThisTool key.Binding
 }
 
 // defaultToolConfirmationKeyMap returns default key bindings
@@ -107,7 +133,39 @@ func defaultToolConfirmationKeyMap() toolConfirmationKeyMap {
 			key.WithKeys("a", "A"),
 			key.WithHelp("A", "approve all"),
 		),
+		ThisTool: key.NewBinding(
+			key.WithKeys("t", "T"),
+			key.WithHelp("T", "always allow this tool"),
+		),
 	}
+}
+
+// buildPermissionPattern creates a permission pattern for the tool call.
+// For shell commands, it extracts the first word of the command and creates
+// a pattern like "shell:cmd=ls*" to match all invocations of that command.
+// For other tools, it returns just the tool name.
+func buildPermissionPattern(toolCall tools.ToolCall) string {
+	toolName := toolCall.Function.Name
+
+	// For shell tool, extract the command and create a pattern
+	if toolName == "shell" {
+		var args struct {
+			Cmd string `json:"cmd"`
+		}
+		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err == nil {
+			// Extract the first word (the command) from the full command string
+			// e.g., "ls -la /tmp" -> "ls"
+			// strings.Fields handles all whitespace (space, tab, newline)
+			if fields := strings.Fields(args.Cmd); len(fields) > 0 {
+				// Create pattern: shell:cmd=<command>*
+				// The trailing * allows matching with any arguments
+				return toolName + ":cmd=" + fields[0] + "*"
+			}
+		}
+	}
+
+	// For other tools, just return the tool name
+	return toolName
 }
 
 // NewToolConfirmationDialog creates a new tool confirmation dialog
@@ -123,17 +181,48 @@ func NewToolConfirmationDialog(msg *runtime.ToolCallConfirmationEvent, sessionSt
 		types.ToolStatusConfirmation,
 	)
 
+	// Build and cache the permission pattern for display and use
+	pattern := buildPermissionPattern(msg.ToolCall)
+
 	return &toolConfirmationDialog{
-		msg:          msg,
-		sessionState: sessionState,
-		keyMap:       defaultToolConfirmationKeyMap(),
-		scrollView:   scrollView,
+		msg:               msg,
+		sessionState:      sessionState,
+		keyMap:            defaultToolConfirmationKeyMap(),
+		scrollView:        scrollView,
+		permissionPattern: pattern,
 	}
 }
 
 // Init initializes the tool confirmation dialog
 func (d *toolConfirmationDialog) Init() tea.Cmd {
 	return d.scrollView.Init()
+}
+
+// executeAction dispatches a confirmation action by key ("Y", "N", "T", "A").
+func (d *toolConfirmationDialog) executeAction(action string) (layout.Model, tea.Cmd) {
+	switch action {
+	case "Y":
+		return d, tea.Sequence(
+			core.CmdHandler(CloseDialogMsg{}),
+			core.CmdHandler(RuntimeResumeMsg{Request: runtime.ResumeApprove()}),
+		)
+	case "N":
+		return d, core.CmdHandler(OpenDialogMsg{
+			Model: NewToolRejectionReasonDialog(),
+		})
+	case "T":
+		return d, tea.Sequence(
+			core.CmdHandler(CloseDialogMsg{}),
+			core.CmdHandler(RuntimeResumeMsg{Request: runtime.ResumeApproveTool(d.permissionPattern)}),
+		)
+	case "A":
+		d.sessionState.SetYoloMode(true)
+		return d, tea.Sequence(
+			core.CmdHandler(CloseDialogMsg{}),
+			core.CmdHandler(RuntimeResumeMsg{Request: runtime.ResumeApproveSession()}),
+		)
+	}
+	return d, nil
 }
 
 // Update handles messages for the tool confirmation dialog
@@ -143,6 +232,12 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		cmd := d.SetSize(msg.Width, msg.Height)
 		return d, cmd
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			return d.handleMouseClick(msg)
+		}
+		return d, nil
+
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
@@ -150,21 +245,13 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 		switch {
 		case key.Matches(msg, d.keyMap.Yes):
-			return d, tea.Sequence(
-				core.CmdHandler(CloseDialogMsg{}),
-				core.CmdHandler(RuntimeResumeMsg{Request: runtime.ResumeApprove()}),
-			)
+			return d.executeAction("Y")
 		case key.Matches(msg, d.keyMap.No):
-			// Open the rejection reason dialog on top of this dialog
-			return d, core.CmdHandler(OpenDialogMsg{
-				Model: NewToolRejectionReasonDialog(),
-			})
+			return d.executeAction("N")
 		case key.Matches(msg, d.keyMap.All):
-			d.sessionState.SetYoloMode(true)
-			return d, tea.Sequence(
-				core.CmdHandler(CloseDialogMsg{}),
-				core.CmdHandler(RuntimeResumeMsg{Request: runtime.ResumeApproveSession()}),
-			)
+			return d.executeAction("A")
+		case key.Matches(msg, d.keyMap.ThisTool):
+			return d.executeAction("T")
 		}
 
 		// Forward scrolling keys to the scroll view
@@ -174,11 +261,50 @@ func (d *toolConfirmationDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			return d, cmd
 		}
 
-	case tea.MouseWheelMsg:
-		// Forward mouse wheel events to scroll view
+	case tuimessages.WheelCoalescedMsg:
 		updatedScrollView, cmd := d.scrollView.Update(msg)
 		d.scrollView = updatedScrollView.(messages.Model)
 		return d, cmd
+	}
+
+	return d, nil
+}
+
+// handleMouseClick handles mouse clicks on the action buttons (Y/N/T/A).
+func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
+	dialogRow, dialogCol := d.Position()
+	renderedDialog := d.View()
+	dialogHeight := lipgloss.Height(renderedDialog)
+
+	// The options line is the last content line inside the dialog.
+	if msg.Y != ContentEndRow(dialogRow, dialogHeight) {
+		return d, nil
+	}
+
+	// Render the help keys and strip ANSI to get plain text for hit-testing.
+	_, contentWidth := d.dialogDimensions()
+	options := RenderHelpKeys(contentWidth, "Y", "yes", "N", "no", "T", d.alwaysAllowHelpText(), "A", "all tools")
+	optionsPlain := ansi.Strip(options)
+
+	// Content starts after left border + padding.
+	frameLeft := styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
+
+	// The help text is center-aligned within contentWidth.
+	plainLen := len(optionsPlain)
+	leadingSpaces := max(0, (contentWidth-plainLen)/2)
+	relX := msg.X - dialogCol - frameLeft - leadingSpaces
+	if relX < 0 || relX >= plainLen {
+		return d, nil
+	}
+
+	// Walk backward from the click position to find the nearest action key.
+	// The plain text looks like: "Y yes  N no  T always allow...  A all tools"
+	// Each region starts with its uppercase action key.
+	actionKeys := "YNTA"
+	for i := relX; i >= 0; i-- {
+		if strings.ContainsRune(actionKeys, rune(optionsPlain[i])) {
+			return d.executeAction(string(optionsPlain[i]))
+		}
 	}
 
 	return d, nil
@@ -208,7 +334,7 @@ func (d *toolConfirmationDialog) View() string {
 
 	// Confirmation prompt
 	question := styles.DialogQuestionStyle.Width(contentWidth).Render("Do you want to allow this tool call?")
-	options := RenderHelpKeys(contentWidth, "Y", "yes", "N", "no", "A", "all (approve all tools this session)")
+	options := RenderHelpKeys(contentWidth, "Y", "yes", "N", "no", "T", d.alwaysAllowHelpText(), "A", "all tools")
 
 	parts = append(parts, "", question, "", options)
 

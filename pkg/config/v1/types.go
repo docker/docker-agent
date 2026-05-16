@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/docker/cagent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/config/types"
 )
 
 const Version = "1"
@@ -36,7 +36,7 @@ type Toolset struct {
 	Ref      string             `json:"ref,omitempty" yaml:"ref,omitempty"`
 	Config   any                `json:"config,omitempty" yaml:"config,omitempty"`
 	Command  string             `json:"command,omitempty" yaml:"command,omitempty"`
-	Remote   Remote             `json:"remote,omitempty" yaml:"remote,omitempty"`
+	Remote   Remote             `json:"remote" yaml:"remote,omitempty"`
 	Args     []string           `json:"args,omitempty" yaml:"args,omitempty"`
 	Env      map[string]string  `json:"env,omitempty" yaml:"env,omitempty"`
 	Envfiles types.StringOrList `json:"env_file,omitempty" yaml:"env_file,omitempty"`
@@ -139,7 +139,7 @@ type Config struct {
 	Agents   map[string]AgentConfig `json:"agents,omitempty" yaml:"agents,omitempty"`
 	Models   map[string]ModelConfig `json:"models,omitempty" yaml:"models,omitempty"`
 	Env      map[string]string      `json:"env,omitempty" yaml:"env,omitempty"`
-	Metadata Metadata               `json:"metadata,omitempty" yaml:"metadata,omitempty"`
+	Metadata Metadata               `json:"metadata" yaml:"metadata,omitempty"`
 }
 
 type Metadata struct {

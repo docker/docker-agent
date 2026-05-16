@@ -30,7 +30,7 @@ type Help interface {
 // Model is the base interface for all TUI models
 type Model interface {
 	Init() tea.Cmd
-	Update(tea.Msg) (Model, tea.Cmd)
+	Update(msg tea.Msg) (Model, tea.Cmd)
 	View() string
 	Sizeable
 }

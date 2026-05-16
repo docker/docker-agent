@@ -9,10 +9,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/environment"
-	"github.com/docker/cagent/pkg/gateway"
-	"github.com/docker/cagent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/gateway"
+	"github.com/docker/docker-agent/pkg/model/provider"
 )
 
 // gatherMissingEnvVars finds out which environment variables are required by the models and tools.
@@ -33,10 +33,12 @@ func gatherMissingEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway
 	if err != nil {
 		// Store tool preflight error but continue checking models
 		toolErr = err
-	} else {
-		for _, e := range names {
-			requiredEnv[e] = true
-		}
+	}
+	// Always add tool env vars, even when some toolsets had preflight errors.
+	// Previously, a preflight error from one toolset would cause all tool
+	// env vars to be silently skipped.
+	for _, e := range names {
+		requiredEnv[e] = true
 	}
 
 	for _, e := range sortedKeys(requiredEnv) {
@@ -88,6 +90,16 @@ func gatherEnvVarsForModel(cfg *latest.Config, modelName string, requiredEnv map
 // addEnvVarsForModelConfig adds required environment variables for a model config.
 // It checks custom providers first, then built-in aliases, then hardcoded fallbacks.
 func addEnvVarsForModelConfig(model *latest.ModelConfig, customProviders map[string]latest.ProviderConfig, requiredEnv map[string]bool) {
+	// A model with non-API-key auth (e.g. Workload Identity Federation) does
+	// not require a TokenKey or the hardcoded API-key env var. Instead, the
+	// env vars referenced by its identity-token source are required.
+	if auth := latest.EffectiveAuth(*model, customProviders); auth != nil {
+		for _, name := range auth.EnvVars() {
+			requiredEnv[name] = true
+		}
+		return
+	}
+
 	if model.TokenKey != "" {
 		requiredEnv[model.TokenKey] = true
 	} else if customProviders != nil {
@@ -95,26 +107,40 @@ func addEnvVarsForModelConfig(model *latest.ModelConfig, customProviders map[str
 		if provCfg, exists := customProviders[model.Provider]; exists {
 			if provCfg.TokenKey != "" {
 				requiredEnv[provCfg.TokenKey] = true
+			} else {
+				// Fall through to check the effective provider type
+				effective := provCfg.Provider
+				if effective == "" {
+					effective = "openai"
+				}
+				addEnvVarsForCoreProvider(effective, model, requiredEnv)
 			}
 		}
-	} else if alias, exists := provider.Aliases[model.Provider]; exists {
+	} else if alias, exists := provider.LookupAlias(model.Provider); exists {
 		// Check built-in aliases
 		if alias.TokenEnvVar != "" {
 			requiredEnv[alias.TokenEnvVar] = true
 		}
 	} else {
-		// Fallback to hardcoded mappings for unknown providers
-		switch model.Provider {
-		case "openai":
-			requiredEnv["OPENAI_API_KEY"] = true
-		case "anthropic":
-			requiredEnv["ANTHROPIC_API_KEY"] = true
-		case "google":
-			if model.ProviderOpts["project"] == nil && model.ProviderOpts["location"] == nil {
+		addEnvVarsForCoreProvider(model.Provider, model, requiredEnv)
+	}
+}
+
+// addEnvVarsForCoreProvider adds the required env vars for a core provider type.
+func addEnvVarsForCoreProvider(providerType string, model *latest.ModelConfig, requiredEnv map[string]bool) {
+	switch providerType {
+	case "openai":
+		requiredEnv["OPENAI_API_KEY"] = true
+	case "anthropic":
+		requiredEnv["ANTHROPIC_API_KEY"] = true
+	case "google":
+		if model.ProviderOpts["project"] == nil && model.ProviderOpts["location"] == nil {
+			if os.Getenv("GOOGLE_GENAI_USE_VERTEXAI") != "" {
+				requiredEnv["GOOGLE_CLOUD_PROJECT"] = true
+				requiredEnv["GOOGLE_CLOUD_LOCATION"] = true
+			} else if _, exist := os.LookupEnv("GEMINI_API_KEY"); !exist {
 				requiredEnv["GOOGLE_API_KEY"] = true
 			}
-		case "mistral":
-			requiredEnv["MISTRAL_API_KEY"] = true
 		}
 	}
 }

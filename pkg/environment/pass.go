@@ -1,52 +1,33 @@
 package environment
 
-import (
-	"bytes"
-	"context"
-	"errors"
-	"log/slog"
-	"os/exec"
-	"strings"
-)
+import "context"
 
 // PassProvider is a provider that retrieves secrets using the `pass` password
 // manager.
-type PassProvider struct{}
+type PassProvider struct {
+	// binaryPath is the absolute path to the `pass` binary, resolved at
+	// construction time to avoid TOCTOU races and PATH hijacking (CWE-426).
+	binaryPath string
+}
 
-type ErrPassNotAvailable struct{}
+type PassNotAvailableError struct{}
 
-func (ErrPassNotAvailable) Error() string {
+func (PassNotAvailableError) Error() string {
 	return "pass is not installed"
 }
 
 // NewPassProvider creates a new PassProvider instance.
+// It verifies that `pass` is available and stores the resolved absolute path.
 func NewPassProvider() (*PassProvider, error) {
-	path, err := exec.LookPath("pass")
-	if err != nil && !errors.Is(err, exec.ErrNotFound) {
-		slog.Warn("failed to lookup `pass` binary", "error", err)
+	path, err := lookupBinary("pass", PassNotAvailableError{})
+	if err != nil {
+		return nil, err
 	}
-	if path == "" {
-		return nil, ErrPassNotAvailable{}
-	}
-	return &PassProvider{}, nil
+	return &PassProvider{binaryPath: path}, nil
 }
 
 // Get retrieves the value of a secret by its name using the `pass` CLI.
 // The name corresponds to the path in the `pass` store.
 func (p *PassProvider) Get(ctx context.Context, name string) (string, bool) {
-	cmd := exec.CommandContext(ctx, "pass", "show", name)
-
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		// Ignore error
-		slog.Debug("Failed to find secret in pass", "error", err)
-		return "", false
-	}
-
-	return strings.TrimSpace(out.String()), true
+	return runCommand(ctx, "pass", p.binaryPath, "show", name)
 }

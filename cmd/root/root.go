@@ -3,7 +3,6 @@ package root
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,14 +10,17 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/docker/cli/cli"
+	"github.com/docker/cli/cli-plugins/metadata"
+	"github.com/docker/cli/cli-plugins/plugin"
+	"github.com/docker/cli/cli/command"
 	"github.com/spf13/cobra"
 
-	"github.com/docker/cagent/pkg/environment"
-	"github.com/docker/cagent/pkg/feedback"
-	"github.com/docker/cagent/pkg/logging"
-	"github.com/docker/cagent/pkg/paths"
-	"github.com/docker/cagent/pkg/telemetry"
-	"github.com/docker/cagent/pkg/version"
+	"github.com/docker/docker-agent/pkg/feedback"
+	"github.com/docker/docker-agent/pkg/logging"
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/telemetry"
+	"github.com/docker/docker-agent/pkg/version"
 )
 
 type rootFlags struct {
@@ -26,18 +28,57 @@ type rootFlags struct {
 	debugMode   bool
 	logFilePath string
 	logFile     io.Closer
+	cacheDir    string
+	configDir   string
+	dataDir     string
 }
 
 func NewRootCmd() *cobra.Command {
 	var flags rootFlags
 
 	cmd := &cobra.Command{
-		Use:   "cagent",
-		Short: "cagent - AI agent runner",
-		Long:  "cagent is a command-line tool for running AI agents",
-		Example: `  cagent run ./agent.yaml
-  cagent run agentcatalog/pirate`,
+		Use:   "docker-agent",
+		Short: "Docker AI Agent Runner",
+		Example: `  docker-agent run
+  docker-agent run ./agent.yaml
+  docker-agent run agentcatalog/pirate`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// Apply directory overrides before anything else so that
+			// logging, telemetry, and config loading honour them.
+			if dir := flags.cacheDir; dir != "" {
+				paths.SetCacheDir(dir)
+			}
+			if dir := flags.configDir; dir != "" {
+				paths.SetConfigDir(dir)
+			}
+			if dir := flags.dataDir; dir != "" {
+				paths.SetDataDir(dir)
+			}
+
+			// Set the version for automatic telemetry initialization
+			telemetry.SetGlobalTelemetryVersion(version.Version)
+
+			// Print startup message only on first installation/setup
+			if isFirstRun() && os.Getenv("CAGENT_HIDE_TELEMETRY_BANNER") != "1" && os.Getenv("DOCKER_AGENT_HIDE_TELEMETRY_BANNER") != "1" {
+				welcomeMsg := fmt.Sprintf(`
+Welcome to docker agent! 🚀
+
+For any feedback, please visit: %s
+`, feedback.Link)
+				fmt.Fprint(cmd.ErrOrStderr(), welcomeMsg)
+
+				// Only show telemetry notice when telemetry is enabled
+				if telemetry.GetTelemetryEnabled() {
+					telemetryMsg := `
+We collect anonymous usage data to help improve docker agent. To disable:
+  - Set environment variable: TELEMETRY_ENABLED=false
+`
+					fmt.Fprint(cmd.ErrOrStderr(), telemetryMsg)
+				}
+
+				fmt.Fprintln(cmd.ErrOrStderr())
+			}
+
 			// Initialize logging before anything else so logs don't break TUI
 			if err := flags.setupLogging(); err != nil {
 				// If logging setup fails, fall back to stderr so we still get logs
@@ -65,109 +106,118 @@ func NewRootCmd() *cobra.Command {
 		},
 		PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
 			if flags.logFile != nil {
-				_ = flags.logFile.Close()
+				if err := flags.logFile.Close(); err != nil {
+					slog.Error("Failed to close log file", "error", err)
+				}
 			}
 			return nil
 		},
-		// If no subcommand is specified, show help
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return cmd.Help()
+			// Default to "run" command
+			if len(args) == 0 {
+				runCmd, _, _ := cmd.Find([]string{"run"})
+				if err := runCmd.PersistentPreRunE(runCmd, nil); err != nil {
+					return err
+				}
+				return runCmd.RunE(runCmd, nil)
+			}
+
+			// Or print help
+			if args[0] == "help" {
+				return cmd.Help()
+			}
+
+			// Or print help and an unknown command error
+			_ = cmd.Help()
+			return cli.StatusError{
+				StatusCode: 1,
+				Status:     fmt.Sprintf("ERROR: unknown command: %q", args[0]),
+			}
 		},
-		SilenceErrors: true,
-		SilenceUsage:  true,
+		SilenceUsage: true,
 	}
 
 	// Add persistent debug flag available to all commands
 	cmd.PersistentFlags().BoolVarP(&flags.debugMode, "debug", "d", false, "Enable debug logging")
 	cmd.PersistentFlags().BoolVarP(&flags.enableOtel, "otel", "o", false, "Enable OpenTelemetry tracing")
 	cmd.PersistentFlags().StringVar(&flags.logFilePath, "log-file", "", "Path to debug log file (default: ~/.cagent/cagent.debug.log; only used with --debug)")
-
-	cmd.AddCommand(newVersionCmd())
-	cmd.AddCommand(newRunCmd())
-	cmd.AddCommand(newExecCmd())
-	cmd.AddCommand(newNewCmd())
-	cmd.AddCommand(newAPICmd())
-	cmd.AddCommand(newACPCmd())
-	cmd.AddCommand(newMCPCmd())
-	cmd.AddCommand(newA2ACmd())
-	cmd.AddCommand(newEvalCmd())
-	cmd.AddCommand(newPushCmd())
-	cmd.AddCommand(newPullCmd())
-	cmd.AddCommand(newDebugCmd())
-	cmd.AddCommand(newFeedbackCmd())
-	cmd.AddCommand(newCatalogCmd())
-	cmd.AddCommand(newBuildCmd())
-	cmd.AddCommand(newAliasCmd())
-	cmd.AddCommand(newConfigCmd())
+	cmd.PersistentFlags().StringVar(&flags.cacheDir, "cache-dir", "", "Override the cache directory (default: ~/Library/Caches/cagent on macOS)")
+	cmd.PersistentFlags().StringVar(&flags.configDir, "config-dir", "", "Override the config directory (default: ~/.config/cagent)")
+	cmd.PersistentFlags().StringVar(&flags.dataDir, "data-dir", "", "Override the data directory (default: ~/.cagent)")
 
 	// Define groups
-	cmd.AddGroup(&cobra.Group{ID: "core", Title: "Core Commands:"})
-	cmd.AddGroup(&cobra.Group{ID: "advanced", Title: "Advanced Commands:"})
-	cmd.AddGroup(&cobra.Group{ID: "server", Title: "Server Commands:"})
+	cmd.AddGroup(
+		&cobra.Group{ID: "core", Title: "Core Commands:"},
+		&cobra.Group{ID: "advanced", Title: "Advanced Commands:"},
+	)
+
+	cmd.AddCommand(
+		newVersionCmd(),
+		newRunCmd(),
+		newNewCmd(),
+		newEvalCmd(),
+		newShareCmd(),
+		newModelsCmd(),
+		newDebugCmd(),
+		newAliasCmd(),
+		newServeCmd(),
+	)
 
 	return cmd
 }
 
 func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
-	// Set the version for automatic telemetry initialization
-	telemetry.SetGlobalTelemetryVersion(version.Version)
-
-	// Print startup message only on first installation/setup
-	if isFirstRun() && os.Getenv("CAGENT_HIDE_TELEMETRY_BANNER") != "1" {
-		welcomeMsg := fmt.Sprintf(`
-Welcome to cagent! 🚀
-
-For any feedback, please visit: %s
-`, feedback.Link)
-		fmt.Fprint(stderr, welcomeMsg)
-
-		// Only show telemetry notice when telemetry is enabled
-		if telemetry.GetTelemetryEnabled() {
-			telemetryMsg := `
-We collect anonymous usage data to help improve cagent. To disable:
-  - Set environment variable: TELEMETRY_ENABLED=false
-`
-			fmt.Fprint(stderr, telemetryMsg)
-		}
-
-		fmt.Fprintln(stderr)
-	}
-
 	rootCmd := NewRootCmd()
-	rootCmd.SetArgs(args)
 	rootCmd.SetIn(stdin)
 	rootCmd.SetOut(stdout)
 	rootCmd.SetErr(stderr)
+	rootCmd.SetArgs(args)
 
-	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		envErr := &environment.RequiredEnvError{}
-		runtimeErr := RuntimeError{}
+	runningStandalone := plugin.RunningStandalone()
 
-		switch {
-		case ctx.Err() != nil:
-			return ctx.Err()
-		case errors.As(err, &envErr):
-			fmt.Fprintln(stderr, "The following environment variables must be set:")
-			for _, v := range envErr.Missing {
-				fmt.Fprintf(stderr, " - %s\n", v)
-			}
-			fmt.Fprintln(stderr, "\nEither:\n - Set those environment variables before running cagent\n - Run cagent with --env-from-file\n - Store those secrets using one of the built-in environment variable providers.")
-		case errors.As(err, &runtimeErr):
-			// Runtime errors have already been printed by the command itself
-			// Don't print them again or show usage
-		default:
-			// Command line usage errors - show the error and usage
-			fmt.Fprintln(stderr, err)
-			fmt.Fprintln(stderr)
-			if strings.HasPrefix(err.Error(), "unknown command ") || strings.HasPrefix(err.Error(), "accepts ") {
-				_ = rootCmd.Usage()
-			}
+	visitAll(rootCmd, func(cmd *cobra.Command) {
+		cmd.SetContext(ctx)
+		if !runningStandalone {
+			cmd.Example = strings.ReplaceAll(cmd.Example, "docker-agent", "docker agent")
 		}
+	})
 
-		return err
+	if runningStandalone {
+		return rootCmd.Execute()
 	}
 
+	plugin.Run(func(command.Cli) *cobra.Command {
+		// Force to the name of the docker command
+		rootCmd.Use = "agent"
+
+		// Force default usage template. Otherwise it gets overridden by docker's.
+		rootCmd.SetUsageTemplate(rootCmd.UsageTemplate())
+
+		originalPreRun := rootCmd.PersistentPreRunE
+		rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+			if err := plugin.PersistentPreRunE(cmd, args); err != nil {
+				return err
+			}
+			if originalPreRun != nil {
+				return originalPreRun(cmd, args)
+			}
+			return nil
+		}
+		return rootCmd
+	}, metadata.Metadata{
+		SchemaVersion: "0.1.0",
+		Vendor:        "Docker Inc.",
+		Version:       version.Version,
+	})
+
 	return nil
+}
+
+func visitAll(cmd *cobra.Command, fn func(*cobra.Command)) {
+	fn(cmd)
+	for _, cmd := range cmd.Commands() {
+		visitAll(cmd, fn)
+	}
 }
 
 // setupLogging configures slog logging behavior.
@@ -206,25 +256,28 @@ func (e RuntimeError) Unwrap() error {
 	return e.Err
 }
 
-// isFirstRun checks if this is the first time cagent is being run
-// It creates a marker file in the user's config directory
+// isFirstRun checks if this is the first time docker agent is being run.
+// It atomically creates a marker file in the user's config directory
+// using os.O_EXCL to avoid a race condition when multiple processes
+// start concurrently.
 func isFirstRun() bool {
 	configDir := paths.GetConfigDir()
 	markerFile := filepath.Join(configDir, ".cagent_first_run")
 
-	// Check if marker file exists
-	if _, err := os.Stat(markerFile); err == nil {
-		return false // File exists, not first run
+	// Ensure the config directory exists before trying to create the marker file
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		slog.Warn("Failed to create config directory for first run marker", "error", err)
+		return false
 	}
 
-	// Create marker file to indicate this run has happened
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		return false // Can't create config dir, assume not first run
+	// Atomically create the marker file. If it already exists, OpenFile returns an error.
+	f, err := os.OpenFile(markerFile, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644) //nolint:gosec // empty marker file with no sensitive content
+	if err != nil {
+		return false // File already exists or other error, not first run
+	}
+	if err := f.Close(); err != nil {
+		slog.Warn("Failed to close first run marker file", "error", err)
 	}
 
-	if err := os.WriteFile(markerFile, []byte(""), 0o644); err != nil {
-		return false // Can't create marker file, assume not first run
-	}
-
-	return true // Successfully created marker, this is first run
+	return true
 }

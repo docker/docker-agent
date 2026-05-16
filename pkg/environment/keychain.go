@@ -1,53 +1,34 @@
 package environment
 
-import (
-	"bytes"
-	"context"
-	"errors"
-	"log/slog"
-	"os/exec"
-	"strings"
-)
+import "context"
 
 // KeychainProvider is a provider that retrieves secrets using the macOS keychain
 // via the `security` command-line tool.
-type KeychainProvider struct{}
+type KeychainProvider struct {
+	// binaryPath is the absolute path to the `security` binary, resolved at
+	// construction time to avoid TOCTOU races and PATH hijacking (CWE-426).
+	binaryPath string
+}
 
-type ErrKeychainNotAvailable struct{}
+type KeychainNotAvailableError struct{}
 
-func (ErrKeychainNotAvailable) Error() string {
+func (KeychainNotAvailableError) Error() string {
 	return "security command is not available (macOS keychain access)"
 }
 
 // NewKeychainProvider creates a new KeychainProvider instance.
-// It verifies that the `security` command is available on the system.
+// It verifies that the `security` command is available on the system and
+// stores the resolved absolute path for later use.
 func NewKeychainProvider() (*KeychainProvider, error) {
-	path, err := exec.LookPath("security")
-	if err != nil && !errors.Is(err, exec.ErrNotFound) {
-		slog.Warn("failed to lookup `security` binary", "error", err)
+	path, err := lookupBinary("security", KeychainNotAvailableError{})
+	if err != nil {
+		return nil, err
 	}
-	if path == "" {
-		return nil, ErrKeychainNotAvailable{}
-	}
-	return &KeychainProvider{}, nil
+	return &KeychainProvider{binaryPath: path}, nil
 }
 
 // Get retrieves the value of a secret by its service name from the macOS keychain.
 // It uses the `security find-generic-password -w -s <name>` command to fetch the password.
 func (p *KeychainProvider) Get(ctx context.Context, name string) (string, bool) {
-	cmd := exec.CommandContext(ctx, "security", "find-generic-password", "-w", "-s", name)
-
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-
-	err := cmd.Run()
-	if err != nil {
-		// Ignore error
-		slog.Debug("Failed to find secret in keychain", "error", err)
-		return "", false
-	}
-
-	return strings.TrimSpace(out.String()), true
+	return runCommand(ctx, "keychain", p.binaryPath, "find-generic-password", "-w", "-s", name)
 }

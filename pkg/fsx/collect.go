@@ -1,6 +1,7 @@
 package fsx
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,11 +14,18 @@ import (
 // Supports glob patterns (via doublestar), directories, and individual files.
 // Skips paths that don't exist instead of returning an error.
 // Optional shouldIgnore filter can exclude files/directories (return true to skip).
-func CollectFiles(paths []string, shouldIgnore func(path string) bool) ([]string, error) {
+// Respects context cancellation.
+func CollectFiles(ctx context.Context, paths []string, shouldIgnore func(path string) bool) ([]string, error) {
 	var files []string
 	seen := make(map[string]bool)
 
 	for _, pattern := range paths {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
 		expanded, err := expandPattern(pattern)
 		if err != nil {
 			return nil, err
@@ -27,6 +35,12 @@ func CollectFiles(paths []string, shouldIgnore func(path string) bool) ([]string
 		}
 
 		for _, entry := range expanded {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
 			normalized := normalizePath(entry)
 
 			// Check if this path should be ignored
@@ -44,7 +58,7 @@ func CollectFiles(paths []string, shouldIgnore func(path string) bool) ([]string
 
 			if info.IsDir() {
 				// Use DirectoryTree to collect files from directory
-				tree, err := DirectoryTree(normalized, func(string) error { return nil }, shouldIgnore, 0)
+				tree, err := DirectoryTree(ctx, normalized, func(string) error { return nil }, shouldIgnore, 0)
 				if err != nil {
 					return nil, fmt.Errorf("failed to read directory %s: %w", normalized, err)
 				}
@@ -52,6 +66,13 @@ func CollectFiles(paths []string, shouldIgnore func(path string) bool) ([]string
 				var dirFiles []string
 				CollectFilesFromTree(tree, filepath.Dir(normalized), &dirFiles)
 				for _, f := range dirFiles {
+					// Check for context cancellation
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					default:
+					}
+
 					absPath := normalizePath(f)
 					if !seen[absPath] {
 						files = append(files, absPath)

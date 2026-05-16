@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config"
 )
 
 func TestSetupRecordingProxy_EmptyPath(t *testing.T) {
@@ -21,7 +21,7 @@ func TestSetupRecordingProxy_EmptyPath(t *testing.T) {
 	assert.NotNil(t, cleanup)
 	assert.Empty(t, runConfig.ModelsGateway, "ModelsGateway should not be set")
 
-	cleanup()
+	require.NoError(t, cleanup())
 }
 
 func TestSetupRecordingProxy_AutoGeneratesFilename(t *testing.T) {
@@ -31,7 +31,7 @@ func TestSetupRecordingProxy_AutoGeneratesFilename(t *testing.T) {
 
 	cassettePath, cleanup, err := setupRecordingProxy("true", &runConfig)
 	require.NoError(t, err)
-	defer cleanup()
+	defer func() { require.NoError(t, cleanup()) }()
 
 	assert.True(t, strings.HasPrefix(cassettePath, "cagent-recording-"), "should have auto-generated prefix")
 	assert.True(t, strings.HasSuffix(cassettePath, ".yaml"), "should have .yaml suffix")
@@ -46,7 +46,7 @@ func TestSetupRecordingProxy_CreatesProxy(t *testing.T) {
 
 	resultPath, cleanup, err := setupRecordingProxy(cassettePath, &runConfig)
 	require.NoError(t, err)
-	defer cleanup()
+	defer func() { require.NoError(t, cleanup()) }()
 
 	assert.Equal(t, cassettePath+".yaml", resultPath)
 	assert.True(t, strings.HasPrefix(runConfig.ModelsGateway, "http://"), "ModelsGateway should be HTTP URL")

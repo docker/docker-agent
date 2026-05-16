@@ -2,15 +2,18 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/environment"
-	"github.com/docker/cagent/pkg/model/provider"
-	"github.com/docker/cagent/pkg/rag/rerank"
-	"github.com/docker/cagent/pkg/rag/strategy"
-	"github.com/docker/cagent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/rag/rerank"
+	"github.com/docker/docker-agent/pkg/rag/strategy"
+	"github.com/docker/docker-agent/pkg/rag/types"
 )
 
 // ManagersBuildConfig contains dependencies needed to build RAG managers from config.
@@ -18,67 +21,73 @@ type ManagersBuildConfig struct {
 	ParentDir     string
 	ModelsGateway string
 	Env           environment.Provider
-	Models        map[string]latest.ModelConfig // Model configurations from config
+	Models        map[string]latest.ModelConfig    // Model configurations from config
+	Providers     map[string]latest.ProviderConfig // Custom provider configurations from config
+	RuntimeConfig *config.RuntimeConfig
 }
 
-// NewManagers constructs all RAG managers defined in the config.
-func NewManagers(
+// NewProvider creates a model provider using the build config's environment,
+// gateway, and custom provider settings.
+func (c ManagersBuildConfig) NewProvider(ctx context.Context, cfg *latest.ModelConfig) (provider.Provider, error) {
+	return provider.New(ctx, cfg, c.Env,
+		options.WithGateway(c.ModelsGateway),
+		options.WithProviders(c.Providers))
+}
+
+// NewManager constructs a single RAG manager from a RAGConfig.
+func NewManager(
 	ctx context.Context,
-	cfg *latest.Config,
+	ragName string,
+	ragCfg *latest.RAGConfig,
 	buildCfg ManagersBuildConfig,
-) (map[string]*Manager, error) {
-	managers := make(map[string]*Manager)
-
-	if len(cfg.RAG) == 0 {
-		return managers, nil
+) (*Manager, error) {
+	if ragCfg == nil {
+		return nil, fmt.Errorf("nil RAG config for %q", ragName)
 	}
 
-	for ragName, ragCfg := range cfg.RAG {
-		// Validate that we have at least one strategy
-		if len(ragCfg.Strategies) == 0 {
-			return nil, fmt.Errorf("no strategies configured for RAG %q", ragName)
-		}
-
-		// Build context for strategy builders
-		strategyBuildCtx := strategy.BuildContext{
-			RAGName:       ragName,
-			ParentDir:     buildCfg.ParentDir,
-			SharedDocs:    GetAbsolutePaths(buildCfg.ParentDir, ragCfg.Docs),
-			Models:        buildCfg.Models,
-			Env:           buildCfg.Env,
-			ModelsGateway: buildCfg.ModelsGateway,
-			RespectVCS:    ragCfg.GetRespectVCS(),
-		}
-
-		strategyConfigs, strategyEvents, err := buildStrategyConfigs(ctx, ragCfg, strategyBuildCtx, ragName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build strategy configs for RAG %q: %w", ragName, err)
-		}
-
-		managerCfg, err := buildManagerConfig(ctx, ragCfg, buildCfg, strategyConfigs)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build manager config for RAG %q: %w", ragName, err)
-		}
-
-		// The strategyEvents channel is so the manager can convert strategy events to RAG events.
-		manager, err := New(ctx, ragName, managerCfg, strategyEvents)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create RAG manager %q: %w", ragName, err)
-		}
-
-		managers[ragName] = manager
-
-		strategyNames := make([]string, len(strategyConfigs))
-		for i, sc := range strategyConfigs {
-			strategyNames[i] = sc.Name
-		}
-		slog.Debug("Created RAG manager",
-			"name", ragName,
-			"strategies", strategyNames,
-			"docs", len(managerCfg.Docs))
+	// Validate that we have at least one strategy
+	if len(ragCfg.Strategies) == 0 {
+		return nil, fmt.Errorf("no strategies configured for RAG %q", ragName)
 	}
 
-	return managers, nil
+	// Build context for strategy builders
+	strategyBuildCtx := strategy.BuildContext{
+		RAGName:       ragName,
+		ParentDir:     buildCfg.ParentDir,
+		SharedDocs:    GetAbsolutePaths(buildCfg.ParentDir, ragCfg.Docs),
+		Models:        buildCfg.Models,
+		Providers:     buildCfg.Providers,
+		Env:           buildCfg.Env,
+		ModelsGateway: buildCfg.ModelsGateway,
+		RespectVCS:    ragCfg.GetRespectVCS(),
+		RuntimeConfig: buildCfg.RuntimeConfig,
+	}
+
+	strategyConfigs, strategyEvents, err := buildStrategyConfigs(ctx, *ragCfg, strategyBuildCtx, ragName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build strategy configs for RAG %q: %w", ragName, err)
+	}
+
+	managerCfg, err := buildManagerConfig(ctx, *ragCfg, buildCfg, strategyConfigs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build manager config for RAG %q: %w", ragName, err)
+	}
+
+	manager, err := New(ctx, ragName, managerCfg, strategyEvents)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RAG manager %q: %w", ragName, err)
+	}
+
+	strategyNames := make([]string, len(strategyConfigs))
+	for i, sc := range strategyConfigs {
+		strategyNames[i] = sc.Name
+	}
+	slog.DebugContext(ctx, "Created RAG manager",
+		"name", ragName,
+		"strategies", strategyNames,
+		"docs", len(managerCfg.Docs))
+
+	return manager, nil
 }
 
 // buildManagerConfig constructs a rag.Manager Config from the configuration and strategies.
@@ -97,20 +106,20 @@ func buildManagerConfig(
 
 	// Build reranking config if configured
 	if ragCfg.Results.Reranking != nil {
-		slog.Debug("Building reranking configuration",
+		slog.DebugContext(ctx, "Building reranking configuration",
 			"model", ragCfg.Results.Reranking.Model,
 			"top_k", ragCfg.Results.Reranking.TopK,
 			"threshold", ragCfg.Results.Reranking.Threshold)
 
 		rerankingCfg, err := buildRerankingConfig(ctx, ragCfg.Results.Reranking, buildCfg, results.Limit)
 		if err != nil {
-			slog.Error("Failed to build reranking config",
+			slog.ErrorContext(ctx, "Failed to build reranking config",
 				"model", ragCfg.Results.Reranking.Model,
 				"error", err)
 			return Config{}, fmt.Errorf("failed to build reranking config: %w", err)
 		}
 		results.RerankingConfig = rerankingCfg
-		slog.Debug("Reranking configuration built successfully",
+		slog.DebugContext(ctx, "Reranking configuration built successfully",
 			"model", ragCfg.Results.Reranking.Model)
 	}
 
@@ -141,37 +150,38 @@ func buildRerankingConfig(
 	}
 
 	if rerankCfg.Model == "" {
-		slog.Error("Reranking model name is empty")
-		return nil, fmt.Errorf("reranking model is required")
+		slog.ErrorContext(ctx, "Reranking model name is empty")
+		return nil, errors.New("reranking model is required")
 	}
 
-	slog.Debug("Resolving reranking model",
+	slog.DebugContext(ctx, "Resolving reranking model",
 		"model_ref", rerankCfg.Model)
 
 	// Resolve model config - check if it's a reference to a defined model or inline
-	modelCfg, err := resolveModelConfig(rerankCfg.Model, buildCfg)
+	modelCfgVal, err := strategy.ResolveModelConfig(rerankCfg.Model, buildCfg.Models)
 	if err != nil {
-		slog.Error("Failed to resolve reranking model",
+		slog.ErrorContext(ctx, "Failed to resolve reranking model",
 			"model_ref", rerankCfg.Model,
 			"error", err)
 		return nil, fmt.Errorf("failed to resolve reranking model %q: %w", rerankCfg.Model, err)
 	}
+	modelCfg := &modelCfgVal
 
-	slog.Debug("Resolved reranking model config",
+	slog.DebugContext(ctx, "Resolved reranking model config",
 		"provider", modelCfg.Provider,
 		"model", modelCfg.Model)
 
 	// Create provider for reranking model
-	rerankProvider, err := provider.New(ctx, modelCfg, buildCfg.Env)
+	rerankProvider, err := buildCfg.NewProvider(ctx, modelCfg)
 	if err != nil {
-		slog.Error("Failed to create reranking provider",
+		slog.ErrorContext(ctx, "Failed to create reranking provider",
 			"provider", modelCfg.Provider,
 			"model", modelCfg.Model,
 			"error", err)
 		return nil, fmt.Errorf("failed to create reranking provider: %w", err)
 	}
 
-	slog.Debug("Created reranking provider",
+	slog.DebugContext(ctx, "Created reranking provider",
 		"provider_id", rerankProvider.ID())
 
 	// Determine effective TopK:
@@ -195,7 +205,7 @@ func buildRerankingConfig(
 		return nil, fmt.Errorf("failed to create reranker: %w", err)
 	}
 
-	slog.Info("Built reranking configuration successfully",
+	slog.InfoContext(ctx, "Built reranking configuration successfully",
 		"model", rerankCfg.Model,
 		"provider_id", rerankProvider.ID(),
 		"top_k", effectiveTopK,
@@ -207,59 +217,6 @@ func buildRerankingConfig(
 		TopK:      effectiveTopK,
 		Threshold: rerankCfg.Threshold,
 	}, nil
-}
-
-// resolveModelConfig resolves a model name to a ModelConfig
-// Handles both inline model references (e.g., "dmr/model-name") and defined model names
-func resolveModelConfig(modelName string, buildCfg ManagersBuildConfig) (*latest.ModelConfig, error) {
-	// Check if it's an inline model reference (contains a '/')
-	if modelName != "" {
-		parts := splitModelRef(modelName)
-		if len(parts) == 2 {
-			// Inline model reference like "dmr/hf.co/model" or "openai/gpt-5"
-			slog.Debug("Using inline model reference",
-				"provider", parts[0],
-				"model", parts[1])
-			return &latest.ModelConfig{
-				Provider: parts[0],
-				Model:    parts[1],
-			}, nil
-		}
-	}
-
-	// Try to find model in defined models
-	if modelCfg, exists := buildCfg.Models[modelName]; exists {
-		slog.Debug("Using defined model from config",
-			"model_name", modelName,
-			"provider", modelCfg.Provider,
-			"model", modelCfg.Model)
-		return &modelCfg, nil
-	}
-
-	slog.Error("Model not found in configuration",
-		"model_name", modelName,
-		"available_models", getModelNames(buildCfg.Models))
-	return nil, fmt.Errorf("model %q not found in configuration", modelName)
-}
-
-// getModelNames extracts model names from the models map for logging
-func getModelNames(models map[string]latest.ModelConfig) []string {
-	names := make([]string, 0, len(models))
-	for name := range models {
-		names = append(names, name)
-	}
-	return names
-}
-
-// splitModelRef splits a model reference into provider and model parts
-func splitModelRef(ref string) []string {
-	// Handle common patterns: "provider/model"
-	for i := range len(ref) {
-		if ref[i] == '/' {
-			return []string{ref[:i], ref[i+1:]}
-		}
-	}
-	return []string{ref}
 }
 
 // buildStrategyConfigs builds the strategy configs for the RAG.

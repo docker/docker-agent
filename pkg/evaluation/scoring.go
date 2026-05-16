@@ -62,16 +62,6 @@ func countStrings(strs []string) map[string]int {
 	return counts
 }
 
-func countHandoffs(toolCalls []string) int {
-	count := 0
-	for _, name := range toolCalls {
-		if name == "handoff" {
-			count++
-		}
-	}
-	return count
-}
-
 func computeSummary(results []Result) Summary {
 	summary := Summary{
 		TotalEvals: len(results),
@@ -91,12 +81,9 @@ func computeSummary(results []Result) Summary {
 			}
 		}
 
-		summary.ToolsTotal += r.ToolCallsExpected
-		summary.ToolsPassed += r.ToolCallsScore * r.ToolCallsExpected
-
-		summary.HandoffsTotal++
-		if r.HandoffsMatch {
-			summary.HandoffsPassed++
+		if r.ToolCallsExpected > 0 {
+			summary.ToolsF1Sum += r.ToolCallsScore
+			summary.ToolsCount++
 		}
 
 		summary.RelevanceTotal += r.RelevanceExpected
@@ -115,24 +102,27 @@ func printSummary(out io.Writer, summary Summary, duration time.Duration) {
 	}
 
 	printMetric(out, "Sizes", summary.SizesPassed, summary.SizesTotal)
-	printMetricFloat(out, "Tool Calls", summary.ToolsPassed, summary.ToolsTotal)
-	printMetric(out, "Handoffs", summary.HandoffsPassed, summary.HandoffsTotal)
-	printMetricFloat(out, "Relevance", summary.RelevancePassed, summary.RelevanceTotal)
+	printF1Score(out, "Tool Calls", summary.ToolsF1Sum, summary.ToolsCount)
+	printMetric(out, "Relevance", int(summary.RelevancePassed), int(summary.RelevanceTotal))
 
 	fmt.Fprintf(out, "\nTotal Cost: $%.6f\n", summary.TotalCost)
 	fmt.Fprintf(out, "Total Time: %s\n", duration.Round(time.Second))
 }
 
 func printMetric(out io.Writer, label string, passed, total int) {
-	printMetricFloat(out, label, float64(passed), float64(total))
+	if total == 0 {
+		return // Skip metrics with no data
+	}
+	ratio := float64(passed) / float64(total)
+	fmt.Fprintf(out, "%s %14s: %d/%d passed (%.1f%%)\n", statusIcon(ratio), label, passed, total, ratio*100)
 }
 
-func printMetricFloat(out io.Writer, label string, passed, total float64) {
-	ratio := 0.0
-	if total > 0 {
-		ratio = passed / total
+func printF1Score(out io.Writer, label string, f1Sum float64, count int) {
+	if count == 0 {
+		return // Skip metrics with no data
 	}
-	fmt.Fprintf(out, "%s %14s: %.0f/%.0f passed (%.1f%%)\n", statusIcon(ratio), label, passed, total, ratio*100)
+	avgF1 := f1Sum / float64(count)
+	fmt.Fprintf(out, "%s %14s: %.1f%% avg F1 (%d evals)\n", statusIcon(avgF1), label, avgF1*100, count)
 }
 
 func statusIcon(ratio float64) string {

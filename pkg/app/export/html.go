@@ -1,23 +1,24 @@
-// Package export provides HTML export functionality for cagent sessions.
+// Package export provides HTML export functionality for docker agent sessions.
 package export
 
 import (
 	"bytes"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
-	"github.com/yuin/goldmark/renderer/html"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/session"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 //go:embed export.css
@@ -39,12 +40,11 @@ const (
 )
 
 // markdown is the goldmark Markdown parser with common extensions.
+// Raw HTML and dangerous URLs in input are escaped (no html.WithUnsafe): assistant
+// content is untrusted and would otherwise allow stored XSS in exported HTML files.
 var markdown = goldmark.New(
 	goldmark.WithExtensions(
 		extension.GFM, // GitHub Flavored Markdown (tables, strikethrough, etc.)
-	),
-	goldmark.WithRendererOptions(
-		html.WithUnsafe(), // Allow raw HTML in markdown
 	),
 )
 
@@ -82,7 +82,7 @@ type ToolCall struct {
 // Returns the absolute path of the created file.
 func SessionToFile(sess *session.Session, agentDescription, filename string) (string, error) {
 	if sess == nil {
-		return "", fmt.Errorf("no session to export")
+		return "", errors.New("no session to export")
 	}
 	data := sessionToData(sess)
 	data.AgentDescription = agentDescription
@@ -116,7 +116,7 @@ func sessionToData(sess *session.Session) SessionData {
 		CreatedAt:    sess.CreatedAt,
 		InputTokens:  sess.InputTokens,
 		OutputTokens: sess.OutputTokens,
-		Cost:         sess.Cost,
+		Cost:         sess.TotalCost(),
 		Messages:     exportMessages,
 	}
 }
@@ -126,7 +126,7 @@ func sessionToData(sess *session.Session) SessionData {
 // Returns the absolute path of the created file.
 func ToFile(data SessionData, filename string) (string, error) {
 	if len(data.Messages) == 0 {
-		return "", fmt.Errorf("session is empty")
+		return "", errors.New("session is empty")
 	}
 
 	// Generate filename if not provided
@@ -149,7 +149,7 @@ func ToFile(data SessionData, filename string) (string, error) {
 		return "", fmt.Errorf("failed to generate HTML: %w", err)
 	}
 
-	if err := os.WriteFile(filename, []byte(htmlContent), 0o644); err != nil {
+	if err := os.WriteFile(filename, []byte(htmlContent), 0o644); err != nil { //nolint:gosec // exported HTML is meant to be readable by browsers/users
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
@@ -341,7 +341,7 @@ func Generate(data SessionData) (string, error) {
 
 	title := data.Title
 	if title == "" {
-		title = "cagent Session"
+		title = "Docker Agent Session"
 	}
 
 	totalTokens := data.InputTokens + data.OutputTokens
@@ -354,11 +354,11 @@ func Generate(data SessionData) (string, error) {
 
 	tplData := templateData{
 		Title:            title,
-		CSS:              template.CSS(cssStyles),
-		JS:               template.JS(jsCode),
+		CSS:              template.CSS(cssStyles), //nolint:gosec // CSS loaded from embedded asset
+		JS:               template.JS(jsCode),     //nolint:gosec // JS loaded from embedded asset
 		FormattedDate:    data.CreatedAt.Format("January 2, 2006 at 3:04 PM"),
 		SidebarDate:      data.CreatedAt.Format("Jan 2, 2006"),
-		MessagesHTML:     template.HTML(messagesBuilder.String()), //nolint:gosec // Content is already escaped by sub-templates
+		MessagesHTML:     template.HTML(messagesBuilder.String()), //nolint:gosec // content is already escaped by sub-templates
 		PrimaryAgent:     primaryAgent,
 		AgentDescription: data.AgentDescription,
 		ToolsUsedCount:   len(toolsUsed),
@@ -392,7 +392,7 @@ func formatTokens(tokens int64) string {
 	if tokens >= 1000 {
 		return fmt.Sprintf("%.1fK", float64(tokens)/1000)
 	}
-	return fmt.Sprintf("%d", tokens)
+	return strconv.FormatInt(tokens, 10)
 }
 
 func formatCost(cost float64) string {
@@ -423,7 +423,7 @@ func renderUserMessage(msg Message, showLabel bool) (string, error) {
 		LabelName:    "you",
 		LabelClasses: "bg-tui-yellow/20 text-tui-yellow",
 		ShowLabel:    showLabel,
-		ContentHTML:  template.HTML(content), //nolint:gosec // Content is escaped above
+		ContentHTML:  template.HTML(content), //nolint:gosec // content is escaped above
 	}
 
 	var buf bytes.Buffer
@@ -444,8 +444,8 @@ func renderAssistantMessage(msg Message, toolResults map[string]string, showLabe
 		LabelName:        agentName,
 		LabelClasses:     "bg-tui-cyan/20 text-tui-cyan",
 		ShowLabel:        showLabel,
-		ChevronRightIcon: template.HTML(svgChevronRight), //nolint:gosec // Constant SVG
-		ChevronDownIcon:  template.HTML(svgChevronDown),  //nolint:gosec // Constant SVG
+		ChevronRightIcon: template.HTML(svgChevronRight), //nolint:gosec // constant SVG
+		ChevronDownIcon:  template.HTML(svgChevronDown),  //nolint:gosec // constant SVG
 	}
 
 	// Reasoning content (if present)
@@ -453,7 +453,7 @@ func renderAssistantMessage(msg Message, toolResults map[string]string, showLabe
 		reasoning := template.HTMLEscapeString(msg.ReasoningContent)
 		reasoning = strings.ReplaceAll(reasoning, "\n", "<br>")
 		data.HasReasoning = true
-		data.ReasoningHTML = template.HTML(reasoning) //nolint:gosec // Content is escaped above
+		data.ReasoningHTML = template.HTML(reasoning) //nolint:gosec // content is escaped above
 	}
 
 	// Main content - render as Markdown
@@ -462,7 +462,7 @@ func renderAssistantMessage(msg Message, toolResults map[string]string, showLabe
 		if err != nil {
 			return "", fmt.Errorf("failed to render markdown: %w", err)
 		}
-		data.ContentHTML = template.HTML(contentHTML) //nolint:gosec // Markdown renderer produces safe HTML
+		data.ContentHTML = template.HTML(contentHTML) //nolint:gosec // goldmark escapes raw HTML and dangerous URLs (no WithUnsafe option)
 	}
 
 	// Tool calls with their results
@@ -483,7 +483,7 @@ func renderAssistantMessage(msg Message, toolResults map[string]string, showLabe
 		}
 		toolsBuilder.WriteString(`</div>`)
 		data.HasToolCalls = true
-		data.ToolCallsHTML = template.HTML(toolsBuilder.String()) //nolint:gosec // Content is escaped by renderToolCall
+		data.ToolCallsHTML = template.HTML(toolsBuilder.String()) //nolint:gosec // content is escaped by renderToolCall
 	}
 
 	var buf bytes.Buffer
@@ -500,9 +500,9 @@ func renderToolCall(name, args, result string) (string, error) {
 		Result:            result,
 		HasArguments:      args != "" && args != "{}" && args != "null",
 		HasResult:         result != "",
-		ChevronRightMuted: template.HTML(svgChevronRightMuted), //nolint:gosec // Constant SVG
-		ChevronDownMuted:  template.HTML(svgChevronDownMuted),  //nolint:gosec // Constant SVG
-		CheckCircle:       template.HTML(svgCheckCircle),       //nolint:gosec // Constant SVG
+		ChevronRightMuted: template.HTML(svgChevronRightMuted), //nolint:gosec // constant SVG
+		ChevronDownMuted:  template.HTML(svgChevronDownMuted),  //nolint:gosec // constant SVG
+		CheckCircle:       template.HTML(svgCheckCircle),       //nolint:gosec // constant SVG
 	}
 
 	var buf bytes.Buffer

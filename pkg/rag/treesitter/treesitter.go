@@ -1,3 +1,5 @@
+//go:build cgo
+
 package treesitter
 
 import (
@@ -13,7 +15,7 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/golang"
 
-	"github.com/docker/cagent/pkg/rag/chunk"
+	"github.com/docker/docker-agent/pkg/rag/chunk"
 )
 
 // DocumentProcessor uses tree-sitter to build syntax trees for source
@@ -518,8 +520,8 @@ func extractPackageName(root *sitter.Node, content []byte) string {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "package ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "package "))
+		if after, ok := strings.CutPrefix(line, "package "); ok {
+			return strings.TrimSpace(after)
 		}
 	}
 

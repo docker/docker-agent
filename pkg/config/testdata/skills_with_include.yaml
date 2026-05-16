@@ -1,0 +1,11 @@
+version: "7"
+
+agents:
+  root:
+    model: openai/gpt-4o
+    # Load local skills but only expose the "git" and "docker" skills.
+    skills:
+      - git
+      - docker
+    toolsets:
+      - type: filesystem

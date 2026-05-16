@@ -1,0 +1,48 @@
+#!/usr/bin/env docker agent run
+
+# This example demonstrates the model_picker toolset, which lets the agent
+# dynamically switch between models mid-conversation. The agent can pick the
+# best model for each sub-task (e.g. a fast model for simple questions, a
+# powerful one for complex reasoning) and revert back when done.
+
+agents:
+  root:
+    model: google/gemini-2.5-flash-lite
+    description: A versatile assistant that picks the best model for each task
+    instruction: |
+      You are a helpful assistant with access to multiple AI models.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: model_picker
+        instruction: |
+          {ORIGINAL_INSTRUCTIONS}
+
+          ## Model selection policy
+
+          Your default model (`gemini-2.5-flash-lite`) is fast and cheap but
+          limited. You MUST follow this policy for every user message:
+
+          1. **Classify first.** Decide whether the request is *trivial*
+             (greetings, single-fact lookups, yes/no answers, short
+             clarifications) or *non-trivial* (anything else: writing, coding,
+             analysis, planning, multi-step reasoning, tool use, etc.).
+
+          2. **Trivial → stay on the default model.** Answer directly.
+
+          3. **Non-trivial → switch before you do any work.**
+             Call `change_model` to `claude-haiku-4-5` as the very first action,
+             *before* reasoning, planning, or calling any other tool.
+             Then carry out the task.
+
+          4. **ALWAYS revert when done.** After completing a non-trivial task,
+             you MUST call `revert_model` as your very last action so the next
+             turn starts on the cheap default again. This is mandatory—treat
+             it as the final step of every non-trivial request. Never end your
+             turn on a non-default model.
+
+          **Important:** never start working on a non-trivial task while still
+          on the default model. When in doubt, switch.
+        models:
+          - google/gemini-2.5-flash-lite
+          - anthropic/claude-haiku-4-5

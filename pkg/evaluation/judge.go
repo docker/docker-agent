@@ -3,15 +3,16 @@ package evaluation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 	"sync"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/config"
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/model/provider"
-	"github.com/docker/cagent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider"
 )
 
 // relevancePrompt is the prompt template for the judge model to evaluate responses.
@@ -55,28 +56,59 @@ var judgeResponseSchema = &latest.StructuredOutput{
 // Judge runs LLM-as-a-judge relevance checks concurrently.
 type Judge struct {
 	model       provider.Provider
-	runConfig   *config.RuntimeConfig
 	concurrency int
 }
 
 // NewJudge creates a new Judge that runs relevance checks with the given concurrency.
 // Concurrency defaults to 1 if n < 1.
-func NewJudge(model provider.Provider, runConfig *config.RuntimeConfig, concurrency int) *Judge {
+func NewJudge(model provider.Provider, concurrency int) *Judge {
 	if concurrency < 1 {
 		concurrency = 1
 	}
 	return &Judge{
 		model:       model,
-		runConfig:   runConfig,
 		concurrency: concurrency,
 	}
 }
 
+// Validate performs an end-to-end check of the judge model by sending a
+// trivial relevance prompt and verifying the response is valid structured
+// JSON. This catches configuration errors (bad API key, unsupported model,
+// missing structured-output support, etc.) before running any evaluations,
+// allowing the framework to fail fast.
+func (j *Judge) Validate(ctx context.Context) error {
+	const (
+		testResponse  = "The sky is blue."
+		testCriterion = "The response mentions a color."
+	)
+
+	passed, _, err := j.checkSingle(ctx, testResponse, testCriterion)
+	if err != nil {
+		return fmt.Errorf("judge model validation failed: %w", err)
+	}
+
+	if !passed {
+		return errors.New("judge model validation failed: expected the test criterion to pass but the judge returned 'fail'")
+	}
+
+	return nil
+}
+
+// RelevanceResult contains the result of a single relevance check.
+type RelevanceResult struct {
+	Criterion string `json:"criterion"`
+	Passed    bool   `json:"passed"`
+	Reason    string `json:"reason"`
+}
+
 // CheckRelevance runs all relevance checks concurrently with the configured concurrency.
-// It returns the number of passed checks, a slice of failed criteria, and any errors encountered.
-func (j *Judge) CheckRelevance(ctx context.Context, response string, criteria []string) (passed int, failed, errs []string) {
+// It returns a result for every criterion (both passed and failed, each with a reason from
+// the judge model), and an error if any check encountered an error (e.g. judge model
+// misconfiguration). Errors cause a hard failure so that configuration issues are surfaced
+// immediately rather than silently producing zero-relevance results.
+func (j *Judge) CheckRelevance(ctx context.Context, response string, criteria []string) (results []RelevanceResult, err error) {
 	if len(criteria) == 0 {
-		return 0, nil, nil
+		return nil, nil
 	}
 
 	// Create work channel
@@ -91,71 +123,71 @@ func (j *Judge) CheckRelevance(ctx context.Context, response string, criteria []
 	close(work)
 
 	// Results slice preserves order
-	type result struct {
+	type rawResult struct {
 		passed bool
+		reason string
 		err    error
 	}
-	results := make([]result, len(criteria))
+	rawResults := make([]rawResult, len(criteria))
 
 	var wg sync.WaitGroup
 	for range j.concurrency {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for item := range work {
 				if ctx.Err() != nil {
-					results[item.index] = result{err: fmt.Errorf("context cancelled: %w", ctx.Err())}
+					rawResults[item.index] = rawResult{err: fmt.Errorf("context cancelled: %w", ctx.Err())}
 					continue
 				}
-				pass, err := j.checkSingle(ctx, response, item.criterion)
-				results[item.index] = result{passed: pass, err: err}
+				pass, reason, checkErr := j.checkSingle(ctx, response, item.criterion)
+				rawResults[item.index] = rawResult{passed: pass, reason: reason, err: checkErr}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
-	// Aggregate results
-	for i, r := range results {
+	// Aggregate results. Any error is fatal — return it immediately so the
+	// caller can fail fast on judge misconfiguration.
+	var errs []error
+	results = make([]RelevanceResult, len(criteria))
+	for i := range results {
+		results[i].Criterion = criteria[i]
+	}
+	for i, r := range rawResults {
 		if r.err != nil {
-			errs = append(errs, fmt.Sprintf("error checking %q: %v", criteria[i], r.err))
+			errs = append(errs, fmt.Errorf("checking %q: %w", criteria[i], r.err))
 			continue
 		}
-		if r.passed {
-			passed++
-		} else {
-			failed = append(failed, criteria[i])
-		}
+		results[i].Passed = r.passed
+		results[i].Reason = r.reason
 	}
 
-	return passed, failed, errs
+	if len(errs) > 0 {
+		return results, errors.Join(errs...)
+	}
+
+	return results, nil
 }
 
 // checkSingle checks a single relevance criterion against the response.
-func (j *Judge) checkSingle(ctx context.Context, response, criterion string) (bool, error) {
-	modelCfg := j.model.BaseConfig().ModelConfig
-	judgeWithSchema, err := provider.New(
-		ctx,
-		&modelCfg,
-		j.runConfig.EnvProvider(),
-		options.WithStructuredOutput(judgeResponseSchema),
-	)
-	if err != nil {
-		return false, fmt.Errorf("creating judge provider with structured output: %w", err)
-	}
-
+// It returns whether the check passed, the reason provided by the judge, and any error.
+func (j *Judge) checkSingle(ctx context.Context, response, criterion string) (passed bool, reason string, err error) {
 	prompt := fmt.Sprintf(relevancePrompt, response, criterion)
 	messages := []chat.Message{{Role: chat.MessageRoleUser, Content: prompt}}
 
-	stream, err := judgeWithSchema.CreateChatCompletionStream(ctx, messages, nil)
+	stream, err := j.model.CreateChatCompletionStream(ctx, messages, nil)
 	if err != nil {
-		return false, fmt.Errorf("creating chat completion: %w", err)
+		return false, "", fmt.Errorf("creating chat completion: %w", err)
 	}
 	defer stream.Close()
 
 	var fullResponse strings.Builder
+	var streamErr error
 	for {
 		resp, err := stream.Recv()
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				streamErr = err
+			}
 			break
 		}
 		for _, choice := range resp.Choices {
@@ -163,23 +195,52 @@ func (j *Judge) checkSingle(ctx context.Context, response, criterion string) (bo
 		}
 	}
 
-	return parseJudgeResponse(fullResponse.String()), nil
+	if streamErr != nil {
+		return false, "", fmt.Errorf("streaming judge response: %w", streamErr)
+	}
+
+	raw := fullResponse.String()
+	passed, reason, err = parseJudgeResponse(raw)
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to parse judge response",
+			"criterion", criterion,
+			"raw_response", raw,
+			"error", err,
+		)
+		return false, "", fmt.Errorf("parsing judge response (length=%d): %w", len(raw), err)
+	}
+
+	slog.DebugContext(ctx, "Judge response parsed successfully",
+		"criterion", criterion,
+		"passed", passed,
+		"reason", reason,
+	)
+
+	return passed, reason, nil
 }
 
-// judgeResult represents the structured response from the judge model.
-type judgeResult struct {
+// judgeResponse represents the structured response from the judge model.
+type judgeResponse struct {
 	Result string `json:"result"`
 	Reason string `json:"reason"`
 }
 
-func parseJudgeResponse(text string) bool {
+// parseJudgeResponse parses a JSON judge response and returns whether the check
+// passed, the reason, and any parse error.
+func parseJudgeResponse(text string) (passed bool, reason string, err error) {
 	text = strings.TrimSpace(text)
 
-	var result judgeResult
-	if err := json.Unmarshal([]byte(text), &result); err != nil {
-		// With structured output this should not happen, but handle gracefully
-		return false
+	var resp judgeResponse
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		return false, "", fmt.Errorf("invalid JSON: %w", err)
 	}
 
-	return strings.EqualFold(result.Result, "pass")
+	if resp.Result == "" {
+		slog.Warn("Judge response has empty result field",
+			"raw_response", text,
+			"reason_field", resp.Reason,
+		)
+	}
+
+	return strings.EqualFold(resp.Result, "pass"), resp.Reason, nil
 }

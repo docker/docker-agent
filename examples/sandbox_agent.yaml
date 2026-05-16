@@ -1,17 +1,13 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run --sandbox
 
 agents:
   root:
     model: openai/gpt-4o
     description: |
       A helpful assistant that runs shell commands in a sandboxed environment.
-      All shell commands execute inside a Docker container with limited filesystem access.
+      All commands execute inside a Docker container with limited filesystem access.
+      Use the --sandbox flag on the command line to enable sandboxing:
+        docker agent run --sandbox examples/sandbox_agent.yaml
     instruction: You are a helpful assistant with access to a sandboxed shell environment.
     toolsets:
       - type: shell
-        sandbox:
-          image: alpine:latest
-          paths:
-            - .
-            - /tmp
-            - "${env.HOME}:ro"

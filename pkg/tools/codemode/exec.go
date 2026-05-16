@@ -9,7 +9,7 @@ import (
 
 	"github.com/dop251/goja"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 type ScriptResult struct {
@@ -89,57 +89,62 @@ func (c *codeModeTool) runJavascript(ctx context.Context, script string) (Script
 
 func callTool(ctx context.Context, tool tools.Tool, tracker *toolCallTracker) func(args map[string]any) (string, error) {
 	return func(args map[string]any) (string, error) {
-		var toolArgs struct {
-			Required []string `json:"required"`
-		}
+		output, filtered, err := invokeTool(ctx, tool, args)
 
-		if err := tools.ConvertSchema(tool.Parameters, &toolArgs); err != nil {
-			tracker.record(ToolCallInfo{
-				Name:      tool.Name,
-				Arguments: args,
-				Error:     err.Error(),
-			})
-			return "", err
-		}
-
-		nonNilArgs := make(map[string]any)
-		for k, v := range args {
-			if slices.Contains(toolArgs.Required, k) || v != nil {
-				nonNilArgs[k] = v
-			}
-		}
-
-		arguments, err := json.Marshal(nonNilArgs)
-		if err != nil {
-			tracker.record(ToolCallInfo{
-				Name:      tool.Name,
-				Arguments: nonNilArgs,
-				Error:     err.Error(),
-			})
-			return "", err
-		}
-
-		result, err := tool.Handler(ctx, tools.ToolCall{
-			Function: tools.FunctionCall{
-				Name:      tool.Name,
-				Arguments: string(arguments),
-			},
-		})
-		if err != nil {
-			tracker.record(ToolCallInfo{
-				Name:      tool.Name,
-				Arguments: nonNilArgs,
-				Error:     err.Error(),
-			})
-			return "", err
-		}
-
-		tracker.record(ToolCallInfo{
+		info := ToolCallInfo{
 			Name:      tool.Name,
-			Arguments: nonNilArgs,
-			Result:    result.Output,
-		})
+			Arguments: filtered,
+		}
+		if err != nil {
+			info.Error = err.Error()
+		} else {
+			info.Result = output
+		}
+		tracker.record(info)
 
-		return result.Output, nil
+		return output, err
 	}
+}
+
+// invokeTool calls a single tool handler, filtering out nil optional arguments.
+// It returns the output, the filtered arguments actually sent, and any error.
+func invokeTool(ctx context.Context, tool tools.Tool, args map[string]any) (string, map[string]any, error) {
+	if tool.Handler == nil {
+		return "", args, fmt.Errorf("tool %q is not available in code mode", tool.Name)
+	}
+
+	var schema struct {
+		Required []string `json:"required"`
+	}
+	if err := tools.ConvertSchema(tool.Parameters, &schema); err != nil {
+		return "", args, err
+	}
+
+	// Strip nil optional arguments that goja passes for omitted parameters.
+	filtered := make(map[string]any)
+	for k, v := range args {
+		if slices.Contains(schema.Required, k) || v != nil {
+			filtered[k] = v
+		}
+	}
+
+	arguments, err := json.Marshal(filtered)
+	if err != nil {
+		return "", filtered, err
+	}
+
+	result, err := tool.Handler(ctx, tools.ToolCall{
+		Function: tools.FunctionCall{
+			Name:      tool.Name,
+			Arguments: string(arguments),
+		},
+	})
+	if err != nil {
+		return "", filtered, err
+	}
+
+	if result == nil {
+		return "", filtered, nil
+	}
+	return result.Output, filtered, nil
 }

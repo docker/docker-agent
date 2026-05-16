@@ -6,13 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
-	"strings"
 
-	"github.com/google/uuid"
-
-	"github.com/docker/cagent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/userid"
 )
 
 // getSystemInfo collects system information for events
@@ -41,48 +37,15 @@ func getTelemetryEnabledFromEnv() bool {
 	return true
 }
 
-// getUserUUIDFilePath returns the path to the user UUID file
-func getUserUUIDFilePath() string {
-	configDir := paths.GetConfigDir()
-	return filepath.Join(configDir, "user-uuid")
-}
-
-// getUserUUID gets or creates a persistent user UUID
+// getUserUUID returns the persistent UUID identifying this cagent
+// installation, generating and persisting one on first use.
+//
+// It delegates to [userid.Get], which is also used by the HTTP
+// transport so the same identifier appears as the `user_uuid`
+// telemetry property and as the `X-Cagent-Id` header on gateway-bound
+// requests.
 func getUserUUID() string {
-	uuidFile := getUserUUIDFilePath()
-
-	// Try to read existing UUID
-	if data, err := os.ReadFile(uuidFile); err == nil {
-		existingUUID := strings.TrimSpace(string(data))
-		if existingUUID != "" {
-			return existingUUID
-		}
-		// UUID file exists but is empty/invalid - will generate new one
-	}
-
-	// Generate new UUID and save it
-	newUUID := uuid.New().String()
-	if err := saveUserUUID(newUUID); err != nil {
-		// If we can't save, still return a UUID for this session
-		// but it won't persist across runs
-		return newUUID
-	}
-
-	return newUUID
-}
-
-// saveUserUUID saves the UUID to disk
-func saveUserUUID(newUUID string) error {
-	uuidFile := getUserUUIDFilePath()
-
-	// Ensure directory exists
-	dir := filepath.Dir(uuidFile)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-
-	// Write UUID to file (readable only by user)
-	return os.WriteFile(uuidFile, []byte(newUUID), 0o600)
+	return userid.Get()
 }
 
 // structToMap converts a struct to map[string]any using JSON marshaling

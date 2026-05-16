@@ -1,0 +1,23 @@
+#!/usr/bin/env docker agent run
+
+# Example: Remote MCP server with explicit OAuth credentials.
+# Use this when connecting to MCP servers that do NOT support
+# Dynamic Client Registration (RFC 7591), such as Slack or GitHub.
+
+agents:
+  root:
+    model: openai/gpt-4.1-mini
+    description: Assistant with remote MCP tools using explicit OAuth credentials
+    instruction: You are a helpful assistant with access to remote tools.
+    toolsets:
+      - type: mcp
+        remote:
+          url: "https://mcp.example.com/sse"
+          transport_type: sse
+          oauth:
+            clientId: "your-client-id"
+            clientSecret: "your-client-secret"
+            callbackPort: 8080
+            scopes:
+              - "read"
+              - "write"

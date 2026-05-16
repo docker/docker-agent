@@ -1,0 +1,16 @@
+#!/usr/bin/env docker agent run
+
+models:
+  gemini:
+    provider: google
+    model: gemini-3.1-flash-lite
+    provider_opts:
+      google_search: true
+
+agents:
+  root:
+    model: gemini
+    description: Gemini with Google Search
+    instruction: |
+      You are a helpful assistant with access to the latest information via Google Search.
+      Use grounded search results to provide accurate, up-to-date answers.

@@ -1,0 +1,29 @@
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+    max_tokens: 64000
+
+mcps:
+  context7:
+    ref: docker:context7
+
+  custom_mcp:
+    command: my-mcp-server
+    args: ["--port", "8080"]
+    env:
+      MY_VAR: "my_value"
+
+agents:
+  root:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: context7
+      - type: mcp
+        ref: custom_mcp
+  other:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: context7

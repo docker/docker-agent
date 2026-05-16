@@ -16,8 +16,8 @@ func TestDependencies(t *testing.T) {
 	t.Run("TUI musn't know about teams", func(t *testing.T) {
 		imports := listImports(t, "../pkg/tui")
 
-		assert.True(t, imports["github.com/docker/cagent/pkg/runtime"])
-		assert.False(t, imports["github.com/docker/cagent/pkg/team"])
+		assert.True(t, imports["github.com/docker/docker-agent/pkg/runtime"])
+		assert.False(t, imports["github.com/docker/docker-agent/pkg/team"])
 	})
 }
 

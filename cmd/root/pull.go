@@ -6,13 +6,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/spf13/cobra"
 
-	"github.com/docker/cagent/pkg/cli"
-	"github.com/docker/cagent/pkg/content"
-	"github.com/docker/cagent/pkg/remote"
-	"github.com/docker/cagent/pkg/telemetry"
+	"github.com/docker/docker-agent/pkg/cli"
+	"github.com/docker/docker-agent/pkg/content"
+	"github.com/docker/docker-agent/pkg/remote"
+	"github.com/docker/docker-agent/pkg/telemetry"
 )
 
 type pullFlags struct {
@@ -23,12 +22,11 @@ func newPullCmd() *cobra.Command {
 	var flags pullFlags
 
 	cmd := &cobra.Command{
-		Use:     "pull <registry-ref>",
-		Short:   "Pull an agent from an OCI registry",
-		Long:    "Pull an agent configuration file from an OCI registry",
-		GroupID: "core",
-		Args:    cobra.ExactArgs(1),
-		RunE:    flags.runPullCommand,
+		Use:   "pull <registry-ref>",
+		Short: "Pull an agent from an OCI registry",
+		Long:  "Pull an agent configuration file from an OCI registry",
+		Args:  cobra.ExactArgs(1),
+		RunE:  flags.runPullCommand,
 	}
 
 	cmd.PersistentFlags().BoolVar(&flags.force, "force", false, "Force pull even if the configuration already exists locally")
@@ -36,18 +34,20 @@ func newPullCmd() *cobra.Command {
 	return cmd
 }
 
-func (f *pullFlags) runPullCommand(cmd *cobra.Command, args []string) error {
-	telemetry.TrackCommand("pull", args)
-
+func (f *pullFlags) runPullCommand(cmd *cobra.Command, args []string) (commandErr error) {
 	ctx := cmd.Context()
+	telemetry.TrackCommand(ctx, "share", append([]string{"pull"}, args...))
+	defer func() { // do not inline this defer so that commandErr is not resolved early
+		telemetry.TrackCommandError(ctx, "share", append([]string{"pull"}, args...), commandErr)
+	}()
+
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	registryRef := args[0]
-	slog.Debug("Starting pull", "registry_ref", registryRef)
+	slog.DebugContext(ctx, "Starting pull", "registry_ref", registryRef)
 
 	out.Println("Pulling agent", registryRef)
 
-	var opts []crane.Option
-	_, err := remote.Pull(ctx, registryRef, f.force, opts...)
+	_, err := remote.Pull(ctx, registryRef, f.force)
 	if err != nil {
 		return fmt.Errorf("failed to pull artifact: %w", err)
 	}
@@ -64,7 +64,7 @@ func (f *pullFlags) runPullCommand(cmd *cobra.Command, args []string) error {
 	agentName := strings.ReplaceAll(registryRef, "/", "_")
 	fileName := agentName + ".yaml"
 
-	if err := os.WriteFile(fileName, []byte(yamlFile), 0o644); err != nil {
+	if err := os.WriteFile(fileName, []byte(yamlFile), 0o644); err != nil { //nolint:gosec // pulled agent yaml is meant to be readable
 		return err
 	}
 

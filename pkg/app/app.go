@@ -1,29 +1,35 @@
 package app
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/docker/cagent/pkg/app/export"
-	"github.com/docker/cagent/pkg/app/transcript"
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/cli"
-	"github.com/docker/cagent/pkg/config/types"
-	"github.com/docker/cagent/pkg/runtime"
-	"github.com/docker/cagent/pkg/session"
-	"github.com/docker/cagent/pkg/sessiontitle"
-	"github.com/docker/cagent/pkg/tools"
-	mcptools "github.com/docker/cagent/pkg/tools/mcp"
-	"github.com/docker/cagent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/app/export"
+	"github.com/docker/docker-agent/pkg/app/transcript"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/cli"
+	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/sessiontitle"
+	"github.com/docker/docker-agent/pkg/shellpath"
+	"github.com/docker/docker-agent/pkg/skills"
+	"github.com/docker/docker-agent/pkg/tools"
+	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
 type App struct {
@@ -31,13 +37,19 @@ type App struct {
 	session                *session.Session
 	firstMessage           *string
 	firstMessageAttach     string
+	queuedMessages         []string
 	events                 chan tea.Msg
 	throttleDuration       time.Duration
 	cancel                 context.CancelFunc
-	currentAgentModel      string                  // Tracks the current agent's model ID from AgentInfoEvent
-	exitAfterFirstResponse bool                    // Exit TUI after first assistant response completes
-	titleGenerating        atomic.Bool             // True when title generation is in progress
-	titleGen               *sessiontitle.Generator // Title generator for local runtime (nil for remote)
+	currentAgentModel      string                      // Tracks the current agent's model ID from AgentInfoEvent
+	exitAfterFirstResponse bool                        // Exit TUI after first assistant response completes
+	titleGenerating        atomic.Bool                 // True when title generation is in progress
+	titleGen               *sessiontitle.Generator     // Title generator for local runtime (nil for remote)
+	snapshotController     builtins.SnapshotController // Drives /undo, /snapshots, /reset; nil for runtimes that don't capture snapshots
+
+	subsMu     sync.Mutex
+	subs       []chan tea.Msg
+	fanoutOnce sync.Once
 }
 
 // Opt is an option for creating a new App.
@@ -64,11 +76,33 @@ func WithExitAfterFirstResponse() Opt {
 	}
 }
 
+// WithQueuedMessages sets messages to be queued after the first message is sent.
+// These messages will be delivered to the TUI as SendMsg events, which the
+// chat page will queue and process sequentially after each agent response.
+func WithQueuedMessages(msgs []string) Opt {
+	return func(a *App) {
+		a.queuedMessages = msgs
+	}
+}
+
 // WithTitleGenerator sets the title generator for local title generation.
 // If not set, title generation will be handled by the runtime (for remote) or skipped.
 func WithTitleGenerator(gen *sessiontitle.Generator) Opt {
 	return func(a *App) {
 		a.titleGen = gen
+	}
+}
+
+// WithSnapshotController plumbs in the [builtins.SnapshotController]
+// the App uses to drive /undo, /snapshots, /reset. Pass the same
+// controller to the runtime via runtime.WithAutoInjector so the
+// instance that captures the checkpoints is the one the TUI commands
+// drive. Pass nil (or omit the option) for runtimes that don't capture
+// snapshots; the App then reports SnapshotsEnabled()==false and the
+// related commands silently no-op.
+func WithSnapshotController(c builtins.SnapshotController) Opt {
+	return func(a *App) {
+		a.snapshotController = c
 	}
 }
 
@@ -91,7 +125,7 @@ func New(ctx context.Context, rt runtime.Runtime, sess *session.Session, opts ..
 		startupEvents := make(chan runtime.Event, 10)
 		go func() {
 			defer close(startupEvents)
-			rt.EmitStartupInfo(ctx, startupEvents)
+			rt.EmitStartupInfo(ctx, sess, runtime.NewChannelSink(startupEvents))
 		}()
 		for event := range startupEvents {
 			select {
@@ -102,17 +136,14 @@ func New(ctx context.Context, rt runtime.Runtime, sess *session.Session, opts ..
 		}
 	}()
 
-	// If the runtime supports background RAG initialization, start it
-	// and forward events to the TUI. Remote runtimes typically handle RAG server-side
-	// and won't implement this optional interface.
-	if ragRuntime, ok := rt.(runtime.RAGInitializer); ok {
-		go ragRuntime.StartBackgroundRAGInit(ctx, func(event runtime.Event) {
-			select {
-			case app.events <- event:
-			case <-ctx.Done():
-			}
-		})
-	}
+	// Subscribe to tool list changes so the sidebar updates immediately
+	// when an MCP server adds or removes tools (outside of a RunStream).
+	rt.OnToolsChanged(func(event runtime.Event) {
+		select {
+		case app.events <- event:
+		case <-ctx.Done():
+		}
+	})
 
 	return app
 }
@@ -122,26 +153,114 @@ func (a *App) SendFirstMessage() tea.Cmd {
 		return nil
 	}
 
-	return func() tea.Msg {
-		// Use the shared PrepareUserMessage function for consistent attachment handling
-		userMsg := cli.PrepareUserMessage(context.Background(), a.runtime, *a.firstMessage, a.firstMessageAttach)
+	cmds := []tea.Cmd{
+		func() tea.Msg {
+			// Use the shared PrepareUserMessage function for consistent attachment handling
+			userMsg, attachedPath := cli.PrepareUserMessage(context.Background(), a.runtime, *a.firstMessage, a.firstMessageAttach)
+			// Inherit the attachment in any sub-session created by this turn.
+			a.session.AddAttachedFile(attachedPath)
 
-		// If the message has multi-content (attachments), we need to handle it specially
-		if len(userMsg.Message.MultiContent) > 0 {
-			return messages.SendAttachmentMsg{
-				Content: userMsg,
+			// If the message has multi-content (attachments), we need to handle it specially
+			if len(userMsg.Message.MultiContent) > 0 {
+				return messages.SendAttachmentMsg{
+					Content: userMsg,
+				}
 			}
-		}
 
-		return messages.SendMsg{
-			Content: userMsg.Message.Content,
-		}
+			return messages.SendMsg{
+				Content: userMsg.Message.Content,
+			}
+		},
 	}
+
+	// Queue additional messages to be sent after the first one.
+	// The TUI's message queue will hold them until the agent finishes
+	// processing the previous message.
+	for _, msg := range a.queuedMessages {
+		cmds = append(cmds, func() tea.Msg {
+			return messages.SendMsg{
+				Content: msg,
+			}
+		})
+	}
+
+	return tea.Sequence(cmds...)
+}
+
+// CurrentAgentTools returns the tools available to the current agent.
+func (a *App) CurrentAgentTools(ctx context.Context) ([]tools.Tool, error) {
+	return a.runtime.CurrentAgentTools(ctx)
+}
+
+// CurrentAgentToolsetStatuses returns lifecycle status for each toolset of
+// the active agent.
+func (a *App) CurrentAgentToolsetStatuses() []tools.ToolsetStatus {
+	return a.runtime.CurrentAgentToolsetStatuses()
+}
+
+// RestartToolset triggers a supervisor-driven restart of the named toolset.
+func (a *App) RestartToolset(ctx context.Context, name string) error {
+	return a.runtime.RestartToolset(ctx, name)
 }
 
 // CurrentAgentCommands returns the commands for the active agent
 func (a *App) CurrentAgentCommands(ctx context.Context) types.Commands {
 	return a.runtime.CurrentAgentInfo(ctx).Commands
+}
+
+// CurrentAgentSkills returns the available skills if skills are enabled for the current agent.
+func (a *App) CurrentAgentSkills() []skills.Skill {
+	st := a.runtime.CurrentAgentSkillsToolset()
+	if st == nil {
+		return nil
+	}
+	return st.Skills()
+}
+
+// ResolveSkillCommand checks if the input matches a skill slash command (e.g. /skill-name args).
+// If matched, it reads the skill content and returns the resolved prompt. Otherwise returns "".
+func (a *App) ResolveSkillCommand(ctx context.Context, input string) (string, error) {
+	if !strings.HasPrefix(input, "/") {
+		return "", nil
+	}
+
+	st := a.runtime.CurrentAgentSkillsToolset()
+	if st == nil {
+		return "", nil
+	}
+
+	cmd, arg, _ := strings.Cut(input[1:], " ")
+	arg = strings.TrimSpace(arg)
+
+	for _, skill := range st.Skills() {
+		if skill.Name != cmd {
+			continue
+		}
+
+		content, err := st.ReadSkillContent(ctx, skill.Name)
+		if err != nil {
+			return "", fmt.Errorf("reading skill %q: %w", skill.Name, err)
+		}
+
+		if arg != "" {
+			return fmt.Sprintf("Use the following skill.\n\nUser's request: %s\n\n<skill name=%q>\n%s\n</skill>", arg, skill.Name, content), nil
+		}
+		return fmt.Sprintf("Use the following skill.\n\n<skill name=%q>\n%s\n</skill>", skill.Name, content), nil
+	}
+
+	return "", nil
+}
+
+// ResolveInput resolves the user input by trying skill commands first,
+// then agent commands. Returns the resolved content ready to send to the agent.
+func (a *App) ResolveInput(ctx context.Context, input string) string {
+	if resolved, err := a.ResolveSkillCommand(ctx, input); err != nil {
+		return fmt.Sprintf("Error loading skill: %v", err)
+	} else if resolved != "" {
+		return resolved
+	}
+
+	return a.ResolveCommand(ctx, input)
 }
 
 // CurrentAgentModel returns the model ID for the current agent.
@@ -169,56 +288,12 @@ func (a *App) TrackCurrentAgentModel(model string) {
 
 // CurrentMCPPrompts returns the available MCP prompts for the active agent
 func (a *App) CurrentMCPPrompts(ctx context.Context) map[string]mcptools.PromptInfo {
-	if localRuntime, ok := a.runtime.(*runtime.LocalRuntime); ok {
-		return localRuntime.CurrentMCPPrompts(ctx)
-	}
-	return make(map[string]mcptools.PromptInfo)
+	return a.runtime.CurrentMCPPrompts(ctx)
 }
 
 // ExecuteMCPPrompt executes an MCP prompt with provided arguments and returns the content
 func (a *App) ExecuteMCPPrompt(ctx context.Context, promptName string, arguments map[string]string) (string, error) {
-	localRuntime, ok := a.runtime.(*runtime.LocalRuntime)
-	if !ok {
-		return "", fmt.Errorf("MCP prompts are only supported with local runtime")
-	}
-
-	currentAgent := localRuntime.CurrentAgent()
-	if currentAgent == nil {
-		return "", fmt.Errorf("no current agent available")
-	}
-
-	for _, toolset := range currentAgent.ToolSets() {
-		if mcpToolset := runtime.UnwrapMCPToolset(toolset); mcpToolset != nil {
-			result, err := mcpToolset.GetPrompt(ctx, promptName, arguments)
-			if err == nil {
-				// Convert the MCP result to a string format suitable for the editor
-				// The result contains Messages which are the prompt content
-				if len(result.Messages) == 0 {
-					return "No content returned from MCP prompt", nil
-				}
-
-				var content string
-				for i, message := range result.Messages {
-					if i > 0 {
-						content += "\n\n"
-					}
-					if textContent, ok := message.Content.(*mcp.TextContent); ok {
-						content += textContent.Text
-					} else {
-						content += fmt.Sprintf("[Non-text content: %T]", message.Content)
-					}
-				}
-				return content, nil
-			}
-			// If error is "prompt not found", continue to next toolset
-			// Otherwise, return the error
-			if err.Error() != "prompt not found" {
-				return "", fmt.Errorf("error executing prompt '%s': %w", promptName, err)
-			}
-		}
-	}
-
-	return "", fmt.Errorf("MCP prompt '%s' not found in any active toolset", promptName)
+	return a.runtime.ExecuteMCPPrompt(ctx, promptName, arguments)
 }
 
 // ResolveCommand converts /command to its prompt text
@@ -228,11 +303,11 @@ func (a *App) ResolveCommand(ctx context.Context, userInput string) string {
 
 // EmitStartupInfo emits initial agent, team, and toolset information to the provided channel
 func (a *App) EmitStartupInfo(ctx context.Context, events chan runtime.Event) {
-	a.runtime.EmitStartupInfo(ctx, events)
+	a.runtime.EmitStartupInfo(ctx, a.session, runtime.NewChannelSink(events))
 }
 
 // Run one agent loop
-func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments map[string]string) {
+func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
 	a.cancel = cancel
 
 	// If this is the first message and no title exists, start local title generation
@@ -241,29 +316,53 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 		go a.generateTitle(ctx, []string{message})
 	}
 
-	go func() {
+	go func() { //nolint:gosec // background processing intentionally continues after request ctx ends; uses context.Background() only to forward StreamStoppedEvent
 		if len(attachments) > 0 {
-			multiContent := []chat.MessagePart{
-				{
-					Type: chat.MessagePartTypeText,
-					Text: message,
-				},
+			// Build a single text string with the user's message and inlined text files.
+			// Keeping everything in one text block ensures the model sees file content
+			// together with the message, rather than as separate content blocks.
+			var textBuilder strings.Builder
+			textBuilder.WriteString(message)
+
+			// binaryParts holds non-text file parts (images, PDFs, etc.)
+			var binaryParts []chat.MessagePart
+
+			for _, att := range attachments {
+				switch {
+				case att.FilePath != "":
+					// File-reference attachment: read and classify from disk.
+					// Only remember the path on the session when the file actually
+					// exists as a regular file — we don't want sub-agents to inherit
+					// dangling references to directories or missing paths. The editor
+					// resolves @-mentions to absolute paths before this point.
+					if a.processFileAttachment(ctx, att, &textBuilder, &binaryParts) {
+						a.session.AddAttachedFile(att.FilePath)
+					}
+				case att.Content != "":
+					// Inline content attachment (e.g. pasted text).
+					a.processInlineAttachment(att, &textBuilder)
+				default:
+					slog.DebugContext(ctx, "skipping attachment with no file path or content", "name", att.Name)
+				}
 			}
 
-			for key, dataURL := range attachments {
-				multiContent = append(multiContent, chat.MessagePart{
-					Type: chat.MessagePartTypeText,
-					Text: fmt.Sprintf("Contents of %s: %s", key, dataURL),
-				})
+			multiContent := []chat.MessagePart{
+				{Type: chat.MessagePartTypeText, Text: textBuilder.String()},
 			}
+			multiContent = append(multiContent, binaryParts...)
+
 			a.session.AddMessage(session.UserMessage(message, multiContent...))
 		} else {
 			a.session.AddMessage(session.UserMessage(message))
 		}
 		for event := range a.runtime.RunStream(ctx, a.session) {
-			// If context is cancelled, continue draining but don't forward events.
-			// This prevents the runtime from blocking on event sends.
+			// If context is cancelled, continue draining but don't forward events
+			// — except StreamStoppedEvent, which must always propagate so the
+			// supervisor can mark the session as no longer running.
 			if ctx.Err() != nil {
+				if _, ok := event.(*runtime.StreamStoppedEvent); ok {
+					a.sendEvent(context.Background(), event)
+				}
 				continue
 			}
 
@@ -272,9 +371,115 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 				a.titleGenerating.Store(false)
 			}
 
-			a.events <- event
+			a.sendEvent(ctx, event)
 		}
 	}()
+}
+
+// processFileAttachment reads a file from disk, classifies it, and either
+// appends its text content to textBuilder or adds a binary part to binaryParts.
+// Returns true when the path resolved to a real, regular file that we attempted
+// to surface to the model — even if the content itself was rejected (too
+// large, unsupported MIME, transient read error, etc.). The boolean is meant
+// for callers that want to record the path on the session for later reuse by
+// sub-agents; we don't want those references to point at directories or
+// missing files, but we do want them to cover "the agent has bigger tools
+// than us" cases.
+func (a *App) processFileAttachment(ctx context.Context, att messages.Attachment, textBuilder *strings.Builder, binaryParts *[]chat.MessagePart) bool {
+	absPath := att.FilePath
+
+	fi, err := os.Stat(absPath)
+	if err != nil {
+		var reason string
+		switch {
+		case os.IsNotExist(err):
+			reason = "file does not exist"
+		case os.IsPermission(err):
+			reason = "permission denied"
+		default:
+			reason = fmt.Sprintf("cannot access file: %v", err)
+		}
+		slog.WarnContext(ctx, "skipping attachment", "path", absPath, "reason", reason)
+		a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: %s", att.Name, reason), ""))
+		return false
+	}
+
+	if !fi.Mode().IsRegular() {
+		slog.WarnContext(ctx, "skipping attachment: not a regular file", "path", absPath, "mode", fi.Mode().String())
+		a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: not a regular file", att.Name), ""))
+		return false
+	}
+
+	const maxAttachmentSize = 100 * 1024 * 1024 // 100MB
+	if fi.Size() > maxAttachmentSize {
+		slog.WarnContext(ctx, "skipping attachment: file too large", "path", absPath, "size", fi.Size(), "max", maxAttachmentSize)
+		a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: file too large (max 100MB)", att.Name), ""))
+		return true
+	}
+
+	mimeType := chat.DetectMimeType(absPath)
+
+	switch {
+	case chat.IsTextFile(absPath):
+		if fi.Size() > chat.MaxInlineFileSize {
+			slog.WarnContext(ctx, "skipping attachment: text file too large to inline", "path", absPath, "size", fi.Size(), "max", chat.MaxInlineFileSize)
+			a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: text file too large to inline (max 5MB)", att.Name), ""))
+			return true
+		}
+		content, err := chat.ReadFileForInline(absPath)
+		if err != nil {
+			slog.WarnContext(ctx, "skipping attachment: failed to read file", "path", absPath, "error", err)
+			a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: failed to read file", att.Name), ""))
+			return true
+		}
+		textBuilder.WriteString("\n\n")
+		textBuilder.WriteString(content)
+
+	case chat.IsSupportedMimeType(mimeType):
+		// Route through ProcessAttachmentWithMetadata for normalised Document output.
+		// For images this also returns resize metadata used to emit a dimension note.
+		doc, resizeMeta, procErr := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
+			Type: chat.MessagePartTypeFile,
+			File: &chat.MessageFile{Path: absPath, MimeType: mimeType},
+		})
+		if procErr != nil {
+			slog.WarnContext(ctx, "skipping attachment: processing failed", "path", absPath, "error", procErr)
+			a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: %s", att.Name, procErr), ""))
+			return true
+		}
+		// For images, emit a dimension note so the model can map coordinates back to the original.
+		if resizeMeta != nil {
+			if note := chat.FormatDimensionNote(resizeMeta); note != "" {
+				textBuilder.WriteString("\n" + note)
+			}
+		}
+		*binaryParts = append(*binaryParts, chat.MessagePart{
+			Type:     chat.MessagePartTypeDocument,
+			Document: &doc,
+		})
+
+	default:
+		slog.WarnContext(ctx, "skipping attachment: unsupported file type", "path", absPath, "mime_type", mimeType)
+		a.sendEvent(ctx, runtime.Warning(fmt.Sprintf("Skipped attachment %s: unsupported file type", att.Name), ""))
+	}
+
+	return true
+}
+
+// sendEvent sends an event to the TUI, respecting context cancellation to
+// avoid blocking on the channel when the consumer has stopped reading.
+func (a *App) sendEvent(ctx context.Context, event tea.Msg) {
+	select {
+	case a.events <- event:
+	case <-ctx.Done():
+	}
+}
+
+// processInlineAttachment handles content that is already in memory (e.g. pasted
+// text). The content is appended to textBuilder wrapped in an XML tag for context.
+func (a *App) processInlineAttachment(att messages.Attachment, textBuilder *strings.Builder) {
+	textBuilder.WriteString("\n\n")
+	fmt.Fprintf(textBuilder, "<attached_file path=%q>\n%s\n</attached_file>", att.Name, att.Content)
 }
 
 // RunWithMessage runs the agent loop with a pre-constructed message.
@@ -298,12 +503,16 @@ func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg
 		go a.generateTitle(ctx, []string{userMessage})
 	}
 
-	go func() {
+	go func() { //nolint:gosec // background processing intentionally continues after request ctx ends; uses context.Background() only to forward StreamStoppedEvent
 		a.session.AddMessage(msg)
 		for event := range a.runtime.RunStream(ctx, a.session) {
-			// If context is cancelled, continue draining but don't forward events.
-			// This prevents the runtime from blocking on event sends.
+			// If context is cancelled, continue draining but don't forward events
+			// — except StreamStoppedEvent, which must always propagate so the
+			// supervisor can mark the session as no longer running.
 			if ctx.Err() != nil {
+				if _, ok := event.(*runtime.StreamStoppedEvent); ok {
+					a.sendEvent(context.Background(), event)
+				}
 				continue
 			}
 
@@ -312,35 +521,103 @@ func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg
 				a.titleGenerating.Store(false)
 			}
 
-			a.events <- event
+			a.sendEvent(ctx, event)
 		}
 	}()
 }
 
 func (a *App) RunBangCommand(ctx context.Context, command string) {
-	out, _ := exec.CommandContext(ctx, "/bin/sh", "-c", command).CombinedOutput()
-	a.events <- runtime.ShellOutput("$ " + command + "\n" + string(out))
+	command = strings.TrimSpace(command)
+	if command == "" {
+		a.events <- runtime.ShellOutput("Error: empty command")
+		return
+	}
+
+	shell, argsPrefix := shellpath.DetectShell()
+	out, err := exec.CommandContext(ctx, shell, append(argsPrefix, command)...).CombinedOutput()
+	output := "$ " + command + "\n" + string(out)
+	if err != nil && len(out) == 0 {
+		output = "$ " + command + "\nError: " + err.Error()
+	}
+	a.events <- runtime.ShellOutput(output)
 }
 
-func (a *App) Subscribe(ctx context.Context, program *tea.Program) {
-	throttledChan := a.throttleEvents(ctx, a.events)
+// SubscribeWith subscribes to app events using a custom send function.
+// Multiple concurrent subscribers are supported: a single fan-out goroutine
+// drains the throttled event stream and dispatches a copy to each one.
+// Slow subscribers drop events rather than block the bus.
+func (a *App) SubscribeWith(ctx context.Context, send func(tea.Msg)) {
+	ch := make(chan tea.Msg, subscriberBufferSize)
+	a.addSubscriber(ch)
+	defer a.removeSubscriber(ch)
+
+	a.fanoutOnce.Do(a.startFanOut)
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case msg, ok := <-throttledChan:
-			if !ok {
-				return
-			}
-
-			program.Send(msg)
+		case msg := <-ch:
+			send(msg)
 		}
 	}
+}
+
+const subscriberBufferSize = 1024
+
+func (a *App) addSubscriber(ch chan tea.Msg) {
+	a.subsMu.Lock()
+	defer a.subsMu.Unlock()
+	a.subs = append(a.subs, ch)
+}
+
+func (a *App) removeSubscriber(ch chan tea.Msg) {
+	a.subsMu.Lock()
+	defer a.subsMu.Unlock()
+	a.subs = slices.DeleteFunc(a.subs, func(c chan tea.Msg) bool { return c == ch })
+}
+
+// startFanOut runs once per App. It throttles the raw events channel and
+// scatters every message to all currently-registered subscribers. Sends are
+// non-blocking; if a subscriber's buffer is full the event is dropped for
+// that subscriber so one slow consumer cannot stall the others.
+func (a *App) startFanOut() {
+	throttled := a.throttleEvents(context.Background(), a.events)
+	go func() {
+		for msg := range throttled {
+			a.subsMu.Lock()
+			subs := slices.Clone(a.subs)
+			a.subsMu.Unlock()
+			for _, ch := range subs {
+				select {
+				case ch <- msg:
+				default:
+					slog.Warn("app: subscriber buffer full, dropping event")
+				}
+			}
+		}
+	}()
 }
 
 // Resume resumes the runtime with the given confirmation request
 func (a *App) Resume(req runtime.ResumeRequest) {
 	a.runtime.Resume(context.Background(), req)
+}
+
+// TogglePause toggles whether the runtime loop is paused at iteration
+// boundaries. The second return value is false if the underlying runtime
+// doesn't support pausing (e.g. remote runtimes), in which case the first
+// return value is meaningless.
+func (a *App) TogglePause() (paused, supported bool) {
+	p, err := a.runtime.TogglePause(context.Background())
+	if errors.Is(err, runtime.ErrUnsupported) {
+		return false, false
+	}
+	if err != nil {
+		slog.Error("Failed to toggle pause", "error", err)
+		return false, false
+	}
+	return p, true
 }
 
 // ResumeElicitation resumes an elicitation request with the given action and content
@@ -353,20 +630,44 @@ func (a *App) NewSession() {
 		a.cancel()
 		a.cancel = nil
 	}
-	// Preserve user-controlled session flags (like /think toggle)
+	// Preserve user-controlled session flags
 	// so they don't reset to default on /new
 	var opts []session.Opt
 	if a.session != nil {
 		opts = append(opts,
-			session.WithThinking(a.session.Thinking),
 			session.WithToolsApproved(a.session.ToolsApproved),
 			session.WithHideToolResults(a.session.HideToolResults),
+			session.WithWorkingDir(a.session.WorkingDir),
 		)
 	}
 	a.session = session.New(opts...)
 	// Clear first message so it won't be re-sent on re-init
 	a.firstMessage = nil
 	a.firstMessageAttach = ""
+
+	// Re-emit startup info so the sidebar shows agent/tools info in the new session
+	a.reEmitStartupInfo(context.Background())
+}
+
+// reEmitStartupInfo resets and re-emits startup info (agent, team, tools)
+// through the events channel so the sidebar updates.
+func (a *App) reEmitStartupInfo(ctx context.Context) {
+	a.runtime.ResetStartupInfo()
+	go func() {
+		startupEvents := make(chan runtime.Event, 10)
+		go func() {
+			defer close(startupEvents)
+			a.runtime.EmitStartupInfo(ctx, a.session, runtime.NewChannelSink(startupEvents))
+		}()
+		for event := range startupEvents {
+			select {
+			case a.events <- event:
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}()
 }
 
 func (a *App) Session() *session.Session {
@@ -382,9 +683,10 @@ func (a *App) PermissionsInfo() *runtime.PermissionsInfo {
 	// Get session-level permissions
 	var sessionPerms *runtime.PermissionsInfo
 	if a.session != nil && a.session.Permissions != nil {
-		if len(a.session.Permissions.Allow) > 0 || len(a.session.Permissions.Deny) > 0 {
+		if len(a.session.Permissions.Allow) > 0 || len(a.session.Permissions.Ask) > 0 || len(a.session.Permissions.Deny) > 0 {
 			sessionPerms = &runtime.PermissionsInfo{
 				Allow: a.session.Permissions.Allow,
+				Ask:   a.session.Permissions.Ask,
 				Deny:  a.session.Permissions.Deny,
 			}
 		}
@@ -399,10 +701,12 @@ func (a *App) PermissionsInfo() *runtime.PermissionsInfo {
 	result := &runtime.PermissionsInfo{}
 	if sessionPerms != nil {
 		result.Allow = append(result.Allow, sessionPerms.Allow...)
+		result.Ask = append(result.Ask, sessionPerms.Ask...)
 		result.Deny = append(result.Deny, sessionPerms.Deny...)
 	}
 	if teamPerms != nil {
 		result.Allow = append(result.Allow, teamPerms.Allow...)
+		result.Ask = append(result.Ask, teamPerms.Ask...)
 		result.Deny = append(result.Deny, teamPerms.Deny...)
 	}
 
@@ -424,15 +728,13 @@ func (a *App) SwitchAgent(agentName string) error {
 // supported by the runtime (e.g., remote runtimes).
 // Pass an empty modelRef to clear the override and use the agent's default model.
 func (a *App) SetCurrentAgentModel(ctx context.Context, modelRef string) error {
-	modelSwitcher, ok := a.runtime.(runtime.ModelSwitcher)
-	if !ok {
-		return fmt.Errorf("model switching not supported by this runtime")
-	}
-
 	agentName := a.runtime.CurrentAgentName()
 
 	// Set the model override on the runtime (empty modelRef clears the override)
-	if err := modelSwitcher.SetAgentModel(ctx, agentName, modelRef); err != nil {
+	if err := a.runtime.SetAgentModel(ctx, agentName, modelRef); err != nil {
+		if errors.Is(err, runtime.ErrUnsupported) {
+			return errors.New("model switching not supported by this runtime")
+		}
 		return err
 	}
 
@@ -440,14 +742,14 @@ func (a *App) SetCurrentAgentModel(ctx context.Context, modelRef string) error {
 	if modelRef == "" {
 		// Clear the override - remove from map
 		delete(a.session.AgentModelOverrides, agentName)
-		slog.Debug("Cleared model override from session", "session_id", a.session.ID, "agent", agentName)
+		slog.DebugContext(ctx, "Cleared model override from session", "session_id", a.session.ID, "agent", agentName)
 	} else {
 		// Set the override
 		if a.session.AgentModelOverrides == nil {
 			a.session.AgentModelOverrides = make(map[string]string)
 		}
 		a.session.AgentModelOverrides[agentName] = modelRef
-		slog.Debug("Set model override in session", "session_id", a.session.ID, "agent", agentName, "model", modelRef)
+		slog.DebugContext(ctx, "Set model override in session", "session_id", a.session.ID, "agent", agentName, "model", modelRef)
 
 		// Track custom models (inline provider/model format) in the session
 		if strings.Contains(modelRef, "/") {
@@ -460,25 +762,11 @@ func (a *App) SetCurrentAgentModel(ctx context.Context, modelRef string) error {
 		if err := store.UpdateSession(ctx, a.session); err != nil {
 			return fmt.Errorf("failed to persist model override: %w", err)
 		}
-		slog.Debug("Persisted session with model override", "session_id", a.session.ID, "overrides", a.session.AgentModelOverrides)
+		slog.DebugContext(ctx, "Persisted session with model override", "session_id", a.session.ID, "overrides", a.session.AgentModelOverrides)
 	}
 
 	// Re-emit startup info so the sidebar updates with the new model
-	a.runtime.ResetStartupInfo()
-	go func() {
-		startupEvents := make(chan runtime.Event, 10)
-		go func() {
-			defer close(startupEvents)
-			a.runtime.EmitStartupInfo(ctx, startupEvents)
-		}()
-		for event := range startupEvents {
-			select {
-			case a.events <- event:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	a.reEmitStartupInfo(ctx)
 
 	return nil
 }
@@ -486,11 +774,10 @@ func (a *App) SetCurrentAgentModel(ctx context.Context, modelRef string) error {
 // AvailableModels returns the list of models available for selection.
 // Returns nil if model switching is not supported.
 func (a *App) AvailableModels(ctx context.Context) []runtime.ModelChoice {
-	modelSwitcher, ok := a.runtime.(runtime.ModelSwitcher)
-	if !ok {
+	if !a.runtime.SupportsModelSwitching() {
 		return nil
 	}
-	models := modelSwitcher.AvailableModels(ctx)
+	models := a.runtime.AvailableModels(ctx)
 
 	// Determine the currently active model for this agent
 	agentName := a.runtime.CurrentAgentName()
@@ -579,8 +866,7 @@ func (a *App) trackCustomModel(modelRef string) {
 
 // SupportsModelSwitching returns true if the runtime supports model switching.
 func (a *App) SupportsModelSwitching() bool {
-	_, ok := a.runtime.(runtime.ModelSwitcher)
-	return ok
+	return a.runtime.SupportsModelSwitching()
 }
 
 // ShouldExitAfterFirstResponse returns true if the app is configured to exit
@@ -589,15 +875,25 @@ func (a *App) ShouldExitAfterFirstResponse() bool {
 	return a.exitAfterFirstResponse
 }
 
-func (a *App) CompactSession(additionalPrompt string) {
-	if a.session != nil {
-		events := make(chan runtime.Event, 100)
-		a.runtime.Summarize(context.Background(), a.session, additionalPrompt, events)
-		close(events)
-		for event := range events {
-			a.events <- event
-		}
+func (a *App) CompactSession(ctx context.Context, additionalPrompt string) {
+	sess := a.session
+	if sess == nil {
+		return
 	}
+
+	go func() {
+		events := make(chan runtime.Event, 100)
+		go func() {
+			defer close(events)
+			a.runtime.Summarize(ctx, sess, additionalPrompt, runtime.NewChannelSink(events))
+		}()
+		for event := range events {
+			if ctx.Err() != nil {
+				return
+			}
+			a.sendEvent(ctx, event)
+		}
+	}()
 }
 
 func (a *App) PlainTextTranscript() string {
@@ -628,45 +924,30 @@ func (a *App) ReplaceSession(ctx context.Context, sess *session.Session) {
 	a.applySessionModelOverrides(ctx, sess)
 
 	// Reset and re-emit startup info so the sidebar shows agent/tools info
-	a.runtime.ResetStartupInfo()
-	go func() {
-		startupEvents := make(chan runtime.Event, 10)
-		go func() {
-			defer close(startupEvents)
-			a.runtime.EmitStartupInfo(ctx, startupEvents)
-		}()
-		for event := range startupEvents {
-			select {
-			case a.events <- event:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	a.reEmitStartupInfo(ctx)
 }
 
 // applySessionModelOverrides applies any stored model overrides from a loaded session.
 func (a *App) applySessionModelOverrides(ctx context.Context, sess *session.Session) {
 	if len(sess.AgentModelOverrides) == 0 {
-		slog.Debug("No model overrides to apply from session", "session_id", sess.ID)
+		slog.DebugContext(ctx, "No model overrides to apply from session", "session_id", sess.ID)
 		return
 	}
 
 	// Check if runtime supports model switching
-	modelSwitcher, ok := a.runtime.(runtime.ModelSwitcher)
-	if !ok {
-		slog.Debug("Runtime does not support model switching, skipping overrides")
+	if !a.runtime.SupportsModelSwitching() {
+		slog.DebugContext(ctx, "Runtime does not support model switching, skipping overrides")
 		return
 	}
 
-	slog.Debug("Applying model overrides from session", "session_id", sess.ID, "overrides", sess.AgentModelOverrides)
+	slog.DebugContext(ctx, "Applying model overrides from session", "session_id", sess.ID, "overrides", sess.AgentModelOverrides)
 	for agentName, modelRef := range sess.AgentModelOverrides {
-		if err := modelSwitcher.SetAgentModel(ctx, agentName, modelRef); err != nil {
+		if err := a.runtime.SetAgentModel(ctx, agentName, modelRef); err != nil {
 			// Log but don't fail - the session can still be used with default models
-			slog.Warn("Failed to apply model override from session", "agent", agentName, "model", modelRef, "error", err)
+			slog.WarnContext(ctx, "Failed to apply model override from session", "agent", agentName, "model", modelRef, "error", err)
 			a.events <- runtime.Warning(fmt.Sprintf("Failed to apply model override for agent %q: %v", agentName, err), agentName)
 		} else {
-			slog.Info("Applied model override from session", "agent", agentName, "model", modelRef)
+			slog.InfoContext(ctx, "Applied model override from session", "agent", agentName, "model", modelRef)
 		}
 	}
 }
@@ -735,76 +1016,149 @@ func (a *App) shouldThrottle(msg tea.Msg) bool {
 	}
 }
 
-// mergeEvents merges consecutive similar events to reduce UI updates
+// mergeEvents merges consecutive similar events to reduce UI updates.
+//
+// Each merge group is built with a single strings.Builder so concatenating N
+// chunks costs O(N) instead of the O(N^2) the naive `merged.Content + next.Content`
+// pattern produces. This matters during fast LLM streams where dozens of
+// chunks land per throttle window.
 func (a *App) mergeEvents(events []tea.Msg) []tea.Msg {
 	if len(events) == 0 {
 		return events
 	}
 
-	var result []tea.Msg
+	result := make([]tea.Msg, 0, len(events))
 
-	// Group events by type and merge
 	for i := 0; i < len(events); i++ {
-		current := events[i]
-
-		switch ev := current.(type) {
+		switch ev := events[i].(type) {
 		case *runtime.AgentChoiceEvent:
-			// Merge consecutive AgentChoiceEvents with same agent
-			merged := ev
-			for i+1 < len(events) {
-				if next, ok := events[i+1].(*runtime.AgentChoiceEvent); ok && next.AgentName == ev.AgentName {
-					// Concatenate content
-					merged = &runtime.AgentChoiceEvent{
-						Type:         ev.Type,
-						Content:      merged.Content + next.Content,
-						AgentContext: ev.AgentContext,
-					}
-					i++
-				} else {
-					break
-				}
-			}
+			merged, consumed := mergeAgentChoiceRun(ev, events[i+1:])
 			result = append(result, merged)
+			i += consumed
 
 		case *runtime.AgentChoiceReasoningEvent:
-			// Merge consecutive AgentChoiceReasoningEvents with same agent
-			merged := ev
-			for i+1 < len(events) {
-				if next, ok := events[i+1].(*runtime.AgentChoiceReasoningEvent); ok && next.AgentName == ev.AgentName {
-					// Concatenate content
-					merged = &runtime.AgentChoiceReasoningEvent{
-						Type:         ev.Type,
-						Content:      merged.Content + next.Content,
-						AgentContext: ev.AgentContext,
-					}
-					i++
-				} else {
-					break
-				}
-			}
+			merged, consumed := mergeAgentChoiceReasoningRun(ev, events[i+1:])
 			result = append(result, merged)
+			i += consumed
 
 		case *runtime.PartialToolCallEvent:
-			// For PartialToolCallEvent, keep only the latest one per tool call ID
-			// Only merge consecutive events with the same ID
-			latest := ev
-			for i+1 < len(events) {
-				if next, ok := events[i+1].(*runtime.PartialToolCallEvent); ok && next.ToolCall.ID == ev.ToolCall.ID {
-					latest = next
-					i++
-				} else {
-					break
-				}
-			}
-			result = append(result, latest)
+			merged, consumed := mergePartialToolCallRun(ev, events[i+1:])
+			result = append(result, merged)
+			i += consumed
 
 		default:
-			// Pass through other events as-is
-			result = append(result, current)
+			result = append(result, events[i])
 		}
 	}
 
 	return result
+}
+
+// mergeAgentChoiceRun merges first with any directly-following AgentChoiceEvents
+// for the same agent. It returns the merged event and the number of follow-up
+// events that were consumed.
+func mergeAgentChoiceRun(first *runtime.AgentChoiceEvent, rest []tea.Msg) (*runtime.AgentChoiceEvent, int) {
+	n := 0
+	total := len(first.Content)
+	for _, msg := range rest {
+		next, ok := msg.(*runtime.AgentChoiceEvent)
+		if !ok || next.AgentName != first.AgentName {
+			break
+		}
+		total += len(next.Content)
+		n++
+	}
+	if n == 0 {
+		return first, 0
+	}
+
+	var b strings.Builder
+	b.Grow(total)
+	b.WriteString(first.Content)
+	for _, msg := range rest[:n] {
+		b.WriteString(msg.(*runtime.AgentChoiceEvent).Content)
+	}
+	return &runtime.AgentChoiceEvent{
+		Type:         first.Type,
+		Content:      b.String(),
+		AgentContext: first.AgentContext,
+	}, n
+}
+
+// mergeAgentChoiceReasoningRun is the AgentChoiceReasoningEvent counterpart of
+// mergeAgentChoiceRun.
+func mergeAgentChoiceReasoningRun(first *runtime.AgentChoiceReasoningEvent, rest []tea.Msg) (*runtime.AgentChoiceReasoningEvent, int) {
+	n := 0
+	total := len(first.Content)
+	for _, msg := range rest {
+		next, ok := msg.(*runtime.AgentChoiceReasoningEvent)
+		if !ok || next.AgentName != first.AgentName {
+			break
+		}
+		total += len(next.Content)
+		n++
+	}
+	if n == 0 {
+		return first, 0
+	}
+
+	var b strings.Builder
+	b.Grow(total)
+	b.WriteString(first.Content)
+	for _, msg := range rest[:n] {
+		b.WriteString(msg.(*runtime.AgentChoiceReasoningEvent).Content)
+	}
+	return &runtime.AgentChoiceReasoningEvent{
+		Type:         first.Type,
+		Content:      b.String(),
+		AgentContext: first.AgentContext,
+	}, n
+}
+
+// mergePartialToolCallRun merges argument deltas across consecutive
+// PartialToolCallEvents that share the same tool call ID.
+func mergePartialToolCallRun(first *runtime.PartialToolCallEvent, rest []tea.Msg) (*runtime.PartialToolCallEvent, int) {
+	n := 0
+	total := len(first.ToolCall.Function.Arguments)
+	for _, msg := range rest {
+		next, ok := msg.(*runtime.PartialToolCallEvent)
+		if !ok || next.ToolCall.ID != first.ToolCall.ID {
+			break
+		}
+		total += len(next.ToolCall.Function.Arguments)
+		n++
+	}
+	if n == 0 {
+		return first, 0
+	}
+
+	var b strings.Builder
+	b.Grow(total)
+	b.WriteString(first.ToolCall.Function.Arguments)
+
+	name := first.ToolCall.Function.Name
+	toolDef := first.ToolDefinition
+	for _, msg := range rest[:n] {
+		next := msg.(*runtime.PartialToolCallEvent)
+		b.WriteString(next.ToolCall.Function.Arguments)
+		// The function name is sometimes only present on later deltas; keep the
+		// first non-empty value we observe across the run.
+		name = cmp.Or(name, next.ToolCall.Function.Name)
+		toolDef = cmp.Or(toolDef, next.ToolDefinition)
+	}
+	return &runtime.PartialToolCallEvent{
+		Type: first.Type,
+		ToolCall: tools.ToolCall{
+			ID:   first.ToolCall.ID,
+			Type: first.ToolCall.Type,
+			Function: tools.FunctionCall{
+				Name:      name,
+				Arguments: b.String(),
+			},
+		},
+		ToolDefinition: toolDef,
+		AgentContext:   first.AgentContext,
+	}, n
 }
 
 // ExportHTML exports the current session as a standalone HTML file.
@@ -814,14 +1168,14 @@ func (a *App) ExportHTML(ctx context.Context, filename string) (string, error) {
 	return export.SessionToFile(a.session, agentInfo.Description, filename)
 }
 
+// ErrTitleGenerating is returned when attempting to set a title while generation is in progress.
+var ErrTitleGenerating = errors.New("title generation in progress, please wait")
+
 // UpdateSessionTitle updates the current session's title and persists it.
 // It works with both local and remote runtimes.
-// ErrTitleGenerating is returned when attempting to set a title while generation is in progress.
-var ErrTitleGenerating = fmt.Errorf("title generation in progress, please wait")
-
 func (a *App) UpdateSessionTitle(ctx context.Context, title string) error {
 	if a.session == nil {
-		return fmt.Errorf("no active session")
+		return errors.New("no active session")
 	}
 
 	// Prevent manual title edits while generation is in progress
@@ -829,19 +1183,9 @@ func (a *App) UpdateSessionTitle(ctx context.Context, title string) error {
 		return ErrTitleGenerating
 	}
 
-	// Update in-memory session
-	a.session.Title = title
-
-	// Check if runtime is a RemoteRuntime and use its UpdateSessionTitle method
-	if remoteRT, ok := a.runtime.(*runtime.RemoteRuntime); ok {
-		if err := remoteRT.UpdateSessionTitle(ctx, title); err != nil {
-			return fmt.Errorf("failed to update session title on remote: %w", err)
-		}
-	} else if store := a.runtime.SessionStore(); store != nil {
-		// For local runtime, persist via session store
-		if err := store.UpdateSession(ctx, a.session); err != nil {
-			return fmt.Errorf("failed to persist session title: %w", err)
-		}
+	// Persist the title through the runtime
+	if err := a.runtime.UpdateSessionTitle(ctx, a.session, title); err != nil {
+		return fmt.Errorf("failed to update session title: %w", err)
 	}
 
 	// Emit a SessionTitleEvent to update the UI consistently
@@ -862,43 +1206,52 @@ func (a *App) generateTitle(ctx context.Context, userMessages []string) {
 	defer a.titleGenerating.Store(false)
 
 	if a.titleGen == nil {
-		slog.Debug("No title generator available, skipping title generation")
+		slog.DebugContext(ctx, "No title generator available, skipping title generation")
+		// Emit empty title event so the UI clears any title-generation spinner
+		select {
+		case a.events <- runtime.SessionTitle(a.session.ID, ""):
+		case <-ctx.Done():
+		}
 		return
 	}
 
 	title, err := a.titleGen.Generate(ctx, a.session.ID, userMessages)
 	if err != nil {
-		slog.Error("Failed to generate session title", "session_id", a.session.ID, "error", err)
+		slog.ErrorContext(ctx, "Failed to generate session title", "session_id", a.session.ID, "error", err)
+		// Emit empty title event so the UI clears any title-generation spinner
+		select {
+		case a.events <- runtime.SessionTitle(a.session.ID, ""):
+		case <-ctx.Done():
+		}
 		return
 	}
 
 	if title == "" {
+		// Emit empty title event so the UI clears any title-generation spinner
+		select {
+		case a.events <- runtime.SessionTitle(a.session.ID, ""):
+		case <-ctx.Done():
+		}
 		return
 	}
 
-	// Update the session title
-	a.session.Title = title
-
 	// Persist the title
-	if remoteRT, ok := a.runtime.(*runtime.RemoteRuntime); ok {
-		if err := remoteRT.UpdateSessionTitle(ctx, title); err != nil {
-			slog.Error("Failed to persist title on remote", "session_id", a.session.ID, "error", err)
-		}
-	} else if store := a.runtime.SessionStore(); store != nil {
-		if err := store.UpdateSession(ctx, a.session); err != nil {
-			slog.Error("Failed to persist title", "session_id", a.session.ID, "error", err)
-		}
+	if err := a.runtime.UpdateSessionTitle(ctx, a.session, title); err != nil {
+		slog.ErrorContext(ctx, "Failed to persist title", "session_id", a.session.ID, "error", err)
 	}
 
 	// Emit the title event to update the UI
-	a.events <- runtime.SessionTitle(a.session.ID, title)
+	select {
+	case a.events <- runtime.SessionTitle(a.session.ID, title):
+	case <-ctx.Done():
+	}
 }
 
 // RegenerateSessionTitle triggers AI-based title regeneration for the current session.
 // Returns ErrTitleGenerating if a title generation is already in progress.
 func (a *App) RegenerateSessionTitle(ctx context.Context) error {
 	if a.session == nil {
-		return fmt.Errorf("no active session")
+		return errors.New("no active session")
 	}
 
 	// Check if title generation is already in progress
@@ -924,6 +1277,6 @@ func (a *App) RegenerateSessionTitle(ctx context.Context) error {
 
 	// For remote runtime, title regeneration is not yet supported
 	// (the server would need to implement this)
-	slog.Debug("Title regeneration not available for remote runtime", "session_id", a.session.ID)
-	return fmt.Errorf("title regeneration not available")
+	slog.DebugContext(ctx, "Title regeneration not available for remote runtime", "session_id", a.session.ID)
+	return errors.New("title regeneration not available")
 }

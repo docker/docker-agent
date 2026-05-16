@@ -2,25 +2,25 @@ package reasoningblock
 
 import (
 	"fmt"
-	"image/color"
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/docker/cagent/pkg/tools"
-	"github.com/docker/cagent/pkg/tui/animation"
-	"github.com/docker/cagent/pkg/tui/components/markdown"
-	"github.com/docker/cagent/pkg/tui/components/tool"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/messages"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/styles"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/markdown"
+	"github.com/docker/docker-agent/pkg/tui/components/tool"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 const (
@@ -30,39 +30,40 @@ const (
 	completedToolVisibleDuration = 1500 * time.Millisecond
 	// completedToolFadeDuration is how long the fade-out effect lasts before hiding.
 	completedToolFadeDuration = 1000 * time.Millisecond
+	// fadeSteps is the number of discrete quantized fade levels.
+	fadeSteps = 20
 )
 
-// fadeColor returns an interpolated color for the given fade progress (0.0 to 1.0).
-// Progress 0.0 is normal color, 1.0 is very faded (close to background).
-func fadeColor(progress float64) color.Color {
-	// Interpolate from #808080 (normal muted) to #303038 (very faded)
-	// RGB: (128,128,128) -> (48,48,56)
-	startR, startG, startB := 128, 128, 128
-	endR, endG, endB := 48, 48, 56
-	r := int(float64(startR) + progress*float64(endR-startR))
-	g := int(float64(startG) + progress*float64(endG-startG))
-	b := int(float64(startB) + progress*float64(endB-startB))
-	return lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b))
+// fadeStyles is a pre-computed table of lipgloss styles for discrete fade levels.
+// Index 0 = no fade (normal), index fadeSteps = fully faded.
+var (
+	fadeStyles     [fadeSteps + 1]lipgloss.Style
+	fadeStylesOnce sync.Once
+)
+
+func initFadeStyles() {
+	for i := range fadeSteps + 1 {
+		progress := float64(i) / float64(fadeSteps)
+		startR, startG, startB := 128, 128, 128
+		endR, endG, endB := 48, 48, 56
+		r := int(float64(startR) + progress*float64(endR-startR))
+		g := int(float64(startG) + progress*float64(endG-startG))
+		b := int(float64(startB) + progress*float64(endB-startB))
+		c := lipgloss.Color(fmt.Sprintf("#%02X%02X%02X", r, g, b))
+		fadeStyles[i] = lipgloss.NewStyle().Foreground(c)
+	}
+}
+
+// fadeStyleForProgress returns the pre-computed style for the given fade progress.
+func fadeStyleForProgress(progress float64) lipgloss.Style {
+	fadeStylesOnce.Do(initFadeStyles)
+	idx := min(max(int(progress*fadeSteps), 0), fadeSteps)
+	return fadeStyles[idx]
 }
 
 // nowFunc is the time function used to get the current time.
 // Tests can override this for deterministic behavior.
 var nowFunc = time.Now
-
-// BlockMsg is implemented by messages that target a specific reasoning block.
-type BlockMsg interface {
-	GetBlockID() string
-}
-
-// blockMsgBase is embedded in messages that target a specific reasoning block.
-type blockMsgBase struct {
-	BlockID string
-}
-
-func (m blockMsgBase) GetBlockID() string { return m.BlockID }
-
-// ToggleMsg is sent when the block should toggle expanded/collapsed state.
-type ToggleMsg struct{ blockMsgBase }
 
 // toolEntry holds a tool call message and its view.
 type toolEntry struct {
@@ -70,6 +71,7 @@ type toolEntry struct {
 	view                  layout.Model
 	collapsedVisibleUntil time.Time // Zero means no grace period (hide immediately when completed)
 	fadeProgress          float64   // 0.0 = not fading, 0.0-1.0 = fading (higher = more faded)
+	strippedCollapsed     string    // Cached ANSI-stripped collapsed view (set once on completion)
 }
 
 // contentItemKind identifies the type of content item.
@@ -96,6 +98,10 @@ type renderCache struct {
 	hasExtra         bool     // whether there's extra content beyond preview
 }
 
+type expandedToolView interface {
+	ExpandedView() string
+}
+
 // Model represents a collapsible reasoning + tool calls block.
 type Model struct {
 	id                  string
@@ -103,6 +109,7 @@ type Model struct {
 	contentItems        []contentItem // Ordered sequence of reasoning and tool calls
 	toolEntries         []toolEntry   // All tool entries (referenced by contentItems)
 	expanded            bool
+	selected            bool
 	width               int
 	height              int
 	sessionState        *service.SessionState
@@ -116,7 +123,7 @@ func New(id, agentName string, sessionState *service.SessionState) *Model {
 	return &Model{
 		id:           id,
 		agentName:    agentName,
-		expanded:     false,
+		expanded:     sessionState == nil || sessionState.ExpandThinking(),
 		width:        80,
 		sessionState: sessionState,
 	}
@@ -204,8 +211,16 @@ func (m *Model) UpdateToolCall(toolCallID string, status types.ToolStatus, args 
 			continue
 		}
 		entry.msg.ToolStatus = status
+		if status == types.ToolStatusRunning && entry.msg.StartedAt == nil {
+			now := time.Now()
+			entry.msg.StartedAt = &now
+		}
 		if args != "" {
-			entry.msg.ToolCall.Function.Arguments = args
+			if status == types.ToolStatusPending {
+				entry.msg.ToolCall.Function.Arguments += args
+			} else {
+				entry.msg.ToolCall.Function.Arguments = args
+			}
 		}
 		m.toolEntries[i] = entry
 		return
@@ -247,6 +262,15 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		view.SetSize(m.contentWidth(), 0)
 		m.toolEntries[i] = entry
 		m.toolEntries[i].view = view
+
+		// Pre-cache the ANSI-stripped collapsed view for fade rendering
+		if wasInProgress && isCompleted {
+			if cv, ok := view.(layout.CollapsedViewer); ok {
+				m.toolEntries[i].strippedCollapsed = ansi.Strip(cv.CollapsedView())
+			} else {
+				m.toolEntries[i].strippedCollapsed = ansi.Strip(view.View())
+			}
+		}
 
 		initCmd := view.Init()
 		if animCmd != nil {
@@ -355,6 +379,19 @@ func (m *Model) Toggle() {
 // SetExpanded sets the expanded state directly.
 func (m *Model) SetExpanded(expanded bool) {
 	m.expanded = expanded
+}
+
+// SetSelected sets the selected state for visual highlighting.
+func (m *Model) SetSelected(selected bool) {
+	m.selected = selected
+}
+
+// messageStyle returns the appropriate style based on selection state.
+func (m *Model) messageStyle() lipgloss.Style {
+	if m.selected {
+		return styles.SelectedMessageStyle
+	}
+	return styles.AssistantMessageStyle
 }
 
 // Init initializes the component.
@@ -489,7 +526,7 @@ func (m *Model) renderExpanded() string {
 				if i == 0 || (i > 0 && m.contentItems[i-1].kind == contentItemReasoning) {
 					parts = append(parts, "")
 				}
-				parts = append(parts, m.toolEntries[item.toolIndex].view.View())
+				parts = append(parts, m.renderToolExpanded(m.toolEntries[item.toolIndex]))
 				// Blank line after last tool in a consecutive group (next is reasoning or end)
 				isLastItem := i == len(m.contentItems)-1
 				nextIsReasoning := !isLastItem && m.contentItems[i+1].kind == contentItemReasoning
@@ -501,6 +538,13 @@ func (m *Model) renderExpanded() string {
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+func (m *Model) renderToolExpanded(entry toolEntry) string {
+	if view, ok := entry.view.(expandedToolView); ok {
+		return view.ExpandedView()
+	}
+	return entry.view.View()
 }
 
 // renderCollapsed renders the compact preview.
@@ -523,7 +567,7 @@ func (m *Model) renderCollapsed() string {
 	visibleTools := m.getVisibleToolsCollapsed()
 	if len(visibleTools) > 0 {
 		parts = append(parts, "") // blank line before tools
-		for _, entry := range visibleTools {
+		for i, entry := range visibleTools {
 			// Prefer CollapsedView() for simplified rendering in collapsed state
 			var toolView string
 			if cv, ok := entry.view.(layout.CollapsedViewer); ok {
@@ -532,11 +576,12 @@ func (m *Model) renderCollapsed() string {
 				toolView = entry.view.View()
 			}
 			if entry.fadeProgress > 0 {
-				// Strip existing ANSI codes and apply faded color based on progress
-				// (wrapping styled content doesn't override inner colors)
-				stripped := ansi.Strip(toolView)
-				fadeStyle := lipgloss.NewStyle().Foreground(fadeColor(entry.fadeProgress))
-				toolView = fadeStyle.Render(stripped)
+				// Use cached stripped text (populated once on tool completion)
+				stripped := visibleTools[i].strippedCollapsed
+				if stripped == "" {
+					stripped = ansi.Strip(toolView)
+				}
+				toolView = fadeStyleForProgress(entry.fadeProgress).Render(stripped)
 			}
 			parts = append(parts, toolView)
 		}
@@ -595,7 +640,7 @@ func (m *Model) renderHeader(expanded bool) string {
 		}
 	}
 
-	return styles.AssistantMessageStyle.Render(badge + indicator + toolInfo)
+	return m.messageStyle().Render(badge + indicator + toolInfo)
 }
 
 // renderReasoningChunk renders a single reasoning chunk with styling.
@@ -610,7 +655,7 @@ func (m *Model) renderReasoningChunk(text string) string {
 	clean := strings.TrimRight(ansi.Strip(rendered), "\n\r\t ")
 	styled := styles.MutedStyle.Italic(true).Render(clean)
 
-	return styles.AssistantMessageStyle.Render(styled)
+	return m.messageStyle().Render(styled)
 }
 
 // renderReasoningPreviewWithTruncationInfo renders the last N lines of reasoning
@@ -650,7 +695,32 @@ func (m *Model) renderReasoningPreviewWithTruncationInfo() (string, bool) {
 	}
 
 	preview := strings.Join(styledLines, "\n")
-	return styles.AssistantMessageStyle.Render(preview), reasoningTruncated
+	return m.messageStyle().Render(preview), reasoningTruncated
+}
+
+// StopAnimation stops all animation subscriptions for this reasoning block.
+// This must be called when the block is removed from the UI to avoid leaked animation subscriptions.
+func (m *Model) StopAnimation() {
+	// Stop the block's own fade animation registration
+	if m.animationRegistered {
+		m.animationRegistered = false
+		animation.Unregister()
+	}
+	// Stop spinners in all tool entries
+	for _, entry := range m.toolEntries {
+		stopViewAnimation(entry.view)
+	}
+}
+
+// stopViewAnimation stops animation subscriptions for a view being removed.
+type animationStopper interface {
+	StopAnimation()
+}
+
+func stopViewAnimation(view layout.Model) {
+	if stopper, ok := view.(animationStopper); ok {
+		stopper.StopAnimation()
+	}
 }
 
 // IsHeaderLine returns true if the given line index is the header (line 0).

@@ -11,9 +11,9 @@ import (
 	"github.com/junegunn/fzf/src/algo"
 	"github.com/junegunn/fzf/src/util"
 
-	"github.com/docker/cagent/pkg/tui/core"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 const maxItems = 10
@@ -52,13 +52,32 @@ type QueryMsg struct {
 }
 
 type SelectedMsg struct {
-	Value   string
-	Execute func() tea.Cmd
+	Value      string
+	Execute    func() tea.Cmd
+	AutoSubmit bool
 }
 
 // SelectionChangedMsg is sent when the selected item changes (for preview in editor)
 type SelectionChangedMsg struct {
 	Value string
+}
+
+// AppendItemsMsg appends items to the current completion list without closing the popup.
+// Useful for async loading of completion items.
+type AppendItemsMsg struct {
+	Items []Item
+}
+
+// ReplaceItemsMsg replaces non-pinned items in the completion list.
+// Pinned items (like "Browse files…") are preserved.
+// Useful for full async load that supersedes initial results.
+type ReplaceItemsMsg struct {
+	Items []Item
+}
+
+// SetLoadingMsg sets the loading state for the completion popup.
+type SetLoadingMsg struct {
+	Loading bool
 }
 
 type matchResult struct {
@@ -70,6 +89,7 @@ type completionKeyMap struct {
 	Up     key.Binding
 	Down   key.Binding
 	Enter  key.Binding
+	Tab    key.Binding
 	Escape key.Binding
 }
 
@@ -87,6 +107,10 @@ func defaultCompletionKeyMap() completionKeyMap {
 		Enter: key.NewBinding(
 			key.WithKeys("enter"),
 			key.WithHelp("enter", "select"),
+		),
+		Tab: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "autocomplete"),
 		),
 		Escape: key.NewBinding(
 			key.WithKeys("esc"),
@@ -119,6 +143,7 @@ type manager struct {
 	scrollOffset  int
 	visible       bool
 	matchMode     MatchMode
+	loading       bool // true when async loading is in progress
 }
 
 // New creates a new  completion component
@@ -168,16 +193,57 @@ func (c *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	case CloseMsg:
 		c.visible = false
+		c.loading = false
 		return c, nil
+
+	case SetLoadingMsg:
+		c.loading = msg.Loading
+		return c, nil
+
+	case AppendItemsMsg:
+		// Append new items to the existing list
+		c.items = append(c.items, msg.Items...)
+		// Re-filter with current query
+		c.filterItems(c.query)
+		// Make popup visible if we now have items
+		if len(c.filteredItems) > 0 && !c.visible {
+			c.visible = true
+		}
+		cmd := c.notifySelectionChanged()
+		return c, cmd
+
+	case ReplaceItemsMsg:
+		// Keep pinned items, replace everything else
+		var pinnedItems []Item
+		for _, item := range c.items {
+			if item.Pinned {
+				pinnedItems = append(pinnedItems, item)
+			}
+		}
+		// Combine pinned items with new items
+		c.items = append(pinnedItems, msg.Items...)
+		// Re-filter with current query
+		c.filterItems(c.query)
+		// Make popup visible if we have items
+		if len(c.filteredItems) > 0 && !c.visible {
+			c.visible = true
+		}
+		cmd := c.notifySelectionChanged()
+		return c, cmd
 
 	case tea.KeyPressMsg:
 		switch {
 		case key.Matches(msg, c.keyMap.Up):
 			if c.selected > 0 {
 				c.selected--
+			} else if len(c.filteredItems) > 0 {
+				c.selected = len(c.filteredItems) - 1
 			}
 			if c.selected < c.scrollOffset {
 				c.scrollOffset = c.selected
+			}
+			if c.selected >= c.scrollOffset+maxItems {
+				c.scrollOffset = c.selected - maxItems + 1
 			}
 			cmd := c.notifySelectionChanged()
 			return c, cmd
@@ -185,9 +251,12 @@ func (c *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		case key.Matches(msg, c.keyMap.Down):
 			if c.selected < len(c.filteredItems)-1 {
 				c.selected++
+			} else if len(c.filteredItems) > 0 {
+				c.selected = 0
+				c.scrollOffset = 0
 			}
-			if c.selected >= c.scrollOffset+10 {
-				c.scrollOffset = c.selected - 9
+			if c.selected >= c.scrollOffset+maxItems {
+				c.scrollOffset = c.selected - maxItems + 1
 			}
 			cmd := c.notifySelectionChanged()
 			return c, cmd
@@ -200,8 +269,23 @@ func (c *manager) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			selectedItem := c.filteredItems[c.selected]
 			return c, tea.Sequence(
 				core.CmdHandler(SelectedMsg{
-					Value:   selectedItem.Value,
-					Execute: selectedItem.Execute,
+					Value:      selectedItem.Value,
+					Execute:    selectedItem.Execute,
+					AutoSubmit: true,
+				}),
+				core.CmdHandler(ClosedMsg{}),
+			)
+		case key.Matches(msg, c.keyMap.Tab):
+			c.visible = false
+			if len(c.filteredItems) == 0 || c.selected >= len(c.filteredItems) {
+				return c, core.CmdHandler(ClosedMsg{})
+			}
+			selectedItem := c.filteredItems[c.selected]
+			return c, tea.Sequence(
+				core.CmdHandler(SelectedMsg{
+					Value:      selectedItem.Value,
+					Execute:    selectedItem.Execute,
+					AutoSubmit: false,
 				}),
 				core.CmdHandler(ClosedMsg{}),
 			)
@@ -232,7 +316,11 @@ func (c *manager) View() string {
 	var lines []string
 
 	if len(c.filteredItems) == 0 {
-		lines = append(lines, styles.CompletionNoResultsStyle.Render("No command found"))
+		if c.loading {
+			lines = append(lines, styles.CompletionNoResultsStyle.Render("Loading…"))
+		} else {
+			lines = append(lines, styles.CompletionNoResultsStyle.Render("No results"))
+		}
 	} else {
 		visibleStart := c.scrollOffset
 		visibleEnd := min(c.scrollOffset+maxItems, len(c.filteredItems))
@@ -284,7 +372,7 @@ func (c *manager) GetLayers() []*lipgloss.Layer {
 	yPos := max(c.height-viewHeight-editorHeight-1, 0)
 
 	return []*lipgloss.Layer{
-		lipgloss.NewLayer(view).SetContent(view).X(styles.AppPaddingLeft).Y(yPos),
+		lipgloss.NewLayer(view).X(styles.AppPadding).Y(yPos),
 	}
 }
 
@@ -297,8 +385,23 @@ func (c *manager) notifySelectionChanged() tea.Cmd {
 }
 
 func (c *manager) filterItems(query string) {
+	// Pinned items are always shown at the top, in their original order.
+	var pinnedItems []Item
+	for _, item := range c.items {
+		if item.Pinned {
+			pinnedItems = append(pinnedItems, item)
+		}
+	}
+
 	if query == "" {
-		c.filteredItems = c.items
+		// Preserve original order for non-pinned items.
+		c.filteredItems = make([]Item, 0, len(c.items))
+		c.filteredItems = append(c.filteredItems, pinnedItems...)
+		for _, item := range c.items {
+			if !item.Pinned {
+				c.filteredItems = append(c.filteredItems, item)
+			}
+		}
 		// Reset selection when clearing the query
 		if c.selected >= len(c.filteredItems) {
 			c.selected = max(0, len(c.filteredItems)-1)
@@ -307,10 +410,12 @@ func (c *manager) filterItems(query string) {
 	}
 
 	lowerQuery := strings.ToLower(query)
-	var pinnedItems []Item
 	var matches []matchResult
 
 	for _, item := range c.items {
+		if item.Pinned {
+			continue
+		}
 		var matched bool
 		var score int
 
@@ -340,15 +445,10 @@ func (c *manager) filterItems(query string) {
 		}
 
 		if matched {
-			if item.Pinned {
-				// Pinned items keep their original order at the top
-				pinnedItems = append(pinnedItems, item)
-			} else {
-				matches = append(matches, matchResult{
-					item:  item,
-					score: score,
-				})
-			}
+			matches = append(matches, matchResult{
+				item:  item,
+				score: score,
+			})
 		}
 	}
 

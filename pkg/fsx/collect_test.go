@@ -3,7 +3,7 @@ package fsx
 import (
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -52,7 +52,7 @@ func TestCollectFiles_WithShouldIgnoreFilter(t *testing.T) {
 	t.Run("no filter collects all files", func(t *testing.T) {
 		t.Parallel()
 
-		got, err := CollectFiles([]string{tmpDir}, nil)
+		got, err := CollectFiles(t.Context(), []string{tmpDir}, nil)
 		require.NoError(t, err)
 		assert.Len(t, got, 5)
 	})
@@ -66,7 +66,7 @@ func TestCollectFiles_WithShouldIgnoreFilter(t *testing.T) {
 			return base == "vendor" || base == "node_modules"
 		}
 
-		got, err := CollectFiles([]string{tmpDir}, shouldIgnore)
+		got, err := CollectFiles(t.Context(), []string{tmpDir}, shouldIgnore)
 		require.NoError(t, err)
 
 		// Should only have src/*.go and build/output.bin
@@ -87,7 +87,7 @@ func TestCollectFiles_WithShouldIgnoreFilter(t *testing.T) {
 			return strings.HasSuffix(path, ".bin")
 		}
 
-		got, err := CollectFiles([]string{tmpDir}, shouldIgnore)
+		got, err := CollectFiles(t.Context(), []string{tmpDir}, shouldIgnore)
 		require.NoError(t, err)
 
 		assert.Len(t, got, 4)
@@ -104,7 +104,7 @@ func TestCollectFiles_WithShouldIgnoreFilter(t *testing.T) {
 			return strings.Contains(path, "vendor")
 		}
 
-		got, err := CollectFiles([]string{tmpDir}, shouldIgnore)
+		got, err := CollectFiles(t.Context(), []string{tmpDir}, shouldIgnore)
 		require.NoError(t, err)
 
 		for _, f := range got {
@@ -148,7 +148,7 @@ func TestCollectFiles_GitDirectoryExclusion(t *testing.T) {
 	t.Run("without filter includes .git", func(t *testing.T) {
 		t.Parallel()
 
-		got, err := CollectFiles([]string{tmpDir}, nil)
+		got, err := CollectFiles(t.Context(), []string{tmpDir}, nil)
 		require.NoError(t, err)
 
 		// Should include .git files
@@ -177,7 +177,7 @@ func TestCollectFiles_GitDirectoryExclusion(t *testing.T) {
 				strings.HasPrefix(normalized, ".git/")
 		}
 
-		got, err := CollectFiles([]string{tmpDir}, shouldIgnore)
+		got, err := CollectFiles(t.Context(), []string{tmpDir}, shouldIgnore)
 		require.NoError(t, err)
 
 		// Should only have src/main.go
@@ -229,7 +229,7 @@ func TestCollectFiles_GlobsWithFilter(t *testing.T) {
 			return strings.HasSuffix(path, "_test.go")
 		}
 
-		got, err := CollectFiles([]string{filepath.Join(tmpDir, "pkg", "**", "*.go")}, shouldIgnore)
+		got, err := CollectFiles(t.Context(), []string{filepath.Join(tmpDir, "pkg", "**", "*.go")}, shouldIgnore)
 		require.NoError(t, err)
 
 		// Should only have non-test .go files
@@ -329,7 +329,7 @@ func TestCollectFiles_Deduplication(t *testing.T) {
 		tmpDir, // Will also include test.go
 	}
 
-	got, err := CollectFiles(patterns, nil)
+	got, err := CollectFiles(t.Context(), patterns, nil)
 	require.NoError(t, err)
 
 	// Should only have one entry
@@ -352,7 +352,7 @@ func TestCollectFiles_NonExistentPaths(t *testing.T) {
 		filepath.Join(tmpDir, "also", "missing", "file.go"),
 	}
 
-	got, err := CollectFiles(patterns, nil)
+	got, err := CollectFiles(t.Context(), patterns, nil)
 	require.NoError(t, err)
 
 	// Should only have the real file
@@ -371,7 +371,7 @@ func TestCollectFiles_SortedOutput(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, f), []byte("package test"), 0o644))
 	}
 
-	got, err := CollectFiles([]string{tmpDir}, nil)
+	got, err := CollectFiles(t.Context(), []string{tmpDir}, nil)
 	require.NoError(t, err)
 
 	// Verify we got all files
@@ -379,7 +379,7 @@ func TestCollectFiles_SortedOutput(t *testing.T) {
 
 	// Note: CollectFiles doesn't guarantee order, but results should be consistent
 	// Sort for comparison
-	sort.Strings(got)
+	slices.Sort(got)
 	assert.True(t, strings.HasSuffix(got[0], "a.go"))
 	assert.True(t, strings.HasSuffix(got[1], "m.go"))
 	assert.True(t, strings.HasSuffix(got[2], "z.go"))

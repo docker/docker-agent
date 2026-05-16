@@ -10,26 +10,21 @@ import (
 
 	"github.com/goccy/go-yaml"
 
-	"github.com/docker/cagent/pkg/environment"
-	"github.com/docker/cagent/pkg/gateway"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/gateway"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 type GatewayToolset struct {
 	*Toolset
+
 	cleanUp func() error
 }
 
 var _ tools.ToolSet = (*GatewayToolset)(nil)
 
-func NewGatewayToolset(ctx context.Context, name, mcpServerName string, config any, envProvider environment.Provider, cwd string) (*GatewayToolset, error) {
-	slog.Debug("Creating MCP Gateway toolset", "name", mcpServerName)
-
-	// Check which secrets (env vars) are required by the MCP server.
-	secrets, err := gateway.RequiredEnvVars(ctx, mcpServerName)
-	if err != nil {
-		return nil, fmt.Errorf("reading which secrets the MCP server needs: %w", err)
-	}
+func NewGatewayToolset(ctx context.Context, name, mcpServerName string, secrets []gateway.Secret, config any, envProvider environment.Provider, cwd string) (*GatewayToolset, error) {
+	slog.DebugContext(ctx, "Creating MCP Gateway toolset", "name", mcpServerName)
 
 	// Make sure all the required secrets are available in the environment.
 	// TODO(dga): Ideally, the MCP gateway would use the same provider that we have.
@@ -54,8 +49,11 @@ func NewGatewayToolset(ctx context.Context, name, mcpServerName string, config a
 		"--config", fileConfig,
 	}
 
+	inner := NewToolsetCommand(name, "docker", args, nil, cwd)
+	inner.description = "mcp(ref=" + mcpServerName + ")"
+
 	return &GatewayToolset{
-		Toolset: NewToolsetCommand(name, "docker", args, nil, cwd),
+		Toolset: inner,
 		cleanUp: func() error {
 			return errors.Join(os.Remove(fileSecrets), os.Remove(fileConfig))
 		},
@@ -63,7 +61,14 @@ func NewGatewayToolset(ctx context.Context, name, mcpServerName string, config a
 }
 
 func (t *GatewayToolset) Stop(ctx context.Context) error {
-	return errors.Join(t.Toolset.Stop(ctx), t.cleanUp())
+	stopErr := t.Toolset.Stop(ctx)
+
+	cleanUpErr := t.cleanUp()
+	if cleanUpErr != nil {
+		slog.WarnContext(ctx, "Failed to clean up MCP Gateway temp files", "error", cleanUpErr)
+	}
+
+	return errors.Join(stopErr, cleanUpErr)
 }
 
 func writeSecretsToFile(ctx context.Context, mcpServerName string, secrets []gateway.Secret, envProvider environment.Provider) (string, error) {
@@ -72,6 +77,10 @@ func writeSecretsToFile(ctx context.Context, mcpServerName string, secrets []gat
 		v, found := envProvider.Get(ctx, secret.Env)
 		if !found || v == "" {
 			return "", errors.New("missing environment variable " + secret.Env + " required by MCP server " + mcpServerName)
+		}
+
+		if strings.ContainsAny(v, "\n\r") {
+			return "", fmt.Errorf("secret %s contains newline characters", secret.Env)
 		}
 
 		secretValues = append(secretValues, fmt.Sprintf("%s=%s", secret.Name, v))
@@ -97,9 +106,15 @@ func writeTempFile(nameTemplate string, content []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("creating temp file: %w", err)
 	}
-	defer f.Close()
 
 	if _, err := f.Write(content); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return "", err
+	}
+
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
 		return "", err
 	}
 

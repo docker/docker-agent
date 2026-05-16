@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
 )
 
 // collectMsgs executes a command (or batch/sequence of commands) and collects all returned messages.

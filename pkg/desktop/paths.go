@@ -4,6 +4,7 @@ import "sync"
 
 type DockerDesktopPaths struct {
 	BackendSocket string
+	ProxySocket   string
 }
 
 var Paths = sync.OnceValue(func() DockerDesktopPaths {

@@ -1,8 +1,8 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
-    model: anthropic/claude-3-7-sonnet-latest
+    model: anthropic/claude-3-7-sonnet-20250219
     description: An agent that fetches and summarizes web content
     instruction: |
       You are a web content analyzer that fetches web pages and provides concise summaries.

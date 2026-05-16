@@ -1,0 +1,23 @@
+version: "8"
+models:
+  model:
+    provider: openai
+    model: gpt-4o
+
+mcps:
+  custom_mcp_with_dir:
+    command: my-mcp-server
+    working_dir: ./tools/mcp
+
+agents:
+  root:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: custom_mcp_with_dir
+  override:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: custom_mcp_with_dir
+        working_dir: ./override/path

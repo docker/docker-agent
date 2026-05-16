@@ -7,14 +7,14 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/docker/cagent/pkg/agent"
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/environment"
-	"github.com/docker/cagent/pkg/model/provider/openai"
-	"github.com/docker/cagent/pkg/runtime"
-	"github.com/docker/cagent/pkg/session"
-	"github.com/docker/cagent/pkg/team"
-	"github.com/docker/cagent/pkg/tools/builtin"
+	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/openai"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
 
 func main() {
@@ -49,7 +49,7 @@ func run(ctx context.Context) error {
 		"You are a human, with feelings and emotions.",
 		agent.WithModel(llm),
 		agent.WithSubAgents(child),
-		agent.WithToolSets(builtin.NewTransferTaskTool()),
+		agent.WithToolSets(transfertask.NewTransferTaskTool()),
 	)
 	rt, err := runtime.New(team.New(team.WithAgents(root, child)))
 	if err != nil {

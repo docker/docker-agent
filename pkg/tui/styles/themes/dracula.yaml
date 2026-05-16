@@ -51,6 +51,11 @@ colors:
   selected_fg: "#ffffff"
   suggestion_ghost: "#6272a4"
   tab_bg: "#282a36"
+  tab_active_bg: "#44475a"
+  tab_active_fg: "#f8f8f2"
+  tab_inactive_fg: "#6272a4"
+  tab_border: "#bd93f9"
+
   placeholder: "#6272a4"
   
   # Badge colors

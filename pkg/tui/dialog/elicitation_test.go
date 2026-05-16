@@ -1,8 +1,10 @@
 package dialog
 
 import (
+	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -287,14 +289,19 @@ func TestNewElicitationDialog(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		message string
-		schema  any
+		name             string
+		message          string
+		schema           any
+		meta             map[string]any
+		expectedTitle    string
+		hasFreeFormInput bool
 	}{
 		{
-			name:    "simple dialog without fields",
-			message: "Please confirm this action",
-			schema:  nil,
+			name:             "simple dialog without fields has response input",
+			message:          "Please confirm this action",
+			schema:           nil,
+			expectedTitle:    "Question",
+			hasFreeFormInput: true,
 		},
 		{
 			name:    "dialog with form fields",
@@ -307,18 +314,38 @@ func TestNewElicitationDialog(t *testing.T) {
 				},
 				"required": []any{"username", "password"},
 			},
+			expectedTitle:    "Question",
+			hasFreeFormInput: false,
+		},
+		{
+			name:             "dialog with custom title from meta",
+			message:          "Choose wisely",
+			schema:           nil,
+			meta:             map[string]any{"cagent/title": "Custom Title"},
+			expectedTitle:    "Custom Title",
+			hasFreeFormInput: true,
+		},
+		{
+			name:             "dialog with empty meta defaults to Question",
+			message:          "What?",
+			schema:           nil,
+			meta:             map[string]any{},
+			expectedTitle:    "Question",
+			hasFreeFormInput: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			dialog := NewElicitationDialog(tt.message, tt.schema, nil)
+			dialog := NewElicitationDialog(tt.message, tt.schema, tt.meta)
 			require.NotNil(t, dialog)
 
 			ed, ok := dialog.(*ElicitationDialog)
 			require.True(t, ok)
 			assert.Equal(t, tt.message, ed.message)
+			assert.Equal(t, tt.expectedTitle, ed.title)
+			assert.Equal(t, tt.hasFreeFormInput, ed.hasFreeFormInput())
 		})
 	}
 }
@@ -547,4 +574,91 @@ func TestElicitationDialog_collectAndValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestElicitationDialog_LongEnumScrolls(t *testing.T) {
+	t.Parallel()
+
+	// Build an enum with many values that would overflow a typical terminal.
+	enumValues := make([]any, 0, 30)
+	for i := range 30 {
+		enumValues = append(enumValues, "option-"+strings.Repeat("x", 5)+string(rune('A'+i%26)))
+	}
+
+	schema := map[string]any{
+		"type":  "string",
+		"title": "Pick one",
+		"enum":  enumValues,
+	}
+
+	dialog := NewElicitationDialog("Choose an option:", schema, nil).(*ElicitationDialog)
+	require.Len(t, dialog.fields, 1)
+	require.Len(t, dialog.fields[0].EnumValues, 30)
+
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
+	_ = dialog.View() // populate fieldStarts and configure the scrollview
+
+	require.Len(t, dialog.fieldStarts, 1)
+	assert.True(t, dialog.scrollview.NeedsScrollbar(), "30 enum options on a 20-row terminal must require scrolling")
+
+	// Selecting an option far down the list must auto-scroll it into view.
+	dialog.enumIndexes[0] = 25
+	dialog.ensureFocusVisible()
+	_ = dialog.View()
+	offset := dialog.scrollview.ScrollOffset()
+	visEnd := offset + dialog.scrollview.VisibleHeight() - 1
+	selectedLine := dialog.fieldStarts[0] + 1 + 25
+	assert.GreaterOrEqual(t, selectedLine, offset, "selected option must be at or below scroll offset")
+	assert.LessOrEqual(t, selectedLine, visEnd, "selected option must be at or above visible end")
+}
+
+func TestElicitationDialog_FieldsBelowFold_AreReachable(t *testing.T) {
+	t.Parallel()
+
+	props := map[string]any{}
+	required := []any{}
+	for i := range 15 {
+		name := "field" + string(rune('a'+i%26)) + string(rune('0'+i/26))
+		props[name] = map[string]any{"type": "string", "title": name}
+		required = append(required, name)
+	}
+	schema := map[string]any{"type": "object", "properties": props, "required": required}
+
+	dialog := NewElicitationDialog("Fill in the form", schema, nil).(*ElicitationDialog)
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 100, Height: 18})
+	_ = dialog.View()
+
+	require.Len(t, dialog.fieldStarts, 15)
+	assert.True(t, dialog.scrollview.NeedsScrollbar(), "15 fields on an 18-row terminal must require scrolling")
+
+	// Tab through every field; each one must end up within the scroll viewport.
+	for i := range 15 {
+		for dialog.currentField != i {
+			dialog.moveFocus(1)
+		}
+		_ = dialog.View()
+		offset := dialog.scrollview.ScrollOffset()
+		visEnd := offset + dialog.scrollview.VisibleHeight() - 1
+		start := dialog.fieldStarts[i]
+		assert.GreaterOrEqual(t, start, offset, "field %d label must be at or below scroll offset", i)
+		assert.LessOrEqual(t, start, visEnd, "field %d label must be visible", i)
+	}
+}
+
+func TestElicitationDialog_SmallContent_NoScrollbar(t *testing.T) {
+	t.Parallel()
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name": map[string]any{"type": "string", "title": "Name"},
+		},
+		"required": []any{"name"},
+	}
+
+	dialog := NewElicitationDialog("Enter your name", schema, nil).(*ElicitationDialog)
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	_ = dialog.View()
+
+	assert.False(t, dialog.scrollview.NeedsScrollbar(), "small dialogs should not need a scrollbar")
 }

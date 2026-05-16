@@ -1,0 +1,4 @@
+agents:
+  root:
+    model: auto
+    instruction: Test agent with auto model selection

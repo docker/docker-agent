@@ -4,36 +4,30 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 	"github.com/anthropics/anthropic-sdk-go/shared"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // streamAdapter adapts the Anthropic stream to our interface
 type streamAdapter struct {
-	stream     *ssestream.Stream[anthropic.MessageStreamEventUnion]
+	retryableStream[anthropic.MessageStreamEventUnion]
+
 	trackUsage bool
 	toolCall   bool
 	toolID     string
-	// For single retry on context length error
-	retryFn            func() *streamAdapter
-	retried            bool
-	getResponseTrailer func() http.Header
 }
 
 func (c *Client) newStreamAdapter(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], trackUsage bool) *streamAdapter {
 	return &streamAdapter{
-		stream:             stream,
-		trackUsage:         trackUsage,
-		getResponseTrailer: c.getResponseTrailer,
+		retryableStream: retryableStream[anthropic.MessageStreamEventUnion]{stream: stream},
+		trackUsage:      trackUsage,
 	}
 }
 
@@ -45,8 +39,8 @@ func isContextLengthError(err error) bool {
 		return false
 	}
 
-	var apiErr *anthropic.Error
-	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+	apiErr, ok := errors.AsType[*anthropic.Error](err)
+	if !ok || apiErr.StatusCode != http.StatusBadRequest {
 		return false
 	}
 
@@ -72,21 +66,9 @@ func isContextLengthError(err error) bool {
 
 // Recv gets the next completion chunk
 func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
-	if !a.stream.Next() {
-		err := a.stream.Err()
-		// Single retry on context length error
-		if err != nil && !a.retried && a.retryFn != nil && isContextLengthError(err) {
-			a.retried = true
-			if retry := a.retryFn(); retry != nil {
-				a.stream.Close()
-				a.stream = retry.stream
-				return a.Recv()
-			}
-		}
-		if err != nil {
-			return chat.MessageStreamResponse{}, err
-		}
-		return chat.MessageStreamResponse{}, io.EOF
+	ok, err := a.next()
+	if !ok {
+		return chat.MessageStreamResponse{}, wrapAnthropicError(err)
 	}
 
 	event := a.stream.Current()
@@ -94,7 +76,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	response := chat.MessageStreamResponse{
 		ID:     event.Message.ID,
 		Object: "chat.completion.chunk",
-		Model:  string(event.Message.Model),
+		Model:  event.Message.Model,
 		Choices: []chat.MessageStreamChoice{
 			{
 				Index: 0,
@@ -166,33 +148,12 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		} else {
 			response.Choices[0].FinishReason = chat.FinishReasonStop
 		}
-
-		// MessageStopEvent is the last event. Let's drain the response to get the trailing headers.
-		trailers := a.getResponseTrailer()
-		if trailers.Get("X-RateLimit-Limit") != "" {
-			response.RateLimit = &chat.RateLimit{
-				Limit:      parseHeaderInt64(trailers.Get("X-RateLimit-Limit")),
-				Remaining:  parseHeaderInt64(trailers.Get("X-RateLimit-Remaining")),
-				Reset:      parseHeaderInt64(trailers.Get("X-RateLimit-Reset")),
-				RetryAfter: parseHeaderInt64(trailers.Get("Retry-After")),
-			}
-		}
 	}
 
 	return response, nil
 }
 
-func parseHeaderInt64(headerValue string) int64 {
-	value, err := strconv.ParseInt(headerValue, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return value
-}
-
 // Close closes the stream
 func (a *streamAdapter) Close() {
-	if a.stream != nil {
-		a.stream.Close()
-	}
+	a.stream.Close()
 }

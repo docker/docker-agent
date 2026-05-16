@@ -1,18 +1,38 @@
 package service
 
 import (
-	"github.com/docker/cagent/pkg/runtime"
-	"github.com/docker/cagent/pkg/session"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
+
+// SessionStateReader provides read-only access to session state.
+// Components that only need to read state should depend on this interface
+// rather than the full SessionState, following the principle of least privilege.
+type SessionStateReader interface {
+	SplitDiffView() bool
+	ExpandThinking() bool
+	YoloMode() bool
+	HideToolResults() bool
+	CurrentAgentName() string
+	PreviousMessage() *types.Message
+	SessionTitle() string
+	AvailableAgents() []runtime.AgentDetails
+	GetCurrentAgent() runtime.AgentDetails
+}
+
+// Verify SessionState implements SessionStateReader
+var _ SessionStateReader = (*SessionState)(nil)
 
 // SessionState holds shared state across the TUI application.
 // This provides a centralized location for state that needs to be
 // accessible by multiple components.
 type SessionState struct {
 	splitDiffView   bool
+	expandThinking  bool
 	yoloMode        bool
-	thinking        bool
 	hideToolResults bool
 	sessionTitle    string
 
@@ -22,17 +42,32 @@ type SessionState struct {
 }
 
 func NewSessionState(s *session.Session) *SessionState {
-	return &SessionState{
-		splitDiffView:   true,
-		yoloMode:        s.ToolsApproved,
-		thinking:        s.Thinking,
-		hideToolResults: s.HideToolResults,
-		sessionTitle:    s.Title,
+	settings := userconfig.Get()
+	state := &SessionState{
+		splitDiffView:  settings.GetSplitDiffView(),
+		expandThinking: settings.GetExpandThinking(),
 	}
+	if s != nil {
+		state.yoloMode = s.ToolsApproved
+		state.hideToolResults = s.HideToolResults
+		state.sessionTitle = s.Title
+	}
+	return state
 }
 
 func (s *SessionState) SplitDiffView() bool {
 	return s.splitDiffView
+}
+
+func (s *SessionState) ExpandThinking() bool {
+	if s == nil {
+		return true
+	}
+	return s.expandThinking
+}
+
+func (s *SessionState) SetExpandThinking(expandThinking bool) {
+	s.expandThinking = expandThinking
 }
 
 func (s *SessionState) ToggleSplitDiffView() {
@@ -45,14 +80,6 @@ func (s *SessionState) YoloMode() bool {
 
 func (s *SessionState) SetYoloMode(yoloMode bool) {
 	s.yoloMode = yoloMode
-}
-
-func (s *SessionState) Thinking() bool {
-	return s.thinking
-}
-
-func (s *SessionState) SetThinking(thinking bool) {
-	s.thinking = thinking
 }
 
 func (s *SessionState) HideToolResults() bool {
@@ -97,6 +124,12 @@ func (s *SessionState) AvailableAgents() []runtime.AgentDetails {
 
 func (s *SessionState) SetAvailableAgents(availableAgents []runtime.AgentDetails) {
 	s.availableAgents = availableAgents
+
+	names := make([]string, len(availableAgents))
+	for i, a := range availableAgents {
+		names[i] = a.Name
+	}
+	styles.SetAgentOrder(names)
 }
 
 func (s *SessionState) GetCurrentAgent() runtime.AgentDetails {

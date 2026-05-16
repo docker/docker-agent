@@ -1,0 +1,52 @@
+#!/usr/bin/env docker agent run
+
+# Demonstrates the `unload` on_agent_switch builtin hook.
+#
+# Two agents share Docker Model Runner but use different models that don't
+# fit in GPU memory at the same time. Wiring the `unload` builtin into
+# each agent's `on_agent_switch` hook chain asks the previous agent's
+# DMR endpoint(s) to release GPU memory every time the active agent
+# transfers control. The hook is pure: it reads the model snapshot the
+# runtime ships on every on_agent_switch dispatch and POSTs to DMR's
+# `_unload` endpoint over plain HTTP — no provider-specific runtime
+# coupling. For cloud-only providers (OpenAI, Anthropic, ...) the hook
+# is a silent no-op since they don't expose an HTTP unload endpoint.
+#
+# Switching back and forth between `coder` and `reviewer` therefore costs
+# one model load per switch instead of failing on out-of-memory.
+
+agents:
+  coder:
+    model: qwen3-large
+    description: Writes Go code on demand.
+    instruction: |
+      You write idiomatic, well-tested Go.
+      When you finish a change, hand off to `reviewer`.
+    handoffs:
+      - reviewer
+    hooks:
+      on_agent_switch:
+        - type: builtin
+          command: unload
+
+  reviewer:
+    model: qwen3-coder
+    description: Reviews code for clarity and correctness.
+    instruction: |
+      You critique Go code written by `coder`. Be concise.
+      Hand back to `coder` with concrete change requests.
+    handoffs:
+      - coder
+    hooks:
+      on_agent_switch:
+        - type: builtin
+          command: unload
+
+models:
+  qwen3-large:
+    provider: dmr
+    model: ai/qwen3
+
+  qwen3-coder:
+    provider: dmr
+    model: ai/smollm2

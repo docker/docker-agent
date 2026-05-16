@@ -1,0 +1,16 @@
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+
+mcps:
+  test:
+    ref: docker:context7
+    shared: true
+
+agents:
+  root:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: test

@@ -9,7 +9,7 @@ type Catalog map[string]Server
 type Server struct {
 	Type    string   `json:"type"`
 	Secrets []Secret `json:"secrets,omitempty"`
-	Remote  Remote   `json:"remote,omitempty"`
+	Remote  Remote   `json:"remote"`
 }
 
 type Remote struct {

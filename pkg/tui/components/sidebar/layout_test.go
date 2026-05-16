@@ -8,7 +8,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/tui/components/scrollbar"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tui/components/scrollbar"
+	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
 func TestDefaultLayoutConfig(t *testing.T) {
@@ -141,4 +143,85 @@ func TestScrollbarGapInOutput(t *testing.T) {
 	// Verify there's actually a space between content and scrollbar
 	assert.Contains(t, combined, " │",
 		"there should be a space (gap) before the scrollbar")
+}
+
+// BenchmarkSidebarVerticalView_Scroll benchmarks the verticalView() method during scrolling.
+// This verifies that scrolling uses the render cache instead of re-rendering sections.
+func BenchmarkSidebarVerticalView_Scroll(b *testing.B) {
+	sessionState := &service.SessionState{}
+	m := New(sessionState).(*model)
+	m.SetSize(35, 50)
+	m.SetMode(ModeVertical)
+
+	// Add some agents to create content
+	m.SetTeamInfo([]runtime.AgentDetails{
+		{Name: "agent1", Model: "gpt-4", Description: "First agent with a long description that might wrap"},
+		{Name: "agent2", Model: "claude-3", Description: "Second agent with another description"},
+		{Name: "agent3", Model: "gemini", Description: "Third agent"},
+	})
+
+	// Add some token usage
+	m.SetTokenUsage(&runtime.TokenUsageEvent{
+		SessionID:    "session-1",
+		AgentContext: runtime.AgentContext{AgentName: "agent1"},
+		Usage: &runtime.Usage{
+			InputTokens:  10000,
+			OutputTokens: 5000,
+			Cost:         0.50,
+		},
+	})
+
+	// Add some tools
+	m.SetToolsetInfo(25, false)
+
+	// Initial render to populate cache
+	_ = m.verticalView()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := range b.N {
+		// Simulate scrolling by updating scroll offset
+		m.scrollview.SetScrollOffset(i % 10)
+		_ = m.verticalView()
+	}
+}
+
+// BenchmarkSidebarVerticalView_NoCache benchmarks verticalView() when cache is always dirty.
+// This shows the cost of full re-rendering for comparison.
+func BenchmarkSidebarVerticalView_NoCache(b *testing.B) {
+	sessionState := &service.SessionState{}
+	m := New(sessionState).(*model)
+	m.SetSize(35, 50)
+	m.SetMode(ModeVertical)
+
+	// Add some agents to create content
+	m.SetTeamInfo([]runtime.AgentDetails{
+		{Name: "agent1", Model: "gpt-4", Description: "First agent with a long description that might wrap"},
+		{Name: "agent2", Model: "claude-3", Description: "Second agent with another description"},
+		{Name: "agent3", Model: "gemini", Description: "Third agent"},
+	})
+
+	// Add some token usage
+	m.SetTokenUsage(&runtime.TokenUsageEvent{
+		SessionID:    "session-1",
+		AgentContext: runtime.AgentContext{AgentName: "agent1"},
+		Usage: &runtime.Usage{
+			InputTokens:  10000,
+			OutputTokens: 5000,
+			Cost:         0.50,
+		},
+	})
+
+	// Add some tools
+	m.SetToolsetInfo(25, false)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for range b.N {
+		// Invalidate cache before each render to force full re-render
+		m.invalidateCache()
+		_ = m.verticalView()
+	}
 }

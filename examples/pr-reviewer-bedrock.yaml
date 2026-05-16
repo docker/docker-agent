@@ -1,5 +1,5 @@
 # PR Review Toolkit - mirrors Claude Code's pr-review-toolkit plugin
-# Usage: cagent run examples/pr-reviewer-bedrock.yaml "please review my PR: https://github.com/docker/cagent/pull/1045"
+# Usage: docker agent run examples/pr-reviewer-bedrock.yaml "please review my PR: https://github.com/docker/docker-agent/pull/1045"
 # Will benefit immensely from parallel subagent execution ;)
 
 agents:

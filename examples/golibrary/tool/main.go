@@ -6,16 +6,17 @@ import (
 	"fmt"
 	"log"
 	"os/signal"
+	"strconv"
 	"syscall"
 
-	"github.com/docker/cagent/pkg/agent"
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/environment"
-	"github.com/docker/cagent/pkg/model/provider/openai"
-	"github.com/docker/cagent/pkg/runtime"
-	"github.com/docker/cagent/pkg/session"
-	"github.com/docker/cagent/pkg/team"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/openai"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func main() {
@@ -40,7 +41,7 @@ func addNumbers(_ context.Context, toolCall tools.ToolCall) (*tools.ToolCallResu
 
 	fmt.Println("Adding numbers", p.A, p.B)
 
-	return tools.ResultSuccess(fmt.Sprintf("%d", p.A+p.B)), nil
+	return tools.ResultSuccess(strconv.Itoa(p.A + p.B)), nil
 }
 
 func run(ctx context.Context) error {

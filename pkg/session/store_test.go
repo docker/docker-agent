@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/agent"
-	"github.com/docker/cagent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/chat"
 )
 
 func TestStoreAgentName(t *testing.T) {
@@ -29,11 +29,11 @@ func TestStoreAgentName(t *testing.T) {
 		ID: "test-session",
 		Messages: []Item{
 			NewMessageItem(UserMessage("Hello")),
-			NewMessageItem(NewAgentMessage(testAgent1, &chat.Message{
+			NewMessageItem(NewAgentMessage(testAgent1.Name(), &chat.Message{
 				Role:    chat.MessageRoleAssistant,
 				Content: "Hello from test-agent-1",
 			})),
-			NewMessageItem(NewAgentMessage(testAgent2, &chat.Message{
+			NewMessageItem(NewAgentMessage(testAgent2.Name(), &chat.Message{
 				Role:    chat.MessageRoleUser,
 				Content: "Another message from test-agent-2",
 			})),
@@ -82,11 +82,11 @@ func TestStoreMultipleAgents(t *testing.T) {
 		CreatedAt: time.Now(),
 		Messages: []Item{
 			NewMessageItem(UserMessage("Start conversation")),
-			NewMessageItem(NewAgentMessage(agent1, &chat.Message{
+			NewMessageItem(NewAgentMessage(agent1.Name(), &chat.Message{
 				Role:    chat.MessageRoleAssistant,
 				Content: "Response from agent 1",
 			})),
-			NewMessageItem(NewAgentMessage(agent2, &chat.Message{
+			NewMessageItem(NewAgentMessage(agent2.Name(), &chat.Message{
 				Role:    chat.MessageRoleAssistant,
 				Content: "Response from agent 2",
 			})),
@@ -128,7 +128,7 @@ func TestGetSessions(t *testing.T) {
 	session1 := &Session{
 		ID: "session-1",
 		Messages: []Item{
-			NewMessageItem(NewAgentMessage(testAgent, &chat.Message{
+			NewMessageItem(NewAgentMessage(testAgent.Name(), &chat.Message{
 				Role:    chat.MessageRoleAssistant,
 				Content: "Message from session 1",
 			})),
@@ -139,7 +139,7 @@ func TestGetSessions(t *testing.T) {
 	session2 := &Session{
 		ID: "session-2",
 		Messages: []Item{
-			NewMessageItem(NewAgentMessage(testAgent, &chat.Message{
+			NewMessageItem(NewAgentMessage(testAgent.Name(), &chat.Message{
 				Role:    chat.MessageRoleAssistant,
 				Content: "Message from session 2",
 			})),
@@ -180,7 +180,7 @@ func TestGetSessionSummaries(t *testing.T) {
 		ID:    "session-1",
 		Title: "First Session",
 		Messages: []Item{
-			NewMessageItem(NewAgentMessage(testAgent, &chat.Message{
+			NewMessageItem(NewAgentMessage(testAgent.Name(), &chat.Message{
 				Role:    chat.MessageRoleAssistant,
 				Content: "A very long message that should not be loaded when getting summaries",
 			})),
@@ -192,7 +192,7 @@ func TestGetSessionSummaries(t *testing.T) {
 		ID:    "session-2",
 		Title: "Second Session",
 		Messages: []Item{
-			NewMessageItem(NewAgentMessage(testAgent, &chat.Message{
+			NewMessageItem(NewAgentMessage(testAgent.Name(), &chat.Message{
 				Role:    chat.MessageRoleAssistant,
 				Content: "Another long message that should not be loaded when getting summaries",
 			})),
@@ -215,10 +215,97 @@ func TestGetSessionSummaries(t *testing.T) {
 	assert.Equal(t, "session-2", summaries[0].ID)
 	assert.Equal(t, "Second Session", summaries[0].Title)
 	assert.Equal(t, session2Time, summaries[0].CreatedAt)
+	assert.Equal(t, 1, summaries[0].NumMessages)
 
 	assert.Equal(t, "session-1", summaries[1].ID)
 	assert.Equal(t, "First Session", summaries[1].Title)
 	assert.Equal(t, session1Time, summaries[1].CreatedAt)
+	assert.Equal(t, 1, summaries[1].NumMessages)
+}
+
+func TestBranchSessionCopiesPrefix(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test_branch_prefix.db")
+
+	store, err := NewSQLiteSessionStore(tempDB)
+	require.NoError(t, err)
+	defer store.(*SQLiteSessionStore).Close()
+
+	testAgent := agent.New("test-agent", "test prompt")
+	parent := &Session{
+		ID:        "parent-session",
+		CreatedAt: time.Now(),
+		Messages: []Item{
+			NewMessageItem(UserMessage("Hello")),
+			NewMessageItem(NewAgentMessage(testAgent.Name(), &chat.Message{
+				Role:    chat.MessageRoleAssistant,
+				Content: "Response",
+			})),
+			NewMessageItem(UserMessage("Edited")),
+		},
+	}
+
+	require.NoError(t, store.AddSession(t.Context(), parent))
+
+	parentLoaded, err := store.GetSession(t.Context(), parent.ID)
+	require.NoError(t, err)
+
+	branched, err := BranchSession(parentLoaded, 2)
+	require.NoError(t, err)
+
+	require.NoError(t, store.AddSession(t.Context(), branched))
+
+	loaded, err := store.GetSession(t.Context(), branched.ID)
+	require.NoError(t, err)
+
+	require.Len(t, loaded.Messages, 2)
+	assert.Equal(t, "Hello", loaded.Messages[0].Message.Message.Content)
+	assert.Equal(t, "Response", loaded.Messages[1].Message.Message.Content)
+}
+
+func TestBranchSessionClonesSubSession(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test_branch_subsession.db")
+
+	store, err := NewSQLiteSessionStore(tempDB)
+	require.NoError(t, err)
+	defer store.(*SQLiteSessionStore).Close()
+
+	subSession := &Session{
+		ID:        "sub-session",
+		CreatedAt: time.Now(),
+		Messages: []Item{
+			NewMessageItem(UserMessage("Sub message")),
+		},
+	}
+	parent := &Session{
+		ID:        "parent-session",
+		CreatedAt: time.Now(),
+		Messages: []Item{
+			NewMessageItem(UserMessage("Start")),
+			NewSubSessionItem(subSession),
+			NewMessageItem(UserMessage("After")),
+		},
+	}
+
+	require.NoError(t, store.AddSession(t.Context(), parent))
+
+	parentLoaded, err := store.GetSession(t.Context(), parent.ID)
+	require.NoError(t, err)
+
+	branched, err := BranchSession(parentLoaded, 2)
+	require.NoError(t, err)
+
+	require.NoError(t, store.AddSession(t.Context(), branched))
+
+	loaded, err := store.GetSession(t.Context(), branched.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.Messages, 2)
+
+	subItem := loaded.Messages[1]
+	require.NotNil(t, subItem.SubSession)
+	assert.NotEqual(t, subSession.ID, subItem.SubSession.ID)
+	assert.Equal(t, loaded.ID, subItem.SubSession.ParentID)
+	require.Len(t, subItem.SubSession.Messages, 1)
+	assert.Equal(t, "Sub message", subItem.SubSession.Messages[0].Message.Message.Content)
 }
 
 func TestStoreAgentNameJSON(t *testing.T) {
@@ -235,11 +322,11 @@ func TestStoreAgentNameJSON(t *testing.T) {
 		ID: "json-test-session",
 		Messages: []Item{
 			NewMessageItem(UserMessage("User input")),
-			NewMessageItem(NewAgentMessage(agent1, &chat.Message{
+			NewMessageItem(NewAgentMessage(agent1.Name(), &chat.Message{
 				Role:    chat.MessageRoleAssistant,
 				Content: "Response from my-agent",
 			})),
-			NewMessageItem(NewAgentMessage(agent2, &chat.Message{
+			NewMessageItem(NewAgentMessage(agent2.Name(), &chat.Message{
 				Role:    chat.MessageRoleAssistant,
 				Content: "Response from another-agent",
 			})),
@@ -271,6 +358,12 @@ func TestNewSQLiteSessionStore_DirectoryNotWritable(t *testing.T) {
 
 	assert.Contains(t, err.Error(), "cannot create database")
 	assert.Contains(t, err.Error(), "permission denied or file cannot be created")
+
+	// We should surface the real "cannot create database" error directly instead of
+	// running the backup+retry recovery path (which cannot fix a filesystem-level
+	// problem and would only wrap the real error in a confusing "migration failed"
+	// message).
+	assert.NotContains(t, err.Error(), "migration failed")
 }
 
 func TestUpdateSession_LazyCreation(t *testing.T) {
@@ -306,7 +399,7 @@ func TestUpdateSession_LazyCreation(t *testing.T) {
 	_, err = store.AddMessage(t.Context(), "lazy-session", UserMessage("Hello"))
 	require.NoError(t, err)
 
-	_, err = store.AddMessage(t.Context(), "lazy-session", NewAgentMessage(testAgent, &chat.Message{
+	_, err = store.AddMessage(t.Context(), "lazy-session", NewAgentMessage(testAgent.Name(), &chat.Message{
 		Role:    chat.MessageRoleAssistant,
 		Content: "Hi there!",
 	}))
@@ -348,7 +441,7 @@ func TestUpdateSession_LazyCreation_InMemory(t *testing.T) {
 	// Add messages via AddMessage
 	_, err = store.AddMessage(t.Context(), "lazy-session", UserMessage("Hello"))
 	require.NoError(t, err)
-	_, err = store.AddMessage(t.Context(), "lazy-session", NewAgentMessage(testAgent, &chat.Message{
+	_, err = store.AddMessage(t.Context(), "lazy-session", NewAgentMessage(testAgent.Name(), &chat.Message{
 		Role:    chat.MessageRoleAssistant,
 		Content: "Hi there!",
 	}))
@@ -542,88 +635,30 @@ func TestAgentModelOverrides_EmptyMap(t *testing.T) {
 	assert.Empty(t, retrieved.AgentModelOverrides)
 }
 
-func TestThinking_Persistence(t *testing.T) {
-	t.Parallel()
+func TestNewSQLiteSessionStore_RejectsNewerDatabase(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_newer_db.db")
 
-	t.Run("default is true (thinking enabled)", func(t *testing.T) {
-		t.Parallel()
+	// Create a valid store first (applies all known migrations)
+	store, err := NewSQLiteSessionStore(dbPath)
+	require.NoError(t, err)
+	defer store.(*SQLiteSessionStore).Close()
 
-		store, err := NewSQLiteSessionStore(filepath.Join(t.TempDir(), "test.db"))
-		require.NoError(t, err)
-		defer store.(*SQLiteSessionStore).Close()
+	// Inject a future migration into the database to simulate a newer version
+	db, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	_, err = db.ExecContext(t.Context(),
+		"INSERT INTO migrations (id, name, description, applied_at) VALUES (?, ?, ?, ?)",
+		9999, "9999_future_migration", "Added by a newer version", "2099-01-01T00:00:00Z")
+	require.NoError(t, err)
+	db.Close()
 
-		session := &Session{
-			ID:        "thinking-default-session",
-			Title:     "Test Session",
-			CreatedAt: time.Now(),
-			Thinking:  true, // Default value for new sessions
-		}
-
-		err = store.AddSession(t.Context(), session)
-		require.NoError(t, err)
-
-		retrieved, err := store.GetSession(t.Context(), "thinking-default-session")
-		require.NoError(t, err)
-		assert.True(t, retrieved.Thinking)
-	})
-
-	t.Run("persists when set to false (thinking disabled)", func(t *testing.T) {
-		t.Parallel()
-
-		store, err := NewSQLiteSessionStore(filepath.Join(t.TempDir(), "test.db"))
-		require.NoError(t, err)
-		defer store.(*SQLiteSessionStore).Close()
-
-		session := &Session{
-			ID:        "thinking-disabled-session",
-			Title:     "Test Session",
-			CreatedAt: time.Now(),
-			Thinking:  false,
-		}
-
-		err = store.AddSession(t.Context(), session)
-		require.NoError(t, err)
-
-		retrieved, err := store.GetSession(t.Context(), "thinking-disabled-session")
-		require.NoError(t, err)
-		assert.False(t, retrieved.Thinking)
-	})
-
-	t.Run("updates correctly via toggle", func(t *testing.T) {
-		t.Parallel()
-
-		store, err := NewSQLiteSessionStore(filepath.Join(t.TempDir(), "test.db"))
-		require.NoError(t, err)
-		defer store.(*SQLiteSessionStore).Close()
-
-		session := &Session{
-			ID:        "thinking-toggle-session",
-			Title:     "Test Session",
-			CreatedAt: time.Now(),
-			Thinking:  true,
-		}
-
-		err = store.AddSession(t.Context(), session)
-		require.NoError(t, err)
-
-		// Simulate toggle: true -> false
-		session.Thinking = !session.Thinking
-		err = store.UpdateSession(t.Context(), session)
-		require.NoError(t, err)
-
-		retrieved, err := store.GetSession(t.Context(), "thinking-toggle-session")
-		require.NoError(t, err)
-		assert.False(t, retrieved.Thinking)
-
-		// Toggle again: false -> true
-		session.Thinking = !session.Thinking
-		err = store.UpdateSession(t.Context(), session)
-		require.NoError(t, err)
-
-		retrieved, err = store.GetSession(t.Context(), "thinking-toggle-session")
-		require.NoError(t, err)
-		assert.True(t, retrieved.Thinking)
-	})
+	// Opening the store should fail with a clear error about version mismatch
+	_, err = NewSQLiteSessionStore(dbPath)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNewerDatabase)
+	assert.Contains(t, err.Error(), "9999")
+	assert.Contains(t, err.Error(), "upgrade docker-agent")
 }
 
 func TestNewSQLiteSessionStore_MigrationFailureRecovery(t *testing.T) {
@@ -706,106 +741,11 @@ func TestBackupDatabase(t *testing.T) {
 	})
 }
 
-// TestBackwardCompatibility_ReadLegacyMessages verifies that new code can read
-// sessions that were created by older cagent versions (messages in JSON column only).
-func TestBackwardCompatibility_ReadLegacyMessages(t *testing.T) {
-	tempDB := filepath.Join(t.TempDir(), "test_legacy.db")
-
-	store, err := NewSQLiteSessionStore(tempDB)
-	require.NoError(t, err)
-	defer store.(*SQLiteSessionStore).Close()
-
-	sqliteStore := store.(*SQLiteSessionStore)
-
-	// Simulate a legacy session by inserting directly into the sessions table
-	// with messages in the JSON column and NO entries in session_items
-	legacyMessages := []Item{
-		NewMessageItem(UserMessage("Hello from legacy")),
-		NewMessageItem(&Message{
-			AgentName: "test-agent",
-			Message: chat.Message{
-				Role:    chat.MessageRoleAssistant,
-				Content: "Hi from legacy agent!",
-			},
-		}),
-	}
-
-	legacyMessagesJSON, err := json.Marshal(legacyMessages)
-	require.NoError(t, err)
-
-	_, err = sqliteStore.db.ExecContext(t.Context(),
-		`INSERT INTO sessions (id, messages, tools_approved, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking)
-		 VALUES (?, ?, 0, 0, 0, 'Legacy Session', 0, 1, 0, '', ?, 0, '', '{}', '[]', 1)`,
-		"legacy-session", string(legacyMessagesJSON), time.Now().Format(time.RFC3339))
-	require.NoError(t, err)
-
-	// Now read the session using the store API - it should fall back to messages column
-	retrieved, err := store.GetSession(t.Context(), "legacy-session")
-	require.NoError(t, err)
-	require.NotNil(t, retrieved)
-
-	// Verify messages were read from the legacy column
-	assert.Len(t, retrieved.Messages, 2)
-	assert.Equal(t, "Hello from legacy", retrieved.Messages[0].Message.Message.Content)
-	assert.Equal(t, "test-agent", retrieved.Messages[1].Message.AgentName)
-	assert.Equal(t, "Hi from legacy agent!", retrieved.Messages[1].Message.Message.Content)
-}
-
-// TestForwardCompatibility_MessagesColumnPopulated verifies that new code populates
-// the messages column so older cagent versions can read sessions.
-func TestForwardCompatibility_MessagesColumnPopulated(t *testing.T) {
-	tempDB := filepath.Join(t.TempDir(), "test_forward.db")
-
-	store, err := NewSQLiteSessionStore(tempDB)
-	require.NoError(t, err)
-	defer store.(*SQLiteSessionStore).Close()
-
-	sqliteStore := store.(*SQLiteSessionStore)
-
-	// Create a session using the new API
-	session := &Session{
-		ID:        "new-session",
-		CreatedAt: time.Now(),
-	}
-	err = store.AddSession(t.Context(), session)
-	require.NoError(t, err)
-
-	// Add messages using the new granular API
-	_, err = store.AddMessage(t.Context(), "new-session", UserMessage("Hello from new code"))
-	require.NoError(t, err)
-
-	_, err = store.AddMessage(t.Context(), "new-session", &Message{
-		AgentName: "new-agent",
-		Message: chat.Message{
-			Role:    chat.MessageRoleAssistant,
-			Content: "Response from new agent",
-		},
-	})
-	require.NoError(t, err)
-
-	// Verify messages column is populated (how old cagent would read it)
-	var messagesJSON string
-	err = sqliteStore.db.QueryRowContext(t.Context(),
-		"SELECT messages FROM sessions WHERE id = ?", "new-session").Scan(&messagesJSON)
-	require.NoError(t, err)
-	assert.NotEmpty(t, messagesJSON)
-	assert.NotEqual(t, "[]", messagesJSON)
-
-	// Parse and verify the messages column content
-	var items []Item
-	err = json.Unmarshal([]byte(messagesJSON), &items)
-	require.NoError(t, err)
-
-	assert.Len(t, items, 2)
-	assert.Equal(t, "Hello from new code", items[0].Message.Message.Content)
-	assert.Equal(t, "new-agent", items[1].Message.AgentName)
-	assert.Equal(t, "Response from new agent", items[1].Message.Message.Content)
-}
-
-// TestForwardCompatibility_SubSessionPopulated verifies that sub-sessions
-// are properly serialized to the messages column for backward compatibility.
-func TestForwardCompatibility_SubSessionPopulated(t *testing.T) {
-	tempDB := filepath.Join(t.TempDir(), "test_subsession.db")
+// TestOrphanedSubsessionReference verifies that loading sessions gracefully
+// handles orphaned subsession references (where the subsession was deleted
+// but the reference in session_items remains).
+func TestOrphanedSubsessionReference(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test_orphaned.db")
 
 	store, err := NewSQLiteSessionStore(tempDB)
 	require.NoError(t, err)
@@ -827,78 +767,37 @@ func TestForwardCompatibility_SubSessionPopulated(t *testing.T) {
 
 	// Create and add a sub-session
 	subSession := &Session{
-		ID:        "sub-session",
+		ID:        "sub-session-to-delete",
 		CreatedAt: time.Now(),
 		Messages: []Item{
 			NewMessageItem(UserMessage("Sub task")),
-			NewMessageItem(&Message{
-				AgentName: "sub-agent",
-				Message: chat.Message{
-					Role:    chat.MessageRoleAssistant,
-					Content: "Sub response",
-				},
-			}),
 		},
 	}
 	err = store.AddSubSession(t.Context(), "parent-session", subSession)
 	require.NoError(t, err)
 
-	// Verify parent's messages column contains the sub-session
-	var messagesJSON string
-	err = sqliteStore.db.QueryRowContext(t.Context(),
-		"SELECT messages FROM sessions WHERE id = ?", "parent-session").Scan(&messagesJSON)
+	// Verify session loads correctly before deletion
+	retrieved, err := store.GetSession(t.Context(), "parent-session")
+	require.NoError(t, err)
+	assert.Len(t, retrieved.Messages, 2) // user message + subsession
+
+	// Now delete the sub-session directly from the database
+	// This simulates a scenario where the sub-session is deleted but the
+	// reference in session_items remains (the FK sets it to NULL)
+	_, err = sqliteStore.db.ExecContext(t.Context(), "DELETE FROM sessions WHERE id = ?", "sub-session-to-delete")
 	require.NoError(t, err)
 
-	var items []Item
-	err = json.Unmarshal([]byte(messagesJSON), &items)
+	// Loading the parent session should gracefully skip the orphaned reference
+	retrieved, err = store.GetSession(t.Context(), "parent-session")
 	require.NoError(t, err)
+	assert.Len(t, retrieved.Messages, 1) // Only the user message remains
+	assert.Equal(t, "Start task", retrieved.Messages[0].Message.Message.Content)
 
-	assert.Len(t, items, 2) // user message + subsession
-	assert.Equal(t, "Start task", items[0].Message.Message.Content)
-	assert.NotNil(t, items[1].SubSession)
-	assert.Equal(t, "sub-session", items[1].SubSession.ID)
-	assert.Len(t, items[1].SubSession.Messages, 2)
-}
-
-// TestForwardCompatibility_SummaryPopulated verifies that summaries
-// are properly serialized to the messages column for backward compatibility.
-func TestForwardCompatibility_SummaryPopulated(t *testing.T) {
-	tempDB := filepath.Join(t.TempDir(), "test_summary.db")
-
-	store, err := NewSQLiteSessionStore(tempDB)
+	// GetSessions should also work without error
+	sessions, err := store.GetSessions(t.Context())
 	require.NoError(t, err)
-	defer store.(*SQLiteSessionStore).Close()
-
-	sqliteStore := store.(*SQLiteSessionStore)
-
-	// Create session
-	session := &Session{
-		ID:        "summary-session",
-		CreatedAt: time.Now(),
-	}
-	err = store.AddSession(t.Context(), session)
-	require.NoError(t, err)
-
-	// Add messages and a summary
-	_, err = store.AddMessage(t.Context(), "summary-session", UserMessage("Hello"))
-	require.NoError(t, err)
-
-	err = store.AddSummary(t.Context(), "summary-session", "This is a summary of the conversation.")
-	require.NoError(t, err)
-
-	// Verify messages column contains the summary
-	var messagesJSON string
-	err = sqliteStore.db.QueryRowContext(t.Context(),
-		"SELECT messages FROM sessions WHERE id = ?", "summary-session").Scan(&messagesJSON)
-	require.NoError(t, err)
-
-	var items []Item
-	err = json.Unmarshal([]byte(messagesJSON), &items)
-	require.NoError(t, err)
-
-	assert.Len(t, items, 2)
-	assert.Equal(t, "Hello", items[0].Message.Message.Content)
-	assert.Equal(t, "This is a summary of the conversation.", items[1].Summary)
+	assert.Len(t, sessions, 1)
+	assert.Equal(t, "parent-session", sessions[0].ID)
 }
 
 // TestMigration_ExistingMessagesToSessionItems verifies that the migration
@@ -953,4 +852,182 @@ func TestMigration_ExistingMessagesToSessionItems(t *testing.T) {
 	assert.Len(t, retrieved.Messages, 2)
 	assert.Equal(t, "Legacy message 1", retrieved.Messages[0].Message.Message.Content)
 	assert.Equal(t, "legacy-agent", retrieved.Messages[1].Message.AgentName)
+}
+
+func TestParseRelativeSessionRef(t *testing.T) {
+	tests := []struct {
+		name       string
+		ref        string
+		wantOffset int
+		wantIsRel  bool
+	}{
+		{"last session", "-1", 1, true},
+		{"second to last", "-2", 2, true},
+		{"tenth session", "-10", 10, true},
+		{"regular ID", "abc123", 0, false},
+		{"UUID-like", "550e8400-e29b-41d4-a716-446655440000", 0, false},
+		{"positive number", "1", 0, false},
+		{"zero", "0", 0, false},
+		{"negative zero", "-0", 0, false},
+		{"not a number", "-abc", 0, false},
+		{"empty string", "", 0, false},
+		{"just dash", "-", 0, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			offset, isRel := parseRelativeSessionRef(tt.ref)
+			assert.Equal(t, tt.wantOffset, offset)
+			assert.Equal(t, tt.wantIsRel, isRel)
+		})
+	}
+}
+
+func TestResolveSessionID_SQLite(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test_resolve.db")
+
+	store, err := NewSQLiteSessionStore(tempDB)
+	require.NoError(t, err)
+	defer store.(*SQLiteSessionStore).Close()
+
+	// Create sessions with known timestamps
+	baseTime := time.Now()
+	sessions := []struct {
+		id        string
+		createdAt time.Time
+	}{
+		{"oldest", baseTime.Add(-3 * time.Hour)},
+		{"middle", baseTime.Add(-2 * time.Hour)},
+		{"newest", baseTime.Add(-1 * time.Hour)},
+	}
+
+	for _, s := range sessions {
+		err := store.AddSession(t.Context(), &Session{
+			ID:        s.id,
+			CreatedAt: s.createdAt,
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("resolves -1 to newest session", func(t *testing.T) {
+		id, err := ResolveSessionID(t.Context(), store, "-1")
+		require.NoError(t, err)
+		assert.Equal(t, "newest", id)
+	})
+
+	t.Run("resolves -2 to middle session", func(t *testing.T) {
+		id, err := ResolveSessionID(t.Context(), store, "-2")
+		require.NoError(t, err)
+		assert.Equal(t, "middle", id)
+	})
+
+	t.Run("resolves -3 to oldest session", func(t *testing.T) {
+		id, err := ResolveSessionID(t.Context(), store, "-3")
+		require.NoError(t, err)
+		assert.Equal(t, "oldest", id)
+	})
+
+	t.Run("returns error for out of range offset", func(t *testing.T) {
+		_, err := ResolveSessionID(t.Context(), store, "-4")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "out of range")
+	})
+
+	t.Run("returns non-relative ID unchanged", func(t *testing.T) {
+		id, err := ResolveSessionID(t.Context(), store, "some-uuid")
+		require.NoError(t, err)
+		assert.Equal(t, "some-uuid", id)
+	})
+}
+
+func TestResolveSessionID_ExcludesSubSessions(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test_resolve_subsessions.db")
+
+	store, err := NewSQLiteSessionStore(tempDB)
+	require.NoError(t, err)
+	defer store.(*SQLiteSessionStore).Close()
+
+	sqliteStore := store.(*SQLiteSessionStore)
+
+	// Create a parent session
+	parent := &Session{
+		ID:        "parent",
+		CreatedAt: time.Now().Add(-2 * time.Hour),
+	}
+	err = store.AddSession(t.Context(), parent)
+	require.NoError(t, err)
+
+	// Create a sub-session directly in the database to avoid the AddSubSession complexity
+	// This simulates an existing sub-session without going through the full API
+	subSessionTime := time.Now().Add(-1 * time.Hour)
+	_, err = sqliteStore.db.ExecContext(t.Context(),
+		`INSERT INTO sessions (id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id)
+		 VALUES (?, 0, 0, 0, '', 0, 1, 0, '', ?, 0, '', '{}', '[]', 1, ?)`,
+		"subsession", subSessionTime.Format(time.RFC3339), "parent")
+	require.NoError(t, err)
+
+	// Create another root session (most recent root)
+	root2 := &Session{
+		ID:        "root2",
+		CreatedAt: time.Now(),
+	}
+	err = store.AddSession(t.Context(), root2)
+	require.NoError(t, err)
+
+	// -1 should resolve to root2, not the subsession
+	id, err := ResolveSessionID(t.Context(), store, "-1")
+	require.NoError(t, err)
+	assert.Equal(t, "root2", id)
+
+	// -2 should resolve to parent
+	id, err = ResolveSessionID(t.Context(), store, "-2")
+	require.NoError(t, err)
+	assert.Equal(t, "parent", id)
+}
+
+func TestResolveSessionID_InMemory(t *testing.T) {
+	store := NewInMemorySessionStore()
+
+	// Create sessions with known timestamps
+	baseTime := time.Now()
+	sessions := []struct {
+		id        string
+		createdAt time.Time
+	}{
+		{"oldest", baseTime.Add(-3 * time.Hour)},
+		{"middle", baseTime.Add(-2 * time.Hour)},
+		{"newest", baseTime.Add(-1 * time.Hour)},
+	}
+
+	for _, s := range sessions {
+		err := store.AddSession(t.Context(), &Session{
+			ID:        s.id,
+			CreatedAt: s.createdAt,
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("resolves -1 to newest session", func(t *testing.T) {
+		id, err := ResolveSessionID(t.Context(), store, "-1")
+		require.NoError(t, err)
+		assert.Equal(t, "newest", id)
+	})
+
+	t.Run("resolves -2 to middle session", func(t *testing.T) {
+		id, err := ResolveSessionID(t.Context(), store, "-2")
+		require.NoError(t, err)
+		assert.Equal(t, "middle", id)
+	})
+
+	t.Run("returns error for out of range offset", func(t *testing.T) {
+		_, err := ResolveSessionID(t.Context(), store, "-4")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "out of range")
+	})
+
+	t.Run("returns non-relative ID unchanged", func(t *testing.T) {
+		id, err := ResolveSessionID(t.Context(), store, "some-uuid")
+		require.NoError(t, err)
+		assert.Equal(t, "some-uuid", id)
+	})
 }

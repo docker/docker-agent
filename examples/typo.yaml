@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
@@ -10,7 +10,8 @@ agents:
       Fix typos and don't print any summary.
     toolsets:
       - type: filesystem
-        tools: ["list_directory", "edit_file", "read_multiple_files", "write_file"]
+        tools:
+          ["list_directory", "edit_file", "read_multiple_files", "write_file"]
     commands:
       - fix: Fix every typo, in every file, in the current directory.
 

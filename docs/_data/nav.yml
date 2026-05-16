@@ -1,0 +1,153 @@
+- section: Getting Started
+  items:
+    - title: Introduction
+      url: /getting-started/introduction/
+    - title: Installation
+      url: /getting-started/installation/
+    - title: Quick Start
+      url: /getting-started/quickstart/
+
+- section: Core Concepts
+  items:
+    - title: Agents
+      url: /concepts/agents/
+    - title: Models
+      url: /concepts/models/
+    - title: Tools
+      url: /concepts/tools/
+    - title: Multi-Agent
+      url: /concepts/multi-agent/
+    - title: Agent Distribution
+      url: /concepts/distribution/
+
+- section: Configuration
+  items:
+    - title: Overview
+      url: /configuration/overview/
+    - title: HCL Configuration
+      url: /configuration/hcl/
+    - title: Agent Config
+      url: /configuration/agents/
+    - title: Model Config
+      url: /configuration/models/
+    - title: Tool Config
+      url: /configuration/tools/
+    - title: Hooks
+      url: /configuration/hooks/
+    - title: Permissions
+      url: /configuration/permissions/
+    - title: Sandbox Mode
+      url: /configuration/sandbox/
+    - title: Structured Output
+      url: /configuration/structured-output/
+    - title: Model Routing
+      url: /configuration/routing/
+
+- section: Built-in Tools
+  items:
+    - title: Filesystem
+      url: /tools/filesystem/
+    - title: Shell
+      url: /tools/shell/
+    - title: Think
+      url: /tools/think/
+    - title: Todo
+      url: /tools/todo/
+    - title: Memory
+      url: /tools/memory/
+    - title: Tasks
+      url: /tools/tasks/
+    - title: Fetch
+      url: /tools/fetch/
+    - title: Script
+      url: /tools/script/
+    - title: LSP
+      url: /tools/lsp/
+    - title: API
+      url: /tools/api/
+    - title: User Prompt
+      url: /tools/user-prompt/
+    - title: Transfer Task
+      url: /tools/transfer-task/
+    - title: Background Agents
+      url: /tools/background-agents/
+    - title: Handoff
+      url: /tools/handoff/
+    - title: Model Picker
+      url: /tools/model-picker/
+    - title: OpenAPI
+      url: /tools/openapi/
+    - title: A2A
+      url: /tools/a2a/
+
+- section: Features
+  items:
+    - title: Terminal UI
+      url: /features/tui/
+    - title: CLI Reference
+      url: /features/cli/
+    - title: MCP Mode
+      url: /features/mcp-mode/
+    - title: A2A Protocol
+      url: /features/a2a/
+    - title: ACP
+      url: /features/acp/
+    - title: API Server
+      url: /features/api-server/
+    - title: Chat Server
+      url: /features/chat-server/
+    - title: Evaluation
+      url: /features/evaluation/
+    - title: RAG
+      url: /features/rag/
+    - title: Skills
+      url: /features/skills/
+    - title: Remote MCP Servers
+      url: /features/remote-mcp/
+
+- section: Model Providers
+  items:
+    - title: Overview
+      url: /providers/overview/
+    - title: OpenAI
+      url: /providers/openai/
+    - title: Anthropic
+      url: /providers/anthropic/
+    - title: Google Gemini
+      url: /providers/google/
+    - title: AWS Bedrock
+      url: /providers/bedrock/
+    - title: Docker Model Runner
+      url: /providers/dmr/
+    - title: Mistral
+      url: /providers/mistral/
+    - title: "xAI (Grok)"
+      url: /providers/xai/
+    - title: Nebius
+      url: /providers/nebius/
+    - title: MiniMax
+      url: /providers/minimax/
+    - title: GitHub Copilot
+      url: /providers/github-copilot/
+    - title: Local Models
+      url: /providers/local/
+    - title: Provider Definitions
+      url: /providers/custom/
+
+- section: Guides
+  items:
+    - title: Tips & Best Practices
+      url: /guides/tips/
+    - title: Managing Secrets
+      url: /guides/secrets/
+    - title: Go SDK
+      url: /guides/go-sdk/
+
+- section: Community
+  items:
+    - title: Contributing
+      url: /community/contributing/
+    - title: Troubleshooting
+      url: /community/troubleshooting/
+    - title: Telemetry
+      url: /community/telemetry/

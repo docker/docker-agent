@@ -1,20 +1,20 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
     model: openai/gpt-4o-mini
     description: A helpful AI assistant with a welcome message
     welcome_message: |
-      👋 **Welcome to cagent!**
-      
+      👋 **Welcome to docker-agent!**
+
       I'm your AI assistant, ready to help you with various tasks.
-      
+
       Here are some things I can do:
-      - Answer questions and provide information
-      - Help with coding and technical problems
-      - Assist with writing and content creation
-      - And much more!
-      
+        - Answer questions and provide information
+        - Help with coding and technical problems
+        - Assist with writing and content creation
+        - And much more!
+
       Just type your question or request below to get started.
     instruction: |
       You are a knowledgeable and helpful assistant.

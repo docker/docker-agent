@@ -1,0 +1,78 @@
+#!/usr/bin/env docker agent run
+# yaml-language-server: $schema=../agent-schema.json
+
+# This example demonstrates how to use the top-level `mcps` section to define
+# MCP servers once and reference them across multiple agents, avoiding duplication.
+
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+    max_tokens: 64000
+
+# Define MCP servers once at the top level.
+# Each entry can use `command`, `remote`, or `ref` (just like inline MCP toolsets).
+mcps:
+  context7:
+    ref: docker:context7
+
+  github:
+    ref: docker:github-official
+    env:
+      GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+    tools:
+      - create_or_update_file
+      - search_repositories
+      - create_repository
+      - get_file_contents
+      - push_files
+      - create_issue
+      - create_pull_request
+      - list_issues
+
+agents:
+  root:
+    model: model
+    description: Lead developer
+    instruction: |
+      You are the lead developer. Coordinate the team.
+    sub_agents: [frontend, backend]
+    toolsets:
+      - type: filesystem
+      - type: think
+      # Reference the MCP definition by name — no need to repeat the full config.
+      - type: mcp
+        ref: context7
+      - type: mcp
+        ref: github
+
+  frontend:
+    model: model
+    description: Frontend engineer
+    instruction: |
+      You are a frontend engineer.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      # Same MCP server, referenced by name.
+      - type: mcp
+        ref: context7
+      # Reference github MCP but override the tool list for this agent.
+      - type: mcp
+        ref: github
+        tools:
+          - get_file_contents
+          - search_repositories
+
+  backend:
+    model: model
+    description: Backend engineer
+    instruction: |
+      You are a backend engineer.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: mcp
+        ref: context7
+      - type: mcp
+        ref: github

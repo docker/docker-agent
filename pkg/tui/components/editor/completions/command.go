@@ -1,25 +1,21 @@
 package completions
 
 import (
-	"context"
+	"slices"
+	"strings"
 
-	"github.com/docker/cagent/pkg/app"
-	"github.com/docker/cagent/pkg/tui/commands"
-	"github.com/docker/cagent/pkg/tui/components/completion"
+	"github.com/docker/docker-agent/pkg/tui/commands"
+	"github.com/docker/docker-agent/pkg/tui/components/completion"
 )
 
 type commandCompletion struct {
-	app *app.App
+	categories []commands.Category
 }
 
-func NewCommandCompletion(a *app.App) Completion {
+func NewCommandCompletion(categories []commands.Category) Completion {
 	return &commandCompletion{
-		app: a,
+		categories: categories,
 	}
-}
-
-func (c *commandCompletion) AutoSubmit() bool {
-	return true // Commands auto-submit: selecting inserts command text and sends it
 }
 
 func (c *commandCompletion) RequiresEmptyEditor() bool {
@@ -33,7 +29,7 @@ func (c *commandCompletion) Trigger() string {
 func (c *commandCompletion) Items() []completion.Item {
 	var items []completion.Item
 
-	for _, cmd := range commands.BuildCommandCategories(context.Background(), c.app) {
+	for _, cmd := range c.categories {
 		for _, command := range cmd.Commands {
 			items = append(items, completion.Item{
 				Label:       command.Label,
@@ -43,6 +39,13 @@ func (c *commandCompletion) Items() []completion.Item {
 		}
 	}
 
+	return sortItemsByLabel(items)
+}
+
+func sortItemsByLabel(items []completion.Item) []completion.Item {
+	slices.SortFunc(items, func(a, b completion.Item) int {
+		return strings.Compare(strings.ToLower(a.Label), strings.ToLower(b.Label))
+	})
 	return items
 }
 

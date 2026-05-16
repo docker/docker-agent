@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
@@ -7,7 +7,7 @@ agents:
     instruction: Use your tool to help the user with their github requests.
     code_mode_tools: true
     commands:
-      demo: How many issues in docker/cagent have a number that is prime?
+      demo: How many issues in docker/docker-agent have a number that is prime?
     toolsets:
       - type: mcp
         ref: docker:github-official

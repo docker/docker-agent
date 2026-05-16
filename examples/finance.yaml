@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
@@ -50,6 +50,7 @@ agents:
     toolsets:
       - type: mcp
         command: uvx
+        version: "astral-sh/uv"
         args: ["yfmcp"]
 
   web_search_agent:
@@ -67,4 +68,4 @@ agents:
 models:
   claude:
     provider: anthropic
-    model: claude-3-7-sonnet-latest
+    model: claude-sonnet-4-6

@@ -2,9 +2,10 @@ package fusion
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 
-	"github.com/docker/cagent/pkg/rag/database"
+	"github.com/docker/docker-agent/pkg/rag/database"
 )
 
 // Fusion defines the interface for combining results from multiple retrieval strategies
@@ -29,7 +30,7 @@ func New(config Config) (Fusion, error) {
 
 	case "weighted":
 		if len(config.Weights) == 0 {
-			return nil, fmt.Errorf("weighted fusion requires strategy weights")
+			return nil, errors.New("weighted fusion requires strategy weights")
 		}
 		return NewWeightedFusion(config.Weights), nil
 

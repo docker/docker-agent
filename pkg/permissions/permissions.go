@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/cagent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
 // Decision represents the permission decision for a tool call
@@ -20,6 +20,9 @@ const (
 	Allow
 	// Deny means the tool is rejected and should not be executed
 	Deny
+	// ForceAsk means an explicit ask pattern matched; the tool must be
+	// confirmed even if it would normally be auto-approved (e.g. read-only).
+	ForceAsk
 )
 
 // String returns a human-readable representation of the decision
@@ -31,6 +34,8 @@ func (d Decision) String() string {
 		return "allow"
 	case Deny:
 		return "deny"
+	case ForceAsk:
+		return "force_ask"
 	default:
 		return "unknown"
 	}
@@ -39,6 +44,7 @@ func (d Decision) String() string {
 // Checker evaluates tool permissions based on configured patterns
 type Checker struct {
 	allowPatterns []string
+	askPatterns   []string
 	denyPatterns  []string
 }
 
@@ -49,6 +55,7 @@ func NewChecker(cfg *latest.PermissionsConfig) *Checker {
 	}
 	return &Checker{
 		allowPatterns: cfg.Allow,
+		askPatterns:   cfg.Ask,
 		denyPatterns:  cfg.Deny,
 	}
 }
@@ -61,7 +68,7 @@ func (c *Checker) Check(toolName string) Decision {
 }
 
 // CheckWithArgs evaluates the permission for a given tool name and its arguments.
-// Evaluation order: Deny (checked first), then Allow, then Ask (default)
+// Evaluation order: Deny (checked first), then Allow, then Ask (explicit), then Ask (default).
 //
 // The toolName can be a simple name like "shell" or a qualified name like
 // "mcp:github:create_issue".
@@ -71,33 +78,69 @@ func (c *Checker) Check(toolName string) Decision {
 // - Argument matching: "shell:cmd=ls*" matches shell tool with cmd argument starting with "ls"
 // - Multiple arguments: "shell:cmd=ls*:cwd=/home/*" matches both conditions
 // - Glob patterns in both tool names and argument values
+//
+// Returns ForceAsk when an explicit ask pattern matches. ForceAsk means the
+// tool must always be confirmed, even when it would normally be auto-approved
+// (e.g. read-only tools). Note that --yolo mode takes precedence over ForceAsk.
 func (c *Checker) CheckWithArgs(toolName string, args map[string]any) Decision {
 	// Deny patterns are checked first - they take priority
-	for _, pattern := range c.denyPatterns {
-		if matchToolPattern(pattern, toolName, args) {
-			return Deny
-		}
+	if matchAny(c.denyPatterns, toolName, args) {
+		return Deny
 	}
 
 	// Allow patterns are checked second
-	for _, pattern := range c.allowPatterns {
-		if matchToolPattern(pattern, toolName, args) {
-			return Allow
-		}
+	if matchAny(c.allowPatterns, toolName, args) {
+		return Allow
+	}
+
+	// Explicit ask patterns override auto-approval (e.g. read-only hints)
+	if matchAny(c.askPatterns, toolName, args) {
+		return ForceAsk
 	}
 
 	// Default is Ask
 	return Ask
 }
 
+// matchAny reports whether any pattern in the list matches the tool name and args.
+func matchAny(patterns []string, toolName string, args map[string]any) bool {
+	for _, pattern := range patterns {
+		if matchToolPattern(pattern, toolName, args) {
+			return true
+		}
+	}
+	return false
+}
+
+// Merge returns a new Checker that combines the patterns from all provided
+// checkers. Nil or empty checkers are skipped. The merged checker evaluates
+// all deny patterns first, then all allow patterns, then all ask patterns.
+func Merge(checkers ...*Checker) *Checker {
+	var allow, ask, deny []string
+	for _, c := range checkers {
+		if c == nil || c.IsEmpty() {
+			continue
+		}
+		allow = append(allow, c.allowPatterns...)
+		ask = append(ask, c.askPatterns...)
+		deny = append(deny, c.denyPatterns...)
+	}
+	return &Checker{allowPatterns: allow, askPatterns: ask, denyPatterns: deny}
+}
+
 // IsEmpty returns true if no permissions are configured
 func (c *Checker) IsEmpty() bool {
-	return len(c.allowPatterns) == 0 && len(c.denyPatterns) == 0
+	return len(c.allowPatterns) == 0 && len(c.askPatterns) == 0 && len(c.denyPatterns) == 0
 }
 
 // AllowPatterns returns the list of allow patterns.
 func (c *Checker) AllowPatterns() []string {
 	return c.allowPatterns
+}
+
+// AskPatterns returns the list of ask patterns.
+func (c *Checker) AskPatterns() []string {
+	return c.askPatterns
 }
 
 // DenyPatterns returns the list of deny patterns.
@@ -152,12 +195,7 @@ func matchToolPattern(pattern, toolName string, args map[string]any) bool {
 		return true
 	}
 
-	// If pattern has argument conditions but no args provided, no match
-	if args == nil {
-		return false
-	}
-
-	// All argument patterns must match
+	// All argument patterns must match (indexing a nil args map is safe in Go)
 	for argName, argPattern := range argPatterns {
 		argValue, exists := args[argName]
 		if !exists {
@@ -179,16 +217,9 @@ func argToString(v any) string {
 	switch val := v.(type) {
 	case string:
 		return val
-	case bool:
-		return fmt.Sprintf("%t", val)
 	case float64:
-		// JSON numbers are float64 - format without trailing zeros
-		if val == float64(int64(val)) {
-			return fmt.Sprintf("%d", int64(val))
-		}
+		// JSON numbers are float64 - use %g for shortest representation
 		return fmt.Sprintf("%g", val)
-	case int, int64:
-		return fmt.Sprintf("%d", val)
 	default:
 		return fmt.Sprintf("%v", v)
 	}
@@ -213,10 +244,11 @@ func matchGlob(pattern, value string) bool {
 
 	// Handle trailing wildcard for prefix matching
 	// This allows "sudo*" to match "sudo rm -rf /"
-	if strings.HasSuffix(pattern, "*") && !strings.HasSuffix(pattern, "\\*") {
+	if strings.HasSuffix(pattern, "*") {
 		prefix := pattern[:len(pattern)-1]
-		// If prefix contains no other glob characters, do simple prefix match
-		if !strings.ContainsAny(prefix, "*?[") {
+		// If prefix contains no other glob characters, do simple prefix match.
+		// Including \ catches escaped asterisks (e.g. "foo\*").
+		if !strings.ContainsAny(prefix, `*?[\`) {
 			return strings.HasPrefix(value, prefix)
 		}
 	}

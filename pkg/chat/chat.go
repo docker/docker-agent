@@ -1,6 +1,21 @@
 package chat
 
-import "github.com/docker/cagent/pkg/tools"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/docker/docker-agent/pkg/tools"
+)
+
+// MaxInlineFileSize is the maximum size of a text file that can be inlined
+// directly into a message. Files larger than this are skipped with a warning.
+// This is much smaller than the general upload limit because inline content
+// expands token usage significantly.
+const MaxInlineFileSize = 5 * 1024 * 1024 // 5MB
 
 type MessageRole string
 
@@ -14,8 +29,11 @@ const (
 type MessagePartType string
 
 const (
-	MessagePartTypeText     MessagePartType = "text"
+	MessagePartTypeText MessagePartType = "text"
+	// MessagePartTypeImageURL is superseded by MessagePartTypeDocument. Will be removed in a future release.
 	MessagePartTypeImageURL MessagePartType = "image_url"
+	// MessagePartTypeFile is superseded by MessagePartTypeDocument. Will be removed in a future release.
+	MessagePartTypeFile MessagePartType = "file"
 )
 
 type ImageURLDetail string
@@ -59,6 +77,9 @@ type Message struct {
 	// For Role=tool prompts this should be set to the ID given in the assistant's prior request to call a tool.
 	ToolCallID string `json:"tool_call_id,omitempty"`
 
+	// IsError indicates the tool call failed (only for Role=tool messages).
+	IsError bool `json:"is_error,omitempty"`
+
 	CreatedAt string `json:"created_at,omitempty"`
 
 	// Usage tracks token usage for this message (only set for assistant messages)
@@ -70,14 +91,31 @@ type Message struct {
 	// Cost is the cost of this message in dollars (only set for assistant messages)
 	Cost float64 `json:"cost,omitempty"`
 
+	// FinishReason indicates why the model stopped generating for this message.
+	// "stop" = natural end, "tool_calls" = tool invocation, "length" = token limit.
+	// Only set for assistant messages.
+	FinishReason FinishReason `json:"finish_reason,omitempty"`
+
 	// CacheControl indicates whether this message is a cached message (only used by anthropic)
 	CacheControl bool `json:"cache_control,omitempty"`
 }
 
+// MessageFile represents a file attachment that can be uploaded to a provider's file storage.
+type MessageFile struct {
+	Path     string `json:"path,omitempty"`      // Local file path (used for upload)
+	FileID   string `json:"file_id,omitempty"`   // Provider-specific file ID (after upload)
+	MimeType string `json:"mime_type,omitempty"` // MIME type of the file
+}
+
 type MessagePart struct {
-	Type     MessagePartType  `json:"type,omitempty"`
-	Text     string           `json:"text,omitempty"`
+	Type MessagePartType `json:"type,omitempty"`
+	Text string          `json:"text,omitempty"`
+	// Note: superseded by Document+MessagePartTypeDocument. Will be removed in a future release.
 	ImageURL *MessageImageURL `json:"image_url,omitempty"`
+	// Note: superseded by Document+MessagePartTypeDocument. Will be removed in a future release.
+	File *MessageFile `json:"file,omitempty"`
+	// Document is set when Type is MessagePartTypeDocument.
+	Document *Document `json:"document,omitempty"`
 }
 
 // FinishReason represents the reason why the model finished generating a response
@@ -114,13 +152,12 @@ type MessageStreamChoice struct {
 
 // MessageStreamResponse represents a streaming response from the model
 type MessageStreamResponse struct {
-	ID        string                `json:"id"`
-	Object    string                `json:"object"`
-	Created   int64                 `json:"created"`
-	Model     string                `json:"model"`
-	Choices   []MessageStreamChoice `json:"choices"`
-	Usage     *Usage                `json:"usage,omitempty"`
-	RateLimit *RateLimit            `json:"rate_limit,omitempty"`
+	ID      string                `json:"id"`
+	Object  string                `json:"object"`
+	Created int64                 `json:"created"`
+	Model   string                `json:"model"`
+	Choices []MessageStreamChoice `json:"choices"`
+	Usage   *Usage                `json:"usage,omitempty"`
 }
 
 type Usage struct {
@@ -131,17 +168,209 @@ type Usage struct {
 	ReasoningTokens   int64 `json:"reasoning_tokens,omitempty"`
 }
 
-type RateLimit struct {
-	Limit      int64 `json:"limit,omitempty"`
-	Remaining  int64 `json:"remaining,omitempty"`
-	Reset      int64 `json:"reset,omitempty"`
-	RetryAfter int64 `json:"retry_after,omitempty"`
-}
-
 // MessageStream interface represents a stream of chat completions
 type MessageStream interface {
 	// Recv gets the next completion chunk
 	Recv() (MessageStreamResponse, error)
 	// Close closes the stream
 	Close()
+}
+
+// DetectMimeType returns the MIME type for a file by reading its first 512
+// bytes and inspecting the content (magic bytes). For text-based files that
+// http.DetectContentType cannot distinguish (e.g. source code vs plain text),
+// it falls back to extension matching. This is the canonical implementation
+// used across all packages for consistency.
+func DetectMimeType(filePath string) string {
+	// Content sniffing — reliably detects images, PDF, etc.
+	if ct := detectMimeTypeFromFile(filePath); ct != "application/octet-stream" {
+		return ct
+	}
+
+	// http.DetectContentType returns "application/octet-stream" for text
+	// files it can't classify, so fall back to extension for those.
+	if isTextExtension(strings.ToLower(filepath.Ext(filePath))) {
+		return "text/plain"
+	}
+	return "application/octet-stream"
+}
+
+// detectMimeTypeFromFile reads the first 512 bytes of a file and uses
+// content-based detection (magic bytes) to determine the MIME type.
+func detectMimeTypeFromFile(filePath string) string {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "application/octet-stream"
+	}
+	defer f.Close()
+
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	if n == 0 {
+		return "application/octet-stream"
+	}
+	return DetectMimeTypeByContent(buf[:n])
+}
+
+// IsImageMimeType returns true if the MIME type is a supported image type.
+func IsImageMimeType(mimeType string) bool {
+	switch mimeType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsImageFile returns true if the file at the given path is a supported image
+// based on its extension. Supported formats: JPEG, PNG, GIF, WebP.
+func IsImageFile(filePath string) bool {
+	return IsImageMimeType(DetectMimeType(filePath))
+}
+
+// IsSupportedMimeType returns true if the MIME type is supported for file attachments.
+// Supported types include images (jpeg, png, gif, webp) and documents (pdf, text, markdown).
+func IsSupportedMimeType(mimeType string) bool {
+	switch mimeType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	case "application/pdf", "text/plain":
+		return true
+	default:
+		return false
+	}
+}
+
+// IsTextFile determines if a file at the given path is a text file that should
+// be inlined into the message rather than uploaded via a provider's file API.
+// It first checks the file extension against a broad allowlist of known text
+// extensions. For unknown extensions, it falls back to reading the first 8KB
+// and checking if the content is valid UTF-8 with no null bytes.
+func IsTextFile(filePath string) bool {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if isTextExtension(ext) {
+		return true
+	}
+	// For unknown extensions, try byte-sniffing
+	return isTextByContent(filePath)
+}
+
+// ReadFileForInline reads a text file and wraps it in an XML-like tag with
+// the file path for context. Returns the formatted content and any error.
+func ReadFileForInline(filePath string) (string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read file: %w", err)
+	}
+	return fmt.Sprintf("<attached_file path=%q>\n%s\n</attached_file>", filePath, string(data)), nil
+}
+
+// isTextExtension returns true for file extensions known to be text-based.
+// This includes programming languages, config files, markup, and data formats.
+func isTextExtension(ext string) bool {
+	switch ext {
+	// Plain text and documentation
+	case ".txt", ".text", ".log",
+		".md", ".markdown", ".mdown", ".mkd", ".mdx",
+		".rst", ".adoc", ".asciidoc",
+		".org", ".wiki", ".tex", ".latex",
+		// Web
+		".html", ".htm", ".xhtml", ".css", ".scss", ".sass", ".less",
+		".js", ".jsx", ".mjs", ".cjs",
+		".ts", ".tsx", ".mts", ".cts",
+		".vue", ".svelte", ".astro",
+		// Programming languages
+		".go", ".py", ".pyi", ".pyw",
+		".rb", ".rbw",
+		".rs",
+		".java", ".kt", ".kts", ".groovy", ".scala", ".clj", ".cljs",
+		".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hxx", ".hh",
+		".cs", ".fs", ".fsx",
+		".swift", ".m", ".mm",
+		".r", ".R",
+		".lua",
+		".pl", ".pm", ".perl",
+		".php",
+		".ex", ".exs",
+		".erl", ".hrl",
+		".hs", ".lhs",
+		".ml", ".mli",
+		".nim",
+		".zig",
+		".v", ".sv",
+		".dart",
+		".jl",
+		".d",
+		".pas", ".pp",
+		".lisp", ".cl", ".el",
+		".tcl",
+		".awk",
+		".sql",
+		// Shell and scripting
+		".sh", ".bash", ".zsh", ".fish", ".ksh", ".csh",
+		".ps1", ".psm1", ".psd1",
+		".bat", ".cmd",
+		// Data and config formats
+		".json", ".jsonl", ".ndjson", ".json5", ".jsonc",
+		".yaml", ".yml",
+		".toml",
+		".xml", ".xsl", ".xslt", ".xsd", ".dtd",
+		".csv", ".tsv",
+		".ini", ".cfg", ".conf", ".config",
+		".env", ".envrc",
+		".properties",
+		".plist",
+		".hcl", ".tf", ".tfvars",
+		// Build and project files
+		".makefile", ".mk",
+		".cmake",
+		".gradle",
+		".sbt",
+		".cabal",
+		".gemspec",
+		".podspec",
+		// Docker and container
+		".dockerfile",
+		".containerfile",
+		// Git
+		".gitignore", ".gitattributes", ".gitmodules",
+		// Editor and IDE config
+		".editorconfig",
+		".eslintrc", ".prettierrc", ".stylelintrc",
+		// Other
+		".proto", ".thrift", ".avsc",
+		".graphql", ".gql",
+		".svg",
+		".diff", ".patch":
+		return true
+	default:
+		return false
+	}
+}
+
+// isTextByContent reads the first 8KB of a file and checks if it looks like text.
+// A file is considered text if it's valid UTF-8 and contains no null bytes.
+func isTextByContent(filePath string) bool {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 8*1024)
+	n, _ := f.Read(buf)
+	if n == 0 {
+		// Empty files are treated as text
+		return true
+	}
+
+	data := buf[:n]
+
+	// Check for null bytes (strong binary indicator)
+	if slices.Contains(data, 0) {
+		return false
+	}
+
+	// Check if the content is valid UTF-8
+	return utf8.Valid(data)
 }

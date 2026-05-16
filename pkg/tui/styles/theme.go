@@ -3,10 +3,9 @@ package styles
 import (
 	"embed"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,8 +16,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/goccy/go-yaml"
 
-	"github.com/docker/cagent/pkg/paths"
-	"github.com/docker/cagent/pkg/userconfig"
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 //go:embed themes/*.yaml
@@ -124,12 +123,19 @@ type ThemeColors struct {
 	SelectedFg      string `yaml:"selected_fg,omitempty"` // Text on selected/brand backgrounds
 	SuggestionGhost string `yaml:"suggestion_ghost,omitempty"`
 	TabBg           string `yaml:"tab_bg,omitempty"`
+	TabActiveBg     string `yaml:"tab_active_bg,omitempty"`   // Active/focused tab background
+	TabActiveFg     string `yaml:"tab_active_fg,omitempty"`   // Active/focused tab text
+	TabInactiveFg   string `yaml:"tab_inactive_fg,omitempty"` // Inactive/unfocused tab text
+	TabBorder       string `yaml:"tab_border,omitempty"`      // Tab left/right border color
 	Placeholder     string `yaml:"placeholder,omitempty"`
 
 	// Badge colors
 	BadgeAccent  string `yaml:"badge_accent,omitempty"`  // Accent badge (e.g., purple highlights)
 	BadgeInfo    string `yaml:"badge_info,omitempty"`    // Info badge (e.g., cyan)
 	BadgeSuccess string `yaml:"badge_success,omitempty"` // Success badge (e.g., green)
+
+	// Agent colors
+	AgentHues []float64 `yaml:"agent_hues,omitempty"` // Hue values (0-360) for agent color generation
 }
 
 // ChromaColors contains syntax highlighting colors (for code blocks).
@@ -274,10 +280,10 @@ func listBuiltinThemeRefs() ([]string, error) {
 		}
 		name := entry.Name()
 		// Accept .yaml and .yml files
-		if strings.HasSuffix(name, ".yaml") {
-			refs = append(refs, strings.TrimSuffix(name, ".yaml"))
-		} else if strings.HasSuffix(name, ".yml") {
-			refs = append(refs, strings.TrimSuffix(name, ".yml"))
+		if before, ok := strings.CutSuffix(name, ".yaml"); ok {
+			refs = append(refs, before)
+		} else if before, ok := strings.CutSuffix(name, ".yml"); ok {
+			refs = append(refs, before)
 		}
 	}
 
@@ -380,10 +386,10 @@ func listThemeRefsFrom(dir string) ([]string, error) {
 		}
 		name := entry.Name()
 		// Accept .yaml and .yml files
-		if strings.HasSuffix(name, ".yaml") {
-			refs = append(refs, strings.TrimSuffix(name, ".yaml"))
-		} else if strings.HasSuffix(name, ".yml") {
-			refs = append(refs, strings.TrimSuffix(name, ".yml"))
+		if before, ok := strings.CutSuffix(name, ".yaml"); ok {
+			refs = append(refs, before)
+		} else if before, ok := strings.CutSuffix(name, ".yml"); ok {
+			refs = append(refs, before)
 		}
 	}
 
@@ -565,12 +571,7 @@ func IsBuiltinTheme(ref string) bool {
 		return false
 	}
 
-	for _, builtinRef := range builtinRefs {
-		if builtinRef == ref {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(builtinRefs, ref)
 }
 
 // loadThemeFrom loads a theme from a specific directory (for testing).
@@ -733,6 +734,18 @@ func mergeColors(base, override ThemeColors) ThemeColors {
 	if override.TabBg != "" {
 		result.TabBg = override.TabBg
 	}
+	if override.TabActiveBg != "" {
+		result.TabActiveBg = override.TabActiveBg
+	}
+	if override.TabActiveFg != "" {
+		result.TabActiveFg = override.TabActiveFg
+	}
+	if override.TabInactiveFg != "" {
+		result.TabInactiveFg = override.TabInactiveFg
+	}
+	if override.TabBorder != "" {
+		result.TabBorder = override.TabBorder
+	}
 	if override.Placeholder != "" {
 		result.Placeholder = override.Placeholder
 	}
@@ -745,6 +758,10 @@ func mergeColors(base, override ThemeColors) ThemeColors {
 	}
 	if override.BadgeSuccess != "" {
 		result.BadgeSuccess = override.BadgeSuccess
+	}
+	// Agent colors
+	if len(override.AgentHues) > 0 {
+		result.AgentHues = override.AgentHues
 	}
 	return result
 }
@@ -925,9 +942,16 @@ func ApplyTheme(theme *Theme) {
 	TabBg = lipgloss.Color(c.TabBg)
 	TabPrimaryFg = lipgloss.Color(c.TextMuted)
 	TabAccentFg = lipgloss.Color(c.Highlight)
+	TabActiveBg = lipgloss.Color(c.TabActiveBg)
+	TabActiveFg = lipgloss.Color(c.TabActiveFg)
+	TabInactiveFg = lipgloss.Color(c.TabInactiveFg)
+	TabBorder = lipgloss.Color(c.TabBorder)
 
 	// Rebuild all derived styles
 	rebuildStyles()
+
+	// Rebuild cached agent color styles with new theme contrast values
+	InvalidateAgentColorCache()
 
 	// Clear style sequence cache (used by RenderComposite)
 	clearStyleSeqCache()
@@ -937,7 +961,7 @@ func ApplyTheme(theme *Theme) {
 func rebuildStyles() {
 	// Base styles
 	BaseStyle = NoStyle.Foreground(TextPrimary)
-	AppStyle = BaseStyle.Padding(0, 1, 0, AppPaddingLeft)
+	AppStyle = BaseStyle.Padding(0, AppPadding, 0, AppPadding)
 
 	// Text styles
 	HighlightWhiteStyle = BaseStyle.Foreground(White).Bold(true)
@@ -985,6 +1009,10 @@ func rebuildStyles() {
 
 	SelectedMessageStyle = AssistantMessageStyle.
 		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(Success)
+
+	SelectedUserMessageStyle = UserMessageStyle.
+		BorderStyle(lipgloss.ThickBorder()).
 		BorderForeground(Success)
 
 	// Dialog styles
@@ -1121,7 +1149,7 @@ func rebuildStyles() {
 		},
 	}
 
-	EditorStyle = BaseStyle.Padding(1, 0, 0, 0)
+	EditorStyle = BaseStyle.Padding(1, AppPadding, 0, AppPadding)
 	SuggestionGhostStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost))
 	SuggestionCursorStyle = BaseStyle.Background(Accent).Foreground(lipgloss.Color(CurrentTheme().Colors.SuggestionGhost))
 
@@ -1133,8 +1161,8 @@ func rebuildStyles() {
 
 	// Scrollbar styles
 	TrackStyle = lipgloss.NewStyle().Foreground(BorderSecondary)
-	ThumbStyle = lipgloss.NewStyle().Foreground(Info).Background(BackgroundAlt).Bold(true)
-	ThumbActiveStyle = lipgloss.NewStyle().Foreground(White).Background(BackgroundAlt).Bold(true)
+	ThumbStyle = lipgloss.NewStyle().Foreground(Info).Background(BackgroundAlt)
+	ThumbActiveStyle = lipgloss.NewStyle().Foreground(White).Background(BackgroundAlt)
 
 	// Resize handle styles
 	ResizeHandleStyle = BaseStyle.Foreground(BorderSecondary)
@@ -1195,92 +1223,6 @@ func rebuildStyles() {
 	SpinnerTextBrightStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SpinnerBright))
 	SpinnerTextDimStyle = BaseStyle.Foreground(lipgloss.Color(CurrentTheme().Colors.SpinnerDim))
 	SpinnerTextDimmestStyle = BaseStyle.Foreground(Accent)
-}
-
-func bestForegroundHex(bgHex string, candidates ...string) string {
-	if len(candidates) == 0 {
-		return ""
-	}
-	best := candidates[0]
-	bestRatio := -1.0
-
-	for _, cand := range candidates {
-		ratio, ok := contrastRatioHex(cand, bgHex)
-		if !ok {
-			continue
-		}
-		if ratio > bestRatio {
-			bestRatio = ratio
-			best = cand
-		}
-	}
-
-	return best
-}
-
-func contrastRatioHex(fgHex, bgHex string) (float64, bool) {
-	fgLum, ok := relativeLuminanceHex(fgHex)
-	if !ok {
-		return 0, false
-	}
-	bgLum, ok := relativeLuminanceHex(bgHex)
-	if !ok {
-		return 0, false
-	}
-
-	L1, L2 := fgLum, bgLum
-	if L2 > L1 {
-		L1, L2 = L2, L1
-	}
-
-	return (L1 + 0.05) / (L2 + 0.05), true
-}
-
-func relativeLuminanceHex(hex string) (float64, bool) {
-	r, g, b, ok := parseHexRGB01(hex)
-	if !ok {
-		return 0, false
-	}
-
-	// WCAG 2.x relative luminance for sRGB
-	rl := 0.2126*srgbToLinear(r) + 0.7152*srgbToLinear(g) + 0.0722*srgbToLinear(b)
-	return rl, true
-}
-
-func srgbToLinear(c float64) float64 {
-	if c <= 0.03928 {
-		return c / 12.92
-	}
-	return math.Pow((c+0.055)/1.055, 2.4)
-}
-
-func parseHexRGB01(hex string) (float64, float64, float64, bool) {
-	if !strings.HasPrefix(hex, "#") {
-		return 0, 0, 0, false
-	}
-
-	h := strings.TrimPrefix(hex, "#")
-	if len(h) == 3 {
-		h = string([]byte{h[0], h[0], h[1], h[1], h[2], h[2]})
-	}
-	if len(h) != 6 {
-		return 0, 0, 0, false
-	}
-
-	r8, err := strconv.ParseUint(h[0:2], 16, 8)
-	if err != nil {
-		return 0, 0, 0, false
-	}
-	g8, err := strconv.ParseUint(h[2:4], 16, 8)
-	if err != nil {
-		return 0, 0, 0, false
-	}
-	b8, err := strconv.ParseUint(h[4:6], 16, 8)
-	if err != nil {
-		return 0, 0, 0, false
-	}
-
-	return float64(r8) / 255.0, float64(g8) / 255.0, float64(b8) / 255.0, true
 }
 
 // init applies the default theme at package initialization time.

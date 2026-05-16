@@ -1,0 +1,49 @@
+#!/usr/bin/env docker agent run
+
+# This example demonstrates the background_agents toolset, which lets a
+# coordinator dispatch work to multiple sub-agents in parallel rather than
+# waiting for each one sequentially.
+#
+# The coordinator fans out research tasks to two specialists at the same time,
+# monitors their progress, and synthesises a final answer once both are done.
+
+agents:
+  root:
+    model: anthropic/claude-sonnet-4-0
+    description: Research coordinator that dispatches work in parallel
+    instruction: |
+      You are a research coordinator. When the user asks a question:
+
+      1. Break the question into independent research tasks.
+      2. Dispatch each task to the appropriate sub-agent using
+         `run_background_agent` so they run in parallel.
+      3. Use `list_background_agents` or `view_background_agent` to check
+         progress and collect results.
+      4. Synthesise the findings into a clear, well-structured answer.
+
+      Always run independent tasks concurrently — do not wait for one to
+      finish before starting the next.
+    sub_agents: [web_researcher, code_analyst]
+    toolsets:
+      - type: think
+      - type: background_agents
+
+  web_researcher:
+    model: openai/gpt-4o
+    description: Searches the web for information and summarises findings
+    instruction: |
+      You are a web researcher. Use the search tools to find relevant,
+      up-to-date information. Provide concise summaries with sources.
+    toolsets:
+      - type: mcp
+        ref: docker:duckduckgo
+
+  code_analyst:
+    model: anthropic/claude-sonnet-4-0
+    description: Analyses local code and provides technical insights
+    instruction: |
+      You are a code analyst. Read the codebase to answer technical
+      questions. Reference specific files and line numbers in your answers.
+    toolsets:
+      - type: filesystem
+      - type: shell

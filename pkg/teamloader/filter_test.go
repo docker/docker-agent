@@ -8,11 +8,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 type mockToolSet struct {
 	tools.ToolSet
+
 	toolsFunc func(ctx context.Context) ([]tools.Tool, error)
 }
 
@@ -118,4 +119,53 @@ func TestWithToolsFilter_CaseSensitive(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result, 1)
 	assert.Equal(t, "tool1", result[0].Name)
+}
+
+type instructableToolSet struct {
+	mockToolSet
+
+	instructions string
+}
+
+func (i *instructableToolSet) Instructions() string {
+	return i.instructions
+}
+
+func TestWithToolsFilter_InstructablePassthrough(t *testing.T) {
+	// Test that filtering preserves instructions from inner toolset
+	inner := &instructableToolSet{
+		mockToolSet: mockToolSet{
+			toolsFunc: func(context.Context) ([]tools.Tool, error) {
+				return []tools.Tool{{Name: "tool1"}, {Name: "tool2"}}, nil
+			},
+		},
+		instructions: "Test instructions for the toolset",
+	}
+
+	wrapped := WithToolsFilter(inner, "tool1")
+
+	// Verify instructions are preserved through the filter wrapper
+	instructions := tools.GetInstructions(wrapped)
+	assert.Equal(t, "Test instructions for the toolset", instructions)
+
+	// Verify filtering still works
+	result, err := wrapped.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, result, 1)
+	assert.Equal(t, "tool1", result[0].Name)
+}
+
+func TestWithToolsFilter_NonInstructableInner(t *testing.T) {
+	// Test that filter works with toolsets that don't implement Instructable
+	inner := &mockToolSet{
+		toolsFunc: func(context.Context) ([]tools.Tool, error) {
+			return []tools.Tool{{Name: "tool1"}}, nil
+		},
+	}
+
+	wrapped := WithToolsFilter(inner, "tool1")
+
+	// Verify instructions are empty for non-instructable inner toolset
+	instructions := tools.GetInstructions(wrapped)
+	assert.Empty(t, instructions)
 }

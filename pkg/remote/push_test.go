@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/content"
+	"github.com/docker/docker-agent/pkg/content"
 )
 
 func TestPush(t *testing.T) {
@@ -38,18 +38,18 @@ func TestPush(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, loadedImg)
 
-	err = Push("invalid:reference:with:too:many:colons")
+	err = Push(t.Context(), "invalid:reference:with:too:many:colons")
 	require.Error(t, err)
 
-	err = Push("invalid:reference:with:too:many:colons")
+	err = Push(t.Context(), "invalid:reference:with:too:many:colons")
 	require.Error(t, err)
 }
 
 func TestPushNonExistentArtifact(t *testing.T) {
-	err := Push("registry.example.com/test:latest")
+	err := Push(t.Context(), "registry.example.com/test:latest")
 	require.Error(t, err)
 
-	err = Push("registry.example.com/test:latest")
+	err = Push(t.Context(), "registry.example.com/test:latest")
 	require.Error(t, err)
 }
 

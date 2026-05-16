@@ -6,440 +6,533 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
+	goruntime "runtime"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/atotto/clipboard"
 
-	"github.com/docker/cagent/pkg/app"
-	"github.com/docker/cagent/pkg/browser"
-	"github.com/docker/cagent/pkg/evaluation"
-	"github.com/docker/cagent/pkg/modelsdev"
-	"github.com/docker/cagent/pkg/tools"
-	mcptools "github.com/docker/cagent/pkg/tools/mcp"
-	"github.com/docker/cagent/pkg/tui/components/notification"
-	"github.com/docker/cagent/pkg/tui/core"
-	"github.com/docker/cagent/pkg/tui/dialog"
-	"github.com/docker/cagent/pkg/tui/messages"
-	"github.com/docker/cagent/pkg/tui/page/chat"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/browser"
+	"github.com/docker/docker-agent/pkg/evaluation"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/shellpath"
+	"github.com/docker/docker-agent/pkg/tools"
+	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
+	"github.com/docker/docker-agent/pkg/tui/components/markdown"
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/editfile"
+	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/dialog"
+	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
-// Session management handlers
+// --- Session management ---
 
-func (a *appModel) applyKeyboardEnhancements() {
-	if a.keyboardEnhancements != nil {
-		updated, _ := a.chatPage.Update(*a.keyboardEnhancements)
-		a.chatPage = updated.(chat.Page)
+func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Model, tea.Cmd) {
+	store := m.application.SessionStore()
+	if store == nil {
+		return m, notification.ErrorCmd("No session store configured")
 	}
-}
+	if msg.ParentSessionID == "" {
+		return m, notification.ErrorCmd("No parent session for branch")
+	}
 
-func (a *appModel) handleNewSession() (tea.Model, tea.Cmd) {
-	// Theme is now global - no per-session theme reset needed
-	a.application.NewSession()
-	sess := a.application.Session()
-	a.sessionState = service.NewSessionState(sess)
-	a.chatPage = chat.New(a.application, a.sessionState)
-	a.dialog = dialog.New()
-	a.applyKeyboardEnhancements()
+	ctx := context.Background()
 
-	return a, tea.Batch(
-		a.Init(),
-		a.handleWindowResize(a.wWidth, a.wHeight),
+	parent, err := store.GetSession(ctx, msg.ParentSessionID)
+	if err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load parent session: %v", err))
+	}
+
+	newSess, err := session.BranchSession(parent, msg.BranchAtPosition)
+	if err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to branch session: %v", err))
+	}
+
+	if err := store.AddSession(ctx, newSess); err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save branched session: %v", err))
+	}
+
+	if current := m.application.Session(); current != nil {
+		newSess.HideToolResults = current.HideToolResults
+		newSess.ToolsApproved = current.ToolsApproved
+	}
+
+	// Preserve sidebar settings across branch
+	sidebarSettings := m.chatPage.GetSidebarSettings()
+
+	activeID := m.supervisor.ActiveID()
+
+	// Update tuistate so the tab points to the branched session on re-launch.
+	if m.tuiStore != nil {
+		oldPersistedID := m.persistedSessionID(activeID)
+		if err := m.tuiStore.UpdateTabSessionID(ctx, oldPersistedID, newSess.ID); err != nil {
+			slog.WarnContext(ctx, "Failed to update tab session ID after branch", "error", err)
+		}
+	}
+	m.persistActiveTab(newSess.ID)
+
+	// Replace the session in the app and rebuild all per-session components.
+	m.application.ReplaceSession(ctx, newSess)
+	m.initSessionComponents(activeID, m.application, newSess)
+	m.dialogMgr = dialog.New()
+
+	// Restore sidebar settings
+	m.chatPage.SetSidebarSettings(sidebarSettings)
+
+	m.reapplyKeyboardEnhancements()
+
+	return m, tea.Sequence(
+		m.chatPage.Init(),
+		m.resizeAll(),
+		m.editor.Focus(),
+		core.CmdHandler(messages.SendMsg{
+			Content:     msg.Content,
+			Attachments: msg.Attachments,
+		}),
 	)
 }
 
-func (a *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
-	store := a.application.SessionStore()
+func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
+	currentSession := m.application.Session()
+	if currentSession == nil {
+		return m, notification.ErrorCmd("No active session to fork")
+	}
+
+	store := m.application.SessionStore()
 	if store == nil {
-		return a, notification.InfoCmd("No session store configured")
+		return m, notification.ErrorCmd("No session store configured")
 	}
 
-	sessions, err := store.GetSessionSummaries(context.Background())
+	spawner := m.supervisor.Spawner()
+	if spawner == nil {
+		return m, notification.ErrorCmd("Session spawning not available")
+	}
+
+	ctx := context.Background()
+
+	// Fork the session and clone all messages.
+	forkedSession, err := session.BranchSession(currentSession, len(currentSession.Messages))
 	if err != nil {
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to load sessions: %v", err))
-	}
-	if len(sessions) == 0 {
-		return a, notification.InfoCmd("No previous sessions found")
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to fork session: %v", err))
 	}
 
-	return a, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewSessionBrowserDialog(sessions),
+	if err := store.AddSession(ctx, forkedSession); err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save forked session: %v", err))
+	}
+
+	a, _, cleanup, err := spawner(ctx, forkedSession.WorkingDir)
+	if err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to create runtime for fork: %v", err))
+	}
+
+	a.ReplaceSession(ctx, forkedSession)
+	m.supervisor.AddSession(ctx, a, forkedSession, forkedSession.WorkingDir, cleanup)
+
+	if m.tuiStore != nil {
+		if err := m.tuiStore.AddTab(ctx, forkedSession.ID, forkedSession.WorkingDir); err != nil {
+			slog.WarnContext(ctx, "Failed to persist forked tab", "error", err)
+		}
+	}
+
+	return m.handleSwitchTab(forkedSession.ID)
+}
+
+func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd) {
+	store := m.application.SessionStore()
+	if store == nil {
+		return m, notification.ErrorCmd("No session store configured")
+	}
+
+	currentSess := m.application.Session()
+	if currentSess != nil && currentSess.ID == sessionID {
+		currentSess.Starred = !currentSess.Starred
+		m.chatPage.SetSessionStarred(currentSess.Starred)
+		if err := store.UpdateSession(context.Background(), currentSess); err != nil {
+			return m, notification.ErrorCmd(fmt.Sprintf("Failed to save session: %v", err))
+		}
+	} else {
+		sess, err := store.GetSession(context.Background(), sessionID)
+		if err != nil {
+			return m, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
+		}
+		if err := store.SetSessionStarred(context.Background(), sessionID, !sess.Starred); err != nil {
+			return m, notification.ErrorCmd(fmt.Sprintf("Failed to update session: %v", err))
+		}
+	}
+	return m, nil
+}
+
+func (m *appModel) handleSetSessionTitle(title string) (tea.Model, tea.Cmd) {
+	if err := m.application.UpdateSessionTitle(context.Background(), title); err != nil {
+		if errors.Is(err, app.ErrTitleGenerating) {
+			return m, notification.WarningCmd("Title is being generated, please wait")
+		}
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to set session title: %v", err))
+	}
+	return m, notification.SuccessCmd("Title set to: " + title)
+}
+
+func (m *appModel) handleRegenerateTitle() (tea.Model, tea.Cmd) {
+	sess := m.application.Session()
+	if sess == nil {
+		return m, notification.ErrorCmd("No active session")
+	}
+	if len(sess.GetLastUserMessages(1)) == 0 {
+		return m, notification.ErrorCmd("Cannot regenerate title: no user message in session")
+	}
+	if err := m.application.RegenerateSessionTitle(context.Background()); err != nil {
+		if errors.Is(err, app.ErrTitleGenerating) {
+			return m, notification.WarningCmd("Title is being generated, please wait")
+		}
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to regenerate title: %v", err))
+	}
+	spinnerCmd := m.chatPage.SetTitleRegenerating(true)
+	return m, tea.Batch(spinnerCmd, notification.SuccessCmd("Regenerating title..."))
+}
+
+func (m *appModel) handleDeleteSession(sessionID string) (tea.Model, tea.Cmd) {
+	store := m.application.SessionStore()
+	if store == nil {
+		return m, notification.ErrorCmd("No session store configured")
+	}
+
+	if err := store.DeleteSession(context.Background(), sessionID); err != nil {
+		return m, notification.ErrorCmd("Failed to delete session: " + err.Error())
+	}
+
+	return m, notification.SuccessCmd("Session deleted.")
+}
+
+// --- Eval / Export / Compact / Copy ---
+
+func (m *appModel) handleEvalSession(filename string) (tea.Model, tea.Cmd) {
+	evalFile, _ := evaluation.Save(m.application.Session(), filename)
+	return m, notification.SuccessCmd("Eval saved to file " + evalFile)
+}
+
+func (m *appModel) handleExportSession(filename string) (tea.Model, tea.Cmd) {
+	exportFile, err := m.application.ExportHTML(context.Background(), filename)
+	if err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to export session: %v", err))
+	}
+	return m, notification.SuccessCmd("Session exported to " + exportFile)
+}
+
+func (m *appModel) handleCompactSession(additionalPrompt string) (tea.Model, tea.Cmd) {
+	return m, m.chatPage.CompactSession(additionalPrompt)
+}
+
+func (m *appModel) handleCopySessionToClipboard() (tea.Model, tea.Cmd) {
+	transcript := m.application.PlainTextTranscript()
+	if transcript == "" {
+		return m, notification.SuccessCmd("Conversation is empty; nothing copied.")
+	}
+	return m, copyToClipboard(transcript, "Conversation copied to clipboard.")
+}
+
+func (m *appModel) handleCopyLastResponseToClipboard() (tea.Model, tea.Cmd) {
+	sess := m.application.Session()
+	if sess == nil {
+		return m, notification.InfoCmd("No active session.")
+	}
+	lastResponse := sess.GetLastAssistantMessageContent()
+	if lastResponse == "" {
+		return m, notification.InfoCmd("No assistant response to copy.")
+	}
+	return m, copyToClipboard(lastResponse, "Last response copied to clipboard.")
+}
+
+func (m *appModel) handleUndoSnapshot() (tea.Model, tea.Cmd) {
+	if m.chatPage.IsWorking() {
+		return m, notification.WarningCmd("Wait for the current response to finish before undoing")
+	}
+	result, err := m.application.UndoLastSnapshot(context.Background())
+	if err != nil {
+		if errors.Is(err, app.ErrNothingToUndo) {
+			return m, notification.InfoCmd("No snapshot to undo")
+		}
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to undo snapshot: %v", err))
+	}
+
+	text := fmt.Sprintf("Restored %d file%s from the last snapshot", result.RestoredFiles, plural(result.RestoredFiles))
+	return m, notification.SuccessCmd(text)
+}
+
+func (m *appModel) handleShowSnapshotsDialog() (tea.Model, tea.Cmd) {
+	snapshots := m.application.ListSnapshots()
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
+		Model: dialog.NewSnapshotsDialog(snapshots),
 	})
 }
 
-func (a *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
-	store := a.application.SessionStore()
-	if store == nil {
-		return a, notification.ErrorCmd("No session store configured")
+func (m *appModel) handleResetSnapshot(keep int) (tea.Model, tea.Cmd) {
+	if m.chatPage.IsWorking() {
+		return m, notification.WarningCmd("Wait for the current response to finish before resetting")
 	}
-
-	sess, err := store.GetSession(context.Background(), sessionID)
+	result, err := m.application.ResetSnapshot(context.Background(), keep)
 	if err != nil {
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
-	}
-
-	slog.Debug("Loaded session from store", "session_id", sessionID, "model_overrides", sess.AgentModelOverrides)
-
-	// Theme is now global - no per-session theme switching needed
-
-	// Cancel current session and replace with loaded one
-	a.application.ReplaceSession(context.Background(), sess)
-	a.sessionState = service.NewSessionState(sess)
-	a.chatPage = chat.New(a.application, a.sessionState)
-	a.dialog = dialog.New()
-	a.applyKeyboardEnhancements()
-
-	return a, tea.Batch(
-		a.Init(),
-		a.handleWindowResize(a.wWidth, a.wHeight),
-	)
-}
-
-func (a *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd) {
-	store := a.application.SessionStore()
-	if store == nil {
-		return a, notification.ErrorCmd("No session store configured")
-	}
-
-	// Get current session
-	currentSess := a.application.Session()
-
-	// Determine the new starred status
-	var newStarred bool
-	if currentSess != nil && currentSess.ID == sessionID {
-		// For current session, toggle from current state
-		newStarred = !currentSess.Starred
-		currentSess.Starred = newStarred
-		a.chatPage.SetSessionStarred(newStarred)
-
-		// Use UpdateSession (upsert) to ensure the session exists in DB before setting starred
-		// This handles the case where the session hasn't been persisted yet
-		if err := store.UpdateSession(context.Background(), currentSess); err != nil {
-			return a, notification.ErrorCmd(fmt.Sprintf("Failed to save session: %v", err))
+		if errors.Is(err, app.ErrNothingToUndo) {
+			return m, notification.InfoCmd("Nothing to reset")
 		}
-	} else {
-		// For non-current sessions (from session browser), fetch and toggle
-		sess, err := store.GetSession(context.Background(), sessionID)
-		if err != nil {
-			return a, notification.ErrorCmd(fmt.Sprintf("Failed to load session: %v", err))
-		}
-		newStarred = !sess.Starred
-
-		// Persist the starred status to database
-		if err := store.SetSessionStarred(context.Background(), sessionID, newStarred); err != nil {
-			return a, notification.ErrorCmd(fmt.Sprintf("Failed to update session: %v", err))
-		}
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to reset snapshot: %v", err))
 	}
 
-	return a, nil
+	target := "the original state"
+	if keep > 0 {
+		target = fmt.Sprintf("snapshot %d", keep)
+	}
+	text := fmt.Sprintf("Restored %d file%s to %s", result.RestoredFiles, plural(result.RestoredFiles), target)
+	return m, notification.SuccessCmd(text)
 }
 
-func (a *appModel) handleSetSessionTitle(title string) (tea.Model, tea.Cmd) {
-	if err := a.application.UpdateSessionTitle(context.Background(), title); err != nil {
-		if errors.Is(err, app.ErrTitleGenerating) {
-			return a, notification.WarningCmd("Title is being generated, please wait")
-		}
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to set session title: %v", err))
+func plural(n int) string {
+	if n == 1 {
+		return ""
 	}
-	// Title will be updated via SessionTitleEvent emitted by UpdateSessionTitle
-	return a, notification.SuccessCmd(fmt.Sprintf("Title set to: %s", title))
+	return "s"
 }
 
-func (a *appModel) handleRegenerateTitle() (tea.Model, tea.Cmd) {
-	sess := a.application.Session()
-	if sess == nil {
-		return a, notification.ErrorCmd("No active session")
-	}
-
-	if len(sess.GetLastUserMessages(1)) == 0 {
-		return a, notification.ErrorCmd("Cannot regenerate title: no user message in session")
-	}
-
-	// Trigger regeneration - returns error if already in progress
-	if err := a.application.RegenerateSessionTitle(context.Background()); err != nil {
-		if errors.Is(err, app.ErrTitleGenerating) {
-			return a, notification.WarningCmd("Title is being generated, please wait")
-		}
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to regenerate title: %v", err))
-	}
-
-	// Show spinner while regenerating - the spinner will be cleared when SessionTitleEvent arrives
-	spinnerCmd := a.chatPage.SetTitleRegenerating(true)
-
-	return a, tea.Batch(spinnerCmd, notification.SuccessCmd("Regenerating title..."))
-}
-
-func (a *appModel) handleEvalSession(filename string) (tea.Model, tea.Cmd) {
-	evalFile, _ := evaluation.Save(a.application.Session(), filename)
-	return a, notification.SuccessCmd(fmt.Sprintf("Eval saved to file %s", evalFile))
-}
-
-func (a *appModel) handleExportSession(filename string) (tea.Model, tea.Cmd) {
-	exportFile, err := a.application.ExportHTML(context.Background(), filename)
-	if err != nil {
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to export session: %v", err))
-	}
-	return a, notification.SuccessCmd(fmt.Sprintf("Session exported to %s", exportFile))
-}
-
-func (a *appModel) handleCompactSession(additionalPrompt string) (tea.Model, tea.Cmd) {
-	return a, a.chatPage.CompactSession(additionalPrompt)
-}
-
-func (a *appModel) handleCopySessionToClipboard() (tea.Model, tea.Cmd) {
-	transcript := a.application.PlainTextTranscript()
-	if transcript == "" {
-		return a, notification.SuccessCmd("Conversation is empty; nothing copied.")
-	}
-
-	return a, tea.Sequence(
-		tea.SetClipboard(transcript),
+// copyToClipboard returns a sequenced command that copies text to the system
+// clipboard using both the OSC 52 escape sequence (for SSH/tmux compatibility)
+// and the platform-native clipboard API, then shows a success notification.
+func copyToClipboard(text, successMsg string) tea.Cmd {
+	return tea.Sequence(
+		tea.SetClipboard(text),
 		func() tea.Msg {
-			_ = clipboard.WriteAll(transcript)
+			_ = clipboard.WriteAll(text)
 			return nil
 		},
-		notification.SuccessCmd("Conversation copied to clipboard."),
+		notification.SuccessCmd(successMsg),
 	)
 }
 
-func (a *appModel) handleCopyLastResponseToClipboard() (tea.Model, tea.Cmd) {
-	sess := a.application.Session()
-	if sess == nil {
-		return a, notification.InfoCmd("No active session.")
-	}
+// --- Agent management ---
 
-	lastResponse := sess.GetLastAssistantMessageContent()
-	if lastResponse == "" {
-		return a, notification.InfoCmd("No assistant response to copy.")
+func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
+	if err := m.application.SwitchAgent(agentName); err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to switch to agent '%s': %v", agentName, err))
 	}
-
-	return a, tea.Sequence(
-		tea.SetClipboard(lastResponse),
-		func() tea.Msg {
-			_ = clipboard.WriteAll(lastResponse)
-			return nil
-		},
-		notification.SuccessCmd("Last response copied to clipboard."),
+	m.sessionState.SetCurrentAgentName(agentName)
+	return m, tea.Batch(
+		m.updateChatCmd(messages.SessionToggleChangedMsg{}),
+		notification.SuccessCmd(fmt.Sprintf("Switched to agent '%s'", agentName)),
 	)
 }
 
-// Agent management handlers
-
-func (a *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
-	if err := a.application.SwitchAgent(agentName); err != nil {
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to switch to agent '%s': %v", agentName, err))
-	}
-
-	a.sessionState.SetCurrentAgentName(agentName)
-	return a, notification.SuccessCmd(fmt.Sprintf("Switched to agent '%s'", agentName))
-}
-
-func (a *appModel) handleCycleAgent() (tea.Model, tea.Cmd) {
-	availableAgents := a.sessionState.AvailableAgents()
+func (m *appModel) handleCycleAgent() (tea.Model, tea.Cmd) {
+	availableAgents := m.sessionState.AvailableAgents()
 	if len(availableAgents) <= 1 {
-		return a, notification.InfoCmd("No other agents available")
+		return m, notification.InfoCmd("No other agents available")
 	}
-
-	// Find the current agent index
 	currentIndex := -1
 	for i, agent := range availableAgents {
-		if agent.Name == a.sessionState.CurrentAgentName() {
+		if agent.Name == m.sessionState.CurrentAgentName() {
 			currentIndex = i
 			break
 		}
 	}
-
-	// Cycle to the next agent (wrap around to 0 if at the end)
 	nextIndex := (currentIndex + 1) % len(availableAgents)
-	return a.handleSwitchToAgentByIndex(nextIndex)
+	return m.handleSwitchToAgentByIndex(nextIndex)
 }
 
-func (a *appModel) handleSwitchToAgentByIndex(index int) (tea.Model, tea.Cmd) {
-	availableAgents := a.sessionState.AvailableAgents()
+func (m *appModel) handleSwitchToAgentByIndex(index int) (tea.Model, tea.Cmd) {
+	availableAgents := m.sessionState.AvailableAgents()
 	if index >= 0 && index < len(availableAgents) {
 		agentName := availableAgents[index].Name
-		if agentName != a.sessionState.CurrentAgentName() {
-			return a, core.CmdHandler(messages.SwitchAgentMsg{AgentName: agentName})
+		if agentName != m.sessionState.CurrentAgentName() {
+			return m, core.CmdHandler(messages.SwitchAgentMsg{AgentName: agentName})
 		}
 	}
-	return a, nil
+	return m, nil
 }
 
-// Toggles
+// --- Toggles ---
 
-func (a *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
-	sess := a.application.Session()
+func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
+	sess := m.application.Session()
 	sess.ToolsApproved = !sess.ToolsApproved
-	a.sessionState.SetYoloMode(sess.ToolsApproved)
-	return a, nil
+	m.sessionState.SetYoloMode(sess.ToolsApproved)
+	return m.forwardChat(messages.SessionToggleChangedMsg{})
 }
 
-func (a *appModel) handleToggleThinking() (tea.Model, tea.Cmd) {
-	// Check if the current model supports reasoning
-	currentModel := a.application.CurrentAgentModel()
-	if !modelsdev.ModelSupportsReasoning(context.Background(), currentModel) {
-		return a, notification.InfoCmd("Thinking/reasoning is not supported for the current model")
+// handleTogglePause toggles whether the runtime loop is paused at iteration
+// boundaries. The pause kicks in once the in-flight LLM request and its tool
+// calls finish; running /pause again resumes the loop.
+func (m *appModel) handleTogglePause() (tea.Model, tea.Cmd) {
+	paused, supported := m.application.TogglePause()
+	switch {
+	case !supported:
+		return m, notification.InfoCmd("Pause is not supported with remote runtimes")
+	case paused:
+		return m, notification.InfoCmd("Runtime paused — /pause again to resume")
+	default:
+		return m, notification.SuccessCmd("Runtime resumed")
 	}
-
-	sess := a.application.Session()
-	sess.Thinking = !sess.Thinking
-	a.sessionState.SetThinking(sess.Thinking)
-
-	// Persist the change to the database immediately
-	if store := a.application.SessionStore(); store != nil {
-		if err := store.UpdateSession(context.Background(), sess); err != nil {
-			return a, notification.ErrorCmd(fmt.Sprintf("Failed to save session: %v", err))
-		}
-	}
-
-	var msg string
-	if sess.Thinking {
-		msg = "Thinking/reasoning enabled for this session"
-	} else {
-		msg = "Thinking/reasoning disabled for this session"
-	}
-	return a, notification.InfoCmd(msg)
 }
 
-func (a *appModel) handleToggleHideToolResults() (tea.Model, tea.Cmd) {
-	updated, cmd := a.chatPage.Update(messages.ToggleHideToolResultsMsg{})
-	a.chatPage = updated.(chat.Page)
-	return a, cmd
+func (m *appModel) handleToggleHideToolResults() (tea.Model, tea.Cmd) {
+	return m.forwardChat(messages.ToggleHideToolResultsMsg{})
 }
 
-// Cost
+func (m *appModel) handleToggleSplitDiff() (tea.Model, tea.Cmd) {
+	m.sessionState.ToggleSplitDiffView()
+	enabled := m.sessionState.SplitDiffView()
 
-func (a *appModel) handleShowCostDialog() (tea.Model, tea.Cmd) {
-	sess := a.application.Session()
-	return a, core.CmdHandler(dialog.OpenDialogMsg{
+	// Persist to global userconfig
+	go persistSplitDiffView(enabled)
+
+	return m, tea.Batch(
+		m.updateChatCmd(editfile.ToggleDiffViewMsg{}),
+		m.updateChatCmd(messages.SessionToggleChangedMsg{}),
+	)
+}
+
+// persistSplitDiffView writes the current split-diff toggle to the user
+// config without blocking the UI. Errors are logged but otherwise ignored
+// because losing the persistence is non-fatal.
+func persistSplitDiffView(enabled bool) {
+	cfg, err := userconfig.Load()
+	if err != nil {
+		slog.Warn("Failed to load userconfig for split diff toggle", "error", err)
+		return
+	}
+	if cfg.Settings == nil {
+		cfg.Settings = &userconfig.Settings{}
+	}
+	cfg.Settings.SplitDiffView = &enabled
+	if err := cfg.Save(); err != nil {
+		slog.Warn("Failed to persist split diff setting to userconfig", "error", err)
+	}
+}
+
+// --- Dialogs ---
+
+func (m *appModel) handleShowCostDialog() (tea.Model, tea.Cmd) {
+	sess := m.application.Session()
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewCostDialog(sess),
 	})
 }
 
-// Permissions
-
-func (a *appModel) handleShowPermissionsDialog() (tea.Model, tea.Cmd) {
-	perms := a.application.PermissionsInfo()
-	sess := a.application.Session()
+func (m *appModel) handleShowPermissionsDialog() (tea.Model, tea.Cmd) {
+	perms := m.application.PermissionsInfo()
+	sess := m.application.Session()
 	yoloEnabled := sess != nil && sess.ToolsApproved
-	return a, core.CmdHandler(dialog.OpenDialogMsg{
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewPermissionsDialog(perms, yoloEnabled),
 	})
 }
 
-// MCP prompt handlers
+func (m *appModel) handleShowToolsDialog() (tea.Model, tea.Cmd) {
+	agentTools, err := m.application.CurrentAgentTools(context.Background())
+	if err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load tools: %v", err))
+	}
+	// Read toolset statuses *after* CurrentAgentTools so the snapshot
+	// reflects the same Started state the user just observed (Tools()
+	// drives lazy startup of any not-yet-started toolset).
+	statuses := m.application.CurrentAgentToolsetStatuses()
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
+		Model: dialog.NewToolsDialog(statuses, agentTools),
+	})
+}
 
-func (a *appModel) handleShowMCPPromptInput(promptName string, promptInfo any) (tea.Model, tea.Cmd) {
+// handleRestartToolset asks the runtime to restart the named toolset.
+// The actual call can block for up to ~35s (the supervisor's
+// reconnect timeout), so we run it inside a tea.Cmd goroutine and
+// surface the result via a notification toast on completion.
+func (m *appModel) handleRestartToolset(name string) (tea.Model, tea.Cmd) {
+	if name == "" {
+		return m, notification.ErrorCmd("usage: /toolset-restart <name>")
+	}
+	appRef := m.application
+	return m, tea.Batch(
+		notification.InfoCmd(fmt.Sprintf("Restarting toolset %q…", name)),
+		func() tea.Msg {
+			if err := appRef.RestartToolset(context.Background(), name); err != nil {
+				return notification.ShowMsg{
+					Text: fmt.Sprintf("Failed to restart %q: %v", name, err),
+					Type: notification.TypeError,
+				}
+			}
+			return notification.ShowMsg{
+				Text: fmt.Sprintf("Toolset %q restarted", name),
+				Type: notification.TypeSuccess,
+			}
+		},
+	)
+}
+
+// --- MCP prompts ---
+
+func (m *appModel) handleShowMCPPromptInput(promptName string, promptInfo any) (tea.Model, tea.Cmd) {
 	info, ok := promptInfo.(mcptools.PromptInfo)
 	if !ok {
-		return a, notification.ErrorCmd("Invalid prompt info")
+		return m, notification.ErrorCmd("Invalid prompt info")
 	}
-
-	return a, core.CmdHandler(dialog.OpenDialogMsg{
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewMCPPromptInputDialog(promptName, info),
 	})
 }
 
-func (a *appModel) handleMCPPrompt(promptName string, arguments map[string]string) (tea.Model, tea.Cmd) {
-	promptContent, err := a.application.ExecuteMCPPrompt(context.Background(), promptName, arguments)
+func (m *appModel) handleMCPPrompt(promptName string, arguments map[string]string) (tea.Model, tea.Cmd) {
+	promptContent, err := m.application.ExecuteMCPPrompt(context.Background(), promptName, arguments)
 	if err != nil {
-		return a, notification.ErrorCmd(fmt.Sprintf("Error executing MCP prompt '%s': %v", promptName, err))
+		return m, notification.ErrorCmd(fmt.Sprintf("Error executing MCP prompt '%s': %v", promptName, err))
 	}
-
-	return a, core.CmdHandler(messages.SendMsg{Content: promptContent})
+	return m, core.CmdHandler(messages.SendMsg{Content: promptContent})
 }
 
-// Miscellaneous handlers
+// --- Model picker ---
 
-func (a *appModel) handleOpenURL(url string) (tea.Model, tea.Cmd) {
-	_ = browser.Open(context.Background(), url)
-	return a, nil
-}
-
-func (a *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
-	resolvedCommand := a.application.ResolveCommand(context.Background(), command)
-	return a, core.CmdHandler(messages.SendMsg{Content: resolvedCommand})
-}
-
-// File attachment handler
-
-func (a *appModel) handleAttachFile(filePath string) (tea.Model, tea.Cmd) {
-	// If a file path is provided and it's an existing file, attach it directly
-	if filePath != "" {
-		info, err := os.Stat(filePath)
-		if err == nil && !info.IsDir() {
-			// Insert the file reference into the editor using @filepath syntax
-			updated, cmd := a.chatPage.Update(messages.InsertFileRefMsg{FilePath: filePath})
-			a.chatPage = updated.(chat.Page)
-			return a, tea.Batch(cmd, notification.SuccessCmd("File attached: "+filePath))
-		}
+func (m *appModel) handleOpenModelPicker() (tea.Model, tea.Cmd) {
+	if !m.application.SupportsModelSwitching() {
+		return m, notification.InfoCmd("Model switching is not supported with remote runtimes")
 	}
-
-	// Otherwise, open the file picker dialog
-	return a, core.CmdHandler(dialog.OpenDialogMsg{
-		Model: dialog.NewFilePickerDialog(filePath),
-	})
-}
-
-// Model switching handlers
-
-func (a *appModel) handleOpenModelPicker() (tea.Model, tea.Cmd) {
-	// Check if model switching is supported
-	if !a.application.SupportsModelSwitching() {
-		return a, notification.InfoCmd("Model switching is not supported with remote runtimes")
-	}
-
-	models := a.application.AvailableModels(context.Background())
+	models := m.application.AvailableModels(context.Background())
 	if len(models) == 0 {
-		return a, notification.InfoCmd("No models available for selection")
+		return m, notification.InfoCmd("No models available for selection")
 	}
-
-	return a, core.CmdHandler(dialog.OpenDialogMsg{
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewModelPickerDialog(models),
 	})
 }
 
-func (a *appModel) handleChangeModel(modelRef string) (tea.Model, tea.Cmd) {
-	if err := a.application.SetCurrentAgentModel(context.Background(), modelRef); err != nil {
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to change model: %v", err))
+func (m *appModel) handleChangeModel(modelRef string) (tea.Model, tea.Cmd) {
+	if err := m.application.SetCurrentAgentModel(context.Background(), modelRef); err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to change model: %v", err))
 	}
-
 	if modelRef == "" {
-		return a, notification.SuccessCmd("Model reset to default")
+		return m, notification.SuccessCmd("Model reset to default")
 	}
-	return a, notification.SuccessCmd(fmt.Sprintf("Model changed to %s", modelRef))
+	return m, notification.SuccessCmd("Model changed to " + modelRef)
 }
 
-// Theme handlers
+// --- Theme picker ---
 
-func (a *appModel) handleOpenThemePicker() (tea.Model, tea.Cmd) {
-	// Get available themes
+func (m *appModel) handleOpenThemePicker() (tea.Model, tea.Cmd) {
 	themeRefs, err := styles.ListThemeRefs()
 	if err != nil {
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to list themes: %v", err))
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to list themes: %v", err))
 	}
-
-	// Get the currently active global theme
 	currentTheme := styles.CurrentTheme()
 	currentRef := currentTheme.Ref
 
-	// Build theme choices
 	var choices []dialog.ThemeChoice
-
 	for _, ref := range themeRefs {
 		theme, loadErr := styles.LoadTheme(ref)
 		if loadErr != nil {
 			continue
 		}
-
-		// Use YAML name, or filename as fallback
 		name := theme.Name
 		if name == "" {
 			name = strings.TrimPrefix(ref, styles.UserThemePrefix)
 		}
-
 		choices = append(choices, dialog.ThemeChoice{
 			Ref:       ref,
 			Name:      name,
@@ -448,150 +541,215 @@ func (a *appModel) handleOpenThemePicker() (tea.Model, tea.Cmd) {
 			IsBuiltin: styles.IsBuiltinTheme(ref),
 		})
 	}
-
-	return a, core.CmdHandler(dialog.OpenDialogMsg{
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewThemePickerDialog(choices, currentRef),
 	})
 }
 
-func (a *appModel) handleChangeTheme(themeRef string) (tea.Model, tea.Cmd) {
-	// Skip if selecting the already-persisted theme - preview already applied it visually,
-	// so no need for notification, cache invalidation, or re-persisting.
+func (m *appModel) handleChangeTheme(themeRef string) (tea.Model, tea.Cmd) {
 	if styles.GetPersistedThemeRef() == themeRef {
-		return a, nil
+		return m, nil
 	}
-
-	// Load and apply the theme
 	theme, err := styles.LoadTheme(themeRef)
 	if err != nil {
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to load theme: %v", err))
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to load theme: %v", err))
 	}
-
 	styles.ApplyTheme(theme)
+	m.invalidateCachesForThemeChange()
 
-	// Invalidate caches synchronously
-	a.invalidateCachesForThemeChange()
-
-	// Persist to user config (global setting)
 	if err := styles.SaveThemeToUserConfig(themeRef); err != nil {
 		slog.Warn("Failed to save theme to user config", "theme", themeRef, "error", err)
 	}
-
-	return a, tea.Sequence(
-		notification.SuccessCmd(fmt.Sprintf("Theme changed to %s", theme.Name)),
+	return m, tea.Sequence(
+		notification.SuccessCmd("Theme changed to "+theme.Name),
 		core.CmdHandler(messages.ThemeChangedMsg{}),
 	)
 }
 
-// handleThemePreview applies a theme temporarily for live preview (without persisting).
-func (a *appModel) handleThemePreview(themeRef string) (tea.Model, tea.Cmd) {
-	// Skip if already on this theme - no need to invalidate caches
+func (m *appModel) handleThemePreview(themeRef string) (tea.Model, tea.Cmd) {
 	if current := styles.CurrentTheme(); current != nil && current.Ref == themeRef {
-		return a, nil
+		return m, nil
 	}
-
-	// Load and apply the theme (without persisting)
 	theme, err := styles.LoadTheme(themeRef)
 	if err != nil {
-		// Silently fail for preview - don't show error notification
-		return a, nil
+		return m, nil
 	}
-
 	styles.ApplyTheme(theme)
-
-	// Apply theme changed logic synchronously to ensure View() renders with updated styles
-	return a.applyThemeChanged()
+	return m.applyThemeChanged()
 }
 
-// handleThemeCancelPreview restores the original theme when the user cancels the theme picker.
-func (a *appModel) handleThemeCancelPreview(originalRef string) (tea.Model, tea.Cmd) {
-	// Skip if already on the original theme - no need to invalidate caches
+func (m *appModel) handleThemeCancelPreview(originalRef string) (tea.Model, tea.Cmd) {
 	if current := styles.CurrentTheme(); current != nil && current.Ref == originalRef {
-		return a, nil
+		return m, nil
 	}
-
-	// Load and apply the original theme
 	theme, err := styles.LoadTheme(originalRef)
 	if err != nil {
-		// Fall back to default theme if original can't be loaded
 		theme = styles.DefaultTheme()
 	}
-
 	styles.ApplyTheme(theme)
-
-	// Apply theme changed logic (invalidates caches, updates watcher, forwards messages)
-	return a.applyThemeChanged()
+	return m.applyThemeChanged()
 }
 
-// Speech-to-text handlers
-
-// speakTranscriptAndContinue is an internal message that carries a transcript delta
-// and the channel to continue listening.
-type speakTranscriptAndContinue struct {
-	delta string
-	ch    <-chan string
+func (m *appModel) invalidateCachesForThemeChange() {
+	markdown.ResetStyles()
+	m.statusBar.InvalidateCache()
 }
 
-func (a *appModel) handleStartSpeak() (tea.Model, tea.Cmd) {
-	if a.transcriber.IsRunning() {
-		return a, nil
-	}
-
-	// Start transcription
-	transcriptCh := make(chan string, 100)
-	err := a.transcriber.Start(context.Background(), func(delta string) {
-		select {
-		case transcriptCh <- delta:
-		default:
-			// Channel full, drop the delta
-		}
-	})
-	if err != nil {
-		return a, notification.ErrorCmd(fmt.Sprintf("Failed to start listening: %v", err))
-	}
-
-	// Set recording mode on the editor to show animated dots
-	recordingCmd := a.chatPage.SetRecording(true)
-
-	// Return a command that listens for transcripts and sends them as messages
-	return a, tea.Batch(
-		notification.InfoCmd("🎤 Listening... (ENTER to send or ESC to cancel)"),
-		recordingCmd,
-		a.listenForTranscripts(transcriptCh),
+func (m *appModel) applyThemeChanged() (tea.Model, tea.Cmd) {
+	m.invalidateCachesForThemeChange()
+	return m, tea.Batch(
+		m.updateDialogCmd(messages.ThemeChangedMsg{}),
+		m.updateChatCmd(messages.ThemeChangedMsg{}),
 	)
 }
 
-// listenForTranscripts returns a command that listens for transcript deltas
-// and sends them as messages to the TUI.
-func (a *appModel) listenForTranscripts(ch <-chan string) tea.Cmd {
+// handleThemeFileChanged hot-reloads a theme that was modified on disk.
+func (m *appModel) handleThemeFileChanged(themeRef string) (tea.Model, tea.Cmd) {
+	theme, err := styles.LoadTheme(themeRef)
+	if err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to hot-reload theme: %v", err))
+	}
+	styles.ApplyTheme(theme)
+	return m, tea.Batch(
+		notification.SuccessCmd("Theme hot-reloaded"),
+		core.CmdHandler(messages.ThemeChangedMsg{}),
+	)
+}
+
+// --- Miscellaneous ---
+
+func (m *appModel) handleOpenURL(url string) (tea.Model, tea.Cmd) {
+	_ = browser.Open(context.Background(), url)
+	return m, nil
+}
+
+func (m *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
+	resolvedCommand := m.application.ResolveCommand(context.Background(), command)
+	return m, core.CmdHandler(messages.SendMsg{Content: resolvedCommand})
+}
+
+func (m *appModel) handleAttachFile(filePath string) (tea.Model, tea.Cmd) {
+	if filePath != "" {
+		if err := m.editor.AttachFile(filePath); err != nil {
+			slog.Warn("failed to attach file", "path", filePath, "error", err)
+			// Attachment failed — open the file picker with an error notification
+			return m, tea.Batch(
+				notification.ErrorCmd("Failed to attach "+filePath),
+				core.CmdHandler(dialog.OpenDialogMsg{
+					Model: dialog.NewFilePickerDialog(filePath),
+				}),
+			)
+		}
+		return m, notification.SuccessCmd("File attached: " + filePath)
+	}
+
+	// No path provided — open the file picker dialog
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
+		Model: dialog.NewFilePickerDialog(filePath),
+	})
+}
+
+// --- Speech-to-text ---
+
+func (m *appModel) handleStartSpeak() (tea.Model, tea.Cmd) {
+	if m.transcriber.IsRunning() {
+		return m, nil
+	}
+
+	// Close any previous channel to unblock stale waitForTranscript goroutines.
+	m.closeTranscriptCh()
+
+	ch := make(chan string, 100)
+	m.transcriptCh = ch
+	err := m.transcriber.Start(context.Background(), func(delta string) {
+		select {
+		case ch <- delta:
+		default:
+		}
+	})
+	if err != nil {
+		m.closeTranscriptCh()
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to start listening: %v", err))
+	}
+
+	return m, tea.Batch(
+		notification.InfoCmd("🎤 Listening... (ENTER to send or ESC to cancel)"),
+		m.editor.SetRecording(true),
+		m.waitForTranscript(),
+	)
+}
+
+func (m *appModel) handleStopSpeak() (tea.Model, tea.Cmd) {
+	if !m.transcriber.IsRunning() {
+		return m, nil
+	}
+
+	m.transcriber.Stop()
+	m.closeTranscriptCh()
+
+	return m, tea.Batch(m.editor.SetRecording(false), notification.SuccessCmd("Stopped listening"))
+}
+
+// waitForTranscript returns a command that blocks until the next transcript
+// delta arrives and delivers it as a SpeakTranscriptMsg.
+func (m *appModel) waitForTranscript() tea.Cmd {
+	ch := m.transcriptCh
 	return func() tea.Msg {
 		delta, ok := <-ch
 		if !ok {
-			return nil // Channel closed
+			return nil
 		}
-		return speakTranscriptAndContinue{delta: delta, ch: ch}
+		return messages.SpeakTranscriptMsg{Delta: delta}
 	}
 }
 
-func (a *appModel) handleStopSpeak() (tea.Model, tea.Cmd) {
-	if !a.transcriber.IsRunning() {
-		return a, nil
+// closeTranscriptCh closes the transcript channel and sets it to nil,
+// unblocking any goroutines waiting in waitForTranscript.
+func (m *appModel) closeTranscriptCh() {
+	if m.transcriptCh != nil {
+		close(m.transcriptCh)
+		m.transcriptCh = nil
 	}
-
-	a.transcriber.Stop()
-	recordingCmd := a.chatPage.SetRecording(false)
-	return a, tea.Batch(recordingCmd, notification.SuccessCmd("Stopped listening"))
 }
 
-func (a *appModel) handleSpeakTranscript(delta string) (tea.Model, tea.Cmd) {
-	a.chatPage.InsertText(delta + " ")
-	return a, nil
-}
-
-func (a *appModel) handleElicitationResponse(action tools.ElicitationAction, content map[string]any) (tea.Model, tea.Cmd) {
-	if err := a.application.ResumeElicitation(context.Background(), action, content); err != nil {
+func (m *appModel) handleElicitationResponse(action tools.ElicitationAction, content map[string]any) (tea.Model, tea.Cmd) {
+	if err := m.application.ResumeElicitation(context.Background(), action, content); err != nil {
 		slog.Error("Failed to resume elicitation", "action", action, "error", err)
-		return a, notification.ErrorCmd("Failed to complete server request: " + err.Error())
+		return m, notification.ErrorCmd("Failed to complete server request: " + err.Error())
 	}
-	return a, nil
+	return m, nil
+}
+
+func (m *appModel) startShell() (tea.Model, tea.Cmd) {
+	cmd := newInteractiveShellCmd("Type 'exit' to return to " + m.appName)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return m, tea.ExecProcess(cmd, nil)
+}
+
+// newInteractiveShellCmd returns a command that launches the user's preferred
+// interactive shell. The command is owned by tea.ExecProcess, not by any
+// request-scoped context, so exec.Command is intentional.
+func newInteractiveShellCmd(exitMsg string) *exec.Cmd {
+	if goruntime.GOOS != "windows" {
+		shell := shellpath.DetectUnixShell()
+		return execCmd(shell, "-i", "-c", `echo -e "\n`+exitMsg+`"; exec `+shell)
+	}
+
+	psArgs := []string{"-NoLogo", "-NoExit", "-Command", `Write-Host ""; Write-Host "` + exitMsg + `"`}
+	if path, err := exec.LookPath("pwsh.exe"); err == nil {
+		return execCmd(path, psArgs...)
+	}
+	if path, err := exec.LookPath("powershell.exe"); err == nil {
+		return execCmd(path, psArgs...)
+	}
+	// Use absolute path to cmd.exe to prevent PATH hijacking (CWE-426).
+	return execCmd(shellpath.WindowsCmdExe(), "/K", "echo. & echo "+exitMsg)
+}
+
+// execCmd is a thin wrapper around exec.Command used for interactive
+// processes whose lifecycle is owned by tea.ExecProcess (not a context).
+func execCmd(name string, args ...string) *exec.Cmd {
+	return exec.Command(name, args...) //nolint:noctx // owned by tea.ExecProcess
 }

@@ -1,0 +1,27 @@
+---
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: generativelanguage.googleapis.com
+        body: |
+            {"contents":[{"parts":[{"text":"You are a helpful AI assistant that generates concise, descriptive titles for conversations. You will be given up to 2 recent user messages and asked to create a single-line title that captures the main topic. Never use newlines or line breaks in your response."}],"role":"user"},{"parts":[{"text":"Based on the following recent user messages from a conversation with an AI assistant, generate a short, descriptive title (maximum 50 characters) that captures the main topic or purpose of the conversation. Return ONLY the title text on a single line, nothing else. Do not include any newlines, explanations, or formatting.\n\nRecent user messages:\n1. What can you do?\n\n\n"}],"role":"user"}],"generationConfig":{"maxOutputTokens":200,"thinkingConfig":{"thinkingLevel":"LOW"}}}
+        form:
+            alt:
+                - sse
+        url: https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:streamGenerateContent?alt=sse
+        method: POST
+      response:
+        proto: HTTP/2.0
+        proto_major: 2
+        proto_minor: 0
+        content_length: -1
+        body: "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"AI Capabilities Inquiry\"}],\"role\": \"model\"},\"index\": 0}],\"usageMetadata\": {\"promptTokenCount\": 132,\"candidatesTokenCount\": 3,\"totalTokenCount\": 256,\"promptTokensDetails\": [{\"modality\": \"TEXT\",\"tokenCount\": 132}],\"thoughtsTokenCount\": 121},\"modelVersion\": \"gemini-3-pro-preview\",\"responseId\": \"HueFaaqiMbK0vdIPhoCD-A8\"}\r\n\r\ndata: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"\",\"thoughtSignature\": \"EuIECt8EAb4+9vu1obEirrLzTDws71xGqNAvZgVSzDyLUZWQvnuxrWpclzTD4zk14DXgytloMMU89nBt6AZLsYX6aurN6mty8dLi0bXBXvFqbytr+6kTT1XKx6PxkP4646Yw5/1DAJ6adz3v++WZAWNXO4towvVJ69l3xcJkAjmITU2vbYQTRcxrn09oOpZWMDNzg/gC7YJAbzEdUfIF0VEaAPucALqyYHjzkr+FGy8HCYNxU2R3/I8BLHtxobsLWaaSnL3qBLJ9RICBDHC5mIoNGurIUulH7g2rMITMLsixcg1xiGyM6mkKu69/x9MRA7NjJ9zQdbFYx3hi8AvBVvFqwCqTUlr/tvkWSVU5XY52eCRiVLBZsHipaYdZDvCifGUaLvtS/iu59T7LlLq9yDAa+Q0SuxULcr/g8HTFlyRtlUZDAOlbGOdKorZrW5tZ1ftOdaKmGV1OY6LiuY0kRyzYBhv8BXzFTLiosqBYECHdHIVuQfS9Apy22Sbghk7WUGF8kZjirqNTnoPg1XW26bXpdRPitKV7xC8a5DG9wNLKNpAKgco+B08AdjcyMc9uhTzWXB3aJWr0Biy1glZSlF+dAV+b7HrvmmKUppaHkdlitgstTEPcL86dqSEzLIQCLwtxGzb4KDFTaQv8Jm4MW/B3v5PtgO7uWlPHQ4jOpE3h2Gi5bskpi7gdZG70RtsSAeINlcxgrCnEqrys1IdC075H1Y+FDDknU6SPF4mkxxF7grNduKxTiy5SO4djUJJ+yK4FRNycp5w6zjqZuG/iGpS/TgHged5BfQEG4kVioQhqZPZ13w==\"}],\"role\": \"model\"},\"finishReason\": \"STOP\",\"index\": 0}],\"usageMetadata\": {\"promptTokenCount\": 132,\"candidatesTokenCount\": 3,\"totalTokenCount\": 256,\"promptTokensDetails\": [{\"modality\": \"TEXT\",\"tokenCount\": 132}],\"thoughtsTokenCount\": 121},\"modelVersion\": \"gemini-3-pro-preview\",\"responseId\": \"HueFaaqiMbK0vdIPhoCD-A8\"}\r\n\r\n"
+        headers: {}
+        status: 200 OK
+        code: 200
+        duration: 3.353562s

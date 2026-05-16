@@ -6,9 +6,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/docker/cagent/pkg/config/types"
-	"github.com/docker/cagent/pkg/session"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/sessiontitle"
+	"github.com/docker/docker-agent/pkg/tools"
+	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
+	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
 // mockRuntime implements Runtime interface for testing
@@ -20,7 +23,9 @@ type mockRuntime struct {
 func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) {
 	return m.tools, nil
 }
-func (m *mockRuntime) CurrentAgentName() string { return "test" }
+func (m *mockRuntime) CurrentAgentName() string                           { return "test" }
+func (m *mockRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus { return nil }
+func (m *mockRuntime) RestartToolset(context.Context, string) error       { return nil }
 func (m *mockRuntime) CurrentAgentInfo(context.Context) CurrentAgentInfo {
 	return CurrentAgentInfo{
 		Name:        "test",
@@ -32,8 +37,8 @@ func (m *mockRuntime) CurrentAgentInfo(context.Context) CurrentAgentInfo {
 func (m *mockRuntime) SetCurrentAgent(string) error {
 	return nil
 }
-func (m *mockRuntime) EmitStartupInfo(context.Context, chan Event) {}
-func (m *mockRuntime) ResetStartupInfo()                           {}
+func (m *mockRuntime) EmitStartupInfo(context.Context, *session.Session, EventSink) {}
+func (m *mockRuntime) ResetStartupInfo()                                            {}
 func (m *mockRuntime) RunStream(context.Context, *session.Session) <-chan Event {
 	return nil
 }
@@ -46,9 +51,34 @@ func (m *mockRuntime) ResumeElicitation(context.Context, tools.ElicitationAction
 	return nil
 }
 func (m *mockRuntime) SessionStore() session.Store { return nil }
-func (m *mockRuntime) Summarize(context.Context, *session.Session, string, chan Event) {
+func (m *mockRuntime) Summarize(context.Context, *session.Session, string, EventSink) {
 }
 func (m *mockRuntime) PermissionsInfo() *PermissionsInfo { return nil }
+func (m *mockRuntime) CurrentAgentSkillsToolset() *skillstool.Toolset {
+	return nil
+}
+
+func (m *mockRuntime) CurrentMCPPrompts(context.Context) map[string]mcptools.PromptInfo {
+	return make(map[string]mcptools.PromptInfo)
+}
+
+func (m *mockRuntime) ExecuteMCPPrompt(context.Context, string, map[string]string) (string, error) {
+	return "", nil
+}
+
+func (m *mockRuntime) UpdateSessionTitle(context.Context, *session.Session, string) error {
+	return nil
+}
+func (m *mockRuntime) TitleGenerator() *sessiontitle.Generator             { return nil }
+func (m *mockRuntime) Close() error                                        { return nil }
+func (m *mockRuntime) Steer(QueuedMessage) error                           { return nil }
+func (m *mockRuntime) FollowUp(QueuedMessage) error                        { return nil }
+func (m *mockRuntime) QueueStatus() QueueStatus                            { return QueueStatus{} }
+func (m *mockRuntime) TogglePause(context.Context) (bool, error)           { return false, nil }
+func (m *mockRuntime) SetAgentModel(context.Context, string, string) error { return nil }
+func (m *mockRuntime) AvailableModels(context.Context) []ModelChoice       { return nil }
+func (m *mockRuntime) SupportsModelSwitching() bool                        { return false }
+func (m *mockRuntime) OnToolsChanged(func(Event))                          {}
 
 func (m *mockRuntime) RegenerateTitle(context.Context, *session.Session, chan Event) {
 }

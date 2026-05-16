@@ -7,27 +7,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
-// mockEnvProvider is a simple environment provider for testing
-type mockEnvProvider struct {
-	vars map[string]string
-}
-
-func (m *mockEnvProvider) Get(_ context.Context, name string) (string, bool) {
-	v, ok := m.vars[name]
-	return v, ok
-}
-
-// mockCatalogStore implements CatalogStore for testing
+// mockCatalogStore implements ModelStore for testing
 type mockCatalogStore struct {
-	db *modelsdev.Database
-}
+	ModelStore
 
-func (m *mockCatalogStore) GetModel(_ context.Context, _ string) (*modelsdev.Model, error) {
-	return nil, nil
+	db *modelsdev.Database
 }
 
 func (m *mockCatalogStore) GetDatabase(_ context.Context) (*modelsdev.Database, error) {
@@ -235,7 +224,7 @@ func TestGetAvailableProviders(t *testing.T) {
 
 			r := &LocalRuntime{
 				modelSwitcherCfg: &ModelSwitcherConfig{
-					EnvProvider:   &mockEnvProvider{vars: tt.envVars},
+					EnvProvider:   environment.NewMapEnvProvider(tt.envVars),
 					ModelsGateway: tt.modelsGateway,
 				},
 			}
@@ -249,6 +238,67 @@ func TestGetAvailableProviders(t *testing.T) {
 	}
 }
 
+// TestGetAvailableProviders_AnthropicWIF verifies that a workspace configured
+// with Workload Identity Federation surfaces the anthropic provider in the
+// model picker even without ANTHROPIC_API_KEY in the env.
+func TestGetAvailableProviders_AnthropicWIF(t *testing.T) {
+	t.Parallel()
+
+	wifAuth := &latest.AuthConfig{
+		Type: latest.AuthTypeWorkloadIdentityFederation,
+		Federation: &latest.FederationAuthConfig{
+			FederationRuleID: "fdrl_x",
+			OrganizationID:   "org",
+			IdentityToken:    &latest.IdentityTokenSourceConfig{File: "/t"},
+		},
+	}
+
+	t.Run("model-level auth", func(t *testing.T) {
+		t.Parallel()
+		r := &LocalRuntime{
+			modelSwitcherCfg: &ModelSwitcherConfig{
+				EnvProvider: environment.NewMapEnvProvider(nil),
+				Models: map[string]latest.ModelConfig{
+					"claude": {Provider: "anthropic", Model: "claude-x", Auth: wifAuth},
+				},
+			},
+		}
+		got := r.getAvailableProviders(t.Context())
+		assert.True(t, got["anthropic"], "WIF should surface anthropic in available providers")
+	})
+
+	t.Run("provider-level auth", func(t *testing.T) {
+		t.Parallel()
+		r := &LocalRuntime{
+			modelSwitcherCfg: &ModelSwitcherConfig{
+				EnvProvider: environment.NewMapEnvProvider(nil),
+				Providers: map[string]latest.ProviderConfig{
+					"claude": {Provider: "anthropic", Auth: wifAuth},
+				},
+				Models: map[string]latest.ModelConfig{
+					"claude": {Provider: "claude", Model: "claude-x"},
+				},
+			},
+		}
+		got := r.getAvailableProviders(t.Context())
+		assert.True(t, got["anthropic"], "WIF on provider should surface anthropic")
+	})
+
+	t.Run("no auth and no api key", func(t *testing.T) {
+		t.Parallel()
+		r := &LocalRuntime{
+			modelSwitcherCfg: &ModelSwitcherConfig{
+				EnvProvider: environment.NewMapEnvProvider(nil),
+				Models: map[string]latest.ModelConfig{
+					"claude": {Provider: "anthropic", Model: "claude-x"},
+				},
+			},
+		}
+		got := r.getAvailableProviders(t.Context())
+		assert.False(t, got["anthropic"], "plain anthropic config without API key must not be available")
+	})
+}
+
 func TestBuildCatalogChoices(t *testing.T) {
 	t.Parallel()
 
@@ -256,25 +306,20 @@ func TestBuildCatalogChoices(t *testing.T) {
 	db := &modelsdev.Database{
 		Providers: map[string]modelsdev.Provider{
 			"openai": {
-				ID:   "openai",
-				Name: "OpenAI",
 				Models: map[string]modelsdev.Model{
 					"gpt-4o": {
-						ID:   "gpt-4o",
 						Name: "GPT-4o",
 						Modalities: modelsdev.Modalities{
 							Output: []string{"text"},
 						},
 					},
 					"dall-e-3": {
-						ID:   "dall-e-3",
 						Name: "DALL-E 3",
 						Modalities: modelsdev.Modalities{
 							Output: []string{"image"}, // Not a text model
 						},
 					},
 					"text-embedding-3-large": {
-						ID:     "text-embedding-3-large",
 						Name:   "Text Embedding 3 Large",
 						Family: "text-embedding",
 						Modalities: modelsdev.Modalities{
@@ -284,11 +329,8 @@ func TestBuildCatalogChoices(t *testing.T) {
 				},
 			},
 			"anthropic": {
-				ID:   "anthropic",
-				Name: "Anthropic",
 				Models: map[string]modelsdev.Model{
 					"claude-sonnet-4-0": {
-						ID:   "claude-sonnet-4-0",
 						Name: "Claude Sonnet 4",
 						Modalities: modelsdev.Modalities{
 							Output: []string{"text"},
@@ -297,11 +339,8 @@ func TestBuildCatalogChoices(t *testing.T) {
 				},
 			},
 			"unsupported": {
-				ID:   "unsupported",
-				Name: "Unsupported Provider",
 				Models: map[string]modelsdev.Model{
 					"some-model": {
-						ID:   "some-model",
 						Name: "Some Model",
 						Modalities: modelsdev.Modalities{
 							Output: []string{"text"},
@@ -315,10 +354,10 @@ func TestBuildCatalogChoices(t *testing.T) {
 	r := &LocalRuntime{
 		modelsStore: &mockCatalogStore{db: db},
 		modelSwitcherCfg: &ModelSwitcherConfig{
-			EnvProvider: &mockEnvProvider{vars: map[string]string{
+			EnvProvider: environment.NewMapEnvProvider(map[string]string{
 				"OPENAI_API_KEY":    "sk-test",
 				"ANTHROPIC_API_KEY": "sk-ant-test",
-			}},
+			}),
 			Models: map[string]latest.ModelConfig{
 				"my_model": {Provider: "openai", Model: "gpt-4o"}, // This should be excluded from catalog (duplicate)
 			},
@@ -360,11 +399,8 @@ func TestBuildCatalogChoicesWithDuplicates(t *testing.T) {
 	db := &modelsdev.Database{
 		Providers: map[string]modelsdev.Provider{
 			"openai": {
-				ID:   "openai",
-				Name: "OpenAI",
 				Models: map[string]modelsdev.Model{
 					"gpt-4o": {
-						ID:   "gpt-4o",
 						Name: "GPT-4o",
 						Modalities: modelsdev.Modalities{
 							Output: []string{"text"},
@@ -378,9 +414,9 @@ func TestBuildCatalogChoicesWithDuplicates(t *testing.T) {
 	r := &LocalRuntime{
 		modelsStore: &mockCatalogStore{db: db},
 		modelSwitcherCfg: &ModelSwitcherConfig{
-			EnvProvider: &mockEnvProvider{vars: map[string]string{
+			EnvProvider: environment.NewMapEnvProvider(map[string]string{
 				"OPENAI_API_KEY": "sk-test",
-			}},
+			}),
 			Models: map[string]latest.ModelConfig{
 				// This model has the same provider/model as the catalog entry
 				"my_gpt4o": {Provider: "openai", Model: "gpt-4o"},
@@ -393,5 +429,60 @@ func TestBuildCatalogChoicesWithDuplicates(t *testing.T) {
 	// Should NOT include gpt-4o since it's already in config
 	for _, c := range choices {
 		assert.NotEqual(t, "openai/gpt-4o", c.Ref, "should not include duplicates from config")
+	}
+}
+
+func TestResolveModelRef_RejectsAlloyConfig(t *testing.T) {
+	t.Parallel()
+
+	r := &LocalRuntime{
+		modelSwitcherCfg: &ModelSwitcherConfig{
+			Models: map[string]latest.ModelConfig{
+				// Alloy config: no provider, comma-separated models
+				"alloy_model": {Model: "openai/gpt-4o,anthropic/claude-sonnet-4-0"},
+			},
+		},
+	}
+
+	_, err := r.resolveModelRef(t.Context(), "alloy_model")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "alloy")
+}
+
+func TestResolveModelRef_NilConfig(t *testing.T) {
+	t.Parallel()
+
+	r := &LocalRuntime{}
+
+	_, err := r.resolveModelRef(t.Context(), "openai/gpt-4o")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not configured")
+}
+
+func TestResolveModelRef_InvalidFormat(t *testing.T) {
+	t.Parallel()
+
+	r := &LocalRuntime{
+		modelSwitcherCfg: &ModelSwitcherConfig{
+			Models: map[string]latest.ModelConfig{},
+		},
+	}
+
+	tests := []struct {
+		name     string
+		modelRef string
+	}{
+		{"no slash", "invalid"},
+		{"empty provider", "/model"},
+		{"empty model", "provider/"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := r.resolveModelRef(t.Context(), tt.modelRef)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid model reference")
+		})
 	}
 }

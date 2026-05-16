@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 metadata:
   readme: |
@@ -52,7 +52,6 @@ permissions:
     - "shell:cmd=go fmt*"
     - "shell:cmd=go vet*"
     - "shell:cmd=go mod*"
-
 
 agents:
   root:

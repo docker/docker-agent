@@ -1,3 +1,4 @@
+
 agents:
   root:
     model: gpt-5-minimal
@@ -7,8 +8,10 @@ agents:
       can use when it makes sense to do so, based on the user's question.
       If you receive sources from the knowledge base, always include them as
       a markdown list of links to local files at the very end of your response.
-    rag: 
-      - blork_knowledge_base
+    welcome_message: Ask me anything about Blorks.
+    toolsets:
+      - type: rag
+        ref: blork_knowledge_base
 
 models:
   gpt-5-minimal:

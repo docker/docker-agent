@@ -1,0 +1,18 @@
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+
+mcps:
+  my_server:
+    remote:
+      url: https://mcp.example.com/sse
+      headers:
+        Authorization: "Bearer token123"
+
+agents:
+  root:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: my_server

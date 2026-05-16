@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
@@ -14,8 +14,8 @@ models:
     provider: dmr
     model: ai/qwen3
     # base_url defaults to http://localhost:12434/engines/llama.cpp/v1
-    # use http://model-runner.docker.internal/engines/v1 if you run cagent from a container
-  
+    # use http://model-runner.docker.internal/engines/v1 if you run docker-agent from a container
+
   # try this model for faster inference if you have enough memory
   qwen_speculative:
     provider: dmr

@@ -1,31 +1,31 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 metadata:
   author: Djordje Lukic
   readme: |
-    This is a team of agents you can use to code things in cagent.
+    This is a team of agents you can use to code things in docker agent.
 
     The team consists of:
     - A **root** golang developer agent that codes.
     - A **planner** agent that gathers requirements from the user and creates a development plan before delegating tasks to the golang developer.
     - A **librarian** agent that searches for relevant documentation to assist the golang developer.
 
-    To quickly change the model to a bigger one, use `cagent run --model opus golang_developer.yaml`.
+    To quickly change the model to a bigger one, use `docker agent run --model opus golang_developer.yaml`.
 
     Different ways you can use this team:
     1. Directly ask the **root** golang developer to help you with a coding task.
     ```console
-    cagent run golang_developer.yaml
+    docker agent run golang_developer.yaml
     ```
 
     With the help of the librarian:
     ```console
-    cagent run --agent root golang_developer.yaml 'Fix the bug in pkg/fsx/vcs.go related to gitignore matching, ask the librarian for relevant documentation if needed.'
+    docker agent run --agent root golang_developer.yaml 'Fix the bug in pkg/fsx/vcs.go related to gitignore matching, ask the librarian for relevant documentation if needed.'
     ```
 
     2. Use the **planner** to gather requirements and create a development plan before coding.
     ```console
-    cagent run --agent planner golang_developer.yaml 
+    docker agent run --agent planner golang_developer.yaml 
     ```
 
     The planner will create a plan in a markdown file and delegate tasks to the golang developer. 
@@ -33,29 +33,26 @@ metadata:
     Pro tip: ask the planner to wait for you to modify and approve the plan before delegating tasks:
 
 models:
-  opus:
-    provider: anthropic
-    model: claude-opus-4-5
   sonnet:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-4-6
   haiku:
     provider: anthropic
     model: claude-haiku-4-5
   gpt:
     provider: openai
-    model: gpt-5.2
+    model: gpt-5.5
   extramax:
-    model: opus,gpt
+    model: sonnet,gpt
 
 agents:
   root:
-    model: opus
-    description: Expert Golang developer specializing in the cagent multi-agent AI system architecture
+    model: gpt
+    description: Expert Golang developer specializing in the docker agent multi-agent AI system architecture
     instruction: |
       <golang_developer>
       <core_purpose>
-      The agent is an expert Golang developer specializing in the cagent multi-agent AI system architecture. Its primary role is to help users with code-related tasks by examining, modifying, and validating code changes.
+      The agent is an expert Golang developer specializing in the docker agent multi-agent AI system architecture. Its primary role is to help users with code-related tasks by examining, modifying, and validating code changes.
 
       The agent always uses conversation context and tools to gather information, preferring tools over its own internal knowledge. When approaching a task, the agent first analyzes the user's requirements to identify relevant code areas, then examines code structure and dependencies before making any modifications.
       </core_purpose>

@@ -1,0 +1,57 @@
+#!/usr/bin/env docker agent run
+
+# This example demonstrates how to use {ORIGINAL_INSTRUCTIONS} in a
+# toolset instruction to *enrich* the built-in instructions instead of
+# replacing them.
+#
+# Every toolset ships with default instructions that guide the agent on
+# how to use its tools effectively (e.g., the filesystem toolset
+# explains security restrictions and performance tips). When you set
+# the `instruction` field on a toolset, by default that text *replaces*
+# the built-in instructions entirely.
+#
+# If you want to keep the original guidance and just add your own rules
+# on top, include the placeholder {ORIGINAL_INSTRUCTIONS} anywhere in
+# your instruction text. At runtime it will be substituted with the
+# toolset's built-in instructions, so the agent sees both.
+#
+# Three patterns:
+#
+#   1. Enrich (prepend originals, append yours):
+#        instruction: |
+#          {ORIGINAL_INSTRUCTIONS}
+#          Never delete files without asking.
+#
+#   2. Enrich (prepend yours, append originals):
+#        instruction: |
+#          Important: only touch files under ./src.
+#          {ORIGINAL_INSTRUCTIONS}
+#
+#   3. Replace (omit the placeholder entirely):
+#        instruction: |
+#          Only read Markdown files.
+
+agents:
+  root:
+    model: openai/gpt-4o
+    description: A coding assistant with enriched toolset instructions
+    instruction: |
+      You are a helpful coding assistant.
+    toolsets:
+      # ── Filesystem: enrich the built-in instructions ──────────
+      - type: filesystem
+        instruction: |
+          {ORIGINAL_INSTRUCTIONS}
+
+          ## Project-specific rules
+          - Never modify files outside the `src/` directory.
+          - Always create a backup before overwriting a file.
+
+      # ── Shell: enrich the built-in instructions ───────────────
+      - type: shell
+        instruction: |
+          {ORIGINAL_INSTRUCTIONS}
+
+          ## Extra safety rules
+          - Never run `rm -rf` commands.
+          - Always use `--dry-run` when available.

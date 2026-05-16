@@ -2,11 +2,11 @@ package fusion
 
 import (
 	"cmp"
-	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 
-	"github.com/docker/cagent/pkg/rag/database"
+	"github.com/docker/docker-agent/pkg/rag/database"
 )
 
 // ReciprocalRankFusion implements the RRF (Reciprocal Rank Fusion) algorithm
@@ -70,7 +70,7 @@ func (rrf *ReciprocalRankFusion) Fuse(strategyResults map[string][]database.Sear
 
 	for strategyName, results := range strategyResults {
 		for rank, result := range results {
-			docID := result.Document.SourcePath + "_" + fmt.Sprint(result.Document.ChunkIndex)
+			docID := result.Document.SourcePath + "_" + strconv.Itoa(result.Document.ChunkIndex)
 
 			if _, exists := docScores[docID]; !exists {
 				docScores[docID] = &fusedDocument{

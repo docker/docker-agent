@@ -7,9 +7,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/cagent/pkg/tui/animation"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 type Mode int
@@ -19,7 +19,15 @@ const (
 	ModeSpinnerOnly
 )
 
-type Spinner struct {
+type Spinner interface {
+	layout.Model
+	Reset() Spinner
+	Stop()
+	// RawFrame returns the current spinner character without any styling applied.
+	RawFrame() string
+}
+type spinner struct {
+	animSub             *animation.Subscription // manages animation tick subscription
 	dotsStyle           lipgloss.Style
 	styledSpinnerFrames []string // pre-rendered spinner frames
 	mode                Mode
@@ -63,12 +71,14 @@ var defaultMessages = []string{
 
 func New(mode Mode, dotsStyle lipgloss.Style) Spinner {
 	// Pre-render all spinner frames for fast lookup during render
-	styledFrames := make([]string, len(spinnerChars))
-	for i, char := range spinnerChars {
+	styledFrames := make([]string, len(spinnerFrames))
+	for i, char := range spinnerFrames {
 		styledFrames[i] = dotsStyle.Render(char)
 	}
 
-	return Spinner{
+	sub := &animation.Subscription{}
+	return &spinner{
+		animSub:             sub,
 		dotsStyle:           dotsStyle,
 		styledSpinnerFrames: styledFrames,
 		mode:                mode,
@@ -78,11 +88,11 @@ func New(mode Mode, dotsStyle lipgloss.Style) Spinner {
 	}
 }
 
-func (s Spinner) Reset() Spinner {
+func (s *spinner) Reset() Spinner {
 	return New(s.mode, s.dotsStyle)
 }
 
-func (s Spinner) Update(message tea.Msg) (layout.Model, tea.Cmd) {
+func (s *spinner) Update(message tea.Msg) (layout.Model, tea.Cmd) {
 	if msg, ok := message.(animation.TickMsg); ok {
 		// Respond to global animation tick (all spinners advance together)
 		s.frame = msg.Frame
@@ -106,7 +116,7 @@ func (s Spinner) Update(message tea.Msg) (layout.Model, tea.Cmd) {
 	return s, nil
 }
 
-func (s Spinner) View() string {
+func (s *spinner) View() string {
 	spinner := s.styledSpinnerFrames[s.frame%len(s.styledSpinnerFrames)]
 	if s.mode == ModeSpinnerOnly {
 		return spinner
@@ -114,21 +124,32 @@ func (s Spinner) View() string {
 	return spinner + " " + s.renderMessage()
 }
 
-func (s Spinner) SetSize(_, _ int) tea.Cmd { return nil }
+func (s *spinner) SetSize(_, _ int) tea.Cmd { return nil }
 
 // Init registers the spinner with the animation coordinator.
 // If this is the first active animation, it starts the global tick.
-func (s Spinner) Init() tea.Cmd {
-	return animation.StartTickIfFirst()
+func (s *spinner) Init() tea.Cmd {
+	return s.animSub.Start()
 }
 
 // Stop unregisters the spinner from the animation coordinator.
 // Call this when the spinner is no longer active/visible.
-func (s Spinner) Stop() {
-	animation.Unregister()
+func (s *spinner) Stop() {
+	s.animSub.Stop()
 }
 
-var spinnerChars = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+// RawFrame returns the current spinner character without any styling applied.
+func (s *spinner) RawFrame() string {
+	return spinnerFrames[s.frame%len(spinnerFrames)]
+}
+
+// spinnerFrames holds the animation frames for the current terminal.
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+// Frame returns the spinner character for the given animation frame.
+func Frame(index int) string {
+	return spinnerFrames[index%len(spinnerFrames)]
+}
 
 // lightStyles maps distance from light position to style (0=brightest, 1=bright, 2=dim, 3+=dimmest).
 var lightStyles = []lipgloss.Style{
@@ -138,7 +159,7 @@ var lightStyles = []lipgloss.Style{
 	styles.SpinnerTextDimmestStyle,
 }
 
-func (s Spinner) renderMessage() string {
+func (s *spinner) renderMessage() string {
 	var out strings.Builder
 	for i, char := range s.currentMessage {
 		dist := min(max(i-s.lightPosition, s.lightPosition-i), len(lightStyles)-1)

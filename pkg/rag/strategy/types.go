@@ -3,7 +3,7 @@ package strategy
 import (
 	"context"
 
-	"github.com/docker/cagent/pkg/rag/database"
+	"github.com/docker/docker-agent/pkg/rag/database"
 )
 
 // Strategy defines the interface for different retrieval strategies.

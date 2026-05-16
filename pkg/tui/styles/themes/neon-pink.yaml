@@ -1,0 +1,99 @@
+version: 1
+name: "Neon Pink"
+colors:
+  # Text colors - kin CLI inspired pink palette
+  text_bright: "#FF69B4"      # Pink
+  text_primary: "#FFB6C1"    # LightPink
+  text_secondary: "#FFFFFF"  # White (was Fuchsia)
+  text_muted: "#DB7093"      # Rose
+  text_faint: "#7a5570"      # Dim rose
+  
+  # Accent colors - pastel pink
+  accent: "#FFB3D9"          # Pastel pink (softer)
+  accent_muted: "#E6A8CF"    # Muted pastel pink
+  
+  # Background colors - Ghostty default grey
+  background: "#1c1c1c"      # Ghostty default grey
+  background_alt: "#262626"  # Slightly lighter grey
+  
+  # Border colors
+  border_secondary: "#DB7093" # Rose
+  
+  # Status colors - keeping practical colors
+  success: "#FFFFFF"         # White (was Magenta)
+  error: "#FF0066"           # Kin error color
+  warning: "#DB7093"         # Rose
+  info: "#FFFFFF"            # White (was Fuchsia)
+  highlight: "#FFB3D9"       # Pastel pink (softer highlights)
+  
+  # Brand colors
+  brand: "#4A4540"           # Dark warm brown - selection backgrounds (for readability)
+  brand_bg: "#1a0a12"        # BgSubtle
+  
+  # Error colors
+  error_strong: "#FFFFFF"
+  error_dark: "#2a0a15"
+  
+  # Spinner colors - pink gradient
+  spinner_dim: "#DB7093"     # Rose
+  spinner_bright: "#FF69B4"  # Pink
+  spinner_brightest: "#FFB6C1" # LightPink
+  
+  # Diff colors
+  diff_add_bg: "#0a2a0a"
+  diff_remove_bg: "#2a0a15"
+  
+  # UI element colors
+  line_number: "#7a5570"     # Dim
+  separator: "#DB7093"       # Rose
+  selected: "#E6A8CF"        # Muted pastel pink
+  selected_fg: "#FFFFFF"     # White text on selection
+  suggestion_ghost: "#7a5570"
+  tab_bg: "#1c1c1c"
+  tab_active_bg: "#262626"   # Lighter grey
+  tab_active_fg: "#FF69B4"   # Pink
+  tab_inactive_fg: "#DB7093" # Rose
+  tab_border: "#FFB3D9"      # Pastel pink
+  placeholder: "#DB7093"     # Rose
+  
+  # Badge colors
+  badge_accent: "#98D8C8"    # Pastel green (for start)
+  badge_info: "#6BA4E8"      # Pastel blue (for Sandbox)
+  badge_success: "#FFFFFF"   # White (was Magenta)
+  
+  # Agent colors (hue values 0-360 for dynamic palette generation)
+  agent_hues: [220, 280, 170, 30, 330, 140, 200, 260, 50, 0, 185, 20, 235, 295, 155, 340]
+
+chroma:
+  # Syntax highlighting - kin inspired
+  comment: "#7a5570"         # Dim
+  comment_preproc: "#FFFFFF" # White (was Magenta)
+  keyword: "#FFFFFF"         # White (was Magenta)
+  keyword_reserved: "#FFFFFF" # White (was HotPink)
+  keyword_namespace: "#FFFFFF" # White (was Fuchsia)
+  keyword_type: "#FF69B4"    # Pink
+  operator: "#DB7093"        # Rose
+  punctuation: "#FFB6C1"     # LightPink
+  name_builtin: "#FFFFFF"    # White (was Fuchsia)
+  name_tag: "#FFFFFF"        # White (was HotPink)
+  name_attribute: "#FF69B4"  # Pink
+  name_decorator: "#FFFFFF"  # White (was Magenta)
+  literal_number: "#FFFFFF"  # White (was Fuchsia)
+  literal_string: "#FFB6C1"  # LightPink
+  literal_string_escape: "#FF69B4" # Pink
+  generic_deleted: "#FFFFFF" # White (was error pink)
+  generic_subheading: "#7a5570"
+  background: "#1c1c1c"
+  error_fg: "#FFFFFF"
+  error_bg: "#2a0a15"
+  success: "#FFFFFF"         # White (was Magenta)
+
+markdown:
+  heading: "#FFFFFF"         # White (was HotPink)
+  link: "#FFFFFF"            # White (was Fuchsia)
+  strong: "#FF69B4"          # Pink (bold)
+  code: "#FFFFFF"            # White (was Fuchsia)
+  code_bg: "#262626"         # Lighter grey
+  blockquote: "#DB7093"      # Rose
+  list: "#FFB6C1"            # LightPink
+  hr: "#DB7093"              # Rose (separator)

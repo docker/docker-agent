@@ -9,6 +9,12 @@ providers:
     base_url: https://responses.example.com/v1
     token_key: RESPONSES_API_KEY
 
+  anthropic_provider:
+    provider: anthropic
+    token_key: MY_ANTHROPIC_KEY
+    max_tokens: 16384
+    thinking_budget: high
+
 models:
   custom_model:
     provider: custom_provider

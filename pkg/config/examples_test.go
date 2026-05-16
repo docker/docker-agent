@@ -4,15 +4,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/xeipuuv/gojsonschema"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 func collectExamples(t *testing.T) []string {
@@ -23,8 +23,11 @@ func collectExamples(t *testing.T) []string {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && filepath.Ext(path) == ".yaml" {
-			files = append(files, path)
+		if !d.IsDir() {
+			ext := filepath.Ext(path)
+			if ext == ".yaml" || ext == ".hcl" {
+				files = append(files, path)
+			}
 		}
 		return nil
 	})
@@ -42,7 +45,7 @@ func TestParseExamples(t *testing.T) {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := Load(t.Context(), testfileSource(file))
+			cfg, err := Load(t.Context(), NewFileSource(file))
 
 			require.NoError(t, err)
 			require.Equal(t, latest.Version, cfg.Version, "Version should be %d in %s", latest.Version, file)
@@ -70,7 +73,7 @@ func TestParseExamples(t *testing.T) {
 					continue
 				}
 
-				model, err := modelsStore.GetModel(t.Context(), model.Provider+"/"+model.Model)
+				model, err := modelsStore.GetModel(t.Context(), modelsdev.NewID(model.Provider, model.Model))
 				require.NoError(t, err)
 				require.NotNil(t, model)
 			}
@@ -78,28 +81,49 @@ func TestParseExamples(t *testing.T) {
 	}
 }
 
-func TestJsonSchemaWorksForExamples(t *testing.T) {
-	// Read json schema.
-	schemaFile, err := os.ReadFile(filepath.Join("..", "..", "cagent-schema.json"))
-	require.NoError(t, err)
-
-	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaFile))
-	require.NoError(t, err)
-
+func TestParseExamplesAfterMarshalling(t *testing.T) {
 	for _, file := range collectExamples(t) {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
-			buf, err := os.ReadFile(file)
+			cfg, err := Load(t.Context(), NewFileSource(file))
 			require.NoError(t, err)
 
-			var rawJSON any
-			err = yaml.Unmarshal(buf, &rawJSON)
+			// Make sure that a config can be marshalled and parsed again.
+			// We've had marshalling issues in the past.
+			buf, err := yaml.Marshal(cfg)
 			require.NoError(t, err)
 
-			result, err := schema.Validate(gojsonschema.NewRawLoader(rawJSON))
+			// The marshalled bytes are always YAML, so re-load them under a
+			// .yaml-named source even when the original example was HCL.
+			name := strings.TrimSuffix(file, filepath.Ext(file)) + ".yaml"
+			_, err = Load(t.Context(), NewBytesSource(name, buf))
 			require.NoError(t, err)
-			assert.True(t, result.Valid(), "Example %s does not match schema: %v", file, result.Errors())
+		})
+	}
+}
+
+// TestHCLExamplesMatchYAML verifies that every .hcl example file produces a
+// configuration identical to its .yaml sibling, ensuring the HCL surface
+// stays in sync with the YAML schema.
+func TestHCLExamplesMatchYAML(t *testing.T) {
+	for _, file := range collectExamples(t) {
+		if filepath.Ext(file) != ".hcl" {
+			continue
+		}
+		yamlFile := strings.TrimSuffix(file, ".hcl") + ".yaml"
+		if _, err := os.Stat(yamlFile); err != nil {
+			continue
+		}
+		t.Run(file, func(t *testing.T) {
+			t.Parallel()
+
+			cfgHCL, err := Load(t.Context(), NewFileSource(file))
+			require.NoError(t, err)
+			cfgYAML, err := Load(t.Context(), NewFileSource(yamlFile))
+			require.NoError(t, err)
+
+			require.Equal(t, cfgYAML, cfgHCL, "HCL config %s differs from YAML sibling %s", file, yamlFile)
 		})
 	}
 }

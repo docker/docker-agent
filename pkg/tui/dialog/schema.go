@@ -1,8 +1,9 @@
 package dialog
 
 import (
+	"cmp"
 	"encoding/json"
-	"sort"
+	"slices"
 )
 
 // parseElicitationSchema extracts fields from a JSON schema.
@@ -30,11 +31,14 @@ func parseObjectSchema(schemaMap, properties map[string]any) []ElicitationField 
 	}
 
 	// Sort: required first, then alphabetically
-	sort.Slice(fields, func(i, j int) bool {
-		if fields[i].Required != fields[j].Required {
-			return fields[i].Required
+	slices.SortFunc(fields, func(a, b ElicitationField) int {
+		if a.Required != b.Required {
+			if a.Required {
+				return -1
+			}
+			return 1
 		}
-		return fields[i].Name < fields[j].Name
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	return fields

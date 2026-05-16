@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>docker-agent in the browser</title>
+<style>
+  /* ---- Design tokens ---------------------------------------------------
+     One block per surface: colours, depth, geometry, typography. The dark
+     palette is set on either an explicit data-theme="dark" or the OS
+     preference (when the user hasn't pinned a theme). Light is the default
+     and gets re-applied for an explicit data-theme="light".
+  ---------------------------------------------------------------------- */
+  :root {
+    color-scheme: light;
+
+    /* Greyscale + radial accent for the page background */
+    --bg: #f4f4f5;
+    --bg-accent:
+      radial-gradient(circle at top left, rgba(0, 0, 0, .04), transparent 34rem),
+      radial-gradient(circle at top right, rgba(34, 197, 94, .07), transparent 30rem),
+      var(--bg);
+
+    /* Surfaces (panels, headers, hover wash) */
+    --panel: rgba(255, 255, 255, .85);
+    --panel-solid: #ffffff;
+    --panel-muted: rgba(0, 0, 0, .04);
+    --panel-muted-strong: rgba(0, 0, 0, .07);
+
+    /* Lines */
+    --border: rgba(0, 0, 0, .12);
+    --border-strong: rgba(0, 0, 0, .20);
+
+    /* Foreground */
+    --text: #18181b;
+    --muted: #6b7280;
+    --muted-2: #9ca3af;
+
+    /* Roles */
+    --link: #2563eb;
+    --accent: #16a34a;
+    --accent-hover: #15803d;
+    --accent-text: #ffffff;
+    --danger: #dc2626;
+    --warning: #d97706;
+
+    /* Depth + geometry */
+    --shadow: 0 18px 45px rgba(0, 0, 0, .08);
+    --shadow-soft: 0 8px 24px rgba(0, 0, 0, .06);
+    --radius: 16px;
+    --radius-sm: 10px;
+
+    /* Type */
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  }
+
+  /* Dark palette — applied via OS preference, unless the user pinned light. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #18181b;
+      --panel: rgba(39, 39, 42, .82);
+      --panel-solid: #27272a;
+      --panel-muted: rgba(255, 255, 255, .04);
+      --panel-muted-strong: rgba(255, 255, 255, .07);
+      --border: rgba(255, 255, 255, .10);
+      --border-strong: rgba(255, 255, 255, .18);
+      --text: #f4f4f5;
+      --muted: #a1a1aa;
+      --muted-2: #71717a;
+      --link: #93c5fd;
+      --accent: #22c55e;
+      --accent-hover: #16a34a;
+      --accent-text: #04130a;
+      --danger: #f87171;
+      --warning: #fbbf24;
+      --shadow: 0 22px 60px rgba(0, 0, 0, .40);
+      --shadow-soft: 0 10px 28px rgba(0, 0, 0, .28);
+      --bg-accent:
+        radial-gradient(circle at top left, rgba(255, 255, 255, .035), transparent 34rem),
+        radial-gradient(circle at top right, rgba(34, 197, 94, .07), transparent 30rem),
+        var(--bg);
+    }
+  }
+
+  /* Same dark palette, this time with the user's explicit pin. */
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #18181b;
+    --panel: rgba(39, 39, 42, .82);
+    --panel-solid: #27272a;
+    --panel-muted: rgba(255, 255, 255, .04);
+    --panel-muted-strong: rgba(255, 255, 255, .07);
+    --border: rgba(255, 255, 255, .10);
+    --border-strong: rgba(255, 255, 255, .18);
+    --text: #f4f4f5;
+    --muted: #a1a1aa;
+    --muted-2: #71717a;
+    --link: #93c5fd;
+    --accent: #22c55e;
+    --accent-hover: #16a34a;
+    --accent-text: #04130a;
+    --danger: #f87171;
+    --warning: #fbbf24;
+    --shadow: 0 22px 60px rgba(0, 0, 0, .40);
+    --shadow-soft: 0 10px 28px rgba(0, 0, 0, .28);
+    --bg-accent:
+      radial-gradient(circle at top left, rgba(255, 255, 255, .035), transparent 34rem),
+      radial-gradient(circle at top right, rgba(34, 197, 94, .07), transparent 30rem),
+      var(--bg);
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+
+  /* ---- Reset + base ---------------------------------------------------- */
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    padding: 1rem;
+    gap: .9rem;
+    color: var(--text);
+    background: var(--bg-accent);
+
+    & a {
+      color: var(--link);
+      text-decoration: none;
+
+      &:hover { text-decoration: underline; }
+    }
+  }
+
+  /* ---- Top bar --------------------------------------------------------- */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex: 0 0 auto;
+
+    & h1 {
+      margin: 0;
+      letter-spacing: -0.025em;
+      font-size: clamp(1.25rem, 1.8vw, 1.65rem);
+      line-height: 1.1;
+      white-space: nowrap;
+
+      & small {
+        font-weight: 500;
+        color: var(--muted);
+        font-size: .56em;
+      }
+    }
+
+    & .spacer { flex: 1 1 auto; }
+  }
+
+  .theme-toggle {
+    width: 2.35rem;
+    height: 2.35rem;
+    border-radius: 999px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-soft);
+    backdrop-filter: blur(14px);
+  }
+
+  /* ---- Utilities ------------------------------------------------------- */
+  .muted { color: var(--muted); font-size: 12px; }
+  .err   { color: var(--danger); }
+  .ok    { color: var(--accent); }
+  .row   { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  code   { background: var(--panel-muted-strong); padding: 1px 4px; border-radius: 5px; }
+
+  /* ---- Form controls --------------------------------------------------- */
+  textarea, input, select {
+    width: 100%;
+    font: inherit;
+    padding: .48rem .65rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel-solid);
+    color: var(--text);
+    outline: none;
+    transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
+
+    &:focus {
+      border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+    }
+  }
+  textarea { font-family: var(--mono); resize: vertical; }
+
+  button {
+    padding: .5rem .95rem;
+    font: inherit;
+    font-weight: 600;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel-solid);
+    cursor: pointer;
+    transition: transform .12s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
+
+    &:hover:not([disabled]) {
+      transform: translateY(-1px);
+      border-color: var(--border-strong);
+      box-shadow: var(--shadow-soft);
+    }
+    &:active:not([disabled]) { transform: translateY(0); }
+    &[disabled]              { opacity: .5; cursor: not-allowed; }
+
+    &.primary {
+      background: var(--accent);
+      color: var(--accent-text);
+      border-color: transparent;
+
+      &:hover:not([disabled]) { background: var(--accent-hover); }
+    }
+
+    &.danger {
+      background: var(--danger);
+      color: #fff;
+      border-color: transparent;
+
+      &:hover:not([disabled]) { background: color-mix(in srgb, var(--danger) 85%, black); }
+    }
+
+    &.sign-in-btn {
+      background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+      color: var(--accent-text);
+      border-color: transparent;
+      box-shadow: 0 10px 24px color-mix(in srgb, var(--accent) 24%, transparent);
+
+      &:hover:not([disabled]) {
+        background: linear-gradient(135deg, var(--accent-hover), var(--accent));
+        box-shadow: 0 14px 30px color-mix(in srgb, var(--accent) 32%, transparent);
+      }
+    }
+  }
+
+  /* ---- Workbench layout ------------------------------------------------ */
+  .workbench {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: .9rem;
+    min-height: 0;
+
+    @media (max-width: 900px) { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 18em;
+    overflow: hidden;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(18px);
+
+    & > header {
+      min-height: 2.55rem;
+      padding: .45rem .85rem;
+      background: var(--panel-muted);
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: .8rem;
+    }
+
+    & > .body {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      background: var(--panel-solid);
+    }
+  }
+
+  /* Panel-edge strips: prompt bar at the bottom of chat, model picker
+     under the YAML editor. Same chrome, different content. */
+  .prompt-bar, .panel-footer {
+    display: flex;
+    gap: .65rem;
+    align-items: center;
+    padding: .75rem .85rem;
+    border-top: 1px solid var(--border);
+    background: var(--panel-muted);
+    flex: 0 0 auto;
+  }
+  .panel-footer {
+    font-size: 12px;
+    color: var(--muted);
+
+    & label  { white-space: nowrap; font-weight: 600; }
+    & select { flex: 1 1 auto; }
+  }
+
+  /* ---- YAML editor (CodeMirror) ----------------------------------------
+     The official One Dark theme handles dark mode; light mode uses CM6's
+     built-in default highlight style. */
+  #yaml { height: 100%; }
+  .cm-editor {
+    height: 100%;
+    font-size: 13px;
+
+    &.cm-focused { outline: none; }
+  }
+  .cm-scroller { overflow: auto; font-family: var(--mono); }
+
+  /* ---- Chat transcript ------------------------------------------------- */
+  #chat {
+    min-height: 100%;
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: .7rem;
+    background: rgb(41, 44, 51);
+
+    &:empty::before {
+      content: "No messages yet — type a prompt below and hit Send.";
+      color: var(--muted);
+      font-size: 12px;
+      align-self: center;
+      margin-top: 2em;
+    }
+  }
+
+  .msg {
+    max-width: min(48em, 88%);
+    padding: .68rem .9rem;
+    border-radius: 16px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    line-height: 1.45;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, .04);
+
+    &.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+      color: var(--accent-text);
+      border-bottom-right-radius: 5px;
+    }
+    &.assistant {
+      align-self: flex-start;
+      background: var(--panel-muted-strong);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 5px;
+
+      &.streaming::after {
+        content: "▋";
+        animation: blink 1s steps(2) infinite;
+      }
+    }
+    &.error {
+      align-self: stretch;
+      max-width: none;
+      font-size: 13px;
+      background: color-mix(in srgb, var(--danger) 12%, transparent);
+      color: var(--danger);
+      border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
+    }
+    &.system {
+      align-self: stretch;
+      max-width: none;
+      font-size: 12px;
+      padding: .4rem .7rem;
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      color: var(--muted);
+      border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+      border-radius: 8px;
+    }
+
+    & .reason {
+      display: block;
+      font-style: italic;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: .35em;
+      padding-bottom: .35em;
+      border-bottom: 1px dashed var(--border-strong);
+    }
+
+    /* Inline markdown rendering */
+    & code {
+      font-family: var(--mono);
+      font-size: .9em;
+      background: var(--panel-muted-strong);
+      padding: .1em .35em;
+      border-radius: 4px;
+    }
+    & pre {
+      margin: .5em 0;
+      padding: .6em .8em;
+      background: var(--panel-muted-strong);
+      border-radius: 8px;
+      overflow-x: auto;
+      white-space: pre;
+      font-family: var(--mono);
+      font-size: .85em;
+      line-height: 1.4;
+    }
+    & pre code {
+      background: none;
+      padding: 0;
+      border-radius: 0;
+    }
+    & strong { font-weight: 700; }
+    & em { font-style: italic; }
+  }
+
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+  /* ---- Prompt bar widgets --------------------------------------------- */
+  #prompt {
+    flex: 1 1 auto;
+    min-width: 0;
+    resize: none;
+    min-height: 2.6em;
+    max-height: 9em;
+  }
+  #send, #abort { white-space: nowrap; align-self: stretch; }
+  #abort { display: none; }
+  .streaming-active #send { display: none; }
+  .streaming-active #abort { display: inline-flex; }
+
+  /* ---- Token usage badge --------------------------------------------- */
+  .token-badge {
+    font-size: 11px;
+    color: var(--muted);
+    padding: .15em .5em;
+    border-radius: 6px;
+    background: var(--panel-muted-strong);
+    white-space: nowrap;
+  }
+
+  /* ---- Account-health dot --------------------------------------------- */
+  .health {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--muted-2);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--muted-2) 18%, transparent);
+    flex: 0 0 auto;
+    cursor: help;
+
+    &.green  { background: var(--accent);  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent)  22%, transparent); }
+    &.yellow { background: var(--warning); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 24%, transparent); }
+    &.red    { background: var(--danger);  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger)  20%, transparent); }
+  }
+
+  /* ---- Loading overlay ------------------------------------------------- */
+  .wasm-loading {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
+    backdrop-filter: blur(6px);
+    z-index: 1000;
+    transition: opacity .3s ease;
+
+    &.loaded { opacity: 0; pointer-events: none; }
+
+    & .spinner {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: .8rem;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    & .spinner::before {
+      content: "";
+      width: 32px;
+      height: 32px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- YAML validation status ----------------------------------------- */
+  #yaml-status {
+    font-size: 11px;
+    font-weight: 500;
+    margin-left: .4em;
+    transition: color .15s ease;
+  }
+  #yaml-status.valid { color: var(--accent); }
+  #yaml-status.invalid { color: var(--danger); }
+  #yaml-status .error-text {
+    display: inline;
+    cursor: help;
+  }
+</style>
+</head>
+<body>
+
+<!-- Loading overlay shown until wasm boots -->
+<div id="wasm-loading" class="wasm-loading">
+  <div class="spinner">Loading WebAssembly runtime…</div>
+</div>
+
+<header class="topbar">
+  <h1>Docker Agent Demo <small>· powered by <a href="https://openrouter.ai" target="_blank" rel="noopener" style="color: var(--accent);">OpenRouter</a></small></h1>
+  <div class="spacer"></div>
+  <div class="row">
+    <button id="sign-in" class="sign-in-btn">Sign in with OpenRouter</button>
+    <button id="sign-out" hidden>Sign out</button>
+    <span id="health-dot" class="health" title="" hidden></span>
+    <span id="auth-state" class="muted">not signed in</span>
+    <button id="theme-toggle" class="theme-toggle" title="Toggle light/dark mode" aria-label="Toggle light/dark mode">◐</button>
+  </div>
+</header>
+
+<section class="workbench">
+  <div class="panel">
+    <header>
+      <span>Agent config <span id="yaml-status"></span></span>
+      <span class="row">
+        <label for="agent-picker" class="muted" style="font-size: 11px;">Agent:</label>
+        <select id="agent-picker" style="width: auto; font-size: 11px; padding: .2em .4em;">
+          <option value="">root</option>
+        </select>
+      </span>
+    </header>
+    <div class="body"><div id="yaml"></div></div>
+    <div class="panel-footer">
+      <label for="model">Model</label>
+      <select id="model">
+        <option value="openai/gpt-oss-120b:free">openai / gpt-oss-120b (free)</option>
+        <option value="meta-llama/llama-3.3-70b-instruct:free">meta-llama / llama-3.3-70b-instruct (free)</option>
+        <option value="google/gemma-3-27b-it:free">google / gemma-3-27b-it (free)</option>
+        <option value="qwen/qwen3-coder:free">qwen / qwen3-coder (free)</option>
+        <option value="openai/gpt-oss-20b:free">openai / gpt-oss-20b (free)</option>
+        <option value="z-ai/glm-4.5-air:free">z-ai / glm-4.5-air (free)</option>
+        <option value="meta-llama/llama-3.2-3b-instruct:free">meta-llama / llama-3.2-3b-instruct (free)</option>
+        <option value="nousresearch/hermes-3-llama-3.1-405b:free">nous / hermes-3-llama-3.1-405b (free)</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="panel">
+    <header>
+      <span>Chat</span>
+      <span class="row" style="font-size: 12px;">
+        <span id="token-usage" class="token-badge" hidden></span>
+        <span id="finish" class="muted"></span>
+        <button id="clear" title="Clear conversation" style="padding: .2em .6em; font-size: 12px;">Clear</button>
+      </span>
+    </header>
+    <div class="body" id="chat-body">
+      <div id="chat"></div>
+    </div>
+    <div class="prompt-bar">
+      <textarea id="prompt" rows="2" spellcheck="false" placeholder="Type a message and press Enter to send (Shift-Enter for newline)…">What can you do in this browser-only Docker Agent demo? Keep it short.</textarea>
+      <button id="send" class="primary" disabled>Send</button>
+      <button id="abort" class="danger">Stop</button>
+    </div>
+  </div>
+</section>
+
+<script src="wasm_exec.js"></script>
+<script type="module">
+import { signIn, signOut, handleCallback, getKey } from "./auth.js";
+import { EditorView, basicSetup } from "https://esm.sh/codemirror@6.0.2";
+import { yaml as yamlLang }       from "https://esm.sh/@codemirror/lang-yaml@6.1.2";
+import { oneDark }                from "https://esm.sh/@codemirror/theme-one-dark@6.1.2";
+
+const themeBtn      = document.getElementById("theme-toggle");
+const sendBtn       = document.getElementById("send");
+const abortBtn      = document.getElementById("abort");
+const clearBtn      = document.getElementById("clear");
+const finish        = document.getElementById("finish");
+const tokenUsageEl  = document.getElementById("token-usage");
+const modelEl       = document.getElementById("model");
+const agentPicker   = document.getElementById("agent-picker");
+const signInB       = document.getElementById("sign-in");
+const signOutB      = document.getElementById("sign-out");
+const authEl        = document.getElementById("auth-state");
+const healthDot     = document.getElementById("health-dot");
+const promptEl      = document.getElementById("prompt");
+const chatEl        = document.getElementById("chat");
+const chatBody      = document.getElementById("chat-body");
+const loadingEl     = document.getElementById("wasm-loading");
+
+// ---- Theme ---------------------------------------------------------------
+function preferredTheme() {
+  return localStorage.getItem("theme") ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+}
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  themeBtn.textContent = theme === "dark" ? "☀" : "☾";
+  themeBtn.title = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+}
+applyTheme(preferredTheme());
+themeBtn.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  localStorage.setItem("theme", next);
+  location.reload();
+});
+
+// ---- YAML editor (CodeMirror 6) -----------------------------------------
+const yamlEditor = new EditorView({
+  doc: "",
+  extensions: [
+    basicSetup,
+    yamlLang(),
+    ...(preferredTheme() === "dark" ? [oneDark] : []),
+    EditorView.theme({ "&": { height: "100%" } }),
+  ],
+  parent: document.getElementById("yaml"),
+});
+function getYaml() { return yamlEditor.state.doc.toString(); }
+function setYaml(text) {
+  yamlEditor.dispatch({
+    changes: { from: 0, to: yamlEditor.state.doc.length, insert: text },
+  });
+}
+
+// ---- Default YAML, regenerated whenever the model dropdown changes -------
+function defaultYaml(model) {
+  return `providers:
+  openrouter:
+    provider: openai
+    base_url: https://openrouter.ai/api/v1
+    token_key: OPENROUTER_API_KEY
+agents:
+  root:
+    model: openrouter/${model}
+    instruction: |
+      You are a helpful assistant running entirely inside a browser tab,
+      compiled to WebAssembly. Keep answers short and friendly.
+`;
+}
+
+let lastDefault = defaultYaml(modelEl.value);
+setYaml(lastDefault);
+modelEl.addEventListener("change", () => {
+  if (getYaml() === lastDefault) {
+    lastDefault = defaultYaml(modelEl.value);
+    setYaml(lastDefault);
+  } else {
+    lastDefault = defaultYaml(modelEl.value);
+  }
+});
+
+// ---- Agent picker: refresh when YAML changes -----------------------------
+function refreshAgentPicker() {
+  if (typeof globalThis.dockerAgent === "undefined") return;
+  try {
+    const agents = dockerAgent.listAgents(getYaml());
+    agentPicker.innerHTML = "";
+    for (const a of agents) {
+      const opt = document.createElement("option");
+      opt.value = a.name;
+      opt.textContent = a.name + (a.description ? ` — ${a.description}` : "");
+      agentPicker.appendChild(opt);
+    }
+    // Show picker only when multiple agents exist
+    agentPicker.parentElement.style.display = agents.length > 1 ? "" : "none";
+  } catch {
+    // YAML might be invalid while typing — ignore silently
+  }
+}
+
+// Debounce YAML change detection for agent picker
+let agentRefreshTimer = null;
+const onYamlChange = EditorView.updateListener.of((update) => {
+  if (update.docChanged) {
+    clearTimeout(agentRefreshTimer);
+    agentRefreshTimer = setTimeout(refreshAgentPicker, 400);
+  }
+});
+yamlEditor.dispatch({ effects: [] }); // no-op to ensure listener is wired
+// We'll wire the updateListener after appending it as an extension — but CM6
+// doesn't support adding extensions post-creation without reconfigure. Instead
+// we poll on meaningful events. We'll call refreshAgentPicker after wasm loads.
+
+// ---- Auth state UI -------------------------------------------------------
+function refreshAuth() {
+  const key = getKey();
+  if (key) {
+    authEl.textContent = "signed in (key: " + key.slice(0, 10) + "…)";
+    authEl.classList.add("ok");
+    authEl.classList.remove("muted");
+    signInB.hidden = true;
+    signOutB.hidden = false;
+    healthDot.hidden = false;
+    refreshHealth();
+  } else {
+    authEl.textContent = "not signed in";
+    authEl.classList.remove("ok");
+    authEl.classList.add("muted");
+    signInB.hidden = false;
+    signOutB.hidden = true;
+    healthDot.hidden = true;
+    healthDot.className = "health";
+    healthDot.title = "";
+  }
+}
+signInB.addEventListener("click", () => signIn());
+signOutB.addEventListener("click", () => { signOut(); refreshAuth(); });
+
+function setHealth(colour, tooltip) {
+  healthDot.className = "health " + colour;
+  healthDot.title = tooltip;
+}
+
+async function refreshHealth() {
+  const key = getKey();
+  if (!key) return;
+  try {
+    const r = await fetch("https://openrouter.ai/api/v1/auth/key", {
+      headers: { Authorization: "Bearer " + key },
+    });
+    if (r.status === 401 || r.status === 403) {
+      setHealth("red", "Key rejected (" + r.status + ") — sign out and back in.");
+      return;
+    }
+    if (!r.ok) {
+      setHealth("yellow", "OpenRouter returned HTTP " + r.status);
+      return;
+    }
+    const { data } = await r.json();
+    const limit = data.limit;
+    const remaining = data.limit_remaining;
+
+    if (limit != null && remaining != null && remaining <= 0) {
+      setHealth("red", "Account quota exhausted (limit " + limit + ").");
+      return;
+    }
+    if (data.is_free_tier) {
+      setHealth("yellow",
+        "Free tier — inference works but popular :free models are " +
+        "often rate-limited upstream. Add $10 of credits at " +
+        "openrouter.ai/settings/credits to lift the cap.");
+      return;
+    }
+    setHealth("green",
+      "Account healthy" +
+      (limit != null ? " (" + remaining + " / " + limit + " remaining)" : "") +
+      ".");
+  } catch (e) {
+    setHealth("red", "Health probe failed: " + (e && e.message ? e.message : e));
+  }
+}
+
+// ---- Lightweight markdown rendering --------------------------------------
+// Handles: **bold**, *italic*, `inline code`, ```code blocks```, and basic
+// line breaks. Returns an HTML string. Does NOT handle full CommonMark; this
+// is intentionally minimal to avoid pulling in a 50 KB library.
+function renderMarkdown(text) {
+  // Escape HTML entities
+  let html = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+  // Fenced code blocks: ```lang\n...\n```
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    return `<pre><code>${code.replace(/\n$/, "")}</code></pre>`;
+  });
+
+  // Inline code: `...`
+  html = html.replace(/`([^`\n]+)`/g, "<code>$1</code>");
+
+  // Bold: **...**
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+
+  // Italic: *...*
+  html = html.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "<em>$1</em>");
+
+  return html;
+}
+
+// ---- Chat transcript -----------------------------------------------------
+let conversation = [];
+let totalInputTokens = 0;
+let totalOutputTokens = 0;
+
+function scrollToBottomIfPinned() {
+  const slack = 80;
+  const nearBottom = chatBody.scrollHeight - chatBody.scrollTop - chatBody.clientHeight < slack;
+  if (nearBottom) chatBody.scrollTop = chatBody.scrollHeight;
+}
+
+function appendMessage(role, content = "") {
+  const el = document.createElement("div");
+  el.className = "msg " + role;
+  if (role === "assistant" && content === "") el.classList.add("streaming");
+  if (role === "assistant") {
+    el.innerHTML = content ? renderMarkdown(content) : "";
+  } else {
+    el.textContent = content;
+  }
+  chatEl.appendChild(el);
+  scrollToBottomIfPinned();
+  return el;
+}
+
+function appendError(message) {
+  const el = document.createElement("div");
+  el.className = "msg error";
+  el.textContent = message;
+  chatEl.appendChild(el);
+  scrollToBottomIfPinned();
+  return el;
+}
+
+function appendSystemMessage(message) {
+  const el = document.createElement("div");
+  el.className = "msg system";
+  el.innerHTML = renderMarkdown(message);
+  chatEl.appendChild(el);
+  scrollToBottomIfPinned();
+  return el;
+}
+
+function updateTokenUsage() {
+  if (totalInputTokens === 0 && totalOutputTokens === 0) {
+    tokenUsageEl.hidden = true;
+    return;
+  }
+  tokenUsageEl.hidden = false;
+  tokenUsageEl.textContent = `↑${totalInputTokens.toLocaleString()} ↓${totalOutputTokens.toLocaleString()} tokens`;
+  tokenUsageEl.title = `Total tokens this session: ${totalInputTokens.toLocaleString()} input, ${totalOutputTokens.toLocaleString()} output`;
+}
+
+clearBtn.addEventListener("click", () => {
+  conversation = [];
+  chatEl.innerHTML = "";
+  finish.textContent = "";
+  totalInputTokens = 0;
+  totalOutputTokens = 0;
+  updateTokenUsage();
+  promptEl.focus();
+});
+
+// ---- Streaming state management ------------------------------------------
+let isStreaming = false;
+
+function setStreaming(active) {
+  isStreaming = active;
+  document.body.classList.toggle("streaming-active", active);
+  promptEl.disabled = active;
+}
+
+// ---- Wasm boot -----------------------------------------------------------
+(async () => {
+  try {
+    try {
+      await handleCallback();
+    } catch (e) {
+      alert("Auth callback failed: " + e.message);
+    }
+    refreshAuth();
+
+    const go = new Go();
+    const result = await WebAssembly.instantiateStreaming(fetch("docker-agent.wasm"), go.importObject);
+    go.run(result.instance);
+
+    // Wasm is ready
+    loadingEl.classList.add("loaded");
+    sendBtn.disabled = false;
+    promptEl.focus();
+    refreshAgentPicker();
+    validateYaml();
+  } catch (e) {
+    loadingEl.querySelector(".spinner").textContent = "Failed to load: " + e.message;
+  }
+})();
+
+// ---- Send a turn ---------------------------------------------------------
+async function run() {
+  const text = promptEl.value.trim();
+  if (!text) return;
+
+  setStreaming(true);
+  finish.textContent = "";
+
+  conversation.push({ role: "user", content: text });
+  appendMessage("user", text);
+  promptEl.value = "";
+
+  const bubble = appendMessage("assistant", "");
+  let assistantContent = "";
+  let assistantReason  = "";
+
+  const yaml = getYaml();
+  const env  = { OPENROUTER_API_KEY: getKey() || "" };
+  const agentName = agentPicker.value || undefined;
+
+  try {
+    // Validate YAML before calling the LLM.
+    dockerAgent.parseConfig(yaml);
+
+    await dockerAgent.chat(
+      { yaml, env, messages: conversation.slice(), agentName },
+      (event) => {
+        if (event.type === "delta") {
+          if (event.content) {
+            assistantContent += event.content;
+            bubble.classList.remove("streaming");
+            renderAssistant(bubble, assistantReason, assistantContent);
+          }
+          if (event.reasoning) {
+            assistantReason += event.reasoning;
+            bubble.classList.remove("streaming");
+            renderAssistant(bubble, assistantReason, assistantContent);
+          }
+          scrollToBottomIfPinned();
+        } else if (event.type === "tool_call") {
+          appendSystemMessage(`🔧 Calling tool: **${event.name}**`);
+        } else if (event.type === "tool_result") {
+          appendSystemMessage(`✅ ${event.name} → ${event.output.slice(0, 200)}${event.output.length > 200 ? "…" : ""}`);
+        } else if (event.type === "tool_blocked") {
+          appendSystemMessage(`🚫 Tool ${event.name} blocked: ${event.reason}`);
+        } else if (event.type === "handoff") {
+          appendSystemMessage(`🔄 Agent handoff: ${event.from} → **${event.to}**`);
+        } else if (event.type === "fallback") {
+          appendSystemMessage(`⚠️ Model fallback: ${event.from} → ${event.to} (attempt ${event.attempt})`);
+        } else if (event.type === "finish") {
+          finish.textContent = "(" + event.reason + ")";
+        } else if (event.type === "usage") {
+          totalInputTokens += event.input_tokens || 0;
+          totalOutputTokens += event.output_tokens || 0;
+          updateTokenUsage();
+        }
+      },
+    );
+
+    bubble.classList.remove("streaming");
+
+    if (assistantContent) {
+      conversation.push({ role: "assistant", content: assistantContent });
+    } else {
+      conversation.pop();
+      bubble.remove();
+      appendError("(no content returned — try a different model or retry)");
+    }
+  } catch (e) {
+    bubble.remove();
+    const msg = String(e && e.message ? e.message : e);
+    if (msg.includes("aborted")) {
+      appendError("(generation stopped)");
+    } else {
+      appendError(msg);
+    }
+    conversation.pop();
+  } finally {
+    setStreaming(false);
+    promptEl.focus();
+  }
+}
+
+// renderAssistant rewrites the assistant bubble with markdown-rendered
+// content. Reasoning is shown above content with a dashed divider.
+function renderAssistant(bubble, reason, content) {
+  let html = "";
+  if (reason) {
+    html += `<span class="reason">${reason.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</span>`;
+  }
+  html += renderMarkdown(content);
+  bubble.innerHTML = html;
+}
+
+// ---- Abort button --------------------------------------------------------
+abortBtn.addEventListener("click", () => {
+  if (typeof dockerAgent !== "undefined" && dockerAgent.abort) {
+    dockerAgent.abort();
+  }
+});
+
+// ---- Send / keyboard shortcuts -------------------------------------------
+sendBtn.addEventListener("click", run);
+promptEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    if (!isStreaming) run();
+  }
+});
+
+// ---- YAML change -> refresh agent picker + live validation --------------
+// Since CM6 doesn't easily support adding updateListeners after construction
+// without a full reconfigure, we use a MutationObserver on the CM content.
+const yamlContainer = document.getElementById("yaml");
+const yamlStatusEl = document.getElementById("yaml-status");
+let validateTimer = null;
+
+function validateYaml() {
+  if (typeof globalThis.dockerAgent === "undefined") return;
+  const yaml = getYaml();
+  if (!yaml.trim()) {
+    yamlStatusEl.className = "";
+    yamlStatusEl.innerHTML = "";
+    yamlStatusEl.title = "";
+    return;
+  }
+  try {
+    dockerAgent.parseConfig(yaml);
+    yamlStatusEl.className = "valid";
+    yamlStatusEl.innerHTML = "✓";
+    yamlStatusEl.title = "Config is valid";
+  } catch (e) {
+    const msg = e.message || String(e);
+    // Strip the "parseConfig: " prefix for cleaner display
+    const clean = msg.replace(/^parseConfig:\s*/, "");
+    const short = clean.length > 60 ? clean.slice(0, 57) + "…" : clean;
+    yamlStatusEl.className = "invalid";
+    yamlStatusEl.innerHTML = `✗ <span class="error-text">${short.replace(/</g,"&lt;")}</span>`;
+    yamlStatusEl.title = clean;
+  }
+}
+
+const observer = new MutationObserver(() => {
+  clearTimeout(agentRefreshTimer);
+  agentRefreshTimer = setTimeout(refreshAgentPicker, 600);
+  clearTimeout(validateTimer);
+  validateTimer = setTimeout(validateYaml, 300);
+});
+observer.observe(yamlContainer, { childList: true, subtree: true, characterData: true });
+</script>
+
+</body>
+</html>

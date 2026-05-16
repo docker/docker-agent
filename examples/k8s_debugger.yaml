@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
@@ -12,7 +12,7 @@ agents:
         2. Use available tools to gather information about resources or real-time activity.
         3. Analyze the collected data to detect potential problems.
         4. Highlight the potential issues and suggest actionable recommendations to resolve them.
-      
+
       Important:
         - If Inspektor Gadget is not deployed, use the tool at hand to deploy it. Ask user to restart the agent session after deployment.
         - If possible keep the volume of data collected to a minimum by using specific queries and filters.

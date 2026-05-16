@@ -1,0 +1,41 @@
+---
+version: 2
+interactions:
+    - id: 0
+      request:
+        proto: HTTP/1.1
+        proto_major: 1
+        proto_minor: 1
+        content_length: 0
+        host: api.openai.com
+        body: '{"messages":[{"content":"You are a helpful AI assistant that generates concise, descriptive titles for conversations. You will be given up to 2 recent user messages and asked to create a single-line title that captures the main topic. Never use newlines or line breaks in your response.","role":"system"},{"content":"Based on the following recent user messages from a conversation with an AI assistant, generate a short, descriptive title (maximum 50 characters) that captures the main topic or purpose of the conversation. Return ONLY the title text on a single line, nothing else. Do not include any newlines, explanations, or formatting.\n\nRecent user messages:\n1. What can you do?\n\n\n","role":"user"}],"model":"gpt-4o","max_tokens":20,"stream_options":{"include_usage":true},"stream":true}'
+        url: https://api.openai.com/v1/chat/completions
+        method: POST
+      response:
+        proto: HTTP/2.0
+        proto_major: 2
+        proto_minor: 0
+        content_length: -1
+        body: |+
+            data: {"id":"chatcmpl-DL6l2B1cp13mjRSf4ifo2QcGmFIjq","object":"chat.completion.chunk","created":1773923236,"model":"gpt-4o-2024-08-06","service_tier":"default","system_fingerprint":"fp_6dc3064ee0","choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"logprobs":null,"finish_reason":null}],"usage":null,"obfuscation":"Ah8378EVbWdjBR"}
+
+            data: {"id":"chatcmpl-DL6l2B1cp13mjRSf4ifo2QcGmFIjq","object":"chat.completion.chunk","created":1773923236,"model":"gpt-4o-2024-08-06","service_tier":"default","system_fingerprint":"fp_6dc3064ee0","choices":[{"index":0,"delta":{"content":"Expl"},"logprobs":null,"finish_reason":null}],"usage":null,"obfuscation":"DM9berK7wRGe"}
+
+            data: {"id":"chatcmpl-DL6l2B1cp13mjRSf4ifo2QcGmFIjq","object":"chat.completion.chunk","created":1773923236,"model":"gpt-4o-2024-08-06","service_tier":"default","system_fingerprint":"fp_6dc3064ee0","choices":[{"index":0,"delta":{"content":"oring"},"logprobs":null,"finish_reason":null}],"usage":null,"obfuscation":"CsflS9lUxgs"}
+
+            data: {"id":"chatcmpl-DL6l2B1cp13mjRSf4ifo2QcGmFIjq","object":"chat.completion.chunk","created":1773923236,"model":"gpt-4o-2024-08-06","service_tier":"default","system_fingerprint":"fp_6dc3064ee0","choices":[{"index":0,"delta":{"content":" AI"},"logprobs":null,"finish_reason":null}],"usage":null,"obfuscation":"5iGuyVseZMHzY"}
+
+            data: {"id":"chatcmpl-DL6l2B1cp13mjRSf4ifo2QcGmFIjq","object":"chat.completion.chunk","created":1773923236,"model":"gpt-4o-2024-08-06","service_tier":"default","system_fingerprint":"fp_6dc3064ee0","choices":[{"index":0,"delta":{"content":" Cap"},"logprobs":null,"finish_reason":null}],"usage":null,"obfuscation":"WFJvtiakBYbJ"}
+
+            data: {"id":"chatcmpl-DL6l2B1cp13mjRSf4ifo2QcGmFIjq","object":"chat.completion.chunk","created":1773923236,"model":"gpt-4o-2024-08-06","service_tier":"default","system_fingerprint":"fp_6dc3064ee0","choices":[{"index":0,"delta":{"content":"abilities"},"logprobs":null,"finish_reason":null}],"usage":null,"obfuscation":"GX6mYkG"}
+
+            data: {"id":"chatcmpl-DL6l2B1cp13mjRSf4ifo2QcGmFIjq","object":"chat.completion.chunk","created":1773923236,"model":"gpt-4o-2024-08-06","service_tier":"default","system_fingerprint":"fp_6dc3064ee0","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"usage":null,"obfuscation":"a8A1nfH5fJ"}
+
+            data: {"id":"chatcmpl-DL6l2B1cp13mjRSf4ifo2QcGmFIjq","object":"chat.completion.chunk","created":1773923236,"model":"gpt-4o-2024-08-06","service_tier":"default","system_fingerprint":"fp_6dc3064ee0","choices":[],"usage":{"prompt_tokens":136,"completion_tokens":5,"total_tokens":141,"prompt_tokens_details":{"cached_tokens":0,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}},"obfuscation":"npMNW2Pgk3u1lZ"}
+
+            data: [DONE]
+
+        headers: {}
+        status: 200 OK
+        code: 200
+        duration: 1.036667917s

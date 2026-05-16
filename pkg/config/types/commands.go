@@ -1,6 +1,7 @@
 package types
 
 import (
+	"errors"
 	"fmt"
 )
 
@@ -112,7 +113,7 @@ func (c *Commands) UnmarshalYAML(unmarshal func(any) error) error {
 
 // parseCommandValue parses a command value which can be either:
 // - a simple string (becomes the instruction)
-// - a map with description/instruction fields
+// - a map with description/instruction fields.
 func parseCommandValue(v any) (Command, error) {
 	switch val := v.(type) {
 	case string:
@@ -122,7 +123,7 @@ func parseCommandValue(v any) (Command, error) {
 		inst, _ := val["instruction"].(string)
 
 		if inst == "" && desc == "" {
-			return Command{}, fmt.Errorf("command must have at least 'instruction' or 'description'")
+			return Command{}, errors.New("command must have at least 'instruction' or 'description'")
 		}
 		if inst == "" {
 			inst = desc

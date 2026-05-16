@@ -7,8 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/app"
-	"github.com/docker/cagent/pkg/history"
+	"github.com/docker/docker-agent/pkg/history"
 )
 
 func TestApplySuggestionOverlay(t *testing.T) {
@@ -61,9 +60,8 @@ func TestApplySuggestionOverlay(t *testing.T) {
 			t.Parallel()
 
 			// Create a simple editor for testing
-			hist, _ := history.New()
-			a := &app.App{} // minimal app for testing
-			e := New(a, hist).(*editor)
+			hist, _ := history.New("")
+			e := New(hist).(*editor)
 
 			// Set up textarea with test content
 			e.textarea.SetValue(tt.textareaText)
@@ -96,9 +94,8 @@ func TestApplySuggestionOverlay(t *testing.T) {
 func TestApplySuggestionOverlayScrolledView(t *testing.T) {
 	t.Parallel()
 
-	hist, _ := history.New()
-	a := &app.App{}
-	e := New(a, hist).(*editor)
+	hist, _ := history.New("")
+	e := New(hist).(*editor)
 
 	// Set up a multi-line textarea that's scrolled
 	content := "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\ncurrent"
@@ -194,9 +191,8 @@ func TestApplySuggestionOverlayWithVariousLineCount(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			hist, _ := history.New()
-			a := &app.App{}
-			e := New(a, hist).(*editor)
+			hist, _ := history.New("")
+			e := New(hist).(*editor)
 
 			e.textarea.SetValue(tt.textareaText)
 			e.textarea.SetWidth(80)
@@ -273,9 +269,8 @@ func TestApplySuggestionOverlayWithMultiLineSuggestion(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			hist, _ := history.New()
-			a := &app.App{}
-			e := New(a, hist).(*editor)
+			hist, _ := history.New("")
+			e := New(hist).(*editor)
 
 			e.textarea.SetValue(tt.textareaText)
 			e.textarea.SetWidth(80)
@@ -388,9 +383,8 @@ func TestIsCursorAtEnd(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			hist, _ := history.New()
-			a := &app.App{}
-			e := New(a, hist).(*editor)
+			hist, _ := history.New("")
+			e := New(hist).(*editor)
 
 			e.textarea.SetValue(tt.value)
 			e.textarea.SetWidth(tt.width)
@@ -460,9 +454,8 @@ func TestExtractLineText(t *testing.T) {
 func TestMultiLineSuggestionWithSmallEditor(t *testing.T) {
 	t.Parallel()
 
-	hist, _ := history.New()
-	a := &app.App{}
-	e := New(a, hist).(*editor)
+	hist, _ := history.New("")
+	e := New(hist).(*editor)
 
 	// Set up editor with minimal height
 	e.textarea.SetValue("A")
@@ -495,9 +488,8 @@ func TestMultiLineSuggestionWithSmallEditor(t *testing.T) {
 func TestLongSuggestionWrapping(t *testing.T) {
 	t.Parallel()
 
-	hist, _ := history.New()
-	a := &app.App{}
-	e := New(a, hist).(*editor)
+	hist, _ := history.New("")
+	e := New(hist).(*editor)
 
 	// Set up editor with narrow width
 	e.textarea.SetValue("L")

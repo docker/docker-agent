@@ -1,0 +1,25 @@
+#!/usr/bin/env docker agent run
+
+# Demonstrates the `headers` field on the fetch toolset. Headers are
+# attached to every request, with `${env.VAR}` expansion so secrets stay
+# out of YAML. Caller-supplied headers override the default User-Agent
+# and the format-driven Accept header.
+#
+# Run with: INTERNAL_DOCS_TOKEN=<token> docker agent run examples/fetch_headers.yaml
+
+agents:
+  root:
+    model: anthropic/claude-sonnet-4-5
+    description: Fetches pages from an internal documentation portal that requires a bearer token.
+    instruction: |
+      You can fetch pages from https://docs.internal.example.com.
+      Always summarise the response.
+    toolsets:
+      - type: fetch
+        # Restrict to the internal portal so the bearer token never leaks
+        # to a third-party host.
+        allowed_domains:
+          - docs.internal.example.com
+        headers:
+          Authorization: "Bearer ${env.INTERNAL_DOCS_TOKEN}"
+          X-Internal-Client: "docker-agent"

@@ -6,8 +6,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/session"
-	"github.com/docker/cagent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
 func TestSidebar_TitleEditStateTransitions(t *testing.T) {
@@ -97,7 +97,7 @@ func TestSidebar_HandleClickType(t *testing.T) {
 
 	// In vertical mode, the title line is at verticalStarY
 	// Click on the star area (adjusted x = 0-2, so raw x = 1-3)
-	result := sb.HandleClickType(paddingLeft+1, verticalStarY)
+	result, _ := sb.HandleClickType(paddingLeft+1, verticalStarY)
 	assert.Equal(t, ClickStar, result, "click on star area should return ClickStar")
 
 	// Set up a title with titleGenerated=true so ClickTitle can be returned
@@ -107,16 +107,16 @@ func TestSidebar_HandleClickType(t *testing.T) {
 	// Click anywhere on the title area (after star) should return ClickTitle
 	// Star "☆ " = 2 chars, so title area starts at position 2
 	titleX := paddingLeft + 3 // middle of title
-	result = sb.HandleClickType(titleX, verticalStarY)
+	result, _ = sb.HandleClickType(titleX, verticalStarY)
 	assert.Equal(t, ClickTitle, result, "click on title area should return ClickTitle")
 
 	// Click at the end (where pencil icon is) should also return ClickTitle
 	pencilX := paddingLeft + 4
-	result = sb.HandleClickType(pencilX, verticalStarY)
+	result, _ = sb.HandleClickType(pencilX, verticalStarY)
 	assert.Equal(t, ClickTitle, result, "click on pencil icon area should return ClickTitle")
 
 	// Click elsewhere (wrong y)
-	result = sb.HandleClickType(10, 0)
+	result, _ = sb.HandleClickType(10, 0)
 	assert.Equal(t, ClickNone, result, "click elsewhere should return ClickNone")
 }
 
@@ -173,15 +173,15 @@ func TestSidebar_HandleClickType_WrappedTitle_Collapsed(t *testing.T) {
 	assert.Greater(t, titleLines, 1, "title should wrap to multiple lines")
 
 	// Click on line 0 (first title line) after star should return ClickTitle
-	result := sb.HandleClickType(paddingLeft+3, 0)
+	result, _ := sb.HandleClickType(paddingLeft+3, 0)
 	assert.Equal(t, ClickTitle, result, "click on first title line should return ClickTitle")
 
 	// Click on line 1 (wrapped title line) should also return ClickTitle
-	result = sb.HandleClickType(paddingLeft+1, 1)
+	result, _ = sb.HandleClickType(paddingLeft+1, 1)
 	assert.Equal(t, ClickTitle, result, "click on wrapped title line should return ClickTitle")
 
 	// Star should still be clickable on line 0
-	result = sb.HandleClickType(paddingLeft+1, 0)
+	result, _ = sb.HandleClickType(paddingLeft+1, 0)
 	assert.Equal(t, ClickStar, result, "star should still be clickable on line 0")
 }
 
@@ -211,15 +211,15 @@ func TestSidebar_HandleClickType_WrappedTitle_Vertical(t *testing.T) {
 
 	// In vertical mode, title starts at verticalStarY
 	// Click on verticalStarY (first title line) after star should return ClickTitle
-	result := sb.HandleClickType(paddingLeft+3, verticalStarY)
+	result, _ := sb.HandleClickType(paddingLeft+3, verticalStarY)
 	assert.Equal(t, ClickTitle, result, "click on first title line should return ClickTitle")
 
 	// Click on verticalStarY+1 (wrapped title line) should also return ClickTitle
-	result = sb.HandleClickType(paddingLeft+1, verticalStarY+1)
+	result, _ = sb.HandleClickType(paddingLeft+1, verticalStarY+1)
 	assert.Equal(t, ClickTitle, result, "click on wrapped title line should return ClickTitle")
 
 	// Star should still be clickable on verticalStarY
-	result = sb.HandleClickType(paddingLeft+1, verticalStarY)
+	result, _ = sb.HandleClickType(paddingLeft+1, verticalStarY)
 	assert.Equal(t, ClickStar, result, "star should still be clickable on verticalStarY")
 }
 
@@ -248,10 +248,87 @@ func TestSidebar_HandleClickType_NoWrap(t *testing.T) {
 	assert.Equal(t, 1, titleLines, "title should be on single line when it doesn't wrap")
 
 	// Click on the title area should return ClickTitle
-	result := sb.HandleClickType(paddingLeft+3, verticalStarY)
+	result, _ := sb.HandleClickType(paddingLeft+3, verticalStarY)
 	assert.Equal(t, ClickTitle, result, "click on title should return ClickTitle")
 
 	// Star should still be clickable
-	result = sb.HandleClickType(paddingLeft+1, verticalStarY)
+	result, _ = sb.HandleClickType(paddingLeft+1, verticalStarY)
 	assert.Equal(t, ClickStar, result, "star should still be clickable")
+}
+
+func TestSidebar_HandleClickType_WorkingDir_Vertical(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	sessionState := service.NewSessionState(sess)
+	sb := New(sessionState)
+
+	m := sb.(*model)
+	m.sessionHasContent = true
+	m.titleGenerated = true
+	m.mode = ModeVertical
+	m.width = 50
+	m.sessionTitle = "Hi"
+	m.workingDirectory = "~/projects/myapp"
+
+	paddingLeft := m.layoutCfg.PaddingLeft
+
+	// In vertical mode, working dir is at verticalStarY + titleLineCount + 1 (empty separator)
+	titleLines := m.titleLineCount()
+	wdY := verticalStarY + titleLines + 1
+
+	// Click on the working directory line
+	result, _ := sb.HandleClickType(paddingLeft+3, wdY)
+	assert.Equal(t, ClickWorkingDir, result, "click on working dir line should return ClickWorkingDir")
+
+	// Click on the title line should still return ClickTitle
+	result, _ = sb.HandleClickType(paddingLeft+3, verticalStarY)
+	assert.Equal(t, ClickTitle, result, "click on title should still return ClickTitle")
+
+	// Click on the empty separator line should return ClickNone
+	result, _ = sb.HandleClickType(paddingLeft+3, verticalStarY+titleLines)
+	assert.Equal(t, ClickNone, result, "click on separator line should return ClickNone")
+}
+
+func TestSidebar_HandleClickType_WorkingDir_Collapsed(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	sessionState := service.NewSessionState(sess)
+	sb := New(sessionState)
+
+	m := sb.(*model)
+	m.sessionHasContent = true
+	m.titleGenerated = true
+	m.mode = ModeCollapsed
+	m.width = 50
+	m.sessionTitle = "Hi"
+	m.workingDirectory = "~/projects/myapp"
+
+	paddingLeft := m.layoutCfg.PaddingLeft
+
+	// In collapsed mode, title occupies 1 line, then working dir
+	titleLines := m.titleLineCount()
+	assert.Equal(t, 1, titleLines, "title should be on single line")
+
+	// Click on the working directory line (right after title)
+	result, _ := sb.HandleClickType(paddingLeft+3, titleLines)
+	assert.Equal(t, ClickWorkingDir, result, "click on working dir line should return ClickWorkingDir")
+
+	// Click on the title should still return ClickTitle
+	result, _ = sb.HandleClickType(paddingLeft+3, 0)
+	assert.Equal(t, ClickTitle, result, "click on title should still return ClickTitle")
+}
+
+func TestSidebar_WorkingDirectory(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	sessionState := service.NewSessionState(sess)
+	sb := New(sessionState)
+
+	m := sb.(*model)
+	m.workingDirectory = "~/projects/myapp"
+
+	assert.Equal(t, "~/projects/myapp", sb.WorkingDirectory())
 }

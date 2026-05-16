@@ -1,0 +1,90 @@
+#!/usr/bin/env docker agent run
+#
+# LLM-as-a-judge — auto-approve tool calls with a small model
+# ==========================================================================
+#
+# This example wires three layers of tool-call control:
+#
+#   1. Deterministic permissions  — `permissions:` block. Hard deny rules
+#      catch obvious abuse (sudo, rm -rf, etc) regardless of what the
+#      judge says, and obvious read-only ops are allow-listed so the
+#      judge isn't paid for every harmless call.
+#
+#   2. LLM judge (this file's centerpiece) — a `pre_tool_use` hook of
+#      type `model` that asks a small LLM to verdict every shell / edit
+#      / MCP call that fell through the deterministic rules. The
+#      `pre_tool_use_decision` schema constrains the model to reply
+#      with strict {decision, reason} JSON; the framework translates
+#      that into the runtime's permission_decision pipeline.
+#
+#   3. User confirmation — anything the judge said `ask` on falls
+#      through to the normal TUI prompt. So the human is still in the
+#      loop on ambiguous calls.
+#
+# This config uses ZERO Go code: the `type: model` hook is provided by
+# the framework, no builtin to register, no shell glue, no jq+curl.
+#
+
+agents:
+  root:
+    model: openai/gpt-4o
+    description: Agent supervised by an LLM judge for tool calls.
+    instruction: |
+      You are a helpful assistant with access to shell and filesystem tools.
+      Use them to help the user. The user's machine is supervised by an
+      LLM judge that decides which of your tool calls are auto-approved.
+
+    toolsets:
+      - type: shell
+      - type: filesystem
+
+    hooks:
+      # Layer 2: LLM judge. Scope it via the matcher so we don't pay
+      # judge latency on cheap tools.
+      pre_tool_use:
+        - matcher: "shell|edit_file|mcp:.*"
+          hooks:
+            - type: model
+              model: openai/gpt-4o-mini
+              # 15s is plenty for a small model; the judge fails closed
+              # (deny) on timeout. Pair with permissions.allow for
+              # read-only ops to keep latency budget under control.
+              timeout: 15
+              schema: pre_tool_use_decision
+              prompt: |
+                You are a security judge for an autonomous agent.
+                Decide whether this tool call is safe to auto-approve.
+
+                Tool: {{ .ToolName }}
+                Args: {{ .ToolInput | toJSON }}
+
+                Project rules:
+                - Reads under the working directory are safe.
+                - Network egress to anything other than github.com or
+                  pypi.org should be `ask`.
+                - Any write under ~/.ssh, ~/.aws, or ~/.docker is `deny`.
+                - When in doubt, prefer `ask` (the user is then asked).
+
+      # Layer 3 (audit): log every verdict so the policy can be tuned.
+      post_tool_use:
+        - matcher: "*"
+          hooks:
+            - type: command
+              timeout: 5
+              command: |
+                INPUT=$(cat)
+                TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                TOOL=$(echo "$INPUT" | jq -r '.tool_name')
+                echo "[$TS] $TOOL completed" >> /tmp/agent-judge-audit.log
+
+# Layer 1: deterministic rules. Evaluated BEFORE any hook fires, so
+# they short-circuit the judge entirely for obvious cases.
+permissions:
+  deny:
+    - "shell:cmd=*sudo*"
+    - "shell:cmd=*rm -rf*"
+    - "shell:cmd=*mkfs*"
+    - "shell:cmd=*dd if=*"
+    - "edit_file:path=/etc/*"
+  allow:
+    - "read_*"

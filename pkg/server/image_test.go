@@ -8,8 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/api"
-	"github.com/docker/cagent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/api"
+	"github.com/docker/docker-agent/pkg/chat"
 )
 
 // TestAPIMessageWithImageStructure tests that the API message type can hold image attachments

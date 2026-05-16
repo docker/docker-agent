@@ -1,0 +1,44 @@
+#!/usr/bin/env docker agent run
+
+# Demonstrates domain filtering for the fetch tool. The agent is only allowed
+# to fetch URLs whose host matches one of the entries in `allowed_domains`
+# (the host itself or any subdomain). Use `blocked_domains` instead to keep
+# fetch open by default while denying specific hosts.
+
+agents:
+  root:
+    model: anthropic/claude-sonnet-4-5
+    description: An agent restricted to Docker and GitHub documentation.
+    instruction: |
+      You are a documentation assistant. You may only fetch pages from the
+      docker.com and github.com families of domains. If asked about an
+      external resource, politely refuse and suggest a search instead.
+    toolsets:
+      - type: fetch
+        # Each entry matches the bare host AND any subdomain.
+        # Example: "docker.com" matches docker.com AND docs.docker.com.
+        # Use ".github.com" to match strict subdomains only.
+        allowed_domains:
+          - docker.com
+          - github.com
+          - raw.githubusercontent.com
+
+  # Alternative: keep fetch open but deny specific hosts (e.g. cloud
+  # metadata endpoints, internal services). Switch the active agent to
+  # `safe_fetch` with `-a safe_fetch` to try this variant.
+  safe_fetch:
+    model: anthropic/claude-sonnet-4-5
+    description: An agent that can fetch the open web except a few sensitive hosts.
+    instruction: |
+      You are a research assistant. Use the fetch tool to gather information
+      from the public web. Some hosts are blocked for safety; if a fetch is
+      rejected, do not retry and explain the situation to the user.
+    toolsets:
+      - type: fetch
+        blocked_domains:
+          - 169.254.169.254          # cloud instance metadata (literal IP)
+          - 169.254.0.0/16           # whole link-local range (CIDR)
+          - 10.0.0.0/8               # RFC1918 private network
+          - 100.100.100.200          # alibaba/oracle metadata
+          - metadata.google.internal
+          - "*.internal.example.com"  # any subdomain (wildcard glob)

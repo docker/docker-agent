@@ -13,13 +13,13 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/docker/cagent/pkg/fsx"
-	"github.com/docker/cagent/pkg/modelsdev"
-	"github.com/docker/cagent/pkg/rag/chunk"
-	"github.com/docker/cagent/pkg/rag/database"
-	"github.com/docker/cagent/pkg/rag/embed"
-	"github.com/docker/cagent/pkg/rag/treesitter"
-	"github.com/docker/cagent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/fsx"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/rag/chunk"
+	"github.com/docker/docker-agent/pkg/rag/database"
+	"github.com/docker/docker-agent/pkg/rag/embed"
+	"github.com/docker/docker-agent/pkg/rag/treesitter"
+	"github.com/docker/docker-agent/pkg/rag/types"
 )
 
 // vectorStoreDB is the internal database interface used by VectorStore.
@@ -38,6 +38,7 @@ type vectorStoreDB interface {
 // It contains base document data plus similarity score.
 type VectorSearchResultData struct {
 	database.Document
+
 	Embedding      []float64
 	EmbeddingInput string // Only populated for semantic-embeddings
 	Similarity     float64
@@ -62,7 +63,7 @@ type VectorStore struct {
 	indexingTokens int64 // Track tokens used during indexing
 	indexingCost   float64
 
-	modelID     string // Full model ID (e.g., "openai/text-embedding-3-small") for pricing lookup
+	modelID     modelsdev.ID // Provider/model identity, used for pricing lookup.
 	modelsStore modelStore
 
 	// embeddingInputBuilder controls how raw chunks are transformed into the
@@ -87,7 +88,7 @@ type VectorStore struct {
 }
 
 type modelStore interface {
-	GetModel(ctx context.Context, modelID string) (*modelsdev.Model, error)
+	GetModel(ctx context.Context, id modelsdev.ID) (*modelsdev.Model, error)
 }
 
 // EmbeddingInputBuilder builds the string that will be sent to the embedding model
@@ -113,7 +114,7 @@ type VectorStoreConfig struct {
 	Embedder             *embed.Embedder
 	Events               chan<- types.Event
 	SimilarityMetric     string
-	ModelID              string
+	ModelID              modelsdev.ID
 	ModelsStore          modelStore
 	EmbeddingConcurrency int
 	FileIndexConcurrency int
@@ -150,7 +151,7 @@ func NewVectorStore(cfg VectorStoreConfig) *VectorStore {
 	// Set usage handler to calculate cost from models.dev and emit events with CUMULATIVE totals
 	// This matches how chat completions calculate cost in runtime.go
 	cfg.Embedder.SetUsageHandler(func(tokens int64, _ float64) {
-		cost := s.calculateCost(context.Background(), tokens)
+		cost := s.calculateCost(tokens)
 		s.recordUsage(tokens, cost)
 	})
 
@@ -169,15 +170,15 @@ func (s *VectorStore) SetEmbeddingInputBuilder(builder EmbeddingInputBuilder) {
 }
 
 // calculateCost calculates embedding cost using models.dev pricing
-func (s *VectorStore) calculateCost(ctx context.Context, tokens int64) float64 {
-	if s.modelsStore == nil || strings.HasPrefix(s.modelID, "dmr/") {
+func (s *VectorStore) calculateCost(tokens int64) float64 {
+	if s.modelsStore == nil || s.modelID.Provider == "dmr" {
 		return 0
 	}
 
-	model, err := s.modelsStore.GetModel(ctx, s.modelID)
+	model, err := s.modelsStore.GetModel(context.Background(), s.modelID)
 	if err != nil {
 		slog.Debug("Failed to get model pricing from models.dev, cost will be 0",
-			"model_id", s.modelID,
+			"model_id", s.modelID.String(),
 			"error", err)
 		return 0
 	}
@@ -215,7 +216,7 @@ func (s *VectorStore) recordUsage(tokens int64, cost float64) {
 
 // Initialize indexes all documents
 func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunking ChunkingConfig) error {
-	slog.Info("Starting vector store initialization",
+	slog.InfoContext(ctx, "Starting vector store initialization",
 		"name", s.name,
 		"doc_paths", docPaths,
 		"chunk_size", chunking.Size,
@@ -224,14 +225,14 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 		"code_aware", chunking.CodeAware)
 
 	// Load existing file hashes from metadata
-	slog.Debug("Loading existing file hashes", "strategy", s.name)
+	slog.DebugContext(ctx, "Loading existing file hashes", "strategy", s.name)
 	if err := s.loadExistingHashes(ctx); err != nil {
-		slog.Warn("Failed to load existing file hashes", "strategy", s.name, "error", err)
+		slog.WarnContext(ctx, "Failed to load existing file hashes", "strategy", s.name, "error", err)
 	}
 
 	// Collect all files
-	slog.Debug("Collecting files", "strategy", s.name, "paths", docPaths)
-	files, err := fsx.CollectFiles(docPaths, s.shouldIgnore)
+	slog.DebugContext(ctx, "Collecting files", "strategy", s.name, "paths", docPaths)
+	files, err := fsx.CollectFiles(ctx, docPaths, s.shouldIgnore)
 	if err != nil {
 		s.emitEvent(types.Event{Type: types.EventTypeError, Error: err})
 		return fmt.Errorf("failed to collect files: %w", err)
@@ -240,20 +241,26 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 	// Track seen files for cleanup
 	seenFilesForCleanup := make(map[string]bool)
 	for _, f := range files {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		seenFilesForCleanup[f] = true
 	}
 
 	// Clean up orphaned documents
 	if err := s.cleanupOrphanedDocuments(ctx, seenFilesForCleanup); err != nil {
-		slog.Error("Failed to cleanup orphaned documents during initialization", "error", err)
+		slog.ErrorContext(ctx, "Failed to cleanup orphaned documents during initialization", "error", err)
 	}
 
 	if len(files) == 0 {
-		slog.Warn("No files found for vector store", "name", s.name, "paths", docPaths)
+		slog.WarnContext(ctx, "No files found for vector store", "name", s.name, "paths", docPaths)
 		return nil
 	}
 
-	slog.Debug("Collected files for indexing check",
+	slog.DebugContext(ctx, "Collected files for indexing check",
 		"strategy", s.name,
 		"file_count", len(files))
 
@@ -268,11 +275,18 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 	filesToIndex := 0
 
 	for _, filePath := range files {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		seenFiles[filePath] = true
 
 		needsIndexing, err := s.needsIndexing(ctx, filePath)
 		if err != nil {
-			slog.Error("Failed to check if file needs indexing",
+			slog.ErrorContext(ctx, "Failed to check if file needs indexing",
 				"path", filePath, "error", err)
 			fileStatuses = append(fileStatuses, fileStatus{path: filePath, needsIndexing: false})
 			continue
@@ -285,7 +299,7 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 	}
 
 	if filesToIndex == 0 {
-		slog.Info("All files up to date, no indexing needed",
+		slog.InfoContext(ctx, "All files up to date, no indexing needed",
 			"name", s.name,
 			"total_files", len(files))
 		return nil
@@ -302,12 +316,12 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 
 	for _, status := range fileStatuses {
 		if !status.needsIndexing {
-			slog.Debug("File unchanged, skipping", "path", status.path)
+			slog.DebugContext(ctx, "File unchanged, skipping", "path", status.path)
 			continue
 		}
 
 		g.Go(func() error {
-			// Check for context cancellation
+			// Check for context cancellation at start of goroutine
 			select {
 			case <-gctx.Done():
 				return gctx.Err()
@@ -316,7 +330,7 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 
 			// Index the file
 			if err := s.indexFile(gctx, status.path); err != nil {
-				slog.Error("Failed to index file", "path", status.path, "error", err)
+				slog.ErrorContext(ctx, "Failed to index file", "path", status.path, "error", err)
 				// Don't return error - continue indexing other files
 				return nil
 			}
@@ -346,12 +360,12 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 	}
 
 	if err := s.cleanupOrphanedDocuments(ctx, seenFiles); err != nil {
-		slog.Error("Failed to cleanup orphaned documents", "error", err)
+		slog.ErrorContext(ctx, "Failed to cleanup orphaned documents", "error", err)
 	}
 
 	s.emitEvent(types.Event{Type: types.EventTypeIndexingComplete})
 
-	slog.Info("Vector store initialization completed",
+	slog.InfoContext(ctx, "Vector store initialization completed",
 		"name", s.name,
 		"total_files", len(files),
 		"indexed", indexed,
@@ -389,7 +403,7 @@ func (s *VectorStore) Query(ctx context.Context, query string, numResults int, t
 
 // CheckAndReindexChangedFiles checks for file changes and re-indexes if needed
 func (s *VectorStore) CheckAndReindexChangedFiles(ctx context.Context, docPaths []string, chunking ChunkingConfig) error {
-	files, err := fsx.CollectFiles(docPaths, s.shouldIgnore)
+	files, err := fsx.CollectFiles(ctx, docPaths, s.shouldIgnore)
 	if err != nil {
 		return fmt.Errorf("failed to collect files: %w", err)
 	}
@@ -397,24 +411,31 @@ func (s *VectorStore) CheckAndReindexChangedFiles(ctx context.Context, docPaths 
 	seenFiles := make(map[string]bool)
 
 	for _, filePath := range files {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		seenFiles[filePath] = true
 
 		needsIndexing, err := s.needsIndexing(ctx, filePath)
 		if err != nil {
-			slog.Error("Failed to check if file needs indexing", "path", filePath, "error", err)
+			slog.ErrorContext(ctx, "Failed to check if file needs indexing", "path", filePath, "error", err)
 			continue
 		}
 
 		if needsIndexing {
-			slog.Info("File changed, re-indexing", "path", filePath)
+			slog.InfoContext(ctx, "File changed, re-indexing", "path", filePath)
 			if err := s.indexFile(ctx, filePath); err != nil {
-				slog.Error("Failed to re-index file", "path", filePath, "error", err)
+				slog.ErrorContext(ctx, "Failed to re-index file", "path", filePath, "error", err)
 			}
 		}
 	}
 
 	if err := s.cleanupOrphanedDocuments(ctx, seenFiles); err != nil {
-		slog.Error("Failed to cleanup orphaned documents during file watch", "error", err)
+		slog.ErrorContext(ctx, "Failed to cleanup orphaned documents during file watch", "error", err)
 	}
 
 	return nil
@@ -432,16 +453,16 @@ func (s *VectorStore) StartFileWatcher(ctx context.Context, docPaths []string, c
 	s.watcher = watcher
 
 	for _, docPath := range docPaths {
-		if err := s.addPathToWatcher(docPath); err != nil {
-			slog.Warn("Failed to watch path", "strategy", s.name, "path", docPath, "error", err)
+		if err := s.addPathToWatcher(ctx, docPath); err != nil {
+			slog.WarnContext(ctx, "Failed to watch path", "strategy", s.name, "path", docPath, "error", err)
 			continue
 		}
-		slog.Debug("Watching path for changes", "strategy", s.name, "path", docPath)
+		slog.DebugContext(ctx, "Watching path for changes", "strategy", s.name, "path", docPath)
 	}
 
 	go s.watchLoop(ctx, docPaths)
 
-	slog.Info("File watcher started", "strategy", s.name, "paths", docPaths)
+	slog.InfoContext(ctx, "File watcher started", "strategy", s.name, "paths", docPaths)
 	return nil
 }
 
@@ -492,12 +513,12 @@ func (s *VectorStore) loadExistingHashes(ctx context.Context) error {
 
 	for _, meta := range metadata {
 		s.fileHashes[meta.SourcePath] = meta.FileHash
-		slog.Debug("Loaded file hash from metadata",
+		slog.DebugContext(ctx, "Loaded file hash from metadata",
 			"path", meta.SourcePath,
 			"hash", meta.FileHash)
 	}
 
-	slog.Debug("Loaded existing file hashes from metadata",
+	slog.DebugContext(ctx, "Loaded existing file hashes from metadata",
 		"strategy", s.name,
 		"count", len(s.fileHashes))
 
@@ -545,6 +566,13 @@ func (s *VectorStore) indexFile(ctx context.Context, filePath string) error {
 	// Filter out empty chunks
 	var validChunks []chunk.Chunk
 	for _, ch := range chunks {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if ch.Content == "" {
 			continue
 		}
@@ -552,7 +580,7 @@ func (s *VectorStore) indexFile(ctx context.Context, filePath string) error {
 	}
 
 	if len(validChunks) == 0 {
-		slog.Debug("No valid chunks in file", "path", filePath)
+		slog.DebugContext(ctx, "No valid chunks in file", "path", filePath)
 		return nil
 	}
 
@@ -563,7 +591,7 @@ func (s *VectorStore) indexFile(ctx context.Context, filePath string) error {
 	}
 
 	// Generate embeddings for all chunks in batch
-	slog.Debug("Generating embeddings for file",
+	slog.DebugContext(ctx, "Generating embeddings for file",
 		"path", filePath,
 		"chunk_count", len(validChunks))
 
@@ -579,6 +607,13 @@ func (s *VectorStore) indexFile(ctx context.Context, filePath string) error {
 	// Store all documents
 	storedChunks := 0
 	for i, ch := range validChunks {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		doc := database.Document{
 			ID:         fmt.Sprintf("%s_%d_%d", filePath, ch.Index, time.Now().UnixNano()),
 			SourcePath: filePath,
@@ -610,7 +645,7 @@ func (s *VectorStore) indexFile(ctx context.Context, filePath string) error {
 	s.fileHashes[filePath] = fileHash
 	s.fileHashesMu.Unlock()
 
-	slog.Debug("Indexed file", "path", filePath, "chunks", storedChunks)
+	slog.DebugContext(ctx, "Indexed file", "path", filePath, "chunks", storedChunks)
 	return nil
 }
 
@@ -624,10 +659,24 @@ func (s *VectorStore) buildEmbeddingInputs(ctx context.Context, filePath string,
 		g.SetLimit(s.embeddingConcurrency)
 
 		for i, ch := range chunks {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+
 			g.Go(func() error {
+				// Check for context cancellation
+				select {
+				case <-gctx.Done():
+					return gctx.Err()
+				default:
+				}
+
 				text, berr := s.embeddingInputBuilder.BuildEmbeddingInput(gctx, filePath, ch)
 				if berr != nil || strings.TrimSpace(text) == "" {
-					slog.Warn("Embedding input builder failed; falling back to raw chunk content",
+					slog.WarnContext(ctx, "Embedding input builder failed; falling back to raw chunk content",
 						"strategy", s.name,
 						"path", filePath,
 						"chunk_index", ch.Index,
@@ -644,9 +693,16 @@ func (s *VectorStore) buildEmbeddingInputs(ctx context.Context, filePath string,
 		}
 	} else {
 		for i, ch := range chunks {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+
 			text, berr := s.embeddingInputBuilder.BuildEmbeddingInput(ctx, filePath, ch)
 			if berr != nil || strings.TrimSpace(text) == "" {
-				slog.Warn("Embedding input builder failed; falling back to raw chunk content",
+				slog.WarnContext(ctx, "Embedding input builder failed; falling back to raw chunk content",
 					"strategy", s.name,
 					"path", filePath,
 					"chunk_index", ch.Index,
@@ -668,20 +724,27 @@ func (s *VectorStore) cleanupOrphanedDocuments(ctx context.Context, seenFiles ma
 
 	deletedCount := 0
 	for _, meta := range metadata {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if seenFiles[meta.SourcePath] {
 			continue
 		}
 
-		slog.Info("Removing embeddings of orphaned documents", "path", meta.SourcePath)
+		slog.InfoContext(ctx, "Removing embeddings of orphaned documents", "path", meta.SourcePath)
 
 		if err := s.db.DeleteDocumentsByPath(ctx, meta.SourcePath); err != nil {
-			slog.Error("Failed to delete orphaned documents",
+			slog.ErrorContext(ctx, "Failed to delete orphaned documents",
 				"path", meta.SourcePath, "error", err)
 			continue
 		}
 
 		if err := s.db.DeleteFileMetadata(ctx, meta.SourcePath); err != nil {
-			slog.Error("Failed to delete orphaned metadata",
+			slog.ErrorContext(ctx, "Failed to delete orphaned metadata",
 				"path", meta.SourcePath, "error", err)
 			continue
 		}
@@ -694,21 +757,21 @@ func (s *VectorStore) cleanupOrphanedDocuments(ctx context.Context, seenFiles ma
 	}
 
 	if deletedCount > 0 {
-		slog.Info("Cleaned up orphaned documents", "strategy", s.name, "count", deletedCount)
+		slog.InfoContext(ctx, "Cleaned up orphaned documents", "strategy", s.name, "count", deletedCount)
 	}
 
 	return nil
 }
 
-func (s *VectorStore) addPathToWatcher(path string) error {
+func (s *VectorStore) addPathToWatcher(ctx context.Context, path string) error {
 	// Resolve path(s) using Processor (handles globs, directories, files)
-	files, err := fsx.CollectFiles([]string{path}, s.shouldIgnore)
+	files, err := fsx.CollectFiles(ctx, []string{path}, s.shouldIgnore)
 	if err != nil {
 		return fmt.Errorf("failed to collect files for watching: %w", err)
 	}
 
 	if len(files) == 0 {
-		slog.Debug("No files found to watch", "path", path)
+		slog.DebugContext(ctx, "No files found to watch", "path", path)
 		return nil
 	}
 
@@ -718,10 +781,10 @@ func (s *VectorStore) addPathToWatcher(path string) error {
 		dir := filepath.Dir(file)
 		if !watchedDirs[dir] {
 			if err := s.watcher.Add(dir); err != nil {
-				slog.Warn("Failed to watch directory", "dir", dir, "error", err)
+				slog.WarnContext(ctx, "Failed to watch directory", "dir", dir, "error", err)
 			} else {
 				watchedDirs[dir] = true
-				slog.Debug("Added directory to watcher", "dir", dir)
+				slog.DebugContext(ctx, "Added directory to watcher", "dir", dir)
 			}
 		}
 	}
@@ -750,6 +813,15 @@ func (s *VectorStore) addPathToWatcher(path string) error {
 }
 
 func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
+	// Capture watcher reference at goroutine start to avoid racing with Close()
+	// which sets s.watcher = nil under watcherMu.
+	s.watcherMu.Lock()
+	watcher := s.watcher
+	s.watcherMu.Unlock()
+	if watcher == nil {
+		return
+	}
+
 	var debounceTimer *time.Timer
 	debounceDuration := 2 * time.Second
 	pendingChanges := make(map[string]bool)
@@ -758,7 +830,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 	processChanges := func() {
 		// Prevent concurrent reindexing operations
 		if !s.reindexMu.TryLock() {
-			slog.Debug("Skipping file change processing - reindexing already in progress", "strategy", s.name)
+			slog.DebugContext(ctx, "Skipping file change processing - reindexing already in progress", "strategy", s.name)
 			return
 		}
 		defer s.reindexMu.Unlock()
@@ -775,29 +847,36 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 			return
 		}
 
-		slog.Info("Processing file changes", "strategy", s.name, "count", len(changedFiles))
+		slog.InfoContext(ctx, "Processing file changes", "strategy", s.name, "count", len(changedFiles))
 
 		filesToReindex := make([]string, 0)
 		for _, file := range changedFiles {
+			// Check for context cancellation
+			select {
+			case <-ctx.Done():
+				return // Stop processing if context is cancelled
+			default:
+			}
+
 			// Check if the file matches any of the configured document paths/patterns
 			matches, matchErr := fsx.Matches(file, docPaths)
 			if matchErr != nil {
-				slog.Error("Failed to match path", "file", file, "error", matchErr)
+				slog.ErrorContext(ctx, "Failed to match path", "file", file, "error", matchErr)
 				continue
 			}
 			if !matches {
-				slog.Debug("File changed but does not match configured docs, ignoring", "path", file)
+				slog.DebugContext(ctx, "File changed but does not match configured docs, ignoring", "path", file)
 				continue
 			}
 			// Check if the file should be ignored (e.g., gitignore)
 			if s.shouldIgnore != nil && s.shouldIgnore(file) {
-				slog.Debug("File changed but is ignored by filter, skipping", "path", file)
+				slog.DebugContext(ctx, "File changed but is ignored by filter, skipping", "path", file)
 				continue
 			}
 
 			needsIndexing, err := s.needsIndexing(ctx, file)
 			if err != nil {
-				slog.Debug("File no longer exists or inaccessible", "path", file, "error", err)
+				slog.DebugContext(ctx, "File no longer exists or inaccessible", "path", file, "error", err)
 				continue
 			}
 			if needsIndexing {
@@ -812,9 +891,17 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 			})
 
 			for i, file := range filesToReindex {
+				// Check for context cancellation
+				select {
+				case <-ctx.Done():
+					slog.InfoContext(ctx, "File watcher stopped during reindexing due to context cancellation", "strategy", s.name)
+					return
+				default:
+				}
+
 				s.emitEvent(types.Event{
 					Type:    "indexing_progress",
-					Message: fmt.Sprintf("Re-indexing: %s", filepath.Base(file)),
+					Message: "Re-indexing: " + filepath.Base(file),
 					Progress: &types.Progress{
 						Current: i + 1,
 						Total:   len(filesToReindex),
@@ -822,17 +909,17 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 				})
 
 				if err := s.indexFile(ctx, file); err != nil {
-					slog.Error("Failed to re-index file", "path", file, "error", err)
+					slog.ErrorContext(ctx, "Failed to re-index file", "path", file, "error", err)
 					s.emitEvent(types.Event{
 						Type:    "error",
-						Message: fmt.Sprintf("Failed to re-index: %s", filepath.Base(file)),
+						Message: "Failed to re-index: " + filepath.Base(file),
 						Error:   err,
 					})
 				}
 			}
 
 			if err := s.cleanupOrphanedDocumentsFromDisk(ctx, docPaths); err != nil {
-				slog.Error("Failed to cleanup orphaned documents", "error", err)
+				slog.ErrorContext(ctx, "Failed to cleanup orphaned documents", "error", err)
 			}
 
 			s.emitEvent(types.Event{
@@ -848,10 +935,10 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 			if debounceTimer != nil {
 				debounceTimer.Stop()
 			}
-			slog.Info("File watcher stopped", "strategy", s.name)
+			slog.InfoContext(ctx, "File watcher stopped", "strategy", s.name)
 			return
 
-		case event, ok := <-s.watcher.Events:
+		case event, ok := <-watcher.Events:
 			if !ok {
 				return
 			}
@@ -862,8 +949,10 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 
 			if event.Op&fsnotify.Create != 0 {
 				s.watcherMu.Lock()
-				if err := s.addPathToWatcher(event.Name); err != nil {
-					slog.Debug("Could not watch new path", "path", event.Name, "error", err)
+				if s.watcher != nil {
+					if err := s.addPathToWatcher(ctx, event.Name); err != nil {
+						slog.DebugContext(ctx, "Could not watch new path", "path", event.Name, "error", err)
+					}
 				}
 				s.watcherMu.Unlock()
 			}
@@ -871,7 +960,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 			// Early filter: only track changes for files that match configured doc patterns
 			matches, err := fsx.Matches(event.Name, docPaths)
 			if err != nil {
-				slog.Debug("Could not match path against doc patterns", "path", event.Name, "error", err)
+				slog.DebugContext(ctx, "Could not match path against doc patterns", "path", event.Name, "error", err)
 				continue
 			}
 			if !matches {
@@ -882,7 +971,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 				continue
 			}
 
-			slog.Debug("File system event detected",
+			slog.DebugContext(ctx, "File system event detected",
 				"strategy", s.name,
 				"event", event.Op.String(),
 				"path", event.Name)
@@ -896,23 +985,29 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 			}
 			debounceTimer = time.AfterFunc(debounceDuration, processChanges)
 
-		case err, ok := <-s.watcher.Errors:
+		case err, ok := <-watcher.Errors:
 			if !ok {
 				return
 			}
-			slog.Error("File watcher error", "strategy", s.name, "error", err)
+			slog.ErrorContext(ctx, "File watcher error", "strategy", s.name, "error", err)
 		}
 	}
 }
 
 func (s *VectorStore) cleanupOrphanedDocumentsFromDisk(ctx context.Context, docPaths []string) error {
-	files, err := fsx.CollectFiles(docPaths, s.shouldIgnore)
+	files, err := fsx.CollectFiles(ctx, docPaths, s.shouldIgnore)
 	if err != nil {
 		return fmt.Errorf("failed to collect files: %w", err)
 	}
 
 	seenFiles := make(map[string]bool)
 	for _, file := range files {
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		seenFiles[file] = true
 	}
 

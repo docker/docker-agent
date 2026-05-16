@@ -2,21 +2,21 @@ package strategy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
-	"github.com/docker/cagent/pkg/config"
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/model/provider"
-	"github.com/docker/cagent/pkg/model/provider/options"
-	"github.com/docker/cagent/pkg/modelsdev"
-	"github.com/docker/cagent/pkg/rag/embed"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/rag/embed"
 )
 
 // EmbeddingConfig holds configuration for creating an embedding provider.
 type EmbeddingConfig struct {
 	Provider    provider.Provider
-	ModelID     string // Full model ID for pricing (e.g., "openai/text-embedding-3-small")
+	ModelID     modelsdev.ID // Provider/model identity, used for pricing lookup.
 	ModelsStore *modelsdev.Store
 }
 
@@ -40,26 +40,28 @@ func CreateEmbeddingProvider(ctx context.Context, modelName string, buildCtx Bui
 			return nil, fmt.Errorf("model '%s' not found: %w", modelName, err)
 		}
 
-		embedModel, err = provider.New(ctx, &modelCfg, buildCtx.Env,
-			options.WithGateway(buildCtx.ModelsGateway))
+		embedModel, err = buildCtx.NewProvider(ctx, &modelCfg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create embedding model: %w", err)
 		}
 	}
 
 	// Determine model ID for pricing lookup
-	var modelID string
+	var modelID modelsdev.ID
 	if modelName == "auto" {
 		modelID = embedModel.ID()
 	} else {
-		modelID = modelCfg.Provider + "/" + modelCfg.Model
+		modelID = modelsdev.NewID(modelCfg.Provider, modelCfg.Model)
 	}
 
-	// Create models.dev store for pricing
-	modelsStore, err := modelsdev.NewStore()
-	if err != nil {
-		slog.Debug("Failed to create models.dev store for RAG pricing; cost tracking disabled",
-			"error", err)
+	var modelsStore *modelsdev.Store
+	if buildCtx.RuntimeConfig != nil {
+		var err error
+		modelsStore, err = buildCtx.RuntimeConfig.ModelsDevStore()
+		if err != nil {
+			slog.DebugContext(ctx, "Failed to create models.dev store for RAG pricing; cost tracking disabled",
+				"error", err)
+		}
 	}
 
 	return &EmbeddingConfig{
@@ -79,8 +81,7 @@ func createAutoEmbeddingModel(ctx context.Context, buildCtx BuildContext) (provi
 			Model:    autoModelCfg.Model,
 		}
 
-		model, err := provider.New(ctx, &modelCfg, buildCtx.Env,
-			options.WithGateway(buildCtx.ModelsGateway))
+		model, err := buildCtx.NewProvider(ctx, &modelCfg)
 		if err != nil {
 			lastErr = err
 			continue
@@ -90,7 +91,7 @@ func createAutoEmbeddingModel(ctx context.Context, buildCtx BuildContext) (provi
 	}
 
 	if lastErr == nil {
-		return nil, fmt.Errorf("failed to create auto embedding model: no candidates configured")
+		return nil, errors.New("failed to create auto embedding model: no candidates configured")
 	}
 
 	return nil, fmt.Errorf("failed to create auto embedding model: %w", lastErr)

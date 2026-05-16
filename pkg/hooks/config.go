@@ -1,66 +1,37 @@
 package hooks
 
 import (
-	"github.com/docker/cagent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
-// FromConfig converts a latest.HooksConfig to a hooks.Config
-func FromConfig(cfg *latest.HooksConfig) *Config {
-	if cfg == nil {
-		return nil
-	}
+// The persisted hooks types live next to the config schema; the
+// runtime uses these short aliases. Adding a new event is a one-line
+// change on [latest.HooksConfig] plus one line in compileEvents.
+type (
+	// Config is the hooks configuration for an agent.
+	Config = latest.HooksConfig
+	// Hook is a single hook entry. The Type field is one of the
+	// HookType* constants below; unrecognised values are rejected by
+	// the executor at registry lookup.
+	Hook = latest.HookDefinition
+	// MatcherConfig pairs a tool-name regex with the hooks to run when
+	// it matches (used by EventPreToolUse, EventPostToolUse, and
+	// EventPermissionRequest).
+	MatcherConfig = latest.HookMatcherConfig
+)
 
-	result := &Config{}
+// HookType values populate [Hook.Type].
+type HookType = string
 
-	// Convert PreToolUse
-	for _, matcher := range cfg.PreToolUse {
-		mc := MatcherConfig{
-			Matcher: matcher.Matcher,
-			Hooks:   make([]Hook, 0, len(matcher.Hooks)),
-		}
-		for _, h := range matcher.Hooks {
-			mc.Hooks = append(mc.Hooks, Hook{
-				Type:    HookType(h.Type),
-				Command: h.Command,
-				Timeout: h.Timeout,
-			})
-		}
-		result.PreToolUse = append(result.PreToolUse, mc)
-	}
-
-	// Convert PostToolUse
-	for _, matcher := range cfg.PostToolUse {
-		mc := MatcherConfig{
-			Matcher: matcher.Matcher,
-			Hooks:   make([]Hook, 0, len(matcher.Hooks)),
-		}
-		for _, h := range matcher.Hooks {
-			mc.Hooks = append(mc.Hooks, Hook{
-				Type:    HookType(h.Type),
-				Command: h.Command,
-				Timeout: h.Timeout,
-			})
-		}
-		result.PostToolUse = append(result.PostToolUse, mc)
-	}
-
-	// Convert SessionStart
-	for _, h := range cfg.SessionStart {
-		result.SessionStart = append(result.SessionStart, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	// Convert SessionEnd
-	for _, h := range cfg.SessionEnd {
-		result.SessionEnd = append(result.SessionEnd, Hook{
-			Type:    HookType(h.Type),
-			Command: h.Command,
-			Timeout: h.Timeout,
-		})
-	}
-
-	return result
-}
+const (
+	// HookTypeCommand runs a shell command.
+	HookTypeCommand HookType = "command"
+	// HookTypeBuiltin dispatches to a named in-process Go function
+	// registered via [Registry.RegisterBuiltin]. The name is stored in
+	// [Hook.Command].
+	HookTypeBuiltin HookType = "builtin"
+	// HookTypeModel asks an LLM and translates the reply into the
+	// hook's native [Output] shape. It is registered by the runtime
+	// because it depends on the runtime's model provider stack.
+	HookTypeModel HookType = "model"
+)

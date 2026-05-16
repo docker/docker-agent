@@ -3,16 +3,16 @@ package readfile
 import (
 	"fmt"
 
-	"github.com/docker/cagent/pkg/tools/builtin"
-	"github.com/docker/cagent/pkg/tui/components/toolcommon"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-func New(msg *types.Message, sessionState *service.SessionState) layout.Model {
+func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
 	return toolcommon.NewBase(msg, sessionState, toolcommon.SimpleRendererWithResult(
-		toolcommon.ExtractField(func(a builtin.ReadFileArgs) string { return toolcommon.ShortenPath(a.Path) }),
+		toolcommon.ExtractField(func(a filesystem.ReadFileArgs) string { return toolcommon.ShortenPath(a.Path) }),
 		extractResult,
 	))
 }
@@ -21,7 +21,7 @@ func extractResult(msg *types.Message) string {
 	if msg.ToolResult == nil || msg.ToolResult.Meta == nil {
 		return ""
 	}
-	meta, ok := msg.ToolResult.Meta.(builtin.ReadFileMeta)
+	meta, ok := msg.ToolResult.Meta.(filesystem.ReadFileMeta)
 	if !ok {
 		return ""
 	}

@@ -2,8 +2,9 @@ package types
 
 import (
 	"strings"
+	"time"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // MessageType represents different types of messages
@@ -21,6 +22,11 @@ const (
 	MessageTypeToolResult
 	MessageTypeWelcome
 	MessageTypeLoading
+)
+
+const (
+	UserMessageEditLabel      = "✎"
+	AssistantMessageCopyLabel = "⎘"
 )
 
 // ToolStatus represents the status of a tool call
@@ -43,6 +49,12 @@ type Message struct {
 	ToolDefinition tools.Tool            // Definition of the tool being called
 	ToolStatus     ToolStatus            // Status for tool calls
 	ToolResult     *tools.ToolCallResult // Result of tool call (when completed)
+	// StartedAt records when a tool call entered ToolStatusRunning.
+	// Used to display elapsed time for long-running tool calls.
+	StartedAt *time.Time
+	// SessionPosition is the index of this message in session.Messages (when known).
+	// Used for operations like branching on edits.
+	SessionPosition *int
 }
 
 func Agent(typ MessageType, agentName, content string) *Message {
@@ -94,13 +106,18 @@ func Welcome(content string) *Message {
 }
 
 func ToolCallMessage(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status ToolStatus) *Message {
-	return &Message{
+	msg := &Message{
 		Type:           MessageTypeToolCall,
 		Sender:         agentName,
 		ToolCall:       toolCall,
 		ToolDefinition: toolDef,
 		ToolStatus:     status,
 	}
+	if status == ToolStatusRunning {
+		now := time.Now()
+		msg.StartedAt = &now
+	}
+	return msg
 }
 
 func Loading(description string) *Message {

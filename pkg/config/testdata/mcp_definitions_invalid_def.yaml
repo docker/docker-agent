@@ -1,0 +1,15 @@
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+
+mcps:
+  broken:
+    command: ""
+
+agents:
+  root:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: docker:context7

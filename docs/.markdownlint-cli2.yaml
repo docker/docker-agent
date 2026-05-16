@@ -1,0 +1,36 @@
+# markdownlint configuration for Jekyll docs
+#
+# These docs mix Markdown with HTML blocks (callouts, cards, feature grids).
+# Rules that conflict with this pattern are disabled.
+
+config:
+  default: true
+
+  # Allow inline HTML — callouts, cards, and feature-grids are HTML
+  MD033: false
+
+  # Don't enforce line length — HTML blocks and tables often exceed 80 chars
+  MD013: false
+
+  # Allow multiple top-level headings — front matter title + # Heading is normal
+  MD025: false
+
+  # Allow duplicate headings — different sections may reuse heading text
+  MD024:
+    siblings_only: true
+
+  # Allow trailing punctuation in headings (e.g. "xAI (Grok)")
+  MD026:
+    punctuation: ".,;:!。，；：！"
+
+# Glob patterns
+globs:
+  - "**/*.md"
+
+# Files to ignore
+ignores:
+  - "_site/**"
+  - "pages/**"
+  - "DEVELOPMENT.md"
+  - "TODO.md"
+  - "node_modules/**"

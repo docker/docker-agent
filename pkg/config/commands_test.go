@@ -1,15 +1,13 @@
 package config
 
 import (
-	"context"
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestV2Commands_AllForms(t *testing.T) {
-	cfg, err := Load(t.Context(), testfileSource("testdata/commands_v2.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v2.yaml"))
 	require.NoError(t, err)
 
 	// Test simple map format
@@ -40,7 +38,7 @@ func TestV2Commands_AllForms(t *testing.T) {
 }
 
 func TestV2Commands_DisplayText(t *testing.T) {
-	cfg, err := Load(t.Context(), testfileSource("testdata/commands_v2.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v2.yaml"))
 	require.NoError(t, err)
 
 	// Simple format: DisplayText returns the instruction
@@ -53,7 +51,7 @@ func TestV2Commands_DisplayText(t *testing.T) {
 }
 
 func TestMigrate_v1_Commands_AllForms(t *testing.T) {
-	cfg, err := Load(t.Context(), testfileSource("testdata/commands_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v1.yaml"))
 	require.NoError(t, err)
 
 	require.Equal(t, "root", cfg.Agents[0].Name)
@@ -71,7 +69,7 @@ func TestMigrate_v1_Commands_AllForms(t *testing.T) {
 }
 
 func TestMigrate_v0_Commands_AllForms(t *testing.T) {
-	cfg, err := Load(t.Context(), testfileSource("testdata/commands_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/commands_v0.yaml"))
 	require.NoError(t, err)
 
 	require.Equal(t, "root", cfg.Agents[0].Name)
@@ -86,10 +84,4 @@ func TestMigrate_v0_Commands_AllForms(t *testing.T) {
 
 	require.Equal(t, "yet_another_agent", cfg.Agents[2].Name)
 	require.Empty(t, cfg.Agents[2].Commands)
-}
-
-type testfileSource string
-
-func (s testfileSource) Read(context.Context) ([]byte, error) {
-	return os.ReadFile(string(s))
 }

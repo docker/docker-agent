@@ -1,0 +1,28 @@
+#!/usr/bin/env docker agent run
+
+# GitHub Copilot requires a `Copilot-Integration-Id` header on every request
+# to https://api.githubcopilot.com. docker-agent sends `copilot-developer-cli`
+# automatically (it works with both OAuth tokens and Personal Access Tokens),
+# but you can override it (or add any other custom header) via
+# `provider_opts.http_headers`.
+#
+# See https://github.com/docker/docker-agent/issues/2471
+
+agents:
+  root:
+    model: github-copilot/gpt-4o
+    description: A helpful AI assistant powered by GitHub Copilot
+    instruction: |
+      You are a helpful AI assistant.
+      Be helpful, accurate, and concise in your responses.
+
+models:
+  github-copilot/gpt-4o:
+    provider: github-copilot
+    model: gpt-4o
+    # Optional: override the default Copilot-Integration-Id header or add
+    # any other custom HTTP headers. Header names are matched
+    # case-insensitively against the default.
+    # provider_opts:
+    #   http_headers:
+    #     Copilot-Integration-Id: vscode-chat

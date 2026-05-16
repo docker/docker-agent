@@ -1,12 +1,12 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 # Run the demo command with:
-# cagent run thinking_budget.yaml -c demo
+# docker agent run thinking_budget.yaml -c demo
 
 agents:
   root:
     model: gpt-5-mini-min # <- try with gpt-5-mini-high
-    # model: claude-4-5-sonnet-min # <- try with claude-4-5-sonnet-high
+    # model: claude-4-5-sonnet-min # <- try with claude-4-5-sonnet-high or claude-opus-4-6-adaptive
     # model: gemini-2-5-flash-dynamic-thinking # <- try with -no-thinking, -low or -high variants
     description: a helpful assistant that thinks
     instruction: you are a helpful assistant who can also use tools, but only if you need to
@@ -29,14 +29,31 @@ models:
   claude-4-5-sonnet-min:
     provider: anthropic
     model: claude-sonnet-4-5-20250929
-    thinking_budget: 1024 # <- tokens, 1024 is the minimum
-  
+    thinking_budget: 1024 # <- explicit token budget (1024-32768) for older models
+
   claude-4-5-sonnet-high:
     provider: anthropic
     model: claude-sonnet-4-5-20250929
-    thinking_budget: 32768 # <- tokens, 32768 is the Anthropic suggested maximum without batching
+    thinking_budget: 32768 # <- explicit token budget (32768 is the Anthropic suggested maximum)
     provider_opts:
       interleaved_thinking: true # <- enables interleaved thinking, aka tool calling during model reasoning
+
+  claude-opus-4-6-adaptive:
+    provider: anthropic
+    model: claude-opus-4-6
+    thinking_budget: adaptive # <- lets the model decide when and how much to think (recommended for 4.6)
+
+  claude-opus-4-6-low:
+    provider: anthropic
+    model: claude-opus-4-6
+    thinking_budget: low # <- adaptive thinking with low effort: "low", "medium", "high", "max"
+
+  claude-opus-4-7-summarized:
+    provider: anthropic
+    model: claude-opus-4-6 # <- Opus 4.7 hides thinking by default; use the same flag with any recent Claude model
+    thinking_budget: adaptive
+    provider_opts:
+      thinking_display: summarized # <- "summarized", "display", or "omitted" (Opus 4.7 defaults to omitted)
 
   gemini-2-5-flash-dynamic-thinking:
     provider: google
@@ -47,12 +64,12 @@ models:
     provider: google
     model: gemini-2.5-flash
     thinking_budget: 0 # <- google only, no thinking
-  
+
   gemini-2-5-flash-low:
     provider: google
     model: gemini-2.5-flash
     thinking_budget: 1024
-  
+
   gemini-2-5-flash-high:
     provider: google
     model: gemini-2.5-flash

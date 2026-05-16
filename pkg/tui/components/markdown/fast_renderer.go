@@ -3,18 +3,21 @@
 package markdown
 
 import (
+	"cmp"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
 
+	"charm.land/glamour/v2/ansi"
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/charmbracelet/glamour/v2/ansi"
+	xansi "github.com/charmbracelet/x/ansi"
 	runewidth "github.com/mattn/go-runewidth"
 
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // ansiStyle holds pre-computed ANSI escape sequences for fast rendering.
@@ -46,66 +49,49 @@ func (s ansiStyle) renderTo(b *strings.Builder, text string) {
 	b.WriteString(s.suffix)
 }
 
-// withBold returns a new style with bold formatting added
-// Bold is applied first, then the parent color, to prevent "bright bold" terminals
-// from overriding the color when bold is enabled.
+// withAttribute returns a new style with the given ANSI attribute layered on
+// top of s while preserving s's color/background. on is the SGR sequence that
+// turns the attribute on (e.g. "\x1b[1m" for bold); off is the matching off
+// sequence (e.g. "\x1b[22m"). When s has no styling the off sequence is
+// replaced with a full reset, matching the behaviour of a fresh style.
+//
+// Format attributes are written before the parent's color/background so that
+// terminals which auto-brighten bold colors do not override our color choice.
+func (s ansiStyle) withAttribute(on, off string) ansiStyle {
+	r := s
+	if s.prefix == "" {
+		r.prefix = on
+		r.suffix = "\x1b[m"
+	} else {
+		r.prefix = on + s.prefix
+		r.suffix = off + s.prefix
+	}
+	return r
+}
+
 func (s ansiStyle) withBold() ansiStyle {
-	if s.prefix == "" {
-		return ansiStyle{prefix: "\x1b[1m", suffix: "\x1b[m", hasBold: true}
-	}
-	return ansiStyle{
-		prefix:    "\x1b[1m" + s.prefix,  // Bold first, then color (prevents bright-bold color override)
-		suffix:    "\x1b[22m" + s.prefix, // Turn off bold, re-apply parent style
-		hasBold:   true,
-		hasStrike: s.hasStrike,
-		hasItalic: s.hasItalic,
-	}
+	r := s.withAttribute("\x1b[1m", "\x1b[22m")
+	r.hasBold = true
+	return r
 }
 
-// withItalic returns a new style with italic formatting added
-// Format attribute applied first, then color, for consistency with withBold.
 func (s ansiStyle) withItalic() ansiStyle {
-	if s.prefix == "" {
-		return ansiStyle{prefix: "\x1b[3m", suffix: "\x1b[m", hasItalic: true}
-	}
-	return ansiStyle{
-		prefix:    "\x1b[3m" + s.prefix,  // Italic first, then color
-		suffix:    "\x1b[23m" + s.prefix, // Turn off italic, re-apply parent style
-		hasBold:   s.hasBold,
-		hasStrike: s.hasStrike,
-		hasItalic: true,
-	}
+	r := s.withAttribute("\x1b[3m", "\x1b[23m")
+	r.hasItalic = true
+	return r
 }
 
-// withBoldItalic returns a new style with bold and italic formatting added
-// Format attributes applied first, then color, to prevent "bright bold" terminals
-// from overriding the color when bold is enabled.
 func (s ansiStyle) withBoldItalic() ansiStyle {
-	if s.prefix == "" {
-		return ansiStyle{prefix: "\x1b[1;3m", suffix: "\x1b[m", hasBold: true, hasItalic: true}
-	}
-	return ansiStyle{
-		prefix:    "\x1b[1;3m" + s.prefix,   // Bold+italic first, then color
-		suffix:    "\x1b[22;23m" + s.prefix, // Turn off bold and italic, re-apply parent style
-		hasBold:   true,
-		hasStrike: s.hasStrike,
-		hasItalic: true,
-	}
+	r := s.withAttribute("\x1b[1;3m", "\x1b[22;23m")
+	r.hasBold = true
+	r.hasItalic = true
+	return r
 }
 
-// withStrikethrough returns a new style with strikethrough formatting added
-// Format attribute applied first, then color, for consistency with withBold.
 func (s ansiStyle) withStrikethrough() ansiStyle {
-	if s.prefix == "" {
-		return ansiStyle{prefix: "\x1b[9m", suffix: "\x1b[m", hasStrike: true}
-	}
-	return ansiStyle{
-		prefix:    "\x1b[9m" + s.prefix,  // Strikethrough first, then color
-		suffix:    "\x1b[29m" + s.prefix, // Turn off strikethrough, re-apply parent style
-		hasBold:   s.hasBold,
-		hasStrike: true,
-		hasItalic: s.hasItalic,
-	}
+	r := s.withAttribute("\x1b[9m", "\x1b[29m")
+	r.hasStrike = true
+	return r
 }
 
 // buildAnsiStyle extracts ANSI codes from a lipgloss style by rendering an empty marker.
@@ -125,36 +111,38 @@ func buildAnsiStyle(style lipgloss.Style) ansiStyle {
 }
 
 // cachedStyles holds pre-computed styles to avoid repeated MarkdownStyle() calls.
+// Everything that can be styled once is pre-rendered to ANSI strings, so the
+// hot path never touches lipgloss.
 type cachedStyles struct {
-	// lipgloss styles (for complex rendering like headings)
-	headingStyles   [6]lipgloss.Style
-	headingPrefixes [6]string
-	styleHR         lipgloss.Style
-	styleBlockquote lipgloss.Style
-	styleCodeBg     lipgloss.Style
+	styleCodeBg lipgloss.Style // kept only because chroma styles inherit its bg color
 
 	// ANSI styles (for fast inline rendering)
-	ansiBold       ansiStyle
-	ansiItalic     ansiStyle
-	ansiBoldItal   ansiStyle
-	ansiStrike     ansiStyle
-	ansiCode       ansiStyle
-	ansiLink       ansiStyle
-	ansiLinkText   ansiStyle
-	ansiText       ansiStyle    // base document text style
-	ansiHeadings   [6]ansiStyle // heading styles for inline restoration
-	ansiBlockquote ansiStyle    // blockquote style for inline restoration
-	ansiFootnote   ansiStyle    // footnote reference style
-	ansiCodeBg     ansiStyle    // code block background (cached to avoid repeated buildAnsiStyle)
+	ansiBold              ansiStyle
+	ansiItalic            ansiStyle
+	ansiBoldItal          ansiStyle
+	ansiStrike            ansiStyle
+	ansiCode              ansiStyle
+	ansiLink              ansiStyle
+	ansiLinkText          ansiStyle
+	ansiText              ansiStyle    // base document text style
+	ansiHeadings          [6]ansiStyle // heading styles for inline restoration
+	ansiBlockquote        ansiStyle    // blockquote style for inline restoration
+	ansiFootnote          ansiStyle    // footnote reference style
+	ansiCodeBg            ansiStyle    // code block background (cached to avoid repeated buildAnsiStyle)
+	ansiCodeBlockCopyIcon ansiStyle    // muted foreground on code block background, used for the per-block copy icon
+
+	// Pre-rendered chrome (computed once, reused across renders)
+	headingPrefixes         [6]string // raw prefix strings (e.g. "## ") for width math
+	styledHeadingPrefixes   [6]string // ANSI-styled prefix used at start of heading
+	styledHeadingContIndent [6]string // ANSI-styled spaces for heading continuation lines
+	styledHR                string    // pre-rendered horizontal rule (with trailing blank line)
+	styledTableSep          string    // styled " │ " for table columns
 
 	styleTaskTicked  string
 	styleTaskUntick  string
 	listIndent       int
 	blockquoteIndent int
 	chromaStyle      *chroma.Style
-
-	// Pre-rendered table chrome
-	styledTableSep string // styled " │ " for table columns
 }
 
 var (
@@ -171,10 +159,14 @@ func ResetStyles() {
 	globalStylesOnce = sync.Once{}
 	globalStylesMu.Unlock()
 
-	// Also clear chroma syntax highlighting cache
+	// Also clear chroma syntax highlighting caches
 	chromaStyleCacheMu.Lock()
 	chromaStyleCache = make(map[chroma.TokenType]ansiStyle)
 	chromaStyleCacheMu.Unlock()
+
+	syntaxHighlightCacheMu.Lock()
+	syntaxHighlightCache.clear()
+	syntaxHighlightCacheMu.Unlock()
 }
 
 func getGlobalStyles() *cachedStyles {
@@ -202,49 +194,67 @@ func getGlobalStyles() *cachedStyles {
 		// Build blockquote lipgloss style
 		blockquoteLipStyle := buildStylePrimitive(mdStyle.BlockQuote.StylePrimitive)
 
-		globalStyles = &cachedStyles{
-			headingStyles:   headingLipStyles,
-			headingPrefixes: [6]string{"## ", "## ", "### ", "#### ", "##### ", "###### "},
-			styleBlockquote: blockquoteLipStyle,
-			styleHR:         buildStylePrimitive(mdStyle.HorizontalRule),
-			styleCodeBg:     lipgloss.NewStyle(),
-			ansiBold:        buildAnsiStyle(styleBold),
-			ansiItalic:      buildAnsiStyle(styleItalic),
-			ansiBoldItal:    buildAnsiStyle(styleBold.Inherit(styleItalic)),
-			ansiStrike:      buildAnsiStyle(buildStylePrimitive(mdStyle.Strikethrough)),
-			ansiCode:        buildAnsiStyle(buildStylePrimitive(mdStyle.Code.StylePrimitive)),
-			ansiLink:        buildAnsiStyle(buildStylePrimitive(mdStyle.Link)),
-			ansiLinkText:    buildAnsiStyle(buildStylePrimitive(mdStyle.LinkText)),
-			ansiText:        buildAnsiStyle(textStyle),
-			ansiHeadings: [6]ansiStyle{
-				buildAnsiStyle(headingLipStyles[0]),
-				buildAnsiStyle(headingLipStyles[1]),
-				buildAnsiStyle(headingLipStyles[2]),
-				buildAnsiStyle(headingLipStyles[3]),
-				buildAnsiStyle(headingLipStyles[4]),
-				buildAnsiStyle(headingLipStyles[5]),
-			},
-			ansiBlockquote:   buildAnsiStyle(blockquoteLipStyle),
-			ansiFootnote:     buildAnsiStyle(lipgloss.NewStyle().Foreground(styles.TextSecondary).Italic(true)),
-			styleTaskTicked:  mdStyle.Task.Ticked,
-			styleTaskUntick:  mdStyle.Task.Unticked,
-			listIndent:       int(mdStyle.List.LevelIndent),
-			blockquoteIndent: 1,
-			chromaStyle:      styles.ChromaStyle(),
+		// Heading prefixes used both for display and width math. H1 deliberately
+		// uses the same "## " prefix as H2 so a single hash in the source does not
+		// dominate the TUI with an oversized banner heading.
+		// Note: H1 uses "# " (single hash) for proper visual hierarchy and correct
+		// continuation-indent width (2 spaces instead of 3).
+		headingPrefixes := [6]string{"# ", "## ", "### ", "#### ", "##### ", "###### "}
+		ansiHeadings := [6]ansiStyle{
+			buildAnsiStyle(headingLipStyles[0]),
+			buildAnsiStyle(headingLipStyles[1]),
+			buildAnsiStyle(headingLipStyles[2]),
+			buildAnsiStyle(headingLipStyles[3]),
+			buildAnsiStyle(headingLipStyles[4]),
+			buildAnsiStyle(headingLipStyles[5]),
 		}
-		for i := range globalStyles.ansiHeadings {
-			globalStyles.ansiHeadings[i].hasBold = true
+		for i := range ansiHeadings {
+			ansiHeadings[i].hasBold = true
 		}
-		if mdStyle.BlockQuote.Indent != nil {
-			globalStyles.blockquoteIndent = int(*mdStyle.BlockQuote.Indent)
+
+		var styledPrefixes, styledContIndents [6]string
+		for i, p := range headingPrefixes {
+			styledPrefixes[i] = ansiHeadings[i].render(p)
+			styledContIndents[i] = ansiHeadings[i].render(spaces(len(p)))
 		}
+
+		codeBg := lipgloss.NewStyle()
 		if mdStyle.CodeBlock.BackgroundColor != nil {
-			globalStyles.styleCodeBg = globalStyles.styleCodeBg.Background(lipgloss.Color(*mdStyle.CodeBlock.BackgroundColor))
+			codeBg = codeBg.Background(lipgloss.Color(*mdStyle.CodeBlock.BackgroundColor))
 		}
-		// Cache ANSI version of code background style (must be after styleCodeBg is fully configured)
-		globalStyles.ansiCodeBg = buildAnsiStyle(globalStyles.styleCodeBg)
-		// Cache styled table separator
-		globalStyles.styledTableSep = globalStyles.ansiText.render(" │ ")
+		ansiText := buildAnsiStyle(textStyle)
+
+		blockquoteIndent := 1
+		if mdStyle.BlockQuote.Indent != nil {
+			blockquoteIndent = int(*mdStyle.BlockQuote.Indent)
+		}
+
+		globalStyles = &cachedStyles{
+			styleCodeBg:             codeBg,
+			ansiBold:                buildAnsiStyle(styleBold),
+			ansiItalic:              buildAnsiStyle(styleItalic),
+			ansiBoldItal:            buildAnsiStyle(styleBold.Inherit(styleItalic)),
+			ansiStrike:              buildAnsiStyle(buildStylePrimitive(mdStyle.Strikethrough)),
+			ansiCode:                buildAnsiStyle(buildStylePrimitive(mdStyle.Code.StylePrimitive)),
+			ansiLink:                buildAnsiStyle(buildStylePrimitive(mdStyle.Link)),
+			ansiLinkText:            buildAnsiStyle(buildStylePrimitive(mdStyle.LinkText)),
+			ansiText:                ansiText,
+			ansiHeadings:            ansiHeadings,
+			ansiBlockquote:          buildAnsiStyle(blockquoteLipStyle),
+			ansiFootnote:            buildAnsiStyle(lipgloss.NewStyle().Foreground(styles.TextSecondary).Italic(true)),
+			ansiCodeBg:              buildAnsiStyle(codeBg),
+			ansiCodeBlockCopyIcon:   buildAnsiStyle(codeBg.Foreground(styles.TextMutedGray)),
+			headingPrefixes:         headingPrefixes,
+			styledHeadingPrefixes:   styledPrefixes,
+			styledHeadingContIndent: styledContIndents,
+			styledHR:                buildAnsiStyle(buildStylePrimitive(mdStyle.HorizontalRule)).render("--------") + "\n\n",
+			styledTableSep:          ansiText.render(" │ "),
+			styleTaskTicked:         mdStyle.Task.Ticked,
+			styleTaskUntick:         mdStyle.Task.Unticked,
+			listIndent:              int(mdStyle.List.LevelIndent),
+			blockquoteIndent:        blockquoteIndent,
+			chromaStyle:             styles.ChromaStyle(),
+		}
 	})
 	return globalStyles
 }
@@ -270,8 +280,17 @@ var parserPool = sync.Pool{
 
 // Render parses and renders markdown content to styled terminal output.
 func (r *FastRenderer) Render(input string) (string, error) {
+	out, _, err := r.RenderWithCodeBlocks(input)
+	return out, err
+}
+
+// RenderWithCodeBlocks renders markdown content and returns both the styled
+// terminal output and the list of fenced code blocks emitted, in document
+// order. Each entry's Line points at the rendered line that carries the
+// clickable copy label for that block.
+func (r *FastRenderer) RenderWithCodeBlocks(input string) (string, []CodeBlock, error) {
 	if input == "" {
-		return "", nil
+		return "", nil, nil
 	}
 
 	input = sanitizeForTerminal(input)
@@ -279,18 +298,24 @@ func (r *FastRenderer) Render(input string) (string, error) {
 	p := parserPool.Get().(*parser)
 	p.reset(input, r.width)
 	result := p.parse()
+	var blocks []CodeBlock
+	if len(p.codeBlocks) > 0 {
+		blocks = make([]CodeBlock, len(p.codeBlocks))
+		copy(blocks, p.codeBlocks)
+	}
 	parserPool.Put(p)
-	return padAllLines(result, r.width), nil
+	return finalizeOutput(result, r.width), blocks, nil
 }
 
 // parser holds the state for parsing markdown.
 type parser struct {
-	input   string
-	width   int
-	styles  *cachedStyles
-	out     strings.Builder
-	lines   []string
-	lineIdx int
+	input      string
+	width      int
+	styles     *cachedStyles
+	out        strings.Builder
+	lines      []string
+	lineIdx    int
+	codeBlocks []CodeBlock
 }
 
 func (p *parser) reset(input string, width int) {
@@ -303,6 +328,7 @@ func (p *parser) reset(input string, width int) {
 		p.lines = append(p.lines, line)
 	}
 	p.lineIdx = 0
+	p.codeBlocks = p.codeBlocks[:0]
 	p.out.Reset()
 	p.out.Grow(len(input) * 2) // Pre-allocate for styled output
 }
@@ -367,35 +393,42 @@ func (p *parser) tryCodeBlock(line string) bool {
 	return true
 }
 
+// headingLevel returns the ATX heading level (1-6) for line, or 0 if line is
+// not a valid ATX heading. A valid heading has 1-6 '#' characters followed by
+// a space, tab, or end of line.
+func headingLevel(line string) int {
+	level := 0
+	for level < len(line) && line[level] == '#' {
+		level++
+	}
+	if level == 0 || level > 6 {
+		return 0
+	}
+	if level == len(line) {
+		return level
+	}
+	if c := line[level]; c == ' ' || c == '\t' {
+		return level
+	}
+	return 0
+}
+
 // tryHeading checks for ATX-style headings (# through ######)
 func (p *parser) tryHeading(line string) bool {
 	trimmed := strings.TrimLeft(line, " \t")
-	if !strings.HasPrefix(trimmed, "#") {
+	level := headingLevel(trimmed)
+	if level == 0 {
 		return false
 	}
 
-	// Count heading level
-	level := 0
-	for i := 0; i < len(trimmed) && trimmed[i] == '#'; i++ {
-		level++
-	}
-	if level > 6 || level == 0 {
-		return false
-	}
-
-	// Must have space after #s or be empty
-	rest := trimmed[level:]
-	if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
-		return false
-	}
-
-	content := strings.TrimSpace(rest)
+	content := strings.TrimSpace(trimmed[level:])
 	// Remove trailing #s
 	content = strings.TrimRight(content, "# \t")
 
-	style := p.headingStyle(level)
-	ansiStyle := p.headingAnsiStyle(level)
-	prefix := p.headingPrefix(level)
+	ansiStyle := p.styles.ansiHeadings[level-1]
+	prefix := p.styles.headingPrefixes[level-1]
+	styledPrefix := p.styles.styledHeadingPrefixes[level-1]
+	styledContinuationIndent := p.styles.styledHeadingContIndent[level-1]
 
 	// Headings are bold by default. If the entire heading is wrapped in emphasis,
 	// strip the wrapper and only apply italics when requested.
@@ -430,53 +463,21 @@ func (p *parser) tryHeading(line string) bool {
 	}
 
 	// Wrap the rendered content and style each line
-	// The content already has ANSI codes from renderInlineWithStyle, which uses
-	// the heading's ansiStyle for restoration. We only need to style the prefix.
 	wrapped := p.wrapText(rendered, contentWidth)
-	styledPrefix := style.Render(prefix)
-	// Lazy-compute continuation indent (only computed if we have multiple lines)
-	var styledContinuationIndent string
 	first := true
 	for l := range strings.SplitSeq(wrapped, "\n") {
 		if first {
 			p.out.WriteString(styledPrefix)
-			p.out.WriteString(l)
-			p.out.WriteByte('\n')
 			first = false
 		} else {
-			// Continuation lines get indented to align with content
-			if styledContinuationIndent == "" {
-				styledContinuationIndent = style.Render(spaces(prefixWidth))
-			}
 			p.out.WriteString(styledContinuationIndent)
-			p.out.WriteString(l)
-			p.out.WriteByte('\n')
 		}
+		p.out.WriteString(l)
+		p.out.WriteByte('\n')
 	}
 	p.out.WriteByte('\n')
 	p.lineIdx++
 	return true
-}
-
-func (p *parser) headingStyle(level int) lipgloss.Style {
-	if level >= 1 && level <= 6 {
-		return p.styles.headingStyles[level-1]
-	}
-	return p.styles.headingStyles[0]
-}
-
-func (p *parser) headingAnsiStyle(level int) ansiStyle {
-	if level >= 1 && level <= 6 {
-		return p.styles.ansiHeadings[level-1]
-	}
-	return p.styles.ansiHeadings[0]
-}
-
-func (p *parser) headingPrefix(level int) string {
-	if level >= 1 && level <= 6 {
-		return p.styles.headingPrefixes[level-1]
-	}
-	return ""
 }
 
 // tryHorizontalRule checks for horizontal rules (---, ***, ___)
@@ -484,9 +485,7 @@ func (p *parser) tryHorizontalRule(line string) bool {
 	if !isHorizontalRule(line) {
 		return false
 	}
-	// Render rule with consistent spacing: content + blank line after
-	// Previous elements already end with \n\n, so we get one blank line before
-	p.out.WriteString(p.styles.styleHR.Render("--------") + "\n\n")
+	p.out.WriteString(p.styles.styledHR)
 	p.lineIdx++
 	return true
 }
@@ -544,10 +543,9 @@ func (p *parser) renderBlockquoteContent(lines []string, indent string, availabl
 
 			// Render the nested blockquote with additional indentation
 			nestedIndent := indent + spaces(p.styles.blockquoteIndent)
-			nestedWidth := availableWidth - p.styles.blockquoteIndent
-			if nestedWidth < 10 {
-				nestedWidth = 10 // Minimum content width
-			}
+			nestedWidth := max(availableWidth-p.styles.blockquoteIndent,
+				// Minimum content width
+				10)
 			p.renderBlockquoteContent(nestedLines, nestedIndent, nestedWidth)
 			continue
 		}
@@ -580,7 +578,9 @@ func (p *parser) renderBlockquoteContent(lines []string, indent string, availabl
 		rendered := p.renderInlineWithStyle(line, p.styles.ansiBlockquote)
 		wrapped := p.wrapText(rendered, availableWidth)
 		for wl := range strings.SplitSeq(wrapped, "\n") {
-			p.out.WriteString(indent + p.styles.styleBlockquote.Render(wl) + "\n")
+			p.out.WriteString(indent)
+			p.styles.ansiBlockquote.renderTo(&p.out, wl)
+			p.out.WriteByte('\n')
 		}
 		i++
 	}
@@ -600,8 +600,198 @@ func (p *parser) renderBlockquoteCodeBlock(code, lang, indent string, availableW
 
 // tableCell holds pre-rendered cell data to avoid re-rendering
 type tableCell struct {
-	rendered string // rendered with inline styles
-	width    int    // visual width (excluding ANSI codes)
+	rendered    string // rendered with inline styles
+	width       int    // visual width (excluding ANSI codes)
+	longestWord int    // width of longest single word (for minimum column width)
+}
+
+// tableLayout holds the computed table layout parameters
+type tableLayout struct {
+	colWidths  []int  // width for each column
+	sepWidth   int    // visual width of column separator (1 or 3)
+	sep        string // separator string (" │ " or "│")
+	dividerSep string // divider join string ("─┼─" or "┼")
+	needsWrap  bool   // whether cells need wrapping
+}
+
+// computeTableLayout calculates viewport-fit column widths using proportional distribution.
+// It returns the column widths and separator configuration that fit within viewportWidth.
+func computeTableLayout(desired, headerWidths []int, viewportWidth int) tableLayout {
+	numCols := len(desired)
+	if numCols == 0 {
+		return tableLayout{}
+	}
+
+	// Standard separator: " │ " (width 3), divider: "─┼─" (width 3)
+	// Compact separator: "│" (width 1), divider: "┼" (width 1)
+	const (
+		wideSepWidth    = 3
+		compactSepWidth = 1
+	)
+
+	// Calculate total natural width with wide separators
+	totalDesired := 0
+	for _, w := range desired {
+		totalDesired += w
+	}
+	totalWithWideSep := totalDesired + (numCols-1)*wideSepWidth
+
+	// Fast path: table fits with natural widths
+	if totalWithWideSep <= viewportWidth {
+		colWidths := make([]int, numCols)
+		copy(colWidths, desired)
+		return tableLayout{
+			colWidths:  colWidths,
+			sepWidth:   wideSepWidth,
+			sep:        " │ ",
+			dividerSep: "─┼─",
+			needsWrap:  false,
+		}
+	}
+
+	// Try with wide separators first
+	sepWidth := wideSepWidth
+	sep := " │ "
+	dividerSep := "─┼─"
+	availableForCells := viewportWidth - (numCols-1)*sepWidth
+
+	// If wide separators don't leave enough room, try compact
+	minColWidth := 1
+	if availableForCells < numCols*minColWidth {
+		sepWidth = compactSepWidth
+		sep = "│"
+		dividerSep = "┼"
+		availableForCells = viewportWidth - (numCols-1)*sepWidth
+	}
+
+	// If even compact mode can't fit, use minimal widths
+	if availableForCells < numCols*minColWidth {
+		availableForCells = numCols * minColWidth
+	}
+
+	colWidths := distributeWidth(desired, headerWidths, availableForCells)
+
+	return tableLayout{
+		colWidths:  colWidths,
+		sepWidth:   sepWidth,
+		sep:        sep,
+		dividerSep: dividerSep,
+		needsWrap:  true,
+	}
+}
+
+// distributeWidth distributes available width proportionally to desired widths.
+// Columns that need less than their proportional share keep their desired width,
+// and the excess is redistributed to columns that need more.
+// minWidths specifies the minimum width for each column (e.g., longest word).
+func distributeWidth(desired, minWidths []int, available int) []int {
+	numCols := len(desired)
+	if numCols == 0 {
+		return nil
+	}
+
+	colWidths := make([]int, numCols)
+
+	// Calculate total desired width
+	totalDesired := 0
+	for _, w := range desired {
+		totalDesired += w
+	}
+
+	// If we have enough space for everything, use desired widths
+	if totalDesired <= available {
+		copy(colWidths, desired)
+		return colWidths
+	}
+
+	// Start with minimum widths (longest word in column), capped at desired
+	remaining := available
+	for i, d := range desired {
+		minW := 1
+		if i < len(minWidths) && minWidths[i] > minW {
+			minW = minWidths[i]
+		}
+		colWidths[i] = min(d, minW)
+		remaining -= colWidths[i]
+	}
+
+	// Distribute remaining width proportionally to columns that still need more
+	for remaining > 0 {
+		// Find columns that can still grow
+		totalNeed := 0
+		for i, d := range desired {
+			if colWidths[i] < d {
+				totalNeed += d - colWidths[i]
+			}
+		}
+		if totalNeed == 0 {
+			break
+		}
+
+		// Distribute proportionally using largest remainder method
+		distributed := 0
+		remainders := make([]struct {
+			idx       int
+			remainder float64
+		}, 0, numCols)
+
+		for i, d := range desired {
+			need := d - colWidths[i]
+			if need <= 0 {
+				continue
+			}
+			// Proportional share of remaining width
+			share := float64(remaining) * float64(need) / float64(totalNeed)
+			intPart := int(share)
+			fracPart := share - float64(intPart)
+
+			// Cap at what the column actually needs
+			if intPart > need {
+				intPart = need
+			}
+			colWidths[i] += intPart
+			distributed += intPart
+
+			// Track remainder for later distribution
+			if colWidths[i] < d {
+				remainders = append(remainders, struct {
+					idx       int
+					remainder float64
+				}{i, fracPart})
+			}
+		}
+
+		remaining -= distributed
+
+		// Distribute leftover 1-by-1 to columns with largest remainders
+		// Sort by remainder descending
+		slices.SortFunc(remainders, func(a, b struct {
+			idx       int
+			remainder float64
+		},
+		) int {
+			return cmp.Compare(b.remainder, a.remainder) // descending order
+		})
+
+		for _, r := range remainders {
+			if remaining <= 0 {
+				break
+			}
+			if colWidths[r.idx] < desired[r.idx] {
+				colWidths[r.idx]++
+				remaining--
+			}
+		}
+	}
+
+	// Ensure minimum of 1 for all columns
+	for i := range colWidths {
+		if colWidths[i] < 1 {
+			colWidths[i] = 1
+		}
+	}
+
+	return colWidths
 }
 
 // tryTable checks for markdown tables
@@ -659,78 +849,191 @@ func (p *parser) tryTable(line string) bool {
 	// Advance line index past all table lines
 	p.lineIdx = startIdx + numLines
 
-	// Calculate column widths from pre-computed cell widths
-	colWidths := make([]int, numCols)
+	// Calculate desired column widths (natural width = max cell width per column)
+	// and minimum widths (longest single word in each column to avoid mid-word breaks)
+	desired := make([]int, numCols)
+	minWidths := make([]int, numCols)
 	for _, row := range rows {
 		for i, cell := range row {
-			if cell.width > colWidths[i] {
-				colWidths[i] = cell.width
+			if cell.width > desired[i] {
+				desired[i] = cell.width
+			}
+			if cell.longestWord > minWidths[i] {
+				minWidths[i] = cell.longestWord
 			}
 		}
 	}
 
-	// Pre-calculate separator line (only done once)
-	var sepLine string
-	{
-		// Calculate total separator length
-		sepLen := 0
-		for i, w := range colWidths {
-			sepLen += w
-			if i < numCols-1 {
-				sepLen += 9 // len("─┼─") in bytes = 9 (3 runes × 3 bytes each)
-			}
-		}
-		var sepBuilder strings.Builder
-		sepBuilder.Grow(sepLen)
-		for i, w := range colWidths {
-			for range w {
-				sepBuilder.WriteString("─")
-			}
-			if i < numCols-1 {
-				sepBuilder.WriteString("─┼─")
-			}
-		}
-		sepLine = sepBuilder.String()
-	}
+	// Compute viewport-fit layout
+	layout := computeTableLayout(desired, minWidths, p.width)
+	colWidths := layout.colWidths
 
-	// Render table rows directly to output
+	// Build separator line based on fitted widths
+	sepLine := p.buildTableSeparatorLine(colWidths, layout.dividerSep)
+
 	// Use ansiText style for table chrome (separators, dividers) to match content
 	textStyle := p.styles.ansiText
-
-	// Pre-render the styled separator line (computed once per table)
 	styledSepLine := textStyle.render(sepLine)
+	styledSep := textStyle.render(layout.sep)
+
+	if !layout.needsWrap {
+		// Fast path: no wrapping needed, render single-line rows
+		p.renderTableRowsFast(rows, colWidths, styledSep, styledSepLine)
+	} else {
+		// Slow path: wrap cells and render multi-line rows
+		p.renderTableRowsWrapped(rows, colWidths, styledSep, styledSepLine)
+	}
+
+	p.out.WriteByte('\n')
+	return true
+}
+
+// buildTableSeparatorLine builds the horizontal separator line for table header
+func (p *parser) buildTableSeparatorLine(colWidths []int, dividerSep string) string {
+	numCols := len(colWidths)
+	var sepBuilder strings.Builder
+	// Estimate size: each column width + divider separators
+	sepBuilder.Grow(numCols * 10)
+	for i, w := range colWidths {
+		for range w {
+			sepBuilder.WriteString("─")
+		}
+		if i < numCols-1 {
+			sepBuilder.WriteString(dividerSep)
+		}
+	}
+	return sepBuilder.String()
+}
+
+// buildTableBlankRow builds a blank row with column separators for visual separation
+func buildTableBlankRow(colWidths []int, styledSep string) string {
+	var b strings.Builder
+	for i, w := range colWidths {
+		b.WriteString(spaces(w))
+		if i < len(colWidths)-1 {
+			b.WriteString(styledSep)
+		}
+	}
+	return b.String()
+}
+
+// renderTableRowsFast renders table rows without wrapping (fast path)
+func (p *parser) renderTableRowsFast(rows [][]tableCell, colWidths []int, styledSep, styledSepLine string) {
+	numCols := len(colWidths)
+	blankRow := buildTableBlankRow(colWidths, styledSep)
 
 	for rowIdx, row := range rows {
-		for i, cell := range row {
-			if i >= numCols {
-				break
+		// Add blank row between data rows for visual separation
+		if rowIdx > 1 {
+			p.out.WriteString(blankRow)
+			p.out.WriteByte('\n')
+		}
+
+		for i := range numCols {
+			var cell tableCell
+			if i < len(row) {
+				cell = row[i]
 			}
+
 			if rowIdx == 0 {
-				// Header row - bold, write directly to output
+				// Header row - bold
 				p.styles.ansiBold.renderTo(&p.out, cell.rendered)
 			} else {
 				p.out.WriteString(cell.rendered)
 			}
-			// Add padding - plain spaces don't need styling
+
+			// Add padding
 			padding := colWidths[i] - cell.width
 			if padding > 0 {
 				p.out.WriteString(spaces(padding))
 			}
-			if i < len(row)-1 {
-				p.out.WriteString(p.styles.styledTableSep)
+
+			if i < numCols-1 {
+				p.out.WriteString(styledSep)
 			}
 		}
 		p.out.WriteByte('\n')
 
-		// Add separator after header (styled to match content)
+		// Add separator after header
 		if rowIdx == 0 {
 			p.out.WriteString(styledSepLine)
 			p.out.WriteByte('\n')
 		}
 	}
+}
 
-	p.out.WriteByte('\n')
-	return true
+// renderTableRowsWrapped renders table rows with cell wrapping (slow path)
+func (p *parser) renderTableRowsWrapped(rows [][]tableCell, colWidths []int, styledSep, styledSepLine string) {
+	numCols := len(colWidths)
+	blankRow := buildTableBlankRow(colWidths, styledSep)
+
+	for rowIdx, row := range rows {
+		// Add blank row between data rows for visual separation
+		if rowIdx > 1 {
+			p.out.WriteString(blankRow)
+			p.out.WriteByte('\n')
+		}
+
+		// Wrap each cell and collect wrapped lines
+		wrappedCells := make([][]string, numCols)
+		maxLines := 1
+
+		for i := range numCols {
+			var cell tableCell
+			if i < len(row) {
+				cell = row[i]
+			}
+
+			if cell.width <= colWidths[i] {
+				// Cell fits, no wrapping needed
+				wrappedCells[i] = []string{cell.rendered}
+			} else {
+				// Wrap the cell content
+				wrapped := p.wrapText(cell.rendered, colWidths[i])
+				lines := strings.Split(wrapped, "\n")
+				wrappedCells[i] = lines
+			}
+
+			if len(wrappedCells[i]) > maxLines {
+				maxLines = len(wrappedCells[i])
+			}
+		}
+
+		// Render each physical line of the row
+		for lineIdx := range maxLines {
+			for colIdx := range numCols {
+				var lineContent string
+				if lineIdx < len(wrappedCells[colIdx]) {
+					lineContent = wrappedCells[colIdx][lineIdx]
+				}
+
+				// Apply bold to header row
+				if rowIdx == 0 {
+					p.styles.ansiBold.renderTo(&p.out, lineContent)
+				} else {
+					p.out.WriteString(lineContent)
+				}
+
+				// Pad to column width
+				lineWidth := ansiStringWidth(lineContent)
+				padding := colWidths[colIdx] - lineWidth
+				if padding > 0 {
+					p.out.WriteString(spaces(padding))
+				}
+
+				if colIdx < numCols-1 {
+					p.out.WriteString(styledSep)
+				}
+			}
+			p.out.WriteByte('\n')
+		}
+
+		// Add separator after header
+		if rowIdx == 0 {
+			p.out.WriteString(styledSepLine)
+			p.out.WriteByte('\n')
+		}
+	}
 }
 
 // parseAndRenderTableRow parses a table row and renders cells in one pass
@@ -773,8 +1076,9 @@ func (p *parser) parseAndRenderTableRow(line string) []tableCell {
 			rendered, width = p.renderInlineWithWidth(cellText)
 		}
 		cells = append(cells, tableCell{
-			rendered: rendered,
-			width:    width,
+			rendered:    rendered,
+			width:       width,
+			longestWord: longestWordWidth(cellText),
 		})
 		start = i + 1
 	}
@@ -1089,95 +1393,17 @@ func (p *parser) renderListBlockquote(bulletWidth int) {
 	indent := spaces(bulletWidth)
 
 	// Calculate available width for blockquote content
-	availableWidth := p.width - bulletWidth - p.styles.blockquoteIndent
-	if availableWidth < 10 {
-		availableWidth = 10
-	}
+	availableWidth := max(p.width-bulletWidth-p.styles.blockquoteIndent, 10)
 
 	// Use renderBlockquoteContent for full support including nested code blocks
 	fullIndent := indent + spaces(p.styles.blockquoteIndent)
-	p.renderListBlockquoteContent(quoteLines, fullIndent, availableWidth)
-}
-
-// renderListBlockquoteContent renders blockquote content within a list, including code blocks and nested blockquotes
-func (p *parser) renderListBlockquoteContent(lines []string, indent string, contentWidth int) {
-	i := 0
-	for i < len(lines) {
-		line := lines[i]
-		trimmed := strings.TrimSpace(line)
-
-		// Check for nested blockquote (line starts with >)
-		if strings.HasPrefix(trimmed, ">") {
-			// Collect all consecutive nested blockquote lines
-			var nestedLines []string
-			for i < len(lines) {
-				l := strings.TrimSpace(lines[i])
-				if !strings.HasPrefix(l, ">") {
-					break
-				}
-				// Strip the > and optional space
-				content := strings.TrimPrefix(l, ">")
-				content = strings.TrimPrefix(content, " ")
-				nestedLines = append(nestedLines, content)
-				i++
-			}
-
-			// Render the nested blockquote with additional indentation
-			nestedIndent := indent + spaces(p.styles.blockquoteIndent)
-			nestedWidth := contentWidth - p.styles.blockquoteIndent
-			if nestedWidth < 10 {
-				nestedWidth = 10 // Minimum content width
-			}
-			p.renderListBlockquoteContent(nestedLines, nestedIndent, nestedWidth)
-			continue
-		}
-
-		// Check for fenced code block start
-		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			fence := trimmed[:3]
-			lang := strings.TrimSpace(trimmed[3:])
-			i++
-
-			// Collect code lines until fence end
-			var codeLines []string
-			for i < len(lines) {
-				codeLine := lines[i]
-				if strings.HasPrefix(strings.TrimSpace(codeLine), fence) {
-					i++
-					break
-				}
-				codeLines = append(codeLines, codeLine)
-				i++
-			}
-
-			// Render the code block within blockquote context
-			code := strings.Join(codeLines, "\n")
-			p.renderListBlockquoteCodeBlock(code, lang, indent, contentWidth)
-			continue
-		}
-
-		// Regular line - render with blockquote-aware inline styling
-		rendered := p.renderInlineWithStyle(line, p.styles.ansiBlockquote)
-		wrapped := p.wrapText(rendered, contentWidth)
-		for wl := range strings.SplitSeq(wrapped, "\n") {
-			p.out.WriteString(indent + p.styles.styleBlockquote.Render(wl) + "\n")
-		}
-		i++
-	}
-}
-
-// renderListBlockquoteCodeBlock renders a code block within a blockquote within a list
-func (p *parser) renderListBlockquoteCodeBlock(code, lang, indent string, availableWidth int) {
-	// Add spacing before code block
-	p.out.WriteString("\n")
-
-	if code == "" {
-		return
-	}
-	p.renderCodeBlockWithIndent(code, lang, indent, availableWidth)
+	p.renderBlockquoteContent(quoteLines, fullIndent, availableWidth)
 }
 
 // renderParagraph collects consecutive non-empty lines and renders them as a paragraph.
+// The first line is always consumed: parse() has already verified it isn't a block,
+// so without that guarantee an approximate isBlockStart check could loop forever on
+// inputs like "####### foo" or "#nospace".
 func (p *parser) renderParagraph() {
 	var paraLines []string
 	for p.lineIdx < len(p.lines) {
@@ -1186,14 +1412,7 @@ func (p *parser) renderParagraph() {
 			p.lineIdx++
 			break
 		}
-		// Check if next line starts a block element
-		trimmed := strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(trimmed, "#") ||
-			strings.HasPrefix(trimmed, "```") ||
-			strings.HasPrefix(trimmed, "~~~") ||
-			strings.HasPrefix(trimmed, ">") ||
-			isListStart(trimmed) ||
-			isHorizontalRule(trimmed) {
+		if len(paraLines) > 0 && isBlockStart(line) {
 			break
 		}
 		paraLines = append(paraLines, line)
@@ -1204,11 +1423,30 @@ func (p *parser) renderParagraph() {
 		return
 	}
 
-	// Join lines and render inline elements
 	text := strings.Join(paraLines, " ")
 	rendered := p.renderInline(text)
 	wrapped := p.wrapText(rendered, p.width)
 	p.out.WriteString(wrapped + "\n\n")
+}
+
+// isBlockStart reports whether line could begin a new block element when
+// encountered inside a paragraph. It mirrors the prefix tests in parse() so a
+// paragraph terminates correctly at the start of the next block.
+func isBlockStart(line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	switch {
+	case headingLevel(trimmed) > 0:
+		return true
+	case strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~"):
+		return true
+	case strings.HasPrefix(trimmed, ">"):
+		return true
+	case isListStart(trimmed):
+		return true
+	case isHorizontalRule(trimmed):
+		return true
+	}
+	return false
 }
 
 func isHorizontalRule(line string) bool {
@@ -1229,6 +1467,49 @@ func isHorizontalRule(line string) bool {
 		}
 	}
 	return count >= 3
+}
+
+// writeHyperlinkStart writes the OSC 8 opening sequence for a clickable hyperlink.
+func writeHyperlinkStart(b *strings.Builder, url string) {
+	b.WriteString(xansi.SetHyperlink(url))
+}
+
+// writeHyperlinkEnd writes the OSC 8 closing sequence to end a hyperlink.
+func writeHyperlinkEnd(b *strings.Builder) {
+	b.WriteString(xansi.ResetHyperlink())
+}
+
+// findURLEnd returns the length of a URL starting at the given position.
+// It stops at whitespace, or certain trailing punctuation that is unlikely
+// part of the URL (e.g., trailing period, comma, parenthesis if unmatched).
+func findURLEnd(s string) int {
+	i := 0
+	parenDepth := 0
+	for i < len(s) {
+		c := s[i]
+		if c <= ' ' {
+			break
+		}
+		if c == '(' {
+			parenDepth++
+		} else if c == ')' {
+			if parenDepth > 0 {
+				parenDepth--
+			} else {
+				break
+			}
+		}
+		i++
+	}
+	for i > 0 {
+		c := s[i-1]
+		if c == '.' || c == ',' || c == ';' || c == ':' || c == '!' || c == '?' {
+			i--
+		} else {
+			break
+		}
+	}
+	return i
 }
 
 // renderInline processes inline markdown elements: bold, italic, code, links, etc.
@@ -1266,22 +1547,29 @@ func (p *parser) renderInlineWithStyleTo(out *strings.Builder, text string, rest
 		return 0
 	}
 
-	// Fast path: check if text contains any markdown characters
+	// Fast path: check if text contains any markdown characters or URLs
 	// If not, apply the restore style directly and return
 	firstMarker := strings.IndexAny(text, inlineMarkdownChars)
-	if firstMarker == -1 {
+	firstURL := findFirstURL(text)
+	if firstMarker == -1 && firstURL == -1 {
 		restoreStyle.renderTo(out, text)
 		return textWidth(text)
+	}
+
+	// Determine the first trigger position (marker or URL)
+	firstTrigger := firstMarker
+	if firstTrigger == -1 || (firstURL != -1 && firstURL < firstTrigger) {
+		firstTrigger = firstURL
 	}
 
 	width := 0
 
 	// Optimization: write any leading plain text in one batch
-	if firstMarker > 0 {
-		plain := text[:firstMarker]
+	if firstTrigger > 0 {
+		plain := text[:firstTrigger]
 		restoreStyle.renderTo(out, plain)
 		width += textWidth(plain)
-		text = text[firstMarker:]
+		text = text[firstTrigger:]
 	}
 
 	i := 0
@@ -1421,16 +1709,16 @@ func (p *parser) renderInlineWithStyleTo(out *strings.Builder, text string, rest
 				if closeParen != -1 {
 					url := rest[:closeParen]
 					if linkText != url {
+						// Emit OSC 8 hyperlink wrapping styled link text
+						writeHyperlinkStart(out, url)
 						p.styles.ansiLinkText.renderTo(out, linkText)
-						out.WriteByte(' ')
-						out.WriteString(p.styles.ansiLink.prefix)
-						out.WriteByte('(')
-						out.WriteString(url)
-						out.WriteByte(')')
-						out.WriteString(p.styles.ansiLink.suffix)
-						width += textWidth(linkText) + 1 + textWidth(url) + 2 // +1 for space, +2 for parens
+						writeHyperlinkEnd(out)
+						width += textWidth(linkText)
 					} else {
+						// URL is the same as the text — emit clickable link with URL as text
+						writeHyperlinkStart(out, url)
 						p.styles.ansiLink.renderTo(out, linkText)
+						writeHyperlinkEnd(out)
 						width += textWidth(linkText)
 					}
 					i = i + closeBracket + 2 + closeParen + 1
@@ -1441,21 +1729,82 @@ func (p *parser) renderInlineWithStyleTo(out *strings.Builder, text string, rest
 		default:
 			// Regular character - collect consecutive plain text
 			start := i
+			origStart := i // Track original start to detect no-progress
 			for i < n && !isInlineMarker(text[i]) {
+				// Auto-link URL detection. URLs we recognize all start with 'h'
+				// ("http://" or "https://"), so a single-byte gate keeps this hot
+				// loop tight on prose: we only pay for slice creation + memequal
+				// on the rare 'h' bytes.
+				if text[i] == 'h' && ((i+8 <= n && text[i:i+8] == "https://") || (i+7 <= n && text[i:i+7] == "http://")) {
+					// First, emit any plain text before the URL
+					if i > start {
+						plainText := text[start:i]
+						restoreStyle.renderTo(out, plainText)
+						width += textWidth(plainText)
+					}
+					// Find URL boundaries, but don't extend past inline markdown markers.
+					// Use urlStopMarkdownChars (excludes _ and \ which are valid in URLs)
+					// to avoid splitting URLs like https://example.com/Thing_(foo).
+					remaining := text[i:]
+					if nextMarker := strings.IndexAny(remaining, urlStopMarkdownChars); nextMarker >= 0 {
+						remaining = remaining[:nextMarker]
+					}
+					urlLen := findURLEnd(remaining)
+					autoURL := text[i : i+urlLen]
+					// Emit OSC 8 hyperlink
+					writeHyperlinkStart(out, autoURL)
+					p.styles.ansiLink.renderTo(out, autoURL)
+					writeHyperlinkEnd(out)
+					width += textWidth(autoURL)
+					i += urlLen
+					start = i
+					continue
+				}
 				i++
 			}
-			// If we didn't advance (started on an unmatched marker), consume it as literal
-			if i == start {
+			// If we didn't advance from the original position (unmatched marker), consume one char as literal
+			if i == origStart {
 				i++
 			}
-			// Always apply restore style to plain text for consistent coloring
-			plainText := text[start:i]
-			restoreStyle.renderTo(out, plainText)
-			width += textWidth(plainText)
+			// Emit remaining plain text
+			if i > start && start < n {
+				plainText := text[start:i]
+				restoreStyle.renderTo(out, plainText)
+				width += textWidth(plainText)
+			}
 		}
 	}
 
 	return width
+}
+
+// longestWordWidth returns the visual width of the longest word in text.
+// Words are separated by whitespace. Used to determine minimum column width.
+func longestWordWidth(s string) int {
+	maxWidth := 0
+	wordStart := -1
+
+	for i, r := range s {
+		if r == ' ' || r == '\t' || r == '\n' {
+			if wordStart >= 0 {
+				w := textWidth(s[wordStart:i])
+				if w > maxWidth {
+					maxWidth = w
+				}
+				wordStart = -1
+			}
+		} else if wordStart < 0 {
+			wordStart = i
+		}
+	}
+	// Handle last word
+	if wordStart >= 0 {
+		w := textWidth(s[wordStart:])
+		if w > maxWidth {
+			maxWidth = w
+		}
+	}
+	return maxWidth
 }
 
 // textWidth calculates the visual width of plain text (no ANSI codes).
@@ -1503,6 +1852,33 @@ func isWord(b byte) bool {
 // inlineMarkdownChars contains all characters that trigger inline markdown processing.
 const inlineMarkdownChars = "\\`*_~["
 
+// urlStopMarkdownChars is the subset of inline markdown markers that should
+// terminate auto-linked URL detection. Excludes _ and \\ because they appear
+// frequently in valid URLs (e.g. https://example.com/Thing_(foo)).
+const urlStopMarkdownChars = "`*~["
+
+// findFirstURL returns the index of the first "https://" or "http://" in s, or -1.
+//
+// Fast path: bail out with a single IndexByte scan when 'h' isn't present at
+// all. Both URL prefixes start with 'h', so the absence of 'h' guarantees no
+// URL — and IndexByte is much cheaper than a substring search on prose that
+// dominates real input (status lines, prompts, code without URLs, etc.).
+func findFirstURL(s string) int {
+	if strings.IndexByte(s, 'h') < 0 {
+		return -1
+	}
+	if idx := strings.Index(s, "https://"); idx != -1 {
+		if httpIdx := strings.Index(s, "http://"); httpIdx != -1 && httpIdx < idx {
+			return httpIdx
+		}
+		return idx
+	}
+	if idx := strings.Index(s, "http://"); idx != -1 {
+		return idx
+	}
+	return -1
+}
+
 // hasInlineMarkdown checks if text contains any markdown formatting characters.
 // This allows a fast path to skip processing plain text.
 // Uses strings.ContainsAny which is highly optimized in the Go standard library.
@@ -1544,10 +1920,9 @@ func (p *parser) renderCodeBlockWithIndent(code, lang, indent string, availableW
 		paddingRight = 0
 	}
 
-	contentWidth := availableWidth - paddingLeft - paddingRight
-	if contentWidth < 1 {
-		contentWidth = 1 // Minimum content width
-	}
+	contentWidth := max(availableWidth-paddingLeft-paddingRight,
+		// Minimum content width
+		1)
 
 	// Pre-compute padding strings (avoids repeated strings.Repeat calls)
 	paddingLeftStr := spaces(paddingLeft)
@@ -1556,10 +1931,25 @@ func (p *parser) renderCodeBlockWithIndent(code, lang, indent string, availableW
 	// Use cached background style
 	bgStyle := p.styles.ansiCodeBg
 
-	// Render empty line at the top (use sequential writes instead of concat)
+	// Render empty line at the top with a copy affordance pushed to the right
+	// edge. Record the rendered line index so click handlers can map a click
+	// back to this block's raw content.
+	topLine := strings.Count(p.out.String(), "\n")
 	p.out.WriteString(indent)
-	bgStyle.renderTo(&p.out, fullWidthPad)
+	iconWidth := runewidth.StringWidth(CodeBlockCopyIcon)
+	leftFill := max(availableWidth-paddingRight-iconWidth, 0)
+	if availableWidth >= iconWidth+paddingRight {
+		bgStyle.renderTo(&p.out, spaces(leftFill))
+		p.styles.ansiCodeBlockCopyIcon.renderTo(&p.out, CodeBlockCopyIcon)
+		if paddingRight > 0 {
+			bgStyle.renderTo(&p.out, spaces(paddingRight))
+		}
+	} else {
+		// Too narrow for the icon; fall back to a plain top padding row.
+		bgStyle.renderTo(&p.out, fullWidthPad)
+	}
 	p.out.WriteByte('\n')
+	p.codeBlocks = append(p.codeBlocks, CodeBlock{Content: code, Line: topLine})
 
 	// Process tokens line by line for better performance
 	var lineBuilder strings.Builder
@@ -1666,7 +2056,7 @@ func (p *parser) renderCodeBlockWithIndent(code, lang, indent string, availableW
 				if i > start {
 					segment := text[start:i]
 					segment = expandTabs(segment, lineWidth)
-					writeSegmentWrapped(segment, tok.style)
+					writeCodeSegmentsWithAutoLinks(segment, tok.style, &lineBuilder, writeSegmentWrapped)
 				}
 				flushLine()
 				start = i + 1
@@ -1676,7 +2066,7 @@ func (p *parser) renderCodeBlockWithIndent(code, lang, indent string, availableW
 		if start < len(text) {
 			segment := text[start:]
 			segment = expandTabs(segment, lineWidth)
-			writeSegmentWrapped(segment, tok.style)
+			writeCodeSegmentsWithAutoLinks(segment, tok.style, &lineBuilder, writeSegmentWrapped)
 		}
 	}
 
@@ -1691,6 +2081,29 @@ func (p *parser) renderCodeBlockWithIndent(code, lang, indent string, availableW
 	p.out.WriteByte('\n')
 
 	p.out.WriteByte('\n')
+}
+
+// writeCodeSegmentsWithAutoLinks detects URLs in a code segment and wraps them
+// in OSC 8 hyperlink sequences so they become clickable in the TUI.
+// OSC 8 open/close are written directly to lineBuilder (not measured by writeSegment),
+// and finalizeOutput in Render() ensures sequences survive line wrapping.
+func writeCodeSegmentsWithAutoLinks(segment string, style ansiStyle, lineBuilder *strings.Builder, writeSegment func(string, ansiStyle)) {
+	for segment != "" {
+		idx := findFirstURL(segment)
+		if idx < 0 {
+			writeSegment(segment, style)
+			return
+		}
+		if idx > 0 {
+			writeSegment(segment[:idx], style)
+		}
+		urlLen := findURLEnd(segment[idx:])
+		url := segment[idx : idx+urlLen]
+		lineBuilder.WriteString(xansi.SetHyperlink(url))
+		writeSegment(url, style)
+		lineBuilder.WriteString(xansi.ResetHyperlink())
+		segment = segment[idx+urlLen:]
+	}
 }
 
 // spacesBuffer is a pre-allocated buffer of spaces for padding needs.
@@ -1718,10 +2131,7 @@ func writeSpaces(b *strings.Builder, n int) {
 		return
 	}
 	for n > 0 {
-		chunk := n
-		if chunk > len(spacesBuffer) {
-			chunk = len(spacesBuffer)
-		}
+		chunk := min(n, len(spacesBuffer))
 		b.WriteString(spacesBuffer[:chunk])
 		n -= chunk
 	}
@@ -1752,18 +2162,8 @@ func ansiStringWidth(s string) int {
 	width := 0
 	for i := 0; i < len(s); {
 		if s[i] == '\x1b' {
-			// Skip CSI sequences (e.g., \x1b[...m)
-			if i+1 < len(s) && s[i+1] == '[' {
-				i += 2
-				for i < len(s) && (s[i] < '@' || s[i] > '~') {
-					i++
-				}
-				if i < len(s) {
-					i++
-				}
-				continue
-			}
-			i++
+			end, _ := scanAnsiSequence(s, i)
+			i = end
 			continue
 		}
 		if s[i] < utf8.RuneSelf {
@@ -1781,55 +2181,191 @@ func ansiStringWidth(s string) int {
 	return width
 }
 
-// padAllLines pads each line to the target width with trailing spaces.
-func padAllLines(s string, width int) string {
-	if width <= 0 || s == "" {
+// scanAnsiSequence parses an ANSI escape sequence that starts at s[i] (which
+// must be '\x1b'). It returns the byte index just past the end of the sequence
+// and a kind byte:
+//
+//	'[' — a CSI sequence (\x1b[…<final byte in 0x40..0x7E>).
+//	']' — an OSC sequence (\x1b]…<BEL or ESC\>).
+//	0   — a bare \x1b not recognised as either; end = i+1.
+//
+// On malformed input (no terminator) the function advances to the end of s
+// rather than looping or panicking.
+func scanAnsiSequence(s string, i int) (end int, kind byte) {
+	n := len(s)
+	if i+1 >= n {
+		return i + 1, 0
+	}
+	switch s[i+1] {
+	case '[':
+		end = i + 2
+		for end < n && (s[end] < '@' || s[end] > '~') {
+			end++
+		}
+		if end < n {
+			end++
+		}
+		return end, '['
+	case ']':
+		end = i + 2
+		for end < n {
+			if s[end] == 0x07 {
+				return end + 1, ']'
+			}
+			if s[end] == 0x1b && end+1 < n && s[end+1] == '\\' {
+				return end + 2, ']'
+			}
+			end++
+		}
+		return end, ']'
+	}
+	return i + 1, 0
+}
+
+// classifyOSC8 inspects a complete OSC sequence and reports whether it is an
+// OSC 8 hyperlink open (with a non-empty URI) or close (empty URI). Any other
+// OSC sequence returns (false, false).
+func classifyOSC8(seq string) (isOpen, isClose bool) {
+	// Minimum well-formed OSC 8: "\x1b]8;;\x07" (close, 6 bytes).
+	if len(seq) < 6 || seq[0] != 0x1b || seq[1] != ']' || seq[2] != '8' || seq[3] != ';' {
+		return false, false
+	}
+	// Locate the ';' separating params from the URI (after the leading "8;").
+	semi := strings.IndexByte(seq[4:], ';')
+	if semi < 0 {
+		return false, false
+	}
+	uriStart := 4 + semi + 1
+	var termLen int
+	switch {
+	case strings.HasSuffix(seq, "\x07"):
+		termLen = 1
+	case strings.HasSuffix(seq, "\x1b\\"):
+		termLen = 2
+	default:
+		return false, false
+	}
+	if uriStart+termLen > len(seq) {
+		return false, false
+	}
+	if len(seq)-uriStart-termLen == 0 {
+		return false, true
+	}
+	return true, false
+}
+
+// osc8Close is the canonical OSC 8 close sequence (empty URI, BEL terminated).
+const osc8Close = "\x1b]8;;\x07"
+
+// finalizeOutput rewrites the rendered markdown to make it terminal-ready:
+//
+//   - OSC 8 hyperlinks that crossed a line break are closed before each '\n'
+//     and re-opened on the next line so every line is independently clickable.
+//   - Each line is padded with trailing spaces up to width so background fills
+//     reach the right edge.
+//
+// Both transformations are streamed in a single pass over the input — width is
+// tracked as we copy bytes and ANSI escape sequences (CSI and OSC) are
+// recognised so they are not counted toward visible width.
+func finalizeOutput(s string, width int) string {
+	if s == "" {
+		return s
+	}
+	needPad := width > 0
+	needLink := strings.Contains(s, "\x1b]8;")
+	if !needPad && !needLink {
 		return s
 	}
 
-	if !strings.Contains(s, "\n") {
-		lineWidth := ansiStringWidth(s)
-		if lineWidth >= width {
-			return s
+	var buf strings.Builder
+	buf.Grow(len(s) + 64)
+
+	var activeOpen string // most recent OSC 8 open sequence; "" when not inside a link
+	lineWidth := 0
+
+	flushNewline := func() {
+		if activeOpen != "" {
+			buf.WriteString(osc8Close)
 		}
-		var result strings.Builder
-		result.Grow(len(s) + width - lineWidth)
-		result.WriteString(s)
-		writeSpaces(&result, width-lineWidth)
-		return result.String()
+		if needPad && lineWidth < width {
+			writeSpaces(&buf, width-lineWidth)
+		}
+		buf.WriteByte('\n')
+		if activeOpen != "" {
+			buf.WriteString(activeOpen)
+		}
+		lineWidth = 0
 	}
 
-	// Pre-allocate result buffer - estimate final size
-	var result strings.Builder
-	result.Grow(len(s) + len(s)/40*width) // rough estimate for padding
+	n := len(s)
+	for i := 0; i < n; {
+		c := s[i]
 
-	start := 0
-	for i := range len(s) + 1 {
-		if i != len(s) && s[i] != '\n' {
+		if c == '\n' {
+			flushNewline()
+			i++
 			continue
 		}
 
-		line := s[start:i]
-		result.WriteString(line)
-
-		lineWidth := ansiStringWidth(line)
-		if lineWidth < width {
-			// Pad with spaces
-			writeSpaces(&result, width-lineWidth)
+		if c == '\x1b' {
+			end, kind := scanAnsiSequence(s, i)
+			if kind == 0 {
+				// Lone ESC byte: copy through without advancing line width.
+				buf.WriteByte(c)
+				i = end
+				continue
+			}
+			seq := s[i:end]
+			buf.WriteString(seq)
+			if kind == ']' {
+				if isOpen, isClose := classifyOSC8(seq); isOpen {
+					activeOpen = seq
+				} else if isClose {
+					activeOpen = ""
+				}
+			}
+			i = end
+			continue
 		}
 
-		if i < len(s) {
-			result.WriteByte('\n')
+		// ASCII fast path: copy a run of plain bytes and count their width.
+		if c < utf8.RuneSelf {
+			start := i
+			for i < n {
+				b := s[i]
+				if b == '\x1b' || b == '\n' || b >= utf8.RuneSelf {
+					break
+				}
+				i++
+			}
+			buf.WriteString(s[start:i])
+			lineWidth += i - start
+			continue
 		}
-		start = i + 1
+
+		r, size := utf8.DecodeRuneInString(s[i:])
+		buf.WriteString(s[i : i+size])
+		lineWidth += runewidth.RuneWidth(r)
+		i += size
 	}
 
-	return result.String()
+	// Trailing line (no terminating newline): pad to width if needed.
+	if needPad && lineWidth < width {
+		writeSpaces(&buf, width-lineWidth)
+	}
+
+	return buf.String()
 }
 
 type token struct {
 	text  string
 	style ansiStyle
+}
+
+// syntaxCacheKey builds a cache key for syntax highlighting results.
+type syntaxCacheKey struct {
+	lang string
+	code string
 }
 
 var (
@@ -1839,34 +2375,43 @@ var (
 	// Cache for chroma token type to ansiStyle conversion (with code bg)
 	chromaStyleCache   = make(map[chroma.TokenType]ansiStyle)
 	chromaStyleCacheMu sync.RWMutex
+
+	// Cache for syntax highlighting results to avoid re-tokenizing unchanged code blocks.
+	// Uses an LRU cache bounded to 128 entries to prevent unbounded memory growth
+	// in long-running TUI sessions with many unique code blocks.
+	syntaxHighlightCache   = newLRUCache[syntaxCacheKey, []token](syntaxHighlightCacheSize)
+	syntaxHighlightCacheMu sync.RWMutex
+)
+
+const (
+	// syntaxHighlightCacheSize is the maximum number of syntax-highlighted code blocks
+	// to keep in cache. This bounds memory usage while retaining recently viewed blocks.
+	syntaxHighlightCacheSize = 128
 )
 
 func (p *parser) syntaxHighlight(code, lang string) []token {
-	var lexer chroma.Lexer
+	cacheKey := syntaxCacheKey{lang: lang, code: code}
 
-	if lang != "" {
-		// Try cache first
-		lexerCacheMu.RLock()
-		lexer = lexerCache[lang]
-		lexerCacheMu.RUnlock()
-
-		if lexer == nil {
-			lexer = lexers.Get(lang)
-			if lexer == nil {
-				// Try with file extension
-				lexer = lexers.Match("file." + lang)
-			}
-			if lexer != nil {
-				lexer = chroma.Coalesce(lexer)
-				lexerCacheMu.Lock()
-				lexerCache[lang] = lexer
-				lexerCacheMu.Unlock()
-			}
-		}
+	syntaxHighlightCacheMu.RLock()
+	if cached, ok := syntaxHighlightCache.get(cacheKey); ok {
+		syntaxHighlightCacheMu.RUnlock()
+		return cached
 	}
+	syntaxHighlightCacheMu.RUnlock()
 
+	tokens := p.doSyntaxHighlight(code, lang)
+
+	syntaxHighlightCacheMu.Lock()
+	syntaxHighlightCache.put(cacheKey, tokens)
+	syntaxHighlightCacheMu.Unlock()
+
+	return tokens
+}
+
+// doSyntaxHighlight performs the actual syntax highlighting without caching.
+func (p *parser) doSyntaxHighlight(code, lang string) []token {
+	lexer := p.getLexer(lang)
 	if lexer == nil {
-		// No highlighting - return plain text with code background
 		return []token{{text: code, style: p.getCodeStyle(chroma.None)}}
 	}
 
@@ -1886,8 +2431,35 @@ func (p *parser) syntaxHighlight(code, lang string) []token {
 			style: p.getCodeStyle(tok.Type),
 		})
 	}
-
 	return tokens
+}
+
+// getLexer returns a cached chroma lexer for the given language, or nil if unknown.
+func (p *parser) getLexer(lang string) chroma.Lexer {
+	if lang == "" {
+		return nil
+	}
+
+	lexerCacheMu.RLock()
+	lexer := lexerCache[lang]
+	lexerCacheMu.RUnlock()
+	if lexer != nil {
+		return lexer
+	}
+
+	lexer = lexers.Get(lang)
+	if lexer == nil {
+		lexer = lexers.Match("file." + lang)
+	}
+	if lexer == nil {
+		return nil
+	}
+
+	lexer = chroma.Coalesce(lexer)
+	lexerCacheMu.Lock()
+	lexerCache[lang] = lexer
+	lexerCacheMu.Unlock()
+	return lexer
 }
 
 func (p *parser) getCodeStyle(tokenType chroma.TokenType) ansiStyle {
@@ -1929,20 +2501,19 @@ func chromaToLipgloss(tokenType chroma.TokenType, style *chroma.Style) lipgloss.
 }
 
 // wrapText wraps text to the given width, respecting ANSI escape sequences.
-// It tracks active ANSI styles and re-applies them on continuation lines.
+// It tracks active CSI styles and re-applies them on continuation lines so a
+// styled segment that crosses a wrap is rendered correctly on both lines.
 func (p *parser) wrapText(text string, width int) string {
-	if width <= 0 {
+	if width <= 0 || text == "" {
 		return text
 	}
 
-	// Fast path: if the text fits in one line, return as-is
-	// This avoids expensive word splitting for short strings
-	textVisualWidth := ansiStringWidth(text)
-	if textVisualWidth <= width {
+	// Fast path: if the text fits in one line, return as-is.
+	if ansiStringWidth(text) <= width {
 		return text
 	}
 
-	// Fast path: no spaces means we can only break the word directly
+	// Fast path: no spaces — just break the long word.
 	if !strings.ContainsAny(text, " \t") {
 		broken := breakWord(text, width)
 		if len(broken) == 1 {
@@ -1951,204 +2522,115 @@ func (p *parser) wrapText(text string, width int) string {
 		return strings.Join(broken, "\n")
 	}
 
-	var result strings.Builder
-	result.Grow(len(text) + len(text)/40) // estimate for newlines
+	var out strings.Builder
+	out.Grow(len(text) + len(text)/40)
 
-	var currentLine strings.Builder
-	currentLine.Grow(width + 32) // typical line length + ANSI codes
-	currentWidth := 0
+	var active []string // currently-active CSI styles (cleared on \x1b[m)
+	lineWidth := 0
 
-	// Track active ANSI sequences that should be re-applied after line breaks
-	// We use a single slice and only snapshot when we actually need to wrap
-	var activeStyles []string
-
-	words := splitWordsWithStyles(text)
-	for i := range words {
-		ws := &words[i]
-		wordWidth := ws.width
-
-		// Determine if we need to wrap - only then do we need the previous styles
-		needsWrap := false
-		if wordWidth > width {
-			needsWrap = currentLine.Len() > 0
-		} else {
-			spaceWidth := 0
-			if currentWidth > 0 {
-				spaceWidth = 1
-			}
-			needsWrap = currentWidth+spaceWidth+wordWidth > width
+	n := len(text)
+	i := 0
+	for i < n {
+		// Skip any whitespace between words.
+		for i < n && (text[i] == ' ' || text[i] == '\t') {
+			i++
+		}
+		if i >= n {
+			break
 		}
 
-		// Only snapshot styles when we actually need to wrap
-		var stylesForWrap []string
-		if needsWrap && len(activeStyles) > 0 {
-			stylesForWrap = make([]string, len(activeStyles))
-			copy(stylesForWrap, activeStyles)
+		// Collect the next word — plain bytes plus any embedded ANSI sequences.
+		wordStart := i
+		wordWidth := 0
+		var wordAnsi []string
+		for i < n && text[i] != ' ' && text[i] != '\t' {
+			c := text[i]
+			if c == '\x1b' {
+				end, kind := scanAnsiSequence(text, i)
+				if kind != 0 {
+					wordAnsi = append(wordAnsi, text[i:end])
+				}
+				// Lone ESC: zero-width pass-through (no width change).
+				i = end
+				continue
+			}
+			if c < utf8.RuneSelf {
+				wordWidth++
+				i++
+				continue
+			}
+			r, size := utf8.DecodeRuneInString(text[i:])
+			wordWidth += runewidth.RuneWidth(r)
+			i += size
+		}
+		word := text[wordStart:i]
+
+		// Fold this word's ANSI codes into the active set BEFORE handling it.
+		// For a long word that gets split, this ensures the continuation-line
+		// breaks below close and re-open any styles that were opened inside the
+		// word, instead of replaying only the styles active before it.
+		active = updateActiveStyles(active, wordAnsi)
+		// Layout decision: do we need to wrap before this word?
+		haveLine := lineWidth > 0
+		needsWrap := haveLine && lineWidth+1+wordWidth > width
+		if wordWidth > width && haveLine {
+			needsWrap = true
+		}
+		if needsWrap {
+			writeLineBreak(&out, active)
+			lineWidth = 0
+		} else if haveLine {
+			out.WriteByte(' ')
+			lineWidth++
 		}
 
-		// Update active styles based on ANSI sequences in this word
-		activeStyles = updateActiveStyles(activeStyles, ws.ansiCodes)
-
 		if wordWidth > width {
-			if currentLine.Len() > 0 {
-				// Close any active styles before line break
-				if len(stylesForWrap) > 0 {
-					currentLine.WriteString("\x1b[m")
-				}
-				result.WriteString(currentLine.String())
-				result.WriteByte('\n')
-				currentLine.Reset()
-				currentWidth = 0
-				// Re-apply styles that were active before this word
-				for _, s := range stylesForWrap {
-					currentLine.WriteString(s)
-				}
-			}
-
-			broken := breakWord(ws.word, width)
+			// Long word: break it into pieces, separated by line breaks that close
+			// and restore the currently-active styles.
+			broken := breakWord(word, width)
 			for j, part := range broken {
 				if j > 0 {
-					result.WriteByte('\n')
-					// Re-apply styles for continuation within long word
-					for _, s := range stylesForWrap {
-						result.WriteString(s)
-					}
+					writeLineBreak(&out, active)
 				}
-				result.WriteString(part)
+				out.WriteString(part)
 			}
-			result.WriteByte('\n')
-			continue
+			// Always end a broken-word run with a line break so the following
+			// word starts on a fresh line.
+			writeLineBreak(&out, active)
+			lineWidth = 0
+		} else {
+			out.WriteString(word)
+			lineWidth += wordWidth
 		}
-
-		spaceWidth := 0
-		if currentWidth > 0 {
-			spaceWidth = 1
-		}
-
-		if currentWidth+spaceWidth+wordWidth > width {
-			// Close any active styles before line break
-			if len(stylesForWrap) > 0 {
-				currentLine.WriteString("\x1b[m")
-			}
-			result.WriteString(currentLine.String())
-			result.WriteByte('\n')
-			currentLine.Reset()
-			currentWidth = 0
-			spaceWidth = 0
-			// Re-apply styles that were active before this word
-			for _, s := range stylesForWrap {
-				currentLine.WriteString(s)
-			}
-		}
-
-		if spaceWidth > 0 {
-			currentLine.WriteByte(' ')
-			currentWidth++
-		}
-
-		currentLine.WriteString(ws.word)
-		currentWidth += wordWidth
 	}
 
-	if currentLine.Len() > 0 {
-		result.WriteString(currentLine.String())
-	}
-
-	return result.String()
+	return out.String()
 }
 
-// styledWord represents a word along with any ANSI codes it contains
-type styledWord struct {
-	word      string   // The full word including ANSI codes (slice of original)
-	ansiCodes []string // ANSI sequences found in this word
-	width     int      // Precomputed visual width
+// writeLineBreak emits a styled line break: it closes any active CSI styles,
+// writes '\n', then re-opens those styles so the next line continues with the
+// same formatting.
+func writeLineBreak(out *strings.Builder, active []string) {
+	if len(active) > 0 {
+		out.WriteString("\x1b[m")
+	}
+	out.WriteByte('\n')
+	for _, s := range active {
+		out.WriteString(s)
+	}
 }
 
-// splitWordsWithStyles splits text into words while tracking ANSI sequences.
-// Words are slices of the original string (no copying), and visual width is precomputed.
-func splitWordsWithStyles(text string) []styledWord {
-	// Count words to pre-allocate
-	wordCount := 1
-	for i := range len(text) {
-		if text[i] == ' ' || text[i] == '\t' {
-			wordCount++
-		}
-	}
-
-	words := make([]styledWord, 0, wordCount)
-	wordStart := -1 // Start index of current word (-1 means no word started)
-	wordWidth := 0  // Visual width of current word
-	var currentAnsi []string
-	inAnsi := false
-	ansiStart := 0
-
-	for i := 0; i < len(text); {
-		if text[i] == '\x1b' {
-			// Start of ANSI sequence
-			if wordStart == -1 {
-				wordStart = i
-			}
-			inAnsi = true
-			ansiStart = i
-			i++
-			continue
-		}
-		if inAnsi {
-			if (text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z') {
-				// End of ANSI sequence - capture it
-				currentAnsi = append(currentAnsi, text[ansiStart:i+1])
-				inAnsi = false
-			}
-			i++
-			continue
-		}
-
-		if text[i] == ' ' || text[i] == '\t' {
-			// End of word
-			if wordStart >= 0 {
-				words = append(words, styledWord{
-					word:      text[wordStart:i],
-					ansiCodes: currentAnsi,
-					width:     wordWidth,
-				})
-				wordStart = -1
-				wordWidth = 0
-				currentAnsi = nil
-			}
-			i++
-			continue
-		}
-
-		// Regular character - decode and measure
-		if wordStart == -1 {
-			wordStart = i
-		}
-		r, size := utf8.DecodeRuneInString(text[i:])
-		wordWidth += runewidth.RuneWidth(r)
-		i += size
-	}
-
-	// Don't forget the last word
-	if wordStart >= 0 {
-		words = append(words, styledWord{
-			word:      text[wordStart:],
-			ansiCodes: currentAnsi,
-			width:     wordWidth,
-		})
-	}
-
-	return words
-}
-
-// updateActiveStyles updates the list of active ANSI styles based on new codes
+// updateActiveStyles folds a sequence of newly-seen ANSI codes into the list
+// of currently-active CSI styles. OSC sequences are line-local and ignored;
+// a full CSI reset (\x1b[m or \x1b[0m) clears the list.
 func updateActiveStyles(active, newCodes []string) []string {
 	for _, code := range newCodes {
-		// Check if this is a reset sequence
+		if strings.HasPrefix(code, "\x1b]") {
+			continue
+		}
 		if code == "\x1b[m" || code == "\x1b[0m" {
-			// Clear all active styles
 			active = active[:0]
 		} else {
-			// Add this style to active list
 			active = append(active, code)
 		}
 	}
@@ -2163,24 +2645,12 @@ func breakWord(word string, maxWidth int) []string {
 	var parts []string
 	var current strings.Builder
 	currentWidth := 0
-	inAnsi := false
-	var ansiSeq strings.Builder
 
 	for i := 0; i < len(word); {
 		if word[i] == '\x1b' {
-			inAnsi = true
-			ansiSeq.WriteByte(word[i])
-			i++
-			continue
-		}
-		if inAnsi {
-			ansiSeq.WriteByte(word[i])
-			if (word[i] >= 'a' && word[i] <= 'z') || (word[i] >= 'A' && word[i] <= 'Z') {
-				inAnsi = false
-				current.WriteString(ansiSeq.String())
-				ansiSeq.Reset()
-			}
-			i++
+			end, _ := scanAnsiSequence(word, i)
+			current.WriteString(word[i:end])
+			i = end
 			continue
 		}
 

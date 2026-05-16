@@ -1,0 +1,22 @@
+#!/usr/bin/env docker agent run
+
+# This example shows how to use provider_opts to pass sampling parameters
+# like top_k and repetition_penalty to different providers.
+
+agents:
+  root:
+    model: gpt
+    description: "Assistant with custom sampling parameters"
+    instruction: |
+      You are a helpful assistant running on a local model with tuned sampling parameters.
+
+models:
+  gpt:
+    provider: openai
+    model: gpt-4o
+    temperature: 0.7
+    top_p: 0.9
+    provider_opts:
+      top_k: 40
+      repetition_penalty: 1.15
+      min_p: 0.05

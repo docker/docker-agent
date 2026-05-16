@@ -1,4 +1,4 @@
-// Package userconfig provides user-level configuration for cagent.
+// Package userconfig provides user-level configuration for docker agent.
 // This configuration is stored in ~/.config/cagent/config.yaml and contains
 // user preferences like aliases.
 package userconfig
@@ -14,9 +14,10 @@ import (
 	"sync"
 
 	"github.com/goccy/go-yaml"
-	"github.com/natefinch/atomic"
 
-	"github.com/docker/cagent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/atomicfile"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/paths"
 )
 
 // Alias represents an alias configuration with optional runtime settings
@@ -40,9 +41,86 @@ func (a *Alias) HasOptions() bool {
 type Settings struct {
 	// HideToolResults hides tool call results in the TUI by default
 	HideToolResults bool `yaml:"hide_tool_results,omitempty"`
+	// ExpandThinking expands reasoning/tool blocks in the TUI by default.
+	// Defaults to false when not set.
+	ExpandThinking *bool `yaml:"expand_thinking,omitempty"`
+	// SplitDiffView enables side-by-side split diff rendering for file edits.
+	// Defaults to true when not set.
+	SplitDiffView *bool `yaml:"split_diff_view,omitempty"`
 	// Theme is the default theme reference (e.g., "dark", "light")
 	// Theme files are loaded from ~/.cagent/themes/<theme>.yaml
 	Theme string `yaml:"theme,omitempty"`
+	// YOLO enables auto-approve mode for all tool calls globally
+	YOLO bool `yaml:"YOLO,omitempty"`
+	// TabTitleMaxLength is the maximum display length for tab titles in the TUI.
+	// Titles longer than this are truncated with an ellipsis. Defaults to 20.
+	TabTitleMaxLength int `yaml:"tab_title_max_length,omitempty"`
+	// RestoreTabs restores previously open tabs when launching the TUI.
+	// Defaults to false when not set (user must explicitly opt-in).
+	RestoreTabs *bool `yaml:"restore_tabs,omitempty"`
+	// Sound enables playing notification sounds on task success or failure.
+	// Defaults to false (user must explicitly opt-in).
+	Sound bool `yaml:"sound,omitempty"`
+	// SoundThreshold is the minimum duration in seconds a task must run
+	// before a success sound is played. Defaults to 5 seconds.
+	SoundThreshold int `yaml:"sound_threshold,omitempty"`
+	// Snapshot enables automatic shadow-git snapshots globally when true.
+	Snapshot *bool `yaml:"snapshot,omitempty"`
+	// Permissions defines global permission patterns applied across all sessions
+	// and agents. These act as user-wide defaults; session-level and agent-level
+	// permissions override them.
+	Permissions *latest.PermissionsConfig `yaml:"permissions,omitempty"`
+}
+
+// DefaultTabTitleMaxLength is the default maximum tab title length when not configured.
+const DefaultTabTitleMaxLength = 20
+
+// DefaultSoundThreshold is the default duration threshold for sound notifications.
+const DefaultSoundThreshold = 10
+
+// GetTabTitleMaxLength returns the configured tab title max length, falling back to the default.
+func (s *Settings) GetTabTitleMaxLength() int {
+	if s == nil || s.TabTitleMaxLength <= 0 {
+		return DefaultTabTitleMaxLength
+	}
+	return s.TabTitleMaxLength
+}
+
+// GetSound returns whether sound notifications are enabled, defaulting to false.
+func (s *Settings) GetSound() bool {
+	if s == nil {
+		return false
+	}
+	return s.Sound
+}
+
+// GetSoundThreshold returns the minimum duration for sound notifications, defaulting to 10s.
+func (s *Settings) GetSoundThreshold() int {
+	if s == nil || s.SoundThreshold <= 0 {
+		return DefaultSoundThreshold
+	}
+	return s.SoundThreshold
+}
+
+// GetExpandThinking returns whether reasoning/tool blocks are expanded by default.
+func (s *Settings) GetExpandThinking() bool {
+	if s == nil || s.ExpandThinking == nil {
+		return false
+	}
+	return *s.ExpandThinking
+}
+
+// GetSplitDiffView returns whether split diff view is enabled, defaulting to true.
+func (s *Settings) GetSplitDiffView() bool {
+	if s == nil || s.SplitDiffView == nil {
+		return true
+	}
+	return *s.SplitDiffView
+}
+
+// SnapshotsEnabled returns whether global snapshot auto-injection is enabled.
+func (s *Settings) SnapshotsEnabled() bool {
+	return s != nil && s.Snapshot != nil && *s.Snapshot
 }
 
 // CredentialHelper contains configuration for a credential helper command
@@ -57,7 +135,7 @@ type CredentialHelper struct {
 // CurrentVersion is the current version of the user config format
 const CurrentVersion = "v1"
 
-// Config represents the user-level cagent configuration
+// Config represents the user-level docker agent configuration
 type Config struct {
 	// mu protects concurrent access to the Aliases map.
 	// Config methods may be called from parallel tests or goroutines.
@@ -67,6 +145,9 @@ type Config struct {
 	Version string `yaml:"version,omitempty"`
 	// ModelsGateway is the default models gateway URL
 	ModelsGateway string `yaml:"models_gateway,omitempty"`
+	// DefaultModel is the default model to use when model is set to "auto".
+	// Supports both shorthand ("provider/model") and full model definition.
+	DefaultModel *latest.FlexibleModelConfig `yaml:"default_model,omitempty"`
 	// Aliases maps alias names to alias configurations
 	Aliases map[string]*Alias `yaml:"aliases,omitempty"`
 	// Settings contains global user settings
@@ -179,7 +260,7 @@ func (c *Config) Save() error {
 }
 
 func (c *Config) saveTo(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
@@ -191,7 +272,9 @@ func (c *Config) saveTo(path string) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	return atomic.WriteFile(path, bytes.NewReader(data))
+	// The config may contain a credential helper command, so restrict it
+	// to the user.
+	return atomicfile.Write(path, bytes.NewReader(data), 0o600)
 }
 
 // GetAlias retrieves the alias configuration for a given name.
@@ -265,10 +348,23 @@ func (c *Config) DeleteAlias(name string) bool {
 	return false
 }
 
-// GetSettings returns the global settings, or an empty Settings if not set
+// GetSettings returns the global settings with defaults applied.
 func (c *Config) GetSettings() *Settings {
 	if c.Settings == nil {
-		return &Settings{}
+		return &Settings{RestoreTabs: new(false)}
+	}
+	if c.Settings.RestoreTabs == nil {
+		c.Settings.RestoreTabs = new(false)
 	}
 	return c.Settings
+}
+
+// Get returns the global user settings from the config file.
+// Returns an empty Settings if the config file doesn't exist or has no settings.
+func Get() *Settings {
+	cfg, err := Load()
+	if err != nil {
+		return &Settings{}
+	}
+	return cfg.GetSettings()
 }

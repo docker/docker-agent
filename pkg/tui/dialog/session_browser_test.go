@@ -2,6 +2,7 @@ package dialog
 
 import (
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -9,7 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 func TestSessionBrowserNavigation(t *testing.T) {
@@ -87,6 +88,12 @@ func TestSessionBrowserNavigationWithCtrl(t *testing.T) {
 	updated, _ = d.Update(ctrlK)
 	d = updated.(*sessionBrowserDialog)
 	require.Equal(t, 0, d.selected, "selection should be 0 after ctrl+k")
+
+	// Verify ctrl+y is bound to CopyID and doesn't collide with Up.
+	// We only assert key matching here to avoid clipboard side-effects in tests.
+	ctrlY := tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl}
+	require.True(t, key.Matches(ctrlY, d.keyMap.CopyID), "ctrl+y should match keyMap.CopyID")
+	require.False(t, key.Matches(ctrlY, d.keyMap.Up), "ctrl+y should not match keyMap.Up")
 }
 
 func TestSessionBrowserViewShowsSelection(t *testing.T) {
@@ -158,7 +165,7 @@ func TestSessionBrowserScrolling(t *testing.T) {
 	sessions := make([]session.Summary, 20)
 	for i := range sessions {
 		sessions[i] = session.Summary{
-			ID:        fmt.Sprintf("%d", i+1),
+			ID:        strconv.Itoa(i + 1),
 			Title:     fmt.Sprintf("Session %d", i+1),
 			CreatedAt: time.Now(),
 		}
@@ -170,7 +177,7 @@ func TestSessionBrowserScrolling(t *testing.T) {
 	// Set a small window size to force scrolling
 	d.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
 
-	maxVisible := d.pageSize()
+	maxVisible := d.scrollview.VisibleHeight()
 	t.Logf("Max visible items: %d", maxVisible)
 
 	// Navigate down past the visible area
@@ -185,13 +192,117 @@ func TestSessionBrowserScrolling(t *testing.T) {
 	// Call View() to trigger offset adjustment (like the TUI does)
 	view := d.View()
 
-	t.Logf("Selected: %d, Offset: %d", d.selected, d.offset)
+	scrollOffset := d.scrollview.ScrollOffset()
+	t.Logf("Selected: %d, ScrollOffset: %d", d.selected, scrollOffset)
 
-	// The offset should have adjusted so selected is visible
-	require.LessOrEqual(t, d.offset, d.selected, "offset should be <= selected")
-	require.Less(t, d.selected, d.offset+maxVisible, "selected should be within visible range")
+	// The scroll offset should have adjusted so selected is visible
+	require.LessOrEqual(t, scrollOffset, d.selected, "scroll offset should be <= selected")
+	require.Less(t, d.selected, scrollOffset+maxVisible, "selected should be within visible range")
 
 	// Verify the view shows the selected session
 	expectedTitle := fmt.Sprintf("Session %d", d.selected+1)
 	require.Contains(t, view, expectedTitle, "view should contain selected session")
+}
+
+func TestSessionBrowserMouseClickSelectsSession(t *testing.T) {
+	sessions := []session.Summary{
+		{ID: "1", Title: "Session 1", CreatedAt: time.Now()},
+		{ID: "2", Title: "Session 2", CreatedAt: time.Now()},
+		{ID: "3", Title: "Session 3", CreatedAt: time.Now()},
+	}
+
+	dialog := NewSessionBrowserDialog(sessions)
+	d := dialog.(*sessionBrowserDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+
+	// Initially selected should be 0
+	require.Equal(t, 0, d.selected)
+
+	// Get the dialog position to calculate where to click
+	dialogRow, _ := d.Position()
+	listStartY := dialogRow + sessionBrowserListStartY
+
+	// Single-click on the second session (line index 1)
+	clickMsg := tea.MouseClickMsg{
+		X:      20,
+		Y:      listStartY + 1,
+		Button: tea.MouseLeft,
+	}
+	updated, cmd := d.Update(clickMsg)
+	d = updated.(*sessionBrowserDialog)
+
+	// Selection should have moved to session 2
+	require.Equal(t, 1, d.selected, "single click should select session")
+	// Single click should not produce a load command
+	require.Nil(t, cmd, "single click should not trigger load")
+
+	// Single-click on the third session
+	clickMsg = tea.MouseClickMsg{
+		X:      20,
+		Y:      listStartY + 2,
+		Button: tea.MouseLeft,
+	}
+	updated, cmd = d.Update(clickMsg)
+	d = updated.(*sessionBrowserDialog)
+
+	require.Equal(t, 2, d.selected, "single click should select third session")
+	require.Nil(t, cmd, "single click on different session should not trigger load")
+}
+
+func TestSessionBrowserDoubleClickOpensSession(t *testing.T) {
+	sessions := []session.Summary{
+		{ID: "sess-1", Title: "Session 1", CreatedAt: time.Now()},
+		{ID: "sess-2", Title: "Session 2", CreatedAt: time.Now()},
+		{ID: "sess-3", Title: "Session 3", CreatedAt: time.Now()},
+	}
+
+	dialog := NewSessionBrowserDialog(sessions)
+	d := dialog.(*sessionBrowserDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+
+	dialogRow, _ := d.Position()
+	listStartY := dialogRow + sessionBrowserListStartY
+
+	// First click selects
+	clickMsg := tea.MouseClickMsg{
+		X:      20,
+		Y:      listStartY + 1,
+		Button: tea.MouseLeft,
+	}
+	updated, _ := d.Update(clickMsg)
+	d = updated.(*sessionBrowserDialog)
+	require.Equal(t, 1, d.selected)
+
+	// Second click on the same item (double-click) should trigger load
+	updated, cmd := d.Update(clickMsg)
+	d = updated.(*sessionBrowserDialog)
+	require.Equal(t, 1, d.selected, "selection should stay on double-clicked session")
+	require.NotNil(t, cmd, "double-click should produce a command to load the session")
+}
+
+func TestSessionBrowserClickOutsideListIgnored(t *testing.T) {
+	sessions := []session.Summary{
+		{ID: "1", Title: "Session 1", CreatedAt: time.Now()},
+		{ID: "2", Title: "Session 2", CreatedAt: time.Now()},
+	}
+
+	dialog := NewSessionBrowserDialog(sessions)
+	d := dialog.(*sessionBrowserDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
+
+	// Click way outside the list area
+	clickMsg := tea.MouseClickMsg{
+		X:      5,
+		Y:      0,
+		Button: tea.MouseLeft,
+	}
+	updated, cmd := d.Update(clickMsg)
+	d = updated.(*sessionBrowserDialog)
+
+	// Selection should remain at 0
+	require.Equal(t, 0, d.selected, "click outside list should not change selection")
+	require.Nil(t, cmd, "click outside list should not produce a command")
 }

@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
@@ -6,10 +6,10 @@ agents:
     description: A demo agent that showcases MCP elicitation capabilities
     welcome_message: |
       🎯 **Elicitation Demo Agent**
-      
+
       This agent demonstrates MCP elicitation - the ability for tools to interactively
       request information from you during execution.
-      
+
       **Example prompts:**
       - "Confirm that I want to delete the database"
       - "Help me create a new user named Alice"
@@ -17,24 +17,26 @@ agents:
       - "Set up my preferences, I prefer dark mode"
       - "Help me select options for production deployment in US-East"
       - "I need to read the API documentation"
-      
+
       When you see an elicitation dialog, fill in the form and submit it.
       The tool will receive your response and continue execution.
     instruction: |
-        You are a helpful assistant that demonstrates interactive elicitation capabilities.
-        
-        You have access to tools that require user input during execution. When the user 
-        asks you to use one of these tools, explain what you're about to do, then call 
-        the tool. The tool will present an interactive dialog to the user.
-        
-        Your job is to:
-        1. Understand what the user wants to accomplish
-        2. Explain the elicitation dialog that will appear
-        3. Call the appropriate tool
-        4. Present the results to the user in a helpful way
-        
-        Be conversational and guide the user through the process.
+      You are a helpful assistant that demonstrates interactive elicitation capabilities.
+
+      You have access to tools that require user input during execution. When the user 
+      asks you to use one of these tools, explain what you're about to do, then call 
+      the tool. The tool will present an interactive dialog to the user.
+
+      Your job is to:
+      1. Understand what the user wants to accomplish
+      2. Explain the elicitation dialog that will appear
+      3. Call the appropriate tool
+      4. Present the results to the user in a helpful way
+
+      Be conversational and guide the user through the process.
     toolsets:
       - type: mcp
         command: uvx
-        args: ["--with", "mcp[cli]", "mcp", "run", "examples/elicitation/server.py"]
+        version: "astral-sh/uv"
+        args:
+          ["--with", "mcp[cli]", "mcp", "run", "examples/elicitation/server.py"]

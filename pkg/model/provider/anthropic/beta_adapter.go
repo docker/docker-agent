@@ -2,55 +2,37 @@ package anthropic
 
 import (
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // betaStreamAdapter adapts the Anthropic Beta stream to our interface
 type betaStreamAdapter struct {
-	stream     *ssestream.Stream[anthropic.BetaRawMessageStreamEventUnion]
+	retryableStream[anthropic.BetaRawMessageStreamEventUnion]
+
 	trackUsage bool
 	toolCall   bool
 	toolID     string
-	// For single retry on context length error
-	retryFn            func() *betaStreamAdapter
-	retried            bool
-	getResponseTrailer func() http.Header
 }
 
 // newBetaStreamAdapter creates a new Beta stream adapter
 func (c *Client) newBetaStreamAdapter(stream *ssestream.Stream[anthropic.BetaRawMessageStreamEventUnion], trackUsage bool) *betaStreamAdapter {
 	return &betaStreamAdapter{
-		stream:             stream,
-		trackUsage:         trackUsage,
-		getResponseTrailer: c.getResponseTrailer,
+		retryableStream: retryableStream[anthropic.BetaRawMessageStreamEventUnion]{stream: stream},
+		trackUsage:      trackUsage,
 	}
 }
 
 // Recv gets the next completion chunk from the Beta stream
 func (a *betaStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
-	if !a.stream.Next() {
-		err := a.stream.Err()
-		// Single retry on context length error
-		if err != nil && !a.retried && a.retryFn != nil && isContextLengthError(err) {
-			a.retried = true
-			if retry := a.retryFn(); retry != nil {
-				a.stream.Close()
-				a.stream = retry.stream
-				return a.Recv()
-			}
-		}
-		if err != nil {
-			return chat.MessageStreamResponse{}, err
-		}
-		return chat.MessageStreamResponse{}, io.EOF
+	ok, err := a.next()
+	if !ok {
+		return chat.MessageStreamResponse{}, wrapAnthropicError(err)
 	}
 
 	event := a.stream.Current()
@@ -58,7 +40,7 @@ func (a *betaStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	response := chat.MessageStreamResponse{
 		ID:     event.Message.ID,
 		Object: "chat.completion.chunk",
-		Model:  string(event.Message.Model),
+		Model:  event.Message.Model,
 		Choices: []chat.MessageStreamChoice{
 			{
 				Index: 0,
@@ -137,7 +119,5 @@ func (a *betaStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 // Close closes the Beta stream
 func (a *betaStreamAdapter) Close() {
-	if a.stream != nil {
-		a.stream.Close()
-	}
+	a.stream.Close()
 }

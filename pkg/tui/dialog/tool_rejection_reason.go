@@ -1,7 +1,7 @@
 package dialog
 
 import (
-	"github.com/docker/cagent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime"
 )
 
 // ToolRejectionDialogID is the unique identifier for the tool rejection reason dialog.

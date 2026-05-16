@@ -7,5 +7,6 @@
 !./**/*.css
 !./**/*.go
 !./**/*.txt
-!/pkg/config/default-agent.yaml
+!/pkg/chatserver/openapi.json
+!/pkg/config/builtin-agents/*.yaml
 !/pkg/tui/styles/themes/*.yaml

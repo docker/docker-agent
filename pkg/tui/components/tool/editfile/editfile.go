@@ -1,22 +1,21 @@
 package editfile
 
 import (
-	"encoding/json"
 	"fmt"
 
-	"github.com/docker/cagent/pkg/tools/builtin"
-	"github.com/docker/cagent/pkg/tui/components/spinner"
-	"github.com/docker/cagent/pkg/tui/components/toolcommon"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/styles"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tui/components/spinner"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 type ToggleDiffViewMsg struct{}
 
 // New creates the edit_file tool UI model.
-func New(msg *types.Message, sessionState *service.SessionState) layout.Model {
+func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
 	return toolcommon.NewBaseWithCollapsed(msg, sessionState, render, renderCollapsed)
 }
 
@@ -27,13 +26,13 @@ func New(msg *types.Message, sessionState *service.SessionState) layout.Model {
 func render(
 	msg *types.Message,
 	s spinner.Spinner,
-	sessionState *service.SessionState,
+	sessionState service.SessionStateReader,
 	width,
 	_ int,
 ) string {
 	// Parse tool arguments to extract the file path for display.
-	var args builtin.EditFileArgs
-	if err := json.Unmarshal([]byte(msg.ToolCall.Function.Arguments), &args); err != nil {
+	args, err := filesystem.ParseEditFileArgs([]byte(msg.ToolCall.Function.Arguments))
+	if err != nil {
 		// If arguments cannot be parsed, fail silently to avoid breaking the TUI.
 		return ""
 	}
@@ -107,12 +106,12 @@ func render(
 func renderCollapsed(
 	msg *types.Message,
 	s spinner.Spinner,
-	_ *service.SessionState,
+	_ service.SessionStateReader,
 	width,
 	_ int,
 ) string {
-	var args builtin.EditFileArgs
-	if err := json.Unmarshal([]byte(msg.ToolCall.Function.Arguments), &args); err != nil {
+	args, err := filesystem.ParseEditFileArgs([]byte(msg.ToolCall.Function.Arguments))
+	if err != nil {
 		return ""
 	}
 

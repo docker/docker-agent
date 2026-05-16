@@ -1,100 +1,117 @@
+# https://taskfile.dev
 version: "3"
 
 vars:
-  BINARY_NAME: cagent{{if eq OS "windows"}}.exe{{end}}
-  MAIN_PKG: ./main.go
-  BUILD_DIR: ./bin
   GIT_TAG:
-    sh: git describe --tags --exact-match 2>/dev/null || echo dev
+    sh: echo "${GIT_TAG:-$(git describe --tags --exact-match 2>/dev/null || echo dev)}"
   GIT_COMMIT:
-    sh: git rev-parse HEAD
-  GO_SOURCES: "**/*.go"
-  BUILD_ARGS: '--build-arg GIT_TAG="{{.GIT_TAG}}" --build-arg GIT_COMMIT="{{.GIT_COMMIT}}"'
-  LDFLAGS: '-X "github.com/docker/cagent/pkg/version.Version={{.GIT_TAG}}" -X "github.com/docker/cagent/pkg/version.Commit={{.GIT_COMMIT}}"'
+    sh: echo "${GIT_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo dev)}"
+
+env:
+  GIT_TAG: "{{.GIT_TAG}}"
+  GIT_COMMIT: "{{.GIT_COMMIT}}"
 
 tasks:
   default:
-    cmd: task --list
-
-  dev:
-    deps: ["lint", "test", "build"]
+    desc: Run lint, test, and build
+    aliases: [dev]
+    deps: [lint, test, build]
 
   build:
-    aliases: [b]
     desc: Build the application binary
-    cmds:
-      - go build -ldflags "{{.LDFLAGS}}" -o {{.BUILD_DIR}}/{{.BINARY_NAME}} {{.MAIN_PKG}}
-      - mkdir -p {{.HOME}}/bin
-      - ln -sf {{.USER_WORKING_DIR}}/{{.BUILD_DIR}}/{{.BINARY_NAME}} {{.HOME}}/bin/{{.BINARY_NAME}}
+    aliases: [b]
     sources:
-      - "{{.GO_SOURCES}}"
+      - "**/*.go"
       - "**/*.template"
       - "**/*.txt"
-      - "go.mod"
-      - "go.sum"
+      - "**/*.yml"
+      - "**/*.yaml"
+      - go.mod
+      - go.sum
     generates:
-      - "{{.BUILD_DIR}}/{{.BINARY_NAME}}"
+      - bin/docker-agent
+    cmds:
+      - ./scripts/build.sh
+
+  deploy-local:
+    desc: Deploy the cli-plugin
+    aliases: [install]
+    deps: [build]
+    cmds:
+      - mkdir -p "${HOME}/.docker/cli-plugins"
+      - /bin/ln -sf "$(pwd)/bin/docker-agent" "${HOME}/.docker/cli-plugins/docker-agent"
 
   lint:
-    desc: Run golangci-lint
-    cmds:
-      - golangci-lint run
-      - go mod tidy --diff >/dev/null || (echo "go.mod/go.sum files are not tidy" && exit 1)
+    desc: Run the linters
     sources:
-      - "{{.GO_SOURCES}}"
-      - ".golangci.yml"
-      - "go.mod"
-      - "go.sum"
+      - "**/*.go"
+      - .golangci.yml
+      - go.mod
+      - go.sum
+    cmds:
+      - GOLANGCI_LINT_CACHE={{.TASKFILE_DIR}}/.cache/lint golangci-lint run
+      - go run ./lint .
+      - go mod tidy --diff >/dev/null || (echo 'go.mod/go.sum files are not tidy' && exit 1)
 
   format:
     desc: Format code
-    cmd: golangci-lint fmt
     sources:
-      - "{{.GO_SOURCES}}"
-      - ".golangci.yml"
+      - "**/*.go"
+      - .golangci.yml
+    cmds:
+      - golangci-lint fmt
 
   test:
-    aliases: [t]
     desc: Run tests
-    cmd: CAGENT_MODELS_GATEWAY= OPENAI_API_KEY= ANTHROPIC_API_KEY= GOOGLE_API_KEY= MISTRAL_API_KEY= GITHUB_TOKEN= go test {{.CLI_ARGS}} ./...
+    dotenv: [.env.test]
+    cmds:
+      - go test ./...
+
+  test-binary:
+    desc: Run tests on build binary
+    deps: [deploy-local]
+    dotenv: [.env.test]
+    cmds:
+      - go test -tags=binary_required ./e2e/binary/...
 
   build-local:
     desc: Build binaries for local host platform
-    cmd: docker buildx build --target=local {{.BUILD_ARGS}} --platform local --output=./dist . {{if eq OS "windows"}}&& mv ./dist/cagent ./dist/cagent.exe{{end}}
+    cmds:
+      - docker build --target=local --build-arg GIT_TAG --build-arg GIT_COMMIT --platform local --output=./dist .
+      - |
+        if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+          mv ./dist/docker-agent ./dist/docker-agent.exe
+        fi
 
   cross:
     desc: Build binaries for multiple platforms
-    cmd: docker buildx build --target=cross {{.BUILD_ARGS}} --platform linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64 --output=./dist .
+    cmds:
+      - docker buildx build --target=cross --build-arg GIT_TAG --build-arg GIT_COMMIT --platform linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64 --output=./dist .
 
   build-image:
     desc: Build Docker image
-    cmd: docker buildx build -t docker/cagent {{.BUILD_ARGS}} .
+    cmds:
+      - docker build -t docker/docker-agent --build-arg GIT_TAG --build-arg GIT_COMMIT .
 
   push-image:
     desc: Build and Push Docker image
-    cmd: docker buildx build --push --platform linux/amd64,linux/arm64 -t docker/cagent {{.BUILD_ARGS}} .
+    cmds:
+      - docker buildx build --push --platform linux/amd64,linux/arm64 -t docker/docker-agent --build-arg GIT_TAG --build-arg GIT_COMMIT .
 
-  push-agent:
-    desc: Build dockerized agent
-    internal: true
-    vars:
-      DOCKER_ID:
-        sh: curl -s --unix-socket ~/Library/Containers/com.docker.docker/Data/backend.sock http://_/registry/info | jq -r .id
-    deps: ["build"]
-    cmd: ./bin/cagent build --push ./examples/{{.AGENT}}.yaml {{.DOCKER_ID}}/cagent-{{.AGENT}}
+  docs-serve:
+    desc: Preview the Jekyll documentation site locally
+    dir: docs
+    cmds:
+      - docker build -t docker-agent-docs .
+      - docker run --rm -v $(cd .. && pwd)/docs:/srv/jekyll -e JEKYLL_ENV=development -p 4000:4000 docker-agent-docs jekyll serve --host 0.0.0.0 --config _config.yml,_config.dev.yml --livereload
 
-  push-agents:
-    desc: Build dockerized agents
-    deps:
-      - task: push-agent
-        vars: { AGENT: "pirate" }
-      - task: push-agent
-        vars: { AGENT: "github" }
-      - task: push-agent
-        vars: { AGENT: "gopher" }
-      - task: push-agent
-        vars: { AGENT: "mem" }
+  docs-check-links:
+    desc: Build the documentation site and check for broken links
+    dir: docs
+    cmds:
+      - ../scripts/docs-check-links.sh
 
   record-demo:
     desc: Record demo gif
-    cmd: vhs ./docs/demo.tape
+    cmds:
+      - vhs ./docs/recordings/demo.tape

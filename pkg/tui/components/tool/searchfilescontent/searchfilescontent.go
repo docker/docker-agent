@@ -3,14 +3,14 @@ package searchfilescontent
 import (
 	"fmt"
 
-	"github.com/docker/cagent/pkg/tools/builtin"
-	"github.com/docker/cagent/pkg/tui/components/toolcommon"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-func New(msg *types.Message, sessionState *service.SessionState) layout.Model {
+func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
 	return toolcommon.NewBase(msg, sessionState, toolcommon.SimpleRendererWithResult(
 		extractArgs,
 		extractResult,
@@ -18,7 +18,7 @@ func New(msg *types.Message, sessionState *service.SessionState) layout.Model {
 }
 
 func extractArgs(args string) string {
-	parsed, err := toolcommon.ParseArgs[builtin.SearchFilesContentArgs](args)
+	parsed, err := toolcommon.ParseArgs[filesystem.SearchFilesContentArgs](args)
 	if err != nil {
 		return ""
 	}
@@ -39,7 +39,7 @@ func extractResult(msg *types.Message) string {
 	if msg.ToolResult == nil || msg.ToolResult.Meta == nil {
 		return "no matches"
 	}
-	meta, ok := msg.ToolResult.Meta.(builtin.SearchFilesContentMeta)
+	meta, ok := msg.ToolResult.Meta.(filesystem.SearchFilesContentMeta)
 	if !ok {
 		return "no matches"
 	}
@@ -48,15 +48,8 @@ func extractResult(msg *types.Message) string {
 		return "no matches"
 	}
 
-	matchWord := "match"
-	if meta.MatchCount != 1 {
-		matchWord = "matches"
-	}
-
-	fileWord := "file"
-	if meta.FileCount != 1 {
-		fileWord = "files"
-	}
-
-	return fmt.Sprintf("%d %s in %d %s", meta.MatchCount, matchWord, meta.FileCount, fileWord)
+	return fmt.Sprintf("%s in %s",
+		toolcommon.Pluralize(meta.MatchCount, "match", "matches"),
+		toolcommon.Pluralize(meta.FileCount, "file", "files"),
+	)
 }

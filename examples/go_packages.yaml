@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
@@ -17,7 +17,7 @@ agents:
                 description: "One keyword expected to be found in the package name. Only alphanumeric characters, dots and / allowed"
           go_documentation:
             cmd: |
-              docker run -e pkg --rm -v cagent_go:/go golang:latest sh -c 'cd $(mktemp -d)
+              docker run -e pkg --rm -v docker-agent_go:/go golang:latest sh -c 'cd $(mktemp -d)
                 go mod init tmp
                 go get $pkg
                 go doc $pkg'

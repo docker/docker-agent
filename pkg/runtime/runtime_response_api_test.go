@@ -1,11 +1,13 @@
 package runtime
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // TestResponseAPIToolCallHandling verifies that tool calls from the Response API
@@ -73,4 +75,58 @@ func TestResponseAPIMultipleToolCalls(t *testing.T) {
 		}
 	}
 	require.ElementsMatch(t, []string{"search", "calculate"}, toolCalls, "Expected both tool calls")
+}
+
+func TestPartialToolCallEventsContainOnlyNewArgumentBytes(t *testing.T) {
+	stream := newStreamBuilder().
+		AddToolCallName("call_abc", "write_file").
+		AddToolCallArguments("call_abc", `{"path":"story.md"`).
+		AddToolCallArguments("call_abc", `,"content":"Once upon a time"}`).
+		AddStopWithUsage(10, 15).
+		Build()
+
+	sess := session.New(session.WithUserMessage("Write a story"))
+	events := runSession(t, sess, stream)
+
+	var partials []*PartialToolCallEvent
+	for _, event := range events {
+		if ev, ok := event.(*PartialToolCallEvent); ok {
+			partials = append(partials, ev)
+		}
+	}
+
+	require.Len(t, partials, 3)
+	require.Equal(t, "write_file", partials[0].ToolCall.Function.Name)
+	require.Empty(t, partials[0].ToolCall.Function.Arguments)
+	require.Equal(t, `{"path":"story.md"`, partials[1].ToolCall.Function.Arguments) //nolint:testifylint // testifylint wants us to use require.JSONEq  but the expected value is not valid JSON
+	require.Nil(t, partials[1].ToolDefinition)
+	require.Equal(t, `,"content":"Once upon a time"}`, partials[2].ToolCall.Function.Arguments)
+	require.Nil(t, partials[2].ToolDefinition)
+
+	secondJSON, err := json.Marshal(partials[1])
+	require.NoError(t, err)
+	require.NotContains(t, string(secondJSON), `"tool_definition"`)
+}
+
+func TestPartialToolCallEventJSONIncludesToolDefinitionOnlyWhenPresent(t *testing.T) {
+	toolDef := &tools.Tool{Name: "write_file", Description: "Create file"}
+	withDef := &PartialToolCallEvent{
+		Type:           "partial_tool_call",
+		ToolCall:       tools.ToolCall{ID: "call_1", Type: "function", Function: tools.FunctionCall{Name: "write_file"}},
+		ToolDefinition: toolDef,
+		AgentContext:   newAgentContext("root"),
+	}
+	withoutDef := &PartialToolCallEvent{
+		Type:         "partial_tool_call",
+		ToolCall:     tools.ToolCall{ID: "call_1", Type: "function", Function: tools.FunctionCall{Name: "write_file", Arguments: `{"path":"story.md"}`}},
+		AgentContext: newAgentContext("root"),
+	}
+
+	withDefJSON, err := json.Marshal(withDef)
+	require.NoError(t, err)
+	require.Contains(t, string(withDefJSON), `"tool_definition"`)
+
+	withoutDefJSON, err := json.Marshal(withoutDef)
+	require.NoError(t, err)
+	require.NotContains(t, string(withoutDefJSON), `"tool_definition"`)
 }

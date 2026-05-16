@@ -38,6 +38,31 @@ func (p *EnvListProvider) Get(_ context.Context, name string) (string, bool) {
 	return "", false
 }
 
+// MapEnvProvider provides access to a static map of environment variables.
+type MapEnvProvider struct {
+	vars map[string]string
+}
+
+func NewMapEnvProvider(vars map[string]string) *MapEnvProvider {
+	return &MapEnvProvider{vars: vars}
+}
+
+func (p *MapEnvProvider) Get(_ context.Context, name string) (string, bool) {
+	v, ok := p.vars[name]
+	return v, ok
+}
+
+// NoEnvProvider is a provider that never finds any variable.
+type NoEnvProvider struct{}
+
+func NewNoEnvProvider() *NoEnvProvider {
+	return &NoEnvProvider{}
+}
+
+func (p *NoEnvProvider) Get(context.Context, string) (string, bool) {
+	return "", false
+}
+
 // EnvFilesProvider provides access env files.
 type EnvFilesProvider struct {
 	values []KeyValuePair

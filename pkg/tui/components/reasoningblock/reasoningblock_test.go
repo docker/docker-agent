@@ -1,6 +1,8 @@
 package reasoningblock
 
 import (
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -9,11 +11,43 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/tools"
-	"github.com/docker/cagent/pkg/tui/animation"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
+
+func TestReasoningBlockCollapsedByDefaultFromSessionState(t *testing.T) {
+	t.Parallel()
+
+	sessionState := service.NewSessionState(&session.Session{})
+	block := New("test-default-collapsed", "root", sessionState)
+	block.SetSize(80, 24)
+	longReasoning := `1. First point about the problem
+2. Second point to consider
+3. Third important aspect
+4. Fourth consideration here
+5. Fifth point for analysis
+6. Final conclusion drawn`
+	block.SetReasoning(longReasoning)
+
+	assert.False(t, block.IsExpanded())
+	assert.Contains(t, ansi.Strip(block.View()), "Thinking [+]")
+}
+
+func TestReasoningBlockCanDefaultExpandedFromSessionState(t *testing.T) {
+	t.Parallel()
+
+	sessionState := service.NewSessionState(&session.Session{})
+	sessionState.SetExpandThinking(true)
+	block := New("test-default-expanded", "root", sessionState)
+	block.SetSize(80, 24)
+	block.SetReasoning("Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6")
+
+	assert.True(t, block.IsExpanded())
+	assert.Contains(t, ansi.Strip(block.View()), "Thinking [-]")
+}
 
 func TestReasoningBlockCollapsed(t *testing.T) {
 	t.Parallel()
@@ -115,6 +149,63 @@ func TestReasoningBlockWithToolCall(t *testing.T) {
 	stripped := ansi.Strip(view)
 	assert.Contains(t, stripped, "read_file")
 	assert.Contains(t, stripped, "1 tool")
+}
+
+func TestReasoningBlockExpandedShowsFullToolRenderer(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.txt")
+	require.NoError(t, os.WriteFile(path, []byte("old line\n"), 0o644))
+
+	sessionState := &service.SessionState{}
+	block := New("test-expanded-tool-renderer", "root", sessionState)
+	block.SetSize(100, 24)
+	block.SetExpanded(true)
+	block.SetReasoning("Need to edit the file.")
+
+	toolMsg := types.ToolCallMessage("root", tools.ToolCall{
+		ID: "call-1",
+		Function: tools.FunctionCall{
+			Name:      "edit_file",
+			Arguments: `{"path":` + strconv.Quote(path) + `,"edits":[{"oldText":"old line\n","newText":"new line\n"}]}`,
+		},
+	}, tools.Tool{Name: "edit_file", Annotations: tools.ToolAnnotations{Title: "Edit"}}, types.ToolStatusConfirmation)
+	block.AddToolCall(toolMsg)
+
+	stripped := ansi.Strip(block.View())
+	assert.Contains(t, stripped, "Edit")
+	assert.Contains(t, stripped, path)
+	assert.Contains(t, stripped, "old line")
+	assert.Contains(t, stripped, "new line")
+}
+
+func TestReasoningBlockCollapsedUsesCollapsedToolRenderer(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "test.txt")
+	require.NoError(t, os.WriteFile(path, []byte("old line\n"), 0o644))
+
+	sessionState := &service.SessionState{}
+	block := New("test-collapsed-tool-renderer", "root", sessionState)
+	block.SetSize(100, 24)
+	block.SetExpanded(false)
+	block.SetReasoning("Need to edit the file.")
+
+	toolMsg := types.ToolCallMessage("root", tools.ToolCall{
+		ID: "call-1",
+		Function: tools.FunctionCall{
+			Name:      "edit_file",
+			Arguments: `{"path":` + strconv.Quote(path) + `,"edits":[{"oldText":"old line\n","newText":"new line\n"}]}`,
+		},
+	}, tools.Tool{Name: "edit_file", Annotations: tools.ToolAnnotations{Title: "Edit"}}, types.ToolStatusRunning)
+	block.AddToolCall(toolMsg)
+
+	stripped := ansi.Strip(block.View())
+	assert.Contains(t, stripped, "Edit")
+	assert.NotContains(t, stripped, "old line")
+	assert.NotContains(t, stripped, "new line")
 }
 
 func TestReasoningBlockCollapsedShowsToolViews(t *testing.T) {

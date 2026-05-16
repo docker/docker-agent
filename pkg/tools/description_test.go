@@ -1,19 +1,16 @@
 package tools
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-type mockToolSet struct {
-	BaseToolSet
-}
+func TestAddDescriptionParameter_AddsDescriptionParameter(t *testing.T) {
+	t.Parallel()
 
-func (m *mockToolSet) Tools(_ context.Context) ([]Tool, error) {
-	return []Tool{
+	tools := []Tool{
 		{
 			Name:        "test_tool",
 			Description: "A test tool",
@@ -27,23 +24,14 @@ func (m *mockToolSet) Tools(_ context.Context) ([]Tool, error) {
 				},
 				"required": []string{"path"},
 			},
-			Handler: func(_ context.Context, _ ToolCall) (*ToolCallResult, error) {
-				return &ToolCallResult{Output: "ok"}, nil
-			},
 			AddDescriptionParameter: true,
 		},
-	}, nil
-}
+	}
 
-func TestDescriptionToolSet_AddsDescriptionParameter(t *testing.T) {
-	t.Parallel()
-	desc := NewDescriptionToolSet(&mockToolSet{})
+	result := AddDescriptionParameter(tools)
+	require.Len(t, result, 1)
 
-	tools, err := desc.Tools(t.Context())
-	require.NoError(t, err)
-	require.Len(t, tools, 1)
-
-	tool := tools[0]
+	tool := result[0]
 	schema, ok := tool.Parameters.(map[string]any)
 	require.True(t, ok)
 
@@ -53,23 +41,61 @@ func TestDescriptionToolSet_AddsDescriptionParameter(t *testing.T) {
 	descProp, ok := properties[DescriptionParam].(map[string]any)
 	require.True(t, ok, "description parameter should be added")
 	assert.Equal(t, "string", descProp["type"])
-	assert.Contains(t, descProp["description"], "human-readable")
+	assert.Contains(t, descProp["description"], "description")
 }
 
-func TestDescriptionToolSet_PreservesOriginalParameters(t *testing.T) {
+func TestAddDescriptionParameter_PreservesOriginalParameters(t *testing.T) {
 	t.Parallel()
-	desc := NewDescriptionToolSet(&mockToolSet{})
 
-	tools, err := desc.Tools(t.Context())
-	require.NoError(t, err)
+	tools := []Tool{
+		{
+			Name: "test_tool",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"path": map[string]any{
+						"type":        "string",
+						"description": "The file path",
+					},
+				},
+			},
+			AddDescriptionParameter: true,
+		},
+	}
 
-	schema := tools[0].Parameters.(map[string]any)
+	result := AddDescriptionParameter(tools)
+
+	schema := result[0].Parameters.(map[string]any)
 	properties := schema["properties"].(map[string]any)
 
 	pathProp, ok := properties["path"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "string", pathProp["type"])
 	assert.Equal(t, "The file path", pathProp["description"])
+}
+
+func TestAddDescriptionParameter_SkipsToolsWithoutFlag(t *testing.T) {
+	t.Parallel()
+
+	tools := []Tool{
+		{
+			Name: "test_tool",
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+			AddDescriptionParameter: false,
+		},
+	}
+
+	result := AddDescriptionParameter(tools)
+	require.Len(t, result, 1)
+
+	schema := result[0].Parameters.(map[string]any)
+	properties := schema["properties"].(map[string]any)
+
+	_, hasDesc := properties[DescriptionParam]
+	assert.False(t, hasDesc, "description parameter should not be added")
 }
 
 func TestExtractDescription(t *testing.T) {

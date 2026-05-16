@@ -9,16 +9,17 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/js"
-	"github.com/docker/cagent/pkg/model/provider"
-	"github.com/docker/cagent/pkg/model/provider/options"
-	"github.com/docker/cagent/pkg/rag/chunk"
-	"github.com/docker/cagent/pkg/rag/types"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/js"
+	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/rag/chunk"
+	"github.com/docker/docker-agent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // NewSemanticEmbeddingsFromConfig creates a semantic-embeddings strategy from configuration.
@@ -88,15 +89,14 @@ func NewSemanticEmbeddingsFromConfig(ctx context.Context, cfg latest.RAGStrategy
 		return nil, fmt.Errorf("invalid chat_model %q: %w", chatModelName, err)
 	}
 
-	chatProvider, err := provider.New(ctx, &chatModelCfg, buildCtx.Env,
-		options.WithGateway(buildCtx.ModelsGateway))
+	chatProvider, err := buildCtx.NewProvider(ctx, &chatModelCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create chat model provider: %w", err)
 	}
 
 	chatModelID := chatProvider.ID()
-	if chatModelID == "" && chatModelCfg.Provider != "" && chatModelCfg.Model != "" {
-		chatModelID = fmt.Sprintf("%s/%s", chatModelCfg.Provider, chatModelCfg.Model)
+	if chatModelID.IsZero() && chatModelCfg.Provider != "" && chatModelCfg.Model != "" {
+		chatModelID = modelsdev.NewID(chatModelCfg.Provider, chatModelCfg.Model)
 	}
 
 	// Get optional parameters with defaults
@@ -114,7 +114,7 @@ func NewSemanticEmbeddingsFromConfig(ctx context.Context, cfg latest.RAGStrategy
 	semanticPrompt := GetParam(cfg.Params, "semantic_prompt", defaultSemanticPrompt())
 	useASTContext := GetParam(cfg.Params, "ast_context", false)
 	if useASTContext && !cfg.Chunking.CodeAware {
-		slog.Warn("semantic-embeddings ast_context is enabled but chunking.code_aware is false; AST metadata may be unavailable",
+		slog.WarnContext(ctx, "semantic-embeddings ast_context is enabled but chunking.code_aware is false; AST metadata may be unavailable",
 			"rag", buildCtx.RAGName)
 	}
 
@@ -173,13 +173,13 @@ func NewSemanticEmbeddingsFromConfig(ctx context.Context, cfg latest.RAGStrategy
 			return
 		}
 
-		cost := calculateSemanticUsageCost(ctx, embeddingCfg.ModelsStore, chatModelID, usage)
+		cost := calculateSemanticUsageCost(embeddingCfg.ModelsStore, chatModelID, usage)
 		store.RecordUsage(totalTokens, cost)
 	}
 
 	// Configure the embedding input builder to use the chat LLM
 	store.SetEmbeddingInputBuilder(newLLMSemanticEmbeddingBuilder(
-		chatProvider, semanticPrompt, usageTracker, useASTContext))
+		chatProvider, js.NewJsExpander(buildCtx.Env), semanticPrompt, usageTracker, useASTContext))
 
 	return &Config{
 		Name:      strategyName,
@@ -217,6 +217,7 @@ Include error handling patterns and edge cases if present.`
 // for each chunk before it is embedded.
 type llmSemanticEmbeddingBuilder struct {
 	provider     provider.Provider
+	expander     *js.Expander
 	prompt       string
 	usageTracker func(ctx context.Context, usage *chat.Usage)
 	astContext   bool
@@ -226,12 +227,14 @@ type llmSemanticEmbeddingBuilder struct {
 // calls the given provider with the configured prompt template.
 func newLLMSemanticEmbeddingBuilder(
 	p provider.Provider,
+	expander *js.Expander,
 	prompt string,
 	usageTracker func(ctx context.Context, usage *chat.Usage),
 	astContext bool,
 ) EmbeddingInputBuilder {
 	return &llmSemanticEmbeddingBuilder{
 		provider:     p,
+		expander:     expander,
 		prompt:       prompt,
 		usageTracker: usageTracker,
 		astContext:   astContext,
@@ -245,16 +248,13 @@ func (b *llmSemanticEmbeddingBuilder) BuildEmbeddingInput(ctx context.Context, s
 		astContext = formatASTContext(ch.Metadata)
 	}
 
-	t, err := js.ExpandString(ctx, b.prompt, map[string]string{
+	t := b.expander.Expand(ctx, b.prompt, map[string]string{
 		"path":        sourcePath,
 		"basename":    filepath.Base(sourcePath),
-		"chunk_index": fmt.Sprintf("%d", ch.Index),
+		"chunk_index": strconv.Itoa(ch.Index),
 		"content":     ch.Content,
 		"ast_context": astContext,
 	})
-	if err != nil {
-		return "", fmt.Errorf("failed to expand prompt template: %w", err)
-	}
 
 	messages := []chat.Message{
 		{
@@ -305,7 +305,7 @@ func (b *llmSemanticEmbeddingBuilder) BuildEmbeddingInput(ctx context.Context, s
 
 	if summary == "" {
 		// If the semantic model returns no content, fall back to truncated chunk
-		slog.Warn("Semantic model returned empty summary; falling back to truncated chunk content",
+		slog.WarnContext(ctx, "Semantic model returned empty summary; falling back to truncated chunk content",
 			"path", sourcePath,
 			"chunk_index", ch.Index,
 			"original_length", len(ch.Content))
@@ -313,7 +313,7 @@ func (b *llmSemanticEmbeddingBuilder) BuildEmbeddingInput(ctx context.Context, s
 		fallback := ch.Content
 		if len(fallback) > maxEmbeddingInputLength {
 			fallback = fallback[:maxEmbeddingInputLength] + "..."
-			slog.Debug("Truncated fallback content to fit embedding model limits",
+			slog.DebugContext(ctx, "Truncated fallback content to fit embedding model limits",
 				"original_length", len(ch.Content),
 				"truncated_length", len(fallback))
 		}
@@ -327,7 +327,7 @@ func (b *llmSemanticEmbeddingBuilder) BuildEmbeddingInput(ctx context.Context, s
 
 	// Truncate if embedding input is unexpectedly long
 	if len(embeddingInput) > maxEmbeddingInputLength {
-		slog.Warn("Semantic embedding input exceeds model limits; truncating",
+		slog.WarnContext(ctx, "Semantic embedding input exceeds model limits; truncating",
 			"path", sourcePath,
 			"chunk_index", ch.Index,
 			"original_length", len(embeddingInput),
@@ -335,7 +335,7 @@ func (b *llmSemanticEmbeddingBuilder) BuildEmbeddingInput(ctx context.Context, s
 		embeddingInput = embeddingInput[:maxEmbeddingInputLength] + "..."
 	}
 
-	slog.Debug("Generated semantic embedding input for chunk",
+	slog.DebugContext(ctx, "Generated semantic embedding input for chunk",
 		"path", sourcePath,
 		"chunk_index", ch.Index,
 		"embedding_input", embeddingInput)
@@ -501,15 +501,15 @@ func humanizeMetadataKey(key string) string {
 }
 
 // calculateSemanticUsageCost calculates cost for semantic LLM usage.
-func calculateSemanticUsageCost(ctx context.Context, modelsStore modelStore, modelID string, usage *chat.Usage) float64 {
-	if usage == nil || modelsStore == nil || modelID == "" || strings.HasPrefix(modelID, "dmr/") {
+func calculateSemanticUsageCost(modelsStore modelStore, id modelsdev.ID, usage *chat.Usage) float64 {
+	if usage == nil || modelsStore == nil || !id.IsValid() || id.Provider == "dmr" {
 		return 0
 	}
 
-	model, err := modelsStore.GetModel(ctx, modelID)
+	model, err := modelsStore.GetModel(context.Background(), id)
 	if err != nil {
 		slog.Debug("Failed to get semantic model pricing from models.dev, cost will be 0",
-			"model_id", modelID,
+			"model_id", id.String(),
 			"error", err)
 		return 0
 	}

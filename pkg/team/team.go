@@ -4,18 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 
-	"github.com/docker/cagent/pkg/agent"
-	"github.com/docker/cagent/pkg/config/types"
-	"github.com/docker/cagent/pkg/permissions"
-	"github.com/docker/cagent/pkg/rag"
+	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/permissions"
 )
 
 type Team struct {
 	agents      []*agent.Agent
-	ragManagers map[string]*rag.Manager
 	permissions *permissions.Checker
 }
 
@@ -27,12 +24,6 @@ func WithAgents(agents ...*agent.Agent) Opt {
 	}
 }
 
-func WithRAGManagers(managers map[string]*rag.Manager) Opt {
-	return func(t *Team) {
-		t.ragManagers = managers
-	}
-}
-
 func WithPermissions(checker *permissions.Checker) Opt {
 	return func(t *Team) {
 		t.permissions = checker
@@ -40,9 +31,7 @@ func WithPermissions(checker *permissions.Checker) Opt {
 }
 
 func New(opts ...Opt) *Team {
-	t := &Team{
-		ragManagers: make(map[string]*rag.Manager),
-	}
+	t := &Team{}
 	for _, opt := range opts {
 		opt(t)
 	}
@@ -75,14 +64,10 @@ func (t *Team) AgentsInfo() []AgentInfo {
 			Description: a.Description(),
 			Commands:    a.Commands(),
 		}
-		if model := a.Model(); model != nil {
-			modelID := model.ID()
-			if prov, modelName, found := strings.Cut(modelID, "/"); found {
-				info.Provider = prov
-				info.Model = modelName
-			} else {
-				info.Model = modelID
-			}
+		if model := a.Model(context.TODO()); model != nil {
+			id := model.ID()
+			info.Provider = id.Provider
+			info.Model = id.Model
 		}
 		infos = append(infos, info)
 	}
@@ -119,6 +104,19 @@ func (t *Team) Agent(name string) (*agent.Agent, error) {
 	return nil, fmt.Errorf("agent not found: %s (available agents: %s)", name, strings.Join(t.AgentNames(), ", "))
 }
 
+// AgentOrDefault returns the agent identified by name, or the team's
+// [DefaultAgent] when name is empty. It is a convenience for the many
+// call sites that accept an optional agent selector (CLI flag, HTTP
+// route, ...) and want "empty means whatever the team considers
+// default" semantics without sprinkling the same `if name == ""` check
+// everywhere.
+func (t *Team) AgentOrDefault(name string) (*agent.Agent, error) {
+	if name == "" {
+		return t.DefaultAgent()
+	}
+	return t.Agent(name)
+}
+
 func (t *Team) Size() int {
 	return len(t.agents)
 }
@@ -129,48 +127,19 @@ func (t *Team) StopToolSets(ctx context.Context) error {
 			return fmt.Errorf("failed to stop tool sets: %w", err)
 		}
 	}
-	for name, mgr := range t.ragManagers {
-		if err := mgr.Close(); err != nil {
-			slog.Error("Failed to close RAG manager", "name", name, "error", err)
-		}
-	}
 
 	return nil
-}
-
-// RAGManagers returns the RAG managers for this team
-func (t *Team) RAGManagers() map[string]*rag.Manager {
-	return t.ragManagers
-}
-
-// InitializeRAG initializes all RAG managers in the background
-func (t *Team) InitializeRAG(ctx context.Context) {
-	for _, mgr := range t.ragManagers {
-		go func(m *rag.Manager) {
-			slog.Debug("Starting RAG manager initialization goroutine", "rag", m.Name())
-			if err := m.Initialize(ctx); err != nil {
-				slog.Error("Failed to initialize RAG manager", "rag", m.Name(), "error", err)
-			} else {
-				slog.Info("RAG manager initialized successfully", "rag", m.Name())
-			}
-		}(mgr)
-	}
-}
-
-// StartRAGFileWatchers starts file watchers for all RAG managers
-func (t *Team) StartRAGFileWatchers(ctx context.Context) {
-	for _, mgr := range t.ragManagers {
-		go func(m *rag.Manager) {
-			slog.Debug("Starting RAG file watcher goroutine", "rag", m.Name())
-			if err := m.StartFileWatcher(ctx); err != nil {
-				slog.Error("Failed to start RAG file watcher", "rag", m.Name(), "error", err)
-			}
-		}(mgr)
-	}
 }
 
 // Permissions returns the permission checker for this team.
 // Returns nil if no permissions are configured.
 func (t *Team) Permissions() *permissions.Checker {
 	return t.permissions
+}
+
+// SetPermissions replaces the team's permission checker.
+// This is used to merge additional permission sources (e.g. user-level global
+// permissions) into the team's checker after construction.
+func (t *Team) SetPermissions(checker *permissions.Checker) {
+	t.permissions = checker
 }

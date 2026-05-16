@@ -1,10 +1,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/docker/cagent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
 // ApplyModelOverrides applies CLI model overrides to the configuration
@@ -60,7 +61,7 @@ func applySingleOverride(cfg *latest.Config, override string) error {
 		// Global override: apply to all agents
 		modelSpec := strings.TrimSpace(override)
 		if modelSpec == "" {
-			return fmt.Errorf("empty model specification")
+			return errors.New("empty model specification")
 		}
 
 		for _, agent := range cfg.Agents {
@@ -109,8 +110,11 @@ func ensureModelsExist(cfg *latest.Config) error {
 	}
 
 	// Ensure models referenced by RAG strategies exist
-	for ragName, ragCfg := range cfg.RAG {
-		for _, stratCfg := range ragCfg.Strategies {
+	for ragName, ragToolset := range cfg.RAG {
+		if ragToolset.RAGConfig == nil {
+			continue
+		}
+		for _, stratCfg := range ragToolset.RAGConfig.Strategies {
 			rawModel, ok := stratCfg.Params["model"]
 			if !ok {
 				continue
@@ -185,15 +189,12 @@ func ensureSingleModelExists(cfg *latest.Config, modelName, context string) erro
 		return nil
 	}
 
-	providerName, model, ok := strings.Cut(modelName, "/")
-	if !ok || providerName == "" || model == "" {
+	parsed, err := latest.ParseModelRef(modelName)
+	if err != nil {
 		return fmt.Errorf("%s references non-existent model '%s'", context, modelName)
 	}
 
-	cfg.Models[modelName] = latest.ModelConfig{
-		Provider: providerName,
-		Model:    model,
-	}
+	cfg.Models[modelName] = parsed
 
 	return nil
 }

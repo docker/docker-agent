@@ -5,9 +5,17 @@ import (
 	"time"
 )
 
+func (tc *Client) TrackSynchronous(_ context.Context, structuredEvent StructuredEvent) {
+	tc.track(context.Background(), structuredEvent, false)
+}
+
 // Track records a structured telemetry event with type-safe properties (synchronous)
 // This is the only method for telemetry tracking, all event-specific methods are wrappers around this one
-func (tc *Client) Track(_ context.Context, structuredEvent StructuredEvent) {
+func (tc *Client) Track(ctx context.Context, structuredEvent StructuredEvent) {
+	tc.track(ctx, structuredEvent, true)
+}
+
+func (tc *Client) track(_ context.Context, structuredEvent StructuredEvent, async bool) {
 	eventType := structuredEvent.GetEventType()
 	structuredProps := structuredEvent.ToStructuredProperties()
 
@@ -16,10 +24,6 @@ func (tc *Client) Track(_ context.Context, structuredEvent StructuredEvent) {
 	properties, err := structToMap(structuredProps)
 	if err != nil {
 		tc.logger.Error("Failed to convert structured properties to map", "error", err, "event_type", eventType)
-		return
-	}
-
-	if !tc.enabled {
 		return
 	}
 
@@ -34,9 +38,15 @@ func (tc *Client) Track(_ context.Context, structuredEvent StructuredEvent) {
 		tc.printEvent(&event)
 	}
 
-	go func() {
+	if !tc.enabled {
+		return
+	}
+
+	if async {
+		go tc.sendEvent(&event) //nolint:gosec // telemetry is fire-and-forget; sendEvent uses its own context internally
+	} else {
 		tc.sendEvent(&event)
-	}()
+	}
 }
 
 // RecordSessionStart initializes session tracking

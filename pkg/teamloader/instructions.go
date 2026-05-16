@@ -3,7 +3,7 @@ package teamloader
 import (
 	"strings"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func WithInstructions(inner tools.ToolSet, instruction string) tools.ToolSet {
@@ -19,9 +19,22 @@ func WithInstructions(inner tools.ToolSet, instruction string) tools.ToolSet {
 
 type replaceInstruction struct {
 	tools.ToolSet
+
 	instruction string
 }
 
-func (a replaceInstruction) Instructions() string {
-	return strings.Replace(a.instruction, "{ORIGINAL_INSTRUCTIONS}", a.ToolSet.Instructions(), 1)
+// Verify interface compliance
+var (
+	_ tools.Instructable = (*replaceInstruction)(nil)
+	_ tools.Unwrapper    = (*replaceInstruction)(nil)
+)
+
+// Unwrap implements tools.Unwrapper.
+func (a *replaceInstruction) Unwrap() tools.ToolSet {
+	return a.ToolSet
+}
+
+func (a *replaceInstruction) Instructions() string {
+	original := tools.GetInstructions(a.ToolSet)
+	return strings.Replace(a.instruction, "{ORIGINAL_INSTRUCTIONS}", original, 1)
 }

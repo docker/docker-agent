@@ -2,17 +2,19 @@ package root
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/mattn/go-runewidth"
 	"github.com/spf13/cobra"
 
-	"github.com/docker/cagent/pkg/cli"
-	"github.com/docker/cagent/pkg/paths"
-	"github.com/docker/cagent/pkg/telemetry"
-	"github.com/docker/cagent/pkg/userconfig"
+	"github.com/docker/docker-agent/pkg/cli"
+	"github.com/docker/docker-agent/pkg/config"
+	pathx "github.com/docker/docker-agent/pkg/path"
+	"github.com/docker/docker-agent/pkg/telemetry"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 func newAliasCmd() *cobra.Command {
@@ -21,16 +23,16 @@ func newAliasCmd() *cobra.Command {
 		Short: "Manage aliases",
 		Long:  "Create and manage aliases for agent configurations or catalog references.",
 		Example: `  # Create an alias for a catalog agent
-  cagent alias add code agentcatalog/notion-expert
+  docker-agent alias add code agentcatalog/notion-expert
 
   # Create an alias for a local agent file
-  cagent alias add myagent ~/myagent.yaml
+  docker-agent alias add myagent ~/myagent.yaml
 
   # List all registered aliases
-  cagent alias list
+  docker-agent alias list
 
   # Remove an alias
-  cagent alias remove code`,
+  docker-agent alias remove code`,
 		GroupID: "advanced",
 	}
 
@@ -62,19 +64,19 @@ the alias is used:
   --model              Override the agent's model (format: [agent=]provider/model)
   --hide-tool-results  Hide tool call results in the TUI`,
 		Example: `  # Create a simple alias
-  cagent alias add code agentcatalog/notion-expert
+  docker-agent alias add code agentcatalog/notion-expert
 
   # Create an alias that always runs in yolo mode
-  cagent alias add yolo-coder agentcatalog/coder --yolo
+  docker-agent alias add yolo-coder agentcatalog/coder --yolo
 
   # Create an alias with a specific model
-  cagent alias add fast-coder agentcatalog/coder --model openai/gpt-4o-mini
+  docker-agent alias add fast-coder agentcatalog/coder --model openai/gpt-4o-mini
 
   # Create an alias with hidden tool results
-  cagent alias add quiet agentcatalog/coder --hide-tool-results
+  docker-agent alias add quiet agentcatalog/coder --hide-tool-results
 
   # Create an alias with multiple options
-  cagent alias add turbo agentcatalog/coder --yolo --model anthropic/claude-sonnet-4-0`,
+  docker-agent alias add turbo agentcatalog/coder --yolo --model anthropic/claude-sonnet-4-0`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAliasAddCommand(cmd, args, &flags)
@@ -108,23 +110,32 @@ func newAliasRemoveCmd() *cobra.Command {
 	}
 }
 
-func runAliasAddCommand(cmd *cobra.Command, args []string, flags *aliasAddFlags) error {
-	telemetry.TrackCommand("alias", append([]string{"add"}, args...))
+func runAliasAddCommand(cmd *cobra.Command, args []string, flags *aliasAddFlags) (commandErr error) {
+	telemetry.TrackCommand(cmd.Context(), "alias", append([]string{"add"}, args...))
+	defer func() { // do not inline this defer so that commandErr is not resolved early
+		telemetry.TrackCommandError(cmd.Context(), "alias", append([]string{"add"}, args...), commandErr)
+	}()
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	name := args[0]
 	agentPath := args[1]
 
-	// Load existing config
 	cfg, err := userconfig.Load()
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Expand tilde in path if it's a local file path
-	absAgentPath, err := expandTilde(agentPath)
+	absAgentPath, err := pathx.ExpandHomeDir(agentPath)
 	if err != nil {
 		return err
+	}
+
+	// Convert relative paths to absolute for local files (not OCI references or URLs)
+	if !config.IsOCIReference(absAgentPath) && !config.IsURLReference(absAgentPath) && !filepath.IsAbs(absAgentPath) {
+		absAgentPath, err = filepath.Abs(absAgentPath)
+		if err != nil {
+			return fmt.Errorf("failed to resolve absolute path: %w", err)
+		}
 	}
 
 	// Create alias with options
@@ -159,16 +170,19 @@ func runAliasAddCommand(cmd *cobra.Command, args []string, flags *aliasAddFlags)
 	}
 
 	if name == "default" {
-		out.Printf("\nYou can now run: cagent run %s (or even cagent run)\n", name)
+		out.Printf("\nYou can now run: docker agent run %s (or even docker agent run)\n", name)
 	} else {
-		out.Printf("\nYou can now run: cagent run %s\n", name)
+		out.Printf("\nYou can now run: docker agent run %s\n", name)
 	}
 
 	return nil
 }
 
-func runAliasListCommand(cmd *cobra.Command, args []string) error {
-	telemetry.TrackCommand("alias", append([]string{"list"}, args...))
+func runAliasListCommand(cmd *cobra.Command, args []string) (commandErr error) {
+	telemetry.TrackCommand(cmd.Context(), "alias", append([]string{"list"}, args...))
+	defer func() { // do not inline this defer so that commandErr is not resolved early
+		telemetry.TrackCommandError(cmd.Context(), "alias", append([]string{"list"}, args...), commandErr)
+	}()
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
 
@@ -180,18 +194,14 @@ func runAliasListCommand(cmd *cobra.Command, args []string) error {
 	allAliases := cfg.Aliases
 	if len(allAliases) == 0 {
 		out.Println("No aliases registered.")
-		out.Println("\nCreate an alias with: cagent alias add <name> <agent-path>")
+		out.Println("\nCreate an alias with: docker agent alias add <name> <agent-path>")
 		return nil
 	}
 
 	out.Printf("Registered aliases (%d):\n\n", len(allAliases))
 
 	// Sort aliases by name for consistent output
-	names := make([]string, 0, len(allAliases))
-	for name := range allAliases {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(allAliases))
 
 	// Find max name width for alignment (using display width for proper Unicode handling)
 	maxLen := 0
@@ -222,13 +232,16 @@ func runAliasListCommand(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	out.Println("\nRun an alias with: cagent run <alias>")
+	out.Println("\nRun an alias with: docker agent run <alias>")
 
 	return nil
 }
 
-func runAliasRemoveCommand(cmd *cobra.Command, args []string) error {
-	telemetry.TrackCommand("alias", append([]string{"remove"}, args...))
+func runAliasRemoveCommand(cmd *cobra.Command, args []string) (commandErr error) {
+	telemetry.TrackCommand(cmd.Context(), "alias", append([]string{"remove"}, args...))
+	defer func() {
+		telemetry.TrackCommandError(cmd.Context(), "alias", append([]string{"remove"}, args...), commandErr)
+	}()
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	name := args[0]
@@ -248,18 +261,4 @@ func runAliasRemoveCommand(cmd *cobra.Command, args []string) error {
 
 	out.Printf("Alias '%s' removed successfully\n", name)
 	return nil
-}
-
-// expandTilde expands the tilde in a path to the user's home directory
-func expandTilde(path string) (string, error) {
-	if !strings.HasPrefix(path, "~/") {
-		return path, nil
-	}
-
-	homeDir := paths.GetHomeDir()
-	if homeDir == "" {
-		return "", fmt.Errorf("failed to get user home directory")
-	}
-
-	return filepath.Join(homeDir, strings.TrimPrefix(path, "~/")), nil
 }

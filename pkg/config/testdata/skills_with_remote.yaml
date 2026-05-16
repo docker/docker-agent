@@ -1,0 +1,10 @@
+version: "5"
+
+agents:
+  root:
+    model: openai/gpt-4o
+    skills:
+      - local
+      - https://skills.example.com
+    toolsets:
+      - type: filesystem

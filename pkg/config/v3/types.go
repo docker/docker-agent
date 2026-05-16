@@ -2,11 +2,11 @@ package v3
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 
-	"github.com/goccy/go-yaml"
-
-	"github.com/docker/cagent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/config/types"
 )
 
 const Version = "3"
@@ -18,7 +18,7 @@ type Config struct {
 	Agents      map[string]AgentConfig    `json:"agents,omitempty"`
 	Models      map[string]ModelConfig    `json:"models,omitempty"`
 	RAG         map[string]RAGConfig      `json:"rag,omitempty"`
-	Metadata    Metadata                  `json:"metadata,omitempty"`
+	Metadata    Metadata                  `json:"metadata"`
 	Permissions *PermissionsConfig        `json:"permissions,omitempty"`
 }
 
@@ -156,13 +156,13 @@ type Toolset struct {
 	Instruction string   `json:"instruction,omitempty"`
 	Toon        string   `json:"toon,omitempty"`
 
-	Defer DeferConfig `json:"defer,omitempty" yaml:"defer,omitempty"`
+	Defer DeferConfig `json:"defer" yaml:"defer,omitempty"`
 
 	// For the `mcp` tool
 	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
 	Ref     string   `json:"ref,omitempty"`
-	Remote  Remote   `json:"remote,omitempty"`
+	Remote  Remote   `json:"remote"`
 	Config  any      `json:"config,omitempty"`
 
 	// For the `a2a` tool
@@ -187,7 +187,7 @@ type Toolset struct {
 	// For the `filesystem` tool - post-edit commands
 	PostEdit []PostEditConfig `json:"post_edit,omitempty"`
 
-	APIConfig APIToolConfig `json:"api_config,omitempty"`
+	APIConfig APIToolConfig `json:"api_config"`
 
 	// For the `filesystem` tool - VCS integration
 	IgnoreVCS *bool `json:"ignore_vcs,omitempty"`
@@ -230,7 +230,7 @@ type SandboxConfig struct {
 // DeferConfig represents the deferred loading configuration for a toolset.
 // It can be either a boolean (true to defer all tools) or a slice of strings
 // (list of tool names to defer).
-type DeferConfig struct {
+type DeferConfig struct { //nolint:recvcheck // MarshalYAML must use value receiver for YAML slice encoding, UnmarshalYAML must use pointer
 	// DeferAll is true when all tools should be deferred
 	DeferAll bool `json:"-"`
 	// Tools is the list of specific tool names to defer (empty if DeferAll is true)
@@ -259,15 +259,15 @@ func (d *DeferConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	return nil
 }
 
-func (d DeferConfig) MarshalYAML() ([]byte, error) {
+func (d DeferConfig) MarshalYAML() (any, error) {
 	if d.DeferAll {
-		return yaml.Marshal(true)
+		return true, nil
 	}
 	if len(d.Tools) == 0 {
 		// Return false for empty config - this will be omitted by yaml encoder
-		return yaml.Marshal(false)
+		return false, nil
 	}
-	return yaml.Marshal(d.Tools)
+	return d.Tools, nil
 }
 
 // ThinkingBudget represents reasoning budget configuration.
@@ -300,14 +300,14 @@ func (t *ThinkingBudget) UnmarshalYAML(unmarshal func(any) error) error {
 }
 
 // MarshalYAML implements custom marshaling to output simple string or int format
-func (t ThinkingBudget) MarshalYAML() ([]byte, error) {
+func (t ThinkingBudget) MarshalYAML() (any, error) {
 	// If Effort string is set (non-empty), marshal as string
 	if t.Effort != "" {
-		return yaml.Marshal(t.Effort)
+		return t.Effort, nil
 	}
 
 	// Otherwise marshal as integer (includes 0, -1, and positive values)
-	return yaml.Marshal(t.Tokens)
+	return t.Tokens, nil
 }
 
 // MarshalJSON implements custom marshaling to output simple string or int format
@@ -315,11 +315,11 @@ func (t ThinkingBudget) MarshalYAML() ([]byte, error) {
 func (t ThinkingBudget) MarshalJSON() ([]byte, error) {
 	// If Effort string is set (non-empty), marshal as string
 	if t.Effort != "" {
-		return []byte(fmt.Sprintf("%q", t.Effort)), nil
+		return fmt.Appendf(nil, "%q", t.Effort), nil
 	}
 
 	// Otherwise marshal as integer (includes 0, -1, and positive values)
-	return []byte(fmt.Sprintf("%d", t.Tokens)), nil
+	return fmt.Appendf(nil, "%d", t.Tokens), nil
 }
 
 // UnmarshalJSON implements custom unmarshaling to accept simple string or int format
@@ -364,11 +364,11 @@ type RAGToolConfig struct {
 // RAGConfig represents a RAG (Retrieval-Augmented Generation) configuration
 // Uses a unified strategies array for flexible, extensible configuration
 type RAGConfig struct {
-	Tool       RAGToolConfig       `json:"tool,omitempty"`        // Tool configuration
+	Tool       RAGToolConfig       `json:"tool"`                  // Tool configuration
 	Docs       []string            `json:"docs,omitempty"`        // Shared documents across all strategies
 	RespectVCS *bool               `json:"respect_vcs,omitempty"` // Whether to respect VCS ignore files like .gitignore (default: true)
 	Strategies []RAGStrategyConfig `json:"strategies,omitempty"`  // Array of strategy configurations
-	Results    RAGResultsConfig    `json:"results,omitempty"`
+	Results    RAGResultsConfig    `json:"results"`
 }
 
 // GetRespectVCS returns whether VCS ignore files should be respected, defaulting to true
@@ -381,12 +381,12 @@ func (c *RAGConfig) GetRespectVCS() bool {
 
 // RAGStrategyConfig represents a single retrieval strategy configuration
 // Strategy-specific fields are stored in Params (validated by strategy implementation)
-type RAGStrategyConfig struct {
-	Type     string            `json:"type"`               // Strategy type: "chunked-embeddings", "bm25", etc.
-	Docs     []string          `json:"docs,omitempty"`     // Strategy-specific documents (augments shared docs)
-	Database RAGDatabaseConfig `json:"database,omitempty"` // Database configuration
-	Chunking RAGChunkingConfig `json:"chunking,omitempty"` // Chunking configuration
-	Limit    int               `json:"limit,omitempty"`    // Max results from this strategy (for fusion input)
+type RAGStrategyConfig struct { //nolint:recvcheck // Marshal methods must use value receiver for YAML/JSON slice encoding, Unmarshal must use pointer
+	Type     string            `json:"type"`            // Strategy type: "chunked-embeddings", "bm25", etc.
+	Docs     []string          `json:"docs,omitempty"`  // Strategy-specific documents (augments shared docs)
+	Database RAGDatabaseConfig `json:"database"`        // Database configuration
+	Chunking RAGChunkingConfig `json:"chunking"`        // Chunking configuration
+	Limit    int               `json:"limit,omitempty"` // Max results from this strategy (for fusion input)
 
 	// Strategy-specific parameters (arbitrary key-value pairs)
 	// Examples:
@@ -448,9 +448,9 @@ func (s *RAGStrategyConfig) UnmarshalYAML(unmarshal func(any) error) error {
 }
 
 // MarshalYAML implements custom marshaling to flatten Params into parent level
-func (s RAGStrategyConfig) MarshalYAML() ([]byte, error) {
+func (s RAGStrategyConfig) MarshalYAML() (any, error) {
 	result := s.buildFlattenedMap()
-	return yaml.Marshal(result)
+	return result, nil
 }
 
 // MarshalJSON implements custom marshaling to flatten Params into parent level
@@ -539,9 +539,7 @@ func (s RAGStrategyConfig) buildFlattenedMap() map[string]any {
 	}
 
 	// Flatten Params into the same level
-	for k, v := range s.Params {
-		result[k] = v
-	}
+	maps.Copy(result, s.Params)
 
 	return result
 }
@@ -599,7 +597,7 @@ func coerceToInt(v any) int {
 	case int64:
 		return int(val)
 	case uint64:
-		return int(val)
+		return int(val) //nolint:gosec // frozen config: value comes from validated YAML; bounds enforced by schema
 	case float64:
 		return int(val)
 	default:
@@ -622,7 +620,7 @@ func (d *RAGDatabaseConfig) UnmarshalYAML(unmarshal func(any) error) error {
 		return nil
 	}
 
-	return fmt.Errorf("database must be a string path to a sqlite database")
+	return errors.New("database must be a string path to a sqlite database")
 }
 
 // AsString returns the database config as a connection string
@@ -637,7 +635,7 @@ func (d *RAGDatabaseConfig) AsString() (string, error) {
 		return str, nil
 	}
 
-	return "", fmt.Errorf("invalid database configuration: expected string path")
+	return "", errors.New("invalid database configuration: expected string path")
 }
 
 // IsEmpty returns true if no database is configured

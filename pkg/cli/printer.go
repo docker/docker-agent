@@ -13,8 +13,8 @@ import (
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 	"golang.org/x/term"
 
-	"github.com/docker/cagent/pkg/input"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/input"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // ConfirmationResult represents the result of a user confirmation prompt
@@ -30,12 +30,18 @@ const (
 var bold = color.New(color.Bold).SprintfFunc()
 
 type Printer struct {
-	out io.Writer
+	out      io.Writer
+	isTTYOut bool
 }
 
 func NewPrinter(out io.Writer) *Printer {
+	isTTY := false
+	if f, ok := out.(*os.File); ok {
+		isTTY = isatty.IsTerminal(f.Fd())
+	}
 	return &Printer{
-		out: out,
+		out:      out,
+		isTTYOut: isTTY,
 	}
 }
 
@@ -63,6 +69,9 @@ func (p *Printer) PrintError(err error) {
 
 // PrintAgentName prints the agent name header
 func (p *Printer) PrintAgentName(agentName string) {
+	if !p.isTTYOut {
+		return
+	}
 	p.Printf("\n--- Agent: %s ---\n", bold(agentName))
 }
 
@@ -134,8 +143,8 @@ func (p *Printer) PrintToolCallWithConfirmation(ctx context.Context, toolCall to
 }
 
 // PrintToolCallResponse prints a tool call response
-func (p *Printer) PrintToolCallResponse(toolCall tools.ToolCall, response string) {
-	p.Printf("\n%s response%s\n", bold(toolCall.Function.Name), formatToolCallResponse(response))
+func (p *Printer) PrintToolCallResponse(name, response string) {
+	p.Printf("\n%s response%s\n", bold(name), formatToolCallResponse(response))
 }
 
 // PromptMaxIterationsContinue prompts the user to continue after max iterations
@@ -322,7 +331,7 @@ func formatJSONValue(key string, value any) string {
 
 	case []any:
 		if len(v) == 0 {
-			return fmt.Sprintf("%s: []", bold(key))
+			return bold(key) + ": []"
 		}
 		// Single item arrays are rendered on a single line
 		if len(v) == 1 {

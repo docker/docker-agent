@@ -5,18 +5,36 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"charm.land/glamour/v2"
 	"github.com/charmbracelet/x/ansi"
 	runewidth "github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-// stripANSI removes ANSI escape sequences from a string.
+// ansiRegex matches CSI escape sequences (used by some tests to inspect sequences).
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
+// stripANSI removes ANSI escape sequences (CSI and OSC) from a string.
 func stripANSI(s string) string {
-	return ansiRegex.ReplaceAllString(s, "")
+	return ansi.Strip(s)
+}
+
+// newGlamourRenderer creates a markdown renderer using glamour.
+// Used as a reference implementation to compare against the fast renderer.
+func newGlamourRenderer(width int) *glamour.TermRenderer {
+	style := styles.MarkdownStyle()
+
+	r, _ := glamour.NewTermRenderer(
+		glamour.WithWordWrap(width),
+		glamour.WithStyles(style),
+		glamour.WithPreservedNewLines(),
+	)
+	return r
 }
 
 func TestFastRendererBasicText(t *testing.T) {
@@ -60,6 +78,51 @@ func TestFastRendererHeadings(t *testing.T) {
 			result, err := r.Render(tt.input)
 			require.NoError(t, err)
 			assert.Contains(t, result, tt.contains)
+		})
+	}
+}
+
+// TestFastRendererHashLikeParagraphs ensures the renderer terminates on lines
+// that look like ATX headings but are rejected by tryHeading (7+ hashes, or '#'
+// not followed by whitespace). Previously these caused an infinite loop in
+// parser.parse() because tryHeading returned false without advancing lineIdx,
+// and renderParagraph also bailed out without consuming the line.
+func TestFastRendererHashLikeParagraphs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		contains string
+	}{
+		{"seven hashes", "####### foo", "####### foo"},
+		{"eight hashes", "######## bar", "######## bar"},
+		{"hash without space", "#nospace", "#nospace"},
+		{"double hash without space", "##nospace", "##nospace"},
+		{"hash followed by punctuation", "#tag:value", "#tag:value"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			done := make(chan struct{})
+			var result string
+			var err error
+			go func() {
+				defer close(done)
+				r := NewFastRenderer(80)
+				result, err = r.Render(tt.input)
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("renderer hung on input %q (infinite loop)", tt.input)
+			}
+
+			require.NoError(t, err)
+			assert.Contains(t, stripANSI(result), tt.contains)
 		})
 	}
 }
@@ -206,6 +269,31 @@ func TestFastRendererHeadingWithLongCode(t *testing.T) {
 		lineWidth := runewidth.StringWidth(stripANSI(line))
 		assert.Equal(t, 40, lineWidth, "Line %d has incorrect width: %q (width=%d)", i, stripANSI(line), lineWidth)
 	}
+}
+
+func TestFastRendererBoldLongWordStyleRestoration(t *testing.T) {
+	t.Parallel()
+
+	// A bold span containing a single word longer than the wrap width forces
+	// breakWord to split it. Each continuation-line break inside the broken
+	// word must close and re-open the bold style that was opened *inside*
+	// the word, so the next line is not left with stale terminal state.
+	p := &parser{styles: getGlobalStyles()}
+	input := "prefix \x1b[1mverylongbolditem more"
+	wrapped := p.wrapText(input, 10)
+
+	lines := strings.Split(wrapped, "\n")
+	require.GreaterOrEqual(t, len(lines), 4, "expected breakWord to split the long bold word, got: %q", wrapped)
+
+	// Line 0 holds the prefix word. Line 1 starts the broken bold word and
+	// contains the original \x1b[1m. Line 2 is the *continuation* of the
+	// broken word: it must explicitly re-open bold, since the previous line
+	// break closed all active styles.
+	assert.True(t, strings.HasPrefix(lines[2], "\x1b[1m"),
+		"continuation line of broken bold word must re-open bold: %q", lines[2])
+	// Subsequent words after the broken word must also have bold re-opened.
+	assert.Contains(t, lines[3], "\x1b[1m",
+		"line after broken bold word must keep bold opened: %q", lines[3])
 }
 
 func TestFastRendererHeadingInlineCodeStyleRestoration(t *testing.T) {
@@ -391,8 +479,13 @@ func TestFastRendererLinks(t *testing.T) {
 	result, err := r.Render(input)
 	require.NoError(t, err)
 	plain := stripANSI(result)
+	// Link text should be visible
 	assert.Contains(t, plain, "this link")
-	assert.Contains(t, plain, "example.com")
+	// URL should NOT appear as visible text (it's in OSC 8 sequence)
+	assert.NotContains(t, plain, "example.com")
+	// But the OSC 8 sequence should be present
+	assert.Contains(t, result, "\x1b]8;;https://example.com\x07")
+	assert.Contains(t, result, "\x1b]8;;\x07")
 }
 
 func TestFastRendererUnorderedLists(t *testing.T) {
@@ -562,6 +655,168 @@ func TestFastRendererTablesColumnAlignment(t *testing.T) {
 	}
 }
 
+func TestFastRendererTableViewportWidth(t *testing.T) {
+	t.Parallel()
+
+	// Table with long cell content that would overflow a narrow viewport
+	input := `| Short | This is a very long cell content that should wrap when the viewport is narrow |
+|-------|------------------------------------------------------------------|
+| A | Another long piece of text that definitely needs wrapping to fit |`
+
+	tests := []struct {
+		name  string
+		width int
+	}{
+		{"width 40", 40},
+		{"width 50", 50},
+		{"width 60", 60},
+		{"width 30", 30},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewFastRenderer(tt.width)
+			result, err := r.Render(input)
+			require.NoError(t, err)
+
+			// Every line should be exactly tt.width (finalizeOutput pads to width)
+			lines := strings.Split(result, "\n")
+			for i, line := range lines {
+				lineWidth := runewidth.StringWidth(stripANSI(line))
+				assert.Equal(t, tt.width, lineWidth,
+					"Line %d should have width %d, got %d: %q",
+					i, tt.width, lineWidth, stripANSI(line))
+			}
+		})
+	}
+}
+
+func TestFastRendererTableProportionalWidths(t *testing.T) {
+	t.Parallel()
+
+	// Table with one narrow column and one wide column
+	// The wide column should get proportionally more width
+	input := `| A | This is a much longer column that should get more space |
+|---|----------------------------------------------------------|
+| B | Another long text in this cell that needs wrapping |`
+
+	r := NewFastRenderer(50)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	plain := stripANSI(result)
+	lines := strings.Split(plain, "\n")
+
+	// Find separator positions in the first data line
+	var sepPositions []int
+	for i, char := range lines[0] {
+		if char == '│' {
+			sepPositions = append(sepPositions, i)
+		}
+	}
+
+	require.NotEmpty(t, sepPositions, "Should have column separators")
+
+	// The first column (just "A" or "B") should be narrow
+	// The separator should be near the beginning, not in the middle
+	// This proves proportional allocation gives more to the wide column
+	assert.Less(t, sepPositions[0], 15,
+		"First separator should be near the start, indicating narrow first column")
+}
+
+func TestFastRendererTableMultiLineAlignment(t *testing.T) {
+	t.Parallel()
+
+	// Table where wrapping produces multi-line rows
+	input := `| ID | Description |
+|-----|-------------|
+| 1 | A short description |
+| 2 | A much longer description that will definitely need to wrap when rendered in a narrow viewport |`
+
+	r := NewFastRenderer(40)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	plain := stripANSI(result)
+	lines := strings.Split(plain, "\n")
+
+	// Filter out empty lines and separator lines (─)
+	var dataLines []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "─") {
+			dataLines = append(dataLines, line)
+		}
+	}
+
+	// All data lines should have column separators at the same position
+	var expectedSepPos int
+	foundFirst := false
+	for i, line := range dataLines {
+		for j, char := range line {
+			if char == '│' {
+				if !foundFirst {
+					expectedSepPos = j
+					foundFirst = true
+				} else {
+					assert.Equal(t, expectedSepPos, j,
+						"Line %d has separator at position %d, expected %d: %q",
+						i, j, expectedSepPos, line)
+				}
+				break
+			}
+		}
+	}
+}
+
+func TestFastRendererTableCompactMode(t *testing.T) {
+	t.Parallel()
+
+	// Table with multiple columns in very narrow viewport
+	// Should switch to compact separators
+	input := `| A | B | C | D |
+|---|---|---|---|
+| 1 | 2 | 3 | 4 |`
+
+	r := NewFastRenderer(20)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	// Every line should still fit within the viewport
+	lines := strings.Split(result, "\n")
+	for i, line := range lines {
+		lineWidth := runewidth.StringWidth(stripANSI(line))
+		assert.Equal(t, 20, lineWidth,
+			"Line %d should have width 20, got %d: %q",
+			i, lineWidth, stripANSI(line))
+	}
+}
+
+func TestFastRendererTableWrappedCellContent(t *testing.T) {
+	t.Parallel()
+
+	// Verify that cell content is preserved when wrapped
+	input := `| Header One | Header Two |
+|------------|------------|
+| Short | This cell has a lot of text that needs to wrap properly without losing any content |`
+
+	r := NewFastRenderer(45)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	plain := stripANSI(result)
+
+	// All key words from the cells should be present (may be on separate lines due to wrapping)
+	assert.Contains(t, plain, "Header")
+	assert.Contains(t, plain, "One")
+	assert.Contains(t, plain, "Two")
+	assert.Contains(t, plain, "Short")
+	assert.Contains(t, plain, "cell has")
+	assert.Contains(t, plain, "properly")
+	assert.Contains(t, plain, "content")
+}
+
 func TestFastRendererEscapedCharacters(t *testing.T) {
 	t.Parallel()
 
@@ -675,7 +930,7 @@ func TestFastRendererFixedWidthRectangle(t *testing.T) {
 	out, err := r.Render(input)
 	require.NoError(t, err)
 
-	for _, line := range strings.Split(out, "\n") {
+	for line := range strings.SplitSeq(out, "\n") {
 		assert.Equal(t, 30, runewidth.StringWidth(stripANSI(line)))
 	}
 }
@@ -747,7 +1002,7 @@ func BenchmarkFastRenderer(b *testing.B) {
 }
 
 func BenchmarkGlamourRenderer(b *testing.B) {
-	r := NewGlamourRenderer(80)
+	r := newGlamourRenderer(80)
 	for b.Loop() {
 		_, _ = r.Render(benchmarkInput)
 	}
@@ -762,7 +1017,7 @@ func BenchmarkFastRendererSmall(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererSmall(b *testing.B) {
-	r := NewGlamourRenderer(80)
+	r := newGlamourRenderer(80)
 	input := "Hello **world**, this is a *test*."
 	for b.Loop() {
 		_, _ = r.Render(input)
@@ -778,7 +1033,7 @@ func BenchmarkFastRendererCodeBlock(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererCodeBlock(b *testing.B) {
-	r := NewGlamourRenderer(80)
+	r := newGlamourRenderer(80)
 	input := "```go\nfunc main() {\n\tfmt.Println(\"hello`\")\n}\n```"
 	for b.Loop() {
 		_, _ = r.Render(input)
@@ -800,7 +1055,7 @@ func BenchmarkFastRendererTable(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererTable(b *testing.B) {
-	r := NewGlamourRenderer(80)
+	r := newGlamourRenderer(80)
 	for b.Loop() {
 		_, _ = r.Render(benchmarkTableInput)
 	}
@@ -814,7 +1069,7 @@ func BenchmarkFastRendererTableWidth20(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererTableWidth20(b *testing.B) {
-	r := NewGlamourRenderer(20)
+	r := newGlamourRenderer(20)
 	for b.Loop() {
 		_, _ = r.Render(benchmarkTableInput)
 	}
@@ -828,7 +1083,7 @@ func BenchmarkFastRendererTableWidth200(b *testing.B) {
 }
 
 func BenchmarkGlamourRendererTableWidth200(b *testing.B) {
-	r := NewGlamourRenderer(200)
+	r := newGlamourRenderer(200)
 	for b.Loop() {
 		_, _ = r.Render(benchmarkTableInput)
 	}
@@ -1321,7 +1576,7 @@ func TestFastRendererDeeplyNestedBlockquotes(t *testing.T) {
 
 	// No literal > symbols should appear in the text content
 	// (they should all be consumed as blockquote markers)
-	for _, line := range strings.Split(plain, "\n") {
+	for line := range strings.SplitSeq(plain, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
 			assert.NotRegexp(t, `^>`, trimmed, "Line should not start with literal >: %q", trimmed)
@@ -1418,10 +1673,10 @@ func TestFastRendererCodeBlockWhitespaceWrap(t *testing.T) {
 	require.NoError(t, err)
 
 	plain := stripANSI(result)
-	lines := strings.Split(plain, "\n")
+	lines := strings.SplitSeq(plain, "\n")
 
 	// If wrapping occurred, it should have wrapped at a space
-	for _, line := range lines {
+	for line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" && len(trimmed) > 1 {
 			// Line shouldn't end mid-word (unless the word itself is longer than width)
@@ -1514,8 +1769,8 @@ func TestFastRendererTableSeparatorStyling(t *testing.T) {
 	require.NoError(t, err)
 
 	// The separator line should have styling applied (same as other table elements)
-	lines := strings.Split(result, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(result, "\n")
+	for line := range lines {
 		plainLine := stripANSI(line)
 		if strings.Contains(plainLine, "─") {
 			// Separator line should have ANSI styling
@@ -1538,15 +1793,205 @@ func splitIntoStreamingChunks(content string) []string {
 
 	for i < len(content) {
 		chunkSize := chunkSizes[sizeIdx%len(chunkSizes)]
-		end := i + chunkSize
-		if end > len(content) {
-			end = len(content)
-		}
+		end := min(i+chunkSize, len(content))
 		chunks = append(chunks, content[i:end])
 		i = end
 		sizeIdx++
 	}
 	return chunks
+}
+
+func TestFastRendererLinkOSC8(t *testing.T) {
+	t.Parallel()
+	input := "[Grafana](https://grafana.example.com/d/abc123?from=now-1h&to=now&var-host=prod-01)"
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	plain := stripANSI(result)
+	// Only link text visible, not the long URL
+	assert.Contains(t, plain, "Grafana")
+	assert.NotContains(t, plain, "grafana.example.com")
+
+	// OSC 8 hyperlink wraps the text
+	assert.Contains(t, result, "\x1b]8;;https://grafana.example.com/d/abc123?from=now-1h&to=now&var-host=prod-01\x07")
+	assert.Contains(t, result, "\x1b]8;;\x07")
+}
+
+func TestFastRendererLinkSameTextAndURL(t *testing.T) {
+	t.Parallel()
+	input := "[https://example.com](https://example.com)"
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	plain := stripANSI(result)
+	assert.Contains(t, plain, "https://example.com")
+	// OSC 8 should still be present
+	assert.Contains(t, result, "\x1b]8;;https://example.com\x07")
+}
+
+func TestFastRendererAutoLinkURL(t *testing.T) {
+	t.Parallel()
+	input := "Visit https://example.com/page for details"
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	plain := stripANSI(result)
+	assert.Contains(t, plain, "https://example.com/page")
+	// URL should be wrapped in OSC 8
+	assert.Contains(t, result, "\x1b]8;;https://example.com/page\x07")
+	assert.Contains(t, result, "\x1b]8;;\x07")
+}
+
+func TestFastRendererAutoLinkTrailingPunctuation(t *testing.T) {
+	t.Parallel()
+	input := "Check https://example.com/page."
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	// The trailing period should NOT be part of the URL
+	assert.Contains(t, result, "\x1b]8;;https://example.com/page\x07")
+}
+
+func TestFastRendererAutoLinkWithParens(t *testing.T) {
+	t.Parallel()
+	input := "See https://en.wikipedia.org/wiki/Thing_(disambiguation) for info"
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	// Parens in URL should be preserved when balanced
+	assert.Contains(t, result, "\x1b]8;;https://en.wikipedia.org/wiki/Thing_(disambiguation)\x07")
+}
+
+func TestFastRendererAutoLinkAdjacentMarkdown(t *testing.T) {
+	t.Parallel()
+	// URL immediately followed by bold markdown — URL should stop before the *
+	input := "Visit https://example.com*important note*"
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	// The URL should be only https://example.com (not including *important note*)
+	assert.Contains(t, result, "\x1b]8;;https://example.com\x07")
+	// "important note" should be rendered as bold (between * markers), not as part of the URL
+	plain := stripANSI(result)
+	assert.Contains(t, plain, "important note")
+}
+
+func TestFastRendererAutoLinkMinimalURL(t *testing.T) {
+	t.Parallel()
+	// Minimal valid-ish URL: "https://x" — should be detected
+	input := "https://x"
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+	assert.Contains(t, result, "\x1b]8;;https://x\x07")
+}
+
+func TestFastRendererAutoLinkAtEndOfText(t *testing.T) {
+	t.Parallel()
+	// URL at the very end of the text with no trailing space or punctuation.
+	// This previously caused a slice bounds panic.
+	input := "Check this: https://example.com/path"
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	// Should contain the OSC 8 hyperlink sequence
+	assert.Contains(t, result, "\x1b]8;;https://example.com/path\x07")
+	assert.Contains(t, result, "\x1b]8;;\x07")
+
+	// Visible text should contain the URL
+	plain := stripANSI(result)
+	assert.Contains(t, plain, "Check this:")
+	assert.Contains(t, plain, "https://example.com/path")
+}
+
+func TestFastRendererLinkWidthCalculation(t *testing.T) {
+	t.Parallel()
+	// With OSC 8, the URL is invisible — only link text width counts
+	input := "[Go](https://very-long-url.example.com/path/to/page?query=value&other=thing)"
+	r := NewFastRenderer(40)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+
+	for line := range strings.SplitSeq(strings.TrimRight(result, "\n"), "\n") {
+		w := ansi.StringWidth(line)
+		assert.LessOrEqual(t, w, 40, "Line exceeds width: %q (width=%d)", line, w)
+	}
+}
+
+func TestFastRendererAutoLinkLongURLWrapping(t *testing.T) {
+	t.Parallel()
+	longURL := "https://grafana.example.com/explore?left=%7B%22datasource%22%3A%22logs%22%2C%22queries%22%3A%5B%7B%22expr%22%3A%22%7Bservice%3D%5C%22test%5C%22%7D%22%7D%5D%7D"
+	r := NewFastRenderer(60)
+	result, err := r.Render(longURL)
+	require.NoError(t, err)
+
+	lines := strings.Split(result, "\n")
+	for i, line := range lines {
+		stripped := ansi.Strip(line)
+		if strings.TrimSpace(stripped) == "" {
+			continue // skip empty/padding lines
+		}
+		hasOpen := strings.Contains(line, "\x1b]8;;http")
+		hasClose := strings.Contains(line, "\x1b]8;;\x07")
+		assert.True(t, hasOpen, "line %d should have OSC 8 open: %q", i, stripped)
+		assert.True(t, hasClose, "line %d should have OSC 8 close: %q", i, stripped)
+	}
+}
+
+func TestFastRendererCodeBlockURL(t *testing.T) {
+	t.Parallel()
+	input := "```\nhttps://example.com/very/long/path\n```"
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+	// The URL in the code block should be wrapped in OSC 8
+	assert.Contains(t, result, "\x1b]8;;https://example.com/very/long/path\x07")
+	assert.Contains(t, result, "\x1b]8;;\x07")
+}
+
+func TestFastRendererCodeBlockLongURLWrapping(t *testing.T) {
+	t.Parallel()
+	longURL := "https://grafana.example.com/explore?left=%7B%22datasource%22%3A%22logs%22%2C%22queries%22%3A%5B%7B%22expr%22%3A%22%7Bservice%3D%5C%22test%5C%22%7D%22%7D%5D%7D"
+	input := "```\n" + longURL + "\n```"
+	r := NewFastRenderer(60)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+	// Each non-empty content line should have OSC 8 open and close
+	lines := strings.Split(result, "\n")
+	for i, line := range lines {
+		stripped := ansi.Strip(line)
+		if strings.TrimSpace(stripped) == "" {
+			continue
+		}
+		// Lines containing URL text should have OSC 8
+		if strings.Contains(stripped, "https://") || strings.Contains(stripped, "grafana") || strings.Contains(stripped, "%22") {
+			hasOpen := strings.Contains(line, "\x1b]8;;http")
+			hasClose := strings.Contains(line, "\x1b]8;;\x07")
+			assert.True(t, hasOpen, "line %d should have OSC 8 open: %q", i, stripped)
+			assert.True(t, hasClose, "line %d should have OSC 8 close: %q", i, stripped)
+		}
+	}
+}
+
+func TestFastRendererCodeBlockMixedTextAndURL(t *testing.T) {
+	t.Parallel()
+	input := "```\nvisit https://example.com for details\n```"
+	r := NewFastRenderer(80)
+	result, err := r.Render(input)
+	require.NoError(t, err)
+	// The URL should be wrapped in OSC 8, but surrounding text should not
+	assert.Contains(t, result, "\x1b]8;;https://example.com\x07")
+	assert.Contains(t, result, "\x1b]8;;\x07")
+	plain := stripANSI(result)
+	assert.Contains(t, plain, "visit")
+	assert.Contains(t, plain, "for details")
 }
 
 // BenchmarkStreamingFastRenderer benchmarks rendering progressively growing markdown.
@@ -1575,11 +2020,62 @@ func BenchmarkStreamingGlamourRenderer(b *testing.B) {
 
 	b.ResetTimer()
 	for b.Loop() {
-		r := NewGlamourRenderer(80)
+		r := newGlamourRenderer(80)
 		var accumulated strings.Builder
 		for _, chunk := range chunks {
 			accumulated.WriteString(chunk)
 			_, _ = r.Render(accumulated.String())
 		}
+	}
+}
+
+func TestFastRendererCodeBlocksReturnsRawContent(t *testing.T) {
+	t.Parallel()
+
+	input := "Some intro.\n\n```go\npackage main\n\nfunc main() {}\n```\n\nMid.\n\n```\nhello\nworld\n```\n"
+	r := NewFastRenderer(80)
+	out, blocks, err := r.RenderWithCodeBlocks(input)
+	require.NoError(t, err)
+
+	require.Len(t, blocks, 2)
+	assert.Equal(t, "package main\n\nfunc main() {}", blocks[0].Content)
+	assert.Equal(t, "hello\nworld", blocks[1].Content)
+
+	// Each block's recorded line must contain the copy-affordance glyph.
+	lines := strings.Split(out, "\n")
+	for _, b := range blocks {
+		require.Less(t, b.Line, len(lines), "code block line index out of range")
+		assert.Contains(t, stripANSI(lines[b.Line]), CodeBlockCopyIcon,
+			"line %d should contain the code block copy label", b.Line)
+	}
+
+	// The two code blocks must land on different lines.
+	assert.NotEqual(t, blocks[0].Line, blocks[1].Line)
+}
+
+func TestIncrementalRendererCodeBlocksAggregate(t *testing.T) {
+	t.Parallel()
+
+	// Render in two streamed chunks; the second extends the first.
+	chunk1 := "Intro paragraph.\n\n```go\nfunc a() {}\n```\n\n"
+	chunk2 := chunk1 + "Middle.\n\n```\nplain\ncode\n```\n"
+
+	r := NewIncrementalRenderer(80)
+	_, blocks1, err := r.RenderWithCodeBlocks(chunk1)
+	require.NoError(t, err)
+	require.Len(t, blocks1, 1)
+	assert.Equal(t, "func a() {}", blocks1[0].Content)
+
+	out, blocks2, err := r.RenderWithCodeBlocks(chunk2)
+	require.NoError(t, err)
+	require.Len(t, blocks2, 2)
+	assert.Equal(t, "func a() {}", blocks2[0].Content)
+	assert.Equal(t, "plain\ncode", blocks2[1].Content)
+
+	// Each block's reported line must carry the copy label in the final output.
+	lines := strings.Split(out, "\n")
+	for _, b := range blocks2 {
+		require.Less(t, b.Line, len(lines))
+		assert.Contains(t, stripANSI(lines[b.Line]), CodeBlockCopyIcon)
 	}
 }

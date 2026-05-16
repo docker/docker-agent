@@ -7,23 +7,25 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/model/provider"
-	"github.com/docker/cagent/pkg/model/provider/base"
-	"github.com/docker/cagent/pkg/rag/database"
-	"github.com/docker/cagent/pkg/rag/types"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/rag/database"
+	"github.com/docker/docker-agent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // fakeRerankingProvider implements provider.RerankingProvider for testing.
 type fakeRerankingProvider struct {
 	base.Config
+
 	scores []float64
 	err    error
 }
 
-func (f *fakeRerankingProvider) ID() string {
-	return "fake-reranker"
+func (f *fakeRerankingProvider) ID() modelsdev.ID {
+	return modelsdev.NewID("test", "fake-reranker")
 }
 
 func (f *fakeRerankingProvider) CreateChatCompletionStream(
@@ -65,8 +67,8 @@ type fakeProviderWithoutRerank struct {
 	base.Config
 }
 
-func (f *fakeProviderWithoutRerank) ID() string {
-	return "fake-no-rerank"
+func (f *fakeProviderWithoutRerank) ID() modelsdev.ID {
+	return modelsdev.NewID("test", "fake-no-rerank")
 }
 
 func (f *fakeProviderWithoutRerank) CreateChatCompletionStream(

@@ -1,0 +1,15 @@
+version: "2"
+
+agents:
+  root:
+    model: openai/gpt-3.5-turbo
+    instruction: |
+      You are a helpful assistant that delegates tasks to sub-agents.
+      When asked about weather, delegate to the weather agent using transfer_task.
+    sub_agents:
+      - weather
+
+  weather:
+    model: openai/gpt-3.5-turbo
+    instruction: |
+      You are a weather expert. When asked about weather, provide a brief answer.

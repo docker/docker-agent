@@ -2,11 +2,11 @@ package v2
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 
-	"github.com/goccy/go-yaml"
-
-	"github.com/docker/cagent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/config/types"
 )
 
 const Version = "2"
@@ -17,7 +17,7 @@ type Config struct {
 	Agents   map[string]AgentConfig `json:"agents,omitempty"`
 	Models   map[string]ModelConfig `json:"models,omitempty"`
 	RAG      map[string]RAGConfig   `json:"rag,omitempty"`
-	Metadata Metadata               `json:"metadata,omitempty"`
+	Metadata Metadata               `json:"metadata"`
 }
 
 // AgentConfig represents a single agent configuration
@@ -125,7 +125,7 @@ type Toolset struct {
 	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
 	Ref     string   `json:"ref,omitempty"`
-	Remote  Remote   `json:"remote,omitempty"`
+	Remote  Remote   `json:"remote"`
 	Config  any      `json:"config,omitempty"`
 
 	// For `shell`, `script` or `mcp` tools
@@ -202,11 +202,11 @@ func (t *ThinkingBudget) UnmarshalYAML(unmarshal func(any) error) error {
 func (t ThinkingBudget) MarshalJSON() ([]byte, error) {
 	// If Effort string is set (non-empty), marshal as string
 	if t.Effort != "" {
-		return []byte(fmt.Sprintf("%q", t.Effort)), nil
+		return fmt.Appendf(nil, "%q", t.Effort), nil
 	}
 
 	// Otherwise marshal as integer (includes 0, -1, and positive values)
-	return []byte(fmt.Sprintf("%d", t.Tokens)), nil
+	return fmt.Appendf(nil, "%d", t.Tokens), nil
 }
 
 // UnmarshalJSON implements custom unmarshaling to accept simple string or int format
@@ -246,17 +246,17 @@ type RAGConfig struct {
 	Description string              `json:"description,omitempty"`
 	Docs        []string            `json:"docs,omitempty"`       // Shared documents across all strategies
 	Strategies  []RAGStrategyConfig `json:"strategies,omitempty"` // Array of strategy configurations
-	Results     RAGResultsConfig    `json:"results,omitempty"`
+	Results     RAGResultsConfig    `json:"results"`
 }
 
 // RAGStrategyConfig represents a single retrieval strategy configuration
 // Strategy-specific fields are stored in Params (validated by strategy implementation)
-type RAGStrategyConfig struct {
-	Type     string            `json:"type"`               // Strategy type: "chunked-embeddings", "bm25", etc.
-	Docs     []string          `json:"docs,omitempty"`     // Strategy-specific documents (augments shared docs)
-	Database RAGDatabaseConfig `json:"database,omitempty"` // Database configuration
-	Chunking RAGChunkingConfig `json:"chunking,omitempty"` // Chunking configuration
-	Limit    int               `json:"limit,omitempty"`    // Max results from this strategy (for fusion input)
+type RAGStrategyConfig struct { //nolint:recvcheck // Marshal methods must use value receiver for YAML/JSON slice encoding, Unmarshal must use pointer
+	Type     string            `json:"type"`            // Strategy type: "chunked-embeddings", "bm25", etc.
+	Docs     []string          `json:"docs,omitempty"`  // Strategy-specific documents (augments shared docs)
+	Database RAGDatabaseConfig `json:"database"`        // Database configuration
+	Chunking RAGChunkingConfig `json:"chunking"`        // Chunking configuration
+	Limit    int               `json:"limit,omitempty"` // Max results from this strategy (for fusion input)
 
 	// Strategy-specific parameters (arbitrary key-value pairs)
 	// Examples:
@@ -318,9 +318,9 @@ func (s *RAGStrategyConfig) UnmarshalYAML(unmarshal func(any) error) error {
 }
 
 // MarshalYAML implements custom marshaling to flatten Params into parent level
-func (s RAGStrategyConfig) MarshalYAML() ([]byte, error) {
+func (s RAGStrategyConfig) MarshalYAML() (any, error) {
 	result := s.buildFlattenedMap()
-	return yaml.Marshal(result)
+	return result, nil
 }
 
 // MarshalJSON implements custom marshaling to flatten Params into parent level
@@ -409,9 +409,7 @@ func (s RAGStrategyConfig) buildFlattenedMap() map[string]any {
 	}
 
 	// Flatten Params into the same level
-	for k, v := range s.Params {
-		result[k] = v
-	}
+	maps.Copy(result, s.Params)
 
 	return result
 }
@@ -462,7 +460,7 @@ func coerceToInt(v any) int {
 	case int64:
 		return int(val)
 	case uint64:
-		return int(val)
+		return int(val) //nolint:gosec // frozen config: value comes from validated YAML; bounds enforced by schema
 	case float64:
 		return int(val)
 	default:
@@ -485,7 +483,7 @@ func (d *RAGDatabaseConfig) UnmarshalYAML(unmarshal func(any) error) error {
 		return nil
 	}
 
-	return fmt.Errorf("database must be a string path to a sqlite database")
+	return errors.New("database must be a string path to a sqlite database")
 }
 
 // AsString returns the database config as a connection string
@@ -500,7 +498,7 @@ func (d *RAGDatabaseConfig) AsString() (string, error) {
 		return str, nil
 	}
 
-	return "", fmt.Errorf("invalid database configuration: expected string path")
+	return "", errors.New("invalid database configuration: expected string path")
 }
 
 // IsEmpty returns true if no database is configured
@@ -509,11 +507,11 @@ func (d *RAGDatabaseConfig) IsEmpty() bool {
 }
 
 // MarshalYAML implements custom marshaling for DatabaseConfig
-func (d RAGDatabaseConfig) MarshalYAML() ([]byte, error) {
+func (d RAGDatabaseConfig) MarshalYAML() (any, error) {
 	if d.value == nil {
-		return yaml.Marshal(nil)
+		return nil, nil
 	}
-	return yaml.Marshal(d.value)
+	return d.value, nil
 }
 
 // MarshalJSON implements custom marshaling for DatabaseConfig
@@ -531,7 +529,7 @@ func (d *RAGDatabaseConfig) UnmarshalJSON(data []byte) error {
 		d.value = str
 		return nil
 	}
-	return fmt.Errorf("database must be a string path to a sqlite database")
+	return errors.New("database must be a string path to a sqlite database")
 }
 
 // RAGChunkingConfig represents text chunking configuration

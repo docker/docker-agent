@@ -5,8 +5,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/rag/types"
 )
 
 // NewChunkedEmbeddingsFromConfig creates a chunked-embeddings strategy from configuration.

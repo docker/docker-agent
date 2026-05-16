@@ -12,15 +12,16 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/docker/cagent/pkg/config"
-	"github.com/docker/cagent/pkg/evaluation"
-	"github.com/docker/cagent/pkg/telemetry"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/evaluation"
+	"github.com/docker/docker-agent/pkg/telemetry"
 )
 
 const defaultJudgeModel = "anthropic/claude-opus-4-5-20251101"
 
 type evalFlags struct {
 	evaluation.Config
+
 	runConfig config.RuntimeConfig
 	outputDir string
 }
@@ -43,12 +44,17 @@ func newEvalCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&flags.Only, "only", nil, "Only run evaluations with file names matching these patterns (can be specified multiple times)")
 	cmd.Flags().StringVar(&flags.BaseImage, "base-image", "", "Custom base Docker image for running evaluations")
 	cmd.Flags().BoolVar(&flags.KeepContainers, "keep-containers", false, "Keep containers after evaluation (don't use --rm)")
+	cmd.Flags().StringSliceVarP(&flags.EnvVars, "env", "e", nil, "Environment variables to pass to container (KEY or KEY=VALUE)")
+	cmd.Flags().IntVar(&flags.Repeat, "repeat", 1, "Number of times to repeat each evaluation (useful for computing baselines)")
 
 	return cmd
 }
 
-func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) error {
-	telemetry.TrackCommand("eval", args)
+func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) (commandErr error) {
+	telemetry.TrackCommand(cmd.Context(), "eval", args)
+	defer func() { // do not inline this defer so that commandErr is not resolved early
+		telemetry.TrackCommandError(cmd.Context(), "eval", args, commandErr)
+	}()
 
 	ctx := cmd.Context()
 	agentFilename := args[0]
@@ -64,7 +70,7 @@ func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create output directory
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return fmt.Errorf("creating output directory: %w", err)
 	}
 
@@ -73,7 +79,7 @@ func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) error {
 
 	// Set up log file with debug logging
 	logPath := filepath.Join(outputDir, runName+".log")
-	logFile, err := os.Create(logPath)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("creating log file: %w", err)
 	}
@@ -118,14 +124,23 @@ func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) error {
 		return evalErr
 	}
 
-	// Save results JSON
-	resultsPath, err := evaluation.SaveRunJSON(run, outputDir)
+	// Save sessions to SQLite database
+	dbPath, err := evaluation.SaveRunSessions(ctx, run, outputDir)
 	if err != nil {
-		slog.Error("Failed to save results", "error", err)
+		slog.ErrorContext(ctx, "Failed to save sessions database", "error", err)
 	} else {
-		fmt.Fprintf(teeOut, "\nResults: %s\n", resultsPath)
-		fmt.Fprintf(teeOut, "Log: %s\n", logPath)
+		fmt.Fprintf(teeOut, "\nSessions DB: %s\n", dbPath)
 	}
+
+	// Save sessions to JSON file (same format as /eval produces)
+	sessionsPath, err := evaluation.SaveRunSessionsJSON(run, outputDir)
+	if err != nil {
+		slog.ErrorContext(ctx, "Failed to save sessions JSON", "error", err)
+	} else {
+		fmt.Fprintf(teeOut, "Sessions JSON: %s\n", sessionsPath)
+	}
+
+	fmt.Fprintf(teeOut, "Log: %s\n", logPath)
 
 	return evalErr
 }

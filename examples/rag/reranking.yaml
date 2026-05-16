@@ -18,8 +18,9 @@ agents:
     instruction: |
       You are a helpful assistant with access to hybrid retrieval
       combining semantic and keyword search for comprehensive results.
-    rag: 
-      - knowledge_base
+    toolsets:
+      - type: rag
+        ref: knowledge_base
 
 rag:
   knowledge_base:

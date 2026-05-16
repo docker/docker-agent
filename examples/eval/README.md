@@ -3,7 +3,7 @@
 This is a simple agent that has two eval sessions saved in the `evals` directory, to run the eval you can:
 
 ```console
-$ cagent eval demo.yaml ./evals
+$ docker agent eval demo.yaml ./evals
 ```
 
 This will output something like

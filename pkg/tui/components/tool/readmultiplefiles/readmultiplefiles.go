@@ -7,22 +7,22 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/cagent/pkg/tools/builtin"
-	"github.com/docker/cagent/pkg/tui/components/spinner"
-	"github.com/docker/cagent/pkg/tui/components/toolcommon"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/styles"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tui/components/spinner"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-func New(msg *types.Message, sessionState *service.SessionState) layout.Model {
+func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
 	return toolcommon.NewBase(msg, sessionState, render)
 }
 
-func render(msg *types.Message, s spinner.Spinner, sessionState *service.SessionState, width, _ int) string {
+func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
 	// Parse arguments
-	var args builtin.ReadMultipleFilesArgs
+	var args filesystem.ReadMultipleFilesArgs
 	if err := json.Unmarshal([]byte(msg.ToolCall.Function.Arguments), &args); err != nil {
 		return toolcommon.RenderTool(msg, s, "", "", width, sessionState.HideToolResults())
 	}
@@ -33,9 +33,9 @@ func render(msg *types.Message, s spinner.Spinner, sessionState *service.Session
 	}
 
 	// For completed/error state, render each file line
-	var meta *builtin.ReadMultipleFilesMeta
+	var meta *filesystem.ReadMultipleFilesMeta
 	if msg.ToolResult != nil {
-		if m, ok := msg.ToolResult.Meta.(builtin.ReadMultipleFilesMeta); ok {
+		if m, ok := msg.ToolResult.Meta.(filesystem.ReadMultipleFilesMeta); ok {
 			meta = &m
 		}
 	}
@@ -87,7 +87,7 @@ type fileSummary struct {
 }
 
 // formatSummaryLines creates a summary for each file from metadata.
-func formatSummaryLines(meta *builtin.ReadMultipleFilesMeta) []fileSummary {
+func formatSummaryLines(meta *filesystem.ReadMultipleFilesMeta) []fileSummary {
 	if meta == nil || len(meta.Files) == 0 {
 		return nil
 	}

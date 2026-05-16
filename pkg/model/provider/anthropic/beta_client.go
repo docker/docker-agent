@@ -12,14 +12,18 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/rag/prompts"
-	"github.com/docker/cagent/pkg/rag/types"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
+	"github.com/docker/docker-agent/pkg/rag/prompts"
+	"github.com/docker/docker-agent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// createBetaStream creates a streaming chat completion using the Beta Messages API
-// This is used when extended thinking is enabled via thinking_budget
+// createBetaStream creates a streaming chat completion using the Beta
+// Messages API. It is used when any feature that requires a beta header is
+// enabled: extended/interleaved thinking, structured output, file attachments
+// (Files API), or task_budget.
 func (c *Client) createBetaStream(
 	ctx context.Context,
 	client anthropic.Client,
@@ -34,207 +38,105 @@ func (c *Client) createBetaStream(
 
 	allTools, err := convertBetaTools(requestTools)
 	if err != nil {
-		slog.Error("Failed to convert tools for Anthropic Beta request", "error", err)
+		slog.ErrorContext(ctx, "Failed to convert tools for Anthropic Beta request", "error", err)
 		return nil, err
 	}
 
-	converted := convertBetaMessages(messages)
-	if err := validateAnthropicSequencingBeta(converted); err != nil {
-		slog.Warn("Invalid message sequencing for Anthropic Beta API detected, attempting self-repair", "error", err)
-		converted = repairAnthropicSequencingBeta(converted)
-		if err2 := validateAnthropicSequencingBeta(converted); err2 != nil {
-			slog.Error("Failed to self-repair Anthropic Beta sequencing", "error", err2)
-			return nil, err
-		}
+	converted, err := c.convertBetaMessages(ctx, messages)
+	if err != nil {
+		slog.ErrorContext(ctx, "Failed to convert messages for Anthropic Beta request", "error", err)
+		return nil, err
+	}
+	if len(converted) == 0 {
+		return nil, errors.New("no messages to send after conversion: all messages were filtered out")
 	}
 
 	sys := extractBetaSystemBlocks(messages)
 
+	// Check if messages contain file attachments to include the files-api beta header
+	needsFilesAPI := hasFileAttachments(messages)
+
+	betas := []anthropic.AnthropicBeta{
+		anthropic.AnthropicBetaInterleavedThinking2025_05_14,
+		"fine-grained-tool-streaming-2025-05-14",
+	}
+	if needsFilesAPI {
+		betas = append(betas, filesAPIBeta)
+		slog.DebugContext(ctx, "Anthropic Beta API: Including files-api beta header for file attachments")
+	}
+
 	params := anthropic.BetaMessageNewParams{
-		Model:     anthropic.Model(c.ModelConfig.Model),
+		Model:     c.ModelConfig.Model,
 		MaxTokens: maxTokens,
 		System:    sys,
 		Messages:  converted,
 		Tools:     allTools,
-		Betas:     []anthropic.AnthropicBeta{anthropic.AnthropicBetaInterleavedThinking2025_05_14, "fine-grained-tool-streaming-2025-05-14"},
+		Betas:     betas,
 	}
 
 	// Apply structured output configuration
 	if structuredOutput := c.ModelOptions.StructuredOutput(); structuredOutput != nil {
-		slog.Debug("Anthropic Beta API using structured output", "name", structuredOutput.Name)
+		slog.DebugContext(ctx, "Anthropic Beta API using structured output", "name", structuredOutput.Name)
 
 		// Add structured outputs beta header
 		params.Betas = append(params.Betas, "structured-outputs-2025-11-13")
 
-		// Configure output format using the SDK helper
-		params.OutputFormat = anthropic.BetaJSONSchemaOutputFormat(structuredOutput.Schema)
+		// Configure output format using the SDK helper via OutputConfig
+		params.OutputConfig = anthropic.BetaOutputConfigParam{
+			Format: anthropic.BetaJSONSchemaOutputFormat(structuredOutput.Schema),
+		}
 	}
 
-	// Configure thinking if not explicitly disabled via /think command
-	// For interleaved thinking to make sense, we use a default of 16384 tokens for the thinking budget
-	thinkingEnabled := c.ModelOptions.Thinking() == nil || *c.ModelOptions.Thinking()
-	if thinkingEnabled {
-		thinkingTokens := int64(16384)
-		if c.ModelConfig.ThinkingBudget != nil {
-			thinkingTokens = int64(c.ModelConfig.ThinkingBudget.Tokens)
-		} else {
-			slog.Info("Anthropic Beta API using default thinking_budget with interleaved thinking", "budget_tokens", thinkingTokens)
-		}
-		switch {
-		case thinkingTokens >= 1024 && thinkingTokens < maxTokens:
-			params.Thinking = anthropic.BetaThinkingConfigParamOfEnabled(thinkingTokens)
-			slog.Debug("Anthropic Beta API using thinking_budget with interleaved thinking", "budget_tokens", thinkingTokens)
-		case thinkingTokens >= maxTokens:
-			slog.Warn("Anthropic Beta API thinking_budget must be less than max_tokens, ignoring", "tokens", thinkingTokens, "max_tokens", maxTokens)
-		default:
-			slog.Warn("Anthropic Beta API thinking_budget below minimum (1024), ignoring", "tokens", thinkingTokens)
-		}
-	} else {
-		slog.Debug("Anthropic Beta API: Thinking disabled via /think command")
-	}
+	// Configure thinking if a thinking budget is set in the model config.
+	// The beta client is also used for structured output and file attachments,
+	// which don't require thinking.
+	c.applyBetaThinkingConfig(&params, maxTokens)
+
+	// Forward task_budget via `output_config.task_budget` (Anthropic
+	// Opus 4.7+) and enable the corresponding beta header. Older Claude
+	// models will reject the field — docker-agent does not gate by model.
+	configureTaskBudget(&params, c.ModelConfig.TaskBudget)
 
 	if len(requestTools) > 0 {
-		slog.Debug("Anthropic Beta API: Adding tools to request", "tool_count", len(requestTools))
+		slog.DebugContext(ctx, "Anthropic Beta API: Adding tools to request", "tool_count", len(requestTools))
 	}
 
-	slog.Debug("Anthropic Beta API chat completion stream request",
+	slog.DebugContext(ctx, "Anthropic Beta API chat completion stream request",
 		"model", params.Model,
 		"max_tokens", maxTokens,
 		"message_count", len(params.Messages))
+
+	// Forward top_k from provider_opts (Anthropic natively supports it)
+	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok {
+		params.TopK = param.NewOpt(topK)
+		slog.DebugContext(ctx, "Anthropic Beta provider_opts: set top_k", "value", topK)
+	}
 
 	stream := client.Beta.Messages.NewStreaming(ctx, params)
 	trackUsage := c.ModelConfig.TrackUsage == nil || *c.ModelConfig.TrackUsage
 	ad := c.newBetaStreamAdapter(stream, trackUsage)
 
 	// Set up single retry for context length errors
-	ad.retryFn = func() *betaStreamAdapter {
-		used, err := countAnthropicTokensBeta(ctx, client, anthropic.Model(c.ModelConfig.Model), converted, sys, allTools)
+	ad.retryFn = func() *ssestream.Stream[anthropic.BetaRawMessageStreamEventUnion] {
+		used, err := countAnthropicTokensBeta(ctx, client, c.ModelConfig.Model, converted, sys, allTools)
 		if err != nil {
-			slog.Warn("Failed to count tokens for retry, skipping", "error", err)
+			slog.WarnContext(ctx, "Failed to count tokens for retry, skipping", "error", err)
 			return nil
 		}
 		newMaxTokens := clampMaxTokens(anthropicContextLimit(c.ModelConfig.Model), used, maxTokens)
 		if newMaxTokens >= maxTokens {
-			slog.Warn("Token count does not require clamping, not retrying")
+			slog.WarnContext(ctx, "Token count does not require clamping, not retrying")
 			return nil
 		}
-		slog.Warn("Retrying with clamped max_tokens after context length error", "original", maxTokens, "clamped", newMaxTokens, "used", used)
+		slog.WarnContext(ctx, "Retrying with clamped max_tokens after context length error", "original", maxTokens, "clamped", newMaxTokens, "used", used)
 		retryParams := params
 		retryParams.MaxTokens = newMaxTokens
-		return c.newBetaStreamAdapter(client.Beta.Messages.NewStreaming(ctx, retryParams), trackUsage)
+		return client.Beta.Messages.NewStreaming(ctx, retryParams)
 	}
 
-	slog.Debug("Anthropic Beta API chat completion stream created successfully", "model", c.ModelConfig.Model)
+	slog.DebugContext(ctx, "Anthropic Beta API chat completion stream created successfully", "model", c.ModelConfig.Model)
 	return ad, nil
 }
-
-// validateAnthropicSequencingBeta performs the same validation as standard API but for Beta payloads
-func validateAnthropicSequencingBeta(msgs []anthropic.BetaMessageParam) error {
-	for i := range msgs {
-		m, ok := marshalToMapBeta(msgs[i])
-		if !ok || m["role"] != "assistant" {
-			continue
-		}
-
-		toolUseIDs := collectToolUseIDs(contentArrayBeta(m))
-		if len(toolUseIDs) == 0 {
-			continue
-		}
-
-		if i+1 >= len(msgs) {
-			slog.Warn("Anthropic (beta) sequencing invalid: assistant tool_use present but no next user tool_result message", "assistant_index", i)
-			return errors.New("assistant tool_use present but no subsequent user message with tool_result blocks (beta)")
-		}
-
-		next, ok := marshalToMapBeta(msgs[i+1])
-		if !ok || next["role"] != "user" {
-			slog.Warn("Anthropic (beta) sequencing invalid: next message after assistant tool_use is not user", "assistant_index", i, "next_role", next["role"])
-			return errors.New("assistant tool_use must be followed by a user message containing corresponding tool_result blocks (beta)")
-		}
-
-		toolResultIDs := collectToolResultIDs(contentArrayBeta(next))
-		missing := differenceIDs(toolUseIDs, toolResultIDs)
-		if len(missing) > 0 {
-			slog.Warn("Anthropic (beta) sequencing invalid: missing tool_result for tool_use id in next user message", "assistant_index", i, "tool_use_id", missing[0], "missing_count", len(missing))
-			return fmt.Errorf("missing tool_result for tool_use id %s in the next user message (beta)", missing[0])
-		}
-	}
-	return nil
-}
-
-// repairAnthropicSequencingBeta inserts a synthetic user message with tool_result blocks
-// for any assistant tool_use blocks that don't have corresponding tool_result blocks
-// in the immediate next user message.
-func repairAnthropicSequencingBeta(msgs []anthropic.BetaMessageParam) []anthropic.BetaMessageParam {
-	if len(msgs) == 0 {
-		return msgs
-	}
-	repaired := make([]anthropic.BetaMessageParam, 0, len(msgs)+2)
-	for i := range msgs {
-		m, ok := marshalToMapBeta(msgs[i])
-		if !ok || m["role"] != "assistant" {
-			repaired = append(repaired, msgs[i])
-			continue
-		}
-
-		toolUseIDs := collectToolUseIDs(contentArrayBeta(m))
-		if len(toolUseIDs) == 0 {
-			repaired = append(repaired, msgs[i])
-			continue
-		}
-
-		// Check if the next message is a user message with tool_results
-		needsSyntheticMessage := true
-		if i+1 < len(msgs) {
-			if next, ok := marshalToMapBeta(msgs[i+1]); ok && next["role"] == "user" {
-				toolResultIDs := collectToolResultIDs(contentArrayBeta(next))
-				// Remove tool_use IDs that have corresponding tool_results
-				for id := range toolResultIDs {
-					delete(toolUseIDs, id)
-				}
-				// If all tool_use IDs have results, no synthetic message needed
-				if len(toolUseIDs) == 0 {
-					needsSyntheticMessage = false
-				}
-			}
-		}
-
-		// Append the assistant message first
-		repaired = append(repaired, msgs[i])
-
-		// If there are missing tool_results, insert a synthetic user message immediately after
-		if needsSyntheticMessage && len(toolUseIDs) > 0 {
-			slog.Debug("Inserting synthetic user message for missing tool_results",
-				"assistant_index", i,
-				"missing_count", len(toolUseIDs))
-
-			blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(toolUseIDs))
-			for id := range toolUseIDs {
-				slog.Debug("Creating synthetic tool_result", "tool_use_id", id)
-				blocks = append(blocks, anthropic.BetaContentBlockParamUnion{
-					OfToolResult: &anthropic.BetaToolResultBlockParam{
-						ToolUseID: id,
-						Content: []anthropic.BetaToolResultBlockParamContentUnion{
-							{OfText: &anthropic.BetaTextBlockParam{Text: "(tool execution failed)"}},
-						},
-					},
-				})
-			}
-			repaired = append(repaired, anthropic.BetaMessageParam{
-				Role:    anthropic.BetaMessageParamRoleUser,
-				Content: blocks,
-			})
-		}
-	}
-	return repaired
-}
-
-// marshalToMapBeta is an alias for marshalToMap - shared with standard API.
-// Kept as separate function for clarity in Beta-specific code paths.
-var marshalToMapBeta = marshalToMap
-
-// contentArrayBeta is an alias for contentArray - shared with standard API.
-var contentArrayBeta = contentArray
 
 // countAnthropicTokensBeta calls Anthropic's Count Tokens API for the provided Beta API payload
 // and returns the number of input tokens.
@@ -281,11 +183,11 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 	const logPrefix = "Anthropic reranking request"
 
 	if len(documents) == 0 {
-		slog.Debug(logPrefix, "model", c.ModelConfig.Model, "num_documents", 0)
+		slog.DebugContext(ctx, logPrefix, "model", c.ModelConfig.Model, "num_documents", 0)
 		return []float64{}, nil
 	}
 
-	slog.Debug(logPrefix,
+	slog.DebugContext(ctx, logPrefix,
 		"model", c.ModelConfig.Model,
 		"query_length", len(query),
 		"num_documents", len(documents),
@@ -293,7 +195,7 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 
 	client, err := c.clientFn(ctx)
 	if err != nil {
-		slog.Error("Failed to create Anthropic client for reranking", "error", err)
+		slog.ErrorContext(ctx, "Failed to create Anthropic client for reranking", "error", err)
 		return nil, err
 	}
 
@@ -337,13 +239,15 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		maxTokens = 8192
 	}
 	params := anthropic.BetaMessageNewParams{
-		Model:     anthropic.Model(c.ModelConfig.Model),
+		Model:     c.ModelConfig.Model,
 		MaxTokens: maxTokens,
 		Messages:  msgs,
 		// Enable structured outputs beta.
 		Betas: []anthropic.AnthropicBeta{"structured-outputs-2025-11-13"},
-		// Enforce schema for the output JSON.
-		OutputFormat: anthropic.BetaJSONSchemaOutputFormat(schema),
+		// Enforce schema for the output JSON via OutputConfig.
+		OutputConfig: anthropic.BetaOutputConfigParam{
+			Format: anthropic.BetaJSONSchemaOutputFormat(schema),
+		},
 	}
 
 	// Apply user-configured sampling settings if specified.
@@ -357,29 +261,35 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		params.TopP = param.NewOpt(*c.ModelConfig.TopP)
 	}
 
+	// Forward top_k from provider_opts (Anthropic natively supports it)
+	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok {
+		params.TopK = param.NewOpt(topK)
+		slog.DebugContext(ctx, "Anthropic Beta provider_opts: set top_k", "value", topK)
+	}
+
 	// Use streaming API to avoid timeout errors for operations that may take longer than 10 minutes
 	stream := client.Beta.Messages.NewStreaming(ctx, params)
 
 	// Accumulate the full response from the stream
 	resp, err := accumulateBetaStreamResponse(stream)
 	if err != nil {
-		slog.Error("Anthropic rerank streaming request failed", "error", err)
+		slog.ErrorContext(ctx, "Anthropic rerank streaming request failed", "error", err)
 		return nil, fmt.Errorf("anthropic rerank request failed: %w", err)
 	}
 
 	rawJSON, err := extractAnthropicStructuredOutputJSON(resp)
 	if err != nil {
-		slog.Error("Failed to extract Anthropic structured output JSON", "error", err)
+		slog.ErrorContext(ctx, "Failed to extract Anthropic structured output JSON", "error", err)
 		return nil, err
 	}
 
 	scores, err := parseRerankScoresAnthropic(rawJSON, len(documents))
 	if err != nil {
-		slog.Error("Failed to parse Anthropic rerank scores", "error", err)
+		slog.ErrorContext(ctx, "Failed to parse Anthropic rerank scores", "error", err)
 		return nil, err
 	}
 
-	slog.Debug("Anthropic reranking complete",
+	slog.DebugContext(ctx, "Anthropic reranking complete",
 		"model", c.ModelConfig.Model,
 		"num_scores", len(scores))
 
@@ -485,7 +395,7 @@ func accumulateBetaStreamResponse(stream *ssestream.Stream[anthropic.BetaRawMess
 		// Initialize the message metadata from the first event
 		if messageID == "" {
 			messageID = event.Message.ID
-			model = string(event.Message.Model)
+			model = event.Message.Model
 			role = string(event.Message.Role)
 			messageType = string(event.Message.Type)
 		}
@@ -545,4 +455,22 @@ func accumulateBetaStreamResponse(stream *ssestream.Stream[anthropic.BetaRawMess
 	}
 
 	return &msg, nil
+}
+
+// taskBudgetBeta is the Anthropic beta header required to send
+// `output_config.task_budget`. docker-agent attaches it automatically
+// whenever a TaskBudget is configured.
+const taskBudgetBeta anthropic.AnthropicBeta = "task-budgets-2026-03-13"
+
+// configureTaskBudget mutates params so the request carries the
+// `task-budgets` beta header and an `output_config.task_budget` payload.
+// No-op when tb is nil or zero.
+func configureTaskBudget(params *anthropic.BetaMessageNewParams, tb *latest.TaskBudget) {
+	payload := tb.AsMap()
+	if payload == nil {
+		return
+	}
+	params.Betas = append(params.Betas, taskBudgetBeta)
+	params.OutputConfig.SetExtraFields(map[string]any{"task_budget": payload})
+	slog.Debug("Anthropic Beta API using task_budget", "type", payload["type"], "total", payload["total"])
 }

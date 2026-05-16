@@ -8,8 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/docker/cagent/pkg/config"
-	"github.com/docker/cagent/pkg/userconfig"
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 func completeRunExec(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -29,6 +29,13 @@ func completeAlias(toComplete string) ([]string, cobra.ShellCompDirective) {
 	}
 
 	var candidates []string
+
+	// Add matching built-in agent names
+	for _, name := range config.BuiltinAgentNames() {
+		if strings.HasPrefix(name, toComplete) {
+			candidates = append(candidates, name+"\tbuilt-in agent")
+		}
+	}
 
 	// Add matching aliases
 	cfg, err := userconfig.Load()
@@ -52,7 +59,7 @@ func completeMessage(cmd *cobra.Command, args []string, toComplete string) ([]st
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	agentSource, err := config.Resolve(args[0])
+	agentSource, err := config.Resolve(args[0], nil)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
@@ -64,7 +71,16 @@ func completeMessage(cmd *cobra.Command, args []string, toComplete string) ([]st
 
 	agent, _ := cmd.Flags().GetString("agent")
 	if agent == "" {
-		agent = "root"
+		if len(cfg.Agents) == 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		// Mirror team.DefaultAgent: prefer "root" when present, otherwise
+		// the first agent declared. This keeps shell completion in sync
+		// with the agent the runtime would actually run.
+		agent = cfg.Agents[0].Name
+		if _, hasRoot := cfg.Agents.Lookup("root"); hasRoot {
+			agent = "root"
+		}
 	}
 	agentCfg, found := cfg.Agents.Lookup(agent)
 	if !found {

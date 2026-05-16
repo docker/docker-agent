@@ -1,0 +1,11 @@
+models:
+  model:
+    provider: anthropic
+    model: claude-sonnet-4-0
+
+agents:
+  root:
+    model: model
+    toolsets:
+      - type: mcp
+        ref: nonexistent

@@ -1,8 +1,8 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 agents:
   root:
-    model: anthropic/claude-3-7-sonnet-latest
+    model: anthropic/claude-3-7-sonnet-20250219
     description: Moby Project Expert
     instruction: You are an AI assistant with expertise in the moby/moby project's documentation.
     toolsets:

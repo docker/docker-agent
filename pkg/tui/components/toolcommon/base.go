@@ -3,19 +3,20 @@ package toolcommon
 import (
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/docker/cagent/pkg/tui/components/spinner"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/service"
-	"github.com/docker/cagent/pkg/tui/styles"
-	"github.com/docker/cagent/pkg/tui/types"
+	"github.com/docker/docker-agent/pkg/tui/components/spinner"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 // Renderer is a function that renders a tool call view.
-// It receives the message, spinner, session state, and available width/height.
-type Renderer func(msg *types.Message, s spinner.Spinner, sessionState *service.SessionState, width, height int) string
+// It receives the message, spinner, session state reader, and available width/height.
+// Note: Uses SessionStateReader interface for read-only access to session state.
+type Renderer func(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, height int) string
 
 // CollapsedRenderer is a function that renders a simplified view for collapsed reasoning blocks.
-type CollapsedRenderer func(msg *types.Message, s spinner.Spinner, sessionState *service.SessionState, width, height int) string
+type CollapsedRenderer func(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, height int) string
 
 // Base provides common boilerplate for tool components.
 // It handles spinner management, sizing, and delegates rendering to a custom function.
@@ -24,14 +25,15 @@ type Base struct {
 	spinner           spinner.Spinner
 	width             int
 	height            int
-	sessionState      *service.SessionState
+	sessionState      service.SessionStateReader // read-only access to session state
 	render            Renderer
 	collapsedRenderer CollapsedRenderer
 	spinnerRegistered bool // tracks whether spinner is registered with coordinator
 }
 
 // NewBase creates a new base tool component with the given renderer.
-func NewBase(msg *types.Message, sessionState *service.SessionState, render Renderer) *Base {
+// Accepts SessionStateReader for read-only access (also accepts *SessionState which implements it).
+func NewBase(msg *types.Message, sessionState service.SessionStateReader, render Renderer) *Base {
 	return &Base{
 		message:      msg,
 		spinner:      spinner.New(spinner.ModeSpinnerOnly, styles.SpinnerDotsAccentStyle),
@@ -43,7 +45,8 @@ func NewBase(msg *types.Message, sessionState *service.SessionState, render Rend
 }
 
 // NewBaseWithCollapsed creates a new base tool component with both regular and collapsed renderers.
-func NewBaseWithCollapsed(msg *types.Message, sessionState *service.SessionState, render Renderer, collapsedRender CollapsedRenderer) *Base {
+// Accepts SessionStateReader for read-only access (also accepts *SessionState which implements it).
+func NewBaseWithCollapsed(msg *types.Message, sessionState service.SessionStateReader, render Renderer, collapsedRender CollapsedRenderer) *Base {
 	return &Base{
 		message:           msg,
 		spinner:           spinner.New(spinner.ModeSpinnerOnly, styles.SpinnerDotsAccentStyle),
@@ -53,31 +56,6 @@ func NewBaseWithCollapsed(msg *types.Message, sessionState *service.SessionState
 		render:            render,
 		collapsedRenderer: collapsedRender,
 	}
-}
-
-// Message returns the tool message.
-func (b *Base) Message() *types.Message {
-	return b.message
-}
-
-// SessionState returns the session state.
-func (b *Base) SessionState() *service.SessionState {
-	return b.sessionState
-}
-
-// Width returns the current width.
-func (b *Base) Width() int {
-	return b.width
-}
-
-// Height returns the current height.
-func (b *Base) Height() int {
-	return b.height
-}
-
-// Spinner returns the spinner.
-func (b *Base) Spinner() spinner.Spinner {
-	return b.spinner
 }
 
 func (b *Base) SetSize(width, height int) tea.Cmd {
@@ -124,6 +102,11 @@ func (b *Base) View() string {
 	return b.render(b.message, b.spinner, b.sessionState, b.width, b.height)
 }
 
+// ExpandedView returns the regular, full tool renderer.
+func (b *Base) ExpandedView() string {
+	return b.View()
+}
+
 // CollapsedView returns a simplified view for use in collapsed reasoning blocks.
 // Falls back to the regular View() if no collapsed renderer is provided.
 func (b *Base) CollapsedView() string {
@@ -133,16 +116,32 @@ func (b *Base) CollapsedView() string {
 	return b.View()
 }
 
+// StopAnimation stops the spinner animation and unregisters from the animation coordinator.
+// This must be called when the view is removed from the UI to avoid leaked animation subscriptions.
+func (b *Base) StopAnimation() {
+	if b.spinnerRegistered {
+		b.spinnerRegistered = false
+		b.spinner.Stop()
+	}
+}
+
 func (b *Base) isSpinnerActive() bool {
 	return b.message.ToolStatus == types.ToolStatusPending ||
 		b.message.ToolStatus == types.ToolStatusRunning
+}
+
+// NoArgsRenderer is a Renderer that displays only the tool name and status,
+// without arguments or a result. Useful for tools whose arguments aren't
+// worth surfacing in the UI (e.g. user_prompt, todo helpers).
+func NoArgsRenderer(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
+	return RenderTool(msg, s, "", "", width, sessionState.HideToolResults())
 }
 
 // SimpleRenderer creates a renderer that extracts a single string argument
 // and renders it with RenderTool. This covers the most common case where
 // tools just display one argument (like path, command, etc.).
 func SimpleRenderer(extractArg func(args string) string) Renderer {
-	return func(msg *types.Message, s spinner.Spinner, sessionState *service.SessionState, width, _ int) string {
+	return func(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
 		arg := ""
 		if msg.ToolCall.Function.Arguments != "" {
 			arg = extractArg(msg.ToolCall.Function.Arguments)
@@ -157,7 +156,7 @@ func SimpleRendererWithResult(
 	extractArg func(args string) string,
 	extractResult func(msg *types.Message) string,
 ) Renderer {
-	return func(msg *types.Message, s spinner.Spinner, sessionState *service.SessionState, width, _ int) string {
+	return func(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
 		arg := ""
 		if msg.ToolCall.Function.Arguments != "" {
 			arg = extractArg(msg.ToolCall.Function.Arguments)

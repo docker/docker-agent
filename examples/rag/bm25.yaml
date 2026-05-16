@@ -1,3 +1,4 @@
+
 agents:
   root:
     model: openai/gpt-5-mini
@@ -5,8 +6,9 @@ agents:
     instruction: |
       You are a helpful assistant that uses BM25 keyword-based search
       to find relevant information in documents.
-    rag: 
-      - blork_knowledge_base
+    toolsets:
+      - type: rag
+        ref: blork_knowledge_base
 
 rag:
   blork_knowledge_base:

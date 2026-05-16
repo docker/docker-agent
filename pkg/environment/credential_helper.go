@@ -1,12 +1,6 @@
 package environment
 
-import (
-	"bytes"
-	"context"
-	"log/slog"
-	"os/exec"
-	"strings"
-)
+import "context"
 
 // CredentialHelperProvider retrieves Docker credentials using an external CLI command
 // configured in the user's global config file.
@@ -26,21 +20,10 @@ func (p *CredentialHelperProvider) Get(ctx context.Context, name string) (string
 		return "", false
 	}
 
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, p.command, p.args...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		slog.Debug("Failed to get Docker token from credential helper",
-			"command", p.command, "args", p.args, "error", err, "stderr", stderr.String())
+	value, found := runCommand(ctx, "credential helper", p.command, p.args...)
+	if !found || value == "" {
 		return "", false
 	}
 
-	if token := strings.TrimSpace(stdout.String()); token != "" {
-		return token, true
-	}
-
-	slog.Debug("Credential helper returned empty token", "command", p.command, "args", p.args)
-	return "", false
+	return value, true
 }

@@ -1,6 +1,6 @@
 # Elicitation Testing Example
 
-This example demonstrates how MCP (Model Context Protocol) elicitation works in cagent.
+This example demonstrates how MCP (Model Context Protocol) elicitation works in docker-agent.
 Elicitation allows MCP tools to request additional input from the user during tool execution.
 
 ## What is Elicitation?
@@ -31,8 +31,8 @@ The MCP SDK will be automatically installed when the server starts via `uvx`.
 ## Running the Example
 
 ```bash
-# From the cagent root directory
-./bin/cagent run examples/elicitation/agent.yaml
+# From the docker-agent root directory
+$ docker agent run examples/elicitation/agent.yaml
 ```
 
 ## Elicitation Scenarios
@@ -74,7 +74,7 @@ Shows multiple enum/dropdown fields for making selections.
 1. Agent decides to call an MCP tool
 2. Tool execution starts
 3. Tool sends an elicitation request with a message and JSON schema
-4. cagent displays an interactive dialog based on the schema
+4. docker-agent displays an interactive dialog based on the schema
 5. User fills in the form and submits (or cancels)
 6. Response is sent back to the tool
 7. Tool continues execution with the provided data

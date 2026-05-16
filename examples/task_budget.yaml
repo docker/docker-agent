@@ -1,0 +1,46 @@
+#!/usr/bin/env docker agent run
+
+# Anthropic `task_budget` caps the total tokens a model spends across a
+# multi-step agentic task (thinking + tool calls + final output). docker-agent
+# forwards it as `output_config.task_budget` and automatically attaches the
+# `task-budgets-2026-03-13` beta header.
+#
+# It can be set on any Claude model; at the time of writing only Claude
+# Opus 4.7 actually honors it. See:
+# https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7
+#
+# Run the demo command with:  docker agent run task_budget.yaml -c demo
+
+# Declare the provider explicitly so we can reference claude-opus-4-7 before
+# it lands in the public models.dev catalog. For catalog-known models you can
+# set `task_budget` directly under `models.<name>` without this block.
+providers:
+  anthropic-opus-47:
+    provider: anthropic
+    token_key: ANTHROPIC_API_KEY
+
+agents:
+  root:
+    model: opus-bounded
+    description: a helpful assistant with a bounded task token budget
+    instruction: Stay within the configured task token budget.
+    commands:
+      demo: "design and sketch a small Python CLI that fetches weather data"
+    toolsets:
+      - type: shell
+
+models:
+  # Integer shorthand = a "tokens" budget of 128k for the whole task.
+  opus-bounded:
+    provider: anthropic-opus-47
+    model: claude-opus-4-7
+    task_budget: 128000
+    thinking_budget: adaptive # task_budget pairs well with adaptive thinking
+
+  # Explicit object form, equivalent to `task_budget: 64000`.
+  opus-bounded-tight:
+    provider: anthropic-opus-47
+    model: claude-opus-4-7
+    task_budget:
+      type: tokens
+      total: 64000

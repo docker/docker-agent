@@ -1,4 +1,4 @@
-//go:build darwin
+//go:build darwin && !no_audio
 
 // Package transcribe provides real-time audio transcription using OpenAI's Realtime API.
 package transcribe
@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -14,7 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/docker/cagent/pkg/audio/capture"
+	"github.com/docker/docker-agent/pkg/audio/capture"
 )
 
 const openAIRealtimeURL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
@@ -54,15 +55,19 @@ func New(apiKey string) *Transcriber {
 // transcription delta received. Returns an error if already running or if
 // connection fails. Call Stop to end transcription.
 func (t *Transcriber) Start(ctx context.Context, handler TranscriptHandler) error {
+	if t.apiKey == "" {
+		return errors.New("speech-to-text requires the OPENAI_API_KEY environment variable to be set")
+	}
+
 	if wasRunning := t.running.Swap(true); wasRunning {
-		return fmt.Errorf("transcriber already running")
+		return errors.New("transcriber already running")
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	t.cancel = cancel
 
 	// Connect to OpenAI Realtime API
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, openAIRealtimeURL, http.Header{
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, openAIRealtimeURL, http.Header{ //nolint:bodyclose // websocket upgrade response
 		"Authorization": []string{"Bearer " + t.apiKey},
 		"OpenAI-Beta":   []string{"realtime=v1"},
 	})

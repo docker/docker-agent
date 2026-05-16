@@ -32,7 +32,7 @@ func TestCollectAttachments(t *testing.T) {
 		assert.Nil(t, result)
 	})
 
-	t.Run("file content in attachments map", func(t *testing.T) {
+	t.Run("file reference preserves path", func(t *testing.T) {
 		t.Parallel()
 
 		// Create a temp file
@@ -51,8 +51,10 @@ func TestCollectAttachments(t *testing.T) {
 
 		result := e.collectAttachments(content)
 
-		require.NotNil(t, result)
-		assert.Equal(t, "file content here", result[ref])
+		require.Len(t, result, 1)
+		assert.Equal(t, "test.txt", result[0].Name)
+		assert.Equal(t, tmpFile, result[0].FilePath)
+		assert.Empty(t, result[0].Content, "file refs should not have inline content")
 		assert.Nil(t, e.attachments, "attachments should be cleared after collection")
 	})
 
@@ -75,9 +77,9 @@ func TestCollectAttachments(t *testing.T) {
 
 		result := e.collectAttachments(content)
 
-		require.NotNil(t, result)
-		assert.Equal(t, "package first", result[ref1])
-		assert.Equal(t, "package second", result[ref2])
+		require.Len(t, result, 2)
+		assert.Equal(t, file1, result[0].FilePath)
+		assert.Equal(t, file2, result[1].FilePath)
 	})
 
 	t.Run("skips refs not in content", func(t *testing.T) {
@@ -97,11 +99,11 @@ func TestCollectAttachments(t *testing.T) {
 
 		result := e.collectAttachments(content)
 
-		assert.Empty(t, result, "should return empty map when ref not in content")
+		assert.Empty(t, result, "should return empty when ref not in content")
 		assert.Nil(t, e.attachments, "attachments should be cleared after collection")
 	})
 
-	t.Run("skips nonexistent files", func(t *testing.T) {
+	t.Run("file reference passes through even for nonexistent files", func(t *testing.T) {
 		t.Parallel()
 
 		ref := "@/nonexistent/path/file.txt"
@@ -114,8 +116,9 @@ func TestCollectAttachments(t *testing.T) {
 
 		result := e.collectAttachments(content)
 
-		// Map is created but empty since file doesn't exist
-		assert.Empty(t, result)
+		// File-reference attachments are passed through; the consumer handles validation.
+		require.Len(t, result, 1)
+		assert.Equal(t, "/nonexistent/path/file.txt", result[0].FilePath)
 		assert.Nil(t, e.attachments, "attachments should still be cleared")
 	})
 
@@ -125,7 +128,8 @@ func TestCollectAttachments(t *testing.T) {
 		tmpDir := t.TempDir()
 		ref := "@" + tmpDir
 		// Note: addFileAttachment would normally reject directories, but we test
-		// collectAttachments directly here - it will fail to read as file
+		// collectAttachments directly here — directories are passed through
+		// as file references; the consumer handles validation.
 		e := &editor{attachments: []attachment{{
 			path:        tmpDir,
 			placeholder: ref,
@@ -135,12 +139,12 @@ func TestCollectAttachments(t *testing.T) {
 
 		result := e.collectAttachments(content)
 
-		// os.ReadFile on a directory returns an error, so no attachment added
-		assert.Empty(t, result)
+		require.Len(t, result, 1)
+		assert.Equal(t, tmpDir, result[0].FilePath)
 		assert.Nil(t, e.attachments, "attachments should be cleared after collection")
 	})
 
-	t.Run("mixed valid and invalid refs", func(t *testing.T) {
+	t.Run("mixed valid and invalid file refs", func(t *testing.T) {
 		t.Parallel()
 
 		tmpDir := t.TempDir()
@@ -157,10 +161,10 @@ func TestCollectAttachments(t *testing.T) {
 
 		result := e.collectAttachments(content)
 
-		require.NotNil(t, result)
-		assert.Equal(t, "valid content", result[validRef])
-		_, hasInvalid := result[invalidRef]
-		assert.False(t, hasInvalid, "invalid ref should not be in map")
+		// Both file-ref attachments are passed through; consumer validates.
+		require.Len(t, result, 2)
+		assert.Equal(t, validFile, result[0].FilePath)
+		assert.Equal(t, "/nonexistent/file.txt", result[1].FilePath)
 		assert.Nil(t, e.attachments, "attachments should be cleared after collection")
 	})
 }
@@ -250,12 +254,13 @@ func TestTryAddFileRef(t *testing.T) {
 
 		require.Len(t, e.attachments, 2)
 
-		// Verify both get collected
+		// Verify both get collected as file references with paths
 		content := "compare @" + completedFile + " with @" + manualFile
 		result := e.collectAttachments(content)
 
-		assert.Equal(t, "package completed", result["@"+completedFile])
-		assert.Equal(t, "package manual", result["@"+manualFile])
+		require.Len(t, result, 2)
+		assert.Equal(t, completedFile, result[0].FilePath)
+		assert.Equal(t, manualFile, result[1].FilePath)
 	})
 }
 

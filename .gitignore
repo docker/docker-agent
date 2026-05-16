@@ -4,10 +4,11 @@ dist
 .DS_Store
 evals
 *.db*
-/cagent
 .crush
 .vscode
+.idea/
 *.debug
+/lint/lint
 
 # agents
 agent.yaml
@@ -16,3 +17,14 @@ vendor
 # Local environment files
 .env.local
 .claude/settings.local.json
+
+# CI-downloaded binaries (cagent-action places these in the workspace root)
+/cagent
+/cagent-*
+/docker-mcp-*
+docker-agent
+
+# Generated wasm artifacts (built locally; see cmd/wasm/README.md)
+/wasm
+cmd/wasm/web/docker-agent.wasm
+cmd/wasm/web/wasm_exec.js

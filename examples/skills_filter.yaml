@@ -1,0 +1,29 @@
+#!yaml
+# Skills filter example.
+#
+# The `skills` field accepts either:
+#   - `true` / `false` to enable/disable skills discovery entirely.
+#   - A list combining skill sources and/or skill names to include.
+#
+# Items equal to "local" or starting with http:// or https:// are treated as
+# sources (where to discover skills from). Any other string is treated as the
+# name of a specific skill to expose to the agent. When only skill names are
+# given, the `local` source is used by default.
+#
+# The agent below loads skills from the local workspace but only exposes the
+# `commit` and `poem` skills. Any other discovered skills (including the
+# built-in `bump-go-dependencies`) will be hidden from the model.
+agents:
+  root:
+    model: openai/gpt-4o-mini
+    description: A small agent that demonstrates filtering skills by name.
+    instruction: |
+      You are a helpful assistant. Use the available skills when the user's
+      request matches one.
+    # Only expose the "commit" and "poem" skills from the locally discovered set.
+    skills:
+      - commit
+      - poem
+    toolsets:
+      - type: shell
+      - type: filesystem

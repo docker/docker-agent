@@ -2,9 +2,12 @@ package toolcommon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 func TestTryFixPartialJSON(t *testing.T) {
@@ -378,6 +381,102 @@ func TestWrapLines(t *testing.T) {
 	}
 }
 
+func TestWrapLinesWords(t *testing.T) {
+	tests := []struct {
+		name     string
+		text     string
+		width    int
+		expected []string
+	}{
+		{
+			name:     "fits on one line",
+			text:     "hello world",
+			width:    20,
+			expected: []string{"hello world"},
+		},
+		{
+			name:     "wraps at word boundary",
+			text:     "hello world foo",
+			width:    11,
+			expected: []string{"hello world", "foo"},
+		},
+		{
+			name:     "word exceeds width falls back to rune split",
+			text:     "supercalifragilistic",
+			width:    10,
+			expected: []string{"supercalif", "ragilistic"},
+		},
+		{
+			name:     "mixed short and long words",
+			text:     "hi supercalifragilistic ok",
+			width:    10,
+			expected: []string{"hi", "supercalif", "ragilistic", "ok"},
+		},
+		{
+			name:     "multiple lines input",
+			text:     "hello world\nfoo bar baz",
+			width:    9,
+			expected: []string{"hello", "world", "foo bar", "baz"},
+		},
+		{
+			name:     "empty string",
+			text:     "",
+			width:    10,
+			expected: []string{""},
+		},
+		{
+			name:     "zero width",
+			text:     "hello world",
+			width:    0,
+			expected: []string{"hello world"},
+		},
+		{
+			name:     "negative width",
+			text:     "hello world",
+			width:    -1,
+			expected: []string{"hello world"},
+		},
+		{
+			name:     "single word exactly at width",
+			text:     "hello",
+			width:    5,
+			expected: []string{"hello"},
+		},
+		{
+			name:     "preserves empty lines",
+			text:     "a\n\nb",
+			width:    10,
+			expected: []string{"a", "", "b"},
+		},
+		{
+			name:     "each word on its own line",
+			text:     "aa bb cc dd",
+			width:    3,
+			expected: []string{"aa", "bb", "cc", "dd"},
+		},
+		{
+			name:     "unicode words",
+			text:     "héllo wörld",
+			width:    6,
+			expected: []string{"héllo", "wörld"},
+		},
+		{
+			name:     "CJK word exceeds width",
+			text:     "你好世界 test",
+			width:    5,
+			expected: []string{"你好", "世界", "test"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := WrapLinesWords(tt.text, tt.width)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestTruncateText(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -614,6 +713,60 @@ func BenchmarkRuneWidth(b *testing.B) {
 			for _, r := range cjkRunes {
 				_ = runeWidth(r)
 			}
+		}
+	})
+}
+
+func TestFormatDuration(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{500 * time.Millisecond, "0s"},
+		{1 * time.Second, "1s"},
+		{45 * time.Second, "45s"},
+		{60 * time.Second, "1m"},
+		{90 * time.Second, "1m30s"},
+		{135 * time.Second, "2m15s"},
+		{5 * time.Minute, "5m"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := formatDuration(tt.d)
+			if got != tt.want {
+				t.Errorf("formatDuration(%v) = %q, want %q", tt.d, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLongRunningWarning(t *testing.T) {
+	t.Run("no StartedAt", func(t *testing.T) {
+		msg := &types.Message{ToolStatus: types.ToolStatusRunning}
+		if w := LongRunningWarning(msg); w != "" {
+			t.Errorf("expected empty warning, got %q", w)
+		}
+	})
+	t.Run("under threshold", func(t *testing.T) {
+		now := time.Now()
+		msg := &types.Message{ToolStatus: types.ToolStatusRunning, StartedAt: &now}
+		if w := LongRunningWarning(msg); w != "" {
+			t.Errorf("expected empty warning, got %q", w)
+		}
+	})
+	t.Run("over threshold", func(t *testing.T) {
+		past := time.Now().Add(-2 * time.Minute)
+		msg := &types.Message{ToolStatus: types.ToolStatusRunning, StartedAt: &past}
+		if w := LongRunningWarning(msg); w == "" {
+			t.Error("expected warning for long-running tool call")
+		}
+	})
+	t.Run("completed tool no warning", func(t *testing.T) {
+		past := time.Now().Add(-2 * time.Minute)
+		msg := &types.Message{ToolStatus: types.ToolStatusCompleted, StartedAt: &past}
+		if w := LongRunningWarning(msg); w != "" {
+			t.Errorf("expected no warning for completed tool, got %q", w)
 		}
 	})
 }

@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 # Example demonstrating environment variable placeholder expansion in commands
 #
@@ -11,9 +11,9 @@
 #   export PROJECT_NAME=myproject
 #   export ENVIRONMENT=production
 #
-#   cagent run env_placeholders.yaml -c greet
-#   cagent run env_placeholders.yaml -c analyze
-#   cagent run env_placeholders.yaml -c status
+#   docker agent run env_placeholders.yaml -c greet
+#   docker agent run env_placeholders.yaml -c analyze
+#   docker agent run env_placeholders.yaml -c status
 #
 # Note: Undefined environment variables expand to empty strings without causing errors,
 # allowing you to only define the variables needed for the commands you actually use.

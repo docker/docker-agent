@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/docker/cagent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider"
 )
 
 // Embedder generates vector embeddings for text
@@ -71,7 +71,7 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float64, error) {
 			e.usageHandler(result.TotalTokens, result.Cost)
 		}
 
-		slog.Debug("Embedding generated",
+		slog.DebugContext(ctx, "Embedding generated",
 			"provider", e.provider.ID(),
 			"tokens", result.TotalTokens,
 			"cost", result.Cost)
@@ -97,7 +97,7 @@ func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float64,
 	}
 
 	// Fall back to sequential processing for providers without batch support
-	slog.Debug("Provider doesn't support batch embeddings, using sequential processing",
+	slog.DebugContext(ctx, "Provider doesn't support batch embeddings, using sequential processing",
 		"provider", e.provider.ID(),
 		"text_count", len(texts))
 
@@ -116,7 +116,7 @@ func (e *Embedder) EmbedBatch(ctx context.Context, texts []string) ([][]float64,
 // embedBatchOptimized processes texts in optimized batches with parallel API calls
 func (e *Embedder) embedBatchOptimized(ctx context.Context, batchProvider provider.BatchEmbeddingProvider, texts []string) ([][]float64, error) {
 	totalTexts := len(texts)
-	slog.Debug("Starting optimized batch embedding",
+	slog.DebugContext(ctx, "Starting optimized batch embedding",
 		"provider", e.provider.ID(),
 		"total_texts", totalTexts,
 		"batch_size", e.batchSize,
@@ -139,7 +139,7 @@ func (e *Embedder) embedBatchOptimized(ctx context.Context, batchProvider provid
 			batchNum := start/e.batchSize + 1
 			numBatches := (totalTexts + e.batchSize - 1) / e.batchSize
 
-			slog.Debug("Processing batch",
+			slog.DebugContext(ctx, "Processing batch",
 				"batch", batchNum,
 				"total_batches", numBatches,
 				"batch_size", len(batchTexts),
@@ -161,7 +161,7 @@ func (e *Embedder) embedBatchOptimized(ctx context.Context, batchProvider provid
 				e.usageHandler(result.TotalTokens, result.Cost)
 			}
 
-			slog.Debug("Batch completed",
+			slog.DebugContext(ctx, "Batch completed",
 				"batch", batchNum,
 				"embeddings", len(result.Embeddings),
 				"tokens", result.TotalTokens,
@@ -176,7 +176,7 @@ func (e *Embedder) embedBatchOptimized(ctx context.Context, batchProvider provid
 		return nil, err
 	}
 
-	slog.Debug("Batch embedding completed",
+	slog.DebugContext(ctx, "Batch embedding completed",
 		"provider", e.provider.ID(),
 		"total_embeddings", len(embeddings),
 		"batches_processed", (totalTexts+e.batchSize-1)/e.batchSize)

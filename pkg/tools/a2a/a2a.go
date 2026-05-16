@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -14,14 +15,13 @@ import (
 	"github.com/a2aproject/a2a-go/a2aclient"
 	"github.com/a2aproject/a2a-go/a2aclient/agentcard"
 
-	"github.com/docker/cagent/pkg/httpclient"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/upstream"
 )
 
 // Toolset implements tools.ToolSet for A2A remote agents.
 type Toolset struct {
-	tools.BaseToolSet
-
 	name    string
 	url     string
 	headers map[string]string
@@ -30,7 +30,12 @@ type Toolset struct {
 	mu      sync.RWMutex
 }
 
-var _ tools.ToolSet = (*Toolset)(nil)
+// Verify interface compliance
+var (
+	_ tools.ToolSet      = (*Toolset)(nil)
+	_ tools.Startable    = (*Toolset)(nil)
+	_ tools.Instructable = (*Toolset)(nil)
+)
 
 // NewToolset creates a new A2A toolset for the given URL.
 func NewToolset(name, url string, headers map[string]string) *Toolset {
@@ -68,7 +73,7 @@ func (t *Toolset) Tools(_ context.Context) ([]tools.Tool, error) {
 	t.mu.RUnlock()
 
 	if card == nil {
-		return nil, fmt.Errorf("A2A toolset not started")
+		return nil, errors.New("A2A toolset not started")
 	}
 
 	// If skills are defined, create a tool for each skill; otherwise create one tool for the agent
@@ -109,7 +114,7 @@ func (t *Toolset) Tools(_ context.Context) ([]tools.Tool, error) {
 
 // Start connects to the A2A agent and fetches the agent card.
 func (t *Toolset) Start(ctx context.Context) error {
-	slog.Debug("Starting A2A toolset", "url", t.url)
+	slog.DebugContext(ctx, "Starting A2A toolset", "url", t.url)
 
 	card, err := agentcard.DefaultResolver.Resolve(ctx, t.url)
 	if err != nil {
@@ -118,7 +123,8 @@ func (t *Toolset) Start(ctx context.Context) error {
 
 	// Use a longer timeout for the HTTP client since LLM responses can take a while.
 	// The default a2a-go HTTP client has only a 5-second timeout which is too short.
-	httpClient := httpclient.NewHTTPClient(httpclient.WithHeaders(t.headers))
+	httpClient := httpclient.NewHTTPClient(ctx)
+	httpClient.Transport = upstream.NewHeaderTransport(httpClient.Transport, t.headers)
 
 	client, err := a2aclient.NewFromCard(ctx, card, a2aclient.WithJSONRPCTransport(httpClient))
 	if err != nil {
@@ -130,7 +136,7 @@ func (t *Toolset) Start(ctx context.Context) error {
 	t.card = card
 	t.mu.Unlock()
 
-	slog.Debug("A2A toolset started", "agent", card.Name, "skills", len(card.Skills))
+	slog.DebugContext(ctx, "A2A toolset started", "agent", card.Name, "skills", len(card.Skills))
 	return nil
 }
 
@@ -157,7 +163,7 @@ func (t *Toolset) createHandler() tools.ToolHandler {
 		t.mu.RUnlock()
 
 		if client == nil {
-			return nil, fmt.Errorf("A2A client not initialized")
+			return nil, errors.New("A2A client not initialized")
 		}
 
 		params := &a2a.MessageSendParams{

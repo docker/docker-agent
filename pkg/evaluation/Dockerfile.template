@@ -1,34 +1,12 @@
 # syntax=docker/dockerfile:1
 
-FROM docker:dind AS dind
-RUN rm -f /usr/local/bin/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-buildx 2>/dev/null || true
-RUN cat <<-'EOF' >/run.sh
-#!/usr/bin/env sh
-set -euxo pipefail
-(
-    echo "Starting dockerd..."
-    export TINI_SUBREAPER=1
-    export DOCKER_DRIVER=vfs
-    dockerd-entrypoint.sh dockerd &
-
-    until docker info > /dev/null 2>&1
-    do
-        echo "Waiting for dockerd..."
-        sleep 1
-    done
-    echo "dockerd is ready!"
-) >/dev/null 2>&1
-
-exec "$@"
-EOF
-RUN chmod +x /run.sh
-
-FROM scratch
-COPY --from=dind / /
-COPY --from=docker/cagent:edge /cagent /
+FROM alpine:latest
+LABEL "io.docker.agent.evals.image"="default"
+COPY --from=docker/docker-agent:edge /docker-agent /
+RUN printf '#!/usr/bin/env sh\nset -euo pipefail\nexec "$@"\n' > /run.sh && chmod +x /run.sh
 WORKDIR /working_dir
 ENV TELEMETRY_ENABLED=false
-ENV CAGENT_HIDE_TELEMETRY_BANNER=1
-ENTRYPOINT ["/run.sh", "/cagent", "exec", "--yolo", "--json"]
+ENV DOCKER_AGENT_HIDE_TELEMETRY_BANNER=1
+ENTRYPOINT ["/run.sh", "/docker-agent", "run", "--exec", "--yolo", "--json"]
 {{if .CopyWorkingDir}}COPY . ./
 {{end}}

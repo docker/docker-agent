@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,28 +13,100 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
+// testClient creates a minimal Client for testing convertMessages.
+func testClient() *Client {
+	return &Client{}
+}
+
+func TestCreateChatCompletionStream_ErrorOnEmptyMessages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("request should not have been sent")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &Client{
+		Config: base.Config{
+			ModelConfig: latest.ModelConfig{
+				Provider: "anthropic",
+				Model:    "claude-sonnet-4-5-20250929",
+			},
+		},
+		clientFn: func(_ context.Context) (anthropic.Client, error) {
+			return anthropic.NewClient(
+				option.WithAPIKey("test-key"),
+				option.WithBaseURL(server.URL),
+			), nil
+		},
+	}
+
+	tests := []struct {
+		name     string
+		messages []chat.Message
+	}{
+		{
+			name:     "nil messages",
+			messages: nil,
+		},
+		{
+			name:     "empty messages",
+			messages: []chat.Message{},
+		},
+		{
+			name: "only system messages",
+			messages: []chat.Message{
+				{Role: chat.MessageRoleSystem, Content: "You are helpful."},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := client.CreateChatCompletionStream(t.Context(), tt.messages, nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "no messages to send after conversion")
+		})
+	}
+}
+
+// TestConvertMessages_SkipEmptySystemText documents that the converter no longer
+// filters whitespace-only system messages — normalizeMessageContent in the session
+// layer does this before messages reach any provider converter.
 func TestConvertMessages_SkipEmptySystemText(t *testing.T) {
 	msgs := []chat.Message{{
 		Role:    chat.MessageRoleSystem,
 		Content: "   \n\t  ",
 	}}
 
-	out := convertMessages(msgs)
+	// System messages are extracted into system blocks by extractSystemBlocks;
+	// that helper now passes them through as-is. The session layer is
+	// responsible for not sending whitespace-only system messages.
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
+	// System messages are not included in the anthropic message list (they go
+	// to extractSystemBlocks instead), so out is still empty.
 	assert.Empty(t, out)
 }
 
+// TestConvertMessages_SkipEmptyUserText_NoMultiContent documents that whitespace
+// filtering is now the session layer's responsibility, not the converter's.
 func TestConvertMessages_SkipEmptyUserText_NoMultiContent(t *testing.T) {
 	msgs := []chat.Message{{
 		Role:    chat.MessageRoleUser,
 		Content: "   \n\t  ",
 	}}
 
-	out := convertMessages(msgs)
-	assert.Empty(t, out)
+	// The converter forwards the message as-is; normalizeMessageContent in the
+	// session layer drops it before it reaches the converter in real usage.
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
+	assert.Len(t, out, 1)
 }
 
 func TestConvertMessages_UserMultiContent_SkipEmptyText_KeepImage(t *testing.T) {
@@ -45,34 +118,36 @@ func TestConvertMessages_UserMultiContent_SkipEmptyText_KeepImage(t *testing.T) 
 		},
 	}}
 
-	out := convertMessages(msgs)
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
 	require.Len(t, out, 1)
 
 	b, err := json.Marshal(out[0])
 	require.NoError(t, err)
-	// Basic JSON structure checks
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(b, &m))
-	// role should be user
 	assert.Equal(t, "user", m["role"])
-	// content should contain exactly one block (the image)
+	// The converter now forwards all parts as-is. normalizeMessageContent in the
+	// session layer strips whitespace-only text parts before calling the converter
+	// in real usage, so both parts appear here when tested directly.
 	content, ok := m["content"].([]any)
 	require.True(t, ok)
-	assert.Len(t, content, 1)
-	// and it should be an image block
-	cb, ok := content[0].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "image", cb["type"])
+	assert.Len(t, content, 2)
 }
 
+// TestConvertMessages_SkipEmptyAssistantText_NoToolCalls documents that the
+// converter no longer filters whitespace-only assistant messages.
 func TestConvertMessages_SkipEmptyAssistantText_NoToolCalls(t *testing.T) {
 	msgs := []chat.Message{{
 		Role:    chat.MessageRoleAssistant,
 		Content: "  \t\n  ",
 	}}
 
-	out := convertMessages(msgs)
-	assert.Empty(t, out)
+	// The converter forwards the message; normalizeMessageContent in the session
+	// layer drops whitespace-only assistant messages before they reach here.
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
+	assert.Len(t, out, 1)
 }
 
 func TestConvertMessages_AssistantToolCalls_NoText_IncludesToolUse(t *testing.T) {
@@ -84,7 +159,8 @@ func TestConvertMessages_AssistantToolCalls_NoText_IncludesToolUse(t *testing.T)
 		},
 	}}
 
-	out := convertMessages(msgs)
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
 	require.Len(t, out, 1)
 
 	b, err := json.Marshal(out[0])
@@ -94,8 +170,11 @@ func TestConvertMessages_AssistantToolCalls_NoText_IncludesToolUse(t *testing.T)
 	assert.Equal(t, "assistant", m["role"])
 	content, ok := m["content"].([]any)
 	require.True(t, ok)
-	assert.Len(t, content, 1)
-	cb, ok := content[0].(map[string]any)
+	// The whitespace text content is now included alongside the tool_use block
+	// because the converter no longer strips it. The session layer would have
+	// already cleaned this up in real usage via normalizeMessageContent.
+	assert.Len(t, content, 2)
+	cb, ok := content[1].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "tool_use", cb["type"])
 }
@@ -112,7 +191,8 @@ func TestSystemMessages_AreExtractedAndNotInMessageList(t *testing.T) {
 	assert.Equal(t, "system rules here", strings.TrimSpace(sys[0].Text))
 
 	// System role messages must not appear in the anthropic messages list
-	out := convertMessages(msgs)
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
 	assert.Len(t, out, 1)
 }
 
@@ -128,7 +208,8 @@ func TestSystemMessages_MultipleExtractedAndExcludedFromMessageList(t *testing.T
 	assert.Equal(t, "sys A", strings.TrimSpace(sys[0].Text))
 	assert.Equal(t, "sys B", strings.TrimSpace(sys[1].Text))
 
-	out := convertMessages(msgs)
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
 	assert.Len(t, out, 1)
 }
 
@@ -148,7 +229,8 @@ func TestSystemMessages_InterspersedExtractedAndExcluded(t *testing.T) {
 	assert.Equal(t, "S2", strings.TrimSpace(sys[1].Text))
 
 	// Converted messages must exclude system roles and preserve order of others
-	out := convertMessages(msgs)
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
 	require.Len(t, out, 3)
 	expectedRoles := []string{"user", "assistant", "user"}
 	for i, expected := range expectedRoles {
@@ -157,77 +239,6 @@ func TestSystemMessages_InterspersedExtractedAndExcluded(t *testing.T) {
 		var m map[string]any
 		require.NoError(t, json.Unmarshal(b, &m))
 		assert.Equal(t, expected, m["role"])
-	}
-}
-
-func TestSequencingRepair_Standard(t *testing.T) {
-	msgs := []chat.Message{
-		{Role: chat.MessageRoleUser, Content: "start"},
-		{
-			Role: chat.MessageRoleAssistant,
-			ToolCalls: []tools.ToolCall{
-				{ID: "tool-1", Function: tools.FunctionCall{Name: "do_thing", Arguments: "{}"}},
-			},
-		},
-		// Intentionally missing the user/tool_result message here
-		{Role: chat.MessageRoleUser, Content: "continue"},
-	}
-
-	converted := convertMessages(msgs)
-	err := validateAnthropicSequencing(converted)
-	require.Error(t, err)
-
-	repaired := repairAnthropicSequencing(converted)
-	err = validateAnthropicSequencing(repaired)
-	require.NoError(t, err)
-}
-
-func TestSequencingRepair_Beta(t *testing.T) {
-	msgs := []chat.Message{
-		{Role: chat.MessageRoleUser, Content: "start"},
-		{
-			Role: chat.MessageRoleAssistant,
-			ToolCalls: []tools.ToolCall{
-				{ID: "tool-1", Function: tools.FunctionCall{Name: "do_thing", Arguments: "{}"}},
-			},
-		},
-		// Intentionally missing the user/tool_result message here
-		{Role: chat.MessageRoleUser, Content: "continue"},
-	}
-
-	converted := convertBetaMessages(msgs)
-	err := validateAnthropicSequencingBeta(converted)
-	require.Error(t, err)
-
-	repaired := repairAnthropicSequencingBeta(converted)
-	err = validateAnthropicSequencingBeta(repaired)
-	require.NoError(t, err)
-}
-
-func TestConvertMessages_DropOrphanToolResults_NoPrecedingToolUse(t *testing.T) {
-	msgs := []chat.Message{
-		{Role: chat.MessageRoleUser, Content: "start"},
-		// Orphan tool result (no assistant tool_use immediately before)
-		{Role: chat.MessageRoleTool, ToolCallID: "tool-1", Content: "result-1"},
-		{Role: chat.MessageRoleUser, Content: "continue"},
-	}
-
-	converted := convertMessages(msgs)
-	// Expect only the two user text messages to appear
-	require.Len(t, converted, 2)
-
-	// Ensure none of the converted messages contain tool_result blocks
-	for i := range converted {
-		b, err := json.Marshal(converted[i])
-		require.NoError(t, err)
-		var m map[string]any
-		require.NoError(t, json.Unmarshal(b, &m))
-		content, _ := m["content"].([]any)
-		for _, c := range content {
-			if cb, ok := c.(map[string]any); ok {
-				assert.NotEqual(t, "tool_result", cb["type"], "unexpected orphan tool_result included in payload")
-			}
-		}
 	}
 }
 
@@ -246,12 +257,10 @@ func TestConvertMessages_GroupToolResults_AfterAssistantToolUse(t *testing.T) {
 		{Role: chat.MessageRoleUser, Content: "ok"},
 	}
 
-	converted := convertMessages(msgs)
+	converted, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
 	// Expect: user(start), assistant(tool_use), user(grouped tool_result), user(ok)
 	require.Len(t, converted, 4)
-
-	// Validate sequencing is acceptable to Anthropic
-	require.NoError(t, validateAnthropicSequencing(converted))
 
 	b, err := json.Marshal(converted[2])
 	require.NoError(t, err)
@@ -442,7 +451,9 @@ func TestExtractSystemBlocks_MultipleSystemMessages(t *testing.T) {
 	assert.Equal(t, "Be concise", blocks[1].Text)
 }
 
-// TestExtractSystemBlocks_SkipsEmptyText tests that empty system text is skipped
+// TestExtractSystemBlocks_SkipsEmptyText tests that empty/whitespace-only system text is skipped.
+// System blocks are trimmed because YAML literal-block instructions (instruction: |) always
+// append a trailing newline that should not be sent to the API.
 func TestExtractSystemBlocks_SkipsEmptyText(t *testing.T) {
 	msgs := []chat.Message{
 		{
@@ -520,4 +531,23 @@ func TestExtractSystemBlocksCacheControl(t *testing.T) {
 	assert.Equal(t, "last", blocks[3].Text)
 	assert.Equal(t, "ephemeral", string(blocks[3].CacheControl.Type))
 	assert.Empty(t, string(blocks[3].CacheControl.TTL))
+}
+
+func TestExtractSystemBlocks_EmptyContentWithCacheControl(t *testing.T) {
+	t.Parallel()
+
+	// An empty system message with CacheControl must not panic.
+	// Since extractSystemBlocks now trims system content, an empty/whitespace-only
+	// message produces no block, so CacheControl has nothing to apply to.
+	msgs := []chat.Message{
+		{
+			Role:         chat.MessageRoleSystem,
+			Content:      "",
+			CacheControl: true,
+		},
+	}
+
+	// Must not panic; the empty block is skipped.
+	blocks := extractSystemBlocks(msgs)
+	assert.Empty(t, blocks)
 }

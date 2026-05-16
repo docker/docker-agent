@@ -50,12 +50,20 @@ colors:
   selected_fg: "#ffffff"
   suggestion_ghost: "#6B6B6B"
   tab_bg: "#25252c"
+  tab_active_bg: "#24283B"
+  tab_active_fg: "#E5F2FC"
+  tab_inactive_fg: "#808080"
+  tab_border: "#7AA2F7"
+
   placeholder: "#808080"
 
   # Badge colors
   badge_accent: "#B083EA"
   badge_info: "#7DCFFF"
   badge_success: "#9ECE6A"
+
+  # Agent colors (hue values 0-360 for dynamic palette generation)
+  agent_hues: [220, 280, 170, 30, 330, 140, 200, 260, 50, 0, 185, 20, 235, 295, 155, 340]
 
 chroma:
   # Syntax highlighting colors (Monokai-inspired)

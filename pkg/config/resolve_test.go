@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,8 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/reference"
-	"github.com/docker/cagent/pkg/userconfig"
+	"github.com/docker/docker-agent/pkg/reference"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 func TestOciRefToFilename(t *testing.T) {
@@ -86,7 +87,8 @@ agents:
 }
 
 func TestResolveAgentFile_EmptyIsDefault(t *testing.T) {
-	t.Parallel()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
 	resolved, err := resolve("")
 
@@ -95,12 +97,22 @@ func TestResolveAgentFile_EmptyIsDefault(t *testing.T) {
 }
 
 func TestResolveAgentFile_DefaultIsDefault(t *testing.T) {
-	t.Parallel()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
 	resolved, err := resolve("default")
 
 	require.NoError(t, err)
 	assert.Equal(t, "default", resolved)
+}
+
+func TestResolveAgentFile_CoderIsCoder(t *testing.T) {
+	t.Parallel()
+
+	resolved, err := resolve("coder")
+
+	require.NoError(t, err)
+	assert.Equal(t, "coder", resolved)
 }
 
 func TestResolveAgentFile_ReplaceAliasWithActualFile(t *testing.T) {
@@ -271,7 +283,7 @@ func TestResolveAgentFile_EmptyDirectory(t *testing.T) {
 func TestResolveSources(t *testing.T) {
 	t.Parallel()
 
-	sources, err := ResolveSources("./testdata/v1.yaml")
+	sources, err := ResolveSources("./testdata/v1.yaml", nil)
 	require.NoError(t, err)
 
 	assert.Len(t, sources, 1)
@@ -297,7 +309,7 @@ func TestResolve_DefaultAliasOverride(t *testing.T) {
 	require.NoError(t, cfg.Save())
 
 	// Resolve with "default" should return the aliased file
-	source, err := Resolve("default")
+	source, err := Resolve("default", nil)
 	require.NoError(t, err)
 	assert.Equal(t, agentFile, source.Name())
 
@@ -305,6 +317,28 @@ func TestResolve_DefaultAliasOverride(t *testing.T) {
 	data, err := source.Read(t.Context())
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "Custom agent")
+}
+
+func TestResolve_CoderBuiltinAgent(t *testing.T) {
+	t.Parallel()
+
+	source, err := Resolve("coder", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "coder", source.Name())
+
+	// Verify it reads the embedded coder agent config
+	data, err := source.Read(t.Context())
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "Coding Agent")
+}
+
+func TestBuiltinAgentNames(t *testing.T) {
+	t.Parallel()
+
+	names := BuiltinAgentNames()
+
+	assert.Contains(t, names, "default")
+	assert.Contains(t, names, "coder")
 }
 
 func TestResolve_DefaultAliasToOCIReference(t *testing.T) {
@@ -318,7 +352,7 @@ func TestResolve_DefaultAliasToOCIReference(t *testing.T) {
 	require.NoError(t, cfg.Save())
 
 	// Resolve with "default" should return an OCI source with the aliased reference
-	source, err := Resolve("default")
+	source, err := Resolve("default", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "docker/gordon", source.Name())
 }
@@ -334,7 +368,7 @@ func TestResolveSources_DefaultAliasToOCIReference(t *testing.T) {
 	require.NoError(t, cfg.Save())
 
 	// ResolveSources with "default" should return an OCI source with the aliased reference
-	sources, err := ResolveSources("default")
+	sources, err := ResolveSources("default", nil)
 	require.NoError(t, err)
 	require.Len(t, sources, 1)
 
@@ -363,7 +397,7 @@ func TestResolve_EmptyWithDefaultAliasOverride(t *testing.T) {
 	require.NoError(t, cfg.Save())
 
 	// Resolve with empty string should also use the "default" alias
-	source, err := Resolve("")
+	source, err := Resolve("", nil)
 	require.NoError(t, err)
 	assert.Equal(t, agentFile, source.Name())
 
@@ -392,7 +426,7 @@ func TestResolveSources_DefaultAliasOverride(t *testing.T) {
 	require.NoError(t, cfg.Save())
 
 	// ResolveSources with "default" should return the aliased file
-	sources, err := ResolveSources("default")
+	sources, err := ResolveSources("default", nil)
 	require.NoError(t, err)
 	require.Len(t, sources, 1)
 
@@ -425,7 +459,7 @@ func TestResolveSources_EmptyWithDefaultAliasOverride(t *testing.T) {
 	require.NoError(t, cfg.Save())
 
 	// ResolveSources with empty string should also use the "default" alias
-	sources, err := ResolveSources("")
+	sources, err := ResolveSources("", nil)
 	require.NoError(t, err)
 	require.Len(t, sources, 1)
 
@@ -589,30 +623,167 @@ func TestResolveAlias_WithAllOptions(t *testing.T) {
 	assert.True(t, alias.HideToolResults)
 }
 
-func TestGetUserSettings_Empty(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+func TestIsExternalReference(t *testing.T) {
+	t.Parallel()
 
-	// No config file exists
-	settings := GetUserSettings()
-	require.NotNil(t, settings)
-	assert.False(t, settings.HideToolResults)
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{
+			name:     "OCI reference with namespace",
+			input:    "agentcatalog/pirate",
+			expected: true,
+		},
+		{
+			name:     "OCI reference with registry",
+			input:    "docker.io/myorg/myagent:v1",
+			expected: true,
+		},
+		{
+			name:     "HTTPS URL",
+			input:    "https://example.com/agent.yaml",
+			expected: true,
+		},
+		{
+			name:     "HTTP URL",
+			input:    "http://example.com/agent.yaml",
+			expected: true,
+		},
+		{
+			name:     "simple agent name is not external",
+			input:    "my_agent",
+			expected: false,
+		},
+		{
+			name:     "agent name with hyphen is not external",
+			input:    "my-local-agent",
+			expected: false,
+		},
+		{
+			name:     "empty string is not external",
+			input:    "",
+			expected: false,
+		},
+		{
+			name:     "named OCI reference is external",
+			input:    "reviewer:agentcatalog/review-pr",
+			expected: true,
+		},
+		{
+			name:     "named URL reference is external",
+			input:    "myagent:https://example.com/agent.yaml",
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := IsExternalReference(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }
 
-func TestGetUserSettings_WithHideToolResults(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+func TestParseExternalAgentRef(t *testing.T) {
+	t.Parallel()
 
-	// Set up config with settings
-	cfg, err := userconfig.Load()
-	require.NoError(t, err)
-	cfg.Settings = &userconfig.Settings{
-		HideToolResults: true,
+	tests := []struct {
+		name         string
+		input        string
+		expectedName string
+		expectedRef  string
+	}{
+		{
+			name:         "simple OCI reference derives base name",
+			input:        "agentcatalog/pirate",
+			expectedName: "pirate",
+			expectedRef:  "agentcatalog/pirate",
+		},
+		{
+			name:         "OCI reference with tag derives base name without tag",
+			input:        "docker.io/myorg/myagent:v1",
+			expectedName: "myagent",
+			expectedRef:  "docker.io/myorg/myagent:v1",
+		},
+		{
+			name:         "OCI reference with digest derives base name",
+			input:        "docker.io/myorg/myagent@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			expectedName: "myagent",
+			expectedRef:  "docker.io/myorg/myagent@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		},
+		{
+			name:         "explicit name prefix",
+			input:        "reviewer:agentcatalog/review-pr",
+			expectedName: "reviewer",
+			expectedRef:  "agentcatalog/review-pr",
+		},
+		{
+			name:         "explicit name with tagged OCI ref",
+			input:        "myreviewer:docker.io/myorg/review-pr:v2",
+			expectedName: "myreviewer",
+			expectedRef:  "docker.io/myorg/review-pr:v2",
+		},
+		{
+			name:         "URL reference derives filename",
+			input:        "https://example.com/agent.yaml",
+			expectedName: "agent",
+			expectedRef:  "https://example.com/agent.yaml",
+		},
+		{
+			name:         "named URL reference",
+			input:        "myagent:https://example.com/agent.yaml",
+			expectedName: "myagent",
+			expectedRef:  "https://example.com/agent.yaml",
+		},
+		{
+			name:         "simple name without slash is not split",
+			input:        "my_agent",
+			expectedName: "my_agent",
+			expectedRef:  "my_agent",
+		},
+		{
+			name:         "OCI ref with registry port is not confused with name prefix",
+			input:        "localhost:5000/test/agent",
+			expectedName: "agent",
+			expectedRef:  "localhost:5000/test/agent",
+		},
+		{
+			name:         "deeply nested OCI path",
+			input:        "registry.example.com/org/sub/agent:latest",
+			expectedName: "agent",
+			expectedRef:  "registry.example.com/org/sub/agent:latest",
+		},
 	}
-	require.NoError(t, cfg.Save())
 
-	// Get settings
-	settings := GetUserSettings()
-	require.NotNil(t, settings)
-	assert.True(t, settings.HideToolResults)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			name, ref := ParseExternalAgentRef(tt.input)
+			assert.Equal(t, tt.expectedName, name)
+			assert.Equal(t, tt.expectedRef, ref)
+		})
+	}
+}
+
+func TestResolveSources_URLEncodedKey(t *testing.T) {
+	t.Parallel()
+
+	testURL := "https://example.com/agent.yaml?agentTag=v1.0.0-dev&origin=cli"
+
+	sources, err := ResolveSources(testURL, nil)
+	require.NoError(t, err)
+	require.Len(t, sources, 1)
+
+	// The key should be the URL-encoded version of the URL
+	expectedKey := url.QueryEscape(testURL)
+	source, ok := sources[expectedKey]
+	require.True(t, ok, "expected source key '%s'", expectedKey)
+
+	// The source Name() should still return the original URL for fetching
+	assert.Equal(t, testURL, source.Name())
 }

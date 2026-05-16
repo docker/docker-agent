@@ -146,6 +146,11 @@ func (m *VCSMatcher) ShouldIgnore(path string) bool {
 	if err != nil {
 		return false
 	}
+	// Resolve symlinks to match m.repoRoot, which go-billy now returns with
+	// symlinks resolved (e.g. /private/var/... instead of /var/... on macOS).
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = resolved
+	}
 
 	// Check if path is within this repository
 	if !strings.HasPrefix(absPath, m.repoRoot) {

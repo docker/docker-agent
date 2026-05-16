@@ -1,0 +1,13 @@
+version: "2"
+
+agents:
+  root:
+    model: openai/gpt-3.5-turbo
+    description: Root agent
+    instruction: You are the root agent.
+    sub_agents:
+      - helper
+  helper:
+    model: openai/gpt-3.5-turbo
+    description: Helper agent
+    instruction: You are a helper agent.

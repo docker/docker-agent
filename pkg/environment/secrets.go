@@ -2,10 +2,10 @@ package environment
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"os"
-
-	"github.com/docker/cagent/pkg/path"
 )
 
 type RunSecretsProvider struct {
@@ -18,24 +18,29 @@ func NewRunSecretsProvider() *RunSecretsProvider {
 	}
 }
 
+// Get reads the named secret file from the provider's root directory.
+//
+// Lookups are anchored to root via os.OpenRoot: name components that
+// escape via ".." segments, absolute paths, or symbolic links pointing
+// outside the root are rejected by the kernel and surface as a missed
+// lookup. An attacker who can plant a symlink under root therefore
+// cannot coerce the agent into reading files elsewhere on the host.
 func (p *RunSecretsProvider) Get(_ context.Context, name string) (string, bool) {
-	// Validate the secret name to prevent path traversal
-	validatedPath, err := path.ValidatePathInDirectory(name, p.root)
+	root, err := os.OpenRoot(p.root)
 	if err != nil {
-		slog.Debug("Invalid secret name", "name", name, "error", err)
-		return "", false
-	}
-
-	buf, err := os.ReadFile(validatedPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", false
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Debug("Failed to open secrets root", "root", p.root, "error", err)
 		}
-
-		// Ignore error
-		slog.Debug("Failed to find secret in /run/secrets", "error", err)
 		return "", false
 	}
+	defer root.Close()
 
+	buf, err := root.ReadFile(name)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Debug("Failed to read secret", "name", name, "error", err)
+		}
+		return "", false
+	}
 	return string(buf), true
 }

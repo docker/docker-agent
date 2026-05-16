@@ -1,0 +1,40 @@
+#!/usr/bin/env docker agent run
+
+# Per-Tool Model Routing Example
+#
+# This example demonstrates how to use the `model` field on toolsets
+# to automatically route specific tool results through a cheaper/faster
+# model, while keeping the agent's primary model for complex reasoning.
+#
+# When the LLM calls a tool from a toolset with a `model` field, the
+# next LLM turn (processing the tool results) uses the specified model
+# instead of the agent's primary model. This is a one-shot override:
+# subsequent turns return to the primary model.
+
+models:
+  primary:
+    provider: anthropic
+    model: claude-sonnet-4-5
+  fast:
+    provider: anthropic
+    model: claude-haiku-4-5
+
+agents:
+  root:
+    model: primary
+    description: >
+      An assistant that uses a fast model for simple tool operations
+      and the primary model for complex reasoning.
+    instruction: >
+      You are a helpful assistant. Use the available tools to help the user.
+    toolsets:
+      # The filesystem toolset uses the fast model to process results.
+      # Reading files and listing directories are simple operations that
+      # don't need the most capable model to interpret.
+      - type: filesystem
+        model: fast
+
+      # The shell toolset also uses the fast model. Most shell command
+      # outputs (ls, cat, grep, etc.) are straightforward to interpret.
+      - type: shell
+        model: fast

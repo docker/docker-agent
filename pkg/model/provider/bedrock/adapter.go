@@ -8,8 +8,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // streamAdapter adapts Bedrock's ConverseStreamEventStream to chat.MessageStream
@@ -71,7 +71,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		// Check for errors
 		if err := a.stream.Err(); err != nil {
 			slog.Debug("Bedrock stream: error on channel close", "error", err)
-			return chat.MessageStreamResponse{}, err
+			return chat.MessageStreamResponse{}, wrapBedrockError(err)
 		}
 		// If we have a pending finish reason but never got metadata, emit it now
 		if a.pendingFinishReason != "" {

@@ -1,13 +1,13 @@
 package environment
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/docker/cagent/pkg/path"
-	"github.com/docker/cagent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/path"
 )
 
 type KeyValuePair struct {
@@ -30,15 +30,22 @@ func AbsolutePaths(parentDir string, relOrAbsPaths []string) ([]string, error) {
 }
 
 func AbsolutePath(parentDir, relOrAbsPath string) (string, error) {
-	p, err := expandTildePath(relOrAbsPath)
-	if err != nil {
-		return "", err
+	p := relOrAbsPath
+	if strings.HasPrefix(p, "~") {
+		expanded, err := path.ExpandHomeDir(p)
+		if err != nil {
+			return "", err
+		}
+		if expanded == p && p != "~" {
+			return "", fmt.Errorf("unsupported tilde expansion format: %s", p)
+		}
+		p = expanded
 	}
 
 	// For absolute paths (including tilde-expanded ones), validate against directory traversal
 	if filepath.IsAbs(p) {
 		if strings.Contains(relOrAbsPath, "..") {
-			return "", fmt.Errorf("invalid environment file path: path contains directory traversal sequences")
+			return "", errors.New("invalid environment file path: path contains directory traversal sequences")
 		}
 		return p, nil
 	}
@@ -49,29 +56,6 @@ func AbsolutePath(parentDir, relOrAbsPath string) (string, error) {
 	}
 
 	return validatedPath, nil
-}
-
-// expandTildePath expands ~ in file paths to the user's home directory
-func expandTildePath(p string) (string, error) {
-	if !strings.HasPrefix(p, "~") {
-		return p, nil
-	}
-
-	homeDir := paths.GetHomeDir()
-	if homeDir == "" {
-		return "", fmt.Errorf("failed to get user home directory")
-	}
-
-	if p == "~" {
-		return homeDir, nil
-	}
-
-	if strings.HasPrefix(p, "~/") {
-		return filepath.Join(homeDir, p[2:]), nil
-	}
-
-	// Handle ~username/ format - not commonly supported in this context
-	return "", fmt.Errorf("unsupported tilde expansion format: %s", p)
 }
 
 func ReadEnvFiles(absolutePaths []string) ([]KeyValuePair, error) {

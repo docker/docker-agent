@@ -1,27 +1,49 @@
 ---
-name: Feature!
-about: Suggest a new feature you'd like to see
-title: "<your feature>"
-labels: kind/feature
+name: Feature Request
+about: Suggest a new feature or improvement
+title: "<short description>"
+type: Enhancement
 assignees: ""
 ---
 
-**What you'd like to see**
+## Overview
 
-Describe in as much detail as possible the feature you'd like to see.
-Please limit this to a single small feature whenever possible to ease development and contribution efforts
+Describe the feature or improvement you'd like to see. Be as specific as possible.
 
-**Why you'd like to see it**
+## Motivation
 
-Tell us why it's important for you.
-`x` thing would help me do ...
-`y` feature frustrates me.
-`z` feature would get rid of these issues ...
+Why is this important? What problem does it solve?
 
-**Workarounds?**
+Examples:
+- "This would let me do..."
+- "Currently, I have to work around this by..."
+- "This is needed for..."
 
-Are you using any workarounds at the moment? If so, tell us about them
+## Use Cases
 
-**Additional context**
+Describe concrete scenarios where this feature would help:
 
-Any other info you consider useful can be included here
+1. 
+2. 
+3. 
+
+## Proposed Solution
+
+If you have ideas on how to implement this, describe them here.
+
+Examples:
+- New CLI flag: `--option value`
+- New agent config field: `agents.root.new_field: value`
+- New tool: `xyz_tool`
+
+## Alternatives
+
+Are there any workarounds available currently? What are the alternatives?
+
+## Related Issues
+
+Link any related issues or discussions.
+
+## Additional Context
+
+Any other information relevant to this feature request.

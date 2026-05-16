@@ -1,0 +1,7 @@
+agents:
+  root:
+    model: openai/gpt-4o
+    instruction: "Hello ${env.USER}, you are running in ${env.ENVIRONMENT || 'staging'}"
+    toolsets:
+      - type: fetch
+        instruction: "Fetch as ${env.USER}"

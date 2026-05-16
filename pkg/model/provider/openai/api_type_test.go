@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,24 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/config/latest"
-	"github.com/docker/cagent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
 )
-
-// mockEnvProvider is a simple env provider for testing
-type mockEnvProvider struct {
-	values map[string]string
-}
-
-func (m *mockEnvProvider) Get(_ context.Context, name string) (string, bool) {
-	v, ok := m.values[name]
-	return v, ok
-}
-
-func newMockEnvProvider(values map[string]string) environment.Provider {
-	return &mockEnvProvider{values: values}
-}
 
 func TestGetAPIType(t *testing.T) {
 	t.Parallel()
@@ -183,7 +168,7 @@ func TestCustomProvider_WithTokenKey(t *testing.T) {
 		},
 	}
 
-	env := newMockEnvProvider(map[string]string{
+	env := environment.NewMapEnvProvider(map[string]string{
 		"MY_CUSTOM_TOKEN": "secret-token-123",
 	})
 
@@ -234,7 +219,7 @@ func TestCustomProvider_WithoutTokenKey(t *testing.T) {
 		},
 	}
 
-	env := newMockEnvProvider(map[string]string{})
+	env := environment.NewNoEnvProvider()
 
 	client, err := NewClient(t.Context(), cfg, env)
 	require.NoError(t, err)
@@ -252,6 +237,6 @@ func TestCustomProvider_WithoutTokenKey(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	// SDK sends "Bearer" with empty key - that's effectively no auth
-	assert.Equal(t, "Bearer", receivedAuth, "Should send empty bearer token when no token_key")
+	// SDK omits the Authorization header entirely when no API key is set
+	assert.Empty(t, receivedAuth, "Should not send an Authorization header when no token_key")
 }

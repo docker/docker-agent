@@ -8,16 +8,17 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	mcptools "github.com/docker/cagent/pkg/tools/mcp"
-	"github.com/docker/cagent/pkg/tui/core"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/messages"
-	"github.com/docker/cagent/pkg/tui/styles"
+	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
+	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // MCPPromptInputDialog implements Dialog for collecting MCP prompt parameters
 type MCPPromptInputDialog struct {
 	BaseDialog
+
 	promptName   string
 	promptInfo   mcptools.PromptInfo
 	inputs       []textinput.Model
@@ -116,6 +117,12 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 		return d, tea.Batch(cmds...)
 
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
+			return d.handleMouseClick(msg)
+		}
+		return d, nil
+
 	case tea.KeyPressMsg:
 		if cmd := HandleQuit(msg); cmd != nil {
 			return d, cmd
@@ -184,8 +191,7 @@ func (d *MCPPromptInputDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 // View renders the MCP prompt input dialog
 func (d *MCPPromptInputDialog) View() string {
-	dialogWidth := max(min(d.Width()*80/100, 80), 60)
-	contentWidth := dialogWidth - 6
+	dialogWidth, contentWidth := d.mcpPromptDialogDimensions()
 
 	title := RenderTitle("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle)
 
@@ -243,6 +249,50 @@ func (d *MCPPromptInputDialog) View() string {
 	return styles.DialogStyle.
 		Width(dialogWidth).
 		Render(lipgloss.JoinVertical(lipgloss.Left, parts...))
+}
+
+// mcpPromptDialogDimensions returns the dialog width and content width.
+func (d *MCPPromptInputDialog) mcpPromptDialogDimensions() (dialogWidth, contentWidth int) {
+	dialogWidth = max(min(d.Width()*80/100, 80), 60)
+	contentWidth = dialogWidth - styles.DialogStyle.GetHorizontalFrameSize()
+	return dialogWidth, contentWidth
+}
+
+// handleMouseClick handles mouse clicks to focus input fields.
+func (d *MCPPromptInputDialog) handleMouseClick(msg tea.MouseClickMsg) (layout.Model, tea.Cmd) {
+	if len(d.inputs) == 0 {
+		return d, nil
+	}
+
+	dialogRow, _ := d.Position()
+	_, contentWidth := d.mcpPromptDialogDimensions()
+
+	// Compute the Y offset where fields start by measuring the rendered header.
+	var headerParts []string
+	headerParts = append(headerParts, RenderTitle("MCP Prompt: "+d.promptName, contentWidth, styles.DialogTitleStyle))
+	if d.promptInfo.Description != "" {
+		headerParts = append(headerParts, "", styles.DialogContentStyle.Width(contentWidth).Render(d.promptInfo.Description))
+	}
+	headerParts = append(headerParts, RenderSeparator(contentWidth))
+	y := ContentStartRow(dialogRow, lipgloss.JoinVertical(lipgloss.Left, headerParts...))
+
+	clickY := msg.Y
+	for i := range d.inputs {
+		// Click on label or input line focuses the field
+		if clickY == y || clickY == y+1 {
+			d.inputs[d.currentInput].Blur()
+			d.currentInput = i
+			d.inputs[d.currentInput].Focus()
+			return d, nil
+		}
+		y += 2 // label + input
+
+		if i < len(d.inputs)-1 {
+			y++ // space between fields
+		}
+	}
+
+	return d, nil
 }
 
 // Position calculates the position to center the dialog

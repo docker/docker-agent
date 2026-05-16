@@ -259,29 +259,20 @@ func TestDefaultTheme_AllColorsPopulated(t *testing.T) {
 
 	// Check ThemeColors - all fields must be non-empty
 	colorsVal := reflect.ValueOf(theme.Colors)
-	colorsType := colorsVal.Type()
-	for i := range colorsType.NumField() {
-		field := colorsType.Field(i)
-		value := colorsVal.Field(i).String()
-		assert.NotEmpty(t, value, "DefaultTheme().Colors.%s is empty - add default in DefaultTheme()", field.Name)
+	for field, value := range colorsVal.Fields() {
+		assert.NotEmpty(t, value.String(), "DefaultTheme().Colors.%s is empty - add default in DefaultTheme()", field.Name)
 	}
 
 	// Check ChromaColors - all fields must be non-empty
 	chromaVal := reflect.ValueOf(theme.Chroma)
-	chromaType := chromaVal.Type()
-	for i := range chromaType.NumField() {
-		field := chromaType.Field(i)
-		value := chromaVal.Field(i).String()
-		assert.NotEmpty(t, value, "DefaultTheme().Chroma.%s is empty - add default in DefaultTheme()", field.Name)
+	for field, value := range chromaVal.Fields() {
+		assert.NotEmpty(t, value.String(), "DefaultTheme().Chroma.%s is empty - add default in DefaultTheme()", field.Name)
 	}
 
 	// Check MarkdownTheme - all fields must be non-empty
 	mdVal := reflect.ValueOf(theme.Markdown)
-	mdType := mdVal.Type()
-	for i := range mdType.NumField() {
-		field := mdType.Field(i)
-		value := mdVal.Field(i).String()
-		assert.NotEmpty(t, value, "DefaultTheme().Markdown.%s is empty - add default in DefaultTheme()", field.Name)
+	for field, value := range mdVal.Fields() {
+		assert.NotEmpty(t, value.String(), "DefaultTheme().Markdown.%s is empty - add default in DefaultTheme()", field.Name)
 	}
 }
 
@@ -290,31 +281,38 @@ func TestDefaultTheme_AllColorsPopulated(t *testing.T) {
 func TestMergeColors_HandlesAllFields(t *testing.T) {
 	t.Parallel()
 
-	// Create a base with all fields set to "BASE"
+	// Create a base with all string fields set to "BASE"
 	base := ThemeColors{}
 	baseVal := reflect.ValueOf(&base).Elem()
-	for i := range baseVal.NumField() {
-		baseVal.Field(i).SetString("BASE")
+	for _, field := range baseVal.Fields() {
+		if field.Kind() == reflect.String {
+			field.SetString("BASE")
+		}
 	}
+	base.AgentHues = []float64{10, 20}
 
-	// Create an override with all fields set to "OVERRIDE"
+	// Create an override with all string fields set to "OVERRIDE"
 	override := ThemeColors{}
 	overrideVal := reflect.ValueOf(&override).Elem()
-	for i := range overrideVal.NumField() {
-		overrideVal.Field(i).SetString("OVERRIDE")
+	for _, field := range overrideVal.Fields() {
+		if field.Kind() == reflect.String {
+			field.SetString("OVERRIDE")
+		}
 	}
+	override.AgentHues = []float64{30, 40, 50}
 
 	// Merge should replace all base values with override values
 	merged := mergeColors(base, override)
 	mergedVal := reflect.ValueOf(merged)
-	mergedType := mergedVal.Type()
 
-	for i := range mergedType.NumField() {
-		field := mergedType.Field(i)
-		value := mergedVal.Field(i).String()
-		assert.Equal(t, "OVERRIDE", value,
-			"mergeColors() doesn't handle ThemeColors.%s - add merge logic in mergeColors()", field.Name)
+	for field, value := range mergedVal.Fields() {
+		if value.Kind() == reflect.String {
+			assert.Equal(t, "OVERRIDE", value.String(),
+				"mergeColors() doesn't handle ThemeColors.%s - add merge logic in mergeColors()", field.Name)
+		}
 	}
+	assert.Equal(t, []float64{30, 40, 50}, merged.AgentHues,
+		"mergeColors() doesn't handle ThemeColors.AgentHues")
 }
 
 // TestMergeChromaColors_HandlesAllFields ensures mergeChromaColors handles every ChromaColors field.
@@ -323,24 +321,21 @@ func TestMergeChromaColors_HandlesAllFields(t *testing.T) {
 
 	base := ChromaColors{}
 	baseVal := reflect.ValueOf(&base).Elem()
-	for i := range baseVal.NumField() {
-		baseVal.Field(i).SetString("BASE")
+	for _, field := range baseVal.Fields() {
+		field.SetString("BASE")
 	}
 
 	override := ChromaColors{}
 	overrideVal := reflect.ValueOf(&override).Elem()
-	for i := range overrideVal.NumField() {
-		overrideVal.Field(i).SetString("OVERRIDE")
+	for _, field := range overrideVal.Fields() {
+		field.SetString("OVERRIDE")
 	}
 
 	merged := mergeChromaColors(base, override)
 	mergedVal := reflect.ValueOf(merged)
-	mergedType := mergedVal.Type()
 
-	for i := range mergedType.NumField() {
-		field := mergedType.Field(i)
-		value := mergedVal.Field(i).String()
-		assert.Equal(t, "OVERRIDE", value,
+	for field, value := range mergedVal.Fields() {
+		assert.Equal(t, "OVERRIDE", value.String(),
 			"mergeChromaColors() doesn't handle ChromaColors.%s - add merge logic", field.Name)
 	}
 }
@@ -351,24 +346,21 @@ func TestMergeMarkdownTheme_HandlesAllFields(t *testing.T) {
 
 	base := MarkdownTheme{}
 	baseVal := reflect.ValueOf(&base).Elem()
-	for i := range baseVal.NumField() {
-		baseVal.Field(i).SetString("BASE")
+	for _, field := range baseVal.Fields() {
+		field.SetString("BASE")
 	}
 
 	override := MarkdownTheme{}
 	overrideVal := reflect.ValueOf(&override).Elem()
-	for i := range overrideVal.NumField() {
-		overrideVal.Field(i).SetString("OVERRIDE")
+	for _, field := range overrideVal.Fields() {
+		field.SetString("OVERRIDE")
 	}
 
 	merged := mergeMarkdownTheme(base, override)
 	mergedVal := reflect.ValueOf(merged)
-	mergedType := mergedVal.Type()
 
-	for i := range mergedType.NumField() {
-		field := mergedType.Field(i)
-		value := mergedVal.Field(i).String()
-		assert.Equal(t, "OVERRIDE", value,
+	for field, value := range mergedVal.Fields() {
+		assert.Equal(t, "OVERRIDE", value.String(),
 			"mergeMarkdownTheme() doesn't handle MarkdownTheme.%s - add merge logic", field.Name)
 	}
 }

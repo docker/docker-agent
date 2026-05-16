@@ -1,26 +1,45 @@
 name: winget
-
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to publish (e.g., v1.20.5)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run (do not submit PR)"
+        required: false
+        type: boolean
+        default: false
 
-env:
-  WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+permissions: {}
 
 jobs:
   publish:
     runs-on: windows-latest
     steps:
       - name: publish
-        run: |
-          $Release = $ENV:RELEASE | ConvertFrom-Json
-          $Version = $Release.tag_name
-          $PackageId = "Docker.Cagent"
-          $Urls = @(
-            "https://github.com/docker/cagent/releases/download/$Version/cagent-windows-amd64.exe|amd64",
-            "https://github.com/docker/cagent/releases/download/$Version/cagent-windows-arm64.exe|arm64"
-          )
-          & curl.exe -JLO https://aka.ms/wingetcreate/latest
-          & .\wingetcreate.exe update $PackageId -s -v $Version -u $Urls
         env:
-          RELEASE: ${{ toJSON(github.event.release) }}
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_GH_TOKEN }}
+          VERSION: ${{ inputs.release_tag || github.event.release.tag_name }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          winget install wingetcreate  --accept-source-agreements   --accept-package-agreements
+
+          $Version = $ENV:VERSION
+          $DryRun = $ENV:DRY_RUN -eq 'true'
+          $PackageId = "Docker.Agent"
+          $Urls = @(
+            "https://github.com/docker/docker-agent/releases/download/$Version/docker-agent-windows-amd64.exe|amd64",
+            "https://github.com/docker/docker-agent/releases/download/$Version/docker-agent-windows-arm64.exe|arm64"
+          )
+
+          # Build command with conditional -s flag
+          $params = @('update', $PackageId, '-v', $Version, '-u', $Urls)
+          if (-not $DryRun) {
+            $params += '-s'
+          }
+
+          & wingetcreate.exe @params

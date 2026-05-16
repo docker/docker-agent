@@ -1,4 +1,4 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 
 # Handoff Graph Diagram:
 #
@@ -33,7 +33,7 @@ agents:
       Based on the user's query, determine whether they need:
       - Web search: for general information, current events, or online resources
       - Filesystem search: for searching local files, directories, or file contents
-      
+
       Hand off to the appropriate agent based on the query type.
       If the query is ambiguous, ask the user for clarification.
     handoffs:
@@ -59,11 +59,11 @@ agents:
     instruction: |
       You are an agent specialized in searching the local filesystem.
       Use filesystem tools to search for files, list directories, or read file contents.
-      
+
       After performing your search:
       - If the results are a list of files/directories (tabular data), you MUST call the handoff tool to hand off to the tabulator agent
       - If the results are file contents (text from reading files), you MUST call the handoff tool to hand off to the redactor agent first
-      
+
       Make your decision based on what type of data you've retrieved.
     toolsets:
       - type: filesystem
@@ -82,7 +82,7 @@ agents:
       - Secrets (look for "secret", "SECRET", "token", "TOKEN")
       - Private keys (look for "-----BEGIN", "PRIVATE KEY")
       - Email addresses (optional, based on context)
-      
+
       Replace sensitive values with "[REDACTED]" or similar placeholders.
       After redacting, you MUST call the handoff tool to hand off to the tabulator agent.
     handoffs:
@@ -98,17 +98,17 @@ agents:
       - Lists of items with similar structure
       - Key-value pairs that can be organized into columns
       - Other structured data, such as search results or file listings
-      
+
       If the data is tabular, format it as a clear, readable markdown table.
       Use markdown table format or ASCII table formatting.
-      
+
       For file listings, create columns like: Name, Type, Size, Modified
       For search results, create columns appropriate to the data.
-      
+
       If the data is not tabular (e.g., plain text, source code, unstructured content), 
       pass it through unchanged - your job is only to format tabular data, not to force 
       non-tabular content into tables.
-      
+
       IMPORTANT: After processing the data, you MUST call the handoff tool to hand off to the summarizer agent.
     handoffs:
       - summarizer
@@ -119,12 +119,12 @@ agents:
     instruction: |
       You are the final presentation agent that summarizes and presents search results.
       Take the information you receive from other agents and present it clearly to the user.
-      
+
       - For all results: Provide a summary with key findings and sources
       - For results containing tables, preserve the table formatting (remove rows with annotation of more than 20 rows)
       - Always be concise and well-organized
       - Include relevant context from the search process
-      
+
       You are the final agent in the workflow - present the results and complete the task,
       then you MUST call the handoff tool to hand off back to the root agent.
     handoffs:

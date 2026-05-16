@@ -9,9 +9,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/cagent/pkg/tui/core"
-	"github.com/docker/cagent/pkg/tui/core/layout"
-	"github.com/docker/cagent/pkg/tui/styles"
+	"github.com/docker/docker-agent/pkg/tui/core"
+	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
 // MultiChoiceOption represents a single selectable option in the dialog.
@@ -98,6 +98,7 @@ type clickableRange struct {
 // multiChoiceDialog implements a reusable multi-choice selection dialog.
 type multiChoiceDialog struct {
 	BaseDialog
+
 	config            MultiChoiceConfig
 	selected          selection       // Currently selected item (-1 = none)
 	customInput       textinput.Model // Text input for custom response
@@ -260,15 +261,7 @@ func (d *multiChoiceDialog) computeDialogWidth() int {
 	}
 
 	// Calculate total dialog width
-	dialogWidth := maxContentWidth + frameWidth
-
-	// Apply bounds
-	if dialogWidth < multiChoiceMinDialogWidth {
-		dialogWidth = multiChoiceMinDialogWidth
-	}
-	if dialogWidth > multiChoiceMaxDialogWidth {
-		dialogWidth = multiChoiceMaxDialogWidth
-	}
+	dialogWidth := min(max(maxContentWidth+frameWidth, multiChoiceMinDialogWidth), multiChoiceMaxDialogWidth)
 
 	// Don't exceed screen width
 	screenLimit := d.Width() * multiChoiceScreenWidthFactor / 100
@@ -629,7 +622,9 @@ func (d *multiChoiceDialog) View() string {
 	// Help text and buttons on same row
 	helpAndButtons := d.renderHelpAndButtons(contentWidth)
 	content.AddContent(helpAndButtons)
-	d.btnRow = rowIdx
+	// Cache the button row index so click handling in Update() can hit-test
+	// against the same layout that was just rendered.
+	d.btnRow = rowIdx //rubocop:disable Lint/TUIViewPurity // click-zone cache consumed by Update()
 
 	return styles.DialogStyle.Width(dialogWidth).Render(content.Build())
 }
@@ -660,10 +655,9 @@ func (d *multiChoiceDialog) renderOption(num int, label string, isSelected bool,
 	numBoxWidth := lipgloss.Width(numBox)
 
 	// Calculate available width for label (allow word wrap)
-	labelWidth := contentWidth - numBoxWidth - 1 // -1 for space between number box and label
-	if labelWidth < multiChoiceMinLabelWidth {
-		labelWidth = multiChoiceMinLabelWidth
-	}
+	labelWidth := max(
+		// -1 for space between number box and label
+		contentWidth-numBoxWidth-1, multiChoiceMinLabelWidth)
 
 	// Apply width constraint for word wrapping
 	var labelRendered string
@@ -706,10 +700,7 @@ func (d *multiChoiceDialog) renderCustomOption(isSelected bool, contentWidth int
 
 	// Calculate available width for text display
 	// -1 for space between number box and input, -1 for cursor space
-	availableWidth := contentWidth - numBoxWidth - 2
-	if availableWidth < multiChoiceMinLabelWidth {
-		availableWidth = multiChoiceMinLabelWidth
-	}
+	availableWidth := max(contentWidth-numBoxWidth-2, multiChoiceMinLabelWidth)
 
 	value := d.customInput.Value()
 
@@ -818,10 +809,7 @@ func (d *multiChoiceDialog) renderHelpAndButtons(contentWidth int) string {
 	totalBtnWidth := secondaryWidth + multiChoiceButtonSpacing + primaryWidth
 
 	// Calculate spacing between help and buttons
-	spacing := contentWidth - helpWidth - totalBtnWidth
-	if spacing < multiChoiceMinHelpSpacing {
-		spacing = multiChoiceMinHelpSpacing
-	}
+	spacing := max(contentWidth-helpWidth-totalBtnWidth, multiChoiceMinHelpSpacing)
 
 	// Store button positions for click detection (relative to content area)
 	d.secondaryBtnCol = helpWidth + spacing

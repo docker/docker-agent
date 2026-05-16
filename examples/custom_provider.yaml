@@ -1,24 +1,39 @@
 # Example: Custom Provider Configuration
 #
-# This example demonstrates how to define and use custom providers in Cagent.
-# Custom providers allow you to connect to OpenAI-compatible APIs with reusable
-# configuration for base URLs, API tokens, and API schema types.
+# This example demonstrates how to define and use providers in docker-agent.
+# Providers allow you to group reusable configuration (base URLs, API tokens,
+# model defaults) that models can inherit by referencing the provider name.
+#
+# Providers support any provider type: openai, anthropic, google, amazon-bedrock, etc.
+# When the 'provider' field is not set, it defaults to 'openai' for backward compatibility.
 
-# Define custom providers with reusable configuration
+# Define providers with reusable configuration
 providers:
-  # Example: A custom OpenAI Chat Completions compatible API gateway
+  # Example: An OpenAI Chat Completions compatible API gateway (default behavior)
   my_gateway:
     api_type: openai_chatcompletions  # Use the Chat Completions API schema
     base_url: https://api.example.com/
     token_key: API_KEY_ENV_VAR_NAME  # Environment variable containing the API token
 
-  # Example: A custom OpenAI Responses compatible API gateway
+  # Example: An OpenAI Responses compatible API gateway
   responses_provider:
     api_type: openai_responses
     base_url: https://responses.example.com/
     token_key: API_KEY_ENV_VAR_NAME
 
-# Define models that use the custom providers
+  # Example: Anthropic provider with shared defaults
+  my_anthropic:
+    provider: anthropic
+    token_key: MY_ANTHROPIC_KEY
+    max_tokens: 16384
+    thinking_budget: high
+
+  # Example: Google provider with shared defaults
+  my_google:
+    provider: google
+    temperature: 0.7
+
+# Define models that use the providers
 models:
   # Model using the custom gateway provider
   gateway_gpt4o:
@@ -32,6 +47,17 @@ models:
     provider: responses_provider
     model: gpt-5
     max_tokens: 16000
+
+  # Model using the Anthropic provider - inherits max_tokens and thinking_budget
+  claude_model:
+    provider: my_anthropic
+    model: claude-sonnet-4-5
+
+  # Model overriding the provider's thinking_budget
+  claude_fast:
+    provider: my_anthropic
+    model: claude-haiku-4-5
+    thinking_budget: low
 
 # Define agents that use the models
 agents:
@@ -48,3 +74,10 @@ agents:
     description: Sub-agent for specialized tasks
     instruction: |
       You are a specialized assistant for specific tasks.
+
+  # Example using Anthropic provider with shorthand
+  researcher:
+    model: my_anthropic/claude-sonnet-4-5
+    description: Research assistant
+    instruction: |
+      You are a research assistant that provides thorough analysis.

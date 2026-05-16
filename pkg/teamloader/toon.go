@@ -8,13 +8,17 @@ import (
 
 	"github.com/alpkeskin/gotoon"
 
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 type toonTools struct {
 	tools.ToolSet
+
 	toolRegexps []*regexp.Regexp
 }
+
+// Verify interface compliance
+var _ tools.Unwrapper = (*toonTools)(nil)
 
 func (f *toonTools) Tools(ctx context.Context) ([]tools.Tool, error) {
 	allTools, err := f.ToolSet.Tools(ctx)
@@ -54,6 +58,11 @@ func (f *toonTools) Tools(ctx context.Context) ([]tools.Tool, error) {
 	}
 
 	return allTools, nil
+}
+
+// Unwrap implements tools.Unwrapper.
+func (f *toonTools) Unwrap() tools.ToolSet {
+	return f.ToolSet
 }
 
 func WithToon(inner tools.ToolSet, toon string) tools.ToolSet {

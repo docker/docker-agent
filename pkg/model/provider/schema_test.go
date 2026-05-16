@@ -7,10 +7,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/cagent/pkg/model/provider/anthropic"
-	"github.com/docker/cagent/pkg/model/provider/dmr"
-	"github.com/docker/cagent/pkg/model/provider/gemini"
-	"github.com/docker/cagent/pkg/model/provider/openai"
+	"github.com/docker/docker-agent/pkg/model/provider/anthropic"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr"
+	"github.com/docker/docker-agent/pkg/model/provider/gemini"
+	"github.com/docker/docker-agent/pkg/model/provider/openai"
 )
 
 const schemaJSON = `
@@ -186,7 +186,7 @@ func TestSchemaForAnthropic(t *testing.T) {
 
 // TestEmptyMapSchemaForOpenai makes sure we format empty properties in a way that
 // OpenAI and LM Studio accept.
-// See https://github.com/docker/cagent/issues/278
+// See https://github.com/docker/docker-agent/issues/278
 func TestEmptyMapSchemaForOpenai(t *testing.T) {
 	schema, err := openai.ConvertParametersToSchema(map[string]any{})
 	require.NoError(t, err)

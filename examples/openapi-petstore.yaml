@@ -1,0 +1,42 @@
+#!/usr/bin/env docker agent run
+
+# OpenAPI Toolset Example
+#
+# This agent uses the "openapi" toolset type to automatically generate
+# tools from a public OpenAPI specification (the Pet Store API).
+#
+# Each endpoint in the spec becomes a callable tool that the agent can use.
+#
+# Usage:
+#   docker agent run examples/openapi-petstore.yaml
+
+agents:
+  root:
+    model: openai/gpt-4o
+    description: Pet Store assistant powered by OpenAPI tools
+    instruction: |
+      You are a helpful Pet Store assistant.
+      You have access to the Pet Store API and can help users manage pets.
+
+      Available actions:
+      - List pets with optional filtering
+      - Create new pets
+      - Look up pets by ID
+
+      Always confirm with the user before creating or modifying data.
+    welcome_message: |
+      🐾 Welcome to the Pet Store!
+
+      I can help you manage pets using the Pet Store API. Try asking me to:
+      - List all available pets
+      - Add a new pet
+      - Look up a specific pet
+
+      What would you like to do?
+    toolsets:
+      - type: openapi
+        url: https://petstore3.swagger.io/api/v3/openapi.json
+        # Optional: pass custom headers to every HTTP request
+        # headers:
+        #   Authorization: "Bearer ${env.API_TOKEN}"
+        #   X-Custom-Header: "my-value"

@@ -16,17 +16,32 @@ import (
 	"github.com/labstack/echo/v4/middleware"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/server/adka2a"
-	"google.golang.org/adk/session"
+	adksession "google.golang.org/adk/session"
 
-	"github.com/docker/cagent/pkg/config"
-	"github.com/docker/cagent/pkg/teamloader"
-	"github.com/docker/cagent/pkg/version"
+	"github.com/docker/docker-agent/pkg/config"
+	pathx "github.com/docker/docker-agent/pkg/path"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/teamloader"
+	"github.com/docker/docker-agent/pkg/version"
 )
 
-func Run(ctx context.Context, agentFilename, agentName string, runConfig *config.RuntimeConfig, ln net.Listener) error {
-	slog.Debug("Starting A2A server", "agent", agentName, "addr", ln.Addr().String())
+// routableAddr replaces wildcard listen addresses (like "0.0.0.0" or "::") with
+// "localhost" so the agent card URL is actually usable by clients.
+func routableAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return net.JoinHostPort("localhost", port)
+	}
+	return addr
+}
 
-	agentSource, err := config.Resolve(agentFilename)
+func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runConfig *config.RuntimeConfig, ln net.Listener) error {
+	slog.DebugContext(ctx, "Starting A2A server", "source", agentFilename, "agent", agentName, "addr", ln.Addr().String())
+
+	agentSource, err := config.Resolve(agentFilename, nil)
 	if err != nil {
 		return err
 	}
@@ -37,18 +52,27 @@ func Run(ctx context.Context, agentFilename, agentName string, runConfig *config
 	}
 	defer func() {
 		if err := t.StopToolSets(ctx); err != nil {
-			slog.Error("Failed to stop tool sets", "error", err)
+			slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
 		}
 	}()
 
-	adkAgent, err := newCAgentAdapter(t, agentName)
+	expandedSessionDB, err := pathx.ExpandHomeDir(sessionDB)
+	if err != nil {
+		return fmt.Errorf("failed to expand session db path: %w", err)
+	}
+	sessStore, err := session.NewSQLiteSessionStore(expandedSessionDB)
+	if err != nil {
+		return fmt.Errorf("failed to open session store: %w", err)
+	}
+
+	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore)
 	if err != nil {
 		return fmt.Errorf("failed to create ADK agent adapter: %w", err)
 	}
 
-	baseURL := &url.URL{Scheme: "http", Host: ln.Addr().String()}
+	baseURL := &url.URL{Scheme: "http", Host: routableAddr(ln.Addr().String())}
 
-	slog.Debug("A2A server listening", "url", baseURL.String())
+	slog.DebugContext(ctx, "A2A server listening", "url", baseURL.String())
 
 	name := strings.TrimSuffix(filepath.Base(agentFilename), filepath.Ext(agentFilename))
 
@@ -60,7 +84,7 @@ func Run(ctx context.Context, agentFilename, agentName string, runConfig *config
 			ID:          fmt.Sprintf("%s_%s", name, agentName),
 			Name:        agentName,
 			Description: adkAgent.Description(),
-			Tags:        []string{"llm", "cagent"},
+			Tags:        []string{"llm", "docker agent"},
 		}},
 		PreferredTransport: a2a.TransportProtocolJSONRPC,
 		URL:                baseURL.JoinPath(agentPath).String(),
@@ -74,7 +98,7 @@ func Run(ctx context.Context, agentFilename, agentName string, runConfig *config
 		RunnerConfig: runner.Config{
 			AppName:        name,
 			Agent:          adkAgent,
-			SessionService: session.InMemoryService(),
+			SessionService: adksession.InMemoryService(),
 		},
 	})
 
@@ -95,7 +119,7 @@ func Run(ctx context.Context, agentFilename, agentName string, runConfig *config
 	e.POST(agentPath, echo.WrapHandler(a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))))
 
 	if err := e.Server.Serve(ln); err != nil && ctx.Err() == nil {
-		slog.Error("Failed to start server", "error", err)
+		slog.ErrorContext(ctx, "Failed to start server", "error", err)
 		return err
 	}
 

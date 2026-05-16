@@ -11,12 +11,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/remote"
 )
 
 const (
 	DockerCatalogURL     = "https://desktop.docker.com/mcp/catalog/v3/catalog.yaml"
 	catalogCacheFileName = "mcp_catalog.json"
-	catalogCacheDuration = 24 * time.Hour
+	fetchTimeout         = 15 * time.Second
+
+	// catalogJSON is the URL we actually fetch (JSON is ~3x faster to parse than YAML).
+	catalogJSON = "https://desktop.docker.com/mcp/catalog/v3/catalog.json"
 )
 
 func RequiredEnvVars(ctx context.Context, serverName string) ([]Secret, error) {
@@ -25,7 +31,7 @@ func RequiredEnvVars(ctx context.Context, serverName string) ([]Secret, error) {
 		return nil, err
 	}
 
-	// TODO(dga): until the MCP Gateway supports oauth with cagent,
+	// TODO(dga): until the MCP Gateway supports oauth with docker agent,
 	// we ignore every secret listed on `remote` servers and assume
 	// we can use oauth by connecting directly to the server's url.
 	if server.Type == "remote" {
@@ -36,210 +42,165 @@ func RequiredEnvVars(ctx context.Context, serverName string) ([]Secret, error) {
 }
 
 func ServerSpec(_ context.Context, serverName string) (Server, error) {
-	server, ok := getCatalogServer(serverName)
+	catalog, err := catalogOnce()
+	if err != nil {
+		return Server{}, err
+	}
+
+	server, ok := catalog[serverName]
 	if !ok {
 		return Server{}, fmt.Errorf("MCP server %q not found in MCP catalog", serverName)
 	}
+
 	return server, nil
 }
 
+// ParseServerRef strips the optional "docker:" prefix from a server reference.
+func ParseServerRef(ref string) string {
+	return strings.TrimPrefix(ref, "docker:")
+}
+
+// cachedCatalog is the on-disk cache format.
 type cachedCatalog struct {
-	Catalog  Catalog   `json:"catalog"`
-	CachedAt time.Time `json:"cached_at"`
+	Catalog Catalog `json:"catalog"`
+	ETag    string  `json:"etag,omitempty"`
 }
 
-var (
-	catalogMu     sync.RWMutex
-	catalogData   Catalog
-	catalogLoaded bool
-	catalogStale  bool
-	refreshOnce   sync.Once
-)
+// catalogOnce guards one-shot catalog loading.
+// We use sync.OnceValues so that:
+//   - the catalog is fetched at most once per process, and
+//   - we detach from the caller's context to avoid permanently
+//     caching a context-cancellation error.
+var catalogOnce = sync.OnceValues(func() (Catalog, error) {
+	return fetchAndCache(context.Background())
+})
 
-// getCatalogServer returns a server from the catalog, refreshing if needed.
-// If server is not found in cache, it will try to fetch fresh data from network
-// in case it's a newly added server.
-func getCatalogServer(serverName string) (Server, bool) {
-	// First, ensure catalog is loaded
-	ensureCatalogLoaded()
+// fetchAndCache tries to fetch the catalog from the network (using ETag for
+// conditional requests) and falls back to the disk cache on any failure.
+func fetchAndCache(ctx context.Context) (Catalog, error) {
+	cacheFile := cacheFilePath()
+	cached := loadFromDisk(cacheFile)
 
-	catalogMu.RLock()
-	server, ok := catalogData[serverName]
-	stale := catalogStale
-	catalogMu.RUnlock()
-
-	if ok {
-		// Found in cache. If stale, trigger background refresh for next time.
-		if stale {
-			triggerBackgroundRefresh()
+	catalog, newETag, err := fetchFromNetwork(ctx, cached.ETag)
+	if err != nil {
+		slog.DebugContext(ctx, "Failed to fetch MCP catalog from network, using cache", "error", err)
+		if cached.Catalog != nil {
+			return cached.Catalog, nil
 		}
-		return server, true
+		return nil, fmt.Errorf("fetching MCP catalog: %w (no cached copy available)", err)
 	}
 
-	// Server not found in cache. Try fetching fresh data in case it's a new server.
-	if refreshCatalogFromNetwork() {
-		catalogMu.RLock()
-		server, ok = catalogData[serverName]
-		catalogMu.RUnlock()
-		return server, ok
+	// A nil catalog means 304 Not Modified — the cached copy is still valid.
+	if catalog == nil {
+		slog.DebugContext(ctx, "MCP catalog not modified (ETag match)")
+		return cached.Catalog, nil
 	}
 
-	return Server{}, false
+	slog.DebugContext(ctx, "MCP catalog fetched from network")
+	saveToDisk(cacheFile, catalog, newETag)
+
+	return catalog, nil
 }
 
-// ensureCatalogLoaded loads the catalog from cache or network on first access.
-func ensureCatalogLoaded() {
-	catalogMu.RLock()
-	loaded := catalogLoaded
-	catalogMu.RUnlock()
+func cacheFilePath() string {
+	return filepath.Join(paths.GetCacheDir(), catalogCacheFileName)
+}
 
-	if loaded {
-		return
-	}
-
-	catalogMu.Lock()
-	defer catalogMu.Unlock()
-
-	// Double-check after acquiring write lock
-	if catalogLoaded {
-		return
-	}
-
-	cacheFile := getCacheFilePath()
-
-	// Try loading from local cache first
-	if cached, cacheAge, err := loadCatalogFromCache(cacheFile); err == nil {
-		slog.Debug("Loaded MCP catalog from cache", "file", cacheFile, "age", cacheAge.Round(time.Second))
-		catalogData = cached
-		catalogLoaded = true
-		catalogStale = cacheAge > catalogCacheDuration
-		return
-	}
-
-	// Cache miss or invalid, fetch from network
-	catalog, err := fetchCatalogFromNetwork()
+func loadFromDisk(path string) cachedCatalog {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		slog.Error("Failed to fetch MCP catalog", "error", err)
-		return
-	}
-
-	catalogData = catalog
-	catalogLoaded = true
-	catalogStale = false
-
-	// Save to cache (best effort)
-	if err := saveCatalogToCache(cacheFile, catalog); err != nil {
-		slog.Warn("Failed to save MCP catalog to cache", "error", err)
-	}
-}
-
-// triggerBackgroundRefresh starts a background goroutine to refresh the catalog.
-// Only one background refresh will run at a time.
-func triggerBackgroundRefresh() {
-	refreshOnce.Do(func() {
-		go func() {
-			refreshCatalogFromNetwork()
-			// Reset refreshOnce so future stale reads can trigger another refresh
-			refreshOnce = sync.Once{}
-		}()
-	})
-}
-
-// refreshCatalogFromNetwork fetches fresh catalog data and updates the cache.
-// Returns true if refresh was successful.
-func refreshCatalogFromNetwork() bool {
-	catalog, err := fetchCatalogFromNetwork()
-	if err != nil {
-		slog.Debug("Background catalog refresh failed", "error", err)
-		return false
-	}
-
-	catalogMu.Lock()
-	catalogData = catalog
-	catalogStale = false
-	catalogMu.Unlock()
-
-	// Save to cache (best effort)
-	if err := saveCatalogToCache(getCacheFilePath(), catalog); err != nil {
-		slog.Warn("Failed to save refreshed MCP catalog to cache", "error", err)
-	}
-
-	slog.Debug("MCP catalog refreshed from network")
-	return true
-}
-
-func getCacheFilePath() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(homeDir, ".cagent", catalogCacheFileName)
-}
-
-func loadCatalogFromCache(cacheFile string) (Catalog, time.Duration, error) {
-	if cacheFile == "" {
-		return nil, 0, fmt.Errorf("no cache file path")
-	}
-
-	data, err := os.ReadFile(cacheFile)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to read cache file: %w", err)
+		return cachedCatalog{}
 	}
 
 	var cached cachedCatalog
 	if err := json.Unmarshal(data, &cached); err != nil {
-		return nil, 0, fmt.Errorf("failed to unmarshal cached data: %w", err)
+		return cachedCatalog{}
 	}
 
-	cacheAge := time.Since(cached.CachedAt)
-	return cached.Catalog, cacheAge, nil
+	return cached
 }
 
-func saveCatalogToCache(cacheFile string, catalog Catalog) error {
-	if cacheFile == "" {
-		return nil
-	}
-
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(cacheFile), 0o755); err != nil {
-		return fmt.Errorf("failed to create cache directory: %w", err)
-	}
-
-	cached := cachedCatalog{
-		Catalog:  catalog,
-		CachedAt: time.Now(),
-	}
-
-	data, err := json.Marshal(cached)
+func saveToDisk(path string, catalog Catalog, etag string) {
+	data, err := json.Marshal(cachedCatalog{Catalog: catalog, ETag: etag})
 	if err != nil {
-		return fmt.Errorf("failed to marshal cached data: %w", err)
+		slog.Warn("Failed to marshal MCP catalog cache", "error", err)
+		return
 	}
 
-	if err := os.WriteFile(cacheFile, data, 0o644); err != nil {
-		return fmt.Errorf("failed to write cache file: %w", err)
+	dir := filepath.Dir(path)
+
+	// Write to a temp file and rename so readers never see a partial file.
+	// Try creating the temp file first; only create the directory if needed.
+	tmp, err := os.CreateTemp(dir, ".mcp_catalog_*.tmp")
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("Failed to create MCP catalog temp file", "error", err)
+			return
+		}
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil { //nolint:gosec // shared with other docker MCP gateway processes
+			slog.Warn("Failed to create MCP catalog cache directory", "error", mkErr)
+			return
+		}
+		tmp, err = os.CreateTemp(dir, ".mcp_catalog_*.tmp")
+		if err != nil {
+			slog.Warn("Failed to create MCP catalog temp file", "error", err)
+			return
+		}
+	}
+	tmpName := tmp.Name()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		slog.Warn("Failed to write MCP catalog temp file", "error", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		slog.Warn("Failed to close MCP catalog temp file", "error", err)
+		return
 	}
 
-	return nil
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		slog.Warn("Failed to rename MCP catalog cache file", "error", err)
+	}
 }
 
-func fetchCatalogFromNetwork() (Catalog, error) {
-	// Use the JSON version because it's 3x time faster to parse than YAML.
-	url := strings.Replace(DockerCatalogURL, ".yaml", ".json", 1)
+// fetchFromNetwork fetches the catalog, using the ETag for conditional requests.
+// It returns (nil, "", nil) when the server responds with 304 Not Modified.
+func fetchFromNetwork(ctx context.Context, etag string) (Catalog, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
 
-	resp, err := http.Get(url)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, catalogJSON, http.NoBody)
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+
+	catalogClient := &http.Client{Transport: remote.NewTransport(ctx)}
+	resp, err := catalogClient.Do(req)
+	if err != nil {
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusNotModified {
+		return nil, "", nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch URL: %s, status: %s", url, resp.Status)
+		return nil, "", fmt.Errorf("unexpected status fetching MCP catalog: %s", resp.Status)
 	}
 
-	var topLevel topLevel
-	if err := json.NewDecoder(resp.Body).Decode(&topLevel); err != nil {
-		return nil, err
+	var top topLevel
+	if err := json.NewDecoder(resp.Body).Decode(&top); err != nil {
+		return nil, "", err
 	}
 
-	return topLevel.Catalog, nil
+	return top.Catalog, resp.Header.Get("ETag"), nil
 }

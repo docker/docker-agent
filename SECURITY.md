@@ -1,6 +1,6 @@
 # Security Policy
 
-The maintainers of Docker `cagent` take security seriously.
+The maintainers of Docker `docker-agent` take security seriously.
 If you discover a security issue, please bring it to their attention right away!
 
 ## Reporting a Vulnerability

@@ -1,59 +1,119 @@
-#!/usr/bin/env cagent run
+#!/usr/bin/env docker agent run
 #
-# Hooks Example - Demonstrating Allow, Deny, and Modify
+# Hooks - one-stop example
+# ==========================================================================
 #
-# This example shows how hooks can control tool execution:
-#   - DENY: Block dangerous shell commands (rm -rf, sudo, etc.)
-#   - MODIFY: Automatically add safety flags to commands
-#   - ALLOW: Let safe operations proceed
+# Hooks let you observe and shape an agent's lifecycle. This file is the
+# single canonical example covering every supported event AND both handler
+# kinds, so you can see them side by side.
 #
-# Try these prompts to see hooks in action:
-#   - "Run: echo hello"           → Allowed
-#   - "Run: rm -rf /tmp/test"     → BLOCKED by hook
-#   - "Run: sudo apt update"      → BLOCKED by hook
-#   - "List files in current dir" → Command gets modified with -h flag
+# Events:
+#
+#   pre_tool_use      - allow / deny / modify a tool call
+#   post_tool_use     - inspect a tool call's result (success OR failure)
+#   permission_request- programmatically approve / deny tool calls without
+#                       prompting the user
+#   session_start     - one-time setup; AdditionalContext PERSISTS in the session
+#   user_prompt_submit- runs once per user message, before the first LLM call
+#   turn_start        - per-turn context; AdditionalContext is TRANSIENT
+#   turn_end          - per-turn finalizer; fires no matter why the turn ended
+#   before_llm_call   - just before each model call (observability, guardrails)
+#   after_llm_call    - just after a successful model call
+#   session_end       - cleanup when the session terminates
+#   pre_compact       - just before context compaction; can steer or veto
+#   subagent_stop     - a sub-agent (transferred task / background) finished
+#   on_user_input     - the agent is waiting on the user
+#   stop              - the model finished its response
+#   notification      - errors / warnings emitted by the runtime (catch-all)
+#   on_error          - structured handler for runtime errors
+#   on_max_iterations - structured handler for hitting max_iterations
+#   before_compaction - veto a compaction OR supply a custom summary string
+#   after_compaction  - observe a successful compaction (logging, audits)
+#
+# Handler kinds:
+#
+#   command - shell command, JSON Input on stdin, decision returned via
+#             stdout JSON or exit codes (2 = block)
+#   builtin - in-process Go function registered by the runtime; reuses the
+#             `command` field for the builtin's name and the `args` field
+#             for parameters. Shipped builtins:
+#               add_date              (turn_start)
+#               add_environment_info  (session_start)
+#               add_prompt_files      (turn_start; args = file names)
+#               add_git_status        (turn_start)
+#               add_git_diff          (turn_start; args = ["full"] for unified diff)
+#               add_directory_listing (session_start)
+#               add_user_info         (session_start)
+#               add_recent_commits    (session_start; args = ["<N>"], default 10)
+#               max_iterations        (before_llm_call; args = ["<N>"], hard stop)
+#               snapshot              (session_start / turn_start / turn_end /
+#                                      pre_tool_use / post_tool_use / session_end;
+#                                      shadow-git filesystem snapshots)
+#
+# Requirements: the command-style hooks below pipe stdin through `jq` for
+# convenient JSON access. If you don't have jq installed (`brew install jq`
+# on macOS, `apt-get install jq` on Debian/Ubuntu), a hook will exit non-zero
+# and the runtime will log a 'Hook execution error' warning but otherwise
+# continue — use plain `awk`/`sed`/`grep` or any other parser if you prefer.
+#
+# Try these prompts:
+#   "Run: echo hello"           → allowed
+#   "Run: rm -rf /tmp/test"     → denied by pre_tool_use
+#   "Run: sudo apt update"      → denied by pre_tool_use
+#   "List files in current dir" → ls gets -h injected (modify)
+#
+# Logs (tail these in another terminal):
+#   /tmp/agent-session.log         (session_start, session_end)
+#   /tmp/agent-prompts.log         (user_prompt_submit)
+#   /tmp/agent-llm-calls.log       (before_llm_call, after_llm_call)
+#   /tmp/agent-turns.log           (turn_end)
+#   /tmp/agent-tool-results.log    (post_tool_use)
+#   /tmp/agent-permissions.log     (permission_request)
+#   /tmp/agent-compactions.log     (pre_compact)
+#   /tmp/agent-subagents.log       (subagent_stop)
+#   /tmp/agent-responses.log       (stop)
+#   /tmp/agent-notifications.log   (notification)
+#   /tmp/agent-errors.log          (on_error)
+#   /tmp/agent-max-iter.log        (on_max_iterations)
+#   /tmp/agent-compactions.log     (before_compaction, after_compaction)
 #
 
 agents:
   root:
     model: openai/gpt-4o
-    description: An agent with lifecycle hooks demonstrating allow/deny/modify
+    description: One-stop example demonstrating every hook event and both handler kinds.
     instruction: |
       You are a helpful assistant with access to shell and filesystem tools.
-      Use them to help the user with their tasks.
-
-      When asked to run a command, use the shell tool directly.
+      Use them to help the user with their tasks. When asked to run a
+      command, use the shell tool directly.
     toolsets:
       - type: shell
       - type: filesystem
 
     hooks:
-      # ============================================================
-      # PRE-TOOL-USE HOOKS - Control what happens BEFORE a tool runs
-      # ============================================================
+      # ====================================================================
+      # PRE-TOOL-USE - control what happens BEFORE a tool runs.
+      # Tool-matched (regex on tool name); each entry can deny, allow with
+      # a modified input, or stay silent (default allow).
+      # ====================================================================
       pre_tool_use:
-        # DENY dangerous shell commands
+        # DENY dangerous shell commands.
         - matcher: "shell"
           hooks:
             - type: command
               timeout: 10
               command: |
-                # Read the JSON input from stdin
                 INPUT=$(cat)
                 CMD=$(echo "$INPUT" | jq -r '.tool_input.cmd // ""')
-
-                # Check for dangerous patterns and DENY if found
                 if echo "$CMD" | grep -qiE 'rm\s+(-[^\s]*)?\s*-rf|rm\s+(-[^\s]*)?\s*-fr|sudo|mkfs|dd\s+if=|:(\(\)\{|\s*){.*}'; then
-                  # Output JSON to deny with a reason
                   cat <<EOF
-                {"hook_specific_output":{"permission_decision":"deny","permission_decision_reason":"🚫 HOOK BLOCKED: Dangerous command pattern detected. Commands with rm -rf, sudo, mkfs, or dd are not allowed."}}
+                {"hook_specific_output":{"permission_decision":"deny","permission_decision_reason":"🚫 HOOK BLOCKED: dangerous command pattern detected. rm -rf, sudo, mkfs, dd are not allowed."}}
                 EOF
                 else
-                  # Allow the command to proceed
                   echo '{"continue": true}'
                 fi
 
-        # MODIFY: Add human-readable flag to ls commands
+        # MODIFY: inject -h into bare `ls` calls for human-readable sizes.
         - matcher: "shell"
           hooks:
             - type: command
@@ -61,36 +121,374 @@ agents:
               command: |
                 INPUT=$(cat)
                 CMD=$(echo "$INPUT" | jq -r '.tool_input.cmd // ""')
-
-                # If it's a plain 'ls' command without -h, add -h for human-readable sizes
                 if echo "$CMD" | grep -qE '^ls(\s|$)' && ! echo "$CMD" | grep -q '\-h'; then
-                  # Modify the command to add -h flag
                   NEW_CMD=$(echo "$CMD" | sed 's/^ls/ls -h/')
                   cat <<EOF
-                {"hook_specific_output":{"permission_decision":"allow","updated_input":{"cmd":"$NEW_CMD"}},"system_message":"📝 Hook modified command: added -h flag for human-readable output"}
+                {"hook_specific_output":{"permission_decision":"allow","updated_input":{"cmd":"$NEW_CMD"}},"system_message":"📝 Hook modified command: added -h for human-readable output"}
                 EOF
                 fi
-                # If no modification needed, output nothing (allows by default)
 
-      # ============================================================
-      # POST-TOOL-USE HOOKS - Run AFTER a tool completes
-      # ============================================================
+      # ====================================================================
+      # POST-TOOL-USE - run AFTER a tool completes (logging, audits).
+      # Fires for BOTH success and failure: branch on tool_response.is_error
+      # to handle them differently if you only care about one outcome.
+      # ====================================================================
       post_tool_use:
         - matcher: "shell"
           hooks:
-            - type: command
+            - name: summarize shell output
+              type: command
+              timeout: 10
+              working_dir: .
+              env:
+                HOOK_PROFILE: dev
+              on_error: warn
               command: |
                 INPUT=$(cat)
                 TOOL=$(echo "$INPUT" | jq -r '.tool_name')
-                echo "✅ Post-hook: $TOOL completed successfully"
+                ERROR=$(echo "$INPUT" | jq -r '.tool_error // false')
+                OUTPUT_LEN=$(echo "$INPUT" | jq -r '.tool_response // ""' | wc -c | tr -d ' ')
+                echo "✅ Post-hook: $TOOL completed (error=$ERROR, output=$OUTPUT_LEN chars, profile=$HOOK_PROFILE)"
 
-      # ============================================================
-      # SESSION HOOKS - Run at session start/end
-      # ============================================================
+      # ====================================================================
+      # PERMISSION-REQUEST - run just before the runtime would prompt the
+      # user to approve a tool call. Auto-allow safe read-only commands so
+      # the user is never asked; auto-deny anything you don't want to even
+      # show in the confirmation UI. Returning nothing falls through to the
+      # interactive prompt.
+      # ====================================================================
+      permission_request:
+        - matcher: "shell"
+          hooks:
+            - type: command
+              timeout: 5
+              command: |
+                INPUT=$(cat)
+                CMD=$(echo "$INPUT" | jq -r '.tool_input.cmd // ""')
+                echo "[$(date)] permission request: $CMD" >> /tmp/agent-permissions.log
+                if echo "$CMD" | grep -qE '^(ls|pwd|cat|echo|date|whoami)( |$)'; then
+                  echo '{"hook_specific_output":{"permission_decision":"allow","permission_decision_reason":"safe read-only command"}}'
+                fi
+
+      # ====================================================================
+      # SESSION-START - runs ONCE when the session begins.
+      # Result.AdditionalContext is appended to the session as a SystemMessage
+      # and persists across turns and resumes.
+      # ====================================================================
       session_start:
-        - type: command
-          command: echo "🚀 Session started at $(date). Hooks are active!"
+        # In-process Go function: reports working dir, OS, arch, git status.
+        - type: builtin
+          command: add_environment_info
 
+        # Custom command hook: log session start and tell the model where
+        # the log lives via additional_context.
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            echo "🚀 Session $SESSION_ID started at $(date)" >> /tmp/agent-session.log
+            echo '{"hook_specific_output":{"additional_context":"Session log: /tmp/agent-session.log"}}'
+
+      # ====================================================================
+      # USER-PROMPT-SUBMIT - runs ONCE per user message, after the prompt
+      # has been recorded in the session and before the first LLM call.
+      # Use it to validate / redact / enrich the prompt, or to inject
+      # per-turn context (additional_context becomes a transient system
+      # message for that turn).
+      # ====================================================================
+      user_prompt_submit:
+        - type: command
+          timeout: 5
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            PROMPT=$(echo "$INPUT" | jq -r '.prompt // ""')
+            echo "[$(date)] [$SESSION_ID] $PROMPT" >> /tmp/agent-prompts.log
+            # Example: inject a hint when the user asks about logs.
+            if echo "$PROMPT" | grep -qiE '\blogs?\b'; then
+              echo '{"hook_specific_output":{"additional_context":"Hook hint: agent log files live under /tmp/agent-*.log"}}'
+            fi
+
+      # ====================================================================
+      # TURN-START - runs at the start of every model call.
+      # Result.AdditionalContext is spliced after the invariant cache
+      # checkpoint and is NOT persisted, so per-turn signals refresh every
+      # turn without bloating the message history.
+      # ====================================================================
+      turn_start:
+        # Built-in: prepends "Today's date: YYYY-MM-DD".
+        - type: builtin
+          command: add_date
+
+        # Built-in: read each file under the working dir and join its
+        # contents into a system message. The `args` field carries per-hook
+        # parameters that builtin handlers receive directly.
+        - type: builtin
+          command: add_prompt_files
+          args:
+            - GUIDELINES.md
+            - PROJECT.md
+
+      # ====================================================================
+      # TURN-END - runs ONCE per turn after the iteration finishes — the
+      # symmetric counterpart of turn_start. Fires no matter why the turn
+      # ended: a normal stop, an error, a hook-driven shutdown, the loop
+      # detector, or context cancellation. The reason is reported via
+      # the .reason field:
+      #
+      #   normal           - model finished cleanly, no follow-up
+      #   continue         - more iterations to come (e.g. tool calls)
+      #   steered          - drained steered messages prompted a re-entry
+      #   error            - model call failed (handleStreamError)
+      #   canceled         - context cancellation (Ctrl+C, parent ctx done)
+      #   hook_blocked     - before_llm_call or post_tool_use signalled stop
+      #   loop_detected    - degenerate consecutive-tool-call loop
+      #
+      # Observational; the result is ignored. Use it to time turns,
+      # accumulate per-turn metrics (token usage, tool counts), or notify
+      # external observability pipelines.
+      # ====================================================================
+      turn_end:
+        - type: command
+          timeout: 5
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            AGENT=$(echo "$INPUT" | jq -r '.agent_name // "unknown"')
+            REASON=$(echo "$INPUT" | jq -r '.reason // "unknown"')
+            echo "[$(date)] [←] $SESSION_ID $AGENT turn ended (reason=$REASON)" >> /tmp/agent-turns.log
+
+      # ====================================================================
+      # BEFORE-LLM-CALL - fires just before every model invocation, AFTER
+      # turn_start has assembled the messages slice. Use for observability
+      # / cost guardrails / auditing without contributing system messages
+      # (turn_start is the right place for the latter).
+      # ====================================================================
+      before_llm_call:
+        - type: command
+          timeout: 5
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            echo "[$(date)] [→] $SESSION_ID llm call starting" >> /tmp/agent-llm-calls.log
+
+      # ====================================================================
+      # AFTER-LLM-CALL - fires just after a successful model call. The
+      # assistant text content arrives via stop_response (matching the
+      # stop event's payload). Failed calls fire on_error instead and
+      # skip this event.
+      # ====================================================================
+      after_llm_call:
+        - type: command
+          timeout: 5
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            LEN=$(echo "$INPUT" | jq -r '.stop_response // ""' | wc -c | tr -d ' ')
+            echo "[$(date)] [←] $SESSION_ID llm call complete, content=$LEN chars" >> /tmp/agent-llm-calls.log
+
+      # ====================================================================
+      # SESSION-END - cleanup when the session terminates.
+      # ====================================================================
       session_end:
         - type: command
-          command: echo "👋 Session ended at $(date)"
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            REASON=$(echo "$INPUT" | jq -r '.reason // "unknown"')
+            echo "👋 Session $SESSION_ID ended (reason: $REASON) at $(date)" >> /tmp/agent-session.log
+
+      # ====================================================================
+      # PRE-COMPACT - runs just before the runtime compacts the transcript.
+      # source is one of: manual (user /compact), auto (proactive threshold),
+      # overflow (context-overflow recovery), tool_overflow (proactive after
+      # tool results pushed past threshold). Return additional_context to
+      # steer the summary without editing the agent's instruction; return
+      # decision=block to cancel compaction entirely.
+      # ====================================================================
+      pre_compact:
+        - type: command
+          timeout: 5
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            SOURCE=$(echo "$INPUT" | jq -r '.source // "unknown"')
+            echo "[$(date)] $SESSION_ID compacting (source=$SOURCE)" >> /tmp/agent-compactions.log
+            echo '{"hook_specific_output":{"additional_context":"When summarizing, please preserve any TODOs, file paths, and command outputs verbatim."}}'
+
+      # ====================================================================
+      # SUBAGENT-STOP - fires when a sub-agent (transfer_task, background
+      # agent, skill sub-session) completes. Runs against the PARENT
+      # agent's hooks executor, so handlers placed on the orchestrator
+      # see every child completion in one place.
+      # ====================================================================
+      subagent_stop:
+        - type: command
+          timeout: 5
+          command: |
+            INPUT=$(cat)
+            AGENT=$(echo "$INPUT" | jq -r '.agent_name // "unknown"')
+            CHILD=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            PARENT=$(echo "$INPUT" | jq -r '.parent_session_id // "unknown"')
+            LEN=$(echo "$INPUT" | jq -r '.stop_response // ""' | wc -c | tr -d ' ')
+            echo "[$(date)] $AGENT child=$CHILD parent=$PARENT len=$LEN" >> /tmp/agent-subagents.log
+
+      # ====================================================================
+      # ON-USER-INPUT - the agent is waiting on the user.
+      # Useful for desktop notifications.
+      # ====================================================================
+      on_user_input:
+        - type: command
+          command: |
+            # macOS only — adapt for Linux notify-send / Windows toast.
+            osascript -e 'display notification "ready!" with title "docker-agent"' 2>/dev/null || true
+
+      # ====================================================================
+      # STOP - runs when the model finishes a response.
+      # Receives the response text via the stop_response field.
+      # ====================================================================
+      stop:
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+            LEN=$(echo "$INPUT" | jq -r '.stop_response // ""' | wc -c | tr -d ' ')
+            echo "[$(date)] Session $SESSION_ID - response length: $LEN chars" >> /tmp/agent-responses.log
+
+      # ====================================================================
+      # NOTIFICATION - runs when the runtime emits a warning or error
+      # (max iterations, model errors, ...). Forward to Slack, Teams, or
+      # a logfile.
+      # ====================================================================
+      notification:
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            LEVEL=$(echo "$INPUT" | jq -r '.notification_level // "unknown"')
+            MESSAGE=$(echo "$INPUT" | jq -r '.notification_message // "no message"')
+            echo "[$(date)] [$LEVEL] $MESSAGE" >> /tmp/agent-notifications.log
+
+      # ====================================================================
+      # ON-ERROR - fires alongside `notification` (level=error) but ONLY
+      # for runtime errors. Use this when you want a dedicated entry point
+      # for errors without filtering on .notification_level inside the
+      # handler. Both events fire for the same condition; you can have
+      # either or both.
+      # ====================================================================
+      on_error:
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            MESSAGE=$(echo "$INPUT" | jq -r '.notification_message // "no message"')
+            echo "[$(date)] error: $MESSAGE" >> /tmp/agent-errors.log
+
+      # ====================================================================
+      # ON-MAX-ITERATIONS - fires alongside `notification` (level=warning)
+      # but ONLY when the agent hits its iteration cap. Useful for
+      # metrics pipelines that want to count runaway sessions without
+      # parsing the notification text.
+      # ====================================================================
+      on_max_iterations:
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            MESSAGE=$(echo "$INPUT" | jq -r '.notification_message // "no message"')
+            echo "[$(date)] max-iterations: $MESSAGE" >> /tmp/agent-max-iter.log
+
+      # ====================================================================
+      # BEFORE-COMPACTION - fires immediately before the runtime compacts
+      # the session. The Input carries:
+      #   .input_tokens       - current session input-token count
+      #   .output_tokens      - current session output-token count
+      #   .context_limit      - the model's context-window size, when known
+      #   .compaction_reason  - "threshold" (proactive 90% trigger),
+      #                         "overflow" (post-overflow auto-recovery),
+      #                         or "manual" (user-invoked /compact).
+      #
+      # Two ways to influence the runtime:
+      #
+      #   1. Veto: exit with code 2 (or return permission_decision="deny").
+      #      The runtime skips compaction entirely. CAUTION: vetoing during
+      #      compaction_reason="overflow" leaves the session unable to make
+      #      progress — gate by reason if you need this.
+      #
+      #   2. Replace: return hookSpecificOutput.summary to supply a custom
+      #      summary string. The runtime applies it verbatim and skips the
+      #      LLM-based summarization. Useful for non-LLM strategies (drop
+      #      oldest tool results, dedupe, stub-out long blobs, ...).
+      # ====================================================================
+      before_compaction:
+        - type: command
+          timeout: 30
+          command: |
+            INPUT=$(cat)
+            REASON=$(echo "$INPUT" | jq -r '.compaction_reason // "manual"')
+            INPUT_TOK=$(echo "$INPUT" | jq -r '.input_tokens // 0')
+            OUTPUT_TOK=$(echo "$INPUT" | jq -r '.output_tokens // 0')
+            LIMIT=$(echo "$INPUT" | jq -r '.context_limit // 0')
+            echo "[$(date)] [→] compacting (reason=$REASON, in=$INPUT_TOK, out=$OUTPUT_TOK, ctx=$LIMIT)" \
+              >> /tmp/agent-compactions.log
+            # Pure observability — fall through to the LLM-based default.
+            echo '{"continue": true}'
+
+      # ====================================================================
+      # AFTER-COMPACTION - fires after a successful compaction has applied
+      # a summary to the session. The Input carries the produced summary
+      # text in .summary alongside the *pre-compaction* .input_tokens /
+      # .output_tokens (what was summarized) so handlers can naturally
+      # express "compacted from X to Y". Purely observational — output is
+      # ignored.
+      # ====================================================================
+      after_compaction:
+        - type: command
+          timeout: 10
+          command: |
+            INPUT=$(cat)
+            REASON=$(echo "$INPUT" | jq -r '.compaction_reason // "manual"')
+            BEFORE_IN=$(echo "$INPUT" | jq -r '.input_tokens // 0')
+            BEFORE_OUT=$(echo "$INPUT" | jq -r '.output_tokens // 0')
+            LEN=$(echo "$INPUT" | jq -r '.summary // ""' | wc -c | tr -d ' ')
+            echo "[$(date)] [✓] compacted (reason=$REASON, ${BEFORE_IN}+${BEFORE_OUT} tokens → ${LEN} chars summary)" \
+              >> /tmp/agent-compactions.log
+
+      # ====================================================================
+      # CUSTOM-SUMMARY EXAMPLE (commented out) - demonstrates the non-LLM
+      # replacement path. Returning a non-empty hookSpecificOutput.summary
+      # makes the runtime apply that string verbatim and skip the LLM call
+      # entirely. Useful for:
+      #
+      #   - deterministic / fast strategies (drop oldest tool results,
+      #     dedupe identical tool calls, stub long blob attachments);
+      #   - regulated environments where shipping conversation history to
+      #     a summarization model isn't permitted;
+      #   - testing: pin a known summary string to make compaction
+      #     deterministic in CI.
+      #
+      # If multiple before_compaction hooks return a summary, the first
+      # non-empty one in config order wins (hooks run concurrently but
+      # the result slots are indexed, so the verdict is deterministic).
+      #
+      # Uncomment to replace the observational hook above with a custom
+      # strategy. Note: only one before_compaction handler block is
+      # supported per agent in YAML; merge your observability logic into
+      # the same handler if you also want logging.
+      #
+      # before_compaction:
+      #   - type: command
+      #     timeout: 5
+      #     command: |
+      #       INPUT=$(cat)
+      #       cat <<'JSON'
+      #       {
+      #         "hookSpecificOutput": {
+      #           "hookEventName": "before_compaction",
+      #           "summary": "Conversation summarized by the deterministic strategy. Latest user request and tool results preserved verbatim."
+      #         }
+      #       }
+      #       JSON

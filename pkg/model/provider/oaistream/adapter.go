@@ -5,13 +5,14 @@ This is a shared adapter for OpenAI-compatible streams.
 */
 
 import (
+	"encoding/json"
 	"io"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/ssestream"
 
-	"github.com/docker/cagent/pkg/chat"
-	"github.com/docker/cagent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // StreamAdapter adapts the OpenAI stream to our interface
@@ -35,7 +36,7 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	if !a.stream.Next() {
 		err := a.stream.Err()
 		if err != nil {
-			return chat.MessageStreamResponse{}, err
+			return chat.MessageStreamResponse{}, WrapOpenAIError(err)
 		}
 		return chat.MessageStreamResponse{}, io.EOF
 	}
@@ -66,19 +67,30 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			a.lastFinishReason = finishReason
 		}
 
+		// Extract reasoning_content from ExtraFields since the OpenAI SDK
+		// does not yet have a dedicated field for it. Providers like DMR
+		// send reasoning tokens as a "reasoning_content" JSON field in the
+		// chat completion chunk delta.
+		var reasoningContent string
+		if ef, ok := choice.Delta.JSON.ExtraFields["reasoning_content"]; ok && ef.Raw() != "" {
+			// ef.Raw() returns the raw JSON value (e.g. `"some text"`), so
+			// we unmarshal it to get the plain Go string.
+			_ = json.Unmarshal([]byte(ef.Raw()), &reasoningContent)
+		}
+
 		response.Choices[i] = chat.MessageStreamChoice{
 			Index:        int(choice.Index),
 			FinishReason: finishReason,
 			Delta: chat.MessageDelta{
-				Role:    choice.Delta.Role,
-				Content: choice.Delta.Content,
-				// ReasoningContent not available in this SDK version
+				Role:             choice.Delta.Role,
+				Content:          choice.Delta.Content,
+				ReasoningContent: reasoningContent,
 			},
 		}
 
 		// Convert function call if present
 		if choice.Delta.JSON.FunctionCall.Valid() {
-			funcCall := choice.Delta.FunctionCall //nolint:staticcheck // deprecated but still needed for compatibility
+			funcCall := choice.Delta.FunctionCall
 			response.Choices[i].Delta.FunctionCall = &tools.FunctionCall{
 				Name:      funcCall.Name,
 				Arguments: funcCall.Arguments,
