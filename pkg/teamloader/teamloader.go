@@ -77,7 +77,7 @@ type LoadResult struct {
 	// AgentDefaultModels maps agent names to their configured default model references
 	AgentDefaultModels map[string]string
 	// Workflow is set when the config defines a workflow; used by run/exec to run the workflow executor.
-	Workflow *workflow.Config
+	Workflow *workflow.Workflow
 }
 
 // Load loads an agent team from the given source

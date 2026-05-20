@@ -7,9 +7,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestStepContext_EvalCondition(t *testing.T) {
+func TestWorkflowContext_EvalCondition(t *testing.T) {
 	t.Parallel()
-	ctx := NewStepContext()
+
+	wf := &Workflow{name: "test_workflow"}
+	ctx, err := NewWorkflowContext(wf, "test_checkpoint")
+	require.NoError(t, err)
+
 	ctx.SetAgentOutput("qa", `{"is_approved": true}`, "qa_agent")
 
 	ok, resolved := ctx.EvalCondition("{{ $steps.qa.output.is_approved }}")

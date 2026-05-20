@@ -12,10 +12,9 @@ import (
 
 	"github.com/goccy/go-yaml"
 
-	"github.com/docker/cagent/pkg/config/types"
-	"github.com/docker/cagent/pkg/workflow"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/effort"
+	"github.com/docker/docker-agent/pkg/workflow"
 )
 
 const Version = "9"
@@ -31,7 +30,7 @@ type Config struct {
 	Metadata    Metadata                  `json:"metadata"`
 	Permissions *PermissionsConfig        `json:"permissions,omitempty"`
 	// Workflow defines optional sequential, conditional, and parallel step execution.
-	Workflow *workflow.Config `json:"workflow,omitempty" yaml:"workflow,omitempty"`
+	Workflow *workflow.Workflow `json:"workflow,omitempty" yaml:"workflow,omitempty"`
 }
 
 // MCPToolset is a reusable MCP server definition stored in the top-level

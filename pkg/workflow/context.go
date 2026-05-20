@@ -1,26 +1,74 @@
 package workflow
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/docker/docker-agent/pkg/concurrent"
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/sqliteutil"
 )
 
-// StepContext holds outputs from executed steps for template evaluation and propagation.
-// Keys are step IDs; values are either a single StepOutput (sequential/agent) or ParallelOutputs (parallel block).
-// Safe for concurrent use (e.g. parallel steps writing different keys).
-type StepContext struct {
-	mu   sync.RWMutex
-	data map[string]any
+func NewInMemoryCheckpointStore(workflowID string) *inMemoryCheckpointStore {
+	return &inMemoryCheckpointStore{
+		workflowID:  workflowID,
+		checkpoints: concurrent.NewMap[string, *Checkpoint](),
+	}
 }
 
-// NewStepContext returns a new StepContext.
-func NewStepContext() StepContext {
-	return StepContext{data: make(map[string]any)}
+func NewSQLiteCheckpointStore(ctx context.Context, workflowID string, path string) (*SQLiteCheckpointStore, error) {
+	db, err := sqliteutil.OpenDB(path)
+	if err != nil {
+		return nil, err
+	}
+	// Ensure we close the connection if table creation fails
+	// Note: We don't defer close here because we return the db on success
+
+	_, err = db.ExecContext(context.Background(), "CREATE TABLE IF NOT EXISTS memories (id TEXT PRIMARY KEY, created_at TEXT, memory TEXT)")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return &SQLiteCheckpointStore{db: db, mu: sync.Mutex{}}, nil
+}
+
+// NewWorkflowContext returns a new WorkflowContext.
+func NewWorkflowContext(workflow *Workflow, checkpointID string) (*WorkflowContext, error) {
+	store, err := NewSQLiteCheckpointStore(context.Background(), checkpointID, filepath.Join(paths.GetHomeDir(), ".cagent", "session.db"))
+	if err != nil {
+		return nil, err
+	}
+	checkpoint, err := store.GetCheckpoint(context.Background(), checkpointID)
+	if err != nil {
+		return nil, err
+	}
+	memoryStore := NewInMemoryCheckpointStore(checkpointID)
+	var data map[string]any
+	if checkpoint != nil {
+		memoryStore.checkpoints.Store(checkpointID, checkpoint)
+		data = checkpoint.State
+	} else {
+		data = make(map[string]any)
+	}
+
+	return &WorkflowContext{
+		mu:          sync.RWMutex{},
+		data:        data,
+		workflow:    workflow,
+		store:       store,
+		memoryStore: memoryStore,
+	}, nil
 }
 
 // Snapshot returns a shallow copy of the internal data map for serialization/debugging.
-func (c *StepContext) Snapshot() map[string]any {
+func (c *WorkflowContext) Snapshot() map[string]any {
 	if c == nil {
 		return nil
 	}
@@ -33,8 +81,70 @@ func (c *StepContext) Snapshot() map[string]any {
 	return out
 }
 
+func (s *SQLiteCheckpointStore) SaveCheckpoint(ctx context.Context, workflow *WorkflowContext) error {
+	workflow.mu.RLock()
+	defer workflow.mu.RUnlock()
+	
+	id := workflow.memoryStore.workflowID
+	checkpoint := &Checkpoint{
+		Name:             id,
+		workflowName:     workflow.workflow.name,
+		State:            workflow.data,
+		CreatedAt:        time.Now(),
+	}
+	workflow.memoryStore.checkpoints.Store(id, checkpoint)
+	
+	data, err := json.Marshal(checkpoint)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err = s.db.ExecContext(ctx, "INSERT OR REPLACE INTO memories (id, created_at, memory) VALUES (?, ?, ?)", id, checkpoint.CreatedAt.Format(time.RFC3339), string(data))
+	return err
+}
+
+func (s *SQLiteCheckpointStore) GetCheckpoint(ctx context.Context, id string) (*Checkpoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var createdAtStr, memoryStr string
+	err := s.db.QueryRowContext(ctx, "SELECT created_at, memory FROM memories WHERE id = ?", id).Scan(&createdAtStr, &memoryStr)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var cp Checkpoint
+	if err := json.Unmarshal([]byte(memoryStr), &cp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal checkpoint: %w", err)
+	}
+	return &cp, nil
+}
+
+func (s *SQLiteCheckpointStore) Close() error {
+	return s.db.Close()
+}
+
+func (s *SQLiteCheckpointStore) FlushCheckpointsToDB(workflowContext *WorkflowContext) error {
+	return nil
+}
+
+// SaveCheckpoint saves the current checkpoint to the store.
+func (c *WorkflowContext) SaveCheckpoint(ctx context.Context) error {
+	return c.store.SaveCheckpoint(ctx, c)
+}
+
+// FlushCheckpointsToDB flushes checkpoints to the database.
+func (c *WorkflowContext) FlushCheckpointsToDB() error {
+	return c.store.FlushCheckpointsToDB(c)
+}
+
 // SetAgentOutput records the output of a single agent step by ID.
-func (c *StepContext) SetAgentOutput(stepID, output, agentName string) {
+func (c *WorkflowContext) SetAgentOutput(stepID, output, agentName string) {
 	if c == nil {
 		return
 	}
@@ -47,7 +157,7 @@ func (c *StepContext) SetAgentOutput(stepID, output, agentName string) {
 }
 
 // SetParallelOutput records the outputs of a parallel block by its step ID.
-func (c *StepContext) SetParallelOutput(stepID string, out *ParallelOutputs) {
+func (c *WorkflowContext) SetParallelOutput(stepID string, out *ParallelOutputs) {
 	if c == nil {
 		return
 	}
@@ -60,7 +170,7 @@ func (c *StepContext) SetParallelOutput(stepID string, out *ParallelOutputs) {
 }
 
 // GetOutput returns the StepOutput for a step ID if it is a single agent output.
-func (c *StepContext) GetOutput(stepID string) (StepOutput, bool) {
+func (c *WorkflowContext) GetOutput(stepID string) (StepOutput, bool) {
 	if c == nil {
 		return StepOutput{}, false
 	}
@@ -75,7 +185,7 @@ func (c *StepContext) GetOutput(stepID string) (StepOutput, bool) {
 }
 
 // GetParallelOutput returns the ParallelOutputs for a step ID if it is a parallel block.
-func (c *StepContext) GetParallelOutput(stepID string) (*ParallelOutputs, bool) {
+func (c *WorkflowContext) GetParallelOutput(stepID string) (*ParallelOutputs, bool) {
 	if c == nil {
 		return nil, false
 	}
@@ -93,7 +203,7 @@ func (c *StepContext) GetParallelOutput(stepID string) (*ParallelOutputs, bool) 
 // Supports simple template form: {{ $steps.<id>.output }} or {{ $steps.<id>.output.path }}.
 // Returns (value, true) if the expression resolves to a boolean; otherwise (nil, false).
 // Full implementation would use a proper expression evaluator; this provides the contract.
-func (c *StepContext) EvalCondition(condition string) (bool, bool) {
+func (c *WorkflowContext) EvalCondition(condition string) (bool, bool) {
 	expr := strings.TrimSpace(condition)
 	expr = trimTemplateBraces(expr)
 	if !strings.HasPrefix(expr, "$steps.") {

@@ -66,7 +66,7 @@ type runExecFlags struct {
 	hideToolResults bool
 
 	// Workflow: set when config has workflow; exec mode runs workflow instead of single agent
-	workflowConfig *workflow.Config
+	workflowConfig *workflow.Workflow
 	lean           bool
 	listenAddr     string
 	onEventSpecs   []string
@@ -455,7 +455,11 @@ func (f *runExecFlags) handleExecMode(ctx context.Context, out *cli.Printer, rt 
 	}
 
 	if f.workflowConfig != nil {
-		return f.runExecWorkflow(ctx, out, rt, sess, execArgs[1])
+		var userMsg string
+		if len(args) > 1 {
+			userMsg = args[1]
+		}
+		return f.runExecWorkflow(ctx, out, rt, sess, userMsg)
 	}
 
 	err := cli.Run(ctx, out, cli.Config{
@@ -475,9 +479,8 @@ func (f *runExecFlags) handleExecMode(ctx context.Context, out *cli.Printer, rt 
 func (f *runExecFlags) runExecWorkflow(ctx context.Context, out *cli.Printer, rt runtime.Runtime, sess *session.Session, userMessage string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-
-	sess.AddMessage(cli.PrepareUserMessage(ctx, rt, userMessage, f.attachmentPath))
-	sess.SendUserMessage = true
+	msg, _ := cli.PrepareUserMessage(ctx, rt, userMessage, f.attachmentPath)
+	sess.AddMessage(msg)
 
 	exec := workflowrun.NewLocalExecutor(rt)
 	events := make(chan workflowrun.Event, 128)
@@ -526,7 +529,7 @@ func (f *runExecFlags) runExecWorkflow(ctx context.Context, out *cli.Printer, rt
 			}
 		case *runtime.ToolCallResponseEvent:
 			if !f.hideToolCalls {
-				out.PrintToolCallResponse(e.ToolCall, e.Response)
+				out.PrintToolCallResponse(e.AgentName, e.Response)
 			}
 		}
 	}

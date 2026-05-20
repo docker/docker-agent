@@ -2,15 +2,20 @@ package workflowrun
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/docker/cagent/pkg/runtime"
-	"github.com/docker/cagent/pkg/session"
-	"github.com/docker/cagent/pkg/workflow"
+	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/sqliteutil"
+	"github.com/docker/docker-agent/pkg/workflow"
 )
 
 // Event is the type of events emitted during workflow execution.
@@ -22,7 +27,29 @@ type Event = any
 // evaluates conditions, and enforces max loop iterations.
 type Executor interface {
 	// Run executes the workflow with the given session (initial user message) and sends events to the channel.
-	Run(ctx context.Context, cfg *workflow.Config, sess *session.Session, events chan Event) (*workflow.StepContext, error)
+	Run(ctx context.Context, cfg *workflow.Workflow, sess *session.Session, events chan Event) (*workflow.WorkflowContext, error)
+}
+
+// SQLiteLoggerStore implements Store using SQLite
+type SQLiteLoggerStore struct {
+	mu sync.Mutex
+	db *sql.DB
+}
+
+func NewSQLiteLoggerStore(ctx context.Context, workflowID string, path string) (*SQLiteLoggerStore, error) {
+	db, err := sqliteutil.OpenDB(path)
+	if err != nil {
+		return nil, err
+	}
+	// Ensure we close the connection if table creation fails
+	// Note: We don't defer close here because we return the db on success
+	_, err = db.ExecContext(context.Background(), "CREATE TABLE IF NOT EXISTS logger (id TEXT PRIMARY KEY, created_at TEXT, memory TEXT)")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return &SQLiteLoggerStore{db: db, mu: sync.Mutex{}}, nil
 }
 
 // Runner is the minimal runtime interface needed to run agent steps.
@@ -50,58 +77,97 @@ func NewLocalExecutor(r Runner) *LocalExecutor {
 // Run executes the workflow. Sequential steps run in order; conditional steps
 // evaluate and run true/false branches; parallel steps run concurrently and
 // all must succeed before the next sequential step.
-func (e *LocalExecutor) Run(ctx context.Context, cfg *workflow.Config, sess *session.Session, events chan Event) (*workflow.StepContext, error) {
+func (e *LocalExecutor) Run(ctx context.Context, cfg *workflow.Workflow, sess *session.Session, events chan Event) (*workflow.WorkflowContext, error) {
 	if cfg == nil || len(cfg.Steps) == 0 {
-		return nil, fmt.Errorf("workflow: no steps configured")
+		return nil, fmt.Errorf("workflow: no steps WorkflowWorkflowured")
 	}
 	maxLoop := cfg.MaxLoopIterations
 	if maxLoop <= 0 {
 		maxLoop = workflow.DefaultMaxLoopIterations
 	}
 	ctx = workflow.NewLoopCounter(ctx, maxLoop)
-	stepCtx := workflow.NewStepContext()
-	err := e.runSteps(ctx, cfg.Steps, &stepCtx, sess, events)
+	stepCtx, err := workflow.NewWorkflowContext(cfg, sess.ID)
+	if err != nil {
+		return nil, err
+	}
+	err = e.runSteps(ctx, cfg.Steps, stepCtx, sess, cfg, events)
+	if err != nil {
+		return nil, err
+	}
 
 	// Print step context for debugging.
 	if b, jerr := json.MarshalIndent(stepCtx.Snapshot(), "", "  "); jerr == nil {
 		fmt.Fprintf(os.Stderr, "\n--- Step Context ---\n%s\n", string(b))
 	}
+	// save workflow run log to db
+	loggerPath := filepath.Join(paths.GetHomeDir(), ".cagent", "logger.db")
+	loggerStore, err := NewSQLiteLoggerStore(ctx, sess.ID, loggerPath)
+	if err != nil {
+		return nil, err
+	}
+	
+	logData, _ := json.Marshal(stepCtx.Snapshot())
+	
+	loggerStore.mu.Lock()
+	defer loggerStore.mu.Unlock()
+	_, err = loggerStore.db.ExecContext(ctx, "INSERT OR REPLACE INTO logger (id, created_at, memory) VALUES (?, ?, ?)", sess.ID, time.Now().Format(time.RFC3339), string(logData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to save workflow log: %w", err)
+	}
 
-	return &stepCtx, err
+	return stepCtx, nil
 }
 
-func (e *LocalExecutor) runSteps(ctx context.Context, steps []workflow.Step, stepCtx *workflow.StepContext, sess *session.Session, events chan Event) error {
+func (e *LocalExecutor) runSteps(ctx context.Context, steps []workflow.Step, stepCtx *workflow.WorkflowContext, sess *session.Session, config *workflow.Workflow, events chan Event) error {
 	for i := range steps {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		if err := e.runStep(ctx, &steps[i], stepCtx, sess, events); err != nil {
+		if err := e.runStepWithTimeout(ctx, &steps[i], stepCtx, sess, config, events); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (e *LocalExecutor) runStep(ctx context.Context, step *workflow.Step, stepCtx *workflow.StepContext, sess *session.Session, events chan Event) error {
+func (e *LocalExecutor) runStepWithTimeout(ctx context.Context, step *workflow.Step, stepCtx *workflow.WorkflowContext, sess *session.Session, config *workflow.Workflow, events chan Event) error {
+	if config.StepTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, config.StepTimeout)
+		defer cancel()
+	}
+	err := e.runStep(ctx, step, stepCtx, sess, config, events)
+	if err != nil {
+		return err
+	}
+	if err := stepCtx.SaveCheckpoint(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (e *LocalExecutor) runStep(ctx context.Context, step *workflow.Step, stepCtx *workflow.WorkflowContext, sess *session.Session, config *workflow.Workflow, events chan Event) error {
 	stepID := step.ID
 	if stepID == "" {
 		stepID = fmt.Sprintf("step_%s", step.Type)
 	}
 	switch step.Type {
 	case workflow.StepTypeAgent:
-		return e.runAgentStep(ctx, stepID, step, stepCtx, sess, events)
+		return e.runAgentStep(ctx, stepID, step, stepCtx, sess, config, events)
 	case workflow.StepTypeCondition:
-		return e.runConditionStep(ctx, stepID, step, stepCtx, sess, events)
+		return e.runConditionStep(ctx, stepID, step, stepCtx, sess, config, events)
 	case workflow.StepTypeParallel:
-		return e.runParallelStep(ctx, stepID, step, stepCtx, sess, events)
+		return e.runParallelStep(ctx, stepID, step, stepCtx, sess, config, events)
+	case workflow.StepTypeSubWorkflow:
+		return e.runSubWorkflowStep(ctx, stepID, step, stepCtx, sess, config, events)
 	default:
 		return fmt.Errorf("workflow: unknown step type %q", step.Type)
 	}
 }
 
-func (e *LocalExecutor) runAgentStep(ctx context.Context, stepID string, step *workflow.Step, stepCtx *workflow.StepContext, sess *session.Session, events chan Event) error {
+func (e *LocalExecutor) runAgentStep(ctx context.Context, stepID string, step *workflow.Step, stepCtx *workflow.WorkflowContext, sess *session.Session, config *workflow.Workflow, events chan Event) error {
 	if err := workflow.IncLoopCounter(ctx, stepID); err != nil {
 		return err
 	}
@@ -133,11 +199,10 @@ func (e *LocalExecutor) runAgentStep(ctx context.Context, stepID string, step *w
 	return nil
 }
 
-func (e *LocalExecutor) buildSessionForStep(step *workflow.Step, stepCtx *workflow.StepContext, initial *session.Session) *session.Session {
+func (e *LocalExecutor) buildSessionForStep(step *workflow.Step, stepCtx *workflow.WorkflowContext, initial *session.Session) *session.Session {
 	opts := []session.Opt{
 		session.WithMaxIterations(initial.MaxIterations),
 		session.WithToolsApproved(initial.ToolsApproved),
-		session.WithThinking(initial.Thinking),
 		session.WithSendUserMessage(true),
 	}
 
@@ -166,7 +231,7 @@ func (e *LocalExecutor) buildSessionForStep(step *workflow.Step, stepCtx *workfl
 
 // buildPriorContext formats all prior step outputs into a context block
 // that is injected into the next step's user message.
-func buildPriorContext(stepCtx *workflow.StepContext) string {
+func buildPriorContext(stepCtx *workflow.WorkflowContext) string {
 	snapshot := stepCtx.Snapshot()
 	if len(snapshot) == 0 {
 		return ""
@@ -207,18 +272,18 @@ func buildPriorContext(stepCtx *workflow.StepContext) string {
 	return sb.String()
 }
 
-func (e *LocalExecutor) runConditionStep(ctx context.Context, stepID string, step *workflow.Step, stepCtx *workflow.StepContext, sess *session.Session, events chan Event) error {
+func (e *LocalExecutor) runConditionStep(ctx context.Context, stepID string, step *workflow.Step, stepCtx *workflow.WorkflowContext, sess *session.Session, config *workflow.Workflow, events chan Event) error {
 	ok, resolved := stepCtx.EvalCondition(step.Condition)
 	if !resolved {
 		return fmt.Errorf("workflow: condition did not resolve to boolean: %q", step.Condition)
 	}
 	if ok {
-		return e.runSteps(ctx, step.TrueSteps, stepCtx, sess, events)
+		return e.runSteps(ctx, step.TrueSteps, stepCtx, sess, config, events)
 	}
-	return e.runSteps(ctx, step.FalseSteps, stepCtx, sess, events)
+	return e.runSteps(ctx, step.FalseSteps, stepCtx, sess, config, events)
 }
 
-func (e *LocalExecutor) runParallelStep(ctx context.Context, stepID string, step *workflow.Step, stepCtx *workflow.StepContext, sess *session.Session, events chan Event) error {
+func (e *LocalExecutor) runParallelStep(ctx context.Context, stepID string, step *workflow.Step, stepCtx *workflow.WorkflowContext, sess *session.Session, config *workflow.Workflow, events chan Event) error {
 	if len(step.Steps) == 0 {
 		return nil
 	}
@@ -248,7 +313,7 @@ func (e *LocalExecutor) runParallelStep(ctx context.Context, stepID string, step
 			subSess := e.buildSessionForStep(s, stepCtx, sess)
 			subSess.ParentID = sess.ID
 
-			if err := e.runAgentStep(ctx, id, s, stepCtx, subSess, events); err != nil {
+			if err := e.runAgentStep(ctx, id, s, stepCtx, subSess, config, events); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
@@ -269,4 +334,15 @@ func (e *LocalExecutor) runParallelStep(ctx context.Context, stepID string, step
 	}
 	stepCtx.SetParallelOutput(stepID, &workflow.ParallelOutputs{Steps: outputs, Order: order})
 	return nil
+}
+
+func (e *LocalExecutor) runSubWorkflowStep(ctx context.Context, stepID string, step *workflow.Step, stepCtx *workflow.WorkflowContext, sess *session.Session, config *workflow.Workflow, events chan Event) error {
+	if step.Workflow == nil {
+		return fmt.Errorf("sub-workflow step %s has no workflow", stepID)
+	}
+	// Create a copy of the sub-workflow and add it to the context.
+	subWorkflow := *step.Workflow
+	// We don't need to set it in the context's data map - the executor will handle it.
+	// Run the sub-workflow's steps sequentially using the same logic as normal steps.
+	return e.runSteps(ctx, subWorkflow.Steps, stepCtx, sess, config, events)
 }

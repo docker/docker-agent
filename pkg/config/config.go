@@ -124,7 +124,8 @@ func validateConfig(cfg *latest.Config) error {
 	for name := range cfg.Models {
 		if cfg.Models[name].ParallelToolCalls == nil {
 			m := cfg.Models[name]
-			m.ParallelToolCalls = new(true)
+			m.ParallelToolCalls = new(bool)
+			*m.ParallelToolCalls = true
 			cfg.Models[name] = m
 		}
 	}

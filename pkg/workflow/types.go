@@ -1,14 +1,22 @@
 package workflow
 
-import "fmt"
+import (
+	"database/sql"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/docker/docker-agent/pkg/concurrent"
+)
 
 // StepType identifies the kind of workflow step.
 type StepType string
 
 const (
-	StepTypeAgent     StepType = "agent"
-	StepTypeCondition StepType = "condition"
-	StepTypeParallel  StepType = "parallel"
+	StepTypeAgent       StepType = "agent"
+	StepTypeCondition   StepType = "condition"
+	StepTypeSubWorkflow StepType = "subworkflow"
+	StepTypeParallel    StepType = "parallel"
 )
 
 // Step represents a single workflow step (agent, condition, or parallel block).
@@ -37,6 +45,11 @@ type Step struct {
 	// Steps are the child steps for type=parallel. All run concurrently.
 	Steps []Step `json:"steps,omitempty" yaml:"steps,omitempty"`
 
+	StepTimeout time.Duration `json:"stepTimeout" yaml:"stepTimeout"`
+
+	// Workflow is the child workflow for type=subworkflow. All run concurrently.
+	Workflow *Workflow `json:"workflow,omitempty" yaml:"workflow,omitempty"`
+
 	// Retry configures per-step retry on failure.
 	Retry *RetryConfig `json:"retry,omitempty" yaml:"retry,omitempty"`
 }
@@ -53,8 +66,46 @@ type RetryConfig struct {
 	On []string `json:"on,omitempty" yaml:"on,omitempty"`
 }
 
+type WorkflowContext struct {
+	workflow    *Workflow
+	Checkpoints map[string]Checkpoint `json:"checkpoints" yaml:"checkpoints"`
+	currentStep Step
+	mu          sync.RWMutex
+	data        map[string]any
+	store       *SQLiteCheckpointStore
+	memoryStore *inMemoryCheckpointStore
+}
+
+// SQLiteSessionStore implements Store using SQLite
+type SQLiteCheckpointStore struct {
+	mu sync.Mutex
+	db *sql.DB
+}
+
+// inMemoryCheckpointStore implements Store using SQLite
+type inMemoryCheckpointStore struct {
+	mu          sync.Mutex
+	workflowID  string
+	checkpoints *concurrent.Map[string, *Checkpoint]
+}
+
+type Checkpoint struct {
+	Name             string         `json:"name" yaml:"name"`
+	workflowName     string         `json:"workflowName" yaml:"workflowName"`
+	CurrentStepIndex int            `json:"currentStepIndex" yaml:"currentStepIndex"`
+	Iteration        int            `json:"iteration" yaml:"iteration"`
+	State            map[string]any `json:"state" yaml:"state"`
+	CreatedAt        time.Time      `json:"createdAt" yaml:"createdAt"`
+}
+
 // Config holds workflow-level settings and the root steps.
-type Config struct {
+type Workflow struct {
+	name string `json:"name" yaml:"name"`
+
+	fileName string `json:"fileName" yaml:"fileName"`
+
+	StepTimeout time.Duration `json:"stepTimeout" yaml:"stepTimeout"`
+
 	// Steps are the top-level workflow steps (sequential by default).
 	Steps []Step `json:"steps,omitempty" yaml:"steps,omitempty"`
 
@@ -64,18 +115,18 @@ type Config struct {
 }
 
 // UnmarshalYAML allows workflow to be specified as a list (steps only) or a map (steps + max_loop_iterations).
-func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
+func (c *Workflow) UnmarshalYAML(unmarshal func(any) error) error {
 	var listForm []Step
 	if err := unmarshal(&listForm); err == nil {
 		c.Steps = listForm
 		return nil
 	}
-	type rawConfig Config
+	type rawConfig Workflow
 	var mapForm rawConfig
 	if err := unmarshal(&mapForm); err != nil {
 		return fmt.Errorf("workflow: expected a list of steps or a map with 'steps' and optional 'max_loop_iterations': %w", err)
 	}
-	*c = Config(mapForm)
+	*c = Workflow(mapForm)
 	return nil
 }
 

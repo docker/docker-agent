@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/docker/cagent/pkg/workflow"
+	"github.com/docker/docker-agent/pkg/workflow"
 )
 
 func (t *Config) UnmarshalYAML(unmarshal func(any) error) error {
@@ -62,7 +62,7 @@ func (t *Config) Validate() error {
 }
 
 // validateWorkflow ensures workflow step agent names exist in Agents and step types are valid.
-func validateWorkflow(cfg *workflow.Config, agents Agents) error {
+func validateWorkflow(cfg *workflow.Workflow, agents Agents) error {
 	if cfg == nil {
 		return nil
 	}
@@ -96,6 +96,13 @@ func validateWorkflow(cfg *workflow.Config, agents Agents) error {
 				if err := validateSteps(s.Steps); err != nil {
 					return err
 				}
+			case workflow.StepTypeSubWorkflow:
+				if s.Workflow == nil {
+					return fmt.Errorf("workflow step[%d]: sub-workflow step requires workflow", i)
+				}
+				if err := validateWorkflow(s.Workflow, agents); err != nil {
+					return err
+				}
 			default:
 				return fmt.Errorf("workflow step[%d]: unknown type %q", i, s.Type)
 			}
@@ -103,6 +110,8 @@ func validateWorkflow(cfg *workflow.Config, agents Agents) error {
 		return nil
 	}
 	return validateSteps(cfg.Steps)
+}
+
 // validateFallback validates the fallback configuration for an agent
 func (a *AgentConfig) validateFallback() error {
 	if a.Fallback == nil {
