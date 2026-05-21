@@ -275,7 +275,7 @@ func needsInterleavedThinking(providerType, model string) bool {
 // isCopilotResponsesModel returns true if the model is a GitHub Copilot model that requires the openai_responses API type.
 func isCopilotResponsesModel(model string) bool {
 	switch model {
-	case "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.4-mini", "gpt-5.4-nano":
+	case "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5":
 		return true
 	}
 	return false
