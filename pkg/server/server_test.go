@@ -199,6 +199,59 @@ func TestServer_UpdateSessionTitle(t *testing.T) {
 	assert.Equal(t, newTitle, sessionResp.Title)
 }
 
+// TestGetSession_ModelOverrides pins the behavior that
+// GET /api/sessions/:id surfaces any per-agent model overrides persisted
+// on the session, so clients can rehydrate their model picker after a
+// restart without having to attach the session's runtime first.
+//
+// The /sessions/:id/models endpoint cannot serve this need on its own
+// because it requires an active runtime (see [SessionManager.AvailableSessionModels]);
+// a session loaded purely from the store after a restart has no runtime
+// attached until the user sends the next message.
+func TestGetSession_ModelOverrides(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+
+	// Seed a session directly in the store with a per-agent override —
+	// this models what's left over on disk after a restart, without
+	// having to spin up a runtime to set it the "real" way.
+	sess := session.New()
+	sess.AgentModelOverrides = map[string]string{
+		"root":       "anthropic/claude-sonnet-4-0",
+		"researcher": "openai/gpt-4o",
+	}
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	lnPath := startServerWithStore(t, ctx, prepareAgentsDir(t), store)
+
+	getResp := httpGET(t, ctx, lnPath, "/api/sessions/"+sess.ID)
+	var got api.SessionResponse
+	unmarshal(t, getResp, &got)
+
+	assert.Equal(t, sess.AgentModelOverrides, got.AgentModelOverrides)
+}
+
+// TestGetSession_NoOverrides guards the `omitempty` tag on
+// AgentModelOverrides: a session without any overrides must not carry
+// an `agent_model_overrides` key in the wire response, so clients can
+// distinguish "no override picked" from "override is the empty map"
+// (which is a wire-level corner case but shows up in tests).
+func TestGetSession_NoOverrides(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	lnPath := startServerWithStore(t, ctx, prepareAgentsDir(t), store)
+
+	getResp := httpGET(t, ctx, lnPath, "/api/sessions/"+sess.ID)
+	assert.NotContains(t, string(getResp), "agent_model_overrides")
+}
+
 func startServerWithStore(t *testing.T, ctx context.Context, agentsDir string, store session.Store) string {
 	t.Helper()
 

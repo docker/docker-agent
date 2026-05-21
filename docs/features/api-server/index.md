@@ -43,7 +43,7 @@ All endpoints are under the `/api` prefix.
 | -------- | ----------------------------------- | ------------------------------------------------------- |
 | `GET`    | `/api/sessions`                     | List all sessions                                       |
 | `POST`   | `/api/sessions`                     | Create a new session                                    |
-| `GET`    | `/api/sessions/:id`                 | Get a session by ID (messages, tokens, permissions)     |
+| `GET`    | `/api/sessions/:id`                 | Get a session by ID (messages, tokens, permissions, per-agent model overrides) |
 | `DELETE` | `/api/sessions/:id`                 | Delete a session                                        |
 | `PATCH`  | `/api/sessions/:id/title`           | Update session title                                    |
 | `PATCH`  | `/api/sessions/:id/permissions`     | Update session permissions                              |

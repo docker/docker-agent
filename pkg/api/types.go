@@ -135,6 +135,16 @@ type SessionResponse struct {
 	OutputTokens  int64                      `json:"output_tokens"`
 	WorkingDir    string                     `json:"working_dir,omitempty"`
 	Permissions   *session.PermissionsConfig `json:"permissions,omitempty"`
+	// AgentModelOverrides maps an agent name to the model ref currently
+	// applied as a per-agent override for that agent in this session
+	// (set on prior turns via the `model` field of POST /sessions/:id/agent/:agent).
+	// Empty/omitted when no override is active for any agent — in that
+	// case the agent's YAML-declared default applies. Surfaced here so
+	// clients can rehydrate their UI's model picker after a restart
+	// without having to attach the session's runtime first (the
+	// /models endpoint requires an active runtime, which GET /sessions/:id
+	// deliberately does not).
+	AgentModelOverrides map[string]string `json:"agent_model_overrides,omitempty"`
 }
 
 // UpdateSessionPermissionsRequest represents a request to update session permissions.

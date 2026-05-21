@@ -235,15 +235,16 @@ func (s *Server) getSession(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, api.SessionResponse{
-		ID:            sess.ID,
-		Title:         sess.Title,
-		CreatedAt:     sess.CreatedAt,
-		Messages:      sess.GetAllMessages(),
-		ToolsApproved: sess.ToolsApproved,
-		InputTokens:   sess.InputTokens,
-		OutputTokens:  sess.OutputTokens,
-		WorkingDir:    sess.WorkingDir,
-		Permissions:   sess.Permissions,
+		ID:                  sess.ID,
+		Title:               sess.Title,
+		CreatedAt:           sess.CreatedAt,
+		Messages:            sess.GetAllMessages(),
+		ToolsApproved:       sess.ToolsApproved,
+		InputTokens:         sess.InputTokens,
+		OutputTokens:        sess.OutputTokens,
+		WorkingDir:          sess.WorkingDir,
+		Permissions:         sess.Permissions,
+		AgentModelOverrides: sess.AgentModelOverrides,
 	})
 }
 
