@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/rag/embed"
 	"github.com/docker/docker-agent/pkg/rag/treesitter"
 	"github.com/docker/docker-agent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 // vectorStoreDB is the internal database interface used by VectorStore.
@@ -162,7 +163,7 @@ func NewVectorStore(cfg VectorStoreConfig) *VectorStore {
 // before being sent to the embedding model. Passing nil resets to the default
 // behavior (raw chunk content).
 func (s *VectorStore) SetEmbeddingInputBuilder(builder EmbeddingInputBuilder) {
-	if builder == nil {
+	if reflectx.IsNil(builder) {
 		s.embeddingInputBuilder = DefaultEmbeddingInputBuilder{}
 		return
 	}
@@ -171,7 +172,7 @@ func (s *VectorStore) SetEmbeddingInputBuilder(builder EmbeddingInputBuilder) {
 
 // calculateCost calculates embedding cost using models.dev pricing
 func (s *VectorStore) calculateCost(tokens int64) float64 {
-	if s.modelsStore == nil || s.modelID.Provider == "dmr" {
+	if reflectx.IsNil(s.modelsStore) || s.modelID.Provider == "dmr" {
 		return 0
 	}
 
@@ -483,7 +484,7 @@ func (s *VectorStore) Close() error {
 	}
 
 	// Close database connection
-	if s.db != nil {
+	if !reflectx.IsNil(s.db) {
 		if err := s.db.Close(); err != nil {
 			slog.Error("Failed to close database", "strategy", s.name, "error", err)
 			if firstErr == nil {

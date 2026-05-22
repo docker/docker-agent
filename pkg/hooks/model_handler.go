@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 // ModelClient is the runtime-provided seam between [HookTypeModel]
@@ -117,7 +118,7 @@ func defaultShape(raw string, in *Input) (*Output, error) {
 // invocation. The shape/schema lookup happens at handler-construction
 // time so adding new shapes after factory registration still works.
 func NewModelFactory(client ModelClient) HandlerFactory {
-	if client == nil {
+	if reflectx.IsNil(client) {
 		// The empty client always errors; this lets a runtime register
 		// the factory without a credentialed client and fail at the
 		// first use rather than at construction.

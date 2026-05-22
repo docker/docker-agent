@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
@@ -861,7 +862,7 @@ func (a *App) SetCurrentAgentModel(ctx context.Context, modelRef string) error {
 	}
 
 	// Persist the session
-	if store := a.runtime.SessionStore(); store != nil {
+	if store := a.runtime.SessionStore(); !reflectx.IsNil(store) {
 		if err := store.UpdateSession(ctx, a.session); err != nil {
 			return fmt.Errorf("failed to persist model override: %w", err)
 		}

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/docker/docker-agent/pkg/app"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 	"github.com/docker/docker-agent/pkg/tui/service/tuistate"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -79,7 +80,7 @@ func (m *appModel) restoreTabs(
 
 	for _, saved := range savedTabs {
 		// Validate the saved session still exists.
-		if sessionStore != nil && saved.SessionID != "" {
+		if !reflectx.IsNil(sessionStore) && saved.SessionID != "" {
 			if _, err := sessionStore.GetSession(ctx, saved.SessionID); err != nil {
 				slog.WarnContext(ctx, "Saved session no longer exists, removing stale tab",
 					"session_id", saved.SessionID, "error", err)
@@ -119,7 +120,7 @@ func (m *appModel) restoreTabs(
 		}
 
 		// Peek at the session title so the tab bar shows a name before lazy load.
-		if sessionStore != nil && saved.SessionID != "" {
+		if !reflectx.IsNil(sessionStore) && saved.SessionID != "" {
 			if oldSess, err := sessionStore.GetSession(ctx, saved.SessionID); err == nil && oldSess.Title != "" {
 				sv.SetRunnerTitle(runtimeID, oldSess.Title)
 			}

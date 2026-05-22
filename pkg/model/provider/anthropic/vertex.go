@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 // vertexCloudPlatformScope is the OAuth2 scope required for Vertex AI API access.
@@ -34,7 +35,7 @@ func NewVertexClient(ctx context.Context, cfg *latest.ModelConfig, env environme
 	if cfg == nil {
 		return nil, errors.New("model configuration is required")
 	}
-	if env == nil {
+	if reflectx.IsNil(env) {
 		return nil, errors.New("environment provider is required")
 	}
 	if project == "" {

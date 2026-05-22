@@ -46,6 +46,7 @@ import (
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/mcp"
 )
@@ -615,7 +616,7 @@ func (t *Toolset) expandHeaders(ctx context.Context, in map[string]string) map[s
 	for k, v := range in {
 		out[k] = unresolvedHeaderEnv.ReplaceAllStringFunc(v, func(match string) string {
 			name := match[2 : len(match)-1] // strip ${ and }
-			if t.env == nil {
+			if reflectx.IsNil(t.env) {
 				return match
 			}
 			if val, ok := t.env.Get(ctx, name); ok && val != "" {
@@ -631,7 +632,7 @@ func (t *Toolset) expandHeaders(ctx context.Context, in map[string]string) map[s
 // available from the toolset's env provider. Empty result means "all good".
 // Returns nil for non api_key servers.
 func (t *Toolset) missingAPIKeyEnv(ctx context.Context, s Server) []string {
-	if s.Auth.Type != "api_key" || t.env == nil {
+	if s.Auth.Type != "api_key" || reflectx.IsNil(t.env) {
 		return nil
 	}
 	var missing []string

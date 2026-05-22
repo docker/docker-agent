@@ -9,6 +9,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -61,7 +62,7 @@ func applyAutoInjectors(cfg *hooks.Config, injectors []builtins.AutoInjector) *h
 		cfg = &hooks.Config{}
 	}
 	for _, inj := range injectors {
-		if inj != nil {
+		if !reflectx.IsNil(inj) {
 			inj.AutoInject(cfg)
 		}
 	}
@@ -105,11 +106,11 @@ func (r *LocalRuntime) dispatchHook(
 	}
 
 	started := time.Now()
-	if events != nil {
+	if !reflectx.IsNil(events) {
 		events.Emit(HookStarted(event, input.SessionID, a.Name()))
 	}
 	result, err := exec.Dispatch(ctx, event, input)
-	if events != nil {
+	if !reflectx.IsNil(events) {
 		events.Emit(HookFinished(event, input.SessionID, result, err, time.Since(started), a.Name()))
 	}
 	if err != nil {
@@ -117,7 +118,7 @@ func (r *LocalRuntime) dispatchHook(
 		return nil
 	}
 
-	if events != nil && result.SystemMessage != "" {
+	if !reflectx.IsNil(events) && result.SystemMessage != "" {
 		events.Emit(Warning(result.SystemMessage, a.Name()))
 	}
 	return result

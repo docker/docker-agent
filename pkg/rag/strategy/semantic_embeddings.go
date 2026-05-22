@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/rag/chunk"
 	"github.com/docker/docker-agent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -502,7 +503,7 @@ func humanizeMetadataKey(key string) string {
 
 // calculateSemanticUsageCost calculates cost for semantic LLM usage.
 func calculateSemanticUsageCost(modelsStore modelStore, id modelsdev.ID, usage *chat.Usage) float64 {
-	if usage == nil || modelsStore == nil || !id.IsValid() || id.Provider == "dmr" {
+	if usage == nil || reflectx.IsNil(modelsStore) || !id.IsValid() || id.Provider == "dmr" {
 		return 0
 	}
 

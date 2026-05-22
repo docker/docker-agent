@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -165,7 +166,7 @@ func (c *Client) CreateChatCompletionStream(
 	availableTools []tools.Tool,
 ) (chat.MessageStream, error) {
 	provider := c.selectProvider(messages)
-	if provider == nil {
+	if reflectx.IsNil(provider) {
 		return nil, errors.New("no provider available for routing")
 	}
 
@@ -240,7 +241,7 @@ func parseRouteIndex(docID string) (int, bool) {
 }
 
 func (c *Client) defaultProvider() Provider {
-	if c.fallback != nil {
+	if !reflectx.IsNil(c.fallback) {
 		return c.fallback
 	}
 	if len(c.routes) > 0 {

@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
 	"github.com/docker/docker-agent/pkg/history"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -252,7 +253,7 @@ func WithCommandBuilder(
 // connecting to a real audio device or external API.
 func WithTranscriber(t Transcriber) Option {
 	return func(m *appModel) {
-		if t != nil {
+		if !reflectx.IsNil(t) {
 			m.transcriber = t
 		}
 	}
@@ -466,7 +467,7 @@ func (m *appModel) Init() tea.Cmd {
 	activeID := m.supervisor.ActiveID()
 	if oldSessionID, ok := m.pendingRestores[activeID]; ok {
 		delete(m.pendingRestores, activeID)
-		if store := m.application.SessionStore(); store != nil {
+		if store := m.application.SessionStore(); !reflectx.IsNil(store) {
 			if sess, err := store.GetSession(context.Background(), oldSessionID); err == nil {
 				_, cmd := m.replaceActiveSession(context.Background(), sess)
 
@@ -1038,7 +1039,7 @@ func (m *appModel) handleWorkingStateChanged(msg messages.WorkingStateChangedMsg
 // handleOpenSessionBrowser opens the session browser dialog.
 func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
 	store := m.application.SessionStore()
-	if store == nil {
+	if reflectx.IsNil(store) {
 		return m, notification.InfoCmd("No session store configured")
 	}
 
@@ -1058,7 +1059,7 @@ func (m *appModel) handleOpenSessionBrowser() (tea.Model, tea.Cmd) {
 // handleLoadSession loads a saved session into the current tab (if empty) or a new tab.
 func (m *appModel) handleLoadSession(sessionID string) (tea.Model, tea.Cmd) {
 	store := m.application.SessionStore()
-	if store == nil {
+	if reflectx.IsNil(store) {
 		return m, notification.ErrorCmd("No session store configured")
 	}
 
@@ -1312,7 +1313,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	var closeBackgroundDialogCmd tea.Cmd
 	if backgroundEvent != nil && outgoingTabID != "" && outgoingTabID != sessionID {
 		m.supervisor.SetPendingEvent(outgoingTabID, backgroundEvent)
-		if backgroundDialog != nil {
+		if !reflectx.IsNil(backgroundDialog) {
 			m.stashedDialogs[outgoingTabID] = stashedDialog{
 				dialog: backgroundDialog,
 				event:  backgroundEvent,
@@ -1329,7 +1330,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	if oldSessionID, ok := m.pendingRestores[sessionID]; ok {
 		delete(m.pendingRestores, sessionID)
 		m.application = runner.App
-		if store := runner.App.SessionStore(); store != nil {
+		if store := runner.App.SessionStore(); !reflectx.IsNil(store) {
 			if sess, err := store.GetSession(context.Background(), oldSessionID); err == nil {
 				m.persistActiveTab(sess.ID)
 				model, cmd := m.replaceActiveSession(context.Background(), sess)
@@ -1438,7 +1439,7 @@ func (m *appModel) replayPendingEvent(sessionID string) tea.Cmd {
 	// in-progress input is preserved.
 	if stash, ok := m.stashedDialogs[sessionID]; ok {
 		delete(m.stashedDialogs, sessionID)
-		if stash.event == pendingEvent && stash.dialog != nil {
+		if stash.event == pendingEvent && !reflectx.IsNil(stash.dialog) {
 			return core.CmdHandler(dialog.OpenDialogMsg{
 				Model:            stash.dialog,
 				OriginatingEvent: pendingEvent,

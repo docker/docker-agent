@@ -26,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -48,7 +49,7 @@ type Runner struct {
 // newRunner creates a new evaluation runner.
 func newRunner(agentSource config.Source, runConfig *config.RuntimeConfig, judgeModel provider.Provider, cfg Config) *Runner {
 	var judge *Judge
-	if judgeModel != nil {
+	if !reflectx.IsNil(judgeModel) {
 		judge = NewJudge(judgeModel, cfg.Concurrency)
 	}
 	return &Runner{

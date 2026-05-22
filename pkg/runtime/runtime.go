@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
@@ -374,7 +375,7 @@ func WithClock(now func() time.Time) Opt {
 // events without setting up an OTel client.
 func WithTelemetry(t Telemetry) Opt {
 	return func(r *LocalRuntime) {
-		if t != nil {
+		if !reflectx.IsNil(t) {
 			r.telemetry = t
 		}
 	}
@@ -424,7 +425,7 @@ func WithRetryOnRateLimit() Opt {
 // Multiple calls accumulate; injectors run in registration order.
 func WithAutoInjector(inj builtins.AutoInjector) Opt {
 	return func(r *LocalRuntime) {
-		if inj != nil {
+		if !reflectx.IsNil(inj) {
 			r.autoInjectors = append(r.autoInjectors, inj)
 		}
 	}
@@ -546,7 +547,7 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		}
 	}
 
-	if r.modelsStore == nil {
+	if reflectx.IsNil(r.modelsStore) {
 		r.modelsStore = &lazyModelStore{}
 	}
 
@@ -557,7 +558,7 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		return nil, err
 	}
 
-	if defaultAgent.Model(context.TODO()) == nil && !defaultAgent.HasHarness() {
+	if reflectx.IsNil(defaultAgent.Model(context.TODO())) && !defaultAgent.HasHarness() {
 		return nil, fmt.Errorf("agent %s has no valid model", defaultAgent.Name())
 	}
 
@@ -853,7 +854,7 @@ func (r *LocalRuntime) TitleGenerator() *sessiontitle.Generator {
 	// generator carries its own ctx when actually invoked. context.TODO is
 	// the right marker here.
 	model := a.Model(context.TODO())
-	if model == nil {
+	if reflectx.IsNil(model) {
 		return nil
 	}
 	return sessiontitle.New(model, a.FallbackModels()...)
@@ -865,7 +866,7 @@ func getAgentModelID(a *agent.Agent) modelsdev.ID {
 	if a == nil {
 		return modelsdev.ID{}
 	}
-	if model := a.Model(context.TODO()); model != nil {
+	if model := a.Model(context.TODO()); !reflectx.IsNil(model) {
 		return model.ID()
 	}
 	return modelsdev.ID{}
@@ -928,7 +929,7 @@ func (r *LocalRuntime) SessionStore() session.Store {
 // Close releases resources held by the runtime, including the session store.
 func (r *LocalRuntime) Close() error {
 	r.bgAgents.StopAll()
-	if r.sessionStore != nil {
+	if !reflectx.IsNil(r.sessionStore) {
 		return r.sessionStore.Close()
 	}
 	return nil
@@ -937,7 +938,7 @@ func (r *LocalRuntime) Close() error {
 // UpdateSessionTitle persists the session title via the session store.
 func (r *LocalRuntime) UpdateSessionTitle(ctx context.Context, sess *session.Session, title string) error {
 	sess.Title = title
-	if r.sessionStore != nil {
+	if !reflectx.IsNil(r.sessionStore) {
 		return r.sessionStore.UpdateSession(ctx, sess)
 	}
 	return nil

@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -373,7 +374,7 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 // arguments — this is the only place pre-call argument rewriting
 // happens.
 func (c *call) consultPreToolUseHook(ctx context.Context, runTool func() CallOutcome) (CallOutcome, bool) {
-	if c.d.Hooks == nil {
+	if reflectx.IsNil(c.d.Hooks) {
 		return CallOutcome{}, false
 	}
 
@@ -425,7 +426,7 @@ func (c *call) applyHookModifiedInput(result *hooks.Result) {
 // HookDispatcher, when one is configured. Centralised so the nil-guard
 // stays in one place.
 func (c *call) notifyApproval(ctx context.Context, decision, source string) {
-	if c.d.Hooks == nil {
+	if reflectx.IsNil(c.d.Hooks) {
 		return
 	}
 	c.d.Hooks.NotifyApprovalDecision(ctx, c.sess, c.a, c.tc, decision, source)
@@ -490,7 +491,7 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 	slog.DebugContext(ctx, "Tools not approved, waiting for resume", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
 	c.em.EmitToolCallConfirmation(c.tc, c.tool, c.a.Name())
 
-	if c.d.Hooks != nil {
+	if !reflectx.IsNil(c.d.Hooks) {
 		c.d.Hooks.NotifyUserInput(ctx, c.sess.ID, "tool confirmation")
 	}
 
@@ -512,7 +513,7 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 // "block" without permission_decision) is also honoured. Returning
 // nothing keeps the existing behaviour and asks the user.
 func (c *call) runPermissionRequestHook(ctx context.Context, runTool func() CallOutcome) (CallOutcome, bool) {
-	if c.d.Hooks == nil {
+	if reflectx.IsNil(c.d.Hooks) {
 		return CallOutcome{}, false
 	}
 
@@ -666,7 +667,7 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 // the persisted session file, the input the post_tool_use hook sees,
 // and the messages going to the next LLM call.
 func (c *call) applyToolResponseTransform(ctx context.Context, payload string, isError bool) string {
-	if c.d.Hooks == nil {
+	if reflectx.IsNil(c.d.Hooks) {
 		return payload
 	}
 	in := NewPostToolHooksInput(c.sess, c.tc, &tools.ToolCallResult{Output: payload, IsError: isError})
@@ -741,7 +742,7 @@ func buildMultiContent(text string, images []tools.MediaContent) []chat.MessageP
 // (stop, message) return. The tool result is forwarded to the hook so
 // post_tool_use handlers can inspect ToolResponse / ToolError.
 func (c *call) postHook(ctx context.Context, res *tools.ToolCallResult) (stop bool, message string) {
-	if c.d.Hooks == nil {
+	if reflectx.IsNil(c.d.Hooks) {
 		return false, ""
 	}
 	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPostToolUse, NewPostToolHooksInput(c.sess, c.tc, res))

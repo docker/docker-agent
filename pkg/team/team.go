@@ -9,6 +9,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 type Team struct {
@@ -64,7 +65,7 @@ func (t *Team) AgentsInfo() []AgentInfo {
 			Description: a.Description(),
 			Commands:    a.Commands(),
 		}
-		if model := a.Model(context.TODO()); model != nil {
+		if model := a.Model(context.TODO()); !reflectx.IsNil(model) {
 			id := model.ID()
 			info.Provider = id.Provider
 			info.Model = id.Model

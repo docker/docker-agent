@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 var ErrNothingToUndo = errors.New("nothing to undo")
@@ -17,13 +19,13 @@ type UndoSnapshotResult struct {
 // active. The answer is a controller-level capability check and does
 // not depend on having an active session attached.
 func (a *App) SnapshotsEnabled() bool {
-	return a.snapshotController != nil && a.snapshotController.Enabled()
+	return !reflectx.IsNil(a.snapshotController) && a.snapshotController.Enabled()
 }
 
 // UndoLastSnapshot restores the files captured in the most recent
 // snapshot checkpoint for the current session.
 func (a *App) UndoLastSnapshot(ctx context.Context) (UndoSnapshotResult, error) {
-	if a.snapshotController == nil || a.session == nil {
+	if reflectx.IsNil(a.snapshotController) || a.session == nil {
 		return UndoSnapshotResult{}, ErrNothingToUndo
 	}
 	return snapshotResult(a.snapshotController.UndoLast(ctx, a.session.ID, a.snapshotCwd()))
@@ -33,7 +35,7 @@ func (a *App) UndoLastSnapshot(ctx context.Context) (UndoSnapshotResult, error) 
 // the current session, oldest first. Returns nil when no snapshots exist
 // or when no controller is configured.
 func (a *App) ListSnapshots() []int {
-	if a.snapshotController == nil || a.session == nil {
+	if reflectx.IsNil(a.snapshotController) || a.session == nil {
 		return nil
 	}
 	infos := a.snapshotController.List(a.session.ID)
@@ -48,7 +50,7 @@ func (a *App) ListSnapshots() []int {
 // returns to the state captured at that snapshot. keep == 0 resets to
 // the original pre-agent state.
 func (a *App) ResetSnapshot(ctx context.Context, keep int) (UndoSnapshotResult, error) {
-	if a.snapshotController == nil || a.session == nil {
+	if reflectx.IsNil(a.snapshotController) || a.session == nil {
 		return UndoSnapshotResult{}, ErrNothingToUndo
 	}
 	return snapshotResult(a.snapshotController.Reset(ctx, a.session.ID, a.snapshotCwd(), keep))

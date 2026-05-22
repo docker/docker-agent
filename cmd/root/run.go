@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/profiling"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -514,7 +515,7 @@ func (f *runExecFlags) buildAppOpts(args []string) ([]app.Opt, error) {
 	if f.exitAfterResponse {
 		opts = append(opts, app.WithExitAfterFirstResponse())
 	}
-	if f.snapshotController != nil {
+	if !reflectx.IsNil(f.snapshotController) {
 		opts = append(opts, app.WithSnapshotController(f.snapshotController))
 	}
 	return opts, nil
@@ -586,7 +587,7 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 		if gen := localRt.TitleGenerator(); gen != nil {
 			appOpts = append(appOpts, app.WithTitleGenerator(gen))
 		}
-		if ctrl != nil {
+		if !reflectx.IsNil(ctrl) {
 			appOpts = append(appOpts, app.WithSnapshotController(ctrl))
 		}
 

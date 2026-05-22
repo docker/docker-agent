@@ -29,6 +29,7 @@ var cops = []cop.Cop{
 	HookConfigSync,
 	HookBuiltinsRegistered,
 	SlogContextual,
+	InterfaceNilComparison,
 }
 
 func main() {

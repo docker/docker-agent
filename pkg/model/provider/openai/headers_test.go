@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 func TestUserHeaders(t *testing.T) {
@@ -196,7 +197,7 @@ func captureHeaders(t *testing.T, cfg *latest.ModelConfig, envVars map[string]st
 		[]chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}},
 		nil,
 	)
-	if err == nil && stream != nil {
+	if err == nil && !reflectx.IsNil(stream) {
 		// Drain the stream so the HTTP request is actually sent.
 		for {
 			if _, err := stream.Recv(); err != nil {

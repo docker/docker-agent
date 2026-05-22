@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -47,7 +48,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		return nil, errors.New("model type must be 'anthropic'")
 	}
 
-	if env == nil {
+	if reflectx.IsNil(env) {
 		slog.ErrorContext(ctx, "Anthropic client creation failed", "error", "environment provider is required")
 		return nil, errors.New("environment provider is required")
 	}

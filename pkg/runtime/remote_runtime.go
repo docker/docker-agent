@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
@@ -70,7 +71,7 @@ func WithRemoteAgentFilename(filename string) RemoteRuntimeOption {
 // NewRemoteRuntime creates a new remote runtime that implements the Runtime interface.
 // It accepts any client that implements the RemoteClient interface.
 func NewRemoteRuntime(client RemoteClient, opts ...RemoteRuntimeOption) (*RemoteRuntime, error) {
-	if client == nil {
+	if reflectx.IsNil(client) {
 		return nil, errors.New("client cannot be nil")
 	}
 

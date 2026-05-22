@@ -6,6 +6,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -116,7 +117,7 @@ func (s *StatusBar) rebuild() {
 
 	var left string
 	var leftW int
-	if s.help != nil {
+	if !reflectx.IsNil(s.help) {
 		if help := s.help.Help(); help != nil {
 			var parts []string
 			for _, b := range help.ShortHelp() {

@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 const (
@@ -46,7 +47,7 @@ type Generator struct {
 func New(model provider.Provider, fallbackModels ...provider.Provider) *Generator {
 	models := slices.DeleteFunc(
 		append([]provider.Provider{model}, fallbackModels...),
-		func(p provider.Provider) bool { return p == nil },
+		func(p provider.Provider) bool { return reflectx.IsNil(p) },
 	)
 	return &Generator{models: models}
 }

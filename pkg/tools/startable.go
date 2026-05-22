@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 // Describer can be implemented by a ToolSet to provide a short, user-visible
@@ -144,7 +146,7 @@ type Unwrapper interface {
 //	    prompts, _ := pp.ListPrompts(ctx)
 //	}
 func As[T any](ts ToolSet) (T, bool) {
-	for ts != nil {
+	for !reflectx.IsNil(ts) {
 		if result, ok := ts.(T); ok {
 			return result, true
 		}

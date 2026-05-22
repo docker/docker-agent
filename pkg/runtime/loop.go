@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -571,7 +572,7 @@ func (r *LocalRuntime) runTurn(
 	// handlers can reuse the same parsing.
 	r.executeAfterLLMCallHooks(ctx, sess, a, res.Content)
 
-	if usedModel != nil && usedModel.ID() != model.ID() {
+	if !reflectx.IsNil(usedModel) && usedModel.ID() != model.ID() {
 		slog.InfoContext(ctx, "Used fallback model", "agent", a.Name(), "primary", model.ID().String(), "used", usedModel.ID().String())
 		events.Emit(AgentInfo(a.Name(), usedModel.ID().String(), a.Description(), a.WelcomeMessage()))
 	}

@@ -29,6 +29,7 @@ import (
 	"github.com/docker/docker-agent/pkg/compaction"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -114,7 +115,7 @@ func RunLLM(ctx context.Context, args LLMArgs) (*Result, error) {
 	if args.ContextLimit <= 0 {
 		return nil, errors.New("compactor: ContextLimit must be > 0")
 	}
-	if args.Agent.Model(ctx) == nil {
+	if reflectx.IsNil(args.Agent.Model(ctx)) {
 		return nil, errors.New("compactor: agent has no model")
 	}
 

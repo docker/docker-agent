@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -158,7 +159,7 @@ func (f *debugFlags) runDebugTitleCommand(cmd *cobra.Command, args []string) (co
 	}
 
 	model := agent.Model(ctx)
-	if model == nil {
+	if reflectx.IsNil(model) {
 		return fmt.Errorf("agent %q has no model configured", agent.Name())
 	}
 

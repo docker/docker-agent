@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -50,7 +51,7 @@ type EventObserver interface {
 // alongside that one.
 func WithEventObserver(o EventObserver) Opt {
 	return func(r *LocalRuntime) {
-		if o == nil {
+		if reflectx.IsNil(o) {
 			return
 		}
 		r.observers = append(r.observers, o)

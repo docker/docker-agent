@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 // ModelChoice represents a model available for selection in the model picker.
@@ -489,7 +490,7 @@ func mapModelsDevProvider(providerID string) (string, bool) {
 // provider/model pair and copies it onto choice. It silently does
 // nothing when the lookup fails or when the runtime has no models store.
 func (r *LocalRuntime) populateCatalogMetadata(ctx context.Context, choice *ModelChoice, providerID, modelID string) {
-	if r.modelsStore == nil {
+	if reflectx.IsNil(r.modelsStore) {
 		return
 	}
 	m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID(providerID, modelID))
@@ -629,7 +630,7 @@ func (r *LocalRuntime) createProviderFromConfig(ctx context.Context, cfg *latest
 	// Use max_tokens from config if specified, otherwise look up from models.dev
 	if cfg.MaxTokens != nil {
 		opts = append(opts, options.WithMaxTokens(*cfg.MaxTokens))
-	} else if r.modelsStore != nil {
+	} else if !reflectx.IsNil(r.modelsStore) {
 		m, err := r.modelsStore.GetModel(ctx, modelsdev.NewID(cfg.Provider, cfg.Model))
 		if err == nil && m != nil {
 			opts = append(opts, options.WithMaxTokens(m.Limit.Output))

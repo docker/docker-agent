@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/rag/rerank"
 	"github.com/docker/docker-agent/pkg/rag/strategy"
 	"github.com/docker/docker-agent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 // ToolConfig represents tool-specific configuration
@@ -106,7 +107,7 @@ func New(_ context.Context, name string, config Config, strategyEvents <-chan ty
 		}
 
 		// Ensure fusion was actually created
-		if fusionStrategy == nil {
+		if reflectx.IsNil(fusionStrategy) {
 			return nil, errors.New("fusion strategy is nil after creation (this is a bug)")
 		}
 	}
@@ -243,7 +244,7 @@ func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchRes
 				"num_results", len(results))
 
 			// Apply reranking if configured
-			if m.reranker != nil {
+			if !reflectx.IsNil(m.reranker) {
 				beforeCount := len(results)
 				slog.DebugContext(ctx, "[RAG Manager] Applying reranking to single-strategy results",
 					"rag_name", m.name,
@@ -355,7 +356,7 @@ func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchRes
 		"num_strategies", len(strategyResults))
 
 	// Safety check: fusion should never be nil with multiple strategies
-	if m.fusion == nil {
+	if reflectx.IsNil(m.fusion) {
 		return nil, errors.New("fusion strategy is nil but multiple strategies are configured (this is a bug)")
 	}
 
@@ -373,7 +374,7 @@ func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchRes
 		"result_limit", m.config.Results.Limit)
 
 	// Apply reranking if configured (before limit and deduplication)
-	if m.reranker != nil {
+	if !reflectx.IsNil(m.reranker) {
 		beforeCount := len(fusedResults)
 		slog.DebugContext(ctx, "[RAG Manager] Applying reranking to fused results",
 			"rag_name", m.name,

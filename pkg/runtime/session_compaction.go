@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/runtime/compactor"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -170,7 +171,7 @@ func summaryFromHook(sess *session.Session, a *agent.Agent, pre *hooks.Result) *
 // pass the cloned summary-call provider so its provider_opts (which
 // match the underlying model) are considered.
 func (r *LocalRuntime) compactionContextLimit(ctx context.Context, a *agent.Agent) int64 {
-	if a == nil || a.Model(ctx) == nil {
+	if a == nil || reflectx.IsNil(a.Model(ctx)) {
 		return 0
 	}
 	summaryModel := provider.CloneWithOptions(ctx, a.Model(ctx),
@@ -213,7 +214,7 @@ func (r *LocalRuntime) resolveContextLimit(ctx context.Context, p provider.Provi
 // treated as "unset" so callers don't accidentally trigger
 // compaction with a degenerate limit.
 func providerContextLimit(p provider.Provider) int64 {
-	if p == nil {
+	if reflectx.IsNil(p) {
 		return 0
 	}
 	opts := p.BaseConfig().ModelConfig.ProviderOpts

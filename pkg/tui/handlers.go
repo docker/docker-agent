@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/browser"
 	"github.com/docker/docker-agent/pkg/evaluation"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -34,7 +35,7 @@ import (
 
 func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Model, tea.Cmd) {
 	store := m.application.SessionStore()
-	if store == nil {
+	if reflectx.IsNil(store) {
 		return m, notification.ErrorCmd("No session store configured")
 	}
 	if msg.ParentSessionID == "" {
@@ -104,7 +105,7 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 	}
 
 	store := m.application.SessionStore()
-	if store == nil {
+	if reflectx.IsNil(store) {
 		return m, notification.ErrorCmd("No session store configured")
 	}
 
@@ -144,7 +145,7 @@ func (m *appModel) handleForkSession() (tea.Model, tea.Cmd) {
 
 func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd) {
 	store := m.application.SessionStore()
-	if store == nil {
+	if reflectx.IsNil(store) {
 		return m, notification.ErrorCmd("No session store configured")
 	}
 
@@ -197,7 +198,7 @@ func (m *appModel) handleRegenerateTitle() (tea.Model, tea.Cmd) {
 
 func (m *appModel) handleDeleteSession(sessionID string) (tea.Model, tea.Cmd) {
 	store := m.application.SessionStore()
-	if store == nil {
+	if reflectx.IsNil(store) {
 		return m, notification.ErrorCmd("No session store configured")
 	}
 

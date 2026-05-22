@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -185,7 +186,7 @@ func (a *Agent) SetModelOverride(models ...provider.Provider) ModelOverrideSnaps
 	// Filter out nil providers
 	var validModels []provider.Provider
 	for _, m := range models {
-		if m != nil {
+		if !reflectx.IsNil(m) {
 			validModels = append(validModels, m)
 		}
 	}

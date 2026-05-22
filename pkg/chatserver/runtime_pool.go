@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/team"
 )
@@ -53,7 +54,7 @@ func (p *runtimePool) Get(agent string) (runtime.Runtime, error) {
 	if p == nil {
 		return nil, errInvalidRuntime
 	}
-	if rt := p.takeIdle(agent); rt != nil {
+	if rt := p.takeIdle(agent); !reflectx.IsNil(rt) {
 		return rt, nil
 	}
 	rt, err := runtime.New(p.team, runtime.WithCurrentAgent(agent))
@@ -68,7 +69,7 @@ func (p *runtimePool) Get(agent string) (runtime.Runtime, error) {
 // underlying toolsets). The runtime must not be used by the caller
 // after Put returns.
 func (p *runtimePool) Put(agent string, rt runtime.Runtime) {
-	if p == nil || rt == nil || p.maxIdle == 0 {
+	if p == nil || reflectx.IsNil(rt) || p.maxIdle == 0 {
 		return
 	}
 	ch := p.channelFor(agent)

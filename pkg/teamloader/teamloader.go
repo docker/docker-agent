@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -620,7 +621,7 @@ func loadExternalAgent(ctx context.Context, ref string, runConfig *config.Runtim
 	}
 
 	var opts []Opt
-	if loadOpts.toolsetRegistry != nil {
+	if !reflectx.IsNil(loadOpts.toolsetRegistry) {
 		opts = append(opts, WithToolsetRegistry(loadOpts.toolsetRegistry))
 	}
 

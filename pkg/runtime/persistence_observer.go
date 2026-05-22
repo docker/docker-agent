@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -47,7 +48,7 @@ type streamingState struct {
 // nil when store is nil so the constructor can call [WithEventObserver]
 // unconditionally without a guard.
 func newPersistenceObserver(store session.Store) *PersistenceObserver {
-	if store == nil {
+	if reflectx.IsNil(store) {
 		return nil
 	}
 	return &PersistenceObserver{store: store}

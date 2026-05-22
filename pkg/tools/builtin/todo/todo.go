@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -140,7 +141,7 @@ type Option func(*ToolSet)
 // WithStorage sets a custom storage implementation for the Tool.
 // The provided storage must not be nil.
 func WithStorage(storage Storage) Option {
-	if storage == nil {
+	if reflectx.IsNil(storage) {
 		panic("todo: storage must not be nil")
 	}
 	return func(t *ToolSet) {

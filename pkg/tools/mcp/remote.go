@@ -9,6 +9,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/upstream"
 )
 
@@ -38,7 +39,7 @@ func newRemoteClient(
 		"allow_private_ips", allowPrivateIPs,
 	)
 
-	if tokenStore == nil {
+	if reflectx.IsNil(tokenStore) {
 		tokenStore = NewInMemoryTokenStore()
 	}
 

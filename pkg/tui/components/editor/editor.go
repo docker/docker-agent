@@ -23,6 +23,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -467,7 +468,7 @@ func deleteLastGraphemeCluster(s string) string {
 // textarea value and available history entries.
 func (e *editor) refreshSuggestion() {
 	// Don't overwrite completion-managed suggestions with history suggestions.
-	if e.currentCompletion != nil {
+	if !reflectx.IsNil(e.currentCompletion) {
 		return
 	}
 
@@ -655,7 +656,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return e, cmd
 
 	case completion.SelectedMsg:
-		if e.currentCompletion == nil {
+		if reflectx.IsNil(e.currentCompletion) {
 			return e, nil
 		}
 
@@ -738,7 +739,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case completion.SelectionChangedMsg:
 		// Show the selected completion item as a suggestion in the editor.
 		e.clearSuggestion()
-		if msg.Value != "" && e.currentCompletion != nil {
+		if msg.Value != "" && !reflectx.IsNil(e.currentCompletion) {
 			currentText := e.textarea.Value()
 			if strings.HasPrefix(msg.Value, currentText) {
 				e.suggestion = msg.Value[len(currentText):]
@@ -1003,7 +1004,7 @@ func (e *editor) handleGraphemeBackspace() (layout.Model, tea.Cmd) {
 func (e *editor) updateCompletionQuery() tea.Cmd {
 	currentWord := e.textarea.Word()
 
-	if e.currentCompletion != nil && strings.HasPrefix(currentWord, e.currentCompletion.Trigger()) {
+	if !reflectx.IsNil(e.currentCompletion) && strings.HasPrefix(currentWord, e.currentCompletion.Trigger()) {
 		e.completionWord = strings.TrimPrefix(currentWord, e.currentCompletion.Trigger())
 
 		// For @ completion, start full file loading when user starts typing (if not already started)
@@ -1050,7 +1051,7 @@ func (e *editor) startFullFileLoad() tea.Cmd {
 		}
 	}
 
-	if asyncLoader == nil {
+	if reflectx.IsNil(asyncLoader) {
 		return nil
 	}
 
@@ -1129,7 +1130,7 @@ func (e *editor) startInitialFileLoad() tea.Cmd {
 		}
 	}
 
-	if asyncLoader == nil {
+	if reflectx.IsNil(asyncLoader) {
 		return nil
 	}
 

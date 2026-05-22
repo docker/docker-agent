@@ -71,6 +71,7 @@ require (
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.44.0
 	golang.org/x/term v0.43.0
+	golang.org/x/tools v0.45.0
 	google.golang.org/adk v1.2.0
 	google.golang.org/genai v1.57.0
 	gopkg.in/dnaeon/go-vcr.v4 v4.0.6
@@ -99,7 +100,6 @@ require (
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.63.0 // indirect
 	golang.org/x/mod v0.36.0 // indirect
-	golang.org/x/tools v0.45.0 // indirect
 	google.golang.org/api v0.272.0 // indirect
 )
 

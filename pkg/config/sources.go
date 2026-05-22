@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/remote"
 )
 
@@ -338,7 +339,7 @@ func isGitHubURL(urlStr string) bool {
 // - An environment provider is configured
 // - GITHUB_TOKEN is available in the environment
 func (a urlSource) addGitHubAuth(ctx context.Context, req *http.Request) {
-	if a.envProvider == nil {
+	if reflectx.IsNil(a.envProvider) {
 		return
 	}
 

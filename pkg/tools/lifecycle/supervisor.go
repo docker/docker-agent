@@ -8,6 +8,8 @@ import (
 	"math/rand/v2"
 	"sync"
 	"time"
+
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 // Connector creates new sessions for a Supervisor. Implementations are
@@ -187,7 +189,7 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	defer s.startMu.Unlock()
 
 	s.mu.Lock()
-	if s.session != nil {
+	if !reflectx.IsNil(s.session) {
 		s.mu.Unlock()
 		return nil
 	}
@@ -255,7 +257,7 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	s.tracker.Set(StateStopped)
 	s.signalDone()
 
-	if sess == nil {
+	if reflectx.IsNil(sess) {
 		return nil
 	}
 	if err := sess.Close(context.WithoutCancel(ctx)); err != nil && ctx.Err() == nil {
@@ -287,7 +289,7 @@ func (s *Supervisor) RestartAndWait(ctx context.Context, timeout time.Duration) 
 
 	// Only force-close if currently usable. If the watcher already detected
 	// the disconnect, closing now would race with tryRestart.
-	if state.IsUsable() && sess != nil {
+	if state.IsUsable() && !reflectx.IsNil(sess) {
 		_ = sess.Close(context.WithoutCancel(ctx))
 	}
 
@@ -335,7 +337,7 @@ func (s *Supervisor) watch(ctx context.Context) {
 		s.mu.Lock()
 		sess := s.session
 		s.mu.Unlock()
-		if sess == nil {
+		if reflectx.IsNil(sess) {
 			return // defensive: shouldn't happen after a successful Start.
 		}
 

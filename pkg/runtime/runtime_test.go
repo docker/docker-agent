@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -246,7 +247,7 @@ func assertEventsEqual(t *testing.T, expected, actual []Event) {
 
 // clearTimestamps sets Timestamp fields to zero value in events for comparison.
 func clearTimestamps(event Event) {
-	if event == nil {
+	if reflectx.IsNil(event) {
 		return
 	}
 

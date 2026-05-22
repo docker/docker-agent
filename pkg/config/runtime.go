@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 type RuntimeConfig struct {
@@ -86,7 +87,7 @@ func (runConfig *RuntimeConfig) ModelsDevStore() (*modelsdev.Store, error) {
 }
 
 func (runConfig *RuntimeConfig) EnvProvider() environment.Provider {
-	if runConfig.EnvProviderForTests != nil {
+	if !reflectx.IsNil(runConfig.EnvProviderForTests) {
 		return runConfig.EnvProviderForTests
 	}
 

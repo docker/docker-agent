@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 // Limits applied to inbound sampling requests to keep a misbehaving or
@@ -64,7 +65,7 @@ func (r *LocalRuntime) samplingHandler(ctx context.Context, req *mcp.CreateMessa
 	}
 
 	baseModel := a.Model(ctx)
-	if baseModel == nil {
+	if reflectx.IsNil(baseModel) {
 		return nil, errors.New("current agent has no model configured")
 	}
 

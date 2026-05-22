@@ -1,5 +1,7 @@
 package tools
 
+import "github.com/docker/docker-agent/pkg/reflectx"
+
 // Named is implemented by toolsets that carry a user-visible name.
 //
 // The convention is:
@@ -31,7 +33,7 @@ func GetName(ts ToolSet) string {
 // The returned wrapper participates in As[T]: every capability of ts
 // remains reachable through the wrapper.
 func WithName(ts ToolSet, name string) ToolSet {
-	if ts == nil || name == "" {
+	if reflectx.IsNil(ts) || name == "" {
 		return ts
 	}
 	if existing, ok := As[Named](ts); ok && existing.Name() != "" {

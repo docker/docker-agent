@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/reflectx"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -52,7 +53,7 @@ func (*dynamicLookup) Keys() []string              { return nil }
 func (exp *Expander) newVMWithBindings(ctx context.Context) *goja.Runtime {
 	vm := newVM()
 
-	if exp.env != nil {
+	if !reflectx.IsNil(exp.env) {
 		_ = vm.Set("env", vm.NewDynamicObject(&dynamicLookup{
 			vm:     vm,
 			lookup: func(k string) string { v, _ := exp.env.Get(ctx, k); return v },

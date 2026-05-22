@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/rag/database"
 	"github.com/docker/docker-agent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/reflectx"
 )
 
 // Reranker re-scores search results using a reranking model
@@ -39,7 +40,7 @@ type LLMReranker struct {
 
 // NewLLMReranker creates a new LLM-based reranker
 func NewLLMReranker(config Config) (*LLMReranker, error) {
-	if config.Model == nil {
+	if reflectx.IsNil(config.Model) {
 		return nil, errors.New("reranking model is required")
 	}
 
