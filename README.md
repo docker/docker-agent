@@ -96,3 +96,27 @@ We collect anonymous usage data to improve the tool. See [Telemetry](https://doc
 ## Community
 
 [Docker Community Slack](http://dockr.ly/comm-slack) · [#docker-agent channel](https://dockercommunity.slack.com/archives/C09DASHHRU4)
+## ❓ FAQ (常见问题)
+
+### What is Docker Agent?
+
+**Docker Agent** is an AI-powered agent by Docker that helps developers build, deploy, and manage containerized applications.
+
+### Key Features
+
+| Feature | Description |
+|---------|-------------|
+| 🤖 **AI-Powered Assistance** | Intelligent help for container operations |
+| 🐳 **Docker Integration** | Seamless integration with Docker ecosystem |
+| 🔄 **Automated Workflows** | Streamline container lifecycle management |
+
+### Getting Started
+
+Visit the repository for installation instructions.
+
+### Help Resources
+
+| Resource | Link |
+|----------|------|
+| 📖 Repository | https://github.com/docker/docker-agent |
+| 🐛 Issues | https://github.com/docker/docker-agent/issues |
