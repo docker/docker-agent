@@ -1013,10 +1013,43 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 		elicCh <- elicResult{r, e}
 	}()
 
+	// Observe the caller's original ctx for user-initiated cancellation.
+	//
+	// `ctx` here is the detached ctx that clientConnector.Connect set up
+	// via context.WithoutCancel, so that the MCP toolset's session can
+	// outlive any single request (see mcp.go for the longevity
+	// rationale). But the user-initiated cancellation signal -- the
+	// embedder's "Stop" affordance on an in-progress agent run --
+	// arrives via the ORIGINAL caller's ctx, which has been stashed as a
+	// value at the Connect boundary. Without observing it here, this
+	// select would block until the user clicks the elicitation dialog's
+	// Cancel button, even when the embedder has already given up on the
+	// turn; the per-session streaming lock at the SessionManager level
+	// would then stay held, and the next user message would return
+	// 409 Conflict / ErrSessionBusy.
+	//
+	// userCancelCh is the Done channel of the parent ctx, or a nil
+	// channel if no parent was attached (in which case the select case
+	// is silently never selected, preserving back-compat for callers
+	// that don't go through clientConnector.Connect, e.g. unit tests).
+	var userCancelCh <-chan struct{}
+	parentCtx := cancellableParentFromContext(ctx)
+	if parentCtx != nil {
+		userCancelCh = parentCtx.Done()
+	}
+
 	var content map[string]any
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-userCancelCh:
+		// The host aborted the in-progress agent run. Return its ctx
+		// error so the agent loop sees a cancellable error (it
+		// propagates up through the MCP tool-call boundary, the
+		// runtime's iteration check then exits cleanly, and the
+		// per-session streaming lock is released by the SessionManager
+		// goroutine's deferred Unlock).
+		return parentCtx.Err()
 	case cb := <-callbackCh:
 		// Direct deeplink callback won. Release the in-flight
 		// elicitation goroutine; any UI the embedder showed for this

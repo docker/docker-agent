@@ -1686,6 +1686,76 @@ func TestUnmanagedOAuthFlow_DriveFlow_DirectCallbackError(t *testing.T) {
 		"token endpoint must NOT be hit when the callback carries an error")
 }
 
+// TestUnmanagedOAuthFlow_DriveFlow_AbortsOnParentCtxCancellation verifies
+// that user-initiated cancellation of the in-progress agent run
+// propagates through the OAuth select even though the local ctx has been
+// detached from its parent by clientConnector.Connect's
+// context.WithoutCancel.
+//
+// The select watches two cancellation signals: the local (detached) ctx
+// and the parent ctx attached via withCancellableParent. Only the
+// second one is expected to fire on user-initiated cancellation; this
+// test asserts it does, and that the OAuth flow returns the parent's
+// ctx error so the agent loop can complete cleanly and the
+// per-session streaming lock can be released.
+func TestUnmanagedOAuthFlow_DriveFlow_AbortsOnParentCtxCancellation(t *testing.T) {
+	srv := newUnmanagedOAuthTestServer(t)
+	defer srv.Close()
+
+	const redirectURI = "https://example.test/oauth/cb"
+	elicitationCanReturn := make(chan struct{})
+	defer close(elicitationCanReturn)
+	capture := &elicitCaptured{}
+	elicitationSent := make(chan struct{}, 1)
+	capture.replyFn = func(req *gomcp.ElicitParams) tools.ElicitationResult {
+		elicitationSent <- struct{}{}
+		<-elicitationCanReturn
+		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}
+	}
+	transport, _ := newUnmanagedTestTransport(t, srv.URL, redirectURI, capture)
+
+	// Mirror what clientConnector.Connect sets up: a cancellable parent
+	// ctx, then a detached ctx that carries the parent as a value.
+	parentCtx, parentCancel := context.WithCancel(t.Context())
+	defer parentCancel()
+	requestCtx := withCancellableParent(context.WithoutCancel(parentCtx), parentCtx)
+
+	rtErrCh := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, srv.URL, strings.NewReader("{}"))
+		if err != nil {
+			rtErrCh <- err
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		_, err = transport.RoundTrip(req)
+		rtErrCh <- err
+	}()
+
+	// Wait for the OAuth flow to enter its blocking select (i.e. the
+	// elicitation has been sent and the goroutine is waiting on a
+	// reply). Cancel the parent ctx; the local ctx remains live, so
+	// without the user-cancel branch in the select, this would hang.
+	select {
+	case <-elicitationSent:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for elicitation to be sent")
+	}
+	parentCancel()
+
+	var rtErr error
+	select {
+	case rtErr = <-rtErrCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OAuth flow did not abort after parent ctx cancellation")
+	}
+	require.Error(t, rtErr)
+	require.ErrorIs(t, rtErr, context.Canceled,
+		"OAuth flow must return the parent's ctx error so the agent loop sees a cancellable error")
+	assert.Equal(t, int32(0), srv.tokenCalls.Load(),
+		"token endpoint must NOT be hit when the parent ctx is cancelled before any callback")
+}
+
 // TestUnmanagedRedirectURI_PerToolsetTakesPrecedence verifies the precedence
 // order: per-toolset RemoteOAuthConfig.CallbackRedirectURL overrides the
 // runtime-wide --mcp-oauth-redirect-uri.

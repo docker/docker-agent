@@ -455,7 +455,17 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 	// But if the connection's underlying context is tied to the first HTTP
 	// request, it gets cancelled when that request completes, killing the
 	// connection even though OAuth succeeded.
+	//
+	// The detachment is the right default for the *connection's* lifetime,
+	// but it also hides user-initiated cancellation from operations that
+	// run inside Connect and need to react to it -- most importantly, the
+	// OAuth flow's wait for an elicitation reply or out-of-band callback.
+	// We stash the caller's original ctx on the detached one (as a value)
+	// so handleUnmanagedOAuthFlow can opt into observing it; see
+	// cancellable_parent.go for the full rationale.
+	parentCtx := ctx
 	ctx = context.WithoutCancel(ctx)
+	ctx = withCancellableParent(ctx, parentCtx)
 
 	slog.DebugContext(ctx, "Starting MCP toolset", "server", ts.logID)
 
