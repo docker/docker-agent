@@ -1592,6 +1592,9 @@ func TestUnmanagedOAuthFlow_DriveFlow_AcceptsDirectCallback(t *testing.T) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := transport.RoundTrip(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 		rtCh <- roundTripResult{resp, err}
 	}()
 
@@ -1615,7 +1618,6 @@ func TestUnmanagedOAuthFlow_DriveFlow_AcceptsDirectCallback(t *testing.T) {
 	}
 	require.NoError(t, rt.err)
 	require.NotNil(t, rt.resp)
-	rt.resp.Body.Close()
 	assert.Equal(t, http.StatusOK, rt.resp.StatusCode)
 
 	// Verify the same token-endpoint contract as the regular drive-flow.
@@ -1658,7 +1660,10 @@ func TestUnmanagedOAuthFlow_DriveFlow_DirectCallbackError(t *testing.T) {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		_, err = transport.RoundTrip(req)
+		resp, err := transport.RoundTrip(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 		rtErrCh <- err
 	}()
 
@@ -1728,7 +1733,10 @@ func TestUnmanagedOAuthFlow_DriveFlow_AbortsOnParentCtxCancellation(t *testing.T
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		_, err = transport.RoundTrip(req)
+		resp, err := transport.RoundTrip(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 		rtErrCh <- err
 	}()
 

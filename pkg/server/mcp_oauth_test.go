@@ -15,9 +15,10 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 )
 
-// httpDoWithStatus is a slim variant of httpDo that exposes the response
-// status code. The standard helper assumes 2xx and only returns the body.
-func httpDoWithStatus(t *testing.T, ctx context.Context, method, socketPath, path string) (int, []byte) {
+// httpDoStatus is a slim variant of httpDo that exposes the response
+// status code. The standard helper assumes 2xx and only returns the body;
+// these tests assert on 4xx, so they need direct access to the status.
+func httpDoStatus(t *testing.T, ctx context.Context, method, socketPath, path string) int {
 	t.Helper()
 	req, err := http.NewRequestWithContext(ctx, method, "http://_"+path, http.NoBody)
 	require.NoError(t, err)
@@ -32,9 +33,9 @@ func httpDoWithStatus(t *testing.T, ctx context.Context, method, socketPath, pat
 	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	_, err = io.Copy(io.Discard, resp.Body)
 	require.NoError(t, err)
-	return resp.StatusCode, body
+	return resp.StatusCode
 }
 
 func startServerBare(t *testing.T, ctx context.Context) string {
@@ -67,7 +68,7 @@ func TestMcpOAuthCb_Unknown(t *testing.T) {
 	ctx := t.Context()
 	lnPath := startServerBare(t, ctx)
 
-	status, _ := httpDoWithStatus(t, ctx, http.MethodPost, lnPath,
+	status := httpDoStatus(t, ctx, http.MethodPost, lnPath,
 		"/api/mcp-oauth/callback?state=unknown-state&code=abc")
 	assert.Equal(t, http.StatusNotFound, status)
 }
@@ -76,7 +77,7 @@ func TestMcpOAuthCb_NoState(t *testing.T) {
 	ctx := t.Context()
 	lnPath := startServerBare(t, ctx)
 
-	status, _ := httpDoWithStatus(t, ctx, http.MethodPost, lnPath,
+	status := httpDoStatus(t, ctx, http.MethodPost, lnPath,
 		"/api/mcp-oauth/callback?code=abc")
 	assert.Equal(t, http.StatusBadRequest, status)
 }
@@ -85,7 +86,7 @@ func TestMcpOAuthCb_NoCode(t *testing.T) {
 	ctx := t.Context()
 	lnPath := startServerBare(t, ctx)
 
-	status, _ := httpDoWithStatus(t, ctx, http.MethodPost, lnPath,
+	status := httpDoStatus(t, ctx, http.MethodPost, lnPath,
 		"/api/mcp-oauth/callback?state=some-state")
 	assert.Equal(t, http.StatusBadRequest, status)
 }

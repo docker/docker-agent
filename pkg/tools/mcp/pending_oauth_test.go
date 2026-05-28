@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,14 +27,14 @@ func TestPendingOAuthRegistry_DeliverUnknownState(t *testing.T) {
 	r := newTestRegistry()
 	err := r.deliver("state-nope", PendingOAuthCallback{Code: "abc"})
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, errNoWaiter))
+	assert.ErrorIs(t, err, errNoWaiter)
 }
 
 func TestPendingOAuthRegistry_RegisterEmptyState(t *testing.T) {
 	r := newTestRegistry()
 	err := r.register("", make(chan PendingOAuthCallback, 1))
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, errEmptyState))
+	assert.ErrorIs(t, err, errEmptyState)
 }
 
 func TestPendingOAuthRegistry_RegisterDuplicate(t *testing.T) {
@@ -43,7 +42,7 @@ func TestPendingOAuthRegistry_RegisterDuplicate(t *testing.T) {
 	require.NoError(t, r.register("state-1", make(chan PendingOAuthCallback, 1)))
 	err := r.register("state-1", make(chan PendingOAuthCallback, 1))
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, errStateRegistered))
+	assert.ErrorIs(t, err, errStateRegistered)
 }
 
 func TestPendingOAuthRegistry_DeliverIsOneShot(t *testing.T) {
@@ -55,7 +54,7 @@ func TestPendingOAuthRegistry_DeliverIsOneShot(t *testing.T) {
 	// Second deliver returns errNoWaiter because the entry was consumed.
 	err := r.deliver("state-1", PendingOAuthCallback{Code: "second"})
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, errNoWaiter))
+	assert.ErrorIs(t, err, errNoWaiter)
 }
 
 func TestPendingOAuthRegistry_UnregisterRemovesEntry(t *testing.T) {
@@ -64,5 +63,5 @@ func TestPendingOAuthRegistry_UnregisterRemovesEntry(t *testing.T) {
 	r.unregister("state-1")
 	err := r.deliver("state-1", PendingOAuthCallback{Code: "abc"})
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, errNoWaiter))
+	assert.ErrorIs(t, err, errNoWaiter)
 }

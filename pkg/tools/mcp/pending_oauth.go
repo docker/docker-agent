@@ -33,10 +33,10 @@ type pendingOAuthRegistry struct {
 }
 
 var (
-	errEmptyState       = errors.New("pending oauth: empty state")
-	errStateRegistered  = errors.New("pending oauth: state already registered")
-	errNoWaiter         = errors.New("pending oauth: no waiter for state")
-	errChannelFull      = errors.New("pending oauth: callback channel is full")
+	errEmptyState      = errors.New("pending oauth: empty state")
+	errStateRegistered = errors.New("pending oauth: state already registered")
+	errNoWaiter        = errors.New("pending oauth: no waiter for state")
+	errChannelFull     = errors.New("pending oauth: callback channel is full")
 )
 
 func (p *pendingOAuthRegistry) register(state string, ch chan<- PendingOAuthCallback) error {

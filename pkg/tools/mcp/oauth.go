@@ -1072,7 +1072,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 			return fmt.Errorf("failed to send elicitation request: %w", er.err)
 		}
 		slog.DebugContext(ctx, "Received elicitation response from client", "action", er.result.Action)
-		if tools.ElicitationAction(er.result.Action) != tools.ElicitationActionAccept {
+		if er.result.Action != tools.ElicitationActionAccept {
 			return errors.New("OAuth flow declined or cancelled by client")
 		}
 		if er.result.Content == nil {
