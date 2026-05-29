@@ -256,7 +256,7 @@ In addition to the common fields, each event ships its own payload:
 | `turn_start`                | _none_ (just the common fields)                                                                                       |
 | `turn_end`                  | `agent_name`, `reason` — one of `normal`, `continue`, `steered`, `error`, `canceled`, `hook_blocked`, `loop_detected` |
 | `before_llm_call`           | `iteration` — 1-based run-loop iteration counter (the model call this hook is gating)                                |
-| `after_llm_call`            | `agent_name`, `stop_response`, `last_user_message`                                                                    |
+| `after_llm_call`            | `agent_name`, `model_id`, `stop_response`, `last_user_message`                                                        |
 | `session_end`               | `reason` — one of `clear`, `logout`, `prompt_input_exit`, `other`                                                     |
 | `pre_compact`               | `source` — one of `manual`, `auto`, `overflow`, `tool_overflow`                                                       |
 | `before_compaction`         | `input_tokens`, `output_tokens`, `context_limit`, `compaction_reason` (one of `threshold`/`overflow`/`manual`)        |
@@ -547,7 +547,7 @@ The `reason` field classifies the exit:
 
 `before_llm_call` fires immediately before every model call (after `turn_start` has assembled the messages). It cannot contribute context — use `turn_start` for that — but it can **stop the run** by returning `decision: block` (or exit code 2). The built-in `max_iterations` hook implements a hard cap on top of this event.
 
-`after_llm_call` fires immediately after each successful model call, before the response is recorded into the session and tool calls are dispatched. The assistant text is in `stop_response`. Use it for response auditing, redaction logging, or quality metrics. Failed model calls fire `on_error` instead.
+`after_llm_call` fires immediately after each successful model call, before the response is recorded into the session and tool calls are dispatched. The assistant text is in `stop_response`. The model used for the call is in `model_id` (e.g. `anthropic/claude-sonnet-4-5`). Use it for response auditing, redaction logging, or quality metrics. Failed model calls fire `on_error` instead.
 
 ### Before/After-Compaction: structured compaction control
 

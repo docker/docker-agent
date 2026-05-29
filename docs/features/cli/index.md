@@ -37,6 +37,9 @@ $ docker agent run [config] [message...] [flags]
 | `--dry-run`                             | Initialize the agent without executing anything (useful for validating a config)                                                          |
 | `--remote <addr>`                       | Use a remote runtime at the given address instead of running the agent locally                                                            |
 | `--lean`                                | Use a simplified TUI with minimal chrome                                                                                                  |
+| `--app-name <name>`                     | Application name shown in the TUI in place of "docker agent"                                                                             |
+| `--sidebar`                             | Show the sidebar in the TUI (set `--sidebar=false` to hide it)                                                                            |
+| `--disable-commands <list>`             | Comma-separated list of slash commands to hide and disable in the TUI (e.g. `/cost,/eval,/model`)                                         |
 | `--json`                                | Output results as newline-delimited JSON (use with `--exec`)                                                                              |
 | `--hide-tool-calls`                     | Hide tool calls in the output                                                                                                             |
 | `--hide-tool-results`                   | Hide tool call results in the output                                                                                                      |
