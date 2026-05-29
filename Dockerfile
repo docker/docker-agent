@@ -12,7 +12,7 @@ FROM crazymax/osxcross:15.5-debian AS osxcross
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder-base
 COPY --from=xx / /
-RUN apk add --no-cache clang zig
+RUN apk add --no-cache clang zig upx
 WORKDIR /src
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=bind,source=go.mod,target=go.mod \
@@ -37,6 +37,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build,id=go-build-$TARGETPLATFORM 
     xx-go build -trimpath -tags no_audio -ldflags "-s -w -linkmode=external -X 'github.com/docker/docker-agent/pkg/version.Version=$GIT_TAG' -X 'github.com/docker/docker-agent/pkg/version.Commit=$GIT_COMMIT'" -o /binaries/docker-agent-$TARGETOS-$TARGETARCH .
     xx-verify --static /binaries/docker-agent-$TARGETOS-$TARGETARCH
 EOT
+RUN upx /binaries/docker-agent-$TARGETOS-$TARGETARCH && \
+    upx -t /binaries/docker-agent-$TARGETOS-$TARGETARCH
 
 FROM builder-base AS builder-cross
 ARG TARGETPLATFORM
