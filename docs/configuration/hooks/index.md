@@ -255,8 +255,8 @@ In addition to the common fields, each event ships its own payload:
 | `user_prompt_submit`        | `prompt` — the text the user just submitted                                                                           |
 | `turn_start`                | _none_ (just the common fields)                                                                                       |
 | `turn_end`                  | `agent_name`, `reason` — one of `normal`, `continue`, `steered`, `error`, `canceled`, `hook_blocked`, `loop_detected` |
-| `before_llm_call`           | `iteration` — 1-based run-loop iteration counter (the model call this hook is gating)                                |
-| `after_llm_call`            | `agent_name`, `stop_response`, `last_user_message`                                                                    |
+| `before_llm_call`           | `model_id`, `iteration` — 1-based run-loop iteration counter (the model call this hook is gating)                                |
+| `after_llm_call`            | `model_id`, `agent_name`, `stop_response`, `last_user_message`                                                                    |
 | `session_end`               | `reason` — one of `clear`, `logout`, `prompt_input_exit`, `other`                                                     |
 | `pre_compact`               | `source` — one of `manual`, `auto`, `overflow`, `tool_overflow`                                                       |
 | `before_compaction`         | `input_tokens`, `output_tokens`, `context_limit`, `compaction_reason` (one of `threshold`/`overflow`/`manual`)        |
@@ -275,6 +275,7 @@ Notes:
 
 - `tool_response` for `post_tool_use` carries the tool's result; `tool_error` is `true` when the tool failed (the failure detail is surfaced inside `tool_response`).
 - `prompt` is only populated for `user_prompt_submit`. Sub-sessions (transferred tasks, background agents, skills) do **not** fire this event because their kick-off message is synthesised by the runtime, not authored by the user.
+- `model_id` is in `provider/model` form and reflects per-tool model overrides and alloy-mode selection. It is populated for `before_llm_call` and `after_llm_call` only.
 - `stop_response` carries the model's final assistant text for `stop`, `after_llm_call`, and `subagent_stop`. `last_user_message` carries the latest user message at dispatch time.
 - `context_limit` is `0` when the model definition is unavailable (treat `0` as "unknown", not as a real limit).
 - `approval_decision` is one of `allow`, `deny`, `canceled`. `approval_source` is a stable classifier of which step decided (e.g. `yolo`, `session_permissions_allow`, `session_permissions_deny`, `team_permissions_allow`, `team_permissions_deny`, `pre_tool_use_hook_allow`, `pre_tool_use_hook_deny`, `readonly_hint`, `user_approved`, `user_approved_session`, `user_approved_tool`, `user_rejected`, `context_canceled`).
