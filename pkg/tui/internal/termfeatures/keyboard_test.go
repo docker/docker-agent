@@ -1,6 +1,9 @@
 package termfeatures
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestSupportsModifiedEnter(t *testing.T) {
 	t.Parallel()
@@ -14,8 +17,8 @@ func TestSupportsModifiedEnter(t *testing.T) {
 		{name: "wezterm pane", env: map[string]string{"WEZTERM_PANE": "1"}, want: true},
 		{name: "wezterm socket", env: map[string]string{"WEZTERM_UNIX_SOCKET": "/tmp/wezterm.sock"}, want: true},
 		{name: "wezterm term", env: map[string]string{"TERM": "wezterm"}, want: true},
-		{name: "other terminal", env: map[string]string{"TERM_PROGRAM": "Apple_Terminal", "TERM": "xterm-256color"}, want: false},
-		{name: "nil getenv", env: nil, want: false},
+		{name: "other terminal", env: map[string]string{"TERM_PROGRAM": "Apple_Terminal", "TERM": "xterm-256color"}, want: runtime.GOOS == "darwin"},
+		{name: "nil getenv", env: nil, want: runtime.GOOS == "darwin"},
 	}
 
 	for _, tt := range tests {

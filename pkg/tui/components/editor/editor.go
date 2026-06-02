@@ -771,6 +771,16 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return e, nil
 			}
 
+			// On macOS, terminals like Terminal.app don't support the Kitty keyboard
+			// protocol, so Shift+Enter sends the same byte as Enter. Use the macOS
+			// CoreGraphics API to check if Shift is physically held, and treat it
+			// as a newline insertion.
+			if msg.String() == "enter" && termfeatures.IsShiftPressed() {
+				e.textarea.InsertString("\n")
+				e.refreshSuggestion()
+				return e, nil
+			}
+
 			// Let textarea process the key - it handles newlines via InsertNewline binding
 			prev := e.textarea.Value()
 			e.textarea, _ = e.textarea.Update(msg)
