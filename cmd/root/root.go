@@ -183,9 +183,18 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 	rootCmd.SetIn(stdin)
 	rootCmd.SetOut(stdout)
 	rootCmd.SetErr(stderr)
-	rootCmd.SetArgs(args)
 
 	runningStandalone := plugin.RunningStandalone()
+
+	// When the Docker CLI invokes the plugin for shell completion it calls:
+	//   docker-agent __complete agent <subcommand> <args...>
+	// RunningStandalone() returns true here (os.Args[1] is "__complete", not
+	// the metadata subcommand), so cobra would receive "agent" as the first
+	// arg to __complete and fail to resolve the subcommand tree. Strip the
+	// redundant plugin-name token so cobra sees the correct args.
+	args = stripPluginNameFromCompletionArgs(args)
+
+	rootCmd.SetArgs(args)
 
 	visitAll(rootCmd, func(cmd *cobra.Command) {
 		cmd.SetContext(ctx)
@@ -240,6 +249,22 @@ func visitAll(cmd *cobra.Command, fn func(*cobra.Command)) {
 //
 // Help and version are detected anywhere in args, not just at args[0], so that
 // per-subcommand help (e.g. "run --help") is also skipped.
+// stripPluginNameFromCompletionArgs removes the redundant "agent" token that
+// the Docker CLI inserts when delegating shell completion to the plugin:
+//
+//	docker-agent __complete agent <subcommand> <args...>
+//
+// Without the strip, cobra receives "agent" as the first argument to
+// __complete and cannot resolve the subcommand tree.
+func stripPluginNameFromCompletionArgs(args []string) []string {
+	if len(args) >= 2 &&
+		(args[0] == cobra.ShellCompRequestCmd || args[0] == cobra.ShellCompNoDescRequestCmd) &&
+		args[1] == "agent" {
+		return append(args[:1:1], args[2:]...)
+	}
+	return args
+}
+
 func isManagementInvocation(args []string) bool {
 	if len(args) == 0 {
 		return false
