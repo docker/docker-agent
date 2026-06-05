@@ -1,8 +1,10 @@
 package root
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -30,26 +32,22 @@ func completeAlias(toComplete string) ([]string, cobra.ShellCompDirective) {
 
 	var candidates []string
 
-	// Add matching built-in agent names
 	for _, name := range config.BuiltinAgentNames() {
 		if strings.HasPrefix(name, toComplete) {
 			candidates = append(candidates, name+"\tbuilt-in agent")
 		}
 	}
 
-	// Add matching aliases
-	cfg, err := userconfig.Load()
-	if err == nil {
-		for k, v := range cfg.Aliases {
+	if cfg, err := userconfig.Load(); err == nil {
+		names := slices.Sorted(maps.Keys(cfg.Aliases))
+		for _, k := range names {
 			if strings.HasPrefix(k, toComplete) {
-				candidates = append(candidates, k+"\t"+v.Path)
+				candidates = append(candidates, k+"\t"+cfg.Aliases[k].Path)
 			}
 		}
 	}
 
-	// Also add matching YAML files from the current directory
-	fileCandidates, _ := completeAgentFilename(toComplete)
-	candidates = append(candidates, fileCandidates...)
+	candidates = append(candidates, completeAgentYAMLInCwd(toComplete)...)
 
 	return candidates, cobra.ShellCompDirectiveNoFileComp
 }
@@ -111,6 +109,35 @@ func completeTheme(_ *cobra.Command, _ []string, toComplete string) ([]string, c
 	}
 
 	return candidates, cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeAgentYAMLInCwd returns *.yaml / *.yml files in the current directory
+// whose name starts with the prefix. Directories and dotfiles are excluded;
+// this is the "no path typed yet" case where suggesting the full filesystem
+// tree would be noise.
+func completeAgentYAMLInCwd(prefix string) []string {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext == ".yaml" || ext == ".yml" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func completeAgentFilename(toComplete string) ([]string, cobra.ShellCompDirective) {

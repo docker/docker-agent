@@ -3,6 +3,7 @@ package root
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -365,6 +366,90 @@ func TestCompleteTheme(t *testing.T) {
 				"expected NoFileComp directive to be set")
 		})
 	}
+}
+
+func TestCompleteAlias_NoDirectoriesForPlainPrefix(t *testing.T) {
+	// This test changes the working directory so it cannot run in parallel
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(tmpDir, "subdir"), 0o755))
+	writeFile(t, tmpDir, "agent.yaml")
+
+	t.Chdir(tmpDir)
+
+	completions, directive := completeAlias("")
+
+	assert.NotContains(t, completions, "subdir/", "directories should not appear in plain-prefix completion")
+	assert.Contains(t, completions, "agent.yaml")
+	assert.NotEqual(t, cobra.ShellCompDirective(0), directive&cobra.ShellCompDirectiveNoFileComp)
+}
+
+func TestCompleteAlias_NoDotfileYAML(t *testing.T) {
+	// This test changes the working directory so it cannot run in parallel
+
+	tmpDir := t.TempDir()
+	writeFile(t, tmpDir, ".golangci.yml")
+	writeFile(t, tmpDir, "agent.yaml")
+
+	t.Chdir(tmpDir)
+
+	completions, directive := completeAlias("")
+
+	assert.NotContains(t, completions, ".golangci.yml", "dotfile YAMLs should not appear in completion")
+	assert.Contains(t, completions, "agent.yaml")
+	assert.NotEqual(t, cobra.ShellCompDirective(0), directive&cobra.ShellCompDirectiveNoFileComp)
+}
+
+func TestCompleteAlias_PathPrefixStillDrillsDown(t *testing.T) {
+	// This test changes the working directory so it cannot run in parallel
+
+	tmpDir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(tmpDir, "subdir"), 0o755))
+
+	t.Chdir(tmpDir)
+
+	completions, directive := completeAlias("./")
+
+	assert.Contains(t, completions, "./subdir/", "path drill-down with './' prefix must still include directories")
+	assert.NotEqual(t, cobra.ShellCompDirective(0), directive&cobra.ShellCompDirectiveNoFileComp)
+}
+
+func TestCompleteAlias_SortedAliases(t *testing.T) {
+	// This test changes the working directory so it cannot run in parallel
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// Write a userconfig with aliases out of alphabetical order.
+	// Set HOME so paths.GetConfigDir resolves to our temp directory.
+	t.Setenv("HOME", tmpDir)
+	cfgDir := filepath.Join(tmpDir, ".config", "cagent")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o755))
+	cfgContent := `aliases:
+  zeta:
+    path: /z.yaml
+  alpha:
+    path: /a.yaml
+  mid:
+    path: /m.yaml
+`
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "config.yaml"), []byte(cfgContent), 0o644))
+
+	completions, directive := completeAlias("")
+
+	// Extract only the alias keys (strip tab-separated description)
+	var aliasNames []string
+	for _, c := range completions {
+		parts := strings.SplitN(c, "\t", 2)
+		name := parts[0]
+		// Only include aliases we created (alpha, mid, zeta)
+		if name == "alpha" || name == "mid" || name == "zeta" {
+			aliasNames = append(aliasNames, name)
+		}
+	}
+
+	assert.Equal(t, []string{"alpha", "mid", "zeta"}, aliasNames, "aliases should appear in alphabetical order")
+	assert.NotEqual(t, cobra.ShellCompDirective(0), directive&cobra.ShellCompDirectiveNoFileComp)
 }
 
 func writeFile(t *testing.T, dir, name string) {
