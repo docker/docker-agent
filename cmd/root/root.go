@@ -249,22 +249,6 @@ func visitAll(cmd *cobra.Command, fn func(*cobra.Command)) {
 //
 // Help and version are detected anywhere in args, not just at args[0], so that
 // per-subcommand help (e.g. "run --help") is also skipped.
-// stripPluginNameFromCompletionArgs removes the redundant "agent" token that
-// the Docker CLI inserts when delegating shell completion to the plugin:
-//
-//	docker-agent __complete agent <subcommand> <args...>
-//
-// Without the strip, cobra receives "agent" as the first argument to
-// __complete and cannot resolve the subcommand tree.
-func stripPluginNameFromCompletionArgs(args []string) []string {
-	if len(args) >= 2 &&
-		(args[0] == cobra.ShellCompRequestCmd || args[0] == cobra.ShellCompNoDescRequestCmd) &&
-		args[1] == "agent" {
-		return append(args[:1:1], args[2:]...)
-	}
-	return args
-}
-
 func isManagementInvocation(args []string) bool {
 	if len(args) == 0 {
 		return false
@@ -281,6 +265,22 @@ func isManagementInvocation(args []string) bool {
 		}
 	}
 	return false
+}
+
+// stripPluginNameFromCompletionArgs removes the redundant "agent" token that
+// the Docker CLI inserts when delegating shell completion to the plugin:
+//
+//	docker-agent __complete agent <subcommand> <args...>
+//
+// Without the strip, cobra receives "agent" as the first argument to
+// __complete and cannot resolve the subcommand tree.
+func stripPluginNameFromCompletionArgs(args []string) []string {
+	if len(args) >= 2 &&
+		(args[0] == cobra.ShellCompRequestCmd || args[0] == cobra.ShellCompNoDescRequestCmd) &&
+		args[1] == "agent" {
+		return append(args[:1:1], args[2:]...)
+	}
+	return args
 }
 
 // setupLogging configures slog logging behavior.

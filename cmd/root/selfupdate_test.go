@@ -42,6 +42,11 @@ func TestStripPluginNameFromCompletionArgs(t *testing.T) {
 			want: []string{cobra.ShellCompRequestCmd, "other", "run", ""},
 		},
 		{
+			name: "strips agent token with no trailing args (len==2)",
+			args: []string{cobra.ShellCompRequestCmd, "agent"},
+			want: []string{cobra.ShellCompRequestCmd},
+		},
+		{
 			name: "handles empty args",
 			args: []string{},
 			want: []string{},
