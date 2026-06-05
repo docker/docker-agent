@@ -122,7 +122,7 @@ func completeAgentYAMLInCwd(prefix string) []string {
 	}
 	var out []string
 	for _, e := range entries {
-		if e.IsDir() {
+		if !e.Type().IsRegular() {
 			continue
 		}
 		name := e.Name()
