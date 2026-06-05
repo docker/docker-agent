@@ -452,6 +452,24 @@ func TestCompleteAlias_SortedAliases(t *testing.T) {
 	assert.NotEqual(t, cobra.ShellCompDirective(0), directive&cobra.ShellCompDirectiveNoFileComp)
 }
 
+func TestCompleteAlias_PlainNonAgentYAMLStillAppears(t *testing.T) {
+	// This test changes the working directory so it cannot run in parallel
+
+	tmpDir := t.TempDir()
+	writeFile(t, tmpDir, "Taskfile.yml")
+	writeFile(t, tmpDir, "agent.yaml")
+
+	t.Chdir(tmpDir)
+
+	completions, directive := completeAlias("")
+
+	// Both files are regular, non-dotfile YAMLs — both appear by design.
+	// Filtering non-agent YAMLs like Taskfile.yml is a known follow-up.
+	assert.Contains(t, completions, "Taskfile.yml")
+	assert.Contains(t, completions, "agent.yaml")
+	assert.NotEqual(t, cobra.ShellCompDirective(0), directive&cobra.ShellCompDirectiveNoFileComp)
+}
+
 func writeFile(t *testing.T, dir, name string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o644))
