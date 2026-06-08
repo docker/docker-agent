@@ -42,6 +42,7 @@ func (r *LocalRuntime) buildHooksExecutors() {
 		})
 		cfg = applyAutoInjectors(cfg, r.autoInjectors)
 		cfg = applyCacheDefault(cfg, a)
+		cfg = applyInjectMemoriesDefault(cfg, a)
 		if cfg == nil {
 			continue
 		}
@@ -153,7 +154,9 @@ func (r *LocalRuntime) executeSessionStartHooks(ctx context.Context, sess *sessi
 // contents of a prompt file the user might be editing mid-session.
 func (r *LocalRuntime) executeTurnStartHooks(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) []chat.Message {
 	return contextMessages(r.dispatchHook(ctx, a, hooks.EventTurnStart, &hooks.Input{
-		SessionID: sess.ID,
+		SessionID:       sess.ID,
+		AgentName:       a.Name(),
+		LastUserMessage: sess.GetLastUserMessageContent(),
 	}, events))
 }
 

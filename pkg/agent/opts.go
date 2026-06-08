@@ -132,6 +132,13 @@ func WithAddPromptFiles(addPromptFiles []string) Opt {
 	}
 }
 
+func WithInjectMemories(enabled bool, maxMemories int) Opt {
+	return func(a *Agent) {
+		a.injectMemories = enabled
+		a.maxInjectMemories = maxMemories
+	}
+}
+
 func WithMaxIterations(maxIterations int) Opt {
 	return func(a *Agent) {
 		a.maxIterations = maxIterations

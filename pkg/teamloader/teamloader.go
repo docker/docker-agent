@@ -176,6 +176,10 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithAddDescriptionParameter(agentConfig.AddDescriptionParameter),
 			agent.WithRedactSecrets(agentConfig.RedactSecretsEnabled()),
 			agent.WithAddPromptFiles(promptFiles),
+			agent.WithInjectMemories(
+				agentConfig.InjectMemories,
+				agentConfig.MaxInjectMemories,
+			),
 			agent.WithMaxIterations(agentConfig.MaxIterations),
 			agent.WithMaxConsecutiveToolCalls(agentConfig.MaxConsecutiveToolCalls),
 			agent.WithMaxOldToolCallTokens(agentConfig.MaxOldToolCallTokens),

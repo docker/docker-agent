@@ -40,6 +40,8 @@ type Agent struct {
 	maxOldToolCallTokens    int
 	numHistoryItems         int
 	addPromptFiles          []string
+	injectMemories          bool
+	maxInjectMemories       int
 	tools                   []tools.Tool
 	commands                types.Commands
 	harness                 *latest.HarnessConfig
@@ -114,6 +116,14 @@ func (a *Agent) NumHistoryItems() int {
 
 func (a *Agent) AddPromptFiles() []string {
 	return a.addPromptFiles
+}
+
+func (a *Agent) InjectMemories() bool {
+	return a.injectMemories
+}
+
+func (a *Agent) MaxInjectMemories() int {
+	return a.maxInjectMemories
 }
 
 // Description returns the agent's description
