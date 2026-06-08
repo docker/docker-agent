@@ -549,6 +549,9 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	if err := r.hooksRegistry.RegisterBuiltin(BuiltinCacheResponse, r.cacheResponseBuiltin); err != nil {
 		return nil, fmt.Errorf("register %q builtin: %w", BuiltinCacheResponse, err)
 	}
+	if err := r.hooksRegistry.RegisterBuiltin(BuiltinInjectMemories, r.injectMemoriesBuiltin); err != nil {
+		return nil, fmt.Errorf("register %q builtin: %w", BuiltinInjectMemories, err)
+	}
 
 	// Build the cooldown manager and wire the fallback executor's
 	// runtime-bound dependencies after opts so they pick up the final
