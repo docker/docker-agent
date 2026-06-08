@@ -42,6 +42,7 @@ type Agent struct {
 	addPromptFiles          []string
 	injectMemories          bool
 	maxInjectMemories       int
+	injectMemoriesStrategy  string
 	tools                   []tools.Tool
 	commands                types.Commands
 	harness                 *latest.HarnessConfig
@@ -124,6 +125,10 @@ func (a *Agent) InjectMemories() bool {
 
 func (a *Agent) MaxInjectMemories() int {
 	return a.maxInjectMemories
+}
+
+func (a *Agent) InjectMemoriesStrategy() string {
+	return a.injectMemoriesStrategy
 }
 
 // Description returns the agent's description

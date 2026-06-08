@@ -179,6 +179,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithInjectMemories(
 				agentConfig.InjectMemories,
 				agentConfig.MaxInjectMemories,
+				agentConfig.InjectMemoriesStrategy,
 			),
 			agent.WithMaxIterations(agentConfig.MaxIterations),
 			agent.WithMaxConsecutiveToolCalls(agentConfig.MaxConsecutiveToolCalls),

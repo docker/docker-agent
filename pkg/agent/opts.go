@@ -132,10 +132,11 @@ func WithAddPromptFiles(addPromptFiles []string) Opt {
 	}
 }
 
-func WithInjectMemories(enabled bool, maxMemories int) Opt {
+func WithInjectMemories(enabled bool, maxMemories int, strategy string) Opt {
 	return func(a *Agent) {
 		a.injectMemories = enabled
 		a.maxInjectMemories = maxMemories
+		a.injectMemoriesStrategy = strategy
 	}
 }
 

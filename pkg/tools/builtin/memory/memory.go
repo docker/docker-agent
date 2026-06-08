@@ -90,6 +90,16 @@ func NewWithPath(manager DB, dbPath string) *ToolSet {
 	}
 }
 
+// DB returns the underlying memory database. Used by the runtime's
+// inject_memories turn_start builtin to bypass the tool-call layer.
+func (t *ToolSet) DB() DB { return t.db }
+
+// SetDB replaces the underlying database. Called once per agent on first
+// turn_start via lookupMemoryDB, which interposes an invalidatingDB wrapper
+// so writes through the agent's own memory tools also bump the snapshot
+// generation counter.
+func (t *ToolSet) SetDB(db DB) { t.db = db }
+
 // Describe returns a short, user-visible description of this toolset instance.
 func (t *ToolSet) Describe() string {
 	if t.path != "" {
