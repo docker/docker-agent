@@ -59,3 +59,7 @@ Memories support an optional `category` field for organization and filtering. Co
 </div>
   <p>Memory is especially useful for long-running assistants that need to recall information across conversations — like coding preferences, project conventions, or context discovered during previous sessions.</p>
 </div>
+
+## See also
+
+- [Inject Memories]({{ '/configuration/agents/#inject-memories' | relative_url }}) — automatically inject relevant memories at the start of each turn without the agent needing to call `get_memories` or `search_memories` explicitly.

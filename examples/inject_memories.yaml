@@ -1,0 +1,28 @@
+# Demonstrates automatic memory injection at the start of every turn.
+#
+# When inject_memories is true, the runtime fetches the most relevant
+# stored memories on each turn and injects them as a transient system
+# message. The injection is never persisted to the session transcript.
+#
+# The "local" strategy (the only one available) uses an in-process BM25
+# ranker to score all stored memories against the user's latest message.
+# Cheap, deterministic, and requires no extra model call. A per-agent
+# snapshot cache avoids a SQLite round-trip on every turn; the cache is
+# invalidated whenever a memory is written through the agent's memory tools.
+#
+# Requires a memory toolset to be configured on the agent.
+
+agents:
+  assistant:
+    model: openai/gpt-4o-mini
+    description: An assistant that remembers what you tell it
+    instruction: |
+      You are a helpful assistant. When the user shares a preference
+      or fact, store it with add_memory. Use stored memories to give
+      consistent, personalised answers.
+    toolsets:
+      - type: memory
+        path: ./inject_memories.db
+    inject_memories: true
+    max_inject_memories: 5
+    inject_memories_strategy: local

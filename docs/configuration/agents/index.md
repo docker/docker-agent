@@ -26,6 +26,9 @@ agents:
     add_date: boolean # Optional: add date to context
     add_environment_info: boolean # Optional: add env info to context
     add_prompt_files: [list] # Optional: include additional prompt files
+    inject_memories: boolean # Optional: inject relevant memories at turn start
+    max_inject_memories: int # Optional: cap on injected memories (default: 10)
+    inject_memories_strategy: string # Optional: retrieval strategy, "local" (default)
     add_description_parameter: bool # Optional: add description to tool schema
     redact_secrets: boolean # Optional: scrub detected secrets out of tool args, outgoing chat messages, and tool output
     code_mode_tools: boolean # Optional: enable code mode tool format
@@ -85,6 +88,9 @@ agents:
 | `add_date`                  | boolean | ✗        | When `true`, injects the current date into the agent's context.                                                                                                               |
 | `add_environment_info`      | boolean | ✗        | When `true`, injects working directory, OS, CPU architecture, and git info into context.                                                                                      |
 | `add_prompt_files`          | array   | ✗        | List of file paths whose contents are appended to the system prompt. Useful for including coding standards, guidelines, or additional context.                                |
+| `inject_memories`           | boolean | ✗        | When `true`, the runtime fetches the most relevant stored memories at the start of every turn and injects them as a transient system message. Requires a `memory` toolset. See [Inject Memories](#inject-memories) below. |
+| `max_inject_memories`       | int     | ✗        | Maximum number of memories injected per turn. Default: `10`.                                                                                                                  |
+| `inject_memories_strategy`  | string  | ✗        | Retrieval strategy for `inject_memories`. `"local"` (default): in-process BM25 ranker against the user's message — cheap and deterministic. Note: an `"llm"` strategy is planned for a future release. |
 | `add_description_parameter` | boolean | ✗        | When `true`, adds agent descriptions as a parameter in tool schemas. Helps with tool selection in multi-agent scenarios.                                                      |
 | `redact_secrets`            | boolean | ✗        | When `true`, scrubs detected secrets (API keys, tokens, private keys, etc.) out of tool-call arguments, outgoing chat messages, and tool output before they reach a tool, the model, or downstream consumers. See [Redacting Secrets](#redacting-secrets) below.   |
 | `code_mode_tools`           | boolean | ✗        | When `true`, formats tool responses in a code-optimized format with structured output schemas. Useful for MCP gateway and programmatic access.                                |
@@ -150,6 +156,44 @@ When `path` is set, every `Store` rewrites the entire cache file. Writes are **a
 Multiple processes can share the same `path:` cache file safely. Every `Store` takes an exclusive advisory lock on a sibling `<path>.lock` file (POSIX `flock(2)` on Unix, `LockFileEx` on Windows), reloads the current on-disk state under the lock, merges the new entry, and writes back atomically. Two processes that store *different* keys at the same time both see their writes preserved on disk; the lock window is short (one read + one fsync'd write).
 
 `Lookup` watches the file's modification time and reloads the in-memory map when the file has advanced since its last load, so writes from a sibling process become visible without a restart. The `<path>.lock` sentinel file is created on first write and never deleted: removing it would let two processes lock different inodes and lose mutual exclusion.
+
+## Inject Memories
+
+When `inject_memories: true`, the runtime retrieves the most relevant memories from the agent's memory toolset at the start of every turn and injects them as a transient system message. The injection is **never persisted** to the session transcript — it is invisible in session replays by design, matching the behaviour of `add_date` and `add_environment_info`.
+
+Requires a `memory` toolset on the same agent. If no memory toolset is configured, the runtime emits a warning and the hook is a no-op.
+
+```yaml
+agents:
+  assistant:
+    model: openai/gpt-4o-mini
+    instruction: |
+      You are a helpful assistant that remembers user preferences.
+    toolsets:
+      - type: memory
+    inject_memories: true
+    max_inject_memories: 5
+    inject_memories_strategy: local
+```
+
+### Retrieval strategies
+
+| Strategy | Description |
+| -------- | ----------- |
+| `local` (default) | In-process BM25 ranker scores all stored memories against the user's message. Cheap, deterministic, no extra model call. Uses a per-turn snapshot cache; the cache is invalidated whenever a memory is written via the agent's memory tools. |
+
+> **Note:** An `llm` strategy is planned for a future release.
+
+### FAQ
+
+**Why don't I see the injected memories in my session transcript?**
+Injection is transient by design — matching the behaviour of `add_date` and `add_environment_info`. The memories are visible to the model during the turn but are not saved to the session file.
+
+**When are memories refreshed from disk?**
+The `local` strategy maintains an in-process snapshot cache per agent. The cache is refreshed whenever a memory write occurs through the agent's own memory tools (`add_memory`, `update_memory`, `delete_memory`). Each refresh issues a single `GetMemories` call to SQLite.
+
+**What if an agent has multiple memory toolsets?**
+Only the first memory toolset found is used for injection. Configure a single `type: memory` toolset per agent for predictable behaviour.
 
 ## Redacting Secrets
 

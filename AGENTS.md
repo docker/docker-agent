@@ -98,6 +98,7 @@ Before marking work as complete:
 - When adding new features to the config:
   - Update `./agent-schema.json` accordingly
   - Create an example YAML that demonstrates the new feature
+- Some config flags (`inject_memories`, `cache_response`) are wired by the runtime as auto-injected hooks rather than through `pkg/hooks/builtins`. Look in `pkg/runtime/inject_memories.go` and `pkg/runtime/cache.go` for examples.
 
 # Git Practices
 
