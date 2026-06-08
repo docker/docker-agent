@@ -62,7 +62,10 @@ func effectiveMaxInjectMemories(a *agent.Agent) int {
 //
 // Only the "local" strategy is implemented. It ranks all stored memories
 // with an in-process BM25 scorer against the last user message — cheap,
-// deterministic, and requires no extra model call.
+// deterministic, and requires no extra model call. The local strategy uses
+// memorySnapshotCache to avoid a SQLite round-trip on every turn; the
+// snapshot is invalidated whenever a memory write occurs via the agent's
+// own memory tools (add_memory, update_memory, delete_memory).
 //
 // No-op when:
 //   - input is missing or AgentName/LastUserMessage are empty;
@@ -97,7 +100,12 @@ func (r *LocalRuntime) injectMemoriesBuiltin(ctx context.Context, in *hooks.Inpu
 	var hits []database.UserMemory
 	switch strategy {
 	case latest.InjectMemoriesStrategyLocal:
-		all, err := db.GetMemories(ctx)
+		var all []database.UserMemory
+		if r.memSnapshots != nil {
+			all, err = r.memSnapshots.get(ctx, a.Name(), db)
+		} else {
+			all, err = db.GetMemories(ctx)
+		}
 		if err != nil {
 			slog.WarnContext(ctx, "inject_memories: GetMemories failed",
 				"agent", a.Name(), "error", err)
@@ -119,20 +127,41 @@ func (r *LocalRuntime) injectMemoriesBuiltin(ctx context.Context, in *hooks.Inpu
 	return hooks.NewAdditionalContextOutput(hooks.EventTurnStart, formatMemoriesXML(hits)), nil
 }
 
-// lookupMemoryDB returns the memory DB for the agent's first memory
-// toolset, or (nil, false) when the agent has no such toolset.
+// lookupMemoryDB returns the invalidatingDB wrapper for the agent's first
+// memory toolset. The wrapper is memoised in r.memDBs so the same instance
+// (and its generation counter) is reused across turns.
 //
-// The first match among the agent's toolsets is used; if an agent has
-// multiple memory toolsets, only the first is used for injection — matching
-// the existing tools.As behaviour throughout the codebase.
+// First-call side effects:
+//   - Wraps the raw DB in an invalidatingDB that bumps a generation counter
+//     on every write.
+//   - Calls mt.SetDB(wrapped) so writes through the agent's own memory tools
+//     (add_memory, update_memory, delete_memory) also advance the counter and
+//     trigger snapshot invalidation on the next turn.
 //
 // Note: we do not call ToolSet.Start() here. The memory toolset's DB is
 // opened eagerly inside CreateToolSet (the sqlite.NewMemoryDatabase call),
-// so GetMemories is safe to call before Start() is invoked.
-func (r *LocalRuntime) lookupMemoryDB(a *agent.Agent) (memory.DB, bool) {
+// so GetMemories is safe to call before Start() is invoked. This is an
+// implicit contract documented here: if Start() ever becomes load-bearing,
+// the runtime's ensureToolSetsAreStarted path (called during model invocation
+// on each turn) will cover it before the hook runs.
+func (r *LocalRuntime) lookupMemoryDB(a *agent.Agent) (*invalidatingDB, bool) {
+	name := a.Name()
+
+	r.memDBsMu.Lock()
+	defer r.memDBsMu.Unlock()
+	if r.memDBs == nil {
+		r.memDBs = make(map[string]*invalidatingDB)
+	}
+	if db, ok := r.memDBs[name]; ok {
+		return db, true
+	}
+
 	for _, ts := range a.ToolSets() {
 		if mt, ok := tools.As[*memory.ToolSet](ts); ok {
-			return mt.DB(), true
+			wrapped := newInvalidatingDB(mt.DB())
+			mt.SetDB(wrapped)
+			r.memDBs[name] = wrapped
+			return wrapped, true
 		}
 	}
 	return nil, false

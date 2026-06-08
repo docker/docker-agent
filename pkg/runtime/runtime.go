@@ -215,6 +215,18 @@ type LocalRuntime struct {
 	// construction, so no locking is needed.
 	hooksExecByAgent map[string]*hooks.Executor
 
+	// memSnapshots is the per-agent frozen memory snapshot cache used by
+	// the inject_memories turn_start builtin (local strategy). It is
+	// initialised once in [NewLocalRuntime] and never replaced.
+	memSnapshots *memorySnapshotCache
+	// memDBsMu guards memDBs. lookupMemoryDB is called from turn_start
+	// (potentially concurrently for multi-agent runtimes) so a mutex is
+	// needed even though writes only happen once per agent.
+	memDBsMu sync.Mutex
+	// memDBs memoises the invalidatingDB wrapper per agent so the same
+	// generation counter instance is reused across turns.
+	memDBs map[string]*invalidatingDB
+
 	// transforms is the runtime's [MessageTransform] chain, applied to
 	// every LLM call in registration order. Populated by
 	// [NewLocalRuntime] (for the runtime-shipped strip transform) and by
@@ -535,6 +547,9 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	// register the runtime-owned builtins on top.
 	if r.hooksRegistry == nil {
 		r.hooksRegistry = hooks.NewRegistry()
+	}
+	if r.memSnapshots == nil {
+		r.memSnapshots = newMemorySnapshotCache()
 	}
 	if err := builtins.Register(r.hooksRegistry); err != nil {
 		return nil, fmt.Errorf("register builtin hooks: %w", err)
