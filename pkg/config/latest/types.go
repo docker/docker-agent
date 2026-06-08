@@ -18,6 +18,17 @@ import (
 
 const Version = "10"
 
+const (
+	// InjectMemoriesStrategyLocal scores memories with an in-process BM25
+	// ranker against the latest user message. Cheap, deterministic, never
+	// calls the model.
+	InjectMemoriesStrategyLocal = "local"
+
+	// DefaultMaxInjectMemories is the default cap when MaxInjectMemories
+	// is unset or zero.
+	DefaultMaxInjectMemories = 10
+)
+
 // Config represents the entire configuration file
 type Config struct {
 	Version   string                    `json:"version,omitempty"`
@@ -446,17 +457,31 @@ type AgentConfig struct {
 	// Pointer (tri-state) so we can distinguish "unset" (nil → default
 	// on) from "explicitly disabled" (false). Use
 	// [AgentConfig.RedactSecretsEnabled] to read the effective value.
-	RedactSecrets           *bool             `json:"redact_secrets,omitempty"`
-	CodeModeTools           bool              `json:"code_mode_tools,omitempty"`
-	AddDescriptionParameter bool              `json:"add_description_parameter,omitempty"`
-	MaxIterations           int               `json:"max_iterations,omitempty"`
-	MaxConsecutiveToolCalls int               `json:"max_consecutive_tool_calls,omitempty"`
-	MaxOldToolCallTokens    int               `json:"max_old_tool_call_tokens,omitempty"`
-	NumHistoryItems         int               `json:"num_history_items,omitempty"`
-	AddPromptFiles          []string          `json:"add_prompt_files,omitempty" yaml:"add_prompt_files,omitempty"`
-	Commands                types.Commands    `json:"commands,omitempty"`
-	StructuredOutput        *StructuredOutput `json:"structured_output,omitempty"`
-	Skills                  SkillsConfig      `json:"skills,omitzero"`
+	RedactSecrets           *bool    `json:"redact_secrets,omitempty"`
+	CodeModeTools           bool     `json:"code_mode_tools,omitempty"`
+	AddDescriptionParameter bool     `json:"add_description_parameter,omitempty"`
+	MaxIterations           int      `json:"max_iterations,omitempty"`
+	MaxConsecutiveToolCalls int      `json:"max_consecutive_tool_calls,omitempty"`
+	MaxOldToolCallTokens    int      `json:"max_old_tool_call_tokens,omitempty"`
+	NumHistoryItems         int      `json:"num_history_items,omitempty"`
+	AddPromptFiles          []string `json:"add_prompt_files,omitempty" yaml:"add_prompt_files,omitempty"`
+
+	// InjectMemories opts the agent into automatic memory retrieval at the
+	// start of every turn. The runtime fetches relevant memories from the
+	// agent's configured memory toolset and injects them as a transient
+	// system message (never persisted to the session).
+	//
+	// Requires a memory toolset to be configured on the agent.
+	// MaxInjectMemories caps the number of memories returned; defaults to
+	// DefaultMaxInjectMemories when zero. InjectMemoriesStrategy selects
+	// the retrieval strategy (see InjectMemoriesStrategy* constants).
+	InjectMemories         bool   `json:"inject_memories,omitempty" yaml:"inject_memories,omitempty"`
+	MaxInjectMemories      int    `json:"max_inject_memories,omitempty" yaml:"max_inject_memories,omitempty"`
+	InjectMemoriesStrategy string `json:"inject_memories_strategy,omitempty" yaml:"inject_memories_strategy,omitempty"`
+
+	Commands         types.Commands    `json:"commands,omitempty"`
+	StructuredOutput *StructuredOutput `json:"structured_output,omitempty"`
+	Skills           SkillsConfig      `json:"skills,omitzero"`
 	// UseCommands and UseSkills reference reusable groups defined in the
 	// top-level Config.Commands / Config.Skills sections. The referenced
 	// groups are merged into Commands / Skills during config resolution;

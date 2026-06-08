@@ -94,7 +94,7 @@
     },
     "runtime": {
       "$ref": "#/definitions/RuntimeDefaults",
-      "description": "Execution-time defaults the agent author wants applied. Values act as defaults only — explicit CLI flags or user-config settings always win."
+      "description": "Execution-time defaults the agent author wants applied. Values act as defaults only \u2014 explicit CLI flags or user-config settings always win."
     }
   },
   "additionalProperties": false,
@@ -613,6 +613,25 @@
           "items": {
             "type": "string"
           }
+        },
+        "inject_memories": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt the agent into automatic memory retrieval at the start of every turn. When true, the runtime fetches relevant memories from the agent's configured memory toolset and injects them into the conversation as a transient system message (never persisted). Requires a memory toolset to be configured on the agent; otherwise the runtime emits a warning and the hook is a no-op."
+        },
+        "max_inject_memories": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 10,
+          "description": "Maximum number of memories injected per turn. 0 means use the default (10)."
+        },
+        "inject_memories_strategy": {
+          "type": "string",
+          "enum": [
+            "local"
+          ],
+          "default": "local",
+          "description": "Retrieval strategy. 'local' scores memories with an in-process BM25 ranker against the latest user message (cheap, deterministic, no extra model call). Note: an 'llm' strategy is planned for a future release."
         },
         "commands": {
           "description": "Named prompts for /commands. Supports simple string format or advanced object format with description and instruction.",
@@ -1586,7 +1605,7 @@
       "properties": {
         "sandbox": {
           "type": "boolean",
-          "description": "When true, run the agent inside a Docker sandbox by default — equivalent to passing --sandbox on the command line. An explicit --sandbox=false on the CLI still wins."
+          "description": "When true, run the agent inside a Docker sandbox by default \u2014 equivalent to passing --sandbox on the command line. An explicit --sandbox=false on the CLI still wins."
         },
         "network_allowlist": {
           "type": "array",

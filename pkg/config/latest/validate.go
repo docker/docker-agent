@@ -49,6 +49,9 @@ func (t *Config) Validate() error {
 				return err
 			}
 		}
+		if err := agent.validateInjectMemories(); err != nil {
+			return err
+		}
 		if agent.Hooks != nil {
 			if err := agent.Hooks.Validate(); err != nil {
 				return err
@@ -167,6 +170,33 @@ func (a *AgentConfig) validateHarness() error {
 		return errors.New("harness.thinking can only be used with harness.type 'opencode'")
 	}
 
+	return nil
+}
+
+// validateInjectMemories validates the inject_memories family of fields.
+func (a *AgentConfig) validateInjectMemories() error {
+	if !a.InjectMemories {
+		// The companion fields are tolerated when inject_memories is
+		// false — matches the convention for max_iterations et al.
+		return nil
+	}
+
+	switch a.InjectMemoriesStrategy {
+	case "", InjectMemoriesStrategyLocal:
+		// ok; "" is normalised to local at apply time.
+	default:
+		return fmt.Errorf("agent %q: inject_memories_strategy %q is invalid (expected %q)",
+			a.Name, a.InjectMemoriesStrategy, InjectMemoriesStrategyLocal)
+	}
+
+	if a.MaxInjectMemories < 0 {
+		return fmt.Errorf("agent %q: max_inject_memories must be >= 0 (got %d)",
+			a.Name, a.MaxInjectMemories)
+	}
+
+	// Toolset presence is not validated here — config validation has no
+	// toolset semantics. The runtime emits a warning and falls back to a
+	// no-op when the memory toolset is missing.
 	return nil
 }
 
