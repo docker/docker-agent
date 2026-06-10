@@ -36,6 +36,11 @@ type Item struct {
 	// Immediate marks commands that should run as soon as they are submitted
 	// instead of being treated as ordinary queued chat input.
 	Immediate bool
+	// SkipImmediateParse excludes this item from Parser.Parse so the slash
+	// command falls through to the chat page's processMessage path. Skill
+	// items use this because their palette Execute re-emits the same SendMsg,
+	// which would otherwise be parsed again instead of resolved by the app.
+	SkipImmediateParse bool
 }
 
 func builtInSessionCommands() []Item {
@@ -557,12 +562,13 @@ func BuildCommandCategories(ctx context.Context, application *app.App) []Categor
 			description := toolcommon.TruncateText(skill.Description, 55)
 
 			skillCommands = append(skillCommands, Item{
-				ID:           "skill." + skillName,
-				Label:        skillName,
-				Description:  description,
-				Category:     "Skills",
-				SlashCommand: "/" + skillName,
-				Immediate:    true,
+				ID:                 "skill." + skillName,
+				Label:              skillName,
+				Description:        description,
+				Category:           "Skills",
+				SlashCommand:       "/" + skillName,
+				Immediate:          true,
+				SkipImmediateParse: true,
 				Execute: func(arg string) tea.Cmd {
 					input := "/" + skillName
 					if arg = strings.TrimSpace(arg); arg != "" {
@@ -620,7 +626,7 @@ func (p *Parser) Parse(input string) tea.Cmd {
 	// Search through all categories and commands
 	for _, category := range p.categories {
 		for _, item := range category.Commands {
-			if item.SlashCommand == cmd && item.Immediate {
+			if item.SlashCommand == cmd && item.Immediate && !item.SkipImmediateParse {
 				return item.Execute(arg)
 			}
 		}

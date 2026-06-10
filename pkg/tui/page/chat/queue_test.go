@@ -2,7 +2,9 @@ package chat
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
@@ -12,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
+	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/tools"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
@@ -98,6 +101,76 @@ func (queueTestRuntime) TogglePause(context.Context) (bool, error)             {
 func (queueTestRuntime) Close() error                                          { return nil }
 
 var _ runtime.Runtime = queueTestRuntime{}
+
+type skillDispatchRuntime struct {
+	queueTestRuntime
+
+	skillset *skillstool.ToolSet
+
+	mu            sync.Mutex
+	forkCalls     []skillstool.RunSkillArgs
+	runStreamRuns int
+	lastRun       string
+}
+
+func (r *skillDispatchRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet {
+	return r.skillset
+}
+
+func (r *skillDispatchRuntime) RunSkillFork(_ context.Context, sess *session.Session, args skillstool.RunSkillArgs, sink runtime.EventSink) (*tools.ToolCallResult, error) {
+	r.mu.Lock()
+	r.forkCalls = append(r.forkCalls, args)
+	r.lastRun = "/" + args.Name
+	if args.Task != "" {
+		r.lastRun += " " + args.Task
+	}
+	r.mu.Unlock()
+
+	sink.Emit(runtime.StreamStopped(sess.ID, "", ""))
+	return tools.ResultSuccess("done"), nil
+}
+
+func (r *skillDispatchRuntime) RunStream(_ context.Context, sess *session.Session) <-chan runtime.Event {
+	r.mu.Lock()
+	r.runStreamRuns++
+	items := sess.GetAllMessages()
+	if len(items) > 0 {
+		r.lastRun = items[len(items)-1].Message.Content
+	}
+	r.mu.Unlock()
+
+	ch := make(chan runtime.Event, 1)
+	ch <- runtime.StreamStopped(sess.ID, "", "")
+	close(ch)
+	return ch
+}
+
+func (r *skillDispatchRuntime) forkCallCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.forkCalls)
+}
+
+func (r *skillDispatchRuntime) lastForkArgs() skillstool.RunSkillArgs {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.forkCalls) == 0 {
+		return skillstool.RunSkillArgs{}
+	}
+	return r.forkCalls[len(r.forkCalls)-1]
+}
+
+func (r *skillDispatchRuntime) runStreamCallCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.runStreamRuns
+}
+
+func (r *skillDispatchRuntime) lastRunMessage() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastRun
+}
 
 func TestQueueFlow_BusyAgent_ImmediateSlashCommandBypassesQueue(t *testing.T) {
 	t.Parallel()
@@ -303,4 +376,81 @@ func TestReadOnly_AllowsSlashCommands(t *testing.T) {
 
 	require.NotNil(t, cmd)
 	assert.Equal(t, immediateCommandMsg{arg: "please"}, cmd())
+}
+
+func skillCommandParser(name string) *commands.Parser {
+	return commands.NewParser(commands.Category{
+		Name: "Skills",
+		Commands: []commands.Item{
+			{
+				SlashCommand:       "/" + name,
+				Immediate:          true,
+				SkipImmediateParse: true,
+				Execute: func(arg string) tea.Cmd {
+					input := "/" + name
+					if arg != "" {
+						input += " " + arg
+					}
+					return func() tea.Msg { return messages.SendMsg{Content: input, BypassQueue: true} }
+				},
+			},
+		},
+	})
+}
+
+func TestHandleSendMsg_ForkSkillFallsThroughToRunSkillFork(t *testing.T) {
+	t.Parallel()
+
+	skillSet := skillstool.New([]skills.Skill{{
+		Name:          "services",
+		Description:   "List services",
+		Context:       "fork",
+		InlineContent: "# Services\nList repository services.",
+	}}, t.TempDir())
+	rt := &skillDispatchRuntime{skillset: skillSet}
+	sess := session.New()
+	p := New(app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	p.commandParser = skillCommandParser("services")
+	p.working = false
+
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "/services please", BypassQueue: true})
+
+	require.NotNil(t, cmd)
+	msg := cmd()
+	_, loops := msg.(messages.SendMsg)
+	assert.False(t, loops, "skill SendMsg must not be re-emitted by the parser")
+	require.Eventually(t, func() bool { return rt.forkCallCount() == 1 }, time.Second, 10*time.Millisecond)
+	assert.Equal(t, "/services please", rt.lastRunMessage())
+	assert.Equal(t, "services", rt.lastForkArgs().Name)
+	assert.Equal(t, "please", rt.lastForkArgs().Task)
+	assert.Zero(t, rt.runStreamCallCount(), "fork skills should not use inline RunStream path")
+	assert.Zero(t, sess.MessageCount(), "fork skill dispatch must not append inline user message")
+}
+
+func TestHandleSendMsg_InlineSkillFallsThroughToResolveInput(t *testing.T) {
+	t.Parallel()
+
+	skillSet := skillstool.New([]skills.Skill{{
+		Name:          "services",
+		Description:   "List services",
+		InlineContent: "# Services\nList repository services.",
+	}}, t.TempDir())
+	rt := &skillDispatchRuntime{skillset: skillSet}
+	sess := session.New()
+	p := New(app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	p.commandParser = skillCommandParser("services")
+	p.working = false
+
+	_, cmd := p.handleSendMsg(messages.SendMsg{Content: "/services please", BypassQueue: true})
+
+	require.NotNil(t, cmd)
+	msg := cmd()
+	_, loops := msg.(messages.SendMsg)
+	assert.False(t, loops, "skill SendMsg must not be re-emitted by the parser")
+	require.Eventually(t, func() bool { return sess.MessageCount() == 1 }, time.Second, 10*time.Millisecond)
+	assert.Zero(t, rt.forkCallCount(), "inline skills must not use fork dispatch")
+	require.Equal(t, 1, rt.runStreamCallCount())
+	assert.Contains(t, rt.lastRunMessage(), `<skill name="services">`)
+	assert.Contains(t, rt.lastRunMessage(), "List repository services.")
+	assert.Contains(t, rt.lastRunMessage(), "User's request: please")
 }

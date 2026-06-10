@@ -3,6 +3,7 @@ package commands
 import (
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -200,4 +201,52 @@ func TestRemoveByIDsDropsSnapshotCommands(t *testing.T) {
 	assert.Nil(t, parser.Parse("/undo"))
 	assert.Nil(t, parser.Parse("/snapshots"))
 	require.NotNil(t, parser.Parse("/exit"))
+}
+
+func TestParseSkipsItemsMarkedSkipImmediateParse(t *testing.T) {
+	t.Parallel()
+
+	parser := NewParser(Category{
+		Name: "Skills",
+		Commands: []Item{
+			{
+				SlashCommand:       "/services",
+				Immediate:          true,
+				SkipImmediateParse: true,
+				Execute: func(string) tea.Cmd {
+					return func() tea.Msg {
+						return messages.SendMsg{Content: "/services", BypassQueue: true}
+					}
+				},
+			},
+		},
+	})
+
+	assert.Nil(t, parser.Parse("/services"))
+	assert.Nil(t, parser.Parse("/services report"))
+}
+
+func TestParseStillMatchesImmediateItems(t *testing.T) {
+	t.Parallel()
+
+	parser := NewParser(Category{
+		Name: "Agent Commands",
+		Commands: []Item{
+			{
+				SlashCommand: "/review",
+				Immediate:    true,
+				Execute: func(arg string) tea.Cmd {
+					return func() tea.Msg {
+						return messages.AgentCommandMsg{Command: "/review " + arg}
+					}
+				},
+			},
+		},
+	})
+
+	cmd := parser.Parse("/review the diff")
+	require.NotNil(t, cmd)
+	msg, ok := cmd().(messages.AgentCommandMsg)
+	require.True(t, ok)
+	assert.Equal(t, "/review the diff", msg.Command)
 }
