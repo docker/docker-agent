@@ -45,6 +45,7 @@ an `instruction`.
 | [`contradict.yaml`](contradict.yaml) | Contrarian. |
 | [`silvia.yaml`](silvia.yaml) | Sylvia-Plath-inspired poet. |
 | [`clermont-guide.yaml`](clermont-guide.yaml) | Proud Clermont-Ferrand tour guide who only talks about the city and snaps back rudely at any criticism. |
+| [`gueret-guide.yaml`](gueret-guide.yaml) | Same persona for Guéret (Creuse): only talks about the city and snaps back rudely at any criticism. |
 | [`mistral.yaml`](mistral.yaml) | Tiny agent pinned to a Mistral model. |
 | [`pokemon.yaml`](pokemon.yaml) | French-speaking Pokémon expert with two trainer sub-agents. |
 | [`alloy.yaml`](alloy.yaml) | Learning assistant. |
