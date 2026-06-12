@@ -35,6 +35,7 @@ package modelinfo
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,19 +88,37 @@ func AlwaysReasons(modelID string) bool {
 // `thinking.type=enabled` (token-based extended thinking) and instead requires
 // `thinking.type=adaptive`.
 //
-// Currently Claude Opus 4.6 and 4.7 (and dated variants like
-// claude-opus-4-7-20251101). For these models the agent transparently
-// switches a token-based budget to adaptive thinking.
+// Claude Opus 4.7+ only supports adaptive thinking. Opus 4.6 also accepts
+// adaptive thinking, but it still accepts token budgets, so it is not coerced.
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func RejectsTokenThinking(modelID string) bool {
-	m := normalize(modelID)
-	for _, prefix := range []string{"claude-opus-4-6", "claude-opus-4-7"} {
-		if m == prefix || strings.HasPrefix(m, prefix+"-") {
-			return true
-		}
+	m := normalizeClaudeName(modelID)
+	return matchesClaudeFamilyAtLeast(m, "opus", 4, 7)
+}
+
+func matchesClaudeFamilyAtLeast(modelID, family string, major, minor int) bool {
+	prefix := "claude-" + family + "-"
+	if !strings.HasPrefix(modelID, prefix) {
+		return false
 	}
-	return false
+	rest := strings.TrimPrefix(modelID, prefix)
+	parts := strings.Split(rest, "-")
+	if len(parts) < 2 || len(parts[1]) != 1 {
+		return false
+	}
+	gotMajor, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	gotMinor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	if gotMajor != major {
+		return gotMajor > major
+	}
+	return gotMinor >= minor
 }
 
 // UsesThinkingLevel reports whether a Google Gemini model uses level-based
@@ -196,6 +215,14 @@ func IsClaudeFamily(family string) bool {
 // by every name-pattern predicate in this package.
 func normalize(modelID string) string {
 	return strings.ToLower(strings.TrimSpace(modelID))
+}
+
+func normalizeClaudeName(modelID string) string {
+	m := normalize(modelID)
+	if i := strings.Index(m, "claude-"); i >= 0 {
+		return m[i:]
+	}
+	return m
 }
 
 // isOSeries reports whether the (already-normalized) identifier names an

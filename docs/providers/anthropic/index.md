@@ -95,16 +95,19 @@ models:
 
 ## Available Models
 
-| Model ID            | Description                                         |
-| ------------------- | --------------------------------------------------- |
-| `claude-opus-4-7`   | Highest-capability Opus model; supports task budget |
-| `claude-sonnet-4-5` | Most capable Sonnet; supports extended thinking     |
-| `claude-sonnet-4-0` | Previous Sonnet generation, still supported         |
-| `claude-haiku-4-5`  | Fast and inexpensive, good for tight loops          |
+| Model ID            | Description                                                 |
+| ------------------- | ----------------------------------------------------------- |
+| `claude-opus-4-8`   | Highest-capability Opus model; uses adaptive thinking       |
+| `claude-opus-4-7`   | Opus model with adaptive thinking and task budget support   |
+| `claude-sonnet-4-5` | Most capable Sonnet; supports extended thinking             |
+| `claude-sonnet-4-0` | Previous Sonnet generation, still supported                 |
+| `claude-haiku-4-5`  | Fast and inexpensive, good for tight loops                  |
 
 ## Thinking Budget
 
-Anthropic uses integer token budgets (1024–32768). Thinking is off unless you set `thinking_budget`; when set, interleaved thinking is auto-enabled:
+Anthropic supports both token budgets and adaptive thinking. Thinking is off unless you set `thinking_budget`; when set, interleaved thinking is auto-enabled.
+
+Use numeric token budgets with Claude Sonnet and older Opus models:
 
 ```yaml
 models:
@@ -113,6 +116,18 @@ models:
     model: claude-sonnet-4-5
     thinking_budget: 16384 # must be < max_tokens
 ```
+
+Use adaptive thinking with Claude Opus 4.7+ (including Opus 4.8):
+
+```yaml
+models:
+  opus:
+    provider: anthropic
+    model: claude-opus-4-8
+    thinking_budget: adaptive/high # adaptive | adaptive/low | adaptive/medium | adaptive/high | adaptive/xhigh | adaptive/max
+```
+
+Claude Opus 4.7+ rejects token-based thinking requests (`thinking.type=enabled`). docker-agent converts numeric budgets on these models to adaptive thinking, but new configs should prefer `adaptive` or `adaptive/<level>` directly.
 
 ## Interleaved Thinking
 
@@ -196,13 +211,13 @@ AI, or the Message Batches API.
 
 ## Thinking Display
 
-Controls whether thinking blocks are returned in responses when thinking is enabled. Claude Opus 4.7 hides thinking content by default (`omitted`); earlier Claude 4 models default to `summarized`. Set `thinking_display` in `provider_opts` to override:
+Controls whether thinking blocks are returned in responses when thinking is enabled. Claude Opus 4.7+ hides thinking content by default (`omitted`); earlier Claude 4 models default to `summarized`. Set `thinking_display` in `provider_opts` to override:
 
 ```yaml
 models:
-  claude-opus-4-7:
+  claude-opus-4-8:
     provider: anthropic
-    model: claude-opus-4-7
+    model: claude-opus-4-8
     thinking_budget: adaptive
     provider_opts:
       thinking_display: summarized # "summarized", "display", or "omitted"
@@ -212,7 +227,7 @@ Valid values:
 
 - `summarized`: thinking blocks are returned with summarized thinking text (default for Claude 4 models prior to Opus 4.7).
 - `display`: thinking blocks are returned for display (use this to re-enable thinking output on Opus 4.7).
-- `omitted`: thinking blocks are returned with an empty thinking field; the signature is still returned for multi-turn continuity (default for Opus 4.7). Useful to reduce time-to-first-text-token when streaming.
+- `omitted`: thinking blocks are returned with an empty thinking field; the signature is still returned for multi-turn continuity (default for Opus 4.7+). Useful to reduce time-to-first-text-token when streaming.
 
 Note: `thinking_display` applies to both `thinking_budget` with token counts and adaptive/effort-based budgets. Full thinking tokens are billed regardless of the `thinking_display` value.
 

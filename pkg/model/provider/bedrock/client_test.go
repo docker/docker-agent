@@ -2,6 +2,7 @@ package bedrock
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -643,6 +644,82 @@ func TestBuildAdditionalModelRequestFields_Enabled(t *testing.T) {
 	result := client.buildAdditionalModelRequestFields()
 
 	require.NotNil(t, result, "expected document for valid thinking_budget")
+	fields := documentToMap(t, result)
+	thinking, ok := fields["thinking"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "enabled", thinking["type"])
+	assert.InDelta(t, float64(16384), thinking["budget_tokens"], 0)
+}
+
+func documentToMap(t *testing.T, doc any) map[string]any {
+	t.Helper()
+	d, ok := doc.(interface{ MarshalSmithyDocument() ([]byte, error) })
+	require.True(t, ok, "expected smithy document")
+	data, err := d.MarshalSmithyDocument()
+	require.NoError(t, err)
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(data, &result))
+	return result
+}
+
+func TestBuildAdditionalModelRequestFields_AdaptiveForOpus48(t *testing.T) {
+	t.Parallel()
+
+	maxTokens := int64(64000)
+	client := &Client{
+		Config: base.Config{
+			ModelConfig: latest.ModelConfig{
+				Provider:  "amazon-bedrock",
+				Model:     "anthropic.claude-opus-4-8",
+				MaxTokens: &maxTokens,
+				ThinkingBudget: &latest.ThinkingBudget{
+					Tokens: 32768,
+				},
+			},
+		},
+	}
+
+	result := client.buildAdditionalModelRequestFields()
+
+	require.NotNil(t, result)
+	fields := documentToMap(t, result)
+	thinking, ok := fields["thinking"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "adaptive", thinking["type"])
+	assert.NotContains(t, thinking, "budget_tokens")
+	outputConfig, ok := fields["output_config"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "high", outputConfig["effort"])
+	assert.NotContains(t, fields, "anthropic_beta")
+}
+
+func TestBuildAdditionalModelRequestFields_AdaptiveEffort(t *testing.T) {
+	t.Parallel()
+
+	maxTokens := int64(64000)
+	client := &Client{
+		Config: base.Config{
+			ModelConfig: latest.ModelConfig{
+				Provider:  "amazon-bedrock",
+				Model:     "anthropic.claude-opus-4-8",
+				MaxTokens: &maxTokens,
+				ThinkingBudget: &latest.ThinkingBudget{
+					Effort: "adaptive/xhigh",
+				},
+			},
+		},
+	}
+
+	result := client.buildAdditionalModelRequestFields()
+
+	require.NotNil(t, result)
+	fields := documentToMap(t, result)
+	thinking, ok := fields["thinking"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "adaptive", thinking["type"])
+	outputConfig, ok := fields["output_config"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "xhigh", outputConfig["effort"])
 }
 
 func TestBuildAdditionalModelRequestFields_Nil(t *testing.T) {

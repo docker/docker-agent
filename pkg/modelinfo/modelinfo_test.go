@@ -133,15 +133,17 @@ func TestRejectsTokenThinking(t *testing.T) {
 		model string
 		want  bool
 	}{
-		{"claude-opus-4-6", true},
+		{"claude-opus-4-6", false},
 		{"claude-opus-4-7", true},
-		{"claude-opus-4-6-20251101", true},
+		{"claude-opus-4-6-20251101", false},
 		{"claude-opus-4-7-20260101", true},
+		{"claude-opus-4-8", true},
+		{"claude-opus-4-8-20260601", true},
+		{"claude-opus-4-9", true},
 		{"CLAUDE-OPUS-4-7", true},     // case-insensitive
-		{"  claude-opus-4-6  ", true}, // trims whitespace
+		{"  claude-opus-4-7  ", true}, // trims whitespace
 		{"claude-opus-4-5", false},
 		{"claude-opus-4-5-20251015", false},
-		{"claude-opus-4-8", false},
 		{"claude-sonnet-4-7", false},
 		{"claude-sonnet-4-5", false},
 		{"claude-haiku-4-5", false},

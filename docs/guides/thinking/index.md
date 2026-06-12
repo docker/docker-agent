@@ -25,10 +25,10 @@ docker-agent exposes this through a single `thinking_budget` field on any named 
 | Provider       | Format     | Values                                                       | Default      |
 | -------------- | ---------- | ------------------------------------------------------------ | ------------ |
 | OpenAI         | string     | `minimal`, `low`, `medium`, `high`, `xhigh`, `none`, `adaptive/<level>` (`max` only via `adaptive/max`) | `medium`     |
-| Anthropic      | int or str | 1024–32768 tokens, or `adaptive`, `low`–`max`, `none`        | off          |
+| Anthropic      | int or str | 1024–32768 tokens (Sonnet / older Opus), or `adaptive`, `adaptive/<level>`, `low`–`max`, `none` | off          |
 | Gemini 2.5     | int        | `0` (off), `-1` (dynamic), or token count (max 24576 / 32768) | `-1` (dynamic)|
 | Gemini 3       | string     | `minimal`, `low`, `medium`, `high`                           | model-dependent |
-| AWS Bedrock    | int or str | 1024–32768 tokens (`minimal`–`max` mapped to tokens)         | off          |
+| AWS Bedrock    | int or str | 1024–32768 tokens for Claude token-budget models; `adaptive` / `adaptive/<level>` for Opus 4.7+ | off          |
 | xAI / Mistral  | string     | `minimal`, `low`, `medium`, `high`, `xhigh`, `none`          | off          |
 
 ## OpenAI
@@ -78,7 +78,7 @@ models:
 
 Anthropic Claude supports two thinking modes: a **token budget** (older models) and **adaptive / effort-based** thinking (newer models).
 
-### Token budget (Claude 4 and earlier)
+### Token budget (Claude Sonnet and older Opus models)
 
 Set an explicit number of thinking tokens (1024–32768). This must be less than `max_tokens`:
 
@@ -92,6 +92,11 @@ models:
 
 docker-agent auto-adjusts `max_tokens` when you set a thinking budget but leave `max_tokens` at its default. If you set `max_tokens` explicitly, it must be greater than `thinking_budget`.
 
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">Opus 4.7+ uses adaptive thinking</div>
+  <p>Claude Opus 4.7 and newer, including Opus 4.8, reject token-based thinking requests. Prefer <code>thinking_budget: adaptive</code> or <code>thinking_budget: adaptive/high</code>. docker-agent converts numeric budgets on these models to adaptive thinking for compatibility.</p>
+</div>
+
 ### Adaptive thinking (Claude Opus 4.6+)
 
 Newer Claude models support adaptive thinking, where the model decides how much to think. Use `adaptive` or pair it with an effort level:
@@ -100,13 +105,13 @@ Newer Claude models support adaptive thinking, where the model decides how much 
 models:
   claude-adaptive:
     provider: anthropic
-    model: claude-opus-4-6
+    model: claude-opus-4-8
     thinking_budget: adaptive          # model decides effort
 
   claude-adaptive-low:
     provider: anthropic
-    model: claude-opus-4-6
-    thinking_budget: low               # adaptive with low effort: low | medium | high | max
+    model: claude-opus-4-8
+    thinking_budget: adaptive/low      # adaptive with low effort: low | medium | high | xhigh | max
 ```
 
 **Adaptive effort levels:**
@@ -116,6 +121,7 @@ models:
 | `low`     | Minimal thinking; fastest adaptive mode.          |
 | `medium`  | Moderate effort.                                  |
 | `high`    | Thorough reasoning; default for `adaptive`.       |
+| `xhigh`   | Extra-high reasoning effort.                      |
 | `max`     | Maximum effort.                                   |
 
 ### Disabling thinking
@@ -147,13 +153,13 @@ models:
 
 ### Thinking display
 
-Claude Opus 4.7 hides thinking content by default. Use `thinking_display` in `provider_opts` to control what you receive:
+Claude Opus 4.7+ hides thinking content by default. Use `thinking_display` in `provider_opts` to control what you receive:
 
 ```yaml
 models:
-  opus-47:
+  opus-48:
     provider: anthropic
-    model: claude-opus-4-7
+    model: claude-opus-4-8
     thinking_budget: adaptive
     provider_opts:
       thinking_display: summarized   # summarized | display | omitted
@@ -163,7 +169,7 @@ models:
 | ------------ | ------------------------------------------------------------------------------------- |
 | `summarized` | Thinking blocks returned with a text summary (default for Claude 4 models pre-4.7).  |
 | `display`    | Full thinking blocks returned for display.                                            |
-| `omitted`    | Thinking blocks hidden — only the signature is returned (default for Opus 4.7).       |
+| `omitted`    | Thinking blocks hidden — only the signature is returned (default for Opus 4.7+).      |
 
 Full thinking tokens are billed regardless of `thinking_display`.
 
@@ -223,7 +229,19 @@ models:
 
 ## AWS Bedrock (Claude)
 
-Bedrock Claude uses a token budget like Anthropic, but only supports integer token values. String effort levels (`minimal`–`max`) are mapped automatically:
+Bedrock Claude supports extended thinking — an internal reasoning phase before the model produces its response. Most Claude models use a token budget; Claude Opus 4.7+ uses adaptive thinking instead:
+
+```yaml
+models:
+  bedrock-claude-adaptive:
+    provider: amazon-bedrock
+    model: global.anthropic.claude-opus-4-8-20260601-v1:0
+    thinking_budget: adaptive/high   # adaptive | adaptive/low | adaptive/medium | adaptive/high | adaptive/xhigh | adaptive/max
+    provider_opts:
+      region: us-east-1
+```
+
+For models that still accept token budgets, use an integer token count (1024–32768) or an effort level string that maps automatically:
 
 | Effort level | Token budget |
 | ------------ | ------------ |

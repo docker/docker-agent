@@ -4,7 +4,7 @@
 agents:
   root:
     model: gpt-5-mini-min # <- try with gpt-5-mini-high
-    # model: claude-4-5-sonnet-min # <- try with claude-4-5-sonnet-high or claude-opus-4-6-adaptive
+    # model: claude-opus-4-8-adaptive # <- try with Opus adaptive thinking
     # model: gemini-2-5-flash-dynamic-thinking # <- try with -no-thinking, -low or -high variants
     description: a helpful assistant that thinks
     instruction: you are a helpful assistant who can also use tools, but only if you need to
@@ -36,22 +36,22 @@ models:
     provider_opts:
       interleaved_thinking: true # <- enables interleaved thinking, aka tool calling during model reasoning
 
-  claude-opus-4-6-adaptive:
+  claude-opus-4-8-adaptive:
     provider: anthropic
-    model: claude-opus-4-6
-    thinking_budget: adaptive # <- lets the model decide when and how much to think (recommended for 4.6)
+    model: claude-opus-4-8
+    thinking_budget: adaptive # <- required style for Opus 4.7+; token budgets are converted for compatibility
 
-  claude-opus-4-6-low:
+  claude-opus-4-8-low:
     provider: anthropic
-    model: claude-opus-4-6
-    thinking_budget: low # <- adaptive thinking with low effort: "low", "medium", "high", "max"
+    model: claude-opus-4-8
+    thinking_budget: adaptive/low # <- adaptive thinking with low effort: "low", "medium", "high", "xhigh", "max"
 
-  claude-opus-4-7-summarized:
+  claude-opus-4-8-summarized:
     provider: anthropic
-    model: claude-opus-4-6 # <- Opus 4.7 hides thinking by default; use the same flag with any recent Claude model
+    model: claude-opus-4-8 # <- Opus 4.7+ hides thinking by default; use thinking_display to receive summaries
     thinking_budget: adaptive
     provider_opts:
-      thinking_display: summarized # <- "summarized", "display", or "omitted" (Opus 4.7 defaults to omitted)
+      thinking_display: summarized # <- "summarized", "display", or "omitted" (Opus 4.7+ defaults to omitted)
 
   gemini-2-5-flash-dynamic-thinking:
     provider: google

@@ -17,11 +17,13 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -320,20 +322,7 @@ func (c *Client) interleavedThinkingEnabled() bool {
 // It mirrors the validation in buildAdditionalModelRequestFields but without
 // side effects (no logging), so it can safely be used to gate inference config.
 func (c *Client) isThinkingEnabled() bool {
-	if c.ModelConfig.ThinkingBudget == nil {
-		return false
-	}
-	tokens := c.ModelConfig.ThinkingBudget.Tokens
-	if t, ok := c.ModelConfig.ThinkingBudget.EffortTokens(); ok {
-		tokens = t
-	}
-	if tokens < 1024 {
-		return false
-	}
-	if c.ModelConfig.MaxTokens != nil && tokens >= int(*c.ModelConfig.MaxTokens) {
-		return false
-	}
-	return true
+	return c.thinkingConfig() != nil
 }
 
 func (c *Client) promptCachingEnabled() bool {
@@ -355,38 +344,21 @@ func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 	}
 
 	// Configure thinking budget if present and valid
-	if budget := c.ModelConfig.ThinkingBudget; budget != nil {
-		tokens := budget.Tokens
-		if t, ok := budget.EffortTokens(); ok {
-			tokens = t
+	if thinking := c.thinkingConfig(); thinking != nil {
+		fields["thinking"] = thinking.thinking
+		if thinking.outputEffort != "" {
+			fields["output_config"] = map[string]any{"effort": thinking.outputEffort}
 		}
 
-		valid := tokens > 0
-		if valid && tokens < 1024 {
-			slog.Warn("Bedrock thinking_budget below minimum (1024), ignoring", "tokens", tokens)
-			valid = false
-		}
-		if valid && c.ModelConfig.MaxTokens != nil && tokens >= int(*c.ModelConfig.MaxTokens) {
-			slog.Warn("Bedrock thinking_budget must be less than max_tokens, ignoring",
-				"thinking_budget", tokens,
-				"max_tokens", *c.ModelConfig.MaxTokens)
-			valid = false
-		}
-
-		if valid {
-			slog.Debug("Bedrock request using thinking_budget", "budget_tokens", tokens)
-			fields["thinking"] = map[string]any{
-				"type":          "enabled",
-				"budget_tokens": tokens,
-			}
-
-			if c.interleavedThinkingEnabled() {
-				fields["anthropic_beta"] = []string{"interleaved-thinking-2025-05-14"}
-				slog.Debug("Bedrock request using interleaved thinking beta")
-			} else {
-				slog.Warn("Bedrock thinking_budget is set but interleaved_thinking is explicitly disabled; " +
-					"the anthropic_beta header will not be sent, which may cause the thinking budget to be ignored")
-			}
+		switch {
+		case thinking.adaptive:
+			slog.Debug("Bedrock request using adaptive thinking", "effort", thinking.outputEffort)
+		case c.interleavedThinkingEnabled():
+			fields["anthropic_beta"] = []string{"interleaved-thinking-2025-05-14"}
+			slog.Debug("Bedrock request using interleaved thinking beta")
+		default:
+			slog.Warn("Bedrock thinking_budget is set but interleaved_thinking is explicitly disabled; " +
+				"the anthropic_beta header will not be sent, which may cause the thinking budget to be ignored")
 		}
 	}
 
@@ -394,6 +366,78 @@ func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 		return nil
 	}
 	return document.NewLazyDocument(fields)
+}
+
+type bedrockThinkingConfig struct {
+	thinking     map[string]any
+	adaptive     bool
+	outputEffort string
+}
+
+func (c *Client) thinkingConfig() *bedrockThinkingConfig {
+	budget := c.ModelConfig.ThinkingBudget
+	if budget == nil || budget.IsDisabled() {
+		return nil
+	}
+
+	if effortStr, ok := bedrockThinkingEffort(budget); ok {
+		return &bedrockThinkingConfig{
+			thinking:     map[string]any{"type": "adaptive"},
+			adaptive:     true,
+			outputEffort: effortStr,
+		}
+	}
+
+	if modelinfo.RejectsTokenThinking(c.ModelConfig.Model) {
+		if budget.Tokens <= 0 {
+			return nil
+		}
+		slog.Warn("Bedrock: model rejects token-based thinking budgets; switching to adaptive thinking",
+			"model", c.ModelConfig.Model,
+			"thinking_budget_tokens", budget.Tokens)
+		return &bedrockThinkingConfig{
+			thinking:     map[string]any{"type": "adaptive"},
+			adaptive:     true,
+			outputEffort: "high",
+		}
+	}
+
+	tokens := budget.Tokens
+	if t, ok := budget.EffortTokens(); ok {
+		tokens = t
+	}
+	if tokens < 1024 {
+		slog.Warn("Bedrock thinking_budget below minimum (1024), ignoring", "tokens", tokens)
+		return nil
+	}
+	if c.ModelConfig.MaxTokens != nil && tokens >= int(*c.ModelConfig.MaxTokens) {
+		slog.Warn("Bedrock thinking_budget must be less than max_tokens, ignoring",
+			"thinking_budget", tokens,
+			"max_tokens", *c.ModelConfig.MaxTokens)
+		return nil
+	}
+
+	slog.Debug("Bedrock request using thinking_budget", "budget_tokens", tokens)
+	return &bedrockThinkingConfig{
+		thinking: map[string]any{
+			"type":          "enabled",
+			"budget_tokens": tokens,
+		},
+	}
+}
+
+func bedrockThinkingEffort(b *latest.ThinkingBudget) (string, bool) {
+	if b == nil {
+		return "", false
+	}
+	if e, ok := b.AdaptiveEffort(); ok {
+		return e, true
+	}
+	l, ok := b.EffortLevel()
+	if !ok {
+		return "", false
+	}
+	return effort.ForAnthropic(l)
 }
 
 func getProviderOpt[T any](opts map[string]any, key string) T {

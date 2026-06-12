@@ -208,8 +208,8 @@ func TestApplyThinkingConfig(t *testing.T) {
 			wantTokens:  2048,
 		},
 		{
-			name:         "opus-4-6 token budget auto-switches to adaptive",
-			model:        "claude-opus-4-6",
+			name:         "opus-4-8 token budget auto-switches to adaptive",
+			model:        "claude-opus-4-8",
 			budget:       &latest.ThinkingBudget{Tokens: 4096},
 			maxTokens:    8192,
 			wantEnabled:  true,
@@ -226,8 +226,8 @@ func TestApplyThinkingConfig(t *testing.T) {
 			wantEffort:   "high",
 		},
 		{
-			name:            "opus-4-6 dated variant token budget auto-switches to adaptive",
-			model:           "claude-opus-4-6-20251101",
+			name:            "opus-4-8 dated variant token budget auto-switches to adaptive",
+			model:           "claude-opus-4-8-20260601",
 			budget:          &latest.ThinkingBudget{Tokens: 8000},
 			opts:            map[string]any{"thinking_display": "summarized"},
 			maxTokens:       16384,
@@ -326,8 +326,8 @@ func TestApplyBetaThinkingConfig(t *testing.T) {
 			maxTokens: 8192,
 		},
 		{
-			name:         "opus-4-6 token budget auto-switches to adaptive",
-			model:        "claude-opus-4-6",
+			name:         "opus-4-8 token budget auto-switches to adaptive",
+			model:        "claude-opus-4-8",
 			budget:       &latest.ThinkingBudget{Tokens: 4096},
 			maxTokens:    8192,
 			wantAdaptive: true,
@@ -407,15 +407,24 @@ func TestAdjustMaxTokensForThinking(t *testing.T) {
 		assert.Contains(t, err.Error(), "max_tokens")
 	})
 
-	t.Run("opus-4-6 with token budget skips adjustment (will be coerced to adaptive)", func(t *testing.T) {
+	t.Run("opus-4-6 with token budget is adjusted", func(t *testing.T) {
 		c := clientWithModel("claude-opus-4-6", &latest.ThinkingBudget{Tokens: 16384}, nil)
+		got, err := c.adjustMaxTokensForThinking(8192)
+		require.NoError(t, err)
+		assert.Equal(t, int64(16384+8192), got)
+	})
+
+	t.Run("opus-4-7 with token budget skips adjustment (will be coerced to adaptive)", func(t *testing.T) {
+		c := clientWithModel("claude-opus-4-7-20251101", &latest.ThinkingBudget{Tokens: 16384}, nil)
+		userMax := int64(8192)
+		c.ModelConfig.MaxTokens = &userMax
 		got, err := c.adjustMaxTokensForThinking(8192)
 		require.NoError(t, err)
 		assert.Equal(t, int64(8192), got)
 	})
 
-	t.Run("opus-4-7 with token budget skips adjustment (will be coerced to adaptive)", func(t *testing.T) {
-		c := clientWithModel("claude-opus-4-7-20251101", &latest.ThinkingBudget{Tokens: 16384}, nil)
+	t.Run("opus-4-8 with token budget skips adjustment (will be coerced to adaptive)", func(t *testing.T) {
+		c := clientWithModel("claude-opus-4-8", &latest.ThinkingBudget{Tokens: 32768}, nil)
 		userMax := int64(8192)
 		c.ModelConfig.MaxTokens = &userMax
 		got, err := c.adjustMaxTokensForThinking(8192)
@@ -436,22 +445,25 @@ func TestCoerceAdaptiveThinking(t *testing.T) {
 		assert.Same(t, in, c.coerceAdaptiveThinking(), "budget pointer must not be replaced")
 	})
 
-	t.Run("opus-4-6 token budget is coerced to adaptive", func(t *testing.T) {
+	t.Run("opus-4-6 token budget is preserved", func(t *testing.T) {
 		in := &latest.ThinkingBudget{Tokens: 4096}
 		c := clientWithModel("claude-opus-4-6", in, nil)
-		got := c.coerceAdaptiveThinking()
-		require.NotNil(t, got)
-		assert.Equal(t, "adaptive", got.Effort)
-		assert.Equal(t, 0, got.Tokens)
-		// Original must not be mutated.
-		assert.Equal(t, 4096, in.Tokens)
-		assert.Empty(t, in.Effort)
+		assert.Same(t, in, c.coerceAdaptiveThinking())
 	})
 
 	t.Run("opus-4-7 adaptive budget is preserved as-is", func(t *testing.T) {
 		in := &latest.ThinkingBudget{Effort: "adaptive/low"}
 		c := clientWithModel("claude-opus-4-7", in, nil)
 		assert.Same(t, in, c.coerceAdaptiveThinking())
+	})
+
+	t.Run("opus-4-8 token budget is coerced to adaptive", func(t *testing.T) {
+		in := &latest.ThinkingBudget{Tokens: 4096}
+		c := clientWithModel("claude-opus-4-8", in, nil)
+		got := c.coerceAdaptiveThinking()
+		require.NotNil(t, got)
+		assert.Equal(t, "adaptive", got.Effort)
+		assert.Equal(t, 0, got.Tokens)
 	})
 
 	// Disabled or non-positive token budgets must NOT be silently coerced to

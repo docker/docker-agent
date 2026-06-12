@@ -103,7 +103,21 @@ Use inference profile prefixes for optimal routing:
 
 ## Thinking Budget (Claude on Bedrock)
 
-Bedrock Claude models support extended thinking — an internal reasoning phase before the model produces its response. Set `thinking_budget` to a token count (1024–32768) or an effort level string that maps automatically:
+Bedrock Claude models support extended thinking — an internal reasoning phase before the model produces its response. Use adaptive thinking for Claude Opus 4.7+ (including Opus 4.8):
+
+```yaml
+models:
+  bedrock-opus-thinking:
+    provider: amazon-bedrock
+    model: global.anthropic.claude-opus-4-8-20260601-v1:0
+    thinking_budget: adaptive/high # adaptive | adaptive/low | adaptive/medium | adaptive/high | adaptive/xhigh | adaptive/max
+    provider_opts:
+      region: us-east-1
+```
+
+Claude Opus 4.7+ rejects token-based thinking requests (`thinking.type=enabled`). docker-agent converts numeric budgets on these models to adaptive thinking, but new configs should prefer `adaptive` or `adaptive/<level>` directly.
+
+For Claude models that still accept token budgets, set `thinking_budget` to a token count (1024–32768) or an effort level string that maps automatically:
 
 | Effort level | Token budget |
 | ------------ | ------------ |
@@ -124,7 +138,7 @@ models:
       region: us-east-1
 ```
 
-`thinking_budget` must be ≥ 1024 and less than `max_tokens`. Values outside this range are logged as a warning and ignored.
+For token-budget models, `thinking_budget` must be ≥ 1024 and less than `max_tokens`. Values outside this range are logged as a warning and ignored.
 
 <div class="callout callout-info" markdown="1">
 <div class="callout-title">Temperature and top_p

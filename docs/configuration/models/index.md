@@ -143,15 +143,22 @@ models:
 
 ### Anthropic
 
-Uses an integer token budget (1024–32768):
+Uses token budgets on Claude Sonnet / older Opus models, and adaptive thinking on Claude Opus 4.7+:
 
 ```yaml
 models:
   claude:
     provider: anthropic
     model: claude-sonnet-4-5
-    thinking_budget: 16384 # must be < max_tokens
+    thinking_budget: 16384 # token budget; must be < max_tokens
+
+  opus:
+    provider: anthropic
+    model: claude-opus-4-8
+    thinking_budget: adaptive/high # adaptive | adaptive/low | adaptive/medium | adaptive/high | adaptive/xhigh | adaptive/max
 ```
+
+Claude Opus 4.7+ rejects token-based thinking requests; prefer `adaptive` or `adaptive/<level>` for those models.
 
 ### Google Gemini 2.5
 
@@ -256,13 +263,13 @@ models:
 
 ## Thinking Display (Anthropic)
 
-For Anthropic Claude models, `thinking_display` controls whether thinking blocks are returned in responses when thinking is enabled. Claude Opus 4.7 hides thinking content by default (`omitted`); set this provider option to receive summarized thinking:
+For Anthropic Claude models, `thinking_display` controls whether thinking blocks are returned in responses when thinking is enabled. Claude Opus 4.7+ hides thinking content by default (`omitted`); set this provider option to receive summarized thinking:
 
 ```yaml
 models:
-  opus-4-7:
+  opus-4-8:
     provider: anthropic
-    model: claude-opus-4-7
+    model: claude-opus-4-8
     thinking_budget: adaptive
     provider_opts:
       thinking_display: summarized # "summarized", "display", or "omitted"
