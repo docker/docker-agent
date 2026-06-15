@@ -149,6 +149,19 @@ func TestAgentTools(t *testing.T) {
 			wantToolCount: 0,
 			wantWarnings:  0,
 		},
+		{
+			// #2251: two toolsets emitting the same names (e.g. the same
+			// built-in type configured twice) must collapse to a unique set,
+			// otherwise Anthropic rejects the request with "Tool names must be
+			// unique." Deduplication is silent (slog only), so no warnings.
+			name: "duplicate names across toolsets are deduped",
+			toolsets: []tools.ToolSet{
+				newStubToolSet(nil, []tools.Tool{{Name: "read_file", Parameters: map[string]any{}}, {Name: "write_file", Parameters: map[string]any{}}}, nil),
+				newStubToolSet(nil, []tools.Tool{{Name: "read_file", Parameters: map[string]any{}}, {Name: "write_file", Parameters: map[string]any{}}}, nil),
+			},
+			wantToolCount: 2,
+			wantWarnings:  0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -167,6 +180,38 @@ func TestAgentTools(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAgentToolsDedupeKeepsFirstInOrder verifies the deduplication contract
+// from #2251: when several toolsets emit the same tool name, Tools() keeps the
+// first occurrence (so the earliest toolset wins), preserves the original
+// order of distinct names, and never emits a duplicate to the provider.
+func TestAgentToolsDedupeKeepsFirstInOrder(t *testing.T) {
+	t.Parallel()
+
+	first := newStubToolSet(nil, []tools.Tool{
+		{Name: "read_file", Description: "from first", Parameters: map[string]any{}},
+		{Name: "fetch", Description: "from first", Parameters: map[string]any{}},
+	}, nil)
+	second := newStubToolSet(nil, []tools.Tool{
+		{Name: "read_file", Description: "from second", Parameters: map[string]any{}},
+		{Name: "write_file", Description: "from second", Parameters: map[string]any{}},
+	}, nil)
+
+	a := New("root", "test", WithToolSets(first, second))
+	got, err := a.Tools(t.Context())
+	require.NoError(t, err)
+
+	names := make([]string, len(got))
+	for i, tool := range got {
+		names[i] = tool.Name
+	}
+	assert.Equal(t, []string{"read_file", "fetch", "write_file"}, names,
+		"distinct names in first-seen order, no duplicates")
+
+	require.Len(t, got, 3)
+	assert.Equal(t, "from first", got[0].Description,
+		"the first occurrence of read_file must win")
 }
 
 // TestAgentNoDuplicateListWarnings verifies that a toolset that starts

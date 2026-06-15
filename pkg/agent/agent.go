@@ -377,11 +377,37 @@ func (a *Agent) collectTools(ctx context.Context) ([]tools.Tool, error) {
 
 	agentTools = append(agentTools, a.tools...)
 
+	// Collapse duplicate tool names to their first occurrence. Two toolsets of
+	// the same type, two unnamed MCP servers, or an MCP server whose tool name
+	// shadows a built-in can all surface the same name; providers such as
+	// Anthropic reject a request whose tool list contains duplicates ("tools:
+	// Tool names must be unique."). This is the single point where every tool
+	// converges before being handed to any provider. See #2251.
+	agentTools = a.dedupeToolsByName(ctx, agentTools)
+
 	if a.addDescriptionParameter {
 		agentTools = tools.AddDescriptionParameter(agentTools)
 	}
 
 	return agentTools, nil
+}
+
+// dedupeToolsByName keeps the first tool seen for each name and drops any later
+// collision, logging a warning per dropped tool. Deduplication happens in place
+// (the input slice is local to collectTools), so a collision-free list is
+// returned unchanged.
+func (a *Agent) dedupeToolsByName(ctx context.Context, agentTools []tools.Tool) []tools.Tool {
+	seen := make(map[string]struct{}, len(agentTools))
+	deduped := agentTools[:0]
+	for _, tool := range agentTools {
+		if _, ok := seen[tool.Name]; ok {
+			slog.WarnContext(ctx, "Dropping duplicate tool name from agent tool set", "agent", a.Name(), "tool", tool.Name)
+			continue
+		}
+		seen[tool.Name] = struct{}{}
+		deduped = append(deduped, tool)
+	}
+	return deduped
 }
 
 func (a *Agent) ToolSets() []tools.ToolSet {
