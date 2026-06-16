@@ -542,6 +542,51 @@ func TestUpdateSession_Permissions(t *testing.T) {
 	assert.Equal(t, []string{"dangerous_*"}, retrieved.Permissions.Deny)
 }
 
+func TestSessionMode_SQLite(t *testing.T) {
+	tempDB := filepath.Join(t.TempDir(), "test_session_mode.db")
+
+	store, err := NewSQLiteSessionStore(tempDB)
+	require.NoError(t, err)
+	defer store.(*SQLiteSessionStore).Close()
+
+	// Default Mode (empty string) round-trips as ModeBuild after scan.
+	defaultSess := &Session{
+		ID:        "default-mode-session",
+		Title:     "Default mode",
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, store.AddSession(t.Context(), defaultSess))
+	retrieved, err := store.GetSession(t.Context(), defaultSess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ModeBuild, retrieved.Mode)
+
+	// ModePlan persists and reloads.
+	planSess := &Session{
+		ID:        "plan-mode-session",
+		Title:     "Plan mode",
+		CreatedAt: time.Now(),
+		Mode:      ModePlan,
+	}
+	require.NoError(t, store.AddSession(t.Context(), planSess))
+	retrieved, err = store.GetSession(t.Context(), planSess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ModePlan, retrieved.Mode)
+
+	// Mode can be flipped via UpdateSession.
+	planSess.Mode = ModeBuild
+	require.NoError(t, store.UpdateSession(t.Context(), planSess))
+	retrieved, err = store.GetSession(t.Context(), planSess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ModeBuild, retrieved.Mode)
+}
+
+func TestNormalizeMode(t *testing.T) {
+	assert.Equal(t, ModeBuild, NormalizeMode(""))
+	assert.Equal(t, ModeBuild, NormalizeMode("garbage"))
+	assert.Equal(t, ModeBuild, NormalizeMode(ModeBuild))
+	assert.Equal(t, ModePlan, NormalizeMode(ModePlan))
+}
+
 func TestAgentModelOverrides_SQLite(t *testing.T) {
 	tempDB := filepath.Join(t.TempDir(), "test_model_overrides.db")
 

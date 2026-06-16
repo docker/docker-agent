@@ -316,6 +316,7 @@ func (sm *SessionManager) GetSessionSnapshot(ctx context.Context, id string) (*a
 		Messages:      sess.GetAllMessages(),
 		ToolsApproved: sess.ToolsApproved,
 		Permissions:   sess.Permissions,
+		Mode:          sess.Mode,
 		InputTokens:   sess.InputTokens,
 		OutputTokens:  sess.OutputTokens,
 		Streaming:     streaming,
@@ -351,6 +352,10 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 
 	if sessionTemplate.Permissions != nil {
 		opts = append(opts, session.WithPermissions(sessionTemplate.Permissions))
+	}
+
+	if sessionTemplate.Mode != "" {
+		opts = append(opts, session.WithMode(sessionTemplate.Mode))
 	}
 
 	sess := session.New(opts...)
@@ -738,6 +743,29 @@ func (sm *SessionManager) UpdateSessionPermissions(ctx context.Context, sessionI
 
 	sess.Permissions = perms
 
+	return sm.sessionStore.UpdateSession(ctx, sess)
+}
+
+// UpdateSessionMode updates the interaction mode (build/plan) for a session.
+// If the session is actively running, it also updates the in-memory session
+// object so the next turn's tool filter and plan-mode reminder see the new
+// mode without having to round-trip through the store.
+func (sm *SessionManager) UpdateSessionMode(ctx context.Context, sessionID string, mode session.Mode) error {
+	mode = session.NormalizeMode(mode)
+	sm.mux.Lock()
+	defer sm.mux.Unlock()
+
+	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
+		rt.session.Mode = mode
+		slog.DebugContext(ctx, "Updated mode for active session", "session_id", sessionID, "mode", mode)
+		return sm.sessionStore.UpdateSession(ctx, rt.session)
+	}
+
+	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	sess.Mode = mode
 	return sm.sessionStore.UpdateSession(ctx, sess)
 }
 

@@ -199,6 +199,64 @@ func TestServer_UpdateSessionTitle(t *testing.T) {
 	assert.Equal(t, newTitle, sessionResp.Title)
 }
 
+func TestServer_UpdateSessionMode(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	lnPath := startServerWithStore(t, ctx, prepareAgentsDir(t), store)
+
+	// Create a session in default (build) mode.
+	createResp := httpDo(t, ctx, http.MethodPost, lnPath, "/api/sessions", map[string]any{})
+	var createdSession session.Session
+	unmarshal(t, createResp, &createdSession)
+	require.NotEmpty(t, createdSession.ID)
+
+	// Switch the session into plan mode.
+	patchResp := httpDo(t, ctx, http.MethodPatch, lnPath,
+		"/api/sessions/"+createdSession.ID+"/mode",
+		api.UpdateSessionModeRequest{Mode: session.ModePlan})
+	var modeResp api.UpdateSessionModeResponse
+	unmarshal(t, patchResp, &modeResp)
+
+	assert.Equal(t, createdSession.ID, modeResp.ID)
+	assert.Equal(t, session.ModePlan, modeResp.Mode)
+
+	// GET should reflect the new mode.
+	getResp := httpGET(t, ctx, lnPath, "/api/sessions/"+createdSession.ID)
+	var sessionResp api.SessionResponse
+	unmarshal(t, getResp, &sessionResp)
+	assert.Equal(t, session.ModePlan, sessionResp.Mode)
+
+	// Switch back to build mode.
+	patchResp = httpDo(t, ctx, http.MethodPatch, lnPath,
+		"/api/sessions/"+createdSession.ID+"/mode",
+		api.UpdateSessionModeRequest{Mode: session.ModeBuild})
+	unmarshal(t, patchResp, &modeResp)
+	assert.Equal(t, session.ModeBuild, modeResp.Mode)
+}
+
+func TestServer_CreateSession_AcceptsMode(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	lnPath := startServerWithStore(t, ctx, prepareAgentsDir(t), store)
+
+	// Creating a session with mode=plan should persist that mode.
+	createResp := httpDo(t, ctx, http.MethodPost, lnPath, "/api/sessions",
+		map[string]any{"mode": string(session.ModePlan)})
+	var createdSession session.Session
+	unmarshal(t, createResp, &createdSession)
+	require.NotEmpty(t, createdSession.ID)
+	assert.Equal(t, session.ModePlan, createdSession.Mode)
+
+	getResp := httpGET(t, ctx, lnPath, "/api/sessions/"+createdSession.ID)
+	var sessionResp api.SessionResponse
+	unmarshal(t, getResp, &sessionResp)
+	assert.Equal(t, session.ModePlan, sessionResp.Mode)
+}
+
 func startServerWithStore(t *testing.T, ctx context.Context, agentsDir string, store session.Store) string {
 	t.Helper()
 

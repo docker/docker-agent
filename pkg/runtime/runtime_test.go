@@ -2395,6 +2395,60 @@ func TestFilterExcludedTools(t *testing.T) {
 	})
 }
 
+func TestFilterToolsForSession_PlanMode(t *testing.T) {
+	readOnly := tools.Tool{Name: "read_file", Annotations: tools.ToolAnnotations{ReadOnlyHint: true}}
+	mutating := tools.Tool{Name: "write_file"}
+	all := []tools.Tool{readOnly, mutating, {Name: "shell"}}
+
+	t.Run("build mode keeps all tools", func(t *testing.T) {
+		sess := &session.Session{Mode: session.ModeBuild}
+		result := filterToolsForSession(all, sess)
+		assert.Len(t, result, 3)
+	})
+
+	t.Run("empty mode is treated as build", func(t *testing.T) {
+		// Sessions loaded before the mode column existed have Mode == "".
+		sess := &session.Session{}
+		result := filterToolsForSession(all, sess)
+		assert.Len(t, result, 3)
+	})
+
+	t.Run("plan mode keeps only read-only tools", func(t *testing.T) {
+		sess := &session.Session{Mode: session.ModePlan}
+		result := filterToolsForSession(all, sess)
+		assert.Len(t, result, 1)
+		assert.Equal(t, "read_file", result[0].Name)
+	})
+
+	t.Run("plan mode still respects ExcludedTools", func(t *testing.T) {
+		readOnly2 := tools.Tool{Name: "list_directory", Annotations: tools.ToolAnnotations{ReadOnlyHint: true}}
+		sess := &session.Session{
+			Mode:          session.ModePlan,
+			ExcludedTools: []string{"read_file"},
+		}
+		result := filterToolsForSession([]tools.Tool{readOnly, readOnly2, mutating}, sess)
+		assert.Len(t, result, 1)
+		assert.Equal(t, "list_directory", result[0].Name)
+	})
+}
+
+func TestPlanModeReminderMessages(t *testing.T) {
+	t.Run("build mode returns nil", func(t *testing.T) {
+		assert.Nil(t, planModeReminderMessages(&session.Session{Mode: session.ModeBuild}))
+	})
+
+	t.Run("nil session returns nil", func(t *testing.T) {
+		assert.Nil(t, planModeReminderMessages(nil))
+	})
+
+	t.Run("plan mode returns a single system reminder", func(t *testing.T) {
+		msgs := planModeReminderMessages(&session.Session{Mode: session.ModePlan})
+		assert.Len(t, msgs, 1)
+		assert.Equal(t, chat.MessageRoleSystem, msgs[0].Role)
+		assert.Contains(t, msgs[0].Content, "PLAN MODE")
+	})
+}
+
 func TestMergeExcludedTools(t *testing.T) {
 	t.Run("both empty", func(t *testing.T) {
 		assert.Nil(t, mergeExcludedTools(nil, nil))

@@ -46,7 +46,8 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	}()
 
 	turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
-	messages := sess.GetMessages(a, append(baseExtra, turnStartMsgs...)...)
+	planReminder := planModeReminderMessages(sess)
+	messages := sess.GetMessages(a, append(append(baseExtra, turnStartMsgs...), planReminder...)...)
 	stop, msg, rewritten := r.executeBeforeLLMCallHooks(ctx, sess, a, modelID, 1, messages)
 	if stop {
 		slog.WarnContext(ctx, "before_llm_call hook signalled run termination",

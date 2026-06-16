@@ -159,6 +159,13 @@ type Session struct {
 	// recursive run_skill calls.
 	ExcludedTools []string `json:"-"`
 
+	// Mode is the session's interaction mode. ModeBuild (default) gives the
+	// agent its full toolset. ModePlan filters the toolset to read-only tools
+	// and injects a system reminder so the agent drafts a plan instead of
+	// making changes. The mode can be flipped at any time via
+	// PATCH /api/sessions/:id/mode; the next turn picks it up.
+	Mode Mode `json:"mode,omitempty"`
+
 	// AgentName, when set, tells RunStream which agent to use for this session
 	// instead of reading from the shared runtime currentAgent field. This is
 	// required for background agent tasks where multiple sessions may run
@@ -183,6 +190,41 @@ type MessageUsageRecord struct {
 	Model     string     `json:"model"`
 	Cost      float64    `json:"cost"`
 	Usage     chat.Usage `json:"usage"`
+}
+
+// Mode is the session's interaction mode (build vs plan).
+//
+// ModeBuild is the default and gives the agent its full toolset.
+// ModePlan filters the toolset to read-only tools (anything whose tool
+// definition lacks Annotations.ReadOnlyHint) and injects a per-turn system
+// reminder telling the agent to plan rather than act. The runtime applies
+// both effects automatically based on this field, so callers only need to
+// flip the mode — they don't have to compute tool lists themselves.
+type Mode string
+
+const (
+	ModeBuild Mode = "build"
+	ModePlan  Mode = "plan"
+)
+
+// IsValid reports whether m is a known mode.
+func (m Mode) IsValid() bool {
+	switch m {
+	case ModeBuild, ModePlan:
+		return true
+	default:
+		return false
+	}
+}
+
+// NormalizeMode returns m if it is a known mode, or ModeBuild otherwise.
+// Use this when reading mode from external input (persistence, HTTP body)
+// to make sure downstream code always sees a valid mode.
+func NormalizeMode(m Mode) Mode {
+	if m.IsValid() {
+		return m
+	}
+	return ModeBuild
 }
 
 // PermissionsConfig defines session-level tool permission overrides
@@ -764,6 +806,14 @@ func WithID(id string) Opt {
 func WithExcludedTools(names []string) Opt {
 	return func(s *Session) {
 		s.ExcludedTools = names
+	}
+}
+
+// WithMode sets the session's interaction mode. An empty or unknown mode is
+// normalised to ModeBuild so callers can pass through user input directly.
+func WithMode(mode Mode) Opt {
+	return func(s *Session) {
+		s.Mode = NormalizeMode(mode)
 	}
 }
 

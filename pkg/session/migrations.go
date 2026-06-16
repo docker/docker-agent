@@ -400,6 +400,13 @@ func getAllMigrations() []Migration {
 			Description: "Add first_kept_entry column to session_items for compaction-preserved messages",
 			UpSQL:       `ALTER TABLE session_items ADD COLUMN first_kept_entry INTEGER DEFAULT 0`,
 		},
+		{
+			ID:          22,
+			Name:        "022_add_mode_column",
+			Description: "Add mode column to sessions table for build/plan mode",
+			UpSQL:       `ALTER TABLE sessions ADD COLUMN mode TEXT DEFAULT ''`,
+			DownSQL:     `ALTER TABLE sessions DROP COLUMN mode`,
+		},
 	}
 }
 

@@ -266,7 +266,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		sink.Emit(ErrorWithCode(ErrorCodeToolFailed, fmt.Sprintf("failed to get tools: %v", err)))
 		return
 	}
-	agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
+	agentTools = filterToolsForSession(agentTools, sess)
 
 	sink.Emit(ToolsetInfo(len(agentTools), false, a.Name()))
 
@@ -348,7 +348,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			sink.Emit(ErrorWithCode(ErrorCodeToolFailed, fmt.Sprintf("failed to get tools: %v", err)))
 			return
 		}
-		agentTools = filterExcludedTools(agentTools, sess.ExcludedTools)
+		agentTools = filterToolsForSession(agentTools, sess)
 
 		// Emit updated tool count. After a ToolListChanged MCP notification
 		// the cache is invalidated, so getTools above re-fetches from the
@@ -554,7 +554,13 @@ func (r *LocalRuntime) runTurn(
 	// files) refresh every turn while session-level context (cwd, OS,
 	// arch) stays stable — all without bloating the stored history.
 	turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
-	messages := sess.GetMessages(a, slices.Concat(ls.sessionStartMsgs, ls.userPromptMsgs, turnStartMsgs)...)
+	// Plan-mode reminder rides alongside the turn_start hook output so it
+	// participates in the same per-turn splice (and the cache_control marker
+	// that GetMessages applies to the last extra). It is appended last so its
+	// instruction is the most recent system context the model sees before the
+	// user prompt — minimising the chance the model ignores it.
+	planReminder := planModeReminderMessages(sess)
+	messages := sess.GetMessages(a, slices.Concat(ls.sessionStartMsgs, ls.userPromptMsgs, turnStartMsgs, planReminder)...)
 	slog.DebugContext(ctx, "Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))
 
 	// before_llm_call hooks fire just before the model is invoked.
@@ -990,6 +996,33 @@ func filterExcludedTools(agentTools []tools.Tool, excluded []string) []tools.Too
 	return filtered
 }
 
+// filterToolsForSession applies all session-level tool filters: the explicit
+// ExcludedTools name list (used by skill sub-sessions) and, when the session
+// is in plan mode, anything whose tool definition doesn't advertise
+// ReadOnlyHint. The MCP spec's ReadOnlyHint is the canonical "this tool has
+// no side effects" signal, so it's the right knob for plan mode and it
+// extends naturally to user-added MCP tools without any per-tool config.
+func filterToolsForSession(agentTools []tools.Tool, sess *session.Session) []tools.Tool {
+	out := filterExcludedTools(agentTools, sess.ExcludedTools)
+	if sess.Mode == session.ModePlan {
+		out = filterToReadOnlyTools(out)
+	}
+	return out
+}
+
+// filterToReadOnlyTools keeps only tools whose definition advertises
+// ReadOnlyHint. Used by plan mode to hide every write/execute tool from the
+// model so it can't reach for them even if the system reminder is ignored.
+func filterToReadOnlyTools(agentTools []tools.Tool) []tools.Tool {
+	filtered := make([]tools.Tool, 0, len(agentTools))
+	for _, t := range agentTools {
+		if t.Annotations.ReadOnlyHint {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered
+}
+
 // reprobe re-runs ensureToolSetsAreStarted after a batch of tool calls.
 // If new tools became available (by name-set diff), it emits a ToolsetInfo
 // event to update the TUI immediately. The new tools will be picked up by
@@ -1010,7 +1043,7 @@ func (r *LocalRuntime) reprobe(
 		slog.WarnContext(ctx, "reprobe: getTools failed", "agent", a.Name(), "error", err)
 		return
 	}
-	updated = filterExcludedTools(updated, sess.ExcludedTools)
+	updated = filterToolsForSession(updated, sess)
 
 	// Emit any pending warnings that getTools just generated.
 	r.emitAgentWarnings(a, events)

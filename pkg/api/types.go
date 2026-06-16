@@ -135,11 +135,23 @@ type SessionResponse struct {
 	OutputTokens  int64                      `json:"output_tokens"`
 	WorkingDir    string                     `json:"working_dir,omitempty"`
 	Permissions   *session.PermissionsConfig `json:"permissions,omitempty"`
+	Mode          session.Mode               `json:"mode,omitempty"`
 }
 
 // UpdateSessionPermissionsRequest represents a request to update session permissions.
 type UpdateSessionPermissionsRequest struct {
 	Permissions *session.PermissionsConfig `json:"permissions"`
+}
+
+// UpdateSessionModeRequest represents a request to update a session's mode.
+type UpdateSessionModeRequest struct {
+	Mode session.Mode `json:"mode"`
+}
+
+// UpdateSessionModeResponse represents the response from updating a session's mode.
+type UpdateSessionModeResponse struct {
+	ID   string       `json:"id"`
+	Mode session.Mode `json:"mode"`
 }
 
 // ResumeSessionRequest represents a request to resume a session
@@ -304,6 +316,7 @@ type SessionSnapshotResponse struct {
 	Messages      []session.Message          `json:"messages"`
 	ToolsApproved bool                       `json:"tools_approved"`
 	Permissions   *session.PermissionsConfig `json:"permissions,omitempty"`
+	Mode          session.Mode               `json:"mode,omitempty"`
 	InputTokens   int64                      `json:"input_tokens"`
 	OutputTokens  int64                      `json:"output_tokens"`
 

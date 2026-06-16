@@ -71,6 +71,7 @@ func (s *Server) registerRoutes() {
 	group.POST("/sessions/:id/resume", s.resumeSession)
 	group.POST("/sessions/:id/tools/toggle", s.toggleSessionYolo)
 	group.PATCH("/sessions/:id/permissions", s.updateSessionPermissions)
+	group.PATCH("/sessions/:id/mode", s.updateSessionMode)
 	group.PATCH("/sessions/:id/title", s.updateSessionTitle)
 	group.PATCH("/sessions/:id/tokens", s.updateSessionTokens)
 	group.PATCH("/sessions/:id/starred", s.setSessionStarred)
@@ -249,6 +250,7 @@ func (s *Server) getSession(c echo.Context) error {
 		OutputTokens:  sess.OutputTokens,
 		WorkingDir:    sess.WorkingDir,
 		Permissions:   sess.Permissions,
+		Mode:          sess.Mode,
 	})
 }
 
@@ -327,6 +329,26 @@ func (s *Server) updateSessionPermissions(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "session permissions updated"})
+}
+
+func (s *Server) updateSessionMode(c echo.Context) error {
+	sessionID := c.Param("id")
+	var req api.UpdateSessionModeRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+	}
+	if !req.Mode.IsValid() {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid mode %q; must be one of: %s, %s", req.Mode, session.ModeBuild, session.ModePlan))
+	}
+
+	if err := s.sm.UpdateSessionMode(c.Request().Context(), sessionID, req.Mode); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to update session mode: %v", err))
+	}
+
+	return c.JSON(http.StatusOK, api.UpdateSessionModeResponse{
+		ID:   sessionID,
+		Mode: req.Mode,
+	})
 }
 
 func (s *Server) updateSessionTitle(c echo.Context) error {
