@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/rag/database"
 	"github.com/docker/docker-agent/pkg/rag/prefetch"
 	"github.com/docker/docker-agent/pkg/rag/strategy"
+	"github.com/docker/docker-agent/pkg/rag/types"
 )
 
 func TestGetAbsolutePaths_WithBasePath(t *testing.T) {
@@ -90,4 +92,29 @@ func TestQueryUsesPrefetchCacheForRepeatedQuery(t *testing.T) {
 
 	assert.Equal(t, int64(1), searchStrategy.calls.Load())
 	assert.Equal(t, "doc one", second[0].Document.Content)
+}
+
+func TestManagerClearsPrefetchCacheOnIndexingCompleteEvent(t *testing.T) {
+	events := make(chan types.Event, 1)
+	m, err := New(t.Context(), "test", Config{
+		Results:        ResultsConfig{Limit: 15},
+		PrefetchConfig: prefetch.Config{Enabled: true, MaxEntries: 4},
+		StrategyConfigs: []strategy.Config{{
+			Name:     "counting",
+			Strategy: &countingStrategy{},
+		}},
+	}, events)
+	require.NoError(t, err)
+
+	m.prefetcher.Store("RAG cache", []database.SearchResult{{
+		Document:   database.Document{ID: "1", SourcePath: "docs/rag.md", Content: "stale"},
+		Similarity: 0.9,
+	}})
+
+	events <- types.Event{Type: types.EventTypeIndexingComplete}
+
+	require.Eventually(t, func() bool {
+		_, ok := m.prefetcher.Get("RAG cache")
+		return !ok
+	}, time.Second, 10*time.Millisecond)
 }

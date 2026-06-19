@@ -57,10 +57,15 @@ type Prefetcher struct {
 	cfg Config
 
 	mu       sync.Mutex
-	cache    map[string][]database.SearchResult
+	cache    map[string]cacheEntry
 	order    []string
 	inflight map[string]struct{}
 	tracker  tracker
+}
+
+type cacheEntry struct {
+	results []database.SearchResult
+	anchors []string
 }
 
 // New creates a prefetcher. It returns nil when disabled so callers can keep
@@ -72,7 +77,7 @@ func New(cfg Config) *Prefetcher {
 	cfg = cfg.withDefaults()
 	return &Prefetcher{
 		cfg:      cfg,
-		cache:    make(map[string][]database.SearchResult, cfg.MaxEntries),
+		cache:    make(map[string]cacheEntry, cfg.MaxEntries),
 		inflight: make(map[string]struct{}),
 	}
 }
@@ -91,9 +96,9 @@ func (p *Prefetcher) Get(query string) ([]database.SearchResult, bool) {
 	defer p.mu.Unlock()
 	results, ok := p.cache[key]
 	if !ok {
-		return nil, false
+		return p.getTopologyLocked(key)
 	}
-	return cloneResults(results), true
+	return cloneResults(results.results), true
 }
 
 // Store records final post-processed results for query.
@@ -115,7 +120,10 @@ func (p *Prefetcher) storeLocked(key string, results []database.SearchResult) {
 	if _, exists := p.cache[key]; !exists {
 		p.order = append(p.order, key)
 	}
-	p.cache[key] = cloneResults(results)
+	p.cache[key] = cacheEntry{
+		results: cloneResults(results),
+		anchors: anchorsFor(results),
+	}
 
 	for len(p.order) > p.cfg.MaxEntries {
 		oldest := p.order[0]
@@ -134,6 +142,21 @@ func (p *Prefetcher) Clear() {
 	clear(p.cache)
 	clear(p.inflight)
 	p.order = nil
+}
+
+func (p *Prefetcher) getTopologyLocked(key string) ([]database.SearchResult, bool) {
+	if !p.tracker.stable(p.cfg.DriftThreshold) {
+		return nil, false
+	}
+	queryTokens := tokenSet(key)
+	for _, entryKey := range slices.Backward(p.order) {
+		entry := p.cache[entryKey]
+		if !topologyRelated(entryKey, queryTokens, entry.anchors) {
+			continue
+		}
+		return cloneResults(entry.results), true
+	}
+	return nil, false
 }
 
 // Observe updates the topology tracker with query/result metadata.
@@ -160,6 +183,7 @@ func (p *Prefetcher) Candidates(query string, results []database.SearchResult) [
 	}
 
 	base := normalize(query)
+	baseTokens := tokenSet(base)
 	seen := map[string]struct{}{base: {}}
 	candidates := make([]string, 0, p.cfg.MaxCandidates)
 
@@ -170,11 +194,11 @@ func (p *Prefetcher) Candidates(query string, results []database.SearchResult) [
 		if result.Similarity < p.cfg.MinSimilarity {
 			continue
 		}
-		name := sourceToken(result.Document.SourcePath)
-		if name == "" {
+		suffix := sourceSuffix(result.Document.SourcePath, baseTokens)
+		if suffix == "" {
 			continue
 		}
-		candidate := strings.TrimSpace(base + " " + name)
+		candidate := strings.TrimSpace(base + " " + suffix)
 		if candidate == "" {
 			continue
 		}
@@ -217,7 +241,7 @@ func (p *Prefetcher) Prefetch(ctx context.Context, query string, fetch FetchFunc
 			p.mu.Unlock()
 		}()
 
-		prefetchCtx, cancel := context.WithTimeout(ctx, p.cfg.Timeout)
+		prefetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.cfg.Timeout)
 		defer cancel()
 
 		results, err := fetch(prefetchCtx, key)
@@ -242,6 +266,81 @@ func sourceToken(path string) string {
 	}
 	ext := filepath.Ext(base)
 	return strings.TrimSuffix(base, ext)
+}
+
+func sourceSuffix(path string, seen map[string]struct{}) string {
+	parts := strings.FieldsFunc(sourceToken(path), isTokenSeparator)
+	novel := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = normalize(part)
+		if part == "" {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		novel = append(novel, part)
+	}
+	return strings.Join(novel, " ")
+}
+
+func anchorsFor(results []database.SearchResult) []string {
+	seen := map[string]struct{}{}
+	anchors := make([]string, 0, len(results))
+	for _, result := range results {
+		for _, part := range strings.FieldsFunc(sourceToken(result.Document.SourcePath), isTokenSeparator) {
+			part = normalize(part)
+			if len(part) < 3 {
+				continue
+			}
+			if _, ok := seen[part]; ok {
+				continue
+			}
+			seen[part] = struct{}{}
+			anchors = append(anchors, part)
+		}
+	}
+	return anchors
+}
+
+func isTokenSeparator(r rune) bool {
+	return r == '_' || r == '-' || r == '.'
+}
+
+func topologyRelated(entryKey string, queryTokens map[string]struct{}, anchors []string) bool {
+	hasAnchor := false
+	for _, anchor := range anchors {
+		if _, ok := queryTokens[anchor]; ok {
+			hasAnchor = true
+			break
+		}
+	}
+	if !hasAnchor {
+		return false
+	}
+	return jaccard(tokenSet(entryKey), queryTokens) >= 0.25
+}
+
+func tokenSet(query string) map[string]struct{} {
+	tokens := map[string]struct{}{}
+	for token := range strings.FieldsSeq(query) {
+		tokens[token] = struct{}{}
+	}
+	return tokens
+}
+
+func jaccard(a, b map[string]struct{}) float64 {
+	var intersection int
+	for token := range a {
+		if _, ok := b[token]; ok {
+			intersection++
+		}
+	}
+	union := len(a) + len(b) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
 }
 
 func cloneResults(results []database.SearchResult) []database.SearchResult {
@@ -270,9 +369,8 @@ func (t *tracker) observe(query string, results []database.SearchResult) {
 	}
 	t.drift = dist
 
-	weight := 1 / float64(t.seen)
 	for i := range t.centroid {
-		t.centroid[i] += (point[i] - t.centroid[i]) * weight
+		t.centroid[i] += (point[i] - t.centroid[i]) * 0.35
 	}
 }
 

@@ -79,7 +79,7 @@ type FusionConfig struct {
 // New creates a new RAG manager with one or more strategies.
 // Pass multiple strategy configs to enable hybrid retrieval.
 // The strategyEvents channel should be shared across all strategies for this manager.
-func New(_ context.Context, name string, config Config, strategyEvents <-chan types.Event) (*Manager, error) {
+func New(ctx context.Context, name string, config Config, strategyEvents <-chan types.Event) (*Manager, error) {
 	if len(config.StrategyConfigs) == 0 {
 		return nil, errors.New("at least one strategy required")
 	}
@@ -127,12 +127,13 @@ func New(_ context.Context, name string, config Config, strategyEvents <-chan ty
 	var reranker rerank.Reranker
 	if config.Results.RerankingConfig != nil {
 		reranker = config.Results.RerankingConfig.Reranker
-		slog.Debug("[RAG Manager] Reranking enabled",
+		slog.DebugContext(ctx, "[RAG Manager] Reranking enabled",
 			"rag_name", name,
 			"top_k", config.Results.RerankingConfig.TopK,
 			"threshold", config.Results.RerankingConfig.Threshold)
 	}
 
+	prefetcher := prefetch.New(config.PrefetchConfig)
 	m := &Manager{
 		name:            name,
 		config:          config,
@@ -140,11 +141,40 @@ func New(_ context.Context, name string, config Config, strategyEvents <-chan ty
 		strategyConfigs: strategyConfigMap,
 		fusion:          fusionStrategy,
 		reranker:        reranker,
-		events:          strategyEvents,
-		prefetcher:      prefetch.New(config.PrefetchConfig),
+		events:          forwardEvents(ctx, strategyEvents, prefetcher),
+		prefetcher:      prefetcher,
 	}
 
 	return m, nil
+}
+
+func forwardEvents(ctx context.Context, in <-chan types.Event, prefetcher *prefetch.Prefetcher) <-chan types.Event {
+	if in == nil {
+		return nil
+	}
+	out := make(chan types.Event, 500)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-in:
+				if !ok {
+					return
+				}
+				if event.Type == types.EventTypeIndexingComplete {
+					prefetcher.Clear()
+				}
+				select {
+				case out <- event:
+				default:
+					slog.WarnContext(ctx, "RAG manager event channel full, dropping event", "event_type", event.Type)
+				}
+			}
+		}
+	}()
+	return out
 }
 
 // Initialize indexes all documents using all configured strategies

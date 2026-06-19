@@ -159,7 +159,7 @@ Supported reranking providers: **DMR** (native `/rerank` endpoint), **OpenAI**, 
 
 ## Adaptive Prefetching
 
-Adaptive prefetching is opt-in. It caches repeated RAG queries and, when query topology is stable, warms a small number of deterministic follow-up candidates in the background.
+Adaptive prefetching is opt-in. It caches repeated RAG queries and, when query topology is stable, can reuse warmed results for closely related follow-up queries that share source-derived anchors. The topology path is gated by query-token overlap, source-path anchors, and drift detection so unrelated topic shifts fall back to normal retrieval.
 
 ```yaml
 results:
@@ -172,7 +172,7 @@ results:
     timeout: 10s
 ```
 
-The prefetcher is bounded and non-blocking. Exact repeated queries can be served from cache. Background candidate prefetch is skipped when reranking is enabled so reranker errors and fallback behavior stay tied to the foreground query.
+The prefetcher is bounded and non-blocking. Exact repeated queries are served from cache first; related-query topology hits are considered only after an exact miss. Background candidate prefetch is skipped when reranking is enabled so reranker errors and fallback behavior stay tied to the foreground query. The deterministic replay benchmark in `pkg/rag/prefetch` reports exact-repeat and topology-assisted hit rates separately.
 
 ## Code-Aware Chunking
 
