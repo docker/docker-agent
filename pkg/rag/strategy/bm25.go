@@ -672,6 +672,89 @@ func (s *BM25Strategy) addPathToWatcher(ctx context.Context, path string) error 
 	return nil
 }
 
+func (s *BM25Strategy) reindexChangedFiles(ctx context.Context, docPaths, changedFiles []string) int {
+	filesToReindex := make([]string, 0, len(changedFiles))
+	for _, file := range changedFiles {
+		select {
+		case <-ctx.Done():
+			return 0
+		default:
+		}
+
+		matches, matchErr := fsx.Matches(file, docPaths)
+		if matchErr != nil {
+			slog.ErrorContext(ctx, "Failed to match path", "file", file, "error", matchErr)
+			continue
+		}
+		if !matches {
+			continue
+		}
+		if s.shouldIgnore != nil && s.shouldIgnore(file) {
+			slog.DebugContext(ctx, "File changed but is ignored by filter, skipping", "path", file)
+			continue
+		}
+
+		needsIndexing, err := s.needsIndexing(ctx, file)
+		if err != nil || !needsIndexing {
+			continue
+		}
+		filesToReindex = append(filesToReindex, file)
+	}
+
+	if len(filesToReindex) == 0 {
+		return 0
+	}
+
+	s.emitEvent(types.Event{
+		Type:    types.EventTypeIndexingStarted,
+		Message: fmt.Sprintf("Re-indexing %d changed file(s)", len(filesToReindex)),
+	})
+
+	indexed := 0
+	for _, file := range filesToReindex {
+		select {
+		case <-ctx.Done():
+			return indexed
+		default:
+		}
+
+		slog.DebugContext(ctx, "Indexing file", "path", file, "strategy", s.name)
+		if err := s.indexFile(ctx, file); err != nil {
+			slog.ErrorContext(ctx, "Failed to re-index file", "path", file, "error", err)
+			s.emitEvent(types.Event{
+				Type:    types.EventTypeError,
+				Message: "Failed to re-index: " + filepath.Base(file),
+				Error:   err,
+			})
+			continue
+		}
+
+		indexed++
+		s.emitEvent(types.Event{
+			Type:    types.EventTypeIndexingProgress,
+			Message: "Re-indexing: " + filepath.Base(file),
+			Progress: &types.Progress{
+				Current: indexed,
+				Total:   len(filesToReindex),
+			},
+		})
+	}
+
+	if indexed == 0 {
+		return 0
+	}
+
+	if err := s.calculateAvgDocLength(ctx); err != nil {
+		slog.ErrorContext(ctx, "Failed to recalculate average document length", "error", err)
+	}
+
+	s.emitEvent(types.Event{
+		Type:    types.EventTypeIndexingComplete,
+		Message: fmt.Sprintf("Re-indexed %d file(s)", indexed),
+	})
+	return indexed
+}
+
 func (s *BM25Strategy) watchLoop(ctx context.Context, docPaths []string) {
 	// Capture watcher reference at goroutine start to avoid racing with Close()
 	// which sets s.watcher = nil under watcherMu.
@@ -700,41 +783,7 @@ func (s *BM25Strategy) watchLoop(ctx context.Context, docPaths []string) {
 			return
 		}
 
-		for _, file := range changedFiles {
-			// Check for context cancellation
-			select {
-			case <-ctx.Done():
-				return // Stop processing if context is cancelled
-			default:
-			}
-
-			// Check if the file matches any of the configured document paths/patterns
-			matches, matchErr := fsx.Matches(file, docPaths)
-			if matchErr != nil {
-				slog.ErrorContext(ctx, "Failed to match path", "file", file, "error", matchErr)
-				continue
-			}
-			if !matches {
-				continue
-			}
-			// Check if the file should be ignored (e.g., gitignore)
-			if s.shouldIgnore != nil && s.shouldIgnore(file) {
-				slog.DebugContext(ctx, "File changed but is ignored by filter, skipping", "path", file)
-				continue
-			}
-
-			needsIndexing, err := s.needsIndexing(ctx, file)
-			if err != nil || !needsIndexing {
-				continue
-			}
-
-			slog.DebugContext(ctx, "Indexing file", "path", file, "strategy", s.name)
-			if err := s.indexFile(ctx, file); err != nil {
-				slog.ErrorContext(ctx, "Failed to re-index file", "path", file, "error", err)
-			}
-		}
-
-		_ = s.calculateAvgDocLength(ctx)
+		s.reindexChangedFiles(ctx, docPaths, changedFiles)
 	}
 
 	for {

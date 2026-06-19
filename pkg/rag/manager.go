@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/rag/prefetch"
 	"github.com/docker/docker-agent/pkg/rag/rerank"
 	"github.com/docker/docker-agent/pkg/rag/strategy"
+	"github.com/docker/docker-agent/pkg/rag/topology"
 	"github.com/docker/docker-agent/pkg/rag/types"
 )
 
@@ -31,13 +32,16 @@ type ToolConfig struct {
 // Config represents RAG manager configuration in domain terms,
 // independent of any particular config schema version.
 type Config struct {
-	Tool            ToolConfig
-	Docs            []string
-	Results         ResultsConfig
-	FusionConfig    *FusionConfig
-	StrategyConfigs []strategy.Config
-	PrefetchConfig  prefetch.Config
+	Tool                ToolConfig
+	Docs                []string
+	Results             ResultsConfig
+	FusionConfig        *FusionConfig
+	StrategyConfigs     []strategy.Config
+	PrefetchConfig      prefetch.Config
+	TopologyPriorConfig TopologyPriorConfig
 }
+
+type TopologyPriorConfig = topology.Config
 
 // ResultsConfig captures result-postprocessing behavior for the manager.
 type ResultsConfig struct {
@@ -67,6 +71,7 @@ type Manager struct {
 	rerankDisabled  atomic.Bool                  // Set after a non-retryable reranking error to stop doomed requests
 	events          <-chan types.Event           // Shared event channel from strategies and other RAG operations
 	prefetcher      *prefetch.Prefetcher
+	topologyPrior   *topology.Prior
 }
 
 // FusionConfig holds configuration for result fusion
@@ -134,6 +139,7 @@ func New(ctx context.Context, name string, config Config, strategyEvents <-chan 
 	}
 
 	prefetcher := prefetch.New(config.PrefetchConfig)
+	topologyPrior := topology.NewPrior(config.TopologyPriorConfig)
 	m := &Manager{
 		name:            name,
 		config:          config,
@@ -141,14 +147,15 @@ func New(ctx context.Context, name string, config Config, strategyEvents <-chan 
 		strategyConfigs: strategyConfigMap,
 		fusion:          fusionStrategy,
 		reranker:        reranker,
-		events:          forwardEvents(ctx, strategyEvents, prefetcher),
+		events:          forwardEvents(ctx, strategyEvents, prefetcher, topologyPrior),
 		prefetcher:      prefetcher,
+		topologyPrior:   topologyPrior,
 	}
 
 	return m, nil
 }
 
-func forwardEvents(ctx context.Context, in <-chan types.Event, prefetcher *prefetch.Prefetcher) <-chan types.Event {
+func forwardEvents(ctx context.Context, in <-chan types.Event, prefetcher *prefetch.Prefetcher, topologyPrior *topology.Prior) <-chan types.Event {
 	if in == nil {
 		return nil
 	}
@@ -165,6 +172,7 @@ func forwardEvents(ctx context.Context, in <-chan types.Event, prefetcher *prefe
 				}
 				if event.Type == types.EventTypeIndexingComplete {
 					prefetcher.Clear()
+					topologyPrior.Clear()
 				}
 				select {
 				case out <- event:
@@ -255,7 +263,7 @@ func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchRes
 		"query_length", len(query))
 
 	if cached, ok := m.prefetcher.Get(query); ok {
-		slog.DebugContext(ctx, "[RAG Manager] Returning prefetched RAG results",
+		slog.DebugContext(ctx, "[RAG Manager] Returning cached RAG results",
 			"rag_name", m.name,
 			"result_count", len(cached))
 		return cached, nil
@@ -268,12 +276,7 @@ func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchRes
 
 	if ctx.Err() == nil {
 		m.prefetcher.Store(query, results)
-		m.prefetcher.Observe(query, results)
-	}
-	if ctx.Err() == nil && m.reranker == nil {
-		for _, candidate := range m.prefetcher.Candidates(query, results) {
-			m.prefetcher.Prefetch(ctx, candidate, m.queryUncached)
-		}
+		m.topologyPrior.Observe(query, results)
 	}
 
 	return results, nil
@@ -402,6 +405,7 @@ func (m *Manager) queryStrategies(ctx context.Context, query string) ([]database
 func (m *Manager) postprocessQueryResults(ctx context.Context, query string, results []database.SearchResult) []database.SearchResult {
 	// Apply reranking if configured (before limit and deduplication)
 	results = m.rerank(ctx, query, results)
+	results = m.topologyPrior.Apply(query, results)
 
 	// Apply result limit if configured
 	if limit := m.config.Results.Limit; limit > 0 && len(results) > limit {
@@ -486,6 +490,7 @@ func (m *Manager) CheckAndReindexChangedFiles(ctx context.Context) error {
 		}
 	}
 	m.prefetcher.Clear()
+	m.topologyPrior.Clear()
 	return nil
 }
 

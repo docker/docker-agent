@@ -41,16 +41,22 @@ func TestGetAbsolutePaths_NilInput(t *testing.T) {
 }
 
 type countingStrategy struct {
-	calls   atomic.Int64
-	results []database.SearchResult
+	calls          atomic.Int64
+	results        []database.SearchResult
+	resultsByQuery map[string][]database.SearchResult
 }
 
 func (s *countingStrategy) Initialize(context.Context, []string, strategy.ChunkingConfig) error {
 	return nil
 }
 
-func (s *countingStrategy) Query(context.Context, string, int, float64) ([]database.SearchResult, error) {
+func (s *countingStrategy) Query(_ context.Context, query string, _ int, _ float64) ([]database.SearchResult, error) {
 	s.calls.Add(1)
+	if s.resultsByQuery != nil {
+		if results, ok := s.resultsByQuery[query]; ok {
+			return append([]database.SearchResult(nil), results...), nil
+		}
+	}
 	return append([]database.SearchResult(nil), s.results...), nil
 }
 
@@ -117,4 +123,74 @@ func TestManagerClearsPrefetchCacheOnIndexingCompleteEvent(t *testing.T) {
 		_, ok := m.prefetcher.Get("RAG cache")
 		return !ok
 	}, time.Second, 10*time.Millisecond)
+}
+
+func TestManagerClearsTopologyPriorOnIndexingCompleteEvent(t *testing.T) {
+	events := make(chan types.Event, 1)
+	m, err := New(t.Context(), "test", Config{
+		TopologyPriorConfig: TopologyPriorConfig{Enabled: true, Weight: 0.05},
+		StrategyConfigs: []strategy.Config{{
+			Name:     "counting",
+			Strategy: &countingStrategy{},
+		}},
+	}, events)
+	require.NoError(t, err)
+
+	m.topologyPrior.Observe("how does rag manager query work", []database.SearchResult{{
+		Document:   database.Document{ID: "1", SourcePath: "pkg/rag/manager.go", Content: "old"},
+		Similarity: 0.91,
+	}})
+
+	events <- types.Event{Type: types.EventTypeIndexingComplete}
+
+	require.Eventually(t, func() bool {
+		got := m.topologyPrior.Apply("rag manager cache behavior", []database.SearchResult{
+			{Document: database.Document{ID: "2", SourcePath: "pkg/model/provider/client.go", Content: "provider"}, Similarity: 0.72},
+			{Document: database.Document{ID: "3", SourcePath: "pkg/rag/manager.go", Content: "manager"}, Similarity: 0.70},
+		})
+		return got[0].Document.SourcePath == "pkg/model/provider/client.go"
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestTopologyPriorReranksOnlyFreshCurrentQueryResults(t *testing.T) {
+	searchStrategy := &countingStrategy{resultsByQuery: map[string][]database.SearchResult{
+		"how does rag manager query work": {
+			{
+				Document:   database.Document{ID: "1", SourcePath: "pkg/rag/manager.go", Content: "manager"},
+				Similarity: 0.91,
+			},
+		},
+		"rag manager cache behavior": {
+			{
+				Document:   database.Document{ID: "2", SourcePath: "pkg/model/provider/client.go", Content: "provider"},
+				Similarity: 0.72,
+			},
+			{
+				Document:   database.Document{ID: "3", SourcePath: "pkg/rag/manager.go", Content: "manager current"},
+				Similarity: 0.70,
+			},
+		},
+	}}
+	m, err := New(t.Context(), "test", Config{
+		Results:             ResultsConfig{Limit: 15},
+		TopologyPriorConfig: TopologyPriorConfig{Enabled: true, Weight: 0.05, MaxSourceHistory: 8},
+		StrategyConfigs: []strategy.Config{{
+			Name:      "counting",
+			Strategy:  searchStrategy,
+			Limit:     5,
+			Threshold: 0.5,
+		}},
+	}, nil)
+	require.NoError(t, err)
+
+	_, err = m.Query(t.Context(), "how does rag manager query work")
+	require.NoError(t, err)
+
+	got, err := m.Query(t.Context(), "rag manager cache behavior")
+	require.NoError(t, err)
+
+	require.Len(t, got, 2)
+	assert.Equal(t, int64(2), searchStrategy.calls.Load())
+	assert.Equal(t, "pkg/rag/manager.go", got[0].Document.SourcePath)
+	assert.Equal(t, "manager current", got[0].Document.Content)
 }

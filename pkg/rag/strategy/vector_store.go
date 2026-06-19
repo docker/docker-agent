@@ -912,7 +912,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 
 		if len(filesToReindex) > 0 {
 			s.emitEvent(types.Event{
-				Type:    "indexing_started",
+				Type:    types.EventTypeIndexingStarted,
 				Message: fmt.Sprintf("Re-indexing %d changed file(s)", len(filesToReindex)),
 			})
 
@@ -926,7 +926,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 				}
 
 				s.emitEvent(types.Event{
-					Type:    "indexing_progress",
+					Type:    types.EventTypeIndexingProgress,
 					Message: "Re-indexing: " + filepath.Base(file),
 					Progress: &types.Progress{
 						Current: i + 1,
@@ -937,7 +937,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 				if err := s.indexFile(ctx, file); err != nil {
 					slog.ErrorContext(ctx, "Failed to re-index file", "path", file, "error", err)
 					s.emitEvent(types.Event{
-						Type:    "error",
+						Type:    types.EventTypeError,
 						Message: "Failed to re-index: " + filepath.Base(file),
 						Error:   err,
 					})
@@ -953,7 +953,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 			}
 
 			s.emitEvent(types.Event{
-				Type:    "indexing_completed",
+				Type:    types.EventTypeIndexingComplete,
 				Message: fmt.Sprintf("Re-indexed %d file(s)", len(filesToReindex)),
 			})
 		}

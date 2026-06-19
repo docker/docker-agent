@@ -132,11 +132,12 @@ func buildManagerConfig(
 			Description: ragCfg.Tool.Description,
 			Instruction: ragCfg.Tool.Instruction,
 		},
-		Docs:            GetAbsolutePaths(buildCfg.ParentDir, ragCfg.Docs),
-		Results:         results,
-		FusionConfig:    fusionCfg,
-		StrategyConfigs: strategyConfigs,
-		PrefetchConfig:  buildPrefetchConfig(ragCfg.Results.Prefetch),
+		Docs:                GetAbsolutePaths(buildCfg.ParentDir, ragCfg.Docs),
+		Results:             results,
+		FusionConfig:        fusionCfg,
+		StrategyConfigs:     strategyConfigs,
+		PrefetchConfig:      buildPrefetchConfig(ragCfg.Results.Prefetch),
+		TopologyPriorConfig: buildTopologyPriorConfig(ragCfg.Results.TopologyPrior),
 	}, nil
 }
 
@@ -145,12 +146,19 @@ func buildPrefetchConfig(cfg *latest.RAGPrefetchConfig) prefetch.Config {
 		return prefetch.Config{}
 	}
 	return prefetch.Config{
-		Enabled:        cfg.Enabled,
-		MaxEntries:     cfg.MaxEntries,
-		MaxCandidates:  cfg.MaxCandidates,
-		MinSimilarity:  cfg.MinSimilarity,
-		DriftThreshold: cfg.DriftThreshold,
-		Timeout:        cfg.Timeout.Duration,
+		Enabled:    cfg.Enabled,
+		MaxEntries: cfg.MaxEntries,
+	}
+}
+
+func buildTopologyPriorConfig(cfg *latest.RAGTopologyPriorConfig) TopologyPriorConfig {
+	if cfg == nil {
+		return TopologyPriorConfig{}
+	}
+	return TopologyPriorConfig{
+		Enabled:          cfg.Enabled,
+		Weight:           cfg.Weight,
+		MaxSourceHistory: cfg.MaxSourceHistory,
 	}
 }
 

@@ -1,19 +1,18 @@
-# This example demonstrates adaptive RAG prefetching for repeated and
-# topology-stable follow-up queries.
+# This example demonstrates exact-repeat RAG query caching and a small topology prior.
 
 agents:
   root:
     model: openai/gpt-5-mini
-    description: assistant with adaptive RAG prefetching
+    description: assistant with RAG query caching and topology ranking
     instruction: |
       You are a helpful assistant with access to hybrid retrieval.
       Use the knowledge base before answering questions about blorks.
     toolsets:
       - type: rag
-        ref: prefetched_knowledge
+        ref: cached_knowledge
 
 rag:
-  prefetched_knowledge:
+  cached_knowledge:
     tool:
       description: to be used to search for information about blorks
     docs:
@@ -21,7 +20,7 @@ rag:
     strategies:
       - type: chunked-embeddings
         embedding_model: openai/text-embedding-3-small
-        database: ./adaptive_prefetch_embeddings.db
+        database: ./query_cache_embeddings.db
         vector_dimensions: 1536
         similarity_metric: cosine_similarity
         threshold: 0.5
@@ -31,7 +30,7 @@ rag:
           overlap: 100
           respect_word_boundaries: true
       - type: bm25
-        database: ./adaptive_prefetch_bm25.db
+        database: ./query_cache_bm25.db
         k1: 1.5
         b: 0.75
         threshold: 0.3
@@ -49,7 +48,7 @@ rag:
       prefetch:
         enabled: true
         max_entries: 32
-        max_candidates: 2
-        min_similarity: 0.5
-        drift_threshold: 0.8
-        timeout: 10s
+      topology_prior:
+        enabled: true
+        weight: 0.05
+        max_source_history: 32

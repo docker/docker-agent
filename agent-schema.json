@@ -2692,11 +2692,11 @@
             },
             "prefetch": {
               "type": "object",
-              "description": "Optional adaptive query prefetching. When enabled, docker-agent caches repeated RAG queries and warms bounded follow-up candidates in the background.",
+              "description": "Optional exact-repeat RAG query caching. When enabled, docker-agent caches final results for repeated normalized queries.",
               "properties": {
                 "enabled": {
                   "type": "boolean",
-                  "description": "Enable adaptive RAG query prefetching.",
+                  "description": "Enable exact-repeat RAG query caching.",
                   "default": false
                 },
                 "max_entries": {
@@ -2704,30 +2704,31 @@
                   "description": "Maximum number of cached query result sets.",
                   "minimum": 1,
                   "default": 32
+                }
+              },
+              "additionalProperties": false
+            },
+            "topology_prior": {
+              "type": "object",
+              "description": "Optional topology-based score prior. When enabled, docker-agent runs normal retrieval first, then applies a small capped score bias to the current query's retrieved results based on query/source topology and recent result sources.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Enable topology-based score biasing.",
+                  "default": false
                 },
-                "max_candidates": {
+                "weight": {
+                  "type": "number",
+                  "description": "Maximum topology contribution blended into each result score. Values above 0.2 are clamped in code.",
+                  "minimum": 0,
+                  "maximum": 0.2,
+                  "default": 0.05
+                },
+                "max_source_history": {
                   "type": "integer",
-                  "description": "Maximum number of follow-up query candidates to prefetch after a cache miss.",
+                  "description": "Maximum number of recent result source paths kept for topology scoring.",
                   "minimum": 1,
-                  "default": 2
-                },
-                "min_similarity": {
-                  "type": "number",
-                  "description": "Minimum result similarity required before a source path can seed a follow-up prefetch candidate.",
-                  "minimum": 0,
-                  "maximum": 1,
-                  "default": 0.5
-                },
-                "drift_threshold": {
-                  "type": "number",
-                  "description": "Maximum topology drift score that still allows background prefetching.",
-                  "minimum": 0,
-                  "default": 0.8
-                },
-                "timeout": {
-                  "type": "string",
-                  "description": "Maximum duration for a background prefetch query, using Go duration syntax such as '10s' or '1m'.",
-                  "default": "10s"
+                  "default": 32
                 }
               },
               "additionalProperties": false
