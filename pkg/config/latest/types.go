@@ -1826,7 +1826,7 @@ type RAGPrefetchConfig struct {
 	MaxCandidates  int      `json:"max_candidates,omitempty"`
 	MinSimilarity  float64  `json:"min_similarity,omitempty"`
 	DriftThreshold float64  `json:"drift_threshold,omitempty"`
-	Timeout        Duration `json:"timeout,omitempty"`
+	Timeout        Duration `json:"timeout,omitzero"`
 }
 
 // RAGRerankingConfig represents reranking configuration

@@ -63,7 +63,7 @@ func (s *countingStrategy) StartFileWatcher(context.Context, []string, strategy.
 func (s *countingStrategy) Close() error { return nil }
 
 func TestQueryUsesPrefetchCacheForRepeatedQuery(t *testing.T) {
-	strat := &countingStrategy{results: []database.SearchResult{{
+	searchStrategy := &countingStrategy{results: []database.SearchResult{{
 		Document:   database.Document{ID: "1", SourcePath: "docs/rag.md", Content: "doc one"},
 		Similarity: 0.9,
 	}}}
@@ -72,7 +72,7 @@ func TestQueryUsesPrefetchCacheForRepeatedQuery(t *testing.T) {
 		PrefetchConfig: prefetch.Config{Enabled: true, MaxEntries: 4},
 		StrategyConfigs: []strategy.Config{{
 			Name:      "counting",
-			Strategy:  strat,
+			Strategy:  searchStrategy,
 			Limit:     5,
 			Threshold: 0.5,
 		}},
@@ -88,6 +88,6 @@ func TestQueryUsesPrefetchCacheForRepeatedQuery(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, second, 1)
 
-	assert.Equal(t, int64(1), strat.calls.Load())
+	assert.Equal(t, int64(1), searchStrategy.calls.Load())
 	assert.Equal(t, "doc one", second[0].Document.Content)
 }
