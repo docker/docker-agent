@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/rag/database"
 	"github.com/docker/docker-agent/pkg/rag/fusion"
+	"github.com/docker/docker-agent/pkg/rag/prefetch"
 	"github.com/docker/docker-agent/pkg/rag/rerank"
 	"github.com/docker/docker-agent/pkg/rag/strategy"
 	"github.com/docker/docker-agent/pkg/rag/types"
@@ -35,6 +36,7 @@ type Config struct {
 	Results         ResultsConfig
 	FusionConfig    *FusionConfig
 	StrategyConfigs []strategy.Config
+	PrefetchConfig  prefetch.Config
 }
 
 // ResultsConfig captures result-postprocessing behavior for the manager.
@@ -64,6 +66,7 @@ type Manager struct {
 	reranker        rerank.Reranker              // Optional reranker for result re-scoring
 	rerankDisabled  atomic.Bool                  // Set after a non-retryable reranking error to stop doomed requests
 	events          <-chan types.Event           // Shared event channel from strategies and other RAG operations
+	prefetcher      *prefetch.Prefetcher
 }
 
 // FusionConfig holds configuration for result fusion
@@ -138,6 +141,7 @@ func New(_ context.Context, name string, config Config, strategyEvents <-chan ty
 		fusion:          fusionStrategy,
 		reranker:        reranker,
 		events:          strategyEvents,
+		prefetcher:      prefetch.New(config.PrefetchConfig),
 	}
 
 	return m, nil
@@ -220,6 +224,41 @@ func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchRes
 		"num_strategies", len(m.strategies),
 		"query_length", len(query))
 
+	if cached, ok := m.prefetcher.Get(query); ok {
+		slog.DebugContext(ctx, "[RAG Manager] Returning prefetched RAG results",
+			"rag_name", m.name,
+			"result_count", len(cached))
+		return cached, nil
+	}
+
+	results, err := m.queryUncached(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	if ctx.Err() == nil {
+		m.prefetcher.Store(query, results)
+		m.prefetcher.Observe(query, results)
+	}
+	if ctx.Err() == nil && m.reranker == nil {
+		for _, candidate := range m.prefetcher.Candidates(query, results) {
+			m.prefetcher.Prefetch(ctx, candidate, m.queryUncached)
+		}
+	}
+
+	return results, nil
+}
+
+func (m *Manager) queryUncached(ctx context.Context, query string) ([]database.SearchResult, error) {
+	results, err := m.queryStrategies(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	return m.postprocessQueryResults(ctx, query, results), nil
+}
+
+func (m *Manager) queryStrategies(ctx context.Context, query string) ([]database.SearchResult, error) {
 	// Single retrieval strategy
 	if len(m.strategies) == 1 {
 		for strategyName, strategyImpl := range m.strategies {
@@ -244,31 +283,6 @@ func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchRes
 				"rag_name", m.name,
 				"strategy", strategyName,
 				"num_results", len(results))
-
-			// Apply reranking if configured
-			results = m.rerank(ctx, query, results)
-
-			if limit := m.config.Results.Limit; limit > 0 && len(results) > limit {
-				slog.DebugContext(ctx, "[RAG Manager] Truncating to global result limit",
-					"rag_name", m.name,
-					"strategy", strategyName,
-					"before", len(results),
-					"after", limit)
-				results = results[:limit]
-			}
-
-			// Reconstruct full documents if configured
-			if m.config.Results.ReturnFullContent {
-				results = m.reconstructFullDocuments(ctx, results)
-			}
-
-			if m.config.Results.Deduplicate {
-				results = m.deduplicateResults(results)
-				slog.DebugContext(ctx, "[RAG Manager] Deduplicated single-strategy results",
-					"rag_name", m.name,
-					"strategy", strategyName,
-					"num_results", len(results))
-			}
 
 			return results, nil
 		}
@@ -352,37 +366,41 @@ func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchRes
 		"fused_results", len(fusedResults),
 		"result_limit", m.config.Results.Limit)
 
+	return fusedResults, nil
+}
+
+func (m *Manager) postprocessQueryResults(ctx context.Context, query string, results []database.SearchResult) []database.SearchResult {
 	// Apply reranking if configured (before limit and deduplication)
-	fusedResults = m.rerank(ctx, query, fusedResults)
+	results = m.rerank(ctx, query, results)
 
 	// Apply result limit if configured
-	if limit := m.config.Results.Limit; limit > 0 && len(fusedResults) > limit {
+	if limit := m.config.Results.Limit; limit > 0 && len(results) > limit {
 		slog.DebugContext(ctx, "[RAG Manager] Truncating to result limit",
 			"rag_name", m.name,
-			"before", len(fusedResults),
+			"before", len(results),
 			"after", limit)
-		fusedResults = fusedResults[:limit]
+		results = results[:limit]
 	}
 
 	// Reconstruct full documents if configured
 	if m.config.Results.ReturnFullContent {
-		fusedResults = m.reconstructFullDocuments(ctx, fusedResults)
+		results = m.reconstructFullDocuments(ctx, results)
 	}
 
 	// Optionally deduplicate based on the final content that will be returned
 	// (full documents or chunks).
 	if m.config.Results.Deduplicate {
-		fusedResults = m.deduplicateResults(fusedResults)
+		results = m.deduplicateResults(results)
 		slog.DebugContext(ctx, "[RAG Manager] Deduplicated fused results",
 			"rag_name", m.name,
-			"num_results", len(fusedResults))
+			"num_results", len(results))
 	}
 
 	// TODO: Track and emit query embedding usage
 	// For queries during agent execution, usage should be added to agent's session
 	// This requires passing session context through the RAG tool
 
-	return fusedResults, nil
+	return results
 }
 
 // Helper to get strategy names for logging
@@ -437,6 +455,7 @@ func (m *Manager) CheckAndReindexChangedFiles(ctx context.Context) error {
 			return fmt.Errorf("strategy %s failed: %w", strategyName, err)
 		}
 	}
+	m.prefetcher.Clear()
 	return nil
 }
 

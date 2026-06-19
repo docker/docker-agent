@@ -1,0 +1,55 @@
+# This example demonstrates adaptive RAG prefetching for repeated and
+# topology-stable follow-up queries.
+
+agents:
+  root:
+    model: openai/gpt-5-mini
+    description: assistant with adaptive RAG prefetching
+    instruction: |
+      You are a helpful assistant with access to hybrid retrieval.
+      Use the knowledge base before answering questions about blorks.
+    toolsets:
+      - type: rag
+        ref: prefetched_knowledge
+
+rag:
+  prefetched_knowledge:
+    tool:
+      description: to be used to search for information about blorks
+    docs:
+      - ./blork_field_guide.txt
+    strategies:
+      - type: chunked-embeddings
+        embedding_model: openai/text-embedding-3-small
+        database: ./adaptive_prefetch_embeddings.db
+        vector_dimensions: 1536
+        similarity_metric: cosine_similarity
+        threshold: 0.5
+        limit: 20
+        chunking:
+          size: 1000
+          overlap: 100
+          respect_word_boundaries: true
+      - type: bm25
+        database: ./adaptive_prefetch_bm25.db
+        k1: 1.5
+        b: 0.75
+        threshold: 0.3
+        limit: 15
+        chunking:
+          size: 1000
+          overlap: 100
+          respect_word_boundaries: true
+    results:
+      fusion:
+        strategy: rrf
+        k: 60
+      deduplicate: true
+      limit: 5
+      prefetch:
+        enabled: true
+        max_entries: 32
+        max_candidates: 2
+        min_similarity: 0.5
+        drift_threshold: 0.8
+        timeout: 10s

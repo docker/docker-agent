@@ -1813,9 +1813,20 @@ type RAGResultsConfig struct {
 	Limit             int                 `json:"limit,omitempty"`               // Maximum number of results to return (top K)
 	Fusion            *RAGFusionConfig    `json:"fusion,omitempty"`              // How to combine results from multiple strategies
 	Reranking         *RAGRerankingConfig `json:"reranking,omitempty"`           // Optional reranking configuration
+	Prefetch          *RAGPrefetchConfig  `json:"prefetch,omitempty"`            // Optional adaptive query prefetching
 	Deduplicate       bool                `json:"deduplicate,omitempty"`         // Remove duplicate documents across strategies
 	IncludeScore      bool                `json:"include_score,omitempty"`       // Include relevance scores in results
 	ReturnFullContent bool                `json:"return_full_content,omitempty"` // Return full document content instead of just matched chunks
+}
+
+// RAGPrefetchConfig configures adaptive RAG query prefetching.
+type RAGPrefetchConfig struct {
+	Enabled        bool     `json:"enabled,omitempty"`
+	MaxEntries     int      `json:"max_entries,omitempty"`
+	MaxCandidates  int      `json:"max_candidates,omitempty"`
+	MinSimilarity  float64  `json:"min_similarity,omitempty"`
+	DriftThreshold float64  `json:"drift_threshold,omitempty"`
+	Timeout        Duration `json:"timeout,omitempty"`
 }
 
 // RAGRerankingConfig represents reranking configuration
@@ -1871,6 +1882,7 @@ func (r *RAGResultsConfig) UnmarshalYAML(unmarshal func(any) error) error {
 		Limit             int                 `json:"limit,omitempty"`
 		Fusion            *RAGFusionConfig    `json:"fusion,omitempty"`
 		Reranking         *RAGRerankingConfig `json:"reranking,omitempty"`
+		Prefetch          *RAGPrefetchConfig  `json:"prefetch,omitempty"`
 		Deduplicate       *bool               `json:"deduplicate,omitempty"`
 		IncludeScore      *bool               `json:"include_score,omitempty"`
 		ReturnFullContent *bool               `json:"return_full_content,omitempty"`
@@ -1889,6 +1901,7 @@ func (r *RAGResultsConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	}
 	r.Fusion = raw.Fusion
 	r.Reranking = raw.Reranking
+	r.Prefetch = raw.Prefetch
 
 	if raw.Deduplicate != nil {
 		r.Deduplicate = *raw.Deduplicate

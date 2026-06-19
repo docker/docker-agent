@@ -126,6 +126,7 @@ func TestSchemaMatchesGoTypes(t *testing.T) {
 		{reflect.TypeFor[latest.RAGResultsConfig](), []string{"RAGConfig", "results"}, "RAGResultsConfig (RAGConfig.results)"},
 		{reflect.TypeFor[latest.RAGFusionConfig](), []string{"RAGConfig", "results", "fusion"}, "RAGFusionConfig (RAGConfig.results.fusion)"},
 		{reflect.TypeFor[latest.RAGRerankingConfig](), []string{"RAGConfig", "results", "reranking"}, "RAGRerankingConfig (RAGConfig.results.reranking)"},
+		{reflect.TypeFor[latest.RAGPrefetchConfig](), []string{"RAGConfig", "results", "prefetch"}, "RAGPrefetchConfig (RAGConfig.results.prefetch)"},
 		{reflect.TypeFor[latest.RAGChunkingConfig](), []string{"RAGConfig", "strategies", "*", "chunking"}, "RAGChunkingConfig (RAGConfig.strategies[].chunking)"},
 	}
 

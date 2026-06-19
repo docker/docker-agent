@@ -16,6 +16,7 @@ The `rag` toolset lets agents search through your documents to find relevant inf
 - **Multiple strategies** — Semantic embeddings, BM25 keyword search, and LLM-enhanced search
 - **Hybrid search** — Combine strategies with result fusion for best results
 - **Reranking** — Re-score results with specialized models for improved relevance
+- **Adaptive prefetching** — Cache repeated queries and warm stable follow-up searches
 
 ## Quick Start
 
@@ -156,6 +157,23 @@ results:
 
 Supported reranking providers: **DMR** (native `/rerank` endpoint), **OpenAI**, **Anthropic**, **Gemini**.
 
+## Adaptive Prefetching
+
+Adaptive prefetching is opt-in. It caches repeated RAG queries and, when query topology is stable, warms a small number of deterministic follow-up candidates in the background.
+
+```yaml
+results:
+  prefetch:
+    enabled: true
+    max_entries: 32
+    max_candidates: 2
+    min_similarity: 0.5
+    drift_threshold: 0.8
+    timeout: 10s
+```
+
+The prefetcher is bounded and non-blocking. Exact repeated queries can be served from cache. Background candidate prefetch is skipped when reranking is enabled so reranker errors and fallback behavior stay tied to the foreground query.
+
 ## Code-Aware Chunking
 
 For source code, enable AST-based chunking to keep functions and methods intact:
@@ -263,6 +281,12 @@ Look for log tags: `[RAG Manager]`, `[Chunked-Embeddings Strategy]`, `[BM25 Stra
 | `include_score`       | bool   | `false` | Include relevance scores in results                         |
 | `return_full_content` | bool   | `false` | Return full document content instead of just matched chunks |
 | `reranking.model`     | string | —       | Reranking model reference                                   |
-| `reranking.top_k`     | int    | (`limit`) | Only rerank top K results. Defaults to the results `limit` when set.  |
+| `reranking.top_k`     | int    | (`limit`) | Only rerank top K results. Defaults to the results `limit` when set. |
 | `reranking.threshold` | float  | `0.5`   | Minimum relevance score after reranking                     |
 | `reranking.criteria`  | string | —       | Custom relevance guidance for the reranking model           |
+| `prefetch.enabled`    | bool   | `false` | Enable adaptive query prefetching                           |
+| `prefetch.max_entries` | int   | `32`    | Maximum cached query result sets                            |
+| `prefetch.max_candidates` | int | `2`    | Maximum follow-up candidates warmed after a cache miss       |
+| `prefetch.min_similarity` | float | `0.5` | Minimum similarity score for source-derived candidates       |
+| `prefetch.drift_threshold` | float | `0.8` | Maximum topology drift that still allows background prefetch |
+| `prefetch.timeout`    | string | `10s`   | Timeout for each background prefetch query                   |

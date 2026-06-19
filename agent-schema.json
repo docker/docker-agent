@@ -2690,6 +2690,48 @@
               ],
               "additionalProperties": false
             },
+            "prefetch": {
+              "type": "object",
+              "description": "Optional adaptive query prefetching. When enabled, docker-agent caches repeated RAG queries and warms bounded follow-up candidates in the background.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Enable adaptive RAG query prefetching.",
+                  "default": false
+                },
+                "max_entries": {
+                  "type": "integer",
+                  "description": "Maximum number of cached query result sets.",
+                  "minimum": 1,
+                  "default": 32
+                },
+                "max_candidates": {
+                  "type": "integer",
+                  "description": "Maximum number of follow-up query candidates to prefetch after a cache miss.",
+                  "minimum": 1,
+                  "default": 2
+                },
+                "min_similarity": {
+                  "type": "number",
+                  "description": "Minimum result similarity required before a source path can seed a follow-up prefetch candidate.",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "default": 0.5
+                },
+                "drift_threshold": {
+                  "type": "number",
+                  "description": "Maximum topology drift score that still allows background prefetching.",
+                  "minimum": 0,
+                  "default": 0.8
+                },
+                "timeout": {
+                  "type": "string",
+                  "description": "Maximum duration for a background prefetch query, using Go duration syntax such as '10s' or '1m'.",
+                  "default": "10s"
+                }
+              },
+              "additionalProperties": false
+            },
             "deduplicate": {
               "type": "boolean",
               "description": "Remove duplicate documents across strategies",

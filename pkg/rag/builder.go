@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/rag/prefetch"
 	"github.com/docker/docker-agent/pkg/rag/rerank"
 	"github.com/docker/docker-agent/pkg/rag/strategy"
 	"github.com/docker/docker-agent/pkg/rag/types"
@@ -135,7 +136,22 @@ func buildManagerConfig(
 		Results:         results,
 		FusionConfig:    fusionCfg,
 		StrategyConfigs: strategyConfigs,
+		PrefetchConfig:  buildPrefetchConfig(ragCfg.Results.Prefetch),
 	}, nil
+}
+
+func buildPrefetchConfig(cfg *latest.RAGPrefetchConfig) prefetch.Config {
+	if cfg == nil {
+		return prefetch.Config{}
+	}
+	return prefetch.Config{
+		Enabled:        cfg.Enabled,
+		MaxEntries:     cfg.MaxEntries,
+		MaxCandidates:  cfg.MaxCandidates,
+		MinSimilarity:  cfg.MinSimilarity,
+		DriftThreshold: cfg.DriftThreshold,
+		Timeout:        cfg.Timeout.Duration,
+	}
 }
 
 // buildRerankingConfig constructs a RerankingConfig from the configuration.

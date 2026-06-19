@@ -1,12 +1,18 @@
 package rag
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/rag/database"
+	"github.com/docker/docker-agent/pkg/rag/prefetch"
+	"github.com/docker/docker-agent/pkg/rag/strategy"
 )
 
 func TestGetAbsolutePaths_WithBasePath(t *testing.T) {
@@ -30,4 +36,58 @@ func TestGetAbsolutePaths_EmptyBasePath(t *testing.T) {
 func TestGetAbsolutePaths_NilInput(t *testing.T) {
 	result := GetAbsolutePaths("/base", nil)
 	assert.Nil(t, result)
+}
+
+type countingStrategy struct {
+	calls   atomic.Int64
+	results []database.SearchResult
+}
+
+func (s *countingStrategy) Initialize(context.Context, []string, strategy.ChunkingConfig) error {
+	return nil
+}
+
+func (s *countingStrategy) Query(context.Context, string, int, float64) ([]database.SearchResult, error) {
+	s.calls.Add(1)
+	return append([]database.SearchResult(nil), s.results...), nil
+}
+
+func (s *countingStrategy) CheckAndReindexChangedFiles(context.Context, []string, strategy.ChunkingConfig) error {
+	return nil
+}
+
+func (s *countingStrategy) StartFileWatcher(context.Context, []string, strategy.ChunkingConfig) error {
+	return nil
+}
+
+func (s *countingStrategy) Close() error { return nil }
+
+func TestQueryUsesPrefetchCacheForRepeatedQuery(t *testing.T) {
+	strat := &countingStrategy{results: []database.SearchResult{{
+		Document:   database.Document{ID: "1", SourcePath: "docs/rag.md", Content: "doc one"},
+		Similarity: 0.9,
+	}}}
+	m, err := New(t.Context(), "test", Config{
+		Results:        ResultsConfig{Limit: 15},
+		PrefetchConfig: prefetch.Config{Enabled: true, MaxEntries: 4},
+		StrategyConfigs: []strategy.Config{{
+			Name:      "counting",
+			Strategy:  strat,
+			Limit:     5,
+			Threshold: 0.5,
+		}},
+	}, nil)
+	require.NoError(t, err)
+
+	first, err := m.Query(t.Context(), "RAG cache")
+	require.NoError(t, err)
+	require.Len(t, first, 1)
+	first[0].Document.Content = "caller mutation"
+
+	second, err := m.Query(t.Context(), " rag   cache ")
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+
+	assert.Equal(t, int64(1), strat.calls.Load())
+	assert.Equal(t, "doc one", second[0].Document.Content)
 }
