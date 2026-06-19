@@ -18,6 +18,15 @@ func WithInstruction(instruction string) Opt {
 	}
 }
 
+// WithPlanInstruction sets the persona instruction used by the runtime
+// when the session is in plan mode. An empty string clears the persona
+// so the runtime falls back to its canned plan-mode reminder.
+func WithPlanInstruction(instruction string) Opt {
+	return func(a *Agent) {
+		a.planInstruction = instruction
+	}
+}
+
 func WithToolSets(toolSet ...tools.ToolSet) Opt {
 	var startableToolSet []*tools.StartableToolSet
 	for _, ts := range toolSet {

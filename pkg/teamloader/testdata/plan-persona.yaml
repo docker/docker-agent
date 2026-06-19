@@ -1,0 +1,6 @@
+agents:
+  root:
+    model: openai/gpt-4o
+    instruction: "You are an executor. Act now."
+    plan_persona:
+      instruction: "Hello ${env.USER}, you plan. You do not execute."

@@ -2433,19 +2433,64 @@ func TestFilterToolsForSession_PlanMode(t *testing.T) {
 }
 
 func TestPlanModeReminderMessages(t *testing.T) {
+	canned := agent.New("canned", "you are an executor")
+
 	t.Run("build mode returns nil", func(t *testing.T) {
-		assert.Nil(t, planModeReminderMessages(&session.Session{Mode: session.ModeBuild}))
+		assert.Nil(t, planModeReminderMessages(&session.Session{Mode: session.ModeBuild}, canned))
 	})
 
 	t.Run("nil session returns nil", func(t *testing.T) {
-		assert.Nil(t, planModeReminderMessages(nil))
+		assert.Nil(t, planModeReminderMessages(nil, canned))
 	})
 
-	t.Run("plan mode returns a single system reminder", func(t *testing.T) {
-		msgs := planModeReminderMessages(&session.Session{Mode: session.ModePlan})
+	t.Run("plan mode returns the canned reminder when the agent has no persona", func(t *testing.T) {
+		msgs := planModeReminderMessages(&session.Session{Mode: session.ModePlan}, canned)
 		assert.Len(t, msgs, 1)
 		assert.Equal(t, chat.MessageRoleSystem, msgs[0].Role)
 		assert.Contains(t, msgs[0].Content, "PLAN MODE")
+		// The canned reminder spells out the no-edits / no-shell rules
+		// itself; the persona path doesn't.
+		assert.Contains(t, msgs[0].Content, "No edits to files")
+	})
+
+	t.Run("plan mode uses the agent's persona when set", func(t *testing.T) {
+		personaText := "You are a planning specialist. Ask questions. Write a numbered plan."
+		withPersona := agent.New(
+			"with-persona",
+			"you are an executor",
+			agent.WithPlanInstruction(personaText),
+		)
+		msgs := planModeReminderMessages(&session.Session{Mode: session.ModePlan}, withPersona)
+		require.Len(t, msgs, 1)
+		// Persona body must be present.
+		assert.Contains(t, msgs[0].Content, personaText)
+		// Runtime guardrail must be prepended so persona authors don't
+		// have to (and can't accidentally drop) the read-only contract.
+		assert.Contains(t, msgs[0].Content, "Only read-only tools have been made available")
+		// And the body must live inside a <system-reminder> envelope so
+		// it visually matches the canned path.
+		assert.True(t, strings.HasPrefix(msgs[0].Content, "<system-reminder>"))
+		assert.True(t, strings.HasSuffix(msgs[0].Content, "</system-reminder>"))
+		// The canned no-edits enumeration must NOT leak in — the persona
+		// owns the framing once set.
+		assert.NotContains(t, msgs[0].Content, "No shell commands or background jobs")
+	})
+
+	t.Run("plan mode falls back to canned reminder when persona is whitespace only", func(t *testing.T) {
+		blank := agent.New(
+			"blank-persona",
+			"you are an executor",
+			agent.WithPlanInstruction("   \n\t  "),
+		)
+		msgs := planModeReminderMessages(&session.Session{Mode: session.ModePlan}, blank)
+		require.Len(t, msgs, 1)
+		assert.Contains(t, msgs[0].Content, "No edits to files")
+	})
+
+	t.Run("plan mode tolerates a nil agent", func(t *testing.T) {
+		msgs := planModeReminderMessages(&session.Session{Mode: session.ModePlan}, nil)
+		require.Len(t, msgs, 1)
+		assert.Contains(t, msgs[0].Content, "No edits to files")
 	})
 }
 

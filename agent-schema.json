@@ -725,6 +725,10 @@
           "$ref": "#/definitions/CacheConfig",
           "description": "Optional response cache: when the same user question is asked again, replay the previous answer instead of calling the model."
         },
+        "plan_persona": {
+          "$ref": "#/definitions/PlanPersonaConfig",
+          "description": "Optional per-mode overrides applied while the session is in plan mode. Plan mode already filters the agent's toolset to read-only tools and injects a per-turn system reminder; plan_persona additionally replaces the agent's instruction for the duration of plan mode so the persona's framing matches its restricted toolset. Useful when the agent's normal instruction is heavily tuned for execution and would conflict with the plan-mode reminder."
+        },
         "skills": {
           "description": "Enable skills discovery for this agent. Set to true to load all discovered skills from local filesystem sources; false disables skills. A list can mix sources (\"local\" or an HTTP/HTTPS URL), skill names to include, and inline skill definitions (objects). If only names are given, local sources are loaded and filtered to just those skills.",
           "oneOf": [
@@ -1012,6 +1016,17 @@
         "path": {
           "type": "string",
           "description": "Path to a JSON file used to persist cache entries across runs. Relative paths are resolved against the agent's config directory. When empty, the cache lives only in memory."
+        }
+      },
+      "additionalProperties": false
+    },
+    "PlanPersonaConfig": {
+      "type": "object",
+      "description": "Per-mode overrides the runtime applies to an agent when the session is in plan mode. Fields are optional; leaving one unset means 'fall back to the agent's normal value'. Plan mode also filters the agent's toolset to read-only tools and prepends a short runtime guardrail so persona authors don't need to repeat the no-edits / no-shell contract.",
+      "properties": {
+        "instruction": {
+          "type": "string",
+          "description": "Replaces the per-turn plan-mode system reminder while plan mode is active. The runtime wraps the value in a <system-reminder> envelope and prefixes a short guardrail line stating that only read-only tools are available, so persona authors own the workflow framing and tone. Empty (or the whole plan_persona block omitted) means 'use the runtime's canned plan-mode reminder unchanged', preserving today's behaviour."
         }
       },
       "additionalProperties": false

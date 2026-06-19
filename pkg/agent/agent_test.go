@@ -563,3 +563,28 @@ func TestAgentToolsRecoversWhenUnderlyingToolsetDies(t *testing.T) {
 	assert.Equal(t, 1, stub.startCalls)
 	assert.Equal(t, 1, stub.restartCalls)
 }
+
+func TestPlanInstruction(t *testing.T) {
+	t.Run("defaults to empty when no persona is configured", func(t *testing.T) {
+		a := New("root", "you are an executor")
+		assert.Empty(t, a.PlanInstruction())
+	})
+
+	t.Run("WithPlanInstruction stores the persona body verbatim", func(t *testing.T) {
+		persona := "You plan. You do not execute."
+		a := New("root", "you are an executor", WithPlanInstruction(persona))
+		assert.Equal(t, persona, a.PlanInstruction())
+		// The agent's normal instruction must remain untouched — the
+		// persona is a per-mode override applied by the runtime, not a
+		// replacement of the canonical instruction.
+		assert.Equal(t, "you are an executor", a.Instruction())
+	})
+
+	t.Run("empty WithPlanInstruction clears any previously stored persona", func(t *testing.T) {
+		a := New("root", "you are an executor",
+			WithPlanInstruction("first"),
+			WithPlanInstruction(""),
+		)
+		assert.Empty(t, a.PlanInstruction())
+	})
+}

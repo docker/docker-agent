@@ -258,6 +258,10 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 
 		opts = append(opts, agent.WithToolSets(agentTools...))
 
+		if persona := agentConfig.PlanPersona; persona != nil && persona.Instruction != "" {
+			opts = append(opts, agent.WithPlanInstruction(expander.Expand(ctx, persona.Instruction, nil)))
+		}
+
 		ag := agent.New(agentConfig.Name, expander.Expand(ctx, agentConfig.Instruction, nil), opts...)
 		agents = append(agents, ag)
 		agentsByName[agentConfig.Name] = ag

@@ -473,6 +473,37 @@ type AgentConfig struct {
 	UseSkills   []string     `json:"use_skills,omitempty"`
 	Hooks       *HooksConfig `json:"hooks,omitempty"`
 	Cache       *CacheConfig `json:"cache,omitempty"`
+
+	// PlanPersona overrides parts of the agent's configuration when the
+	// session is in plan mode. Plan mode (see session.Mode) already filters
+	// the agent's toolset to read-only tools and injects a per-turn system
+	// reminder; PlanPersona lets the agent author additionally replace the
+	// agent's instruction for the duration of plan mode, so the persona's
+	// framing matches its restricted toolset.
+	//
+	// This is useful when the agent's normal instruction is heavily tuned
+	// for execution (e.g. "fix files immediately", "never ask clarifying
+	// questions") and would conflict with the plan-mode reminder otherwise.
+	// Without a PlanPersona the runtime applies the canned reminder on top
+	// of the agent's normal instruction, which leaves the two specs in
+	// tension.
+	PlanPersona *PlanPersonaConfig `json:"plan_persona,omitempty" yaml:"plan_persona,omitempty"`
+}
+
+// PlanPersonaConfig holds the per-mode overrides the runtime applies to an
+// agent when the session is in plan mode. Fields are optional; leaving one
+// empty means "fall back to the agent's normal value".
+type PlanPersonaConfig struct {
+	// Instruction replaces the per-turn plan-mode system reminder while
+	// plan mode is active. The runtime still wraps the value in a
+	// <system-reminder> envelope and prefixes a short guardrail line
+	// stating that only read-only tools are available, so persona authors
+	// don't need to repeat the constraint — they own the workflow framing
+	// and tone.
+	//
+	// Empty (or PlanPersona nil) means "use the runtime's canned plan-mode
+	// reminder unchanged", preserving today's behaviour.
+	Instruction string `json:"instruction,omitempty" yaml:"instruction,omitempty"`
 }
 
 // CacheConfig configures the agent's response cache. When set and Enabled

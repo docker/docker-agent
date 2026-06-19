@@ -327,6 +327,31 @@ func TestToolsetInstructions(t *testing.T) {
 	require.Equal(t, expected, instructions)
 }
 
+// TestPlanPersonaInstruction verifies that agents.<name>.plan_persona.instruction
+// is loaded onto the resulting *agent.Agent so the runtime can pick it up when
+// the session enters plan mode. ${env.X} placeholders are expanded the same way
+// as the canonical instruction.
+func TestPlanPersonaInstruction(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+	t.Setenv("USER", "alice")
+
+	agentSource, err := config.Resolve("testdata/plan-persona.yaml", nil)
+	require.NoError(t, err)
+
+	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{})
+	require.NoError(t, err)
+
+	rootAgent, err := team.Agent("root")
+	require.NoError(t, err)
+
+	// The canonical (build-mode) instruction must remain unchanged: the
+	// persona is a per-mode override, not a replacement.
+	assert.Equal(t, "You are an executor. Act now.", rootAgent.Instruction())
+
+	// The plan persona must be loaded with ${env.X} placeholders expanded.
+	assert.Equal(t, "Hello alice, you plan. You do not execute.", rootAgent.PlanInstruction())
+}
+
 // TestInstructionExpansion verifies that ${env.X} placeholders are expanded
 // at load time both in agent.instruction and in toolsets[*].instruction.
 // See https://github.com/docker/docker-agent/issues/2614.

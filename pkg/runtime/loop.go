@@ -559,7 +559,7 @@ func (r *LocalRuntime) runTurn(
 	// that GetMessages applies to the last extra). It is appended last so its
 	// instruction is the most recent system context the model sees before the
 	// user prompt — minimising the chance the model ignores it.
-	planReminder := planModeReminderMessages(sess)
+	planReminder := planModeReminderMessages(sess, a)
 	messages := sess.GetMessages(a, slices.Concat(ls.sessionStartMsgs, ls.userPromptMsgs, turnStartMsgs, planReminder)...)
 	slog.DebugContext(ctx, "Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))
 

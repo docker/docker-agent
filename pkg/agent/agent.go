@@ -48,6 +48,10 @@ type Agent struct {
 	harness                 *latest.HarnessConfig
 	hooks                   *latest.HooksConfig
 	cache                   *cache.Cache
+	// planInstruction is the persona instruction used by the runtime
+	// when the session is in plan mode. Empty means "use the runtime's
+	// canned plan-mode reminder". See [latest.PlanPersonaConfig].
+	planInstruction string
 
 	// warningsMu guards pendingWarnings. AddToolWarning and DrainWarnings
 	// may be called concurrently from the runtime loop, the MCP server,
@@ -77,6 +81,13 @@ func (a *Agent) Name() string {
 // Instruction returns the agent's instructions
 func (a *Agent) Instruction() string {
 	return a.instruction
+}
+
+// PlanInstruction returns the persona instruction the runtime uses while
+// the session is in plan mode. Empty means the agent did not declare a
+// plan persona — the runtime falls back to its canned plan-mode reminder.
+func (a *Agent) PlanInstruction() string {
+	return a.planInstruction
 }
 
 func (a *Agent) AddDate() bool {

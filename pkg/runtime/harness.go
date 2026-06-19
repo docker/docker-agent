@@ -46,7 +46,7 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	}()
 
 	turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
-	planReminder := planModeReminderMessages(sess)
+	planReminder := planModeReminderMessages(sess, a)
 	messages := sess.GetMessages(a, append(append(baseExtra, turnStartMsgs...), planReminder...)...)
 	stop, msg, rewritten := r.executeBeforeLLMCallHooks(ctx, sess, a, modelID, 1, messages)
 	if stop {
