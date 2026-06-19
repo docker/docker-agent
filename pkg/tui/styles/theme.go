@@ -490,6 +490,30 @@ func LoadTheme(ref string) (*Theme, error) {
 	return theme, nil
 }
 
+// ParseTheme decodes a theme from raw YAML bytes and merges it onto the default
+// theme, so a partial theme need only specify the fields it wants to override.
+// This is the same merge behavior used when loading built-in and user themes
+// (see loadBuiltinTheme / loadThemeFrom), exposed for in-memory or embedded
+// themes that are not backed by a file on disk.
+//
+// Unlike LoadTheme, ParseTheme does not consult the theme cache and leaves Ref
+// unset, since an in-memory theme has no reference to reload from.
+func ParseTheme(data []byte) (*Theme, error) {
+	var override Theme
+	if err := yaml.Unmarshal(data, &override); err != nil {
+		return nil, fmt.Errorf("parsing theme: %w", err)
+	}
+
+	// mergeTheme inherits the default's Name when the override omits one, which
+	// would mislabel an unnamed custom theme as "Default". Name it explicitly.
+	merged := mergeTheme(DefaultTheme(), &override)
+	if override.Name == "" {
+		merged.Name = "custom"
+	}
+
+	return merged, nil
+}
+
 // getUserThemeFileInfo returns the path and modTime of a user theme file if it exists.
 // Returns empty path and zero time if the file doesn't exist.
 func getUserThemeFileInfo(ref string) (path string, modTime time.Time) {

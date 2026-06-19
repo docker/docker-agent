@@ -41,6 +41,43 @@ func TestDefaultTheme(t *testing.T) {
 	assert.NotEmpty(t, theme.Markdown.Heading)
 }
 
+func TestParseTheme_PartialOverrideMergesOntoDefault(t *testing.T) {
+	t.Parallel()
+
+	def := DefaultTheme()
+
+	// A partial theme that overrides only the accent color.
+	data := []byte("name: Branded\ncolors:\n  accent: \"#FF0000\"\n")
+
+	theme, err := ParseTheme(data)
+	require.NoError(t, err)
+	require.NotNil(t, theme)
+
+	// Overridden field takes the new value.
+	assert.Equal(t, "#FF0000", theme.Colors.Accent)
+	assert.Equal(t, "Branded", theme.Name)
+
+	// Unspecified fields are inherited from the default theme.
+	assert.Equal(t, def.Colors.Background, theme.Colors.Background)
+	assert.Equal(t, def.Colors.Success, theme.Colors.Success)
+	assert.Equal(t, def.Markdown.Heading, theme.Markdown.Heading)
+}
+
+func TestParseTheme_DefaultsNameWhenAbsent(t *testing.T) {
+	t.Parallel()
+
+	theme, err := ParseTheme([]byte("colors:\n  accent: \"#FF0000\"\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "custom", theme.Name)
+}
+
+func TestParseTheme_InvalidYAML(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseTheme([]byte("colors: [this is not a map"))
+	require.Error(t, err)
+}
+
 func TestListThemeRefs_EmptyDir(t *testing.T) {
 	t.Parallel()
 
