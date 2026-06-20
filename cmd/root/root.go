@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/selfupdate"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	_ "github.com/docker/docker-agent/pkg/tools/mcp/keyringstore"
 	"github.com/docker/docker-agent/pkg/version"
 )
 

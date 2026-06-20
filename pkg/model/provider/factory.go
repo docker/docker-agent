@@ -10,7 +10,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
-	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/rulebased"
 )
@@ -22,8 +21,7 @@ type Registry struct {
 }
 
 func NewRegistry(factories map[string]Factory) *Registry {
-	copied := make(map[string]Factory, len(factories)+1)
-	copied["dmr"] = dmrFactory
+	copied := make(map[string]Factory, len(factories))
 	maps.Copy(copied, factories)
 	return &Registry{factories: copied}
 }
@@ -92,14 +90,13 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 
 var defaultFactories map[string]Factory
 
+// Deprecated: the core registry intentionally contains no concrete SDK-backed
+// providers. Use providers.NewDefaultRegistry for Docker Agent's full provider
+// set, or NewRegistry with the concrete provider factories an embedder needs.
 func DefaultRegistry() *Registry {
 	return NewRegistry(defaultFactories)
 }
 
 func unknownProviderError(providerType string) error {
 	return fmt.Errorf("unknown provider type %q (register it with provider.NewRegistry or use providers.NewDefaultRegistry)", providerType)
-}
-
-func dmrFactory(ctx context.Context, cfg *latest.ModelConfig, _ environment.Provider, opts ...options.Opt) (Provider, error) {
-	return dmr.NewClient(ctx, cfg, opts...)
 }

@@ -28,6 +28,9 @@ func NewRegistry(factories map[string]Factory) *Registry {
 
 var defaultFactories map[string]Factory
 
+// Deprecated: the core registry intentionally contains no concrete SDK-backed
+// providers. Use providers.NewDefaultRegistry for Docker Agent's full provider
+// set, or NewRegistry with the concrete provider factories an embedder needs.
 func DefaultRegistry() *Registry { return NewRegistry(defaultFactories) }
 
 func (r *Registry) New(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {

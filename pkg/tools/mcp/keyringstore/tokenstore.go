@@ -1,4 +1,4 @@
-package mcp
+package keyringstore
 
 import (
 	"bytes"
@@ -20,6 +20,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
 // OAuth tokens are encrypted with AES-256-GCM and written to a single file
@@ -67,7 +68,7 @@ type KeyringTokenStore struct {
 	write    func(string, []byte) error
 
 	mu      sync.Mutex
-	cache   map[string]*OAuthToken
+	cache   map[string]*mcp.OAuthToken
 	key     []byte // cached encryption key; fetched from the keyring once
 	loaded  bool
 	loadErr error
@@ -92,22 +93,31 @@ func openKeyring() (keyring.Keyring, error) {
 // outbound HTTP request, popping a macOS password prompt for the
 // `docker-agent-oauth` keychain item on developer machines that have a
 // token from a prior login.
-var defaultStore = sync.OnceValue(func() OAuthTokenStore {
+var defaultStore = sync.OnceValue(func() mcp.OAuthTokenStore {
 	if testing.Testing() {
-		return NewInMemoryTokenStore()
+		return mcp.NewInMemoryTokenStore()
 	}
 	ring, err := openKeyring()
 	if err != nil {
 		slog.Warn("OS keyring not available, falling back to in-memory token store", "error", err)
-		return NewInMemoryTokenStore()
+		return mcp.NewInMemoryTokenStore()
 	}
 	return newKeyringTokenStore(ring, filepath.Join(paths.GetConfigDir(), tokenFileName))
 })
 
+func init() {
+	Register()
+}
+
+// Register installs the keyring-backed token store as the default for MCP OAuth.
+func Register() {
+	mcp.SetDefaultTokenStoreFactory(NewKeyringTokenStore)
+}
+
 // NewKeyringTokenStore returns the process-wide token store backed by the
 // OS keyring, falling back to InMemoryTokenStore when no backend is
 // available. It always returns the same instance.
-func NewKeyringTokenStore() OAuthTokenStore {
+func NewKeyringTokenStore() mcp.OAuthTokenStore {
 	return defaultStore()
 }
 
@@ -119,7 +129,7 @@ func newKeyringTokenStore(ring keyring.Keyring, filePath string) *KeyringTokenSt
 		ring:     ring,
 		filePath: filePath,
 		write:    writeTokenFile,
-		cache:    map[string]*OAuthToken{},
+		cache:    map[string]*mcp.OAuthToken{},
 	}
 }
 
@@ -147,7 +157,7 @@ func (s *KeyringTokenStore) load() {
 		}
 		if derr := s.decryptInto(key, data); derr != nil {
 			slog.Warn("OAuth token file is corrupt; starting fresh", "error", derr)
-			s.cache = map[string]*OAuthToken{}
+			s.cache = map[string]*mcp.OAuthToken{}
 		}
 	case errors.Is(err, os.ErrNotExist):
 		// Possibly an upgrade from an older keyring-only layout. Best-effort
@@ -212,7 +222,7 @@ func (s *KeyringTokenStore) decryptInto(key, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("failed to decrypt token file: %w", err)
 	}
-	cache := map[string]*OAuthToken{}
+	cache := map[string]*mcp.OAuthToken{}
 	if err := json.Unmarshal(plaintext, &cache); err != nil {
 		return fmt.Errorf("failed to unmarshal token bundle: %w", err)
 	}
@@ -267,7 +277,7 @@ func (s *KeyringTokenStore) migrateLegacyLocked() {
 // Caller must hold s.mu.
 func (s *KeyringTokenStore) collectLegacyTokensLocked() []string {
 	var legacyKeys []string
-	legacyTokens := map[string]*OAuthToken{}
+	legacyTokens := map[string]*mcp.OAuthToken{}
 
 	// Oldest legacy layout: one keyring item per resource URL.
 	keys, err := s.ring.Keys()
@@ -285,7 +295,7 @@ func (s *KeyringTokenStore) collectLegacyTokensLocked() []string {
 			if err != nil {
 				continue
 			}
-			var token OAuthToken
+			var token mcp.OAuthToken
 			if json.Unmarshal(item.Data, &token) != nil {
 				continue
 			}
@@ -297,7 +307,7 @@ func (s *KeyringTokenStore) collectLegacyTokensLocked() []string {
 	// Newer legacy layout: a single JSON bundle under one keyring item. It
 	// intentionally wins over per-resource items for the same URL.
 	if item, err := s.ring.Get(legacyBundleKey); err == nil {
-		bundle := map[string]*OAuthToken{}
+		bundle := map[string]*mcp.OAuthToken{}
 		if json.Unmarshal(item.Data, &bundle) == nil {
 			maps.Copy(legacyTokens, bundle)
 		}
@@ -372,7 +382,7 @@ func (s *KeyringTokenStore) reloadFromDiskLocked() error {
 	}
 	if err := s.decryptInto(key, data); err != nil {
 		slog.Warn("OAuth token file is corrupt; overwriting with fresh token bundle", "error", err)
-		s.cache = map[string]*OAuthToken{}
+		s.cache = map[string]*mcp.OAuthToken{}
 	}
 	return nil
 }
@@ -396,7 +406,7 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	return gcm, nil
 }
 
-func (s *KeyringTokenStore) GetToken(resourceURL string) (*OAuthToken, error) {
+func (s *KeyringTokenStore) GetToken(resourceURL string) (*mcp.OAuthToken, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.load()
@@ -408,7 +418,7 @@ func (s *KeyringTokenStore) GetToken(resourceURL string) (*OAuthToken, error) {
 	return token, nil
 }
 
-func (s *KeyringTokenStore) StoreToken(resourceURL string, token *OAuthToken) error {
+func (s *KeyringTokenStore) StoreToken(resourceURL string, token *mcp.OAuthToken) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.load()
@@ -453,48 +463,15 @@ func (s *KeyringTokenStore) RemoveToken(resourceURL string) error {
 	return s.persistLocked()
 }
 
-// list returns a snapshot of all stored tokens.
-func (s *KeyringTokenStore) list() []OAuthTokenEntry {
+// ListOAuthTokens returns a snapshot of all stored tokens.
+func (s *KeyringTokenStore) ListOAuthTokens() []mcp.OAuthTokenEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.load()
 
-	entries := make([]OAuthTokenEntry, 0, len(s.cache))
+	entries := make([]mcp.OAuthTokenEntry, 0, len(s.cache))
 	for url, token := range s.cache {
-		entries = append(entries, OAuthTokenEntry{ResourceURL: url, Token: token})
+		entries = append(entries, mcp.OAuthTokenEntry{ResourceURL: url, Token: token})
 	}
 	return entries
-}
-
-// OAuthTokenEntry pairs a stored OAuth token with its resource URL.
-type OAuthTokenEntry struct {
-	ResourceURL string
-	Token       *OAuthToken
-}
-
-// requireKeyring returns the singleton store cast to *KeyringTokenStore,
-// or an error if the OS keyring backend is unavailable.
-func requireKeyring() (*KeyringTokenStore, error) {
-	if s, ok := defaultStore().(*KeyringTokenStore); ok {
-		return s, nil
-	}
-	return nil, errors.New("OS keyring not available")
-}
-
-// ListOAuthTokens returns every OAuth token persisted in the keyring.
-func ListOAuthTokens() ([]OAuthTokenEntry, error) {
-	s, err := requireKeyring()
-	if err != nil {
-		return nil, err
-	}
-	return s.list(), nil
-}
-
-// RemoveOAuthToken deletes the token stored for resourceURL.
-func RemoveOAuthToken(resourceURL string) error {
-	s, err := requireKeyring()
-	if err != nil {
-		return err
-	}
-	return s.RemoveToken(resourceURL)
 }

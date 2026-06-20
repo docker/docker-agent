@@ -8,11 +8,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/hooks"
-	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 )
 
 // Unload is the registered name of the on_agent_switch builtin that
@@ -31,11 +31,6 @@ import (
 // net/http. It carries no runtime-side coupling and silently skips any
 // model whose endpoint isn't reachable as plain HTTP (e.g. cloud
 // providers that don't expose [hooks.ModelEndpoint.BaseURL]).
-//
-// Provider dispatch and URL resolution are owned by
-// [pkg/model/provider/dmr] (see [dmr.ProviderType] and [dmr.UnloadURL]),
-// so this builtin stays a dumb dispatcher and DMR keeps full control
-// of its conventions.
 const Unload = "unload"
 
 // unloadTimeout caps each per-model Unload call so a stalled engine
@@ -52,7 +47,7 @@ func unload(ctx context.Context, in *hooks.Input, _ []string) (*hooks.Output, er
 		return nil, nil
 	}
 	for _, m := range in.FromAgentModels {
-		if m.Provider != dmr.ProviderType {
+		if m.Provider != "dmr" {
 			continue
 		}
 		if err := unloadOne(ctx, m); err != nil {
@@ -68,7 +63,7 @@ func unload(ctx context.Context, in *hooks.Input, _ []string) (*hooks.Output, er
 // (no base_url and no unload_api) is a silent no-op so the hook stays
 // harmless on test / in-process providers.
 func unloadOne(parent context.Context, m hooks.ModelEndpoint) error {
-	endpoint, err := dmr.UnloadURL(m.BaseURL, m.UnloadAPI)
+	endpoint, err := dmrUnloadURL(m.BaseURL, m.UnloadAPI)
 	if err != nil || endpoint == "" {
 		return err
 	}
@@ -105,4 +100,26 @@ func unloadOne(parent context.Context, m hooks.ModelEndpoint) error {
 	// body has been read to EOF and closed).
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return nil
+}
+
+func dmrUnloadURL(baseURL, unloadAPI string) (string, error) {
+	if strings.HasPrefix(unloadAPI, "http://") || strings.HasPrefix(unloadAPI, "https://") {
+		return unloadAPI, nil
+	}
+	if baseURL == "" && unloadAPI == "" {
+		return "", nil
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("base_url %q is not absolute; cannot resolve unload endpoint", baseURL)
+	}
+	switch {
+	case unloadAPI == "":
+		u.Path = strings.TrimSuffix(strings.TrimSuffix(u.Path, "/"), "/v1") + "/_unload"
+	case strings.HasPrefix(unloadAPI, "/"):
+		u.Path = unloadAPI
+	default:
+		u.Path = "/" + unloadAPI
+	}
+	return u.String(), nil
 }

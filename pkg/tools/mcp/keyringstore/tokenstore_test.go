@@ -1,4 +1,4 @@
-package mcp
+package keyringstore
 
 import (
 	"bytes"
@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/99designs/keyring"
+
+	"github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
 // newTestStore returns a KeyringTokenStore backed by an in-memory array
@@ -26,7 +28,7 @@ func newTestStore(t *testing.T) (*KeyringTokenStore, keyring.Keyring) {
 func TestKeyringTokenStore_RoundTrip(t *testing.T) {
 	// Use in-memory store to avoid triggering macOS keychain permission dialogs
 	// or failing in CI environments without a keyring.
-	store := NewInMemoryTokenStore()
+	store := mcp.NewInMemoryTokenStore()
 
 	resourceURL := "https://example.com/mcp"
 
@@ -36,7 +38,7 @@ func TestKeyringTokenStore_RoundTrip(t *testing.T) {
 	}
 
 	// Store a token
-	token := &OAuthToken{
+	token := &mcp.OAuthToken{
 		AccessToken:  "access-123",
 		TokenType:    "Bearer",
 		RefreshToken: "refresh-456",
@@ -69,8 +71,8 @@ func TestKeyringTokenStore_RoundTrip(t *testing.T) {
 }
 
 func TestKeyringTokenStore_JSONRoundTrip(t *testing.T) {
-	// Verify that OAuthToken serializes correctly (important for keyring storage)
-	token := &OAuthToken{
+	// Verify that mcp.OAuthToken serializes correctly (important for keyring storage)
+	token := &mcp.OAuthToken{
 		AccessToken:  "at",
 		TokenType:    "Bearer",
 		RefreshToken: "rt",
@@ -84,7 +86,7 @@ func TestKeyringTokenStore_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 
-	var got OAuthToken
+	var got mcp.OAuthToken
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
@@ -95,7 +97,7 @@ func TestKeyringTokenStore_JSONRoundTrip(t *testing.T) {
 }
 
 func TestKeyringTokenStore_RemoveNonExistent(t *testing.T) {
-	store := NewInMemoryTokenStore()
+	store := mcp.NewInMemoryTokenStore()
 	if err := store.RemoveToken("https://nonexistent.example.com"); err != nil {
 		t.Fatalf("RemoveToken for non-existent key should not error: %v", err)
 	}
@@ -113,7 +115,7 @@ func TestEncryptedStore_PersistsAcrossReload(t *testing.T) {
 		"https://server-c.example/mcp",
 	}
 	for i, url := range urls {
-		if err := store.StoreToken(url, &OAuthToken{AccessToken: "at-" + string(rune('A'+i))}); err != nil {
+		if err := store.StoreToken(url, &mcp.OAuthToken{AccessToken: "at-" + string(rune('A'+i))}); err != nil {
 			t.Fatalf("StoreToken(%s): %v", url, err)
 		}
 	}
@@ -172,7 +174,7 @@ func TestEncryptedStore_ReadsTouchKeyringOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), tokenFileName)
 	store := newKeyringTokenStore(ring, path)
 	for i, url := range urls {
-		if err := store.StoreToken(url, &OAuthToken{AccessToken: "at-" + string(rune('A'+i))}); err != nil {
+		if err := store.StoreToken(url, &mcp.OAuthToken{AccessToken: "at-" + string(rune('A'+i))}); err != nil {
 			t.Fatalf("StoreToken(%s): %v", url, err)
 		}
 	}
@@ -210,7 +212,7 @@ func TestEncryptedStore_WritesTouchKeyringOnce(t *testing.T) {
 
 	for i := range 5 {
 		url := fmt.Sprintf("https://server-%d.example/mcp", i)
-		if err := store.StoreToken(url, &OAuthToken{AccessToken: "at"}); err != nil {
+		if err := store.StoreToken(url, &mcp.OAuthToken{AccessToken: "at"}); err != nil {
 			t.Fatalf("StoreToken(%s): %v", url, err)
 		}
 	}
@@ -251,17 +253,17 @@ func TestEncryptedStore_CrossProcessStoresMerge(t *testing.T) {
 	processA := newKeyringTokenStore(ring, path)
 	processB := newKeyringTokenStore(ring, path)
 
-	if err := processA.StoreToken("https://a.example/mcp", &OAuthToken{AccessToken: "a"}); err != nil {
+	if err := processA.StoreToken("https://a.example/mcp", &mcp.OAuthToken{AccessToken: "a"}); err != nil {
 		t.Fatalf("processA initial StoreToken: %v", err)
 	}
 	// Process B loads the same initial state before A writes again.
 	if _, err := processB.GetToken("https://a.example/mcp"); err != nil {
 		t.Fatalf("processB load: %v", err)
 	}
-	if err := processA.StoreToken("https://c.example/mcp", &OAuthToken{AccessToken: "c"}); err != nil {
+	if err := processA.StoreToken("https://c.example/mcp", &mcp.OAuthToken{AccessToken: "c"}); err != nil {
 		t.Fatalf("processA second StoreToken: %v", err)
 	}
-	if err := processB.StoreToken("https://b.example/mcp", &OAuthToken{AccessToken: "b"}); err != nil {
+	if err := processB.StoreToken("https://b.example/mcp", &mcp.OAuthToken{AccessToken: "b"}); err != nil {
 		t.Fatalf("processB StoreToken: %v", err)
 	}
 
@@ -293,7 +295,7 @@ func TestEncryptedStore_KeyringHoldsOnlyTheKey(t *testing.T) {
 		"https://server-b.example/mcp",
 		"https://server-c.example/mcp",
 	} {
-		if err := store.StoreToken(url, &OAuthToken{AccessToken: "at"}); err != nil {
+		if err := store.StoreToken(url, &mcp.OAuthToken{AccessToken: "at"}); err != nil {
 			t.Fatalf("StoreToken(%s): %v", url, err)
 		}
 	}
@@ -313,7 +315,7 @@ func TestEncryptedStore_FileIsNotPlaintext(t *testing.T) {
 	store, _ := newTestStore(t)
 
 	const secret = "super-secret-access-token-value"
-	if err := store.StoreToken("https://a.example/mcp", &OAuthToken{AccessToken: secret}); err != nil {
+	if err := store.StoreToken("https://a.example/mcp", &mcp.OAuthToken{AccessToken: secret}); err != nil {
 		t.Fatalf("StoreToken: %v", err)
 	}
 
@@ -333,7 +335,7 @@ func TestEncryptedStore_FileIsNotPlaintext(t *testing.T) {
 // owner-only permissions.
 func TestEncryptedStore_FilePermissions(t *testing.T) {
 	store, _ := newTestStore(t)
-	if err := store.StoreToken("https://a.example/mcp", &OAuthToken{AccessToken: "x"}); err != nil {
+	if err := store.StoreToken("https://a.example/mcp", &mcp.OAuthToken{AccessToken: "x"}); err != nil {
 		t.Fatalf("StoreToken: %v", err)
 	}
 	info, err := os.Stat(store.filePath)
@@ -352,7 +354,7 @@ func TestEncryptedStore_LegacyBundleMigration(t *testing.T) {
 	ring := keyring.NewArrayKeyring(nil)
 	path := filepath.Join(t.TempDir(), tokenFileName)
 
-	bundle := map[string]*OAuthToken{
+	bundle := map[string]*mcp.OAuthToken{
 		"https://legacy-a.example/mcp": {AccessToken: "legacy-a"},
 		"https://legacy-b.example/mcp": {AccessToken: "legacy-b"},
 	}
@@ -402,7 +404,7 @@ func TestEncryptedStore_LegacyPerTokenMigration(t *testing.T) {
 		"https://legacy-b.example/mcp",
 	}
 	for _, url := range urls {
-		seedLegacyToken(t, ring, url, &OAuthToken{AccessToken: "legacy-" + url})
+		seedLegacyToken(t, ring, url, &mcp.OAuthToken{AccessToken: "legacy-" + url})
 	}
 	// Also seed the legacy index, which should be removed without becoming
 	// a token entry.
@@ -438,8 +440,8 @@ func TestEncryptedStore_LegacyBundleWinsOverPerTokenMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), tokenFileName)
 	const url = "https://legacy.example/mcp"
 
-	seedLegacyToken(t, ring, url, &OAuthToken{AccessToken: "old-per-token"})
-	bundleData, err := json.Marshal(map[string]*OAuthToken{
+	seedLegacyToken(t, ring, url, &mcp.OAuthToken{AccessToken: "old-per-token"})
+	bundleData, err := json.Marshal(map[string]*mcp.OAuthToken{
 		url: {AccessToken: "new-bundle"},
 	})
 	if err != nil {
@@ -458,7 +460,7 @@ func TestEncryptedStore_LegacyBundleWinsOverPerTokenMigration(t *testing.T) {
 	}
 }
 
-func seedLegacyToken(t *testing.T, ring keyring.Keyring, url string, tok *OAuthToken) {
+func seedLegacyToken(t *testing.T, ring keyring.Keyring, url string, tok *mcp.OAuthToken) {
 	t.Helper()
 	data, err := json.Marshal(tok)
 	if err != nil {
@@ -476,7 +478,7 @@ func seedLegacyToken(t *testing.T, ring keyring.Keyring, url string, tok *OAuthT
 func TestEncryptedStore_MigrationKeepsLegacyOnPersistFailure(t *testing.T) {
 	ring := keyring.NewArrayKeyring(nil)
 
-	bundle := map[string]*OAuthToken{
+	bundle := map[string]*mcp.OAuthToken{
 		"https://legacy-a.example/mcp": {AccessToken: "legacy-a"},
 	}
 	data, err := json.Marshal(bundle)
@@ -514,7 +516,7 @@ func TestEncryptedStore_StoreRefusesAfterUnreadableFile(t *testing.T) {
 	}
 	store := newKeyringTokenStore(ring, filepath.Join(blocker, tokenFileName))
 
-	if err := store.StoreToken("https://a.example/mcp", &OAuthToken{AccessToken: "a"}); err == nil {
+	if err := store.StoreToken("https://a.example/mcp", &mcp.OAuthToken{AccessToken: "a"}); err == nil {
 		t.Fatal("StoreToken should refuse to overwrite after unreadable token file")
 	}
 }
@@ -526,7 +528,7 @@ func TestEncryptedStore_RemovePersists(t *testing.T) {
 	store, ring := newTestStore(t)
 
 	url := "https://to-remove.example/mcp"
-	if err := store.StoreToken(url, &OAuthToken{AccessToken: "x"}); err != nil {
+	if err := store.StoreToken(url, &mcp.OAuthToken{AccessToken: "x"}); err != nil {
 		t.Fatalf("StoreToken: %v", err)
 	}
 	if err := store.RemoveToken(url); err != nil {
@@ -545,7 +547,7 @@ func TestEncryptedStore_CorruptFile(t *testing.T) {
 
 	// Seed the encryption key by writing a real token first, then clobber
 	// the file with garbage that won't decrypt.
-	if err := store.StoreToken("https://seed.example/mcp", &OAuthToken{AccessToken: "seed"}); err != nil {
+	if err := store.StoreToken("https://seed.example/mcp", &mcp.OAuthToken{AccessToken: "seed"}); err != nil {
 		t.Fatalf("seed StoreToken: %v", err)
 	}
 	if err := os.WriteFile(store.filePath, []byte("not-encrypted-garbage"), 0o600); err != nil {
@@ -558,7 +560,7 @@ func TestEncryptedStore_CorruptFile(t *testing.T) {
 	}
 
 	// StoreToken on top of a corrupt file should overwrite it.
-	if err := fresh.StoreToken("https://anything.example/mcp", &OAuthToken{AccessToken: "fresh"}); err != nil {
+	if err := fresh.StoreToken("https://anything.example/mcp", &mcp.OAuthToken{AccessToken: "fresh"}); err != nil {
 		t.Fatalf("StoreToken after corrupt file: %v", err)
 	}
 	got, err := fresh.GetToken("https://anything.example/mcp")
@@ -572,15 +574,15 @@ func TestEncryptedStore_CorruptFile(t *testing.T) {
 func TestEncryptedStore_ListReturnsAllEntries(t *testing.T) {
 	store, ring := newTestStore(t)
 
-	if err := store.StoreToken("https://a.example/mcp", &OAuthToken{AccessToken: "a"}); err != nil {
+	if err := store.StoreToken("https://a.example/mcp", &mcp.OAuthToken{AccessToken: "a"}); err != nil {
 		t.Fatalf("StoreToken: %v", err)
 	}
-	if err := store.StoreToken("https://b.example/mcp", &OAuthToken{AccessToken: "b"}); err != nil {
+	if err := store.StoreToken("https://b.example/mcp", &mcp.OAuthToken{AccessToken: "b"}); err != nil {
 		t.Fatalf("StoreToken: %v", err)
 	}
 
 	// Reload from the ring + file (mirroring what a fresh process would do).
-	entries := newKeyringTokenStore(ring, store.filePath).list()
+	entries := newKeyringTokenStore(ring, store.filePath).ListOAuthTokens()
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 entries, got %d: %+v", len(entries), entries)
 	}
@@ -657,7 +659,7 @@ func TestKeyringTokenStore_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			url := fmt.Sprintf("https://server-%d.example/mcp", id%3)
 			for j := range numOperations {
-				_ = store.StoreToken(url, &OAuthToken{
+				_ = store.StoreToken(url, &mcp.OAuthToken{
 					AccessToken: fmt.Sprintf("token-%d-%d", id, j),
 				})
 			}
@@ -678,6 +680,6 @@ func TestKeyringTokenStore_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 
 	// Verify the store is still in a consistent state
-	entries := store.list()
+	entries := store.ListOAuthTokens()
 	t.Logf("After concurrent access: %d tokens remain", len(entries))
 }

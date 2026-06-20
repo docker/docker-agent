@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
@@ -15,6 +16,44 @@ type OAuthTokenStore interface {
 	StoreToken(resourceURL string, token *OAuthToken) error
 	// RemoveToken removes a token for the given resource URL
 	RemoveToken(resourceURL string) error
+}
+
+// OAuthTokenStoreFactory constructs the process-wide persistent OAuth token store.
+type OAuthTokenStoreFactory func() OAuthTokenStore
+
+var (
+	defaultStoreMu sync.Mutex
+	defaultStore   = sync.OnceValue(func() OAuthTokenStore { return NewInMemoryTokenStore() })
+)
+
+// SetDefaultTokenStoreFactory installs the process-wide persistent token-store
+// factory used by NewKeyringTokenStore and remote MCP toolsets. It must be
+// called during package initialization, before any NewKeyringTokenStore call;
+// the first store lookup seals the registered factory for the process.
+// Embedders that do not need persistent MCP OAuth storage can avoid importing
+// any OS keyring implementation; docker-agent's CLI registers one from
+// pkg/tools/mcp/keyringstore.
+func SetDefaultTokenStoreFactory(factory OAuthTokenStoreFactory) {
+	if factory == nil {
+		factory = NewInMemoryTokenStore
+	}
+	defaultStoreMu.Lock()
+	defer defaultStoreMu.Unlock()
+	defaultStore = sync.OnceValue(factory)
+}
+
+func defaultTokenStore() OAuthTokenStore {
+	defaultStoreMu.Lock()
+	defer defaultStoreMu.Unlock()
+	return defaultStore()
+}
+
+// NewKeyringTokenStore returns the process-wide persistent OAuth token store.
+// The name is kept for compatibility; without an optional keyring-backed store
+// registered by pkg/tools/mcp/keyringstore before first use, it falls back to
+// an in-memory store.
+func NewKeyringTokenStore() OAuthTokenStore {
+	return defaultTokenStore()
 }
 
 type OAuthToken struct {
@@ -45,7 +84,31 @@ func (t *OAuthToken) IsExpired() bool {
 	return time.Now().Add(30 * time.Second).After(t.ExpiresAt)
 }
 
-// InMemoryTokenStore implements OAuthTokenStore in memory
+// OAuthTokenEntry pairs a stored OAuth token with its resource URL.
+type OAuthTokenEntry struct {
+	ResourceURL string
+	Token       *OAuthToken
+}
+
+type oauthTokenLister interface {
+	ListOAuthTokens() []OAuthTokenEntry
+}
+
+// ListOAuthTokens returns every OAuth token from the registered persistent store.
+func ListOAuthTokens() ([]OAuthTokenEntry, error) {
+	store := NewKeyringTokenStore()
+	lister, ok := store.(oauthTokenLister)
+	if !ok {
+		return nil, fmt.Errorf("persistent OAuth token store not available")
+	}
+	return lister.ListOAuthTokens(), nil
+}
+
+// RemoveOAuthToken deletes the token stored for resourceURL.
+func RemoveOAuthToken(resourceURL string) error {
+	return NewKeyringTokenStore().RemoveToken(resourceURL)
+}
+
 type InMemoryTokenStore struct {
 	tokens *concurrent.Map[string, *OAuthToken]
 }

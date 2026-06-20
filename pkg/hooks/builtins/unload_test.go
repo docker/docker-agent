@@ -12,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/hooks"
-	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 )
 
 // dmrInput builds an on_agent_switch [hooks.Input] carrying a single
@@ -27,7 +26,7 @@ func dmrInput(server *httptest.Server, unloadAPI string, opts ...func(*hooks.Inp
 		FromAgent: "from",
 		ToAgent:   "to",
 		FromAgentModels: []hooks.ModelEndpoint{{
-			Provider:  dmr.ProviderType,
+			Provider:  "dmr",
 			Model:     "ai/qwen3",
 			BaseURL:   server.URL + "/engines/v1",
 			UnloadAPI: unloadAPI,
@@ -133,9 +132,9 @@ func TestUnload_FiltersPerElement(t *testing.T) {
 		ToAgent:   "to",
 		FromAgentModels: []hooks.ModelEndpoint{
 			{Provider: "openai", Model: "gpt-4", BaseURL: "https://api.openai.com/v1"},
-			{Provider: dmr.ProviderType, Model: "ai/qwen3", BaseURL: server.URL + "/engines/v1"},
+			{Provider: "dmr", Model: "ai/qwen3", BaseURL: server.URL + "/engines/v1"},
 			{Provider: "anthropic", Model: "claude", BaseURL: "https://api.anthropic.com"},
-			{Provider: dmr.ProviderType, Model: "ai/llama3.2", BaseURL: server.URL + "/engines/llama.cpp/v1"},
+			{Provider: "dmr", Model: "ai/llama3.2", BaseURL: server.URL + "/engines/llama.cpp/v1"},
 		},
 	}
 
@@ -194,7 +193,7 @@ func TestUnload_NoOpInputs(t *testing.T) {
 			in: func(*httptest.Server) *hooks.Input {
 				return &hooks.Input{
 					FromAgent: "from", ToAgent: "to",
-					FromAgentModels: []hooks.ModelEndpoint{{Provider: dmr.ProviderType, Model: "ai/qwen3"}},
+					FromAgentModels: []hooks.ModelEndpoint{{Provider: "dmr", Model: "ai/qwen3"}},
 				}
 			},
 		},

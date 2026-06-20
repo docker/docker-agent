@@ -12,8 +12,7 @@
 //     custom providers, built-in aliases, and model-specific rules
 //     (thinking budget, interleaved thinking, ...).
 //   - factory.go: shared dispatch from a resolved provider type to the
-//     concrete client constructor, plus the always-available dmr provider
-//     and the rule-based router.
+//     concrete client constructor, plus the rule-based router.
 //
 // Optional SDK-backed providers live outside this package's default import
 // graph. YAML-loading applications that need Docker Agent's full provider set
