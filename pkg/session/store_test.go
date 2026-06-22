@@ -587,6 +587,56 @@ func TestNormalizeMode(t *testing.T) {
 	assert.Equal(t, ModePlan, NormalizeMode(ModePlan))
 }
 
+func TestSession_ModeAccessors(t *testing.T) {
+	t.Run("LoadMode normalises unset / invalid", func(t *testing.T) {
+		// Sessions loaded before the mode column existed have Mode == ""
+		// in the struct. LoadMode should still return a valid value
+		// (ModeBuild) so downstream code never sees the empty sentinel.
+		s := &Session{}
+		assert.Equal(t, ModeBuild, s.LoadMode())
+
+		s.Mode = Mode("garbage")
+		assert.Equal(t, ModeBuild, s.LoadMode())
+	})
+
+	t.Run("StoreMode normalises invalid input", func(t *testing.T) {
+		s := &Session{}
+		s.StoreMode(Mode("garbage"))
+		assert.Equal(t, ModeBuild, s.LoadMode())
+		s.StoreMode(ModePlan)
+		assert.Equal(t, ModePlan, s.LoadMode())
+	})
+
+	t.Run("Load and Store are race-free", func(t *testing.T) {
+		// Go's race detector catches unsynchronised reads/writes; this
+		// test is a no-op without -race but must succeed under it.
+		// Spawn one writer flipping the mode and many readers
+		// sampling it; LoadMode/StoreMode both take s.mu so neither
+		// observes a torn value.
+		s := New(WithUserMessage("hi"))
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			for {
+				select {
+				case <-stop:
+					close(done)
+					return
+				default:
+					s.StoreMode(ModePlan)
+					s.StoreMode(ModeBuild)
+				}
+			}
+		}()
+		for range 1000 {
+			m := s.LoadMode()
+			require.Truef(t, m == ModeBuild || m == ModePlan, "unexpected mode %q", m)
+		}
+		close(stop)
+		<-done
+	})
+}
+
 func TestAgentModelOverrides_SQLite(t *testing.T) {
 	tempDB := filepath.Join(t.TempDir(), "test_model_overrides.db")
 

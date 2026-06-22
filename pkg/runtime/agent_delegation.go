@@ -169,6 +169,20 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithSendUserMessage(false),
 		session.WithParentID(parent.ID),
 		session.WithAttachedFiles(attachedFiles),
+		// Propagate the parent's interaction mode so that plan mode is
+		// not bypassable via delegation: transfer_task / handoff / the
+		// agent builtin are read-only and survive plan-mode tool
+		// filtering, but without this line the child session would
+		// default back to build mode and the child agent would get
+		// every mutating tool. Inheriting the parent's mode preserves
+		// the "hard tool removal" guarantee across the whole delegation
+		// tree (sub-skills, transferred tasks, background agents).
+		//
+		// LoadMode (not direct field access) because the parent's
+		// mode may be flipped concurrently by PATCH
+		// /sessions/:id/mode while the parent's turn is still
+		// running.
+		session.WithMode(parent.LoadMode()),
 	}
 	if cfg.PinAgent {
 		opts = append(opts, session.WithAgentName(cfg.AgentName))

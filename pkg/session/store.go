@@ -592,6 +592,10 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// LoadMode (not direct Mode access) since the runtime may write
+	// to sess.Mode concurrently via StoreMode (PATCH /sessions/:id/mode).
+	// Other fields here pre-date this PR and follow the existing
+	// unlocked pattern — see TODO on session.go for the broader cleanup.
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO sessions (
 			id, tools_approved, input_tokens, output_tokens, title, cost, send_user_message,
@@ -601,7 +605,7 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 		session.ID, session.ToolsApproved, session.InputTokens, session.OutputTokens, session.Title,
 		session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
 		session.CreatedAt.Format(time.RFC3339), fields.PermissionsJSON, fields.AgentModelOverridesJSON,
-		fields.CustomModelsUsedJSON, false, fields.ParentID, string(session.Mode))
+		fields.CustomModelsUsedJSON, false, fields.ParentID, string(session.LoadMode()))
 	if err != nil {
 		return err
 	}
@@ -934,7 +938,7 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		session.ID, session.ToolsApproved, session.InputTokens, session.OutputTokens,
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
 		session.CreatedAt.Format(time.RFC3339), session.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
-		fields.CustomModelsUsedJSON, false, fields.ParentID, string(session.Mode))
+		fields.CustomModelsUsedJSON, false, fields.ParentID, string(session.LoadMode()))
 	if err != nil {
 		return err
 	}
@@ -1088,7 +1092,7 @@ func (s *SQLiteSessionStore) addSessionTx(ctx context.Context, tx *sql.Tx, sessi
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations,
 		session.WorkingDir, session.CreatedAt.Format(time.RFC3339), session.Starred,
 		fields.PermissionsJSON, fields.AgentModelOverridesJSON, fields.CustomModelsUsedJSON, false,
-		fields.ParentID, string(session.Mode))
+		fields.ParentID, string(session.LoadMode()))
 	return err
 }
 

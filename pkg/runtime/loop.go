@@ -1004,7 +1004,9 @@ func filterExcludedTools(agentTools []tools.Tool, excluded []string) []tools.Too
 // extends naturally to user-added MCP tools without any per-tool config.
 func filterToolsForSession(agentTools []tools.Tool, sess *session.Session) []tools.Tool {
 	out := filterExcludedTools(agentTools, sess.ExcludedTools)
-	if sess.Mode == session.ModePlan {
+	// LoadMode rather than direct field access: PATCH /sessions/:id/mode
+	// may flip Mode concurrently with the runtime stream goroutine.
+	if sess.LoadMode() == session.ModePlan {
 		out = filterToReadOnlyTools(out)
 	}
 	return out

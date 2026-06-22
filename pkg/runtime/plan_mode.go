@@ -34,8 +34,11 @@ to begin.
 // planModeReminderMessages returns the system-reminder messages to splice
 // before the conversation history when sess is in plan mode. Returns nil for
 // other modes so callers can use it unconditionally.
+//
+// Reads mode via LoadMode so it stays consistent with concurrent
+// PATCH /sessions/:id/mode writes coming through SessionManager.
 func planModeReminderMessages(sess *session.Session) []chat.Message {
-	if sess == nil || sess.Mode != session.ModePlan {
+	if sess == nil || sess.LoadMode() != session.ModePlan {
 		return nil
 	}
 	return []chat.Message{{

@@ -50,6 +50,7 @@ All endpoints are under the `/api` prefix.
 | `DELETE` | `/api/sessions/:id`                 | Delete a session                                        |
 | `PATCH`  | `/api/sessions/:id/title`           | Update session title                                    |
 | `PATCH`  | `/api/sessions/:id/permissions`     | Update session permissions                              |
+| `PATCH`  | `/api/sessions/:id/mode`            | Switch the session between `build` (default) and `plan` mode — see [Plan mode](#plan-mode) |
 | `POST`   | `/api/sessions/:id/resume`          | Resume a paused session (after tool confirmation)       |
 | `POST`   | `/api/sessions/:id/tools/toggle`    | Toggle auto-approve (YOLO) mode                         |
 | `POST`   | `/api/sessions/:id/elicitation`     | Respond to an MCP tool elicitation request              |
@@ -203,6 +204,30 @@ By default, tool calls require approval. In the API workflow:
 3. Execution continues based on approval/denial
 
 Toggle auto-approve with `POST /api/sessions/:id/tools/toggle` for automated workflows.
+
+## Plan mode {#plan-mode}
+
+Each session has an interaction `mode` that controls what the agent is allowed to do during a turn:
+
+- `build` (default) — the agent has its full toolset.
+- `plan` — the runtime hides every tool that isn't tagged with the MCP-spec `ReadOnlyHint` annotation, and splices a per-turn system reminder telling the agent to draft a plan instead of acting. Use this when you want the agent to research and propose changes before the user authorises execution.
+
+The mode is server-scoped session state, persisted alongside the rest of the session.
+
+**Setting the mode**
+
+- At create time: `POST /api/sessions` with `{ "mode": "plan" }` in the body. Empty / omitted means `build`. Unknown values are rejected with `400`.
+- Mid-session: `PATCH /api/sessions/:id/mode` with `{ "mode": "plan" }` or `{ "mode": "build" }`. The new mode applies on the **next** turn — an in-flight turn finishes under the mode it started with. Responds with `{ "id": "...", "mode": "..." }`.
+
+The current mode is included in `GET /api/sessions/:id` and `GET /api/sessions/:id/snapshot` responses as the top-level `mode` field.
+
+**Inheritance**
+
+Sub-sessions created by delegation tools (`transfer_task`, `run_skill`, the `agent` background-agent builtin) inherit the parent's mode, so a plan-mode parent can't bypass the filter by delegating to a child that would otherwise default to `build`.
+
+**Harness-backed agents**
+
+Plan mode is not supported for agents that delegate the whole turn to an external coding harness (`agent.harness` set in the YAML): the harness manages its own toolset, so the runtime cannot enforce the read-only filter. Attempting to run a harness agent while the session is in plan mode produces an `error` event with `code: "unsupported_mode"` — switch back to `build` first, or pick a non-harness agent.
 
 ## Driving a running TUI with `--listen` {#listen}
 

@@ -226,6 +226,17 @@ func (s *Server) createSession(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 
+	// Reject unknown mode values with a clear 400 instead of silently
+	// coercing to build (which is what the WithMode opt's NormalizeMode
+	// would do downstream). Matches the validation already done by
+	// PATCH /api/sessions/:id/mode so API clients get the same shape
+	// of error whether they pick a mode at create-time or via the
+	// mode-update endpoint. An empty mode is still accepted: it means
+	// "default" and resolves to ModeBuild.
+	if sessionTemplate.Mode != "" && !sessionTemplate.Mode.IsValid() {
+		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid mode %q; must be one of: %s, %s", sessionTemplate.Mode, session.ModeBuild, session.ModePlan))
+	}
+
 	sess, err := s.sm.CreateSession(c.Request().Context(), &sessionTemplate)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to create session: %v", err))
@@ -250,7 +261,9 @@ func (s *Server) getSession(c echo.Context) error {
 		OutputTokens:  sess.OutputTokens,
 		WorkingDir:    sess.WorkingDir,
 		Permissions:   sess.Permissions,
-		Mode:          sess.Mode,
+		// LoadMode: the runtime may be writing Mode via StoreMode
+		// concurrently if the session is actively streaming.
+		Mode: sess.LoadMode(),
 	})
 }
 

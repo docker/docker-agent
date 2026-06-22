@@ -512,6 +512,34 @@ func (s *Session) Usage() (input, output int64) {
 	return s.InputTokens, s.OutputTokens
 }
 
+// LoadMode returns the session's interaction mode under s.mu. Use
+// this from any code that may run concurrently with the runtime
+// (filterToolsForSession, planModeReminderMessages, the harness gate,
+// the PATCH /sessions/:id/mode handler). Direct reads of sess.Mode
+// are only safe at construction/serialisation time, before the
+// session is shared with the runtime goroutine. Returns ModeBuild
+// for any value that NormalizeMode doesn't recognise so downstream
+// code always sees a valid mode.
+//
+// Verb naming matches sync/atomic.Value (Load/Store) rather than the
+// field name to avoid a method-vs-field collision on Mode.
+func (s *Session) LoadMode() Mode {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return NormalizeMode(s.Mode)
+}
+
+// StoreMode atomically updates the session's interaction mode under
+// s.mu. Unknown/empty inputs are normalised to ModeBuild so callers
+// can pass through HTTP/store input without an extra IsValid gate.
+// Use this in place of `sess.Mode = ...` everywhere except
+// construction/serialisation paths.
+func (s *Session) StoreMode(mode Mode) {
+	s.mu.Lock()
+	s.Mode = NormalizeMode(mode)
+	s.mu.Unlock()
+}
+
 // ApplyCompaction atomically resets the session's cumulative token
 // counts and appends a summary item under s.mu so concurrent readers
 // (e.g. the persistence observer's UpdateSession snapshot) cannot

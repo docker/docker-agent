@@ -316,12 +316,14 @@ func (sm *SessionManager) GetSessionSnapshot(ctx context.Context, id string) (*a
 		Messages:      sess.GetAllMessages(),
 		ToolsApproved: sess.ToolsApproved,
 		Permissions:   sess.Permissions,
-		Mode:          sess.Mode,
-		InputTokens:   sess.InputTokens,
-		OutputTokens:  sess.OutputTokens,
-		Streaming:     streaming,
-		Agent:         agent,
-		LastEventSeq:  lastSeq,
+		// LoadMode: the runtime may be writing Mode via StoreMode
+		// concurrently if the session is actively streaming.
+		Mode:         sess.LoadMode(),
+		InputTokens:  sess.InputTokens,
+		OutputTokens: sess.OutputTokens,
+		Streaming:    streaming,
+		Agent:        agent,
+		LastEventSeq: lastSeq,
 	}, nil
 }
 
@@ -750,13 +752,18 @@ func (sm *SessionManager) UpdateSessionPermissions(ctx context.Context, sessionI
 // If the session is actively running, it also updates the in-memory session
 // object so the next turn's tool filter and plan-mode reminder see the new
 // mode without having to round-trip through the store.
+//
+// The runtime stream goroutine reads Mode via LoadMode while we write
+// here, so the write goes through StoreMode to take s.mu. sm.mux still
+// gates UpdateSession to keep the store snapshot consistent with
+// other session-manager mutations (Title, Permissions, …).
 func (sm *SessionManager) UpdateSessionMode(ctx context.Context, sessionID string, mode session.Mode) error {
 	mode = session.NormalizeMode(mode)
 	sm.mux.Lock()
 	defer sm.mux.Unlock()
 
 	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
-		rt.session.Mode = mode
+		rt.session.StoreMode(mode)
 		slog.DebugContext(ctx, "Updated mode for active session", "session_id", sessionID, "mode", mode)
 		return sm.sessionStore.UpdateSession(ctx, rt.session)
 	}
@@ -765,7 +772,7 @@ func (sm *SessionManager) UpdateSessionMode(ctx context.Context, sessionID strin
 	if err != nil {
 		return err
 	}
-	sess.Mode = mode
+	sess.StoreMode(mode)
 	return sm.sessionStore.UpdateSession(ctx, sess)
 }
 

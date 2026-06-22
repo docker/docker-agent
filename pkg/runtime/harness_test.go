@@ -167,6 +167,49 @@ printf '%s\n' '{"type":"result","result":"Hello world"}'
 	assert.Equal(t, []string{"Hello", " world"}, chunks)
 }
 
+// TestHarnessAgentRefusesPlanMode pins the plan-mode-vs-harness invariant:
+// the runtime owns the toolset in the normal LLM loop and can strip
+// non-read-only tools, but a harness-backed agent delegates the whole
+// turn (tools included) to an external library. Rather than degrade
+// plan mode to "advisory prompt only" — which the reminder text
+// explicitly contradicts — the runtime refuses the turn and surfaces
+// an unsupported_mode error so the user can switch back to build mode
+// or pick a non-harness agent.
+func TestHarnessAgentRefusesPlanMode(t *testing.T) {
+	if stdruntime.GOOS == "windows" {
+		t.Skip("shell script shim test")
+	}
+
+	binDir := t.TempDir()
+	// Intentionally produces output that would normally be surfaced as
+	// an assistant message; the test asserts that the harness never
+	// runs, so this output should be dropped.
+	writeHarnessScript(t, binDir, "codex", `#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"this should not appear"}}'
+`)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	rt := newHarnessRuntime(t, "codex")
+	sess := session.New(
+		session.WithUserMessage("do the task"),
+		session.WithMode(session.ModePlan),
+	)
+	events := collectRuntimeEvents(t, rt, sess)
+
+	var errEvent *ErrorEvent
+	for _, ev := range events {
+		if e, ok := ev.(*ErrorEvent); ok {
+			errEvent = e
+			break
+		}
+	}
+	require.NotNil(t, errEvent, "expected ErrorEvent rejecting plan mode for harness agent")
+	assert.Equal(t, ErrorCodeUnsupportedMode, errEvent.Code)
+	assert.Contains(t, errEvent.Error, "plan mode")
+	// Harness must not have produced any assistant content.
+	assert.Empty(t, sess.GetLastAssistantMessageContent())
+}
+
 func writeHarnessScript(t *testing.T, dir, name, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o755))

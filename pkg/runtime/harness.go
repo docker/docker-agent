@@ -24,6 +24,22 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	ctx, span := r.startSpan(ctx, "runtime.harness", trace.WithAttributes(traceAttributesForHarness(sess, a)...))
 	defer span.End()
 
+	// Plan mode's hard guarantee — every non-read-only tool is stripped
+	// from the model's toolset — relies on the runtime owning the
+	// toolset. Harness agents delegate the whole turn (tools included)
+	// to an external library, so we can't enforce the filter here.
+	// Rather than degrade plan mode to an advisory prompt (which the
+	// reminder text explicitly contradicts), refuse the turn so the
+	// user can either switch to build mode or pick a non-harness
+	// agent.
+	if sess.LoadMode() == session.ModePlan {
+		msg := fmt.Sprintf("plan mode is not supported for harness-backed agents (%q): the harness manages its own toolset, so the read-only tool filter cannot be enforced. Switch back to build mode to run this agent.", a.Name())
+		events.Emit(ErrorWithCode(ErrorCodeUnsupportedMode, msg))
+		r.notifyError(ctx, a, sess.ID, msg)
+		span.SetStatus(codes.Error, "plan mode unsupported for harness agent")
+		return turnEndReasonError
+	}
+
 	provider, err := codingharness.NewProvider(a.Harness())
 	if err != nil {
 		msg := fmt.Sprintf("failed to configure harness: %v", err)
@@ -46,8 +62,11 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	}()
 
 	turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
-	planReminder := planModeReminderMessages(sess)
-	messages := sess.GetMessages(a, append(append(baseExtra, turnStartMsgs...), planReminder...)...)
+	// No plan-mode reminder spliced here: plan mode is refused for
+	// harness agents above, so by the time we reach this point
+	// sess.Mode is guaranteed to be build (or empty, which normalises
+	// to build).
+	messages := sess.GetMessages(a, append(baseExtra, turnStartMsgs...)...)
 	stop, msg, rewritten := r.executeBeforeLLMCallHooks(ctx, sess, a, modelID, 1, messages)
 	if stop {
 		slog.WarnContext(ctx, "before_llm_call hook signalled run termination",

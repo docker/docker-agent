@@ -163,6 +163,35 @@ func httpDo(t *testing.T, ctx context.Context, method, socketPath, path string, 
 	return buf
 }
 
+// rawHTTPDo issues an HTTP request like httpDo but returns the status
+// code and body without asserting < 400. Use it from tests that need
+// to verify error responses (4xx/5xx).
+func rawHTTPDo(t *testing.T, ctx context.Context, method, socketPath, path string, payload any) (int, []byte) {
+	t.Helper()
+
+	buf, err := json.Marshal(payload)
+	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(ctx, method, "http://_"+path, bytes.NewReader(buf))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", strings.TrimPrefix(socketPath, "unix://"))
+			},
+		},
+	}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	out, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, out
+}
+
 func unmarshal(t *testing.T, buf []byte, v any) {
 	t.Helper()
 	err := json.Unmarshal(buf, &v)
@@ -255,6 +284,24 @@ func TestServer_CreateSession_AcceptsMode(t *testing.T) {
 	var sessionResp api.SessionResponse
 	unmarshal(t, getResp, &sessionResp)
 	assert.Equal(t, session.ModePlan, sessionResp.Mode)
+}
+
+func TestServer_RejectsInvalidMode(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	lnPath := startServerWithStore(t, ctx, prepareAgentsDir(t), store)
+
+	// Unknown mode values must be rejected with 400 rather than
+	// silently coerced to build — mirrors the validation already done
+	// by PATCH /api/sessions/:id/mode so clients get the same error
+	// shape at create-time and at update-time.
+	status, body := rawHTTPDo(t, ctx, http.MethodPost, lnPath, "/api/sessions",
+		map[string]any{"mode": "yolo"})
+	assert.Equal(t, http.StatusBadRequest, status)
+	// Body is a JSON-escaped echo error message; match on the escaped form.
+	assert.Contains(t, string(body), `invalid mode \"yolo\"`)
 }
 
 func startServerWithStore(t *testing.T, ctx context.Context, agentsDir string, store session.Store) string {

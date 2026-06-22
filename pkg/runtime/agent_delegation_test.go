@@ -148,6 +148,30 @@ func TestNewSubSession(t *testing.T) {
 		// We can verify the user message is still the default.
 		assert.Equal(t, "Please proceed.", s.GetLastUserMessageContent())
 	})
+
+	t.Run("inherits parent mode (build)", func(t *testing.T) {
+		// Default-mode parent should produce a build-mode child. This
+		// is the trivial case but documents the invariant.
+		buildParent := session.New(session.WithUserMessage("hello"))
+		s := newSubSession(buildParent, SubSessionConfig{Task: "t"}, childAgent)
+		assert.Equal(t, session.ModeBuild, s.Mode)
+	})
+
+	t.Run("inherits parent mode (plan)", func(t *testing.T) {
+		// Regression test for the plan-mode delegation bypass: a
+		// plan-mode parent must produce plan-mode children, so that
+		// downstream filterToolsForSession strips mutating tools from
+		// the child's toolset. Without WithMode(parent.Mode) in
+		// newSubSession the child would default back to build and a
+		// plan-mode agent could route around the filter via
+		// transfer_task / run_skill / the agent builtin.
+		planParent := session.New(
+			session.WithUserMessage("hello"),
+			session.WithMode(session.ModePlan),
+		)
+		s := newSubSession(planParent, SubSessionConfig{Task: "t"}, childAgent)
+		assert.Equal(t, session.ModePlan, s.Mode)
+	})
 }
 
 func TestSubSessionConfig_DefaultValues(t *testing.T) {

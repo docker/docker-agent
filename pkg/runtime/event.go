@@ -234,6 +234,14 @@ const (
 	ErrorCodeToolFailed      = "tool_failed"
 	ErrorCodeHookBlocked     = "hook_blocked"
 	ErrorCodeLoopDetected    = "loop_detected"
+	// ErrorCodeUnsupportedMode signals that the session's current Mode
+	// (e.g. plan) is incompatible with the agent that's about to run.
+	// Today this only fires when a plan-mode session tries to run a
+	// harness-backed agent: the runtime can't enforce plan mode's
+	// read-only tool filter for harness agents because the harness
+	// owns its toolset, so the turn is refused instead of running with
+	// a partial (advisory-only) guarantee.
+	ErrorCodeUnsupportedMode = "unsupported_mode"
 )
 
 type ErrorEvent struct {
