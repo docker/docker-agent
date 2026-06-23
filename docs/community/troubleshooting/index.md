@@ -134,6 +134,12 @@ MCP tools using stdio transport must complete the initialization handshake befor
 3. Check that the MCP server process starts and responds to `initialize`
 4. Verify environment variables required by the tool are set (check `env` and `env_file` in the toolset config)
 
+<div class="callout callout-info" markdown="1">
+<div class="callout-title">Startup tool-listing timeout
+</div>
+  <p>At startup, docker-agent queries each toolset for its tool list. If a toolset does not respond within 10 seconds (e.g. a wedged MCP stdio server that never answers <code>tools/list</code>), that toolset is skipped with a warning and the remaining toolsets load normally. The sidebar resolves showing whichever tools did load — no infinite spinner. Enable <code>--debug</code> to see the warning message, and use <code>/toolset-restart &lt;name&gt;</code> once the server becomes responsive.</p>
+</div>
+
 If a toolset keeps crashing in a tight loop, tune the [`lifecycle`]({{ '/configuration/tools/#toolset-lifecycle' | relative_url }}) block on the toolset (e.g. raise `backoff.initial`, lower `max_restarts`, or switch to the `best-effort` profile) so a flaky dependency does not amplify into a restart storm.
 
 ## Configuration Errors

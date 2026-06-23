@@ -4,15 +4,35 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/chat"
 )
 
+// forkSuffixRe matches a "(fork N)" trailing suffix on a session title,
+// with optional leading whitespace before the parenthesis. Anchored at
+// the end of the string so mid-title occurrences of "(fork N)" (e.g.
+// in a user-chosen title like "Q1 (fork 2) Analysis") are not detected
+// as a suffix and the trailing content is not silently dropped.
+var forkSuffixRe = regexp.MustCompile(`^(.*?)[ \t]*\(fork (\d+)\)$`)
+
 // BranchSession creates a new session branched from the parent at the given position.
 // Messages up to (but not including) branchAtPosition are deep-cloned into the new session.
 func BranchSession(parent *Session, branchAtPosition int) (*Session, error) {
+	return branchSessionWithTitle(parent, branchAtPosition, generateBranchTitle)
+}
+
+// ForkSession is like BranchSession but uses fork-numbered titles
+// ("<title> (fork 1)", "(fork 2)", …). It is intended for HTTP/API clients
+// that expose a "fork from here" UX distinct from the TUI's branch-from-edit
+// flow, which keeps using BranchSession.
+func ForkSession(parent *Session, branchAtPosition int) (*Session, error) {
+	return branchSessionWithTitle(parent, branchAtPosition, generateForkTitle)
+}
+
+func branchSessionWithTitle(parent *Session, branchAtPosition int, titleFn func(string) string) (*Session, error) {
 	if parent == nil {
 		return nil, errors.New("parent session is nil")
 	}
@@ -21,7 +41,7 @@ func BranchSession(parent *Session, branchAtPosition int) (*Session, error) {
 	}
 
 	branched := New()
-	copySessionMetadata(branched, parent, generateBranchTitle(parent.Title))
+	copySessionMetadata(branched, parent, titleFn(parent.Title))
 
 	branched.Messages = make([]Item, 0, branchAtPosition)
 	for i := range branchAtPosition {
@@ -153,6 +173,14 @@ func copySessionMetadata(dst, src *Session, title string) {
 	dst.WorkingDir = src.WorkingDir
 	dst.SendUserMessage = src.SendUserMessage
 	dst.MaxIterations = src.MaxIterations
+	// MaxConsecutiveToolCalls and MaxOldToolCallTokens are safety / context
+	// rails that may be configured deliberately by the user or operator
+	// (consecutive-tool-call cutoff, old-tool-call truncation budget).
+	// Dropping them on a fork or branch would silently make the new
+	// session behave differently from its parent. Clone() preserves both,
+	// so do the same here.
+	dst.MaxConsecutiveToolCalls = src.MaxConsecutiveToolCalls
+	dst.MaxOldToolCallTokens = src.MaxOldToolCallTokens
 	dst.Starred = src.Starred
 	dst.Permissions = clonePermissionsConfig(src.Permissions)
 	dst.AgentModelOverrides = cloneStringMap(src.AgentModelOverrides)
@@ -190,6 +218,32 @@ func generateBranchTitle(parentTitle string) string {
 	}
 
 	return parentTitle + " (branched)"
+}
+
+// generateForkTitle creates a title for a forked session based on the parent
+// title using "(fork N)" suffixes that increment on repeated forks.
+// If the parent has no title, returns empty string (will trigger auto-generation).
+// "<title>" -> "<title> (fork 1)"; "<title> (fork N)" -> "<title> (fork N+1)".
+//
+// The "(fork N)" detection is anchored at the end of the title so a mid-title
+// occurrence (e.g. "Q1 (fork 2) Analysis") is not treated as a suffix.
+// generateBranchTitle uses an older LastIndex+Sscanf approach that has the
+// same end-anchoring gap; that's a pre-existing issue in the TUI's branch
+// flow and is intentionally left alone here.
+func generateForkTitle(parentTitle string) string {
+	if parentTitle == "" {
+		return ""
+	}
+
+	if m := forkSuffixRe.FindStringSubmatch(parentTitle); m != nil {
+		baseTitle := m[1]
+		var n int
+		if _, err := fmt.Sscanf(m[2], "%d", &n); err == nil && n >= 1 {
+			return fmt.Sprintf("%s (fork %d)", baseTitle, n+1)
+		}
+	}
+
+	return parentTitle + " (fork 1)"
 }
 
 func cloneEvalCriteria(src *EvalCriteria) *EvalCriteria {

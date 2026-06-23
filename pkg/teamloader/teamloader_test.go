@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
+	providerdefaults "github.com/docker/docker-agent/pkg/model/provider/providers"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -25,6 +26,13 @@ import (
 // (e.g., AWS profiles, GCP credentials) that can't be mocked with dummy env vars.
 var skipExamples = map[string]string{
 	"pr-reviewer-bedrock.yaml": "requires AWS profile configuration",
+}
+
+func withTestProviderRegistry(opts ...Opt) []Opt {
+	return append([]Opt{
+		WithProviderRegistry(providerdefaults.NewDefaultRegistry()),
+		WithToolsetRegistry(testToolsetRegistry()),
+	}, opts...)
 }
 
 func collectExamples(t *testing.T) []string {
@@ -107,7 +115,7 @@ func TestLoadExamples(t *testing.T) {
 			runConfig := &config.RuntimeConfig{}
 			runConfig.WorkingDir = t.TempDir()
 
-			teams, err := Load(t.Context(), agentSource, runConfig)
+			teams, err := Load(t.Context(), agentSource, runConfig, withTestProviderRegistry()...)
 			if errors.Is(err, dmr.ErrNotInstalled) {
 				t.Skipf("Skipping %s: Docker Model Runner not installed", agentFilename)
 			}
@@ -154,7 +162,7 @@ func TestLoadDefaultAgent(t *testing.T) {
 		}),
 	}
 
-	teams, err := Load(t.Context(), agentSource, runConfig)
+	teams, err := Load(t.Context(), agentSource, runConfig, withTestProviderRegistry()...)
 	require.NoError(t, err)
 	require.NotEmpty(t, teams)
 }
@@ -189,7 +197,7 @@ func TestOverrideModel(t *testing.T) {
 			agentSource, err := config.Resolve("testdata/basic.yaml", nil)
 			require.NoError(t, err)
 
-			team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, WithModelOverrides(test.overrides))
+			team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry(WithModelOverrides(test.overrides))...)
 			if test.expectedErr != "" {
 				require.Contains(t, err.Error(), test.expectedErr)
 			} else {
@@ -221,7 +229,7 @@ agents:
     instruction: test
 `)
 
-		team, err := Load(t.Context(), config.NewBytesSource("title.yaml", data), &config.RuntimeConfig{})
+		team, err := Load(t.Context(), config.NewBytesSource("title.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
 		require.NoError(t, err)
 
 		root, err := team.Agent("root")
@@ -250,7 +258,7 @@ agents:
     instruction: test
 `)
 
-		team, err := Load(t.Context(), config.NewBytesSource("title.yaml", data), &config.RuntimeConfig{})
+		team, err := Load(t.Context(), config.NewBytesSource("title.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
 		require.NoError(t, err)
 
 		root, err := team.Agent("root")
@@ -267,7 +275,7 @@ agents:
     instruction: test
 `)
 
-		team, err := Load(t.Context(), config.NewBytesSource("title.yaml", data), &config.RuntimeConfig{})
+		team, err := Load(t.Context(), config.NewBytesSource("title.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
 		require.NoError(t, err)
 
 		root, err := team.Agent("root")
@@ -297,7 +305,7 @@ func TestLoadHarnessAgentWithoutModel(t *testing.T) {
       type: codex
 `)
 
-	team, err := Load(t.Context(), config.NewBytesSource("harness.yaml", data), &config.RuntimeConfig{})
+	team, err := Load(t.Context(), config.NewBytesSource("harness.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
 	require.NoError(t, err)
 
 	coder, err := team.Agent("coder")
@@ -313,7 +321,7 @@ func TestToolsetInstructions(t *testing.T) {
 	agentSource, err := config.Resolve("testdata/tool-instruction.yaml", nil)
 	require.NoError(t, err)
 
-	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{})
+	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry()...)
 	require.NoError(t, err)
 
 	agent, err := team.Agent("root")
@@ -337,7 +345,7 @@ func TestInstructionExpansion(t *testing.T) {
 	agentSource, err := config.Resolve("testdata/instruction-expansion.yaml", nil)
 	require.NoError(t, err)
 
-	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{})
+	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry()...)
 	require.NoError(t, err)
 
 	rootAgent, err := team.Agent("root")
@@ -376,7 +384,7 @@ func TestAutoModelFallbackError(t *testing.T) {
 		EnvProviderForTests: &noEnvProvider{},
 	}
 
-	_, err = Load(t.Context(), agentSource, runConfig)
+	_, err = Load(t.Context(), agentSource, runConfig, withTestProviderRegistry()...)
 	require.Error(t, err)
 
 	var autoErr *config.AutoModelFallbackError
@@ -446,7 +454,7 @@ func TestWithPromptFiles(t *testing.T) {
 				opts = append(opts, WithPromptFiles(tt.cliPromptFiles))
 			}
 
-			team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, opts...)
+			team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry(opts...)...)
 			require.NoError(t, err)
 
 			rootAgent, err := team.Agent("root")
@@ -478,7 +486,7 @@ agents:
 
 	// Load with CLI prompt files - should merge with config
 	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{},
-		WithPromptFiles([]string{"cli-file.md"}))
+		withTestProviderRegistry(WithPromptFiles([]string{"cli-file.md"}))...)
 	require.NoError(t, err)
 
 	rootAgent, err := team.Agent("root")
@@ -511,7 +519,7 @@ agents:
 
 	// CLI specifies a file that's already in config - should deduplicate
 	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{},
-		WithPromptFiles([]string{"AGENTS.md", "extra.md"}))
+		withTestProviderRegistry(WithPromptFiles([]string{"AGENTS.md", "extra.md"}))...)
 	require.NoError(t, err)
 
 	rootAgent, err := team.Agent("root")
@@ -549,7 +557,7 @@ func TestGetToolsForAgent_MultipleLSPToolsetsAreCombined(t *testing.T) {
 
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
-	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, NewDefaultToolsetRegistry(), "test-config", expander)
+	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, testToolsetRegistry(), "test-config", expander)
 	require.Empty(t, warnings)
 
 	// Should have exactly one toolset (the multiplexer)
@@ -591,7 +599,7 @@ func TestGetToolsForAgent_SingleLSPToolsetNotWrapped(t *testing.T) {
 
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
-	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, NewDefaultToolsetRegistry(), "test-config", expander)
+	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, testToolsetRegistry(), "test-config", expander)
 	require.Empty(t, warnings)
 
 	// Should have exactly one toolset that provides LSP tools.
@@ -647,7 +655,7 @@ agents:
 	runConfig := &config.RuntimeConfig{}
 	runConfig.WorkingDir = tmpDir
 
-	_, err := LoadWithConfig(t.Context(), source, runConfig)
+	_, err := LoadWithConfig(t.Context(), source, runConfig, withTestProviderRegistry()...)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "escapes parent directory")
 }

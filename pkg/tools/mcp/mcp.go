@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -142,6 +144,11 @@ type mcpClient interface {
 	SetUnmanagedOAuthRedirectURI(uri string)
 	SetToolListChangedHandler(handler func())
 	SetPromptListChangedHandler(handler func())
+	// ServerAddress returns the connection identifier (URL for remote
+	// clients, executable name for stdio). Used by `Toolset.Start` to
+	// stamp `server.address` on the parent `toolset.start` span so
+	// initialize failures show which target produced them.
+	ServerAddress() string
 	// Wait blocks until the underlying connection is closed by the server.
 	// It returns nil if the connection was closed gracefully.
 	Wait() error
@@ -433,6 +440,19 @@ func buildRemoteDescription(rawURL, transport string) string {
 func (ts *Toolset) Start(ctx context.Context) error {
 	if ts.supervisor == nil {
 		return errors.New("toolset has no supervisor: must be created via NewToolsetCommand or NewRemoteToolset")
+	}
+	// Stamp the connection identifier on the parent `toolset.start`
+	// span before doing anything else so an Initialize failure (e.g.
+	// the multi-replica MCP "session not found" 404 case) carries the
+	// target address as `server.address` — without this, the error
+	// message has the only clue and triage requires log greppage to
+	// match toolsets to URLs.
+	if ts.mcpClient != nil {
+		if addr := ts.mcpClient.ServerAddress(); addr != "" {
+			if span := trace.SpanFromContext(ctx); span.IsRecording() {
+				span.SetAttributes(attribute.String("server.address", addr))
+			}
+		}
 	}
 	return ts.supervisor.Start(ctx)
 }

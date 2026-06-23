@@ -510,6 +510,27 @@ func TestConfig_Settings_HideToolResults(t *testing.T) {
 	assert.True(t, loaded.Settings.HideToolResults)
 }
 
+func TestConfig_Settings_Lean(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+
+	config := &Config{
+		Settings: &Settings{
+			Lean: true,
+		},
+	}
+
+	require.NoError(t, config.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+
+	assert.NotNil(t, loaded.Settings)
+	assert.True(t, loaded.Settings.Lean)
+}
+
 func TestConfig_Settings_Empty(t *testing.T) {
 	t.Parallel()
 
@@ -523,6 +544,7 @@ func TestConfig_Settings_Empty(t *testing.T) {
 	settings := config.GetSettings()
 	assert.NotNil(t, settings)
 	assert.False(t, settings.HideToolResults)
+	assert.False(t, settings.Lean)
 	assert.False(t, settings.GetExpandThinking())
 }
 

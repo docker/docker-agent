@@ -14,6 +14,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
@@ -289,25 +290,38 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	}()
 
 	childEvents := r.RunStream(ctx, s)
+	var subSessionErr error
 	for event := range childEvents {
 		evts.Emit(event)
-		if errEvent, ok := event.(*ErrorEvent); ok {
-			// Drain remaining events (including StreamStoppedEvent) so the
-			// TUI's streamDepth counter stays balanced.
-			for remaining := range childEvents {
-				evts.Emit(remaining)
-			}
-			err := fmt.Errorf("%s", errEvent.Error)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, "sub-session error")
-			return nil, err
+		if errEvent, ok := event.(*ErrorEvent); ok && subSessionErr == nil {
+			// Capture the first ErrorEvent but keep draining the channel so
+			// the sub-session's full transcript still streams through. The
+			// child's run loop may emit additional events (e.g. notifications,
+			// hook output) after the error before its channel closes; dropping
+			// them here would leave the TUI's streamDepth counter unbalanced
+			// and the user without context for what actually went wrong.
+			subSessionErr = fmt.Errorf("%s", errEvent.Error)
 		}
 	}
 
-	parent.ToolsApproved = s.ToolsApproved
+	// Persist the sub-session unconditionally — even on error, the partial
+	// transcript is the most valuable artifact for debugging. The persistence
+	// pipeline relies on SubSessionCompleted to write the sub-session's
+	// messages to the store; without this emission they are silently dropped.
 	parent.AddSubSession(s)
 	evts.Emit(SubSessionCompleted(parent.ID, s, callerAgent.Name()))
 
+	if subSessionErr != nil {
+		span.RecordError(subSessionErr)
+		span.SetStatus(codes.Error, "sub-session error")
+		return nil, subSessionErr
+	}
+
+	// Only propagate ToolsApproved on success. A failed sub-session must not
+	// silently escalate the parent's tool-approval gate: the user approved
+	// tools within a sub-session scope that ended in error, and that approval
+	// should not carry over to the parent's remaining turns.
+	parent.ToolsApproved = s.ToolsApproved
 	span.SetStatus(codes.Ok, "sub-session completed")
 	return tools.ResultSuccess(s.GetLastAssistantMessageContent()), nil
 }
@@ -361,14 +375,42 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	for range events {
 	}
 
+	// Persist the sub-session unconditionally — the partial transcript is
+	// the most valuable artifact for debugging a failed background agent.
+	// AddSubSession records it in-memory on both the success and error paths.
+	parent.AddSubSession(s)
+
+	// Mirror runForwarding's persistence, but write to the store directly
+	// instead of emitting SubSessionCompleted: runCollecting runs on a
+	// detached background goroutine, so routing through the shared observer
+	// chain would race the parent's live RunStream (the PersistenceObserver
+	// keeps unsynchronised streaming state). Without this the background
+	// sub-session never reaches the store — its tokens and cost are recorded
+	// as $0 and escape any spend accounting that reads the store. Use
+	// WithoutCancel so a cancelled/stopped task still persists its transcript.
+	r.persistBackgroundSubSession(context.WithoutCancel(ctx), parent.ID, s)
+
 	if errMsg != "" {
 		return &agenttool.RunResult{ErrMsg: errMsg}
 	}
 
-	result := s.GetLastAssistantMessageContent()
-	parent.AddSubSession(s)
+	return &agenttool.RunResult{Result: s.GetLastAssistantMessageContent()}
+}
 
-	return &agenttool.RunResult{Result: result}
+// persistBackgroundSubSession writes a completed background sub-session to the
+// session store, linking it under parentID. It is the runCollecting analogue
+// of the SubSessionCompletedEvent that runForwarding emits: background tasks
+// have no live EventSink, so the persistence observer never sees them. Errors
+// are logged rather than surfaced — a failed persist must not change the tool
+// result the caller returns to the model.
+func (r *LocalRuntime) persistBackgroundSubSession(ctx context.Context, parentID string, sub *session.Session) {
+	if r.sessionStore == nil {
+		return
+	}
+	if err := r.sessionStore.AddSubSession(ctx, parentID, sub); err != nil {
+		slog.WarnContext(ctx, "Failed to persist background sub-session",
+			"parent_id", parentID, "sub_session_id", sub.ID, "error", err)
+	}
 }
 
 // CurrentAgentSubAgentNames implements agenttool.Runner.
@@ -422,11 +464,34 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 
 	slog.DebugContext(ctx, "Transferring task to agent", "from_agent", a.Name(), "to_agent", params.Agent, "task", params.Task)
 
-	ctx, span := r.startSpan(ctx, "runtime.task_transfer", trace.WithAttributes(
-		attribute.String("from.agent", a.Name()),
-		attribute.String("to.agent", params.Agent),
-		attribute.String("session.id", sess.ID),
-	))
+	delegationAttrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationInvokeAgent),
+		// gen_ai.agent.name identifies the target agent of the invoke_agent
+		// operation per the OTel GenAI semconv (Required). cagent.agent.name
+		// is the same value but in our internal namespace; we emit both so
+		// spec-aware backends and existing cagent dashboards both see it.
+		attribute.String(genai.AttrAgentName, params.Agent),
+		attribute.String("cagent.delegation.from_agent", a.Name()),
+		attribute.String("cagent.delegation.to_agent", params.Agent),
+		attribute.String("cagent.delegation.kind", "transfer_task"),
+		attribute.String(genai.AttrConversationID, sess.ID),
+		attribute.String(genai.AttrAgentNameRuntime, params.Agent),
+	}
+	if params.Task != "" {
+		// Task length is bounded enough to be useful as a span
+		// attribute for debugging "agent X transferred which task
+		// to Y". The full task body lands on the sub-session's
+		// runtime.session span when content capture is opt-in.
+		delegationAttrs = append(delegationAttrs, attribute.Int("cagent.delegation.task_length", len(params.Task)))
+	}
+	if genai.EmitLegacyAttributes() {
+		delegationAttrs = append(delegationAttrs,
+			attribute.String("from.agent", a.Name()),
+			attribute.String("to.agent", params.Agent),
+			attribute.String("session.id", sess.ID),
+		)
+	}
+	ctx, span := r.startSpan(ctx, "runtime.task_transfer", trace.WithAttributes(delegationAttrs...))
 	defer span.End()
 
 	return r.runForwarding(ctx, sess, evts, delegationRequest{
@@ -462,6 +527,26 @@ func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session,
 	if err != nil {
 		return nil, err
 	}
+
+	// Handoff is in-place agent swap (same session, different agent
+	// from the next turn). Span name keeps the runtime.* family;
+	// attributes mirror the transfer_task span shape so dashboards
+	// can union both delegation kinds. Take the returned ctx so
+	// `executeOnAgentSwitchHooks` and any of its children parent
+	// onto this span instead of bypassing it.
+	ctx, span := r.startSpan(ctx, "runtime.handoff", trace.WithAttributes(
+		attribute.String(genai.AttrOperationName, genai.OperationInvokeAgent),
+		// gen_ai.agent.name — Required by OTel GenAI semconv on invoke_agent
+		// spans; identifies the agent being handed off to. See task_transfer
+		// for the rationale of dual-emitting alongside cagent.agent.name.
+		attribute.String(genai.AttrAgentName, next.Name()),
+		attribute.String("cagent.delegation.from_agent", ca),
+		attribute.String("cagent.delegation.to_agent", next.Name()),
+		attribute.String("cagent.delegation.kind", "handoff"),
+		attribute.String(genai.AttrConversationID, sess.ID),
+		attribute.String(genai.AttrAgentNameRuntime, next.Name()),
+	))
+	defer span.End()
 
 	r.executeOnAgentSwitchHooks(ctx, currentAgent, sess.ID, ca, next.Name(), agentSwitchKindHandoff)
 	r.setCurrentAgent(next.Name())

@@ -30,3 +30,15 @@ const defaultMaxOverflowCompactions = 1
 // a notification from a server), so a slow or stuck server cannot be
 // allowed to wedge the caller indefinitely.
 const toolsChangedTimeout = 5 * time.Second
+
+// defaultToolListTimeout bounds how long EmitStartupInfo waits for a single
+// toolset to enumerate its tools while populating the sidebar. A toolset
+// whose Tools() blocks indefinitely — e.g. an MCP stdio subprocess that
+// never answers tools/list, possibly while also ignoring context
+// cancellation — would otherwise stall the whole startup: the terminal
+// ToolsetInfo{Loading:false} event is never emitted, so the sidebar stays
+// on "Loading tools…" forever and /quit appears to hang. A timed-out
+// toolset is skipped here; it stays usable for the actual agent turn, which
+// lists its tools again without this startup bound. Tests override it via
+// WithToolListTimeout to exercise the skip path without a real-time wait.
+const defaultToolListTimeout = 10 * time.Second

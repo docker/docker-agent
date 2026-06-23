@@ -1,7 +1,10 @@
 package runtime
 
 import (
+	"context"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -60,7 +63,7 @@ func TestHandleStream_Refusal(t *testing.T) {
 
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
-		t.Context(), stream, a, nil, sess, nil,
+		t.Context(), nil, stream, a, nil, sess, nil,
 		defaultTelemetry{}, NewChannelSink(evCh),
 	)
 	require.NoError(t, err)
@@ -86,7 +89,7 @@ func TestHandleStream_RefusalDropsPartialToolCalls(t *testing.T) {
 
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
-		t.Context(), stream, a, nil, sess, nil,
+		t.Context(), nil, stream, a, nil, sess, nil,
 		defaultTelemetry{}, NewChannelSink(evCh),
 	)
 	require.NoError(t, err)
@@ -111,7 +114,7 @@ func TestHandleStream_ToolCallAndStopInSameChunk(t *testing.T) {
 
 	evCh := make(chan Event, 64) // buffered so handleStream never blocks on Emit
 	res, err := handleStream(
-		t.Context(), stream, a, nil, sess, nil,
+		t.Context(), nil, stream, a, nil, sess, nil,
 		defaultTelemetry{}, NewChannelSink(evCh),
 	)
 	require.NoError(t, err)
@@ -139,7 +142,7 @@ func TestHandleStream_ToolCallThenSeparateStop(t *testing.T) {
 
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
-		t.Context(), stream, a, nil, sess, nil,
+		t.Context(), nil, stream, a, nil, sess, nil,
 		defaultTelemetry{}, NewChannelSink(evCh),
 	)
 	require.NoError(t, err)
@@ -149,4 +152,101 @@ func TestHandleStream_ToolCallThenSeparateStop(t *testing.T) {
 	assert.JSONEq(t, `{"query":"x"}`, res.Calls[0].Function.Arguments)
 	assert.Equal(t, chat.FinishReasonToolCalls, res.FinishReason)
 	assert.False(t, res.Stopped)
+}
+
+// stalledStream is a chat.MessageStream that blocks in Recv() until
+// either unblocked or the stream is closed. It is used to simulate a
+// half-open TCP connection where the remote side stops sending data.
+type stalledStream struct {
+	// unblock is closed (or sent on) to release a blocked Recv call.
+	unblock chan struct{}
+	// closed is set when Close is called.
+	closed bool
+}
+
+func newStalledStream() *stalledStream {
+	return &stalledStream{unblock: make(chan struct{})}
+}
+
+// Recv blocks until unblock is closed, then returns io.EOF.
+func (s *stalledStream) Recv() (chat.MessageStreamResponse, error) {
+	<-s.unblock
+	return chat.MessageStreamResponse{}, io.EOF
+}
+
+func (s *stalledStream) Close() {
+	if !s.closed {
+		s.closed = true
+		close(s.unblock)
+	}
+}
+
+// withShortStreamIdleTimeout temporarily overrides defaultStreamIdleTimeout
+// to shorten it for tests. Restores the original value via t.Cleanup.
+func withShortStreamIdleTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := defaultStreamIdleTimeout
+	defaultStreamIdleTimeout = d
+	t.Cleanup(func() { defaultStreamIdleTimeout = orig })
+}
+
+// TestHandleStream_IdleTimeout verifies that handleStream returns an error
+// wrapping errStreamIdle when no SSE chunk arrives within the idle window.
+// It also checks that the provided cancelStream function is called so the
+// HTTP transport can close the underlying TCP connection.
+func TestHandleStream_IdleTimeout(t *testing.T) {
+	withShortStreamIdleTimeout(t, 50*time.Millisecond)
+
+	stream := newStalledStream()
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	cancelCalled := false
+	cancelStream := func(cause error) {
+		cancelCalled = true
+		stream.Close() // unblock the stalled Recv so the reader goroutine can exit
+	}
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), cancelStream, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh),
+	)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, errStreamIdle, "error must wrap errStreamIdle")
+	assert.True(t, res.Stopped)
+	assert.True(t, cancelCalled, "cancelStream must be called on idle timeout")
+}
+
+// TestHandleStream_ContextCancellation verifies that handleStream returns
+// promptly when the caller's context is cancelled, even while a Recv call
+// is blocked. This covers the SIGTERM / graceful-shutdown path.
+func TestHandleStream_ContextCancellation(t *testing.T) {
+	// Use a long idle timeout so only context cancellation can trigger.
+	withShortStreamIdleTimeout(t, 10*time.Minute)
+
+	stream := newStalledStream()
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	// Cancel the context shortly after handleStream starts.
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+		stream.Close() // unblock the stalled Recv so the reader goroutine can exit
+	}()
+
+	evCh := make(chan Event, 64)
+	_, cancelStream := context.WithCancelCause(ctx)
+	res, err := handleStream(
+		ctx, cancelStream, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh),
+	)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled, "error must be context.Canceled")
+	assert.True(t, res.Stopped)
 }

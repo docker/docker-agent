@@ -48,16 +48,22 @@ func TestSupportedThinkingLevels(t *testing.T) {
 			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.Max},
 		},
 		{
-			name:     "claude opus 4.7 gets xhigh but not max",
+			name:     "claude opus 4.7 gets xhigh and max",
 			provider: "anthropic",
 			modelID:  "claude-opus-4-7",
-			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh},
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max},
 		},
 		{
-			name:     "claude opus 4.8 gets xhigh",
+			name:     "claude opus 4.8 gets xhigh and max",
 			provider: "anthropic",
 			modelID:  "claude-opus-4-8",
-			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh},
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max},
+		},
+		{
+			name:     "claude sonnet 4.6 gets max but not xhigh",
+			provider: "anthropic",
+			modelID:  "claude-sonnet-4-6",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.Max},
 		},
 		{
 			name:     "dotted opus version",
@@ -66,10 +72,16 @@ func TestSupportedThinkingLevels(t *testing.T) {
 			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.Max},
 		},
 		{
-			name:     "bedrock regional opus 4.7",
+			name:     "bedrock regional opus 4.7 gets xhigh and max",
 			provider: "amazon-bedrock",
 			modelID:  "us.anthropic.claude-opus-4-7",
-			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh},
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max},
+		},
+		{
+			name:     "bedrock regional sonnet 4.6 gets max but not xhigh",
+			provider: "amazon-bedrock",
+			modelID:  "global.anthropic.claude-sonnet-4-6",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.Max},
 		},
 		{
 			name:     "bedrock sonnet tops out at high",
@@ -78,10 +90,22 @@ func TestSupportedThinkingLevels(t *testing.T) {
 			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High},
 		},
 		{
-			name:     "claude fable gets xhigh",
+			name:     "claude fable gets xhigh and max",
 			provider: "anthropic",
 			modelID:  "claude-fable-5",
-			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh},
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max},
+		},
+		{
+			name:     "claude mythos 5 gets xhigh and max",
+			provider: "anthropic",
+			modelID:  "claude-mythos-5",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max},
+		},
+		{
+			name:     "claude mythos preview gets max but not xhigh",
+			provider: "anthropic",
+			modelID:  "claude-mythos-preview",
+			want:     []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.Max},
 		},
 		{
 			name:     "gpt-5 tops out at high",
@@ -141,31 +165,47 @@ func TestSupportedThinkingLevels(t *testing.T) {
 	}
 }
 
-func TestAnthropicTopEffort(t *testing.T) {
+func TestAnthropicTopEfforts(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		modelID string
-		want    effort.Level
+		want    []effort.Level
 	}{
-		{"claude-sonnet-4-5", ""},
-		{"claude-opus-4-1-20250805", ""},
-		{"claude-opus-4-20250514", ""},
-		{"claude-opus-4-6", effort.Max},
-		{"claude-opus-4-6-v1", effort.Max},
-		{"claude-opus-4.6", effort.Max},
-		{"claude-opus-4-7", effort.XHigh},
-		{"claude-opus-4-8", effort.XHigh},
-		{"global.anthropic.claude-opus-4-6-v1", effort.Max},
-		{"us.anthropic.claude-opus-4-7", effort.XHigh},
-		{"claude-fable-5", effort.XHigh},
-		{"CLAUDE-OPUS-4-7", effort.XHigh},
+		// Tops out at high (no explicit-only tier).
+		{"claude-sonnet-4-5", nil},
+		{"claude-haiku-4-5-20251001", nil},
+		{"claude-opus-4-5", nil},
+		{"claude-opus-4-1-20250805", nil},
+		{"claude-opus-4-20250514", nil},
+		// Max without xhigh.
+		{"claude-opus-4-6", []effort.Level{effort.Max}},
+		{"claude-opus-4-6-v1", []effort.Level{effort.Max}},
+		{"claude-opus-4.6", []effort.Level{effort.Max}},
+		{"claude-sonnet-4-6", []effort.Level{effort.Max}},
+		{"claude-sonnet-4-6-20260101", []effort.Level{effort.Max}},
+		{"claude-mythos-preview", []effort.Level{effort.Max}},
+		// Both xhigh and max.
+		{"claude-opus-4-7", []effort.Level{effort.XHigh, effort.Max}},
+		{"claude-opus-4-8", []effort.Level{effort.XHigh, effort.Max}},
+		{"claude-fable-5", []effort.Level{effort.XHigh, effort.Max}},
+		{"claude-mythos-5", []effort.Level{effort.XHigh, effort.Max}},
+		// Bedrock-style identifiers with regional prefixes: the prefix is
+		// stripped before both the numeric and the name-matched (fable/mythos)
+		// branches, so all of them must resolve through it.
+		{"global.anthropic.claude-opus-4-6-v1", []effort.Level{effort.Max}},
+		{"us.anthropic.claude-opus-4-7", []effort.Level{effort.XHigh, effort.Max}},
+		{"global.anthropic.claude-sonnet-4-6", []effort.Level{effort.Max}},
+		{"us.anthropic.claude-fable-5", []effort.Level{effort.XHigh, effort.Max}},
+		{"global.anthropic.claude-mythos-preview", []effort.Level{effort.Max}},
+		// Case-insensitive.
+		{"CLAUDE-OPUS-4-7", []effort.Level{effort.XHigh, effort.Max}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.modelID, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, anthropicTopEffort(tt.modelID))
+			assert.Equal(t, tt.want, anthropicTopEfforts(tt.modelID))
 		})
 	}
 }

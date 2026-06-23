@@ -415,7 +415,7 @@ func (rt *wasmRuntime) streamWithFallback(ctx context.Context, a *agent.Agent, m
 			}
 		}
 
-		result, err := rt.streamCompletion(ctx, p, a, messages, agentTools)
+		result, err := rt.streamCompletion(ctx, p, messages, agentTools)
 		if err != nil {
 			lastErr = err
 			slog.WarnContext(ctx, "Model attempt failed", "model", p.ID(), "attempt", i+1, "error", err)
@@ -428,7 +428,7 @@ func (rt *wasmRuntime) streamWithFallback(ctx context.Context, a *agent.Agent, m
 }
 
 // streamCompletion runs one streaming completion call and emits deltas.
-func (rt *wasmRuntime) streamCompletion(ctx context.Context, prov provider.Provider, a *agent.Agent, messages []chat.Message, agentTools []tools.Tool) (*wasmStreamResult, error) {
+func (rt *wasmRuntime) streamCompletion(ctx context.Context, prov provider.Provider, messages []chat.Message, agentTools []tools.Tool) (*wasmStreamResult, error) {
 	stream, err := prov.CreateChatCompletionStream(ctx, messages, agentTools)
 	if err != nil {
 		return nil, fmt.Errorf("opening stream: %w", err)

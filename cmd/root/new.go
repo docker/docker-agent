@@ -7,6 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/config"
@@ -57,13 +58,17 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 		telemetry.TrackCommandError(ctx, "new", args, commandErr)
 	}()
 
-	t, err := creator.Agent(ctx, &f.runConfig, f.modelParam)
+	loadResult, err := creator.Load(ctx, &f.runConfig, f.modelParam)
 	if err != nil {
 		return err
 	}
+	t := loadResult.Team
 	defer stopToolSets(t)
 
-	rt, err := runtime.New(t)
+	rt, err := runtime.New(t,
+		runtime.WithProviderRegistry(loadResult.ProviderRegistry),
+		runtime.WithTracer(otel.Tracer(AppName)),
+	)
 	if err != nil {
 		return err
 	}

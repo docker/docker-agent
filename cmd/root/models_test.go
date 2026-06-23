@@ -128,7 +128,7 @@ func TestModelsListCommand_DefaultMarker(t *testing.T) {
 
 	// The auto-selected model should be marked as default
 	rc := config.RuntimeConfig{}
-	autoModel := config.AutoModelConfig(t.Context(), "", rc.EnvProvider(), nil)
+	autoModel := config.AutoModelConfig(t.Context(), "", rc.EnvProvider(), nil, nil)
 	for _, r := range rows {
 		if r.Provider == autoModel.Provider && r.Model == autoModel.Model {
 			assert.True(t, r.Default, "auto-selected model %s/%s should be marked as default", r.Provider, r.Model)

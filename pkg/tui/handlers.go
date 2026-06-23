@@ -26,6 +26,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -367,14 +368,25 @@ func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
 // handleTogglePause toggles whether the runtime loop is paused at iteration
 // boundaries. The pause kicks in once the in-flight LLM request and its tool
 // calls finish; running /pause again resumes the loop.
+//
+// The TUI reflects this in the resize-handle indicator: requesting a pause
+// while the agent is working shows "Pausing…" until the runtime emits a
+// RuntimePausedEvent at the next iteration boundary (flipping it to
+// "Paused"); requesting a pause while idle shows "Paused" immediately.
 func (m *appModel) handleTogglePause() (tea.Model, tea.Cmd) {
 	paused, supported := m.application.TogglePause()
 	switch {
 	case !supported:
 		return m, notification.InfoCmd("Pause is not supported with remote runtimes")
 	case paused:
+		if m.chatPage.IsWorking() {
+			m.sessionState.SetPauseState(service.PausePausing)
+			return m, notification.InfoCmd("Pausing after the current request — /pause again to resume")
+		}
+		m.sessionState.SetPauseState(service.PausePaused)
 		return m, notification.InfoCmd("Runtime paused — /pause again to resume")
 	default:
+		m.sessionState.SetPauseState(service.PauseNone)
 		return m, notification.SuccessCmd("Runtime resumed")
 	}
 }

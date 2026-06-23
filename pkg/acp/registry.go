@@ -7,6 +7,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loadertoolsets "github.com/docker/docker-agent/pkg/teamloader/toolsets"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
 )
@@ -15,7 +16,7 @@ import (
 func createToolsetRegistry(agent *Agent) teamloader.ToolsetRegistry {
 	return &acpToolsetRegistry{
 		agent:    agent,
-		registry: teamloader.NewDefaultToolsetRegistry(),
+		registry: loadertoolsets.NewDefaultToolsetRegistry(),
 	}
 }
 

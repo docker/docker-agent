@@ -137,6 +137,69 @@ agents:
 	}
 }
 
+func TestToolset_Validate_SudoAskpass(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		config  string
+		wantErr string
+	}{
+		{
+			name: "sudo_askpass on shell is allowed",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: shell
+        sudo_askpass: true
+`,
+			wantErr: "",
+		},
+		{
+			name: "sudo_askpass false on shell is allowed",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: shell
+        sudo_askpass: false
+`,
+			wantErr: "",
+		},
+		{
+			name: "sudo_askpass on non-shell toolset is rejected",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: filesystem
+        sudo_askpass: true
+`,
+			wantErr: "sudo_askpass can only be used with type 'shell'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var cfg latest.Config
+			err := yaml.Unmarshal([]byte(tt.config), &cfg)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestToolset_Validate_MCP_WorkingDir(t *testing.T) {
 	t.Parallel()
 

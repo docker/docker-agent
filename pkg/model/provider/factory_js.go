@@ -1,84 +1,93 @@
 //go:build js && wasm
 
-// Package provider's js/wasm factory.
-//
-// The non-js factory.go pulls in every provider — including dmr (os/exec),
-// rulebased (bleve, mmap), bedrock and vertexai (cloud SDKs). None of those
-// can be cross-compiled to js/wasm, so this file replaces factory.go under
-// js/wasm with a slim variant that only knows about the providers that work
-// over plain net/http (which the Go runtime maps to fetch in the browser):
-//
-//   - openai / openai_chatcompletions / openai_responses
-//   - anthropic
-//   - google (Gemini API; Vertex AI is unsupported under wasm)
-//
-// Routing rules and Docker Model Runner are unsupported and return an error.
 package provider
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
-	"github.com/docker/docker-agent/pkg/model/provider/anthropic"
-	"github.com/docker/docker-agent/pkg/model/provider/gemini"
-	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/model/provider/rulebased"
 )
 
-// errRoutingUnsupported is returned by createRuleBasedRouter under js/wasm:
-// the rulebased provider depends on bleve which cannot be cross-compiled to
-// wasm (mmap, file locking).
-var errRoutingUnsupported = errors.New("rule-based model routing is not supported under js/wasm")
+type Factory func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error)
 
-// createRuleBasedRouter is a stub that always returns an error under wasm.
-func createRuleBasedRouter(_ context.Context, _ *latest.ModelConfig, _ map[string]latest.ModelConfig, _ environment.Provider, _ ...options.Opt) (Provider, error) {
-	return nil, errRoutingUnsupported
+type Registry struct {
+	factories map[string]Factory
 }
 
-// createDirectProvider mirrors the non-wasm version but only dispatches to
-// providers that are reachable from a browser.
-func createDirectProvider(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+func NewRegistry(factories map[string]Factory) *Registry {
+	copied := make(map[string]Factory, len(factories))
+	maps.Copy(copied, factories)
+	return &Registry{factories: copied}
+}
+
+var defaultFactories map[string]Factory
+
+func DefaultRegistry() *Registry { return NewRegistry(defaultFactories) }
+
+func (r *Registry) New(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+	return r.NewWithModels(ctx, cfg, nil, env, opts...)
+}
+
+func (r *Registry) NewWithModels(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+	slog.DebugContext(ctx, "Creating model provider", "type", cfg.Provider, "model", cfg.Model)
+	if len(cfg.Routing) > 0 {
+		p, err := r.createRuleBasedRouter(ctx, cfg, models, env, opts...)
+		if err != nil {
+			return nil, err
+		}
+		if setter, ok := p.(interface{ SetProviderRegistry(registry any) }); ok {
+			setter.SetProviderRegistry(r)
+		}
+		return p, nil
+	}
+	return r.createDirectProvider(ctx, cfg, env, opts...)
+}
+
+func (r *Registry) createRuleBasedRouter(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+	return rulebased.NewClient(ctx, cfg, models, env, r.resolveRoutedModel, opts...)
+}
+
+func (r *Registry) resolveRoutedModel(ctx context.Context, modelSpec string, models map[string]latest.ModelConfig, env environment.Provider, factoryOpts ...options.Opt) (rulebased.Provider, error) {
+	if modelCfg, exists := models[modelSpec]; exists {
+		if len(modelCfg.Routing) > 0 {
+			return nil, fmt.Errorf("model %q has routing rules and cannot be used as a routing target", modelSpec)
+		}
+		return r.createDirectProvider(ctx, &modelCfg, env, factoryOpts...)
+	}
+	inlineCfg, parseErr := latest.ParseModelRef(modelSpec)
+	if parseErr != nil {
+		return nil, fmt.Errorf("invalid model spec %q: expected 'provider/model' format or a model reference", modelSpec)
+	}
+	return r.createDirectProvider(ctx, &inlineCfg, env, factoryOpts...)
+}
+
+func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+	if r == nil {
+		r = DefaultRegistry()
+	}
 	var globalOptions options.ModelOptions
 	for _, opt := range opts {
 		opt(&globalOptions)
 	}
-
 	enhancedCfg := applyProviderDefaults(cfg, globalOptions.Providers())
-
 	providerType := resolveProviderType(enhancedCfg)
-
-	factory, ok := providerFactories[providerType]
+	factory, ok := r.factories[providerType]
 	if !ok {
 		slog.ErrorContext(ctx, "Unknown or unsupported provider type under js/wasm", "type", providerType)
-		return nil, fmt.Errorf("provider type %q is not supported under js/wasm (only openai/anthropic/google work in the browser)", providerType)
+		return nil, fmt.Errorf("provider type %q is not registered", providerType)
 	}
-	return factory(ctx, enhancedCfg, env, opts...)
-}
-
-type providerFactory func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error)
-
-// providerFactories: js/wasm-only subset. dmr (os/exec), amazon-bedrock and
-// vertex AI (cloud SDKs that don't compile to wasm) are deliberately absent.
-var providerFactories = map[string]providerFactory{
-	"openai":                 openaiFactory,
-	"openai_chatcompletions": openaiFactory,
-	"openai_responses":       openaiFactory,
-	"anthropic":              anthropicFactory,
-	"google":                 googleFactory,
-}
-
-func openaiFactory(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
-	return openai.NewClient(ctx, cfg, env, opts...)
-}
-
-func anthropicFactory(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
-	return anthropic.NewClient(ctx, cfg, env, opts...)
-}
-
-func googleFactory(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
-	return gemini.NewClient(ctx, cfg, env, opts...)
+	p, err := factory(ctx, enhancedCfg, env, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if setter, ok := p.(interface{ SetProviderRegistry(registry any) }); ok {
+		setter.SetProviderRegistry(r)
+	}
+	return p, nil
 }

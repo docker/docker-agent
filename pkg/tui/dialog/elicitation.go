@@ -364,7 +364,8 @@ func (d *ElicitationDialog) collectAndValidate() (map[string]any, int) {
 			}
 			content[field.Name] = field.EnumValues[idx]
 		default:
-			val := strings.TrimSpace(d.inputs[i].Value())
+			raw := d.inputs[i].Value()
+			val := strings.TrimSpace(raw)
 			if val == "" {
 				if field.Required {
 					d.fieldErrors[i] = "This field is required"
@@ -373,6 +374,12 @@ func (d *ElicitationDialog) collectAndValidate() (map[string]any, int) {
 					}
 				}
 				continue
+			}
+			// Secret fields (e.g. a sudo password) may legitimately contain
+			// leading/trailing whitespace; store the raw value. The trimmed
+			// copy above is only used for the required/empty check.
+			if field.Format == "password" {
+				val = raw
 			}
 			parsed, errMsg := d.parseAndValidateField(val, field)
 			if errMsg != "" {
@@ -728,6 +735,11 @@ func (d *ElicitationDialog) createInput(field ElicitationField, idx int) textinp
 	default: // string
 		ti.Placeholder = cmp.Or(field.Description, "Enter value")
 		ti.CharLimit = cmp.Or(field.MaxLength, defaultCharLimit)
+		// Mask secret fields (JSON Schema "format": "password"), e.g. the sudo
+		// password prompt, so the value is never echoed to the screen.
+		if field.Format == "password" {
+			ti.EchoMode = textinput.EchoPassword
+		}
 	}
 
 	// Set default value

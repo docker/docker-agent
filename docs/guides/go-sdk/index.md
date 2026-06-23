@@ -31,6 +31,7 @@ docker-agent can be used as a Go library, allowing you to build AI agents direct
 | `pkg/model/provider/*` | Model provider clients                   |
 | `pkg/config/latest`    | Configuration types                      |
 | `pkg/environment`      | Environment and secrets                  |
+| `pkg/embeddedchat`     | Headless chat session for embedding the agent runtime in a custom UI |
 | `pkg/tui/components/toolconfirm` | Tool-confirmation policy: `Decision` enum, `BuildPermissionPattern`, key bindings, and rejection-reason presets. Share this instead of copying the permission-pattern logic. |
 | `pkg/tui/service`      | `StaticSessionState` — a `SessionStateReader` with conservative fixed values, for rendering message/tool views outside the full TUI app. Replaces hand-rolled nine-method stubs. |
 | `pkg/tui/animation`    | `Stopper` / `StopView` — animation lifecycle contract. Call `StopAnimation` on views removed from the UI to prevent leaked tick subscriptions. |
@@ -44,6 +45,161 @@ When building custom UIs on top of docker-agent's TUI primitives, four packages 
 - **`pkg/tui/service`** — use `StaticSessionState` as a stub `SessionStateReader` when rendering individual message or tool views outside the full TUI app. It returns conservative fixed values for all nine interface methods, eliminating the need for hand-rolled stubs.
 - **`pkg/tui/animation`** — implement `animation.Stopper` on any view that owns a tick-based animation. Call `StopAnimation` whenever a view is removed from the UI hierarchy to prevent leaked `time.Tick` subscriptions from firing against a dead view.
 - **`pkg/tui/components/transcript`** — embed the transcript view for displaying conversation history. Use the `Messages()` method to read the current slice of transcript messages (treat as read-only — mutations desync renders). This is useful for host-side tests asserting on chat history, and for persistence layers that need to snapshot conversation state.
+
+## Headless Embedded Chat (`pkg/embeddedchat`)
+
+`pkg/embeddedchat` is a thin wrapper around the docker-agent runtime that lets you drive an agent from your own UI instead of running docker-agent's Bubble Tea application. It handles runtime construction, event projection, and conversation state, exposing a simple `Send` / `Confirm` / `Restart` / `Close` API.
+
+### Creating a session
+
+```go
+import (
+    "context"
+    "fmt"
+    "strings"
+
+    dagentcfg "github.com/docker/docker-agent/pkg/config"
+    dagentruntime "github.com/docker/docker-agent/pkg/runtime"
+    "github.com/docker/docker-agent/pkg/embeddedchat"
+)
+
+chat, err := embeddedchat.New(ctx, embeddedchat.Config{
+    // AgentSource can be a file path, raw YAML bytes, or an OCI reference.
+    AgentSource: dagentcfg.NewBytesSource("agent", []byte(agentYAML)),
+})
+if err != nil {
+    return err
+}
+defer chat.Close()
+```
+
+### Sending a message and reading events
+
+`Send` appends the user message to the conversation and returns a channel of `Event` values. Drain the channel until it closes.
+
+```go
+events, err := chat.Send(ctx, "Hello! What can you do?")
+if err != nil {
+    return err
+}
+
+var response strings.Builder
+for ev := range events {
+    switch {
+    case ev.Text != "":
+        response.WriteString(ev.Text)
+    case ev.Tool != nil && ev.Tool.NeedsConfirmation:
+        // Approve the pending tool call (use ResumeApproveSession to allow all).
+        if err := chat.Confirm(ctx, dagentruntime.ResumeApprove()); err != nil {
+            return err
+        }
+    case ev.Tool != nil && ev.Tool.Finished:
+        fmt.Printf("[tool %s finished]\n", ev.Tool.Def.Name)
+    case ev.Err != nil:
+        fmt.Printf("error: %v\n", ev.Err)
+    case ev.Done:
+        fmt.Println("\n[turn complete]")
+    }
+}
+fmt.Print(response.String())
+```
+
+### Restarting the conversation
+
+To start a fresh conversation without recreating the runtime:
+
+```go
+if err := chat.Restart(); err != nil {
+    return err
+}
+```
+
+### Event types
+
+| Field          | When set                                                                 |
+| -------------- | ------------------------------------------------------------------------ |
+| `Text`         | Assistant text delta; accumulate into a string for the full reply.       |
+| `Tool`         | A tool call started, needs confirmation, or finished.                    |
+| `Tool.NeedsConfirmation` | Runtime is blocked until `Confirm` is called.              |
+| `Tool.Finished` | Tool call completed; `Tool.IsError` is true if it errored.             |
+| `Err`          | A user-facing runtime error; no further content events follow.           |
+| `Done`         | Clean end of turn; no more events.                                       |
+| `RuntimeEvent` | The original `runtime.Event` for callers that need the full stream.      |
+
+For advanced use (custom elicitation, raw event inspection), call `chat.Runtime()` to access the underlying `runtime.Runtime` directly.
+
+## Optional Provider Build Tags
+
+By default docker-agent includes all four cloud providers (OpenAI, Anthropic, Google, Amazon Bedrock). When embedding docker-agent in your own binary you can compile out unneeded providers — together with their transitive SDK dependencies — to reduce binary size.
+
+Each provider is gated by a negative build tag prefixed `docker_agent_` to avoid collisions with your own project's tags:
+
+| Build tag                    | Provider dropped         | Major dependency removed                          |
+| ---------------------------- | ------------------------ | ------------------------------------------------- |
+| `docker_agent_no_openai`     | OpenAI                   | `github.com/openai/openai-go`                     |
+| `docker_agent_no_anthropic`  | Anthropic                | `github.com/anthropics/anthropic-sdk-go` (partial — see note) |
+| `docker_agent_no_google`     | Google / Vertex AI       | `google.golang.org/genai`, Vertex auth stack, and indirectly the Anthropic and OpenAI SDKs via Vertex Model Garden |
+| `docker_agent_no_bedrock`    | Amazon Bedrock           | `github.com/aws/aws-sdk-go-v2` stack (the largest provider dependency tree) |
+
+To build without Bedrock and OpenAI:
+
+```bash
+go build -tags 'docker_agent_no_bedrock docker_agent_no_openai' ./...
+```
+
+Requesting a model whose provider was compiled out fails at construction time with a clear `"not compiled into this build"` error. The `dmr` (Docker Model Runner) provider and the rule-based router are always compiled in.
+
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">Anthropic + Google dependency</div>
+  <p>The Google provider's Vertex Model Garden support also imports the Anthropic SDK, so the Anthropic dependency is only fully removed when <em>both</em> <code>docker_agent_no_anthropic</code> and <code>docker_agent_no_google</code> are set.</p>
+</div>
+
+## RAG Toolset (opt-out)
+
+The RAG toolset (`type: rag`) is included in `NewDefaultToolsetRegistry()` (from `pkg/teamloader/toolsets`) and `loaderdefaults.Opts()` (from `pkg/teamloader/defaults`, using the conventional import alias `loaderdefaults`).
+
+The underlying tree-sitter code parser uses cgo, but build-tag guards in `pkg/rag/treesitter` mean importing the package is safe regardless of `CGO_ENABLED`: with `CGO_ENABLED=0` the parser stub compiles in and returns a runtime error on first use rather than failing at compile time.
+
+If you want to exclude the RAG toolset from your binary entirely — surfacing a load-time warning on the agent rather than a deferred runtime error from the `!cgo` stub — remove it from the registry before passing it to `teamloader.Load`:
+
+```go
+import (
+    "github.com/docker/docker-agent/pkg/teamloader"
+    loadertoolsets "github.com/docker/docker-agent/pkg/teamloader/toolsets"
+)
+
+// Opt out of the RAG toolset; a config that declares type: rag attaches
+// a load-time warning to the agent instead of failing at document processing.
+creators := loadertoolsets.DefaultToolsetCreators()
+delete(creators, "rag")
+registry := teamloader.NewToolsetRegistry(creators)
+```
+
+Pass the custom registry via `teamloader.WithToolsetRegistry(registry)` when calling `teamloader.Load`. Note that `teamloader.Load()` does not return an error for unknown toolset types — the failure is recorded as a load-time warning and can be retrieved with `agent.DrainWarnings()`; it is also surfaced via logging and TUI notifications.
+
+## MCP OAuth Token Persistence
+
+By default, MCP OAuth tokens are stored in-memory only and are not persisted across process restarts. The CLI registers a keyring-backed store automatically at startup; when embedding docker-agent as a library you must do this yourself if you want tokens to survive restarts.
+
+Call `keyringstore.Register()` **before** any MCP toolset is initialised to enable the OS keyring-backed token store:
+
+```go
+import "github.com/docker/docker-agent/pkg/tools/mcp/keyringstore"
+
+func main() {
+    // Must be called before teamloader.Load() on configs with remote MCP
+    // toolsets; calling it after the store is created panics.
+    keyringstore.Register()
+    // ... rest of your startup code
+}
+```
+
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">Call order matters</div>
+  <p>If <code>keyringstore.Register()</code> is called after the default token store has already been lazily initialised, docker-agent panics. The store is initialised when any remote MCP toolset is constructed — which happens inside <code>teamloader.Load()</code>. Always call <code>keyringstore.Register()</code> before calling <code>teamloader.Load()</code> on a config that includes remote MCP toolsets.</p>
+</div>
+
+If you do not need persistent OAuth tokens (for example, in short-lived batch jobs or tests), omit the call and tokens will be kept in-memory for the process lifetime.
 
 ## Basic Example
 

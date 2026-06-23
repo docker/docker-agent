@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/kofalt/go-memoize"
+	"github.com/docker/docker-agent/pkg/memoize"
 )
 
 // versionMemoizer caches the Docker Desktop version lookup with a TTL so:
@@ -12,7 +12,7 @@ import (
 //     recovers automatically once Desktop comes up;
 //   - if Desktop is upgraded mid-session, the new version is picked up
 //     within at most one TTL.
-var versionMemoizer = memoize.NewMemoizer(5*time.Minute, 10*time.Minute)
+var versionMemoizer = memoize.New[string](5 * time.Minute)
 
 // GetVersion returns the running Docker Desktop version (e.g. "4.74.0") or
 // an empty string if Docker Desktop is not running or the call fails.
@@ -23,7 +23,7 @@ var versionMemoizer = memoize.NewMemoizer(5*time.Minute, 10*time.Minute)
 // HTTP call on a cache miss; on a cache hit the cached value is returned
 // without consulting ctx.
 func GetVersion(ctx context.Context) string {
-	v, _, _ := memoize.Call(versionMemoizer, "desktopVersion", func() (string, error) {
+	v, _ := versionMemoizer.Memoize("desktopVersion", func() (string, error) {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 

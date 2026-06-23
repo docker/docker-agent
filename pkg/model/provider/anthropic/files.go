@@ -15,6 +15,10 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/chat"
 )
@@ -78,7 +82,25 @@ func NewFileManager(clientFn func(context.Context) (anthropic.Client, error)) *F
 // Files are deduplicated by content hash AND MIME type, so identical files with
 // different extensions will be uploaded separately.
 // Concurrent calls for the same file will wait for a single upload to complete.
-func (fm *FileManager) GetOrUpload(ctx context.Context, filePath string) (*UploadedFile, error) {
+func (fm *FileManager) GetOrUpload(ctx context.Context, filePath string) (result *UploadedFile, err error) {
+	// Span the whole upload — large files take seconds to minutes
+	// over slow links and previously the latency was completely
+	// dark. cache_hit=true paths are short-lived siblings; the
+	// network upload path is the long branch.
+	ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/model/provider/anthropic").Start(
+		ctx,
+		"anthropic.files.get_or_upload",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(attribute.String("cagent.file.path", filePath)),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get absolute path: %w", err)

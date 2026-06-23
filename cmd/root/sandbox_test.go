@@ -79,11 +79,28 @@ func TestDockerAgentArgs_PreservesUserYolo(t *testing.T) {
 
 	yoloCount := 0
 	for _, a := range got {
-		if a == "--yolo" {
+		if strings.HasPrefix(a, "--yolo") {
 			yoloCount++
 		}
 	}
 	assert.Equal(t, 1, yoloCount, "--yolo should not be duplicated, got: %v", got)
+	assert.Contains(t, got, "--yolo=true")
+}
+
+func TestDockerAgentArgs_PreservesExplicitFalseBool(t *testing.T) {
+	cmd := &cobra.Command{
+		RunE: func(*cobra.Command, []string) error { return nil },
+	}
+	var sandboxFlag, lean bool
+	cmd.PersistentFlags().BoolVar(&sandboxFlag, "sandbox", false, "")
+	cmd.PersistentFlags().BoolVar(&lean, "lean", true, "")
+
+	require.NoError(t, cmd.ParseFlags([]string{"--sandbox", "--lean=false"}))
+
+	got := dockerAgentArgs(cmd, []string{"./agent.yaml"}, "/cfg")
+
+	assert.Contains(t, got, "--lean=false")
+	assert.NotContains(t, got, "--lean")
 }
 
 func TestGatewayHostPort(t *testing.T) {

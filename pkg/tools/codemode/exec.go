@@ -3,12 +3,17 @@ package codemode
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"slices"
 
 	"github.com/dop251/goja"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -39,6 +44,29 @@ func (t *toolCallTracker) record(info ToolCallInfo) {
 func (c *codeModeTool) runJavascript(ctx context.Context, script string) (ScriptResult, error) {
 	vm := goja.New()
 	tracker := &toolCallTracker{}
+
+	// Always stamp a hash + length so dashboards can correlate
+	// identical scripts ("model ran the same script 200 times this
+	// hour") without ever shipping the body. Codemode scripts are
+	// kilobyte-scale arbitrary JS — embedded auth tokens, pasted
+	// user data, and inline secrets are common — so the body itself
+	// is gated behind the GenAI content-capture opt-in.
+	span := trace.SpanFromContext(ctx)
+	if span.IsRecording() {
+		sum := sha256.Sum256([]byte(script))
+		span.SetAttributes(
+			attribute.String("cagent.tool.codemode.script_hash", hex.EncodeToString(sum[:])),
+			attribute.Int("cagent.tool.codemode.script_length", len(script)),
+		)
+		if genai.IsContentCaptureEnabled() {
+			span.SetAttributes(attribute.String("cagent.tool.codemode.script", script))
+		}
+	}
+	defer func() {
+		if span.IsRecording() {
+			span.SetAttributes(attribute.Int("cagent.tool.codemode.tool_call_count", len(tracker.calls)))
+		}
+	}()
 
 	// Inject console object to the help the LLM debug its own code.
 	var (

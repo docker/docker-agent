@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
@@ -101,7 +102,9 @@ func (runConfig *RuntimeConfig) ModelsDevStore() (*modelsdev.Store, error) {
 		return runConfig.ModelsDevStoreOverride, nil
 	}
 	runConfig.modelsDevStoreOnce.Do(func() {
-		runConfig.modelsDevStore, runConfig.modelsDevStoreErr = modelsdev.NewStore()
+		runConfig.modelsDevStore, runConfig.modelsDevStoreErr = modelsdev.NewStore(
+			modelsdev.WithKnownProvider(provider.IsKnownProvider),
+		)
 	})
 	return runConfig.modelsDevStore, runConfig.modelsDevStoreErr
 }

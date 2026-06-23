@@ -105,12 +105,7 @@ func (a *betaStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case anthropic.BetaRawMessageDeltaEvent:
 		a.stopReason = eventVariant.Delta.StopReason
 		if a.trackUsage {
-			response.Usage = &chat.Usage{
-				InputTokens:       eventVariant.Usage.InputTokens,
-				OutputTokens:      eventVariant.Usage.OutputTokens,
-				CachedInputTokens: eventVariant.Usage.CacheReadInputTokens,
-				CacheWriteTokens:  eventVariant.Usage.CacheCreationInputTokens,
-			}
+			response.Usage = betaUsageFromDelta(eventVariant.Usage)
 		}
 	case anthropic.BetaRawMessageStopEvent:
 		response.Choices[0].FinishReason = finishReason(anthropic.StopReason(a.stopReason), a.toolCall)
@@ -122,4 +117,18 @@ func (a *betaStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 // Close closes the Beta stream
 func (a *betaStreamAdapter) Close() {
 	a.stream.Close()
+}
+
+// betaUsageFromDelta maps the Beta Messages API streaming usage onto chat.Usage.
+// As with the standard API, ReasoningTokens is sourced from
+// OutputTokensDetails.ThinkingTokens — a read-only decomposition of the already
+// billed OutputTokens — so recording it is purely additive observability.
+func betaUsageFromDelta(u anthropic.BetaMessageDeltaUsage) *chat.Usage {
+	return &chat.Usage{
+		InputTokens:       u.InputTokens,
+		OutputTokens:      u.OutputTokens,
+		CachedInputTokens: u.CacheReadInputTokens,
+		CacheWriteTokens:  u.CacheCreationInputTokens,
+		ReasoningTokens:   u.OutputTokensDetails.ThinkingTokens,
+	}
 }

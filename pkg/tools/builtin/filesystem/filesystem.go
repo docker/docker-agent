@@ -18,6 +18,9 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -25,6 +28,41 @@ import (
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/tools"
 )
+
+// annotateFilesystemSpan stamps the operation kind and target path
+// onto the active runtime.tool.handler span. Paths ship unconditionally
+// — they're the main signal of what the agent touched. Drop or hash
+// `cagent.tool.filesystem.path` at the OTel collector if paths
+// routinely reveal identifiers you don't want shipped.
+func annotateFilesystemSpan(ctx context.Context, op, path string) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.String("cagent.tool.filesystem.op", op),
+	}
+	if path != "" {
+		attrs = append(attrs, attribute.String("cagent.tool.filesystem.path", path))
+	}
+	span.SetAttributes(attrs...)
+}
+
+// maxFilesystemPathsAttr caps how many entries from args.Paths land on a
+// span attribute. Many backends drop attributes over a few KiB and per-
+// element string costs add up fast on a multi-hundred-path call. The
+// path_count attribute (always recorded) preserves total fidelity.
+const maxFilesystemPathsAttr = 32
+
+// cappedPaths returns paths truncated to maxFilesystemPathsAttr entries.
+// Callers should also record `path_count = len(paths)` separately so the
+// truncation is visible.
+func cappedPaths(paths []string) []string {
+	if len(paths) <= maxFilesystemPathsAttr {
+		return paths
+	}
+	return paths[:maxFilesystemPathsAttr]
+}
 
 const (
 	ToolNameReadFile           = "read_file"
@@ -784,6 +822,7 @@ func (t *ToolSet) shouldIgnorePath(path string) bool {
 // Handler implementations
 
 func (t *ToolSet) handleDirectoryTree(ctx context.Context, args DirectoryTreeArgs) (*tools.ToolCallResult, error) {
+	annotateFilesystemSpan(ctx, "directory_tree", args.Path)
 	resolvedPath, err := t.resolveAndCheckPath(args.Path)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
@@ -856,6 +895,7 @@ func (t *ToolSet) editFileHandler() tools.ToolHandler {
 }
 
 func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools.ToolCallResult, error) {
+	annotateFilesystemSpan(ctx, "edit_file", args.Path)
 	resolvedPath, err := t.resolveAndCheckPath(args.Path)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
@@ -893,7 +933,8 @@ func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools
 	return tools.ResultSuccess("File edited successfully. Changes:\n" + strings.Join(changes, "\n")), nil
 }
 
-func (t *ToolSet) handleListDirectory(_ context.Context, args ListDirectoryArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleListDirectory(ctx context.Context, args ListDirectoryArgs) (*tools.ToolCallResult, error) {
+	annotateFilesystemSpan(ctx, "list_directory", args.Path)
 	resolvedPath, err := t.resolveAndCheckPath(args.Path)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
@@ -934,7 +975,8 @@ func (t *ToolSet) handleListDirectory(_ context.Context, args ListDirectoryArgs)
 	}, nil
 }
 
-func (t *ToolSet) handleReadFile(_ context.Context, args ReadFileArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleReadFile(ctx context.Context, args ReadFileArgs) (*tools.ToolCallResult, error) {
+	annotateFilesystemSpan(ctx, "read_file", args.Path)
 	resolvedPath, err := t.resolveAndCheckPath(args.Path)
 	if err != nil {
 		return &tools.ToolCallResult{
@@ -1041,6 +1083,13 @@ func (t *ToolSet) readImageFile(resolvedPath, originalPath string) (*tools.ToolC
 }
 
 func (t *ToolSet) handleReadMultipleFiles(ctx context.Context, args ReadMultipleFilesArgs) (*tools.ToolCallResult, error) {
+	annotateFilesystemSpan(ctx, "read_multiple_files", "")
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.Int("cagent.tool.filesystem.path_count", len(args.Paths)),
+			attribute.StringSlice("cagent.tool.filesystem.paths", cappedPaths(args.Paths)),
+		)
+	}
 	type PathContent struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -1113,7 +1162,8 @@ func (t *ToolSet) handleReadMultipleFiles(ctx context.Context, args ReadMultiple
 	}, nil
 }
 
-func (t *ToolSet) handleSearchFilesContent(_ context.Context, args SearchFilesContentArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleSearchFilesContent(ctx context.Context, args SearchFilesContentArgs) (*tools.ToolCallResult, error) {
+	annotateFilesystemSpan(ctx, "search_files_content", args.Path)
 	resolvedPath, err := t.resolveAndCheckPath(args.Path)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
@@ -1320,6 +1370,7 @@ func isBinaryContent(header []byte) bool {
 }
 
 func (t *ToolSet) handleWriteFile(ctx context.Context, args WriteFileArgs) (*tools.ToolCallResult, error) {
+	annotateFilesystemSpan(ctx, "write_file", args.Path)
 	resolvedPath, err := t.resolveAndCheckPath(args.Path)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
@@ -1342,7 +1393,14 @@ func (t *ToolSet) handleWriteFile(ctx context.Context, args WriteFileArgs) (*too
 	return tools.ResultSuccess(fmt.Sprintf("File written successfully: %s (%d bytes)", args.Path, len(args.Content))), nil
 }
 
-func (t *ToolSet) handleCreateDirectory(_ context.Context, args CreateDirectoryArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleCreateDirectory(ctx context.Context, args CreateDirectoryArgs) (*tools.ToolCallResult, error) {
+	annotateFilesystemSpan(ctx, "create_directory", "")
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.Int("cagent.tool.filesystem.path_count", len(args.Paths)),
+			attribute.StringSlice("cagent.tool.filesystem.paths", cappedPaths(args.Paths)),
+		)
+	}
 	var results []string
 	for _, path := range args.Paths {
 		resolvedPath, err := t.resolveAndCheckPath(path)
@@ -1358,7 +1416,14 @@ func (t *ToolSet) handleCreateDirectory(_ context.Context, args CreateDirectoryA
 	return tools.ResultSuccess(strings.Join(results, "\n")), nil
 }
 
-func (t *ToolSet) handleRemoveDirectory(_ context.Context, args RemoveDirectoryArgs) (*tools.ToolCallResult, error) {
+func (t *ToolSet) handleRemoveDirectory(ctx context.Context, args RemoveDirectoryArgs) (*tools.ToolCallResult, error) {
+	annotateFilesystemSpan(ctx, "remove_directory", "")
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.Int("cagent.tool.filesystem.path_count", len(args.Paths)),
+			attribute.StringSlice("cagent.tool.filesystem.paths", cappedPaths(args.Paths)),
+		)
+	}
 	var results []string
 	for _, path := range args.Paths {
 		resolvedPath, err := t.resolveAndCheckPath(path)

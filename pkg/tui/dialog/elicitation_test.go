@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -574,6 +575,29 @@ func TestElicitationDialog_collectAndValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestElicitationDialog_PasswordFieldMaskedAndUntrimmed(t *testing.T) {
+	t.Parallel()
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"password": map[string]any{"type": "string", "format": "password"},
+		},
+		"required": []any{"password"},
+	}
+	dialog := NewElicitationDialog("sudo", schema, nil).(*ElicitationDialog)
+
+	// The password input is masked, not echoed in clear text.
+	assert.Equal(t, textinput.EchoPassword, dialog.inputs[0].EchoMode)
+
+	// A password with surrounding whitespace must round-trip unchanged
+	// (regular string fields are trimmed, secret ones are not).
+	dialog.inputs[0].SetValue("  s p a c e d  ")
+	content, firstErrorIdx := dialog.collectAndValidate()
+	assert.Equal(t, -1, firstErrorIdx)
+	assert.Equal(t, "  s p a c e d  ", content["password"])
 }
 
 func TestElicitationDialog_LongEnumScrolls(t *testing.T) {

@@ -150,6 +150,24 @@ func TestLoopDetector(t *testing.T) {
 			wantCount: 0,
 		},
 		{
+			// list_background_agents is zero-arg, so every call is byte-identical.
+			// That makes it the textbook trigger for the consecutive-duplicate
+			// killer — but it's also the natural reach-for tool when a model
+			// has lost track of task IDs and needs to re-discover them. The
+			// runtime exempts it for the same reason it exempts the view_*
+			// tools: polling status is a legitimate, expected pattern.
+			name:        "exempt list_background_agents polling does not count as a loop",
+			threshold:   2,
+			exemptTools: []string{bgagent.ToolNameListBackgroundAgents},
+			batches: [][]tools.ToolCall{
+				makeCalls(bgagent.ToolNameListBackgroundAgents, `{}`),
+				makeCalls(bgagent.ToolNameListBackgroundAgents, `{}`),
+				makeCalls(bgagent.ToolNameListBackgroundAgents, `{}`),
+			},
+			wantTrip:  false,
+			wantCount: 0,
+		},
+		{
 			// A looping model cannot evade detection by interleaving a single
 			// polling call between identical non-exempt calls. Exempt calls are
 			// completely invisible to the detector and do NOT reset the counter.

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -18,8 +19,21 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
+// useEmptyUserConfig points paths.GetConfigDir at an empty temp dir so
+// service.NewSessionState reads default user settings rather than the
+// developer's real ~/.config/cagent/config.yaml, which would otherwise leak
+// preferences like expand_thinking into these tests.
+//
+// Tests using it must not call t.Parallel: they mutate the package-level
+// config-dir override.
+func useEmptyUserConfig(t *testing.T) {
+	t.Helper()
+	paths.SetConfigDir(t.TempDir())
+	t.Cleanup(func() { paths.SetConfigDir("") })
+}
+
 func TestReasoningBlockCollapsedByDefaultFromSessionState(t *testing.T) {
-	t.Parallel()
+	useEmptyUserConfig(t)
 
 	sessionState := service.NewSessionState(&session.Session{})
 	block := New("test-default-collapsed", "root", sessionState)
@@ -37,7 +51,7 @@ func TestReasoningBlockCollapsedByDefaultFromSessionState(t *testing.T) {
 }
 
 func TestReasoningBlockCanDefaultExpandedFromSessionState(t *testing.T) {
-	t.Parallel()
+	useEmptyUserConfig(t)
 
 	sessionState := service.NewSessionState(&session.Session{})
 	sessionState.SetExpandThinking(true)

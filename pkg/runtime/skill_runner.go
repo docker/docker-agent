@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/skills"
 )
@@ -41,13 +42,40 @@ func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, 
 
 	ca := r.CurrentAgentName()
 
-	// Open the span before model resolution so it's recorded under
-	// runtime.run_skill rather than the parent session span.
-	ctx, span := r.startSpan(ctx, "runtime.run_skill", trace.WithAttributes(
-		attribute.String("agent", ca),
-		attribute.String("skill", prepared.SkillName),
-		attribute.String("session.id", sess.ID),
-	))
+	// Open the span before any pre-delegation work so model resolution
+	// (inside WithAgentModel) is recorded under runtime.run_skill rather
+	// than the parent session span.
+	//
+	// Skills are workflow-shaped (a coordinated process the agent
+	// orchestrates), so the GenAI semconv `invoke_workflow` operation
+	// applies. Emit it via gen_ai.* attrs alongside the legacy keys
+	// for back-compat.
+	skillAttrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationInvokeWorkflow),
+		attribute.String(genai.AttrWorkflowName, prepared.SkillName),
+		attribute.String(genai.AttrAgentNameRuntime, ca),
+		attribute.String(genai.AttrConversationID, sess.ID),
+	}
+	if genai.EmitLegacyAttributes() {
+		skillAttrs = append(skillAttrs,
+			attribute.String("agent", ca),
+			attribute.String("skill", prepared.SkillName),
+			attribute.String("session.id", sess.ID),
+		)
+	}
+	// Span name follows the GenAI agent semconv pattern
+	// `invoke_workflow {workflow.name}` so spec-aware backends
+	// classify the span as a workflow invocation. SpanKindInternal is
+	// passed explicitly per spec rather than relying on the SDK
+	// default — keeps intent clear and immune to default changes.
+	spanName := genai.OperationInvokeWorkflow
+	if prepared.SkillName != "" {
+		spanName = genai.OperationInvokeWorkflow + " " + prepared.SkillName
+	}
+	ctx, span := r.startSpan(ctx, spanName,
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(skillAttrs...),
+	)
 	defer span.End()
 
 	slog.DebugContext(ctx, "Running skill as sub-agent",

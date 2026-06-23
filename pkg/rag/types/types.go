@@ -37,3 +37,18 @@ type Progress struct {
 	Current int
 	Total   int
 }
+
+// EventCallback receives RAG manager events during initialization.
+type EventCallback func(event Event)
+
+// EventForwarder is implemented by RAG toolsets that can stream lifecycle
+// events (indexing progress, usage, errors) to a callback. The runtime
+// type-asserts to this interface to wire event forwarding without importing
+// the concrete rag toolset package — which keeps the cgo tree-sitter
+// dependency out of the runtime's import graph.
+type EventForwarder interface {
+	// Name returns the toolset's user-facing name.
+	Name() string
+	// SetEventCallback registers the callback; must be called before Start.
+	SetEventCallback(callback EventCallback)
+}

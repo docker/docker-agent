@@ -1,6 +1,7 @@
 package teamloader
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,16 +13,35 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/fetch"
 	"github.com/docker/docker-agent/pkg/tools/builtin/lsp"
+	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
 	mcptool "github.com/docker/docker-agent/pkg/tools/mcp"
 )
+
+func testToolsetRegistry() ToolsetRegistry {
+	return NewToolsetRegistry(map[string]ToolsetCreator{
+		"shell": func(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+			return shell.CreateToolSet(ctx, toolset, runConfig)
+		},
+		"mcp": func(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+			return mcptool.CreateToolSet(ctx, toolset, runConfig)
+		},
+		"fetch": func(_ context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+			return fetch.CreateToolSet(toolset, runConfig)
+		},
+		"lsp": func(ctx context.Context, toolset latest.Toolset, _ string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+			return lsp.CreateToolSet(ctx, toolset, runConfig)
+		},
+	})
+}
 
 func TestCreateShellTool(t *testing.T) {
 	toolset := latest.Toolset{
 		Type: "shell",
 	}
 
-	registry := NewDefaultToolsetRegistry()
+	registry := testToolsetRegistry()
 
 	runConfig := &config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: t.TempDir()},
@@ -41,7 +61,7 @@ func TestCreateMCPTool_CommandNotFound_CreatesToolsetAnyway(t *testing.T) {
 		Command: "./bin/nonexistent-mcp-server",
 	}
 
-	registry := NewDefaultToolsetRegistry()
+	registry := testToolsetRegistry()
 
 	runConfig := &config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: t.TempDir()},
@@ -62,7 +82,7 @@ func TestCreateMCPTool_BareCommandNotFound_CreatesToolsetAnyway(t *testing.T) {
 		Command: "some-nonexistent-mcp-binary",
 	}
 
-	registry := NewDefaultToolsetRegistry()
+	registry := testToolsetRegistry()
 
 	runConfig := &config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: t.TempDir()},
@@ -88,7 +108,7 @@ func TestCreateMCPTool_WorkingDir_ReachesSubprocess(t *testing.T) {
 		WorkingDir: customDir,
 	}
 
-	registry := NewDefaultToolsetRegistry()
+	registry := testToolsetRegistry()
 	runConfig := &config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: agentDir},
 		EnvProviderForTests: environment.NewOsEnvProvider(),
@@ -120,7 +140,7 @@ func TestCreateMCPTool_RelativeWorkingDir_ResolvedAgainstAgentDir(t *testing.T) 
 		WorkingDir: "tools/mcp",
 	}
 
-	registry := NewDefaultToolsetRegistry()
+	registry := testToolsetRegistry()
 	runConfig := &config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: agentDir},
 		EnvProviderForTests: environment.NewOsEnvProvider(),
@@ -151,7 +171,7 @@ func TestCreateMCPTool_NonexistentWorkingDir_ReturnsError(t *testing.T) {
 		WorkingDir: nonExistent,
 	}
 
-	registry := NewDefaultToolsetRegistry()
+	registry := testToolsetRegistry()
 	runConfig := &config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: t.TempDir()},
 		EnvProviderForTests: environment.NewOsEnvProvider(),
@@ -176,7 +196,7 @@ func TestCreateLSPTool_WorkingDir_ReachesHandler(t *testing.T) {
 		WorkingDir: customDir,
 	}
 
-	registry := NewDefaultToolsetRegistry()
+	registry := testToolsetRegistry()
 	runConfig := &config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: agentDir},
 		EnvProviderForTests: environment.NewOsEnvProvider(),
@@ -202,7 +222,7 @@ func TestCreateMCPTool_RefRemote_WorkingDir_ReturnsError(t *testing.T) {
 		WorkingDir: "./workspace",
 	}
 
-	registry := NewDefaultToolsetRegistry()
+	registry := testToolsetRegistry()
 	runConfig := &config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: t.TempDir()},
 		EnvProviderForTests: environment.NewOsEnvProvider(),
@@ -224,7 +244,7 @@ func TestCreateMCPTool_RefRemote_NoWorkingDir_Succeeds(t *testing.T) {
 		Ref:  "docker:remote-server",
 	}
 
-	registry := NewDefaultToolsetRegistry()
+	registry := testToolsetRegistry()
 	runConfig := &config.RuntimeConfig{
 		Config:              config.Config{WorkingDir: t.TempDir()},
 		EnvProviderForTests: environment.NewOsEnvProvider(),

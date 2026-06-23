@@ -1,6 +1,7 @@
 package root
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
 	pathx "github.com/docker/docker-agent/pkg/path"
+	"github.com/docker/docker-agent/pkg/profiling"
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry"
@@ -25,6 +27,7 @@ type apiFlags struct {
 	fakeResponses    string
 	recordPath       string
 	authToken        string
+	pprofAddr        string
 	runConfig        config.RuntimeConfig
 }
 
@@ -44,6 +47,8 @@ func newAPICmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.fakeResponses, "fake", "", "Replay AI responses from cassette file (for testing)")
 	cmd.PersistentFlags().StringVar(&flags.recordPath, "record", "", "Record AI API interactions to cassette file")
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for API requests (empty = no authentication)")
+	cmd.PersistentFlags().StringVar(&flags.pprofAddr, "pprof-addr", "", "TCP host:port to expose Go pprof endpoints at /debug/pprof/ (e.g. 127.0.0.1:6060); also set via CAGENT_PPROF_ADDR")
+	_ = cmd.PersistentFlags().MarkHidden("pprof-addr")
 	cmd.MarkFlagsMutuallyExclusive("fake", "record")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
@@ -87,6 +92,12 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 
 	if f.pullIntervalMins > 0 && !config.IsOCIReference(agentsPath) && !config.IsURLReference(agentsPath) {
 		return errors.New("--pull-interval flag can only be used with OCI or URL references, not local files")
+	}
+
+	if pprofAddr := cmp.Or(f.pprofAddr, os.Getenv("CAGENT_PPROF_ADDR")); pprofAddr != "" {
+		if err := profiling.StartPprofServer(ctx, pprofAddr); err != nil {
+			return err
+		}
 	}
 
 	ln, lnCleanup, err := newListener(ctx, f.listenAddr)

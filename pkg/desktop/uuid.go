@@ -3,17 +3,16 @@ package desktop
 import (
 	"context"
 
-	"github.com/kofalt/go-memoize"
-	"github.com/patrickmn/go-cache"
+	"github.com/docker/docker-agent/pkg/memoize"
 )
 
-var uuidMmemoizer = memoize.NewMemoizer(cache.NoExpiration, cache.NoExpiration)
+var uuidMemoizer = memoize.New[string](memoize.NoExpiration)
 
 func GetUUID(ctx context.Context) string {
-	uuid, _, _ := uuidMmemoizer.Memoize("desktopUUID", func() (any, error) {
+	uuid, _ := uuidMemoizer.Memoize("desktopUUID", func() (string, error) {
 		var uuid string
 		_ = ClientBackend.Get(ctx, "/uuid", &uuid)
 		return uuid, nil
 	})
-	return uuid.(string)
+	return uuid
 }

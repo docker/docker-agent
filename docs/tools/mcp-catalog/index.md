@@ -63,7 +63,7 @@ Up to five tools are exposed to the model. The disable / reset-auth pair only ap
 
 ### Workflow
 
-1. The agent calls `search_remote_mcp_servers` with a keyword matching the user's intent (`"notion"`, `"stripe"`, `"docs"`, `"browser"`, …).
+1. The agent calls `search_remote_mcp_servers` with a keyword matching the user's intent (`"notion"`, `"stripe"`, `"docs"`, `"browser"`, `"grafana"`, …).
 2. It picks a matching server id and calls `enable_remote_mcp_server`. **`enable` blocks** until the MCP handshake (and any required OAuth flow) completes:
    - on success the server's tools are available **in the same turn** — the agent goes straight to the user's original request, no re-ask required;
    - on failure (user dismissed the authorization dialog, server refused) the tool returns an error result naming the specific reason so the agent can recover instead of pretending the server is connected.

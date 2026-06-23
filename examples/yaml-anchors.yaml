@@ -1,0 +1,39 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+# This example demonstrates YAML anchors (&name), aliases (*name) and merge
+# keys (<<). Declare a value once and reuse it across agents instead of
+# copy-pasting the same block.
+#
+# An anchor has to sit on a real value inside a known section (here, real
+# agents). A separate top-level block such as `defaults:` is rejected as an
+# unknown field.
+
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-5
+    max_tokens: 64000
+
+agents:
+  root:
+    model: sonnet
+    description: Coordinator that delegates to specialist sub-agents.
+    # `&house_rules` anchors this instruction so it can be reused verbatim.
+    instruction: &house_rules |
+      You are part of the Acme engineering team.
+      Cite the files you looked at and keep changes minimal.
+    sub_agents: [reviewer, documenter]
+
+  # `&specialist` anchors this whole agent so it can be merged into others.
+  reviewer: &specialist
+    model: sonnet
+    description: Reviews code changes for correctness and clarity.
+    instruction: *house_rules # reuse the same instruction, declared once
+    toolsets:
+      - type: filesystem
+
+  documenter:
+    # Merge everything from `reviewer` (model, instruction, toolsets), then
+    # override a single field. Overriding a merged key works in `agents:`.
+    <<: *specialist
+    description: Writes and updates project documentation.

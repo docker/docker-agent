@@ -18,9 +18,14 @@ import (
 	"time"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/oauth2"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	otelmcp "github.com/docker/docker-agent/pkg/telemetry/mcp"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -663,11 +668,33 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 
 	slog.DebugContext(ctx, "Attempting silent token refresh", "url", t.baseURL)
 
+	// Wrap the refresh path in a span so the latency and failure
+	// rate of silent OAuth token refreshes are visible — the user
+	// otherwise just sees a stalled MCP request with no obvious
+	// cause. Pull conversation id from baggage so observability-svc
+	// can attribute the refresh to the spawning session.
+	refreshAttrs := []attribute.KeyValue{
+		attribute.String("cagent.oauth.base_url", t.baseURL),
+	}
+	if convID := otelmcp.ConversationIDFromBaggage(ctx); convID != "" {
+		refreshAttrs = append(refreshAttrs, attribute.String("gen_ai.conversation.id", convID))
+	}
+	ctx, refreshSpan := otel.Tracer("github.com/docker/docker-agent/pkg/tools/mcp").Start(
+		ctx,
+		"oauth.token.refresh",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(refreshAttrs...),
+	)
+	defer refreshSpan.End()
+
 	o := &oauth{metadataClient: t.oauthClient()}
 	authServer := cmp.Or(token.AuthServer, t.baseURL)
 	metadata, err := o.getAuthorizationServerMetadata(ctx, authServer)
 	if err != nil {
 		slog.DebugContext(ctx, "Failed to fetch auth server metadata for refresh", "auth_server", authServer, "error", err)
+		refreshSpan.RecordError(err)
+		refreshSpan.SetStatus(codes.Error, "metadata fetch failed")
+		refreshSpan.SetAttributes(attribute.String("error.type", "metadata"))
 		return nil
 	}
 
@@ -681,6 +708,9 @@ func (t *oauthTransport) getValidToken(ctx context.Context) *OAuthToken {
 	)
 	if err != nil {
 		slog.DebugContext(ctx, "Token refresh failed, will require interactive auth", "error", err)
+		refreshSpan.RecordError(err)
+		refreshSpan.SetStatus(codes.Error, "refresh failed")
+		refreshSpan.SetAttributes(attribute.String("error.type", "refresh_token"))
 		t.mu.Lock()
 		t.refreshFailedAt = time.Now()
 		t.mu.Unlock()
@@ -741,19 +771,49 @@ func configuredScopes(c *latest.RemoteOAuthConfig) []string {
 }
 
 // handleOAuthFlow performs the OAuth flow when a 401 response is received
-func (t *oauthTransport) handleOAuthFlow(ctx context.Context, authServer, wwwAuth string) error {
+func (t *oauthTransport) handleOAuthFlow(ctx context.Context, authServer, wwwAuth string) (err error) {
+	kind := "unmanaged"
+	if t.managed {
+		kind = "managed"
+	}
+	// Interactive OAuth flows can take seconds to minutes (user
+	// switches to browser, completes the consent screen, comes
+	// back). The span makes that latency attributable and gives
+	// dashboards a way to count auth-failure rates by managed kind.
+	flowAttrs := []attribute.KeyValue{
+		attribute.String("cagent.oauth.base_url", t.baseURL),
+		attribute.String("cagent.oauth.kind", kind),
+	}
+	if convID := otelmcp.ConversationIDFromBaggage(ctx); convID != "" {
+		flowAttrs = append(flowAttrs, attribute.String("gen_ai.conversation.id", convID))
+	}
+	ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/tools/mcp").Start(
+		ctx,
+		"oauth.flow",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(flowAttrs...),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	if t.managed {
 		return t.handleManagedOAuthFlow(ctx, authServer, wwwAuth)
 	}
-
 	return t.handleUnmanagedOAuthFlow(ctx, authServer, wwwAuth)
 }
 
 func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer, wwwAuth string) error {
 	slog.DebugContext(ctx, "Starting OAuth flow for server", "url", t.baseURL)
+	span := trace.SpanFromContext(ctx)
 
 	resourceURL := cmp.Or(resourceMetadataFromWWWAuth(wwwAuth), authServer+"/.well-known/oauth-protected-resource")
 
+	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "fetch_protected_resource_metadata")))
 	resourceReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, http.NoBody)
 	if err != nil {
 		return err
@@ -781,6 +841,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	oauth := &oauth{metadataClient: t.oauthClient()}
+	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "fetch_authorization_server_metadata")))
 	authServerMetadata, err := oauth.getAuthorizationServerMetadata(ctx, resourceMetadata.AuthorizationServers[0])
 	if err != nil {
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)
@@ -853,6 +914,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	slog.DebugContext(ctx, "Requesting authorization code", "url", authURL)
+	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "request_authorization_code")))
 
 	code, receivedState, err := RequestAuthorizationCode(ctx, authURL, callbackServer, state)
 	if err != nil {
@@ -864,6 +926,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	slog.DebugContext(ctx, "Exchanging authorization code for token")
+	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "token_exchange")))
 	token, err := exchangeCodeForToken(
 		ctx,
 		t.oauthClient(),
@@ -964,10 +1027,12 @@ func (t *oauthTransport) unmanagedRedirectURI() string {
 // free to return an access token.
 func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServer, wwwAuth string) error {
 	slog.DebugContext(ctx, "Starting unmanaged OAuth flow for server", "url", t.baseURL)
+	span := trace.SpanFromContext(ctx)
 
 	// Extract resource URL from WWW-Authenticate header
 	resourceURL := cmp.Or(resourceMetadataFromWWWAuth(wwwAuth), authServer+"/.well-known/oauth-protected-resource")
 
+	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "fetch_protected_resource_metadata")))
 	resourceReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, http.NoBody)
 	if err != nil {
 		return err
@@ -995,6 +1060,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	}
 
 	oauth := &oauth{metadataClient: t.oauthClient()}
+	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "fetch_authorization_server_metadata")))
 	authServerMetadata, err := oauth.getAuthorizationServerMetadata(ctx, resourceMetadata.AuthorizationServers[0])
 	if err != nil {
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)

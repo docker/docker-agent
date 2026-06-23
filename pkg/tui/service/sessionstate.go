@@ -8,6 +8,22 @@ import (
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
+// PauseState describes how /pause is currently affecting the runtime loop
+// for a session, so the TUI can show whether the system is winding down a
+// roundtrip before pausing or fully paused.
+type PauseState int
+
+const (
+	// PauseNone means the runtime is not paused.
+	PauseNone PauseState = iota
+	// PausePausing means /pause was requested but the runtime is still
+	// finishing the in-flight LLM request and its tool calls.
+	PausePausing
+	// PausePaused means the runtime has reached an iteration boundary and is
+	// idle until the user resumes.
+	PausePaused
+)
+
 // SessionStateReader provides read-only access to session state.
 // Components that only need to read state should depend on this interface
 // rather than the full SessionState, following the principle of least privilege.
@@ -21,6 +37,7 @@ type SessionStateReader interface {
 	SessionTitle() string
 	AvailableAgents() []runtime.AgentDetails
 	GetCurrentAgent() runtime.AgentDetails
+	PauseState() PauseState
 }
 
 // Verify SessionState implements SessionStateReader
@@ -39,6 +56,7 @@ type SessionState struct {
 	previousMessage  *types.Message
 	currentAgentName string
 	availableAgents  []runtime.AgentDetails
+	pauseState       PauseState
 }
 
 func NewSessionState(s *session.Session) *SessionState {
@@ -130,6 +148,17 @@ func (s *SessionState) SetAvailableAgents(availableAgents []runtime.AgentDetails
 		names[i] = a.Name
 	}
 	styles.SetAgentOrder(names)
+}
+
+func (s *SessionState) PauseState() PauseState {
+	if s == nil {
+		return PauseNone
+	}
+	return s.pauseState
+}
+
+func (s *SessionState) SetPauseState(state PauseState) {
+	s.pauseState = state
 }
 
 func (s *SessionState) GetCurrentAgent() runtime.AgentDetails {

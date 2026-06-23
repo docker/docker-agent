@@ -226,6 +226,9 @@ func (t *Toolset) validate() error {
 	if t.AllowPrivateIPsEnabled() && t.Type != "fetch" && t.Type != "mcp" && t.Type != "api" && t.Type != "openapi" && t.Type != "a2a" {
 		return errors.New("allow_private_ips can only be used with type 'fetch', 'api', 'openapi', 'a2a' or remote MCP toolsets")
 	}
+	if t.SudoAskpass != nil && t.Type != "shell" {
+		return errors.New("sudo_askpass can only be used with type 'shell'")
+	}
 	if len(t.AllowedDomains) > 0 && len(t.BlockedDomains) > 0 {
 		return errors.New("allowed_domains and blocked_domains are mutually exclusive")
 	}

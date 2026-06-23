@@ -12,6 +12,9 @@ import (
 	"slices"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
@@ -162,6 +165,17 @@ func (t *ScriptToolSet) execute(ctx context.Context, toolConfig *latest.ScriptSh
 		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
+	}
+
+	// Stamp the script_shell call shape onto the active span. Cmd
+	// ships unconditionally for the same reason as shell.RunShell —
+	// see that comment for the redact-at-collector guidance.
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("cagent.tool.script_shell.tool_name", toolCall.Function.Name),
+			attribute.String("cagent.tool.script_shell.cmd", toolConfig.Cmd),
+			attribute.String("cagent.tool.script_shell.cwd", cmp.Or(toolConfig.WorkingDir, ".")),
+		)
 	}
 
 	shell, argsPrefix := shellpath.DetectShell()

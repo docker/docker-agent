@@ -14,6 +14,38 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestSanitizeRemoteAddress verifies that URLs with embedded credentials
+// (basic-auth userinfo, query-string secrets) collapse to a host-only
+// string before reaching the `server.address` span attribute. The point
+// is exfiltration safety: a URL like `https://user:token@host/?api_key=…`
+// would otherwise be replicated verbatim into every CLIENT span and
+// shipped to the trace backend.
+func TestSanitizeRemoteAddress(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{name: "plain", url: "https://example.com/mcp", want: "example.com"},
+		{name: "host with port", url: "https://example.com:8443/mcp", want: "example.com:8443"},
+		{name: "userinfo stripped", url: "https://alice:s3cret@example.com/mcp", want: "example.com"},
+		{name: "query stripped", url: "https://example.com/mcp?api_key=s3cret", want: "example.com"},
+		{name: "userinfo and query stripped", url: "https://alice:s3cret@example.com:8443/mcp?api_key=x", want: "example.com:8443"},
+		{name: "fragment stripped", url: "https://example.com/mcp#frag", want: "example.com"},
+		{name: "hostless empty fallback", url: "not-a-url", want: ""},
+		{name: "empty input", url: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := sanitizeRemoteAddress(tc.url)
+			assert.Equal(t, tc.want, got, "sanitizeRemoteAddress(%q)", tc.url)
+		})
+	}
+}
+
 // TestRemoteClientCustomHeaders verifies that custom headers passed to the remote
 // MCP client are actually applied to HTTP requests sent to the MCP server.
 func TestRemoteClientCustomHeaders(t *testing.T) {
@@ -182,6 +214,65 @@ func TestRemoteClientEmptyHeaders(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("Server did not receive request within timeout")
 	}
+}
+
+// TestOAuthHTTPClientWithHeaders_ScopesHeadersToMCPHost verifies that the
+// OAuth HTTP client forwards configured custom headers to requests targeting
+// the MCP server's own host — where protected-resource-metadata discovery is
+// served (issue #3148) — but NOT to requests aimed at a different host, such
+// as an authorization server advertised in the server's own metadata.
+func TestOAuthHTTPClientWithHeaders_ScopesHeadersToMCPHost(t *testing.T) {
+	t.Parallel()
+
+	var mcpHostHeader, thirdPartyHeader string
+	mcpHostHit := make(chan struct{}, 1)
+	thirdPartyHit := make(chan struct{}, 1)
+
+	mcpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mcpHostHeader = r.Header.Get("X-Grafana-URL")
+		w.WriteHeader(http.StatusOK)
+		mcpHostHit <- struct{}{}
+	}))
+	defer mcpServer.Close()
+
+	thirdParty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		thirdPartyHeader = r.Header.Get("X-Grafana-URL")
+		w.WriteHeader(http.StatusOK)
+		thirdPartyHit <- struct{}{}
+	}))
+	defer thirdParty.Close()
+
+	headers := map[string]string{"X-Grafana-URL": "https://instance.grafana.net/"}
+	client := oauthHTTPClientWithHeaders(mcpServer.URL, headers, true)
+
+	mcpReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, mcpServer.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := client.Do(mcpReq)
+	require.NoError(t, err)
+	resp.Body.Close()
+	<-mcpHostHit
+	assert.Equal(t, "https://instance.grafana.net/", mcpHostHeader,
+		"requests to the MCP server's own host must carry the configured header")
+
+	thirdPartyReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, thirdParty.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err = client.Do(thirdPartyReq)
+	require.NoError(t, err)
+	resp.Body.Close()
+	<-thirdPartyHit
+	assert.Empty(t, thirdPartyHeader,
+		"requests to a third-party host must NOT carry the configured header (credential-leak guard)")
+}
+
+// TestOAuthHTTPClientWithHeaders_NoHeadersReusesBaseClient verifies that with
+// no configured headers the helper returns the shared SSRF-safe OAuth client
+// unchanged — no wrapping, and the package singleton is never mutated.
+func TestOAuthHTTPClientWithHeaders_NoHeadersReusesBaseClient(t *testing.T) {
+	t.Parallel()
+
+	got := oauthHTTPClientWithHeaders("https://mcp.example.com/mcp", nil, false)
+	assert.Same(t, oauthHTTPClientForAllowPrivateIPs(false), got,
+		"with no headers the helper must return the base OAuth client unchanged")
 }
 
 // TestInitialize_SurfacesServerErrorInReturnedError verifies that when an

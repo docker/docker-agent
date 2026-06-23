@@ -174,6 +174,12 @@ agents:
     model: local_llm/llama-3.1-8b
 ```
 
+<div class="callout callout-info" markdown="1">
+<div class="callout-title">Reasoning tokens from OpenAI-compatible providers
+</div>
+  <p>Models that stream reasoning under <code>delta.reasoning</code> (e.g. Qwen3 served via OVHcloud AI Endpoints, OpenRouter, or a self-hosted vLLM / SGLang deployment) are fully supported. Docker Agent reads both the <code>delta.reasoning_content</code> and <code>delta.reasoning</code> fields from the stream, so thinking blocks are captured and shown in the TUI regardless of which field the server uses.</p>
+</div>
+
 ### API Router (Requesty, LiteLLM)
 
 ```yaml

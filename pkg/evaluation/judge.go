@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 )
 
 // relevancePrompt is the prompt template for the judge model to evaluate responses.
@@ -155,10 +156,34 @@ func (j *Judge) CheckRelevance(ctx context.Context, response string, criteria []
 	for i, r := range rawResults {
 		if r.err != nil {
 			errs = append(errs, fmt.Errorf("checking %q: %w", criteria[i], r.err))
+			// Emit gen_ai.evaluation.result with error.type so the
+			// failed checks show up alongside the successful ones in
+			// log-based dashboards. Set ScoreLabel="error" so
+			// dashboards that GROUP BY label still surface these
+			// rows (otherwise the missing label silently drops them).
+			genai.EmitEvaluationResult(ctx, genai.EvaluationResult{
+				Name:       "relevance",
+				ScoreLabel: "error",
+				ErrorType:  genai.ClassifyError(r.err),
+			})
 			continue
 		}
 		results[i].Passed = r.passed
 		results[i].Reason = r.reason
+
+		score := 0.0
+		label := "failed"
+		if r.passed {
+			score = 1.0
+			label = "passed"
+		}
+		genai.EmitEvaluationResult(ctx, genai.EvaluationResult{
+			Name:          "relevance",
+			ScoreLabel:    label,
+			ScoreValue:    score,
+			HasScoreValue: true,
+			Explanation:   r.reason,
+		})
 	}
 
 	if len(errs) > 0 {

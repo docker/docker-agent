@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,7 +12,10 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/memory/database"
+	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -228,4 +233,38 @@ func TestMemoryTool_ParametersAreObjects(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "object", m["type"])
 	}
+}
+
+// TestCreateToolSet_DefaultPath_SanitisesReservedChars guards the
+// default-path branch against config names that contain characters which
+// are illegal in a Windows path component. Agents loaded from an OCI
+// reference produce config names that include the image tag's ':', and
+// without sanitisation os.MkdirAll fails with ERROR_INVALID_NAME on NTFS.
+// The test runs the same assertions on every OS so the behaviour is
+// pinned regardless of where the suite executes.
+func TestCreateToolSet_DefaultPath_SanitisesReservedChars(t *testing.T) {
+	dataDir := t.TempDir()
+	paths.SetDataDir(dataDir)
+	t.Cleanup(func() { paths.SetDataDir("") })
+
+	ts, err := CreateToolSet(latest.Toolset{Type: "memory"}, "", &config.RuntimeConfig{}, `oci:v8<>"|?*\/-deadbeef`)
+	require.NoError(t, err)
+	require.NotNil(t, ts)
+
+	// The directory under <dataDir>/memory must exist and contain no
+	// Windows-reserved characters in its single path segment.
+	entries, err := os.ReadDir(filepath.Join(dataDir, "memory"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	name := entries[0].Name()
+	assert.NotContains(t, name, ":")
+	assert.NotContains(t, name, "<")
+	assert.NotContains(t, name, ">")
+	assert.NotContains(t, name, `"`)
+	assert.NotContains(t, name, "|")
+	assert.NotContains(t, name, "?")
+	assert.NotContains(t, name, "*")
+	assert.NotContains(t, name, `\`)
+	assert.NotContains(t, name, "/")
 }

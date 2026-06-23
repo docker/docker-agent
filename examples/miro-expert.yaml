@@ -1,0 +1,128 @@
+# Example: Miro's hosted MCP server (https://miro.com/ai/mcp/) with skills.
+#
+# Miro exposes a remote, streamable-HTTP MCP server at https://mcp.miro.com/.
+# It authenticates with OAuth 2.1 and supports Dynamic Client Registration, so
+# no clientId/clientSecret is required: docker-agent opens the browser for the
+# OAuth flow on first run.
+#
+# Official docs: https://developers.miro.com/docs/miro-mcp
+#
+#   - The MCP server is Enterprise-plan only. Your organization's admin must
+#     enable it before you can connect (see the docs above).
+#   - The MCP server is the source of truth for the exact tools available; the
+#     skills below are intentionally thin shortcuts that route the agent to the
+#     right family of tools rather than hard-coding tool names or schemas.
+#
+# The four inline skills are adapted from Miro's own skill set
+# (https://github.com/miroapp/miro-ai/tree/main/skills) — one read-oriented
+# (browse) and three authoring ones (diagram, doc, table). They are defined
+# inline so this example runs without any external skill source.
+
+models:
+  sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-6
+
+agents:
+  root:
+    model: sonnet
+    description: Miro Expert — search, summarize, and build on Miro boards.
+    instruction: |
+      You are a Miro board expert with access to Miro's hosted MCP server.
+
+      You can explore and summarize boards, and author structured content:
+      frames, sticky notes, shapes, diagrams, documents, and tables.
+
+      Operating rules:
+      - Always work against a specific board. If the user hasn't given a board
+        URL, ask for one before calling a tool. Preserve any item target
+        (e.g. ?moveTowidget=...) in the URL so tools scope correctly.
+      - The MCP server is the source of truth for which tools exist and their
+        parameter schemas. Inspect the live tool descriptions and follow them;
+        never invent tool names, diagram types, or column types.
+      - Match the user's intent to the right skill (browse / diagram / doc /
+        table), then call the corresponding MCP tool per its schema.
+      - For authoring, restate what you're about to create and where before
+        creating it, then report back a link to the board or frame.
+      - Respect existing board permissions and access controls at all times.
+    skills:
+      - name: miro-browse
+        description: Use when the user wants to explore, list, summarize, or inspect items on a Miro board.
+        instructions: |
+          # Miro Browse
+
+          Shortcut to the Miro MCP browsing and context tools. The MCP server
+          is the source of truth for which tools exist (board-level overview,
+          item-level content, item listing/filtering, image and asset
+          retrieval), which to pick, how to chain them, and all parameters.
+
+          ## Workflow
+
+          1. Identify the **board URL**. If the user's URL targets a specific
+             item (frame, document, prototype screen, etc.), preserve it so the
+             tools scope their response to that target.
+          2. Identify **what the user wants to learn**: a high-level overview
+             of the whole board, a filtered listing of items of a certain type,
+             the contents of one specific item, or a downloadable asset. Ask if
+             unclear.
+          3. Pick the appropriate browsing or context tool and call it per its
+             description. For a board summary, start with the high-level
+             overview tool and then drill into individual items with the
+             item-level retrieval tool as questions get more specific.
+
+      - name: miro-diagram
+        description: Use when the user wants to create or update a diagram on a Miro board.
+        instructions: |
+          # Miro Diagram
+
+          Shortcut to the Miro MCP diagramming tools. The MCP server is the
+          source of truth for which diagram types and inputs are supported,
+          which tool to pick, the order in which tools must be called, and all
+          placement parameters.
+
+          ## Workflow
+
+          1. Identify the **board URL**. If missing, ask.
+          2. Identify **what to diagram**. Ask if unclear.
+          3. Pick the appropriate diagramming tool and call it according to its
+             description and parameter schema.
+
+      - name: miro-doc
+        description: Use when the user wants to create or edit a Google-Docs-style markdown document on a Miro board.
+        instructions: |
+          # Miro Doc
+
+          Shortcut to the Miro MCP document tools. The MCP server is the source
+          of truth for supported markdown, which tool to pick, the order in
+          which tools must be called, and all placement parameters.
+
+          ## Workflow
+
+          1. Identify the **board URL**. If missing, ask.
+          2. Identify **what document the user wants** (provided content or a
+             topic to generate from). Ask if unclear.
+          3. Pick the appropriate document tool and call it according to its
+             description and parameter schema.
+
+      - name: miro-table
+        description: Use when the user wants to create or update a structured table on a Miro board.
+        instructions: |
+          # Miro Table
+
+          Shortcut to the Miro MCP table tools. The MCP server is the source of
+          truth for supported column types and option shape, which tool to
+          pick, the order in which tools must be called, and all placement
+          parameters.
+
+          ## Workflow
+
+          1. Identify the **board URL**. If missing, ask.
+          2. Identify **what table the user wants** (title and columns, or a
+             topic to propose a column set from). Ask if unclear.
+          3. Pick the appropriate table tool and call it according to its
+             description and parameter schema.
+    toolsets:
+      - type: mcp
+        remote:
+          url: https://mcp.miro.com/
+          transport_type: streamable

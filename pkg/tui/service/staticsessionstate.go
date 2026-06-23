@@ -29,3 +29,4 @@ func (s StaticSessionState) PreviousMessage() *types.Message         { return ni
 func (s StaticSessionState) SessionTitle() string                    { return s.Title }
 func (s StaticSessionState) AvailableAgents() []runtime.AgentDetails { return nil }
 func (s StaticSessionState) GetCurrentAgent() runtime.AgentDetails   { return runtime.AgentDetails{} }
+func (s StaticSessionState) PauseState() PauseState                  { return PauseNone }

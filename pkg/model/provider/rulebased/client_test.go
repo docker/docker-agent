@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/blevesearch/bleve/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -254,21 +253,23 @@ func TestGetLastUserMessage(t *testing.T) {
 	}
 }
 
-func TestCreateIndex(t *testing.T) {
+func TestMatcher(t *testing.T) {
 	t.Parallel()
 
-	index, err := createIndex()
-	require.NoError(t, err)
-	defer index.Close()
+	m := newMatcher()
+	m.add(0, "hello world")
+	m.add(1, "debug the algorithm")
 
-	err = index.Index("test", map[string]any{"text": "hello world"})
-	require.NoError(t, err)
+	route, ok := m.bestRoute("hello")
+	require.True(t, ok)
+	assert.Equal(t, 0, route)
 
-	query := bleve.NewMatchQuery("hello")
-	query.SetField("text")
-	results, err := index.Search(bleve.NewSearchRequest(query))
-	require.NoError(t, err)
-	assert.Equal(t, uint64(1), results.Total)
+	route, ok = m.bestRoute("algorithm")
+	require.True(t, ok)
+	assert.Equal(t, 1, route)
+
+	_, ok = m.bestRoute("completely unrelated tokens")
+	assert.False(t, ok)
 }
 
 func TestClient_ID(t *testing.T) {
@@ -317,19 +318,16 @@ func TestClient_DefaultProvider(t *testing.T) {
 func TestClient_CreateChatCompletionStream_NilProvider(t *testing.T) {
 	t.Parallel()
 
-	index, err := createIndex()
-	require.NoError(t, err)
-
 	client := &Client{
 		Config:   base.Config{},
 		routes:   nil,
 		fallback: nil,
-		index:    index,
+		matcher:  newMatcher(),
 	}
 	defer client.Close()
 
 	messages := []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}
-	_, err = client.CreateChatCompletionStream(t.Context(), messages, nil)
+	_, err := client.CreateChatCompletionStream(t.Context(), messages, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no provider available")
 }
@@ -372,31 +370,4 @@ func TestClient_ModelsMapStoredInBaseConfig(t *testing.T) {
 	assert.Equal(t, models, baseConfig.Models, "Models map should match what was passed to NewClient")
 	assert.NotNil(t, baseConfig.Env, "Env should be stored in base config for cloning")
 	assert.Equal(t, mockEnv, baseConfig.Env, "Env should match what was passed to NewClient")
-}
-
-func TestParseRouteIndex(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		docID   string
-		wantIdx int
-		wantOK  bool
-	}{
-		{"r0_e0", 0, true},
-		{"r2_e5", 2, true},
-		{"r10_e3", 10, true},
-		{"invalid", 0, false},
-		{"", 0, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.docID, func(t *testing.T) {
-			t.Parallel()
-			idx, ok := parseRouteIndex(tt.docID)
-			assert.Equal(t, tt.wantOK, ok)
-			if ok {
-				assert.Equal(t, tt.wantIdx, idx)
-			}
-		})
-	}
 }

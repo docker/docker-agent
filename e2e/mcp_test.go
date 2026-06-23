@@ -9,6 +9,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/mcp"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
 
 func TestMCP_SingleAgent(t *testing.T) {
@@ -19,7 +20,7 @@ func TestMCP_SingleAgent(t *testing.T) {
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)
-	team, err := teamloader.Load(ctx, agentSource, runConfig)
+	team, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
 	require.NoError(t, err, "Failed to load agent")
 	t.Cleanup(func() {
 		require.NoError(t, team.StopToolSets(ctx))
@@ -42,7 +43,7 @@ func TestMCP_MultiAgent(t *testing.T) {
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)
-	team, err := teamloader.Load(ctx, agentSource, runConfig)
+	team, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
 	require.NoError(t, err, "Failed to load team")
 	t.Cleanup(func() {
 		require.NoError(t, team.StopToolSets(ctx))

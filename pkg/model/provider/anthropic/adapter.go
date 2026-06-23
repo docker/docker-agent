@@ -143,18 +143,28 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case anthropic.MessageDeltaEvent:
 		a.stopReason = eventVariant.Delta.StopReason
 		if a.trackUsage {
-			response.Usage = &chat.Usage{
-				InputTokens:       eventVariant.Usage.InputTokens,
-				OutputTokens:      eventVariant.Usage.OutputTokens,
-				CachedInputTokens: eventVariant.Usage.CacheReadInputTokens,
-				CacheWriteTokens:  eventVariant.Usage.CacheCreationInputTokens,
-			}
+			response.Usage = usageFromDelta(eventVariant.Usage)
 		}
 	case anthropic.MessageStopEvent:
 		response.Choices[0].FinishReason = finishReason(a.stopReason, a.toolCall)
 	}
 
 	return response, nil
+}
+
+// usageFromDelta maps the standard Messages API streaming usage onto chat.Usage.
+// ReasoningTokens comes from OutputTokensDetails.ThinkingTokens, which Anthropic
+// reports as a read-only decomposition of OutputTokens (thinking is already
+// billed inside output), so surfacing it never changes the cost computed in the
+// runtime — it only makes the otherwise-invisible thinking spend observable.
+func usageFromDelta(u anthropic.MessageDeltaUsage) *chat.Usage {
+	return &chat.Usage{
+		InputTokens:       u.InputTokens,
+		OutputTokens:      u.OutputTokens,
+		CachedInputTokens: u.CacheReadInputTokens,
+		CacheWriteTokens:  u.CacheCreationInputTokens,
+		ReasoningTokens:   u.OutputTokensDetails.ThinkingTokens,
+	}
 }
 
 // finishReason maps an Anthropic stop reason (received on message_delta) onto

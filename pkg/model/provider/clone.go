@@ -18,7 +18,11 @@ func CloneWithOptions(ctx context.Context, baseProvider Provider, opts ...option
 
 	// Use NewWithModels to support cloning routers that reference other models.
 	// cfg.Models is populated by routers; for other providers it's nil (which is fine).
-	clone, err := NewWithModels(ctx, &modelConfig, cfg.Models, cfg.Env, mergedOpts...)
+	registry, _ := cfg.ProviderRegistry.(*Registry)
+	if registry == nil {
+		registry = DefaultRegistry()
+	}
+	clone, err := registry.NewWithModels(ctx, &modelConfig, cfg.Models, cfg.Env, mergedOpts...)
 	if err != nil {
 		slog.DebugContext(ctx, "Failed to clone provider; using base provider", "error", err, "id", baseProvider.ID())
 		return baseProvider

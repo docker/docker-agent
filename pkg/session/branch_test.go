@@ -70,6 +70,80 @@ func TestGenerateBranchTitle(t *testing.T) {
 	}
 }
 
+func TestGenerateForkTitle(t *testing.T) {
+	tests := []struct {
+		name        string
+		parentTitle string
+		expected    string
+	}{
+		{
+			name:        "empty title returns empty",
+			parentTitle: "",
+			expected:    "",
+		},
+		{
+			name:        "simple title gets fork 1 suffix",
+			parentTitle: "My Session",
+			expected:    "My Session (fork 1)",
+		},
+		{
+			name:        "fork 1 becomes fork 2",
+			parentTitle: "My Session (fork 1)",
+			expected:    "My Session (fork 2)",
+		},
+		{
+			name:        "fork 2 becomes fork 3",
+			parentTitle: "My Session (fork 2)",
+			expected:    "My Session (fork 3)",
+		},
+		{
+			name:        "fork 99 becomes fork 100",
+			parentTitle: "My Session (fork 99)",
+			expected:    "My Session (fork 100)",
+		},
+		{
+			name:        "title with fork in middle is treated as simple title",
+			parentTitle: "fork analysis session",
+			expected:    "fork analysis session (fork 1)",
+		},
+		{
+			name:        "title ending with (fork but no number treated as simple",
+			parentTitle: "My Session (fork",
+			expected:    "My Session (fork (fork 1)",
+		},
+		{
+			name:        "branched title is treated as a simple title (separate series)",
+			parentTitle: "My Session (branched)",
+			expected:    "My Session (branched) (fork 1)",
+		},
+		{
+			name:        "trims whitespace before suffix",
+			parentTitle: "My Session  (fork 1)",
+			expected:    "My Session (fork 2)",
+		},
+		{
+			// Regression: a user-chosen title containing "(fork N)" anywhere
+			// other than at the end must not be treated as a suffix — the
+			// trailing content has to be preserved.
+			name:        "mid-title (fork N) is not treated as suffix",
+			parentTitle: "Q1 (fork 2) Analysis",
+			expected:    "Q1 (fork 2) Analysis (fork 1)",
+		},
+		{
+			name:        "title ending with ) but not (fork N)) is appended verbatim",
+			parentTitle: "My Session (notes)",
+			expected:    "My Session (notes) (fork 1)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := generateForkTitle(tt.parentTitle)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestCloneSessionItem(t *testing.T) {
 	t.Run("empty item returns error", func(t *testing.T) {
 		_, err := cloneSessionItem(Item{})
@@ -188,5 +262,84 @@ func TestBranchSession(t *testing.T) {
 		assert.Equal(t, "/tmp/parent.txt", parentParts[1].File.Path, "File must be deep-copied")
 		assert.Equal(t, "parent.pdf", parentParts[2].Document.Name, "Document must be deep-copied")
 		assert.Equal(t, []byte("parent"), parentParts[2].Document.Source.InlineData, "Document InlineData must be deep-copied")
+	})
+}
+
+func TestForkSession(t *testing.T) {
+	t.Run("nil parent returns error", func(t *testing.T) {
+		_, err := ForkSession(nil, 0)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "parent session is nil")
+	})
+
+	t.Run("out-of-range position returns error", func(t *testing.T) {
+		parent := &Session{Messages: []Item{NewMessageItem(UserMessage("test"))}}
+		_, err := ForkSession(parent, 2)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "out of range")
+	})
+
+	t.Run("copies messages up to position and uses fork-numbered title", func(t *testing.T) {
+		parent := &Session{
+			ID:    "parent-id",
+			Title: "Parent Title",
+			Messages: []Item{
+				NewMessageItem(UserMessage("msg1")),
+				NewMessageItem(UserMessage("msg2")),
+				NewMessageItem(UserMessage("msg3")),
+			},
+		}
+
+		forked, err := ForkSession(parent, 2)
+		require.NoError(t, err)
+		assert.NotEqual(t, parent.ID, forked.ID)
+		assert.Equal(t, "Parent Title (fork 1)", forked.Title)
+		assert.Len(t, forked.Messages, 2)
+		assert.Equal(t, "msg1", forked.Messages[0].Message.Message.Content)
+		assert.Equal(t, "msg2", forked.Messages[1].Message.Message.Content)
+	})
+
+	t.Run("fork of a fork increments the counter", func(t *testing.T) {
+		parent := &Session{
+			Title:    "Parent Title (fork 2)",
+			Messages: []Item{NewMessageItem(UserMessage("hi"))},
+		}
+
+		forked, err := ForkSession(parent, 1)
+		require.NoError(t, err)
+		assert.Equal(t, "Parent Title (fork 3)", forked.Title)
+	})
+
+	t.Run("position zero produces an empty fork", func(t *testing.T) {
+		parent := &Session{
+			Title:    "Parent Title",
+			Messages: []Item{NewMessageItem(UserMessage("only"))},
+		}
+
+		forked, err := ForkSession(parent, 0)
+		require.NoError(t, err)
+		assert.Empty(t, forked.Messages)
+		assert.Equal(t, "Parent Title (fork 1)", forked.Title)
+	})
+
+	t.Run("copies safety-rail limits onto the fork", func(t *testing.T) {
+		// Regression: MaxConsecutiveToolCalls / MaxOldToolCallTokens used to
+		// be silently zeroed out, making the fork behave differently from
+		// the parent (tool-call cutoff and old-tool-call truncation budget
+		// would reset to "use built-in default") despite the user having
+		// configured them deliberately.
+		parent := &Session{
+			Title:                   "Parent Title",
+			Messages:                []Item{NewMessageItem(UserMessage("hi"))},
+			MaxIterations:           42,
+			MaxConsecutiveToolCalls: 17,
+			MaxOldToolCallTokens:    9000,
+		}
+
+		forked, err := ForkSession(parent, 1)
+		require.NoError(t, err)
+		assert.Equal(t, 42, forked.MaxIterations)
+		assert.Equal(t, 17, forked.MaxConsecutiveToolCalls)
+		assert.Equal(t, 9000, forked.MaxOldToolCallTokens)
 	})
 }

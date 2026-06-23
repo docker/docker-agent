@@ -109,8 +109,9 @@ func TestCreateDirectProvider_DispatchByType(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p, err := createDirectProvider(t.Context(), tt.cfg, environment.NewNoEnvProvider())
 			require.NoError(t, err)
-			fp, ok := p.(*fakeProvider)
-			require.True(t, ok, "expected fakeProvider, got %T", p)
+			leaf := unwrapProvider(p)
+			fp, ok := leaf.(*fakeProvider)
+			require.True(t, ok, "expected fakeProvider, got %T", leaf)
 			assert.Equal(t, tt.expectID, fp.id.Model)
 		})
 	}

@@ -8,10 +8,43 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
+
+// annotateTodoSpan stamps the operation kind, batch size, and the
+// resulting list size onto the active runtime.tool.handler span so a
+// glance at a session shows when the agent was actually managing
+// progress vs. just chatting.
+func annotateTodoSpan(ctx context.Context, op string, batch, total, completed int) {
+	span := trace.SpanFromContext(ctx)
+	if !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(
+		attribute.String("cagent.tool.todo.op", op),
+		attribute.Int("cagent.tool.todo.batch_size", batch),
+		attribute.Int("cagent.tool.todo.total", total),
+		attribute.Int("cagent.tool.todo.completed", completed),
+	)
+}
+
+// countCompleted returns how many todos in the current snapshot are
+// marked completed. Cheap O(n) scan over a typically-tiny slice; called
+// once per todo handler invocation for the span annotation.
+func countCompleted(all []Todo) int {
+	n := 0
+	for _, t := range all {
+		if t.Status == "completed" {
+			n++
+		}
+	}
+	return n
+}
 
 const (
 	ToolNameCreateTodo  = "create_todo"
@@ -203,9 +236,11 @@ func (h *todoHandler) jsonResult(ctx context.Context, v any) (*tools.ToolCallRes
 
 func (h *todoHandler) createTodo(ctx context.Context, params CreateTodoArgs) (*tools.ToolCallResult, error) {
 	created := h.addTodo(ctx, params.Description)
+	all := h.storage.All(ctx)
+	annotateTodoSpan(ctx, "create_todo", 1, len(all), countCompleted(all))
 	return h.jsonResult(ctx, CreateTodoOutput{
 		Created:  created,
-		AllTodos: h.storage.All(ctx),
+		AllTodos: all,
 		Reminder: h.incompleteReminder(ctx),
 	})
 }
@@ -215,9 +250,11 @@ func (h *todoHandler) createTodos(ctx context.Context, params CreateTodosArgs) (
 	for _, desc := range params.Descriptions {
 		created = append(created, h.addTodo(ctx, desc))
 	}
+	all := h.storage.All(ctx)
+	annotateTodoSpan(ctx, "create_todos", len(params.Descriptions), len(all), countCompleted(all))
 	return h.jsonResult(ctx, CreateTodosOutput{
 		Created:  created,
-		AllTodos: h.storage.All(ctx),
+		AllTodos: all,
 		Reminder: h.incompleteReminder(ctx),
 	})
 }
@@ -250,6 +287,7 @@ func (h *todoHandler) updateTodos(ctx context.Context, params UpdateTodosArgs) (
 
 	result.AllTodos = h.storage.All(ctx)
 	result.Reminder = h.incompleteReminder(ctx)
+	annotateTodoSpan(ctx, "update_todos", len(params.Updates), len(result.AllTodos), countCompleted(result.AllTodos))
 
 	return h.jsonResult(ctx, result)
 }
@@ -287,6 +325,7 @@ func (h *todoHandler) listTodos(ctx context.Context, _ tools.ToolCall) (*tools.T
 	if todos == nil {
 		todos = []Todo{}
 	}
+	annotateTodoSpan(ctx, "list_todos", 0, len(todos), countCompleted(todos))
 	out := ListTodosOutput{Todos: todos}
 	out.Reminder = h.incompleteReminder(ctx)
 	return h.jsonResult(ctx, out)

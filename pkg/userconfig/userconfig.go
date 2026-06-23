@@ -55,6 +55,8 @@ type Settings struct {
 	Theme string `yaml:"theme,omitempty"`
 	// YOLO enables auto-approve mode for all tool calls globally
 	YOLO bool `yaml:"YOLO,omitempty"`
+	// Lean makes the simplified TUI with minimal chrome the default UI.
+	Lean bool `yaml:"lean,omitempty"`
 	// TabTitleMaxLength is the maximum display length for tab titles in the TUI.
 	// Titles longer than this are truncated with an ellipsis. Defaults to 20.
 	TabTitleMaxLength int `yaml:"tab_title_max_length,omitempty"`

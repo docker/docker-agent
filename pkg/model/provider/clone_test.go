@@ -1,3 +1,5 @@
+//go:build !js && !docker_agent_no_openai
+
 package provider
 
 import (
@@ -77,7 +79,7 @@ func TestCloneWithOptions_RouterWithModelReferences(t *testing.T) {
 	})
 
 	// Create the router with the models map
-	router, err := NewWithModels(t.Context(), routerCfg, models, env)
+	router, err := fullTestRegistry().NewWithModels(t.Context(), routerCfg, models, env)
 	require.NoError(t, err)
 
 	// Verify the original router has the models map stored
@@ -120,7 +122,7 @@ func TestCloneWithOptions_DirectProvider(t *testing.T) {
 		"OPENAI_API_KEY": "test-key",
 	})
 
-	provider, err := New(t.Context(), cfg, env)
+	provider, err := fullTestRegistry().New(t.Context(), cfg, env)
 	require.NoError(t, err)
 
 	// Clone with max tokens
@@ -157,7 +159,7 @@ func TestCloneWithOptions_PreservesMaxTokens(t *testing.T) {
 		"OPENAI_API_KEY": "test-key",
 	})
 
-	provider, err := New(t.Context(), cfg, env, options.WithMaxTokens(maxTokens))
+	provider, err := fullTestRegistry().New(t.Context(), cfg, env, options.WithMaxTokens(maxTokens))
 	require.NoError(t, err)
 
 	// Clone with an option that doesn't affect max_tokens (e.g., WithGeneratingTitle)
@@ -198,7 +200,7 @@ func TestCloneWithOptions_OverridesMaxTokens(t *testing.T) {
 		"OPENAI_API_KEY": "test-key",
 	})
 
-	provider, err := New(t.Context(), cfg, env, options.WithMaxTokens(originalMaxTokens))
+	provider, err := fullTestRegistry().New(t.Context(), cfg, env, options.WithMaxTokens(originalMaxTokens))
 	require.NoError(t, err)
 
 	// Clone with an explicit max_tokens override

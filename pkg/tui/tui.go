@@ -1052,6 +1052,7 @@ func (m *appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if agentName := event.GetAgentName(); agentName != "" {
 				m.sessionState.SetCurrentAgentName(agentName)
 			}
+			m.applyPauseEvent(m.sessionState, msg)
 			return m.forwardChat(msg)
 		}
 
@@ -1087,6 +1088,7 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 			if agentName := event.GetAgentName(); agentName != "" {
 				sessionState.SetCurrentAgentName(agentName)
 			}
+			m.applyPauseEvent(sessionState, msg.Inner)
 		}
 	}
 
@@ -1094,6 +1096,29 @@ func (m *appModel) handleRoutedMsg(msg messages.RoutedMsg) (tea.Model, tea.Cmd) 
 	updated, _ := chatPage.Update(msg.Inner)
 	m.chatPages[msg.SessionID] = updated.(chat.Page)
 	return m, nil
+}
+
+// applyPauseEvent advances a session's pause indicator in response to runtime
+// events. The runtime emits a PausedEvent when the loop reaches an
+// iteration boundary and blocks, which flips a pending "Pausing…" state to
+// "Paused". A stream that stops while still "Pausing…" (e.g. the agent
+// happened to finish its final turn before re-entering the loop) is likewise
+// resolved to "Paused", since /pause stays armed for the next run. The arm/
+// disarm transitions themselves are driven by handleTogglePause.
+func (m *appModel) applyPauseEvent(ss *service.SessionState, msg tea.Msg) {
+	if ss == nil {
+		return
+	}
+	switch msg.(type) {
+	case *runtime.PausedEvent:
+		if ss.PauseState() != service.PauseNone {
+			ss.SetPauseState(service.PausePaused)
+		}
+	case *runtime.StreamStoppedEvent:
+		if ss.PauseState() == service.PausePausing {
+			ss.SetPauseState(service.PausePaused)
+		}
+	}
 }
 
 // handleWorkingStateChanged updates the editor working indicator and resize handle spinner.
@@ -1678,8 +1703,8 @@ func (m *appModel) resizeAll() tea.Cmd {
 	// Calculate chrome height (everything that isn't content or editor)
 	chromeHeight := 0
 	if m.leanMode {
-		if m.chatPage.IsWorking() {
-			chromeHeight = 1 // working indicator line
+		if m.chatPage.IsWorking() || m.sessionState.PauseState() != service.PauseNone {
+			chromeHeight = 1 // working/pause indicator line
 		}
 	} else {
 		chromeHeight = m.tabBar.Height() + m.statusBar.Height() + 1 // +1 for resize handle
@@ -2298,14 +2323,23 @@ func (m *appModel) handleEditorResize(y int) tea.Cmd {
 	return nil
 }
 
-// renderLeanWorkingIndicator renders a single-line working indicator for lean mode.
+// renderLeanWorkingIndicator renders a single-line working/pause indicator for
+// lean mode.
 func (m *appModel) renderLeanWorkingIndicator() string {
 	innerWidth := m.width - appPaddingHorizontal
-	workingText := "Working\u2026"
-	if queueLen := m.chatPage.QueueLength(); queueLen > 0 {
-		workingText = fmt.Sprintf("Working\u2026 (%d queued)", queueLen)
+	var line string
+	switch m.sessionState.PauseState() {
+	case service.PausePaused:
+		line = styles.WarningStyle.Render("⏸ Paused") + " " + styles.MutedStyle.Render("(/pause to resume)")
+	case service.PausePausing:
+		line = m.workingSpinner.View() + " " + styles.WarningStyle.Render("Pausing… (finishing current request)")
+	default:
+		workingText := "Working\u2026"
+		if queueLen := m.chatPage.QueueLength(); queueLen > 0 {
+			workingText = fmt.Sprintf("Working\u2026 (%d queued)", queueLen)
+		}
+		line = m.workingSpinner.View() + " " + styles.SpinnerDotsHighlightStyle.Render(workingText)
 	}
-	line := m.workingSpinner.View() + " " + styles.SpinnerDotsHighlightStyle.Render(workingText)
 	return lipgloss.NewStyle().Padding(0, styles.AppPadding).Width(innerWidth + appPaddingHorizontal).Render(line)
 }
 
@@ -2336,6 +2370,19 @@ func (m *appModel) renderResizeHandle(width int) string {
 
 	var result string
 	switch {
+	case m.sessionState.PauseState() == service.PausePaused:
+		// Static indicator: the loop is idle until the user resumes.
+		resumeKey := styles.HighlightWhiteStyle.Render("/pause")
+		suffix := " " + styles.WarningStyle.Render("⏸ Paused") + " (" + resumeKey + " to resume)"
+		suffixWidth := lipgloss.Width(suffix)
+		result = lipgloss.NewStyle().MaxWidth(innerWidth-suffixWidth).Render(fullLine) + suffix
+
+	case m.sessionState.PauseState() == service.PausePausing:
+		// The agent is finishing the in-flight request before it pauses.
+		suffix := " " + m.workingSpinner.View() + " " + styles.WarningStyle.Render("Pausing…") + " (finishing current request)"
+		suffixWidth := lipgloss.Width(suffix)
+		result = lipgloss.NewStyle().MaxWidth(innerWidth-suffixWidth).Render(fullLine) + suffix
+
 	case m.chatPage.IsWorking():
 		// Truncate right side and append spinner (handle stays centered)
 		workingText := "Working…"
@@ -2388,7 +2435,7 @@ func (m *appModel) View() tea.View {
 	// space pushed to the top via bottom-alignment.
 	if m.leanMode {
 		viewParts := []string{contentView}
-		if m.chatPage.IsWorking() {
+		if m.chatPage.IsWorking() || m.sessionState.PauseState() != service.PauseNone {
 			viewParts = append(viewParts, m.renderLeanWorkingIndicator())
 		}
 		viewParts = append(viewParts, m.editor.View())

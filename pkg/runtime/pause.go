@@ -23,6 +23,14 @@ func (r *LocalRuntime) TogglePause(context.Context) (bool, error) {
 	return true, nil
 }
 
+// isPaused reports whether /pause is currently armed (the run loop will
+// block at the next iteration boundary).
+func (r *LocalRuntime) isPaused() bool {
+	r.pauseMu.Lock()
+	defer r.pauseMu.Unlock()
+	return r.pauseCh != nil
+}
+
 // waitIfPaused blocks until the runtime is resumed or ctx is cancelled.
 func (r *LocalRuntime) waitIfPaused(ctx context.Context) error {
 	r.pauseMu.Lock()

@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
+	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 )
 
@@ -57,6 +58,21 @@ func (s *stubToolSet) Tools(context.Context) ([]tools.Tool, error) {
 		return nil, s.listErr
 	}
 	return s.tools, nil
+}
+
+// blockingToolSet models a toolset whose Tools() never returns on its own —
+// e.g. a wedged MCP stdio subprocess that does not even answer context
+// cancellation. It deliberately ignores ctx and blocks until release is
+// closed, which tests do on cleanup so the orphaned listing goroutine exits.
+type blockingToolSet struct {
+	release <-chan struct{}
+}
+
+var _ tools.ToolSet = (*blockingToolSet)(nil)
+
+func (b *blockingToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	<-b.release
+	return nil, nil
 }
 
 type mockStream struct {
@@ -1072,6 +1088,64 @@ func TestEmitStartupInfo_SurfacesToolsetStartFailureAsWarning(t *testing.T) {
 		"warning should include the toolset's actual error message so the user can see the real cause")
 }
 
+// TestEmitStartupInfo_SkipsToolsetWhoseListingHangs is the regression test for
+// issue #3137: a toolset whose Tools() blocks indefinitely must not stall the
+// whole startup tool-loading loop. Before the per-toolset timeout,
+// emitToolsProgressively blocked forever on the hung toolset, so the terminal
+// ToolsetInfo{Loading:false} was never emitted (sidebar stuck on "Loading
+// tools…") and EmitStartupInfo's goroutine leaked, also delaying /quit.
+func TestEmitStartupInfo_SkipsToolsetWhoseListingHangs(t *testing.T) {
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	// release is closed on cleanup so the orphaned listing goroutine (whose
+	// Tools() ignores context cancellation) exits instead of leaking.
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	hanging := &blockingToolSet{release: release}
+	fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(hanging, fast),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(tm,
+		WithCurrentAgent("root"),
+		WithModelStore(mockModelStore{}),
+		WithToolListTimeout(50*time.Millisecond),
+	)
+	require.NoError(t, err)
+
+	events := make(chan Event, 32)
+	done := make(chan struct{})
+	go func() {
+		rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+		close(events)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("EmitStartupInfo did not return: a hung toolset blocked startup tool loading")
+	}
+
+	var toolsetInfos []*ToolsetInfoEvent
+	for e := range events {
+		if ti, ok := e.(*ToolsetInfoEvent); ok {
+			toolsetInfos = append(toolsetInfos, ti)
+		}
+	}
+
+	require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+	last := toolsetInfos[len(toolsetInfos)-1]
+	assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false so the sidebar resolves")
+	assert.Equal(t, 1, last.AvailableTools,
+		"the hung toolset is skipped; the fast toolset's single tool is still counted")
+}
+
 // TestEmitStartupInfo_AuthRequiredIsSilent verifies that when a toolset's
 // Start() returns an mcptools.IsAuthorizationRequired error — the runtime
 // deliberately deferred OAuth until the user is interacting — the user
@@ -1923,6 +1997,88 @@ func TestTransferTaskAllowsSubAgent(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.IsError, "transfer to valid sub-agent should succeed")
+}
+
+// TestTransferTaskPersistsSubSessionOnError covers the case where a sub-agent's
+// run loop emits an ErrorEvent — for example because the model stream failed,
+// the loop detector fired, or a hook blocked execution. Before the fix in
+// runForwarding, an ErrorEvent caused an early return that skipped both
+// parent.AddSubSession and the SubSessionCompletedEvent emission, so the
+// entire sub-session transcript was silently dropped — invisible to the user,
+// invisible to debug tooling that walks session_items.
+//
+// The fix persists unconditionally: capture the error, drain the channel,
+// AddSubSession + emit SubSessionCompleted, then return the error so the
+// parent's tool dispatcher still records an error tool result.
+func TestTransferTaskPersistsSubSessionOnError(t *testing.T) {
+	t.Parallel()
+	// Root has a librarian sub-agent whose model always fails to produce a
+	// stream. This mirrors the production failure mode where a sub-agent
+	// hits an irrecoverable error mid-stream.
+	parentProv := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+	failingProv := &mockProviderWithError{id: "test/mock-model"}
+
+	librarian := agent.New("librarian", "Library agent", agent.WithModel(failingProv))
+	root := agent.New("root", "Root agent", agent.WithModel(parentProv))
+	agent.WithSubAgents(librarian)(root)
+
+	tm := team.New(team.WithAgents(root, librarian))
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	sess.NonInteractive = true // mirror --exec mode
+	evts := make(chan Event, 128)
+
+	toolCall := tools.ToolCall{
+		ID:   "call_1",
+		Type: "function",
+		Function: tools.FunctionCall{
+			Name:      "transfer_task",
+			Arguments: `{"agent":"librarian","task":"find a book","expected_output":"book title"}`,
+		},
+	}
+
+	// runForwarding returns an error because the child emitted an ErrorEvent,
+	// but only *after* persisting the sub-session.
+	_, err = rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	require.Error(t, err, "transfer should surface the sub-session error to the caller")
+
+	// The parent session must now hold a sub-session item — without the fix
+	// this would be empty because AddSubSession was skipped on the error path.
+	var subSessionItems int
+	for _, item := range sess.Messages {
+		if item.SubSession != nil {
+			subSessionItems++
+		}
+	}
+	assert.Equal(t, 1, subSessionItems,
+		"parent session must record the sub-session even when the sub-agent errored — "+
+			"otherwise the entire transcript is lost and the failure is invisible to observers")
+
+	// Drain the event channel and assert both required events are present.
+	//
+	// ErrorEvent must reach the parent sink: runForwarding forwards it
+	// unconditionally so the TUI's streamDepth counter stays balanced and
+	// the user sees the error context.
+	//
+	// SubSessionCompletedEvent must fire: the persistence pipeline
+	// (PersistenceObserver) writes the sub-session to the store on this
+	// event; without it the store never learns the sub-session existed.
+	close(evts)
+	var sawSubSessionCompleted, sawErrorEvent bool
+	for ev := range evts {
+		switch ev.(type) {
+		case *SubSessionCompletedEvent:
+			sawSubSessionCompleted = true
+		case *ErrorEvent:
+			sawErrorEvent = true
+		}
+	}
+	assert.True(t, sawErrorEvent,
+		"ErrorEvent must be forwarded to the parent sink to keep TUI streamDepth balanced")
+	assert.True(t, sawSubSessionCompleted,
+		"SubSessionCompletedEvent must fire on the error path so observers persist the sub-session")
 }
 
 func TestYoloMode_OverridesPermissionsDeny(t *testing.T) {
@@ -3508,4 +3664,110 @@ func TestElicitationHandler_Interactive_NoChannel(t *testing.T) {
 
 	require.Error(t, err, "interactive runtime with no events channel should error")
 	assert.ErrorIs(t, err, errNoElicitationChannel)
+}
+
+// TestRunAgentPersistsSubSessionToStore is the regression test for the
+// background-agent spend leak: run_background_agent sub-sessions were added to
+// the parent's in-memory object but never written to the session store, so
+// their tokens and cost were invisible to anything reading the store ($0
+// recorded for work that actually ran). The fix persists the completed
+// sub-session directly from runCollecting. This asserts the sub-session row
+// reaches the store and carries the worker's recorded usage.
+func TestRunAgentPersistsSubSessionToStore(t *testing.T) {
+	t.Parallel()
+
+	// Worker produces real output and usage so the sub-session has a transcript.
+	workerStream := newStreamBuilder().AddContent("worker done").AddStopWithUsage(100, 50).Build()
+	parentProv := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+	workerProv := &mockProvider{id: "test/mock-model", stream: workerStream}
+
+	worker := agent.New("worker", "Worker agent", agent.WithModel(workerProv))
+	root := agent.New("root", "Root agent", agent.WithModel(parentProv))
+	agent.WithSubAgents(worker)(root)
+
+	tm := team.New(team.WithAgents(root, worker))
+
+	store := session.NewInMemorySessionStore()
+	rt, err := NewLocalRuntime(tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+		WithSessionStore(store),
+	)
+	require.NoError(t, err)
+
+	// The parent must exist in the store before a sub-session can be linked
+	// to it. Use UpdateSession (what OnRunStart calls) so the store holds its
+	// own copy of the parent — exactly as in the real flow — rather than
+	// aliasing the runtime's in-memory object.
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	require.NoError(t, store.UpdateSession(t.Context(), sess))
+
+	result := rt.RunAgent(t.Context(), agenttool.RunParams{
+		AgentName:     "worker",
+		Task:          "do something",
+		ParentSession: sess,
+	})
+	require.Empty(t, result.ErrMsg, "RunAgent should succeed")
+
+	// The store's copy of the parent must now contain the sub-session — not
+	// just the runtime's in-memory object. Before the fix this was empty,
+	// so the background agent's work was recorded nowhere durable.
+	stored, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+
+	var storedSubSessions []*session.Session
+	for _, item := range stored.Messages {
+		if item.SubSession != nil {
+			storedSubSessions = append(storedSubSessions, item.SubSession)
+		}
+	}
+	require.Len(t, storedSubSessions, 1,
+		"the background sub-session must be persisted to the store, not just held in memory")
+
+	// The persisted sub-session must carry the worker's token usage so spend
+	// accounting that reads the store sees real numbers, not nothing.
+	assert.Positive(t, storedSubSessions[0].InputTokens+storedSubSessions[0].OutputTokens,
+		"persisted sub-session must carry the worker's recorded token usage")
+}
+
+// TestRunAgentPersistsSubSessionOnError covers the background-agent path
+// (runCollecting) when the sub-agent's model stream fails. Before the fix,
+// runCollecting returned early on ErrorEvent without calling
+// parent.AddSubSession, so the sub-session was silently dropped from the
+// parent's in-memory record — invisible to any code that walks session.Messages.
+func TestRunAgentPersistsSubSessionOnError(t *testing.T) {
+	t.Parallel()
+
+	parentProv := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+	failingProv := &mockProviderWithError{id: "test/mock-model"}
+
+	worker := agent.New("worker", "Worker agent", agent.WithModel(failingProv))
+	root := agent.New("root", "Root agent", agent.WithModel(parentProv))
+	agent.WithSubAgents(worker)(root)
+
+	tm := team.New(team.WithAgents(root, worker))
+	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+
+	result := rt.RunAgent(t.Context(), agenttool.RunParams{
+		AgentName:     "worker",
+		Task:          "do something",
+		ParentSession: sess,
+	})
+
+	require.NotEmpty(t, result.ErrMsg, "RunAgent should surface the sub-session error")
+
+	// The parent session must hold a sub-session record even though the
+	// sub-agent errored — without the fix AddSubSession was skipped and
+	// the entire partial transcript was lost.
+	var subSessionItems int
+	for _, item := range sess.Messages {
+		if item.SubSession != nil {
+			subSessionItems++
+		}
+	}
+	assert.Equal(t, 1, subSessionItems,
+		"parent session must record the sub-session even when the background agent errored")
 }

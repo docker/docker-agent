@@ -1,5 +1,6 @@
 // Package rulebased provides a rule-based model router that selects
-// the appropriate model based on text similarity using Bleve full-text search.
+// the appropriate model based on text similarity using a lightweight
+// in-memory BM25 ranker.
 //
 // A model becomes a rule-based router when it has routing rules configured.
 // The model's provider/model fields define the fallback model, and each
@@ -13,9 +14,6 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
-
-	"github.com/blevesearch/bleve/v2"
-	"github.com/blevesearch/bleve/v2/mapping"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -47,7 +45,7 @@ type Client struct {
 
 	routes         []Provider
 	fallback       Provider
-	index          bleve.Index
+	matcher        *matcher
 	mu             sync.RWMutex
 	lastSelectedID modelsdev.ID // ID of the provider selected by the most recent call
 }
@@ -62,26 +60,12 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, models map[string]l
 		return nil, errors.New("no routing rules configured")
 	}
 
-	index, err := createIndex()
-	if err != nil {
-		return nil, fmt.Errorf("creating bleve index: %w", err)
-	}
-
-	// On any subsequent error, close the index before returning.
-	var cleanupErr error
-	defer func() {
-		if cleanupErr != nil {
-			_ = index.Close()
-		}
-	}()
-
 	routeOpts := filterOutMaxTokens(opts)
 
 	// Create fallback provider from the model's provider/model fields.
 	fallbackSpec := cfg.Provider + "/" + cfg.Model
 	fallback, err := providerFactory(ctx, fallbackSpec, models, env, routeOpts...)
 	if err != nil {
-		cleanupErr = err
 		return nil, fmt.Errorf("creating fallback provider %q: %w", fallbackSpec, err)
 	}
 
@@ -91,52 +75,31 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, models map[string]l
 			Models:      models,
 			Env:         env,
 		},
-		index:    index,
+		matcher:  newMatcher(),
 		fallback: fallback,
 	}
 
-	// Process routing rules. Each example is indexed with a doc ID
-	// that encodes the route index (e.g. "r0_e1") so we can map
-	// search hits back to the corresponding provider.
+	// Process routing rules. Each example is indexed under its route index so
+	// a match can be mapped back to the corresponding provider.
 	for i, rule := range cfg.Routing {
 		if rule.Model == "" {
-			cleanupErr = fmt.Errorf("routing rule %d: 'model' field is required", i)
-			return nil, cleanupErr
+			return nil, fmt.Errorf("routing rule %d: 'model' field is required", i)
 		}
 
 		provider, err := providerFactory(ctx, rule.Model, models, env, routeOpts...)
 		if err != nil {
-			cleanupErr = err
 			return nil, fmt.Errorf("creating provider for routing rule %q: %w", rule.Model, err)
 		}
 
 		routeIndex := len(client.routes)
 		client.routes = append(client.routes, provider)
 
-		for j, example := range rule.Examples {
-			docID := fmt.Sprintf("r%d_e%d", routeIndex, j)
-			if err := index.Index(docID, map[string]any{"text": example}); err != nil {
-				cleanupErr = err
-				return nil, fmt.Errorf("indexing example: %w", err)
-			}
+		for _, example := range rule.Examples {
+			client.matcher.add(routeIndex, example)
 		}
 	}
 
 	return client, nil
-}
-
-// createIndex creates an in-memory Bleve index for example matching.
-func createIndex() (bleve.Index, error) {
-	indexMapping := mapping.NewIndexMapping()
-
-	docMapping := mapping.NewDocumentMapping()
-	textField := mapping.NewTextFieldMapping()
-	textField.Analyzer = "en"
-	docMapping.AddFieldMappingsAt("text", textField)
-
-	indexMapping.DefaultMapping = docMapping
-
-	return bleve.NewMemOnly(indexMapping)
 }
 
 // filterOutMaxTokens removes WithMaxTokens options from the slice.
@@ -192,51 +155,20 @@ func (c *Client) LastSelectedModelID() modelsdev.ID {
 }
 
 // selectProvider finds the best matching provider for the messages.
-// Bleve returns hits sorted by score, so the top hit determines the route.
 func (c *Client) selectProvider(messages []chat.Message) Provider {
 	userMessage := getLastUserMessage(messages)
 	if userMessage == "" {
 		return c.defaultProvider()
 	}
 
-	query := bleve.NewMatchQuery(userMessage)
-	query.SetField("text")
-
-	searchRequest := bleve.NewSearchRequest(query)
-	searchRequest.Size = 1
-
-	results, err := c.index.Search(searchRequest)
-	if err != nil {
-		slog.Error("Bleve search failed", "error", err)
-		return c.defaultProvider()
-	}
-
-	if results.Total == 0 {
-		return c.defaultProvider()
-	}
-
-	// Parse the route index from the top hit's doc ID (e.g. "r2_e0" → 2).
-	hit := results.Hits[0]
-	routeIdx, ok := parseRouteIndex(hit.ID)
+	routeIdx, ok := c.matcher.bestRoute(userMessage)
 	if !ok || routeIdx >= len(c.routes) {
 		return c.defaultProvider()
 	}
 
 	selected := c.routes[routeIdx]
-	slog.Debug("Route matched",
-		"model", selected.ID().String(),
-		"score", hit.Score,
-	)
+	slog.Debug("Route matched", "model", selected.ID().String())
 	return selected
-}
-
-// parseRouteIndex extracts the route index from a doc ID like "r2_e0".
-func parseRouteIndex(docID string) (int, bool) {
-	var idx int
-	if _, err := fmt.Sscanf(docID, "r%d_e", &idx); err != nil || idx < 0 {
-		return 0, false
-	}
-	return idx, true
 }
 
 func (c *Client) defaultProvider() Provider {
@@ -265,8 +197,5 @@ func (c *Client) BaseConfig() base.Config {
 
 // Close cleans up resources.
 func (c *Client) Close() error {
-	if c.index != nil {
-		return c.index.Close()
-	}
 	return nil
 }

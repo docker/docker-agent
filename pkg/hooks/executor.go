@@ -10,6 +10,13 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 )
 
 // Executor dispatches configured hooks. Hook types are resolved against
@@ -137,6 +144,27 @@ func (e *Executor) Dispatch(ctx context.Context, event EventType, input *Input) 
 		return &Result{Allowed: true}, nil
 	}
 
+	// Single span per Dispatch call covers every hook the event matched.
+	// Custom name `hook.{event}` because there is no GenAI semconv for
+	// arbitrary user-defined lifecycle hooks; we surface the event type,
+	// matched hook count, and session/agent identifiers so dashboards can
+	// split by event class without parsing span events.
+	ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/hooks").Start(
+		ctx,
+		"hook."+string(event),
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String("cagent.hook.event", string(event)),
+			attribute.Int("cagent.hook.count", len(hooks)),
+			attribute.String("cagent.agent.name", input.AgentName),
+			attribute.String("gen_ai.conversation.id", input.SessionID),
+		),
+	)
+	if input.ToolName != "" {
+		span.SetAttributes(attribute.String("gen_ai.tool.name", input.ToolName))
+	}
+	defer span.End()
+
 	input.HookEventName = event
 	if input.Cwd == "" {
 		input.Cwd = e.workingDir
@@ -146,6 +174,8 @@ func (e *Executor) Dispatch(ctx context.Context, event EventType, input *Input) 
 
 	inputJSON, err := input.ToJSON()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("failed to serialize hook input: %w", err)
 	}
 
@@ -156,7 +186,57 @@ func (e *Executor) Dispatch(ctx context.Context, event EventType, input *Input) 
 	}
 	wg.Wait()
 
-	return aggregate(results, event), nil
+	final := aggregate(results, event)
+	annotateHookSpan(span, event, final)
+	return final, nil
+}
+
+// annotateHookSpan stamps the aggregated verdict onto the hook.{event}
+// span so dashboards can answer "did the hook block this?" and "why?"
+// without re-running the hook. Prior to this the span only carried the
+// event type and hook count — a denied call looked identical to an
+// allowed one. The verdict booleans and short reason are unconditional
+// (they're decisions, not content); free-text fields that may contain
+// PII or LLM output (Message, AdditionalContext, SystemMessage,
+// Summary) are gated on the GenAI content-capture opt-in.
+func annotateHookSpan(span trace.Span, event EventType, r *Result) {
+	if span == nil || r == nil {
+		return
+	}
+	attrs := []attribute.KeyValue{
+		attribute.Bool("cagent.hook.allowed", r.Allowed),
+		attribute.Int("cagent.hook.exit_code", r.ExitCode),
+	}
+	if r.Decision != "" {
+		attrs = append(attrs, attribute.String("cagent.hook.decision", string(r.Decision)))
+	}
+	if r.DecisionReason != "" {
+		attrs = append(attrs, attribute.String("cagent.hook.decision_reason", r.DecisionReason))
+	}
+	if event == EventPermissionRequest {
+		attrs = append(attrs, attribute.Bool("cagent.hook.permission_allowed", r.PermissionAllowed))
+	}
+	if r.ModifiedInput != nil {
+		attrs = append(attrs, attribute.Bool("cagent.hook.modified_input", true))
+	}
+	if r.Summary != "" {
+		attrs = append(attrs, attribute.Bool("cagent.hook.summary_provided", true))
+	}
+	if genai.IsContentCaptureEnabled() {
+		if r.Message != "" {
+			attrs = append(attrs, attribute.String("cagent.hook.message", r.Message))
+		}
+		if r.AdditionalContext != "" {
+			attrs = append(attrs, attribute.String("cagent.hook.additional_context", r.AdditionalContext))
+		}
+		if r.SystemMessage != "" {
+			attrs = append(attrs, attribute.String("cagent.hook.system_message", r.SystemMessage))
+		}
+		if r.Summary != "" {
+			attrs = append(attrs, attribute.String("cagent.hook.summary", r.Summary))
+		}
+	}
+	span.SetAttributes(attrs...)
 }
 
 // hooksFor returns the deduplicated list of hooks that should run for

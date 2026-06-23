@@ -67,15 +67,31 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			a.lastFinishReason = finishReason
 		}
 
-		// Extract reasoning_content from ExtraFields since the OpenAI SDK
-		// does not yet have a dedicated field for it. Providers like DMR
-		// send reasoning tokens as a "reasoning_content" JSON field in the
-		// chat completion chunk delta.
+		// Extract reasoning text from ExtraFields since the OpenAI SDK does
+		// not have a dedicated field for it. OpenAI-compatible providers
+		// carry thinking tokens under different keys: DMR/DeepSeek use
+		// "reasoning_content", while Qwen3 thinking mode (e.g. via OVHcloud
+		// AI Endpoints), OpenRouter and several vLLM/SGLang builds use
+		// "reasoning". Without handling "reasoning", a Qwen3 turn that only
+		// reasons and then stops is dropped entirely and the user sees an
+		// empty reply. See https://github.com/docker/docker-agent/issues/3145.
 		var reasoningContent string
-		if ef, ok := choice.Delta.JSON.ExtraFields["reasoning_content"]; ok && ef.Raw() != "" {
-			// ef.Raw() returns the raw JSON value (e.g. `"some text"`), so
-			// we unmarshal it to get the plain Go string.
-			_ = json.Unmarshal([]byte(ef.Raw()), &reasoningContent)
+		for _, key := range []string{"reasoning_content", "reasoning"} {
+			ef, ok := choice.Delta.JSON.ExtraFields[key]
+			if !ok || ef.Raw() == "" {
+				continue
+			}
+			// ef.Raw() returns the raw JSON value (e.g. `"some text"`), so we
+			// unmarshal it to get the plain Go string. Some providers send a
+			// non-string "reasoning" (e.g. an object); ignore those and keep
+			// looking rather than surfacing a partial value.
+			if err := json.Unmarshal([]byte(ef.Raw()), &reasoningContent); err != nil {
+				reasoningContent = ""
+				continue
+			}
+			if reasoningContent != "" {
+				break
+			}
 		}
 
 		response.Choices[i] = chat.MessageStreamChoice{

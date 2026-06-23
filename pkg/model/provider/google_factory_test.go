@@ -1,3 +1,5 @@
+//go:build !js && !docker_agent_no_google
+
 package provider
 
 import (

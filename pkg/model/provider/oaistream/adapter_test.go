@@ -81,6 +81,53 @@ data: [DONE]
 	assert.ErrorIs(t, err, io.EOF)
 }
 
+// TestStreamAdapter_ReasoningField is a regression test for
+// https://github.com/docker/docker-agent/issues/3145. Qwen3 thinking mode (e.g.
+// via OVHcloud AI Endpoints), OpenRouter and several vLLM/SGLang builds stream
+// thinking tokens under a "reasoning" delta field (note the extra non-standard
+// "name" field too), not "reasoning_content". Before the fix the adapter only
+// read "reasoning_content", so a turn that only reasoned and then stopped was
+// dropped entirely and the user saw an empty reply.
+func TestStreamAdapter_ReasoningField(t *testing.T) {
+	t.Parallel()
+
+	// Faithful to the bytes captured from OVHcloud's Qwen3.5 endpoint: the
+	// model reasons via delta.reasoning, then stops with no content and no
+	// tool calls.
+	sseData := `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"Qwen3.5","choices":[{"index":0,"delta":{"role":"assistant","reasoning":"The user","name":"assistant"}}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"Qwen3.5","choices":[{"index":0,"delta":{"role":"assistant","reasoning":" wants help","name":"assistant"}}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"Qwen3.5","choices":[{"index":0,"delta":{"role":"assistant","name":"assistant"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`
+
+	stream := newTestStream(t, sseData)
+	adapter := NewStreamAdapter(stream, false)
+	defer adapter.Close()
+
+	resp, err := adapter.Recv()
+	require.NoError(t, err)
+	require.Len(t, resp.Choices, 1)
+	assert.Equal(t, "The user", resp.Choices[0].Delta.ReasoningContent)
+	assert.Empty(t, resp.Choices[0].Delta.Content)
+
+	resp, err = adapter.Recv()
+	require.NoError(t, err)
+	require.Len(t, resp.Choices, 1)
+	assert.Equal(t, " wants help", resp.Choices[0].Delta.ReasoningContent)
+
+	resp, err = adapter.Recv()
+	require.NoError(t, err)
+	require.Len(t, resp.Choices, 1)
+	assert.Equal(t, "stop", string(resp.Choices[0].FinishReason))
+
+	_, err = adapter.Recv()
+	assert.ErrorIs(t, err, io.EOF)
+}
+
 func TestStreamAdapter_NoReasoningContent(t *testing.T) {
 	t.Parallel()
 

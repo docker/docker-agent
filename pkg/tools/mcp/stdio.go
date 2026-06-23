@@ -22,10 +22,15 @@ type stdioMCPClient struct {
 
 func newStdioCmdClient(command string, args, env []string, cwd string) *stdioMCPClient {
 	return &stdioMCPClient{
-		command: command,
-		args:    args,
-		env:     env,
-		cwd:     cwd,
+		// stdio has no real "server address" in the OTel HTTP sense; using
+		// the command as a stand-in keeps spans triageable when the agent
+		// has multiple stdio MCPs wired up. Span readers see the
+		// executable name (e.g. `foo-mcp-server`) on `server.address`.
+		sessionClient: sessionClient{serverAddress: command},
+		command:       command,
+		args:          args,
+		env:           env,
+		cwd:           cwd,
 	}
 }
 

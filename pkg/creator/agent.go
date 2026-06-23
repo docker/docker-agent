@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
 
 //go:embed instructions.txt
@@ -25,7 +26,7 @@ const (
 	creatorWelcomeMessage = "Hello! I'm here to create agents for you.\n\nCan you explain to me what the agent will be used for?"
 )
 
-// Agent creates and returns a team configured for the agent builder functionality.
+// Load creates and returns the agent-builder team load result.
 // The agent builder helps users create their own agent configurations interactively.
 //
 // Parameters:
@@ -34,7 +35,7 @@ const (
 //   - modelNameOverride: Optional model override (empty string uses auto-selection)
 //
 // Returns the configured team or an error if configuration fails.
-func Agent(ctx context.Context, runConfig *config.RuntimeConfig, modelNameOverride string) (*team.Team, error) {
+func Load(ctx context.Context, runConfig *config.RuntimeConfig, modelNameOverride string) (*teamloader.LoadResult, error) {
 	instructions := buildInstructions(ctx, runConfig)
 
 	configYAML, err := buildCreatorConfigYAML(instructions)
@@ -42,12 +43,21 @@ func Agent(ctx context.Context, runConfig *config.RuntimeConfig, modelNameOverri
 		return nil, fmt.Errorf("building creator config: %w", err)
 	}
 
-	return teamloader.Load(
+	return teamloader.LoadWithConfig(
 		ctx,
 		config.NewBytesSource("creator", configYAML),
 		runConfig,
-		teamloader.WithModelOverrides([]string{modelNameOverride}),
+		append(loaderdefaults.Opts(), teamloader.WithModelOverrides([]string{modelNameOverride}))...,
 	)
+}
+
+// Agent creates and returns a team configured for the agent builder functionality.
+func Agent(ctx context.Context, runConfig *config.RuntimeConfig, modelNameOverride string) (*team.Team, error) {
+	result, err := Load(ctx, runConfig, modelNameOverride)
+	if err != nil {
+		return nil, err
+	}
+	return result.Team, nil
 }
 
 // buildInstructions creates the full instruction set for the creator agent,

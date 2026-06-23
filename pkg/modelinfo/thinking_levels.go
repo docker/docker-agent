@@ -25,7 +25,7 @@ func thinkingLevelMap(provider, modelID string) effort.LevelMap {
 		// The Anthropic effort scale starts at low ([effort.ForAnthropic]
 		// maps minimal onto low), so offering minimal would duplicate low.
 		m := effort.LevelMap{effort.Minimal: false}
-		if top := anthropicTopEffort(modelID); top != "" {
+		for _, top := range anthropicTopEfforts(modelID) {
 			m[top] = true
 		}
 		return m
@@ -60,39 +60,92 @@ func providerFamily(providerType string) string {
 	}
 }
 
-// anthropicTopEffort returns the highest selectable effort above high for a
-// Claude model: Max for Opus 4.6 (the only model accepting effort "max"),
-// XHigh for Opus 4.7+ and the Fable family, and "" for every other Claude
-// model, which tops out at high.
+// anthropicTopEfforts returns the explicit-only effort tiers (xhigh and/or
+// max) a Claude model accepts beyond the universal low/medium/high ladder, in
+// canonical ascending order. It returns nil for models that top out at high.
+//
+// xhigh and max are independent capabilities, not a single ladder: Opus 4.6
+// and Sonnet 4.6 accept max without xhigh, while Opus 4.7+, Fable 5 and
+// Mythos 5 accept both. Returning the supported subset (rather than one "top"
+// tier) lets the Shift+Tab cycle offer every tier a model really has.
+//
+// Authoritative per-level availability:
+// https://platform.claude.com/docs/en/build-with-claude/effort
 //
 // Works on bare Anthropic IDs ("claude-opus-4-7", "claude-opus-4.7") as well
 // as Bedrock-style IDs with regional prefixes ("us.anthropic.claude-opus-4-7").
-func anthropicTopEffort(modelID string) effort.Level {
-	m := normalize(modelID)
-	if strings.Contains(m, "fable") {
-		return effort.XHigh
+func anthropicTopEfforts(modelID string) []effort.Level {
+	hasXHigh, hasMax := anthropicTopTierSupport(normalize(modelID))
+	switch {
+	case hasXHigh && hasMax:
+		return []effort.Level{effort.XHigh, effort.Max}
+	case hasMax:
+		return []effort.Level{effort.Max}
+	case hasXHigh:
+		return []effort.Level{effort.XHigh}
+	default:
+		return nil
 	}
-	_, rest, found := strings.Cut(m, "opus-4")
-	if !found {
-		return ""
-	}
-	if rest == "" || (rest[0] != '-' && rest[0] != '.') {
-		return ""
-	}
-	minor, width := leadingInt(rest[1:])
-	// Long digit runs are date stamps (claude-opus-4-20250514 is Opus 4.0),
-	// not minor versions.
-	if width == 0 || width > 2 {
-		return ""
+}
+
+// anthropicTopTierSupport reports whether the normalized Claude model id m
+// accepts the xhigh and max effort tiers. The capability matrix it encodes is
+// quoted in [anthropicTopEfforts]'s authoritative reference.
+func anthropicTopTierSupport(m string) (hasXHigh, hasMax bool) {
+	if bare, ok := bedrockClaudeModelName(m); ok {
+		m = bare
 	}
 	switch {
-	case minor >= 7:
-		return effort.XHigh
-	case minor == 6:
-		return effort.Max
-	default:
-		return ""
+	case strings.Contains(m, "fable"):
+		// Fable 5: both xhigh and max.
+		return true, true
+	case strings.Contains(m, "mythos"):
+		// Mythos model ids are inferred from the effort reference (no
+		// catalogue entry yet): every variant accepts max, and the full
+		// release adds xhigh while the preview tops out at max.
+		return !strings.Contains(m, "preview"), true
 	}
+	family, minor, ok := claudeFamilyMinor(m)
+	if !ok {
+		return false, false
+	}
+	switch family {
+	case "opus":
+		switch {
+		case minor >= 7:
+			return true, true
+		case minor == 6:
+			return false, true
+		}
+	case "sonnet":
+		if minor >= 6 {
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// claudeFamilyMinor extracts the family ("opus" or "sonnet") and minor version
+// from a normalized Claude id of the form "...<family>-4-<minor>" or
+// "...<family>-4.<minor>". It reports ok=false for other families and for
+// date-stamped 4.0 ids such as "claude-opus-4-20250514", whose long digit run
+// is a date, not a minor version.
+func claudeFamilyMinor(m string) (family string, minor int, ok bool) {
+	for _, fam := range []string{"opus", "sonnet"} {
+		_, rest, found := strings.Cut(m, fam+"-4")
+		if !found {
+			continue
+		}
+		if rest == "" || (rest[0] != '-' && rest[0] != '.') {
+			return "", 0, false
+		}
+		minor, width := leadingInt(rest[1:])
+		if width == 0 || width > 2 {
+			return "", 0, false
+		}
+		return fam, minor, true
+	}
+	return "", 0, false
 }
 
 // openAISupportsXHighEffort reports whether an OpenAI model accepts

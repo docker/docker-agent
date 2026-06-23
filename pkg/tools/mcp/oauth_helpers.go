@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/browser"
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/upstream"
 )
 
 // oauthHTTPClient is the *http.Client used for outbound OAuth requests
@@ -38,6 +40,89 @@ func oauthHTTPClientForAllowPrivateIPs(allowPrivateIPs bool) *http.Client {
 		return &http.Client{Timeout: 30 * time.Second}
 	}
 	return oauthHTTPClient
+}
+
+// oauthHTTPClientWithHeaders builds the HTTP client used by the OAuth flow
+// (protected-resource / authorization-server metadata discovery, dynamic
+// client registration, token exchange and refresh). It layers the configured
+// custom headers on top of the SSRF-safe (or allow_private_ips) transport,
+// but ONLY for requests that target the MCP server's own host.
+//
+// OAuth metadata can advertise authorization servers on hosts chosen by the
+// (untrusted) server response, so forwarding the configured headers to every
+// OAuth request would leak credentials (Authorization, API keys, ...) meant
+// for the MCP server to a third party. Scoping to the server's host mirrors
+// the main channel, which only ever talks to rawURL.
+//
+// This is what makes routing headers such as Grafana Cloud's X-Grafana-URL
+// reach the protected-resource-metadata request (served by the MCP host
+// itself), so the OAuth flow is scoped to the right instance instead of
+// prompting the user for it. See issue #3148.
+//
+// The returned client is a fresh instance; the shared oauthHTTPClient
+// singleton is never mutated.
+func oauthHTTPClientWithHeaders(rawURL string, headers map[string]string, allowPrivateIPs bool) *http.Client {
+	base := oauthHTTPClientForAllowPrivateIPs(allowPrivateIPs)
+	if len(headers) == 0 {
+		return base
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return base
+	}
+
+	// nil Transport means net/http uses DefaultTransport; make it explicit so
+	// the header wrapper sits outside it and the underlying (SSRF-safe) dialer
+	// still runs for header and non-header requests alike.
+	inner := base.Transport
+	if inner == nil {
+		inner = http.DefaultTransport
+	}
+	return &http.Client{
+		Timeout:       base.Timeout,
+		CheckRedirect: base.CheckRedirect,
+		Transport: &hostScopedHeaderTransport{
+			host:        hostWithoutDefaultPort(u.Host, u.Scheme),
+			withHeaders: upstream.NewHeaderTransport(inner, headers),
+			base:        inner,
+		},
+	}
+}
+
+// hostScopedHeaderTransport applies the configured custom headers only to
+// requests whose host matches host; every other request (e.g. an OAuth call
+// to a third-party authorization server advertised in server metadata) goes
+// through base unchanged so configured credentials are never forwarded
+// off-host.
+type hostScopedHeaderTransport struct {
+	host        string
+	withHeaders http.RoundTripper
+	base        http.RoundTripper
+}
+
+func (t *hostScopedHeaderTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.EqualFold(hostWithoutDefaultPort(req.URL.Host, req.URL.Scheme), t.host) {
+		return t.withHeaders.RoundTrip(req)
+	}
+	return t.base.RoundTrip(req)
+}
+
+// hostWithoutDefaultPort strips the scheme's default port from host so that
+// "mcp.example.com:443" and "mcp.example.com" compare equal under https
+// (likewise :80 under http). A non-default or absent port is left untouched.
+//
+// Both sides of the host-scoping comparison are normalised through this so
+// headers still flow when the configured URL and a server-advertised
+// discovery URL disagree on whether to spell out the standard port.
+func hostWithoutDefaultPort(host, scheme string) string {
+	h, port, err := net.SplitHostPort(host)
+	if err != nil {
+		return host // no port present
+	}
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		return h
+	}
+	return host
 }
 
 // GenerateState generates a random state parameter for OAuth CSRF protection
@@ -248,12 +333,10 @@ func registerClient(ctx context.Context, client *http.Client, authMetadata *Auth
 	}
 
 	reqBody := map[string]any{
-		"redirect_uris": []string{redirectURI},
-		"client_name":   "docker-agent",
-		"grant_types":   []string{"authorization_code"},
-		"response_types": []string{
-			"code",
-		},
+		"redirect_uris":  []string{redirectURI},
+		"client_name":    "docker-agent",
+		"grant_types":    []string{"authorization_code", "refresh_token"},
+		"response_types": []string{"code"},
 	}
 	if len(scopes) > 0 {
 		reqBody["scope"] = strings.Join(scopes, " ")

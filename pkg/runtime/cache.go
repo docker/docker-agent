@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 )
 
 // BuiltinCacheResponse is the name of the builtin stop hook that persists
@@ -63,7 +64,10 @@ func (r *LocalRuntime) tryReplayCachedResponse(
 	if question == "" {
 		return false
 	}
+	_, cacheSpan := genai.RecordCacheLookup(ctx, "")
 	cached, ok := c.Lookup(question)
+	cacheSpan.SetHit(ok && cached != "")
+	cacheSpan.End()
 	// Treat empty stored values as misses: cache_response only stores
 	// non-empty responses, so an empty entry only surfaces if the JSON
 	// file was hand-edited or downgraded from a future version. Replaying
@@ -99,7 +103,7 @@ func (r *LocalRuntime) tryReplayCachedResponse(
 // (handled inside [cache.Cache.Store]), which makes the replay path —
 // where [LocalRuntime.tryReplayCachedResponse] fires stop hooks for the
 // cached answer — free of redundant disk writes.
-func (r *LocalRuntime) cacheResponseBuiltin(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
+func (r *LocalRuntime) cacheResponseBuiltin(ctx context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
 	if in == nil || in.AgentName == "" || in.LastUserMessage == "" ||
 		strings.TrimSpace(in.StopResponse) == "" {
 		return nil, nil
@@ -111,7 +115,16 @@ func (r *LocalRuntime) cacheResponseBuiltin(_ context.Context, in *hooks.Input, 
 		return nil, nil
 	}
 	if c := a.Cache(); c != nil {
+		// Thread the active context so the cache.store span chains
+		// onto the surrounding stop-hook trace instead of starting a
+		// detached one. Mark the operation as a successful write so
+		// the `cagent.cache.requests{operation="store"}` counter is
+		// incremented — without SetHit the store path would never
+		// register on the metric.
+		_, storeSpan := genai.RecordCacheStore(ctx, "")
 		c.Store(in.LastUserMessage, in.StopResponse)
+		storeSpan.SetHit(true)
+		storeSpan.End()
 	}
 	return nil, nil
 }

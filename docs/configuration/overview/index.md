@@ -447,3 +447,55 @@ agents:
 | `provider_opts`       | Provider-specific options.                                                                |
 
 See [Provider Definitions]({{ '/providers/custom/' | relative_url }}) for more details.
+
+## Reusable YAML (anchors & aliases)
+
+YAML anchors (`&name`), aliases (`*name`) and merge keys (`<<`) are part of the YAML spec, and Docker Agent's config parser supports them. Use them to declare a value once and reuse it elsewhere in the same file, instead of copy-pasting the same block across agents.
+
+This complements the named-reuse sections above (`mcps:`, `commands:` / `skills:`, `providers:`). Reach for anchors when you want to share something those sections don't cover, such as an instruction string or a block of agent settings.
+
+Reuse a value verbatim with an anchor and an alias:
+
+```yaml
+agents:
+  root:
+    model: anthropic/claude-sonnet-4-5
+    description: Coordinator.
+    instruction: &house_rules |
+      You are part of the Acme engineering team.
+      Cite the files you looked at and keep changes minimal.
+  reviewer:
+    model: anthropic/claude-sonnet-4-5
+    description: Reviews code changes.
+    instruction: *house_rules        # the same instruction, declared once
+```
+
+Compose a block with a merge key (`<<`), then override individual fields:
+
+```yaml
+agents:
+  reviewer: &specialist
+    model: anthropic/claude-sonnet-4-5
+    description: Reviews code changes.
+    instruction: |
+      You are a meticulous software professional.
+    toolsets:
+      - type: filesystem
+  documenter:
+    <<: *specialist                   # inherit model, instruction, toolsets
+    description: Writes documentation. # then override one field
+```
+
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">Where anchors can live</div>
+  <p>An anchor has to sit on a real value inside a known section (for example a real agent, model, or MCP entry, as above). Parking anchors in a separate top-level block such as <code>defaults:</code> or <code>prompts:</code> fails, because the parser rejects unknown top-level keys.</p>
+</div>
+
+<div class="callout callout-warning" markdown="1">
+<div class="callout-title">Overriding merged keys</div>
+  <p>Overriding a key that a <code>&lt;&lt;</code> merge already set works only in the <code>agents:</code> section, as shown above. Every other section (<code>models:</code>, <code>mcps:</code>, <code>providers:</code>, <code>rag:</code>) is parsed strictly and reports the override as a duplicate key. There, use <code>&lt;&lt;</code> only to add new fields, or use the named-reuse sections above when you need per-entry overrides.</p>
+</div>
+
+Anchors are for static reuse within a single file, not dynamic values or cross-file composition. For environment-specific settings, see [Variable Expansion in Config Fields](#variable-expansion-in-config-fields), which substitutes `${env.VAR}` at load time. Templating tags such as `!include` are not acted on: the tag is ignored and its argument is kept as a plain string, so no other file is loaded. Circular aliases are not detected, so keep references acyclic.
+
+See [`examples/yaml-anchors.yaml`](https://github.com/docker/docker-agent/blob/main/examples/yaml-anchors.yaml) for a complete example.

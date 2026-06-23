@@ -456,6 +456,29 @@ func StreamStopped(sessionID, agentName, reason string) Event {
 
 func (e *StreamStoppedEvent) GetSessionID() string { return e.SessionID }
 
+// PausedEvent reports that the run loop has reached an iteration
+// boundary and is now blocked because /pause was toggled on. It is emitted
+// once the in-flight LLM request and its tool calls have finished — i.e. the
+// transition from "pausing" (still finishing a roundtrip) to "paused"
+// (idle until resumed). The TUI uses it to flip its indicator from
+// "Pausing…" to "Paused".
+type PausedEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
+func Paused(sessionID, agentName string) Event {
+	return &PausedEvent{
+		Type:         "runtime_paused",
+		SessionID:    sessionID,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+func (e *PausedEvent) GetSessionID() string { return e.SessionID }
+
 // ElicitationRequestEvent is sent when an elicitation request is received from an MCP server
 type ElicitationRequestEvent struct {
 	AgentContext

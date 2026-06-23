@@ -3,6 +3,166 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.85.0] - 2026-06-22
+
+This release contains only a changelog documentation update for v1.84.0 with no user-facing changes.
+
+## Technical Changes
+- Updates CHANGELOG.md with release notes for v1.84.0
+### Pull Requests
+
+- [#3190](https://github.com/docker/docker-agent/pull/3190) - docs: update CHANGELOG.md for v1.84.0
+
+
+## [v1.84.0] - 2026-06-20
+
+This release adds a lean TUI user setting, hardens MCP OAuth token storage, and includes several refactoring changes to make toolsets, providers, and embedder dependencies more explicit.
+
+## What's New
+
+- Adds a `settings.lean` global user config option to make the lean TUI the default for interactive runs, while preserving explicit CLI overrides including `--lean=false`
+- Adds a headless chat session API (`pkg/embeddedchat`) for embedding docker-agent runtime conversations in non-docker-agent UIs
+- Makes OpenAI, Anthropic, Google, and Amazon Bedrock providers optional via build tags, allowing embedders to drop unneeded providers and shrink binary size
+- Makes the RAG toolset opt-in to remove the cgo dependency on go-tree-sitter from embedders that don't need it
+
+## Bug Fixes
+
+- Fixes the Shift+Tab thinking-level cycle to include the `max` effort tier for Claude models that support it (Opus 4.7+, Fable 5, Mythos 5)
+- Fixes potential token loss and repeated keyring access in the OAuth token store
+- Hardens MCP OAuth token file storage with cross-process locking, reload-before-write merge semantics, Windows-safe atomic file replacement, and migration of legacy keyring entries
+
+## Technical Changes
+
+- Replaces the single keyring OAuth token bundle with a keyring-sealed AES-256/AES-GCM encrypted file, storing only a fixed-size key in the OS keyring
+- Refactors toolset and provider registries to be explicit rather than relying on blank imports and `init()` functions
+- Decouples embedder dependencies so that `pkg/runtime`, `pkg/model/provider`, and `pkg/tools/mcp` no longer transitively pull in `openai-go` and `99designs/keyring`; moves the OS-keyring-backed MCP OAuth store to its own `pkg/tools/mcp/keyringstore` sub-package
+- Removes unused agent in the wasm runtime
+### Pull Requests
+
+- [#3171](https://github.com/docker/docker-agent/pull/3171) - feat(embeddedchat): add headless chat session API
+- [#3174](https://github.com/docker/docker-agent/pull/3174) - refactor(rag): make the rag toolset opt-in to drop cgo from embedders
+- [#3176](https://github.com/docker/docker-agent/pull/3176) - feat(provider): make openai, anthropic, google, and amazon-bedrock optional
+- [#3178](https://github.com/docker/docker-agent/pull/3178) - fix(modelinfo): offer the max effort tier in the Shift+Tab thinking cycle
+- [#3179](https://github.com/docker/docker-agent/pull/3179) - docs: update CHANGELOG.md for v1.83.0
+- [#3181](https://github.com/docker/docker-agent/pull/3181) - Add lean TUI user setting
+- [#3183](https://github.com/docker/docker-agent/pull/3183) - docs: update /docs for PRs merged 2026-06-18–20
+- [#3184](https://github.com/docker/docker-agent/pull/3184) - refactor: make toolsets and providers explicit
+- [#3185](https://github.com/docker/docker-agent/pull/3185) - fix: seal MCP OAuth tokens with keyring-backed file
+- [#3187](https://github.com/docker/docker-agent/pull/3187) - Remove unused agent in wasm runtime
+- [#3189](https://github.com/docker/docker-agent/pull/3189) - refactor: decouple embedder deps and register keyring store explicitly
+
+
+## [Unreleased]
+
+## What's New
+
+- Adds `settings.lean: true` user config option (`~/.config/cagent/config.yaml`) to make the lean TUI the default interface for all interactive runs, without needing to pass `--lean` each time
+
+### Pull Requests
+
+- [#3181](https://github.com/docker/docker-agent/pull/3181) - feat(tui): add lean user config setting
+
+## [v1.83.0] - 2026-06-19
+
+This release adds an opt-in sudo askpass flow for shell commands, a headless embedded chat session API, and several bug fixes for cost accounting, session handling, and custom provider model resolution.
+
+## What's New
+
+- Adds opt-in `sudo_askpass: true` flag to the `shell` toolset, bridging `sudo` password prompts to the agent's elicitation flow instead of hanging until timeout
+- Adds `pkg/embeddedchat`, a headless chat session API for embedding docker-agent runtime conversations in non-docker-agent UIs, with support for streaming events, tool call confirmation, conversation restart, and cancellation
+- Makes OpenAI, Anthropic, Google, and Amazon Bedrock providers optional via build tags, allowing embedders to drop unneeded providers and reduce binary size
+
+## Improvements
+
+- Replaces the bleve full-text search library with a lightweight pure-Go BM25 matcher for model routing, removing a large transitive dependency tree and enabling WebAssembly cross-compilation
+
+## Bug Fixes
+
+- Fixes duplicate `tool_result` blocks for the same `tool_call_id` being passed to strict providers such as AWS Bedrock
+- Fixes custom providers (defined with `base_url` + `token_key`) triggering a blocking fetch of the full models.dev catalog (~3.4 MB) on every turn in internet-restricted environments
+- Fixes reasoning tokens from streaming usage not being recorded for Anthropic extended-thinking models
+- Fixes `run_background_agent` sub-sessions not being persisted to the store
+- Adds a warning when an uncatalogued model bills $0 with token usage
+- Fixes the Shift+Tab thinking-level cycle in the TUI not offering the `max` effort tier on Claude models that support it (Opus 4.7/4.8, Sonnet 4.6, Fable 5)
+
+## Technical Changes
+
+- Replaces external `go-memoize` and `go-cache` libraries with a new internal `pkg/memoize` package built on `golang.org/x/sync/singleflight`
+- Makes the RAG toolset opt-in to remove the cgo dependency on go-tree-sitter from the default build
+- Documents YAML anchors, aliases, and merge keys support in the configuration overview
+- Documents the 10-second per-toolset tool-listing timeout for wedged MCP servers in the troubleshooting guide
+### Pull Requests
+
+- [#1551](https://github.com/docker/docker-agent/pull/1551) - feat(shell): add opt-in sudo askpass flow (#1551)
+- [#3154](https://github.com/docker/docker-agent/pull/3154) - fix(runtime): bound per-toolset tool listing during startup (#3137)
+- [#3161](https://github.com/docker/docker-agent/pull/3161) - docs: update CHANGELOG.md for v1.82.0
+- [#3162](https://github.com/docker/docker-agent/pull/3162) - fix(session): drop duplicate tool results in sanitizeToolCalls
+- [#3163](https://github.com/docker/docker-agent/pull/3163) - feat(shell): opt-in sudo askpass flow (#1551)
+- [#3165](https://github.com/docker/docker-agent/pull/3165) - fix(modelsdev): skip models.dev fetch for custom providers (#3165)
+- [#3166](https://github.com/docker/docker-agent/pull/3166) - docs: document startup tool-listing timeout for wedged MCP servers
+- [#3169](https://github.com/docker/docker-agent/pull/3169) - fix(modelsdev): skip models.dev fetch for custom providers (#3165)
+- [#3170](https://github.com/docker/docker-agent/pull/3170) - chore: bump direct Go dependencies
+- [#3171](https://github.com/docker/docker-agent/pull/3171) - feat(embeddedchat): add headless chat session API
+- [#3172](https://github.com/docker/docker-agent/pull/3172) - refactor: replace go-memoize and go-cache with internal memoize package
+- [#3173](https://github.com/docker/docker-agent/pull/3173) - fix(runtime): close cost-accounting blind spots (reasoning tokens, $0 spend leaks)
+- [#3174](https://github.com/docker/docker-agent/pull/3174) - refactor(rag): make the rag toolset opt-in to drop cgo from embedders
+- [#3175](https://github.com/docker/docker-agent/pull/3175) - docs: document YAML anchors, aliases and merge keys
+- [#3176](https://github.com/docker/docker-agent/pull/3176) - feat(provider): make openai, anthropic, google, and amazon-bedrock optional
+- [#3177](https://github.com/docker/docker-agent/pull/3177) - refactor: replace bleve with lightweight BM25 matcher for model routing
+- [#3178](https://github.com/docker/docker-agent/pull/3178) - fix(modelinfo): offer the max effort tier in the Shift+Tab thinking cycle
+
+
+## [v1.82.0] - 2026-06-18
+
+This release adds visual pause state indicators to the TUI, expands MCP catalog and OAuth support, and fixes several runtime, provider, and memory issues.
+
+## What's New
+
+- Adds a banner to the lean TUI on startup
+- Adds Grafana Cloud as a remote streamable-http MCP server to the catalog (monitoring category, OAuth 2.1 authentication)
+- Adds pausing/paused visual state indicators to the TUI when the `/pause` command is active
+
+## Bug Fixes
+
+- Fixes reserved character sanitization in the memory toolset's default-path config segment, preventing initialization failures on Windows when agents are loaded from OCI references containing `:` in the image tag
+- Fixes sub-session transcript not being persisted when the run loop exits via an error path in `runForwarding`
+- Fixes sub-session transcript not being persisted on error path in `runCollecting` (background agent path)
+- Fixes startup tool listing hanging indefinitely when a toolset's `Tools()` call blocks; adds a per-toolset timeout so the sidebar no longer gets stuck on "Loading tools..."
+- Exempts `list_background_agents` from the runtime loop-killer, which previously flagged it as a repeated identical call
+- Fixes `delta.reasoning` field being dropped in the OpenAI-compatible chat-completions stream adapter, resolving silent/empty responses with Qwen3 thinking mode
+- Fixes configured headers not being forwarded to OAuth discovery requests for remote MCP servers, resolving repeated auth prompts for servers like Grafana Cloud that require instance-scoping headers
+- Fixes OAuth default port normalization in MCP header host scoping
+### Pull Requests
+
+- [#3137](https://github.com/docker/docker-agent/pull/3137) - fix(runtime): bound per-toolset tool listing during startup (#3137)
+- [#3139](https://github.com/docker/docker-agent/pull/3139) - feat(mcpcatalog): add Grafana Cloud remote MCP server
+- [#3143](https://github.com/docker/docker-agent/pull/3143) - docs: update CHANGELOG.md for v1.81.2
+- [#3146](https://github.com/docker/docker-agent/pull/3146) - fix(memory): sanitise reserved characters in default-path config segment
+- [#3147](https://github.com/docker/docker-agent/pull/3147) - Add a banner in the lean tui
+- [#3149](https://github.com/docker/docker-agent/pull/3149) - chore: bump Go dependencies
+- [#3151](https://github.com/docker/docker-agent/pull/3151) - fix(runtime): persist sub-session transcript on error path
+- [#3152](https://github.com/docker/docker-agent/pull/3152) - fix(runtime): persist sub-session transcript on error path in runCollecting
+- [#3153](https://github.com/docker/docker-agent/pull/3153) - docs: sync /docs with main — Grafana Cloud catalog, lean TUI banner, memory path sanitization
+- [#3154](https://github.com/docker/docker-agent/pull/3154) - fix(runtime): bound per-toolset tool listing during startup (#3137)
+- [#3155](https://github.com/docker/docker-agent/pull/3155) - chore: bump github.com/alecthomas/chroma/v2 to v2.27.0
+- [#3156](https://github.com/docker/docker-agent/pull/3156) - feat(tui): show pausing/paused state for /pause
+- [#3157](https://github.com/docker/docker-agent/pull/3157) - fix(runtime): exempt list_background_agents from the loop-killer
+- [#3158](https://github.com/docker/docker-agent/pull/3158) - fix(providers): consume delta.reasoning in chat-completions stream adapter
+- [#3159](https://github.com/docker/docker-agent/pull/3159) - fix(mcp): forward configured headers to OAuth discovery on the server host
+- [#3160](https://github.com/docker/docker-agent/pull/3160) - docs: update documentation for recent merged PRs
+
+
+## [v1.81.2] - 2026-06-16
+
+This release adds Grafana Cloud to the MCP server catalog.
+
+## What's New
+- Adds Grafana Cloud as a remote MCP server to the catalog, accessible via `https://mcp.grafana.com/mcp` using streamable-http transport and browser-based OAuth 2.1 authentication
+### Pull Requests
+
+- [#3139](https://github.com/docker/docker-agent/pull/3139) - feat(mcpcatalog): add Grafana Cloud remote MCP server
+
+
 ## [v1.79.0] - 2026-06-12
 
 This release adds TUI embedding capabilities, gateway model discovery, and HTTP transport middleware support, along with various fixes and improvements.
@@ -3532,3 +3692,13 @@ This release improves the terminal user interface with better error handling and
 [v1.78.0]: https://github.com/docker/docker-agent/releases/tag/v1.78.0
 
 [v1.79.0]: https://github.com/docker/docker-agent/releases/tag/v1.79.0
+
+[v1.81.2]: https://github.com/docker/docker-agent/releases/tag/v1.81.2
+
+[v1.82.0]: https://github.com/docker/docker-agent/releases/tag/v1.82.0
+
+[v1.83.0]: https://github.com/docker/docker-agent/releases/tag/v1.83.0
+
+[v1.84.0]: https://github.com/docker/docker-agent/releases/tag/v1.84.0
+
+[v1.85.0]: https://github.com/docker/docker-agent/releases/tag/v1.85.0

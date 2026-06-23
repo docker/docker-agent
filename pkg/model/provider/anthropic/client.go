@@ -14,6 +14,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -24,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/modelinfo"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -823,7 +828,30 @@ func countAnthropicTokens(
 	messages []anthropic.MessageParam,
 	system []anthropic.TextBlockParam,
 	anthropicTools []anthropic.ToolUnionParam,
-) (int64, error) {
+) (count int64, err error) {
+	// Token counting is a blocking API call to Anthropic that fires
+	// on the context-overflow retry path. Span it so the latency is
+	// attributable when the retry stalls.
+	ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/model/provider/anthropic").Start(
+		ctx,
+		"anthropic.tokens.count",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String(genai.AttrProviderName, genai.ProviderAnthropic),
+			attribute.String(genai.AttrRequestModel, model),
+		),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		if count > 0 {
+			span.SetAttributes(attribute.Int64("cagent.anthropic.tokens.counted", count))
+		}
+		span.End()
+	}()
+
 	params := anthropic.MessageCountTokensParams{
 		Model:    model,
 		Messages: messages,

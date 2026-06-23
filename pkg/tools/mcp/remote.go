@@ -6,10 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
+	neturl "net/url"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/upstream"
 )
 
@@ -45,6 +47,7 @@ func newRemoteClient(
 	}
 
 	return &remoteMCPClient{
+		sessionClient:   sessionClient{serverAddress: sanitizeRemoteAddress(url)},
 		url:             url,
 		transportType:   transportType,
 		headers:         headers,
@@ -52,6 +55,26 @@ func newRemoteClient(
 		oauthConfig:     oauthConfig,
 		allowPrivateIPs: allowPrivateIPs,
 	}
+}
+
+// sanitizeRemoteAddress extracts a span-safe identifier from an MCP URL
+// before stamping it as `server.address`. The URL may legitimately
+// contain credentials in userinfo (`https://user:token@host/`) or query
+// params (`?api_key=...`); sending those to the trace backend would be
+// a real exfiltration risk. OTel's semantic convention for
+// `server.address` is the host (with optional port) anyway, so we keep
+// only `u.Host` and drop everything else.
+//
+// Returns the empty string on parse failure or hostless URLs (file://,
+// stdio commands, malformed input). The caller stamps `server.address`
+// only when it's non-empty, so a sanitisation miss leaves the span
+// without that attribute rather than leaking a raw URL.
+func sanitizeRemoteAddress(rawURL string) string {
+	u, err := neturl.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Host
 }
 
 func (c *remoteMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequest) (*gomcp.InitializeResult, error) {
@@ -166,6 +189,16 @@ func (c *remoteMCPClient) SetUnmanagedOAuthRedirectURI(uri string) {
 // The oauthTransport is returned alongside the client so callers can inspect
 // the most recent server-side failure (via lastServerError) when Connect()
 // returns a bare HTTP-status error and we need to surface the actual cause.
+//
+// The transport chain wraps `httpclient.WrapWithOTel` outermost so every
+// outbound MCP request injects W3C `traceparent` (and creates an HTTP
+// CLIENT span). Without this wrap, the streamable-HTTP / SSE transports
+// the gomcp SDK builds with our `*http.Client` send raw POST/GET requests
+// that never chain onto the calling cagent span — the downstream MCP
+// server's spans then live in a separate root trace, breaking end-to-end
+// observability for any agent talking to a remote MCP. `WrapWithOTel` is
+// a no-op when OTel is disabled at runtime, so the laptop-mode default
+// stays unchanged.
 func (c *remoteMCPClient) createHTTPClient() (*http.Client, *oauthTransport, error) {
 	base := c.headerTransport()
 
@@ -178,7 +211,7 @@ func (c *remoteMCPClient) createHTTPClient() (*http.Client, *oauthTransport, err
 		managed:                   c.managed,
 		unmanagedOAuthRedirectURI: c.unmanagedOAuthRedirectURI,
 		oauthConfig:               c.oauthConfig,
-		oauthHTTPClient:           oauthHTTPClientForAllowPrivateIPs(c.allowPrivateIPs),
+		oauthHTTPClient:           oauthHTTPClientWithHeaders(c.url, c.headers, c.allowPrivateIPs),
 	}
 
 	// Persist cookies across requests
@@ -187,7 +220,7 @@ func (c *remoteMCPClient) createHTTPClient() (*http.Client, *oauthTransport, err
 	if err != nil {
 		return nil, nil, fmt.Errorf("creating cookie jar: %w", err)
 	}
-	return &http.Client{Transport: oauthT, Jar: jar}, oauthT, nil
+	return &http.Client{Transport: httpclient.WrapWithOTel(oauthT), Jar: jar}, oauthT, nil
 }
 
 func (c *remoteMCPClient) headerTransport() http.RoundTripper {

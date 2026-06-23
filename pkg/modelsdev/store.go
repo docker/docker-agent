@@ -34,16 +34,25 @@ const (
 // The database is loaded on first access via GetDatabase and
 // then cached in memory for the lifetime of the Store.
 type Store struct {
-	cacheFile string
-	mu        sync.Mutex
-	db        *Database
+	cacheFile     string
+	knownProvider func(string) bool
+	mu            sync.Mutex
+	// db is the authoritative catalog from the full (fetch-eligible) load path.
+	db *Database
+	// cacheDB is a cache-only snapshot served to fetch-disallowed lookups. It is
+	// kept separate from db because it may be empty or stale and must never
+	// satisfy a later fetch-eligible lookup for a known provider; memoizing it
+	// keeps the hot path from re-reading and re-parsing the catalog file on
+	// every custom-provider resolution.
+	cacheDB *Database
 }
 
 // Opt configures a Store created with NewStore.
 type Opt func(*storeOptions)
 
 type storeOptions struct {
-	cacheFile string
+	cacheFile     string
+	knownProvider func(string) bool
 }
 
 // WithCache overrides the path of the on-disk cache file used by the Store.
@@ -51,6 +60,24 @@ type storeOptions struct {
 func WithCache(path string) Opt {
 	return func(o *storeOptions) {
 		o.cacheFile = path
+	}
+}
+
+// WithKnownProvider restricts which provider names may trigger an outbound
+// fetch of the models.dev catalog. The predicate should report whether a
+// provider is one models.dev could plausibly contain (a built-in or alias).
+//
+// Looking up a model for a provider the predicate rejects — typically a
+// user-defined custom provider whose config (base_url + token) is already
+// self-contained — resolves against the cached catalog only and never reaches
+// the network. This keeps custom providers working in internet-restricted
+// environments instead of blocking on a doomed GET to models.dev (issue #3165).
+//
+// When no predicate is set, every provider may trigger a fetch (the default,
+// backwards-compatible behaviour).
+func WithKnownProvider(fn func(string) bool) Opt {
+	return func(o *storeOptions) {
+		o.knownProvider = fn
 	}
 }
 
@@ -80,7 +107,8 @@ func NewStore(opts ...Opt) (*Store, error) {
 	}
 
 	return &Store{
-		cacheFile: cacheFile,
+		cacheFile:     cacheFile,
+		knownProvider: options.knownProvider,
 	}, nil
 }
 
@@ -94,25 +122,52 @@ func NewDatabaseStore(db *Database) *Store {
 
 // GetDatabase returns the models.dev database, fetching from cache or API as needed.
 func (s *Store) GetDatabase(ctx context.Context) (*Database, error) {
+	return s.getDatabase(ctx, true)
+}
+
+// getDatabase returns the models.dev database. When allowFetch is false the
+// catalog is served from memory or the on-disk cache only and the network is
+// never touched; a cache miss yields an empty database rather than an error.
+func (s *Store) getDatabase(ctx context.Context, allowFetch bool) (*Database, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The authoritative catalog, once loaded, serves every lookup — including
+	// fetch-disallowed ones, which then benefit from the fresher data.
 	if s.db != nil {
 		return s.db, nil
 	}
 
-	db, err := loadDatabase(ctx, s.cacheFile)
+	if !allowFetch {
+		// Serve (and memoize) a cache-only snapshot without touching the
+		// network. Kept out of s.db so it can never satisfy a later
+		// fetch-eligible lookup for a known provider.
+		if s.cacheDB == nil {
+			db, err := loadDatabase(ctx, s.cacheFile, false)
+			if err != nil {
+				return nil, err
+			}
+			s.cacheDB = db
+		}
+		return s.cacheDB, nil
+	}
+
+	db, err := loadDatabase(ctx, s.cacheFile, true)
 	if err != nil {
 		return nil, err
 	}
-
 	s.db = db
 	return db, nil
 }
 
-// getProvider returns a specific provider by ID.
+// getProvider returns a specific provider by ID. A provider the Store's
+// knownProvider predicate rejects (a user-defined custom provider) is looked
+// up without ever fetching the catalog from the network, so a self-contained
+// custom-provider config keeps working when models.dev is unreachable.
 func (s *Store) getProvider(ctx context.Context, providerID string) (*Provider, error) {
-	db, err := s.GetDatabase(ctx)
+	allowFetch := s.knownProvider == nil || s.knownProvider(providerID)
+
+	db, err := s.getDatabase(ctx, allowFetch)
 	if err != nil {
 		return nil, err
 	}
@@ -158,11 +213,26 @@ func (s *Store) GetModel(ctx context.Context, id ID) (*Model, error) {
 
 // loadDatabase loads the database from the local cache file or
 // falls back to fetching from the models.dev API.
-func loadDatabase(ctx context.Context, cacheFile string) (*Database, error) {
+//
+// When allowFetch is false the network is never touched: a fresh cache is
+// returned as-is, a stale cache is returned regardless of age, and a missing
+// cache yields an empty database. This lets lookups for providers models.dev
+// cannot know about resolve locally without a doomed outbound call.
+func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool) (*Database, error) {
 	// Try to load from cache first
 	cached, err := loadFromCache(cacheFile)
-	if err == nil && time.Since(cached.LastRefresh) < refreshInterval {
+	if err == nil && (!allowFetch || time.Since(cached.LastRefresh) < refreshInterval) {
 		return &cached.Database, nil
+	}
+
+	if !allowFetch {
+		// No fresh cache and fetching is disallowed: use a stale cache if we
+		// have one, otherwise serve an empty catalog so the caller resolves to
+		// "provider not found" with no network call.
+		if cached != nil {
+			return &cached.Database, nil
+		}
+		return &Database{}, nil
 	}
 
 	// Cache is stale or doesn't exist — try a conditional fetch with the ETag.

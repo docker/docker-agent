@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,4 +78,30 @@ func TestLazyModelStore_DefersError(t *testing.T) {
 	require.ErrorIs(t, err, wantErr)
 
 	assert.Equal(t, 1, calls, "loader should only run once even after multiple method calls")
+}
+
+// TestLazyModelStore_GatesCustomProvider is the regression test for issue
+// #3165. The runtime's default ModelStore must not reach out to models.dev
+// when resolving a model for a user-defined custom provider, so a
+// self-contained custom-provider config stays usable when models.dev is
+// unreachable. This exercises the exact store the request loop (loop.go:405)
+// and session compaction (session_compaction.go:198) use in production.
+func TestLazyModelStore_GatesCustomProvider(t *testing.T) {
+	// Point the cache at an empty home so there is no on-disk catalog to fall
+	// back on: a cold start, as in a freshly-spawned pod. t.Setenv forbids
+	// t.Parallel, which is fine here.
+	t.Setenv("HOME", t.TempDir())
+
+	var store ModelStore = &lazyModelStore{}
+
+	// An already-expired deadline makes any HTTP attempt fail instantly,
+	// standing in for "models.dev is unreachable" without real network state.
+	ctx, cancel := context.WithDeadline(t.Context(), time.Unix(0, 0))
+	defer cancel()
+
+	_, err := store.GetModel(ctx, modelsdev.NewID("mistral_gateway", "mistral-small-latest"))
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "fetch from API",
+		"custom provider must not trigger a models.dev fetch from the runtime store")
+	assert.Contains(t, err.Error(), `provider "mistral_gateway" not found`)
 }

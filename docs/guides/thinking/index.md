@@ -84,9 +84,9 @@ models:
 
 docker-agent auto-adjusts `max_tokens` when you set a thinking budget but leave `max_tokens` at its default. If you set `max_tokens` explicitly, it must be greater than `thinking_budget`.
 
-### Adaptive thinking (Claude Opus 4.6+)
+### Adaptive thinking (Opus 4.6+ and Sonnet 4.6)
 
-Newer Claude models support adaptive thinking, where the model decides how much to think. **Claude Opus 4.6, 4.7 and 4.8 only support adaptive thinking** — they reject token-based budgets. Use `adaptive`, `adaptive/<effort>`, or a bare effort level — on Anthropic, a bare effort level like `high` is shorthand for adaptive thinking at that effort:
+Newer Claude models support adaptive thinking, where the model decides how much to think. **Claude Opus 4.6, 4.7, 4.8, and Sonnet 4.6 only support adaptive thinking** — they reject token-based budgets. Use `adaptive`, `adaptive/<effort>`, or a bare effort level — on Anthropic, a bare effort level like `high` is shorthand for adaptive thinking at that effort:
 
 ```yaml
 models:
@@ -106,21 +106,22 @@ models:
     thinking_budget: adaptive/max      # adaptive/low | adaptive/medium | adaptive/high | adaptive/xhigh | adaptive/max
 ```
 
-**Adaptive effort levels:**
+**Adaptive effort levels and per-model support:**
 
-| Level     | Description                                       |
-| --------- | ------------------------------------------------- |
-| `minimal` | Treated as `low` (bare form only).                |
-| `low`     | Minimal thinking; fastest adaptive mode.          |
-| `medium`  | Moderate effort.                                  |
-| `high`    | Thorough reasoning; default for `adaptive`.       |
-| `xhigh`   | Very high effort (newer models, e.g. Opus 4.7+).  |
-| `max`     | Maximum effort.                                   |
+| Level     | Opus 4.5 | Sonnet 4.5 / Haiku | Sonnet 4.6 | Opus 4.6 | Opus 4.7 / 4.8 | Fable 5 | Mythos 5 | Mythos preview |
+| --------- | :------: | :----------------: | :--------: | :------: | :------------: | :-----: | :------: | :------------: |
+| `low`     | ✓        | ✓                  | ✓          | ✓        | ✓              | ✓       | ✓        | ✓              |
+| `medium`  | ✓        | ✓                  | ✓          | ✓        | ✓              | ✓       | ✓        | ✓              |
+| `high`    | ✓        | ✓                  | ✓          | ✓        | ✓              | ✓       | ✓        | ✓              |
+| `xhigh`   | —        | —                  | —          | —        | ✓              | ✓       | ✓        | —              |
+| `max`     | —        | —                  | ✓          | ✓        | ✓              | ✓       | ✓        | ✓              |
+
+`minimal` is treated as `low` (bare form only). `high` is the default when `adaptive` is used without an effort level.
 
 <div class="callout callout-warning" markdown="1">
 <div class="callout-title">Effort strings require adaptive-capable models
 </div>
-  <p>Every string effort value on Anthropic is sent as adaptive thinking (<code>output_config.effort</code>), which only newer Claude models (Opus 4.6+) accept. For older models like Sonnet 4.5, use an integer token budget instead. Conversely, models that <em>only</em> support adaptive thinking (Opus 4.6, 4.7, 4.8) automatically have token budgets coerced to <code>adaptive</code> (a warning is logged).</p>
+  <p>Every string effort value on Anthropic is sent as adaptive thinking (<code>output_config.effort</code>), which only newer Claude models (Opus 4.6+, Sonnet 4.6) accept. For older models like Sonnet 4.5, use an integer token budget instead. Conversely, models that <em>only</em> support adaptive thinking (Opus 4.6, 4.7, 4.8, Sonnet 4.6) automatically have token budgets coerced to <code>adaptive</code> (a warning is logged).</p>
 </div>
 
 ### Disabling thinking
@@ -332,7 +333,7 @@ models:
 
 While running in the TUI, press **Shift+Tab** to cycle the thinking effort level for the current model without editing your YAML config:
 
-- The level steps through the model's supported range (model-specific), wrapping around — for example `none → minimal → low → medium → high → none` on OpenAI gpt-5/o-series, `none → minimal → low → medium → high → xhigh → none` on gpt-5.2+, `none → low → medium → high → max → none` on Anthropic Opus 4.6, and `none → low → medium → high → xhigh → none` on Anthropic Opus 4.7+. For older Anthropic models (e.g. Sonnet 4.5) that only accept token budgets, effort-string cycling has no effect — use an integer `thinking_budget` in your YAML config instead.
+- The level steps through the model's supported range (model-specific), wrapping around — for example `none → minimal → low → medium → high → none` on OpenAI gpt-5/o-series, `none → minimal → low → medium → high → xhigh → none` on gpt-5.2+, `none → low → medium → high → max → none` on Anthropic Opus 4.6 and Sonnet 4.6, and `none → low → medium → high → xhigh → max → none` on Anthropic Opus 4.7+, Fable 5, and Mythos 5. For older Anthropic models (e.g. Sonnet 4.5) that only accept token budgets, effort-string cycling has no effect — use an integer `thinking_budget` in your YAML config instead.
 - The current level is shown in the sidebar next to the model name (e.g. `openai/gpt-5 • high`).
 - This applies as a session override — it is **not** saved to the config file. The next session starts from the level defined in your YAML.
 - For models that don't support reasoning, and for remote runtimes, Shift+Tab is a no-op and an informational message is displayed.

@@ -56,6 +56,8 @@ func (m *mockMCPClient) SetToolListChangedHandler(func()) {}
 
 func (m *mockMCPClient) SetPromptListChangedHandler(func()) {}
 
+func (m *mockMCPClient) ServerAddress() string { return "mock://test" }
+
 func (m *mockMCPClient) Wait() error { return nil }
 
 func (m *mockMCPClient) Close(context.Context) error { return nil }

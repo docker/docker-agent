@@ -1385,6 +1385,12 @@ func sanitizeToolCalls(messages []chat.Message) []chat.Message {
 			if msg.ToolCallID == "" || !pendingIDs[msg.ToolCallID] {
 				continue
 			}
+			// Drop duplicate tool results: a second result for the same
+			// tool_use leaves more toolResult than toolUse blocks, which strict
+			// providers (AWS Bedrock) reject the same way as an orphaned result.
+			if resultIDs[msg.ToolCallID] {
+				continue
+			}
 			resultIDs[msg.ToolCallID] = true
 
 		case msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) > 0:

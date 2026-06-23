@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -74,6 +76,14 @@ func (t *ToolSet) userPrompt(ctx context.Context, params Args) (*tools.ToolCallR
 		return tools.ResultError("user_prompt tool is not available in this context (no elicitation handler configured)"), nil
 	}
 
+	span := trace.SpanFromContext(ctx)
+	if span.IsRecording() {
+		span.SetAttributes(
+			attribute.Int("cagent.tool.user_prompt.message_length", len(params.Message)),
+			attribute.Bool("cagent.tool.user_prompt.has_schema", params.Schema != nil),
+		)
+	}
+
 	var meta mcp.Meta
 	if params.Title != "" {
 		meta = mcp.Meta{"cagent/title": params.Title}
@@ -93,6 +103,10 @@ func (t *ToolSet) userPrompt(ctx context.Context, params Args) (*tools.ToolCallR
 	response := Response{
 		Action:  string(result.Action),
 		Content: result.Content,
+	}
+
+	if span.IsRecording() {
+		span.SetAttributes(attribute.String("cagent.tool.user_prompt.action", string(result.Action)))
 	}
 
 	responseJSON, err := json.Marshal(response)

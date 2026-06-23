@@ -5,11 +5,10 @@ import (
 	"log/slog"
 
 	ragtypes "github.com/docker/docker-agent/pkg/rag/types"
-	"github.com/docker/docker-agent/pkg/tools/builtin/rag"
 )
 
 // ragEventForwarder returns a callback that converts RAG manager events to runtime events.
-func ragEventForwarder(ragName string, r *LocalRuntime, sendEvent func(Event)) rag.EventCallback {
+func ragEventForwarder(ragName string, r *LocalRuntime, sendEvent func(Event)) ragtypes.EventCallback {
 	return func(ragEvent ragtypes.Event) {
 		agentName := r.CurrentAgentName()
 		slog.Debug("Forwarding RAG event", "type", ragEvent.Type, "rag", ragName, "agent", agentName)

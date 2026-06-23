@@ -18,6 +18,10 @@ type Config struct {
 	// Models stores the full models map for providers that need it (e.g., routers).
 	// This enables proper cloning of providers that reference other models.
 	Models map[string]latest.ModelConfig
+	// ProviderRegistry stores the registry that created this provider. It is kept
+	// as any to avoid a package cycle; pkg/model/provider type-asserts it when
+	// cloning providers with adjusted options.
+	ProviderRegistry any
 	// BaseURL is the resolved HTTP base URL the client talks to, when
 	// the provider is reachable over a configurable HTTP endpoint.
 	// Distinct from [latest.ModelConfig.BaseURL] (the user-typed input):
@@ -29,6 +33,10 @@ type Config struct {
 	// resolution logic. Empty for providers that don't expose a stable
 	// per-instance URL.
 	BaseURL string
+}
+
+func (c *Config) SetProviderRegistry(registry any) {
+	c.ProviderRegistry = registry
 }
 
 // ID returns the provider and model identity as a [modelsdev.ID] so

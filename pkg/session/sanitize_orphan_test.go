@@ -78,6 +78,37 @@ func TestSanitizeToolCalls_KeepsMissingResultBalanced(t *testing.T) {
 	assertToolPairingInvariant(t, out) // synthetic result injected
 }
 
+// TestSanitizeToolCalls_DropsDuplicateToolResult guards the remaining
+// toolResult/toolUse imbalance that orphan-dropping alone does not cover: a
+// second tool_result carrying the same tool_call_id. Bedrock counts it as an
+// extra toolResult block ("the number of toolResult blocks ... exceeds the
+// number of toolUse blocks of previous turn"), the same ValidationException
+// family as #1676 and #1593. Only the first result for a given tool_use should
+// survive.
+func TestSanitizeToolCalls_DropsDuplicateToolResult(t *testing.T) {
+	messages := []chat.Message{
+		{Role: chat.MessageRoleUser, Content: "hi"},
+		{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{{ID: "tc1"}}},
+		{Role: chat.MessageRoleTool, ToolCallID: "tc1", Content: "result"},
+		{Role: chat.MessageRoleTool, ToolCallID: "tc1", Content: "duplicate result"},
+		{Role: chat.MessageRoleUser, Content: "next"},
+	}
+
+	out := sanitizeToolCalls(messages)
+
+	assertToolPairingInvariant(t, out)
+
+	var count int
+	for _, m := range out {
+		if m.Role == chat.MessageRoleTool && m.ToolCallID == "tc1" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one tool result for tc1 after dedup, got %d", count)
+	}
+}
+
 // TestGetMessages_ResumeAfterCompaction_NoOrphanedToolResult exercises the full
 // GetMessages reconstruction path that runs on the first turn after a session
 // is resumed (runtime/loop.go calls sess.GetMessages before the loop starts).

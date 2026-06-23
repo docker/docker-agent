@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
+	"time"
 
+	"charm.land/lipgloss/v2"
 	"github.com/muesli/cancelreader"
 	"golang.org/x/term"
 )
@@ -27,7 +27,8 @@ type terminal struct {
 	width  int
 	height int
 
-	winch chan os.Signal
+	resize     chan [2]int
+	stopResize chan struct{}
 }
 
 func newTerminal(in, out *os.File) (*terminal, error) {
@@ -43,26 +44,21 @@ func newTerminal(in, out *os.File) (*terminal, error) {
 	}
 
 	t := &terminal{
-		in:        in,
-		out:       out,
-		writer:    bufio.NewWriterSize(out, 16*1024),
-		reader:    reader,
-		prevState: state,
-		winch:     make(chan os.Signal, 1),
+		in:         in,
+		out:        out,
+		writer:     bufio.NewWriterSize(out, 16*1024),
+		reader:     reader,
+		prevState:  state,
+		resize:     make(chan [2]int, 1),
+		stopResize: make(chan struct{}),
 	}
 
-	t.width, t.height = t.querySize()
-	if t.width <= 0 {
-		t.width = 80
-	}
-	if t.height <= 0 {
-		t.height = 24
-	}
+	t.width, t.height = normalizeTerminalSize(t.querySize())
 
+	lipgloss.EnableLegacyWindowsANSI(out)
 	t.writeString(seqEnableBracketedPaste)
 	t.flush()
-
-	signal.Notify(t.winch, syscall.SIGWINCH)
+	t.startResizeWatcher()
 
 	return t, nil
 }
@@ -71,23 +67,66 @@ func newTerminal(in, out *os.File) (*terminal, error) {
 // dimensions and reports the new size. It returns ok=false once the resize
 // channel is closed during shutdown.
 func (t *terminal) resized() (w, h int, ok bool) {
-	if _, open := <-t.winch; !open {
+	size, open := <-t.resize
+	if !open {
 		return 0, 0, false
 	}
-	t.width, t.height = t.querySize()
-	if t.width <= 0 {
-		t.width = 80
-	}
-	if t.height <= 0 {
-		t.height = 24
-	}
+	t.width, t.height = size[0], size[1]
 	return t.width, t.height, true
+}
+
+func (t *terminal) startResizeWatcher() {
+	lastW, lastH := t.width, t.height
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		defer close(t.resize)
+
+		for {
+			select {
+			case <-ticker.C:
+				w, h := normalizeTerminalSize(t.querySize())
+				if w == lastW && h == lastH {
+					continue
+				}
+				lastW, lastH = w, h
+				sendLatestResize(t.resize, [2]int{w, h})
+			case <-t.stopResize:
+				return
+			}
+		}
+	}()
+}
+
+func sendLatestResize(ch chan [2]int, size [2]int) {
+	select {
+	case ch <- size:
+		return
+	default:
+	}
+
+	select {
+	case <-ch:
+	default:
+	}
+
+	ch <- size
 }
 
 func (t *terminal) querySize() (w, h int) {
 	w, h, err := term.GetSize(int(t.out.Fd()))
 	if err != nil {
 		return 0, 0
+	}
+	return w, h
+}
+
+func normalizeTerminalSize(w, h int) (int, int) {
+	if w <= 0 {
+		w = 80
+	}
+	if h <= 0 {
+		h = 24
 	}
 	return w, h
 }
@@ -105,15 +144,13 @@ func (t *terminal) flush() {
 }
 
 // restore tears the terminal back down: it disables bracketed paste, cancels
-// the reader, restores the saved terminal state and stops listening for
-// resize signals.
+// the reader, restores the saved terminal state and stops watching for resizes.
 func (t *terminal) restore() {
 	t.writeString(seqDisableBracketedPaste)
 	t.writeString(seqShowCursor)
 	t.flush()
 
-	signal.Stop(t.winch)
-	close(t.winch)
+	close(t.stopResize)
 
 	t.reader.Cancel()
 	_ = t.reader.Close()

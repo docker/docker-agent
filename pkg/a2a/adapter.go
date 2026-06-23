@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/model"
 	adksession "google.golang.org/adk/session"
@@ -18,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
+	cgenai "github.com/docker/docker-agent/pkg/telemetry/genai"
 )
 
 // newDockerAgentAdapter creates a new ADK agent adapter from a docker agent team and agent name.
@@ -44,6 +47,21 @@ func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Sto
 // runDockerAgent executes a docker agent and returns ADK session events
 func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store) iter.Seq2[*adksession.Event, error] {
 	return func(yield func(*adksession.Event, error) bool) {
+		// Decorate the inbound `a2a.message` SERVER span (created by
+		// otelhttp.NewHandler in server.go) with the GenAI semconv
+		// invoke_agent shape so dashboards can recognise A2A traffic as
+		// agent invocations rather than generic JSON-RPC POSTs. The
+		// runtime.session span we open below is the child that records
+		// the actual work; this annotation makes the parent searchable
+		// via gen_ai.operation.name="invoke_agent".
+		if span := trace.SpanFromContext(ctx); span.IsRecording() {
+			span.SetAttributes(
+				attribute.String(cgenai.AttrOperationName, cgenai.OperationInvokeAgent),
+				attribute.String(cgenai.AttrAgentName, agentName),
+				attribute.String(cgenai.AttrAgentNameRuntime, agentName),
+			)
+		}
+
 		// Extract user message from the ADK context
 		userContent := ctx.UserContent()
 		message := contentToMessage(userContent)
@@ -78,6 +96,13 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		rt, err := runtime.New(t,
 			runtime.WithCurrentAgent(agentName),
 			runtime.WithSessionStore(sessStore),
+			// Match the tracer scope used by `cmd/root/run.go` so
+			// MCP / A2A / API spans share the same instrumentation
+			// scope as the CLI's runtime spans. Without this option
+			// `LocalRuntime.startSpan` sees a nil tracer and silently
+			// returns no-op spans for runtime.session, runtime.stream,
+			// runtime.tool.call, runtime.fallback, runtime.run_skill,
+			// hook events, and so on.
 			runtime.WithTracer(otel.Tracer("cagent")),
 		)
 		if err != nil {

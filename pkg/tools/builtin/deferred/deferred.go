@@ -8,6 +8,9 @@ import (
 	"strings"
 	"sync"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -84,7 +87,7 @@ type AddToolArgs struct {
 	Name string `json:"name" jsonschema:"The name of the tool to activate"`
 }
 
-func (d *ToolSet) handleSearchTool(_ context.Context, args SearchToolArgs) (*tools.ToolCallResult, error) {
+func (d *ToolSet) handleSearchTool(ctx context.Context, args SearchToolArgs) (*tools.ToolCallResult, error) {
 	query := strings.ToLower(args.Query)
 
 	d.mu.RLock()
@@ -103,6 +106,15 @@ func (d *ToolSet) handleSearchTool(_ context.Context, args SearchToolArgs) (*too
 		}
 	}
 
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("cagent.tool.deferred.op", "search_tool"),
+			attribute.String("cagent.tool.deferred.query", args.Query),
+			attribute.Int("cagent.tool.deferred.match_count", len(results)),
+			attribute.Int("cagent.tool.deferred.pool_size", len(d.deferredTools)),
+		)
+	}
+
 	if len(results) == 0 {
 		return tools.ResultError(fmt.Sprintf("No deferred tools found matching '%s'", args.Query)), nil
 	}
@@ -115,21 +127,37 @@ func (d *ToolSet) handleSearchTool(_ context.Context, args SearchToolArgs) (*too
 	return tools.ResultSuccess(fmt.Sprintf("Found %d deferred tool(s):\n%s", len(results), string(output))), nil
 }
 
-func (d *ToolSet) handleAddTool(_ context.Context, args AddToolArgs) (*tools.ToolCallResult, error) {
+func (d *ToolSet) handleAddTool(ctx context.Context, args AddToolArgs) (*tools.ToolCallResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
+	span := trace.SpanFromContext(ctx)
+	annotate := func(outcome string) {
+		if !span.IsRecording() {
+			return
+		}
+		span.SetAttributes(
+			attribute.String("cagent.tool.deferred.op", "add_tool"),
+			attribute.String("cagent.tool.deferred.tool_name", args.Name),
+			attribute.String("cagent.tool.deferred.outcome", outcome),
+			attribute.Int("cagent.tool.deferred.activated_count", len(d.activatedTools)),
+		)
+	}
+
 	if _, exists := d.activatedTools[args.Name]; exists {
+		annotate("already_active")
 		return tools.ResultSuccess(fmt.Sprintf("Tool '%s' is already active", args.Name)), nil
 	}
 
 	entry, exists := d.deferredTools[args.Name]
 	if !exists {
+		annotate("not_found")
 		return tools.ResultError(fmt.Sprintf("Tool '%s' not found.", args.Name)), nil
 	}
 
 	delete(d.deferredTools, args.Name)
 	d.activatedTools[args.Name] = entry.tool
+	annotate("activated")
 
 	return tools.ResultSuccess(fmt.Sprintf("Tool '%s' has been activated and is now available for use.\n\nDescription: %s", args.Name, entry.tool.Description)), nil
 }

@@ -13,7 +13,9 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -42,6 +44,20 @@ func (configProvider) CreateChatCompletionStream(context.Context, []chat.Message
 
 func newConfigProvider(cfg latest.ModelConfig) *configProvider {
 	return &configProvider{Config: base.Config{ModelConfig: cfg}}
+}
+
+func testProviderRegistry() *provider.Registry {
+	factory := func(_ context.Context, cfg *latest.ModelConfig, _ environment.Provider, _ ...options.Opt) (provider.Provider, error) {
+		return newConfigProvider(*cfg), nil
+	}
+	return provider.NewRegistry(map[string]provider.Factory{
+		"openai":                 factory,
+		"openai_chatcompletions": factory,
+		"openai_responses":       factory,
+		"anthropic":              factory,
+		"google":                 factory,
+		"amazon-bedrock":         factory,
+	})
 }
 
 func TestCurrentThinkingLevel(t *testing.T) {
@@ -177,7 +193,8 @@ func TestCycleAgentThinkingLevel_AdvancesAndOverrides(t *testing.T) {
 	r := &LocalRuntime{
 		team: team.New(team.WithAgents(root)),
 		modelSwitcherCfg: &ModelSwitcherConfig{
-			EnvProvider: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
+			ProviderRegistry: testProviderRegistry(),
+			EnvProvider:      environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "sk-test"}),
 		},
 	}
 
@@ -211,19 +228,49 @@ func TestCycleAgentThinkingLevel_PerModelTopTier(t *testing.T) {
 		wantCycle []effort.Level
 	}{
 		{
-			name:      "sonnet never reaches xhigh or max",
+			name:      "sonnet 4.5 never reaches xhigh or max",
 			modelID:   "claude-sonnet-4-5",
 			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.None},
 		},
 		{
-			name:      "opus 4.6 tops out at max",
+			name:      "opus 4.5 never reaches xhigh or max",
+			modelID:   "claude-opus-4-5",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.None},
+		},
+		{
+			name:      "sonnet 4.6 reaches max but not xhigh",
+			modelID:   "claude-sonnet-4-6",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.Max, effort.None},
+		},
+		{
+			name:      "opus 4.6 reaches max but not xhigh",
 			modelID:   "claude-opus-4-6",
 			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.Max, effort.None},
 		},
 		{
-			name:      "opus 4.7 tops out at xhigh",
+			name:      "opus 4.7 reaches both xhigh and max",
 			modelID:   "claude-opus-4-7",
-			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.None},
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max, effort.None},
+		},
+		{
+			name:      "opus 4.8 reaches both xhigh and max",
+			modelID:   "claude-opus-4-8",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max, effort.None},
+		},
+		{
+			name:      "fable 5 reaches both xhigh and max",
+			modelID:   "claude-fable-5",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max, effort.None},
+		},
+		{
+			name:      "mythos 5 reaches both xhigh and max",
+			modelID:   "claude-mythos-5",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max, effort.None},
+		},
+		{
+			name:      "mythos preview reaches max but not xhigh",
+			modelID:   "claude-mythos-preview",
+			wantCycle: []effort.Level{effort.Low, effort.Medium, effort.High, effort.Max, effort.None},
 		},
 	}
 
@@ -236,7 +283,8 @@ func TestCycleAgentThinkingLevel_PerModelTopTier(t *testing.T) {
 			r := &LocalRuntime{
 				team: team.New(team.WithAgents(root)),
 				modelSwitcherCfg: &ModelSwitcherConfig{
-					EnvProvider: environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "sk-test"}),
+					ProviderRegistry: testProviderRegistry(),
+					EnvProvider:      environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "sk-test"}),
 				},
 			}
 
@@ -453,8 +501,9 @@ func TestGetAvailableProviders(t *testing.T) {
 
 			r := &LocalRuntime{
 				modelSwitcherCfg: &ModelSwitcherConfig{
-					EnvProvider:   environment.NewMapEnvProvider(tt.envVars),
-					ModelsGateway: tt.modelsGateway,
+					ProviderRegistry: testProviderRegistry(),
+					EnvProvider:      environment.NewMapEnvProvider(tt.envVars),
+					ModelsGateway:    tt.modelsGateway,
 				},
 			}
 
@@ -486,7 +535,8 @@ func TestGetAvailableProviders_AnthropicWIF(t *testing.T) {
 		t.Parallel()
 		r := &LocalRuntime{
 			modelSwitcherCfg: &ModelSwitcherConfig{
-				EnvProvider: environment.NewMapEnvProvider(nil),
+				ProviderRegistry: testProviderRegistry(),
+				EnvProvider:      environment.NewMapEnvProvider(nil),
 				Models: map[string]latest.ModelConfig{
 					"claude": {Provider: "anthropic", Model: "claude-x", Auth: wifAuth},
 				},
@@ -500,7 +550,8 @@ func TestGetAvailableProviders_AnthropicWIF(t *testing.T) {
 		t.Parallel()
 		r := &LocalRuntime{
 			modelSwitcherCfg: &ModelSwitcherConfig{
-				EnvProvider: environment.NewMapEnvProvider(nil),
+				ProviderRegistry: testProviderRegistry(),
+				EnvProvider:      environment.NewMapEnvProvider(nil),
 				Providers: map[string]latest.ProviderConfig{
 					"claude": {Provider: "anthropic", Auth: wifAuth},
 				},
@@ -517,7 +568,8 @@ func TestGetAvailableProviders_AnthropicWIF(t *testing.T) {
 		t.Parallel()
 		r := &LocalRuntime{
 			modelSwitcherCfg: &ModelSwitcherConfig{
-				EnvProvider: environment.NewMapEnvProvider(nil),
+				ProviderRegistry: testProviderRegistry(),
+				EnvProvider:      environment.NewMapEnvProvider(nil),
 				Models: map[string]latest.ModelConfig{
 					"claude": {Provider: "anthropic", Model: "claude-x"},
 				},
@@ -583,6 +635,7 @@ func TestBuildCatalogChoices(t *testing.T) {
 	r := &LocalRuntime{
 		modelsStore: &mockCatalogStore{db: db},
 		modelSwitcherCfg: &ModelSwitcherConfig{
+			ProviderRegistry: testProviderRegistry(),
 			EnvProvider: environment.NewMapEnvProvider(map[string]string{
 				"OPENAI_API_KEY":    "sk-test",
 				"ANTHROPIC_API_KEY": "sk-ant-test",
@@ -643,6 +696,7 @@ func TestBuildCatalogChoicesWithDuplicates(t *testing.T) {
 	r := &LocalRuntime{
 		modelsStore: &mockCatalogStore{db: db},
 		modelSwitcherCfg: &ModelSwitcherConfig{
+			ProviderRegistry: testProviderRegistry(),
 			EnvProvider: environment.NewMapEnvProvider(map[string]string{
 				"OPENAI_API_KEY": "sk-test",
 			}),
@@ -666,6 +720,7 @@ func TestResolveModelRef_RejectsAlloyConfig(t *testing.T) {
 
 	r := &LocalRuntime{
 		modelSwitcherCfg: &ModelSwitcherConfig{
+			ProviderRegistry: testProviderRegistry(),
 			Models: map[string]latest.ModelConfig{
 				// Alloy config: no provider, comma-separated models
 				"alloy_model": {Model: "openai/gpt-4o,anthropic/claude-sonnet-4-0"},
@@ -693,7 +748,8 @@ func TestResolveModelRef_InvalidFormat(t *testing.T) {
 
 	r := &LocalRuntime{
 		modelSwitcherCfg: &ModelSwitcherConfig{
-			Models: map[string]latest.ModelConfig{},
+			ProviderRegistry: testProviderRegistry(),
+			Models:           map[string]latest.ModelConfig{},
 		},
 	}
 

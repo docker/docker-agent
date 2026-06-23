@@ -12,7 +12,7 @@ _Persistent key-value storage backed by SQLite for cross-session recall._
 
 The memory tool provides persistent key-value storage backed by SQLite. Data survives across sessions, allowing agents to remember facts, user preferences, project context, and past decisions. Memories can be organized with categories and searched by keyword.
 
-By default, the database is stored at `~/.cagent/memory/<config-name>/memory.db`, where `<config-name>` is derived from the loaded configuration (typically the YAML file name) and falls back to `default` when unavailable. Agents declared in the same configuration share this database by default; set an explicit `path` per toolset to isolate them.
+By default, the database is stored at `~/.cagent/memory/<config-name>/memory.db`, where `<config-name>` is derived from the loaded configuration (typically the YAML file name) and falls back to `default` when unavailable. When the agent is loaded from an OCI reference (e.g. `docker/my-agent:latest`), characters that are reserved in filesystem paths (such as `:`) are sanitised in the `<config-name>` segment — the agent's display name elsewhere is unchanged. Agents declared in the same configuration share this database by default; set an explicit `path` per toolset to isolate them.
 
 ## Available Tools
 

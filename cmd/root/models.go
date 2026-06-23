@@ -95,8 +95,11 @@ func (f *modelsListFlags) runModelsListCommand(cmd *cobra.Command, args []string
 		availableProviders[p] = true
 	}
 
-	// Determine which model auto-selection would pick.
-	autoModel := config.AutoModelConfig(ctx, f.runConfig.ModelsGateway, env, f.runConfig.DefaultModel)
+	// Determine which model auto-selection would pick. DMR discovery is left
+	// out here (nil lister) so listing models stays a pure, side-effect-free
+	// operation; the default marker therefore reflects the static per-provider
+	// default rather than a locally-pulled DMR model.
+	autoModel := config.AutoModelConfig(ctx, f.runConfig.ModelsGateway, env, f.runConfig.DefaultModel, nil)
 
 	rows := f.collectModels(ctx, availableProviders, autoModel)
 

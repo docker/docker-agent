@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // CallbackServer handles OAuth callback requests
@@ -61,8 +63,12 @@ func NewCallbackServerOnPort(port int) (*CallbackServer, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", cs.handleCallback)
 
+	// Wrap with otelhttp so the OAuth callback span chains onto the
+	// caller's trace when the OAuth provider preserves trace context
+	// in the redirect (most don't, but the wrap is harmless when
+	// they don't, and useful when they do).
 	cs.server = &http.Server{
-		Handler:      mux,
+		Handler:      otelhttp.NewHandler(mux, "oauth.callback"),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}

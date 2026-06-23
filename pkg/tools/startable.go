@@ -4,6 +4,11 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Describer can be implemented by a ToolSet to provide a short, user-visible
@@ -103,7 +108,7 @@ func (s *StartableToolSet) IsStarted() bool {
 // Concurrent callers block until the start attempt completes.
 // If start fails, a future call will retry.
 // If the underlying toolset doesn't implement Startable, this is a no-op.
-func (s *StartableToolSet) Start(ctx context.Context) error {
+func (s *StartableToolSet) Start(ctx context.Context) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -116,12 +121,53 @@ func (s *StartableToolSet) Start(ctx context.Context) error {
 		recovering = true
 	}
 
-	if restarter, ok := As[Restartable](s.ToolSet); recovering && ok {
+	// Span the toolset startup — MCP handshake, OAuth probes,
+	// tool discovery, etc. can take seconds to minutes and the
+	// "tools loading…" UI was previously unattributable. Only
+	// fires when the toolset has work to do (Restartable on a
+	// recovering run, or Startable on a cold start); cheap
+	// toolsets without either skip the span entirely.
+	//
+	// Unwrap once so the kind attribute names the underlying toolset
+	// (e.g. *mcp.Toolset, *builtin.ShellTool) instead of the
+	// *tools.namedToolSet wrapper that every toolset gets in the
+	// registry — same pattern DescribeToolSet uses.
+	inner := s.ToolSet
+	if u, ok := inner.(Unwrapper); ok {
+		inner = u.Unwrap()
+	}
+	if restarter, hasRestarter := As[Restartable](s.ToolSet); recovering && hasRestarter {
+		ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/tools").Start(
+			ctx,
+			"toolset.start",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(attribute.String("cagent.toolset.kind", fmt.Sprintf("%T", inner))),
+		)
+		defer func() {
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
+			span.End()
+		}()
 		if err := restarter.Restart(ctx); err != nil {
 			s.startStreak.fail()
 			return err
 		}
 	} else if startable, ok := As[Startable](s.ToolSet); ok {
+		ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/tools").Start(
+			ctx,
+			"toolset.start",
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithAttributes(attribute.String("cagent.toolset.kind", fmt.Sprintf("%T", inner))),
+		)
+		defer func() {
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
+			span.End()
+		}()
 		if err := startable.Start(ctx); err != nil {
 			s.startStreak.fail()
 			return err

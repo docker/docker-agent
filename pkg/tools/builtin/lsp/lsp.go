@@ -19,6 +19,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -493,12 +496,29 @@ type WorkspaceArgs struct{}
 
 // lspTool is a shorthand for constructing a tools.Tool with common LSP defaults.
 func lspTool(name, title, description string, readOnly bool, params any, handler tools.ToolHandler) tools.Tool {
+	// Wrap the handler so every LSP RPC stamps the LSP method name on
+	// the active runtime.tool.handler span. Single tool name = single
+	// LSP operation, so the gen_ai.tool.name attribute on the parent
+	// span is enough for filtering by RPC kind in dashboards. The
+	// `cagent.tool.lsp.tool` is redundant with gen_ai.tool.name but
+	// kept under the cagent.* namespace for symmetry with the other
+	// builtin tool annotations and so dashboards have a uniform
+	// `cagent.tool.{kind}.*` query surface across builtins.
+	wrapped := func(ctx context.Context, tc tools.ToolCall) (*tools.ToolCallResult, error) {
+		if span := trace.SpanFromContext(ctx); span.IsRecording() {
+			span.SetAttributes(
+				attribute.String("cagent.tool.lsp.tool", name),
+				attribute.Bool("cagent.tool.lsp.read_only", readOnly),
+			)
+		}
+		return handler(ctx, tc)
+	}
 	return tools.Tool{
 		Name:        name,
 		Category:    "lsp",
 		Description: description,
 		Parameters:  params,
-		Handler:     handler,
+		Handler:     wrapped,
 		Annotations: tools.ToolAnnotations{
 			Title:        title,
 			ReadOnlyHint: readOnly,

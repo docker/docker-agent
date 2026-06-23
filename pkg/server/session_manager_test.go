@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/api"
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/runtime"
@@ -364,4 +365,171 @@ func TestFollowUpSession_IdempotencyKeyDedupes(t *testing.T) {
 
 	assert.Equal(t, []string{"once", "again"}, fake.followUpContents(),
 		"the deduplicated follow-up must be delivered exactly once")
+}
+
+// TestForkSession_CopiesHistoryBeforeUserMessage exercises the happy path:
+// forking at the second user message keeps the first user/assistant pair
+// and drops everything from the fork point onwards.
+func TestForkSession_CopiesHistoryBeforeUserMessage(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	parent := session.New()
+	parent.Title = "Parent Title"
+	parent.Messages = []session.Item{
+		session.NewMessageItem(session.UserMessage("first user")),
+		session.NewMessageItem(session.NewAgentMessage("root", &chat.Message{
+			Role:    chat.MessageRoleAssistant,
+			Content: "first answer",
+		})),
+		session.NewMessageItem(session.UserMessage("second user")),
+		session.NewMessageItem(session.NewAgentMessage("root", &chat.Message{
+			Role:    chat.MessageRoleAssistant,
+			Content: "second answer",
+		})),
+	}
+	require.NoError(t, store.AddSession(ctx, parent))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	// Fork BEFORE the second user message (flat index 2).
+	forked, err := sm.ForkSession(ctx, parent.ID, 2)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, parent.ID, forked.ID, "fork must have a fresh session ID")
+	assert.Equal(t, "Parent Title (fork 1)", forked.Title)
+
+	msgs := forked.GetAllMessages()
+	require.Len(t, msgs, 2, "fork must contain only the user/assistant pair before the cut point")
+	assert.Equal(t, "first user", msgs[0].Message.Content)
+	assert.Equal(t, "first answer", msgs[1].Message.Content)
+
+	// The forked session must be persisted and retrievable.
+	loaded, err := store.GetSession(ctx, forked.ID)
+	require.NoError(t, err)
+	assert.Equal(t, forked.ID, loaded.ID)
+}
+
+// TestForkSession_RejectsNonUserMessage pins the contract that fork is
+// only valid at a user-role message. Attempting to fork at an assistant
+// turn must fail with ErrForkInvalidMessage, regardless of where the
+// index points in the flat list.
+func TestForkSession_RejectsNonUserMessage(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	parent := session.New()
+	parent.Messages = []session.Item{
+		session.NewMessageItem(session.UserMessage("hello")),
+		session.NewMessageItem(session.NewAgentMessage("root", &chat.Message{
+			Role:    chat.MessageRoleAssistant,
+			Content: "hi",
+		})),
+	}
+	require.NoError(t, store.AddSession(ctx, parent))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	// Index 1 points at the assistant message in the flat list — must be
+	// rejected even though the position is otherwise valid.
+	_, err := sm.ForkSession(ctx, parent.ID, 1)
+	require.ErrorIs(t, err, ErrForkInvalidMessage)
+}
+
+// TestForkSession_OutOfRange covers the validation boundary: a negative
+// index, an index past the end of the visible message list, and the
+// "after the last message" position must all fail with ErrForkOutOfRange
+// without touching the store. The end-of-list case is the regression
+// guard for the dropped full-clone shortcut.
+func TestForkSession_OutOfRange(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	parent := session.New()
+	parent.Messages = []session.Item{session.NewMessageItem(session.UserMessage("hello"))}
+	require.NoError(t, store.AddSession(ctx, parent))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	_, err := sm.ForkSession(ctx, parent.ID, -1)
+	require.ErrorIs(t, err, ErrForkOutOfRange)
+
+	_, err = sm.ForkSession(ctx, parent.ID, 5)
+	require.ErrorIs(t, err, ErrForkOutOfRange)
+
+	// Equal to the visible-message count: previously a silent full clone,
+	// now an explicit ErrForkOutOfRange so the role check can't be bypassed.
+	_, err = sm.ForkSession(ctx, parent.ID, 1)
+	require.ErrorIs(t, err, ErrForkOutOfRange)
+}
+
+// TestForkSession_DeepCopyIsolatesParent verifies that mutating the
+// forked session's messages does not leak back into the parent: this is
+// the property that makes a fork safe to edit independently.
+func TestForkSession_DeepCopyIsolatesParent(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	parent := session.New()
+	parent.Messages = []session.Item{
+		session.NewMessageItem(session.UserMessage("original")),
+		session.NewMessageItem(session.UserMessage("next")),
+	}
+	require.NoError(t, store.AddSession(ctx, parent))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	forked, err := sm.ForkSession(ctx, parent.ID, 1)
+	require.NoError(t, err)
+	require.Len(t, forked.Messages, 1)
+
+	forked.Messages[0].Message.Message.Content = "mutated"
+
+	parentReloaded, err := store.GetSession(ctx, parent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "original", parentReloaded.Messages[0].Message.Message.Content,
+		"mutating the fork must not affect the parent")
+}
+
+// TestFlatMessageIndexToItemIndex covers the index translation helper in
+// isolation, including the system-message skip rule that mirrors
+// Session.GetAllMessages.
+func TestFlatMessageIndexToItemIndex(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	// Items: [user(0), system(skipped), user(1)]. From a client's
+	// perspective the flat indexing is 0 → user "u1", 1 → user "u2".
+	sess.Messages = []session.Item{
+		session.NewMessageItem(session.UserMessage("u1")),
+		session.NewMessageItem(&session.Message{
+			Message: chat.Message{Role: chat.MessageRoleSystem, Content: "sys"},
+		}),
+		session.NewMessageItem(session.UserMessage("u2")),
+	}
+
+	idx, err := flatMessageIndexToItemIndex(sess, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 0, idx)
+
+	idx, err = flatMessageIndexToItemIndex(sess, 1)
+	require.NoError(t, err)
+	assert.Equal(t, 2, idx, "flat index 1 must skip past the system item")
+
+	// Past the end is rejected, including the "after the last message"
+	// position that earlier revisions accepted as a full-clone shortcut.
+	// Forks must anchor on a real user turn so the role validation in
+	// ForkSession is never bypassed.
+	_, err = flatMessageIndexToItemIndex(sess, 2)
+	require.ErrorIs(t, err, ErrForkOutOfRange)
+
+	_, err = flatMessageIndexToItemIndex(sess, -1)
+	require.ErrorIs(t, err, ErrForkOutOfRange)
+
+	_, err = flatMessageIndexToItemIndex(sess, 3)
+	require.ErrorIs(t, err, ErrForkOutOfRange)
 }

@@ -41,7 +41,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, parentDir string
 }
 
 // EventCallback is called to forward RAG manager events during initialization.
-type EventCallback func(event ragtypes.Event)
+type EventCallback = ragtypes.EventCallback
 
 // ToolSet provides document querying capabilities for a single RAG source.
 type ToolSet struct {

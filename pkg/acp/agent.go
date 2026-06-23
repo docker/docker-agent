@@ -13,14 +13,17 @@ import (
 	"time"
 
 	"github.com/coder/acp-go-sdk"
+	"go.opentelemetry.io/otel"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/version"
 )
 
@@ -31,10 +34,11 @@ type Agent struct {
 	sessionStore session.Store
 	sessions     map[string]*Session
 
-	conn     *acp.AgentSideConnection
-	clientFS acp.FileSystemCapabilities
-	team     *team.Team
-	mu       sync.Mutex
+	conn             *acp.AgentSideConnection
+	clientFS         acp.FileSystemCapabilities
+	team             *team.Team
+	providerRegistry *provider.Registry
+	mu               sync.Mutex
 }
 
 var _ acp.Agent = (*Agent)(nil)
@@ -82,11 +86,14 @@ func (a *Agent) Initialize(ctx context.Context, params acp.InitializeRequest) (a
 	a.mu.Lock()
 	a.clientFS = params.ClientCapabilities.Fs
 	defer a.mu.Unlock()
-	t, err := teamloader.Load(ctx, a.agentSource, a.runConfig, teamloader.WithToolsetRegistry(createToolsetRegistry(a)))
+	loadOpts := append(loaderdefaults.Opts(), teamloader.WithToolsetRegistry(createToolsetRegistry(a)))
+	loadResult, err := teamloader.LoadWithConfig(ctx, a.agentSource, a.runConfig, loadOpts...)
 	if err != nil {
 		return acp.InitializeResponse{}, fmt.Errorf("failed to load teams: %w", err)
 	}
+	t := loadResult.Team
 	a.team = t
+	a.providerRegistry = loadResult.ProviderRegistry
 	slog.DebugContext(ctx, "Teams loaded successfully", "source", a.agentSource.Name(), "agent_count", t.Size())
 
 	agentTitle := "docker agent"
@@ -132,6 +139,10 @@ func (a *Agent) newRuntime(workingDir string) (runtime.Runtime, *agent.Agent, er
 	opts := []runtime.Opt{
 		runtime.WithCurrentAgent(defaultAgent.Name()),
 		runtime.WithSessionStore(a.sessionStore),
+		runtime.WithProviderRegistry(a.providerRegistry),
+		// Match the CLI tracer scope; without this the ACP-mode
+		// runtime's `startSpan` is a no-op for every runtime.* span.
+		runtime.WithTracer(otel.Tracer("cagent")),
 	}
 	if workingDir != "" {
 		opts = append(opts, runtime.WithWorkingDir(workingDir))

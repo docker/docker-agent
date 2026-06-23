@@ -36,6 +36,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/openai/openai-go/v3"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/echolog"
@@ -43,6 +44,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
 
 // Options configures the chat completions server. Future improvements
@@ -126,14 +128,23 @@ func Run(ctx context.Context, agentFilename string, opts Options, ln net.Listene
 		return err
 	}
 
-	httpServer := &http.Server{
-		Handler: newRouter(&server{
+	// Wrap with otelhttp so incoming /v1/chat/completions requests
+	// (including SSE streams) extract the caller's trace context.
+	// otelhttp ends the span when the response body is closed, so
+	// SSE streaming responses get a span that covers the full
+	// stream duration.
+	handler := otelhttp.NewHandler(
+		newRouter(&server{
 			team:              t,
 			policy:            policy,
 			conversations:     newConversationStore(opts.ConversationsMaxSessions, conversationTTL(opts)),
 			conversationLocks: newConversationLockSet(),
 			runtimes:          newRuntimePool(t, opts.MaxIdleRuntimes),
 		}, opts),
+		"chatserver",
+	)
+	httpServer := &http.Server{
+		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 	return serve(ctx, httpServer, ln)
@@ -152,7 +163,7 @@ func loadTeam(ctx context.Context, agentFilename string, runConfig *config.Runti
 	if err != nil {
 		return nil, err
 	}
-	t, err := teamloader.Load(ctx, src, runConfig)
+	t, err := teamloader.Load(ctx, src, runConfig, loaderdefaults.Opts()...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load agents: %w", err)
 	}

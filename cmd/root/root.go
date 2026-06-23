@@ -21,6 +21,8 @@ import (
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/selfupdate"
 	"github.com/docker/docker-agent/pkg/telemetry"
+	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	"github.com/docker/docker-agent/pkg/tools/mcp/keyringstore"
 	"github.com/docker/docker-agent/pkg/version"
 )
 
@@ -163,12 +165,17 @@ We collect anonymous usage data to help improve docker agent. To disable:
 		newAliasCmd(),
 		newSandboxCmd(),
 		newServeCmd(),
+		newAskpassCmd(),
 	)
 
 	return cmd
 }
 
 func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
+	// Back MCP OAuth with the OS keyring for the CLI. Embedders that don't
+	// import cmd/root keep the default in-memory store.
+	keyringstore.Register()
+
 	selfupdate.Cleanup(ctx)
 
 	// Opt-in self-update: when enabled, replace this binary with the latest
@@ -194,7 +201,12 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 		}
 	})
 
-	if runningStandalone {
+	// The hidden __askpass helper is always invoked directly (sudo execs the
+	// generated wrapper, which execs this binary), but it inherits the docker
+	// CLI plugin reexec env, which would otherwise route it through the plugin
+	// framework and print docker usage to stdout — corrupting the password
+	// sudo reads. Force the standalone cobra path so the subcommand dispatches.
+	if runningStandalone || isAskpassInvocation(args) {
 		return rootCmd.Execute()
 	}
 
@@ -240,12 +252,19 @@ func visitAll(cmd *cobra.Command, fn func(*cobra.Command)) {
 //
 // Help and version are detected anywhere in args, not just at args[0], so that
 // per-subcommand help (e.g. "run --help") is also skipped.
+// isAskpassInvocation reports whether args invoke the hidden sudo askpass
+// helper. It must dispatch through the standalone cobra path even when the
+// docker CLI plugin reexec env is inherited (see Execute).
+func isAskpassInvocation(args []string) bool {
+	return len(args) > 0 && args[0] == shell.AskpassCommandName
+}
+
 func isManagementInvocation(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
 	switch args[0] {
-	case metadata.MetadataSubcommandName, cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd, "completion", "version", "help", "--version":
+	case metadata.MetadataSubcommandName, cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd, "completion", "version", "help", "--version", shell.AskpassCommandName:
 		return true
 	}
 	// A help request can appear after a subcommand ("run --help"); never update

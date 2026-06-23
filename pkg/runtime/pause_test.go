@@ -30,6 +30,21 @@ func TestTogglePause_StateCycles(t *testing.T) {
 	assertToggle(false, "fourth toggle should resume again")
 }
 
+// TestIsPaused_TracksToggle verifies isPaused mirrors the armed state set by
+// TogglePause.
+func TestIsPaused_TracksToggle(t *testing.T) {
+	t.Parallel()
+
+	r := &LocalRuntime{}
+	assert.False(t, r.isPaused(), "should not be paused initially")
+
+	_, _ = r.TogglePause(t.Context())
+	assert.True(t, r.isPaused(), "should be paused after first toggle")
+
+	_, _ = r.TogglePause(t.Context())
+	assert.False(t, r.isPaused(), "should not be paused after second toggle")
+}
+
 // TestWaitIfPaused_NotPaused returns immediately when the runtime isn't paused.
 func TestWaitIfPaused_NotPaused(t *testing.T) {
 	t.Parallel()

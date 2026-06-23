@@ -1,6 +1,6 @@
 // Package provider builds and dispatches to LLM provider clients.
 //
-// The package is organised across four files:
+// The package is organised across several files:
 //
 //   - provider.go (this file): the public Provider interfaces and the entry
 //     points [New] and [NewWithModels] that callers use to construct a
@@ -11,14 +11,18 @@
 //   - defaults.go: pure config-merging logic that fills in defaults from
 //     custom providers, built-in aliases, and model-specific rules
 //     (thinking budget, interleaved thinking, ...).
-//   - factory.go: dispatch from a resolved provider type to the concrete
-//     client constructor (openai, anthropic, google, dmr, amazon-bedrock,
-//     vertex AI), plus the rule-based router.
+//   - factory.go: shared dispatch from a resolved provider type to the
+//     concrete client constructor, plus the rule-based router.
+//
+// Optional SDK-backed providers live outside this package's default import
+// graph. YAML-loading applications that need Docker Agent's full provider set
+// should import pkg/model/provider/providers and pass its explicit registry;
+// embedders that build agents manually can import only the concrete provider
+// packages they use and pass their factories to [NewRegistry].
 package provider
 
 import (
 	"context"
-	"log/slog"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -76,21 +80,16 @@ type RerankingProvider interface {
 	Rerank(ctx context.Context, query string, documents []types.Document, criteria string) ([]float64, error)
 }
 
-// New creates a new provider from a model config.
-// This is a convenience wrapper for NewWithModels with no models map.
+// New creates a new provider from a model config using the default registry.
+// The default registry only contains providers that the core package can expose
+// without optional SDK dependencies. YAML-loading applications that need all
+// docker-agent providers should use pkg/model/provider/providers.NewDefaultRegistry.
 func New(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
-	return NewWithModels(ctx, cfg, nil, env, opts...)
+	return DefaultRegistry().New(ctx, cfg, env, opts...)
 }
 
 // NewWithModels creates a new provider from a model config with access to the full models map.
 // The models map is used to resolve model references in routing rules.
 func NewWithModels(ctx context.Context, cfg *latest.ModelConfig, models map[string]latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
-	slog.DebugContext(ctx, "Creating model provider", "type", cfg.Provider, "model", cfg.Model)
-
-	// Check if this model has routing rules - if so, create a rule-based router
-	if len(cfg.Routing) > 0 {
-		return createRuleBasedRouter(ctx, cfg, models, env, opts...)
-	}
-
-	return createDirectProvider(ctx, cfg, env, opts...)
+	return DefaultRegistry().NewWithModels(ctx, cfg, models, env, opts...)
 }

@@ -15,6 +15,8 @@ import (
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
 	"github.com/k3a/html2text"
 	"github.com/temoto/robotstxt"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -53,9 +55,49 @@ type ToolArgs struct {
 	Format  string   `json:"format,omitempty"`
 }
 
+// sanitizeFetchURLs strips query strings and userinfo from each URL so
+// the resulting span attribute can ship by default without leaking
+// signed-URL tokens, OAuth codes, or inline credentials. URLs that fail
+// to parse are emitted as a sentinel rather than the raw string, since
+// an unparseable URL could also carry sensitive material.
+func sanitizeFetchURLs(urls []string) []string {
+	out := make([]string, len(urls))
+	for i, raw := range urls {
+		u, err := url.Parse(raw)
+		if err != nil {
+			out[i] = "<unparseable>"
+			continue
+		}
+		u.RawQuery = ""
+		u.Fragment = ""
+		u.User = nil
+		out[i] = u.String()
+	}
+	return out
+}
+
 func (h *fetchHandler) CallTool(ctx context.Context, params ToolArgs) (*tools.ToolCallResult, error) {
 	if len(params.URLs) == 0 {
 		return nil, errors.New("at least one URL is required")
+	}
+
+	// Decorate the active runtime.tool.handler span with the requested
+	// URLs. Strip query params and userinfo first: query strings often
+	// carry signed-URL tokens, OAuth codes, or session IDs, and userinfo
+	// carries credentials inline. The path stays intact so dashboards
+	// can still answer "which sites/endpoints did the agent hit?" — the
+	// HTTP CLIENT child span emitted by `httpclient.WrapWithOTel` below
+	// retains the full URL under `http.url` for callers that opt into
+	// that backend's full-URL capture.
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		attrs := []attribute.KeyValue{
+			attribute.Int("cagent.tool.fetch.url_count", len(params.URLs)),
+			attribute.StringSlice("cagent.tool.fetch.urls", sanitizeFetchURLs(params.URLs)),
+		}
+		if params.Format != "" {
+			attrs = append(attrs, attribute.String("cagent.tool.fetch.format", params.Format))
+		}
+		span.SetAttributes(attrs...)
 	}
 
 	// Transport: by default we install [httpclient.SSRFDialControl] on the
@@ -73,7 +115,7 @@ func (h *fetchHandler) CallTool(ctx context.Context, params ToolArgs) (*tools.To
 
 	client := &http.Client{
 		Timeout:   h.timeout,
-		Transport: transport,
+		Transport: httpclient.WrapWithOTel(transport),
 		// Re-check the domain allow/deny lists on every redirect: without this,
 		// an allowed origin could redirect into a denied one and bypass the
 		// policy. The 10-redirect cap mirrors the net/http default.

@@ -878,6 +878,59 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+// TestOAuthHTTPClientWithHeaders_StripsDefaultPort verifies that an explicit
+// standard port in the configured URL (e.g. https://host:443) is stripped
+// when building the host-scoping transport, so it matches the port-less
+// discovery URLs servers usually advertise instead of silently dropping the
+// headers. Guards the construction call site.
+func TestOAuthHTTPClientWithHeaders_StripsDefaultPort(t *testing.T) {
+	t.Parallel()
+
+	client := oauthHTTPClientWithHeaders("https://mcp.example.com:443/mcp",
+		map[string]string{"X-Grafana-URL": "https://instance.grafana.net/"}, false)
+	hst, ok := client.Transport.(*hostScopedHeaderTransport)
+	require.True(t, ok, "expected a host-scoped transport when headers are configured")
+	assert.Equal(t, "mcp.example.com", hst.host,
+		"a configured standard :443 port must be stripped so it matches port-less discovery URLs")
+}
+
+// TestHostScopedHeaderTransport_NormalizesRequestPort verifies the other side:
+// when the configured host omits the port but a server-advertised discovery
+// URL spells out :443, RoundTrip still routes through the header-bearing
+// transport. Guards the per-request normalisation in RoundTrip.
+func TestHostScopedHeaderTransport_NormalizesRequestPort(t *testing.T) {
+	t.Parallel()
+
+	var withHeadersCalled, baseCalled bool
+	mark := func(flag *bool) roundTripFunc {
+		return func(*http.Request) (*http.Response, error) {
+			*flag = true
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+			}, nil
+		}
+	}
+
+	tr := &hostScopedHeaderTransport{
+		host:        "mcp.example.com", // configured without an explicit port
+		withHeaders: mark(&withHeadersCalled),
+		base:        mark(&baseCalled),
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet,
+		"https://mcp.example.com:443/.well-known/oauth-protected-resource", http.NoBody)
+	require.NoError(t, err)
+	resp, err := tr.RoundTrip(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	assert.True(t, withHeadersCalled,
+		"a request that spells out :443 must route through the header-bearing transport when the configured host omits it")
+	assert.False(t, baseCalled, "must not fall through to the header-less branch")
+}
+
 func TestOAuthTransportCoalescesConcurrentAuthorization(t *testing.T) {
 	authMux := http.NewServeMux()
 	authSrv := httptest.NewServer(authMux)
@@ -1243,6 +1296,7 @@ type unmanagedOAuthTestServer struct {
 
 	tokenCalls atomic.Int32
 	lastForm   url.Values
+	prmHeaders http.Header
 }
 
 func newUnmanagedOAuthTestServer(t *testing.T) *unmanagedOAuthTestServer {
@@ -1251,6 +1305,7 @@ func newUnmanagedOAuthTestServer(t *testing.T) *unmanagedOAuthTestServer {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
+		srv.prmHeaders = r.Header.Clone()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{
 			Resource:             srv.URL,
@@ -1398,6 +1453,37 @@ func TestUnmanagedOAuthFlow_DriveFlow_ExchangesCodeForToken(t *testing.T) {
 	assert.Equal(t, "registered-client-id", tok.ClientID)
 	assert.Equal(t, "registered-secret", tok.ClientSecret)
 	assert.Equal(t, srv.URL, tok.AuthServer)
+}
+
+// TestInitialize_CustomHeadersReachOAuthDiscovery drives the real
+// Initialize -> createHTTPClient path (not a hand-built transport) to prove
+// the production wiring forwards configured custom headers to the OAuth
+// protected-resource-metadata discovery request. Grafana Cloud relies on the
+// X-Grafana-URL header on that request to scope the OAuth flow to the right
+// instance; without it the auth screen prompts for the instance. Regression
+// test for issue #3148.
+func TestInitialize_CustomHeadersReachOAuthDiscovery(t *testing.T) {
+	srv := newUnmanagedOAuthTestServer(t)
+	defer srv.Close()
+
+	headers := map[string]string{"X-Grafana-URL": "https://instance.grafana.net/"}
+	client := newRemoteClient(srv.URL, "streamable", headers, NewInMemoryTokenStore(), nil, true)
+
+	// Decline the OAuth elicitation: the unmanaged flow reaches the
+	// protected-resource-metadata discovery request (which carries the
+	// header) before the elicitation, so declining lets Initialize return
+	// promptly while still exercising the discovery request through the real
+	// createHTTPClient wiring.
+	client.SetElicitationHandler(func(context.Context, *gomcp.ElicitParams) (tools.ElicitationResult, error) {
+		return tools.ElicitationResult{Action: tools.ElicitationActionDecline}, nil
+	})
+
+	_, err := client.Initialize(t.Context(), nil)
+	require.Error(t, err, "Initialize should fail after the OAuth elicitation is declined")
+
+	require.NotNil(t, srv.prmHeaders, "protected-resource-metadata endpoint was never hit during the OAuth flow")
+	assert.Equal(t, "https://instance.grafana.net/", srv.prmHeaders.Get("X-Grafana-URL"),
+		"the configured header must reach the protected-resource-metadata discovery request (issue #3148)")
 }
 
 // TestUnmanagedOAuthFlow_ElicitationDeclineReturnsSentinel verifies that
@@ -1914,6 +2000,40 @@ func TestUnmanagedOAuthFlow_DriveFlow_TimesOutWhenNoReplyArrives(t *testing.T) {
 	)
 	assert.Equal(t, int32(0), srv.tokenCalls.Load(),
 		"token endpoint must NOT be hit on timeout")
+}
+
+// TestRegisterClient_GrantTypesIncludeRefreshToken verifies that dynamic
+// client registration (RFC 7591) advertises both grant types the client
+// uses. Strict authorization servers like Miro reject registrations that
+// omit refresh_token.
+func TestRegisterClient_GrantTypesIncludeRefreshToken(t *testing.T) {
+	var registrationBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&registrationBody); err != nil {
+			t.Fatalf("failed to decode registration request body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"client_id":"test-client","client_secret":"test-secret"}`))
+	}))
+	defer srv.Close()
+
+	meta := &AuthorizationServerMetadata{
+		RegistrationEndpoint: srv.URL,
+	}
+	clientID, clientSecret, err := RegisterClient(t.Context(), meta, "https://example.test/oauth/cb", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "test-client", clientID)
+	assert.Equal(t, "test-secret", clientSecret)
+
+	grantTypes, _ := registrationBody["grant_types"].([]any)
+	require.Len(t, grantTypes, 2, "grant_types must list both grants the client uses")
+	assert.Contains(t, grantTypes, "authorization_code", "grant_types must include authorization_code")
+	assert.Contains(t, grantTypes, "refresh_token", "grant_types must include refresh_token (RFC 7591; required by strict servers such as Miro)")
+
+	responseTypes, _ := registrationBody["response_types"].([]any)
+	assert.Contains(t, responseTypes, "code", "response_types must include code")
 }
 
 // TestUnmanagedRedirectURI_PerToolsetTakesPrecedence verifies the precedence

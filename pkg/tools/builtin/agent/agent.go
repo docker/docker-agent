@@ -12,9 +12,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -300,6 +305,13 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 	// via HandleStop which calls cancel().
 	taskCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
+	// Capture a link to the current trace so the background task's
+	// new root trace can be navigated back to the spawning agent in
+	// observability-svc. The parent span context comes from the
+	// active `runtime.tool.call` span; the link survives even after
+	// that span ends, while a child-span relationship would not.
+	parentSpanContext := trace.SpanContextFromContext(ctx)
+
 	t := &task{
 		id:        taskID,
 		agentName: params.Agent,
@@ -313,9 +325,50 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 	h.wg.Go(func() {
 		defer cancel()
 
-		slog.DebugContext(ctx, "Starting background agent task", "task_id", taskID, "agent", params.Agent)
+		// Each background task starts its own trace (WithNewRoot)
+		// because it outlives the spawning request — making it a
+		// child would leave a span open after the parent ended.
+		// A span link preserves navigability from the spawning
+		// trace to the background task.
+		spanAttrs := []attribute.KeyValue{
+			attribute.String("cagent.background_agent.task_id", taskID),
+			attribute.String("cagent.background_agent.agent", params.Agent),
+		}
+		// Stamp gen_ai.conversation.id directly: WithNewRoot resets the
+		// span context but baggage flows through context.WithoutCancel,
+		// so the id is reachable yet would not appear as a span attr
+		// without an explicit lift.
+		if convID := genai.ConversationIDFromContext(taskCtx); convID != "" {
+			spanAttrs = append(spanAttrs, attribute.String(genai.AttrConversationID, convID))
+		}
+		startOpts := []trace.SpanStartOption{
+			trace.WithSpanKind(trace.SpanKindInternal),
+			trace.WithNewRoot(),
+			trace.WithAttributes(spanAttrs...),
+		}
+		if parentSpanContext.IsValid() {
+			startOpts = append(startOpts, trace.WithLinks(trace.Link{
+				SpanContext: parentSpanContext,
+				Attributes: []attribute.KeyValue{
+					attribute.String("cagent.link.kind", "spawned_from"),
+				},
+			}))
+		}
+		// Static span name; the agent name lives in the
+		// `cagent.background_agent.agent` attribute. Putting the
+		// user-defined agent name into the span name itself would
+		// blow up Tempo's operation-name index when many agents are
+		// configured.
+		tracedCtx, span := otel.Tracer("github.com/docker/docker-agent/pkg/tools/builtin/agent").Start(
+			taskCtx,
+			"background_agent.run",
+			startOpts...,
+		)
+		defer span.End()
 
-		result := h.runner.RunAgent(taskCtx, RunParams{
+		slog.DebugContext(tracedCtx, "Starting background agent task", "task_id", taskID, "agent", params.Agent)
+
+		result := h.runner.RunAgent(tracedCtx, RunParams{
 			AgentName:      params.Agent,
 			Task:           params.Task,
 			ExpectedOutput: params.ExpectedOutput,
@@ -326,13 +379,19 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 		if result.ErrMsg != "" {
 			t.errMsg = result.ErrMsg
 			t.storeStatus(taskFailed)
-			slog.DebugContext(ctx, "Background agent task failed", "task_id", taskID, "agent", params.Agent, "error", result.ErrMsg)
+			span.SetStatus(codes.Error, result.ErrMsg)
+			span.SetAttributes(
+				attribute.String("error.type", "agent_error"),
+				attribute.String("cagent.background_agent.outcome", "failed"),
+			)
+			slog.DebugContext(tracedCtx, "Background agent task failed", "task_id", taskID, "agent", params.Agent, "error", result.ErrMsg)
 			return
 		}
 
-		if taskCtx.Err() != nil && t.loadStatus() == taskRunning {
+		if tracedCtx.Err() != nil && t.loadStatus() == taskRunning {
 			t.storeStatus(taskStopped)
-			slog.DebugContext(ctx, "Background agent task stopped", "task_id", taskID)
+			span.SetAttributes(attribute.String("cagent.background_agent.outcome", "stopped"))
+			slog.DebugContext(tracedCtx, "Background agent task stopped", "task_id", taskID)
 			return
 		}
 
@@ -340,7 +399,8 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 		// always see the populated result field.
 		t.result = result.Result
 		if t.casStatus(taskRunning, taskCompleted) {
-			slog.DebugContext(ctx, "Background agent task completed", "task_id", taskID, "agent", params.Agent)
+			span.SetAttributes(attribute.String("cagent.background_agent.outcome", "completed"))
+			slog.DebugContext(tracedCtx, "Background agent task completed", "task_id", taskID, "agent", params.Agent)
 		}
 	})
 

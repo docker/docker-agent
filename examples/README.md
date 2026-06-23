@@ -140,6 +140,7 @@ remote MCP endpoints.
 | File | What it shows |
 |------|---------------|
 | [`notion-expert.yaml`](notion-expert.yaml) | Remote MCP server with OAuth Dynamic Client Registration. |
+| [`miro-expert.yaml`](miro-expert.yaml) | Miro's hosted MCP server (`mcp.miro.com`) over streamable HTTP with OAuth 2.1 DCR, plus four inline board skills (browse / diagram / doc / table). |
 | [`remote_mcp_oauth.yaml`](remote_mcp_oauth.yaml) | Remote MCP server with explicit OAuth credentials (Slack/GitHub-style). |
 | [`remote_mcp_oauth_callback_redirect.yaml`](remote_mcp_oauth_callback_redirect.yaml) | OAuth flow with a public redirect URL bouncing back to localhost. |
 | [`websocket_transport.yaml`](websocket_transport.yaml) | OpenAI Responses API streaming over WebSocket instead of SSE. |

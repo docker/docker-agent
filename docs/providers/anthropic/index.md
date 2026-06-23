@@ -116,7 +116,7 @@ models:
     thinking_budget: 16384 # must be < max_tokens
 ```
 
-**Adaptive / effort-based** (Claude Opus 4.6+ only — every string value is sent as adaptive thinking via `output_config.effort`):
+**Adaptive / effort-based** (Claude Opus 4.6+, Sonnet 4.6 — every string value is sent as adaptive thinking via `output_config.effort`):
 
 ```yaml
 models:
@@ -131,7 +131,7 @@ models:
     thinking_budget: high # low | medium | high | xhigh | max (same as adaptive/<effort>)
 ```
 
-On models that reject token-based thinking (Opus 4.6, 4.7, 4.8), an integer budget is automatically coerced to `adaptive` with a logged warning. See the [Thinking / Reasoning guide]({{ '/guides/thinking/' | relative_url }}) for the full cross-provider reference.
+On models that reject token-based thinking (Opus 4.6, 4.7, 4.8, Sonnet 4.6), an integer budget is automatically coerced to `adaptive` with a logged warning. See the [Thinking / Reasoning guide]({{ '/guides/thinking/' | relative_url }}) for the full cross-provider reference.
 
 ## Interleaved Thinking
 

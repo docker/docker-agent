@@ -6,8 +6,10 @@ import (
 )
 
 // ParseModelRef parses an inline "provider/model" reference into a
-// ModelConfig. It returns an error when the string does not contain
-// exactly one "/" separator or when either part is empty.
+// ModelConfig. It splits on the first "/", so the model portion may itself
+// contain slashes (e.g. "dmr/ai/qwen3:latest" yields provider "dmr" and model
+// "ai/qwen3:latest"). It returns an error when there is no "/" or when either
+// part is empty.
 //
 //	cfg, err := ParseModelRef("openai/gpt-4o")
 //	// cfg.Provider == "openai", cfg.Model == "gpt-4o"

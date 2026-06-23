@@ -31,6 +31,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tui"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -81,6 +82,7 @@ type runExecFlags struct {
 	// Run only
 	hideToolResults  bool
 	lean             bool
+	leanChanged      bool
 	appName          string
 	sidebar          bool
 	listenAddr       string
@@ -281,6 +283,7 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	if f.worktreeBase != "" && !f.worktree {
 		return errors.New("--worktree-base requires --worktree")
 	}
+	f.leanChanged = cmd.Flags().Changed("lean")
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
 
@@ -309,18 +312,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	// Apply global user settings first (lowest priority)
 	// User settings only apply if the flag wasn't explicitly set by the user
 	userSettings := userconfig.Get()
-	if userSettings.HideToolResults && !f.hideToolResults {
-		f.hideToolResults = true
-		slog.DebugContext(ctx, "Applying user settings", "hide_tool_results", true)
-	}
-	if userSettings.YOLO && !f.autoApprove {
-		f.autoApprove = true
-		slog.DebugContext(ctx, "Applying user settings", "YOLO", true)
-	}
-	if userSettings.SnapshotsEnabled() {
-		f.snapshotsEnabled = true
-		slog.DebugContext(ctx, "Applying user settings", "snapshot", true)
-	}
+	f.applyUserSettings(ctx, userSettings)
 
 	// Apply alias options if this is an alias reference
 	// Alias options only apply if the flag wasn't explicitly set by the user
@@ -506,6 +498,25 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 // It returns the loaded team, the created worktree (nil when neither
 // --worktree nor --worktree-pr was given) and the working directory to run in
 // (the worktree's directory when one was created, otherwise wd unchanged).
+func (f *runExecFlags) applyUserSettings(ctx context.Context, userSettings *userconfig.Settings) {
+	if userSettings.HideToolResults && !f.hideToolResults {
+		f.hideToolResults = true
+		slog.DebugContext(ctx, "Applying user settings", "hide_tool_results", true)
+	}
+	if userSettings.YOLO && !f.autoApprove {
+		f.autoApprove = true
+		slog.DebugContext(ctx, "Applying user settings", "YOLO", true)
+	}
+	if userSettings.Lean && !f.leanChanged && !f.lean {
+		f.lean = true
+		slog.DebugContext(ctx, "Applying user settings", "lean", true)
+	}
+	if userSettings.SnapshotsEnabled() {
+		f.snapshotsEnabled = true
+		slog.DebugContext(ctx, "Applying user settings", "snapshot", true)
+	}
+}
+
 func (f *runExecFlags) loadTeamInWorktree(ctx context.Context, b backend, wd string) (*teamloader.LoadResult, *worktree.Worktree, string, error) {
 	createdWorktree, err := f.setupWorktree(ctx, wd)
 	if err != nil {
@@ -683,9 +694,7 @@ func (f *runExecFlags) dispatchWorktreeCreate(ctx context.Context, out *cli.Prin
 }
 
 func (f *runExecFlags) loadAgentFrom(ctx context.Context, req runtime.LoadTeamRequest) (*teamloader.LoadResult, error) {
-	opts := []teamloader.Opt{
-		teamloader.WithModelOverrides(req.ModelOverrides),
-	}
+	opts := append(loaderdefaults.Opts(), teamloader.WithModelOverrides(req.ModelOverrides))
 	if len(req.PromptFiles) > 0 {
 		opts = append(opts, teamloader.WithPromptFiles(req.PromptFiles))
 	}
@@ -702,6 +711,7 @@ func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig 
 		Providers:          loadResult.Providers,
 		ModelsGateway:      runConfig.ModelsGateway,
 		EnvProvider:        runConfig.EnvProvider(),
+		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
 	}
 	opts := []runtime.Opt{

@@ -12,12 +12,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/rag/database"
 	"github.com/docker/docker-agent/pkg/rag/fusion"
 	"github.com/docker/docker-agent/pkg/rag/rerank"
 	"github.com/docker/docker-agent/pkg/rag/strategy"
 	"github.com/docker/docker-agent/pkg/rag/types"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 )
 
 // ToolConfig represents tool-specific configuration
@@ -146,7 +152,23 @@ func New(_ context.Context, name string, config Config, strategyEvents <-chan ty
 // Initialize indexes all documents using all configured strategies
 // Each strategy indexes its own document set (shared + strategy-specific)
 // Strategies are initialized in parallel for better performance
-func (m *Manager) Initialize(ctx context.Context) error {
+func (m *Manager) Initialize(ctx context.Context) (err error) {
+	tracer := otel.Tracer("github.com/docker/docker-agent/pkg/rag")
+	ctx, span := tracer.Start(ctx, "rag.initialize",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(
+			attribute.String(genai.AttrDataSourceID, m.name),
+			attribute.Int("cagent.rag.num_strategies", len(m.strategies)),
+		),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	slog.DebugContext(ctx, "[RAG Manager] Starting initialization",
 		"rag_name", m.name,
 		"num_strategies", len(m.strategies))
@@ -214,7 +236,20 @@ func (m *Manager) Initialize(ctx context.Context) error {
 
 // Query searches for relevant documents using all configured strategies
 // If multiple strategies are configured, results are combined using the fusion strategy
-func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchResult, error) {
+func (m *Manager) Query(ctx context.Context, query string) (results []database.SearchResult, err error) {
+	// Start a `retrieval {rag_name}` span per the OTel GenAI semconv.
+	// The query text itself is sensitive so we never capture it on the
+	// span here — content capture is gated by a separate environment
+	// variable in a later commit and emitted via a span event then.
+	ctx, retSpan := genai.StartRetrieval(ctx, "rag", m.name, false, "")
+	defer func() {
+		if err != nil {
+			retSpan.RecordError(err, "")
+		}
+		retSpan.SetResultCount(len(results))
+		retSpan.End()
+	}()
+
 	slog.DebugContext(ctx, "[RAG Manager] Starting query",
 		"rag_name", m.name,
 		"num_strategies", len(m.strategies),
@@ -231,7 +266,11 @@ func (m *Manager) Query(ctx context.Context, query string) ([]database.SearchRes
 				"strategy_limit", strategyCfg.Limit,
 				"strategy_threshold", strategyCfg.Threshold)
 
-			results, err := strategyImpl.Query(ctx, query, strategyCfg.Limit, strategyCfg.Threshold)
+			// Assign to the function's named returns (note `=`, not
+			// `:=`) so the deferred span closure sees the live values
+			// even if a future change replaces the explicit
+			// `return X, Y` form below with a bare `return`.
+			results, err = strategyImpl.Query(ctx, query, strategyCfg.Limit, strategyCfg.Threshold)
 			if err != nil {
 				slog.ErrorContext(ctx, "[RAG Manager] Strategy query failed",
 					"rag_name", m.name,
@@ -430,7 +469,20 @@ func (m *Manager) rerank(ctx context.Context, query string, results []database.S
 }
 
 // CheckAndReindexChangedFiles checks for file changes and re-indexes if needed
-func (m *Manager) CheckAndReindexChangedFiles(ctx context.Context) error {
+func (m *Manager) CheckAndReindexChangedFiles(ctx context.Context) (err error) {
+	tracer := otel.Tracer("github.com/docker/docker-agent/pkg/rag")
+	ctx, span := tracer.Start(ctx, "rag.reindex",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(attribute.String(genai.AttrDataSourceID, m.name)),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	for strategyName, strategyImpl := range m.strategies {
 		strategyCfg := m.strategyConfigs[strategyName]
 		if err := strategyImpl.CheckAndReindexChangedFiles(ctx, strategyCfg.Docs, strategyCfg.Chunking); err != nil {
@@ -441,7 +493,20 @@ func (m *Manager) CheckAndReindexChangedFiles(ctx context.Context) error {
 }
 
 // StartFileWatcher starts monitoring files and directories for changes
-func (m *Manager) StartFileWatcher(ctx context.Context) error {
+func (m *Manager) StartFileWatcher(ctx context.Context) (err error) {
+	tracer := otel.Tracer("github.com/docker/docker-agent/pkg/rag")
+	ctx, span := tracer.Start(ctx, "rag.file_watcher.start",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithAttributes(attribute.String(genai.AttrDataSourceID, m.name)),
+	)
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
 	for strategyName, strategyImpl := range m.strategies {
 		strategyCfg := m.strategyConfigs[strategyName]
 		if err := strategyImpl.StartFileWatcher(ctx, strategyCfg.Docs, strategyCfg.Chunking); err != nil {

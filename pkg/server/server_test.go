@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/api"
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/session"
 )
@@ -302,6 +303,107 @@ func TestServer_RejectsInvalidMode(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, status)
 	// Body is a JSON-escaped echo error message; match on the escaped form.
 	assert.Contains(t, string(body), `invalid mode \"yolo\"`)
+}
+
+func TestServer_ForkSession(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+
+	parent := session.New()
+	parent.Title = "Original"
+	parent.Messages = []session.Item{
+		session.NewMessageItem(session.UserMessage("hello")),
+		session.NewMessageItem(session.NewAgentMessage("root", &chat.Message{
+			Role:    chat.MessageRoleAssistant,
+			Content: "hi there",
+		})),
+		session.NewMessageItem(session.UserMessage("ignore me")),
+	}
+	require.NoError(t, store.AddSession(ctx, parent))
+
+	lnPath := startServerWithStore(t, ctx, prepareAgentsDir(t), store)
+
+	// Happy path: fork before the second user message (flat index 2).
+	resp := httpDo(t, ctx, http.MethodPost, lnPath,
+		"/api/sessions/"+parent.ID+"/fork",
+		api.ForkSessionRequest{MessageIndex: 2})
+	var forked api.SessionResponse
+	unmarshal(t, resp, &forked)
+
+	assert.NotEqual(t, parent.ID, forked.ID)
+	assert.Equal(t, "Original (fork 1)", forked.Title)
+	require.Len(t, forked.Messages, 2)
+	assert.Equal(t, "hello", forked.Messages[0].Message.Content)
+	assert.Equal(t, "hi there", forked.Messages[1].Message.Content)
+
+	// Fork must be persisted server-side so a subsequent GET returns it.
+	getResp := httpGET(t, ctx, lnPath, "/api/sessions/"+forked.ID)
+	var fetched api.SessionResponse
+	unmarshal(t, getResp, &fetched)
+	assert.Equal(t, forked.ID, fetched.ID)
+	assert.Equal(t, "Original (fork 1)", fetched.Title)
+
+	// Forking at the assistant message must be rejected with 400.
+	rejected := httpRaw(t, ctx, http.MethodPost, lnPath,
+		"/api/sessions/"+parent.ID+"/fork",
+		api.ForkSessionRequest{MessageIndex: 1})
+	assert.Equal(t, http.StatusBadRequest, rejected.StatusCode, rejected.body)
+
+	// Forking past the end of the visible list (no real "after the last
+	// message" full-clone shortcut) must also return 400, not 500. This
+	// pins the sentinel-driven classification so future error-message
+	// reshuffles can't silently flip the status code.
+	outOfRange := httpRaw(t, ctx, http.MethodPost, lnPath,
+		"/api/sessions/"+parent.ID+"/fork",
+		api.ForkSessionRequest{MessageIndex: 99})
+	assert.Equal(t, http.StatusBadRequest, outOfRange.StatusCode, outOfRange.body)
+}
+
+// httpRaw issues an HTTP request and returns the raw response without
+// asserting on the status code, so tests can verify 4xx/5xx paths.
+func httpRaw(t *testing.T, ctx context.Context, method, socketPath, path string, payload any) struct {
+	StatusCode int
+	body       string
+} {
+	t.Helper()
+
+	var (
+		body        io.Reader
+		contentType string
+	)
+	if payload != nil {
+		buf, err := json.Marshal(payload)
+		require.NoError(t, err)
+		body = bytes.NewReader(buf)
+		contentType = "application/json"
+	} else {
+		body = http.NoBody
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, "http://_"+path, body)
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", contentType)
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", strings.TrimPrefix(socketPath, "unix://"))
+			},
+		},
+	}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	buf, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return struct {
+		StatusCode int
+		body       string
+	}{StatusCode: resp.StatusCode, body: string(buf)}
 }
 
 func startServerWithStore(t *testing.T, ctx context.Context, agentsDir string, store session.Store) string {

@@ -1110,6 +1110,13 @@ type Toolset struct {
 	// nil means the field was omitted and may inherit from a referenced definition.
 	AllowPrivateIPs *bool `json:"allow_private_ips,omitempty" yaml:"allow_private_ips,omitempty"`
 
+	// For the `shell` toolset — opt in to a sudo privilege escalation flow.
+	// When enabled, sudo commands prompt the user for their password (masked)
+	// through the host UI via SUDO_ASKPASS; in non-interactive runs the prompt
+	// is declined automatically and sudo fails as before. No effect on Windows.
+	// nil/false keeps the default behaviour (sudo has no TTY and fails fast).
+	SudoAskpass *bool `json:"sudo_askpass,omitempty" yaml:"sudo_askpass,omitempty"`
+
 	// For the `rag` tool
 	RAGConfig *RAGConfig `json:"rag_config,omitempty" yaml:"rag_config,omitempty"`
 

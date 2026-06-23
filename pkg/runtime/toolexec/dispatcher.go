@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -30,19 +31,21 @@ const (
 	ApprovalDecisionDeny     = "deny"
 	ApprovalDecisionCanceled = "canceled"
 
-	ApprovalSourceYolo                    = "yolo"
-	ApprovalSourceSessionPermissionsAllow = "session_permissions_allow"
-	ApprovalSourceSessionPermissionsDeny  = "session_permissions_deny"
-	ApprovalSourceTeamPermissionsAllow    = "team_permissions_allow"
-	ApprovalSourceTeamPermissionsDeny     = "team_permissions_deny"
-	ApprovalSourcePreToolUseHookAllow     = "pre_tool_use_hook_allow"
-	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
-	ApprovalSourceReadOnlyHint            = "readonly_hint"
-	ApprovalSourceUserApproved            = "user_approved"
-	ApprovalSourceUserApprovedSession     = "user_approved_session"
-	ApprovalSourceUserApprovedTool        = "user_approved_tool"
-	ApprovalSourceUserRejected            = "user_rejected"
-	ApprovalSourceContextCanceled         = "context_canceled"
+	ApprovalSourceYolo                       = "yolo"
+	ApprovalSourceSessionPermissionsAllow    = "session_permissions_allow"
+	ApprovalSourceSessionPermissionsDeny     = "session_permissions_deny"
+	ApprovalSourceTeamPermissionsAllow       = "team_permissions_allow"
+	ApprovalSourceTeamPermissionsDeny        = "team_permissions_deny"
+	ApprovalSourcePreToolUseHookAllow        = "pre_tool_use_hook_allow"
+	ApprovalSourcePreToolUseHookDeny         = "pre_tool_use_hook_deny"
+	ApprovalSourcePermissionRequestHookDeny  = "permission_request_hook_deny"
+	ApprovalSourcePermissionRequestHookAllow = "permission_request_hook_allow"
+	ApprovalSourceReadOnlyHint               = "readonly_hint"
+	ApprovalSourceUserApproved               = "user_approved"
+	ApprovalSourceUserApprovedSession        = "user_approved_session"
+	ApprovalSourceUserApprovedTool           = "user_approved_tool"
+	ApprovalSourceUserRejected               = "user_rejected"
+	ApprovalSourceContextCanceled            = "context_canceled"
 )
 
 // CallOutcome captures the verdicts of a single tool invocation as
@@ -245,13 +248,25 @@ type call struct {
 // and approval bookkeeping lives here so the call lifecycle is visible
 // at a glance.
 func (c *call) run(ctx context.Context) CallOutcome {
-	ctx, span := c.d.startSpan(ctx, "runtime.tool.call", trace.WithAttributes(
-		attribute.String("tool.name", c.tc.Function.Name),
-		attribute.String("tool.type", string(c.tc.Type)),
-		attribute.String("agent", c.a.Name()),
-		attribute.String("session.id", c.sess.ID),
-		attribute.String("tool.call_id", c.tc.ID),
-	))
+	// gen_ai.* attributes are always emitted (spec-compliant). Legacy
+	// attribute names are added only when the OTel stability flag is
+	// at its default — `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`
+	// drops the legacy keys. Tool type is "function" because every tool
+	// presented here is an LLM-callable function (transfer_task /
+	// handoff are runtime-managed but still appear as functions to the
+	// model).
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, c.tc.Function.Name),
+		attribute.String(genai.AttrToolType, "function"),
+		attribute.String(genai.AttrToolCallID, c.tc.ID),
+		attribute.String(genai.AttrAgentNameRuntime, c.a.Name()),
+		attribute.String(genai.AttrConversationID, c.sess.ID),
+	}
+	attrs = append(attrs, genai.LegacyToolAttributes(
+		c.tc.Function.Name, string(c.tc.Type), c.a.Name(), c.sess.ID, c.tc.ID,
+	)...)
+	ctx, span := c.d.startSpan(ctx, "runtime.tool.call", trace.WithAttributes(attrs...))
 	defer span.End()
 
 	slog.DebugContext(ctx, "Processing tool call", "agent", c.a.Name(), "tool", c.tc.Function.Name, "session_id", c.sess.ID)
@@ -422,9 +437,17 @@ func (c *call) applyHookModifiedInput(result *hooks.Result) {
 }
 
 // notifyApproval forwards the resolved approval decision to the
-// HookDispatcher, when one is configured. Centralised so the nil-guard
-// stays in one place.
+// HookDispatcher, when one is configured. Also stamps the decision +
+// source on the active runtime.tool.call span so denied / canceled
+// calls are visible in trace dashboards (without it, denied tool calls
+// are indistinguishable from user-canceled ones at the span level).
 func (c *call) notifyApproval(ctx context.Context, decision, source string) {
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
+		span.SetAttributes(
+			attribute.String("cagent.approval.decision", decision),
+			attribute.String("cagent.approval.source", source),
+		)
+	}
 	if c.d.Hooks == nil {
 		return
 	}
@@ -529,6 +552,12 @@ func (c *call) runPermissionRequestHook(ctx context.Context, runTool func() Call
 
 	if !result.Allowed {
 		slog.DebugContext(ctx, "Tool denied by permission_request hook", "tool", toolName, "session_id", c.sess.ID, "reason", result.Message)
+		// Stamp the deny on the runtime.tool.call span via notifyApproval
+		// before returning. Without this the span would end with status
+		// Ok and no cagent.approval.* attrs — denied-by-hook calls would
+		// look identical to successful ones in trace dashboards, while
+		// pre_tool_use deny does emit the attrs. Symmetry matters.
+		c.notifyApproval(ctx, ApprovalDecisionDeny, ApprovalSourcePermissionRequestHookDeny)
 		rejectMsg := "The tool call was rejected by a permission_request hook."
 		if reason := strings.TrimSpace(result.Message); reason != "" {
 			rejectMsg += " Reason: " + reason
@@ -539,6 +568,7 @@ func (c *call) runPermissionRequestHook(ctx context.Context, runTool func() Call
 
 	if result.PermissionAllowed {
 		slog.DebugContext(ctx, "Tool auto-approved by permission_request hook", "tool", toolName, "session_id", c.sess.ID, "reason", result.AdditionalContext)
+		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourcePermissionRequestHookAllow)
 		return runTool(), true
 	}
 
@@ -618,13 +648,27 @@ func (c *call) runHandler(ctx context.Context, handler ToolHandler) {
 // translation, and session message persistence. It is the only place
 // where a tool actually runs.
 func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error)) *tools.ToolCallResult {
-	ctx, span := c.d.startSpan(ctx, spanName, trace.WithAttributes(
-		attribute.String("tool.name", c.tc.Function.Name),
-		attribute.String("agent", c.a.Name()),
-		attribute.String("session.id", c.sess.ID),
-		attribute.String("tool.call_id", c.tc.ID),
-	))
+	attrs := []attribute.KeyValue{
+		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),
+		attribute.String(genai.AttrToolName, c.tc.Function.Name),
+		attribute.String(genai.AttrToolType, "function"),
+		attribute.String(genai.AttrToolCallID, c.tc.ID),
+		attribute.String(genai.AttrAgentNameRuntime, c.a.Name()),
+		attribute.String(genai.AttrConversationID, c.sess.ID),
+	}
+	attrs = append(attrs, genai.LegacyToolAttributes(
+		c.tc.Function.Name, string(c.tc.Type), c.a.Name(), c.sess.ID, c.tc.ID,
+	)...)
+	ctx, span := c.d.startSpan(ctx, spanName, trace.WithAttributes(attrs...))
 	defer span.End()
+
+	// gen_ai.tool.call.arguments capture is gated on the same opt-in as
+	// chat content (`OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT`)
+	// because tool arguments commonly carry the same PII / secrets as the
+	// chat history that produced them (file paths, API tokens, prompts).
+	if genai.IsContentCaptureEnabled() && c.tc.Function.Arguments != "" {
+		span.SetAttributes(attribute.String(genai.AttrToolCallArguments, c.tc.Function.Arguments))
+	}
 
 	c.em.EmitToolCall(c.tc, c.tool, c.a.Name())
 
@@ -650,6 +694,14 @@ func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx contex
 	// agents that haven't opted into output rewriting take the cheap
 	// path through Dispatch's `exec.Has(event)` short-circuit.
 	res.Output = c.applyToolResponseTransform(ctx, res.Output, false)
+
+	// gen_ai.tool.call.result captures the post-transform output so the
+	// span matches what the LLM actually saw on the next turn (any
+	// redact_secrets / scrubber rewrite is reflected). Same content-capture
+	// gating as arguments above.
+	if genai.IsContentCaptureEnabled() && res != nil && res.Output != "" {
+		span.SetAttributes(attribute.String(genai.AttrToolCallResult, res.Output))
+	}
 
 	c.em.EmitToolCallResponse(c.tc.ID, c.tool, res, res.Output, c.a.Name())
 	c.recordToolResponse(res)

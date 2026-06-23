@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
 
 func TestRuntime_OpenAI_Basic(t *testing.T) {
@@ -21,7 +22,7 @@ func TestRuntime_OpenAI_Basic(t *testing.T) {
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)
-	team, err := teamloader.Load(ctx, agentSource, runConfig)
+	team, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
 	require.NoError(t, err)
 
 	rt, err := runtime.New(team)
@@ -58,7 +59,7 @@ func TestRuntime_MultiAgent_SessionReload(t *testing.T) {
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)
-	team, err := teamloader.Load(ctx, agentSource, runConfig)
+	team, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
 	require.NoError(t, err)
 
 	// Use a SQLite store so we test real persistence and reload.
@@ -107,7 +108,7 @@ func TestRuntime_Mistral_Basic(t *testing.T) {
 	require.NoError(t, err)
 
 	_, runConfig := startRecordingAIProxy(t)
-	team, err := teamloader.Load(ctx, agentSource, runConfig, teamloader.WithModelOverrides([]string{"mistral/mistral-small"}))
+	team, err := teamloader.Load(ctx, agentSource, runConfig, append(loaderdefaults.Opts(), teamloader.WithModelOverrides([]string{"mistral/mistral-small"}))...)
 	require.NoError(t, err)
 
 	rt, err := runtime.New(team)

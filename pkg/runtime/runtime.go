@@ -22,6 +22,8 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
@@ -209,7 +211,9 @@ type LocalRuntime struct {
 	workingDir                string   // Working directory for hooks execution
 	env                       []string // Environment variables for hooks execution
 	modelSwitcherCfg          *ModelSwitcherConfig
+	providerRegistry          *provider.Registry
 	gatewayModels             gatewayModelsCache
+	dmrModels                 dmrModelsCache
 
 	// hooksRegistry is the runtime-private hooks.Registry used to build
 	// every Executor. It carries the runtime-owned builtin hooks
@@ -266,6 +270,12 @@ type LocalRuntime struct {
 
 	bgAgents *agenttool.Handler
 
+	// dmrModelLister lists the models pulled locally in Docker Model Runner,
+	// used to populate DMR entries in the model picker. Defaults to
+	// dmr.ListModels in NewLocalRuntime; left nil by runtimes built directly
+	// (e.g. tests) so DMR discovery stays opt-in. Tests inject a stub here.
+	dmrModelLister func(ctx context.Context) ([]string, error)
+
 	// now is the runtime's clock. Defaults to time.Now and can be replaced
 	// in tests via WithClock to make timestamps and cooldown windows
 	// deterministic. Every time-dependent call inside the runtime (message
@@ -286,6 +296,12 @@ type LocalRuntime struct {
 	// WithMaxOverflowCompactions to exercise both the "compaction
 	// succeeded" and "compaction exhausted" branches.
 	maxOverflowCompactions int
+
+	// toolListTimeout bounds how long EmitStartupInfo waits for a single
+	// toolset to enumerate its tools before skipping it, so one hung toolset
+	// cannot stall the sidebar's "Loading tools…" state forever. Defaults to
+	// defaultToolListTimeout; overridden via WithToolListTimeout.
+	toolListTimeout time.Duration
 
 	// pauseMu guards pauseCh.
 	pauseMu sync.Mutex
@@ -366,6 +382,14 @@ func WithSessionCompaction(sessionCompaction bool) Opt {
 	}
 }
 
+func WithProviderRegistry(registry *provider.Registry) Opt {
+	return func(r *LocalRuntime) {
+		if registry != nil {
+			r.providerRegistry = registry
+		}
+	}
+}
+
 func WithModelStore(store ModelStore) Opt {
 	return func(r *LocalRuntime) {
 		r.modelsStore = store
@@ -430,6 +454,19 @@ func WithMaxOverflowCompactions(n int) Opt {
 			n = 0
 		}
 		r.maxOverflowCompactions = n
+	}
+}
+
+// WithToolListTimeout overrides how long EmitStartupInfo waits for a single
+// toolset to enumerate its tools before skipping it. Defaults to
+// defaultToolListTimeout. A non-positive value is ignored so the default
+// stands. Tests pass a short timeout to exercise the skip path (a toolset
+// whose Tools() blocks) without a real-time wait.
+func WithToolListTimeout(d time.Duration) Opt {
+	return func(r *LocalRuntime) {
+		if d > 0 {
+			r.toolListTimeout = d
+		}
 	}
 }
 
@@ -517,7 +554,10 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 		fallback:               newFallbackExecutor(),
 		now:                    time.Now,
 		telemetry:              defaultTelemetry{},
+		providerRegistry:       provider.DefaultRegistry(),
 		maxOverflowCompactions: defaultMaxOverflowCompactions,
+		toolListTimeout:        defaultToolListTimeout,
+		dmrModelLister:         dmr.ListModels,
 	}
 	r.bgAgents = agenttool.NewHandler(r)
 
@@ -555,7 +595,7 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	if err := builtins.Register(r.hooksRegistry); err != nil {
 		return nil, fmt.Errorf("register builtin hooks: %w", err)
 	}
-	registerModelHook(r.hooksRegistry)
+	registerModelHook(r.hooksRegistry, r.providerRegistry)
 
 	// cache_response is registered here (not in pkg/hooks/builtins)
 	// because it needs to capture the runtime to resolve the agent
@@ -1250,10 +1290,18 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 			}
 		}
 
-		// Get tools from this toolset
-		ts, err := toolset.Tools(ctx)
+		// Get tools from this toolset under a bounded deadline. A toolset
+		// whose Tools() blocks indefinitely would otherwise stall the whole
+		// loop: the terminal ToolsetInfo{Loading:false} below is never sent,
+		// so the sidebar stays on "Loading tools…" forever and /quit appears
+		// to hang. Time it out, skip it, and move on. The skip is only for
+		// this startup sidebar pass — the toolset is not torn down, so a
+		// slow-but-responsive one is listed (and counted) again on the next
+		// turn or tool-change refresh.
+		ts, err := listToolsWithTimeout(ctx, toolset, r.toolListTimeout)
 		if err != nil {
-			slog.WarnContext(ctx, "Failed to get tools from toolset", "agent", a.Name(), "error", err)
+			slog.WarnContext(ctx, "Failed to list tools from toolset; skipping",
+				"agent", a.Name(), "toolset", tools.DescribeToolSet(toolset), "error", err)
 			continue
 		}
 
@@ -1267,6 +1315,41 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 
 	// Emit final state (not loading)
 	send(ToolsetInfo(totalTools, false, r.CurrentAgentName()))
+}
+
+// listToolsWithTimeout enumerates a toolset's tools under a bounded deadline.
+// The (potentially blocking) Tools call runs in a goroutine and we select on
+// either its completion or the timeout, so a toolset whose Tools() ignores
+// context cancellation — e.g. a wedged MCP stdio subprocess — cannot block
+// startup. On timeout it returns the context error; the orphaned goroutine
+// sends into a buffered channel and exits if the call ever returns, so it does
+// not leak past the eventual (or never) return of Tools().
+func listToolsWithTimeout(ctx context.Context, toolset tools.ToolSet, timeout time.Duration) ([]tools.Tool, error) {
+	// Defend against a zero/negative timeout (e.g. a directly-constructed
+	// LocalRuntime that bypassed NewLocalRuntime) so we never collapse to an
+	// already-expired context that skips every toolset.
+	if timeout <= 0 {
+		timeout = defaultToolListTimeout
+	}
+	toolCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	type listResult struct {
+		tools []tools.Tool
+		err   error
+	}
+	done := make(chan listResult, 1) // buffered so a late send never blocks
+	go func() {
+		ts, err := toolset.Tools(toolCtx)
+		done <- listResult{tools: ts, err: err}
+	}()
+
+	select {
+	case <-toolCtx.Done():
+		return nil, toolCtx.Err()
+	case res := <-done:
+		return res.tools, res.err
+	}
 }
 
 func (r *LocalRuntime) Resume(_ context.Context, req ResumeRequest) {

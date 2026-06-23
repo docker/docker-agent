@@ -24,7 +24,9 @@ import (
 // times per turn and the marginal cost of construction is negligible
 // compared to the LLM round-trip itself. If profiling later shows
 // otherwise, a sync.Map keyed on modelSpec would be a drop-in.
-type providerModelClient struct{}
+type providerModelClient struct {
+	registry *provider.Registry
+}
 
 // Ask implements [hooks.ModelClient].
 //
@@ -33,7 +35,7 @@ type providerModelClient struct{}
 // fail-closed semantics deny PreToolUse calls cleanly. The caller
 // (the model handler) is responsible for surfacing the error to the
 // hook's [HandlerResult].
-func (providerModelClient) Ask(
+func (c providerModelClient) Ask(
 	ctx context.Context,
 	modelSpec, system, user string,
 	schema *latest.StructuredOutput,
@@ -47,7 +49,11 @@ func (providerModelClient) Ask(
 	if schema != nil {
 		opts = append(opts, options.WithStructuredOutput(schema))
 	}
-	p, err := provider.New(ctx, &cfg, environment.NewDefaultProvider(), opts...)
+	registry := c.registry
+	if registry == nil {
+		registry = provider.DefaultRegistry()
+	}
+	p, err := registry.New(ctx, &cfg, environment.NewDefaultProvider(), opts...)
 	if err != nil {
 		return "", fmt.Errorf("create provider: %w", err)
 	}
@@ -80,6 +86,6 @@ func (providerModelClient) Ask(
 // registerModelHook installs the [hooks.HookTypeModel] factory on r
 // using the runtime's default [hooks.ModelClient]. It is called once
 // from [NewLocalRuntime] alongside the builtins.
-func registerModelHook(r *hooks.Registry) {
-	r.Register(hooks.HookTypeModel, hooks.NewModelFactory(providerModelClient{}))
+func registerModelHook(r *hooks.Registry, registry *provider.Registry) {
+	r.Register(hooks.HookTypeModel, hooks.NewModelFactory(providerModelClient{registry: registry}))
 }

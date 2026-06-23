@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
 
@@ -28,7 +29,7 @@ func (c *lspConnector) Connect(ctx context.Context) (lifecycle.Session, error) {
 	h := c.h
 	slog.DebugContext(ctx, "Starting LSP server", "command", h.command, "args", h.args)
 
-	p, err := spawnLSPProcess(h)
+	p, err := spawnLSPProcess(ctx, h)
 	if err != nil {
 		return nil, err
 	}
@@ -73,14 +74,19 @@ type lspProcess struct {
 // kicks off a stderr-drain goroutine bound to the process lifetime.
 // Errors are mapped to typed lifecycle errors so the supervisor can
 // apply the right policy.
-func spawnLSPProcess(h *lspHandler) (*lspProcess, error) {
+func spawnLSPProcess(callerCtx context.Context, h *lspHandler) (*lspProcess, error) {
 	// The process must outlive the caller's request context (which is
 	// often cancelled when an HTTP/agent turn ends). The supervisor
 	// calls Close to shut it down on Stop or restart.
 	processCtx, processCancel := context.WithCancel(context.Background())
 
 	cmd := exec.CommandContext(processCtx, h.command, h.args...)
+	// Inherit the caller's W3C trace context (the Connect call's
+	// `toolset.start` or per-request span) so an OTel-aware LSP server
+	// can chain its spans onto the agent trace. Most LSPs do not emit
+	// OTel today, so this is defensive parity with sandbox.exec.
 	cmd.Env = append(os.Environ(), h.env...)
+	cmd.Env = append(cmd.Env, genai.InjectTraceContextEnv(callerCtx)...)
 	cmd.Dir = h.workingDir
 
 	stdin, err := cmd.StdinPipe()

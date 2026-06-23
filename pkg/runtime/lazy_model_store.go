@@ -4,20 +4,25 @@ import (
 	"context"
 	"sync"
 
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 // lazyModelStore is the default ModelStore wired in when the caller did not
-// pass WithModelStore. It defers modelsdev.NewStore() (which calls
+// pass WithModelStore. It defers constructing the modelsdev store (which calls
 // os.UserHomeDir and creates the ~/.cagent cache directory) until the first
 // method invocation. This keeps NewLocalRuntime free of disk I/O — tests
 // that never touch the catalog can build a runtime without paying the cost
 // or hitting failure modes that depend on the host filesystem.
 //
-// The underlying modelsdev.NewStore is itself memoized via sync.OnceValues,
-// so wrapping it in a per-runtime sync.Once does not change cross-runtime
-// caching semantics; it simply isolates the failure of the home-dir lookup
-// to the first caller that actually needs catalog data.
+// The store is created with WithKnownProvider so that resolving a model for a
+// user-defined custom provider never triggers an outbound models.dev fetch.
+// Without it the request loop (loop.go) and session compaction would block on
+// a doomed GET to models.dev for every custom-provider model in an
+// internet-restricted environment (issue #3165).
+//
+// Each runtime gets its own *Store; the per-runtime sync.Once only defers
+// construction, it does not share catalog state across runtimes.
 type lazyModelStore struct {
 	once sync.Once
 	st   *modelsdev.Store
@@ -26,7 +31,7 @@ type lazyModelStore struct {
 
 func (l *lazyModelStore) load() (*modelsdev.Store, error) {
 	l.once.Do(func() {
-		l.st, l.err = modelsdev.NewStore()
+		l.st, l.err = modelsdev.NewStore(modelsdev.WithKnownProvider(provider.IsKnownProvider))
 	})
 	return l.st, l.err
 }

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -219,7 +221,7 @@ func TestAutoModelConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			modelConfig := AutoModelConfig(t.Context(), tt.gateway, environment.NewMapEnvProvider(tt.envVars), nil)
+			modelConfig := AutoModelConfig(t.Context(), tt.gateway, environment.NewMapEnvProvider(tt.envVars), nil, nil)
 
 			assert.Equal(t, tt.expectedProvider, modelConfig.Provider)
 			assert.Equal(t, tt.expectedModel, modelConfig.Model)
@@ -319,7 +321,7 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 				envVars["MISTRAL_API_KEY"] = "test-key"
 			}
 
-			modelConfig := AutoModelConfig(t.Context(), "", environment.NewMapEnvProvider(envVars), nil)
+			modelConfig := AutoModelConfig(t.Context(), "", environment.NewMapEnvProvider(envVars), nil, nil)
 
 			// Verify the returned model matches the DefaultModels entry
 			expectedModel := DefaultModels[provider]
@@ -332,7 +334,7 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 	t.Run("dmr", func(t *testing.T) {
 		t.Parallel()
 
-		modelConfig := AutoModelConfig(t.Context(), "", environment.NewNoEnvProvider(), nil)
+		modelConfig := AutoModelConfig(t.Context(), "", environment.NewNoEnvProvider(), nil, nil)
 
 		assert.Equal(t, "dmr", modelConfig.Provider)
 		assert.Equal(t, DefaultModels["dmr"], modelConfig.Model)
@@ -448,7 +450,7 @@ func TestAutoModelConfig_UserDefaultModel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			modelConfig := AutoModelConfig(t.Context(), "", environment.NewMapEnvProvider(tt.envVars), tt.defaultModel)
+			modelConfig := AutoModelConfig(t.Context(), "", environment.NewMapEnvProvider(tt.envVars), tt.defaultModel, nil)
 
 			assert.Equal(t, tt.expectedProvider, modelConfig.Provider)
 			assert.Equal(t, tt.expectedModel, modelConfig.Model)
@@ -471,11 +473,124 @@ func TestAutoModelConfig_UserDefaultModelWithOptions(t *testing.T) {
 		ThinkingBudget: thinkingBudget,
 	}
 
-	modelConfig := AutoModelConfig(t.Context(), "", environment.NewNoEnvProvider(), defaultModel)
+	modelConfig := AutoModelConfig(t.Context(), "", environment.NewNoEnvProvider(), defaultModel, nil)
 
 	assert.Equal(t, "anthropic", modelConfig.Provider)
 	assert.Equal(t, "claude-sonnet-4-5", modelConfig.Model)
 	assert.Equal(t, int64(64000), *modelConfig.MaxTokens)
 	assert.NotNil(t, modelConfig.ThinkingBudget)
 	assert.Equal(t, 10000, modelConfig.ThinkingBudget.Tokens)
+}
+
+func TestAutoModelConfig_DMRLocalModels(t *testing.T) {
+	t.Parallel()
+
+	lister := func(models []string, err error) DMRModelLister {
+		return func(context.Context) ([]string, error) { return models, err }
+	}
+
+	tests := []struct {
+		name          string
+		lister        DMRModelLister
+		expectedModel string
+	}{
+		{
+			name:          "nil lister keeps the static default",
+			lister:        nil,
+			expectedModel: DefaultModels["dmr"],
+		},
+		{
+			name:          "default model already pulled is used",
+			lister:        lister([]string{"ai/gemma3:latest", "ai/qwen3:latest"}, nil),
+			expectedModel: "ai/qwen3:latest",
+		},
+		{
+			name:          "default not pulled falls back to first installed model",
+			lister:        lister([]string{"ai/llama3.2:latest", "ai/smollm2:latest"}, nil),
+			expectedModel: "ai/llama3.2:latest",
+		},
+		{
+			name:          "default model under a different tag is preferred over other models",
+			lister:        lister([]string{"ai/gemma3:latest", "ai/qwen3:Q4_K_M"}, nil),
+			expectedModel: "ai/qwen3:Q4_K_M",
+		},
+		{
+			name:          "embedding-only models are skipped, default retained",
+			lister:        lister([]string{"ai/embeddinggemma", "ai/nomic-embed-text"}, nil),
+			expectedModel: DefaultModels["dmr"],
+		},
+		{
+			name:          "embedding models are skipped when a chat model exists",
+			lister:        lister([]string{"ai/embeddinggemma", "ai/mistral:latest"}, nil),
+			expectedModel: "ai/mistral:latest",
+		},
+		{
+			name:          "discovery error keeps the static default",
+			lister:        lister(nil, errors.New("dmr unreachable")),
+			expectedModel: DefaultModels["dmr"],
+		},
+		{
+			name:          "empty list keeps the static default",
+			lister:        lister([]string{}, nil),
+			expectedModel: DefaultModels["dmr"],
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			modelConfig := AutoModelConfig(t.Context(), "", environment.NewNoEnvProvider(), nil, tt.lister)
+
+			assert.Equal(t, "dmr", modelConfig.Provider)
+			assert.Equal(t, tt.expectedModel, modelConfig.Model)
+			assert.Equal(t, int64(16000), *modelConfig.MaxTokens)
+		})
+	}
+}
+
+func TestAutoModelConfig_DMRListerNotConsultedForCloudProvider(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	lister := func(context.Context) ([]string, error) {
+		called = true
+		return []string{"ai/qwen3:latest"}, nil
+	}
+
+	// A cloud provider is available, so the DMR lister must never run.
+	modelConfig := AutoModelConfig(
+		t.Context(),
+		"",
+		environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "test-key"}),
+		nil,
+		lister,
+	)
+
+	assert.Equal(t, "anthropic", modelConfig.Provider)
+	assert.False(t, called, "DMR lister should not be consulted when a cloud provider is selected")
+}
+
+func TestAutoModelFallbackError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("without cause", func(t *testing.T) {
+		t.Parallel()
+
+		err := &AutoModelFallbackError{}
+		msg := err.Error()
+		assert.Contains(t, msg, "No model is currently available")
+		assert.Contains(t, msg, "docker model pull")
+		assert.Contains(t, msg, "ANTHROPIC_API_KEY")
+		assert.NotContains(t, msg, "Could not initialize")
+	})
+
+	t.Run("with cause is surfaced and unwrappable", func(t *testing.T) {
+		t.Parallel()
+
+		cause := errors.New("model pull declined by user")
+		err := &AutoModelFallbackError{Cause: cause}
+		assert.Contains(t, err.Error(), "model pull declined by user")
+		assert.ErrorIs(t, err, cause)
+	})
 }

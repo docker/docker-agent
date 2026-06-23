@@ -161,6 +161,8 @@ type ModelSwitcherConfig struct {
 	ModelsGateway string
 	// EnvProvider provides access to environment variables
 	EnvProvider environment.Provider
+	// ProviderRegistry instantiates providers for runtime model switching.
+	ProviderRegistry *provider.Registry
 	// AgentDefaultModels maps agent names to their configured default model references
 	AgentDefaultModels map[string]string
 }
@@ -500,6 +502,11 @@ func (r *LocalRuntime) AvailableModels(ctx context.Context) []ModelChoice {
 		}
 	}
 
+	// Surface models pulled locally in Docker Model Runner. They are not part
+	// of the models.dev catalog, so without this a working local DMR setup
+	// would show nothing selectable in the picker.
+	choices = append(choices, r.buildDMRChoices(ctx)...)
+
 	// Append models.dev catalog entries filtered by available credentials
 	catalogChoices := r.buildCatalogChoices(ctx)
 	choices = append(choices, catalogChoices...)
@@ -737,7 +744,14 @@ func (r *LocalRuntime) createProviderFromConfig(ctx context.Context, cfg *latest
 		}
 	}
 
-	return provider.NewWithModels(ctx,
+	registry := r.modelSwitcherCfg.ProviderRegistry
+	if registry == nil {
+		registry = r.providerRegistry
+	}
+	if registry == nil {
+		registry = provider.DefaultRegistry()
+	}
+	return registry.NewWithModels(ctx,
 		cfg,
 		r.modelSwitcherCfg.Models,
 		r.modelSwitcherCfg.EnvProvider,
@@ -748,6 +762,14 @@ func (r *LocalRuntime) createProviderFromConfig(ctx context.Context, cfg *latest
 // WithModelSwitcherConfig sets the model switcher configuration for the runtime.
 func WithModelSwitcherConfig(cfg *ModelSwitcherConfig) Opt {
 	return func(r *LocalRuntime) {
+		if cfg != nil && cfg.ProviderRegistry == nil {
+			cfgCopy := *cfg
+			cfgCopy.ProviderRegistry = r.providerRegistry
+			cfg = &cfgCopy
+		}
+		if cfg != nil && cfg.ProviderRegistry != nil {
+			r.providerRegistry = cfg.ProviderRegistry
+		}
 		r.modelSwitcherCfg = cfg
 	}
 }

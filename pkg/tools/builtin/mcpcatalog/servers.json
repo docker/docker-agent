@@ -3,7 +3,7 @@
   "source_url": "https://desktop.docker.com/mcp/catalog/v3/catalog.json",
   "schema_version": 3,
   "filter": "type=remote AND remote.transport_type=streamable-http",
-  "count": 33,
+  "count": 34,
   "servers": [
     {
       "id": "astro-docs",
@@ -205,6 +205,26 @@
       "headers": {},
       "auth": {
         "type": "none"
+      }
+    },
+    {
+      "id": "grafana",
+      "title": "Grafana Cloud",
+      "description": "Query and manage Grafana Cloud observability data including dashboards, Prometheus metrics, Loki logs, incidents, and alerts.",
+      "url": "https://mcp.grafana.com/mcp",
+      "transport": "streamable-http",
+      "category": "monitoring",
+      "tags": [
+        "monitoring",
+        "observability",
+        "metrics",
+        "logs",
+        "remote"
+      ],
+      "icon": "https://www.google.com/s2/favicons?domain=grafana.com&sz=64",
+      "headers": {},
+      "auth": {
+        "type": "oauth"
       }
     },
     {

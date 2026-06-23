@@ -14,6 +14,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/shellpath"
+	"github.com/docker/docker-agent/pkg/telemetry/genai"
 )
 
 // Handler executes a single hook invocation. It is built by a
@@ -185,7 +186,19 @@ type commandHandler struct {
 func (h *commandHandler) Run(ctx context.Context, input []byte) (HandlerResult, error) {
 	cmd := exec.CommandContext(ctx, h.shell, append(h.shellArgs, h.command)...)
 	cmd.Dir = h.workingDir
-	cmd.Env = h.env
+	// Expand nil to os.Environ() so the child inherits the parent env
+	// (matching the pre-OTel cmd.Env=h.env=nil behaviour), and copy
+	// into a fresh backing array so concurrent hooks don't race on a
+	// shared slice when adding the trace-context vars.
+	base := h.env
+	if base == nil {
+		base = os.Environ()
+	}
+	traceEnv := genai.InjectTraceContextEnv(ctx)
+	envCopy := make([]string, 0, len(base)+len(traceEnv))
+	envCopy = append(envCopy, base...)
+	envCopy = append(envCopy, traceEnv...)
+	cmd.Env = envCopy
 	cmd.Stdin = bytes.NewReader(input)
 
 	var stdout, stderr bytes.Buffer

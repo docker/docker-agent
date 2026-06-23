@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/config"
@@ -60,7 +61,7 @@ func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.R
 		if configName == "" {
 			configName = "default"
 		}
-		validatedMemoryPath = filepath.Join(paths.GetDataDir(), "memory", configName, "memory.db")
+		validatedMemoryPath = filepath.Join(paths.GetDataDir(), "memory", sanitizePathSegment(configName), "memory.db")
 	}
 
 	if err := os.MkdirAll(filepath.Dir(validatedMemoryPath), 0o700); err != nil {
@@ -73,6 +74,26 @@ func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.R
 	}
 
 	return NewWithPath(db, validatedMemoryPath), nil
+}
+
+// sanitizePathSegment replaces characters that are illegal in a single path
+// component on Windows with '_'. Agent sources loaded from an OCI reference
+// (e.g. "namespace/repo:tag") produce config names that include the image
+// tag's ':'; the colon causes os.MkdirAll to fail with ERROR_INVALID_NAME on
+// NTFS. The replacement is lossy but safe — the hash suffix already in the
+// config name preserves uniqueness, so collisions from sanitisation aren't a
+// concern in practice.
+func sanitizePathSegment(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '<', '>', ':', '"', '|', '?', '*', '\\', '/':
+			return '_'
+		}
+		if r < 0x20 {
+			return '_'
+		}
+		return r
+	}, s)
 }
 
 func New(manager DB) *ToolSet {

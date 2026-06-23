@@ -152,7 +152,9 @@ func NewRegistry() *Registry {
 		// resolves to a public IP can be DNS-rebound to 127.0.0.1 or
 		// 169.254.169.254 and we want the request to fail at dial,
 		// not after exfiltration. The 30s timeout matches the de-facto
-		// upper bound the request context already enforces.
+		// upper bound the request context already enforces. The
+		// transport is OTel-wrapped inside NewSafeClient itself, so
+		// outbound registry calls inject `traceparent` when enabled.
 		httpClient: httpclient.NewSafeClient(30*time.Second, false),
 		baseURL:    registryBaseURL,
 		cacheDir:   RegistryDir(),

@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/teamloader"
+	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
 
 func TestNewDockerAgentAdapter(t *testing.T) {
@@ -17,7 +18,7 @@ func TestNewDockerAgentAdapter(t *testing.T) {
 	agentSource, err := config.Resolve("testdata/basic.yaml", nil)
 	require.NoError(t, err)
 
-	team, err := teamloader.Load(t.Context(), agentSource, &config.RuntimeConfig{})
+	team, err := teamloader.Load(t.Context(), agentSource, &config.RuntimeConfig{}, loaderdefaults.Opts()...)
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, team.StopToolSets(t.Context()))
@@ -36,7 +37,7 @@ func TestNewCAgentAdapter_NonExistent(t *testing.T) {
 	agentSource, err := config.Resolve("testdata/basic.yaml", nil)
 	require.NoError(t, err)
 
-	team, err := teamloader.Load(t.Context(), agentSource, &config.RuntimeConfig{})
+	team, err := teamloader.Load(t.Context(), agentSource, &config.RuntimeConfig{}, loaderdefaults.Opts()...)
 	require.NoError(t, err)
 	defer func() {
 		require.NoError(t, team.StopToolSets(t.Context()))

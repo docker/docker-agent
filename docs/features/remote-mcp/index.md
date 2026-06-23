@@ -53,6 +53,12 @@ For full configuration details, see the [Tool Config]({{ '/configuration/tools/'
 Set `allow_private_ips: true` on a remote MCP toolset only when the MCP server or its OAuth registration/token endpoints intentionally resolve to private, loopback, or link-local addresses. The default blocks those OAuth helper requests to reduce SSRF risk.
 
 <div class="callout callout-info" markdown="1">
+<div class="callout-title">Headers forwarded during OAuth discovery
+</div>
+  <p>Configured <code>headers</code> are forwarded to OAuth protected-resource-metadata discovery requests directed at the MCP server's own host — not to third-party authorization servers. This allows services like Grafana Cloud that require a routing header (e.g. <code>X-Grafana-URL</code>) on the discovery request to scope the OAuth flow correctly. Headers are never sent to a different host than the one in <code>remote.url</code>.</p>
+</div>
+
+<div class="callout callout-info" markdown="1">
 <div class="callout-title">Automatic reconnection after idle timeouts
 </div>
   <p>Remote MCP connections (Streamable HTTP / SSE) automatically reconnect after the server closes an idle connection — no configuration needed. Services like Notion and Linear close idle connections periodically; docker-agent detects the clean close and reconnects with exponential backoff. To tune reconnect behaviour or disable reconnection entirely, use the <a href="{{ '/configuration/tools/#toolset-lifecycle' | relative_url }}"><code>lifecycle</code> block</a>.</p>
@@ -188,6 +194,7 @@ A per-toolset `callbackRedirectURL` (in the YAML) overrides the runtime-wide `--
 | Service    | URL                                               | Transport  | Description                       |
 | ---------- | ------------------------------------------------- | ---------- | --------------------------------- |
 | Canva      | `https://mcp.canva.com/mcp`                       | streamable | Design and graphics platform      |
+| Miro       | `https://mcp.miro.com/`                           | streamable | Collaborative whiteboard platform (Enterprise plan required; see [official docs](https://developers.miro.com/docs/miro-mcp)) |
 | Cloudinary | `https://asset-management.mcp.cloudinary.com/sse` | sse        | Media management and optimization |
 | InVideo    | `https://mcp.invideo.io/sse`                      | sse        | Video creation platform           |
 | Webflow    | `https://mcp.webflow.com/sse`                     | sse        | Website builder and CMS           |

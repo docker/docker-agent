@@ -38,7 +38,7 @@ $ docker agent run [config] [message...] [flags]
 | `--dry-run`                             | Initialize the agent without executing anything (useful for validating a config)                                                          |
 | `--remote <addr>`                       | Use a remote runtime at the given address instead of running the agent locally                                                            |
 | `--listen <addr>`                       | Expose this run's control plane over HTTP so an external process can drive the running TUI (send follow-ups, stream events, read the title). Accepts `host:port` or `unix://`, `npipe://`, `fd://`. See the [API Server]({{ '/features/api-server/' | relative_url }}#listen). |
-| `--lean`                                | Use a simplified, non-alternate-screen TUI. Unlike the default full-screen TUI, this renders inline in the normal terminal buffer — useful in environments where an alternate screen is unwanted (e.g. inside tmux panes, CI with a tty, or log-friendly pipelines). |
+| `--lean`                                | Use a simplified, non-alternate-screen TUI. Unlike the default full-screen TUI, this renders inline in the normal terminal buffer — useful in environments where an alternate screen is unwanted (e.g. inside tmux panes, CI with a tty, or log-friendly pipelines). Displays an ASCII art banner on startup. |
 | `--app-name <name>`                     | Override the application name label shown in the TUI (status bar, window title, "/exit" notifications).                                   |
 | `--sidebar`                             | Control sidebar visibility. Set to `--sidebar=false` to hide the sidebar and disable the Ctrl+B toggle (default: `true`).                 |
 | `--disable-commands <list>`             | Hide and disable specific slash commands in the TUI. Accepts a comma-separated list of command names (leading slash optional, case-insensitive). E.g. `--disable-commands="/cost,/eval,/model"`. |
@@ -70,7 +70,7 @@ $ docker agent run [config] [message...] [flags]
 | `--record [path]`                       | Record AI API interactions to a cassette file (auto-generates filename if no path given)                                                  |
 | `-d, --debug`                           | Enable debug logging                                                                                                                      |
 | `--log-file <path>`                     | Custom debug log location                                                                                                                 |
-| `-o, --otel`                            | Enable OpenTelemetry tracing                                                                                                              |
+| `-o, --otel`                            | Enable OpenTelemetry observability: traces, metrics, and logs. Requires `OTEL_EXPORTER_OTLP_ENDPOINT` to export to a collector. |
 
 ```bash
 # Examples
@@ -103,7 +103,7 @@ $ docker agent run --agent-picker=agentcatalog/coder,agentcatalog/researcher
 <div class="callout callout-tip" markdown="1">
 <div class="callout-title">Lean, inline TUI
 </div>
-  <p>Pass <code>--lean</code> to get a lightweight TUI that renders inline in your terminal (no alternate screen). It supports the same slash commands and streaming output as the full TUI, making it handy inside tmux, scripts, or any context where a full-screen takeover is unwanted.</p>
+  <p>Pass <code>--lean</code> to get a lightweight TUI that renders inline in your terminal (no alternate screen). It displays an ASCII art banner on startup and supports the same slash commands and streaming output as the full TUI, making it handy inside tmux, scripts, or any context where a full-screen takeover is unwanted.</p>
 </div>
 
 <div class="callout callout-tip" markdown="1">
@@ -521,11 +521,20 @@ These flags are available on every `docker agent` command:
 | ------------------------- | -------------------------------------------------------------------------------------- |
 | `-d, --debug`             | Enable debug logging (default location: `~/.cagent/cagent.debug.log`)                  |
 | `--log-file <path>`       | Custom debug log location (only used with `--debug`)                                   |
-| `-o, --otel`              | Enable OpenTelemetry tracing                                                           |
+| `-o, --otel`              | Enable OpenTelemetry observability: traces, metrics, and logs. Requires `OTEL_EXPORTER_OTLP_ENDPOINT` to export to a collector. |
 | `--cache-dir <path>`      | Override the cache directory (default: `~/Library/Caches/cagent` on macOS)             |
 | `--config-dir <path>`     | Override the config directory (default: `~/.config/cagent`)                            |
 | `--data-dir <path>`       | Override the data directory (default: `~/.cagent`)                                     |
 | `--help`                  | Show help for any command                                                              |
+
+### OpenTelemetry environment variables
+
+When `--otel` is enabled, the standard [OTel SDK env vars](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/) are honored (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES`, etc.). Two additional docker-agent-specific variables control GenAI instrumentation:
+
+| Variable | Default | Description |
+| -------- | ------- | ----------- |
+| `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` | `false` | Set to `true` to capture prompt text, model responses, tool arguments, and tool results as span attributes. Off by default because these fields may contain PII. |
+| `OTEL_SEMCONV_STABILITY_OPT_IN` | (dual-emit) | Set to `gen_ai_latest_experimental` to emit only the spec-defined `gen_ai.*` keys from the [GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/). The default dual-emit mode emits both `gen_ai.*` and legacy keys so existing dashboards continue working. |
 
 ## Runtime Configuration Flags
 
