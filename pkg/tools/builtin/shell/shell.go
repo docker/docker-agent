@@ -168,18 +168,42 @@ func (h *shellHandler) ValidateShellToolCall(toolCall tools.ToolCall) *tools.Too
 	if err := json.Unmarshal([]byte(args), &params); err != nil {
 		return nil
 	}
+	// 1. Exact known-pattern match wins (highest precision).
 	if safety := assessDestructiveShellCommand(params.Cmd); safety != nil {
 		return safety
 	}
-	// Pattern miss. If a residual Judge is wired up AND the command
-	// contains a destructive lexical signal, ask the judge for a
-	// refined verdict before falling back to BlastRadiusUnknown. The
-	// judge call is gated behind shouldConsultJudge so a clean stream
-	// of inspection commands never pays an LLM round-trip.
+
+	// 2. Autonomous structural estimate, with bounded read-only filesystem
+	// probing anchored at the command's working directory. This replaces
+	// the old blanket BlastRadiusUnknown verdict for every pattern miss:
+	//   - confidently read-only commands (ls, cat, git status, docker ps,
+	//     ...) are no longer force-gated; they defer to the normal
+	//     approval flow like any other tool;
+	//   - recognized destructive commands get a real blast-radius tier
+	//     derived from recursion/force flags, target path scope, and the
+	//     measured breadth of what they would touch;
+	//   - genuinely ambiguous commands fall through to the residual judge.
+	est := estimateBlastRadius(params.Cmd, h.resolveWorkDir(params.Cwd))
+	switch est.kind {
+	case estimateReadOnly:
+		return nil
+	case estimateDestructive:
+		return &tools.ToolCallSafety{
+			Destructive: true,
+			BlastRadius: est.level,
+			Reason:      "Safer-mode estimate: " + est.reason,
+		}
+	}
+
+	// 3. estimateUncertain. If a residual Judge is wired up AND the command
+	// contains a destructive lexical signal, ask the judge for a refined
+	// verdict before falling back. The judge call is gated behind
+	// shouldConsultJudge so a clean stream of inspection commands never
+	// pays an LLM round-trip.
 	//
-	// Fail-closed: timeout, transport error, or a nil safety return
-	// all leave the default Unknown verdict in place — the user is
-	// still gated, just without the refined blast-radius label.
+	// Fail-closed: timeout, transport error, or a nil safety return all
+	// leave the estimator's tentative tier (or the default Unknown verdict)
+	// in place — the user is still gated.
 	//
 	// context.Background() with a hard 500 ms cap is intentional: the
 	// validator type signature does not (yet) carry a context. A future
@@ -189,6 +213,16 @@ func (h *shellHandler) ValidateShellToolCall(toolCall tools.ToolCall) *tools.Too
 		defer cancel()
 		if safety, err := h.judge.Refine(ctx, params.Cmd); err == nil && safety != nil {
 			return safety
+		}
+	}
+	// The estimator recognized a destructive operation but could not fully
+	// resolve its scope: gate with its best-effort tier rather than the
+	// less informative blanket Unknown.
+	if est.level != "" && est.level != tools.BlastRadiusUnknown {
+		return &tools.ToolCallSafety{
+			Destructive: true,
+			BlastRadius: est.level,
+			Reason:      "Safer-mode estimate: " + est.reason,
 		}
 	}
 	return &tools.ToolCallSafety{

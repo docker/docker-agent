@@ -61,8 +61,22 @@ func TestValidateShellToolCallRespectsSaferFlag(t *testing.T) {
 	assert.Equal(t, tools.BlastRadiusHigh, safety.BlastRadius)
 }
 
-func TestValidateShellToolCallSaferWarnsForUnmatchedCommand(t *testing.T) {
+// The autonomous estimator recognizes ls as read-only, so safer mode no
+// longer force-gates it: the validator returns nil and the call goes
+// through the normal approval flow.
+func TestValidateShellToolCallSaferPassesReadOnlyCommand(t *testing.T) {
 	args, err := json.Marshal(RunShellArgs{Cmd: "ls -la"})
+	require.NoError(t, err)
+	call := tools.ToolCall{Function: tools.FunctionCall{Name: ToolNameShell, Arguments: string(args)}}
+
+	safety := (&shellHandler{safer: true}).ValidateShellToolCall(call)
+	assert.Nil(t, safety)
+}
+
+// A command the estimator cannot recognize still falls back to a
+// fail-closed safer-mode confirmation with an unknown blast radius.
+func TestValidateShellToolCallSaferWarnsForUnrecognizedCommand(t *testing.T) {
+	args, err := json.Marshal(RunShellArgs{Cmd: "frobnicate --wibble foo"})
 	require.NoError(t, err)
 	call := tools.ToolCall{Function: tools.FunctionCall{Name: ToolNameShell, Arguments: string(args)}}
 
@@ -71,4 +85,23 @@ func TestValidateShellToolCallSaferWarnsForUnmatchedCommand(t *testing.T) {
 	assert.True(t, safety.Destructive)
 	assert.Equal(t, tools.BlastRadiusUnknown, safety.BlastRadius)
 	assert.Contains(t, safety.Reason, "safer-mode")
+}
+
+// The estimator produces a real blast-radius tier for a recognized
+// destructive command that misses the curated pattern set (blkdiscard is
+// not in safety_patterns.json), instead of the old blanket
+// BlastRadiusUnknown.
+func TestValidateShellToolCallSaferEstimatesUnpatternedDestructive(t *testing.T) {
+	args, err := json.Marshal(RunShellArgs{Cmd: "blkdiscard /dev/sdb"})
+	require.NoError(t, err)
+	call := tools.ToolCall{Function: tools.FunctionCall{Name: ToolNameShell, Arguments: string(args)}}
+
+	// Sanity: the command really is a pattern miss, so this exercises the
+	// estimator and not assessDestructiveShellCommand.
+	require.Nil(t, assessDestructiveShellCommand("blkdiscard /dev/sdb"))
+
+	safety := (&shellHandler{safer: true}).ValidateShellToolCall(call)
+	require.NotNil(t, safety)
+	assert.True(t, safety.Destructive)
+	assert.Equal(t, tools.BlastRadiusHigh, safety.BlastRadius)
 }

@@ -49,11 +49,21 @@ toolsets:
     safer: true
 ```
 
-When enabled, docker-agent checks each `shell` tool call before the normal approval flow. The runtime always asks for explicit user approval, even when `--yolo` or permissions would otherwise auto-approve it. If the command matches a known destructive operation, the confirmation uses the taxonomy's blast-radius level; otherwise it still warns with an `unknown` blast radius.
+When enabled, docker-agent checks each `shell` tool call before the normal approval flow and assigns it a blast-radius level (`low`, `medium`, `high`, or `unknown`). When a command is found to be destructive, the runtime always asks for explicit user approval and shows the blast radius, even when `--yolo` or permissions would otherwise auto-approve it.
+
+The check runs in three layers, most precise first:
+
+1. **Curated patterns.** The command is matched against docker-agent's embedded `safety_patterns.json` taxonomy (filesystem deletion/overwrite, Docker cleanup, and common out-of-scope destructive commands such as Git history rewrites). A match uses the taxonomy's blast-radius level.
+2. **Autonomous estimation.** On a pattern miss, docker-agent estimates the blast radius itself by analysing the command's structure — the program, recursion/force flags, the scope of the target paths (filesystem root, system directories, the home directory, or inside vs. outside the working directory), output redirections, pipelines into a shell interpreter, and command substitutions. It also performs a **bounded, read-only probe of the working directory** to sharpen the estimate: a recursive delete of a directory holding tens of thousands of files scores higher than one whose target does not exist. The probe never follows symlinks, never leaves the working directory, and never runs the command.
+   - Commands the estimator is confident are **read-only** (`ls`, `cat`, `grep`, `git status`, `docker ps`, …) are no longer force-gated; they go through the normal approval flow like any other tool.
+   - Recognized **destructive** commands get a real blast-radius tier instead of a blanket `unknown`.
+3. **Residual LLM judge (optional).** When the estimate is genuinely ambiguous and `safer_judge_model` is configured, a small model is consulted for commands carrying a destructive lexical signal (`drop`, `wipe`, `destroy`, …). See below.
+
+Anything that still cannot be resolved (an unrecognized program, an unresolved variable or command substitution feeding a destructive operation) is treated fail-closed: the command is gated for confirmation with the estimator's best-effort tier, or `unknown` when none can be derived.
+
+The "read-only" classification is deliberately conservative: a command is only allowed to skip the gate when it uses a known read-only program with no overwrite redirect, no command-executing flag (e.g. `rg --pre`, `git --upload-pack`), no code-injecting environment assignment (e.g. `LD_PRELOAD=…`), no pipe into an interpreter, and no command substitution. It remains best-effort, not a sandbox: a command that genuinely needs to be contained should run under [Sandbox Mode]({{ '/configuration/sandbox/' | relative_url }}). Safer mode raises the bar for accidental destruction; it is not a substitute for isolation when running untrusted agents with `--yolo`.
 
 See [`examples/shell_safer.yaml`](https://github.com/docker/docker-agent/blob/main/examples/shell_safer.yaml) for a complete example.
-
-Current destructive command patterns are loaded from docker-agent's embedded `safety_patterns.json` taxonomy. The list covers filesystem deletion/overwrite commands, Docker cleanup commands, and selected out-of-scope-but-common destructive commands such as Git history rewrites. Each match carries a blast-radius level (`low`, `medium`, `high`, or `unknown`).
 
 ### Sudo support
 

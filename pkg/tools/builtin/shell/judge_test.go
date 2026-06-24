@@ -107,7 +107,10 @@ func TestValidateShellToolCallJudgeGating(t *testing.T) {
 		}
 		h := &shellHandler{safer: true, judge: judge}
 
-		got := h.ValidateShellToolCall(makeCall("uptime"))
+		// An unrecognized program with no lexical signal: the estimator
+		// cannot classify it (uncertain) and the judge is not consulted, so
+		// it falls through to the fail-closed BlastRadiusUnknown gate.
+		got := h.ValidateShellToolCall(makeCall("frobnicate config"))
 
 		if got == nil || got.BlastRadius != tools.BlastRadiusUnknown {
 			t.Fatalf("BlastRadiusUnknown fall-through expected, got %+v", got)
