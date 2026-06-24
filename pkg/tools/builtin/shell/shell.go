@@ -55,8 +55,15 @@ type shellHandler struct {
 	timeout         time.Duration
 	workingDir      string
 	safer           bool
-	jobs            *concurrent.Map[string, *backgroundJob]
-	jobCounter      atomic.Int64
+	// judge, when non-nil, is the residual LLM-backed classifier
+	// consulted by ValidateShellToolCall after the deterministic regex
+	// pass returns no match and the command trips a lexical destructive
+	// signal (see shouldConsultJudge / LexicalSignals). nil disables
+	// the LLM path entirely — safer mode falls back to its default
+	// BlastRadiusUnknown verdict in that case.
+	judge      Judge
+	jobs       *concurrent.Map[string, *backgroundJob]
+	jobCounter atomic.Int64
 
 	// sudoAskpass opts this toolset into the one-time sudo privilege
 	// escalation flow (SUDO_ASKPASS bridged to the elicitation handler).
@@ -163,11 +170,47 @@ func (h *shellHandler) ValidateShellToolCall(toolCall tools.ToolCall) *tools.Too
 	if safety := assessDestructiveShellCommand(params.Cmd); safety != nil {
 		return safety
 	}
+	// Pattern miss. If a residual Judge is wired up AND the command
+	// contains a destructive lexical signal, ask the judge for a
+	// refined verdict before falling back to BlastRadiusUnknown. The
+	// judge call is gated behind shouldConsultJudge so a clean stream
+	// of inspection commands never pays an LLM round-trip.
+	//
+	// Fail-closed: timeout, transport error, or a nil safety return
+	// all leave the default Unknown verdict in place — the user is
+	// still gated, just without the refined blast-radius label.
+	//
+	// context.Background() with a hard 500 ms cap is intentional: the
+	// validator type signature does not (yet) carry a context. A future
+	// change can plumb the dispatcher's context through.
+	if h.judge != nil && shouldConsultJudge(params.Cmd) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		if safety, err := h.judge.Refine(ctx, params.Cmd); err == nil && safety != nil {
+			return safety
+		}
+	}
 	return &tools.ToolCallSafety{
 		Destructive: true,
 		BlastRadius: tools.BlastRadiusUnknown,
 		Reason:      "Shell command requires safer-mode confirmation.",
 	}
+}
+
+// SetJudge installs the residual LLM Judge that ValidateShellToolCall
+// consults when the deterministic regex pass returns no match for a
+// command containing a destructive lexical signal. Passing nil
+// disables the LLM path; safer mode then falls back to its default
+// BlastRadiusUnknown verdict for every pattern miss.
+//
+// Intended to be called once at toolset wiring, after New: the runtime
+// constructs a small-model-backed ProviderJudge from its model config
+// and hands it off here. Calling SetJudge after the toolset has
+// started serving traffic is safe but races with in-flight validator
+// invocations; redo the wiring during agent reload rather than mid-run
+// when avoidable.
+func (t *ToolSet) SetJudge(j Judge) {
+	t.handler.judge = j
 }
 
 // UnmarshalJSON accepts both the canonical "cmd" key and the common alias
