@@ -370,11 +370,15 @@ func fromInnerEstimate(prog string, inner blastEstimate) segResult {
 	case estimateReadOnly:
 		return segResult{kind: estimateReadOnly}
 	case estimateDestructive:
-		return segResult{kind: estimateDestructive, score: scoreFromTier(inner.level),
-			reason: prog + " -c runs: " + inner.reason}
+		return segResult{
+			kind: estimateDestructive, score: scoreFromTier(inner.level),
+			reason: prog + " -c runs: " + inner.reason,
+		}
 	default:
-		return segResult{kind: estimateUncertain, score: scoreFromTier(inner.level),
-			reason: prog + " -c runs an unresolved command."}
+		return segResult{
+			kind: estimateUncertain, score: scoreFromTier(inner.level),
+			reason: prog + " -c runs an unresolved command.",
+		}
 	}
 }
 
@@ -797,8 +801,8 @@ var gitExecConfigKeyMarkers = []string{
 func gitInjectsExecConfig(args []string) bool {
 	check := func(kv string) bool {
 		key := kv
-		if eq := strings.IndexByte(kv, '='); eq >= 0 {
-			key = kv[:eq]
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			key = k
 		}
 		key = strings.ToLower(key)
 		for _, m := range gitExecConfigKeyMarkers {
@@ -1084,12 +1088,12 @@ func pathScopeCandidates(abs string, wasAbs bool) []string {
 	if abs == "" {
 		return nil
 	}
-	real := evalSymlinksBestEffort(abs)
+	resolved := evalSymlinksBestEffort(abs)
 	if !wasAbs {
-		return []string{real}
+		return []string{resolved}
 	}
-	if real != abs {
-		return []string{abs, real}
+	if resolved != abs {
+		return []string{abs, resolved}
 	}
 	return []string{abs}
 }
@@ -1102,8 +1106,8 @@ func evalSymlinksBestEffort(p string) string {
 	if p == "" {
 		return ""
 	}
-	if real, err := filepath.EvalSymlinks(p); err == nil {
-		return real
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
 	}
 	dir := filepath.Dir(p)
 	if dir == p {
@@ -1284,9 +1288,7 @@ func resolvePath(raw, workdir string) string {
 		return ""
 	}
 	p := expandHome(raw)
-	if containsGlob(p) {
-		// keep as-is; caller uses filepath.Glob
-	}
+	// Globs are left verbatim here; the caller expands them via filepath.Glob.
 	if filepath.IsAbs(p) {
 		return filepath.Clean(p)
 	}
@@ -1672,13 +1674,14 @@ func lexElements(cmd string) (elems []element, dynamic bool) {
 			}
 		case '|':
 			flush()
-			if i+1 < n && cmd[i+1] == '|' {
+			switch {
+			case i+1 < n && cmd[i+1] == '|':
 				elems = append(elems, element{kind: elemSepSemantic})
 				i += 2
-			} else if i+1 < n && cmd[i+1] == '&' {
+			case i+1 < n && cmd[i+1] == '&':
 				elems = append(elems, element{kind: elemSepPipe})
 				i += 2
-			} else {
+			default:
 				elems = append(elems, element{kind: elemSepPipe})
 				i++
 			}
@@ -1853,11 +1856,11 @@ func effectiveProgram(words []string) (prog string, args []string, stdinFed bool
 // (and could therefore inject code, e.g. LD_PRELOAD, BASH_ENV, GIT_SSH).
 func hasUnsafeAssignment(assigns []string) bool {
 	for _, a := range assigns {
-		eq := strings.IndexByte(a, '=')
-		if eq < 0 {
+		name, _, ok := strings.Cut(a, "=")
+		if !ok {
 			continue
 		}
-		if !safeLeadingEnvVars[strings.ToLower(a[:eq])] {
+		if !safeLeadingEnvVars[strings.ToLower(name)] {
 			return true
 		}
 	}
@@ -1949,7 +1952,9 @@ func isAssignment(w string) bool {
 	}
 	for i := range eq {
 		c := w[i]
-		if !(c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (i > 0 && c >= '0' && c <= '9')) {
+		isLetter := c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		isDigit := i > 0 && c >= '0' && c <= '9'
+		if !isLetter && !isDigit {
 			return false
 		}
 	}

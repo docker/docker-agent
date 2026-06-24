@@ -145,8 +145,16 @@ const judgeSystemPrompt = `You are a strict classifier for shell commands. ` +
 	`Use "unknown" if the destructiveness cannot be determined from the command alone. ` +
 	`Output the JSON object and nothing else.`
 
-// parseJudgeVerdict extracts the trailing JSON object from the LLM
-// response and maps it to a ToolCallSafety.
+// parseJudgeVerdict extracts the first JSON object from the LLM response
+// and maps it to a ToolCallSafety.
+//
+// The first '{' anchors the scan and a json.Decoder reads exactly one
+// object from there, ignoring any trailing text. Decoding the FIRST
+// object (not the last) is a safety property: a response that emits more
+// than one JSON-like object — a re-statement of the command before the
+// real verdict, a model preamble, or an adversarial command name
+// embedding a {"blast_radius":"low"} snippet — cannot downgrade the
+// verdict by appending a lower tier after the genuine one.
 //
 // Returns nil for:
 //   - missing or unparseable JSON
@@ -157,7 +165,7 @@ const judgeSystemPrompt = `You are a strict classifier for shell commands. ` +
 //
 // Returns a non-destructive verdict only on explicit "low".
 func parseJudgeVerdict(response string) *tools.ToolCallSafety {
-	start := strings.LastIndex(response, "{")
+	start := strings.IndexByte(response, '{')
 	if start < 0 {
 		return nil
 	}
@@ -165,7 +173,7 @@ func parseJudgeVerdict(response string) *tools.ToolCallSafety {
 		BlastRadius string `json:"blast_radius"`
 		Reason      string `json:"reason"`
 	}
-	if err := json.Unmarshal([]byte(response[start:]), &v); err != nil {
+	if err := json.NewDecoder(strings.NewReader(response[start:])).Decode(&v); err != nil {
 		return nil
 	}
 	if strings.TrimSpace(v.BlastRadius) == "" {

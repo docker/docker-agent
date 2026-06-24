@@ -10,4 +10,5 @@
 !/pkg/chatserver/openapi.json
 !/pkg/config/builtin-agents/*.yaml
 !/pkg/tools/builtin/mcpcatalog/servers.json
+!/pkg/tools/builtin/shell/safety_patterns.json
 !/pkg/tui/styles/themes/*.yaml

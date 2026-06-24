@@ -585,8 +585,10 @@ func TestEffectiveProgramWrappers(t *testing.T) {
 	}
 
 	// Wrapper-carried env assignments must be surfaced for the safety check.
-	_, _, _, assigns := effectiveProgram([]string{"env", "LD_PRELOAD=/x", "ls"})
+	prog, _, _, assigns := effectiveProgram([]string{"env", "LD_PRELOAD=/x", "ls"})
+	assert.Equal(t, "ls", prog, "env wrapper resolves to the wrapped program")
 	assert.True(t, hasUnsafeAssignment(assigns), "env-carried LD_PRELOAD must be surfaced")
-	_, _, _, safe := effectiveProgram([]string{"env", "LANG=C", "ls"})
+	prog, _, _, safe := effectiveProgram([]string{"env", "LANG=C", "ls"})
+	assert.Equal(t, "ls", prog, "env wrapper resolves to the wrapped program")
 	assert.False(t, hasUnsafeAssignment(safe), "locale assignment is safe")
 }

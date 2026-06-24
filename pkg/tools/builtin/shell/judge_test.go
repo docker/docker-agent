@@ -88,7 +88,8 @@ func TestValidateShellToolCallJudgeGating(t *testing.T) {
 				Reason:      "judge said high",
 			},
 		}
-		h := &shellHandler{safer: true, judge: judge}
+		h := &shellHandler{safer: true}
+		h.storeJudge(judge)
 
 		got := h.ValidateShellToolCall(makeCall("rm -rf ./data"))
 
@@ -105,7 +106,8 @@ func TestValidateShellToolCallJudgeGating(t *testing.T) {
 		judge := &fakeJudge{
 			Safety: &tools.ToolCallSafety{BlastRadius: tools.BlastRadiusHigh},
 		}
-		h := &shellHandler{safer: true, judge: judge}
+		h := &shellHandler{safer: true}
+		h.storeJudge(judge)
 
 		// An unrecognized program with no lexical signal: the estimator
 		// cannot classify it (uncertain) and the judge is not consulted, so
@@ -129,7 +131,8 @@ func TestValidateShellToolCallJudgeGating(t *testing.T) {
 				Reason:      "Safer-mode LLM judge: drops the dev database",
 			},
 		}
-		h := &shellHandler{safer: true, judge: judge}
+		h := &shellHandler{safer: true}
+		h.storeJudge(judge)
 
 		got := h.ValidateShellToolCall(makeCall("bun run drop-db"))
 
@@ -147,7 +150,8 @@ func TestValidateShellToolCallJudgeGating(t *testing.T) {
 	t.Run("pattern miss + lexical signal + judge uncertain (nil, nil) — falls through", func(t *testing.T) {
 		t.Parallel()
 		judge := &fakeJudge{Safety: nil, Err: nil}
-		h := &shellHandler{safer: true, judge: judge}
+		h := &shellHandler{safer: true}
+		h.storeJudge(judge)
 
 		got := h.ValidateShellToolCall(makeCall("make wipe"))
 
@@ -165,7 +169,8 @@ func TestValidateShellToolCallJudgeGating(t *testing.T) {
 			Safety: &tools.ToolCallSafety{BlastRadius: tools.BlastRadiusLow}, // would otherwise downgrade
 			Err:    errors.New("provider timeout"),
 		}
-		h := &shellHandler{safer: true, judge: judge}
+		h := &shellHandler{safer: true}
+		h.storeJudge(judge)
 
 		got := h.ValidateShellToolCall(makeCall("./script --reset-everything"))
 
@@ -179,7 +184,8 @@ func TestValidateShellToolCallJudgeGating(t *testing.T) {
 		judge := &fakeJudge{
 			Safety: &tools.ToolCallSafety{BlastRadius: tools.BlastRadiusHigh},
 		}
-		h := &shellHandler{safer: false, judge: judge}
+		h := &shellHandler{safer: false}
+		h.storeJudge(judge)
 
 		got := h.ValidateShellToolCall(makeCall("rm -rf ./data"))
 
@@ -240,8 +246,18 @@ func TestParseJudgeVerdict(t *testing.T) {
 			wantNil:  true,
 		},
 		{
-			name:        "thinking preamble then JSON — trailing object extracted",
+			name:        "thinking preamble then JSON — object extracted after prose",
 			response:    "Let me think...\n{\"blast_radius\":\"high\",\"reason\":\"rm -rf /\"}",
+			wantRadius:  tools.BlastRadiusHigh,
+			wantDestruc: true,
+		},
+		{
+			// Regression: a multi-object response must not let a trailing
+			// low verdict override the genuine first one. LastIndex-based
+			// parsing would have picked the last object and downgraded to
+			// non-destructive, bypassing the safer-mode gate.
+			name:        "multiple objects — first (genuine) verdict wins, not the last",
+			response:    `{"blast_radius":"high","reason":"rm -rf /"} {"blast_radius":"low","reason":"safe"}`,
 			wantRadius:  tools.BlastRadiusHigh,
 			wantDestruc: true,
 		},
@@ -284,8 +300,7 @@ func jsonString(s string) string {
 	for _, r := range s {
 		switch r {
 		case '"', '\\':
-			b = append(b, '\\')
-			b = append(b, byte(r))
+			b = append(b, '\\', byte(r))
 		default:
 			b = append(b, []byte(string(r))...)
 		}

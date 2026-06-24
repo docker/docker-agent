@@ -56,13 +56,17 @@ type shellHandler struct {
 	timeout         time.Duration
 	workingDir      string
 	safer           bool
-	// judge, when non-nil, is the residual LLM-backed classifier
-	// consulted by ValidateShellToolCall after the deterministic regex
-	// pass returns no match and the command trips a lexical destructive
-	// signal (see shouldConsultJudge / LexicalSignals). nil disables
-	// the LLM path entirely — safer mode falls back to its default
+	// judge, when set, is the residual LLM-backed classifier consulted by
+	// ValidateShellToolCall after the deterministic regex pass returns no
+	// match and the command trips a lexical destructive signal (see
+	// shouldConsultJudge / LexicalSignals). An unset judge disables the
+	// LLM path entirely — safer mode falls back to its default
 	// BlastRadiusUnknown verdict in that case.
-	judge      Judge
+	//
+	// Stored in an atomic.Pointer so SetJudge (called at toolset wiring)
+	// is race-free against concurrent ValidateShellToolCall reads. Access
+	// it through loadJudge / storeJudge, never the field directly.
+	judge      atomic.Pointer[Judge]
 	jobs       *concurrent.Map[string, *backgroundJob]
 	jobCounter atomic.Int64
 
@@ -166,7 +170,14 @@ func (h *shellHandler) ValidateShellToolCall(toolCall tools.ToolCall) *tools.Too
 		args = "{}"
 	}
 	if err := json.Unmarshal([]byte(args), &params); err != nil {
-		return nil
+		// Fail-closed: an argument blob safer mode cannot decode is, by
+		// definition, unclassifiable. Gate it rather than let an
+		// unconfirmed shell command through.
+		return &tools.ToolCallSafety{
+			Destructive: true,
+			BlastRadius: tools.BlastRadiusUnknown,
+			Reason:      "Safer-mode: could not parse shell tool-call arguments.",
+		}
 	}
 	// 1. Exact known-pattern match wins (highest precision).
 	if safety := assessDestructiveShellCommand(params.Cmd); safety != nil {
@@ -208,10 +219,10 @@ func (h *shellHandler) ValidateShellToolCall(toolCall tools.ToolCall) *tools.Too
 	// context.Background() with a hard 500 ms cap is intentional: the
 	// validator type signature does not (yet) carry a context. A future
 	// change can plumb the dispatcher's context through.
-	if h.judge != nil && shouldConsultJudge(params.Cmd) {
+	if judge := h.loadJudge(); judge != nil && shouldConsultJudge(params.Cmd) {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
-		if safety, err := h.judge.Refine(ctx, params.Cmd); err == nil && safety != nil {
+		if safety, err := judge.Refine(ctx, params.Cmd); err == nil && safety != nil {
 			return safety
 		}
 	}
@@ -240,12 +251,31 @@ func (h *shellHandler) ValidateShellToolCall(toolCall tools.ToolCall) *tools.Too
 //
 // Intended to be called once at toolset wiring, after New: the runtime
 // constructs a small-model-backed ProviderJudge from its model config
-// and hands it off here. Calling SetJudge after the toolset has
-// started serving traffic is safe but races with in-flight validator
-// invocations; redo the wiring during agent reload rather than mid-run
-// when avoidable.
+// and hands it off here. The judge is held in an atomic.Pointer, so
+// calling SetJudge while ValidateShellToolCall runs concurrently is
+// race-free; in-flight validations observe either the old or the new
+// judge, never a torn value.
 func (t *ToolSet) SetJudge(j Judge) {
-	t.handler.judge = j
+	t.handler.storeJudge(j)
+}
+
+// loadJudge returns the currently-wired residual Judge, or nil if none
+// has been installed. Safe for concurrent use with storeJudge.
+func (h *shellHandler) loadJudge() Judge {
+	if jp := h.judge.Load(); jp != nil {
+		return *jp
+	}
+	return nil
+}
+
+// storeJudge installs j as the residual Judge (or clears it when j is
+// nil). Safe for concurrent use with loadJudge.
+func (h *shellHandler) storeJudge(j Judge) {
+	if j == nil {
+		h.judge.Store(nil)
+		return
+	}
+	h.judge.Store(&j)
 }
 
 // UnmarshalJSON accepts both the canonical "cmd" key and the common alias

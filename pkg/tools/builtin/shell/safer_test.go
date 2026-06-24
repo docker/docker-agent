@@ -61,6 +61,18 @@ func TestValidateShellToolCallRespectsSaferFlag(t *testing.T) {
 	assert.Equal(t, tools.BlastRadiusHigh, safety.BlastRadius)
 }
 
+// Fail-closed: when safer mode cannot decode the tool-call arguments it
+// must gate the command rather than return nil (allow-through). An
+// unparseable argument blob is, by definition, unclassifiable.
+func TestValidateShellToolCallSaferGatesUnparseableArguments(t *testing.T) {
+	call := tools.ToolCall{Function: tools.FunctionCall{Name: ToolNameShell, Arguments: "{not valid json"}}
+
+	safety := (&shellHandler{safer: true}).ValidateShellToolCall(call)
+	require.NotNil(t, safety)
+	assert.True(t, safety.Destructive)
+	assert.Equal(t, tools.BlastRadiusUnknown, safety.BlastRadius)
+}
+
 // The autonomous estimator recognizes ls as read-only, so safer mode no
 // longer force-gates it: the validator returns nil and the call goes
 // through the normal approval flow.
