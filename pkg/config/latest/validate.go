@@ -229,6 +229,17 @@ func (t *Toolset) validate() error {
 	if t.Safer != nil && t.Type != "shell" {
 		return errors.New("safer can only be used with type 'shell'")
 	}
+	if t.SaferJudgeModel != nil {
+		if t.Type != "shell" {
+			return errors.New("safer_judge_model can only be used with type 'shell'")
+		}
+		if t.Safer == nil || !*t.Safer {
+			return errors.New("safer_judge_model requires safer: true")
+		}
+		if *t.SaferJudgeModel == "" {
+			return errors.New("safer_judge_model must not be empty when set")
+		}
+	}
 	if t.SudoAskpass != nil && t.Type != "shell" {
 		return errors.New("sudo_askpass can only be used with type 'shell'")
 	}

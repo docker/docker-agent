@@ -1116,6 +1116,19 @@ type Toolset struct {
 	// confirmation, regardless of permissions or --yolo.
 	Safer *bool `json:"safer,omitempty" yaml:"safer,omitempty"`
 
+	// For the `shell` toolset — opt in to a residual LLM judge that
+	// classifies commands that pass safer's regex pass without matching
+	// any pattern but contain a destructive lexical signal (drop, wipe,
+	// destroy, ...). The format is "provider/model"
+	// (e.g. "anthropic/claude-haiku-4-5"). When set, the runtime
+	// constructs a provider from this string and wires it into the
+	// shell toolset's residual classifier; nil/empty keeps the default
+	// behaviour (BlastRadiusUnknown for every pattern miss).
+	//
+	// Requires Safer:true; validation rejects this field on non-shell
+	// toolsets or when Safer is unset.
+	SaferJudgeModel *string `json:"safer_judge_model,omitempty" yaml:"safer_judge_model,omitempty"`
+
 	// For the `shell` toolset — opt in to a sudo privilege escalation flow.
 	// When enabled, sudo commands prompt the user for their password (masked)
 	// through the host UI via SUDO_ASKPASS; in non-interactive runs the prompt

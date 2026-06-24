@@ -2042,6 +2042,10 @@
           "type": "boolean",
           "description": "Enable destructive command detection for the shell toolset (only valid for type 'shell'). When enabled, every shell command requires explicit user approval regardless of permissions or --yolo. Commands matching docker-agent's embedded safety-pattern taxonomy use the matched blast-radius level; unmatched commands still warn with an unknown blast radius. Default false."
         },
+        "safer_judge_model": {
+          "type": "string",
+          "description": "Opt in to a residual LLM judge for safer-mode pattern misses (only valid for type 'shell' and requires safer: true). Format is 'provider/model' (e.g. 'anthropic/claude-haiku-4-5'). When set and a shell command contains a destructive lexical signal (drop, wipe, destroy, purge, ...) without matching the embedded pattern set, the runtime asks this model to classify the command and uses its refined blast-radius verdict. Fail-closed: timeout, error, or an uncertain verdict falls back to the default unknown-blast-radius confirmation. Unset disables the LLM path."
+        },
         "sudo_askpass": {
           "type": "boolean",
           "description": "Opt in to a sudo privilege escalation flow for the shell toolset (only valid for type 'shell'). When enabled, sudo commands prompt the user for their password through the host UI via SUDO_ASKPASS; in non-interactive runs the prompt is declined automatically. Only a bare 'sudo ...' invocation in a POSIX shell is handled. No effect on Windows. Default false."

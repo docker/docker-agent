@@ -242,6 +242,68 @@ agents:
 `,
 			wantErr: "safer can only be used with type 'shell'",
 		},
+		{
+			name: "safer_judge_model on shell with safer:true is allowed",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: shell
+        safer: true
+        safer_judge_model: anthropic/claude-haiku-4-5
+`,
+		},
+		{
+			name: "safer_judge_model without safer:true is rejected",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: shell
+        safer_judge_model: anthropic/claude-haiku-4-5
+`,
+			wantErr: "safer_judge_model requires safer: true",
+		},
+		{
+			name: "safer_judge_model with safer:false is rejected",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: shell
+        safer: false
+        safer_judge_model: anthropic/claude-haiku-4-5
+`,
+			wantErr: "safer_judge_model requires safer: true",
+		},
+		{
+			name: "safer_judge_model on non-shell toolset is rejected",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: filesystem
+        safer_judge_model: anthropic/claude-haiku-4-5
+`,
+			wantErr: "safer_judge_model can only be used with type 'shell'",
+		},
+		{
+			name: "empty safer_judge_model is rejected",
+			config: `
+agents:
+  root:
+    model: "openai/gpt-4"
+    toolsets:
+      - type: shell
+        safer: true
+        safer_judge_model: ""
+`,
+			wantErr: "safer_judge_model must not be empty when set",
+		},
 	}
 
 	for _, tt := range tests {

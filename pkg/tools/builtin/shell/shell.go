@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/providers"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -590,11 +591,51 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	ts := New(env, runConfig)
 	if toolset.Safer != nil && *toolset.Safer {
 		ts.handler.safer = true
+		// Optional residual LLM judge for pattern misses. When the
+		// toolset config sets safer_judge_model, build a provider from
+		// the "provider/model" string and wire it into the validator.
+		// Failure to construct the judge is non-fatal — safer mode
+		// still runs and falls back to BlastRadiusUnknown for every
+		// pattern miss (the existing PR 3216 behaviour). Validation in
+		// pkg/config/latest already guarantees the field is unset
+		// without safer:true and not empty when present.
+		if toolset.SaferJudgeModel != nil && *toolset.SaferJudgeModel != "" {
+			if judge, err := buildSaferJudge(ctx, *toolset.SaferJudgeModel, runConfig); err != nil {
+				slog.Warn("safer-shell: residual judge not wired",
+					"model", *toolset.SaferJudgeModel, "err", err)
+			} else {
+				ts.SetJudge(judge)
+			}
+		}
 	}
 	if toolset.SudoAskpass != nil && *toolset.SudoAskpass {
 		ts.handler.sudoAskpass = true
 	}
 	return ts, nil
+}
+
+// buildSaferJudge constructs a residual LLM Judge from a "provider/model"
+// spec by building a Provider via the default registry and wrapping it
+// in ProviderJudge. The provider construction depends on the optional
+// model-SDK packages in pkg/model/provider/providers — coupling the
+// shell builtin to that surface is intentional here so safer mode can
+// self-wire its LLM judge from a single YAML field; a follow-up can
+// hoist this wiring into a runtime-level setup pass if the import
+// chain becomes a problem.
+func buildSaferJudge(ctx context.Context, spec string, runConfig *config.RuntimeConfig) (Judge, error) {
+	providerName, modelName, ok := strings.Cut(spec, "/")
+	if !ok || providerName == "" || modelName == "" {
+		return nil, fmt.Errorf("safer_judge_model %q: expected format 'provider/model'", spec)
+	}
+	p, err := providers.NewDefaultRegistry().New(
+		ctx,
+		&latest.ModelConfig{Provider: providerName, Model: modelName},
+		runConfig.EnvProvider(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("construct provider for safer judge: %w", err)
+	}
+	return NewProviderJudge(p), nil
 }
 
 // New creates a new shell toolset.

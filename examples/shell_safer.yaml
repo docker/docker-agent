@@ -8,3 +8,11 @@ agents:
     toolsets:
       - type: shell
         safer: true
+        # Optional: opt in to a residual LLM judge for safer-mode
+        # pattern misses. When set, commands containing a destructive
+        # lexical signal (drop / wipe / destroy / purge / nuke / ...)
+        # without matching the embedded pattern set are classified by
+        # this model. Fail-closed: timeout or error falls back to the
+        # default unknown-blast-radius confirmation. Unset disables
+        # the LLM path entirely.
+        safer_judge_model: anthropic/claude-haiku-4-5
