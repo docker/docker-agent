@@ -199,7 +199,7 @@ settings:
 
 Omit `snapshot` or set it to `false` to leave automatic snapshots off; manually configured snapshot hooks still run.
 
-See [`examples/snapshot_hooks.yaml`](https://github.com/docker/docker-agent/blob/main/examples/snapshot_hooks.yaml) for a complete snapshot hook configuration.
+See [`examples/snapshot_hooks.yaml`](https://github.com/docker/docker-agent/blob/main/examples/snapshot_hooks.yaml) for a complete snapshot hook configuration. For an overview of the snapshot feature and the `/undo` / `/snapshots` commands, see [Snapshots]({{ '/features/snapshots/' | relative_url }}).
 
 <div class="callout callout-warning" markdown="1">
 <div class="callout-title">Two flavors of <code>max_iterations</code>

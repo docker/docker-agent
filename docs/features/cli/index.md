@@ -219,6 +219,8 @@ $ docker agent serve api <agent-file>|<agents-dir>|<registry-ref> [flags]
 | `--record [path]`           | (none)             | Record AI API interactions to a cassette file.                                                            |
 | `--mcp-oauth-redirect-uri <url>` | (none)        | OAuth redirect URI for the unmanaged MCP OAuth flow in server mode. When set, the runtime drives PKCE and code exchange in-process and sends the full authorize URL to the client via elicitation. See [Remote MCP]({{ '/features/remote-mcp/' | relative_url }}) for details. |
 
+> **Diagnostics:** Set `CAGENT_PPROF_ADDR=127.0.0.1:6060` (or `--pprof-addr`, a hidden flag) to start a live Go pprof server at `/debug/pprof/`. Use a loopback address; a non-loopback binding logs a security warning.
+
 All [runtime configuration flags](#runtime-configuration-flags) (`--working-dir`, `--env-from-file`, `--models-gateway`, `--hook-*`, …) are also accepted.
 
 ```bash

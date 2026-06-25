@@ -177,6 +177,46 @@ registry := teamloader.NewToolsetRegistry(creators)
 
 Pass the custom registry via `teamloader.WithToolsetRegistry(registry)` when calling `teamloader.Load`. Note that `teamloader.Load()` does not return an error for unknown toolset types — the failure is recorded as a load-time warning and can be retrieved with `agent.DrainWarnings()`; it is also surfaced via logging and TUI notifications.
 
+## Registering Custom Built-in Themes
+
+When embedding docker-agent, you can contribute your own built-in themes via `styles.RegisterBuiltinThemes`. Registered themes integrate seamlessly with the existing theme picker, `/theme` command, and `settings.theme` config key — they behave exactly like docker-agent's own bundled themes.
+
+```go
+import (
+    "embed"
+
+    "github.com/docker/docker-agent/pkg/tui/styles"
+)
+
+//go:embed themes/*.yaml
+var brandThemes embed.FS
+
+// Call at startup, before applying any persisted theme:
+if err := styles.RegisterBuiltinThemes(brandThemes); err != nil {
+    return err
+}
+```
+
+Each theme file lives at `themes/<name>.yaml` inside the embedded filesystem and is a **partial override** — only the colors you want to change are required; everything else falls back to `DefaultTheme()`.
+
+```yaml
+# themes/brand.yaml
+name: Brand
+colors:
+  accent: "#FF6A00"
+  background: "#1A0F0A"
+```
+
+If `name:` is omitted, docker-agent uses the filename stem as the display name in the theme picker (e.g. `brand` from `themes/brand.yaml`).
+
+To replace docker-agent's default theme entirely, ship the file as `themes/default.yaml` — it masks the bundled default while inheriting any colors you don't set.
+
+**Semantics:**
+
+- Registered sources take precedence over bundled themes; a registered ref overrides a bundled theme of the same name.
+- Among multiple registered sources, last-registered wins on a collision.
+- `RegisterBuiltinThemes` validates eagerly (nil fs, missing `themes/` dir) so errors surface at registration time, not at picker time.
+
 ## MCP OAuth Token Persistence
 
 By default, MCP OAuth tokens are stored in-memory only and are not persisted across process restarts. The CLI registers a keyring-backed store automatically at startup; when embedding docker-agent as a library you must do this yourself if you want tokens to survive restarts.

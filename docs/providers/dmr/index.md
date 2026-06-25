@@ -12,6 +12,8 @@ _Run AI models locally with Docker — no API keys, no costs, full data privacy.
 
 Docker Model Runner (DMR) lets you run open-source AI models directly on your machine. Models run in Docker, so there's no API key needed and no data leaves your computer.
 
+docker-agent automatically discovers models you have already pulled from DMR. When no model is explicitly configured, auto-selection prefers a locally-installed model (choosing the model specified via the `model:` key in the agent YAML if it is already pulled locally, or otherwise the first available non-embedding model) rather than always defaulting to `ai/qwen3:latest` and triggering a pull prompt.
+
 <div class="callout callout-tip" markdown="1">
 <div class="callout-title">No API key needed
 </div>

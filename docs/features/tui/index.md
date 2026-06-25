@@ -124,6 +124,8 @@ When enabled, docker-agent records filesystem snapshots at turn boundaries. The 
 
 Neither command removes messages from the session transcript — they only touch files on disk. Both commands (and the matching command-palette entries) are hidden when snapshots are turned off. Omit `snapshot` or set it to `false` to leave automatic snapshots off; agents can still configure snapshot hooks manually.
 
+See [Snapshots]({{ '/features/snapshots/' | relative_url }}) for how the shadow-git machinery works and how to wire it per-agent.
+
 ## File Attachments
 
 Attach file contents to your messages using the `@` trigger:

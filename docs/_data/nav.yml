@@ -90,6 +90,8 @@
   items:
     - title: Terminal UI
       url: /features/tui/
+    - title: Snapshots
+      url: /features/snapshots/
     - title: CLI Reference
       url: /features/cli/
     - title: MCP Mode

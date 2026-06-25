@@ -51,6 +51,7 @@ All endpoints are under the `/api` prefix.
 | `PATCH`  | `/api/sessions/:id/title`           | Update session title                                    |
 | `PATCH`  | `/api/sessions/:id/permissions`     | Update session permissions                              |
 | `PATCH`  | `/api/sessions/:id/mode`            | Switch the session between `build` (default) and `plan` mode — see [Plan mode](#plan-mode) |
+| `POST`   | `/api/sessions/:id/fork`            | Fork a session at a user message — creates a new session with messages `[0, message_index)` of the parent (see [Session Forking](#session-forking)) |
 | `POST`   | `/api/sessions/:id/resume`          | Resume a paused session (after tool confirmation)       |
 | `POST`   | `/api/sessions/:id/tools/toggle`    | Toggle auto-approve (YOLO) mode                         |
 | `POST`   | `/api/sessions/:id/elicitation`     | Respond to an MCP tool elicitation request              |
@@ -179,6 +180,13 @@ docker agent serve api <agent-file>|<agents-dir> [flags]
 | `--fake`           | (none)           | Replay AI responses from cassette file (testing) |
 | `--record`         | (none)           | Record AI API interactions to cassette file      |
 | `--mcp-oauth-redirect-uri` | (none)   | Public HTTPS URL advertised as the OAuth `redirect_uri` for unmanaged MCP OAuth flows. When set, docker-agent drives PKCE and code exchange in-process and sends the full authorize URL to the client via elicitation. See [Remote MCP]({{ '/features/remote-mcp/' | relative_url }}) for details. |
+
+<div class="callout callout-tip" markdown="1">
+<div class="callout-title">Live profiling (advanced)
+</div>
+  <p>For production diagnostics, set the <code>CAGENT_PPROF_ADDR</code> environment variable (or the hidden <code>--pprof-addr</code> flag) to a TCP address such as <code>127.0.0.1:6060</code>. docker-agent will start a Go pprof HTTP server at <code>/debug/pprof/</code>, which you can query with <code>go tool pprof</code>. Use a loopback address — a non-loopback binding logs a security warning. This flag is intentionally hidden from <code>--help</code>.</p>
+
+</div>
 
 <div class="callout callout-tip" markdown="1">
 <div class="callout-title">Multi-agent configs
@@ -317,6 +325,35 @@ restarted) rebuild a session's state and keep it correct without polling.
 runtime is attached and ready to accept follow-ups, then return its status, or
 `503` on timeout. This is session-scoped, unlike `GET /api/ready`, which fires
 as soon as any session is ready.
+
+## Session Forking
+
+`POST /api/sessions/:id/fork` creates a new session whose history is a copy of the parent up to (but **excluding**) a specified user message. This lets a client "branch" a conversation — e.g. rewind to an earlier question and try a different prompt — without losing the shared history that came before.
+
+**Request body:**
+
+```json
+{ "message_index": 2 }
+```
+
+`message_index` is a **0-based index** into the flat, user-visible message list (the same shape `GET /api/sessions/:id` returns in `messages`). The fork includes messages `[0, message_index)` — the message at `message_index` is **excluded**, so clients can prefill it into their chat input for the user to edit and resubmit.
+
+**Example:**
+
+```bash
+# Fork a session before message index 4 (the user message the user wants to rewrite)
+$ curl -X POST http://localhost:8080/api/sessions/$SID/fork \
+  -H 'Content-Type: application/json' \
+  -d '{"message_index": 4}'
+# Returns: api.SessionResponse for the new forked session
+# New session title: "<parent title> (fork 1)", "(fork 2)", etc.
+```
+
+**Validation:**
+
+- `message_index` must point to a **user-role message**; pointing at an assistant turn returns `400 Bad Request`.
+- Out-of-range indices return `400 Bad Request`.
+- An index that falls inside a sub-session returns `400 Bad Request`. A sub-session is a nested session created when a multi-agent config delegates work to a child agent; its messages are embedded within the parent session's message list and cannot be used as a fork boundary.
 
 ## Idempotent follow-ups
 

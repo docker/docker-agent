@@ -3,6 +3,46 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.86.0] - 2026-06-23
+
+This release adds comprehensive OpenTelemetry instrumentation following GenAI semantic conventions, exposes session forking over HTTP, and includes several bug fixes for model streaming, local model detection, and OAuth registration.
+
+## What's New
+
+- Adds end-to-end OpenTelemetry instrumentation across the runtime, including provider chat/embed/rerank spans, session and stream spans, MCP client/server and OAuth flows, A2A server, memory, RAG, evaluation, hook executor, and built-in tool internals — following GenAI semantic conventions
+- Adds structured status code classification for GenAI errors in telemetry
+- Exposes session forking over HTTP, allowing clients to branch a conversation from a specific point in history
+- Adds a hidden `--pprof-addr` flag (and `CAGENT_PPROF_ADDR` env var) to `serve api` that starts a Go pprof HTTP server at `/debug/pprof/` when explicitly configured
+
+## Bug Fixes
+
+- Fixes OAuth Dynamic Client Registration to advertise both `authorization_code` and `refresh_token` grant types, resolving rejections from strict authorization servers
+- Fixes detection and use of locally-installed Docker Model Runner models, resolving "No model providers available" and "No models available" symptoms when local models are already pulled
+- Fixes permanently stalled `docker-agent run` sessions caused by blocking SSE stream reads with no idle timeout or context cancellation
+- Fixes fork validation and stops classifying fork errors by string matching; serializes fork read-modify-write and preserves safety-rail limits
+- Fixes `toolset.start` span kind attribute by correctly unwrapping the toolset wrapper
+
+## Technical Changes
+
+- Adds tool count attributes to session and MCP spans
+- Adds W3C traceparent injection for remote MCP requests
+- Migrates CI/CD references from `docker/cagent-action` to `docker/docker-agent-action` (v2.0.0)
+### Pull Requests
+
+- [#2620](https://github.com/docker/docker-agent/pull/2620) - feat(otel): instrument runtime with GenAI semantic conventions
+- [#3184](https://github.com/docker/docker-agent/pull/3184) - refactor: make toolsets and providers explicit
+- [#3189](https://github.com/docker/docker-agent/pull/3189) - refactor: decouple embedder deps and register keyring store explicitly
+- [#3192](https://github.com/docker/docker-agent/pull/3192) - fix: advertise refresh_token grant in OAuth DCR + add Miro MCP example
+- [#3194](https://github.com/docker/docker-agent/pull/3194) - docs: update CHANGELOG.md for v1.85.0
+- [#3195](https://github.com/docker/docker-agent/pull/3195) - chore: bump go.yaml.in/yaml/v4 and modernc.org/sqlite
+- [#3199](https://github.com/docker/docker-agent/pull/3199) - feat(server): expose session forking over HTTP
+- [#3201](https://github.com/docker/docker-agent/pull/3201) - feat(serve): add live pprof HTTP server to serve api command
+- [#3203](https://github.com/docker/docker-agent/pull/3203) - chore: migrate cagent-action to docker-agent-action (v2.0.0)
+- [#3206](https://github.com/docker/docker-agent/pull/3206) - fix(dmr): detect and use locally-installed Docker Model Runner models
+- [#3208](https://github.com/docker/docker-agent/pull/3208) - docs: update /docs for PRs merged 2026-06-22–23
+- [#3210](https://github.com/docker/docker-agent/pull/3210) - fix: add idle timeout and context cancellation to model stream reads
+
+
 ## [v1.85.0] - 2026-06-22
 
 This release contains only a changelog documentation update for v1.84.0 with no user-facing changes.
@@ -3702,3 +3742,5 @@ This release improves the terminal user interface with better error handling and
 [v1.84.0]: https://github.com/docker/docker-agent/releases/tag/v1.84.0
 
 [v1.85.0]: https://github.com/docker/docker-agent/releases/tag/v1.85.0
+
+[v1.86.0]: https://github.com/docker/docker-agent/releases/tag/v1.86.0

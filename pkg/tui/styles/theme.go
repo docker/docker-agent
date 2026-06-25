@@ -2,7 +2,9 @@ package styles
 
 import (
 	"embed"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -38,7 +40,114 @@ var (
 	builtinRefsCache   []string
 	builtinRefsCacheOK bool
 	builtinRefsCacheMu sync.Mutex
+
+	// extraThemeFSes holds additional theme sources contributed by embedders via
+	// RegisterBuiltinThemes. They are consulted alongside the bundled themes.
+	extraThemeFSes   []fs.FS
+	extraThemeFSesMu sync.RWMutex
 )
+
+// RegisterBuiltinThemes adds an additional source of built-in themes from fsys.
+// It must contain theme files at "themes/<ref>.yaml" (or .yml) — the same layout
+// and partial-override-onto-default semantics as cagent's bundled themes — so an
+// embedder typically passes an embed.FS declared with //go:embed themes/*.yaml.
+//
+// Registered themes are treated exactly like cagent's own built-ins: they appear
+// in ListThemeRefs and the theme picker, resolve via LoadTheme/ApplyThemeRef, and
+// can be persisted as the user's selection. Registered sources take precedence
+// over the bundled themes, so a registered ref overrides the bundled theme of the
+// same name — including masking "default" with the embedder's own. Precedence is
+// last-wins: when more than one registered source provides the same ref, a later
+// RegisterBuiltinThemes call overrides an earlier one. An override is still merged
+// onto cagent's pristine DefaultTheme() base, so a registered theme only needs to
+// specify the fields it changes; DefaultTheme() itself stays the bundled merge
+// base, and each name is listed once.
+//
+// Call this at startup, before applying any persisted theme, so that a persisted
+// selection naming a registered theme resolves.
+func RegisterBuiltinThemes(fsys fs.FS) error {
+	if fsys == nil {
+		return errors.New("register built-in themes: nil fs")
+	}
+	// Surface an unreadable source eagerly rather than at picker time.
+	if _, err := fs.ReadDir(fsys, "themes"); err != nil {
+		return fmt.Errorf("register built-in themes: %w", err)
+	}
+
+	extraThemeFSesMu.Lock()
+	extraThemeFSes = append(extraThemeFSes, fsys)
+	extraThemeFSesMu.Unlock()
+
+	// Newly registered themes must appear in subsequent listings.
+	builtinRefsCacheMu.Lock()
+	builtinRefsCacheOK = false
+	builtinRefsCacheMu.Unlock()
+
+	// Drop any theme already resolved under a ref this source overrides (a bundled
+	// built-in, or "default"), so the registered override/mask wins even when it
+	// was loaded before registration — built-in cache entries are otherwise treated
+	// as permanently valid. DefaultTheme()'s own cache is separate and untouched, so
+	// it stays the pristine merge base.
+	InvalidateThemeCache("")
+
+	return nil
+}
+
+// registeredThemeFSes returns a snapshot of the embedder-contributed theme
+// sources.
+func registeredThemeFSes() []fs.FS {
+	extraThemeFSesMu.RLock()
+	defer extraThemeFSesMu.RUnlock()
+	return extraThemeFSes
+}
+
+// readThemeRefsFromFS lists the theme refs (file basenames without extension)
+// under the "themes" directory of fsys.
+func readThemeRefsFromFS(fsys fs.FS) ([]string, error) {
+	entries, err := fs.ReadDir(fsys, "themes")
+	if err != nil {
+		return nil, err
+	}
+	var refs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if before, ok := strings.CutSuffix(name, ".yaml"); ok {
+			refs = append(refs, before)
+		} else if before, ok := strings.CutSuffix(name, ".yml"); ok {
+			refs = append(refs, before)
+		}
+	}
+	return refs, nil
+}
+
+// readThemeData returns the raw YAML for ref from fsys, trying .yaml then .yml.
+func readThemeData(fsys fs.FS, ref string) ([]byte, bool) {
+	if data, err := fs.ReadFile(fsys, "themes/"+ref+".yaml"); err == nil {
+		return data, true
+	}
+	if data, err := fs.ReadFile(fsys, "themes/"+ref+".yml"); err == nil {
+		return data, true
+	}
+	return nil, false
+}
+
+// readRegisteredThemeData returns the raw YAML for ref from the most recently
+// registered source that provides it. Registered sources take precedence over
+// cagent's bundled themes, so an embedder can override a built-in — including
+// masking "default" with their own — and a later RegisterBuiltinThemes call wins
+// a name collision with an earlier one (last-wins).
+func readRegisteredThemeData(ref string) ([]byte, bool) {
+	// Iterate newest-first so a later RegisterBuiltinThemes call wins (last-wins).
+	for _, fsys := range slices.Backward(registeredThemeFSes()) {
+		if data, ok := readThemeData(fsys, ref); ok {
+			return data, true
+		}
+	}
+	return nil, false
+}
 
 // InvalidateThemeCache clears the theme cache for a specific ref, or all if ref is empty.
 // This is primarily for testing; the cache is mtime-aware so it auto-invalidates on file changes.
@@ -267,23 +376,28 @@ func listBuiltinThemeRefs() ([]string, error) {
 		return builtinRefsCache, nil
 	}
 
-	var refs []string
-
-	entries, err := builtinThemes.ReadDir("themes")
+	refs, err := readThemeRefsFromFS(builtinThemes)
 	if err != nil {
 		return nil, fmt.Errorf("reading embedded themes directory: %w", err)
 	}
 
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
+	// Append themes contributed by embedders, skipping the reserved "default"
+	// ref and any name that collides with an existing built-in.
+	seen := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		seen[r] = true
+	}
+	for _, fsys := range registeredThemeFSes() {
+		extraRefs, err := readThemeRefsFromFS(fsys)
+		if err != nil {
+			return nil, fmt.Errorf("reading registered themes: %w", err)
 		}
-		name := entry.Name()
-		// Accept .yaml and .yml files
-		if before, ok := strings.CutSuffix(name, ".yaml"); ok {
-			refs = append(refs, before)
-		} else if before, ok := strings.CutSuffix(name, ".yml"); ok {
-			refs = append(refs, before)
+		for _, r := range extraRefs {
+			if r == DefaultThemeRef || seen[r] {
+				continue
+			}
+			seen[r] = true
+			refs = append(refs, r)
 		}
 	}
 
@@ -524,18 +638,15 @@ func validateThemeRef(ref string) error {
 func loadBuiltinTheme(ref string) (*Theme, error) {
 	base := DefaultTheme()
 
-	// Try .yaml first, then .yml
-	var data []byte
-	var err error
-
-	yamlPath := "themes/" + ref + ".yaml"
-	ymlPath := "themes/" + ref + ".yml"
-
-	data, err = builtinThemes.ReadFile(yamlPath)
-	if err != nil {
-		data, err = builtinThemes.ReadFile(ymlPath)
+	// Prefer embedder-registered sources over cagent's bundled themes, so an
+	// embedder can override a built-in — including masking "default" with their
+	// own. The override is still merged onto the bundled DefaultTheme() base, so
+	// a registered theme only needs to specify the fields it changes.
+	data, ok := readRegisteredThemeData(ref)
+	if !ok {
+		data, ok = readThemeData(builtinThemes, ref)
 	}
-	if err != nil {
+	if !ok {
 		return nil, fmt.Errorf("built-in theme %q not found", ref)
 	}
 
