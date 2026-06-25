@@ -611,6 +611,17 @@ func (r *LocalRuntime) runTurn(
 	// hook's output is persisted, so per-turn signals (date, prompt
 	// files) refresh every turn while session-level context (cwd, OS,
 	// arch) stays stable — all without bloating the stored history.
+	//
+	// Splice order (extras passed to GetMessages):
+	//   session_start: ls.sessionStartMsgs  (stable for the session's life)
+	//   user_prompt_submit: ls.userPromptMsgs (only on real user prompts)
+	//   turn_start: turnStartMsgs           (refreshed each turn)
+	//
+	// PREFIX-STABILITY RULE: all extras must be byte-stable within a UTC
+	// day.  Only add_date ("Today's date: YYYY-MM-DD") may rotate, and
+	// only at midnight.  Do NOT add timestamps, counters, request IDs, or
+	// other per-turn volatile content here — each such addition busts the
+	// prompt-cache read for every turn of every session.
 	turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
 	messages := sess.GetMessages(a, slices.Concat(ls.sessionStartMsgs, ls.userPromptMsgs, turnStartMsgs)...)
 	slog.DebugContext(ctx, "Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))

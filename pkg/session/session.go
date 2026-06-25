@@ -1081,6 +1081,29 @@ func (s *Session) GetMessages(a *agent.Agent, extraSystemMessages ...chat.Messag
 	// is acceptable: the cache simply rotates when the date rolls over,
 	// matching the behavior of the previous inline
 	// buildContextSpecificSystemMessages path.
+	//
+	// PREFIX-STABILITY INVARIANT
+	// The cacheable prefix — system param checkpoint #1 (invariant) plus
+	// checkpoint #2 (last extra) — MUST be byte-stable across consecutive
+	// turns of the same session so that Anthropic prompt-cache reads hit
+	// rather than paying full-price cache-creation tokens each turn.
+	//
+	// Rules:
+	//   1. Invariant system messages (agent instruction, toolset instructions,
+	//      sub-agent/handoff prompts) must be derived solely from static agent
+	//      configuration — no timestamps, counts, IDs, or per-session state.
+	//   2. Extras supplied here (session_start / turn_start hook output,
+	//      prompt-file contents) must likewise be byte-stable within a UTC day.
+	//   3. The add_date builtin ("Today's date: YYYY-MM-DD") is the ONLY
+	//      sanctioned volatile extra.  It rotates at UTC midnight — at most
+	//      once per session — and never busts checkpoint #1.  Adding further
+	//      volatile content (time-of-day, counters, per-request IDs, etc.)
+	//      is prohibited; doing so degrades prompt-cache efficiency for every
+	//      turn of every session.
+	//
+	// See docker/agentic-platform docs/design/prefix-stability-audit.md for
+	// the full per-source audit and the rationale for accepting add_date's
+	// daily rotation.
 	if len(extraSystemMessages) > 0 {
 		messages = append(messages, extraSystemMessages...)
 		markLastMessageAsCacheControl(messages[len(messages)-len(extraSystemMessages):])

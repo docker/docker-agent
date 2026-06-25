@@ -39,7 +39,33 @@
 //
 // turn_start builtins recompute every turn (date, git state).
 // session_start builtins run once per session for context that's
-// stable for its duration. snapshot is stateful: it keeps per-session
+// stable for its duration.
+//
+// PREFIX-STABILITY CONTRACT (prompt-cache efficiency)
+//
+// All session_start and turn_start builtins inject their AdditionalContext
+// into the cacheable prefix — the region of the Anthropic system prompt
+// that lies before the second cache checkpoint (CP2).  To preserve prompt
+// caching across consecutive turns:
+//
+//   - session_start context (add_environment_info, add_directory_listing,
+//     add_user_info, add_recent_commits) must be byte-stable for the
+//     session's entire life.
+//   - turn_start context (add_prompt_files) must be byte-stable for the
+//     session's entire life (files do not change mid-session).
+//   - add_date is the ONLY sanctioned volatile turn_start item.  Its
+//     "Today's date: YYYY-MM-DD" payload rotates at most once per session
+//     (at UTC midnight) and never busts checkpoint #1 (system + tools).
+//
+// Do NOT add timestamps, wall-clock time, per-request IDs, mutable
+// counters, or any other per-turn volatile data to a session_start or
+// turn_start builtin.  Every such addition degrades prompt-cache reads
+// for every turn of every session that uses the builtin.
+// Note: add_git_status and add_git_diff are deliberately volatile turn_start
+// builtins; configuring them trades away CP2 cache-hit efficiency in exchange
+// for up-to-date diff context.  They are not auto-injected by the platform.
+//
+// snapshot is stateful: it keeps per-session
 // turn/tool snapshot hashes and undo checkpoints in memory while the
 // shadow git objects live under the data directory. Undo checkpoints
 // intentionally survive the RunStream session_end cleanup so /undo
