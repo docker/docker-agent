@@ -74,6 +74,12 @@ type Config struct {
 	AutoApprove    bool
 	HideToolCalls  bool
 	OutputJSON     bool
+
+	// SummaryOut, when non-nil, receives the end-of-run recap (interaction
+	// summary, model usage, token/cost totals). It is kept separate from the
+	// agent's response stream so callers can route it to stderr and keep
+	// stdout machine-consumable. The recap is skipped in JSON output mode.
+	SummaryOut io.Writer
 }
 
 // Run executes an agent in non-TUI mode, handling user input and runtime events.
@@ -309,6 +315,14 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				return err
 			}
 		}
+	}
+
+	// Print an end-of-run recap (interaction summary, model usage, token/cost
+	// totals) to the dedicated summary writer (typically stderr) so stdout stays
+	// machine-consumable. JSON mode emits machine-readable events instead, so it
+	// is skipped there.
+	if !cfg.OutputJSON && cfg.SummaryOut != nil {
+		NewPrinter(cfg.SummaryOut).PrintSessionSummary(sess.Stats())
 	}
 
 	// Wrap runtime errors to prevent duplicate error messages and usage display

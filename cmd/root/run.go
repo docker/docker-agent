@@ -287,10 +287,10 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
 
-	return f.runOrExec(ctx, out, args, useTUI)
+	return f.runOrExec(ctx, out, cmd.ErrOrStderr(), args, useTUI)
 }
 
-func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []string, useTUI bool) error {
+func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, errOut io.Writer, args []string, useTUI bool) error {
 	slog.DebugContext(ctx, "Starting agent", "agent", f.agentName)
 
 	// Start profiling if requested
@@ -436,7 +436,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		// Non-interactive (--exec) runs never clean up the worktree: there
 		// is no safe moment to prompt, and silently discarding work would
 		// be surprising. The worktree is left in place for later inspection.
-		return f.handleExecMode(ctx, out, rt, sess, args)
+		return f.handleExecMode(ctx, out, errOut, rt, sess, args)
 	}
 
 	listenOpt, err := f.startAttachedServer(ctx, out, rt, sess)
@@ -823,7 +823,7 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 	return localRt, sess, nil
 }
 
-func (f *runExecFlags) handleExecMode(ctx context.Context, out *cli.Printer, rt runtime.Runtime, sess *session.Session, args []string) error {
+func (f *runExecFlags) handleExecMode(ctx context.Context, out *cli.Printer, errOut io.Writer, rt runtime.Runtime, sess *session.Session, args []string) error {
 	if f.sessionReadOnly {
 		return errors.New("--session-read-only cannot be used with --exec: there is nothing to display without a TUI")
 	}
@@ -840,6 +840,7 @@ func (f *runExecFlags) handleExecMode(ctx context.Context, out *cli.Printer, rt 
 		HideToolCalls:  f.hideToolCalls,
 		OutputJSON:     f.outputJSON,
 		AutoApprove:    f.autoApprove,
+		SummaryOut:     errOut,
 	}, rt, sess, userMessages)
 	if cliErr, ok := errors.AsType[cli.RuntimeError](err); ok {
 		return RuntimeError{Err: cliErr.Err}
