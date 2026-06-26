@@ -89,11 +89,19 @@ func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Se
 	messageCountBefore := len(sess.OwnMessages())
 	contents := make([]string, 0, len(steered))
 	for i, sm := range steered {
+		// Record the raw, unframed text for the
+		// user_steering_messages_submit hook: hooks always see exactly what
+		// the user sent, never the <system-reminder> envelope.
 		contents = append(contents, sm.Content)
+		// Render the framing envelope first, then append the newline
+		// separator to the framed result so the "\n" lands after the
+		// closing tag of a wrapped message (where the gluing it prevents
+		// would otherwise occur).
+		framed := frameSteeredMessage(sm)
 		if i < len(steered)-1 {
-			sm = appendNewlineToQueuedMessage(sm)
+			framed = appendNewlineToQueuedMessage(framed)
 		}
-		r.appendSteerAndEmit(sess, sm, events)
+		r.appendSteerAndEmit(sess, framed, events)
 	}
 	stop, stopMsg, ctxMsgs := r.executeUserSteeringMessagesSubmitHooks(ctx, sess, a, contents, events)
 	return steerResult{
@@ -138,6 +146,68 @@ func appendNewlineToQueuedMessage(sm QueuedMessage) QueuedMessage {
 	// Shallow-copy the slice so we don't mutate the original.
 	parts := append([]chat.MessagePart(nil), sm.MultiContent...)
 	parts[last].Text += "\n"
+	sm.MultiContent = parts
+	return sm
+}
+
+// Framing envelopes. The user's text is embedded between the preamble and
+// postamble so the model reads the user's words inside an explicit
+// meta-instruction. The wrapper is deliberately persisted into the session and
+// surfaced in the UserMessageEvent — the same trade-off documented for the
+// newline above — because the runtime passes chat.Message slices straight to
+// the provider and this injection point is the only place that doesn't require
+// restructuring.
+const (
+	framingInstructionPreamble  = "<system-reminder>\nThe user sent a new message while you were working:\n\n"
+	framingInstructionPostamble = "\n\nIMPORTANT: finish your current task first, then address this. Do not abandon what you're doing.\n</system-reminder>"
+
+	framingReplacementPreamble  = "<system-reminder>\nThe user has changed direction:\n\n"
+	framingReplacementPostamble = "\n\nAbandon your current task and address this instead.\n</system-reminder>"
+)
+
+// resolveSteerFraming maps the zero value to the steer default
+// (FramingInstruction) and leaves explicit, recognized values untouched. Any
+// unrecognized value falls back to FramingPlain so a malformed caller never
+// silently gets an envelope it didn't ask for; the HTTP boundary rejects such
+// values outright, this is the defense-in-depth for direct QueuedMessage
+// construction.
+func resolveSteerFraming(f Framing) Framing {
+	switch f {
+	case FramingPlain, FramingInstruction, FramingReplacement:
+		return f
+	case "":
+		return FramingInstruction
+	default:
+		return FramingPlain
+	}
+}
+
+// frameSteeredMessage renders sm according to its framing. FramingPlain (and
+// the unrecognized fallback) returns sm unchanged. instruction/replacement
+// wrap the message text in a <system-reminder> envelope. For multi-content
+// messages the envelope is added as leading and trailing text parts so
+// non-text parts (e.g. images) are preserved in place, mirroring how
+// appendNewlineToQueuedMessage leaves non-text parts alone.
+func frameSteeredMessage(sm QueuedMessage) QueuedMessage {
+	var pre, post string
+	switch resolveSteerFraming(sm.Framing) {
+	case FramingInstruction:
+		pre, post = framingInstructionPreamble, framingInstructionPostamble
+	case FramingReplacement:
+		pre, post = framingReplacementPreamble, framingReplacementPostamble
+	default:
+		return sm
+	}
+
+	if len(sm.MultiContent) == 0 {
+		sm.Content = pre + sm.Content + post
+		return sm
+	}
+
+	parts := make([]chat.MessagePart, 0, len(sm.MultiContent)+2)
+	parts = append(parts, chat.MessagePart{Type: chat.MessagePartTypeText, Text: pre})
+	parts = append(parts, sm.MultiContent...)
+	parts = append(parts, chat.MessagePart{Type: chat.MessagePartTypeText, Text: post})
 	sm.MultiContent = parts
 	return sm
 }

@@ -163,8 +163,19 @@ type ResumeElicitationRequest struct {
 // SteerSessionRequest represents a request to inject user messages into a
 // running agent session. The messages are picked up by the agent loop between
 // tool execution and the next LLM call.
+//
+// Framing controls how the steered messages are rendered for the model:
+//   - "plain": a bare user turn (no envelope) — for programmatic callers.
+//   - "instruction": wrapped in a <system-reminder> asking the model to finish
+//     its current task first, then address the message.
+//   - "replacement": wrapped in a <system-reminder> asking the model to abandon
+//     its current task and address the message instead.
+//
+// An empty value defaults to "instruction" on the steer route. The follow-up
+// route reuses this type but ignores Framing — follow-ups are always plain.
 type SteerSessionRequest struct {
 	Messages []Message `json:"messages"`
+	Framing  string    `json:"framing,omitempty"`
 }
 
 // FollowUpResponse is the response to POST /api/sessions/:id/followup.

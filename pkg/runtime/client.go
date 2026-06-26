@@ -307,9 +307,11 @@ func (c *Client) ResumeSession(ctx context.Context, id, confirmation, reason, to
 	return c.doRequest(ctx, http.MethodPost, "/api/sessions/"+id+"/resume", req, nil)
 }
 
-// SteerSession injects user messages into a running session mid-turn.
-func (c *Client) SteerSession(ctx context.Context, sessionID string, messages []api.Message) error {
-	req := api.SteerSessionRequest{Messages: messages}
+// SteerSession injects user messages into a running session mid-turn. framing
+// selects how the model reads the injected text ("plain", "instruction", or
+// "replacement"); empty defaults to "instruction" server-side.
+func (c *Client) SteerSession(ctx context.Context, sessionID string, messages []api.Message, framing string) error {
+	req := api.SteerSessionRequest{Messages: messages, Framing: framing}
 	return c.doRequest(ctx, http.MethodPost, "/api/sessions/"+sessionID+"/steer", req, nil)
 }
 

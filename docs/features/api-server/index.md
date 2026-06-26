@@ -54,7 +54,7 @@ All endpoints are under the `/api` prefix.
 | `POST`   | `/api/sessions/:id/resume`          | Resume a paused session (after tool confirmation)       |
 | `POST`   | `/api/sessions/:id/tools/toggle`    | Toggle auto-approve (YOLO) mode                         |
 | `POST`   | `/api/sessions/:id/elicitation`     | Respond to an MCP tool elicitation request              |
-| `POST`   | `/api/sessions/:id/steer`           | Inject messages into a running turn (pre-empts current) |
+| `POST`   | `/api/sessions/:id/steer`           | Inject messages into a running turn, with a `framing` axis (see [Steering a running turn](#steering-a-running-turn)) |
 | `POST`   | `/api/sessions/:id/followup`        | Enqueue messages to run after the current turn finishes (supports an `Idempotency-Key` — see [Idempotent follow-ups](#idempotent-follow-ups)). |
 | `GET`    | `/api/sessions/:id/models`          | List available models for the session's current agent   |
 
@@ -328,6 +328,40 @@ $ curl -X POST http://localhost:8080/api/sessions/$SID/fork \
 
 - Out-of-range ordinals (negative, or at/past the user-message count) return `400 Bad Request`.
 - An ordinal that resolves to a user message inside a sub-session returns `400 Bad Request`. A sub-session is a nested session created when a multi-agent config delegates work to a child agent; its messages are embedded within the parent session's message list and cannot be used as a fork boundary.
+
+## Steering a running turn
+
+`POST /api/sessions/:id/steer` injects messages into a turn that is already
+running. They are picked up after the current batch of tool calls finishes but
+before the next model call, so the agent reacts within the same turn rather
+than waiting for it to end (that is what `followup` is for).
+
+An optional request-level `framing` field controls how the model reads the
+injected text. It is orthogonal to scheduling — it only changes the rendering:
+
+| `framing`       | What the model sees                                             | Use for |
+|-----------------|----------------------------------------------------------------|---------|
+| `instruction`   | The text wrapped in a `<system-reminder>` asking it to finish the current task first, then address the message. **Default.** | Interactive course corrections ("also do Y", "btw, Z"). |
+| `replacement`   | The text wrapped in a `<system-reminder>` asking it to abandon the current task and address the message instead. | Explicit pivots ("stop, do X instead"). |
+| `plain`         | The bare text, as a fresh user turn (no envelope).             | Programmatic callers (chains, channels, bridges) that don't want a meta-instruction. |
+
+An omitted or empty `framing` defaults to `instruction`. An unrecognized value
+returns `400 Bad Request`.
+
+```bash
+# Course-correct without abandoning the in-flight work (default framing):
+$ curl -X POST http://127.0.0.1:8080/api/sessions/$SID/steer \
+    -H 'Content-Type: application/json' \
+    -d '{"messages":[{"content":"also use pytest, not unittest"}]}'
+
+# Explicit pivot:
+$ curl -X POST http://127.0.0.1:8080/api/sessions/$SID/steer \
+    -H 'Content-Type: application/json' \
+    -d '{"messages":[{"content":"skip the bug fix, just write a reproducer test"}],"framing":"replacement"}'
+```
+
+The `followup` endpoint reuses the same request body but ignores `framing`:
+follow-ups always start a fresh turn as a plain user message.
 
 ## Idempotent follow-ups
 

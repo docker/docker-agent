@@ -3037,8 +3037,10 @@ func TestSteer_IdleWindowIsConsumedOnNextTurn(t *testing.T) {
 
 	// Enqueue a steer message BEFORE calling RunStream — simulating the
 	// idle-window race where a Steer call lands between two RunStream
-	// invocations.
-	err = rt.Steer(QueuedMessage{Content: "urgent: change direction"})
+	// invocations. Plain framing keeps the content assertions below exact;
+	// the instruction/replacement envelopes are covered by the dedicated
+	// framing tests.
+	err = rt.Steer(QueuedMessage{Content: "urgent: change direction", Framing: FramingPlain})
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("Do the task"))
@@ -3131,8 +3133,9 @@ func TestSteer_EmptySessionBootstrap(t *testing.T) {
 	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 
-	// Enqueue before RunStream — zero messages in the session.
-	err = rt.Steer(QueuedMessage{Content: "bootstrap message"})
+	// Enqueue before RunStream — zero messages in the session. Plain framing
+	// keeps the content assertions below exact.
+	err = rt.Steer(QueuedMessage{Content: "bootstrap message", Framing: FramingPlain})
 	require.NoError(t, err)
 
 	// Fresh session with NO messages (SendUserMessage defaults to true but
@@ -3287,7 +3290,8 @@ func TestSteer_EndOfIterationRaceIsConsumedInCurrentRunStream(t *testing.T) {
 	turn1 := &hookStream{
 		mockStream: turn1Base,
 		onStop: func() {
-			_ = rt.Steer(QueuedMessage{Content: "end-of-iter steer"})
+			// Plain framing keeps the content assertions below exact.
+			_ = rt.Steer(QueuedMessage{Content: "end-of-iter steer", Framing: FramingPlain})
 		},
 	}
 	// Turn 2: the loop re-entered after the steer was consumed; model acks.
@@ -3445,10 +3449,12 @@ func TestDrainAndEmitSteered_MultipleMessages(t *testing.T) {
 	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 
-	// Enqueue three plain-text steer messages before draining.
-	require.NoError(t, rt.Steer(QueuedMessage{Content: "first"}))
-	require.NoError(t, rt.Steer(QueuedMessage{Content: "second"}))
-	require.NoError(t, rt.Steer(QueuedMessage{Content: "third"}))
+	// Enqueue three plain-text steer messages before draining. Plain framing
+	// isolates the newline-separator behavior under test from the
+	// instruction/replacement envelopes.
+	require.NoError(t, rt.Steer(QueuedMessage{Content: "first", Framing: FramingPlain}))
+	require.NoError(t, rt.Steer(QueuedMessage{Content: "second", Framing: FramingPlain}))
+	require.NoError(t, rt.Steer(QueuedMessage{Content: "third", Framing: FramingPlain}))
 
 	sess := session.New()
 	events := make(chan Event, 16)
@@ -3498,7 +3504,8 @@ func TestDrainAndEmitSteered_MultiContent(t *testing.T) {
 	rt, err := NewLocalRuntime(tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 
-	// Two multi-content messages.
+	// Two multi-content messages. Plain framing isolates the newline-separator
+	// behavior under test from the instruction/replacement envelopes.
 	require.NoError(t, rt.Steer(QueuedMessage{
 		Content: "first",
 		MultiContent: []chat.MessagePart{
@@ -3506,12 +3513,14 @@ func TestDrainAndEmitSteered_MultiContent(t *testing.T) {
 			{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "https://example.com/a.png"}},
 			{Type: chat.MessagePartTypeText, Text: "first-text-after-img"},
 		},
+		Framing: FramingPlain,
 	}))
 	require.NoError(t, rt.Steer(QueuedMessage{
 		Content: "second",
 		MultiContent: []chat.MessagePart{
 			{Type: chat.MessagePartTypeText, Text: "second"},
 		},
+		Framing: FramingPlain,
 	}))
 
 	sess := session.New()

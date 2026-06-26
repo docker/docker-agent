@@ -18,6 +18,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -41,8 +42,94 @@ func TestAttachedServer_SteerReachesAttachedRuntime(t *testing.T) {
 
 	addr := "http://" + ln.Addr().String()
 	resp := httpDoTCP(t, ctx, http.MethodPost, addr+"/api/sessions/"+sess.ID+"/steer",
-		api.SteerSessionRequest{Messages: []api.Message{{Content: "hello"}}})
+		api.SteerSessionRequest{Messages: []api.Message{{Content: "hello"}}, Framing: "replacement"})
 	assert.Contains(t, string(resp), "queued")
+
+	// The request-level framing must survive JSON binding and reach the runtime.
+	steered := fake.steeredMessages()
+	require.Len(t, steered, 1)
+	assert.Equal(t, "hello", steered[0].Content)
+	assert.Equal(t, runtime.FramingReplacement, steered[0].Framing)
+}
+
+// TestAttachedServer_SteerForwardsDefaultAndPlainFraming verifies that an
+// omitted framing field binds to the zero value (which the runtime resolves to
+// instruction at drain time) and that an explicit "plain" survives JSON
+// binding for programmatic callers.
+func TestAttachedServer_SteerForwardsDefaultAndPlainFraming(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	fake := &fakeRuntime{}
+	sm.AttachRuntime(sess.ID, fake, sess)
+
+	srv := NewWithManager(sm, "")
+	ln, err := Listen(ctx, "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(ctx, ln) }()
+
+	addr := "http://" + ln.Addr().String()
+
+	// Omitted framing must be accepted (no 400) and arrive as the zero value.
+	resp := httpDoTCP(t, ctx, http.MethodPost, addr+"/api/sessions/"+sess.ID+"/steer",
+		api.SteerSessionRequest{Messages: []api.Message{{Content: "default one"}}})
+	assert.Contains(t, string(resp), "queued")
+
+	// Explicit plain framing is forwarded verbatim.
+	resp = httpDoTCP(t, ctx, http.MethodPost, addr+"/api/sessions/"+sess.ID+"/steer",
+		api.SteerSessionRequest{Messages: []api.Message{{Content: "plain one"}}, Framing: "plain"})
+	assert.Contains(t, string(resp), "queued")
+
+	steered := fake.steeredMessages()
+	require.Len(t, steered, 2)
+	assert.Equal(t, runtime.Framing(""), steered[0].Framing, "omitted framing arrives as the zero value")
+	assert.Equal(t, runtime.FramingPlain, steered[1].Framing)
+}
+
+// TestAttachedServer_SteerRejectsInvalidFraming verifies the steer endpoint
+// rejects an unrecognized framing value with 400 before reaching the runtime.
+func TestAttachedServer_SteerRejectsInvalidFraming(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	fake := &fakeRuntime{}
+	sm.AttachRuntime(sess.ID, fake, sess)
+
+	srv := NewWithManager(sm, "")
+	ln, err := Listen(ctx, "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = srv.Serve(ctx, ln) }()
+
+	addr := "http://" + ln.Addr().String()
+	buf, err := json.Marshal(api.SteerSessionRequest{
+		Messages: []api.Message{{Content: "hello"}},
+		Framing:  "bogus",
+	})
+	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		addr+"/api/sessions/"+sess.ID+"/steer", bytes.NewReader(buf))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	httpResp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer httpResp.Body.Close()
+	body, err := io.ReadAll(httpResp.Body)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusBadRequest, httpResp.StatusCode, string(body))
+	assert.Contains(t, string(body), "invalid framing")
+	assert.Empty(t, fake.steeredMessages(), "an invalid framing must be rejected before reaching the runtime")
 }
 
 func TestAttachedServer_EventStreamEmitsRegisteredEvents(t *testing.T) {

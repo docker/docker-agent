@@ -53,7 +53,7 @@ func (s *stubRemoteClient) RunAgentWithAgentName(context.Context, string, string
 	panic("RunAgentWithAgentName not exercised by the contract test")
 }
 
-func (s *stubRemoteClient) SteerSession(context.Context, string, []api.Message) error {
+func (s *stubRemoteClient) SteerSession(context.Context, string, []api.Message, string) error {
 	return nil
 }
 

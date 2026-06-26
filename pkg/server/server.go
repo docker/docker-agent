@@ -555,7 +555,12 @@ func (s *Server) steerSession(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "at least one message is required")
 	}
 
-	if err := s.sm.SteerSession(c.Request().Context(), sessionID, req.Messages); err != nil {
+	if !runtime.Framing(req.Framing).Valid() {
+		return echo.NewHTTPError(http.StatusBadRequest,
+			fmt.Sprintf("invalid framing %q: must be one of plain, instruction, replacement", req.Framing))
+	}
+
+	if err := s.sm.SteerSession(c.Request().Context(), sessionID, req.Messages, req.Framing); err != nil {
 		if strings.Contains(err.Error(), "queue full") {
 			c.Response().Header().Set("Retry-After", "1")
 			return echo.NewHTTPError(http.StatusTooManyRequests, "steer queue full")

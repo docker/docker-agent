@@ -33,8 +33,10 @@ type RemoteClient interface {
 	// RunAgentWithAgentName executes an agent with a specific agent name. See RunAgent for the meaning of model.
 	RunAgentWithAgentName(ctx context.Context, sessionID, agent, agentName string, messages []api.Message, model string) (<-chan Event, error)
 
-	// SteerSession injects user messages into a running session mid-turn
-	SteerSession(ctx context.Context, sessionID string, messages []api.Message) error
+	// SteerSession injects user messages into a running session mid-turn.
+	// framing selects how the model reads the injected text ("plain",
+	// "instruction", or "replacement"); empty defaults to "instruction".
+	SteerSession(ctx context.Context, sessionID string, messages []api.Message, framing string) error
 
 	// FollowUpSession queues messages for end-of-turn processing
 	FollowUpSession(ctx context.Context, sessionID string, messages []api.Message) error

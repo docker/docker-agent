@@ -703,9 +703,11 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 
 // SteerSession enqueues user messages for mid-turn injection into a running
 // session. The messages are picked up by the agent loop after the current tool
-// calls finish but before the next LLM call. Returns an error if the session
-// is not actively running or if the steer buffer is full.
-func (sm *SessionManager) SteerSession(_ context.Context, sessionID string, messages []api.Message) error {
+// calls finish but before the next LLM call. framing selects how the model
+// reads the injected text ("plain", "instruction", or "replacement"); empty
+// defaults to "instruction" when the message is drained. Returns an error if
+// the session is not actively running or if the steer buffer is full.
+func (sm *SessionManager) SteerSession(_ context.Context, sessionID string, messages []api.Message, framing string) error {
 	rt, exists := sm.runtimeSessions.Load(sessionID)
 	if !exists {
 		return ErrSessionNotRunning
@@ -715,6 +717,7 @@ func (sm *SessionManager) SteerSession(_ context.Context, sessionID string, mess
 		if err := rt.runtime.Steer(runtime.QueuedMessage{
 			Content:      msg.Content,
 			MultiContent: msg.MultiContent,
+			Framing:      runtime.Framing(framing),
 		}); err != nil {
 			return err
 		}

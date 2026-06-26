@@ -27,6 +27,10 @@ type fakeRuntime struct {
 	concurrentStreams atomic.Int32
 	maxConcurrent     atomic.Int32
 	streamDelay       time.Duration
+
+	steerMu  sync.Mutex
+	steered  []runtime.QueuedMessage
+	followed []runtime.QueuedMessage
 }
 
 func (f *fakeRuntime) RunStream(_ context.Context, _ *session.Session) <-chan runtime.Event {
@@ -49,9 +53,25 @@ func (f *fakeRuntime) RunStream(_ context.Context, _ *session.Session) <-chan ru
 
 func (f *fakeRuntime) Resume(_ context.Context, _ runtime.ResumeRequest) {}
 
-func (f *fakeRuntime) Steer(_ runtime.QueuedMessage) error { return nil }
+func (f *fakeRuntime) Steer(msg runtime.QueuedMessage) error {
+	f.steerMu.Lock()
+	defer f.steerMu.Unlock()
+	f.steered = append(f.steered, msg)
+	return nil
+}
 
-func (f *fakeRuntime) FollowUp(_ runtime.QueuedMessage) error { return nil }
+func (f *fakeRuntime) FollowUp(msg runtime.QueuedMessage) error {
+	f.steerMu.Lock()
+	defer f.steerMu.Unlock()
+	f.followed = append(f.followed, msg)
+	return nil
+}
+
+func (f *fakeRuntime) steeredMessages() []runtime.QueuedMessage {
+	f.steerMu.Lock()
+	defer f.steerMu.Unlock()
+	return append([]runtime.QueuedMessage(nil), f.steered...)
+}
 
 func (f *fakeRuntime) ResumeElicitation(_ context.Context, _ tools.ElicitationAction, _ map[string]any) error {
 	return nil
@@ -107,7 +127,43 @@ func TestAttachRuntime_RegistersRuntimeForExternalDriver(t *testing.T) {
 	sm.AttachRuntime(sess.ID, fake, sess)
 
 	// Steer routes through the attached runtime, not a freshly built one.
-	require.NoError(t, sm.SteerSession(ctx, sess.ID, []api.Message{{Content: "hi"}}))
+	require.NoError(t, sm.SteerSession(ctx, sess.ID, []api.Message{{Content: "hi"}}, ""))
+
+	steered := fake.steeredMessages()
+	require.Len(t, steered, 1)
+	assert.Equal(t, "hi", steered[0].Content)
+}
+
+// TestSteerSession_ThreadsFramingToRuntime verifies the request-level framing
+// is forwarded verbatim onto every QueuedMessage handed to the runtime, while
+// an empty framing is left as the zero value for the runtime to resolve.
+func TestSteerSession_ThreadsFramingToRuntime(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	fake := &fakeRuntime{}
+	sm.AttachRuntime(sess.ID, fake, sess)
+
+	require.NoError(t, sm.SteerSession(ctx, sess.ID,
+		[]api.Message{{Content: "one"}, {Content: "two"}}, "replacement"))
+
+	steered := fake.steeredMessages()
+	require.Len(t, steered, 2)
+	for _, msg := range steered {
+		assert.Equal(t, runtime.FramingReplacement, msg.Framing,
+			"request-level framing must reach every queued message")
+	}
+
+	// An empty framing stays the zero value; the runtime resolves the default.
+	require.NoError(t, sm.SteerSession(ctx, sess.ID, []api.Message{{Content: "three"}}, ""))
+	steered = fake.steeredMessages()
+	require.Len(t, steered, 3)
+	assert.Equal(t, runtime.Framing(""), steered[2].Framing)
 }
 
 // TestRunSession_ConcurrentRequestReturnsErrSessionBusy verifies that a

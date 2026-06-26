@@ -119,6 +119,22 @@ func TestUserSteeringMessagesSubmitFiresOnDrain(t *testing.T) {
 	got, _ := seen.Load().([]string)
 	assert.Equal(t, []string{"steer one", "steer two"}, got,
 		"hook must receive the drained messages via Input.SteeringMessages, in order")
+
+	// The hook saw the raw text above, but with the default framing
+	// (instruction) the persisted messages must carry the <system-reminder>
+	// envelope — proving the hook-raw / model-framed split holds in one run.
+	var steered []string
+	for _, item := range sess.Messages {
+		if item.IsMessage() && item.Message.Message.Role == chat.MessageRoleUser {
+			steered = append(steered, item.Message.Message.Content)
+		}
+	}
+	require.Len(t, steered, 2)
+	for _, content := range steered {
+		assert.Contains(t, content, "<system-reminder>",
+			"default-framed steer messages must be wrapped for the model")
+		assert.Contains(t, content, "finish your current task first")
+	}
 }
 
 // setupUserPromptSubmitCounter wires up a single-turn mock runtime with

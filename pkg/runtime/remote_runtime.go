@@ -324,7 +324,7 @@ func (r *RemoteRuntime) Steer(msg QueuedMessage) error {
 	}
 	return r.client.SteerSession(context.Background(), r.sessionID, []api.Message{
 		{Content: msg.Content, MultiContent: msg.MultiContent},
-	})
+	}, string(msg.Framing))
 }
 
 // FollowUp enqueues a message for end-of-turn processing on the remote server.

@@ -16,6 +16,7 @@ import (
 type SendInput struct {
 	Message  string `json:"message" jsonschema:"the message to send"`
 	FollowUp bool   `json:"followup,omitempty" jsonschema:"queue as end-of-turn follow-up instead of mid-turn steer"`
+	Framing  string `json:"framing,omitempty" jsonschema:"how a steered message is read by the model: plain (bare turn), instruction (finish current task first), or replacement (abandon current task); empty defaults to instruction; ignored for follow-ups"`
 }
 
 type SendOutput struct {
@@ -63,7 +64,7 @@ func AttachServer(ctx context.Context, addr, sessionID string) (*mcp.Server, err
 		if in.FollowUp {
 			err = client.FollowUpSession(ctx, sessionID, msgs)
 		} else {
-			err = client.SteerSession(ctx, sessionID, msgs)
+			err = client.SteerSession(ctx, sessionID, msgs, in.Framing)
 		}
 		if err != nil {
 			return nil, SendOutput{}, err
