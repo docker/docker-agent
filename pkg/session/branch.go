@@ -101,6 +101,7 @@ func (s *Session) Clone() *Session {
 		AgentName:               s.AgentName,
 		ParentID:                s.ParentID,
 		MessageUsageHistory:     slices.Clone(s.MessageUsageHistory),
+		DisableTitle:            s.DisableTitle,
 	}
 
 	// Start from a shallow copy of each item so value fields (Summary,

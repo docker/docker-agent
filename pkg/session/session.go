@@ -158,6 +158,13 @@ type Session struct {
 	OutputTokens int64   `json:"output_tokens"`
 	Cost         float64 `json:"cost"`
 
+	// DisableTitle suppresses the background LLM call that generates a
+	// session title on the first user message. False (the zero value)
+	// preserves the default behaviour. Set to true for programmatic /
+	// headless callers (e.g. Harbor Watch) that never display the title —
+	// this avoids a wasted LLM call on every session.
+	DisableTitle bool `json:"disable_title,omitempty"`
+
 	// Permissions holds session-level permission overrides.
 	// When set, these are evaluated before team-level permissions.
 	Permissions *PermissionsConfig `json:"permissions,omitempty"`

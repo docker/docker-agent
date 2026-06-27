@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,8 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
@@ -549,4 +552,58 @@ func TestUserMessageOrdinalToItemIndex(t *testing.T) {
 
 	_, err = userMessageOrdinalToItemIndex(sess, 99)
 	require.ErrorIs(t, err, ErrForkOutOfRange)
+}
+
+// recordingProvider is a provider.Provider that records whether
+// CreateChatCompletionStream was called. Used to verify title generation
+// is suppressed when Session.DisableTitle is true.
+type recordingProvider struct {
+	called atomic.Bool
+}
+
+func (p *recordingProvider) ID() modelsdev.ID { return modelsdev.ID{} }
+func (p *recordingProvider) CreateChatCompletionStream(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+	p.called.Store(true)
+	return nil, errors.New("unexpected title generation call")
+}
+func (p *recordingProvider) BaseConfig() base.Config { return base.Config{} }
+
+// TestRunSession_DisableTitle_SkipsTitleGeneration verifies that when
+// Session.DisableTitle is true, the title generator is never invoked even
+// when a non-nil titleGen is wired and user messages are present.
+func TestRunSession_DisableTitle_SkipsTitleGeneration(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	sess := session.New()
+	sess.DisableTitle = true
+
+	prov := &recordingProvider{}
+	gen := sessiontitle.New(prov)
+
+	store := session.NewInMemorySessionStore()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	sm := &SessionManager{
+		runtimeSessions:   concurrent.NewMap[string, *activeRuntimes](),
+		deletedSessions:   concurrent.NewMap[string, *activeRuntimes](),
+		followUpInjectors: concurrent.NewMap[string, FollowUpInjector](),
+		followUpKeys:      concurrent.NewMap[string, *idempotencyCache](),
+		sessionStore:      store,
+		Sources:           config.Sources{},
+		runConfig:         &config.RuntimeConfig{},
+		sessionReady:      make(chan struct{}),
+	}
+	sm.runtimeSessions.Store(sess.ID, &activeRuntimes{
+		runtime:  &fakeRuntime{},
+		session:  sess,
+		titleGen: gen,
+	})
+
+	events, err := sm.RunSession(ctx, sess.ID, "", "root", []api.Message{{Content: "hello"}}, "")
+	require.NoError(t, err)
+	for range events {
+	}
+
+	assert.False(t, prov.called.Load(), "title provider must not be called when DisableTitle is true")
 }

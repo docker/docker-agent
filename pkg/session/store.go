@@ -235,6 +235,7 @@ func (s *InMemorySessionStore) UpdateSession(_ context.Context, session *Session
 		CustomModelsUsed:    cloneStringSlice(session.CustomModelsUsed),
 		AttachedFiles:       slices.Clone(session.AttachedFiles),
 		ParentID:            session.ParentID,
+		DisableTitle:        session.DisableTitle,
 	}
 	session.mu.RUnlock()
 
@@ -941,6 +942,7 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		AgentModelOverrides: cloneStringMap(session.AgentModelOverrides),
 		CustomModelsUsed:    cloneStringSlice(session.CustomModelsUsed),
 		ParentID:            session.ParentID,
+		DisableTitle:        session.DisableTitle,
 	}
 	session.mu.RUnlock()
 

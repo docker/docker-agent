@@ -371,6 +371,7 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 	if len(sessionTemplate.CustomModelsUsed) > 0 {
 		sess.CustomModelsUsed = append([]string(nil), sessionTemplate.CustomModelsUsed...)
 	}
+	sess.DisableTitle = sessionTemplate.DisableTitle
 
 	return sess, sm.sessionStore.AddSession(ctx, sess)
 }
@@ -657,7 +658,8 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	// avoid a data race with UpdateSessionTitle, which takes sm.mux and
 	// writes to sess.Title concurrently with the goroutine's read.
 	titleToEmit := sess.Title
-	needsTitle := titleToEmit == "" && len(userMessages) > 0 && titleGen != nil
+	needsTitle := titleToEmit == "" && len(userMessages) > 0 && titleGen != nil &&
+		!sess.DisableTitle
 
 	go func() {
 		// Defers run LIFO: close(streamChan) last, so by the time the
@@ -1299,6 +1301,7 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 		OutputTokens:            sess.OutputTokens,
 		Cost:                    sess.Cost,
 		Starred:                 sess.Starred,
+		DisableTitle:            sess.DisableTitle,
 	}
 
 	// Clone the maps/slices under sm.mux to avoid data races

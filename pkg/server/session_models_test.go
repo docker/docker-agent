@@ -155,6 +155,25 @@ func TestSessionManager_CreateSession_KeepsModelOverrides(t *testing.T) {
 	assert.Equal(t, "openai/gpt-4o", stored.AgentModelOverrides["root"])
 }
 
+// TestSessionManager_CreateSession_PropagatesDisableTitle verifies that the
+// DisableTitle field is carried from the session template through CreateSession
+// and persisted to the store.
+func TestSessionManager_CreateSession_PropagatesDisableTitle(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	created, err := sm.CreateSession(ctx, &session.Session{DisableTitle: true})
+	require.NoError(t, err)
+	assert.True(t, created.DisableTitle)
+
+	stored, err := store.GetSession(ctx, created.ID)
+	require.NoError(t, err)
+	assert.True(t, stored.DisableTitle)
+}
+
 func TestAttachedServer_GetSessionModels(t *testing.T) {
 	t.Parallel()
 
