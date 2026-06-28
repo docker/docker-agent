@@ -15,21 +15,27 @@ import (
 const maxVisibleShellOutputLines = 20
 
 func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
-	return toolcommon.NewBase(msg, sessionState, renderShell)
+	return toolcommon.NewBaseWithCollapsed(msg, sessionState, renderShell, renderShellCollapsed)
 }
 
 func renderShell(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
-	arg := ""
-	if msg.ToolCall.Function.Arguments != "" {
-		arg = toolcommon.ExtractField(func(a builtinshell.RunShellArgs) string { return a.Cmd })(msg.ToolCall.Function.Arguments)
-	}
-
 	result := ""
 	if msg.Content != "" {
 		result = formatShellOutput(msg.Content, width)
 	}
 
-	return toolcommon.RenderTool(msg, s, arg, result, width, sessionState.HideToolResults())
+	return toolcommon.RenderTool(msg, s, extractCommand(msg.ToolCall.Function.Arguments), result, width, sessionState.HideToolResults())
+}
+
+func renderShellCollapsed(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
+	return toolcommon.RenderTool(msg, s, extractCommand(msg.ToolCall.Function.Arguments), "", width, sessionState.HideToolResults())
+}
+
+func extractCommand(arguments string) string {
+	if arguments == "" {
+		return ""
+	}
+	return toolcommon.ExtractField(func(a builtinshell.RunShellArgs) string { return a.Cmd })(arguments)
 }
 
 func formatShellOutput(output string, width int) string {
