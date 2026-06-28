@@ -15,7 +15,7 @@ import (
 )
 
 func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
-	return toolcommon.NewBase(msg, sessionState, render)
+	return toolcommon.NewBaseWithCollapsed(msg, sessionState, render, renderCollapsed)
 }
 
 func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
@@ -24,11 +24,7 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 		return toolcommon.RenderTool(msg, s, "", "", width, sessionState.HideToolResults())
 	}
 
-	// Extract argument summary for the tool call display
-	var params string
-	if argsText := formatArgs(args); argsText != "" {
-		params = "(" + argsText + ")"
-	}
+	params := formatParams(args)
 
 	// Add inline result/progress after the tool name
 	switch msg.ToolStatus {
@@ -43,6 +39,22 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 	}
 
 	return toolcommon.RenderTool(msg, s, params, "", width, sessionState.HideToolResults())
+}
+
+func renderCollapsed(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(msg.ToolCall.Function.Arguments), &args); err != nil {
+		return toolcommon.RenderTool(msg, s, "", "", width, sessionState.HideToolResults())
+	}
+
+	return toolcommon.RenderTool(msg, s, formatParams(args), "", width, sessionState.HideToolResults())
+}
+
+func formatParams(args map[string]any) string {
+	if argsText := formatArgs(args); argsText != "" {
+		return "(" + argsText + ")"
+	}
+	return ""
 }
 
 // extractEndpoint tries to find the endpoint/URL being called.
