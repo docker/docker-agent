@@ -11,7 +11,7 @@ import (
 // New creates a new default tool component.
 // It provides a standard visualization with tool name, arguments, and results.
 func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
-	return toolcommon.NewBase(msg, sessionState, render)
+	return toolcommon.NewBaseWithCollapsed(msg, sessionState, render, renderCollapsed)
 }
 
 func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
@@ -30,4 +30,12 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 	}
 
 	return toolcommon.RenderTool(msg, s, argsContent, resultContent, width, sessionState.HideToolResults())
+}
+
+func renderCollapsed(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
+	var argsContent string
+	if msg.ToolCall.Function.Arguments != "" {
+		argsContent = renderToolArgsSummary(msg.ToolCall, width-4-len(msg.ToolDefinition.DisplayName()))
+	}
+	return toolcommon.RenderTool(msg, s, argsContent, "", width, sessionState.HideToolResults())
 }

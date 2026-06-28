@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
@@ -17,19 +18,7 @@ type kv struct {
 }
 
 func renderToolArgs(toolCall tools.ToolCall, shortWidth, width int) string {
-	args, err := decodeArguments(toolCall.Function.Arguments)
-	if err != nil {
-		return ""
-	}
-
-	// Filter out the friendly description parameter
-	filteredArgs := make([]kv, 0, len(args))
-	for _, arg := range args {
-		if arg.Key != tools.DescriptionParam {
-			filteredArgs = append(filteredArgs, arg)
-		}
-	}
-
+	filteredArgs := filteredToolArgs(toolCall)
 	if len(filteredArgs) == 0 {
 		return ""
 	}
@@ -56,6 +45,39 @@ func renderToolArgs(toolCall tools.ToolCall, shortWidth, width int) string {
 	}
 
 	return "\n" + styles.ToolCallArgs.Width(width).Render(strings.TrimSuffix(md.String(), "\n"))
+}
+
+func renderToolArgsSummary(toolCall tools.ToolCall, width int) string {
+	filteredArgs := filteredToolArgs(toolCall)
+	if len(filteredArgs) == 0 {
+		return ""
+	}
+
+	arg := filteredArgs[0]
+	summary := fmt.Sprintf("%s=%s", arg.Key, formatValueInline(arg.Value))
+	if len(filteredArgs) > 1 {
+		summary += fmt.Sprintf(" (+%d more)", len(filteredArgs)-1)
+	}
+	return toolcommon.TruncateText(summary, max(width, 1))
+}
+
+func filteredToolArgs(toolCall tools.ToolCall) []kv {
+	args, err := decodeArguments(toolCall.Function.Arguments)
+	if err != nil {
+		return nil
+	}
+
+	filteredArgs := make([]kv, 0, len(args))
+	for _, arg := range args {
+		if arg.Key != tools.DescriptionParam {
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+	return filteredArgs
+}
+
+func formatValueInline(value any) string {
+	return strings.Join(strings.Fields(formatValue(value)), " ")
 }
 
 // formatValue formats a value for display.
