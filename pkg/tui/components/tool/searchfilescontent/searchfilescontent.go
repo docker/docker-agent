@@ -5,17 +5,30 @@ import (
 
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
 func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
-	return toolcommon.NewBase(msg, sessionState, toolcommon.SimpleRendererWithResult(
-		extractArgs,
-		extractResult,
-	))
+	renderArgs := toolcommon.SimpleRenderer(extractArgs)
+	return toolcommon.NewBaseWithCollapsed(
+		msg,
+		sessionState,
+		render,
+		toolcommon.CollapsedRenderer(renderArgs),
+	)
+}
+
+func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
+	header := toolcommon.RenderTool(msg, s, extractArgs(msg.ToolCall.Function.Arguments), extractResult(msg), width, sessionState.HideToolResults())
+	if sessionState.HideToolResults() || msg.Content == "" {
+		return header
+	}
+	return header + "\n" + styles.ToolCallResult.Render(toolcommon.FormatToolResult(msg.Content, width))
 }
 
 func extractArgs(args string) string {
