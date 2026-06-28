@@ -18,7 +18,7 @@ import (
 )
 
 func New(msg *types.Message, sessionState service.SessionStateReader) layout.Model {
-	return toolcommon.NewBase(msg, sessionState, render)
+	return toolcommon.NewBaseWithCollapsed(msg, sessionState, render, renderCollapsed)
 }
 
 func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
@@ -34,12 +34,7 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 	}
 
 	// For completed/error state, render each file line
-	var meta *filesystem.ReadMultipleFilesMeta
-	if msg.ToolResult != nil {
-		if m, ok := msg.ToolResult.Meta.(filesystem.ReadMultipleFilesMeta); ok {
-			meta = &m
-		}
-	}
+	meta := readMultipleFilesMeta(msg)
 
 	// Each file on its own line with checkmark
 	var content strings.Builder
@@ -79,6 +74,29 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 	}
 
 	return styles.RenderComposite(styles.ToolMessageStyle.Width(width), content.String())
+}
+
+func renderCollapsed(msg *types.Message, s spinner.Spinner, sessionState service.SessionStateReader, width, _ int) string {
+	var args filesystem.ReadMultipleFilesArgs
+	if err := json.Unmarshal([]byte(msg.ToolCall.Function.Arguments), &args); err != nil {
+		return toolcommon.RenderTool(msg, s, "", "", width, sessionState.HideToolResults())
+	}
+
+	summary := formatFilesCount(args.Paths)
+	if meta := readMultipleFilesMeta(msg); meta != nil && len(meta.Files) > 0 {
+		summary = formatResultCount(meta)
+	}
+	return toolcommon.RenderTool(msg, s, summary, "", width, sessionState.HideToolResults())
+}
+
+func readMultipleFilesMeta(msg *types.Message) *filesystem.ReadMultipleFilesMeta {
+	if msg.ToolResult == nil {
+		return nil
+	}
+	if meta, ok := msg.ToolResult.Meta.(filesystem.ReadMultipleFilesMeta); ok {
+		return &meta
+	}
+	return nil
 }
 
 type fileSummary struct {
@@ -129,4 +147,40 @@ func formatFilesList(filePaths []string) string {
 	}
 
 	return strings.Join(shortened, ", ")
+}
+
+func formatFilesCount(filePaths []string) string {
+	if len(filePaths) == 0 {
+		return ""
+	}
+	if len(filePaths) == 1 {
+		return pathx.ShortenHome(filePaths[0])
+	}
+	return toolcommon.Pluralize(len(filePaths), "file", "files")
+}
+
+func formatResultCount(meta *filesystem.ReadMultipleFilesMeta) string {
+	if meta == nil || len(meta.Files) == 0 {
+		return ""
+	}
+
+	failed := 0
+	for _, file := range meta.Files {
+		if file.Error != "" {
+			failed++
+		}
+	}
+
+	read := len(meta.Files) - failed
+	switch {
+	case failed == 0:
+		return toolcommon.Pluralize(read, "file", "files")
+	case read == 0:
+		return toolcommon.Pluralize(failed, "file", "files") + " failed"
+	default:
+		return fmt.Sprintf("%s read, %s failed",
+			toolcommon.Pluralize(read, "file", "files"),
+			toolcommon.Pluralize(failed, "file", "files"),
+		)
+	}
 }
