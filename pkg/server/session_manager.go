@@ -32,11 +32,12 @@ import (
 )
 
 type activeRuntimes struct {
-	runtime  runtime.Runtime
-	done     <-chan struct{} // Closed when the session is deleted/detached. Nil for sessions without lifetime tracking.
-	cancel   context.CancelFunc
-	session  *session.Session        // The actual session object used by the runtime
-	titleGen *sessiontitle.Generator // Title generator (includes fallback models)
+	runtime      runtime.Runtime
+	done         <-chan struct{} // Closed when the session is deleted/detached. Nil for sessions without lifetime tracking.
+	cancel       context.CancelFunc
+	session      *session.Session        // The actual session object used by the runtime
+	titleGen     *sessiontitle.Generator // Title generator (includes fallback models)
+	defaultAgent string                  // Team default-agent name, cached so RunSession can resolve empty currentAgent without reloading the team.
 
 	streaming sync.Mutex // Held while a RunStream is in progress; serialises concurrent requests
 }
@@ -593,21 +594,36 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	var titleGen *sessiontitle.Generator
 	if !exists {
 		var rt runtime.Runtime
-		rt, titleGen, err = sm.runtimeForSession(ctx, sess, agentFilename, currentAgent, rc)
+		var defaultAgent string
+		rt, titleGen, defaultAgent, err = sm.runtimeForSession(ctx, sess, agentFilename, currentAgent, rc)
 		if err != nil {
 			cancel()
 			return nil, err
 		}
 		runtimeSession = &activeRuntimes{
-			runtime:  rt,
-			cancel:   cancel,
-			session:  sess,
-			titleGen: titleGen,
+			runtime:      rt,
+			cancel:       cancel,
+			session:      sess,
+			titleGen:     titleGen,
+			defaultAgent: defaultAgent,
 		}
 		sm.runtimeSessions.Store(sessionID, runtimeSession)
 		sm.markReady()
 	} else {
 		titleGen = runtimeSession.titleGen
+		// Re-apply the per-turn agent on warm runtimes — without this the
+		// runtime sticks on whatever agent the first turn (or a prior handoff)
+		// left active and a host toggling a sub-agent off has no effect.
+		desiredAgent := currentAgent
+		if desiredAgent == "" {
+			desiredAgent = runtimeSession.defaultAgent
+		}
+		if runtimeSession.runtime.CurrentAgentName(ctx) != desiredAgent {
+			if err := runtimeSession.runtime.SetCurrentAgent(ctx, desiredAgent); err != nil {
+				cancel()
+				return nil, err
+			}
+		}
 	}
 
 	// Reject the request immediately if the session is already streaming.
@@ -904,7 +920,7 @@ func (sm *SessionManager) generateTitle(ctx context.Context, sess *session.Sessi
 	}
 }
 
-func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.Session, agentFilename, currentAgent string, rc *config.RuntimeConfig) (_ runtime.Runtime, _ *sessiontitle.Generator, err error) {
+func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.Session, agentFilename, currentAgent string, rc *config.RuntimeConfig) (_ runtime.Runtime, _ *sessiontitle.Generator, defaultAgent string, err error) {
 	// Caller (RunSession) holds sm.mux and has already verified that no
 	// active runtime exists for this session. This function is purely a
 	// constructor: it must not touch sm.runtimeSessions, otherwise it would
@@ -930,14 +946,20 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 
 	loadResult, err := sm.loadTeamWithConfig(ctx, agentFilename, rc)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	t := loadResult.Team
+
+	defaultAgentInfo, err := t.DefaultAgent()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	defaultAgent = defaultAgentInfo.Name()
 
 	// Resolve the team's default agent when no specific agent was requested.
 	agt, err := t.AgentOrDefault(currentAgent)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	currentAgent = agt.Name()
 	sess.MaxIterations = agt.MaxIterations()
@@ -973,7 +995,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 	}
 	run, err := runtime.New(ctx, t, opts...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 
 	// Apply any stored per-agent model overrides so that a session
@@ -989,7 +1011,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 
 	slog.DebugContext(ctx, "Runtime created for session", "session_id", sess.ID)
 
-	return run, titleGen, nil
+	return run, titleGen, defaultAgent, nil
 }
 
 func (sm *SessionManager) loadTeam(ctx context.Context, agentFilename string, runConfig *config.RuntimeConfig) (*team.Team, error) {

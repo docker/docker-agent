@@ -202,6 +202,79 @@ func TestRunSession_SequentialRequestsSucceed(t *testing.T) {
 	assert.Equal(t, int32(1), fake.maxConcurrent.Load())
 }
 
+// agentTrackingRuntime is a fakeRuntime that records the current-agent
+// pointer the SessionManager pushes into it across turns. Regression coverage
+// for the bug where a warm runtime ignored the URL's per-turn agent.
+type agentTrackingRuntime struct {
+	fakeRuntime
+
+	mu      sync.Mutex
+	current string
+}
+
+func (f *agentTrackingRuntime) CurrentAgentName(context.Context) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.current
+}
+
+func (f *agentTrackingRuntime) SetCurrentAgent(_ context.Context, agentName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.current = agentName
+	return nil
+}
+
+func TestRunSession_AppliesPerTurnAgentOnWarmRuntime(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	fake := &agentTrackingRuntime{fakeRuntime: fakeRuntime{streamDelay: time.Millisecond}, current: "root"}
+	sm := &SessionManager{
+		runtimeSessions:   concurrent.NewMap[string, *activeRuntimes](),
+		deletedSessions:   concurrent.NewMap[string, *activeRuntimes](),
+		followUpInjectors: concurrent.NewMap[string, FollowUpInjector](),
+		followUpKeys:      concurrent.NewMap[string, *idempotencyCache](),
+		sessionStore:      store,
+		Sources:           config.Sources{},
+		runConfig:         &config.RuntimeConfig{},
+		sessionReady:      make(chan struct{}),
+	}
+	sm.runtimeSessions.Store(sess.ID, &activeRuntimes{
+		runtime:      fake,
+		session:      sess,
+		titleGen:     (*sessiontitle.Generator)(nil),
+		defaultAgent: "root",
+	})
+
+	drain := func(ch <-chan runtime.Event) {
+		for range ch {
+		}
+	}
+
+	for _, tc := range []struct {
+		name         string
+		currentAgent string
+		expected     string
+	}{
+		{"first turn switches to planner", "planner", "planner"},
+		{"empty currentAgent resets to default", "", "root"},
+		{"explicit planner again", "planner", "planner"},
+		{"same agent twice is a no-op", "planner", "planner"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch, err := sm.RunSession(ctx, sess.ID, "agent", tc.currentAgent, []api.Message{{Content: "hi"}}, "")
+			require.NoError(t, err)
+			drain(ch)
+			assert.Equal(t, tc.expected, fake.CurrentAgentName(ctx))
+		})
+	}
+}
+
 // TestRunSession_DifferentSessionsConcurrently verifies that concurrent
 // requests on *different* sessions are not blocked by each other.
 func TestRunSession_DifferentSessionsConcurrently(t *testing.T) {
