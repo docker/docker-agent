@@ -34,9 +34,9 @@ func (r *LocalRuntime) handleWritePlan(ctx context.Context, sess *session.Sessio
 }
 
 func (r *LocalRuntime) handleReadPlan(_ context.Context, sess *session.Session, _ tools.ToolCall, _ EventSink) (*tools.ToolCallResult, error) {
-	content, path, err := plan.ReadContent(plan.DefaultDir(), sess.ID)
+	content, _, err := plan.ReadContent(plan.DefaultDir(), sess.ID)
 	if errors.Is(err, plan.ErrPlanNotFound) {
-		return tools.ResultError(fmt.Sprintf("no plan written yet for this session; call write_plan first (would write to %s)", path)), nil
+		return tools.ResultError("no plan written yet for this session; call write_plan first"), nil
 	}
 	if err != nil {
 		if errors.Is(err, plan.ErrInvalidSessionID) {
