@@ -424,6 +424,30 @@ func SessionTitle(sessionID, title string) Event {
 
 func (e *SessionTitleEvent) GetSessionID() string { return e.SessionID }
 
+// PlanUpdatedEvent is emitted when the plan toolset writes a new plan for a
+// session. Content is included so a UI can render the plan inline without
+// re-reading the file.
+type PlanUpdatedEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	Content   string `json:"content,omitempty"`
+	Path      string `json:"path,omitempty"`
+}
+
+func PlanUpdated(sessionID, content, path, agentName string) Event {
+	return &PlanUpdatedEvent{
+		Type:         "plan_updated",
+		SessionID:    sessionID,
+		Content:      content,
+		Path:         path,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+func (e *PlanUpdatedEvent) GetSessionID() string { return e.SessionID }
+
 type SessionSummaryEvent struct {
 	AgentContext
 

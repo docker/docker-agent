@@ -1,55 +1,47 @@
-# Two agents collaborate on shared, named plans stored in a global folder
-# under the docker-agent data directory.
+# A two-agent "plan then execute" workflow.
 #
-# The architect writes a plan; the builder reads it and refines it. Both load
-# the `plan` toolset, so they see the same shared plans (addressed by name) and
-# the plans persist across runs.
+# The user starts in `root`. Typing `/plan` switches to `planner`, which has
+# read-only tools and the plan toolset. The planner investigates the request,
+# writes the plan to <data-dir>/plans/<session-id>.md, and calls
+# exit_plan_mode when ready — that signal tells the host the plan is final.
+# Switching back to `root` for execution is up to the host (toggle, slash
+# command, an explicit handoff on the agent, …); the tool itself does not
+# move the conversation.
 
 agents:
   root:
     model: anthropic/claude-sonnet-4-5
-    description: Coordinator that routes work between the architect and the builder
+    description: Executes plans the planner has handed off
     instruction: |
-      You coordinate a planning session between two specialists.
-      - Hand off to the architect to draft or revise a high-level plan.
-      - Hand off to the builder to review the plan and add concrete
-        implementation steps.
-      Keep iterating until the plan is complete, then summarize it for the user.
-    handoffs:
-      - architect
-      - builder
-
-  architect:
-    model: anthropic/claude-sonnet-4-5
-    description: Drafts and revises high-level plans
-    instruction: |
-      You are a software architect. Use list_plans to see existing plans and
-      read_plan to inspect one, then use write_plan to create or revise a plan
-      by name. Always read before writing so you preserve content you want to
-      keep. Set the title and use "architect" as the author. Note the revision
-      you read and pass it as last_known_revision when you write, so a
-      concurrent edit by the builder is detected instead of silently lost; on a
-      conflict, re-read and retry. Use set_plan_status to mark the plan
-      "drafting" while you work and "ready-for-build" when the high-level plan
-      is done, then hand off to the builder.
+      You execute plans the planner has prepared. When you see a message
+      saying a plan has been approved, read it with read_plan and work
+      through its steps in order. For ambiguous or multi-file changes that
+      have not been planned yet, type `/plan <task>` first instead of
+      starting work directly.
     toolsets:
       - type: plan
-    handoffs:
-      - builder
+        tools:
+          - read_plan
+      - type: filesystem
+      - type: shell
+    commands:
+      plan:
+        description: "Switch to the planner"
+        agent: planner
 
-  builder:
-    model: openai/gpt-4o
-    description: Reviews plans and adds concrete implementation steps
+  planner:
+    model: anthropic/claude-sonnet-4-5
+    description: Investigates the request and writes a plan for user approval
     instruction: |
-      You are an implementation engineer. For large plans, edit cheaply: call
-      export_plan_to_file to write the current plan to a scratch file, edit that
-      file in place to add concrete implementation steps, then call
-      update_plan_from_file to commit it (passing last_known_revision so you
-      don't clobber a concurrent edit). Use "builder" as the author and
-      set_plan_status to "done" when the plan is complete. Delete obsolete plans
-      with delete_plan. When done, hand off back to root.
+      Investigate the user's request with read-only tools, then draft the
+      plan with write_plan. Iterate — re-read code, ask clarifying
+      questions with user_prompt — until the plan is complete. When the
+      plan is final, call exit_plan_mode to mark it ready for review.
+
+      Do not modify any files. The only write you may perform is write_plan.
     toolsets:
       - type: plan
       - type: filesystem
-    handoffs:
-      - root
+        readonly: true
+      - type: fetch
+      - type: user_prompt
