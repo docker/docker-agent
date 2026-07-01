@@ -243,3 +243,72 @@ func TestACPSessionPersistence(t *testing.T) {
 	assert.True(t, hasUserMsg, "Session should have a user message")
 	assert.True(t, hasAssistantMsg, "Session should have an assistant message")
 }
+
+func TestCommandName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		text   string
+		want   string
+		wantOk bool
+	}{
+		{"new command", "/new", "new", true},
+		{"compact command", "/compact", "compact", true},
+		{"usage command", "/usage", "usage", true},
+		{"leading/trailing space", "  /new  ", "new", true},
+		{"command with args is not a bare command", "/compact focus on tests", "", false},
+		{"plain message", "hello there", "", false},
+		{"message starting with slash but with words", "/path/to/file please read", "", false},
+		{"empty", "", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			name, ok := commandName([]acpsdk.ContentBlock{acpsdk.TextBlock(tt.text)})
+			assert.Equal(t, tt.wantOk, ok)
+			assert.Equal(t, tt.want, name)
+		})
+	}
+}
+
+// TestClearSessionHistory verifies that /new drops the persisted conversation
+// so it cannot reload on a subsequent resume (the bug behind "/new clears the
+// session but it comes back when I reopen sbx and gordon").
+func TestClearSessionHistory(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	dbPath := filepath.Join(t.TempDir(), "session.db")
+	sessStore, err := session.NewSQLiteSessionStore(ctx, dbPath)
+	require.NoError(t, err)
+	if closer, ok := sessStore.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	sess := session.New(session.WithWorkingDir(t.TempDir()))
+	sess.AddMessage(session.UserMessage("first message"))
+	require.NoError(t, sessStore.AddSession(ctx, sess))
+
+	loaded, err := sessStore.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	require.Len(t, loaded.Messages, 1)
+
+	acpAgent := &Agent{
+		runConfig:    &config.RuntimeConfig{},
+		sessionStore: sessStore,
+		sessions:     make(map[string]*Session),
+	}
+	acpSess := &Session{id: sess.ID, sess: sess}
+
+	require.NoError(t, acpAgent.clearSessionHistory(ctx, acpSess))
+
+	// In-memory session is cleared.
+	assert.Empty(t, acpSess.sess.Messages)
+
+	// A resume (GetSession) must not bring the old messages back.
+	reloaded, err := sessStore.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	assert.Empty(t, reloaded.Messages, "cleared session must not reload previous messages")
+}
