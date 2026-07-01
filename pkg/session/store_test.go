@@ -320,6 +320,93 @@ func TestBranchSessionClonesSubSession(t *testing.T) {
 	assert.Equal(t, "Sub message", subItem.SubSession.Messages[0].Message.Message.Content)
 }
 
+// TestClearSessionHistorySQLite verifies that clearing a session drops its
+// items and resets counters while keeping the session row, atomically, and
+// removes any sub-sessions.
+func TestClearSessionHistorySQLite(t *testing.T) {
+	t.Parallel()
+
+	tempDB := filepath.Join(t.TempDir(), "test_clear_history.db")
+	store, err := NewSQLiteSessionStore(t.Context(), tempDB)
+	require.NoError(t, err)
+	defer store.(*SQLiteSessionStore).Close()
+
+	subSession := &Session{
+		ID:        "clear-sub-session",
+		CreatedAt: time.Now(),
+		Messages:  []Item{NewMessageItem(UserMessage("Sub message"))},
+	}
+	sess := &Session{
+		ID:           "clear-session",
+		Title:        "Keep me",
+		WorkingDir:   "/tmp/work",
+		InputTokens:  10,
+		OutputTokens: 5,
+		Cost:         1.5,
+		CreatedAt:    time.Now(),
+		Messages: []Item{
+			NewMessageItem(UserMessage("Start")),
+			NewSubSessionItem(subSession),
+		},
+	}
+	require.NoError(t, store.AddSession(t.Context(), sess))
+
+	require.NoError(t, store.ClearSessionHistory(t.Context(), sess.ID))
+
+	// The session row survives with metadata intact but no items and reset counters.
+	loaded, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	assert.Empty(t, loaded.Messages)
+	assert.Equal(t, "Keep me", loaded.Title)
+	assert.Equal(t, "/tmp/work", loaded.WorkingDir)
+	assert.Zero(t, loaded.InputTokens)
+	assert.Zero(t, loaded.OutputTokens)
+	assert.Zero(t, loaded.Cost)
+
+	// The sub-session row is gone too.
+	_, err = store.GetSession(t.Context(), subSession.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestClearSessionHistoryNotFound(t *testing.T) {
+	t.Parallel()
+
+	tempDB := filepath.Join(t.TempDir(), "test_clear_missing.db")
+	store, err := NewSQLiteSessionStore(t.Context(), tempDB)
+	require.NoError(t, err)
+	defer store.(*SQLiteSessionStore).Close()
+
+	require.ErrorIs(t, store.ClearSessionHistory(t.Context(), "does-not-exist"), ErrNotFound)
+	require.ErrorIs(t, store.ClearSessionHistory(t.Context(), ""), ErrEmptyID)
+}
+
+func TestClearSessionHistoryInMemory(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemorySessionStore()
+	sess := &Session{
+		ID:           "mem-clear",
+		Title:        "Keep me",
+		InputTokens:  7,
+		OutputTokens: 3,
+		CreatedAt:    time.Now(),
+		Messages:     []Item{NewMessageItem(UserMessage("hello"))},
+	}
+	require.NoError(t, store.AddSession(t.Context(), sess))
+
+	require.NoError(t, store.ClearSessionHistory(t.Context(), sess.ID))
+
+	loaded, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	assert.Empty(t, loaded.Messages)
+	assert.Equal(t, "Keep me", loaded.Title)
+	assert.Zero(t, loaded.InputTokens)
+	assert.Zero(t, loaded.OutputTokens)
+
+	require.ErrorIs(t, store.ClearSessionHistory(t.Context(), "missing"), ErrNotFound)
+	require.ErrorIs(t, store.ClearSessionHistory(t.Context(), ""), ErrEmptyID)
+}
+
 func TestStoreAgentNameJSON(t *testing.T) {
 	t.Parallel()
 

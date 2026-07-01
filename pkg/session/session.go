@@ -547,6 +547,19 @@ func (s *Session) ApplyCompaction(inputTokens, outputTokens int64, item Item) {
 	s.Messages = append(s.Messages, item)
 }
 
+// ResetHistory clears the conversation and its cumulative token/cost counters
+// under s.mu, so a fresh conversation can start on the same session. It mirrors
+// the fields the store persists for a message-free session, keeping the
+// in-memory view consistent with a cleared row.
+func (s *Session) ResetHistory() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Messages = nil
+	s.InputTokens = 0
+	s.OutputTokens = 0
+	s.Cost = 0
+}
+
 // AddSubSession adds a sub-session to the session
 func (s *Session) AddSubSession(subSession *Session) {
 	s.mu.Lock()

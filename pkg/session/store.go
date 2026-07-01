@@ -95,6 +95,13 @@ type Store interface {
 	UpdateSession(ctx context.Context, session *Session) error // Updates metadata only (not messages/items)
 	SetSessionStarred(ctx context.Context, id string, starred bool) error
 
+	// ClearSessionHistory removes all items (messages, summaries, errors,
+	// sub-session links) of a session and resets its token/cost counters,
+	// keeping the session row itself. It is atomic: a session is never left
+	// partially cleared or missing. Used by the /new command so a cleared
+	// conversation cannot reload on the next resume.
+	ClearSessionHistory(ctx context.Context, id string) error
+
 	// === Granular item operations ===
 
 	// AddMessage adds a message to a session at the next position.
@@ -200,6 +207,25 @@ func (s *InMemorySessionStore) DeleteSession(_ context.Context, id string) error
 		return ErrNotFound
 	}
 	s.sessions.Delete(id)
+	return nil
+}
+
+// ClearSessionHistory removes all items and resets token/cost counters for a
+// session while keeping the session itself. See [Store.ClearSessionHistory].
+func (s *InMemorySessionStore) ClearSessionHistory(_ context.Context, id string) error {
+	if id == "" {
+		return ErrEmptyID
+	}
+	session, exists := s.sessions.Load(id)
+	if !exists {
+		return ErrNotFound
+	}
+	session.mu.Lock()
+	session.Messages = nil
+	session.InputTokens = 0
+	session.OutputTokens = 0
+	session.Cost = 0
+	session.mu.Unlock()
 	return nil
 }
 
@@ -907,6 +933,48 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 	}
 
 	return nil
+}
+
+// ClearSessionHistory deletes all of a session's items and resets its
+// token/cost counters in a single transaction, keeping the session row.
+// See [Store.ClearSessionHistory].
+func (s *SQLiteSessionStore) ClearSessionHistory(ctx context.Context, id string) error {
+	if id == "" {
+		return ErrEmptyID
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, "UPDATE sessions SET input_tokens = 0, output_tokens = 0, cost = 0 WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrNotFound
+	}
+
+	// Deleting the parent's items drops the 'subsession' link rows; the
+	// sub-session rows themselves are then orphaned, so remove them too.
+	// The ON DELETE CASCADE on session_items.session_id cleans up their
+	// items in turn.
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM sessions WHERE parent_id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM session_items WHERE session_id = ?", id); err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // UpdateSession updates an existing session's metadata, or creates it if it doesn't exist (upsert).

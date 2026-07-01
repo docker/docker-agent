@@ -806,6 +806,10 @@ func (s *RemoteSessionStore) DeleteSession(ctx context.Context, id string) error
 	return s.client.DeleteRemoteSession(ctx, id)
 }
 
+func (s *RemoteSessionStore) ClearSessionHistory(context.Context, string) error {
+	return fmt.Errorf("clear session history: %w", ErrUnsupported)
+}
+
 func (s *RemoteSessionStore) UpdateSession(context.Context, *session.Session) error {
 	return fmt.Errorf("update session: %w", ErrUnsupported)
 }

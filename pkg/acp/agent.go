@@ -406,8 +406,28 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	// These are handled agent-side and never forwarded to the LLM; without
 	// this the client's /new only clears its own transcript while the
 	// persisted session keeps every message and reloads them on resume.
-	if handled, err := a.handleCommand(ctx, acpSess, params.Prompt); handled {
-		return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, err
+	//
+	// Commands run under a cancellable turn context registered on the
+	// session (like a normal prompt) so the ACP Cancel/CloseSession
+	// notifications can interrupt a long-running /compact.
+	if name, isCmd := commandName(params.Prompt); isCmd {
+		turnCtx, cancel := context.WithCancel(ctx)
+		a.mu.Lock()
+		acpSess.cancel = cancel
+		a.mu.Unlock()
+		defer func() {
+			a.mu.Lock()
+			acpSess.cancel = nil
+			a.mu.Unlock()
+			cancel()
+		}()
+
+		if handled, err := a.handleCommand(turnCtx, acpSess, name); handled {
+			if err != nil && turnCtx.Err() != nil {
+				return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+			}
+			return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, err
+		}
 	}
 
 	turnCtx, cancel := context.WithCancel(ctx)
@@ -434,19 +454,12 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }
 
-// handleCommand intercepts the slash commands advertised through
-// emitAvailableCommands (/new, /compact, /usage). It returns handled=true
-// when the prompt was a recognised command (so the caller must not forward it
-// to the LLM), along with any error from executing it.
-//
-// The command name is taken from the leading token of the prompt's text; the
-// ACP client sends it verbatim (e.g. "/new") as a normal text block.
-func (a *Agent) handleCommand(ctx context.Context, acpSess *Session, prompt []acp.ContentBlock) (bool, error) {
-	name, ok := commandName(prompt)
-	if !ok {
-		return false, nil
-	}
-
+// handleCommand dispatches a slash command advertised through
+// emitAvailableCommands (/new, /compact, /usage). name is the already-parsed
+// command (without the leading slash). It returns handled=true when the
+// command was recognised (so the caller must not forward it to the LLM),
+// along with any error from executing it.
+func (a *Agent) handleCommand(ctx context.Context, acpSess *Session, name string) (bool, error) {
 	switch name {
 	case "new":
 		return true, a.handleNewCommand(ctx, acpSess)
@@ -460,15 +473,19 @@ func (a *Agent) handleCommand(ctx context.Context, acpSess *Session, prompt []ac
 }
 
 // commandName extracts a leading slash-command name from the prompt's text
-// content (e.g. "/new" → "new"). It returns ok=false when the prompt is not a
-// single bare slash command, so ordinary messages that merely start with "/"
-// followed by arguments are still sent to the LLM.
+// content (e.g. "/new" → "new"). It returns ok=false unless the prompt is a
+// single bare slash command with no other (text or non-text) content, so
+// ordinary messages that merely start with "/" — or a "/usage" typed next to
+// an attachment — are still sent to the LLM.
 func commandName(prompt []acp.ContentBlock) (string, bool) {
 	var b strings.Builder
 	for _, block := range prompt {
-		if block.Text != nil {
-			b.WriteString(block.Text.Text)
+		if block.Text == nil {
+			// Any non-text content means this is a real message, not a
+			// bare command.
+			return "", false
 		}
+		b.WriteString(block.Text.Text)
 	}
 	text := strings.TrimSpace(b.String())
 	if !strings.HasPrefix(text, "/") {
@@ -491,29 +508,35 @@ func (a *Agent) handleNewCommand(ctx context.Context, acpSess *Session) error {
 }
 
 // clearSessionHistory resets the session's conversation in memory and in the
-// persistent store. The same session ID is reused (deleted, then recreated
-// empty) so the client's session handle stays valid while the previously
-// persisted messages are dropped and cannot reload on the next resume.
+// persistent store. The session row is kept (only its items are dropped and
+// its counters reset) so the client's session handle stays valid while the
+// previously persisted messages can no longer reload on the next resume.
+//
+// The in-memory reset happens first and under the session lock; the store
+// clear is a single atomic operation, so a failure can never leave the
+// session missing or half-cleared.
 func (a *Agent) clearSessionHistory(ctx context.Context, acpSess *Session) error {
-	acpSess.sess.Messages = nil
-	acpSess.sess.InputTokens = 0
-	acpSess.sess.OutputTokens = 0
-	acpSess.sess.Cost = 0
+	acpSess.sess.ResetHistory()
 
 	if a.sessionStore == nil {
 		return nil
 	}
-	if err := a.sessionStore.DeleteSession(ctx, acpSess.id); err != nil {
+	if err := a.sessionStore.ClearSessionHistory(ctx, acpSess.id); err != nil {
+		// A never-persisted session (no messages sent yet) has no store row;
+		// clearing an already-empty conversation is a no-op, not an error.
+		if errors.Is(err, session.ErrNotFound) {
+			return nil
+		}
 		return fmt.Errorf("failed to clear session: %w", err)
-	}
-	if err := a.sessionStore.AddSession(ctx, acpSess.sess); err != nil {
-		return fmt.Errorf("failed to recreate session: %w", err)
 	}
 	return nil
 }
 
-// handleCompactCommand summarizes the conversation and compacts the history,
-// streaming the runtime's compaction events to the ACP client.
+// handleCompactCommand summarizes the conversation and compacts the history.
+// It mirrors the runtime's compaction events to the store — the direct
+// Summarize path bypasses the persistence observer that RunStream wires in,
+// so without this the summary would live only in memory and the old,
+// un-compacted history would reload on the next resume.
 func (a *Agent) handleCompactCommand(ctx context.Context, acpSess *Session) error {
 	ctx = withSessionID(ctx, acpSess.id)
 
@@ -523,17 +546,41 @@ func (a *Agent) handleCompactCommand(ctx context.Context, acpSess *Session) erro
 		acpSess.rt.Summarize(ctx, acpSess.sess, "", runtime.NewChannelSink(events))
 	}()
 
+	var (
+		summarized bool
+		failed     bool
+	)
 	for event := range events {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if e, ok := event.(*runtime.ErrorEvent); ok {
+		switch e := event.(type) {
+		case *runtime.SessionSummaryEvent:
+			summarized = true
+			if a.sessionStore != nil {
+				if err := a.sessionStore.AddSummary(ctx, e.SessionID, e.Summary, e.FirstKeptEntry); err != nil {
+					return fmt.Errorf("failed to persist summary: %w", err)
+				}
+			}
+		case *runtime.TokenUsageEvent:
+			if e.Usage != nil && a.sessionStore != nil {
+				if err := a.sessionStore.UpdateSessionTokens(ctx, e.SessionID, e.Usage.InputTokens, e.Usage.OutputTokens, e.Usage.Cost); err != nil {
+					return fmt.Errorf("failed to persist token usage: %w", err)
+				}
+			}
+		case *runtime.ErrorEvent:
+			failed = true
 			if err := a.sendUpdate(ctx, acpSess.id, acp.UpdateAgentMessageText(fmt.Sprintf("\n\nError: %s\n", e.Error))); err != nil {
 				return err
 			}
 		}
 	}
 
+	if failed || !summarized {
+		// Compaction was skipped (e.g. by a hook) or errored; the error, if
+		// any, was already surfaced above. Don't claim success.
+		return nil
+	}
 	return a.sendUpdate(ctx, acpSess.id, acp.UpdateAgentMessageText("Compacted the conversation."))
 }
 

@@ -287,8 +287,9 @@ func TestClearSessionHistory(t *testing.T) {
 		defer closer.Close()
 	}
 
-	sess := session.New(session.WithWorkingDir(t.TempDir()))
+	sess := session.New(session.WithWorkingDir(t.TempDir()), session.WithTitle("Keep me"))
 	sess.AddMessage(session.UserMessage("first message"))
+	sess.SetUsage(10, 5)
 	require.NoError(t, sessStore.AddSession(ctx, sess))
 
 	loaded, err := sessStore.GetSession(ctx, sess.ID)
@@ -304,11 +305,44 @@ func TestClearSessionHistory(t *testing.T) {
 
 	require.NoError(t, acpAgent.clearSessionHistory(ctx, acpSess))
 
-	// In-memory session is cleared.
+	// In-memory session is cleared, including token counters.
 	assert.Empty(t, acpSess.sess.Messages)
+	in, out := acpSess.sess.Usage()
+	assert.Zero(t, in)
+	assert.Zero(t, out)
 
-	// A resume (GetSession) must not bring the old messages back.
+	// A resume (GetSession) must not bring the old messages back, but the
+	// session row itself (id, title, working dir) must survive.
 	reloaded, err := sessStore.GetSession(ctx, sess.ID)
 	require.NoError(t, err)
 	assert.Empty(t, reloaded.Messages, "cleared session must not reload previous messages")
+	assert.Equal(t, "Keep me", reloaded.Title)
+	assert.Equal(t, sess.WorkingDir, reloaded.WorkingDir)
+	assert.Zero(t, reloaded.InputTokens)
+	assert.Zero(t, reloaded.OutputTokens)
+}
+
+// TestClearSessionHistoryNeverPersisted verifies /new on a session that was
+// never written to the store (no messages sent yet) is a no-op rather than an
+// error.
+func TestClearSessionHistoryNeverPersisted(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	dbPath := filepath.Join(t.TempDir(), "session.db")
+	sessStore, err := session.NewSQLiteSessionStore(ctx, dbPath)
+	require.NoError(t, err)
+	if closer, ok := sessStore.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	sess := session.New(session.WithWorkingDir(t.TempDir()))
+	acpAgent := &Agent{
+		runConfig:    &config.RuntimeConfig{},
+		sessionStore: sessStore,
+		sessions:     make(map[string]*Session),
+	}
+	acpSess := &Session{id: sess.ID, sess: sess}
+
+	assert.NoError(t, acpAgent.clearSessionHistory(ctx, acpSess))
 }
