@@ -114,3 +114,28 @@ func TestWithAttachedFiles(t *testing.T) {
 	s := New(WithAttachedFiles([]string{"/abs/foo.go", "", "relative/path.go", "/abs/bar.go", "/abs/foo.go"}))
 	assert.Equal(t, []string{"/abs/foo.go", "/abs/bar.go"}, s.AttachedFilesSnapshot())
 }
+
+func TestRemoveAttachedFile(t *testing.T) {
+	t.Parallel()
+	t.Run("removes and preserves order of remaining files", func(t *testing.T) {
+		t.Parallel()
+		s := New(WithAttachedFiles([]string{"/abs/foo.go", "/abs/bar.go", "/abs/baz.go"}))
+		assert.True(t, s.RemoveAttachedFile("/abs/bar.go"))
+		assert.Equal(t, []string{"/abs/foo.go", "/abs/baz.go"}, s.AttachedFilesSnapshot())
+	})
+
+	t.Run("reports false for unknown path", func(t *testing.T) {
+		t.Parallel()
+		s := New(WithAttachedFiles([]string{"/abs/foo.go"}))
+		assert.False(t, s.RemoveAttachedFile("/abs/other.go"))
+		assert.Equal(t, []string{"/abs/foo.go"}, s.AttachedFilesSnapshot())
+	})
+
+	t.Run("allows re-attaching after removal", func(t *testing.T) {
+		t.Parallel()
+		s := New(WithAttachedFiles([]string{"/abs/foo.go"}))
+		assert.True(t, s.RemoveAttachedFile("/abs/foo.go"))
+		s.AddAttachedFile("/abs/foo.go")
+		assert.Equal(t, []string{"/abs/foo.go"}, s.AttachedFilesSnapshot())
+	})
+}

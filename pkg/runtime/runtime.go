@@ -28,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/promptfiles"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
@@ -1191,6 +1192,24 @@ func (r *LocalRuntime) CurrentAgentSkillsToolset() *skills.ToolSet {
 		}
 	}
 	return nil
+}
+
+// CurrentAgentPromptFiles resolves the current agent's add_prompt_files
+// entries (AGENTS.md, CLAUDE.md, ...) to on-disk paths using the same lookup
+// rules as the add_prompt_files turn-start hook: the workdir hierarchy plus
+// the user's home directory (or the staged kit inside a sandbox). Used by
+// the TUI /context dialog to show which prompt files enter the context.
+func (r *LocalRuntime) CurrentAgentPromptFiles() []string {
+	a := r.CurrentAgent()
+	if a == nil {
+		return nil
+	}
+	home, _ := os.UserHomeDir() // empty string disables the home-dir lookup
+	var paths []string
+	for _, name := range a.AddPromptFiles() {
+		paths = append(paths, promptfiles.PathsFromEnv(r.workingDir, home, name)...)
+	}
+	return paths
 }
 
 // ExecuteMCPPrompt executes an MCP prompt with provided arguments and returns the content.

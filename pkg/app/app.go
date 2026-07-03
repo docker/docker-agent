@@ -267,6 +267,25 @@ func (a *App) CurrentAgentSkills() []skills.Skill {
 	return st.Skills()
 }
 
+// promptFilesProvider is an optional runtime capability: resolving the
+// current agent's add_prompt_files entries to on-disk paths. Only the local
+// runtime implements it; remote runtimes don't, so the /context dialog
+// simply omits the prompt-files section for them.
+type promptFilesProvider interface {
+	CurrentAgentPromptFiles() []string
+}
+
+// CurrentAgentPromptFiles returns the resolved prompt-file paths injected
+// into the current agent's context at each turn, or nil when the runtime
+// cannot resolve them (remote runtime or no prompt files configured).
+func (a *App) CurrentAgentPromptFiles() []string {
+	p, ok := a.runtime.(promptFilesProvider)
+	if !ok {
+		return nil
+	}
+	return p.CurrentAgentPromptFiles()
+}
+
 // ResolveSkillCommand checks if the input matches a skill slash command (e.g. /skill-name args).
 // If matched, it reads the skill content and returns the resolved prompt. Otherwise returns "".
 //

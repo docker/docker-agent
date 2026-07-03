@@ -24,6 +24,10 @@ type (
 	// ShowCostDialogMsg shows the cost/usage dialog.
 	ShowCostDialogMsg struct{}
 
+	// ShowContextDialogMsg shows the context inventory dialog: attached
+	// files and prompt files with per-item token estimates.
+	ShowContextDialogMsg struct{}
+
 	// ShowPermissionsDialogMsg shows the permissions dialog.
 	ShowPermissionsDialogMsg struct{}
 

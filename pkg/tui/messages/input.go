@@ -5,6 +5,10 @@ type (
 	// AttachFileMsg attaches a file directly or opens file picker if empty/directory.
 	AttachFileMsg struct{ FilePath string }
 
+	// DropAttachedFileMsg removes a previously attached file from the session
+	// so it no longer enters the context of future turns.
+	DropAttachedFileMsg struct{ FilePath string }
+
 	// InsertFileRefMsg inserts @filepath reference into editor.
 	InsertFileRefMsg struct{ FilePath string }
 

@@ -118,6 +118,33 @@ func builtInSessionCommands() []Item {
 			},
 		},
 		{
+			ID:           "session.context",
+			Label:        "Context",
+			SlashCommand: "/context",
+			Description:  "List attached and prompt files in context with token estimates",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(string) tea.Cmd {
+				return core.CmdHandler(messages.ShowContextDialogMsg{})
+			},
+		},
+		{
+			ID:           "session.drop",
+			Label:        "Drop",
+			SlashCommand: "/drop",
+			Description:  "Remove an attached file from context (usage: /drop [path])",
+			Category:     "Session",
+			Immediate:    true,
+			Execute: func(arg string) tea.Cmd {
+				arg = strings.TrimSpace(arg)
+				if arg == "" {
+					// No argument: open the context inventory to pick a file.
+					return core.CmdHandler(messages.ShowContextDialogMsg{})
+				}
+				return core.CmdHandler(messages.DropAttachedFileMsg{FilePath: arg})
+			},
+		},
+		{
 			ID:           "session.cost",
 			Label:        "Cost",
 			SlashCommand: "/cost",

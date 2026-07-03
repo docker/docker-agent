@@ -79,6 +79,8 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/yolo`            | Toggle automatic tool call approval                                                  |
 | `/title`           | Set or regenerate session title                                                      |
 | `/attach`          | Attach a file to your message                                                        |
+| `/context`         | List attached files and prompt files in context, each with a token estimate; press <kbd>d</kbd> to drop the selected attachment |
+| `/drop`            | Remove an attached file from context (`/drop <path>`, or `/drop` alone to pick from the list) |
 | `/shell`           | Open a shell                                                                         |
 | `/star`            | Star/unstar the current session                                                      |
 | `/cost`            | Show cost breakdown for this session                                                 |

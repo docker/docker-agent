@@ -745,6 +745,21 @@ func (s *Session) AttachedFilesSnapshot() []string {
 	return slices.Clone(s.AttachedFiles)
 }
 
+// RemoveAttachedFile removes absPath from the session's attached files so
+// that sub-sessions created afterwards no longer inherit it. It reports
+// whether the path was present. Re-attaching later (e.g. via a new @-mention)
+// simply calls AddAttachedFile again.
+func (s *Session) RemoveAttachedFile(absPath string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	i := slices.Index(s.AttachedFiles, absPath)
+	if i < 0 {
+		return false
+	}
+	s.AttachedFiles = slices.Delete(s.AttachedFiles, i, i+1)
+	return true
+}
+
 type Opt func(s *Session)
 
 func WithUserMessage(content string) Opt {

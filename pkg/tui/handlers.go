@@ -7,6 +7,7 @@ import (
 	neturl "net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/evaluation"
 	"github.com/docker/docker-agent/pkg/modelinfo"
+	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/shellpath"
@@ -474,6 +476,45 @@ func (m *appModel) handleShowSkillsDialog() (tea.Model, tea.Cmd) {
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewSkillsDialog(m.application.CurrentAgentSkills()),
 	})
+}
+
+func (m *appModel) handleShowContextDialog() (tea.Model, tea.Cmd) {
+	var attached []string
+	if sess := m.application.Session(); sess != nil {
+		attached = sess.AttachedFilesSnapshot()
+	}
+	return m, core.CmdHandler(dialog.OpenDialogMsg{
+		Model: dialog.NewContextDialog(
+			dialog.BuildContextFiles(attached, m.application.CurrentAgentPromptFiles()),
+		),
+	})
+}
+
+// handleDropAttachedFile removes a previously attached file from the session
+// and persists the change so a later resume does not resurrect it. The path
+// is expanded (~, env vars) and made absolute to match the fully qualified
+// paths stored in the session; entries dropped from the /context dialog
+// arrive already absolute so resolution is a no-op for them.
+func (m *appModel) handleDropAttachedFile(path string) (tea.Model, tea.Cmd) {
+	sess := m.application.Session()
+	if sess == nil {
+		return m, notification.ErrorCmd("No active session")
+	}
+
+	absPath := pathx.ExpandPath(path)
+	if resolved, err := filepath.Abs(absPath); err == nil {
+		absPath = resolved
+	}
+	if !sess.RemoveAttachedFile(absPath) {
+		return m, notification.WarningCmd("Not attached: " + path)
+	}
+
+	if store := m.application.SessionStore(); store != nil {
+		if err := store.UpdateSession(m.ctx(), sess); err != nil {
+			slog.Warn("failed to persist dropped attachment", "path", absPath, "error", err)
+		}
+	}
+	return m, notification.SuccessCmd("Dropped " + pathx.ShortenHome(absPath))
 }
 
 // handleRestartToolset asks the runtime to restart the named toolset.
