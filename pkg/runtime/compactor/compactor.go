@@ -216,13 +216,23 @@ func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
 		session.WithTitle("Generating summary"),
 		session.WithMessages(toItems(messages)),
 	)
+	seedLen := len(compactionSession.Messages)
 
 	if err := args.RunAgent(ctx, compactionAgent, compactionSession); err != nil {
 		return nil, fmt.Errorf("run compaction agent: %w", err)
 	}
 
-	summary := compactionSession.GetLastAssistantMessageContent()
+	// Only assistant content produced by the summarization run counts as
+	// the summary. The session was seeded with the conversation being
+	// summarized, so GetLastAssistantMessageContent would fall back to the
+	// conversation's own last assistant reply when the model returned an
+	// empty response — and that bogus "summary" would then replace the
+	// real history. Scanning past the seed makes an empty model response
+	// a no-op instead.
+	summary := lastAssistantContentAfter(compactionSession, seedLen)
 	if summary == "" {
+		slog.WarnContext(ctx, "Compaction skipped: summarization model produced no summary",
+			"session_id", args.Session.ID, "model", summaryModel.ID().String())
 		return nil, nil
 	}
 
@@ -335,6 +345,20 @@ func firstKeptSessionIndex(sess *session.Session, sessIndices []int, splitIdx in
 		return len(sess.Messages)
 	}
 	return sessIndices[splitIdx]
+}
+
+// lastAssistantContentAfter returns the content of the last assistant
+// message appended to sess after the first seedLen items, or "" when
+// the run produced none. sess is the throwaway compaction sub-session,
+// owned exclusively by the caller once RunAgent has returned.
+func lastAssistantContentAfter(sess *session.Session, seedLen int) string {
+	for i := len(sess.Messages) - 1; i >= seedLen; i-- {
+		item := sess.Messages[i]
+		if item.IsMessage() && item.Message.Message.Role == chat.MessageRoleAssistant {
+			return item.Message.Message.Content
+		}
+	}
+	return ""
 }
 
 // toItems wraps a flat slice of chat messages into session items so a
