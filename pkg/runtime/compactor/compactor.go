@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -355,7 +356,9 @@ func lastAssistantContentAfter(sess *session.Session, seedLen int) string {
 	for i := len(sess.Messages) - 1; i >= seedLen; i-- {
 		item := sess.Messages[i]
 		if item.IsMessage() && item.Message.Message.Role == chat.MessageRoleAssistant {
-			return item.Message.Message.Content
+			// Whitespace-only output is no summary; trimming keeps it on
+			// the no-op path.
+			return strings.TrimSpace(item.Message.Message.Content)
 		}
 	}
 	return ""

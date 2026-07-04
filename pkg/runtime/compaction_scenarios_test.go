@@ -71,25 +71,36 @@ func TestScenario_CompactionFailure_ReportsFailedOutcome(t *testing.T) {
 // compaction must be a no-op: the session is left untouched (an empty
 // model response must NOT fall back to the conversation's own last
 // assistant message — that would wipe real history) and the terminal
-// event reports "skipped".
+// event reports "skipped". Whitespace-only responses take the same path.
 func TestScenario_EmptySummary_IsNoOp(t *testing.T) {
 	t.Parallel()
 
-	emptySummaryStream := newStreamBuilder().AddStopWithUsage(1, 0).Build()
-	prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{emptySummaryStream}}
-	root := agent.New("root", "test", agent.WithModel(prov))
-	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
-		WithSessionCompaction(false),
-		WithModelStore(mockModelStoreWithLimit{limit: 100_000}),
-	)
-	require.NoError(t, err)
+	tests := []struct {
+		name   string
+		stream *mockStream
+	}{
+		{"empty response", newStreamBuilder().AddStopWithUsage(1, 0).Build()},
+		{"whitespace-only response", newStreamBuilder().AddContent("\n \t\n").AddStopWithUsage(1, 2).Build()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{tt.stream}}
+			root := agent.New("root", "test", agent.WithModel(prov))
+			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+				WithSessionCompaction(false),
+				WithModelStore(mockModelStoreWithLimit{limit: 100_000}),
+			)
+			require.NoError(t, err)
 
-	sess := twoMessageSession()
-	kinds := collectCompactionEvents(t, rt, sess)
+			sess := twoMessageSession()
+			kinds := collectCompactionEvents(t, rt, sess)
 
-	assert.Equal(t, []string{"compaction:started", "compaction:completed:skipped"}, kinds,
-		"a no-summary no-op must not look like a successful compaction")
-	assert.Len(t, sess.Messages, 2, "a no-summary response must leave the session unmodified")
+			assert.Equal(t, []string{"compaction:started", "compaction:completed:skipped"}, kinds,
+				"a no-summary no-op must not look like a successful compaction")
+			assert.Len(t, sess.Messages, 2, "a no-summary response must leave the session unmodified")
+		})
+	}
 }
 
 // Scenario: session token bookkeeping right after a successful compaction.
