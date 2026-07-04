@@ -23,7 +23,11 @@ func collectCompactionEvents(t *testing.T, rt *LocalRuntime, sess *session.Sessi
 	for ev := range events {
 		switch e := ev.(type) {
 		case *SessionCompactionEvent:
-			kinds = append(kinds, "compaction:"+e.Status)
+			if e.Status == "completed" && e.Outcome != "" {
+				kinds = append(kinds, "compaction:completed:"+e.Outcome)
+			} else {
+				kinds = append(kinds, "compaction:"+e.Status)
+			}
 		case *SessionSummaryEvent:
 			kinds = append(kinds, "summary")
 		case *ErrorEvent:
@@ -41,9 +45,9 @@ func twoMessageSession() *session.Session {
 }
 
 // Scenario: when the model definition can't be resolved (unknown model, no
-// provider_opts), doCompact emits started -> error -> completed; the
-// started/completed pairing is what UIs use for spinner logic.
-func TestScenario_CompactionFailure_EmitsErrorAndCompleted(t *testing.T) {
+// provider_opts), doCompact emits started -> error -> completed with a
+// "failed" outcome so UIs don't announce success after an error.
+func TestScenario_CompactionFailure_ReportsFailedOutcome(t *testing.T) {
 	t.Parallel()
 
 	prov := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
@@ -57,15 +61,17 @@ func TestScenario_CompactionFailure_EmitsErrorAndCompleted(t *testing.T) {
 	sess := twoMessageSession()
 	kinds := collectCompactionEvents(t, rt, sess)
 
-	// The started/completed pairing is preserved for spinner logic.
-	assert.Equal(t, []string{"compaction:started", "error", "compaction:completed"}, kinds)
+	// The started/completed pairing is preserved for spinner logic, but
+	// the terminal event now reports the failure.
+	assert.Equal(t, []string{"compaction:started", "error", "compaction:completed:failed"}, kinds)
 	assert.Len(t, sess.Messages, 2, "failed compaction must not modify the session")
 }
 
 // Scenario: when the summary model returns an empty response, the
 // compaction must be a no-op: the session is left untouched (an empty
 // model response must NOT fall back to the conversation's own last
-// assistant message — that would wipe real history).
+// assistant message — that would wipe real history) and the terminal
+// event reports "skipped".
 func TestScenario_EmptySummary_IsNoOp(t *testing.T) {
 	t.Parallel()
 
@@ -81,8 +87,9 @@ func TestScenario_EmptySummary_IsNoOp(t *testing.T) {
 	sess := twoMessageSession()
 	kinds := collectCompactionEvents(t, rt, sess)
 
-	assert.Equal(t, []string{"compaction:started", "compaction:completed"}, kinds)
-	assert.Len(t, sess.Messages, 2, "an empty model response must leave the session unmodified")
+	assert.Equal(t, []string{"compaction:started", "compaction:completed:skipped"}, kinds,
+		"a no-summary no-op must not look like a successful compaction")
+	assert.Len(t, sess.Messages, 2, "a no-summary response must leave the session unmodified")
 }
 
 // Scenario: session token bookkeeping right after a successful compaction.

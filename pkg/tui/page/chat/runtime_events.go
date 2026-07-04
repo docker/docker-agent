@@ -134,13 +134,24 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	case *runtime.SessionCompactionEvent:
 		if msg.Status == "completed" {
 			p.msgCancel = nil
-			return true, tea.Batch(
+			cmds := []tea.Cmd{
 				p.setWorking(false),
 				p.setPendingResponse(false),
 				p.processNextQueuedMessage(),
-				notification.SuccessCmd("Session compacted successfully."),
 				p.messages.ScrollToBottom(),
-			)
+			}
+			// Only announce success when a summary was actually applied.
+			// "failed" already surfaced an ErrorEvent; "skipped" means the
+			// compaction was a no-op (nothing to compact, hook veto, empty
+			// model output). Empty outcome (older servers) keeps the legacy
+			// success toast.
+			switch msg.Outcome {
+			case "", runtime.CompactionOutcomeApplied:
+				cmds = append(cmds, notification.SuccessCmd("Session compacted successfully."))
+			case runtime.CompactionOutcomeSkipped:
+				cmds = append(cmds, notification.InfoCmd("Session compaction skipped."))
+			}
+			return true, tea.Batch(cmds...)
 		}
 		return true, nil
 

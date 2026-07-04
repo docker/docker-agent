@@ -77,8 +77,14 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 
 	slog.DebugContext(ctx, "Generating summary for session", "session_id", sess.ID, "reason", reason)
 	events.Emit(SessionCompaction(sess.ID, "started", a.Name()))
+	// outcome qualifies the terminal "completed" event: "applied" when a
+	// summary was written to the session, "skipped" for no-ops (nothing
+	// to compact, empty model output), "failed" when an error was
+	// emitted. UIs use it to avoid announcing success for a compaction
+	// that did nothing.
+	outcome := CompactionOutcomeApplied
 	defer func() {
-		events.Emit(SessionCompaction(sess.ID, "completed", a.Name()))
+		events.Emit(SessionCompactionCompleted(sess.ID, outcome, a.Name()))
 	}()
 
 	// Choose the strategy: a hook-supplied summary if before_compaction
@@ -89,6 +95,7 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 			slog.ErrorContext(ctx, "Failed to generate session summary",
 				"error", "model definition unavailable")
 			events.Emit(ErrorForSession(sess.ID, "Failed to get model definition"))
+			outcome = CompactionOutcomeFailed
 			return
 		}
 
@@ -103,10 +110,12 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to generate session summary", "error", err)
 			events.Emit(ErrorForSession(sess.ID, err.Error()))
+			outcome = CompactionOutcomeFailed
 			return
 		}
 		if result == nil {
 			// Empty summary — bail without applying anything.
+			outcome = CompactionOutcomeSkipped
 			return
 		}
 	}

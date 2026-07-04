@@ -1150,7 +1150,11 @@ func (a *App) CompactSession(ctx context.Context, cancel context.CancelFunc, add
 			a.sendEvent(ctx, event)
 		}
 		if !completed && ctx.Err() == nil {
-			a.sendEvent(ctx, runtime.SessionCompaction(sess.ID, "completed", agentName))
+			// The compaction never emitted its started/completed pair (e.g. a
+			// pre_compact / before_compaction hook vetoed it). Synthesize the
+			// terminal event so the TUI unsticks, but report it as skipped —
+			// nothing was compacted.
+			a.sendEvent(ctx, runtime.SessionCompactionCompleted(sess.ID, runtime.CompactionOutcomeSkipped, agentName))
 		}
 	}()
 }

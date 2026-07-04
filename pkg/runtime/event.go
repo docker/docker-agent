@@ -468,12 +468,26 @@ func SessionSummary(sessionID, summary, agentName string, firstKeptEntry int) Ev
 
 func (e *SessionSummaryEvent) GetSessionID() string { return e.SessionID }
 
+// Outcome values carried by a "completed" [SessionCompactionEvent].
+const (
+	CompactionOutcomeApplied = "applied"
+	CompactionOutcomeSkipped = "skipped"
+	CompactionOutcomeFailed  = "failed"
+)
+
 type SessionCompactionEvent struct {
 	AgentContext
 
 	Type      string `json:"type"`
 	SessionID string `json:"session_id"`
 	Status    string `json:"status"`
+	// Outcome qualifies a "completed" status: "applied" (a summary
+	// replaced part of the history), "skipped" (no-op: nothing to
+	// compact or the model produced no summary), or "failed" (an error
+	// was emitted). Empty on "started" events and events from older
+	// servers; consumers should treat empty as "applied" for backward
+	// compatibility.
+	Outcome string `json:"outcome,omitempty"`
 }
 
 func SessionCompaction(sessionID, status, agentName string) Event {
@@ -481,6 +495,19 @@ func SessionCompaction(sessionID, status, agentName string) Event {
 		Type:         "session_compaction",
 		SessionID:    sessionID,
 		Status:       status,
+		AgentContext: newAgentContext(agentName),
+	}
+}
+
+// SessionCompactionCompleted is the terminal counterpart of a "started"
+// [SessionCompaction] event, carrying the outcome ("applied", "skipped"
+// or "failed") so consumers can render an honest completion signal.
+func SessionCompactionCompleted(sessionID, outcome, agentName string) Event {
+	return &SessionCompactionEvent{
+		Type:         "session_compaction",
+		SessionID:    sessionID,
+		Status:       "completed",
+		Outcome:      outcome,
 		AgentContext: newAgentContext(agentName),
 	}
 }
