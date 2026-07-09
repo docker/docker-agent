@@ -344,6 +344,10 @@ func TestDatabaseOperationsWithCanceledContext(t *testing.T) {
 }
 
 func TestMemoryDatabaseUsesWALAndBusyTimeout(t *testing.T) {
+	// WAL is only expected outside a Docker sandbox (sqliteutil falls back
+	// to DELETE inside one), so pin the detection env var.
+	t.Setenv("SANDBOX_VM_ID", "")
+
 	db := setupTestDB(t)
 	memDB := db.(*MemoryDatabase)
 
