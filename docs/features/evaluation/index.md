@@ -165,6 +165,11 @@ $ docker agent eval <agent-file>|<registry-ref> [<eval-dir>|./evals]
 | `-e, --env`         | (none)                      | Environment variables to pass to container (`KEY` or `KEY=VALUE`) |
 | `--repeat`          | `1`                         | Number of times to repeat each evaluation (useful for computing baselines) |
 
+> [!NOTE]
+> **Container cleanup on cancellation**
+>
+> If the run is cancelled (Ctrl-C or a timeout), docker-agent force-removes the in-flight eval containers so they don't keep running in the background. An individual eval failing does not cancel the run — evaluation continues with the rest — so this cleanup only kicks in when the whole run is cancelled. Pass `--keep-containers` to opt out and preserve containers for debugging even when a run is cancelled.
+
 ### Custom Base Images
 
 When `--base-image` is set, the eval harness builds a derived image on top of your base image at evaluation time. Two things happen automatically:

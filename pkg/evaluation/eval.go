@@ -3,6 +3,7 @@ package evaluation
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -471,19 +472,15 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 	if err != nil {
 		return nil, fmt.Errorf("creating stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("creating stderr pipe: %w", err)
-	}
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	cmd.WaitDelay = 10 * time.Second
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting docker run: %w", err)
 	}
-
-	var stderrData []byte
-	go func() {
-		stderrData, _ = io.ReadAll(stderr)
-	}()
+	defer r.reapContainer(containerName)
 
 	var events []map[string]any
 	scanner := bufio.NewScanner(stdout)
@@ -508,6 +505,7 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 	}
 
 	waitErr := cmd.Wait()
+	stderrData := stderrBuf.Bytes()
 	if waitErr != nil {
 		slog.DebugContext(ctx, "Container exited with error", "stderr", string(stderrData), "error", waitErr)
 	}
@@ -524,6 +522,30 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 	}
 
 	return events, nil
+}
+
+// reapContainer force-removes the eval container so it never outlives the
+// run. --rm normally removes it on a clean exit, but exec.CommandContext
+// only kills the docker CLI on ctx cancellation; the container itself is
+// never signaled and would otherwise leak. Uses a fresh context because the
+// eval ctx may already be cancelled by the time this runs.
+func (r *Runner) reapContainer(containerName string) {
+	if r.KeepContainers {
+		return
+	}
+
+	// Detached on purpose: the eval's ctx may already be cancelled
+	// (timeout, Ctrl-C) by the time this runs, and cleanup must still happen.
+	//rubocop:disable Lint/ContextConnectivity
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "docker", "rm", "-f", containerName).CombinedOutput()
+	if err == nil || strings.Contains(string(out), "No such container") {
+		return
+	}
+
+	slog.WarnContext(ctx, "Failed to reap eval container", "container", containerName, "error", err, "output", string(out))
 }
 
 func parseContainerEvents(events []map[string]any) (response string, cost float64, outputTokens int64, toolCalls []string) {

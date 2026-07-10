@@ -2,7 +2,9 @@ package evaluation
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +15,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -1005,4 +1009,237 @@ func TestNeedsJudge(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// writeDockerStub installs a fake "docker" executable on PATH that appends
+// its invocation args (one line per call) to logFile, so tests can assert
+// on how reapContainer invoked it without a real Docker daemon.
+func writeDockerStub(t *testing.T, logFile string) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %q\n", logFile)
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+}
+
+func TestReapContainer_RunsRmDashF(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "docker-calls.log")
+	writeDockerStub(t, logFile)
+
+	r := &Runner{}
+	r.reapContainer("docker-agent-eval-1234")
+
+	data, err := os.ReadFile(logFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "rm -f docker-agent-eval-1234")
+}
+
+func TestReapContainer_RunsEvenWhenCallerContextAlreadyCancelled(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "docker-calls.log")
+	writeDockerStub(t, logFile)
+
+	// Simulate the eval's context (timeout, Ctrl-C, ...) already being
+	// cancelled by the time reapContainer runs. reapContainer must not
+	// derive its context from it, so the cleanup still happens.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.Error(t, ctx.Err())
+
+	r := &Runner{}
+	r.reapContainer("docker-agent-eval-5678")
+
+	data, err := os.ReadFile(logFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "rm -f docker-agent-eval-5678")
+}
+
+func TestReapContainer_SkippedWhenKeepContainers(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "docker-calls.log")
+	writeDockerStub(t, logFile)
+
+	r := &Runner{Config: Config{KeepContainers: true}}
+	r.reapContainer("docker-agent-eval-9999")
+
+	_, err := os.ReadFile(logFile)
+	assert.ErrorIs(t, err, os.ErrNotExist, "docker should never be invoked when --keep-containers is set")
+}
+
+func TestReapContainer_IgnoresNoSuchContainer(t *testing.T) {
+	// Common path: --rm already removed the container by the time reap
+	// runs, so "docker rm -f" fails with "No such container". That must
+	// not be surfaced as a warning-worthy failure.
+	binDir := t.TempDir()
+	script := "#!/bin/sh\necho \"Error: No such container: $2\" >&2\nexit 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	r := &Runner{}
+	// Should not panic and should complete quickly despite the non-zero exit.
+	r.reapContainer("docker-agent-eval-missing")
+}
+
+// --- Integration-level tests for runDockerAgentInContainer ---
+//
+// These go through the real function (not reapContainer directly) using a
+// fake "docker" on PATH that distinguishes "docker run" from "docker rm", so
+// they protect the actual regression: they fail if the
+// `defer r.reapContainer(containerName)` registration in
+// runDockerAgentInContainer is ever removed or short-circuited.
+
+// writeDockerStubWithRunBehavior installs a fake "docker" executable on PATH
+// that appends every invocation's args (one line per call) to logFile. For
+// "docker run" calls it executes runBehavior, a POSIX shell snippet standing
+// in for the containerized process; "docker rm" calls always succeed. This
+// lets tests exercise runDockerAgentInContainer end-to-end, including its
+// deferred cleanup, without a Docker daemon.
+func writeDockerStubWithRunBehavior(t *testing.T, logFile, runBehavior string) {
+	t.Helper()
+
+	binDir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" >> %q\ncase \"$1\" in\nrun)\n%s\n;;\nrm)\nexit 0\n;;\nesac\n", logFile, runBehavior)
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755))
+	// Keep the real PATH behind the stub: the run behaviors below shell out to
+	// real utilities (sleep, head, tr); only "docker" itself must be faked.
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// dockerCallLines returns the recorded docker invocations, one per line, in
+// the order they occurred.
+func dockerCallLines(t *testing.T, logFile string) []string {
+	t.Helper()
+
+	data, err := os.ReadFile(logFile)
+	require.NoError(t, err)
+	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+}
+
+// containerNameFromRunArgs extracts the --name value from a recorded "docker
+// run ..." invocation line, so tests can confirm the matching "docker rm -f"
+// call targeted the same container.
+func containerNameFromRunArgs(t *testing.T, runLine string) string {
+	t.Helper()
+
+	m := regexp.MustCompile(`--name (\S+)`).FindStringSubmatch(runLine)
+	require.Len(t, m, 2, "expected --name in docker run args: %s", runLine)
+	return m[1]
+}
+
+// newTestRunner builds a Runner suitable for exercising
+// runDockerAgentInContainer without touching a real agent file or the host
+// environment.
+func newTestRunner(cfg Config) *Runner {
+	return &Runner{
+		Config:      cfg,
+		agentSource: config.NewBytesSource("agent.yaml", []byte("name: test")),
+		runConfig: &config.RuntimeConfig{
+			EnvProviderForTests: environment.NewNoEnvProvider(),
+		},
+	}
+}
+
+func TestRunDockerAgentInContainer_CallerContextCancellation(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "docker-calls.log")
+	// "exec sleep 5" replaces the shell's own process image instead of
+	// forking a child, so SIGKILLing the docker run process (what ctx
+	// cancellation does) terminates the sleep directly -- matching how the
+	// real docker CLI process (not a shell wrapper) behaves.
+	writeDockerStubWithRunBehavior(t, logFile, "exec sleep 5")
+
+	r := newTestRunner(Config{})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		// Cancel only once "docker run" has actually started and recorded its
+		// invocation, so this genuinely exercises mid-flight cancellation
+		// rather than racing (and possibly losing to) process-startup latency.
+		assert.Eventually(t, func() bool {
+			data, err := os.ReadFile(logFile)
+			return err == nil && strings.HasPrefix(string(data), "run ")
+		}, 5*time.Second, 5*time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := r.runDockerAgentInContainer(ctx, "image123", []string{"question"}, "")
+	require.Error(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second, "context cancellation should kill docker run before its 5s sleep completes")
+
+	calls := dockerCallLines(t, logFile)
+	require.GreaterOrEqual(t, len(calls), 2, "expected both a docker run and a docker rm -f call, got: %v", calls)
+	require.True(t, strings.HasPrefix(calls[0], "run "))
+	containerName := containerNameFromRunArgs(t, calls[0])
+	assert.Contains(t, calls[len(calls)-1], "rm -f "+containerName, "container must still be reaped when the caller context is cancelled")
+}
+
+func TestRunDockerAgentInContainer_NonZeroExit(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "docker-calls.log")
+	writeDockerStubWithRunBehavior(t, logFile, "echo boom >&2; exit 7")
+
+	r := newTestRunner(Config{})
+	_, err := r.runDockerAgentInContainer(t.Context(), "image123", []string{"question"}, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "container failed")
+	assert.Contains(t, err.Error(), "boom")
+
+	calls := dockerCallLines(t, logFile)
+	require.GreaterOrEqual(t, len(calls), 2)
+	require.True(t, strings.HasPrefix(calls[0], "run "))
+	containerName := containerNameFromRunArgs(t, calls[0])
+	assert.Contains(t, calls[len(calls)-1], "rm -f "+containerName, "container must be reaped after a non-zero docker run exit")
+}
+
+func TestRunDockerAgentInContainer_ScannerTokenTooLong(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "docker-calls.log")
+	// A single line above the 10 MiB scanner buffer limit (no newline) trips
+	// bufio.ErrTooLong; the reader loop must handle that without a panic.
+	// Once the scanner gives up, nothing keeps draining stdout, so the
+	// still-writing "tr" can block on a full pipe forever -- bound the test
+	// with a timeout (as any real caller eventually would) so that residual
+	// hang is force-killed rather than wedging the test.
+	writeDockerStubWithRunBehavior(t, logFile, `head -c 11000000 /dev/zero | tr '\0' 'a'`)
+
+	r := newTestRunner(Config{})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	_, err := r.runDockerAgentInContainer(ctx, "image123", []string{"question"}, "")
+	require.Error(t, err)
+
+	calls := dockerCallLines(t, logFile)
+	require.GreaterOrEqual(t, len(calls), 2)
+	require.True(t, strings.HasPrefix(calls[0], "run "))
+	containerName := containerNameFromRunArgs(t, calls[0])
+	assert.Contains(t, calls[len(calls)-1], "rm -f "+containerName, "container must be reaped after a scanner error")
+}
+
+func TestRunDockerAgentInContainer_Success(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "docker-calls.log")
+	writeDockerStubWithRunBehavior(t, logFile, `echo '{"type":"agent_choice","content":"hi"}'`)
+
+	r := newTestRunner(Config{})
+	events, err := r.runDockerAgentInContainer(t.Context(), "image123", []string{"question"}, "")
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, "agent_choice", events[0]["type"])
+
+	calls := dockerCallLines(t, logFile)
+	require.Len(t, calls, 2)
+	require.True(t, strings.HasPrefix(calls[0], "run "))
+	containerName := containerNameFromRunArgs(t, calls[0])
+	assert.Contains(t, calls[1], "rm -f "+containerName, "container must be reaped after a normal successful exit")
+}
+
+func TestRunDockerAgentInContainer_KeepContainersSkipsCleanup(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "docker-calls.log")
+	writeDockerStubWithRunBehavior(t, logFile, `echo '{"type":"agent_choice","content":"hi"}'`)
+
+	r := newTestRunner(Config{KeepContainers: true})
+	events, err := r.runDockerAgentInContainer(t.Context(), "image123", []string{"question"}, "")
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+
+	calls := dockerCallLines(t, logFile)
+	require.Len(t, calls, 1, "docker rm must never run when KeepContainers is set")
+	assert.True(t, strings.HasPrefix(calls[0], "run "))
+	assert.NotContains(t, calls[0], "--rm", "run args must omit --rm when KeepContainers is set")
 }

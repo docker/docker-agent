@@ -423,7 +423,7 @@ $ docker agent eval <agent-file>|<registry-ref> [<eval-dir>|./evals] [flags]
 | `--output <dir>`    | `<eval-dir>/results`                 | Directory for results, logs, and session databases                         |
 | `--only <pattern>`  | (all)                                | Only run evals with file names matching these patterns (repeatable)        |
 | `--base-image`      | (default)                            | Custom base Docker image for eval containers                               |
-| `--keep-containers` | `false`                              | Keep containers after evaluation (don't remove with `--rm`)                |
+| `--keep-containers` | `false`                              | Keep containers after evaluation, including cancelled/interrupted runs (don't remove with `--rm`) |
 | `-e, --env`         | (none)                               | Environment variables to pass to container (`KEY` or `KEY=VALUE`, repeatable) |
 | `--repeat <n>`      | `1`                                  | Number of times to repeat each evaluation (useful for computing baselines) |
 
