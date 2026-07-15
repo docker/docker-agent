@@ -32,10 +32,12 @@ func Open(ctx context.Context, urlToOpen string) error {
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
 
-	err := exec.CommandContext(ctx, cmd, args...).Start()
-	if err != nil {
+	command := exec.CommandContext(ctx, cmd, args...)
+	if err := command.Start(); err != nil {
 		return fmt.Errorf("failed to open browser: %w", err)
 	}
+	// Reap the child in the background so it does not linger as a zombie.
+	go func() { _ = command.Wait() }()
 
 	return nil
 }
