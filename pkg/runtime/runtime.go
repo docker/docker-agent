@@ -1400,7 +1400,7 @@ func (r *LocalRuntime) Close() error {
 
 // UpdateSessionTitle persists the session title via the session store.
 func (r *LocalRuntime) UpdateSessionTitle(ctx context.Context, sess *session.Session, title string) error {
-	sess.Title = title
+	sess.SetTitle(title)
 	if r.sessionStore != nil {
 		return r.sessionStore.UpdateSession(ctx, sess)
 	}

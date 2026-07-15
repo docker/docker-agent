@@ -185,7 +185,7 @@ func copySessionMetadata(dst, src *Session, title string) {
 	if src == nil || dst == nil {
 		return
 	}
-	dst.Title = title
+	dst.SetTitle(title)
 	dst.ToolsApproved = src.ToolsApproved
 	dst.HideToolResults = src.HideToolResults
 	dst.WorkingDir = src.WorkingDir
@@ -375,6 +375,5 @@ func recalculateSessionTotals(sess *Session) {
 		}
 	}
 
-	sess.InputTokens = inputTokens
-	sess.OutputTokens = outputTokens
+	sess.SetUsage(inputTokens, outputTokens)
 }

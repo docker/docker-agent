@@ -211,6 +211,33 @@ func TestSummaryMessageContentMatchesGetMessages(t *testing.T) {
 	assert.True(t, found, "GetMessages output must contain the exact SummaryMessageContent string")
 }
 
+func TestSessionSetTitle(t *testing.T) {
+	t.Parallel()
+
+	s := New()
+	s.SetTitle("Generated title")
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	assert.Equal(t, "Generated title", s.Title)
+}
+
+func TestSessionSetTokensAndCost(t *testing.T) {
+	t.Parallel()
+
+	s := New()
+	s.SetTokensAndCost(100, 200, 0.25)
+
+	input, output := s.Usage()
+	s.mu.RLock()
+	cost := s.Cost
+	s.mu.RUnlock()
+
+	assert.Equal(t, int64(100), input)
+	assert.Equal(t, int64(200), output)
+	assert.Equal(t, 0.25, cost)
+}
+
 func TestGetMessages_Instructions(t *testing.T) {
 	t.Parallel()
 

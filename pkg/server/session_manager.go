@@ -460,7 +460,7 @@ func (sm *SessionManager) ForkSession(ctx context.Context, sessionID string, use
 	for _, s := range siblings {
 		siblingTitles = append(siblingTitles, s.Title)
 	}
-	forked.Title = session.NextForkTitle(parent.Title, siblingTitles)
+	forked.SetTitle(session.NextForkTitle(parent.Title, siblingTitles))
 
 	if err := sm.sessionStore.AddSession(ctx, forked); err != nil {
 		return nil, err
@@ -975,7 +975,7 @@ func (sm *SessionManager) UpdateSessionTitle(ctx context.Context, sessionID, tit
 	// If session is actively running, update the in-memory session object directly.
 	// This ensures the runtime's saveSession won't overwrite our manual edit.
 	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
-		rt.session.Title = title
+		rt.session.SetTitle(title)
 		slog.DebugContext(ctx, "Updated title for active session", "session_id", sessionID, "title", title)
 		return sm.sessionStore.UpdateSession(ctx, rt.session)
 	}
@@ -986,7 +986,7 @@ func (sm *SessionManager) UpdateSessionTitle(ctx context.Context, sessionID, tit
 		return err
 	}
 
-	sess.Title = title
+	sess.SetTitle(title)
 	return sm.sessionStore.UpdateSession(ctx, sess)
 }
 
@@ -1009,7 +1009,7 @@ func (sm *SessionManager) generateTitle(ctx context.Context, sess *session.Sessi
 	}
 
 	// Update the in-memory session
-	sess.Title = title
+	sess.SetTitle(title)
 
 	// Persist the title
 	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {

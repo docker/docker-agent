@@ -649,7 +649,7 @@ func (r *RemoteRuntime) RunSkillFork(context.Context, *session.Session, skills.R
 
 // UpdateSessionTitle updates the title of the current session on the remote server.
 func (r *RemoteRuntime) UpdateSessionTitle(ctx context.Context, sess *session.Session, title string) error {
-	sess.Title = title
+	sess.SetTitle(title)
 	if r.sessionID == "" {
 		return errors.New("cannot update session title: no session ID available")
 	}

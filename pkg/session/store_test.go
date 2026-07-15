@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -285,6 +286,53 @@ func TestGetSessionSummaries_InMemory_WorkingDir(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, summaries, 1)
 	assert.Equal(t, "/work/project", summaries[0].WorkingDir)
+}
+
+func TestInMemorySessionStoreGranularUpdatesUseSessionLock(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := NewInMemorySessionStore()
+	sess := &Session{
+		ID:        "race-safe-session",
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	const iterations = 100
+	errs := make(chan error, iterations*2)
+	var wg sync.WaitGroup
+
+	for i := 0; i < iterations; i++ {
+		input := int64(i)
+
+		wg.Add(4)
+		go func() {
+			defer wg.Done()
+			errs <- store.UpdateSessionTokens(ctx, sess.ID, input, input+1, float64(input))
+		}()
+		go func() {
+			defer wg.Done()
+			errs <- store.UpdateSessionTitle(ctx, sess.ID, "updated")
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = sess.Usage()
+		}()
+		go func() {
+			defer wg.Done()
+			sess.mu.RLock()
+			_ = sess.Title
+			_ = sess.Cost
+			sess.mu.RUnlock()
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 }
 
 func TestBranchSessionCopiesPrefix(t *testing.T) {

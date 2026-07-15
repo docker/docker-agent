@@ -608,6 +608,14 @@ func (s *Session) AddMessage(msg *Message) int {
 	return len(s.Messages) - 1
 }
 
+// SetTitle records the session title under s.mu.
+func (s *Session) SetTitle(title string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.Title = title
+}
+
 // SetUsage records cumulative input/output token counts under s.mu.
 // The runtime stream goroutine and the persistence observer race on
 // these fields without it.
@@ -616,6 +624,17 @@ func (s *Session) SetUsage(input, output int64) {
 	defer s.mu.Unlock()
 	s.InputTokens = input
 	s.OutputTokens = output
+}
+
+// SetTokensAndCost records cumulative input/output token counts and cost under s.mu.
+// The runtime stream goroutine and persistence paths race on these fields without it.
+func (s *Session) SetTokensAndCost(input, output int64, cost float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.InputTokens = input
+	s.OutputTokens = output
+	s.Cost = cost
 }
 
 // Usage returns a consistent snapshot of the cumulative input/output
@@ -882,7 +901,7 @@ func WithWorkingDir(workingDir string) Opt {
 
 func WithTitle(title string) Opt {
 	return func(s *Session) {
-		s.Title = title
+		s.SetTitle(title)
 	}
 }
 
