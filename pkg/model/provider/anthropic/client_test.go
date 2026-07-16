@@ -509,64 +509,57 @@ func TestExtractSystemBlocks_MultiContent(t *testing.T) {
 	assert.Equal(t, "Part 2", blocks[1].Text)
 }
 
-func TestExtractSystemBlocksCacheControl(t *testing.T) {
+func TestPromptCacheControlMarksLastSystemBlock(t *testing.T) {
 	t.Parallel()
 	msgs := []chat.Message{
 		{
-			Role:    chat.MessageRoleSystem,
-			Content: "instructions",
+			Role:          chat.MessageRoleSystem,
+			Content:       "instructions",
+			PromptSection: chat.PromptSectionInvariant,
 		},
 		{
-			Role:         chat.MessageRoleSystem,
-			Content:      "tools",
-			CacheControl: true,
+			Role:          chat.MessageRoleSystem,
+			Content:       "tools",
+			PromptSection: chat.PromptSectionInvariant,
 		},
 		{
-			Role:    chat.MessageRoleSystem,
-			Content: "date",
+			Role:          chat.MessageRoleSystem,
+			Content:       "date",
+			PromptSection: chat.PromptSectionContext,
 		},
 		{
-			Role:         chat.MessageRoleSystem,
-			Content:      "last",
-			CacheControl: true,
+			Role:          chat.MessageRoleSystem,
+			Content:       "last",
+			PromptSection: chat.PromptSectionContext,
 		},
 	}
 
-	blocks := extractSystemBlocks(msgs)
+	params := anthropic.MessageNewParams{System: extractSystemBlocks(msgs)}
+	applyPromptCacheControl(msgs, nil, &params)
 
-	require.Len(t, blocks, 4)
-	assert.Equal(t, "instructions", blocks[0].Text)
-	assert.Empty(t, string(blocks[0].CacheControl.Type))
-	assert.Empty(t, string(blocks[0].CacheControl.TTL))
+	require.Len(t, params.System, 4)
+	assert.Equal(t, "instructions", params.System[0].Text)
+	assert.Empty(t, string(params.System[0].CacheControl.Type))
+	assert.Empty(t, string(params.System[0].CacheControl.TTL))
 
-	assert.Equal(t, "tools", blocks[1].Text)
-	assert.Equal(t, "ephemeral", string(blocks[1].CacheControl.Type))
-	assert.Empty(t, string(blocks[1].CacheControl.TTL))
+	assert.Equal(t, "tools", params.System[1].Text)
+	assert.Equal(t, "ephemeral", string(params.System[1].CacheControl.Type))
+	assert.Empty(t, string(params.System[1].CacheControl.TTL))
 
-	assert.Equal(t, "date", blocks[2].Text)
-	assert.Empty(t, string(blocks[2].CacheControl.Type))
-	assert.Empty(t, string(blocks[2].CacheControl.TTL))
+	assert.Equal(t, "date", params.System[2].Text)
+	assert.Empty(t, string(params.System[2].CacheControl.Type))
+	assert.Empty(t, string(params.System[2].CacheControl.TTL))
 
-	assert.Equal(t, "last", blocks[3].Text)
-	assert.Equal(t, "ephemeral", string(blocks[3].CacheControl.Type))
-	assert.Empty(t, string(blocks[3].CacheControl.TTL))
+	assert.Equal(t, "last", params.System[3].Text)
+	assert.Equal(t, "ephemeral", string(params.System[3].CacheControl.Type))
+	assert.Empty(t, string(params.System[3].CacheControl.TTL))
 }
 
-func TestExtractSystemBlocks_EmptyContentWithCacheControl(t *testing.T) {
+func TestExtractSystemBlocks_EmptyContent(t *testing.T) {
 	t.Parallel()
 
-	// An empty system message with CacheControl must not panic.
-	// Since extractSystemBlocks now trims system content, an empty/whitespace-only
-	// message produces no block, so CacheControl has nothing to apply to.
-	msgs := []chat.Message{
-		{
-			Role:         chat.MessageRoleSystem,
-			Content:      "",
-			CacheControl: true,
-		},
-	}
+	msgs := []chat.Message{{Role: chat.MessageRoleSystem, Content: ""}}
 
-	// Must not panic; the empty block is skipped.
 	blocks := extractSystemBlocks(msgs)
 	assert.Empty(t, blocks)
 }

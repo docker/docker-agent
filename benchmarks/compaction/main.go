@@ -236,7 +236,6 @@ func buildCompactionMessages(sess *session.Session) []chat.Message {
 	messages, _, _ := sess.CompactionInput()
 	for i := range messages {
 		messages[i].Cost = 0
-		messages[i].CacheControl = false
 	}
 
 	splitIdx := compaction.SplitIndexForKeep(messages, min(maxKeepTokens, contextLimit/5))

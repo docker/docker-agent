@@ -262,10 +262,7 @@ func ComputeFirstKeptEntry(sess *session.Session, contextLimit int64) int {
 // Cost is per-message bookkeeping already accumulated into
 // sess.TotalCost(); leaving it set would double-count when the
 // summarization session reports its own TotalCost back through
-// [Result.Cost]. CacheControl pins a provider cache checkpoint
-// (Anthropic prompt caching, etc.); pinning it inside the
-// summarization sub-call would associate the cache point with the
-// throwaway compaction conversation rather than the parent session.
+// [Result.Cost].
 //
 // The reconstruction work — surfacing a synthetic "Session Summary"
 // message when a prior summary exists, picking the right start index
@@ -282,7 +279,6 @@ func gatherCompactionInput(sess *session.Session) (messages []chat.Message, sess
 	messages, sessIndices, itemCount = sess.CompactionInput()
 	for i := range messages {
 		messages[i].Cost = 0
-		messages[i].CacheControl = false
 	}
 	return messages, sessIndices, itemCount
 }

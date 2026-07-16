@@ -226,6 +226,7 @@ func (c *Client) CreateChatCompletionStream(
 		Messages:  converted,
 		Tools:     allTools,
 	}
+	applyPromptCacheControl(messages, requestTools, &params)
 
 	// Apply thinking budget first, as it affects whether we can set temperature
 	thinkingEnabled := c.applyThinkingConfig(&params, maxTokens)
@@ -439,9 +440,6 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 		}
 	}
 
-	// Add ephemeral cache to last 2 messages' last content block
-	applyMessageCacheControl(anthropicMessages)
-
 	return anthropicMessages, nil
 }
 
@@ -623,32 +621,6 @@ func (c *Client) convertUserMultiContent(ctx context.Context, parts []chat.Messa
 	return contentBlocks, nil
 }
 
-// applyMessageCacheControl adds ephemeral cache control to the last content block
-// of the last 2 messages for prompt caching.
-func applyMessageCacheControl(messages []anthropic.MessageParam) {
-	for i := len(messages) - 1; i >= 0 && i >= len(messages)-2; i-- {
-		msg := &messages[i]
-		if len(msg.Content) == 0 {
-			continue
-		}
-		lastIdx := len(msg.Content) - 1
-		block := &msg.Content[lastIdx]
-		cacheCtrl := anthropic.NewCacheControlEphemeralParam()
-		switch {
-		case block.OfText != nil:
-			block.OfText.CacheControl = cacheCtrl
-		case block.OfToolUse != nil:
-			block.OfToolUse.CacheControl = cacheCtrl
-		case block.OfToolResult != nil:
-			block.OfToolResult.CacheControl = cacheCtrl
-		case block.OfImage != nil:
-			block.OfImage.CacheControl = cacheCtrl
-		case block.OfDocument != nil:
-			block.OfDocument.CacheControl = cacheCtrl
-		}
-	}
-}
-
 // extractSystemBlocks converts any system-role messages into Anthropic system text blocks
 // to be set on the top-level MessageNewParams.System field.
 func extractSystemBlocks(messages []chat.Message) []anthropic.TextBlockParam {
@@ -673,10 +645,6 @@ func extractSystemBlocks(messages []chat.Message) []anthropic.TextBlockParam {
 			systemBlocks = append(systemBlocks, anthropic.TextBlockParam{
 				Text: txt,
 			})
-		}
-
-		if msg.CacheControl && len(systemBlocks) > 0 {
-			systemBlocks[len(systemBlocks)-1].CacheControl = anthropic.NewCacheControlEphemeralParam()
 		}
 	}
 
@@ -704,8 +672,7 @@ func (c *Client) toolsWithSupportedDeferral(requestTools []tools.Tool) []tools.T
 }
 
 func convertTools(tooles []tools.Tool) ([]anthropic.ToolUnionParam, error) {
-	hasDeferredTools := containsDeferredTool(tooles)
-	tooles, immediateCount := orderToolsForDeferredLoading(tooles)
+	tooles = orderToolsForDeferredLoading(tooles)
 	toolParams := make([]anthropic.ToolParam, len(tooles))
 
 	for i, tool := range tooles {
@@ -721,9 +688,6 @@ func convertTools(tooles []tools.Tool) ([]anthropic.ToolUnionParam, error) {
 		}
 		if tool.Deferred {
 			toolParams[i].DeferLoading = param.NewOpt(true)
-		}
-		if hasDeferredTools && i == immediateCount-1 {
-			toolParams[i].CacheControl = anthropic.NewCacheControlEphemeralParam()
 		}
 	}
 	anthropicTools := make([]anthropic.ToolUnionParam, len(toolParams))
@@ -743,7 +707,7 @@ func containsDeferredTool(requestTools []tools.Tool) bool {
 	return false
 }
 
-func orderToolsForDeferredLoading(requestTools []tools.Tool) ([]tools.Tool, int) {
+func orderToolsForDeferredLoading(requestTools []tools.Tool) []tools.Tool {
 	ordered := make([]tools.Tool, 0, len(requestTools))
 	for _, tool := range requestTools {
 		if !tool.Deferred {
@@ -756,14 +720,14 @@ func orderToolsForDeferredLoading(requestTools []tools.Tool) ([]tools.Tool, int)
 		for i := range ordered {
 			ordered[i].Deferred = false
 		}
-		return ordered, len(ordered)
+		return ordered
 	}
 	for _, tool := range requestTools {
 		if tool.Deferred {
 			ordered = append(ordered, tool)
 		}
 	}
-	return ordered, immediateCount
+	return ordered
 }
 
 // ConvertParametersToSchema converts parameters to Anthropic Schema format

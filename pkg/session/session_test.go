@@ -221,71 +221,25 @@ func TestGetMessages_Instructions(t *testing.T) {
 
 	assert.Len(t, messages, 1)
 	assert.Equal(t, "instructions", messages[0].Content)
-	assert.True(t, messages[0].CacheControl)
 }
 
-func TestGetMessages_CacheControl(t *testing.T) {
+func TestGetMessages_SystemMessageOrder(t *testing.T) {
 	t.Parallel()
 
 	testAgent := agent.New("root", "instructions", agent.WithToolSets(todoToolSet(t)))
-
-	s := New()
-	messages := s.GetMessages(testAgent)
-
-	assert.Len(t, messages, 2)
-	assert.Equal(t, "instructions", messages[0].Content)
-	assert.False(t, messages[0].CacheControl)
-
-	assert.Contains(t, messages[1].Content, "Todo Tools")
-	assert.True(t, messages[1].CacheControl)
-}
-
-func TestGetMessages_CacheControlWithSummary(t *testing.T) {
-	t.Parallel()
-
-	// Caching contract pinned by this test:
-	//
-	//   - The last invariant system message gets a cache-control marker.
-	//   - The last caller-supplied extra (typically turn_start hook output)
-	//     ALSO gets a cache-control marker so stable per-session/per-day
-	//     extras (AddPromptFiles, AddEnvironmentInfo) participate in
-	//     prompt caching. This matches the prior
-	//     buildContextSpecificSystemMessages caching behavior.
-	//   - Summary and conversation messages are not cache-controlled.
-	testAgent := agent.New("root", "instructions",
-		agent.WithToolSets(todoToolSet(t)),
-	)
-
 	s := New()
 	s.Messages = append(s.Messages, Item{Summary: "Test summary"})
+	extra := chat.Message{Role: chat.MessageRoleSystem, Content: "Today's date: 2026-04-25"}
 
-	extra := chat.Message{
-		Role:    chat.MessageRoleSystem,
-		Content: "Today's date: 2026-04-25",
-	}
 	messages := s.GetMessages(testAgent, extra)
 
-	var checkpointIndices []int
-	for i, msg := range messages {
-		if msg.Role == chat.MessageRoleSystem && msg.CacheControl {
-			checkpointIndices = append(checkpointIndices, i)
-		}
-	}
-
-	require.Len(t, checkpointIndices, 2,
-		"invariant and last-extra messages should each be cache-controlled")
-
-	// Checkpoint #1: last invariant message (toolset instructions).
-	assert.Contains(t, messages[checkpointIndices[0]].Content, "Todo Tools",
-		"checkpoint #1 must land on the last invariant message")
-
-	// Checkpoint #2: last extra (the date system message).
-	assert.Equal(t, extra.Content, messages[checkpointIndices[1]].Content,
-		"checkpoint #2 must land on the last extra system message")
-
-	// The extra must come AFTER the invariant block.
-	assert.Greater(t, checkpointIndices[1], checkpointIndices[0],
-		"extras must come AFTER the invariant cache checkpoint")
+	require.Len(t, messages, 4)
+	assert.Equal(t, "instructions", messages[0].Content)
+	assert.Contains(t, messages[1].Content, "Todo Tools")
+	assert.Equal(t, extra.Role, messages[2].Role)
+	assert.Equal(t, extra.Content, messages[2].Content)
+	assert.Equal(t, chat.PromptSectionContext, messages[2].PromptSection)
+	assert.Equal(t, SummaryMessageContent("Test summary"), messages[3].Content)
 }
 
 func TestGetLastUserMessages(t *testing.T) {
@@ -932,10 +886,9 @@ func TestCompactionInput(t *testing.T) {
 		t.Parallel()
 		sess := New(WithMessages([]Item{
 			NewMessageItem(&Message{Message: chat.Message{
-				Role:         chat.MessageRoleUser,
-				Content:      "hello",
-				Cost:         1.5,
-				CacheControl: true,
+				Role:    chat.MessageRoleUser,
+				Content: "hello",
+				Cost:    1.5,
 			}}),
 		}))
 
@@ -943,11 +896,9 @@ func TestCompactionInput(t *testing.T) {
 		require.Len(t, messages, 1)
 
 		messages[0].Cost = 0
-		messages[0].CacheControl = false
 		messages[0].Content = "mutated"
 
 		assert.InDelta(t, 1.5, sess.Messages[0].Message.Message.Cost, 0)
-		assert.True(t, sess.Messages[0].Message.Message.CacheControl)
 		assert.Equal(t, "hello", sess.Messages[0].Message.Message.Content)
 	})
 }

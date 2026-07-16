@@ -49,6 +49,13 @@ type MessageImageURL struct {
 	Detail ImageURLDetail `json:"detail,omitempty"`
 }
 
+type PromptSection string
+
+const (
+	PromptSectionInvariant PromptSection = "invariant"
+	PromptSectionContext   PromptSection = "context"
+)
+
 type Message struct {
 	Role         MessageRole   `json:"role"`
 	Content      string        `json:"content"`
@@ -96,8 +103,9 @@ type Message struct {
 	// Only set for assistant messages.
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 
-	// CacheControl indicates whether this message is a cached message (only used by anthropic)
-	CacheControl bool `json:"cache_control,omitempty"`
+	// PromptSection describes system-prompt provenance for provider-level caching.
+	// It is request metadata and is never persisted with conversation history.
+	PromptSection PromptSection `json:"-"`
 }
 
 // MessageFile is the legacy file attachment shape kept for stored sessions.

@@ -1516,12 +1516,6 @@ func New(opts ...Opt) *Session {
 	return s
 }
 
-func markLastMessageAsCacheControl(messages []chat.Message) {
-	if len(messages) > 0 {
-		messages[len(messages)-1].CacheControl = true
-	}
-}
-
 // buildInvariantSystemMessages builds system messages that are identical
 // for all users of a given agent configuration. These messages can be
 // cached efficiently as they don't change between sessions, users, or projects.
@@ -1686,8 +1680,8 @@ func (s *Session) buildSessionSummaryMessages(items []Item) ([]chat.Message, int
 //
 // This method intentionally bypasses GetMessages's agent-level
 // transformations — invariant system prompts, NumHistoryItems
-// trimming, old-tool-content truncation, whitespace normalization,
-// orphan-tool-call sanitization, and cache_control marking. None of
+// trimming, old-tool-content truncation, whitespace normalization, and
+// orphan-tool-call sanitization. None of
 // those belong in compaction input: the compactor needs the full,
 // untrimmed history (so the LLM can summarize what trimming would
 // have hidden), supplies its own system/user prompt, and runs through
@@ -1785,6 +1779,14 @@ func (s *Session) instructionMessages() ([]chat.Message, []InstructionUpdate) {
 	return initial, slices.Clone(s.InstructionContext.Updates)
 }
 
+func setPromptSection(messages []chat.Message, section chat.PromptSection) {
+	for i := range messages {
+		if messages[i].Role == chat.MessageRoleSystem {
+			messages[i].PromptSection = section
+		}
+	}
+}
+
 func (s *Session) GetMessages(a *agent.Agent, extraSystemMessages ...chat.Message) []chat.Message {
 	return s.getMessages(a, true, extraSystemMessages...)
 }
@@ -1800,7 +1802,7 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 
 	// Build invariant system messages (cacheable across sessions/users/projects)
 	invariantMessages := buildInvariantSystemMessages(a)
-	markLastMessageAsCacheControl(invariantMessages)
+	setPromptSection(invariantMessages, chat.PromptSectionInvariant)
 
 	// Take a snapshot of Messages under the lock, copying Message structs
 	// to avoid racing with UpdateMessage which may modify the pointed-to objects.
@@ -1809,6 +1811,7 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 	var instructionUpdates []InstructionUpdate
 	if includeInstructionContext {
 		instructionInitial, instructionUpdates = s.instructionMessages()
+		setPromptSection(instructionInitial, chat.PromptSectionContext)
 	}
 
 	// Build session summary messages (vary per session)
@@ -1817,20 +1820,11 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 	var messages []chat.Message
 	messages = append(messages, invariantMessages...)
 	messages = append(messages, instructionInitial...)
-	markLastMessageAsCacheControl(messages)
 	// extraSystemMessages are caller-supplied transient system messages
-	// (e.g. turn_start hook output) inserted after the invariant cache
-	// checkpoint and before the conversation. The last extra carries a
-	// cache_control marker so that stable per-session/per-day extras
-	// (AddPromptFiles, AddEnvironmentInfo) participate in prompt caching.
-	// Volatile extras (the daily date) live behind the same marker, which
-	// is acceptable: the cache simply rotates when the date rolls over,
-	// matching the behavior of the previous inline
-	// buildContextSpecificSystemMessages path.
-	if len(extraSystemMessages) > 0 {
-		messages = append(messages, extraSystemMessages...)
-		markLastMessageAsCacheControl(messages[len(messages)-len(extraSystemMessages):])
-	}
+	// (e.g. turn_start hook output) inserted before the conversation.
+	extraStart := len(messages)
+	messages = append(messages, extraSystemMessages...)
+	setPromptSection(messages[extraStart:], chat.PromptSectionContext)
 	messages = append(messages, summaryMessages...)
 
 	// Begin adding conversation messages, interleaving instruction changes at

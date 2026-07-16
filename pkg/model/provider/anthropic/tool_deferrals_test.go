@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	anthropic "github.com/anthropics/anthropic-sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -31,19 +32,23 @@ func TestConvertToolsMarksOnlyDeferredTools(t *testing.T) {
 
 	standard, err := convertTools(requestTools)
 	require.NoError(t, err)
-	require.Len(t, standard, 2)
-	assert.False(t, standard[0].OfTool.DeferLoading.Valid())
-	assert.Equal(t, "ephemeral", string(standard[0].OfTool.CacheControl.Type))
-	require.True(t, standard[1].OfTool.DeferLoading.Valid())
-	assert.True(t, standard[1].OfTool.DeferLoading.Value)
+	standardParams := anthropic.MessageNewParams{Tools: standard}
+	applyPromptCacheControl(nil, requestTools, &standardParams)
+	require.Len(t, standardParams.Tools, 2)
+	assert.False(t, standardParams.Tools[0].OfTool.DeferLoading.Valid())
+	assert.Equal(t, "ephemeral", string(standardParams.Tools[0].OfTool.CacheControl.Type))
+	require.True(t, standardParams.Tools[1].OfTool.DeferLoading.Valid())
+	assert.True(t, standardParams.Tools[1].OfTool.DeferLoading.Value)
 
 	beta, err := convertBetaTools(requestTools)
 	require.NoError(t, err)
-	require.Len(t, beta, 2)
-	assert.False(t, beta[0].OfTool.DeferLoading.Valid())
-	assert.Equal(t, "ephemeral", string(beta[0].OfTool.CacheControl.Type))
-	require.True(t, beta[1].OfTool.DeferLoading.Valid())
-	assert.True(t, beta[1].OfTool.DeferLoading.Value)
+	betaParams := anthropic.BetaMessageNewParams{Tools: beta}
+	applyBetaPromptCacheControl(nil, requestTools, &betaParams)
+	require.Len(t, betaParams.Tools, 2)
+	assert.False(t, betaParams.Tools[0].OfTool.DeferLoading.Valid())
+	assert.Equal(t, "ephemeral", string(betaParams.Tools[0].OfTool.CacheControl.Type))
+	require.True(t, betaParams.Tools[1].OfTool.DeferLoading.Valid())
+	assert.True(t, betaParams.Tools[1].OfTool.DeferLoading.Value)
 }
 
 func TestDeferredToolsAreReferencedAtTheirLoadPoint(t *testing.T) {

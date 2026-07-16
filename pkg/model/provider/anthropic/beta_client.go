@@ -67,6 +67,7 @@ func (c *Client) createBetaStream(
 		Tools:     allTools,
 		Betas:     betas,
 	}
+	applyBetaPromptCacheControl(messages, requestTools, &params)
 
 	// Apply structured output configuration
 	if structuredOutput := c.ModelOptions.StructuredOutput(); structuredOutput != nil {

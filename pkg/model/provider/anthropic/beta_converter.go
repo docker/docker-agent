@@ -137,9 +137,6 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 		}
 	}
 
-	// Add ephemeral cache to last 2 messages' last content block
-	applyBetaMessageCacheControl(betaMessages)
-
 	return betaMessages, nil
 }
 
@@ -330,14 +327,6 @@ func extractBetaSystemBlocks(messages []chat.Message) []anthropic.BetaTextBlockP
 	betaBlocks := make([]anthropic.BetaTextBlockParam, len(regularBlocks))
 	for i, block := range regularBlocks {
 		betaBlocks[i] = anthropic.BetaTextBlockParam{Text: block.Text}
-
-		// Copy over cache control from regular blocks (already set on first 2)
-		if block.CacheControl.Type != "" {
-			betaBlocks[i].CacheControl = anthropic.BetaCacheControlEphemeralParam{
-				Type: block.CacheControl.Type,
-				TTL:  anthropic.BetaCacheControlEphemeralTTL(block.CacheControl.TTL),
-			}
-		}
 	}
 
 	return betaBlocks
@@ -345,8 +334,7 @@ func extractBetaSystemBlocks(messages []chat.Message) []anthropic.BetaTextBlockP
 
 // convertBetaTools converts tools to Beta API format
 func convertBetaTools(t []tools.Tool) ([]anthropic.BetaToolUnionParam, error) {
-	hasDeferredTools := containsDeferredTool(t)
-	t, immediateCount := orderToolsForDeferredLoading(t)
+	t = orderToolsForDeferredLoading(t)
 	betaTools := make([]anthropic.BetaToolUnionParam, 0, len(t))
 
 	for _, tool := range t {
@@ -370,39 +358,10 @@ func convertBetaTools(t []tools.Tool) ([]anthropic.BetaToolUnionParam, error) {
 		if tool.Deferred {
 			betaTool.DeferLoading = param.NewOpt(true)
 		}
-		if hasDeferredTools && len(betaTools) == immediateCount-1 {
-			betaTool.CacheControl = anthropic.NewBetaCacheControlEphemeralParam()
-		}
 		betaTools = append(betaTools, anthropic.BetaToolUnionParam{OfTool: betaTool})
 	}
 
 	return betaTools, nil
-}
-
-// applyBetaMessageCacheControl adds ephemeral cache control to the last content block
-// of the last 2 messages for prompt caching.
-func applyBetaMessageCacheControl(messages []anthropic.BetaMessageParam) {
-	for i := len(messages) - 1; i >= 0 && i >= len(messages)-2; i-- {
-		msg := &messages[i]
-		if len(msg.Content) == 0 {
-			continue
-		}
-		lastIdx := len(msg.Content) - 1
-		block := &msg.Content[lastIdx]
-		cacheCtrl := anthropic.NewBetaCacheControlEphemeralParam()
-		switch {
-		case block.OfText != nil:
-			block.OfText.CacheControl = cacheCtrl
-		case block.OfToolUse != nil:
-			block.OfToolUse.CacheControl = cacheCtrl
-		case block.OfToolResult != nil:
-			block.OfToolResult.CacheControl = cacheCtrl
-		case block.OfImage != nil:
-			block.OfImage.CacheControl = cacheCtrl
-		case block.OfDocument != nil:
-			block.OfDocument.CacheControl = cacheCtrl
-		}
-	}
 }
 
 // stdBlocksToBeta converts standard Anthropic SDK content blocks to their Beta

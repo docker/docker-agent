@@ -102,14 +102,13 @@ func TestExtractMessages(t *testing.T) {
 			wantConversationMsgCount: 1,
 		},
 		{
-			name: "cost and cache control are cleared",
+			name: "cost is cleared",
 			messages: []session.Item{
 				session.NewMessageItem(&session.Message{
 					Message: chat.Message{
-						Role:         chat.MessageRoleUser,
-						Content:      "hello",
-						Cost:         1.5,
-						CacheControl: true,
+						Role:    chat.MessageRoleUser,
+						Content: "hello",
+						Cost:    1.5,
 					},
 				}),
 			},
@@ -140,10 +139,9 @@ func TestExtractMessages(t *testing.T) {
 			// Conversation messages are all except first (system) and last (user prompt)
 			assert.Len(t, result[1:len(result)-1], tt.wantConversationMsgCount)
 
-			// Verify cost and cache control are cleared on conversation messages
+			// Verify cost is cleared on conversation messages.
 			for i := 1; i < len(result)-1; i++ {
 				assert.Zero(t, result[i].Cost)
-				assert.False(t, result[i].CacheControl)
 			}
 		})
 	}
