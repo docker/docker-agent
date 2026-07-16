@@ -240,6 +240,25 @@ func TestGetMessages_CacheControl(t *testing.T) {
 	assert.True(t, messages[1].CacheControl)
 }
 
+func TestGetMessages_MarksRecentConversationForCaching(t *testing.T) {
+	t.Parallel()
+
+	testAgent := agent.New("root", "instructions")
+	s := New()
+	for _, content := range []string{"one", "two", "three"} {
+		s.Messages = append(s.Messages, Item{Message: &Message{Message: chat.Message{
+			Role:    chat.MessageRoleUser,
+			Content: content,
+		}}})
+	}
+
+	messages := s.GetMessages(testAgent)
+	require.Len(t, messages, 4)
+	assert.False(t, messages[1].CacheControl)
+	assert.True(t, messages[2].CacheControl)
+	assert.True(t, messages[3].CacheControl)
+}
+
 func TestGetMessages_CacheControlWithSummary(t *testing.T) {
 	t.Parallel()
 
@@ -251,7 +270,7 @@ func TestGetMessages_CacheControlWithSummary(t *testing.T) {
 	//     extras (AddPromptFiles, AddEnvironmentInfo) participate in
 	//     prompt caching. This matches the prior
 	//     buildContextSpecificSystemMessages caching behavior.
-	//   - Summary and conversation messages are not cache-controlled.
+	//   - The two most recent conversation messages are cache-control candidates.
 	testAgent := agent.New("root", "instructions",
 		agent.WithToolSets(todoToolSet(t)),
 	)

@@ -203,6 +203,7 @@ func (c *Client) CreateChatCompletionStream(
 	}
 
 	requestTools = c.toolsWithSupportedDeferral(requestTools)
+	messages = limitCacheControlMarkers(messages, containsDeferredTool(requestTools))
 	allTools, err := convertTools(requestTools)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to convert tools for Anthropic request", "error", err)
@@ -335,9 +336,15 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 				}
 				if len(contentBlocks) > 0 {
 					anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(contentBlocks...))
+					if msg.CacheControl {
+						applyMessageCacheControl(&anthropicMessages[len(anthropicMessages)-1])
+					}
 				}
 			} else {
 				anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
+				if msg.CacheControl {
+					applyMessageCacheControl(&anthropicMessages[len(anthropicMessages)-1])
+				}
 			}
 			continue
 		}
@@ -380,6 +387,9 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 					}
 				}
 				anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(toolUseBlocks...))
+				if msg.CacheControl {
+					applyMessageCacheControl(&anthropicMessages[len(anthropicMessages)-1])
+				}
 				// Mark that we expect the very next message to be the grouped tool_result blocks.
 				pendingAssistantToolUse = true
 			} else {
@@ -388,6 +398,9 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 				}
 				if len(contentBlocks) > 0 {
 					anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(contentBlocks...))
+					if msg.CacheControl {
+						applyMessageCacheControl(&anthropicMessages[len(anthropicMessages)-1])
+					}
 				}
 				// No tool_use in this assistant message
 				pendingAssistantToolUse = false
@@ -400,8 +413,10 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 			// This is to satisfy Anthropic's requirement that tool_use blocks are immediately followed
 			// by a single user message containing all corresponding tool_result blocks.
 			var blocks []anthropic.ContentBlockParamUnion
+			cacheControl := false
 			j := i
 			for j < len(messages) && messages[j].Role == chat.MessageRoleTool {
+				cacheControl = cacheControl || messages[j].CacheControl
 				if names := deferredByCallID[messages[j].ToolCallID]; len(names) > 0 {
 					content := make([]anthropic.ToolResultBlockParamContentUnion, 0, len(names))
 					for _, name := range names {
@@ -430,6 +445,9 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 				// sequencing errors.
 				if pendingAssistantToolUse {
 					anthropicMessages = append(anthropicMessages, anthropic.NewUserMessage(blocks...))
+					if cacheControl {
+						applyMessageCacheControl(&anthropicMessages[len(anthropicMessages)-1])
+					}
 				}
 				// Whether we used them or not, we've now handled the expected tool_result slot.
 				pendingAssistantToolUse = false
@@ -439,10 +457,41 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 		}
 	}
 
-	// Add ephemeral cache to last 2 messages' last content block
-	applyMessageCacheControl(anthropicMessages)
-
 	return anthropicMessages, nil
+}
+
+const maxCacheControlMarkers = 4
+
+func limitCacheControlMarkers(messages []chat.Message, reserveForDeferredTools bool) []chat.Message {
+	available := maxCacheControlMarkers
+	if reserveForDeferredTools {
+		available--
+	}
+
+	var candidates []int
+	for i := range messages {
+		if messages[i].CacheControl {
+			candidates = append(candidates, i)
+		}
+	}
+	if len(candidates) <= available {
+		return messages
+	}
+
+	limited := append([]chat.Message(nil), messages...)
+	for _, i := range candidates {
+		limited[i].CacheControl = false
+	}
+	if available == 0 {
+		return limited
+	}
+
+	// Preserve the stable prefix checkpoint and spend remaining slots on recent context.
+	limited[candidates[0]].CacheControl = true
+	for _, i := range candidates[len(candidates)-(available-1):] {
+		limited[i].CacheControl = true
+	}
+	return limited
 }
 
 func deferredToolNamesByCallID(requestTools []tools.Tool) map[string][]string {
@@ -623,29 +672,23 @@ func (c *Client) convertUserMultiContent(ctx context.Context, parts []chat.Messa
 	return contentBlocks, nil
 }
 
-// applyMessageCacheControl adds ephemeral cache control to the last content block
-// of the last 2 messages for prompt caching.
-func applyMessageCacheControl(messages []anthropic.MessageParam) {
-	for i := len(messages) - 1; i >= 0 && i >= len(messages)-2; i-- {
-		msg := &messages[i]
-		if len(msg.Content) == 0 {
-			continue
-		}
-		lastIdx := len(msg.Content) - 1
-		block := &msg.Content[lastIdx]
-		cacheCtrl := anthropic.NewCacheControlEphemeralParam()
-		switch {
-		case block.OfText != nil:
-			block.OfText.CacheControl = cacheCtrl
-		case block.OfToolUse != nil:
-			block.OfToolUse.CacheControl = cacheCtrl
-		case block.OfToolResult != nil:
-			block.OfToolResult.CacheControl = cacheCtrl
-		case block.OfImage != nil:
-			block.OfImage.CacheControl = cacheCtrl
-		case block.OfDocument != nil:
-			block.OfDocument.CacheControl = cacheCtrl
-		}
+func applyMessageCacheControl(message *anthropic.MessageParam) {
+	if len(message.Content) == 0 {
+		return
+	}
+	block := &message.Content[len(message.Content)-1]
+	cacheCtrl := anthropic.NewCacheControlEphemeralParam()
+	switch {
+	case block.OfText != nil:
+		block.OfText.CacheControl = cacheCtrl
+	case block.OfToolUse != nil:
+		block.OfToolUse.CacheControl = cacheCtrl
+	case block.OfToolResult != nil:
+		block.OfToolResult.CacheControl = cacheCtrl
+	case block.OfImage != nil:
+		block.OfImage.CacheControl = cacheCtrl
+	case block.OfDocument != nil:
+		block.OfDocument.CacheControl = cacheCtrl
 	}
 }
 

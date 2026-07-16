@@ -509,6 +509,59 @@ func TestExtractSystemBlocks_MultiContent(t *testing.T) {
 	assert.Equal(t, "Part 2", blocks[1].Text)
 }
 
+func TestConvertMessagesUsesSessionCacheControl(t *testing.T) {
+	t.Parallel()
+
+	messages := []chat.Message{
+		{Role: chat.MessageRoleUser, Content: "one"},
+		{Role: chat.MessageRoleAssistant, Content: "two", CacheControl: true},
+		{Role: chat.MessageRoleUser, Content: "three"},
+	}
+
+	standard, err := testClient().convertMessages(t.Context(), messages)
+	require.NoError(t, err)
+	require.Len(t, standard, 3)
+	assert.Empty(t, string(standard[0].Content[0].OfText.CacheControl.Type))
+	assert.Equal(t, "ephemeral", string(standard[1].Content[0].OfText.CacheControl.Type))
+	assert.Empty(t, string(standard[2].Content[0].OfText.CacheControl.Type))
+
+	beta, err := testClient().convertBetaMessages(t.Context(), messages)
+	require.NoError(t, err)
+	require.Len(t, beta, 3)
+	assert.Empty(t, string(beta[0].Content[0].OfText.CacheControl.Type))
+	assert.Equal(t, "ephemeral", string(beta[1].Content[0].OfText.CacheControl.Type))
+	assert.Empty(t, string(beta[2].Content[0].OfText.CacheControl.Type))
+}
+
+func TestLimitCacheControlMarkers(t *testing.T) {
+	t.Parallel()
+
+	messages := make([]chat.Message, 6)
+	for i := range messages {
+		messages[i].CacheControl = true
+	}
+
+	limited := limitCacheControlMarkers(messages, false)
+	assert.True(t, limited[0].CacheControl)
+	assert.False(t, limited[1].CacheControl)
+	assert.False(t, limited[2].CacheControl)
+	assert.True(t, limited[3].CacheControl)
+	assert.True(t, limited[4].CacheControl)
+	assert.True(t, limited[5].CacheControl)
+
+	limited = limitCacheControlMarkers(messages, true)
+	assert.True(t, limited[0].CacheControl)
+	assert.False(t, limited[1].CacheControl)
+	assert.False(t, limited[2].CacheControl)
+	assert.False(t, limited[3].CacheControl)
+	assert.True(t, limited[4].CacheControl)
+	assert.True(t, limited[5].CacheControl)
+
+	for i := range messages {
+		assert.True(t, messages[i].CacheControl, "input must not be mutated")
+	}
+}
+
 func TestExtractSystemBlocksCacheControl(t *testing.T) {
 	t.Parallel()
 	msgs := []chat.Message{

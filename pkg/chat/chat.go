@@ -96,7 +96,7 @@ type Message struct {
 	// Only set for assistant messages.
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 
-	// CacheControl indicates whether this message is a cached message (only used by anthropic)
+	// CacheControl marks this message as a prompt-cache checkpoint candidate.
 	CacheControl bool `json:"cache_control,omitempty"`
 }
 

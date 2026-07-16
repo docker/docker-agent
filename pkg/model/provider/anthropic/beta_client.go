@@ -37,6 +37,7 @@ func (c *Client) createBetaStream(
 	}
 
 	requestTools = c.toolsWithSupportedDeferral(requestTools)
+	messages = limitCacheControlMarkers(messages, containsDeferredTool(requestTools))
 	allTools, err := convertBetaTools(requestTools)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to convert tools for Anthropic Beta request", "error", err)

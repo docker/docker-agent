@@ -47,6 +47,9 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 						Role:    anthropic.BetaMessageParamRoleUser,
 						Content: contentBlocks,
 					})
+					if msg.CacheControl {
+						applyBetaMessageCacheControl(&betaMessages[len(betaMessages)-1])
+					}
 				}
 			} else {
 				betaMessages = append(betaMessages, anthropic.BetaMessageParam{
@@ -55,6 +58,9 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 						{OfText: &anthropic.BetaTextBlockParam{Text: msg.Content}},
 					},
 				})
+				if msg.CacheControl {
+					applyBetaMessageCacheControl(&betaMessages[len(betaMessages)-1])
+				}
 			}
 			continue
 		}
@@ -101,6 +107,9 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 					Role:    anthropic.BetaMessageParamRoleAssistant,
 					Content: contentBlocks,
 				})
+				if msg.CacheControl {
+					applyBetaMessageCacheControl(&betaMessages[len(betaMessages)-1])
+				}
 			}
 			continue
 		}
@@ -113,10 +122,12 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 				return nil, err
 			}
 			toolResultBlocks := []anthropic.BetaContentBlockParamUnion{firstBlock}
+			cacheControl := msg.CacheControl
 
 			// Look ahead for consecutive tool messages and merge them
 			j := i + 1
 			for j < len(messages) && messages[j].Role == chat.MessageRoleTool {
+				cacheControl = cacheControl || messages[j].CacheControl
 				block, err := c.convertBetaToolResultBlockWithDeferred(ctx, &messages[j], deferredByCallID[messages[j].ToolCallID])
 				if err != nil {
 					return nil, err
@@ -130,15 +141,15 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 				Role:    anthropic.BetaMessageParamRoleUser,
 				Content: toolResultBlocks,
 			})
+			if cacheControl {
+				applyBetaMessageCacheControl(&betaMessages[len(betaMessages)-1])
+			}
 
 			// Skip the messages we've already processed
 			i = j - 1
 			continue
 		}
 	}
-
-	// Add ephemeral cache to last 2 messages' last content block
-	applyBetaMessageCacheControl(betaMessages)
 
 	return betaMessages, nil
 }
@@ -379,29 +390,23 @@ func convertBetaTools(t []tools.Tool) ([]anthropic.BetaToolUnionParam, error) {
 	return betaTools, nil
 }
 
-// applyBetaMessageCacheControl adds ephemeral cache control to the last content block
-// of the last 2 messages for prompt caching.
-func applyBetaMessageCacheControl(messages []anthropic.BetaMessageParam) {
-	for i := len(messages) - 1; i >= 0 && i >= len(messages)-2; i-- {
-		msg := &messages[i]
-		if len(msg.Content) == 0 {
-			continue
-		}
-		lastIdx := len(msg.Content) - 1
-		block := &msg.Content[lastIdx]
-		cacheCtrl := anthropic.NewBetaCacheControlEphemeralParam()
-		switch {
-		case block.OfText != nil:
-			block.OfText.CacheControl = cacheCtrl
-		case block.OfToolUse != nil:
-			block.OfToolUse.CacheControl = cacheCtrl
-		case block.OfToolResult != nil:
-			block.OfToolResult.CacheControl = cacheCtrl
-		case block.OfImage != nil:
-			block.OfImage.CacheControl = cacheCtrl
-		case block.OfDocument != nil:
-			block.OfDocument.CacheControl = cacheCtrl
-		}
+func applyBetaMessageCacheControl(message *anthropic.BetaMessageParam) {
+	if len(message.Content) == 0 {
+		return
+	}
+	block := &message.Content[len(message.Content)-1]
+	cacheCtrl := anthropic.NewBetaCacheControlEphemeralParam()
+	switch {
+	case block.OfText != nil:
+		block.OfText.CacheControl = cacheCtrl
+	case block.OfToolUse != nil:
+		block.OfToolUse.CacheControl = cacheCtrl
+	case block.OfToolResult != nil:
+		block.OfToolResult.CacheControl = cacheCtrl
+	case block.OfImage != nil:
+		block.OfImage.CacheControl = cacheCtrl
+	case block.OfDocument != nil:
+		block.OfDocument.CacheControl = cacheCtrl
 	}
 }
 

@@ -1522,6 +1522,21 @@ func markLastMessageAsCacheControl(messages []chat.Message) {
 	}
 }
 
+func markRecentConversationCacheControl(messages []chat.Message, count int) {
+	for i := range messages {
+		if messages[i].Role != chat.MessageRoleSystem {
+			messages[i].CacheControl = false
+		}
+	}
+	for i := len(messages) - 1; i >= 0 && count > 0; i-- {
+		if messages[i].Role == chat.MessageRoleSystem {
+			continue
+		}
+		messages[i].CacheControl = true
+		count--
+	}
+}
+
 // buildInvariantSystemMessages builds system messages that are identical
 // for all users of a given agent configuration. These messages can be
 // cached efficiently as they don't change between sessions, users, or projects.
@@ -1876,6 +1891,8 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 			capToolResultContent(&messages[i], s.MaxToolResultTokens)
 		}
 	}
+
+	markRecentConversationCacheControl(messages, 2)
 
 	systemCount := 0
 	conversationCount := 0
