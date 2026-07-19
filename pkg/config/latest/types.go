@@ -88,7 +88,9 @@ type BudgetConfig struct {
 	// compaction resets — those measure current context length, not spend.
 	MaxTokens int64 `json:"max_tokens,omitempty" yaml:"max_tokens,omitempty"`
 
-	// MaxTime is the maximum wall-clock duration of the run, in Go
+	// MaxTime is the maximum working time for the run — the cumulative
+	// sum of turn durations, not wall-clock since the session opened.
+	// Idle time while the user reads and types does not count. In Go
 	// duration format ("10m", "30s", "1h30m").
 	//
 	// It is checked at turn boundaries, so a run stops at the first

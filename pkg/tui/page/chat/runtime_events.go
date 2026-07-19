@@ -452,7 +452,7 @@ func (p *chatPage) handleToolCallResponse(msg *runtime.ToolCallResponseEvent) te
 func (p *chatPage) handleBudgetExceeded(msg *runtime.BudgetExceededEvent) tea.Cmd {
 	spinnerCmd := p.setWorking(false)
 	warnCmd := notification.WarningCmd(fmt.Sprintf(
-		"Run stopped by budget.%s — used %s of %s.", msg.Limit, msg.Used, msg.Max,
+		"Run stopped by %s — used %s of %s.", msg.ConfigPath, msg.Used, msg.Max,
 	))
 	return tea.Batch(spinnerCmd, warnCmd)
 }

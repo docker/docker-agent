@@ -1,12 +1,12 @@
 ---
 title: "Budget"
-description: "Cap what a single run may spend in money, tokens, or wall-clock time."
+description: "Cap what a single run may spend in money, tokens, or working time."
 keywords: docker agent, ai agents, configuration, yaml, budget, cost, limits
 weight: 75
 canonical: https://docs.docker.com/ai/docker-agent/configuration/budget/
 ---
 
-_Cap what a single run may spend in money, tokens, or wall-clock time._
+_Cap what a single run may spend in money, tokens, or working time._
 
 ## Overview
 
@@ -176,7 +176,7 @@ budget:
   max_cost: 5.00
 ```
 
-Cap wall-clock time for an unattended job:
+Cap working time for an unattended job:
 
 ```yaml
 agents:

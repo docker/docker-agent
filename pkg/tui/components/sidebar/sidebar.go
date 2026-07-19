@@ -1866,8 +1866,6 @@ func budgetPartStyle(used, limit float64) lipgloss.Style {
 	return contextGaugeStyle(level, styles.TabAccentStyle)
 }
 
-// formatBudgetDuration renders whole seconds, so a live reading doesn't
-// jitter with sub-second noise.
 // formatBudgetDuration renders a whole-second reading compactly, dropping
 // zero components so a round ceiling reads "10m" and "1h" rather than
 // Duration.String's "10m0s" and "1h0m0s" — the budget column is the

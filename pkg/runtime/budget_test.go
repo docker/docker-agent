@@ -11,6 +11,11 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
+// ptr returns a pointer to a float64 value — used in tests to pass an
+// inline literal where a *float64 is required.
+func ptr(v float64) *float64 { return &v }
+
+
 var budgetEpoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func TestNewBudgetTrackerNilWhenNoLimitSet(t *testing.T) {
@@ -33,7 +38,7 @@ func TestNewBudgetTrackerNilWhenNoLimitSet(t *testing.T) {
 func TestNilBudgetTrackerIsInert(t *testing.T) {
 	var b *budgetTracker
 	assert.NotPanics(t, func() {
-		b.record("root", &chat.Usage{InputTokens: 10}, new(1.0), time.Second)
+		b.record("root", &chat.Usage{InputTokens: 10}, ptr(1.0), time.Second)
 		assert.Nil(t, b.exceeded())
 		assert.Equal(t, budgetSnapshot{}, b.snapshot())
 		assert.False(t, b.unpricedSpend())
@@ -44,13 +49,13 @@ func TestBudgetMaxCost(t *testing.T) {
 	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 0.50})
 	require.NotNil(t, b)
 
-	b.record("root", &chat.Usage{InputTokens: 100}, new(0.20), time.Second)
+	b.record("root", &chat.Usage{InputTokens: 100}, ptr(0.20), time.Second)
 	assert.Nil(t, b.exceeded(), "under budget must not trip")
 
-	b.record("root", &chat.Usage{InputTokens: 100}, new(0.20), time.Second)
+	b.record("root", &chat.Usage{InputTokens: 100}, ptr(0.20), time.Second)
 	assert.Nil(t, b.exceeded(), "$0.40 of $0.50 must not trip")
 
-	b.record("root", &chat.Usage{InputTokens: 100}, new(0.15), time.Second)
+	b.record("root", &chat.Usage{InputTokens: 100}, ptr(0.15), time.Second)
 	breach := b.exceeded()
 	require.NotNil(t, breach, "$0.55 of $0.50 must trip")
 	assert.Equal(t, budgetLimitCost, breach.Limit)
@@ -61,7 +66,7 @@ func TestBudgetMaxCost(t *testing.T) {
 
 func TestBudgetTripsOnExactLimit(t *testing.T) {
 	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 0.50})
-	b.record("root", &chat.Usage{}, new(0.50), time.Second)
+	b.record("root", &chat.Usage{}, ptr(0.50), time.Second)
 	require.NotNil(t, b.exceeded())
 }
 
@@ -120,7 +125,7 @@ func TestBudgetMaxTimeIgnoresIdleTime(t *testing.T) {
 
 func TestBudgetUnsetLimitsNeverTrip(t *testing.T) {
 	b := newBudgetTracker(&latest.BudgetConfig{MaxTime: latest.Duration{Duration: time.Hour}})
-	b.record("root", &chat.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000}, new(999.0), time.Second)
+	b.record("root", &chat.Usage{InputTokens: 1_000_000, OutputTokens: 1_000_000}, ptr(999.0), time.Second)
 	assert.Nil(t, b.exceeded(), "only max_time is set; cost and tokens must be ignored")
 }
 
@@ -136,7 +141,7 @@ func TestBudgetUnpricedSpendIsFlaggedNotCountedAsFree(t *testing.T) {
 
 func TestBudgetPricedFreeCallIsNotUnpriced(t *testing.T) {
 	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 0.50})
-	b.record("root", &chat.Usage{InputTokens: 10}, new(0.0), time.Second)
+	b.record("root", &chat.Usage{InputTokens: 10}, ptr(0.0), time.Second)
 	assert.False(t, b.unpricedSpend(), "a priced free call is not unpriced")
 	assert.False(t, b.snapshot().Unpriced)
 }
@@ -153,7 +158,7 @@ func TestBudgetReportsCostFirstWhenSeveralTrip(t *testing.T) {
 		MaxTokens: 10,
 		MaxTime:   latest.Duration{Duration: time.Minute},
 	})
-	b.record("root", &chat.Usage{InputTokens: 100, OutputTokens: 100}, new(5.0), time.Second)
+	b.record("root", &chat.Usage{InputTokens: 100, OutputTokens: 100}, ptr(5.0), time.Second)
 
 	breach := b.exceeded()
 	require.NotNil(t, breach)
@@ -166,7 +171,7 @@ func TestBudgetSnapshotReportsLimitsAndTotals(t *testing.T) {
 		MaxTokens: 1000,
 		MaxTime:   latest.Duration{Duration: 10 * time.Minute},
 	})
-	b.record("root", &chat.Usage{InputTokens: 30, OutputTokens: 20}, new(0.25), time.Second)
+	b.record("root", &chat.Usage{InputTokens: 30, OutputTokens: 20}, ptr(0.25), time.Second)
 
 	s := b.snapshot()
 	assert.InDelta(t, 0.25, s.Cost, 1e-9)
@@ -185,7 +190,7 @@ func TestBudgetTrackerIsConcurrencySafe(t *testing.T) {
 		go func() {
 			defer func() { done <- struct{}{} }()
 			for range 50 {
-				b.record("root", &chat.Usage{InputTokens: 1, OutputTokens: 1}, new(0.01), time.Second)
+				b.record("root", &chat.Usage{InputTokens: 1, OutputTokens: 1}, ptr(0.01), time.Second)
 				b.exceeded()
 				b.snapshot()
 			}
@@ -209,9 +214,9 @@ func TestBudgetRecordToleratesNilUsage(t *testing.T) {
 func TestBudgetPerAgentBreakdown(t *testing.T) {
 	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 10})
 
-	b.record("root", &chat.Usage{InputTokens: 100, OutputTokens: 100}, new(0.02), 2*time.Second)
-	b.record("developer", &chat.Usage{InputTokens: 300, OutputTokens: 300}, new(0.09), 5*time.Second)
-	b.record("root", &chat.Usage{InputTokens: 50, OutputTokens: 50}, new(0.01), time.Second)
+	b.record("root", &chat.Usage{InputTokens: 100, OutputTokens: 100}, ptr(0.02), 2*time.Second)
+	b.record("developer", &chat.Usage{InputTokens: 300, OutputTokens: 300}, ptr(0.09), 5*time.Second)
+	b.record("root", &chat.Usage{InputTokens: 50, OutputTokens: 50}, ptr(0.01), time.Second)
 
 	per := b.snapshot().PerAgent
 	require.Len(t, per, 2)
@@ -257,7 +262,7 @@ func TestBudgetSetNamedBudgetIsSharedNotCopied(t *testing.T) {
 
 	for _, agent := range []string{"root", "developer"} {
 		for _, nt := range s.budgetsFor(agent) {
-			nt.Tracker.record(agent, &chat.Usage{OutputTokens: 10}, new(0.04), time.Second)
+			nt.Tracker.record(agent, &chat.Usage{OutputTokens: 10}, ptr(0.04), time.Second)
 		}
 	}
 
@@ -267,7 +272,7 @@ func TestBudgetSetNamedBudgetIsSharedNotCopied(t *testing.T) {
 	assert.Nil(t, s.exceededFor("root"), "$0.08 of $0.10 must not trip")
 
 	for _, nt := range s.budgetsFor("root") {
-		nt.Tracker.record("root", &chat.Usage{OutputTokens: 10}, new(0.04), time.Second)
+		nt.Tracker.record("root", &chat.Usage{OutputTokens: 10}, ptr(0.04), time.Second)
 	}
 	for _, agent := range []string{"root", "developer"} {
 		br := s.exceededFor(agent)
@@ -319,7 +324,7 @@ func TestBudgetSetRunWideBudgetTrips(t *testing.T) {
 		map[string][]string{"root": {"roomy"}},
 	)
 	for _, nt := range s.budgetsFor("root") {
-		nt.Tracker.record("root", &chat.Usage{OutputTokens: 10}, new(0.06), time.Second)
+		nt.Tracker.record("root", &chat.Usage{OutputTokens: 10}, ptr(0.06), time.Second)
 	}
 	br := s.exceededFor("root")
 	require.NotNil(t, br)
@@ -345,7 +350,7 @@ func TestBudgetSetNilWhenNothingConfigured(t *testing.T) {
 func TestBudgetSetSnapshotPerBudget(t *testing.T) {
 	s := budgetSetFixture()
 	for _, nt := range s.budgetsFor("developer") {
-		nt.Tracker.record("developer", &chat.Usage{InputTokens: 5, OutputTokens: 5}, new(0.02), time.Second)
+		nt.Tracker.record("developer", &chat.Usage{InputTokens: 5, OutputTokens: 5}, ptr(0.02), time.Second)
 	}
 
 	snaps := s.snapshot()

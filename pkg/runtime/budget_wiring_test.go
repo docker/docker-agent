@@ -50,7 +50,7 @@ func TestRecordBudgetEmitsNonZeroReading(t *testing.T) {
 	sink := &collectSink{}
 
 	now = budgetEpoch.Add(30 * time.Second)
-	r.recordBudget(sess, a, &chat.Usage{InputTokens: 1000, OutputTokens: 200}, new(0.01), 30*time.Second, sink)
+	r.recordBudget(sess, a, &chat.Usage{InputTokens: 1000, OutputTokens: 200}, ptr(0.01), 30*time.Second, sink)
 
 	usages := sink.budgetUsages()
 	require.Len(t, usages, 1, "recordBudget must emit exactly one budget_usage event")
@@ -87,7 +87,7 @@ func TestRecordBudgetAccumulatesAcrossTurns(t *testing.T) {
 
 	for i := range 3 {
 		now = budgetEpoch.Add(time.Duration(i+1) * 10 * time.Second)
-		r.recordBudget(sess, a, &chat.Usage{InputTokens: 100, OutputTokens: 100}, new(0.001), 10*time.Second, sink)
+		r.recordBudget(sess, a, &chat.Usage{InputTokens: 100, OutputTokens: 100}, ptr(0.001), 10*time.Second, sink)
 	}
 
 	usages := sink.budgetUsages()
@@ -128,11 +128,11 @@ func TestBudgetSurvivesAcrossMessages(t *testing.T) {
 
 	r.ensureBudget()
 	now = budgetEpoch.Add(10 * time.Second)
-	r.recordBudget(sess, a, &chat.Usage{InputTokens: 500, OutputTokens: 500}, new(0.02), 10*time.Second, sink)
+	r.recordBudget(sess, a, &chat.Usage{InputTokens: 500, OutputTokens: 500}, ptr(0.02), 10*time.Second, sink)
 
 	r.ensureBudget()
 	now = budgetEpoch.Add(20 * time.Second)
-	r.recordBudget(sess, a, &chat.Usage{InputTokens: 500, OutputTokens: 500}, new(0.02), 10*time.Second, sink)
+	r.recordBudget(sess, a, &chat.Usage{InputTokens: 500, OutputTokens: 500}, ptr(0.02), 10*time.Second, sink)
 
 	usages := sink.budgetUsages()
 	last := usages[len(usages)-1]
