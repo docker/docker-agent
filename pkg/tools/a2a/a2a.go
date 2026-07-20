@@ -186,7 +186,8 @@ func (t *Toolset) Start(ctx context.Context) error {
 	headers := t.expander.ExpandMap(ctx, t.headers)
 	httpClient.Transport = upstream.NewHeaderTransport(base, headers)
 
-	client, err := a2aclient.NewFromCard(ctx, card,
+	client, err := a2aclient.NewFromCard(
+		ctx, card,
 		a2aclient.WithDefaultsDisabled(),
 		a2aclient.WithJSONRPCTransport(httpClient),
 	)
@@ -241,10 +242,11 @@ func (t *Toolset) createHandler() tools.ToolHandler {
 			response.WriteString(extractText(event))
 		}
 
-		result := cmp.Or(response.String(), "No response from agent")
+		if response.Len() == 0 {
+			return tools.ResultError("No response from agent"), nil
+		}
 
-		// TODO(dga): could this be a tool call error?
-		return tools.ResultSuccess(result), nil
+		return tools.ResultSuccess(response.String()), nil
 	}
 }
 
