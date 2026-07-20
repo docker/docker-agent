@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,7 +42,7 @@ func TestCheckAvailable(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fakeDir := t.TempDir()
 			if tt.script != "" {
-				require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "docker"), []byte(tt.script), 0o755))
+				writeMockScript(t, fakeDir, "docker", tt.script)
 			}
 			t.Setenv("PATH", fakeDir)
 
@@ -103,8 +105,8 @@ func TestForWorkspace(t *testing.T) {
 	// the OS validates each freshly written binary on first run.
 	fakeDir := t.TempDir()
 	dataFile := filepath.Join(fakeDir, "ls.json")
-	script := fmt.Sprintf("#!/bin/sh\ncat %q\n", dataFile)
-	require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "docker"), []byte(script), 0o755))
+	script := fmt.Sprintf("cat %q", dataFile)
+	writeMockScript(t, fakeDir, "docker", script)
 	// Prepend (not replace) so the fake "docker" wins while the script
 	// can still resolve "cat".
 	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -140,7 +142,7 @@ func TestExisting_HasWorkspace(t *testing.T) {
 
 func TestNewBackend_PrefersSbx(t *testing.T) {
 	fakeDir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "sbx"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	writeMockScript(t, fakeDir, "sbx", "exit 0")
 	t.Setenv("PATH", fakeDir)
 
 	// When sbx is available and preferred, CheckAvailable uses sbx.
@@ -152,7 +154,7 @@ func TestNewBackend_PrefersSbx(t *testing.T) {
 func TestNewBackend_FallsBackToDocker(t *testing.T) {
 	fakeDir := t.TempDir()
 	// Only docker is available, no sbx.
-	require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	writeMockScript(t, fakeDir, "docker", "exit 0")
 	t.Setenv("PATH", fakeDir)
 
 	backend := sandbox.NewBackend(true)
@@ -163,9 +165,12 @@ func TestNewBackend_FallsBackToDocker(t *testing.T) {
 func TestForWorkspace_SbxBackend(t *testing.T) {
 	fakeDir := t.TempDir()
 	jsonData := `{"sandboxes":[{"name":"my-sbx","workspaces":["/my/project"]}]}`
-	script := fmt.Sprintf("#!/bin/sh\necho '%s'\n", jsonData)
-	require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "sbx"), []byte(script), 0o755))
-	t.Setenv("PATH", fakeDir)
+	dataFile := filepath.Join(fakeDir, "sbx_data.json")
+	require.NoError(t, os.WriteFile(dataFile, []byte(jsonData), 0o600))
+	script := fmt.Sprintf("cat %q", dataFile)
+	writeMockScript(t, fakeDir, "sbx", script)
+	// Prepend so fake "sbx" wins while the script can still resolve "cat".
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	backend := sandbox.NewBackend(true)
 	got := backend.ForWorkspace(t.Context(), "/my/project")
@@ -280,4 +285,29 @@ func TestAllowHosts_SkipsEmptyEntries(t *testing.T) {
 
 	backend := sandbox.NewBackend(false)
 	require.NoError(t, backend.AllowHosts(t.Context(), "sandbox-x", []string{"", "   ", "\t"}))
+}
+
+// writeMockScript writes a mock executable script to the given directory.
+// On Windows, it converts the POSIX shell script to a basic .bat script.
+//
+// Limitations:
+//   - String-replace of "cat " -> "type " could mis-translate if a future script
+//     embeds "cat" in a different context (e.g. a filename).
+//   - The "#!/bin/sh\n" prefix strip is vestigial as some callers omit it.
+//   - Replaces "exit 0" with "exit /b 0" but leaves plain "exit" untouched.
+//
+// This helper covers exactly the mock scripts currently used by the sandbox tests.
+func writeMockScript(t *testing.T, dir, name, script string) {
+	t.Helper()
+	script = strings.TrimPrefix(script, "#!/bin/sh\n")
+
+	if runtime.GOOS == "windows" {
+		name += ".bat"
+		script = strings.ReplaceAll(script, "cat ", "type ")
+		script = strings.ReplaceAll(script, "exit 0", "exit /b 0")
+		script = "@echo off\n" + script
+	} else {
+		script = "#!/bin/sh\n" + script
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755))
 }

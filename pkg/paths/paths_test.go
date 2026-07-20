@@ -34,11 +34,11 @@ func TestOverrides(t *testing.T) {
 			assert.NotEmpty(t, original)
 
 			tt.set(tt.custom)
-			assert.Equal(t, tt.custom, tt.get())
+			assert.Equal(t, filepath.Clean(tt.custom), tt.get())
 
 			// Empty string restores the default.
 			tt.set("")
-			assert.Equal(t, original, tt.get())
+			assert.Equal(t, filepath.Clean(original), tt.get())
 		})
 	}
 }

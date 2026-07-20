@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -109,6 +110,10 @@ func TestSessionGetMessages_SummaryWithoutFirstKeptEntry(t *testing.T) {
 func TestDoCompactBeforeHookDeniesSkipsCompaction(t *testing.T) {
 	t.Parallel()
 
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping test relying on POSIX shell commands on Windows")
+	}
+
 	denyingHooks := &latest.HooksConfig{
 		BeforeCompaction: []latest.HookDefinition{
 			{Type: "command", Command: "echo 'denied for safety' >&2; exit 2", Timeout: 5},
@@ -162,6 +167,10 @@ func TestDoCompactBeforeHookDeniesSkipsCompaction(t *testing.T) {
 // summarization (no new model call).
 func TestDoCompactBeforeHookSuppliesSummary(t *testing.T) {
 	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping test relying on POSIX shell commands on Windows")
+	}
 
 	const customSummary = "custom hook-supplied summary"
 	jsonOutput := `{"hook_specific_output":{"hook_event_name":"before_compaction","summary":"` + customSummary + `"}}`
@@ -234,6 +243,10 @@ func TestDoCompactBeforeHookSuppliesSummary(t *testing.T) {
 // express "compacted from X to Y").
 func TestDoCompactAfterHookFires(t *testing.T) {
 	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("skipping test relying on POSIX shell commands on Windows")
+	}
 
 	dir := t.TempDir()
 	logFile := dir + "/after.log"

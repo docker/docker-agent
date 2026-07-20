@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,9 +37,11 @@ func TestBuildTaskSystemMessage(t *testing.T) {
 	})
 
 	t.Run("with attached files", func(t *testing.T) {
-		msg := buildTaskSystemMessage("do the thing", "", []string{"/abs/foo.go", "/abs/bar.go"})
+		fooPath, _ := filepath.Abs("/abs/foo.go")
+		barPath, _ := filepath.Abs("/abs/bar.go")
+		msg := buildTaskSystemMessage("do the thing", "", []string{fooPath, barPath})
 		assert.Contains(t, msg, "<task>\ndo the thing\n</task>")
-		assert.Contains(t, msg, "<attached_files>\n- /abs/foo.go\n- /abs/bar.go\n</attached_files>")
+		assert.Contains(t, msg, "<attached_files>\n- "+fooPath+"\n- "+barPath+"\n</attached_files>")
 	})
 }
 
@@ -225,10 +228,13 @@ func TestSubSessionConfig_InheritsAgentLimits(t *testing.T) {
 func TestSubSessionInheritsAttachedFiles(t *testing.T) {
 	t.Parallel()
 
+	fooPath, _ := filepath.Abs("/abs/foo.go")
+	barPath, _ := filepath.Abs("/abs/bar.go")
+
 	parent := session.New(session.WithUserMessage("hello"))
-	parent.AddAttachedFile("/abs/foo.go")
-	parent.AddAttachedFile("/abs/bar.go")
-	parent.AddAttachedFile("/abs/foo.go") // duplicate, should be ignored
+	parent.AddAttachedFile(fooPath)
+	parent.AddAttachedFile(barPath)
+	parent.AddAttachedFile(fooPath) // duplicate, should be ignored
 
 	childAgent := agent.New("worker", "")
 	cfg := SubSessionConfig{
@@ -240,7 +246,7 @@ func TestSubSessionInheritsAttachedFiles(t *testing.T) {
 	s := newSubSession(parent, cfg, childAgent)
 
 	// Child session inherits parent's attached files (deduplicated, ordered).
-	assert.Equal(t, []string{"/abs/foo.go", "/abs/bar.go"}, s.AttachedFilesSnapshot())
+	assert.Equal(t, []string{fooPath, barPath}, s.AttachedFilesSnapshot())
 
 	// The system message lists them so the sub-agent sees them up-front.
 	sysMsg := s.GetMessages(childAgent)
@@ -250,7 +256,7 @@ func TestSubSessionInheritsAttachedFiles(t *testing.T) {
 		joined.WriteString(m.Content)
 		joined.WriteString("\n")
 	}
-	assert.Contains(t, joined.String(), "<attached_files>\n- /abs/foo.go\n- /abs/bar.go\n</attached_files>")
+	assert.Contains(t, joined.String(), "<attached_files>\n- "+fooPath+"\n- "+barPath+"\n</attached_files>")
 }
 
 func TestSubSessionWithoutAttachedFilesOmitsBlock(t *testing.T) {
