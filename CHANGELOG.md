@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 
 
+## [Unreleased]
+
+## What's New
+
+- Adds argument completion for the `/drop` slash command: pressing <kbd>Tab</kbd> after `/drop ` opens a popup listing the session's currently attached file paths, so selecting one fills the exact path and it resolves via the exact-match branch of file resolution. Reuses the argument-completion hook shipped earlier for `/toolset-restart`
+
+
 ## [v1.111.0] - 2026-07-17
 
 This release adds a new scheduler toolset, inline Mermaid diagram rendering, model switching in the lean TUI, project config autodiscovery, and a range of bug fixes and performance improvements across the agent, TUI, and server.
