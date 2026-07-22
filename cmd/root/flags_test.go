@@ -412,3 +412,24 @@ func TestEnvFromFileErrorsAbortPreRun(t *testing.T) {
 		assert.Contains(t, err.Error(), "bad.env")
 	})
 }
+
+// TestSetupWorkingDirectory: whitespace-only --working-dir is a
+// misconfiguration and must fail loudly, not silently disable containment.
+func TestSetupWorkingDirectory(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty is a no-op", func(t *testing.T) {
+		t.Parallel()
+		require.NoError(t, setupWorkingDirectory(""))
+	})
+
+	t.Run("whitespace-only is rejected", func(t *testing.T) {
+		t.Parallel()
+		err := setupWorkingDirectory("   ")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--working-dir")
+
+		err = setupWorkingDirectory("\t\n")
+		require.Error(t, err)
+	})
+}

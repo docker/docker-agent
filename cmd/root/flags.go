@@ -2,6 +2,7 @@ package root
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -61,6 +62,9 @@ func sessionDBPath(flagValue string) string {
 func setupWorkingDirectory(workingDir string) error {
 	if workingDir == "" {
 		return nil
+	}
+	if strings.TrimSpace(workingDir) == "" {
+		return errors.New("--working-dir: value is empty after trimming whitespace")
 	}
 
 	absWd, err := filepath.Abs(workingDir)
