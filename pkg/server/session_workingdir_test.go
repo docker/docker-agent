@@ -104,6 +104,53 @@ func TestCreateSession_WorkingDirValidation(t *testing.T) {
 	})
 }
 
+// TestCreateSession_WorkingDirNoRootConfigured: no --working-dir → no containment.
+func TestCreateSession_WorkingDirNoRootConfigured(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+
+	newSM := func(rc *config.RuntimeConfig) *SessionManager {
+		return NewSessionManager(ctx, config.Sources{}, session.NewInMemorySessionStore(), 0, rc)
+	}
+
+	elsewhere := t.TempDir()
+
+	t.Run("nil runConfig accepts any directory", func(t *testing.T) {
+		t.Parallel()
+		sm := newSM(nil)
+		created, err := sm.CreateSession(ctx, &session.Session{WorkingDir: elsewhere})
+		require.NoError(t, err)
+		resolved, err := filepath.EvalSymlinks(elsewhere)
+		require.NoError(t, err)
+		assert.Equal(t, resolved, created.WorkingDir)
+	})
+
+	t.Run("empty runConfig.WorkingDir accepts any directory", func(t *testing.T) {
+		t.Parallel()
+		sm := newSM(&config.RuntimeConfig{})
+		created, err := sm.CreateSession(ctx, &session.Session{WorkingDir: elsewhere})
+		require.NoError(t, err)
+		resolved, err := filepath.EvalSymlinks(elsewhere)
+		require.NoError(t, err)
+		assert.Equal(t, resolved, created.WorkingDir)
+	})
+
+	t.Run("whitespace-only runConfig.WorkingDir accepts any directory", func(t *testing.T) {
+		t.Parallel()
+		sm := newSM(&config.RuntimeConfig{Config: config.Config{WorkingDir: "   "}})
+		_, err := sm.CreateSession(ctx, &session.Session{WorkingDir: elsewhere})
+		require.NoError(t, err)
+	})
+
+	t.Run("non-existent WorkingDir is still rejected", func(t *testing.T) {
+		t.Parallel()
+		sm := newSM(&config.RuntimeConfig{})
+		_, err := sm.CreateSession(ctx, &session.Session{WorkingDir: filepath.Join(elsewhere, "does-not-exist")})
+		require.Error(t, err)
+	})
+}
+
 // TestResolveWithinRoot exercises the containment helper directly.
 func TestResolveWithinRoot(t *testing.T) {
 	t.Parallel()
@@ -174,4 +221,31 @@ func TestResolveWithinRoot(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "outside the permitted root")
 	})
+}
+
+// TestResolveWithinRoot_NoRootConfigured: no root → canonicalise, no containment.
+func TestResolveWithinRoot_NoRootConfigured(t *testing.T) {
+	t.Parallel()
+
+	unrelated := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(unrelated)
+	require.NoError(t, err)
+
+	cases := []struct {
+		name string
+		rc   *config.RuntimeConfig
+	}{
+		{"nil runConfig", nil},
+		{"empty WorkingDir", &config.RuntimeConfig{}},
+		{"whitespace WorkingDir", &config.RuntimeConfig{Config: config.Config{WorkingDir: "   "}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sm := NewSessionManager(t.Context(), config.Sources{}, session.NewInMemorySessionStore(), 0, tc.rc)
+			got, err := sm.resolveWithinRoot(unrelated)
+			require.NoError(t, err)
+			assert.Equal(t, resolved, got)
+		})
+	}
 }
