@@ -300,7 +300,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithAddEnvironmentInfo(agentConfig.AddEnvironmentInfo),
 			agent.WithAddDescriptionParameter(agentConfig.AddDescriptionParameter),
 			agent.WithRedactSecrets(agentConfig.RedactSecretsEnabled()),
-			agent.WithSaferShell(agentConfig.SaferShellEnabled()),
+			agent.WithSaferShell(agentConfig.HasShellToolset()),
 			agent.WithAddPromptFiles(promptFiles),
 			agent.WithMaxIterations(agentConfig.MaxIterations),
 			agent.WithMaxConsecutiveToolCalls(agentConfig.MaxConsecutiveToolCalls),

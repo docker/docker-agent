@@ -3,12 +3,12 @@ agents:
     model: anthropic/claude-haiku-4-5
     description: Shell agent with the safer_shell classifier enabled
     welcome_message: |
-      The safer_shell classifier is enabled. Its verdict follows the
-      session's SafetyPolicy (unsafe / safer / safe-auto / strict, set
-      by the caller — CLI `--yolo` maps to unsafe, the API accepts
-      `safety_policy` on session create, and users can opt into
-      `safe-auto` from a confirmation prompt).
+      The safer_shell classifier runs automatically for every shell
+      toolset. It labels each shell command (safe / destructive /
+      unknown) and attaches the label as tool-call metadata; the
+      runtime's safety mode (strict / balanced / autonomous) is what
+      actually gates the call. Confirmation prompts render a
+      destructive-tier badge when the classifier flagged the command.
     instruction: Use the shell tool to run the command the user asks for.
     toolsets:
       - type: shell
-        safer: true

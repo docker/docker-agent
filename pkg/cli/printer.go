@@ -21,10 +21,10 @@ import (
 type ConfirmationResult string
 
 const (
-	ConfirmationApprove        ConfirmationResult = "approve"
-	ConfirmationApproveSession ConfirmationResult = "approve_session"
-	ConfirmationReject         ConfirmationResult = "reject"
-	ConfirmationAbort          ConfirmationResult = "abort"
+	ConfirmationApprove           ConfirmationResult = "approve"
+	ConfirmationApproveAutonomous ConfirmationResult = "approve_autonomous"
+	ConfirmationReject            ConfirmationResult = "reject"
+	ConfirmationAbort             ConfirmationResult = "abort"
 )
 
 var bold = color.New(color.Bold).SprintfFunc()
@@ -111,7 +111,7 @@ func (p *Printer) PrintToolCallWithConfirmation(ctx context.Context, toolCall to
 				return ConfirmationApprove
 			case 'a', 'A':
 				p.Print(bold("Yes to all 👍"))
-				return ConfirmationApproveSession
+				return ConfirmationApproveAutonomous
 			case 'n', 'N':
 				p.Print(bold("No 👎"))
 				return ConfirmationReject
@@ -135,7 +135,7 @@ func (p *Printer) PrintToolCallWithConfirmation(ctx context.Context, toolCall to
 	case "y":
 		return ConfirmationApprove
 	case "a":
-		return ConfirmationApproveSession
+		return ConfirmationApproveAutonomous
 	case "n":
 		return ConfirmationReject
 	default:

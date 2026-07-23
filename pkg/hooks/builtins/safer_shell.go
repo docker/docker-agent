@@ -1,15 +1,9 @@
 package builtins
 
-// safer_shell classifies shell tool calls against a taxonomy and
-// adapts its verdict to hooks.Input.SafetyPolicy. Registered on
-// pre_tool_use with preempt_yolo:true so it runs before --yolo.
-//
-// Per-policy verdict:
-//   unsafe    — silent.
-//   safer     — destructive ask; safe/unknown silent.
-//   safe-auto — safe allow; destructive/unknown ask.
-//   strict    — safe/destructive/unknown all ask (with metadata).
-//
+// safer_shell labels shell calls against an embedded taxonomy of
+// safe reads and destructive patterns. Pure labeller: always returns
+// Allow + metadata (blast_radius, category, reason). The mode × label
+// table in pkg/runtime/toolexec is what actually gates the call.
 // Compound shell (a && b, a; b, a | b) skips the safe-list.
 
 import (
@@ -135,11 +129,10 @@ func compileSafe(value any) ([]safePattern, error) {
 	return out, nil
 }
 
-// saferShell is the [hooks.BuiltinFunc] registered under [SaferShell].
-// See the file-level comment for the policy-aware logic. Taxonomy
-// load failure asks with blast_radius=unknown regardless of policy
-// (fail-closed), except under unsafe which stays silent.
-func saferShell(_ context.Context, in *hooks.Input, args []string) (*hooks.Output, error) {
+// blast_radius wire values: "safe" | "low" | "medium" | "high" |
+// "unknown". low/medium/high all collapse to "destructive" at the
+// runtime layer (see LabelFromBlastRadius).
+func saferShell(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
 	if in == nil || in.HookEventName != hooks.EventPreToolUse {
 		return nil, nil
 	}
@@ -147,75 +140,31 @@ func saferShell(_ context.Context, in *hooks.Input, args []string) (*hooks.Outpu
 		return nil, nil
 	}
 
-	policy := effectiveSafetyPolicy(in.SafetyPolicy, args)
-	if policy == policyUnsafe {
-		return nil, nil
-	}
-
 	command, _ := shellCommandArg(in.ToolInput)
 
 	patterns, err := loadSafetyPatterns()
 	if err != nil {
-		return askWithMetadata(radiusUnknown, "", "Safety pattern load failed: "+err.Error()), nil
+		return allowWithMetadata(radiusUnknown, "", "Safety pattern load failed: "+err.Error()), nil
 	}
 
 	if command != "" {
 		if match := bestDestructiveMatch(command, patterns.destructive); match != nil {
-			return askWithMetadata(match.BlastRadius, match.Category,
+			return allowWithMetadata(match.BlastRadius, match.Category,
 				"Command matches destructive operation: "+match.Pattern), nil
 		}
 		if match := bestSafeMatch(command, patterns.safe); match != nil {
-			reason := "Command matches safe read-only pattern: " + match.Pattern
-			switch policy {
-			case policySafer:
-				return nil, nil
-			case policySafeAuto:
-				return allowWithMetadata(radiusSafe, match.Category, reason), nil
-			default:
-				return askWithMetadata(radiusSafe, match.Category, reason), nil
-			}
+			return allowWithMetadata(radiusSafe, match.Category,
+				"Command matches safe read-only pattern: "+match.Pattern), nil
 		}
 	}
-	// Unknown command: safer defers, strict / safe-auto ask.
-	if policy == policySafer {
-		return nil, nil
-	}
-	return askWithMetadata(radiusUnknown, "",
-		"Shell command requires safer-mode confirmation."), nil
+	return allowWithMetadata(radiusUnknown, "",
+		"Command does not match any known safe or destructive pattern."), nil
 }
-
-// Mirrors pkg/session.SafetyPolicy strings; the hooks package must
-// stay free of a session dependency.
-const (
-	policyUnsafe   = "unsafe"
-	policySafer    = "safer"
-	policySafeAuto = "safe-auto"
-	policyStrict   = "strict"
-)
 
 const (
 	radiusSafe    = "safe"
 	radiusUnknown = "unknown"
 )
-
-// effectiveSafetyPolicy picks the policy for one invocation.
-// Precedence: args[0] (YAML pin) > session > strict. Unrecognised
-// args[0] falls through to session (so a YAML typo doesn't flip
-// modes silently).
-func effectiveSafetyPolicy(sessionPolicy string, args []string) string {
-	if len(args) > 0 {
-		switch args[0] {
-		case policyUnsafe, policySafer, policySafeAuto, policyStrict:
-			return args[0]
-		}
-	}
-	switch sessionPolicy {
-	case policyUnsafe, policySafer, policySafeAuto, policyStrict:
-		return sessionPolicy
-	default:
-		return policyStrict
-	}
-}
 
 func shellCommandArg(input map[string]any) (string, bool) {
 	if v, ok := input["cmd"].(string); ok {
@@ -275,15 +224,7 @@ func containsShellSeparator(command string) bool {
 	return false
 }
 
-func askWithMetadata(blastRadius, category, reason string) *hooks.Output {
-	return verdictWithMetadata(hooks.DecisionAsk, blastRadius, category, reason)
-}
-
 func allowWithMetadata(blastRadius, category, reason string) *hooks.Output {
-	return verdictWithMetadata(hooks.DecisionAllow, blastRadius, category, reason)
-}
-
-func verdictWithMetadata(decision hooks.Decision, blastRadius, category, reason string) *hooks.Output {
 	meta := map[string]string{
 		metaBlastRadius: blastRadius,
 		metaReason:      reason,
@@ -294,10 +235,23 @@ func verdictWithMetadata(decision hooks.Decision, blastRadius, category, reason 
 	return &hooks.Output{
 		HookSpecificOutput: &hooks.HookSpecificOutput{
 			HookEventName:            hooks.EventPreToolUse,
-			PermissionDecision:       decision,
+			PermissionDecision:       hooks.DecisionAllow,
 			PermissionDecisionReason: reason,
 			Metadata:                 meta,
 		},
+	}
+}
+
+// LabelFromBlastRadius collapses the wire radius to the three-way
+// classifier label consumed by the mode table.
+func LabelFromBlastRadius(blastRadius string) string {
+	switch blastRadius {
+	case radiusSafe:
+		return "safe"
+	case "low", "medium", "high":
+		return "destructive"
+	default:
+		return "unknown"
 	}
 }
 

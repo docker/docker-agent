@@ -1363,7 +1363,7 @@
         },
         "preempt_yolo": {
           "type": "boolean",
-          "description": "Opt a pre_tool_use entry into firing BEFORE the deterministic approval pipeline (--yolo, permission allow/deny patterns). A deny/ask verdict from a preempting hook cannot be bypassed by --yolo or permission allow-rules; an allow verdict is advisory (the pipeline still runs Decide() and the rest of pre_tool_use). Default pre_tool_use entries fire AFTER Decide(). Only meaningful on pre_tool_use; ignored on other events. Used by the safer_shell builtin (auto-registered with this flag when a shell toolset has `safer: true`)."
+          "description": "Opt a pre_tool_use entry into firing BEFORE the deterministic approval pipeline (custom allow/ask/deny rules + safety mode). A deny/ask verdict from a preempting hook cannot be bypassed by the safety mode (including Autonomous); an allow verdict is advisory. Default pre_tool_use entries fire AFTER the safety mode's verdict. Only meaningful on pre_tool_use; ignored on other events. Used by the safer_shell builtin (auto-registered whenever an agent has a shell toolset) as a pure labeller — it always returns Allow with classification metadata that the runtime's (mode × label) table consumes."
         }
       },
       "required": [
@@ -2329,10 +2329,6 @@
         "recall": {
           "type": "boolean",
           "description": "Opt in to background-job recall for the background_jobs toolset (only valid for type 'background_jobs'). When enabled, run_background_job exposes a recall boolean parameter. If the agent sets recall=true for a background job, the runtime injects a steering message with a short completion sentence and the job output when the job finishes. Default false."
-        },
-        "safer": {
-          "type": "boolean",
-          "description": "Opt in to the safer_shell classifier for the shell toolset (only valid for type 'shell'). When enabled, the agent auto-registers the safer_shell builtin under pre_tool_use with preempt_yolo:true. Verdict adapts to the session's SafetyPolicy (unsafe / safer / safe-auto / strict). See docs/configuration/hooks/index.md for the per-policy behaviour matrix. Default false."
         },
         "url": {
           "type": "string",

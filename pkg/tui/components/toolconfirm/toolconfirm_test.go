@@ -86,7 +86,7 @@ func TestDecisionResume(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, runtime.ResumeApprove(), Approve.Resume("", ""))
 	assert.Equal(t, runtime.ResumeApproveTool("shell:cmd=ls*"), ApproveTool.Resume("shell:cmd=ls*", ""))
-	assert.Equal(t, runtime.ResumeApproveSession(), ApproveSession.Resume("", ""))
+	assert.Equal(t, runtime.ResumeApproveAutonomous(), ApproveAutonomous.Resume("", ""))
 	assert.Equal(t, runtime.ResumeReject("too risky"), Reject.Resume("", "too risky"))
 }
 
@@ -117,8 +117,8 @@ func TestKeyMapDecisionFor(t *testing.T) {
 		{"N", Reject},
 		{"t", ApproveTool},
 		{"T", ApproveTool},
-		{"a", ApproveSession},
-		{"A", ApproveSession},
+		{"a", ApproveAutonomous},
+		{"A", ApproveAutonomous},
 	} {
 		decision, ok := keyMap.DecisionFor(tea.KeyPressMsg{Code: rune(tt.key[0]), Text: tt.key})
 		require.True(t, ok, "key %q", tt.key)
@@ -132,7 +132,7 @@ func TestKeyMapDecisionFor(t *testing.T) {
 func TestDecisionForAction(t *testing.T) {
 	t.Parallel()
 
-	for i, want := range []Decision{Approve, Reject, ApproveTool, ApproveSession} {
+	for i, want := range []Decision{Approve, Reject, ApproveTool, ApproveAutonomous} {
 		action := string(ActionKeys[i])
 		decision, ok := DecisionForAction(action)
 		require.True(t, ok, "action %q", action)

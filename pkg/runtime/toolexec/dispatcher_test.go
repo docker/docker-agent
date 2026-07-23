@@ -104,7 +104,7 @@ func TestDispatcher_RoutesToToolsetHandler(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true // skip approval so we exercise the happy path
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous) // skip approval so we exercise the happy path
 
 	var handlerCalls int
 	tool := tools.Tool{
@@ -135,7 +135,7 @@ func TestDispatcher_RunsToolHandlersInParallel(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	started := make(chan string, 2)
 	release := make(chan struct{})
@@ -196,7 +196,7 @@ func TestDispatcher_EmitsToolOutputFromHandlerContext(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	tool := tools.Tool{
 		Name: "streamer",
@@ -225,7 +225,7 @@ func TestDispatcher_RecordsDocumentToolResult(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	tool := tools.Tool{
 		Name: "report",
@@ -264,7 +264,7 @@ func TestDispatcher_RoutesToRuntimeHandler(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	var handlerCalls int
 	d := &toolexec.Dispatcher{
@@ -431,7 +431,7 @@ func TestDispatcher_ResumeRejectEmitsErrorResponseWithReason(t *testing.T) {
 	assert.Contains(t, em.responses[0].Output, "wrong arguments")
 }
 
-func TestDispatcher_ResumeApproveSafeFlipsSessionToSafeAuto(t *testing.T) {
+func TestDispatcher_ResumeApproveBalancedFlipsSessionToBalanced(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New()
@@ -452,17 +452,17 @@ func TestDispatcher_ResumeApproveSafeFlipsSessionToSafeAuto(t *testing.T) {
 	}
 	em := &captureEmitter{}
 
-	resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeApproveSafe}
+	resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeApproveBalanced}
 
 	d.Process(t.Context(), sess, []tools.ToolCall{{
 		ID:       "x",
 		Function: tools.FunctionCall{Name: "shell", Arguments: "{}"},
 	}}, []tools.Tool{tool}, em)
 
-	assert.True(t, ran, "approve-safe must run the pending tool")
-	assert.Equal(t, session.SafetyPolicySafeAuto, sess.SafetyPolicy,
-		"approve-safe must persist safe-auto on the session")
-	assert.False(t, sess.ToolsApproved, "safe-auto must not backfill ToolsApproved")
+	assert.True(t, ran, "approve-balanced must run the pending tool")
+	assert.Equal(t, session.SafetyPolicyBalanced, sess.SafetyPolicy,
+		"approve-balanced must persist balanced on the session")
+	assert.False(t, sess.ToolsApproved, "balanced must not backfill ToolsApproved")
 }
 
 func TestDispatcher_ResumeApproveToolPersistsToSessionPermissions(t *testing.T) {
@@ -498,10 +498,12 @@ func TestDispatcher_ResumeApproveToolPersistsToSessionPermissions(t *testing.T) 
 	assert.Contains(t, sess.Permissions.Allow, "shell")
 }
 
-func TestDispatcher_ReadOnlyHintAutoApproves(t *testing.T) {
+// Under Balanced mode, a ReadOnlyHint tool auto-approves without
+// prompting: mode(balanced) × label(safe) = allow.
+func TestDispatcher_ReadOnlyHintAutoApprovesUnderBalanced(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
-	sess := session.New() // ToolsApproved=false; no permissions configured
+	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyBalanced))
 
 	var ran bool
 	tool := tools.Tool{
@@ -526,14 +528,221 @@ func TestDispatcher_ReadOnlyHintAutoApproves(t *testing.T) {
 	}}, []tools.Tool{tool}, em)
 
 	assert.True(t, ran)
-	assert.Empty(t, em.confirmations, "read-only tool must not prompt the user")
+	assert.Empty(t, em.confirmations, "balanced + read-only must not prompt the user")
 	require.Len(t, em.responses, 1)
 	assert.False(t, em.responses[0].IsError)
 }
 
-// DestructiveHint on a non-approved tool must surface as
-// blast_radius=high in the confirmation event metadata so the UI can
-// render a warning tier without duplicating the classification logic.
+// A batch of shell calls the classifier can't recognise (label =
+// unknown): user picks approve-tool with a per-command shell pattern
+// on the first prompt. Subsequent sibling calls that match the same
+// pattern should auto-approve without emitting a second confirmation.
+// Mirrors Gordon in prod where most commands (docker build, npm
+// install, mise run …) fall into the unknown bucket and users grant
+// per-command allow rules from the confirmation card.
+func TestDispatcher_ApproveToolAutoApprovesSiblingCallsMatchingPattern(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New()
+
+	tool := tools.Tool{
+		Name: "shell",
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("ok"), nil
+		},
+	}
+
+	// safer_shell can't classify these — falls back to unknown, which
+	// under Balanced/Strict would keep asking. approve-tool is the
+	// escape hatch.
+	hd := &stubHookDispatcher{
+		on: map[hooks.EventType]*hooks.Result{
+			hooks.EventPreToolUsePreYolo: {
+				Allowed:  true,
+				Decision: hooks.DecisionAllow,
+				Metadata: map[string]string{"blast_radius": "unknown"},
+			},
+		},
+	}
+
+	resume := make(chan toolexec.ResumeRequest, 1)
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Hooks:    hd,
+		Resume:   resume,
+		// Real runtimes expose the session's own Permissions here (see
+		// pkg/runtime/tool_dispatch.go). Without it, approve-tool's
+		// session-level allow rule never reaches Decide().
+		Permissions: func(s *session.Session) []toolexec.NamedChecker {
+			perms := s.ClonePermissions()
+			if perms == nil {
+				return nil
+			}
+			return []toolexec.NamedChecker{{
+				Checker: permissions.NewCheckerFromRules(perms.Allow, perms.Ask, perms.Deny),
+				Source:  "session permissions",
+			}}
+		},
+	}
+	em := &captureEmitter{confirmed: make(chan struct{})}
+
+	go func() {
+		<-em.confirmed
+		resume <- toolexec.ResumeRequest{
+			Type:     toolexec.ResumeTypeApproveTool,
+			ToolName: "shell:cmd=docker*",
+		}
+	}()
+
+	d.Process(t.Context(), sess, []tools.ToolCall{
+		{ID: "a", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"docker ps"}`}},
+		{ID: "b", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"docker images"}`}},
+		{ID: "c", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"docker build ."}`}},
+	}, []tools.Tool{tool}, em)
+
+	require.Len(t, em.responses, 3)
+	for i, r := range em.responses {
+		assert.Falsef(t, r.IsError, "response %d must not be an error", i)
+	}
+	assert.Len(t, em.confirmations, 1,
+		"approve-tool with a shell pattern must auto-approve every matching sibling")
+}
+
+// A batch of safe shell calls under Strict, with the safer_shell
+// classifier wired in: user approve-balanced on the first prompt
+// should auto-approve every remaining safe shell call in the batch.
+// Mirrors production Gordon where the classifier tags each shell
+// call with blast_radius via the preempt-yolo lane.
+func TestDispatcher_ApproveBalancedAutoApprovesSiblingSafeShellCalls(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New()
+
+	tool := tools.Tool{
+		Name: "shell",
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("ok"), nil
+		},
+	}
+
+	// safer_shell always returns Allow + blast_radius=safe for safe
+	// commands under the new pure-labeller design.
+	hd := &stubHookDispatcher{
+		on: map[hooks.EventType]*hooks.Result{
+			hooks.EventPreToolUsePreYolo: {
+				Allowed:  true,
+				Decision: hooks.DecisionAllow,
+				Metadata: map[string]string{"blast_radius": "safe"},
+			},
+		},
+	}
+
+	resume := make(chan toolexec.ResumeRequest, 1)
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Hooks:    hd,
+		Resume:   resume,
+	}
+	em := &captureEmitter{confirmed: make(chan struct{})}
+
+	go func() {
+		<-em.confirmed
+		resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeApproveBalanced}
+	}()
+
+	d.Process(t.Context(), sess, []tools.ToolCall{
+		{ID: "a", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"ls"}`}},
+		{ID: "b", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"pwd"}`}},
+		{ID: "c", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"git status"}`}},
+	}, []tools.Tool{tool}, em)
+
+	require.Len(t, em.responses, 3)
+	for i, r := range em.responses {
+		assert.Falsef(t, r.IsError, "response %d must not be an error", i)
+	}
+	assert.Len(t, em.confirmations, 1,
+		"only the first call should prompt; balanced flip must auto-approve safe siblings")
+}
+
+// A batch of safe tool calls under Strict: user approve-balanced on
+// the first prompt should auto-approve every remaining call in the
+// batch without emitting a second confirmation event. Regression test
+// for a Gordon bug where each parallel call kept surfacing its own
+// prompt even after the mode flipped.
+func TestDispatcher_ApproveBalancedAutoApprovesSiblingSafeCalls(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New()
+
+	var ran atomic.Int32
+	tool := tools.Tool{
+		Name:        "read_file",
+		Annotations: tools.ToolAnnotations{ReadOnlyHint: true},
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			ran.Add(1)
+			return tools.ResultSuccess("contents"), nil
+		},
+	}
+
+	resume := make(chan toolexec.ResumeRequest, 1)
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Resume:   resume,
+	}
+	em := &captureEmitter{confirmed: make(chan struct{})}
+
+	go func() {
+		<-em.confirmed
+		resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeApproveBalanced}
+	}()
+
+	d.Process(t.Context(), sess, []tools.ToolCall{
+		{ID: "a", Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"a"}`}},
+		{ID: "b", Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"b"}`}},
+		{ID: "c", Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"c"}`}},
+	}, []tools.Tool{tool}, em)
+
+	assert.Equal(t, int32(3), ran.Load(), "every safe sibling must run")
+	assert.Len(t, em.confirmations, 1,
+		"only the first call should prompt; the balanced flip must auto-approve the siblings")
+}
+
+// Under Strict (default), ReadOnlyHint tools prompt the user.
+func TestDispatcher_ReadOnlyHintPromptsUnderStrict(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New() // empty policy ≡ strict
+
+	tool := tools.Tool{
+		Name: "read_file",
+		Annotations: tools.ToolAnnotations{
+			ReadOnlyHint: true,
+		},
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("contents"), nil
+		},
+	}
+
+	resume := make(chan toolexec.ResumeRequest, 1)
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Resume:   resume,
+	}
+	em := &captureEmitter{}
+
+	resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeReject}
+
+	d.Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "r",
+		Function: tools.FunctionCall{Name: "read_file", Arguments: "{}"},
+	}}, []tools.Tool{tool}, em)
+
+	require.Len(t, em.confirmations, 1, "strict must prompt even for read-only tools")
+}
+
+// DestructiveHint on a tool that reaches the confirmation event must
+// surface blast_radius=high metadata so the UI can render a warning
+// tier without duplicating the classification logic.
 func TestDispatcher_DestructiveHintEmitsHighBlastRadiusMetadata(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
@@ -604,59 +813,21 @@ func TestDispatcher_UnannotatedToolEmitsNoBlastRadius(t *testing.T) {
 	}
 }
 
-// Under safe-auto, a ReadOnlyHint tool must auto-approve even when the
-// session-level permissions checker asks for confirmation. Without this,
-// callers configuring permissions.ask: "*" defeat the safe-auto opt-in.
-func TestDispatcher_SafeAutoBypassesAskForReadOnlyTools(t *testing.T) {
+// Under Autonomous mode, tools auto-approve without prompting even
+// when marked destructive: the mode wins over the classifier's
+// label. The user opted in explicitly.
+func TestDispatcher_AutonomousAutoApprovesDestructiveTools(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
-	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicySafeAuto))
-	perms := session.PermissionsConfig{Ask: []string{"*"}}
-	sess.Permissions = &perms
+	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyAutonomous))
 
+	destructive := true
 	var ran bool
 	tool := tools.Tool{
-		Name: "read_file",
+		Name: "delete_task",
 		Annotations: tools.ToolAnnotations{
-			ReadOnlyHint: true,
+			DestructiveHint: &destructive,
 		},
-		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
-			ran = true
-			return tools.ResultSuccess("contents"), nil
-		},
-	}
-
-	d := &toolexec.Dispatcher{
-		AgentFor: func(*session.Session) *agent.Agent { return a },
-		Permissions: func(s *session.Session) []toolexec.NamedChecker {
-			return []toolexec.NamedChecker{{
-				Checker: permissions.NewCheckerFromRules(nil, s.Permissions.Ask, nil),
-				Source:  "session",
-			}}
-		},
-	}
-	em := &captureEmitter{}
-
-	d.Process(t.Context(), sess, []tools.ToolCall{{
-		ID:       "r",
-		Function: tools.FunctionCall{Name: "read_file", Arguments: "{}"},
-	}}, []tools.Tool{tool}, em)
-
-	assert.True(t, ran, "safe-auto + ReadOnlyHint must auto-approve")
-	assert.Empty(t, em.confirmations,
-		"safe-auto + ReadOnlyHint must not prompt the user")
-}
-
-func TestDispatcher_SaferBypassesAskForUnclassifiedTools(t *testing.T) {
-	t.Parallel()
-	a := newAgent()
-	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicySafer))
-	perms := session.PermissionsConfig{Ask: []string{"*"}}
-	sess.Permissions = &perms
-
-	var ran bool
-	tool := tools.Tool{
-		Name: "custom_tool",
 		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
 			ran = true
 			return tools.ResultSuccess("ok"), nil
@@ -665,28 +836,61 @@ func TestDispatcher_SaferBypassesAskForUnclassifiedTools(t *testing.T) {
 
 	d := &toolexec.Dispatcher{
 		AgentFor: func(*session.Session) *agent.Agent { return a },
-		Permissions: func(s *session.Session) []toolexec.NamedChecker {
-			return []toolexec.NamedChecker{{
-				Checker: permissions.NewCheckerFromRules(nil, s.Permissions.Ask, nil),
-				Source:  "session",
-			}}
-		},
 	}
 	em := &captureEmitter{}
 
 	d.Process(t.Context(), sess, []tools.ToolCall{{
 		ID:       "x",
-		Function: tools.FunctionCall{Name: "custom_tool", Arguments: "{}"},
+		Function: tools.FunctionCall{Name: "delete_task", Arguments: "{}"},
 	}}, []tools.Tool{tool}, em)
 
-	assert.True(t, ran, "safer + unclassified tool must auto-approve")
+	assert.True(t, ran, "autonomous must auto-approve every tool")
 	assert.Empty(t, em.confirmations)
 }
 
-func TestDispatcher_SaferPromptsForDestructiveHintTools(t *testing.T) {
+// Custom ask: pattern beats Autonomous — new behaviour under the
+// mode model.
+func TestDispatcher_CustomAskBeatsAutonomous(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
-	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicySafer))
+	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyAutonomous))
+
+	tool := tools.Tool{
+		Name: "shell",
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			panic("must not run without confirmation")
+		},
+	}
+
+	resume := make(chan toolexec.ResumeRequest, 1)
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Resume:   resume,
+		Permissions: func(*session.Session) []toolexec.NamedChecker {
+			return []toolexec.NamedChecker{{
+				Checker: permissions.NewCheckerFromRules(nil, []string{"shell"}, nil),
+				Source:  toolexec.SessionPermissionsSource,
+			}}
+		},
+	}
+	em := &captureEmitter{}
+
+	resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeReject}
+
+	d.Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "x",
+		Function: tools.FunctionCall{Name: "shell", Arguments: "{}"},
+	}}, []tools.Tool{tool}, em)
+
+	require.Len(t, em.confirmations, 1,
+		"session-level ask must prompt even under autonomous")
+}
+
+// Balanced mode prompts on destructive tools (mode × destructive = ask).
+func TestDispatcher_BalancedPromptsForDestructiveHintTools(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyBalanced))
 
 	destructive := true
 	tool := tools.Tool{
@@ -716,7 +920,39 @@ func TestDispatcher_SaferPromptsForDestructiveHintTools(t *testing.T) {
 	require.Len(t, em.confirmations, 1)
 }
 
-func TestDispatcher_ResumeApproveSaferFlipsSessionToSafer(t *testing.T) {
+// Balanced mode also prompts on unknown (readOnlyHint=false, no
+// destructive hint) tools.
+func TestDispatcher_BalancedPromptsForUnknownTools(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyBalanced))
+
+	tool := tools.Tool{
+		Name: "custom_tool",
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("ok"), nil
+		},
+	}
+
+	resume := make(chan toolexec.ResumeRequest, 1)
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Resume:   resume,
+	}
+	em := &captureEmitter{}
+
+	resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeReject}
+
+	d.Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "x",
+		Function: tools.FunctionCall{Name: "custom_tool", Arguments: "{}"},
+	}}, []tools.Tool{tool}, em)
+
+	require.Len(t, em.confirmations, 1,
+		"balanced + unknown tool must prompt the user")
+}
+
+func TestDispatcher_ResumeApproveAutonomousFlipsSessionToAutonomous(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New()
@@ -737,7 +973,7 @@ func TestDispatcher_ResumeApproveSaferFlipsSessionToSafer(t *testing.T) {
 	}
 	em := &captureEmitter{}
 
-	resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeApproveSafer}
+	resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeApproveAutonomous}
 
 	d.Process(t.Context(), sess, []tools.ToolCall{{
 		ID:       "x",
@@ -745,7 +981,9 @@ func TestDispatcher_ResumeApproveSaferFlipsSessionToSafer(t *testing.T) {
 	}}, []tools.Tool{tool}, em)
 
 	assert.True(t, ran)
-	assert.Equal(t, session.SafetyPolicySafer, sess.SafetyPolicy)
+	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
+	assert.True(t, sess.ToolsApproved,
+		"approve-autonomous must backfill ToolsApproved for legacy branches")
 }
 
 func TestDispatcher_DenyByPermissionsEmitsErrorResponse(t *testing.T) {
@@ -792,7 +1030,7 @@ func TestDispatcher_ToolResponseTransformRewritesOutput(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	original := "raw output with a secret"
 	rewritten := "output with [REDACTED]"
@@ -845,7 +1083,7 @@ func TestDispatcher_ToolResponseTransformIsNoOpWithoutHooks(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	original := "untouched output"
 
@@ -1050,7 +1288,7 @@ func TestDispatcher_PreToolUsePreYoloAskPreemptsYolo(t *testing.T) {
 
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	tool := tools.Tool{
 		Name: "shell",
@@ -1270,7 +1508,7 @@ func TestDispatcher_PreToolUsePreYoloDenyShortCircuits(t *testing.T) {
 
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	tool := tools.Tool{
 		Name: "shell",
@@ -1316,7 +1554,7 @@ func TestDispatcher_PreToolUsePreYoloAllowIsAdvisory(t *testing.T) {
 
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	ran := false
 	tool := tools.Tool{
@@ -1363,7 +1601,7 @@ func TestDispatcher_PreToolUseDefaultLaneSkippedUnderYolo(t *testing.T) {
 
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	ran := false
 	tool := tools.Tool{
@@ -1415,7 +1653,7 @@ func TestDispatcher_PreToolUseDefaultLaneSkippedUnderYolo(t *testing.T) {
 func TestDispatcher_NonInteractiveAskAutoDenies(t *testing.T) {
 	a := newAgent()
 	sess := session.New()
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 	sess.NonInteractive = true
 
 	tool := tools.Tool{

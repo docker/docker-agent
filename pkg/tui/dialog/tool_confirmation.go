@@ -281,11 +281,11 @@ func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (l
 			core.CmdHandler(CloseDialogMsg{}),
 			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveTool.Resume(d.permissionPattern, "")}),
 		)
-	case toolconfirm.ApproveSession:
+	case toolconfirm.ApproveAutonomous:
 		d.sessionState.SetYoloMode(true)
 		return d, tea.Sequence(
 			core.CmdHandler(CloseDialogMsg{}),
-			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveSession.Resume("", "")}),
+			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveAutonomous.Resume("", "")}),
 		)
 	}
 	return d, nil

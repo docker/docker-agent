@@ -65,7 +65,7 @@ func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.Name
 				Ask:   perms.Ask,
 				Deny:  perms.Deny,
 			}),
-			Source: "session permissions",
+			Source: toolexec.SessionPermissionsSource,
 		})
 	}
 	if tc := r.team.Permissions(); tc != nil {
@@ -126,8 +126,8 @@ func (h *hookDispatcher) NotifyUserInput(ctx context.Context, sessionID, label s
 	h.r.executeOnUserInputHooks(ctx, sessionID, label)
 }
 
-func (h *hookDispatcher) NotifyApprovalDecision(ctx context.Context, sess *session.Session, a *agent.Agent, tc tools.ToolCall, decision, source string) {
-	h.r.executeOnToolApprovalDecisionHooks(ctx, sess, a, tc, decision, source)
+func (h *hookDispatcher) NotifyApprovalDecision(ctx context.Context, sess *session.Session, a *agent.Agent, tc tools.ToolCall, decision, source, safetyLabel string) {
+	h.r.executeOnToolApprovalDecisionHooks(ctx, sess, a, tc, decision, source, safetyLabel)
 }
 
 // allowSourceFor maps a permission-checker source label to the

@@ -103,9 +103,9 @@ func TestObserve_ToolStepChecks(t *testing.T) {
 	t.Parallel()
 
 	approvals := map[string]tea.Msg{
-		"approve":         dialog.RuntimeResumeMsg{Request: runtime.ResumeApprove()},
-		"approve-tool":    dialog.RuntimeResumeMsg{Request: runtime.ResumeApproveTool("shell:cmd=ls*")},
-		"approve-session": dialog.RuntimeResumeMsg{Request: runtime.ResumeApproveSession()},
+		"approve":            dialog.RuntimeResumeMsg{Request: runtime.ResumeApprove()},
+		"approve-tool":       dialog.RuntimeResumeMsg{Request: runtime.ResumeApproveTool("shell:cmd=ls*")},
+		"approve-autonomous": dialog.RuntimeResumeMsg{Request: runtime.ResumeApproveAutonomous()},
 	}
 	for name, msg := range approvals {
 		m := startedTour()

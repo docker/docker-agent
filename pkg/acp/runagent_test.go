@@ -633,7 +633,7 @@ func TestRunAgent_ToolCallConfirmationOutcomes(t *testing.T) {
 		{
 			name:       "allow-always approves session",
 			result:     permissionSelected("allow-always"),
-			wantResume: []runtime.ResumeRequest{{Type: runtime.ResumeTypeApproveSession}},
+			wantResume: []runtime.ResumeRequest{{Type: runtime.ResumeTypeApproveAutonomous}},
 		},
 		{
 			name:       "reject rejects",

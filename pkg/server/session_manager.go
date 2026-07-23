@@ -926,19 +926,19 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 		return errors.New("session not found")
 	}
 
+	slog.DebugContext(ctx, "ResumeSession received",
+		"session_id", sessionID, "confirmation", confirmation, "tool_name", toolName)
+
 	// Mirror + persist mid-turn session mutations synchronously —
 	// PersistenceObserver only persists on OnRunStart.
 	if rt.session != nil {
 		mutated := false
 		switch runtime.ResumeType(confirmation) {
-		case runtime.ResumeTypeApproveSafe:
-			rt.session.SetSafetyPolicy(session.SafetyPolicySafeAuto)
+		case runtime.ResumeTypeApproveBalanced:
+			rt.session.SetSafetyPolicy(session.SafetyPolicyBalanced)
 			mutated = true
-		case runtime.ResumeTypeApproveSafer:
-			rt.session.SetSafetyPolicy(session.SafetyPolicySafer)
-			mutated = true
-		case runtime.ResumeTypeApproveSession:
-			rt.session.SetToolsApproved(true)
+		case runtime.ResumeTypeApproveAutonomous:
+			rt.session.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 			mutated = true
 		case runtime.ResumeTypeApproveTool:
 			// Skip when toolName is empty — the dispatcher's own
@@ -949,6 +949,9 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 			}
 		}
 		if mutated {
+			slog.DebugContext(ctx, "ResumeSession mutated session",
+				"session_id", sessionID, "safety_policy", string(rt.session.SafetyPolicy),
+				"tools_approved", rt.session.ToolsApproved)
 			if err := sm.sessionStore.UpdateSession(ctx, rt.session); err != nil {
 				slog.WarnContext(ctx, "failed to persist mid-turn session state",
 					"session_id", sessionID, "confirmation", confirmation, "err", err)

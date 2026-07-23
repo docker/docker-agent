@@ -443,7 +443,7 @@ func (m *model) handleConfirmKey(k ui.Key) {
 	case 'a', 'A':
 		m.resolveConfirm(runtime.ResumeApproveTool(m.screen.Confirm.Tool))
 	case 's', 'S':
-		m.resolveConfirm(runtime.ResumeApproveSession())
+		m.resolveConfirm(runtime.ResumeApproveAutonomous())
 	case 'n', 'N':
 		m.resolveConfirm(runtime.ResumeReject("rejected by user"))
 	}

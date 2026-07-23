@@ -996,28 +996,17 @@ func (a *AgentConfig) SessionCompactionEnabled() bool {
 	return *a.SessionCompaction
 }
 
-// SaferShellEnabled reports whether any of the agent's shell toolsets
-// has opted into destructive-command detection. The flag lives on the
-// toolset (not the agent), so this aggregates across all of an agent's
-// toolsets — one match anywhere flips the agent-level flag the runtime
-// uses to register the safer_shell builtin.
-//
-// Off by default: a missing pointer or explicit `safer: false` does
-// not enable the feature. Only an explicit `safer: true` on at least
-// one shell toolset switches it on.
-//
-// Multi-toolset note: when an agent declares more than one shell
-// toolset and only some opt in, the safer_shell builtin still runs
-// for every shell call on this agent (it filters by ToolName, not
-// by toolset identity). Author one shell toolset per agent when you
-// need toolset-scoped granularity.
-func (a *AgentConfig) SaferShellEnabled() bool {
+// HasShellToolset reports whether any of the agent's toolsets is a
+// shell toolset. The runtime uses this to decide whether to auto-inject
+// the safer_shell classifier as a pre_tool_use hook — the classifier
+// is a pure labeller (never blocks) that emits blast_radius metadata
+// consumed by the runtime's (mode × classifier-label) verdict table.
+func (a *AgentConfig) HasShellToolset() bool {
 	if a == nil {
 		return false
 	}
 	for i := range a.Toolsets {
-		ts := &a.Toolsets[i]
-		if ts.Type == "shell" && ts.Safer != nil && *ts.Safer {
+		if a.Toolsets[i].Type == "shell" {
 			return true
 		}
 	}
@@ -1613,17 +1602,6 @@ type Toolset struct {
 	// message with a short completion sentence and the job output when the job
 	// finishes.
 	Recall *bool `json:"recall,omitempty" yaml:"recall,omitempty"`
-
-	// For the `shell` toolset — opt in to destructive-command detection.
-	// When enabled, the agent auto-registers the safer_shell builtin under
-	// pre_tool_use with preempt_yolo:true. Destructive commands (rm -rf, docker
-	// volume rm, mkfs, …) get an Ask verdict carrying a blast-radius
-	// classification; known-safe reads (ls, git status, docker ps, …)
-	// flow through silently; everything else asks with blast_radius=unknown
-	// so the user sees the prompt before --yolo or permission allow-rules
-	// can auto-approve it. nil/false leaves the agent's shell calls subject
-	// only to the regular approval pipeline.
-	Safer *bool `json:"safer,omitempty" yaml:"safer,omitempty"`
 
 	// For the `rag` tool
 	RAGConfig *RAGConfig `json:"rag_config,omitempty" yaml:"rag_config,omitempty"`
@@ -2440,14 +2418,16 @@ type RAGFusionConfig struct {
 }
 
 // PermissionsConfig represents tool permission configuration.
-// Allow/Ask/Deny model. This controls tool call approval behavior:
-// - Allow: Tools matching these patterns are auto-approved (like --yolo for specific tools)
-// - Ask: Tools matching these patterns always require user approval, even if the tool is read-only
-// - Deny: Tools matching these patterns are always rejected, even with --yolo
+// Allow/Ask/Deny model. Custom rules always override the session's
+// SafetyPolicy (strict / balanced / autonomous):
+// - Allow: Tools matching these patterns are auto-approved, even under Strict.
+// - Ask:   Tools matching these patterns always require user approval, even under Autonomous.
+// - Deny:  Tools matching these patterns are always rejected.
 //
-// Patterns support glob-style matching (e.g., "shell", "read_*", "mcp:github:*")
-// The evaluation order is: Deny (checked first), then Allow, then Ask (explicit), then default
-// (read-only tools auto-approved, others ask)
+// Patterns support glob-style matching (e.g., "shell", "read_*", "mcp:github:*").
+// Within a single checker, priority is Deny > Allow > Ask; when no
+// custom rule matches, the safety mode is applied against the tool's
+// classifier label (safe / destructive / unknown) to pick allow / ask.
 type PermissionsConfig struct {
 	// Allow lists tool name patterns that are auto-approved without user confirmation
 	Allow []string `json:"allow,omitempty"`
@@ -2473,11 +2453,12 @@ type HooksConfig struct {
 	PostToolUse HookMatcherConfigs `json:"post_tool_use,omitempty" yaml:"post_tool_use,omitempty"`
 
 	// PermissionRequest hooks run just before the runtime would prompt
-	// the user to approve a tool call (i.e. when neither --yolo nor a
-	// permissions rule short-circuited the decision). Hooks may auto-allow
-	// or auto-deny via hook_specific_output.permission_decision so the
-	// user is not prompted; otherwise the runtime falls through to the
-	// usual interactive confirmation. Tool-matched, like pre_tool_use.
+	// the user to approve a tool call (i.e. when neither a custom
+	// rule nor the safety mode auto-approved the call). Hooks may
+	// auto-allow or auto-deny via hook_specific_output.permission_decision
+	// so the user is not prompted; otherwise the runtime falls
+	// through to the usual interactive confirmation. Tool-matched,
+	// like pre_tool_use.
 	PermissionRequest HookMatcherConfigs `json:"permission_request,omitempty" yaml:"permission_request,omitempty"`
 
 	// SessionStart hooks run when a session begins
@@ -2684,17 +2665,19 @@ type HookMatcherConfig struct {
 	Hooks HookDefinitions `json:"hooks" yaml:"hooks"`
 
 	// PreemptYolo opts a pre_tool_use entry into firing BEFORE the
-	// deterministic approval pipeline (--yolo, permission patterns).
-	// A deny/ask verdict from a preempting hook cannot be bypassed by
-	// auto-approval rules; an allow verdict is advisory (the pipeline
-	// still runs Decide() and the rest of pre_tool_use). Default
-	// pre_tool_use entries fire AFTER Decide(), as before. Only valid
-	// on pre_tool_use; ignored on other events.
+	// deterministic approval pipeline (custom rules + safety mode).
+	// A deny/ask verdict from a preempting hook cannot be bypassed
+	// by the safety mode (including Autonomous); an allow verdict is
+	// advisory (the pipeline still consults custom rules + the mode
+	// table + the default pre_tool_use lane). Default pre_tool_use
+	// entries fire AFTER the safety mode's verdict. Only valid on
+	// pre_tool_use; ignored on other events.
 	//
-	// Used by the safer_shell builtin (auto-registered with this flag
-	// when a shell toolset has `safer: true`). Custom hooks set it to
-	// true when they implement a security-critical check that must
-	// not be bypassed by --yolo.
+	// Used by the safer_shell builtin (auto-registered whenever an
+	// agent has a shell toolset) as a pure labeller — it always
+	// returns Allow with classification metadata. Custom hooks set
+	// this to true when they implement a security-critical check
+	// that must not be bypassed by the safety mode.
 	PreemptYolo *bool `json:"preempt_yolo,omitempty" yaml:"preempt_yolo,omitempty"`
 }
 

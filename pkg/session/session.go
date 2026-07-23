@@ -33,32 +33,26 @@ const (
 	toolResultTruncationMarker = "\n[...tool result truncated: middle omitted...]\n"
 )
 
-// SafetyPolicy is the per-session safety preference. It is data only:
-// the runtime forwards it to hooks via [hooks.Input.SafetyPolicy] and
-// classifiers (e.g. safer_shell) adapt on it. Empty ⇒ derive from
-// ToolsApproved (true ⇒ unsafe, false ⇒ strict).
+// SafetyPolicy is the per-session safety preference. The runtime
+// routes tool calls to allow/ask via the mode × classifier-label
+// table (pkg/runtime/toolexec). Empty ⇒ derive from ToolsApproved
+// (true ⇒ autonomous, false ⇒ strict).
 type SafetyPolicy string
 
 const (
-	// SafetyPolicyUnsafe: --yolo / ToolsApproved=true equivalent.
-	// Classifiers stay silent, tool calls auto-approve.
-	SafetyPolicyUnsafe SafetyPolicy = "unsafe"
-	// SafetyPolicySafer: auto-approve except classifier-flagged
-	// destructive calls (blast_radius low/medium/high).
-	SafetyPolicySafer SafetyPolicy = "safer"
-	// SafetyPolicySafeAuto: auto-approve shell calls the classifier
-	// positively recognises as safe (blast_radius=safe); ask on
-	// destructive and unknown. Sits between safer and strict:
-	// safer waves through unknown too, strict prompts for safe.
-	SafetyPolicySafeAuto SafetyPolicy = "safe-auto"
-	// SafetyPolicyStrict: today's no-yolo CLI default — prompt for
-	// anything not auto-approved by a checker rule.
+	// SafetyPolicyStrict prompts on every tool call.
 	SafetyPolicyStrict SafetyPolicy = "strict"
+	// SafetyPolicyBalanced auto-approves classifier-safe calls; asks
+	// on destructive and unknown.
+	SafetyPolicyBalanced SafetyPolicy = "balanced"
+	// SafetyPolicyAutonomous auto-approves every call (legacy yolo).
+	// Classifiers still emit metadata for audit but never gate.
+	SafetyPolicyAutonomous SafetyPolicy = "autonomous"
 )
 
 func (p SafetyPolicy) IsValid() bool {
 	switch p {
-	case "", SafetyPolicyUnsafe, SafetyPolicySafer, SafetyPolicySafeAuto, SafetyPolicyStrict:
+	case "", SafetyPolicyStrict, SafetyPolicyBalanced, SafetyPolicyAutonomous:
 		return true
 	}
 	return false
@@ -1201,24 +1195,24 @@ func WithMessages(messages []Item) Opt {
 
 // WithToolsApproved is the legacy --yolo setter. Prefer
 // [WithSafetyPolicy]. With toolsApproved=true and no explicit
-// SafetyPolicy, pins the policy to [SafetyPolicyUnsafe].
+// SafetyPolicy, pins the policy to [SafetyPolicyAutonomous].
 func WithToolsApproved(toolsApproved bool) Opt {
 	return func(s *Session) {
 		s.ToolsApproved = toolsApproved
 		if toolsApproved && s.SafetyPolicy == "" {
-			s.SafetyPolicy = SafetyPolicyUnsafe
+			s.SafetyPolicy = SafetyPolicyAutonomous
 		}
 	}
 }
 
 // WithSafetyPolicy sets the session's safety preference.
-// [SafetyPolicyUnsafe] also flips ToolsApproved=true so legacy branches
-// on ToolsApproved keep working. The other modes leave ToolsApproved
-// alone — set both if you want auto-approve + selective gating.
+// [SafetyPolicyAutonomous] also flips ToolsApproved=true so legacy
+// branches on ToolsApproved keep working. The other modes leave
+// ToolsApproved alone.
 func WithSafetyPolicy(policy SafetyPolicy) Opt {
 	return func(s *Session) {
 		s.SafetyPolicy = policy
-		if policy == SafetyPolicyUnsafe {
+		if policy == SafetyPolicyAutonomous {
 			s.ToolsApproved = true
 		}
 	}
@@ -1462,20 +1456,20 @@ func (s *Session) SetToolsApproved(approved bool) {
 	defer s.mu.Unlock()
 	s.ToolsApproved = approved
 	if approved && s.SafetyPolicy == "" {
-		s.SafetyPolicy = SafetyPolicyUnsafe
+		s.SafetyPolicy = SafetyPolicyAutonomous
 	}
 }
 
 // SetSafetyPolicy updates the session's SafetyPolicy under s.mu.
-// Mirrors WithSafetyPolicy: setting unsafe also flips ToolsApproved
+// Mirrors WithSafetyPolicy: setting autonomous also flips ToolsApproved
 // so legacy branches on ToolsApproved keep working. Runtime callers
 // use this to persist a user's mid-session mode change (e.g. opting
-// into safe-auto from a confirmation prompt).
+// into balanced from a confirmation prompt).
 func (s *Session) SetSafetyPolicy(policy SafetyPolicy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.SafetyPolicy = policy
-	if policy == SafetyPolicyUnsafe {
+	if policy == SafetyPolicyAutonomous {
 		s.ToolsApproved = true
 	}
 }

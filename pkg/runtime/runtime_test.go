@@ -2627,19 +2627,68 @@ func TestDenyOverridesYoloMode(t *testing.T) {
 	require.False(t, executed, "expected tool to NOT be executed in --yolo mode because Deny wins")
 }
 
-// TestYoloMode_OverridesForceAsk verifies that the yolo flag takes precedence over ForceAsk permissions.
-func TestYoloMode_OverridesForceAsk(t *testing.T) {
+// TestSessionForceAsk_BeatsAutonomous verifies that a session-level
+// ask: pattern (from the user's Custom rules UI) still forces a
+// confirmation even under Autonomous mode. Team-level ask patterns
+// from YAML are advisory — see TestTeamForceAsk_YieldsToAutonomous
+// below.
+func TestSessionForceAsk_BeatsAutonomous(t *testing.T) {
 	t.Parallel()
 
-	// Test that --yolo flag takes precedence over ForceAsk permissions
+	var executed bool
+	agentTools := []tools.Tool{{
+		Name:       "careful_tool",
+		Parameters: map[string]any{},
+		Handler: func(_ context.Context, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+			executed = true
+			return tools.ResultSuccess("executed"), nil
+		},
+	}}
+
+	prov := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+	root := agent.New("root", "You are a test agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(newStubToolSet(nil, agentTools, nil)),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	sess.Permissions = &session.PermissionsConfig{Ask: []string{"careful_tool"}}
+	sess.NonInteractive = true // ForceAsk in non-interactive → auto-deny (no hang, no run)
+
+	calls := []tools.ToolCall{{
+		ID:       "call_1",
+		Type:     "function",
+		Function: tools.FunctionCall{Name: "careful_tool", Arguments: "{}"},
+	}}
+
+	events := make(chan Event, 10)
+	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
+	close(events)
+
+	require.False(t, executed, "session-level ask: pattern must beat Autonomous")
+}
+
+// TestTeamForceAsk_YieldsToAutonomous verifies that a team-level
+// ask: pattern (from the agent YAML) is advisory: it forces asking
+// only when the mode itself would ask. Under Autonomous, the mode
+// wins so agents shipping `ask: "*"` in YAML don't defeat the user's
+// mode choice.
+func TestTeamForceAsk_YieldsToAutonomous(t *testing.T) {
+	t.Parallel()
+
 	permChecker := permissions.NewChecker(&latest.PermissionsConfig{
 		Ask: []string{"careful_tool"},
 	})
 
 	var executed bool
 	agentTools := []tools.Tool{{
-		Name:       "careful_tool",
-		Parameters: map[string]any{},
+		Name:        "careful_tool",
+		Parameters:  map[string]any{},
+		Annotations: tools.ToolAnnotations{ReadOnlyHint: true},
 		Handler: func(_ context.Context, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
 			executed = true
 			return tools.ResultSuccess("executed"), nil
@@ -2660,8 +2709,6 @@ func TestYoloMode_OverridesForceAsk(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
-	sess.NonInteractive = true // fail fast instead of hanging on askUser if this regresses
-	require.True(t, sess.ToolsApproved)
 
 	calls := []tools.ToolCall{{
 		ID:       "call_1",
@@ -2673,9 +2720,7 @@ func TestYoloMode_OverridesForceAsk(t *testing.T) {
 	rt.processToolCalls(t.Context(), sess, calls, agentTools, NewChannelSink(events))
 	close(events)
 
-	// YOLO overrides ForceAsk: the checker's ForceAsk verdict is bypassed
-	// and the tool executes automatically.
-	require.True(t, executed, "expected tool to be executed in --yolo mode because YOLO wins over ForceAsk")
+	require.True(t, executed, "team-level ask: pattern must yield to Autonomous")
 }
 
 // TestSessionDenyOverridesYoloMode verifies that session-level Deny permissions take precedence over the yolo flag.
@@ -3399,7 +3444,7 @@ func TestReprobe_NewToolsAvailableAfterToolCall(t *testing.T) {
 
 	sess := session.New(session.WithUserMessage("Install and use MCP"))
 	sess.Title = "reprobe test"
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	evCh := rt.RunStream(t.Context(), sess)
 	var events []Event
@@ -3476,7 +3521,7 @@ func TestReprobe_NoChangeMeansNoExtraEvents(t *testing.T) {
 
 	sess := session.New(session.WithUserMessage("Do the thing"))
 	sess.Title = "no-change reprobe test"
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	evCh := rt.RunStream(t.Context(), sess)
 	var events []Event
@@ -4684,7 +4729,7 @@ func TestEmptyTrailingTurnAfterToolCallsIsSilent(t *testing.T) {
 
 	sess := session.New(session.WithUserMessage("Do the thing"))
 	sess.Title = "empty trailing turn test"
-	sess.ToolsApproved = true
+	sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	evCh := rt.RunStream(t.Context(), sess)
 	var events []Event

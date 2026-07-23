@@ -36,9 +36,10 @@ const (
 	// ApproveTool runs the call and always allows the tool, scoped by the
 	// permission pattern from BuildPermissionPattern.
 	ApproveTool
-	// ApproveSession runs the call and approves all tools for the rest of
-	// the session.
-	ApproveSession
+	// ApproveAutonomous runs the call and flips the session to
+	// SafetyPolicyAutonomous (auto-approve everything for the rest of
+	// the session).
+	ApproveAutonomous
 	// Reject rejects the call with an optional reason shown to the model.
 	Reject
 )
@@ -51,8 +52,8 @@ func (d Decision) Resume(pattern, reason string) runtime.ResumeRequest {
 	switch d {
 	case ApproveTool:
 		return runtime.ResumeApproveTool(pattern)
-	case ApproveSession:
-		return runtime.ResumeApproveSession()
+	case ApproveAutonomous:
+		return runtime.ResumeApproveAutonomous()
 	case Reject:
 		return runtime.ResumeReject(reason)
 	default:
@@ -109,7 +110,7 @@ func DecisionForAction(action string) (decision Decision, ok bool) {
 	case "T":
 		return ApproveTool, true
 	case "A":
-		return ApproveSession, true
+		return ApproveAutonomous, true
 	}
 	return 0, false
 }
@@ -146,7 +147,7 @@ func (k KeyMap) DecisionFor(msg tea.KeyPressMsg) (decision Decision, ok bool) {
 	case key.Matches(msg, k.ThisTool):
 		return ApproveTool, true
 	case key.Matches(msg, k.All):
-		return ApproveSession, true
+		return ApproveAutonomous, true
 	}
 	return 0, false
 }

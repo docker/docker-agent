@@ -305,8 +305,8 @@ func TestSubSessionInheritsPermissions(t *testing.T) {
 	assert.Equal(t, perms.Deny, s.Permissions.Deny)
 	assert.Equal(t, perms.Ask, s.Permissions.Ask)
 
-	// Even with ToolsApproved set (yolo), an inherited Deny must win during dispatch.
-	s.ToolsApproved = true
+	// Even under Autonomous mode, an inherited Deny must win during dispatch.
+	s.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 
 	checker := permissions.NewChecker(&latest.PermissionsConfig{
 		Allow: s.Permissions.Allow,
@@ -317,8 +317,8 @@ func TestSubSessionInheritsPermissions(t *testing.T) {
 		{Checker: checker, Source: "session permissions"},
 	}
 
-	decision := toolexec.Decide(s.ToolsApproved, namedCheckers, "write_file", map[string]any{"path": "foo"}, false)
-	assert.Equal(t, toolexec.OutcomeDeny, decision.Outcome, "Inherited Deny should override ToolsApproved: true (yolo)")
+	decision := toolexec.Decide(s.SafetyPolicy, toolexec.SafetyLabelUnknown, namedCheckers, "write_file", map[string]any{"path": "foo"})
+	assert.Equal(t, toolexec.OutcomeDeny, decision.Outcome, "Inherited Deny should override Autonomous mode")
 }
 
 func TestNewSubSession_PermissionsIsolation(t *testing.T) {

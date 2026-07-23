@@ -456,38 +456,44 @@ const (
 	ApprovalDecisionDeny     = "deny"
 	ApprovalDecisionCanceled = "canceled"
 
-	ApprovalSourceYolo                    = "yolo"
 	ApprovalSourceSessionPermissionsAllow = "session_permissions_allow"
 	ApprovalSourceSessionPermissionsDeny  = "session_permissions_deny"
 	ApprovalSourceTeamPermissionsAllow    = "team_permissions_allow"
 	ApprovalSourceTeamPermissionsDeny     = "team_permissions_deny"
 	ApprovalSourcePreToolUseHookAllow     = "pre_tool_use_hook_allow"
 	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
-	ApprovalSourceReadOnlyHint            = "readonly_hint"
-	ApprovalSourceUserApproved            = "user_approved"
-	ApprovalSourceUserApprovedSession     = "user_approved_session"
-	ApprovalSourceUserApprovedSafe        = "user_approved_safe"
-	ApprovalSourceUserApprovedSafer       = "user_approved_safer"
-	ApprovalSourceUserApprovedTool        = "user_approved_tool"
-	ApprovalSourceUserRejected            = "user_rejected"
-	ApprovalSourceContextCanceled         = "context_canceled"
+	// ApprovalSourceModeStrict / ModeBalanced / ModeAutonomous are
+	// recorded when the (mode × classifier-label) table produced the
+	// verdict (i.e. no custom rule matched).
+	ApprovalSourceModeStrict             = "mode_strict"
+	ApprovalSourceModeBalanced           = "mode_balanced"
+	ApprovalSourceModeAutonomous         = "mode_autonomous"
+	ApprovalSourceUserApproved           = "user_approved"
+	ApprovalSourceUserApprovedBalanced   = "user_approved_balanced"
+	ApprovalSourceUserApprovedAutonomous = "user_approved_autonomous"
+	ApprovalSourceUserApprovedTool       = "user_approved_tool"
+	ApprovalSourceUserRejected           = "user_rejected"
+	ApprovalSourceContextCanceled        = "context_canceled"
 )
 
 // executeOnToolApprovalDecisionHooks fires on_tool_approval_decision
 // after the runtime's approval chain has resolved a verdict for a
 // tool call. Fired once per call from each return path of
 // [executeWithApproval], so a single hook gets one record per tool
-// call regardless of which step decided.
+// call regardless of which step decided. safetyLabel carries the
+// classifier's verdict for the call (safe / destructive / unknown);
+// empty when classification didn't run before the decision.
 func (r *LocalRuntime) executeOnToolApprovalDecisionHooks(
 	ctx context.Context,
 	sess *session.Session,
 	a *agent.Agent,
 	toolCall tools.ToolCall,
-	decision, source string,
+	decision, source, safetyLabel string,
 ) {
 	input := toolexec.NewHooksInput(sess, toolCall)
 	input.ApprovalDecision = decision
 	input.ApprovalSource = source
+	input.SafetyLabel = safetyLabel
 	r.dispatchHook(ctx, a, hooks.EventOnToolApprovalDecision, input, nil)
 }
 

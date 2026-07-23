@@ -81,7 +81,10 @@ func checkToolCallApproved(msg tea.Msg) bool {
 		return false
 	}
 	switch resume.Request.Type {
-	case runtime.ResumeTypeApprove, runtime.ResumeTypeApproveTool, runtime.ResumeTypeApproveSession:
+	case runtime.ResumeTypeApprove,
+		runtime.ResumeTypeApproveTool,
+		runtime.ResumeTypeApproveBalanced,
+		runtime.ResumeTypeApproveAutonomous:
 		return true
 	}
 	return false
