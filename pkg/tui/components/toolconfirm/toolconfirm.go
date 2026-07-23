@@ -36,6 +36,10 @@ const (
 	// ApproveTool runs the call and always allows the tool, scoped by the
 	// permission pattern from BuildPermissionPattern.
 	ApproveTool
+	// ApproveBalanced runs the call and flips the session to
+	// SafetyPolicyBalanced (auto-approve classifier-safe calls; ask on
+	// destructive and unknown).
+	ApproveBalanced
 	// ApproveAutonomous runs the call and flips the session to
 	// SafetyPolicyAutonomous (auto-approve everything for the rest of
 	// the session).
@@ -52,6 +56,8 @@ func (d Decision) Resume(pattern, reason string) runtime.ResumeRequest {
 	switch d {
 	case ApproveTool:
 		return runtime.ResumeApproveTool(pattern)
+	case ApproveBalanced:
+		return runtime.ResumeApproveBalanced()
 	case ApproveAutonomous:
 		return runtime.ResumeApproveAutonomous()
 	case Reject:
@@ -97,10 +103,10 @@ func AlwaysAllowLabel(pattern string) string {
 // ActionKeys are the uppercase action letters of the decision row, in
 // display order. Click hit-testing on the rendered options walks these
 // letters; map a hit back to its decision with DecisionForAction.
-const ActionKeys = "YNTA"
+const ActionKeys = "YNTBA"
 
 // DecisionForAction maps an action letter from ActionKeys ("Y", "N", "T",
-// "A") to its decision. ok is false for any other string.
+// "B", "A") to its decision. ok is false for any other string.
 func DecisionForAction(action string) (decision Decision, ok bool) {
 	switch action {
 	case "Y":
@@ -109,6 +115,8 @@ func DecisionForAction(action string) (decision Decision, ok bool) {
 		return Reject, true
 	case "T":
 		return ApproveTool, true
+	case "B":
+		return ApproveBalanced, true
 	case "A":
 		return ApproveAutonomous, true
 	}
@@ -122,6 +130,7 @@ func OptionsHelp(pattern string) []string {
 		"Y", "yes",
 		"N", "no",
 		"T", AlwaysAllowLabel(pattern),
+		"B", "balanced",
 		"A", "all tools",
 	}
 }
@@ -131,6 +140,7 @@ type KeyMap struct {
 	Yes      key.Binding
 	No       key.Binding
 	All      key.Binding
+	Balanced key.Binding
 	ThisTool key.Binding
 }
 
@@ -146,6 +156,8 @@ func (k KeyMap) DecisionFor(msg tea.KeyPressMsg) (decision Decision, ok bool) {
 		return Reject, true
 	case key.Matches(msg, k.ThisTool):
 		return ApproveTool, true
+	case key.Matches(msg, k.Balanced):
+		return ApproveBalanced, true
 	case key.Matches(msg, k.All):
 		return ApproveAutonomous, true
 	}
@@ -166,6 +178,10 @@ func DefaultKeyMap() KeyMap {
 		All: key.NewBinding(
 			key.WithKeys("a", "A"),
 			key.WithHelp("A", "approve all"),
+		),
+		Balanced: key.NewBinding(
+			key.WithKeys("b", "B"),
+			key.WithHelp("B", "approve + switch to balanced"),
 		),
 		ThisTool: key.NewBinding(
 			key.WithKeys("t", "T"),

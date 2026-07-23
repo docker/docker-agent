@@ -78,14 +78,15 @@ func TestAlwaysAllowLabel(t *testing.T) {
 func TestOptionsHelpUsesThePattern(t *testing.T) {
 	t.Parallel()
 	opts := OptionsHelp("shell:cmd=rm*")
-	require.Len(t, opts, 8)
-	assert.Equal(t, []string{"Y", "yes", "N", "no", "T", "always allow rm*", "A", "all tools"}, opts)
+	require.Len(t, opts, 10)
+	assert.Equal(t, []string{"Y", "yes", "N", "no", "T", "always allow rm*", "B", "balanced", "A", "all tools"}, opts)
 }
 
 func TestDecisionResume(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, runtime.ResumeApprove(), Approve.Resume("", ""))
 	assert.Equal(t, runtime.ResumeApproveTool("shell:cmd=ls*"), ApproveTool.Resume("shell:cmd=ls*", ""))
+	assert.Equal(t, runtime.ResumeApproveBalanced(), ApproveBalanced.Resume("", ""))
 	assert.Equal(t, runtime.ResumeApproveAutonomous(), ApproveAutonomous.Resume("", ""))
 	assert.Equal(t, runtime.ResumeReject("too risky"), Reject.Resume("", "too risky"))
 }
@@ -117,6 +118,8 @@ func TestKeyMapDecisionFor(t *testing.T) {
 		{"N", Reject},
 		{"t", ApproveTool},
 		{"T", ApproveTool},
+		{"b", ApproveBalanced},
+		{"B", ApproveBalanced},
 		{"a", ApproveAutonomous},
 		{"A", ApproveAutonomous},
 	} {
@@ -132,7 +135,7 @@ func TestKeyMapDecisionFor(t *testing.T) {
 func TestDecisionForAction(t *testing.T) {
 	t.Parallel()
 
-	for i, want := range []Decision{Approve, Reject, ApproveTool, ApproveAutonomous} {
+	for i, want := range []Decision{Approve, Reject, ApproveTool, ApproveBalanced, ApproveAutonomous} {
 		action := string(ActionKeys[i])
 		decision, ok := DecisionForAction(action)
 		require.True(t, ok, "action %q", action)
