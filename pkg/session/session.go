@@ -1468,11 +1468,9 @@ func (s *Session) SetToolsApproved(approved bool) {
 	}
 }
 
-// SetSafetyPolicy updates the session's SafetyPolicy under s.mu.
-// Mirrors WithSafetyPolicy: setting autonomous also flips ToolsApproved
-// so legacy branches on ToolsApproved keep working. Runtime callers
-// use this to persist a user's mid-session mode change (e.g. opting
-// into balanced from a confirmation prompt).
+// SetSafetyPolicy updates SafetyPolicy under s.mu. Setting Autonomous
+// also flips ToolsApproved to keep legacy branches on that flag
+// working.
 func (s *Session) SetSafetyPolicy(policy SafetyPolicy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

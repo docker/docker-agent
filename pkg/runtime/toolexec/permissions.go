@@ -3,6 +3,7 @@ package toolexec
 import (
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // PermissionOutcome is the resolved decision after evaluating the full
@@ -119,20 +120,14 @@ func applyMode(mode session.SafetyPolicy, label string) PermissionDecision {
 	}
 }
 
-// LabelFromReadOnlyHint: readOnlyHint=true ⇒ safe; false ⇒ unknown.
-func LabelFromReadOnlyHint(readOnlyHint bool) string {
-	if readOnlyHint {
+// LabelFromAnnotations maps a tool's MCP hints to a safety label:
+// DestructiveHint wins, then ReadOnlyHint → safe, else unknown.
+func LabelFromAnnotations(a tools.ToolAnnotations) string {
+	if a.DestructiveHint != nil && *a.DestructiveHint {
+		return SafetyLabelDestructive
+	}
+	if a.ReadOnlyHint {
 		return SafetyLabelSafe
 	}
 	return SafetyLabelUnknown
-}
-
-// LabelWithDestructiveHint upgrades to destructive when the tool's
-// DestructiveHint annotation is set; otherwise falls back to
-// [LabelFromReadOnlyHint].
-func LabelWithDestructiveHint(readOnlyHint bool, destructiveHint *bool) string {
-	if destructiveHint != nil && *destructiveHint {
-		return SafetyLabelDestructive
-	}
-	return LabelFromReadOnlyHint(readOnlyHint)
 }

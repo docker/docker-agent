@@ -462,7 +462,7 @@ func (c *call) classifierLabel() string {
 		}
 		return SafetyLabelUnknown
 	}
-	return LabelWithDestructiveHint(c.tool.Annotations.ReadOnlyHint, c.tool.Annotations.DestructiveHint)
+	return LabelFromAnnotations(c.tool.Annotations)
 }
 
 func (c *call) autoApprovalAfterConfirmationWait() (PermissionDecision, bool) {

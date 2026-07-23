@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func newChecker(t *testing.T, allow, ask, deny []string) *permissions.Checker {
@@ -149,24 +150,28 @@ func TestDecide_EmptyModeDefaultsToStrict(t *testing.T) {
 	assert.Equal(t, PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonMode, Source: "mode_strict"}, d)
 }
 
-// LabelFromReadOnlyHint: readOnlyHint=true → safe, false → unknown.
-func TestLabelFromReadOnlyHint(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, SafetyLabelSafe, LabelFromReadOnlyHint(true))
-	assert.Equal(t, SafetyLabelUnknown, LabelFromReadOnlyHint(false))
-}
-
-// LabelWithDestructiveHint: an explicit destructive annotation
-// upgrades a non-shell tool to the destructive label regardless of
-// readOnlyHint.
-func TestLabelWithDestructiveHint(t *testing.T) {
+// LabelFromAnnotations: DestructiveHint wins, then ReadOnlyHint →
+// safe, else unknown.
+func TestLabelFromAnnotations(t *testing.T) {
 	t.Parallel()
 	trueVal := true
 	falseVal := false
-	assert.Equal(t, SafetyLabelDestructive, LabelWithDestructiveHint(false, &trueVal))
-	assert.Equal(t, SafetyLabelDestructive, LabelWithDestructiveHint(true, &trueVal))
-	assert.Equal(t, SafetyLabelSafe, LabelWithDestructiveHint(true, &falseVal))
-	assert.Equal(t, SafetyLabelUnknown, LabelWithDestructiveHint(false, &falseVal))
-	assert.Equal(t, SafetyLabelUnknown, LabelWithDestructiveHint(false, nil))
-	assert.Equal(t, SafetyLabelSafe, LabelWithDestructiveHint(true, nil))
+	cases := []struct {
+		name string
+		in   tools.ToolAnnotations
+		want string
+	}{
+		{"destructive beats read-only", tools.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &trueVal}, SafetyLabelDestructive},
+		{"destructive alone", tools.ToolAnnotations{DestructiveHint: &trueVal}, SafetyLabelDestructive},
+		{"read-only, destructive=false", tools.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: &falseVal}, SafetyLabelSafe},
+		{"read-only, destructive nil", tools.ToolAnnotations{ReadOnlyHint: true}, SafetyLabelSafe},
+		{"neither", tools.ToolAnnotations{}, SafetyLabelUnknown},
+		{"destructive=false only", tools.ToolAnnotations{DestructiveHint: &falseVal}, SafetyLabelUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, LabelFromAnnotations(tc.in))
+		})
+	}
 }
