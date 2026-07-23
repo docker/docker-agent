@@ -664,80 +664,38 @@ func TestDispatcher_ApproveBalancedAutoApprovesSiblingSafeShellCalls(t *testing.
 		"only the first call should prompt; balanced flip must auto-approve safe siblings")
 }
 
-// A batch of safe tool calls under Strict: user approve-balanced on
-// the first prompt should auto-approve every remaining call in the
-// batch without emitting a second confirmation event. Regression test
-// for a Gordon bug where each parallel call kept surfacing its own
-// prompt even after the mode flipped.
-func TestDispatcher_ApproveBalancedAutoApprovesSiblingSafeCalls(t *testing.T) {
-	t.Parallel()
-	a := newAgent()
-	sess := session.New()
-
-	var ran atomic.Int32
-	tool := tools.Tool{
-		Name:        "read_file",
-		Annotations: tools.ToolAnnotations{ReadOnlyHint: true},
-		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
-			ran.Add(1)
-			return tools.ResultSuccess("contents"), nil
-		},
-	}
-
-	resume := make(chan toolexec.ResumeRequest, 1)
-	d := &toolexec.Dispatcher{
-		AgentFor: func(*session.Session) *agent.Agent { return a },
-		Resume:   resume,
-	}
-	em := &captureEmitter{confirmed: make(chan struct{})}
-
-	go func() {
-		<-em.confirmed
-		resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeApproveBalanced}
-	}()
-
-	d.Process(t.Context(), sess, []tools.ToolCall{
-		{ID: "a", Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"a"}`}},
-		{ID: "b", Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"b"}`}},
-		{ID: "c", Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"c"}`}},
-	}, []tools.Tool{tool}, em)
-
-	assert.Equal(t, int32(3), ran.Load(), "every safe sibling must run")
-	assert.Len(t, em.confirmations, 1,
-		"only the first call should prompt; the balanced flip must auto-approve the siblings")
-}
-
-// Under Strict (default), ReadOnlyHint tools prompt the user.
-func TestDispatcher_ReadOnlyHintPromptsUnderStrict(t *testing.T) {
+// Under Strict (default), ReadOnlyHint tools bypass the prompt —
+// preserves the pre-three-mode default of auto-approving read-only
+// calls so headless callers ({--exec}, MCP, A2A) don't regress.
+func TestDispatcher_ReadOnlyHintAutoApprovesUnderStrict(t *testing.T) {
 	t.Parallel()
 	a := newAgent()
 	sess := session.New() // empty policy ≡ strict
 
+	var ran atomic.Int32
 	tool := tools.Tool{
 		Name: "read_file",
 		Annotations: tools.ToolAnnotations{
 			ReadOnlyHint: true,
 		},
 		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			ran.Add(1)
 			return tools.ResultSuccess("contents"), nil
 		},
 	}
 
-	resume := make(chan toolexec.ResumeRequest, 1)
 	d := &toolexec.Dispatcher{
 		AgentFor: func(*session.Session) *agent.Agent { return a },
-		Resume:   resume,
 	}
 	em := &captureEmitter{}
-
-	resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeReject}
 
 	d.Process(t.Context(), sess, []tools.ToolCall{{
 		ID:       "r",
 		Function: tools.FunctionCall{Name: "read_file", Arguments: "{}"},
 	}}, []tools.Tool{tool}, em)
 
-	require.Len(t, em.confirmations, 1, "strict must prompt even for read-only tools")
+	assert.Equal(t, int32(1), ran.Load(), "read-only tool must run")
+	assert.Empty(t, em.confirmations, "read-only tool must not prompt under Strict")
 }
 
 // DestructiveHint on a tool that reaches the confirmation event must

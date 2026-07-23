@@ -43,6 +43,10 @@ const (
 	ApprovalSourcePreToolUseHookDeny         = "pre_tool_use_hook_deny"
 	ApprovalSourcePermissionRequestHookDeny  = "permission_request_hook_deny"
 	ApprovalSourcePermissionRequestHookAllow = "permission_request_hook_allow"
+	// ApprovalSourceReadOnlyHint short-circuits the ask stage for
+	// tools annotated read-only. Preserves the pre-three-mode default
+	// of auto-approving read-only calls under Strict.
+	ApprovalSourceReadOnlyHint = "readonly_hint"
 	// ApprovalSourceModeStrict / Balanced / Autonomous mark the
 	// verdict as coming from the mode × classifier-label table.
 	ApprovalSourceModeStrict     = "mode_strict"
@@ -419,6 +423,14 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 	// Stage 2: default pre_tool_use.
 	if outcome, handled := c.consultPreToolUseHook(ctx, runTool); handled {
 		return outcome
+	}
+
+	// Read-only tools bypass the prompt — this preserves the
+	// pre-three-mode default. Balanced/Autonomous already allowed
+	// them via the mode table; this catches Strict.
+	if c.tool.Annotations.ReadOnlyHint {
+		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceReadOnlyHint)
+		return runTool()
 	}
 
 	// Stage 3: fallback prompt.

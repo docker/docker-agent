@@ -462,6 +462,7 @@ const (
 	ApprovalSourceTeamPermissionsDeny     = "team_permissions_deny"
 	ApprovalSourcePreToolUseHookAllow     = "pre_tool_use_hook_allow"
 	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
+	ApprovalSourceReadOnlyHint            = "readonly_hint"
 	// ApprovalSourceModeStrict / Balanced / Autonomous mark the
 	// verdict as coming from the mode × classifier-label table.
 	ApprovalSourceModeStrict             = "mode_strict"
