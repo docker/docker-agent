@@ -19,7 +19,7 @@ func NewHooksInput(sess *session.Session, toolCall tools.ToolCall) *hooks.Input 
 		ToolName:     toolCall.Function.Name,
 		ToolUseID:    toolCall.ID,
 		ToolInput:    ParseToolInput(toolCall.Function.Arguments),
-		SafetyPolicy: string(sess.SafetyPolicy),
+		SafetyPolicy: string(sess.GetSafetyPolicy()),
 	}
 }
 

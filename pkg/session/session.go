@@ -1433,6 +1433,14 @@ func (s *Session) IsToolsApproved() bool {
 	return s.ToolsApproved
 }
 
+// GetSafetyPolicy returns a consistent snapshot of the SafetyPolicy.
+// This is safe to call concurrently with SetSafetyPolicy.
+func (s *Session) GetSafetyPolicy() SafetyPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.SafetyPolicy
+}
+
 // ClonePermissions returns a deep copy of the session's PermissionsConfig.
 // This is safe to call concurrently with session mutations.
 func (s *Session) ClonePermissions() *PermissionsConfig {

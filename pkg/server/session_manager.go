@@ -926,9 +926,6 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 		return errors.New("session not found")
 	}
 
-	slog.DebugContext(ctx, "ResumeSession received",
-		"session_id", sessionID, "confirmation", confirmation, "tool_name", toolName)
-
 	// Mirror + persist mid-turn session mutations synchronously —
 	// PersistenceObserver only persists on OnRunStart.
 	if rt.session != nil {
@@ -949,9 +946,6 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 			}
 		}
 		if mutated {
-			slog.DebugContext(ctx, "ResumeSession mutated session",
-				"session_id", sessionID, "safety_policy", string(rt.session.SafetyPolicy),
-				"tools_approved", rt.session.ToolsApproved)
 			if err := sm.sessionStore.UpdateSession(ctx, rt.session); err != nil {
 				slog.WarnContext(ctx, "failed to persist mid-turn session state",
 					"session_id", sessionID, "confirmation", confirmation, "err", err)

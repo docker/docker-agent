@@ -446,23 +446,13 @@ func (c *call) permissionDecision() PermissionDecision {
 	if c.d.Permissions != nil {
 		checkers = c.d.Permissions(c.sess)
 	}
-	label := c.classifierLabel()
-	d := Decide(
-		c.sess.SafetyPolicy,
-		label,
+	return Decide(
+		c.sess.GetSafetyPolicy(),
+		c.classifierLabel(),
 		checkers,
 		c.tc.Function.Name,
 		ParseToolInput(c.tc.Function.Arguments),
 	)
-	slog.Debug("permissionDecision",
-		"session_id", c.sess.ID,
-		"tool", c.tc.Function.Name,
-		"safety_policy", string(c.sess.SafetyPolicy),
-		"label", label,
-		"outcome", d.Outcome,
-		"reason", d.Reason,
-		"source", d.Source)
-	return d
 }
 
 // classifierLabel returns the safety label the mode table consumes:
@@ -794,7 +784,7 @@ func (c *call) runPermissionRequestHook(ctx context.Context, runTool func() Call
 		ToolName:     toolName,
 		ToolUseID:    c.tc.ID,
 		ToolInput:    ParseToolInput(c.tc.Function.Arguments),
-		SafetyPolicy: string(c.sess.SafetyPolicy),
+		SafetyPolicy: string(c.sess.GetSafetyPolicy()),
 	})
 	if result == nil {
 		return CallOutcome{}, false, nil
