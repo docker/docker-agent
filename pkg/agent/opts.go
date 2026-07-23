@@ -169,10 +169,11 @@ func WithRedactSecrets(redactSecrets bool) Opt {
 }
 
 // WithSaferShell registers the safer_shell builtin under pre_tool_use
-// with preempt_yolo:true when any of the agent's shell toolsets has
-// `safer: true`. The builtin runs pre-Decide() and routes destructive
-// shell commands to user confirmation regardless of --yolo or
-// permission allow-rules. See [builtins.SaferShell].
+// with preempt_yolo:true whenever the agent declares a shell toolset
+// (see [config.AgentConfig.HasShellToolset]). The builtin runs
+// pre-Decide() as a pure labeller — it always allows the call and
+// attaches classification metadata (blast_radius) that the runtime's
+// (mode × label) verdict table consumes. See [builtins.SaferShell].
 func WithSaferShell(saferShell bool) Opt {
 	return func(a *Agent) {
 		a.saferShell = saferShell
