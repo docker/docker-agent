@@ -442,6 +442,8 @@ func (m *model) handleConfirmKey(k ui.Key) {
 		m.resolveConfirm(runtime.ResumeApprove())
 	case 'a', 'A':
 		m.resolveConfirm(runtime.ResumeApproveTool(m.screen.Confirm.Tool))
+	case 'b', 'B':
+		m.resolveConfirm(runtime.ResumeApproveBalanced())
 	case 's', 'S':
 		m.resolveConfirm(runtime.ResumeApproveAutonomous())
 	case 'n', 'N':
