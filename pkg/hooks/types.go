@@ -346,25 +346,15 @@ type Input struct {
 	PreviousMaxIterations int `json:"previous_max_iterations,omitempty"`
 	NewMaxIterations      int `json:"new_max_iterations,omitempty"`
 
-	// OnToolApprovalDecision specific: the verdict resolved by the
-	// approval chain ("allow", "deny", "canceled") and a stable
-	// classifier for what produced it ("session_permissions_allow",
-	// "session_permissions_deny", "team_permissions_allow",
-	// "team_permissions_deny", "pre_tool_use_hook_allow",
-	// "pre_tool_use_hook_deny", "permission_request_hook_allow",
-	// "permission_request_hook_deny", "mode_strict", "mode_balanced",
-	// "mode_autonomous", "user_approved", "user_approved_balanced",
-	// "user_approved_autonomous", "user_approved_tool",
-	// "user_rejected", "context_canceled", "non_interactive_deny").
+	// OnToolApprovalDecision specific: verdict + a stable source
+	// label (mode_*, session_permissions_*, pre_tool_use_hook_*,
+	// user_*, etc. — see the ApprovalSource* constants in the
+	// runtime package for the full set).
 	ApprovalDecision string `json:"approval_decision,omitempty"`
 	ApprovalSource   string `json:"approval_source,omitempty"`
-	// SafetyLabel is the safety classifier's verdict for the call
-	// (safe / destructive / unknown). For shell tools this is
-	// derived from safer_shell's blast_radius metadata; for other
-	// tools from readOnlyHint / DestructiveHint annotations.
-	// Populated on every [EventOnToolApprovalDecision] dispatch so
-	// audit sinks always see the classification even when the call
-	// auto-approved under Autonomous.
+	// SafetyLabel is the classifier verdict (safe / destructive /
+	// unknown). Populated even when the call auto-approved so audit
+	// sinks always see the classification.
 	SafetyLabel string `json:"safety_label,omitempty"`
 
 	// AfterLLMCall specific: per-turn token usage and the computed USD

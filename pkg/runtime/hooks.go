@@ -462,9 +462,8 @@ const (
 	ApprovalSourceTeamPermissionsDeny     = "team_permissions_deny"
 	ApprovalSourcePreToolUseHookAllow     = "pre_tool_use_hook_allow"
 	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
-	// ApprovalSourceModeStrict / ModeBalanced / ModeAutonomous are
-	// recorded when the (mode × classifier-label) table produced the
-	// verdict (i.e. no custom rule matched).
+	// ApprovalSourceModeStrict / Balanced / Autonomous mark the
+	// verdict as coming from the mode × classifier-label table.
 	ApprovalSourceModeStrict             = "mode_strict"
 	ApprovalSourceModeBalanced           = "mode_balanced"
 	ApprovalSourceModeAutonomous         = "mode_autonomous"
@@ -476,13 +475,9 @@ const (
 	ApprovalSourceContextCanceled        = "context_canceled"
 )
 
-// executeOnToolApprovalDecisionHooks fires on_tool_approval_decision
-// after the runtime's approval chain has resolved a verdict for a
-// tool call. Fired once per call from each return path of
-// [executeWithApproval], so a single hook gets one record per tool
-// call regardless of which step decided. safetyLabel carries the
-// classifier's verdict for the call (safe / destructive / unknown);
-// empty when classification didn't run before the decision.
+// executeOnToolApprovalDecisionHooks fires exactly once per tool
+// call after the approval chain resolves. safetyLabel is empty when
+// classification didn't run before the decision (e.g. context cancel).
 func (r *LocalRuntime) executeOnToolApprovalDecisionHooks(
 	ctx context.Context,
 	sess *session.Session,

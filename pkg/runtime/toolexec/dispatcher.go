@@ -43,27 +43,22 @@ const (
 	ApprovalSourcePreToolUseHookDeny         = "pre_tool_use_hook_deny"
 	ApprovalSourcePermissionRequestHookDeny  = "permission_request_hook_deny"
 	ApprovalSourcePermissionRequestHookAllow = "permission_request_hook_allow"
-	// ApprovalSourceModeStrict / ModeBalanced / ModeAutonomous are
-	// recorded when the (mode × classifier-label) table produced the
-	// verdict (i.e. no custom rule matched).
+	// ApprovalSourceModeStrict / Balanced / Autonomous mark the
+	// verdict as coming from the mode × classifier-label table.
 	ApprovalSourceModeStrict     = "mode_strict"
 	ApprovalSourceModeBalanced   = "mode_balanced"
 	ApprovalSourceModeAutonomous = "mode_autonomous"
-	ApprovalSourceUserApproved   = "user_approved"
-	// ApprovalSourceUserApprovedBalanced / Autonomous are recorded
-	// when the user picked a bulk-approve verb from a confirmation
-	// prompt that also flipped the session's SafetyPolicy.
+	// ApprovalSourceUserApproved / Balanced / Autonomous / Tool /
+	// Rejected mark bulk-approve verbs picked from a prompt.
+	ApprovalSourceUserApproved           = "user_approved"
 	ApprovalSourceUserApprovedBalanced   = "user_approved_balanced"
 	ApprovalSourceUserApprovedAutonomous = "user_approved_autonomous"
 	ApprovalSourceUserApprovedTool       = "user_approved_tool"
 	ApprovalSourceUserRejected           = "user_rejected"
 	ApprovalSourceContextCanceled        = "context_canceled"
-	// ApprovalSourceNonInteractiveDeny is recorded when a tool call
-	// reaches [call.askUser] in a non-interactive session (eval, MCP
-	// serve, A2A adapter, …). With no human at the keyboard and no
-	// Resume listener, the deterministic safe answer is Deny; without
-	// this guard the dispatcher would block on the Resume channel
-	// forever.
+	// ApprovalSourceNonInteractiveDeny is the auto-deny recorded when
+	// askUser is reached in a non-interactive session (eval, MCP
+	// serve, A2A) with no Resume listener.
 	ApprovalSourceNonInteractiveDeny = "non_interactive_deny"
 )
 
@@ -375,10 +370,7 @@ func (c *call) run(ctx context.Context) CallOutcome {
 //     Deny/Allow/Ask and rewrite args via UpdatedInput.
 //  3. askUser — prompt (or auto-deny non-interactively).
 func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) CallOutcome {
-	// Stage 0: pre_tool_use entries flagged with preempt_yolo:true.
-	// The safer_shell classifier lives here as a pure labeller (always
-	// Allow + metadata); user-authored hooks can still Deny/Ask to
-	// override every downstream stage.
+	// Stage 0: preempt_yolo pre_tool_use.
 	if r := c.consultPreToolUsePreYolo(ctx); r != nil {
 		switch r.Decision {
 		case hooks.DecisionDeny:
@@ -391,10 +383,8 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 			c.errorResponse(ctx, rejectMsg)
 			return CallOutcome{}
 		case hooks.DecisionAsk:
-			// A session-scoped allow grant (the interactive "T = always
-			// allow this tool" decision, stored in sess.Permissions) is an
-			// informed opt-in the user made in response to this very safety
-			// prompt. Honor it instead of asking again.
+			// Honor a session-scoped Allow grant — it's an informed opt-in
+			// from the user, not something to re-prompt on.
 			if c.sessionPermissionsAllow() {
 				slog.DebugContext(ctx, "preempt-yolo Ask overridden by session permission allow", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
 				c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceSessionPermissionsAllow)
@@ -420,15 +410,13 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 		return CallOutcome{}
 	case OutcomeAsk:
 		if decision.Reason == ReasonChecker {
-			// Explicit ask pattern from a checker: skip the hook and
-			// prompt the user directly. The user is the source of
-			// truth for explicit ask rules.
+			// Explicit ask rule: prompt directly, skip the hook chain.
 			slog.DebugContext(ctx, "Tool requires confirmation (ask pattern)", "tool", c.tc.Function.Name, "source", decision.Source, "session_id", c.sess.ID)
 			return c.askUser(ctx, runTool)
 		}
 	}
 
-	// Stage 2: consult the default pre_tool_use hook chain (non-preempt).
+	// Stage 2: default pre_tool_use.
 	if outcome, handled := c.consultPreToolUseHook(ctx, runTool); handled {
 		return outcome
 	}
@@ -437,10 +425,6 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 	return c.askUser(ctx, runTool)
 }
 
-// permissionDecision applies the runtime approval pipeline for this
-// call: custom checkers first (Deny / Allow / ForceAsk always win),
-// then the (mode × classifier-label) verdict table. See [Decide] for
-// the full semantics.
 func (c *call) permissionDecision() PermissionDecision {
 	var checkers []NamedChecker
 	if c.d.Permissions != nil {

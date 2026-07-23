@@ -18,25 +18,15 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 )
 
-// SaferShell is the registered name of the builtin that classifies
-// destructive shell commands and forces confirmation by preempting
-// --yolo on the pre_tool_use chain.
+// SaferShell is the registered name of the builtin.
 const SaferShell = "safer_shell"
 
-// shellToolName is the tool name that this builtin acts on. The shell
-// builtin's canonical name is duplicated here as a string literal so
-// pkg/hooks/builtins does not depend on pkg/tools/builtin/shell. The
-// name is part of the user-facing wire protocol — if it ever changes,
-// the rename is caught by tests in both packages.
+// shellToolName duplicated as a literal to avoid depending on
+// pkg/tools/builtin/shell. Rename drift is caught by tests in both.
 const shellToolName = "shell"
 
-// Metadata keys the safer_shell builtin emits. The runtime carries
-// these through hooks.Result.Metadata into the tool-call confirmation
-// event so renderers can highlight destructive calls. The TUI
-// confirmation dialog renders the blast_radius key as a colored badge
-// (see pkg/tui/dialog/tool_confirmation.go). Treated as opaque
-// strings by the runtime; documented for hook authors who want to
-// match the same key names.
+// Metadata keys emitted onto hooks.Result.Metadata; consumed by
+// LabelFromBlastRadius and by UI renderers for the confirmation card.
 const (
 	metaBlastRadius = "blast_radius"
 	metaCategory    = "category"
@@ -129,9 +119,8 @@ func compileSafe(value any) ([]safePattern, error) {
 	return out, nil
 }
 
-// blast_radius wire values: "safe" | "low" | "medium" | "high" |
-// "unknown". low/medium/high all collapse to "destructive" at the
-// runtime layer (see LabelFromBlastRadius).
+// blast_radius wire values: safe | low | medium | high | unknown.
+// The runtime collapses low/medium/high to "destructive" (see LabelFromBlastRadius).
 func saferShell(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
 	if in == nil || in.HookEventName != hooks.EventPreToolUse {
 		return nil, nil

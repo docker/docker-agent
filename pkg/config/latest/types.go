@@ -996,11 +996,8 @@ func (a *AgentConfig) SessionCompactionEnabled() bool {
 	return *a.SessionCompaction
 }
 
-// HasShellToolset reports whether any of the agent's toolsets is a
-// shell toolset. The runtime uses this to decide whether to auto-inject
-// the safer_shell classifier as a pre_tool_use hook — the classifier
-// is a pure labeller (never blocks) that emits blast_radius metadata
-// consumed by the runtime's (mode × classifier-label) verdict table.
+// HasShellToolset gates auto-injection of the safer_shell classifier
+// (a pure labeller consumed by the runtime's mode × label table).
 func (a *AgentConfig) HasShellToolset() bool {
 	if a == nil {
 		return false
@@ -2417,17 +2414,11 @@ type RAGFusionConfig struct {
 	Weights  map[string]float64 `json:"weights,omitempty"`  // Strategy weights for weighted fusion
 }
 
-// PermissionsConfig represents tool permission configuration.
-// Allow/Ask/Deny model. Custom rules always override the session's
-// SafetyPolicy (strict / balanced / autonomous):
-// - Allow: Tools matching these patterns are auto-approved, even under Strict.
-// - Ask:   Tools matching these patterns always require user approval, even under Autonomous.
-// - Deny:  Tools matching these patterns are always rejected.
-//
-// Patterns support glob-style matching (e.g., "shell", "read_*", "mcp:github:*").
-// Within a single checker, priority is Deny > Allow > Ask; when no
-// custom rule matches, the safety mode is applied against the tool's
-// classifier label (safe / destructive / unknown) to pick allow / ask.
+// PermissionsConfig configures per-tool overrides that layer on top
+// of the session's SafetyPolicy. Allow/Deny always win; Ask beats the
+// mode only for session-scoped rules (YAML `ask:` is advisory — see
+// [toolexec.Decide]). Patterns are glob-style ("shell", "read_*",
+// "mcp:github:*").
 type PermissionsConfig struct {
 	// Allow lists tool name patterns that are auto-approved without user confirmation
 	Allow []string `json:"allow,omitempty"`
@@ -2452,13 +2443,10 @@ type HooksConfig struct {
 	// in the handler when you only want to act on one of them.
 	PostToolUse HookMatcherConfigs `json:"post_tool_use,omitempty" yaml:"post_tool_use,omitempty"`
 
-	// PermissionRequest hooks run just before the runtime would prompt
-	// the user to approve a tool call (i.e. when neither a custom
-	// rule nor the safety mode auto-approved the call). Hooks may
-	// auto-allow or auto-deny via hook_specific_output.permission_decision
-	// so the user is not prompted; otherwise the runtime falls
-	// through to the usual interactive confirmation. Tool-matched,
-	// like pre_tool_use.
+	// PermissionRequest hooks fire right before an interactive
+	// confirmation prompt. Return DecisionAllow/DecisionDeny to
+	// short-circuit; anything else falls through to the prompt.
+	// Tool-matched, like pre_tool_use.
 	PermissionRequest HookMatcherConfigs `json:"permission_request,omitempty" yaml:"permission_request,omitempty"`
 
 	// SessionStart hooks run when a session begins
@@ -2664,20 +2652,11 @@ type HookMatcherConfig struct {
 	// Hooks are the hooks to execute when the matcher matches
 	Hooks HookDefinitions `json:"hooks" yaml:"hooks"`
 
-	// PreemptYolo opts a pre_tool_use entry into firing BEFORE the
-	// deterministic approval pipeline (custom rules + safety mode).
-	// A deny/ask verdict from a preempting hook cannot be bypassed
-	// by the safety mode (including Autonomous); an allow verdict is
-	// advisory (the pipeline still consults custom rules + the mode
-	// table + the default pre_tool_use lane). Default pre_tool_use
-	// entries fire AFTER the safety mode's verdict. Only valid on
-	// pre_tool_use; ignored on other events.
-	//
-	// Used by the safer_shell builtin (auto-registered whenever an
-	// agent has a shell toolset) as a pure labeller — it always
-	// returns Allow with classification metadata. Custom hooks set
-	// this to true when they implement a security-critical check
-	// that must not be bypassed by the safety mode.
+	// PreemptYolo fires the entry BEFORE the mode/custom-rules
+	// pipeline. Deny/Ask verdicts cannot be bypassed by any mode
+	// (including Autonomous); Allow is advisory. Only valid on
+	// pre_tool_use. Used by the safer_shell classifier (labeller
+	// only) and by user-authored security-critical checks.
 	PreemptYolo *bool `json:"preempt_yolo,omitempty" yaml:"preempt_yolo,omitempty"`
 }
 

@@ -63,25 +63,16 @@ type PermissionDecision struct {
 	Source  string
 }
 
-// SessionPermissionsSource is the checker source label the runtime
-// uses for the session-scoped permission layer (interactive "T =
-// always allow" grants and mid-session API mutations). Session
-// ForceAsk beats the mode; team ForceAsk is advisory.
+// SessionPermissionsSource labels the session-scoped checker layer.
+// Session ForceAsk beats the mode; team ForceAsk is advisory.
 const SessionPermissionsSource = "session permissions"
 
 // Decide resolves the final permission outcome:
-//
-//   - Deny (any checker) → Deny.
-//   - Allow (any checker) → Allow.
-//   - ForceAsk (session-level only) → Ask, beats the mode.
-//   - Otherwise → (mode × label) verdict table.
-//
-// Team-level ForceAsk is deliberately advisory: a YAML rule like
-// `ask: "*"` should not defeat Balanced/Autonomous. Users who want
-// targeted asks that beat the mode add them via the Custom rules UI,
-// which populates the session-level checker.
-//
-// Pure so the matrix is unit-testable.
+//   - Deny/Allow from any checker win outright.
+//   - ForceAsk wins only when it comes from the session layer;
+//     team-level ForceAsk falls through so Balanced/Autonomous can
+//     override it.
+//   - Otherwise applies the (mode × label) table.
 func Decide(
 	mode session.SafetyPolicy,
 	label string,
@@ -108,9 +99,7 @@ func Decide(
 }
 
 // applyMode implements the (mode × label) → verdict table. Empty /
-// unrecognised modes fall back to Strict. Source is the
-// ApprovalSourceMode* constant so [allowSourceForDecision] can return
-// it verbatim without a second lookup.
+// unrecognised modes fall back to Strict.
 //
 //	                  safe      destructive     unknown
 //	Strict            ask       ask             ask

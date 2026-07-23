@@ -3,73 +3,53 @@ package runtime
 import "github.com/docker/docker-agent/pkg/runtime/toolexec"
 
 // ResumeType identifies the user's response to a confirmation request.
-//
-// The runtime emits a TOOL_PERMISSION_REQUEST event whenever a tool call
-// requires user approval, then blocks until the embedder calls Resume(...)
-// with one of the values below.
-//
-// ResumeType, ResumeRequest, and the ResumeType* constants are aliased
-// from [toolexec] so the dispatcher and the runtime share one definition
-// without circular imports.
+// Aliased from [toolexec] to keep dispatcher + runtime in sync without
+// circular imports.
 type ResumeType = toolexec.ResumeType
 
 const (
 	// ResumeTypeApprove approves the single pending tool call.
 	ResumeTypeApprove = toolexec.ResumeTypeApprove
-	// ResumeTypeApproveBalanced approves the pending call and flips the
-	// session to [session.SafetyPolicyBalanced] so subsequent safe
-	// tool calls auto-approve.
+	// ResumeTypeApproveBalanced approves + flips session to
+	// [session.SafetyPolicyBalanced].
 	ResumeTypeApproveBalanced = toolexec.ResumeTypeApproveBalanced
-	// ResumeTypeApproveAutonomous approves the pending call and flips
-	// the session to [session.SafetyPolicyAutonomous] so subsequent
-	// tool calls auto-approve.
+	// ResumeTypeApproveAutonomous approves + flips session to
+	// [session.SafetyPolicyAutonomous].
 	ResumeTypeApproveAutonomous = toolexec.ResumeTypeApproveAutonomous
-	// ResumeTypeApproveTool approves the pending call and every future
-	// call to the same tool name within the session.
+	// ResumeTypeApproveTool approves + appends the tool to the
+	// session's Allow list.
 	ResumeTypeApproveTool = toolexec.ResumeTypeApproveTool
 	// ResumeTypeReject rejects the pending tool call.
 	ResumeTypeReject = toolexec.ResumeTypeReject
 )
 
-// ResumeRequest carries the user's confirmation decision along with an optional
-// reason (used when rejecting a tool call to help the model understand why).
-// The struct fields live in [toolexec.ResumeRequest]; this alias is kept
-// for readers who land here from the runtime API.
+// ResumeRequest carries the user's confirmation decision plus an
+// optional reason (used with Reject to help the model understand why).
 type ResumeRequest = toolexec.ResumeRequest
 
-// ResumeApprove creates a ResumeRequest to approve a single tool call.
 func ResumeApprove() ResumeRequest {
 	return ResumeRequest{Type: ResumeTypeApprove}
 }
 
-// ResumeApproveBalanced creates a ResumeRequest that approves the pending
-// call and flips the session to [session.SafetyPolicyBalanced].
 func ResumeApproveBalanced() ResumeRequest {
 	return ResumeRequest{Type: ResumeTypeApproveBalanced}
 }
 
-// ResumeApproveAutonomous creates a ResumeRequest that approves the pending
-// call and flips the session to [session.SafetyPolicyAutonomous].
 func ResumeApproveAutonomous() ResumeRequest {
 	return ResumeRequest{Type: ResumeTypeApproveAutonomous}
 }
 
-// ResumeApproveTool creates a ResumeRequest to always approve a specific tool for the session.
 func ResumeApproveTool(toolName string) ResumeRequest {
 	return ResumeRequest{Type: ResumeTypeApproveTool, ToolName: toolName}
 }
 
-// ResumeReject creates a ResumeRequest to reject a tool call with an optional reason.
 func ResumeReject(reason string) ResumeRequest {
 	return ResumeRequest{Type: ResumeTypeReject, Reason: reason}
 }
 
-// IsValidResumeType validates confirmation values coming from /resume.
-//
-// The runtime may be resumed by multiple entry points (API, CLI, TUI, tests).
-// Even if upstream layers perform validation, the runtime must never assume
-// the ResumeType is valid; accepting invalid values leads to confusing
-// downstream behaviour where tool execution fails without a clear cause.
+// IsValidResumeType rejects unknown ResumeType values arriving from
+// external callers (API, CLI, TUI, tests). Unvalidated values lead to
+// tool execution failing without a clear cause.
 func IsValidResumeType(t ResumeType) bool {
 	switch t {
 	case ResumeTypeApprove,
