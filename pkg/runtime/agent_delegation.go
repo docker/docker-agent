@@ -92,6 +92,9 @@ type SubSessionConfig struct {
 	Title string
 	// ToolsApproved overrides whether tools are pre-approved in the child session.
 	ToolsApproved bool
+	// SafetyPolicy inherits the parent's mode so a Balanced parent
+	// doesn't silently downgrade its sub-agents / skill runs to Strict.
+	SafetyPolicy session.SafetyPolicy
 	// Permissions defines session-level tool permission overrides.
 	Permissions *session.PermissionsConfig
 	// NonInteractive marks the child session as running without a user present
@@ -178,6 +181,7 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithMaxToolResultTokens(childAgent.MaxToolResultTokens()),
 		session.WithTitle(cfg.Title),
 		session.WithToolsApproved(cfg.ToolsApproved),
+		session.WithSafetyPolicy(cfg.SafetyPolicy),
 		session.WithNonInteractive(cfg.NonInteractive),
 		session.WithSendUserMessage(false),
 		session.WithParentID(parent.ID),
@@ -532,6 +536,7 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 		AgentName:      params.AgentName,
 		Title:          "Background agent task",
 		ToolsApproved:  params.ParentSession.IsToolsApproved(),
+		SafetyPolicy:   params.ParentSession.GetSafetyPolicy(),
 		Permissions:    params.ParentSession.ClonePermissions(),
 		NonInteractive: true,
 		PinAgent:       true,
@@ -592,6 +597,7 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 			AgentName:      params.Agent,
 			Title:          "Transferred task",
 			ToolsApproved:  sess.IsToolsApproved(),
+			SafetyPolicy:   sess.GetSafetyPolicy(),
 			Permissions:    sess.ClonePermissions(),
 			NonInteractive: sess.NonInteractive,
 		},
