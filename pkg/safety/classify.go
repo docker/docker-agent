@@ -164,11 +164,12 @@ func bestDestructiveMatch(command string, patterns []destructivePattern) *destru
 }
 
 // bestSafeMatch returns the first matching safe-list pattern, or nil.
-// Refuses to match compound shell (approximated via separator tokens)
-// so `ls && rm -rf ~` doesn't inherit `ls`'s safe verdict.
+// Refuses to vouch for any command carrying shell metacharacters so
+// `ls && rm -rf ~` or `grep foo|rm -rf ~` never inherit a safe verdict
+// from their first segment.
 func bestSafeMatch(command string, patterns []safePattern) *safePattern {
 	normalized := normalizeCommand(command)
-	if containsShellSeparator(normalized) {
+	if containsShellMetacharacter(command) {
 		return nil
 	}
 	for i := range patterns {
@@ -179,18 +180,18 @@ func bestSafeMatch(command string, patterns []safePattern) *safePattern {
 	return nil
 }
 
-// containsShellSeparator returns true when the normalised command
-// contains a whitespace-separated operator that chains or pipes
-// multiple commands. The matcher then refuses to treat the whole
-// string as safe even if one of the segments looks like a known
-// safe command.
-func containsShellSeparator(command string) bool {
-	for _, sep := range []string{"&&", "||", "|", ";"} {
-		if strings.Contains(" "+command+" ", " "+sep+" ") {
-			return true
-		}
-	}
-	return false
+// containsShellMetacharacter returns true when the command contains a
+// character that can chain (`;`, `&`), pipe (`|`), redirect (`<`, `>`),
+// or substitute (backticks, `$(`) commands — with or without
+// surrounding whitespace, so `grep foo|rm -rf /` is caught just like
+// `grep foo | rm -rf /`. The safe list must never vouch for such a
+// string: a safe-looking prefix says nothing about what the rest does,
+// and trailing-wildcard patterns (`grep ...`) would otherwise cover the
+// injected tail. Erring toward "not safe" only costs a confirmation
+// prompt. Deliberately the same strictness as the runtime's
+// session-grant check for shell commands.
+func containsShellMetacharacter(command string) bool {
+	return strings.ContainsAny(command, ";&|<>`\n") || strings.Contains(command, "$(")
 }
 
 // collectDestructiveEntries walks the JSON destructive section. The
