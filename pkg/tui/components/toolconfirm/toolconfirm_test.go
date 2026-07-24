@@ -79,7 +79,7 @@ func TestOptionsHelpUsesThePattern(t *testing.T) {
 	t.Parallel()
 	opts := OptionsHelp("shell:cmd=rm*")
 	require.Len(t, opts, 10)
-	assert.Equal(t, []string{"Y", "yes", "N", "no", "T", "always allow rm*", "B", "auto-approve safe", "A", "all tools"}, opts)
+	assert.Equal(t, []string{"Y", "yes", "N", "no", "T", "always allow rm*", "B", "balanced", "A", "all tools"}, opts)
 }
 
 func TestDecisionResume(t *testing.T) {

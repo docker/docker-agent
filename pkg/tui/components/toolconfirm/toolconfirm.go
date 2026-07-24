@@ -123,13 +123,16 @@ func DecisionForAction(action string) (decision Decision, ok bool) {
 }
 
 // OptionsHelp returns the key/label pairs of the decision row, in display
-// order, ready for a help-keys renderer (e.g. dialog.RenderHelpKeys).
+// order, ready for a help-keys renderer (e.g. dialog.RenderHelpKeys). The
+// Balanced label is deliberately the short mode name: the confirmation
+// dialog is ~70% of the terminal wide and a longer label makes the row
+// wrap, which breaks row-based click hit-testing.
 func OptionsHelp(pattern string) []string {
 	return []string{
 		"Y", "yes",
 		"N", "no",
 		"T", AlwaysAllowLabel(pattern),
-		"B", "auto-approve safe",
+		"B", "balanced",
 		"A", "all tools",
 	}
 }

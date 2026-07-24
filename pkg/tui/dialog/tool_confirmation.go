@@ -346,15 +346,21 @@ func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 		return d, nil
 	}
 
-	// Render the help keys and strip ANSI to get plain text for hit-testing.
+	// Render the help keys and strip ANSI to get plain text for
+	// hit-testing. RenderHelpKeys center-aligns within contentWidth, so
+	// the stripped string already carries the centering spaces — trim
+	// them, or the first segment would start on padding and clicks on
+	// the leading action key would dispatch on a space and no-op.
 	_, contentWidth := d.dialogDimensions()
 	options := d.renderOptions(contentWidth)
-	optionsPlain := ansi.Strip(options)
+	optionsPlain := strings.TrimSpace(ansi.Strip(options))
 
 	// Content starts after left border + padding.
 	frameLeft := styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
 
-	// The help text is center-aligned within contentWidth.
+	// Re-derive the centering offset from the trimmed content; lipgloss
+	// puts the shorter half of an odd padding on the left, matching
+	// this floor division.
 	plainLen := len(optionsPlain)
 	leadingSpaces := max(0, (contentWidth-plainLen)/2)
 	relX := msg.X - dialogCol - frameLeft - leadingSpaces

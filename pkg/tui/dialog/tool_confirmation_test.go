@@ -170,3 +170,44 @@ func TestToolConfirmationDialog_EmbeddedSessionState(t *testing.T) {
 	require.NotNil(t, cmd)
 	assert.True(t, state.YoloMode(), "approving all tools must flip the embedder's session-wide approval")
 }
+
+// Clicking the leading action key must fire at every dialog width.
+// RenderHelpKeys bakes lipgloss centering spaces into the options line;
+// hit-testing must factor them out or 'Y' clicks dispatch on a padding
+// space and silently no-op whenever the centering padding is odd.
+func TestToolConfirmationDialog_ClickOnYFiresAtEveryWidth(t *testing.T) {
+	t.Parallel()
+
+	tested := 0
+	for width := 60; width <= 130; width++ {
+		dialog := NewToolConfirmationDialog(newConfirmationEvent(nil), &service.SessionState{})
+		_, _ = dialog.Update(tea.WindowSizeMsg{Width: width, Height: 30})
+
+		d, ok := dialog.(*toolConfirmationDialog)
+		require.True(t, ok)
+
+		// Locate the rendered options line and the on-screen column of
+		// its 'Y' key, then click it.
+		dialogRow, dialogCol := d.Position()
+		view := ansi.Strip(d.View())
+		lines := strings.Split(view, "\n")
+		optionsRow := ContentEndRow(dialogRow, len(lines))
+		optionsLine := lines[optionsRow-dialogRow]
+		yIdx := strings.Index(optionsLine, "Y yes")
+		if yIdx < 0 {
+			// Narrow widths wrap the help line; hit-testing only
+			// targets the single-line layout.
+			continue
+		}
+		tested++
+
+		_, cmd := d.handleMouseClick(tea.MouseClickMsg{
+			X:      dialogCol + yIdx,
+			Y:      optionsRow,
+			Button: tea.MouseLeft,
+		})
+		assert.NotNilf(t, cmd, "width %d: click on 'Y' at col %d must fire", width, dialogCol+yIdx)
+	}
+	// The sweep must cover several widths (both centering parities).
+	assert.Greater(t, tested, 10)
+}
