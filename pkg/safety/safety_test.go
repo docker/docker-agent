@@ -78,6 +78,33 @@ func TestClassifyCommand_CompoundShellIsNeverSafe(t *testing.T) {
 	assert.Equal(t, "high", label.BlastRadius)
 }
 
+// Deny-listed flags are exec/write escape hatches inside otherwise
+// read-only commands: the trailing-wildcard safe patterns must refuse
+// to vouch for them, without a metacharacter in sight.
+func TestClassifyCommand_DenyFlagsAreNeverSafe(t *testing.T) {
+	for _, command := range []string{
+		"rg --pre /tmp/script.sh foo",
+		"rg --pre=/tmp/script.sh foo",
+		"rg '--pre=/tmp/script.sh' foo",
+		"rg --pre-glob '*' foo",
+		"git log --output=/tmp/pwned",
+		"git log --output /tmp/pwned",
+		"git diff --output=/tmp/pwned",
+		"git show --output=/tmp/pwned",
+	} {
+		t.Run(command, func(t *testing.T) {
+			assert.NotEqual(t, ClassSafe, ClassifyCommand(command).Class)
+		})
+	}
+
+	// The deny list is per-pattern: kubectl's --output is a plain
+	// format selector and must stay safe.
+	assert.Equal(t, ClassSafe, ClassifyCommand("kubectl get pods --output=json").Class)
+	// Vanilla forms of the guarded commands stay safe too.
+	assert.Equal(t, ClassSafe, ClassifyCommand("rg -n foo pkg/").Class)
+	assert.Equal(t, ClassSafe, ClassifyCommand("git log --oneline -5").Class)
+}
+
 func TestClassifyCommand_UnknownCommand(t *testing.T) {
 	label := ClassifyCommand("./deploy.sh --prod")
 	assert.Equal(t, ClassUnknown, label.Class)

@@ -70,9 +70,10 @@ type destructivePattern struct {
 }
 
 type safePattern struct {
-	Pattern  string
-	Category string
-	regexp   *regexp.Regexp
+	Pattern   string
+	Category  string
+	DenyFlags []string
+	regexp    *regexp.Regexp
 }
 
 type destructivePatternEntry struct {
@@ -82,8 +83,9 @@ type destructivePatternEntry struct {
 }
 
 type safePatternEntry struct {
-	Pattern  string `json:"pattern"`
-	Category string `json:"category"`
+	Pattern   string   `json:"pattern"`
+	Category  string   `json:"category"`
+	DenyFlags []string `json:"deny_flags"`
 }
 
 type compiledPatterns struct {
@@ -137,9 +139,10 @@ func compileSafe(value any) ([]safePattern, error) {
 			return nil, fmt.Errorf("compile safe pattern %q: %w", entry.Pattern, err)
 		}
 		out = append(out, safePattern{
-			Pattern:  entry.Pattern,
-			Category: entry.Category,
-			regexp:   re,
+			Pattern:   entry.Pattern,
+			Category:  entry.Category,
+			DenyFlags: entry.DenyFlags,
+			regexp:    re,
 		})
 	}
 	return out, nil
@@ -173,11 +176,32 @@ func bestSafeMatch(command string, patterns []safePattern) *safePattern {
 		return nil
 	}
 	for i := range patterns {
-		if patterns[i].regexp.MatchString(normalized) {
+		if patterns[i].regexp.MatchString(normalized) && !carriesDenyFlag(normalized, patterns[i].DenyFlags) {
 			return &patterns[i]
 		}
 	}
 	return nil
+}
+
+// carriesDenyFlag reports whether the command uses one of the pattern's
+// deny-listed flags — exec/write escape hatches inside otherwise
+// read-only commands (`rg --pre <cmd>`, `git log --output=<file>`) that
+// a trailing-wildcard pattern would otherwise vouch for. Tokens are
+// quote-trimmed so `"--pre=cmd"` is caught too; a false positive only
+// costs a confirmation prompt.
+func carriesDenyFlag(normalized string, flags []string) bool {
+	if len(flags) == 0 {
+		return false
+	}
+	for tok := range strings.FieldsSeq(normalized) {
+		tok = strings.Trim(tok, `"'`)
+		for _, flag := range flags {
+			if tok == flag || strings.HasPrefix(tok, flag+"=") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // containsShellMetacharacter returns true when the command contains a
@@ -239,7 +263,7 @@ func collectSafeEntries(value any) []safePatternEntry {
 		if pattern, ok := v["pattern"].(string); ok {
 			if _, hasBlast := v["blast_radius"]; !hasBlast {
 				category, _ := v["category"].(string)
-				return []safePatternEntry{{Pattern: pattern, Category: category}}
+				return []safePatternEntry{{Pattern: pattern, Category: category, DenyFlags: stringSlice(v["deny_flags"])}}
 			}
 			// A destructive entry (pattern + blast_radius) in the safe
 			// section is rejected wholesale: do not recurse into its
@@ -255,6 +279,21 @@ func collectSafeEntries(value any) []safePatternEntry {
 	default:
 		return nil
 	}
+}
+
+// stringSlice converts a JSON []any into []string, dropping non-strings.
+func stringSlice(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // patternToRegexp converts a destructive pattern into a regex that
