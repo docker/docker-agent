@@ -67,15 +67,14 @@ func (c *Config) TrackUsageEnabled() bool {
 // over a models.dev lookup that would otherwise miss for custom/aliased
 // providers and degrade attachments to text-only (issue #2741).
 //
-// [latest.CapabilitiesConfig] does not yet expose audio/video override flags,
-// so Audio/Video are always false here; they flow through purely from
-// models.dev detection until a later config change adds them.
+// All four fields (Image, PDF, Audio, Video) are read from the config's
+// capabilities block when one is present.
 func (c *Config) CapsOverride() *modelinfo.CapsOverride {
 	caps := c.ModelConfig.Capabilities
 	if caps == nil {
 		return nil
 	}
-	return &modelinfo.CapsOverride{Image: caps.Image, PDF: caps.PDF}
+	return &modelinfo.CapsOverride{Image: caps.Image, PDF: caps.PDF, Audio: caps.Audio, Video: caps.Video}
 }
 
 // EmbeddingResult contains the embedding and usage information

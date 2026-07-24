@@ -38,6 +38,8 @@ models:
     capabilities: # Optional: override attachment capabilities
       image: boolean # Optional: whether the model accepts image attachments
       pdf: boolean # Optional: whether the model accepts PDF attachments
+      audio: boolean # Optional: whether the model accepts audio attachments
+      video: boolean # Optional: whether the model accepts video attachments
     cost: # Optional: explicit token pricing (USD per 1M tokens)
       input: float # Optional: price per 1M input tokens
       output: float # Optional: price per 1M output tokens
@@ -83,9 +85,9 @@ models:
 
 For custom OpenAI-compatible providers, local models (Ollama, DMR), and any
 model the built-in catalogue does not describe, Docker Agent cannot
-auto-detect whether the endpoint accepts image or PDF attachments. When the
-model is absent from the catalogue, Docker Agent logs a diagnostic and falls
-back to text-only, silently dropping attachments.
+auto-detect whether the endpoint accepts image, PDF, audio, or video
+attachments. When the model is absent from the catalogue, Docker Agent logs a
+diagnostic and falls back to text-only, silently dropping attachments.
 
 Declare `capabilities` to make the model's attachment support authoritative
 and skip the catalogue lookup entirely:
@@ -105,12 +107,23 @@ models:
     capabilities:
       image: true
       pdf: true
+
+  proxy-multimodal:
+    provider: vision-proxy
+    model: gemini-2.5-pro
+    capabilities:
+      image: true
+      pdf: true
+      audio: true
+      video: true
 ```
 
 | Field                  | Type    | Description                                       |
-| ---------------------- | ------- | ------------------------------------------------- |
+| ---------------------- | ------- | -------------------------------------------------- |
 | `capabilities.image`   | boolean | Whether the model accepts image attachments       |
 | `capabilities.pdf`     | boolean | Whether the model accepts PDF attachments         |
+| `capabilities.audio`   | boolean | Whether the model accepts audio attachments       |
+| `capabilities.video`   | boolean | Whether the model accepts video attachments       |
 
 The flags must match what the endpoint actually accepts. Claiming a modality
 that the endpoint does not support leads to a provider-side API error. When

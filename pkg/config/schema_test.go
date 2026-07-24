@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -99,6 +100,93 @@ agents: {}
 			assert.False(t, result.Valid(), "expected schema to reject config with %s", tt.name)
 		})
 	}
+}
+
+// TestJsonSchemaRejectsMalformedCapabilities pins that the capabilities
+// override fields are strictly boolean: a non-boolean value (e.g. a string)
+// for image/pdf/audio/video must fail schema validation rather than silently
+// coercing, since a malformed override would otherwise reach the provider
+// and surface as a confusing runtime error instead of an early config error.
+func TestJsonSchemaRejectsMalformedCapabilities(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	const base = `version: "15"
+models:
+  m:
+    provider: openai
+    model: gpt-4o
+    capabilities:
+%s
+agents:
+  root:
+    model: m
+    instruction: hi
+`
+
+	tests := []struct {
+		name  string
+		field string
+	}{
+		{name: "image not boolean", field: "      image: \"yes\"\n"},
+		{name: "pdf not boolean", field: "      pdf: \"yes\"\n"},
+		{name: "audio not boolean", field: "      audio: \"yes\"\n"},
+		{name: "video not boolean", field: "      video: \"yes\"\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var rawJSON any
+			require.NoError(t, yaml.Unmarshal(fmt.Appendf(nil, base, tt.field), &rawJSON))
+
+			result, err := schema.Validate(gojsonschema.NewRawLoader(rawJSON))
+			require.NoError(t, err)
+			assert.False(t, result.Valid(), "expected schema to reject a non-boolean %s", tt.name)
+		})
+	}
+}
+
+// TestJsonSchemaAcceptsAudioVideoCapabilities confirms the audio/video
+// capability override fields validate against the schema, both individually
+// and together with image/pdf, mirroring how the runtime resolves them.
+func TestJsonSchemaAcceptsAudioVideoCapabilities(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	const in = `version: "15"
+models:
+  m:
+    provider: openai
+    model: gpt-4o
+    capabilities:
+      image: true
+      pdf: true
+      audio: true
+      video: true
+agents:
+  root:
+    model: m
+    instruction: hi
+`
+
+	var rawJSON any
+	require.NoError(t, yaml.Unmarshal([]byte(in), &rawJSON))
+
+	result, err := schema.Validate(gojsonschema.NewRawLoader(rawJSON))
+	require.NoError(t, err)
+	assert.True(t, result.Valid(), "expected schema to accept audio/video capabilities: %v", result.Errors())
 }
 
 // TestSchemaMatchesGoTypes verifies that every JSON-tagged field in the Go

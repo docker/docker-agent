@@ -1738,7 +1738,7 @@
         },
         "capabilities": {
           "$ref": "#/definitions/CapabilitiesConfig",
-          "description": "Explicit attachment capability override for models the models.dev catalogue does not describe correctly (custom OpenAI-compatible providers, local models like Ollama, or dropped model versions). When set, the declared flags are authoritative and no models.dev lookup is performed; when omitted, capabilities are detected automatically. Without it, such models fall back to text-only and their image/PDF attachments are silently dropped."
+          "description": "Explicit attachment capability override for models the models.dev catalogue does not describe correctly (custom OpenAI-compatible providers, local models like Ollama, or dropped model versions). When set, the declared flags are authoritative and no models.dev lookup is performed; when omitted, capabilities are detected automatically. Without it, such models fall back to text-only and their image/PDF/audio/video attachments are silently dropped."
         },
         "cost": {
           "$ref": "#/definitions/CostConfig",
@@ -1758,6 +1758,14 @@
         "pdf": {
           "type": "boolean",
           "description": "Whether the model accepts PDF (application/pdf) attachments"
+        },
+        "audio": {
+          "type": "boolean",
+          "description": "Whether the model accepts audio attachments"
+        },
+        "video": {
+          "type": "boolean",
+          "description": "Whether the model accepts video attachments"
         }
       },
       "additionalProperties": false
