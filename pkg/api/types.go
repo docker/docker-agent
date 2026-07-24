@@ -161,12 +161,17 @@ type UpdateSessionPermissionsRequest struct {
 }
 
 // UpdateSessionSafetyPolicyRequest represents a request to change a
-// session's SafetyPolicy mid-session.
+// session's safety mode mid-session. Accepts "strict", "balanced",
+// "autonomous", "" (legacy default), and the deprecated aliases
+// "unsafe" / "safer" / "safe-auto".
 type UpdateSessionSafetyPolicyRequest struct {
 	SafetyPolicy session.SafetyPolicy `json:"safety_policy"`
 }
 
-// ResumeSessionRequest represents a request to resume a session
+// ResumeSessionRequest represents a request to resume a session.
+// Confirmation is one of "approve", "approve-balanced",
+// "approve-autonomous", "approve-tool", "reject" (deprecated aliases
+// "approve-session", "approve-safe", "approve-safer" stay accepted).
 type ResumeSessionRequest struct {
 	Confirmation string `json:"confirmation"`
 	Reason       string `json:"reason,omitempty"`    // e.g reason for tool call rejection

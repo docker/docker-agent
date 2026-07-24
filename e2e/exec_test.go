@@ -136,5 +136,5 @@ func TestExec_ToolCallsNeedAcceptance(t *testing.T) {
 	t.Parallel()
 	out := runCLI(t, "run", "--exec", "testdata/file_writer.yaml", "Create a hello.txt file with \"Hello, World!\" content. Try only once. On error, exit without further message.")
 
-	require.Contains(t, out, `Can I run this tool? ([y]es/[a]ll/[n]o)`)
+	require.Contains(t, out, `Can I run this tool? ([y]es/[b]alanced/[a]ll/[n]o)`)
 }

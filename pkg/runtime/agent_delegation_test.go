@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
+	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -317,7 +318,7 @@ func TestSubSessionInheritsPermissions(t *testing.T) {
 		{Checker: checker, Source: "session permissions"},
 	}
 
-	decision := toolexec.Decide(s.ToolsApproved, namedCheckers, "write_file", map[string]any{"path": "foo"}, false)
+	decision := toolexec.Decide(s.GetSafetyPolicy(), safety.Label{Class: safety.ClassUnknown}, namedCheckers, "write_file", map[string]any{"path": "foo"})
 	assert.Equal(t, toolexec.OutcomeDeny, decision.Outcome, "Inherited Deny should override ToolsApproved: true (yolo)")
 }
 

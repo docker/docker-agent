@@ -51,5 +51,5 @@ func (s *stubHookDispatcher) Dispatch(_ context.Context, _ *agent.Agent, event h
 }
 
 func (s *stubHookDispatcher) NotifyUserInput(context.Context, string, string) {}
-func (s *stubHookDispatcher) NotifyApprovalDecision(context.Context, *session.Session, *agent.Agent, tools.ToolCall, string, string) {
+func (s *stubHookDispatcher) NotifyApprovalDecision(context.Context, *session.Session, *agent.Agent, tools.ToolCall, string, string, string) {
 }

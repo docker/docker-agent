@@ -212,6 +212,7 @@ func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadRes
 
 	sessTemplate := session.New(
 		session.WithToolsApproved(req.ToolsApproved),
+		session.WithSafetyPolicy(req.SafetyPolicy),
 	)
 
 	sess, err := client.CreateSession(ctx, sessTemplate)

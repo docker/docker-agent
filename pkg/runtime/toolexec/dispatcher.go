@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
@@ -34,6 +35,9 @@ const (
 	ApprovalDecisionDeny     = "deny"
 	ApprovalDecisionCanceled = "canceled"
 
+	// ApprovalSourceYolo marks an auto-approve produced by the
+	// Autonomous safety mode (historically the --yolo flag; the
+	// string is kept for hook-contract stability).
 	ApprovalSourceYolo                       = "yolo"
 	ApprovalSourceSessionPermissionsAllow    = "session_permissions_allow"
 	ApprovalSourceSessionPermissionsDeny     = "session_permissions_deny"
@@ -43,14 +47,22 @@ const (
 	ApprovalSourcePreToolUseHookDeny         = "pre_tool_use_hook_deny"
 	ApprovalSourcePermissionRequestHookDeny  = "permission_request_hook_deny"
 	ApprovalSourcePermissionRequestHookAllow = "permission_request_hook_allow"
-	ApprovalSourceReadOnlyHint               = "readonly_hint"
-	ApprovalSourceUserApproved               = "user_approved"
-	ApprovalSourceUserApprovedSession        = "user_approved_session"
-	ApprovalSourceUserApprovedSafe           = "user_approved_safe"
-	ApprovalSourceUserApprovedSafer          = "user_approved_safer"
-	ApprovalSourceUserApprovedTool           = "user_approved_tool"
-	ApprovalSourceUserRejected               = "user_rejected"
-	ApprovalSourceContextCanceled            = "context_canceled"
+	// ApprovalSourceReadOnlyHint marks the legacy default's
+	// auto-approve of read-only-annotated tools (sessions that never
+	// chose an explicit safety mode).
+	ApprovalSourceReadOnlyHint = "readonly_hint"
+	// ApprovalSourceModeBalanced / ModeStrict / ModeLegacy identify
+	// verdicts produced by the (mode × label) table. Autonomous
+	// allows keep the stable "yolo" source above.
+	ApprovalSourceModeBalanced           = "mode_balanced"
+	ApprovalSourceModeStrict             = "mode_strict"
+	ApprovalSourceModeLegacy             = "mode_legacy"
+	ApprovalSourceUserApproved           = "user_approved"
+	ApprovalSourceUserApprovedBalanced   = "user_approved_balanced"
+	ApprovalSourceUserApprovedAutonomous = "user_approved_autonomous"
+	ApprovalSourceUserApprovedTool       = "user_approved_tool"
+	ApprovalSourceUserRejected           = "user_rejected"
+	ApprovalSourceContextCanceled        = "context_canceled"
 	// ApprovalSourceNonInteractiveDeny is recorded when a tool call
 	// reaches [call.askUser] in a non-interactive session (eval, MCP
 	// serve, A2A adapter, …). With no human at the keyboard and no
@@ -110,10 +122,11 @@ type HookDispatcher interface {
 	// NotifyApprovalDecision is invoked once per tool call after the
 	// approval pipeline (auto-allow, deny, user confirmation, ...) has
 	// resolved a verdict. Implementations typically fire
-	// [hooks.EventOnToolApprovalDecision] with decision and source set
-	// to the supplied strings (see ApprovalDecision* / ApprovalSource*
-	// constants).
-	NotifyApprovalDecision(ctx context.Context, sess *session.Session, a *agent.Agent, tc tools.ToolCall, decision, source string)
+	// [hooks.EventOnToolApprovalDecision] with decision, source, and
+	// the classifier's safety label set to the supplied strings (see
+	// ApprovalDecision* / ApprovalSource* constants and
+	// [safety.Class]).
+	NotifyApprovalDecision(ctx context.Context, sess *session.Session, a *agent.Agent, tc tools.ToolCall, decision, source, safetyLabel string)
 }
 
 // ToolHandler is the signature for runtime-managed tool handlers
@@ -137,13 +150,43 @@ type ResumeRequest struct {
 type ResumeType string
 
 const (
-	ResumeTypeApprove        ResumeType = "approve"
-	ResumeTypeApproveSession ResumeType = "approve-session"
-	ResumeTypeApproveSafe    ResumeType = "approve-safe"
-	ResumeTypeApproveSafer   ResumeType = "approve-safer"
-	ResumeTypeApproveTool    ResumeType = "approve-tool"
-	ResumeTypeReject         ResumeType = "reject"
+	ResumeTypeApprove ResumeType = "approve"
+	// ResumeTypeApproveBalanced approves the pending call and flips
+	// the session to [session.SafetyPolicyBalanced].
+	ResumeTypeApproveBalanced ResumeType = "approve-balanced"
+	// ResumeTypeApproveAutonomous approves the pending call and flips
+	// the session to [session.SafetyPolicyAutonomous].
+	ResumeTypeApproveAutonomous ResumeType = "approve-autonomous"
+	ResumeTypeApproveTool       ResumeType = "approve-tool"
+	ResumeTypeReject            ResumeType = "reject"
 )
+
+// Legacy resume verbs accepted from older callers and normalized by
+// [NormalizeResumeType]. Never emitted by new code.
+const (
+	// Deprecated: use [ResumeTypeApproveAutonomous].
+	ResumeTypeApproveSession ResumeType = "approve-session"
+	// Deprecated: use [ResumeTypeApproveBalanced].
+	ResumeTypeApproveSafe ResumeType = "approve-safe"
+	// Deprecated: use [ResumeTypeApproveBalanced].
+	ResumeTypeApproveSafer ResumeType = "approve-safer"
+)
+
+// NormalizeResumeType maps legacy resume verbs onto the current set:
+// approve-session → approve-autonomous, approve-safe / approve-safer →
+// approve-balanced (the cautious mapping — old "safer" also waved
+// unknown calls through, balanced asks about them). Current values
+// pass through unchanged.
+func NormalizeResumeType(t ResumeType) ResumeType {
+	switch t {
+	case ResumeTypeApproveSession:
+		return ResumeTypeApproveAutonomous
+	case ResumeTypeApproveSafe, ResumeTypeApproveSafer:
+		return ResumeTypeApproveBalanced
+	default:
+		return t
+	}
+}
 
 // Dispatcher executes batches of tool calls. Construct one per runtime
 // (or per RunStream) and call [Dispatcher.Process] for each LLM response.
@@ -277,6 +320,30 @@ type call struct {
 	// per tool call.
 	preYoloComputed bool
 	preYoloResult   *hooks.Result
+
+	// Safety-label cache: the classifier result is stable for the
+	// call, and permissionDecision + confirmationMetadata +
+	// notifyApproval all consume it.
+	labelComputed bool
+	label         safety.Label
+}
+
+// safetyLabel labels the call for the (mode × label) table: shell
+// commands via the pattern classifier, everything else via MCP
+// annotation hints. Cached after the first call.
+func (c *call) safetyLabel() safety.Label {
+	if c.labelComputed {
+		return c.label
+	}
+	c.labelComputed = true
+	destructive := c.tool.Annotations.DestructiveHint != nil && *c.tool.Annotations.DestructiveHint
+	c.label = safety.LabelToolCall(
+		c.tc.Function.Name,
+		ParseToolInput(c.tc.Function.Arguments),
+		c.tool.Annotations.ReadOnlyHint,
+		destructive,
+	)
+	return c.label
 }
 
 // run processes a single tool call and returns its outcome. All span
@@ -352,33 +419,27 @@ func (c *call) run(ctx context.Context) CallOutcome {
 //
 // The pipeline order is:
 //
-//  0. pre_tool_use entries with preempt_yolo:true — fire BEFORE the
-//     deterministic checkers so a Deny or Ask verdict here preempts
-//     --yolo and permission allow rules. Allow / no-opinion fall
-//     through. The safer_shell builtin is the canonical user; its
-//     verdict's metadata is surfaced to the confirmation event via
-//     [call.confirmationMetadata].
-//  1. yolo / permission checkers (delegated to [Decide]) — deterministic
-//     verdicts win first. ForceAsk goes straight to the user.
+//  0. pre_tool_use entries with preempt_yolo:true — user-authored
+//     security hooks that fire BEFORE the deterministic pipeline so a
+//     Deny or Ask verdict here cannot be bypassed by any safety mode
+//     (including Autonomous) or permission allow rules. Allow /
+//     no-opinion fall through.
+//  1. [Decide] — custom Deny/Allow/Ask rules win outright; otherwise
+//     the (safety mode × safety label) table produces the verdict.
+//     An explicit ask rule goes straight to the user.
 //  2. pre_tool_use hooks (LLM-judge, shell scripts, ...) — the
-//     default lane, consulted ONLY when no deterministic checker
-//     matched. The hook can Deny (block), Allow (skip the user
-//     prompt) or Ask (force the prompt). Hooks may also rewrite tool
-//     arguments via UpdatedInput, in which case the rewrite is
-//     applied here so the user prompt and the tool handler both see
-//     the modified call.
-//  3. read-only hint — auto-approve when the tool advertises it.
+//     default lane, consulted ONLY when the mode said Ask. The hook
+//     can Deny (block), Allow (skip the user prompt) or Ask (force
+//     the prompt). Hooks may also rewrite tool arguments via
+//     UpdatedInput, in which case the rewrite is applied here so the
+//     user prompt and the tool handler both see the modified call.
+//  3. legacy read-only auto-approve — sessions that never chose a
+//     safety mode keep the pre-modes contract: read-only-annotated
+//     tools run without prompting. Placed after the hook chain so an
+//     LLM judge still gets a turn on those calls.
 //  4. user confirmation — fallback prompt.
-//
-// Splitting the read-only hint out of [Decide] is deliberate: it lets
-// the pre_tool_use hook see (and override) calls that would otherwise
-// auto-approve via the read-only hint. This matches the PR's intent
-// that an LLM judge gets a turn on every call that isn't covered by an
-// explicit allow/deny rule.
 func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) CallOutcome {
-	// Stage 0: pre_tool_use entries flagged with preempt_yolo:true fire
-	// before the deterministic checkers so destructive-command
-	// verdicts can preempt --yolo / permissions.
+	// Stage 0: pre_tool_use entries flagged with preempt_yolo:true.
 	if r := c.consultPreToolUsePreYolo(ctx); r != nil {
 		switch r.Decision {
 		case hooks.DecisionDeny:
@@ -395,8 +456,8 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 			// allow this tool" decision, stored in sess.Permissions) is an
 			// informed opt-in the user made in response to this very safety
 			// prompt. Honor it instead of asking again, otherwise "always
-			// allow" would re-prompt on every matching call. The blanket
-			// --yolo and the team/config permission layer stay subordinate
+			// allow" would re-prompt on every matching call. The safety
+			// mode and the team/config permission layer stay subordinate
 			// to the preempt-yolo verdict — see [call.sessionPermissionsAllow].
 			if c.sessionPermissionsAllow() {
 				slog.DebugContext(ctx, "preempt-yolo Ask overridden by session permission allow", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
@@ -408,17 +469,8 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 		// DecisionAllow / "" → advisory; fall through to Decide().
 	}
 
-	// safe-auto / safer opt-ins bypass the permissions layer for the
-	// calls each policy considers auto-approvable. Otherwise
-	// permissions.ask: "*" would defeat the opt-in.
-	if source, ok := c.policyAutoApprove(); ok {
-		c.notifyApproval(ctx, ApprovalDecisionAllow, source)
-		return runTool()
-	}
-
-	// readOnlyHint is intentionally false here so the pre_tool_use hook
-	// gets a turn before the read-only fast-path applies.
-	decision := c.permissionDecision(false)
+	// Stage 1: custom rules + (mode × label) table.
+	decision := c.permissionDecision()
 
 	switch decision.Outcome {
 	case OutcomeAllow:
@@ -440,29 +492,33 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 		}
 	}
 
-	// No deterministic verdict: consult the pre_tool_use hook chain.
+	// Stage 2: the mode said Ask — consult the pre_tool_use hook chain.
 	if outcome, handled := c.consultPreToolUseHook(ctx, runTool); handled {
 		return outcome
 	}
 
-	if c.tool.Annotations.ReadOnlyHint {
+	// Stage 3: legacy default only — read-only tools never prompted
+	// before safety modes existed, and sessions that never chose a
+	// mode keep that contract. Explicit Strict deliberately does not
+	// take this path: the user asked to be prompted for everything.
+	if legacyReadOnlyAutoApprove(c.sess.GetSafetyPolicy(), c.safetyLabel()) {
 		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceReadOnlyHint)
 		return runTool()
 	}
 	return c.askUser(ctx, runTool)
 }
 
-func (c *call) permissionDecision(readOnlyHint bool) PermissionDecision {
+func (c *call) permissionDecision() PermissionDecision {
 	var checkers []NamedChecker
 	if c.d.Permissions != nil {
 		checkers = c.d.Permissions(c.sess)
 	}
 	return Decide(
-		c.sess.IsToolsApproved(),
+		c.sess.GetSafetyPolicy(),
+		c.safetyLabel(),
 		checkers,
 		c.tc.Function.Name,
 		ParseToolInput(c.tc.Function.Arguments),
-		readOnlyHint,
 	)
 }
 
@@ -472,13 +528,18 @@ func (c *call) autoApprovalAfterConfirmationWait() (PermissionDecision, bool) {
 		// landed while we were blocked on the resume channel (e.g. a
 		// concurrent "always allow this tool" decision) is an informed
 		// opt-in and takes effect. Mirrors approveAndRun's Stage 0: the
-		// blanket --yolo and the team/config layer stay subordinate.
+		// safety mode and the team/config layer stay subordinate.
 		if c.sessionPermissionsAllow() {
 			return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonChecker, Source: sessionPermissionsSource}, true
 		}
 		return PermissionDecision{}, false
 	}
-	decision := c.permissionDecision(c.tool.Annotations.ReadOnlyHint)
+	// A mode escalation or allow grant may have landed while this call
+	// was queued behind another confirmation. The legacy read-only
+	// fast path is deliberately NOT rechecked here: it is static, so a
+	// call that reached askUser despite it was explicitly asked about
+	// (a hook or ask rule), and that prompt must be honored.
+	decision := c.permissionDecision()
 	return decision, decision.Outcome == OutcomeAllow
 }
 
@@ -515,30 +576,6 @@ func (c *call) sessionPermissionsAllow() bool {
 		return shellGrantCoversCommand(perms.Allow, args)
 	}
 	return true
-}
-
-// policyAutoApprove returns (source, true) when the session's safety
-// policy allows this call to skip the permissions layer. Under
-// safe-auto that requires a positive safe verdict (preempt-yolo Allow
-// or ReadOnlyHint). Under safer it just requires the tool not to
-// declare itself destructive — destructive preempt-yolo verdicts
-// already short-circuited to askUser at Stage 0.
-func (c *call) policyAutoApprove() (string, bool) {
-	switch c.sess.SafetyPolicy {
-	case session.SafetyPolicySafeAuto:
-		if c.preYoloResult != nil && c.preYoloResult.Decision == hooks.DecisionAllow {
-			return ApprovalSourcePreToolUseHookAllow, true
-		}
-		if c.tool.Annotations.ReadOnlyHint {
-			return ApprovalSourceReadOnlyHint, true
-		}
-	case session.SafetyPolicySafer:
-		if c.tool.Annotations.DestructiveHint != nil && *c.tool.Annotations.DestructiveHint {
-			return "", false
-		}
-		return ApprovalSourcePreToolUseHookAllow, true
-	}
-	return "", false
 }
 
 func (c *call) cancellationMessage(ctx context.Context) string {
@@ -645,6 +682,9 @@ func (c *call) applyHookModifiedInput(result *hooks.Result) {
 	}
 	slog.Debug("Pre-tool hook modified tool input", "tool", c.tc.Function.Name)
 	c.tc.Function.Arguments = string(updated)
+	// The rewrite may change the shell command; drop the cached label
+	// so the confirmation prompt classifies what will actually run.
+	c.labelComputed = false
 }
 
 // notifyApproval forwards the resolved approval decision to the
@@ -662,31 +702,26 @@ func (c *call) notifyApproval(ctx context.Context, decision, source string) {
 	if c.d.Hooks == nil {
 		return
 	}
-	c.d.Hooks.NotifyApprovalDecision(ctx, c.sess, c.a, c.tc, decision, source)
+	c.d.Hooks.NotifyApprovalDecision(ctx, c.sess, c.a, c.tc, decision, source, string(c.safetyLabel().Class))
 }
 
 // logAllow emits the auto-approval debug log appropriate to the reason
 // that produced the [OutcomeAllow] decision.
 func (c *call) logAllow(d PermissionDecision) {
 	switch d.Reason {
-	case ReasonYolo:
-		slog.Debug("Tool auto-approved by --yolo flag", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+	case ReasonMode:
+		slog.Debug("Tool auto-approved by safety mode", "tool", c.tc.Function.Name, "source", d.Source, "session_id", c.sess.ID)
 	case ReasonChecker:
 		slog.Debug("Tool auto-approved by permissions", "tool", c.tc.Function.Name, "source", d.Source, "session_id", c.sess.ID)
-		// ReasonReadOnlyHint is intentionally silent (matches prior behaviour).
 	}
 }
 
 // allowSourceForDecision maps a [PermissionDecision] with [OutcomeAllow]
-// onto the corresponding ApprovalSource* constant.
+// onto the corresponding ApprovalSource* constant. Mode decisions
+// already carry the constant in Source.
 func allowSourceForDecision(d PermissionDecision) string {
-	switch d.Reason {
-	case ReasonYolo:
-		return ApprovalSourceYolo
-	case ReasonReadOnlyHint:
-		return ApprovalSourceReadOnlyHint
-	case ReasonChecker:
-		return allowSourceForChecker(d.Source)
+	if d.Reason == ReasonMode {
+		return d.Source
 	}
 	return allowSourceForChecker(d.Source)
 }
@@ -810,7 +845,7 @@ func (c *call) runPermissionRequestHook(ctx context.Context, runTool func() Call
 		ToolName:     toolName,
 		ToolUseID:    c.tc.ID,
 		ToolInput:    ParseToolInput(c.tc.Function.Arguments),
-		SafetyPolicy: string(c.sess.SafetyPolicy),
+		SafetyPolicy: string(c.sess.GetSafetyPolicy()),
 	})
 	if result == nil {
 		return CallOutcome{}, false, nil
@@ -842,70 +877,49 @@ func (c *call) runPermissionRequestHook(ctx context.Context, runTool func() Call
 }
 
 // confirmationMetadata merges the tool's static metadata (set by the
-// toolset) with the per-call metadata contributed by permission_request
-// and the preempt-yolo lane of pre_tool_use. Merge order — and
-// therefore key-clash precedence — is:
+// toolset) with the per-call metadata contributed by permission_request,
+// the runtime's own safety label, and the preempt-yolo lane of
+// pre_tool_use. Merge order — and therefore key-clash precedence — is:
 //
-//	tool static  <  permission_request  <  pre_tool_use (preempt_yolo)
+//	tool static  <  permission_request  <  safety label  <  pre_tool_use (preempt_yolo)
 //
-// the preempt-yolo lane wins because it carries security verdicts (blast
-// radius, classification) that a policy-level permission_request hook
-// must not silently overwrite. Returns nil when no source supplied
-// anything so the confirmation event stays lean.
+// The runtime's classification (safety_label, blast_radius, category,
+// reason) outranks a policy-level permission_request hook so the
+// prompt's security badges can't be silently rewritten; a user-authored
+// preempt hook outranks the runtime because it carries a more specific,
+// security-critical verdict for this call.
 func (c *call) confirmationMetadata(permissionMeta map[string]string) map[string]string {
-	var safetyMeta map[string]string
+	var preemptMeta map[string]string
 	if c.preYoloResult != nil {
-		safetyMeta = c.preYoloResult.Metadata
+		preemptMeta = c.preYoloResult.Metadata
 	}
-	annotationMeta := blastRadiusFromAnnotations(c.tool.Annotations)
-	if len(annotationMeta) == 0 && len(c.tool.Metadata) == 0 && len(permissionMeta) == 0 && len(safetyMeta) == 0 {
-		return nil
-	}
-	merged := make(map[string]string, len(annotationMeta)+len(c.tool.Metadata)+len(permissionMeta)+len(safetyMeta))
-	maps.Copy(merged, annotationMeta)
+	labelMeta := c.safetyLabel().Metadata()
+	merged := make(map[string]string, len(c.tool.Metadata)+len(permissionMeta)+len(labelMeta)+len(preemptMeta))
 	maps.Copy(merged, c.tool.Metadata)
 	maps.Copy(merged, permissionMeta)
-	maps.Copy(merged, safetyMeta)
+	maps.Copy(merged, labelMeta)
+	maps.Copy(merged, preemptMeta)
 	return merged
-}
-
-// blastRadiusFromAnnotations derives a blast_radius verdict from a tool's
-// MCP annotations. ReadOnlyHint → safe; DestructiveHint == true → high.
-// Returns nil when neither hint applies so callers keep the empty-map
-// short-circuit path.
-func blastRadiusFromAnnotations(a tools.ToolAnnotations) map[string]string {
-	if a.ReadOnlyHint {
-		return map[string]string{"blast_radius": "safe"}
-	}
-	if a.DestructiveHint != nil && *a.DestructiveHint {
-		return map[string]string{"blast_radius": "high"}
-	}
-	return nil
 }
 
 // handleResume applies the user's confirmation decision: run the tool
 // (with optional session/tool-wide approval persistence) or emit a
 // rejection error response.
 func (c *call) handleResume(ctx context.Context, req ResumeRequest, runTool func() CallOutcome) CallOutcome {
-	switch req.Type {
+	switch NormalizeResumeType(req.Type) {
 	case ResumeTypeApprove:
 		slog.DebugContext(ctx, "Resume signal received, approving tool", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
 		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceUserApproved)
 		return runTool()
-	case ResumeTypeApproveSession:
-		slog.DebugContext(ctx, "Resume signal received, approving session", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
-		c.sess.SetToolsApproved(true)
-		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceUserApprovedSession)
+	case ResumeTypeApproveBalanced:
+		slog.DebugContext(ctx, "Resume signal received, opting into balanced", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+		c.sess.SetSafetyPolicy(session.SafetyPolicyBalanced)
+		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceUserApprovedBalanced)
 		return runTool()
-	case ResumeTypeApproveSafe:
-		slog.DebugContext(ctx, "Resume signal received, opting into safe-auto", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
-		c.sess.SetSafetyPolicy(session.SafetyPolicySafeAuto)
-		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceUserApprovedSafe)
-		return runTool()
-	case ResumeTypeApproveSafer:
-		slog.DebugContext(ctx, "Resume signal received, opting into safer", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
-		c.sess.SetSafetyPolicy(session.SafetyPolicySafer)
-		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceUserApprovedSafer)
+	case ResumeTypeApproveAutonomous:
+		slog.DebugContext(ctx, "Resume signal received, opting into autonomous", "tool", c.tc.Function.Name, "session_id", c.sess.ID)
+		c.sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
+		c.notifyApproval(ctx, ApprovalDecisionAllow, ApprovalSourceUserApprovedAutonomous)
 		return runTool()
 	case ResumeTypeApproveTool:
 		approvedTool := req.ToolName

@@ -1173,7 +1173,7 @@
         },
         "permission_request": {
           "type": "array",
-          "description": "Hooks that run just before the runtime prompts the user to approve a tool call (i.e. when --yolo and permission rules did not short-circuit the decision). Hooks may auto-allow or auto-deny via hook_specific_output.permission_decision; otherwise control falls through to the interactive confirmation. Tool-matched, like pre_tool_use.",
+          "description": "Hooks that run just before the runtime prompts the user to approve a tool call (i.e. when the safety mode and permission rules did not short-circuit the decision). Hooks may auto-allow or auto-deny via hook_specific_output.permission_decision; otherwise control falls through to the interactive confirmation. Tool-matched, like pre_tool_use.",
           "items": {
             "$ref": "#/definitions/HookMatcherConfig"
           }
@@ -1306,7 +1306,7 @@
         },
         "on_tool_approval_decision": {
           "type": "array",
-          "description": "Hooks that run after the runtime's tool approval chain (yolo / permissions / readonly / ask) resolves a verdict for a tool call, before the call is executed (allow) or its error response is recorded (deny / canceled). Receives approval_decision (\"allow\" | \"deny\" | \"canceled\") and approval_source (a stable classifier of which step decided). Observational; gives audit pipelines a single \"who approved what\" record without re-implementing the chain.",
+          "description": "Hooks that run after the runtime's tool approval chain (custom rules / safety mode / hooks / ask) resolves a verdict for a tool call, before the call is executed (allow) or its error response is recorded (deny / canceled). Receives approval_decision (\"allow\" | \"deny\" | \"canceled\"), approval_source (a stable classifier of which step decided), and safety_label (the runtime classifier's safe / destructive / unknown verdict). Observational; gives audit pipelines a single \"who approved what\" record without re-implementing the chain.",
           "items": {
             "$ref": "#/definitions/HookDefinition"
           }
@@ -1365,7 +1365,7 @@
         },
         "preempt_yolo": {
           "type": "boolean",
-          "description": "Opt a pre_tool_use entry into firing BEFORE the deterministic approval pipeline (--yolo, permission allow/deny patterns). A deny/ask verdict from a preempting hook cannot be bypassed by --yolo or permission allow-rules; an allow verdict is advisory (the pipeline still runs Decide() and the rest of pre_tool_use). Default pre_tool_use entries fire AFTER Decide(). Only meaningful on pre_tool_use; ignored on other events. Used by the safer_shell builtin (auto-registered with this flag when a shell toolset has `safer: true`)."
+          "description": "Opt a pre_tool_use entry into firing BEFORE the deterministic approval pipeline (custom allow/ask/deny rules + safety mode). A deny/ask verdict from a preempting hook cannot be bypassed by any safety mode (including autonomous) or permission allow-rules; an allow verdict is advisory (the pipeline still runs Decide() and the rest of pre_tool_use). Default pre_tool_use entries fire AFTER Decide(). Only meaningful on pre_tool_use; ignored on other events. Set it on hooks that implement a security-critical check that must not be bypassed by auto-approval."
         }
       },
       "required": [
@@ -2334,7 +2334,7 @@
         },
         "safer": {
           "type": "boolean",
-          "description": "Opt in to the safer_shell classifier for the shell toolset (only valid for type 'shell'). When enabled, the agent auto-registers the safer_shell builtin under pre_tool_use with preempt_yolo:true. Verdict adapts to the session's SafetyPolicy (unsafe / safer / safe-auto / strict). See docs/configuration/hooks/index.md for the per-policy behaviour matrix. Default false."
+          "description": "Deprecated and ignored (only valid for type 'shell'). The runtime now classifies every shell command natively (safe / destructive / unknown) and gates it through the session's safety mode (strict / balanced / autonomous), so the opt-in is meaningless. Kept so existing YAMLs with safer: true still parse."
         },
         "url": {
           "type": "string",

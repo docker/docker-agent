@@ -68,7 +68,7 @@ Examples that wire up one of the toolsets shipped with docker-agent
 | [`background_jobs.yaml`](background_jobs.yaml) | `background_jobs` toolset for servers, watchers, and other long-running commands. |
 | [`shell_recall.yaml`](shell_recall.yaml) | `background_jobs` with recall enabled for finite long-running commands. |
 | [`docker-wiki.yaml`](docker-wiki.yaml) | OpenWiki-inspired documentation agent that initializes and updates a `docker-wiki/` directory with `/init`, `/update`, and `/status` commands. |
-| [`shell_safer.yaml`](shell_safer.yaml) | Shell toolset wired with the `safer_shell` builtin under `pre_tool_use` with `preempt_yolo: true` — destructive commands force confirmation regardless of `--yolo`; known-safe reads pass through silently. |
+| [`safety_modes.yaml`](safety_modes.yaml) | Shell agent demonstrating the three safety modes (strict / balanced / autonomous): every shell command is classified safe / destructive / unknown and the session's mode decides what auto-runs and what asks. |
 | [`filesystem.yaml`](filesystem.yaml) | Plain `filesystem` toolset. |
 | [`filesystem_allow_deny.yaml`](filesystem_allow_deny.yaml) | Restricting the filesystem tool with allow/deny path lists. |
 | [`script_shell.yaml`](script_shell.yaml) | Defining custom shell commands as named tools via `type: script`. |

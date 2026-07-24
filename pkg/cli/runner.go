@@ -179,9 +179,12 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 				switch result {
 				case ConfirmationApprove:
 					rt.Resume(ctx, runtime.ResumeApprove())
+				case ConfirmationApproveBalanced:
+					sess.SetSafetyPolicy(session.SafetyPolicyBalanced)
+					rt.Resume(ctx, runtime.ResumeApproveBalanced())
 				case ConfirmationApproveSession:
-					sess.ToolsApproved = true
-					rt.Resume(ctx, runtime.ResumeApproveSession())
+					sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
+					rt.Resume(ctx, runtime.ResumeApproveAutonomous())
 				case ConfirmationReject:
 					rt.Resume(ctx, runtime.ResumeReject(""))
 					lastConfirmedToolCallID = "" // Clear on reject since tool won't execute

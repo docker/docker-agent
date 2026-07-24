@@ -97,7 +97,7 @@
     ],
     "text-read": [
       { "pattern": "grep ...", "category": "text-read", "notes": "stdout-only search; compound shell is blocked upstream" },
-      { "pattern": "rg ...",   "category": "text-read", "notes": "ripgrep; same constraints as grep" },
+      { "pattern": "rg ...",   "category": "text-read", "notes": "ripgrep; same constraints as grep", "deny_flags": ["--pre", "--pre-glob"] },
       { "pattern": "sort <file>",   "category": "text-read", "notes": "in-memory sort to stdout" },
       { "pattern": "uniq <file>",   "category": "text-read", "notes": "adjacent dedupe to stdout" }
     ],
@@ -121,11 +121,11 @@
       { "pattern": "git status",    "category": "git-read", "notes": "working-tree state" },
       { "pattern": "git status ...", "category": "git-read", "notes": "status with flags" },
       { "pattern": "git diff",      "category": "git-read", "notes": "unstaged diff" },
-      { "pattern": "git diff ...",  "category": "git-read", "notes": "any diff variant; argv read-only" },
+      { "pattern": "git diff ...",  "category": "git-read", "notes": "any diff variant; argv read-only", "deny_flags": ["--output"] },
       { "pattern": "git log",       "category": "git-read", "notes": "commit history" },
-      { "pattern": "git log ...",   "category": "git-read", "notes": "log variants" },
+      { "pattern": "git log ...",   "category": "git-read", "notes": "log variants", "deny_flags": ["--output"] },
       { "pattern": "git show",      "category": "git-read", "notes": "show HEAD" },
-      { "pattern": "git show ...",  "category": "git-read", "notes": "show arbitrary ref" },
+      { "pattern": "git show ...",  "category": "git-read", "notes": "show arbitrary ref", "deny_flags": ["--output"] },
       { "pattern": "git branch",    "category": "git-read", "notes": "list branches" },
       { "pattern": "git remote",    "category": "git-read", "notes": "list remotes" },
       { "pattern": "git remote -v", "category": "git-read", "notes": "verbose remotes" },

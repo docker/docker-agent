@@ -3,6 +3,7 @@ package root
 import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 // loadTeamRequest builds a runtime.LoadTeamRequest from the current flags.
@@ -21,6 +22,7 @@ func (f *runExecFlags) createSessionRequest(workingDir string) runtime.CreateSes
 	return runtime.CreateSessionRequest{
 		AgentName:         f.agentName,
 		ToolsApproved:     f.autoApprove,
+		SafetyPolicy:      session.SafetyPolicy(f.safety),
 		HideToolResults:   f.hideToolResults,
 		SessionDB:         sessionDBPath(f.sessionDB),
 		ResumeSessionID:   f.sessionID,

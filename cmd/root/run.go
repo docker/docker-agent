@@ -55,6 +55,7 @@ var projectDefaultAgentFiles = []string{"docker-agent.yaml", "docker-agent.yml",
 type runExecFlags struct {
 	agentName         string
 	autoApprove       bool
+	safety            string
 	attachmentPath    string
 	remoteAddress     string
 	modelOverrides    []string
@@ -150,7 +151,8 @@ func newRunCmd() *cobra.Command {
 
 func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().StringVarP(&flags.agentName, "agent", "a", "", "Name of the agent to run (defaults to the team's first agent)")
-	cmd.PersistentFlags().BoolVar(&flags.autoApprove, "yolo", false, "Automatically approve all tool calls without prompting")
+	cmd.PersistentFlags().BoolVar(&flags.autoApprove, "yolo", false, "Automatically approve all tool calls without prompting (same as --safety autonomous)")
+	cmd.PersistentFlags().StringVar(&flags.safety, "safety", "", "Safety mode for tool approval: strict (ask for everything), balanced (auto-approve safe calls), or autonomous (approve everything)")
 	cmd.PersistentFlags().BoolVar(&flags.hideToolResults, "hide-tool-results", false, "Hide tool call results")
 	cmd.PersistentFlags().StringVar(&flags.attachmentPath, "attach", "", "Attach an image file to the message")
 	cmd.PersistentFlags().StringArrayVar(&flags.promptFiles, "prompt-file", nil, "Append file contents to the prompt (repeatable)")
@@ -242,6 +244,15 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		if err := validateTheme(f.theme); err != nil {
 			return err
 		}
+	}
+
+	// Same early-failure treatment for --safety: a typo must not
+	// silently collapse to strict. Legacy policy aliases are a wire
+	// compat concern; the new flag only takes the canonical modes.
+	switch session.SafetyPolicy(f.safety) {
+	case "", session.SafetyPolicyStrict, session.SafetyPolicyBalanced, session.SafetyPolicyAutonomous:
+	default:
+		return fmt.Errorf("invalid --safety value %q (valid: strict, balanced, autonomous)", f.safety)
 	}
 
 	useTUI := !f.exec && (f.forceTUI || isatty.IsTerminal(os.Stdout.Fd()))
@@ -890,10 +901,21 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 		sess, err = sessStore.GetSession(ctx, resolvedID)
 		switch {
 		case err == nil:
-			// Via the option, not a raw field write: WithToolsApproved
-			// backfills SafetyPolicy=unsafe so safer_shell honours --yolo
-			// on resumed sessions too.
+			// Via the options, not raw field writes, so the legacy
+			// ToolsApproved flag and the mode stay in sync. Flags
+			// override whatever the stored session carried; --safety
+			// wins over --yolo when both are given, matching the
+			// option order buildSessionOpts applies to new sessions.
+			// The explicit escalation matters: WithToolsApproved only
+			// backfills autonomous onto an EMPTY stored policy, so
+			// --yolo on a session stored as balanced/strict would
+			// otherwise be silently discarded.
 			session.WithToolsApproved(req.ToolsApproved)(sess)
+			if req.SafetyPolicy != "" {
+				session.WithSafetyPolicy(req.SafetyPolicy)(sess)
+			} else if req.ToolsApproved {
+				session.WithSafetyPolicy(session.SafetyPolicyAutonomous)(sess)
+			}
 			sess.HideToolResults = req.HideToolResults
 
 			// Apply any stored model overrides from the session
@@ -1098,6 +1120,7 @@ func (f *runExecFlags) buildSessionOpts(agt *agent.Agent, req runtime.CreateSess
 		session.WithMaxOldToolCallTokens(agt.MaxOldToolCallTokens()),
 		session.WithMaxToolResultTokens(agt.MaxToolResultTokens()),
 		session.WithToolsApproved(req.ToolsApproved),
+		session.WithSafetyPolicy(req.SafetyPolicy),
 		session.WithHideToolResults(req.HideToolResults),
 		session.WithWorkingDir(req.WorkingDir),
 	}

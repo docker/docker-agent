@@ -170,3 +170,90 @@ func TestToolConfirmationDialog_EmbeddedSessionState(t *testing.T) {
 	require.NotNil(t, cmd)
 	assert.True(t, state.YoloMode(), "approving all tools must flip the embedder's session-wide approval")
 }
+
+// Clicking the leading action key must fire at every dialog width.
+// RenderHelpKeys bakes lipgloss centering spaces into the options line;
+// hit-testing must factor them out or 'Y' clicks dispatch on a padding
+// space and silently no-op whenever the centering padding is odd.
+func TestToolConfirmationDialog_ClickOnYFiresAtEveryWidth(t *testing.T) {
+	t.Parallel()
+
+	tested := 0
+	for width := 60; width <= 130; width++ {
+		dialog := NewToolConfirmationDialog(newConfirmationEvent(nil), &service.SessionState{})
+		_, _ = dialog.Update(tea.WindowSizeMsg{Width: width, Height: 30})
+
+		d, ok := dialog.(*toolConfirmationDialog)
+		require.True(t, ok)
+
+		// Locate the rendered options line and the on-screen column of
+		// its 'Y' key, then click it.
+		dialogRow, dialogCol := d.Position()
+		view := ansi.Strip(d.View())
+		lines := strings.Split(view, "\n")
+		optionsRow := ContentEndRow(dialogRow, len(lines))
+		optionsLine := lines[optionsRow-dialogRow]
+		yIdx := strings.Index(optionsLine, "Y yes")
+		if yIdx < 0 {
+			// Narrow widths wrap the help line; hit-testing only
+			// targets the single-line layout.
+			continue
+		}
+		tested++
+
+		_, cmd := d.handleMouseClick(tea.MouseClickMsg{
+			X:      dialogCol + yIdx,
+			Y:      optionsRow,
+			Button: tea.MouseLeft,
+		})
+		assert.NotNilf(t, cmd, "width %d: click on 'Y' at col %d must fire", width, dialogCol+yIdx)
+	}
+	// The sweep must cover several widths (both centering parities).
+	assert.Greater(t, tested, 10)
+}
+
+// Separator gaps between the option segments are dead zones: a click
+// there fires nothing, because attributing the gap to either neighbour
+// would fire some action on a near-miss (left would make the Y/N gap
+// approve, right would make the B/A gap go autonomous).
+func TestToolConfirmationDialog_GapClicksAreDeadZones(t *testing.T) {
+	t.Parallel()
+
+	dialog := NewToolConfirmationDialog(newConfirmationEvent(nil), &service.SessionState{})
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	d, ok := dialog.(*toolConfirmationDialog)
+	require.True(t, ok)
+
+	dialogRow, dialogCol := d.Position()
+	view := ansi.Strip(d.View())
+	lines := strings.Split(view, "\n")
+	optionsRow := ContentEndRow(dialogRow, len(lines))
+	optionsLine := lines[optionsRow-dialogRow]
+
+	click := func(col int) tea.Cmd {
+		_, cmd := d.handleMouseClick(tea.MouseClickMsg{
+			X:      dialogCol + col,
+			Y:      optionsRow,
+			Button: tea.MouseLeft,
+		})
+		return cmd
+	}
+
+	// Clicking inside a segment's text fires.
+	nIdx := strings.Index(optionsLine, "N no")
+	require.GreaterOrEqual(t, nIdx, 0)
+	assert.NotNil(t, click(nIdx), "click on 'N' must fire")
+	assert.NotNil(t, click(nIdx+3), "click on N's label must fire")
+
+	// Clicking the two-space gap between "Y yes" and "N no" fires nothing.
+	assert.Nil(t, click(nIdx-1), "gap click must be a dead zone")
+	assert.Nil(t, click(nIdx-2), "gap click must be a dead zone")
+
+	// The trailing segment is clickable to its last character.
+	aIdx := strings.Index(optionsLine, "A all tools")
+	require.GreaterOrEqual(t, aIdx, 0)
+	assert.NotNil(t, click(aIdx), "click on 'A' must fire")
+	assert.NotNil(t, click(aIdx+len("A all tools")-1), "click on the last label char must fire")
+	assert.Nil(t, click(aIdx+len("A all tools")), "click past the line must be a no-op")
+}

@@ -326,6 +326,19 @@ func TestBranchSession(t *testing.T) {
 		assert.Equal(t, "msg2", branched.Messages[1].Message.Message.Content)
 	})
 
+	t.Run("preserves the safety policy", func(t *testing.T) {
+		t.Parallel()
+		parent := &Session{
+			SafetyPolicy: SafetyPolicyBalanced,
+			Messages:     []Item{NewMessageItem(UserMessage("hi"))},
+		}
+
+		branched, err := BranchSession(parent, 1)
+		require.NoError(t, err)
+		assert.Equal(t, SafetyPolicyBalanced, branched.SafetyPolicy)
+		assert.Equal(t, SafetyPolicyBalanced, branched.GetSafetyPolicy())
+	})
+
 	t.Run("deep-copies pointer fields in MultiContent", func(t *testing.T) {
 		t.Parallel()
 		// Regression test: MultiContent pointer fields must not be shared

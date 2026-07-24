@@ -7,6 +7,8 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/safety"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 func newChecker(t *testing.T, allow, ask, deny []string) *permissions.Checker {
@@ -18,63 +20,117 @@ func newChecker(t *testing.T, allow, ask, deny []string) *permissions.Checker {
 	})
 }
 
-func TestDecide_DenyOverridesYolo(t *testing.T) {
-	t.Parallel()
-	d := Decide(true, []NamedChecker{
-		{Checker: newChecker(t, nil, nil, []string{"shell"}), Source: "team"},
-	}, "shell", nil, false)
+var (
+	labelSafeAnnotation = safety.Label{Class: safety.ClassSafe, Origin: safety.OriginAnnotation}
+	labelSafeClassifier = safety.Label{Class: safety.ClassSafe, Origin: safety.OriginClassifier}
+	labelDestructive    = safety.Label{Class: safety.ClassDestructive, Origin: safety.OriginClassifier}
+	labelUnknown        = safety.Label{Class: safety.ClassUnknown, Origin: safety.OriginClassifier}
+)
 
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeDeny, Reason: ReasonChecker, Source: "team"}, d)
+// The full (mode × label) matrix with no custom rules.
+func TestDecide_ModeLabelTable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		mode    session.SafetyPolicy
+		label   safety.Label
+		outcome PermissionOutcome
+	}{
+		{"", labelSafeAnnotation, OutcomeAsk}, // legacy allow happens post-hooks in the dispatcher
+		{"", labelSafeClassifier, OutcomeAsk},
+		{"", labelDestructive, OutcomeAsk},
+		{"", labelUnknown, OutcomeAsk},
+
+		{session.SafetyPolicyStrict, labelSafeAnnotation, OutcomeAsk},
+		{session.SafetyPolicyStrict, labelSafeClassifier, OutcomeAsk},
+		{session.SafetyPolicyStrict, labelDestructive, OutcomeAsk},
+		{session.SafetyPolicyStrict, labelUnknown, OutcomeAsk},
+
+		{session.SafetyPolicyBalanced, labelSafeAnnotation, OutcomeAllow},
+		{session.SafetyPolicyBalanced, labelSafeClassifier, OutcomeAllow},
+		{session.SafetyPolicyBalanced, labelDestructive, OutcomeAsk},
+		{session.SafetyPolicyBalanced, labelUnknown, OutcomeAsk},
+
+		{session.SafetyPolicyAutonomous, labelSafeAnnotation, OutcomeAllow},
+		{session.SafetyPolicyAutonomous, labelSafeClassifier, OutcomeAllow},
+		{session.SafetyPolicyAutonomous, labelDestructive, OutcomeAllow},
+		{session.SafetyPolicyAutonomous, labelUnknown, OutcomeAllow},
+
+		// Unrecognised modes must behave like strict, never wider.
+		{"bogus", labelSafeAnnotation, OutcomeAsk},
+		{"bogus", labelDestructive, OutcomeAsk},
+	}
+	for _, tt := range tests {
+		d := Decide(tt.mode, tt.label, nil, "shell", nil)
+		assert.Equalf(t, tt.outcome, d.Outcome, "mode=%q label=%s/%s", tt.mode, tt.label.Class, tt.label.Origin)
+		assert.Equalf(t, ReasonMode, d.Reason, "mode=%q label=%s", tt.mode, tt.label.Class)
+	}
 }
 
-func TestDecide_YoloAllowsWhenNoCheckerMatches(t *testing.T) {
+// Custom deny rules win over every mode — including Autonomous.
+func TestDecide_DenyOverridesAutonomous(t *testing.T) {
 	t.Parallel()
-	d := Decide(true, nil, "shell", nil, false)
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonYolo}, d)
+	for _, tier := range []Tier{TierSession, TierTeam} {
+		d := Decide(session.SafetyPolicyAutonomous, labelSafeClassifier, []NamedChecker{
+			{Checker: newChecker(t, nil, nil, []string{"shell"}), Source: "rules", Tier: tier},
+		}, "shell", nil)
+		assert.Equal(t, PermissionDecision{Outcome: OutcomeDeny, Reason: ReasonChecker, Source: "rules"}, d)
+	}
 }
 
-func TestDecide_YoloOverridesForceAsk(t *testing.T) {
+// Custom allow rules win over Strict.
+func TestDecide_AllowOverridesStrict(t *testing.T) {
 	t.Parallel()
-	d := Decide(true, []NamedChecker{
-		{Checker: newChecker(t, nil, []string{"shell"}, nil), Source: "team"},
-	}, "shell", nil, false)
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonYolo}, d)
+	d := Decide(session.SafetyPolicyStrict, labelUnknown, []NamedChecker{
+		{Checker: newChecker(t, []string{"read_*"}, nil, nil), Source: "session permissions", Tier: TierSession},
+	}, "read_file", nil)
+	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonChecker, Source: "session permissions"}, d)
 }
 
-func TestDecide_DenyFromCheckerWins(t *testing.T) {
+// A session-tier ask rule always prompts, even under Autonomous —
+// it is direct user intent.
+func TestDecide_SessionAskBeatsAutonomous(t *testing.T) {
 	t.Parallel()
-	d := Decide(false, []NamedChecker{
-		{Checker: newChecker(t, nil, nil, []string{"shell"}), Source: "session"},
-	}, "shell", nil, true /* read-only doesn't bypass deny */)
-
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeDeny, Reason: ReasonChecker, Source: "session"}, d)
+	d := Decide(session.SafetyPolicyAutonomous, labelSafeClassifier, []NamedChecker{
+		{Checker: newChecker(t, nil, []string{"shell"}, nil), Source: "session permissions", Tier: TierSession},
+	}, "shell", nil)
+	assert.Equal(t, PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonChecker, Source: "session permissions"}, d)
 }
 
-func TestDecide_AllowFromChecker(t *testing.T) {
+// A team-tier ask rule is agent-author advisory: it prompts under
+// strict/legacy but yields to a user-chosen auto-approving mode.
+func TestDecide_TeamAskYieldsToAutoApprovingModes(t *testing.T) {
 	t.Parallel()
-	d := Decide(false, []NamedChecker{
-		{Checker: newChecker(t, []string{"read_*"}, nil, nil), Source: "session"},
-	}, "read_file", nil, false)
+	checkers := []NamedChecker{
+		{Checker: newChecker(t, nil, []string{"shell"}, nil), Source: "permissions configuration", Tier: TierTeam},
+	}
 
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonChecker, Source: "session"}, d)
-}
+	d := Decide(session.SafetyPolicyStrict, labelSafeClassifier, checkers, "shell", nil)
+	assert.Equal(t, OutcomeAsk, d.Outcome)
+	assert.Equal(t, ReasonChecker, d.Reason, "team ask prompts under strict")
 
-func TestDecide_ForceAskFromCheckerOverridesReadOnly(t *testing.T) {
-	t.Parallel()
-	d := Decide(false, []NamedChecker{
-		{Checker: newChecker(t, nil, []string{"read_file"}, nil), Source: "team"},
-	}, "read_file", nil, true /* read-only would normally bypass ask */)
+	d = Decide("", labelSafeClassifier, checkers, "shell", nil)
+	assert.Equal(t, OutcomeAsk, d.Outcome)
+	assert.Equal(t, ReasonChecker, d.Reason, "team ask prompts under the legacy default")
 
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonChecker, Source: "team"}, d)
+	d = Decide(session.SafetyPolicyBalanced, labelSafeClassifier, checkers, "shell", nil)
+	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonMode, Source: ApprovalSourceModeBalanced}, d,
+		"team ask yields to balanced for safe calls")
+
+	d = Decide(session.SafetyPolicyBalanced, labelDestructive, checkers, "shell", nil)
+	assert.Equal(t, OutcomeAsk, d.Outcome, "balanced still asks about destructive calls")
+
+	d = Decide(session.SafetyPolicyAutonomous, labelDestructive, checkers, "shell", nil)
+	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonMode, Source: ApprovalSourceYolo}, d,
+		"team ask yields to autonomous")
 }
 
 func TestDecide_FirstCheckerWins_SessionBeforeTeam(t *testing.T) {
 	t.Parallel()
 	// Session allows; team denies. Session is checked first → Allow.
-	d := Decide(false, []NamedChecker{
-		{Checker: newChecker(t, []string{"shell"}, nil, nil), Source: "session permissions"},
-		{Checker: newChecker(t, nil, nil, []string{"shell"}), Source: "permissions configuration"},
-	}, "shell", nil, false)
+	d := Decide(session.SafetyPolicyStrict, labelUnknown, []NamedChecker{
+		{Checker: newChecker(t, []string{"shell"}, nil, nil), Source: "session permissions", Tier: TierSession},
+		{Checker: newChecker(t, nil, nil, []string{"shell"}), Source: "permissions configuration", Tier: TierTeam},
+	}, "shell", nil)
 
 	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonChecker, Source: "session permissions"}, d)
 }
@@ -82,47 +138,44 @@ func TestDecide_FirstCheckerWins_SessionBeforeTeam(t *testing.T) {
 func TestDecide_FallsThroughWhenNoCheckerMatches(t *testing.T) {
 	t.Parallel()
 	// First checker doesn't match anything (no patterns) → falls through to second.
-	d := Decide(false, []NamedChecker{
-		{Checker: newChecker(t, nil, nil, nil), Source: "session permissions"},
-		{Checker: newChecker(t, []string{"shell"}, nil, nil), Source: "permissions configuration"},
-	}, "shell", nil, false)
+	d := Decide(session.SafetyPolicyStrict, labelUnknown, []NamedChecker{
+		{Checker: newChecker(t, nil, nil, nil), Source: "session permissions", Tier: TierSession},
+		{Checker: newChecker(t, []string{"shell"}, nil, nil), Source: "permissions configuration", Tier: TierTeam},
+	}, "shell", nil)
 
 	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonChecker, Source: "permissions configuration"}, d)
-}
-
-func TestDecide_ReadOnlyHintAutoApproves(t *testing.T) {
-	t.Parallel()
-	d := Decide(false, nil, "read_file", nil, true)
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonReadOnlyHint}, d)
-}
-
-func TestDecide_DefaultAsk(t *testing.T) {
-	t.Parallel()
-	d := Decide(false, nil, "shell", nil, false)
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonDefault}, d)
-}
-
-func TestDecide_NoCheckersWithReadOnly(t *testing.T) {
-	t.Parallel()
-	d := Decide(false, []NamedChecker{}, "read_file", nil, true)
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonReadOnlyHint}, d)
 }
 
 func TestDecide_ArgPatternMatching(t *testing.T) {
 	t.Parallel()
 	// A checker that only allows shell when cmd starts with "ls".
-	d := Decide(false, []NamedChecker{
-		{Checker: newChecker(t, []string{"shell:cmd=ls*"}, nil, nil), Source: "session"},
-	}, "shell", map[string]any{"cmd": "ls -la"}, false)
+	d := Decide(session.SafetyPolicyStrict, labelSafeClassifier, []NamedChecker{
+		{Checker: newChecker(t, []string{"shell:cmd=ls*"}, nil, nil), Source: "session", Tier: TierSession},
+	}, "shell", map[string]any{"cmd": "ls -la"})
 
 	assert.Equal(t, PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonChecker, Source: "session"}, d)
 }
 
-func TestDecide_ArgPatternNoMatchFallsToDefault(t *testing.T) {
+func TestDecide_ArgPatternNoMatchFallsToMode(t *testing.T) {
 	t.Parallel()
-	d := Decide(false, []NamedChecker{
-		{Checker: newChecker(t, []string{"shell:cmd=ls*"}, nil, nil), Source: "session"},
-	}, "shell", map[string]any{"cmd": "rm -rf /"}, false)
+	d := Decide(session.SafetyPolicyStrict, labelDestructive, []NamedChecker{
+		{Checker: newChecker(t, []string{"shell:cmd=ls*"}, nil, nil), Source: "session", Tier: TierSession},
+	}, "shell", map[string]any{"cmd": "rm -rf /"})
 
-	assert.Equal(t, PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonDefault}, d)
+	assert.Equal(t, OutcomeAsk, d.Outcome)
+	assert.Equal(t, ReasonMode, d.Reason)
+}
+
+// The legacy read-only fast path applies only to annotation-derived
+// safety on sessions that never chose a mode.
+func TestLegacyReadOnlyAutoApprove(t *testing.T) {
+	t.Parallel()
+	assert.True(t, legacyReadOnlyAutoApprove("", labelSafeAnnotation))
+	assert.False(t, legacyReadOnlyAutoApprove("", labelSafeClassifier),
+		"classifier-safe must not widen the legacy default")
+	assert.False(t, legacyReadOnlyAutoApprove("", labelUnknown))
+	assert.False(t, legacyReadOnlyAutoApprove(session.SafetyPolicyStrict, labelSafeAnnotation),
+		"explicit strict asks for everything")
+	assert.False(t, legacyReadOnlyAutoApprove(session.SafetyPolicyBalanced, labelSafeAnnotation),
+		"balanced already allows via the mode table")
 }

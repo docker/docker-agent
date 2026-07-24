@@ -42,7 +42,6 @@ type Agent struct {
 	addEnvironmentInfo      bool
 	addDescriptionParameter bool
 	redactSecrets           bool
-	saferShell              bool
 	maxIterations           int
 	maxConsecutiveToolCalls int
 	maxOldToolCallTokens    int
@@ -109,14 +108,6 @@ func (a *Agent) AddEnvironmentInfo() bool {
 // input, or the next LLM call).
 func (a *Agent) RedactSecrets() bool {
 	return a.redactSecrets
-}
-
-// SaferShell reports whether any of the agent's shell toolsets opted
-// into the `safer: true` destructive-command guard. When true, the
-// runtime auto-injects the safer_shell builtin under pre_tool_use
-// with preempt_yolo:true; see [builtins.ApplyAgentDefaults].
-func (a *Agent) SaferShell() bool {
-	return a.saferShell
 }
 
 func (a *Agent) MaxIterations() int {

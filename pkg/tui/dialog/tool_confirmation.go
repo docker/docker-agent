@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -281,6 +282,11 @@ func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (l
 			core.CmdHandler(CloseDialogMsg{}),
 			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveTool.Resume(d.permissionPattern, "")}),
 		)
+	case toolconfirm.ApproveBalanced:
+		return d, tea.Sequence(
+			core.CmdHandler(CloseDialogMsg{}),
+			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveBalanced.Resume("", "")}),
+		)
 	case toolconfirm.ApproveSession:
 		d.sessionState.SetYoloMode(true)
 		return d, tea.Sequence(
@@ -340,29 +346,61 @@ func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 		return d, nil
 	}
 
-	// Render the help keys and strip ANSI to get plain text for hit-testing.
+	// Hit-test against the line the user actually saw: take the clicked
+	// row from the rendered dialog and locate the options text inside
+	// it. Reconstructing the left offset from frame sizes plus the
+	// centering padding is fragile — any extra inset between the frame
+	// and the help line shifts every click.
 	_, contentWidth := d.dialogDimensions()
-	options := d.renderOptions(contentWidth)
-	optionsPlain := ansi.Strip(options)
+	optionsPlain := strings.TrimSpace(ansi.Strip(d.renderOptions(contentWidth)))
+	if optionsPlain == "" {
+		return d, nil
+	}
+	renderedLines := strings.Split(ansi.Strip(renderedDialog), "\n")
+	rowIdx := msg.Y - dialogRow
+	if rowIdx < 0 || rowIdx >= len(renderedLines) {
+		return d, nil
+	}
+	contentStart := strings.Index(renderedLines[rowIdx], optionsPlain)
+	if contentStart < 0 {
+		return d, nil
+	}
 
-	// Content starts after left border + padding.
-	frameLeft := styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
-
-	// The help text is center-aligned within contentWidth.
 	plainLen := len(optionsPlain)
-	leadingSpaces := max(0, (contentWidth-plainLen)/2)
-	relX := msg.X - dialogCol - frameLeft - leadingSpaces
+	relX := msg.X - dialogCol - contentStart
 	if relX < 0 || relX >= plainLen {
 		return d, nil
 	}
 
-	// Walk backward from the click position to find the nearest action key.
-	// The plain text looks like: "Y yes  N no  T always allow...  A all tools"
-	// Each region starts with its uppercase action key.
-	for i := relX; i >= 0; i-- {
-		if decision, ok := toolconfirm.DecisionForAction(string(optionsPlain[i])); ok {
-			return d.executeAction(decision)
+	// The help line is built by helpKeysLine as "<KEY> <label>" segments
+	// joined with two spaces, e.g.:
+	//
+	//	"Y yes  N no  T always allow rm*  B balanced  A all tools"
+	//
+	// Map the click onto its segment and dispatch on the segment's leading
+	// action key. Labels can contain uppercase letters (the always-allow
+	// label echoes the command pattern), so scanning the clicked character
+	// itself could fire the wrong action. Separator gaps are dead zones:
+	// attributing them to either neighbour would fire some action on a
+	// near-miss, and no attribution is uniformly the safer one (left
+	// makes the Y/N gap approve, right makes the B/A gap go autonomous).
+	start := 0
+	for start < plainLen {
+		textEnd := plainLen
+		if sep := strings.Index(optionsPlain[start:], "  "); sep >= 0 {
+			textEnd = start + sep
 		}
+		if relX < textEnd {
+			if decision, ok := toolconfirm.DecisionForAction(string(optionsPlain[start])); ok {
+				return d.executeAction(decision)
+			}
+			return d, nil
+		}
+		if relX < textEnd+2 {
+			// Inside the separator gap.
+			return d, nil
+		}
+		start = textEnd + 2
 	}
 
 	return d, nil

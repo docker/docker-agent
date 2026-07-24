@@ -16,23 +16,38 @@ type ResumeType = toolexec.ResumeType
 const (
 	// ResumeTypeApprove approves the single pending tool call.
 	ResumeTypeApprove = toolexec.ResumeTypeApprove
-	// ResumeTypeApproveSession approves the pending tool call and every
-	// subsequent permission-gated call for the rest of the session.
-	ResumeTypeApproveSession = toolexec.ResumeTypeApproveSession
-	// ResumeTypeApproveSafe approves the pending call and flips the
-	// session to SafetyPolicySafeAuto so subsequent classifier-verified
-	// safe calls auto-approve.
-	ResumeTypeApproveSafe = toolexec.ResumeTypeApproveSafe
-	// ResumeTypeApproveSafer approves the pending call and flips the
-	// session to SafetyPolicySafer so subsequent non-destructive calls
-	// auto-approve (superset of safe-auto — includes unclassified).
-	ResumeTypeApproveSafer = toolexec.ResumeTypeApproveSafer
+	// ResumeTypeApproveBalanced approves the pending call and flips
+	// the session to [session.SafetyPolicyBalanced] so subsequent
+	// classifier-safe calls auto-approve.
+	ResumeTypeApproveBalanced = toolexec.ResumeTypeApproveBalanced
+	// ResumeTypeApproveAutonomous approves the pending call and flips
+	// the session to [session.SafetyPolicyAutonomous] so every
+	// subsequent call auto-approves (custom deny/ask rules still win).
+	ResumeTypeApproveAutonomous = toolexec.ResumeTypeApproveAutonomous
 	// ResumeTypeApproveTool approves the pending call and every future
 	// call to the same tool name within the session.
 	ResumeTypeApproveTool = toolexec.ResumeTypeApproveTool
 	// ResumeTypeReject rejects the pending tool call.
 	ResumeTypeReject = toolexec.ResumeTypeReject
 )
+
+// Legacy resume verbs, accepted and normalized for older callers.
+//
+//nolint:staticcheck // deliberate re-export of the deprecated aliases
+const (
+	// Deprecated: use [ResumeTypeApproveAutonomous].
+	ResumeTypeApproveSession = toolexec.ResumeTypeApproveSession
+	// Deprecated: use [ResumeTypeApproveBalanced].
+	ResumeTypeApproveSafe = toolexec.ResumeTypeApproveSafe
+	// Deprecated: use [ResumeTypeApproveBalanced].
+	ResumeTypeApproveSafer = toolexec.ResumeTypeApproveSafer
+)
+
+// NormalizeResumeType maps legacy resume verbs onto the current set.
+// See [toolexec.NormalizeResumeType].
+func NormalizeResumeType(t ResumeType) ResumeType {
+	return toolexec.NormalizeResumeType(t)
+}
 
 // ResumeRequest carries the user's confirmation decision along with an optional
 // reason (used when rejecting a tool call to help the model understand why).
@@ -45,21 +60,24 @@ func ResumeApprove() ResumeRequest {
 	return ResumeRequest{Type: ResumeTypeApprove}
 }
 
-// ResumeApproveSession creates a ResumeRequest to approve all tool calls for the session.
+// ResumeApproveBalanced creates a ResumeRequest that approves the
+// pending call and flips the session to SafetyPolicyBalanced.
+func ResumeApproveBalanced() ResumeRequest {
+	return ResumeRequest{Type: ResumeTypeApproveBalanced}
+}
+
+// ResumeApproveAutonomous creates a ResumeRequest that approves the
+// pending call and flips the session to SafetyPolicyAutonomous.
+func ResumeApproveAutonomous() ResumeRequest {
+	return ResumeRequest{Type: ResumeTypeApproveAutonomous}
+}
+
+// ResumeApproveSession creates a ResumeRequest to approve all tool calls
+// for the session.
+//
+// Deprecated: use [ResumeApproveAutonomous].
 func ResumeApproveSession() ResumeRequest {
-	return ResumeRequest{Type: ResumeTypeApproveSession}
-}
-
-// ResumeApproveSafe creates a ResumeRequest that approves the pending
-// call and flips the session to SafetyPolicySafeAuto.
-func ResumeApproveSafe() ResumeRequest {
-	return ResumeRequest{Type: ResumeTypeApproveSafe}
-}
-
-// ResumeApproveSafer creates a ResumeRequest that approves the pending
-// call and flips the session to SafetyPolicySafer.
-func ResumeApproveSafer() ResumeRequest {
-	return ResumeRequest{Type: ResumeTypeApproveSafer}
+	return ResumeApproveAutonomous()
 }
 
 // ResumeApproveTool creates a ResumeRequest to always approve a specific tool for the session.
@@ -73,17 +91,18 @@ func ResumeReject(reason string) ResumeRequest {
 }
 
 // IsValidResumeType validates confirmation values coming from /resume.
+// Legacy verbs (approve-session, approve-safe, approve-safer) stay
+// accepted; [NormalizeResumeType] maps them onto the current set.
 //
 // The runtime may be resumed by multiple entry points (API, CLI, TUI, tests).
 // Even if upstream layers perform validation, the runtime must never assume
 // the ResumeType is valid; accepting invalid values leads to confusing
 // downstream behaviour where tool execution fails without a clear cause.
 func IsValidResumeType(t ResumeType) bool {
-	switch t {
+	switch NormalizeResumeType(t) {
 	case ResumeTypeApprove,
-		ResumeTypeApproveSession,
-		ResumeTypeApproveSafe,
-		ResumeTypeApproveSafer,
+		ResumeTypeApproveBalanced,
+		ResumeTypeApproveAutonomous,
 		ResumeTypeApproveTool,
 		ResumeTypeReject:
 		return true
@@ -92,13 +111,13 @@ func IsValidResumeType(t ResumeType) bool {
 	}
 }
 
-// ValidResumeTypes returns all allowed confirmation values, in declaration order.
+// ValidResumeTypes returns the current (non-legacy) confirmation values,
+// in declaration order.
 func ValidResumeTypes() []ResumeType {
 	return []ResumeType{
 		ResumeTypeApprove,
-		ResumeTypeApproveSession,
-		ResumeTypeApproveSafe,
-		ResumeTypeApproveSafer,
+		ResumeTypeApproveBalanced,
+		ResumeTypeApproveAutonomous,
 		ResumeTypeApproveTool,
 		ResumeTypeReject,
 	}

@@ -1955,6 +1955,9 @@ func (r *LocalRuntime) Resume(_ context.Context, req ResumeRequest) {
 		)
 		return
 	}
+	// Normalize legacy verbs (approve-session, approve-safe,
+	// approve-safer) so every downstream consumer sees the current set.
+	req.Type = NormalizeResumeType(req.Type)
 
 	// Attempt to deliver the resume signal to the execution loop.
 	//

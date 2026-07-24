@@ -927,18 +927,18 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 	}
 
 	// Mirror + persist mid-turn session mutations synchronously —
-	// PersistenceObserver only persists on OnRunStart.
+	// PersistenceObserver only persists on OnRunStart. Legacy verbs
+	// (approve-session, approve-safe, approve-safer) are normalized
+	// so old clients keep working.
+	resumeType := runtime.NormalizeResumeType(runtime.ResumeType(confirmation))
 	if rt.session != nil {
 		mutated := false
-		switch runtime.ResumeType(confirmation) {
-		case runtime.ResumeTypeApproveSafe:
-			rt.session.SetSafetyPolicy(session.SafetyPolicySafeAuto)
+		switch resumeType {
+		case runtime.ResumeTypeApproveBalanced:
+			rt.session.SetSafetyPolicy(session.SafetyPolicyBalanced)
 			mutated = true
-		case runtime.ResumeTypeApproveSafer:
-			rt.session.SetSafetyPolicy(session.SafetyPolicySafer)
-			mutated = true
-		case runtime.ResumeTypeApproveSession:
-			rt.session.SetToolsApproved(true)
+		case runtime.ResumeTypeApproveAutonomous:
+			rt.session.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 			mutated = true
 		case runtime.ResumeTypeApproveTool:
 			// Skip when toolName is empty — the dispatcher's own
@@ -957,7 +957,7 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 	}
 
 	rt.runtime.Resume(ctx, runtime.ResumeRequest{
-		Type:     runtime.ResumeType(confirmation),
+		Type:     resumeType,
 		Reason:   reason,
 		ToolName: toolName,
 	})
@@ -1145,17 +1145,34 @@ func (sm *SessionManager) ResumeElicitation(ctx context.Context, sessionID, acti
 	return rt.runtime.ResumeElicitation(ctx, tools.ElicitationAction(action), content, elicitationID)
 }
 
-// ToggleToolApproval toggles the tool approval mode for a session.
+// ToggleToolApproval toggles the legacy blanket tool approval for a
+// session. Routed through the safety mode (see [session.Session.ToggleYolo])
+// so the two signals cannot disagree, a toggle-off genuinely revokes the
+// blanket approval, and an explicit Balanced/Strict choice survives a
+// toggle round-trip.
 func (sm *SessionManager) ToggleToolApproval(ctx context.Context, sessionID string) error {
 	sm.mux.Lock()
 	defer sm.mux.Unlock()
+
+	// Mirror onto the live runtime session so the dispatcher picks up
+	// the change on the next tool call, not just the next turn. If the
+	// store write fails, toggle back (ToggleYolo is its own inverse) so
+	// the live session never diverges from what a reload would produce —
+	// the caller got an error, so the toggle must not have half-happened.
+	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
+		rt.session.ToggleYolo()
+		if err := sm.sessionStore.UpdateSession(ctx, rt.session); err != nil {
+			rt.session.ToggleYolo()
+			return err
+		}
+		return nil
+	}
+
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
 	if err != nil {
 		return err
 	}
-
-	sess.ToolsApproved = !sess.ToolsApproved
-
+	sess.ToggleYolo()
 	return sm.sessionStore.UpdateSession(ctx, sess)
 }
 
