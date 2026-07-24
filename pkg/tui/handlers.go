@@ -57,14 +57,16 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to branch session: %v", err))
 	}
 
-	if err := store.AddSession(ctx, newSess); err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save branched session: %v", err))
-	}
-
+	// Apply live-session state before the store write so mid-session
+	// changes the store copy lacks (e.g. a mode downgrade) are persisted
+	// with the branch, not just patched in memory.
 	if current := m.application.Session(); current != nil {
 		newSess.HideToolResults = current.HideToolResults
-		// Carries live mid-session mode changes the store copy may lack.
 		newSess.SetSafetyPolicy(current.GetSafetyPolicy())
+	}
+
+	if err := store.AddSession(ctx, newSess); err != nil {
+		return m, notification.ErrorCmd(fmt.Sprintf("Failed to save branched session: %v", err))
 	}
 
 	// Preserve sidebar settings across branch
