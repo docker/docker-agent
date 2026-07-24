@@ -15,7 +15,25 @@ Permissions provide fine-grained control over tool execution. You can configure 
 > [!NOTE]
 > **Evaluation Order**
 >
-> Permissions are evaluated in this order: **Deny → Allow → Ask**. Deny patterns take priority, then allow patterns, and anything else defaults to asking for user confirmation.
+> Permissions are evaluated in this order: **Deny → Allow → Ask**. Deny patterns take priority, then allow patterns, and anything else falls through to the session's [safety mode](#safety-modes).
+
+## Safety Modes
+
+Every session runs in a **safety mode** that decides what happens when no permission rule matched a tool call. The runtime labels each call `safe` (safe-listed shell command such as `ls` or `git status`, or a read-only-annotated tool), `destructive` (destructive shell command such as `rm -rf`, or a destructive-annotated tool), or `unknown` — and the mode gates on that label:
+
+| Mode | safe | destructive | unknown |
+| ---- | ---- | ----------- | ------- |
+| `strict` | ask | ask | ask |
+| `balanced` | **allow** | ask | ask |
+| `autonomous` | **allow** | **allow** | **allow** |
+
+- **`strict`** prompts for every tool call, read-only ones included. Only an `allow:` rule silences a prompt.
+- **`balanced`** runs safe calls silently and asks about everything else.
+- **`autonomous`** is the legacy `--yolo` behavior: everything runs. Only `deny:` rules, session-scoped `ask:` rules, and `preempt_yolo` hooks still gate.
+
+Pick a mode with the `--safety` flag (`docker-agent run --safety balanced ...`), the `safety_policy` field on session create (`POST /api/sessions`) or mid-session (`PATCH /api/sessions/:id/safety-policy`), or escalate directly from a confirmation prompt (`B` switches to balanced, `A` to autonomous). Sessions that never choose a mode keep the historical default: read-only tools auto-approve, everything else asks.
+
+**Custom rules always win over the mode**, with one asymmetry: `ask:` rules written in an agent's YAML (or global config) are agent-author advisories and yield to a user-chosen `balanced`/`autonomous` mode, while `ask:` rules granted at the session level (interactive "always ask" decisions, the session permissions API) always prompt.
 
 ## Permission Levels
 
@@ -238,12 +256,14 @@ permissions:
 
 Permissions work alongside [hooks](../hooks/index.md). The evaluation order is:
 
-1. Check **deny** patterns — if matched, tool is blocked
-2. Check **allow** patterns — if matched, tool is auto-approved
-3. Run **pre_tool_use hooks** — hooks can allow, deny, or ask
-4. If no decision, **ask user** for confirmation
+1. Run **`preempt_yolo` pre_tool_use hooks** — security-critical checks that no mode or allow rule can bypass
+2. Check **deny** patterns — if matched, tool is blocked
+3. Check **allow** patterns — if matched, tool is auto-approved
+4. Apply the **[safety mode](#safety-modes)** to the call's safety label — may auto-approve
+5. Run **pre_tool_use hooks** — hooks can allow, deny, or ask
+6. If no decision, **ask user** for confirmation
 
-Hooks can override allow decisions but cannot override deny decisions.
+Default-lane hooks only see calls the rules and the mode routed to "ask"; they cannot override deny decisions.
 
 > [!WARNING]
 > **Security Note**
