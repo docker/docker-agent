@@ -2,8 +2,11 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,7 +14,10 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -19,9 +25,9 @@ import (
 )
 
 // modalityModelStore returns a fixed [modelsdev.Model] regardless of
-// the requested ID. Tests configure its Modalities to exercise the
-// strip_unsupported_modalities transform's three branches: text-only
-// (strip), image-supporting (no-op), and unknown-model (no-op).
+// the requested ID. Runstream-level tests configure its Modalities to
+// exercise the loop's capability resolution feeding the
+// strip_unsupported_modalities transform.
 type modalityModelStore struct {
 	ModelStore
 
@@ -31,20 +37,6 @@ type modalityModelStore struct {
 
 func (m modalityModelStore) GetModel(_ context.Context, _ modelsdev.ID) (*modelsdev.Model, error) {
 	return m.model, m.err
-}
-
-// modalityByIDStore returns a different [modelsdev.Model] depending
-// on the requested ID, letting tests prove the transform consulted
-// the right ID (via [hooks.Input.ModelID]) rather than recomputing
-// it from the agent.
-type modalityByIDStore struct {
-	ModelStore
-
-	models map[string]*modelsdev.Model
-}
-
-func (m modalityByIDStore) GetModel(_ context.Context, id modelsdev.ID) (*modelsdev.Model, error) {
-	return m.models[id.String()], nil
 }
 
 // recordingMsgProvider captures the messages each model call sees so
@@ -62,11 +54,28 @@ func (p *recordingMsgProvider) CreateChatCompletionStream(_ context.Context, msg
 	return p.stream, nil
 }
 
-// TestStripUnsupportedModalitiesTransform pins the three branches of
-// the runtime-shipped transform: a text-only model strips images, a
-// multimodal model passes them through, and an unknown model also
-// passes them through (the call surfaces any modality mismatch as a
-// provider error rather than panicking transform-side).
+// mixedMediaMsg is a user message carrying every strippable media kind
+// (legacy image URL, audio document, video document) plus text and a
+// PDF document that the transform must never touch.
+func mixedMediaMsg() chat.Message {
+	return chat.Message{
+		Role: chat.MessageRoleUser,
+		MultiContent: []chat.MessagePart{
+			{Type: chat.MessagePartTypeText, Text: "look at this"},
+			{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+			{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.wav", MimeType: "audio/wav", Source: chat.DocumentSource{InlineData: []byte{0x52}}}},
+			{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp4", MimeType: "video/mp4", Source: chat.DocumentSource{InlineData: []byte{0x00}}}},
+			{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "report.pdf", MimeType: "application/pdf", Source: chat.DocumentSource{InlineData: []byte{0x25}}}},
+			{Type: chat.MessagePartTypeText, Text: "and this"},
+		},
+	}
+}
+
+// TestStripUnsupportedModalitiesTransform pins the capability matrix of
+// the runtime-shipped transform. The transform consumes the resolved
+// capability set from [hooks.Input.ModelCapabilities]; it never queries
+// models.dev itself (the runtime is built with a deliberately
+// contradictory multimodal store to prove that).
 func TestStripUnsupportedModalitiesTransform(t *testing.T) {
 	t.Parallel()
 
@@ -74,95 +83,112 @@ func TestStripUnsupportedModalitiesTransform(t *testing.T) {
 	a := agent.New("root", "instructions", agent.WithModel(prov))
 	tm := team.New(team.WithAgents(a))
 
-	imgMsg := chat.Message{
-		Role: chat.MessageRoleUser,
-		MultiContent: []chat.MessagePart{
-			{Type: chat.MessagePartTypeText, Text: "look at this"},
-			{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
-		},
+	capsPtr := func(image, pdf, audio, video bool) *modelinfo.ModelCapabilities {
+		mc := modelinfo.CapsWith(image, pdf, audio, video)
+		return &mc
 	}
 
 	cases := []struct {
-		name      string
-		store     modalityModelStore
-		modelID   string
-		wantStrip bool
+		name string
+		caps *modelinfo.ModelCapabilities
+		// wantMime lists the expected surviving MultiContent parts, in
+		// order, identified by text or MIME/kind.
+		wantParts []string
 	}{
-		{name: "text-only model strips images", modelID: "test/text", store: modalityModelStore{model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text"}}}}, wantStrip: true},
-		{name: "multimodal model passes through", modelID: "test/multimodal", store: modalityModelStore{model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text", "image"}}}}},
-		{name: "nil model passes through", modelID: "test/unknown", store: modalityModelStore{model: nil}},
-		{name: "lookup error passes through", modelID: "test/unknown", store: modalityModelStore{err: errors.New("not found")}},
-		{name: "empty modalities passes through", modelID: "test/empty", store: modalityModelStore{model: &modelsdev.Model{}}},
-		{name: "empty ModelID passes through", modelID: "", store: modalityModelStore{model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text"}}}}},
+		{
+			name:      "all media capabilities on retains everything",
+			caps:      capsPtr(true, true, true, true),
+			wantParts: []string{"text", "image", "audio", "video", "pdf", "text"},
+		},
+		{
+			name:      "text-only strips image, audio, and video but keeps text and pdf",
+			caps:      capsPtr(false, false, false, false),
+			wantParts: []string{"text", "pdf", "text"},
+		},
+		{
+			name:      "audio-only override keeps audio, strips image and video",
+			caps:      capsPtr(false, false, true, false),
+			wantParts: []string{"text", "audio", "pdf", "text"},
+		},
+		{
+			name:      "unknown model resolves to conservative caps upstream and strips",
+			caps:      &modelinfo.ModelCapabilities{},
+			wantParts: []string{"text", "pdf", "text"},
+		},
+		{
+			name:      "nil capabilities pass messages through untouched",
+			caps:      nil,
+			wantParts: []string{"text", "image", "audio", "video", "pdf", "text"},
+		},
 	}
+
+	// The store contradicts every restrictive case: if the transform
+	// consulted models.dev instead of the resolved caps, nothing would
+	// ever be stripped.
+	store := modalityModelStore{model: &modelsdev.Model{
+		Modalities: modelsdev.Modalities{Input: []string{"text", "image", "audio", "video", "pdf"}},
+	}}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := NewLocalRuntime(t.Context(), tm, WithModelStore(tc.store))
+			t.Parallel()
+			r, err := NewLocalRuntime(t.Context(), tm, WithModelStore(store))
 			require.NoError(t, err)
 
 			got, err := r.stripUnsupportedModalitiesTransform(t.Context(),
-				&hooks.Input{ModelID: tc.modelID}, []chat.Message{imgMsg})
+				&hooks.Input{ModelID: "test/model", ModelCapabilities: tc.caps},
+				[]chat.Message{mixedMediaMsg()})
 			require.NoError(t, err)
 			require.Len(t, got, 1)
-			if tc.wantStrip {
-				require.Len(t, got[0].MultiContent, 1, "image part must be stripped")
-				assert.Equal(t, chat.MessagePartTypeText, got[0].MultiContent[0].Type)
-			} else {
-				assert.Equal(t, imgMsg, got[0], "messages must reach the model untouched")
+
+			var kinds []string
+			for _, p := range got[0].MultiContent {
+				switch {
+				case p.Type == chat.MessagePartTypeText:
+					kinds = append(kinds, "text")
+				case p.Type == chat.MessagePartTypeImageURL:
+					kinds = append(kinds, "image")
+				case p.Document != nil && p.Document.MimeType == "application/pdf":
+					kinds = append(kinds, "pdf")
+				case p.Document != nil:
+					kinds = append(kinds, strings.SplitN(p.Document.MimeType, "/", 2)[0])
+				}
 			}
+			assert.Equal(t, tc.wantParts, kinds, "surviving parts (and their order) must match")
 		})
 	}
 }
 
-// TestStripUnsupportedModalitiesTransform_UsesInputModelID pins the
-// fix for an alloy-mode / per-tool-override correctness bug: the
-// transform must trust [hooks.Input.ModelID] (populated by the loop
-// with the model it actually picked) and NOT recompute the model by
-// calling agent.Model() — doing so would re-randomize the alloy
-// pick and miss any per-tool override the loop had applied.
+// TestStripUnsupportedModalitiesTransform_EmitsDebugLog verifies each
+// stripped part is reported at Debug level with its media kind and a
+// reason, so operators can trace why content never reached the model.
 //
-// The test wires a store that reports text-only for one ID and
-// multimodal for another. Querying by the text-only ID must strip;
-// querying by the multimodal ID must pass through. The agent's own
-// model (its pool) is irrelevant — it's never consulted.
-func TestStripUnsupportedModalitiesTransform_UsesInputModelID(t *testing.T) {
-	t.Parallel()
+// It swaps the default slog logger and is deliberately NOT parallel so
+// no other test logs into the buffer concurrently.
+func TestStripUnsupportedModalitiesTransform_EmitsDebugLog(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	prov := &mockProvider{id: "test/agent-pool-model", stream: &mockStream{}}
+	prov := &mockProvider{id: "test/model", stream: &mockStream{}}
 	a := agent.New("root", "instructions", agent.WithModel(prov))
 	tm := team.New(team.WithAgents(a))
-
-	store := modalityByIDStore{models: map[string]*modelsdev.Model{
-		"text/only":             {Modalities: modelsdev.Modalities{Input: []string{"text"}}},
-		"multi/modal":           {Modalities: modelsdev.Modalities{Input: []string{"text", "image"}}},
-		"test/agent-pool-model": {Modalities: modelsdev.Modalities{Input: []string{"text", "image"}}},
-	}}
-	r, err := NewLocalRuntime(t.Context(), tm, WithModelStore(store))
+	r, err := NewLocalRuntime(t.Context(), tm, WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 
-	imgMsg := chat.Message{
-		Role: chat.MessageRoleUser,
-		MultiContent: []chat.MessagePart{
-			{Type: chat.MessagePartTypeText, Text: "describe"},
-			{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
-		},
+	textOnly := modelinfo.CapsWith(false, false, false, false)
+	_, err = r.stripUnsupportedModalitiesTransform(t.Context(),
+		&hooks.Input{ModelID: "test/model", ModelCapabilities: &textOnly},
+		[]chat.Message{mixedMediaMsg()})
+	require.NoError(t, err)
+
+	logged := buf.String()
+	for _, kind := range []string{"image", "audio", "video"} {
+		assert.Contains(t, logged, "kind="+kind, "stripped %s part must be logged with its kind", kind)
+		assert.Contains(t, logged, "model does not support "+kind+" input",
+			"stripped %s part must be logged with a reason", kind)
 	}
-
-	// ModelID = text-only — strip must happen even though the agent's
-	// pool model is multimodal.
-	stripped, err := r.stripUnsupportedModalitiesTransform(t.Context(),
-		&hooks.Input{ModelID: "text/only"}, []chat.Message{imgMsg})
-	require.NoError(t, err)
-	require.Len(t, stripped[0].MultiContent, 1, "image must be stripped when ModelID is text-only")
-	assert.Equal(t, chat.MessagePartTypeText, stripped[0].MultiContent[0].Type)
-
-	// ModelID = multimodal — strip must NOT happen even if some other
-	// model in scope is text-only. Proves the lookup keys off ModelID.
-	passed, err := r.stripUnsupportedModalitiesTransform(t.Context(),
-		&hooks.Input{ModelID: "multi/modal"}, []chat.Message{imgMsg})
-	require.NoError(t, err)
-	assert.Equal(t, imgMsg, passed[0], "images must reach a multimodal ModelID untouched")
 }
 
 // path: a runtime with no registered transforms returns the input
@@ -183,7 +209,7 @@ func TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap(t *testing.T) {
 	sess := session.New(session.WithUserMessage("hi"))
 	msgs := []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}
 
-	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, "", msgs)
+	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, "", nil, msgs)
 	assert.Equal(t, msgs, got)
 }
 
@@ -217,7 +243,7 @@ func TestApplyBeforeLLMCallTransforms_OrderAndChain(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("hi"))
-	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, "test/mock-model",
+	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, "test/mock-model", nil,
 		[]chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}})
 
 	require.Len(t, calls, 2, "expected tag_a + tag_b to fire exactly once each")
@@ -259,7 +285,7 @@ func TestApplyBeforeLLMCallTransforms_ErrorsAreSwallowed(t *testing.T) {
 	require.NoError(t, err)
 
 	sess := session.New(session.WithUserMessage("hi"))
-	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, "test/mock-model",
+	got := r.applyBeforeLLMCallTransforms(t.Context(), sess, a, "test/mock-model", nil,
 		[]chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}})
 
 	var contents []string
@@ -306,6 +332,67 @@ func TestRunStream_StripsImagesForTextOnlyModel(t *testing.T) {
 				"image parts must be stripped before reaching a text-only model")
 		}
 	}
+}
+
+// capsOverrideProvider is a recording provider whose BaseConfig declares
+// an explicit `capabilities:` override, mimicking a model config with a
+// capabilities block.
+type capsOverrideProvider struct {
+	recordingMsgProvider
+
+	caps *latest.CapabilitiesConfig
+}
+
+func (p *capsOverrideProvider) BaseConfig() base.Config {
+	return base.Config{ModelConfig: latest.ModelConfig{Capabilities: p.caps}}
+}
+
+// TestRunStream_CapabilityOverrideWinsOverModelsDev is the end-to-end
+// regression test for the Step 3 override contract: a model that
+// models.dev catalogues as text-only but whose config declares
+// `capabilities.image: true` must NOT have its images stripped — the
+// loop resolves capabilities with the override applied and the
+// transform consumes that result instead of querying models.dev.
+func TestRunStream_CapabilityOverrideWinsOverModelsDev(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().AddContent("ok").AddStopWithUsage(1, 1).Build()
+	prov := &capsOverrideProvider{
+		recordingMsgProvider: recordingMsgProvider{mockProvider: mockProvider{id: "custom/vision", stream: stream}},
+		caps:                 &latest.CapabilitiesConfig{Image: true},
+	}
+
+	a := agent.New("root", "instructions", agent.WithModel(prov))
+	tm := team.New(team.WithAgents(a))
+
+	// models.dev claims text-only — without the override the image would
+	// be stripped (see TestRunStream_StripsImagesForTextOnlyModel).
+	store := modalityModelStore{model: &modelsdev.Model{
+		Modalities: modelsdev.Modalities{Input: []string{"text"}},
+	}}
+	r, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(store))
+	require.NoError(t, err)
+
+	sess := session.New()
+	sess.AddMessage(session.UserMessage("",
+		chat.MessagePart{Type: chat.MessagePartTypeText, Text: "describe"},
+		chat.MessagePart{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+	))
+
+	for range r.RunStream(t.Context(), sess) {
+		// drain — only the recorded provider state matters
+	}
+
+	require.NotEmpty(t, prov.got, "provider must have been called")
+	var sawImage bool
+	for _, m := range prov.got[0] {
+		for _, p := range m.MultiContent {
+			if p.Type == chat.MessagePartTypeImageURL {
+				sawImage = true
+			}
+		}
+	}
+	assert.True(t, sawImage, "explicit capabilities.image override must keep images despite a text-only models.dev record")
 }
 
 // TestRunStream_TransformErrorDoesNotBreakRun is the end-to-end smoke

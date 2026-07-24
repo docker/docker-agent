@@ -7,6 +7,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -71,22 +72,31 @@ func WithMessageTransform(name string, fn MessageTransform) Opt {
 // transforms read it via [hooks.Input.ModelID]. Calling
 // agent.Model() from a transform would re-randomize the alloy pick
 // and miss the per-tool override.
+//
+// caps is the model's already-resolved attachment capability set
+// (explicit `capabilities:` config override applied — see
+// [modelinfo.ResolveCapsFromModel]); transforms read it via
+// [hooks.Input.ModelCapabilities]. nil means the caller has no
+// capability information (e.g. the coding-harness path) and
+// capability-gated transforms must not act.
 func (r *LocalRuntime) applyBeforeLLMCallTransforms(
 	ctx context.Context,
 	sess *session.Session,
 	a *agent.Agent,
 	modelID string,
+	caps *modelinfo.ModelCapabilities,
 	msgs []chat.Message,
 ) []chat.Message {
 	if len(r.transforms) == 0 {
 		return msgs
 	}
 	in := &hooks.Input{
-		SessionID:     sess.ID,
-		AgentName:     a.Name(),
-		ModelID:       modelID,
-		HookEventName: hooks.EventBeforeLLMCall,
-		Cwd:           r.workingDir,
+		SessionID:         sess.ID,
+		AgentName:         a.Name(),
+		ModelID:           modelID,
+		ModelCapabilities: caps,
+		HookEventName:     hooks.EventBeforeLLMCall,
+		Cwd:               r.workingDir,
 	}
 	for _, t := range r.transforms {
 		out, err := t.fn(ctx, in, msgs)
