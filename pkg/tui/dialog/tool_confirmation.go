@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -361,13 +362,31 @@ func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 		return d, nil
 	}
 
-	// Walk backward from the click position to find the nearest action key.
-	// The plain text looks like: "Y yes  N no  T always allow...  A all tools"
-	// Each region starts with its uppercase action key.
-	for i := relX; i >= 0; i-- {
-		if decision, ok := toolconfirm.DecisionForAction(string(optionsPlain[i])); ok {
-			return d.executeAction(decision)
+	// The help line is built by helpKeysLine as "<KEY> <label>" segments
+	// joined with two spaces, e.g.:
+	//
+	//	"Y yes  N no  T always allow rm*  B auto-approve safe  A all tools"
+	//
+	// Map the click onto its segment and dispatch on the segment's leading
+	// action key. Labels can contain uppercase letters (the always-allow
+	// label echoes the command pattern), so scanning the clicked character
+	// itself could fire the wrong action. A click in the separator gap
+	// resolves to the segment on its left — for the B/A boundary that is
+	// also the milder action (Balanced, not Autonomous) when a click near
+	// the boundary misses.
+	start := 0
+	for start < plainLen {
+		segEnd := plainLen
+		if sep := strings.Index(optionsPlain[start:], "  "); sep >= 0 {
+			segEnd = start + sep + 2 // the separator belongs to this segment
 		}
+		if relX < segEnd {
+			if decision, ok := toolconfirm.DecisionForAction(string(optionsPlain[start])); ok {
+				return d.executeAction(decision)
+			}
+			return d, nil
+		}
+		start = segEnd
 	}
 
 	return d, nil
