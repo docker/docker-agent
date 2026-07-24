@@ -465,17 +465,41 @@ func isOSeries(m string) bool {
 type ModelCapabilities struct {
 	supportsImage bool
 	supportsPDF   bool
+	supportsAudio bool
+	supportsVideo bool
+}
+
+// SupportsImage reports whether the model accepts image attachments.
+func (mc ModelCapabilities) SupportsImage() bool {
+	return mc.supportsImage
+}
+
+// SupportsPDF reports whether the model accepts application/pdf attachments.
+func (mc ModelCapabilities) SupportsPDF() bool {
+	return mc.supportsPDF
+}
+
+// SupportsAudio reports whether the model accepts audio attachments.
+func (mc ModelCapabilities) SupportsAudio() bool {
+	return mc.supportsAudio
+}
+
+// SupportsVideo reports whether the model accepts video attachments.
+func (mc ModelCapabilities) SupportsVideo() bool {
+	return mc.supportsVideo
 }
 
 // Supports reports whether the model can accept an attachment with the given
 // MIME type.
 //
-// Only three content families are recognised:
+// Only five content families are recognised:
 //   - image/* → requires the models.dev "image" input modality
 //   - application/pdf → requires the models.dev "pdf" input modality
+//   - audio/* → requires the models.dev "audio" input modality
+//   - video/* → requires the models.dev "video" input modality
 //   - text/* → always accepted (TXT envelope is universally safe)
 //
-// Everything else (audio, video, Office binaries, …) returns false.
+// Everything else (Office binaries, …) returns false.
 func (mc ModelCapabilities) Supports(mimeType string) bool {
 	mt := strings.ToLower(mimeType)
 	switch {
@@ -483,6 +507,10 @@ func (mc ModelCapabilities) Supports(mimeType string) bool {
 		return mc.supportsImage
 	case mt == "application/pdf":
 		return mc.supportsPDF
+	case strings.HasPrefix(mt, "audio/"):
+		return mc.supportsAudio
+	case strings.HasPrefix(mt, "video/"):
+		return mc.supportsVideo
 	case strings.HasPrefix(mt, "text/"):
 		return true
 	default:
@@ -538,6 +566,8 @@ func ContextLimit(ctx context.Context, store *modelsdev.Store, id modelsdev.ID, 
 type CapsOverride struct {
 	Image bool
 	PDF   bool
+	Audio bool
+	Video bool
 }
 
 // ResolveCaps returns the model's attachment capabilities, preferring an
@@ -550,7 +580,7 @@ type CapsOverride struct {
 // versions); see [github.com/docker/docker-agent/pkg/config/latest.CapabilitiesConfig].
 func ResolveCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID, override *CapsOverride) ModelCapabilities {
 	if override != nil {
-		return CapsWith(override.Image, override.PDF)
+		return CapsWith(override.Image, override.PDF, override.Audio, override.Video)
 	}
 	return LoadCaps(ctx, store, id)
 }
@@ -613,6 +643,10 @@ func LoadCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) Mode
 			mc.supportsImage = true
 		case "pdf":
 			mc.supportsPDF = true
+		case "audio":
+			mc.supportsAudio = true
+		case "video":
+			mc.supportsVideo = true
 		}
 	}
 	return mc
@@ -621,9 +655,11 @@ func LoadCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) Mode
 // CapsWith constructs a ModelCapabilities value directly from booleans. This is
 // intended for use in tests and provider implementations that need to create a
 // capabilities value without hitting the network.
-func CapsWith(supportsImage, supportsPDF bool) ModelCapabilities {
+func CapsWith(supportsImage, supportsPDF, supportsAudio, supportsVideo bool) ModelCapabilities {
 	return ModelCapabilities{
 		supportsImage: supportsImage,
 		supportsPDF:   supportsPDF,
+		supportsAudio: supportsAudio,
+		supportsVideo: supportsVideo,
 	}
 }

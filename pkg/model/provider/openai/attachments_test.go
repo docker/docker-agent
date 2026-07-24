@@ -26,7 +26,7 @@ func TestConvertDocumentResponseInput_StrategyB64_Image(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	visionCaps := modelinfo.CapsWith(true, true)
+	visionCaps := modelinfo.CapsWith(true, true, false, false)
 	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, visionCaps)
 	require.NoError(t, err)
 	require.Len(t, parts, 1, "expected exactly one image part")
@@ -49,7 +49,7 @@ func TestConvertDocumentResponseInput_StrategyB64_PDF(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: []byte("%PDF")},
 	}
 
-	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, modelinfo.CapsWith(false, true))
+	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, modelinfo.CapsWith(false, true, false, false))
 	require.NoError(t, err)
 	require.Len(t, parts, 1)
 	require.NotNil(t, parts[0].OfInputFile)
@@ -65,7 +65,7 @@ func TestConvertDocumentResponseInput_StrategyB64_ImageDropped(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	textOnlyCaps := modelinfo.CapsWith(false, false)
+	textOnlyCaps := modelinfo.CapsWith(false, false, false, false)
 	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, textOnlyCaps)
 	require.NoError(t, err)
 	assert.Nil(t, parts, "image should be dropped for text-only model")

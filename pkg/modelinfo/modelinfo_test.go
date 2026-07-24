@@ -761,18 +761,49 @@ func TestLoadCaps_OfficeDocsNotAllowed(t *testing.T) {
 func TestCapsWith(t *testing.T) {
 	t.Parallel()
 
-	mc := CapsWith(true, false)
+	mc := CapsWith(true, false, false, false)
 	assert.True(t, mc.Supports("image/jpeg"))
 	assert.False(t, mc.Supports("application/pdf"))
 
-	mc2 := CapsWith(false, false)
+	mc2 := CapsWith(false, false, false, false)
 	assert.False(t, mc2.Supports("image/png"))
 }
 
-func TestSupports_AudioVideoRejected(t *testing.T) {
+// TestCapsWith_AudioVideo verifies the audio/video booleans passed to
+// CapsWith flow through to Supports and to the dedicated accessors, and that
+// each modality is independent of the others.
+func TestCapsWith_AudioVideo(t *testing.T) {
 	t.Parallel()
 
-	mc := CapsWith(true, true)
+	audioOnly := CapsWith(false, false, true, false)
+	assert.True(t, audioOnly.Supports("audio/mp3"))
+	assert.True(t, audioOnly.SupportsAudio())
+	assert.False(t, audioOnly.Supports("video/mp4"))
+	assert.False(t, audioOnly.SupportsVideo())
+	assert.False(t, audioOnly.Supports("image/jpeg"))
+	assert.False(t, audioOnly.Supports("application/pdf"))
+
+	videoOnly := CapsWith(false, false, false, true)
+	assert.True(t, videoOnly.Supports("video/webm"))
+	assert.True(t, videoOnly.SupportsVideo())
+	assert.False(t, videoOnly.Supports("audio/wav"))
+	assert.False(t, videoOnly.SupportsAudio())
+
+	all := CapsWith(true, true, true, true)
+	assert.True(t, all.SupportsImage())
+	assert.True(t, all.SupportsPDF())
+	assert.True(t, all.SupportsAudio())
+	assert.True(t, all.SupportsVideo())
+
+	none := CapsWith(false, false, false, false)
+	assert.False(t, none.SupportsAudio())
+	assert.False(t, none.SupportsVideo())
+}
+
+func TestSupports_AudioVideoRejectedWhenUnsupported(t *testing.T) {
+	t.Parallel()
+
+	mc := CapsWith(true, true, false, false)
 
 	for _, mime := range []string{
 		"audio/mp3",
@@ -788,4 +819,139 @@ func TestSupports_AudioVideoRejected(t *testing.T) {
 		assert.False(t, mc.Supports(mime),
 			"%q must not be supported", mime)
 	}
+}
+
+// TestLoadCaps_AudioVideoModel verifies that "audio" and "video" models.dev
+// input modalities are parsed into SupportsAudio/SupportsVideo, alongside a
+// regression check that image/pdf parsing (added earlier) is unaffected.
+func TestLoadCaps_AudioVideoModel(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {
+			Models: map[string]modelsdev.Model{
+				"gemini-2.5-pro": {
+					Name: "Gemini 2.5 Pro",
+					Modalities: modelsdev.Modalities{
+						Input:  []string{"text", "image", "audio", "video", "pdf"},
+						Output: []string{"text"},
+					},
+				},
+			},
+		},
+	}})
+
+	mc := LoadCaps(t.Context(), store, modelsdev.NewID("google", "gemini-2.5-pro"))
+
+	assert.True(t, mc.Supports("image/jpeg"), "regression: image parsing must still work")
+	assert.True(t, mc.Supports("application/pdf"), "regression: pdf parsing must still work")
+	assert.True(t, mc.Supports("audio/mp3"))
+	assert.True(t, mc.Supports("video/mp4"))
+	assert.True(t, mc.SupportsAudio())
+	assert.True(t, mc.SupportsVideo())
+}
+
+// TestLoadCaps_AudioOnlyModel verifies that a model declaring only "audio"
+// (no "video") does not also report video support, and vice versa.
+func TestLoadCaps_AudioOnlyModel(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"openai": {
+			Models: map[string]modelsdev.Model{
+				"gpt-4o-audio-preview": {
+					Name: "GPT-4o Audio",
+					Modalities: modelsdev.Modalities{
+						Input:  []string{"text", "audio"},
+						Output: []string{"text", "audio"},
+					},
+				},
+			},
+		},
+	}})
+
+	mc := LoadCaps(t.Context(), store, modelsdev.NewID("openai", "gpt-4o-audio-preview"))
+
+	assert.True(t, mc.SupportsAudio())
+	assert.False(t, mc.SupportsVideo())
+	assert.False(t, mc.SupportsImage())
+	assert.False(t, mc.SupportsPDF())
+}
+
+// TestLoadCaps_UnknownModelHasNoAudioVideo is the conservative-default
+// regression for audio/video: an uncatalogued model must not infer either
+// modality, matching the existing image/PDF posture (#2741).
+func TestLoadCaps_UnknownModelHasNoAudioVideo(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{}})
+
+	mc := LoadCaps(t.Context(), store, modelsdev.NewID("unknown", "nonexistent-model"))
+
+	assert.False(t, mc.SupportsAudio())
+	assert.False(t, mc.SupportsVideo())
+	assert.False(t, mc.SupportsImage())
+	assert.False(t, mc.SupportsPDF())
+	assert.True(t, mc.Supports("text/plain"))
+}
+
+// TestLoadCaps_MissingModalitiesHasNoAudioVideo covers a catalogued model
+// whose Modalities.Input is present but lists neither "audio" nor "video"
+// (only text/image): both new fields must stay conservative (false).
+func TestLoadCaps_MissingModalitiesHasNoAudioVideo(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"openai": {
+			Models: map[string]modelsdev.Model{
+				"gpt-4o": {
+					Name: "GPT-4o",
+					Modalities: modelsdev.Modalities{
+						Input:  []string{"text", "image"},
+						Output: []string{"text"},
+					},
+				},
+			},
+		},
+	}})
+
+	mc := LoadCaps(t.Context(), store, modelsdev.NewID("openai", "gpt-4o"))
+
+	assert.True(t, mc.SupportsImage())
+	assert.False(t, mc.SupportsAudio())
+	assert.False(t, mc.SupportsVideo())
+}
+
+// TestResolveCaps_OverrideAudioVideo verifies that CapsOverride's Audio/Video
+// fields flow through ResolveCaps and take precedence over models.dev, mirroring
+// the existing image/pdf override-precedence coverage in resolve_caps_test.go.
+func TestResolveCaps_OverrideAudioVideo(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"gemini-2.5-pro": {Modalities: modelsdev.Modalities{Input: []string{"text", "image", "audio", "video"}}},
+		}},
+	}})
+
+	// Override declares audio/video false even though the catalogue says
+	// true: the override is authoritative and wins.
+	override := &CapsOverride{Image: true, Audio: false, Video: false}
+	mc := ResolveCaps(t.Context(), store, modelsdev.NewID("google", "gemini-2.5-pro"), override)
+	assert.True(t, mc.SupportsImage())
+	assert.False(t, mc.SupportsAudio())
+	assert.False(t, mc.SupportsVideo())
+
+	// An override can also grant audio/video to an uncatalogued provider.
+	override2 := &CapsOverride{Audio: true, Video: true}
+	mc2 := ResolveCaps(t.Context(), store, modelsdev.NewID("custom-proxy", "some-model"), override2)
+	assert.True(t, mc2.SupportsAudio())
+	assert.True(t, mc2.SupportsVideo())
+	assert.False(t, mc2.SupportsImage())
+
+	// A nil override falls back to the models.dev lookup, which is fully
+	// multimodal for this model.
+	mc3 := ResolveCaps(t.Context(), store, modelsdev.NewID("google", "gemini-2.5-pro"), nil)
+	assert.True(t, mc3.SupportsAudio())
+	assert.True(t, mc3.SupportsVideo())
 }

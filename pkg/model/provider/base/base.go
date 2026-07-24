@@ -66,6 +66,10 @@ func (c *Config) TrackUsageEnabled() bool {
 // pass the result to [modelinfo.ResolveCaps] so a user-declared override wins
 // over a models.dev lookup that would otherwise miss for custom/aliased
 // providers and degrade attachments to text-only (issue #2741).
+//
+// [latest.CapabilitiesConfig] does not yet expose audio/video override flags,
+// so Audio/Video are always false here; they flow through purely from
+// models.dev detection until a later config change adds them.
 func (c *Config) CapsOverride() *modelinfo.CapsOverride {
 	caps := c.ModelConfig.Capabilities
 	if caps == nil {
