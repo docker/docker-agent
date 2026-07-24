@@ -239,8 +239,11 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	}
 
 	// Same early-failure treatment for --safety: a typo must not
-	// silently collapse to strict.
-	if !session.SafetyPolicy(f.safety).IsValid() {
+	// silently collapse to strict. Legacy policy aliases are a wire
+	// compat concern; the new flag only takes the canonical modes.
+	switch session.SafetyPolicy(f.safety) {
+	case "", session.SafetyPolicyStrict, session.SafetyPolicyBalanced, session.SafetyPolicyAutonomous:
+	default:
 		return fmt.Errorf("invalid --safety value %q (valid: strict, balanced, autonomous)", f.safety)
 	}
 
