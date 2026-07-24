@@ -167,3 +167,16 @@ func TestSafetyPatternsLoad(t *testing.T) {
 	assert.NotEmpty(t, patterns.destructive)
 	assert.NotEmpty(t, patterns.safe)
 }
+
+// A destructive-marked entry in the safe section is rejected wholesale:
+// nested children under it must never be harvested into the safe list.
+func TestCollectSafeEntries_RejectedDestructiveEntryDoesNotRecurse(t *testing.T) {
+	entries := collectSafeEntries(map[string]any{
+		"pattern":      "rm -rf <path>",
+		"blast_radius": "HIGH",
+		"children": []any{
+			map[string]any{"pattern": "rm --help", "category": "smuggled"},
+		},
+	})
+	assert.Empty(t, entries)
+}

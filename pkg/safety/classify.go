@@ -241,6 +241,11 @@ func collectSafeEntries(value any) []safePatternEntry {
 				category, _ := v["category"].(string)
 				return []safePatternEntry{{Pattern: pattern, Category: category}}
 			}
+			// A destructive entry (pattern + blast_radius) in the safe
+			// section is rejected wholesale: do not recurse into its
+			// values, or nested children could be harvested into the
+			// safe list.
+			return nil
 		}
 		var entries []safePatternEntry
 		for _, item := range v {
