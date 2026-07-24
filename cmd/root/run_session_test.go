@@ -68,9 +68,29 @@ func TestCreateLocalRuntimeAndSession_ResumeWithYoloBackfillsSafetyPolicy(t *tes
 	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
 }
 
-// An explicit stored SafetyPolicy survives a --yolo resume: the backfill
-// only applies when the policy is empty.
+// An explicit stored SafetyPolicy survives a plain resume (no flags):
+// the mode is session-scoped state.
 func TestCreateLocalRuntimeAndSession_ResumeKeepsExplicitSafetyPolicy(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewInMemorySessionStore()
+	require.NoError(t, store.AddSession(t.Context(), session.New(
+		session.WithID("existing"),
+		session.WithSafetyPolicy(session.SafetyPolicyBalanced),
+	)))
+
+	f := &runExecFlags{}
+	req := runtime.CreateSessionRequest{AgentName: "root", ResumeSessionID: "existing"}
+
+	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	require.NoError(t, err)
+	assert.Equal(t, session.SafetyPolicyBalanced, sess.SafetyPolicy)
+}
+
+// --yolo on resume escalates even a session stored with an explicit
+// non-autonomous mode: the flag is a direct user instruction for THIS
+// run, not a default that only fills a gap.
+func TestCreateLocalRuntimeAndSession_ResumeWithYoloEscalatesStoredPolicy(t *testing.T) {
 	t.Parallel()
 
 	store := session.NewInMemorySessionStore()
@@ -84,7 +104,30 @@ func TestCreateLocalRuntimeAndSession_ResumeKeepsExplicitSafetyPolicy(t *testing
 
 	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
-	assert.Equal(t, session.SafetyPolicyBalanced, sess.SafetyPolicy)
+	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
+	assert.True(t, sess.ToolsApproved)
+}
+
+// When both --safety and --yolo are given, the more explicit --safety
+// wins — same precedence as buildSessionOpts applies to new sessions.
+func TestCreateLocalRuntimeAndSession_ResumeSafetyFlagWinsOverYolo(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewInMemorySessionStore()
+	require.NoError(t, store.AddSession(t.Context(), session.New(session.WithID("existing"))))
+
+	f := &runExecFlags{}
+	req := runtime.CreateSessionRequest{
+		AgentName:       "root",
+		ResumeSessionID: "existing",
+		ToolsApproved:   true,
+		SafetyPolicy:    session.SafetyPolicyStrict,
+	}
+
+	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
+	require.NoError(t, err)
+	assert.Equal(t, session.SafetyPolicyStrict, sess.SafetyPolicy)
+	assert.False(t, sess.ToolsApproved, "explicit strict must revoke the blanket approval")
 }
 
 // A relative ref (e.g. -1) is resume-only: it must resolve against existing

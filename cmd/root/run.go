@@ -890,13 +890,20 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 		sess, err = sessStore.GetSession(ctx, resolvedID)
 		switch {
 		case err == nil:
-			// Via the options, not raw field writes: WithToolsApproved
-			// backfills SafetyPolicy=autonomous so --yolo applies to
-			// resumed sessions too, and an explicit --safety overrides
-			// whatever the stored session carried.
+			// Via the options, not raw field writes, so the legacy
+			// ToolsApproved flag and the mode stay in sync. Flags
+			// override whatever the stored session carried; --safety
+			// wins over --yolo when both are given, matching the
+			// option order buildSessionOpts applies to new sessions.
+			// The explicit escalation matters: WithToolsApproved only
+			// backfills autonomous onto an EMPTY stored policy, so
+			// --yolo on a session stored as balanced/strict would
+			// otherwise be silently discarded.
 			session.WithToolsApproved(req.ToolsApproved)(sess)
 			if req.SafetyPolicy != "" {
 				session.WithSafetyPolicy(req.SafetyPolicy)(sess)
+			} else if req.ToolsApproved {
+				session.WithSafetyPolicy(session.SafetyPolicyAutonomous)(sess)
 			}
 			sess.HideToolResults = req.HideToolResults
 
