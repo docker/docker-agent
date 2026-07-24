@@ -1165,10 +1165,18 @@ func (sm *SessionManager) ToggleToolApproval(ctx context.Context, sessionID stri
 	}
 
 	// Mirror onto the live runtime session so the dispatcher picks up
-	// the change on the next tool call, not just the next turn.
+	// the change on the next tool call, not just the next turn. If the
+	// store write fails, restore the previous mode so the live session
+	// never diverges from what a reload would produce — the caller got
+	// an error, so the toggle must not have half-happened.
 	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
+		prev := rt.session.GetSafetyPolicy()
 		setPolicy(rt.session)
-		return sm.sessionStore.UpdateSession(ctx, rt.session)
+		if err := sm.sessionStore.UpdateSession(ctx, rt.session); err != nil {
+			rt.session.SetSafetyPolicy(prev)
+			return err
+		}
+		return nil
 	}
 
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
