@@ -1159,7 +1159,6 @@ func (sm *SessionManager) ToggleToolApproval(ctx context.Context, sessionID stri
 			// toggle round-trip restores today's behavior: read-only
 			// tools auto-approve, everything else asks.
 			sess.SetSafetyPolicy("")
-			sess.SetToolsApproved(false)
 		} else {
 			sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 		}

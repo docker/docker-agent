@@ -1244,13 +1244,17 @@ func WithToolsApproved(toolsApproved bool) Opt {
 // WithSafetyPolicy sets the session's safety mode. The input is
 // normalized (legacy aliases map onto the three-mode vocabulary) and
 // ToolsApproved is kept in sync so legacy readers of that flag agree
-// with the mode.
+// with the mode. Empty means "no explicit choice" and is a no-op, so
+// the option composes with [WithToolsApproved] regardless of order
+// (--yolo callers pass ToolsApproved=true and an empty policy).
 func WithSafetyPolicy(policy SafetyPolicy) Opt {
 	return func(s *Session) {
-		s.SafetyPolicy = policy.Normalize()
-		if s.SafetyPolicy != "" {
-			s.ToolsApproved = s.SafetyPolicy == SafetyPolicyAutonomous
+		policy = policy.Normalize()
+		if policy == "" {
+			return
 		}
+		s.SafetyPolicy = policy
+		s.ToolsApproved = policy == SafetyPolicyAutonomous
 	}
 }
 
@@ -1511,19 +1515,20 @@ func (s *Session) SetToolsApproved(approved bool) {
 }
 
 // SetSafetyPolicy updates the session's safety mode under s.mu,
-// normalizing legacy aliases. ToolsApproved is synced both ways
-// (Autonomous → true, any other explicit mode → false) so a mode
-// downgrade genuinely revokes the blanket approval and serialized
-// state stays coherent for legacy readers. Runtime callers use this
-// to persist a user's mid-session mode change (e.g. opting into
-// Balanced from a confirmation prompt).
+// normalizing legacy aliases. ToolsApproved is synced in the same
+// critical section (Autonomous → true, anything else → false) so a
+// mode downgrade genuinely revokes the blanket approval, serialized
+// state stays coherent for legacy readers, and no concurrent
+// GetSafetyPolicy can observe a half-updated combination. Setting the
+// empty policy is a full reset to the legacy default (read-only tools
+// auto-approve, everything else asks). Runtime callers use this to
+// persist a user's mid-session mode change (e.g. opting into Balanced
+// from a confirmation prompt).
 func (s *Session) SetSafetyPolicy(policy SafetyPolicy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.SafetyPolicy = policy.Normalize()
-	if s.SafetyPolicy != "" {
-		s.ToolsApproved = s.SafetyPolicy == SafetyPolicyAutonomous
-	}
+	s.ToolsApproved = s.SafetyPolicy == SafetyPolicyAutonomous
 }
 
 // AppendPermissionAllow adds toolName to the session's Allow list if not

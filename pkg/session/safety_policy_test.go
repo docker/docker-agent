@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSafetyPolicy_IsValid(t *testing.T) {
@@ -117,4 +118,33 @@ func TestSetSafetyPolicy_MidSession(t *testing.T) {
 	assert.Equal(t, SafetyPolicyStrict, s.SafetyPolicy)
 	assert.False(t, s.ToolsApproved, "downgrading from autonomous must revoke the blanket approval")
 	assert.False(t, s.IsToolsApproved())
+}
+
+// Setting the empty policy is a full reset to the legacy default: the
+// blanket approval must be revoked in the same critical section, or a
+// concurrent GetSafetyPolicy could still observe autonomous.
+func TestSetSafetyPolicy_EmptyResetsToLegacyDefault(t *testing.T) {
+	t.Parallel()
+	s := New(WithSafetyPolicy(SafetyPolicyAutonomous))
+	require.True(t, s.ToolsApproved)
+
+	s.SetSafetyPolicy("")
+	assert.Equal(t, SafetyPolicy(""), s.SafetyPolicy)
+	assert.False(t, s.ToolsApproved, "reset must revoke the blanket approval")
+	assert.Equal(t, SafetyPolicy(""), s.GetSafetyPolicy())
+	assert.False(t, s.IsToolsApproved())
+}
+
+// The option form treats empty as "no explicit choice" so it composes
+// with WithToolsApproved regardless of order (--yolo callers pass
+// ToolsApproved=true and an empty policy).
+func TestWithSafetyPolicy_EmptyIsNoOp(t *testing.T) {
+	t.Parallel()
+	s := New(
+		WithToolsApproved(true),
+		WithSafetyPolicy(""),
+	)
+	assert.Equal(t, SafetyPolicyAutonomous, s.SafetyPolicy,
+		"the --yolo backfill must survive an empty WithSafetyPolicy")
+	assert.True(t, s.ToolsApproved)
 }
