@@ -11,15 +11,15 @@ import (
 
 // testCaps is a small helper that builds a ModelCapabilities directly.
 func visionCaps() modelinfo.ModelCapabilities {
-	return modelinfo.CapsWith(true, true)
+	return modelinfo.CapsWith(true, true, false, false)
 }
 
 func textOnlyCaps() modelinfo.ModelCapabilities {
-	return modelinfo.CapsWith(false, false)
+	return modelinfo.CapsWith(false, false, false, false)
 }
 
 func imageNoPDFCaps() modelinfo.ModelCapabilities {
-	return modelinfo.CapsWith(true, false)
+	return modelinfo.CapsWith(true, false, false, false)
 }
 
 func TestDecide(t *testing.T) {
