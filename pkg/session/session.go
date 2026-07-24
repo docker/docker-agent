@@ -1519,11 +1519,16 @@ func (s *Session) SetToolsApproved(approved bool) {
 // critical section (Autonomous → true, anything else → false) so a
 // mode downgrade genuinely revokes the blanket approval, serialized
 // state stays coherent for legacy readers, and no concurrent
-// GetSafetyPolicy can observe a half-updated combination. Setting the
-// empty policy is a full reset to the legacy default (read-only tools
-// auto-approve, everything else asks). Runtime callers use this to
-// persist a user's mid-session mode change (e.g. opting into Balanced
-// from a confirmation prompt).
+// GetSafetyPolicy can observe a half-updated combination.
+//
+// SetSafetyPolicy("") is NOT a no-op: it is a full reset to the legacy
+// default (read-only tools auto-approve, everything else asks) and
+// CLEARS ToolsApproved, demoting a --yolo session. Callers that want
+// to keep a blanket approval must pass [SafetyPolicyAutonomous]; the
+// [WithSafetyPolicy] option is the empty-means-unset variant.
+//
+// Runtime callers use this to persist a user's mid-session mode change
+// (e.g. opting into Balanced from a confirmation prompt).
 func (s *Session) SetSafetyPolicy(policy SafetyPolicy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
