@@ -123,17 +123,3 @@ func CommandArg(input map[string]any) (string, bool) {
 	}
 	return "", false
 }
-
-// ClassFromBlastRadius collapses a blast-radius level onto the
-// three-value taxonomy: "safe" → safe, low/medium/high → destructive,
-// anything else → unknown.
-func ClassFromBlastRadius(radius string) Class {
-	switch radius {
-	case "safe":
-		return ClassSafe
-	case "low", "medium", "high":
-		return ClassDestructive
-	default:
-		return ClassUnknown
-	}
-}

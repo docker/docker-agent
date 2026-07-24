@@ -137,15 +137,6 @@ func TestLabelMetadata(t *testing.T) {
 	assert.Equal(t, map[string]string{MetaSafetyLabel: "unknown"}, minimal)
 }
 
-func TestClassFromBlastRadius(t *testing.T) {
-	assert.Equal(t, ClassSafe, ClassFromBlastRadius("safe"))
-	assert.Equal(t, ClassDestructive, ClassFromBlastRadius("low"))
-	assert.Equal(t, ClassDestructive, ClassFromBlastRadius("medium"))
-	assert.Equal(t, ClassDestructive, ClassFromBlastRadius("high"))
-	assert.Equal(t, ClassUnknown, ClassFromBlastRadius(""))
-	assert.Equal(t, ClassUnknown, ClassFromBlastRadius("bogus"))
-}
-
 func TestCommandArg(t *testing.T) {
 	cmd, ok := CommandArg(map[string]any{"cmd": "ls"})
 	require.True(t, ok)
