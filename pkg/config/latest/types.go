@@ -1272,7 +1272,8 @@ func (c *CostConfig) validate() error {
 // catalogue). It exists for models the catalogue does not describe correctly:
 // custom OpenAI-compatible providers, local models (e.g. Ollama), and model
 // versions that have been dropped from the catalogue. Without it, such models
-// fall back to text-only and their image/PDF attachments are silently dropped.
+// fall back to text-only and their image/PDF/audio/video attachments are
+// silently dropped.
 //
 // When set, the declared flags are authoritative and no models.dev lookup is
 // performed. When nil (the default), capabilities are detected from models.dev.
@@ -1283,6 +1284,10 @@ type CapabilitiesConfig struct {
 	Image bool `json:"image,omitempty"`
 	// PDF reports whether the model accepts PDF (application/pdf) attachments.
 	PDF bool `json:"pdf,omitempty"`
+	// Audio reports whether the model accepts audio attachments.
+	Audio bool `json:"audio,omitempty"`
+	// Video reports whether the model accepts video attachments.
+	Video bool `json:"video,omitempty"`
 }
 
 // IsFirstAvailable reports whether this model is a first-available selector
