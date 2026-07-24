@@ -636,9 +636,15 @@ func LoadCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) Mode
 		return ModelCapabilities{}
 	}
 
+	return capsFromModalities(model.Modalities.Input)
+}
+
+// capsFromModalities maps a models.dev input-modality list to the capability
+// booleans it grants. Unknown modality names are ignored.
+func capsFromModalities(input []string) ModelCapabilities {
 	var mc ModelCapabilities
-	for _, input := range model.Modalities.Input {
-		switch strings.ToLower(input) {
+	for _, modality := range input {
+		switch strings.ToLower(modality) {
 		case "image":
 			mc.supportsImage = true
 		case "pdf":
@@ -650,6 +656,22 @@ func LoadCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) Mode
 		}
 	}
 	return mc
+}
+
+// ResolveCapsFromModel applies the same precedence contract as [ResolveCaps]
+// — an explicit override wins, otherwise capabilities derive from the
+// models.dev record — for callers that fetch models through their own store
+// abstraction (e.g. the runtime's ModelStore interface) instead of a concrete
+// [*modelsdev.Store]. A nil model yields the same conservative text-only
+// default as a store miss in [LoadCaps].
+func ResolveCapsFromModel(model *modelsdev.Model, override *CapsOverride) ModelCapabilities {
+	if override != nil {
+		return CapsWith(override.Image, override.PDF, override.Audio, override.Video)
+	}
+	if model == nil {
+		return ModelCapabilities{}
+	}
+	return capsFromModalities(model.Modalities.Input)
 }
 
 // CapsWith constructs a ModelCapabilities value directly from booleans. This is

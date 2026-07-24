@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	ragtypes "github.com/docker/docker-agent/pkg/rag/types"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
@@ -800,14 +801,19 @@ func (r *LocalRuntime) runTurn(
 	}
 
 	// Apply registered before_llm_call message transforms (e.g.
-	// strip_unsupported_modalities for text-only models, plus any
-	// embedder-supplied redactor / scrubber registered via
-	// WithMessageTransform). Runs after the gate so a transform
-	// failure cannot waste the gate's allow verdict. modelID is
-	// passed explicitly so transforms see the actual model the
-	// loop chose (per-tool override + alloy-mode selection),
-	// not whatever a fresh agent.Model() call would re-randomize.
-	messages = r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID.String(), messages)
+	// strip_unsupported_modalities for models lacking media input
+	// support, plus any embedder-supplied redactor / scrubber
+	// registered via WithMessageTransform). Runs after the gate so a
+	// transform failure cannot waste the gate's allow verdict. modelID
+	// and the resolved capabilities are passed explicitly so transforms
+	// see the actual model the loop chose (per-tool override +
+	// alloy-mode selection) with its explicit `capabilities:` config
+	// override applied — not whatever a fresh agent.Model() call would
+	// re-randomize, and not an independent models.dev lookup that would
+	// ignore the override.
+	modelCfg := model.BaseConfig()
+	caps := modelinfo.ResolveCapsFromModel(m, modelCfg.CapsOverride())
+	messages = r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID.String(), &caps, messages)
 
 	// Try primary model with fallback chain if configured
 	agentTools = r.toolDeferrals.MarkAt(sess.ID, lastToolCallID(messages), agentTools)

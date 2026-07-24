@@ -61,7 +61,9 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	if rewritten != nil {
 		messages = rewritten
 	}
-	messages = r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID, messages)
+	// Harness labels are not models.dev identities and carry no resolved
+	// capabilities; capability-gated transforms skip on nil.
+	messages = r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID, nil, messages)
 	prompt := strings.TrimSpace(harnessPrompt(messages))
 	if prompt == "" {
 		msg := "cannot run external harness without a user prompt"

@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelerrors"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/session"
@@ -2992,11 +2993,12 @@ func TestSessionDenyOverridesYoloMode(t *testing.T) {
 	require.False(t, executed, "expected tool to NOT be executed in --yolo mode because session Deny wins")
 }
 
-func TestStripImageContent(t *testing.T) {
+func TestStripUnsupportedMediaContent(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
+		caps     modelinfo.ModelCapabilities // zero value = text-only
 		messages []chat.Message
 		want     []chat.Message
 	}{
@@ -3180,12 +3182,58 @@ func TestStripImageContent(t *testing.T) {
 				{Role: chat.MessageRoleAssistant, Content: "got it"},
 			},
 		},
+		{
+			name: "strips audio and video documents, preserves supported image",
+			caps: modelinfo.CapsWith(true, false, false, false),
+			messages: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeText, Text: "listen and watch"},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.wav", MimeType: "audio/wav", Source: chat.DocumentSource{InlineData: []byte{0x52}}}},
+						{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp4", MimeType: "video/mp4", Source: chat.DocumentSource{InlineData: []byte{0x00}}}},
+					},
+				},
+			},
+			want: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeText, Text: "listen and watch"},
+						{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+					},
+				},
+			},
+		},
+		{
+			name: "retains audio and video when supported",
+			caps: modelinfo.CapsWith(false, false, true, true),
+			messages: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp3", MimeType: "audio/mpeg", Source: chat.DocumentSource{InlineData: []byte{0x49}}}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.webm", MimeType: "video/webm", Source: chat.DocumentSource{InlineData: []byte{0x1a}}}},
+					},
+				},
+			},
+			want: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp3", MimeType: "audio/mpeg", Source: chat.DocumentSource{InlineData: []byte{0x49}}}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.webm", MimeType: "video/webm", Source: chat.DocumentSource{InlineData: []byte{0x1a}}}},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := stripImageContent(tt.messages)
+			got := stripUnsupportedMediaContent(t.Context(), tt.messages, tt.caps)
 			require.Equal(t, tt.want, got)
 		})
 	}

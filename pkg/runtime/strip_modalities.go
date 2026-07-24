@@ -3,90 +3,74 @@ package runtime
 import (
 	"context"
 	"log/slog"
-	"slices"
+	"strings"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
-	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
 // BuiltinStripUnsupportedModalities is the name of the runtime-shipped
-// before_llm_call message transform that drops image content from the
-// outgoing messages when the agent's current model doesn't list image
-// in its input modalities. It's the runtime-shipped peer of
-// [BuiltinCacheResponse] (a stop hook) — the constant exists mostly
-// for log filtering and diagnostics.
+// before_llm_call message transform that drops image, audio, and video
+// content from the outgoing messages when the resolved capabilities of
+// the agent's current model don't cover that media kind. It's the
+// runtime-shipped peer of [BuiltinCacheResponse] (a stop hook) — the
+// constant exists mostly for log filtering and diagnostics.
 //
-// Sending images to a text-only model produces hard provider errors
-// (HTTP 400 from OpenAI, "image input is not supported" from
-// Anthropic text variants, etc.); promoting the strip into a
-// registered transform replaces an inline branch in runStreamLoop and
-// opens the door to a family of message-mutating transforms
-// (redactors, scrubbers, ...).
+// Sending unsupported media produces hard provider errors (HTTP 400
+// from OpenAI, "image input is not supported" from Anthropic text
+// variants, etc.); promoting the strip into a registered transform
+// replaced an inline branch in runStreamLoop and opened the door to a
+// family of message-mutating transforms (redactors, scrubbers, ...).
 const BuiltinStripUnsupportedModalities = "strip_unsupported_modalities"
 
-// modalityImage is the canonical models.dev modality name for image
-// input. A constant instead of a literal so a typo trips a compile
-// error and the contract with [modelsdev.Modalities.Input] is
-// discoverable from the runtime side.
-const modalityImage = "image"
-
 // stripUnsupportedModalitiesTransform is the [MessageTransform]
-// registered under [BuiltinStripUnsupportedModalities]. It looks up
-// the model definition from [hooks.Input.ModelID] (populated by the
-// runtime with the actual model the loop chose, including per-tool
-// overrides and alloy-mode selection) and applies
-// [stripImageContent] when image is missing from the model's input
-// modalities.
+// registered under [BuiltinStripUnsupportedModalities]. It consumes
+// the already-resolved capability set from
+// [hooks.Input.ModelCapabilities] — populated by the loop for the
+// model it actually chose (per-tool override + alloy-mode selection),
+// with any explicit `capabilities:` config override applied — and
+// drops the image/audio/video parts that model does not support.
 //
-// The transform is a no-op for every "we don't know enough to act"
-// case (missing ModelID, models.dev miss, empty modalities, image
-// already supported): erring on the side of "send the messages
-// as-is" matches the previous inline behavior in runStreamLoop,
-// where an unknown model also fell through. Each fall-through emits
-// a Debug log so operators can tell strip_unsupported_modalities
-// from a transform that's silently inactive.
+// The transform must NOT resolve capabilities itself: a models.dev
+// lookup here would ignore explicit config overrides, so a model the
+// user declared `capabilities.audio: true` for would have its audio
+// stripped anyway. Unknown models resolve (upstream, via
+// [modelinfo.ResolveCapsFromModel]) to the conservative text-only
+// default and lose their media parts — matching the attachment
+// pipeline, which would drop them at provider conversion regardless.
+//
+// A nil capability set means the dispatching path had nothing to
+// resolve against (e.g. a coding-harness label, or an embedder-built
+// Input); the messages then pass through untouched, with a Debug log
+// so operators can tell that apart from a silently inactive transform.
 func (r *LocalRuntime) stripUnsupportedModalitiesTransform(
 	ctx context.Context,
 	in *hooks.Input,
 	msgs []chat.Message,
 ) ([]chat.Message, error) {
-	if in == nil || in.ModelID == "" {
-		slog.DebugContext(ctx, "strip_unsupported_modalities: skipping, no ModelID on input")
+	if in == nil || in.ModelCapabilities == nil {
+		slog.DebugContext(ctx, "strip_unsupported_modalities: skipping, no resolved capabilities on input")
 		return msgs, nil
 	}
-	id, err := modelsdev.ParseID(in.ModelID)
-	if err != nil {
-		slog.DebugContext(ctx, "strip_unsupported_modalities: skipping, invalid ModelID",
-			"model_id", in.ModelID, "error", err)
+	mc := *in.ModelCapabilities
+	if mc.SupportsImage() && mc.SupportsAudio() && mc.SupportsVideo() {
 		return msgs, nil
 	}
-	m, err := r.modelsStore.GetModel(ctx, id)
-	if err != nil || m == nil {
-		// Unknown model: keep the previous (inline) behavior of
-		// passing messages through untouched. The model call will
-		// surface any modality mismatch as a provider error.
-		slog.DebugContext(ctx, "strip_unsupported_modalities: skipping, model definition unavailable",
-			"model_id", in.ModelID, "error", err)
-		return msgs, nil
-	}
-	if len(m.Modalities.Input) == 0 || slices.Contains(m.Modalities.Input, modalityImage) {
-		return msgs, nil
-	}
-	return stripImageContent(msgs), nil
+	return stripUnsupportedMediaContent(ctx, msgs, mc), nil
 }
 
-// stripImageContent returns a copy of messages with all image-related
-// content removed. Text content is preserved; image parts in
-// [chat.Message.MultiContent] are filtered out, and file attachments
-// with image MIME types are dropped.
+// stripUnsupportedMediaContent returns a copy of messages with the
+// media parts (image/audio/video) the model does not support removed.
+// Text parts, PDFs, and any other non-media content are preserved,
+// and the relative order of the surviving parts is unchanged.
 //
 // Lives next to [stripUnsupportedModalitiesTransform] (rather than in
-// streaming.go where it originated) so the builtin's storage,
-// transform, and helper are co-located. Kept as an unexported helper
-// because the only legitimate caller is the transform itself — direct
-// use bypasses the modality check.
-func stripImageContent(messages []chat.Message) []chat.Message {
+// streaming.go where its image-only ancestor originated) so the
+// builtin's registration, transform, and helper are co-located. Kept
+// as an unexported helper because the only legitimate caller is the
+// transform itself — direct use bypasses the capability resolution.
+func stripUnsupportedMediaContent(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities) []chat.Message {
 	result := make([]chat.Message, len(messages))
 	for i, msg := range messages {
 		result[i] = msg
@@ -97,31 +81,77 @@ func stripImageContent(messages []chat.Message) []chat.Message {
 
 		var filtered []chat.MessagePart
 		for _, part := range msg.MultiContent {
-			switch part.Type {
-			case chat.MessagePartTypeImageURL:
-				// Drop image URL parts entirely.
+			if kind := partMediaKind(part); kind != "" && !supportsMediaKind(mc, kind) {
+				slog.DebugContext(ctx, "strip_unsupported_modalities: stripped media part",
+					"kind", kind,
+					"role", msg.Role,
+					"reason", "model does not support "+kind+" input")
 				continue
-			case chat.MessagePartTypeFile:
-				// Drop file parts that are images.
-				if part.File != nil && chat.IsImageMimeType(part.File.MimeType) {
-					continue
-				}
-			case chat.MessagePartTypeDocument:
-				// Drop Document parts that carry image InlineData.
-				if part.Document != nil && chat.IsImageMimeType(part.Document.MimeType) {
-					continue
-				}
 			}
 			filtered = append(filtered, part)
 		}
 
 		if len(filtered) != len(msg.MultiContent) {
 			result[i].MultiContent = filtered
-			slog.Debug("Stripped image content from message",
+			slog.DebugContext(ctx, "Stripped media content from message",
 				"role", msg.Role,
 				"original_parts", len(msg.MultiContent),
 				"remaining_parts", len(filtered))
 		}
 	}
 	return result
+}
+
+// partMediaKind classifies a message part into the media kind gated by
+// model input modalities: "image", "audio", or "video". Everything
+// else — text parts, PDFs, unknown binaries — returns "" and is never
+// touched by this transform (PDF gating stays at provider conversion).
+// Legacy ImageURL parts carry no MIME type and are images by
+// construction.
+func partMediaKind(part chat.MessagePart) string {
+	switch part.Type {
+	case chat.MessagePartTypeImageURL:
+		return "image"
+	case chat.MessagePartTypeFile:
+		if part.File != nil {
+			return mimeMediaKind(part.File.MimeType)
+		}
+	case chat.MessagePartTypeDocument:
+		if part.Document != nil {
+			return mimeMediaKind(part.Document.MimeType)
+		}
+	}
+	return ""
+}
+
+// mimeMediaKind maps a MIME type to "image", "audio", or "video" by
+// family prefix — the same classification
+// [modelinfo.ModelCapabilities.Supports] uses — or "" for any other
+// type.
+func mimeMediaKind(mimeType string) string {
+	switch mt := strings.ToLower(mimeType); {
+	case strings.HasPrefix(mt, "image/"):
+		return "image"
+	case strings.HasPrefix(mt, "audio/"):
+		return "audio"
+	case strings.HasPrefix(mt, "video/"):
+		return "video"
+	default:
+		return ""
+	}
+}
+
+// supportsMediaKind reports whether the resolved capability set covers
+// a media kind produced by [partMediaKind].
+func supportsMediaKind(mc modelinfo.ModelCapabilities, kind string) bool {
+	switch kind {
+	case "image":
+		return mc.SupportsImage()
+	case "audio":
+		return mc.SupportsAudio()
+	case "video":
+		return mc.SupportsVideo()
+	default:
+		return true
+	}
 }
