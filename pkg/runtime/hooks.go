@@ -39,7 +39,6 @@ func (r *LocalRuntime) buildHooksExecutors() {
 			AddEnvironmentInfo: a.AddEnvironmentInfo(),
 			AddPromptFiles:     a.AddPromptFiles(),
 			RedactSecrets:      a.RedactSecrets(),
-			SaferShell:         a.SaferShell(),
 		})
 		cfg = applyAutoInjectors(cfg, r.autoInjectors)
 		cfg = applyCacheDefault(cfg, a)
@@ -464,10 +463,12 @@ const (
 	ApprovalSourcePreToolUseHookAllow     = "pre_tool_use_hook_allow"
 	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
 	ApprovalSourceReadOnlyHint            = "readonly_hint"
+	ApprovalSourceModeBalanced            = "mode_balanced"
+	ApprovalSourceModeStrict              = "mode_strict"
+	ApprovalSourceModeLegacy              = "mode_legacy"
 	ApprovalSourceUserApproved            = "user_approved"
-	ApprovalSourceUserApprovedSession     = "user_approved_session"
-	ApprovalSourceUserApprovedSafe        = "user_approved_safe"
-	ApprovalSourceUserApprovedSafer       = "user_approved_safer"
+	ApprovalSourceUserApprovedBalanced    = "user_approved_balanced"
+	ApprovalSourceUserApprovedAutonomous  = "user_approved_autonomous"
 	ApprovalSourceUserApprovedTool        = "user_approved_tool"
 	ApprovalSourceUserRejected            = "user_rejected"
 	ApprovalSourceContextCanceled         = "context_canceled"
@@ -483,11 +484,12 @@ func (r *LocalRuntime) executeOnToolApprovalDecisionHooks(
 	sess *session.Session,
 	a *agent.Agent,
 	toolCall tools.ToolCall,
-	decision, source string,
+	decision, source, safetyLabel string,
 ) {
 	input := toolexec.NewHooksInput(sess, toolCall)
 	input.ApprovalDecision = decision
 	input.ApprovalSource = source
+	input.SafetyLabel = safetyLabel
 	r.dispatchHook(ctx, a, hooks.EventOnToolApprovalDecision, input, nil)
 }
 

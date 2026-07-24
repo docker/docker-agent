@@ -274,10 +274,10 @@ type Input struct {
 	ToolUseID    string         `json:"tool_use_id,omitempty"`
 	ToolInput    map[string]any `json:"tool_input,omitempty"`
 
-	// SafetyPolicy mirrors the session's safety preference (see
-	// [github.com/docker/docker-agent/pkg/session.SafetyPolicy]) on
-	// tool-call events. Empty ⇒ derive from ToolsApproved. Typed as
-	// string to avoid a session dep.
+	// SafetyPolicy mirrors the session's effective safety mode
+	// (strict / balanced / autonomous, empty for the legacy default;
+	// see [github.com/docker/docker-agent/pkg/session.SafetyPolicy])
+	// on tool-call events. Typed as string to avoid a session dep.
 	SafetyPolicy string `json:"safety_policy,omitempty"`
 
 	// PostToolUse / ToolResponseTransform: the tool's textual output.
@@ -348,13 +348,16 @@ type Input struct {
 
 	// OnToolApprovalDecision specific: the verdict resolved by the
 	// approval chain ("allow", "deny", "canceled") and a stable
-	// classifier for what produced it ("yolo",
-	// "session_permissions_allow", "session_permissions_deny",
-	// "team_permissions_allow", "team_permissions_deny",
-	// "readonly_hint", "user_approved", "user_approved_session",
-	// "user_approved_tool", "user_rejected", "context_canceled").
+	// source label for what produced it (see the ApprovalSource*
+	// constants in pkg/runtime for the full set — mode_*, yolo,
+	// session_permissions_*, team_permissions_*, pre_tool_use_hook_*,
+	// readonly_hint, user_*, context_canceled, non_interactive_deny).
 	ApprovalDecision string `json:"approval_decision,omitempty"`
 	ApprovalSource   string `json:"approval_source,omitempty"`
+	// SafetyLabel is the runtime classifier's verdict for the call
+	// (safe / destructive / unknown). Populated even when the call
+	// auto-approved so audit sinks always see the classification.
+	SafetyLabel string `json:"safety_label,omitempty"`
 
 	// AfterLLMCall specific: per-turn token usage and the computed USD
 	// cost of the model response the runtime just received. Both are

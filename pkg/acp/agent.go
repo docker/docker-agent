@@ -748,7 +748,7 @@ func (a *Agent) handleToolCallConfirmation(ctx context.Context, acpSess *Session
 	case "allow":
 		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeApprove})
 	case "allow-always":
-		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeApproveSession})
+		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeApproveAutonomous})
 	case "reject":
 		acpSess.rt.Resume(ctx, runtime.ResumeRequest{Type: runtime.ResumeTypeReject})
 	default:

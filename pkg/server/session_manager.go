@@ -927,18 +927,18 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 	}
 
 	// Mirror + persist mid-turn session mutations synchronously —
-	// PersistenceObserver only persists on OnRunStart.
+	// PersistenceObserver only persists on OnRunStart. Legacy verbs
+	// (approve-session, approve-safe, approve-safer) are normalized
+	// so old clients keep working.
+	resumeType := runtime.NormalizeResumeType(runtime.ResumeType(confirmation))
 	if rt.session != nil {
 		mutated := false
-		switch runtime.ResumeType(confirmation) {
-		case runtime.ResumeTypeApproveSafe:
-			rt.session.SetSafetyPolicy(session.SafetyPolicySafeAuto)
+		switch resumeType {
+		case runtime.ResumeTypeApproveBalanced:
+			rt.session.SetSafetyPolicy(session.SafetyPolicyBalanced)
 			mutated = true
-		case runtime.ResumeTypeApproveSafer:
-			rt.session.SetSafetyPolicy(session.SafetyPolicySafer)
-			mutated = true
-		case runtime.ResumeTypeApproveSession:
-			rt.session.SetToolsApproved(true)
+		case runtime.ResumeTypeApproveAutonomous:
+			rt.session.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 			mutated = true
 		case runtime.ResumeTypeApproveTool:
 			// Skip when toolName is empty — the dispatcher's own
@@ -957,7 +957,7 @@ func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirma
 	}
 
 	rt.runtime.Resume(ctx, runtime.ResumeRequest{
-		Type:     runtime.ResumeType(confirmation),
+		Type:     resumeType,
 		Reason:   reason,
 		ToolName: toolName,
 	})
@@ -1145,17 +1145,38 @@ func (sm *SessionManager) ResumeElicitation(ctx context.Context, sessionID, acti
 	return rt.runtime.ResumeElicitation(ctx, tools.ElicitationAction(action), content, elicitationID)
 }
 
-// ToggleToolApproval toggles the tool approval mode for a session.
+// ToggleToolApproval toggles the legacy blanket tool approval for a
+// session. Routed through the safety mode (Autonomous ⟷ Strict) so the
+// two signals cannot disagree and a toggle-off genuinely revokes the
+// blanket approval.
 func (sm *SessionManager) ToggleToolApproval(ctx context.Context, sessionID string) error {
 	sm.mux.Lock()
 	defer sm.mux.Unlock()
+
+	setPolicy := func(sess *session.Session) {
+		if sess.GetSafetyPolicy() == session.SafetyPolicyAutonomous {
+			// Back to the legacy default (not explicit Strict) so a
+			// toggle round-trip restores today's behavior: read-only
+			// tools auto-approve, everything else asks.
+			sess.SetSafetyPolicy("")
+			sess.SetToolsApproved(false)
+		} else {
+			sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
+		}
+	}
+
+	// Mirror onto the live runtime session so the dispatcher picks up
+	// the change on the next tool call, not just the next turn.
+	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
+		setPolicy(rt.session)
+		return sm.sessionStore.UpdateSession(ctx, rt.session)
+	}
+
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
 	if err != nil {
 		return err
 	}
-
-	sess.ToolsApproved = !sess.ToolsApproved
-
+	setPolicy(sess)
 	return sm.sessionStore.UpdateSession(ctx, sess)
 }
 

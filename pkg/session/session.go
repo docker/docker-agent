@@ -33,32 +33,62 @@ const (
 	toolResultTruncationMarker = "\n[...tool result truncated: middle omitted...]\n"
 )
 
-// SafetyPolicy is the per-session safety preference. It is data only:
-// the runtime forwards it to hooks via [hooks.Input.SafetyPolicy] and
-// classifiers (e.g. safer_shell) adapt on it. Empty ⇒ derive from
-// ToolsApproved (true ⇒ unsafe, false ⇒ strict).
+// SafetyPolicy is the per-session safety mode. The runtime routes
+// tool calls to allow/ask through the (mode × safety-label) table in
+// pkg/runtime/toolexec; custom permission rules always win over the
+// mode.
+//
+// Empty means "never explicitly chosen": tool calls behave like the
+// pre-modes default (read-only-annotated tools auto-approve, everything
+// else asks), except that ToolsApproved=true upgrades it to Autonomous.
 type SafetyPolicy string
 
 const (
-	// SafetyPolicyUnsafe: --yolo / ToolsApproved=true equivalent.
-	// Classifiers stay silent, tool calls auto-approve.
-	SafetyPolicyUnsafe SafetyPolicy = "unsafe"
-	// SafetyPolicySafer: auto-approve except classifier-flagged
-	// destructive calls (blast_radius low/medium/high).
-	SafetyPolicySafer SafetyPolicy = "safer"
-	// SafetyPolicySafeAuto: auto-approve shell calls the classifier
-	// positively recognises as safe (blast_radius=safe); ask on
-	// destructive and unknown. Sits between safer and strict:
-	// safer waves through unknown too, strict prompts for safe.
-	SafetyPolicySafeAuto SafetyPolicy = "safe-auto"
-	// SafetyPolicyStrict: today's no-yolo CLI default — prompt for
-	// anything not auto-approved by a checker rule.
+	// SafetyPolicyStrict prompts on every tool call, including
+	// read-only ones. Only custom allow rules silence a prompt.
 	SafetyPolicyStrict SafetyPolicy = "strict"
+	// SafetyPolicyBalanced auto-approves classifier-safe calls
+	// (safe-listed shell commands, read-only-annotated tools); asks
+	// on destructive and unknown.
+	SafetyPolicyBalanced SafetyPolicy = "balanced"
+	// SafetyPolicyAutonomous auto-approves every call (legacy yolo).
+	// Only custom deny/ask rules and preempt hooks still gate.
+	SafetyPolicyAutonomous SafetyPolicy = "autonomous"
 )
 
+// Legacy safety-policy values accepted on input (API requests,
+// persisted sessions) and normalized by [SafetyPolicy.Normalize].
+// Never emitted by new code.
+const (
+	legacyPolicyUnsafe   SafetyPolicy = "unsafe"
+	legacyPolicySafer    SafetyPolicy = "safer"
+	legacyPolicySafeAuto SafetyPolicy = "safe-auto"
+)
+
+// Normalize maps legacy policy values onto the current three-mode
+// vocabulary: unsafe → autonomous, safer / safe-auto → balanced
+// (the cautious mapping: old "safer" also waved unknown calls
+// through, balanced asks about them). Current values and empty pass
+// through unchanged; unrecognised values collapse to strict so an
+// unknown input can never widen approval.
+func (p SafetyPolicy) Normalize() SafetyPolicy {
+	switch p {
+	case "", SafetyPolicyStrict, SafetyPolicyBalanced, SafetyPolicyAutonomous:
+		return p
+	case legacyPolicyUnsafe:
+		return SafetyPolicyAutonomous
+	case legacyPolicySafer, legacyPolicySafeAuto:
+		return SafetyPolicyBalanced
+	default:
+		return SafetyPolicyStrict
+	}
+}
+
+// IsValid accepts current values, the legacy aliases, and empty.
 func (p SafetyPolicy) IsValid() bool {
 	switch p {
-	case "", SafetyPolicyUnsafe, SafetyPolicySafer, SafetyPolicySafeAuto, SafetyPolicyStrict:
+	case "", SafetyPolicyStrict, SafetyPolicyBalanced, SafetyPolicyAutonomous,
+		legacyPolicyUnsafe, legacyPolicySafer, legacyPolicySafeAuto:
 		return true
 	}
 	return false
@@ -1201,25 +1231,25 @@ func WithMessages(messages []Item) Opt {
 
 // WithToolsApproved is the legacy --yolo setter. Prefer
 // [WithSafetyPolicy]. With toolsApproved=true and no explicit
-// SafetyPolicy, pins the policy to [SafetyPolicyUnsafe].
+// SafetyPolicy, pins the policy to [SafetyPolicyAutonomous].
 func WithToolsApproved(toolsApproved bool) Opt {
 	return func(s *Session) {
 		s.ToolsApproved = toolsApproved
 		if toolsApproved && s.SafetyPolicy == "" {
-			s.SafetyPolicy = SafetyPolicyUnsafe
+			s.SafetyPolicy = SafetyPolicyAutonomous
 		}
 	}
 }
 
-// WithSafetyPolicy sets the session's safety preference.
-// [SafetyPolicyUnsafe] also flips ToolsApproved=true so legacy branches
-// on ToolsApproved keep working. The other modes leave ToolsApproved
-// alone — set both if you want auto-approve + selective gating.
+// WithSafetyPolicy sets the session's safety mode. The input is
+// normalized (legacy aliases map onto the three-mode vocabulary) and
+// ToolsApproved is kept in sync so legacy readers of that flag agree
+// with the mode.
 func WithSafetyPolicy(policy SafetyPolicy) Opt {
 	return func(s *Session) {
-		s.SafetyPolicy = policy
-		if policy == SafetyPolicyUnsafe {
-			s.ToolsApproved = true
+		s.SafetyPolicy = policy.Normalize()
+		if s.SafetyPolicy != "" {
+			s.ToolsApproved = s.SafetyPolicy == SafetyPolicyAutonomous
 		}
 	}
 }
@@ -1431,12 +1461,26 @@ func (s *Session) EmbeddedSubSessionCost() float64 {
 	return cost
 }
 
-// IsToolsApproved returns a consistent snapshot of the ToolsApproved flag.
-// This is safe to call concurrently with session mutations.
+// IsToolsApproved reports whether every tool call auto-approves. It is
+// derived from the effective safety mode — [SafetyPolicyAutonomous] —
+// so a mode downgrade takes effect even if the legacy ToolsApproved
+// flag was left behind by an older writer. Safe for concurrent use.
 func (s *Session) IsToolsApproved() bool {
+	return s.GetSafetyPolicy() == SafetyPolicyAutonomous
+}
+
+// GetSafetyPolicy returns the session's effective safety mode: the
+// normalized explicit policy or, when none was ever chosen,
+// [SafetyPolicyAutonomous] if the legacy ToolsApproved flag is set and
+// the empty legacy default otherwise. Safe for concurrent use.
+func (s *Session) GetSafetyPolicy() SafetyPolicy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.ToolsApproved
+	policy := s.SafetyPolicy.Normalize()
+	if policy == "" && s.ToolsApproved {
+		return SafetyPolicyAutonomous
+	}
+	return policy
 }
 
 // ClonePermissions returns a deep copy of the session's PermissionsConfig.
@@ -1454,29 +1498,31 @@ func (s *Session) SetPermissions(perms *PermissionsConfig) {
 	s.Permissions = perms
 }
 
-// SetToolsApproved updates ToolsApproved under s.mu so concurrent readers
-// (e.g. background-agent goroutines calling IsToolsApproved) observe a
-// consistent value. It mirrors WithToolsApproved's SafetyPolicy sync.
+// SetToolsApproved is the legacy --yolo toggle. Prefer
+// [Session.SetSafetyPolicy]; this maps true → Autonomous (when no
+// explicit mode was chosen) so the two signals cannot disagree.
 func (s *Session) SetToolsApproved(approved bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ToolsApproved = approved
 	if approved && s.SafetyPolicy == "" {
-		s.SafetyPolicy = SafetyPolicyUnsafe
+		s.SafetyPolicy = SafetyPolicyAutonomous
 	}
 }
 
-// SetSafetyPolicy updates the session's SafetyPolicy under s.mu.
-// Mirrors WithSafetyPolicy: setting unsafe also flips ToolsApproved
-// so legacy branches on ToolsApproved keep working. Runtime callers
-// use this to persist a user's mid-session mode change (e.g. opting
-// into safe-auto from a confirmation prompt).
+// SetSafetyPolicy updates the session's safety mode under s.mu,
+// normalizing legacy aliases. ToolsApproved is synced both ways
+// (Autonomous → true, any other explicit mode → false) so a mode
+// downgrade genuinely revokes the blanket approval and serialized
+// state stays coherent for legacy readers. Runtime callers use this
+// to persist a user's mid-session mode change (e.g. opting into
+// Balanced from a confirmation prompt).
 func (s *Session) SetSafetyPolicy(policy SafetyPolicy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.SafetyPolicy = policy
-	if policy == SafetyPolicyUnsafe {
-		s.ToolsApproved = true
+	s.SafetyPolicy = policy.Normalize()
+	if s.SafetyPolicy != "" {
+		s.ToolsApproved = s.SafetyPolicy == SafetyPolicyAutonomous
 	}
 }
 

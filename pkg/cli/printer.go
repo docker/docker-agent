@@ -21,7 +21,12 @@ import (
 type ConfirmationResult string
 
 const (
-	ConfirmationApprove        ConfirmationResult = "approve"
+	ConfirmationApprove ConfirmationResult = "approve"
+	// ConfirmationApproveBalanced switches the session to the Balanced
+	// safety mode (auto-approve classifier-safe calls).
+	ConfirmationApproveBalanced ConfirmationResult = "approve_balanced"
+	// ConfirmationApproveSession switches the session to the
+	// Autonomous safety mode (approve everything).
 	ConfirmationApproveSession ConfirmationResult = "approve_session"
 	ConfirmationReject         ConfirmationResult = "reject"
 	ConfirmationAbort          ConfirmationResult = "abort"
@@ -86,7 +91,7 @@ func (p *Printer) PrintToolCall(toolCall tools.ToolCall) {
 func (p *Printer) PrintToolCallWithConfirmation(ctx context.Context, toolCall tools.ToolCall, rd io.Reader) ConfirmationResult {
 	p.Printf("\n%s\n", bold("🛠️ Tool call requires confirmation 🛠️"))
 	p.PrintToolCall(toolCall)
-	p.Printf("\n%s", bold("Can I run this tool? ([y]es/[a]ll/[n]o): "))
+	p.Printf("\n%s", bold("Can I run this tool? ([y]es/[b]alanced/[a]ll/[n]o): "))
 
 	if !isatty.IsTerminal(os.Stdout.Fd()) {
 		return ConfirmationReject
@@ -109,6 +114,9 @@ func (p *Printer) PrintToolCallWithConfirmation(ctx context.Context, toolCall to
 			case 'y', 'Y':
 				p.Print(bold("Yes 👍"))
 				return ConfirmationApprove
+			case 'b', 'B':
+				p.Print(bold("Yes, auto-approve safe commands 👍"))
+				return ConfirmationApproveBalanced
 			case 'a', 'A':
 				p.Print(bold("Yes to all 👍"))
 				return ConfirmationApproveSession
@@ -134,6 +142,8 @@ func (p *Printer) PrintToolCallWithConfirmation(ctx context.Context, toolCall to
 	switch text {
 	case "y":
 		return ConfirmationApprove
+	case "b":
+		return ConfirmationApproveBalanced
 	case "a":
 		return ConfirmationApproveSession
 	case "n":

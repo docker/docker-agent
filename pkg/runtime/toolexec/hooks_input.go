@@ -10,16 +10,16 @@ import (
 
 // NewHooksInput builds a [hooks.Input] from the common tool-call fields.
 // [hooks.Executor.Dispatch] auto-fills Cwd from the executor's working
-// directory, so callers don't set it here. SafetyPolicy is forwarded
-// as a plain string; the runtime does not act on it — classifiers
-// (e.g. safer_shell) read it and adapt.
+// directory, so callers don't set it here. SafetyPolicy carries the
+// session's effective (normalized) safety mode as a plain string so
+// hooks can adapt to it.
 func NewHooksInput(sess *session.Session, toolCall tools.ToolCall) *hooks.Input {
 	return &hooks.Input{
 		SessionID:    sess.ID,
 		ToolName:     toolCall.Function.Name,
 		ToolUseID:    toolCall.ID,
 		ToolInput:    ParseToolInput(toolCall.Function.Arguments),
-		SafetyPolicy: string(sess.SafetyPolicy),
+		SafetyPolicy: string(sess.GetSafetyPolicy()),
 	}
 }
 

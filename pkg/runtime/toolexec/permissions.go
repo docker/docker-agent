@@ -2,6 +2,8 @@ package toolexec
 
 import (
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/safety"
+	"github.com/docker/docker-agent/pkg/session"
 )
 
 // PermissionOutcome is the resolved decision after evaluating the full
@@ -20,61 +22,71 @@ const (
 
 // PermissionReason explains *why* a [PermissionDecision] was reached.
 // Callers use it to produce accurate log messages and to know which
-// auto-approval path was taken (yolo, checker rule, read-only hint, or
-// default).
+// stage produced the verdict (custom rule vs. safety mode).
 type PermissionReason int
 
 const (
-	// ReasonYolo: --yolo (sess.ToolsApproved) auto-approved the tool.
-	ReasonYolo PermissionReason = iota
 	// ReasonChecker: a configured permission checker (session-level or
-	// team-level) produced a definitive Allow/Deny/ForceAsk verdict.
-	// PermissionDecision.Source identifies which checker.
-	ReasonChecker
-	// ReasonReadOnlyHint: no checker matched and the tool's ReadOnlyHint
-	// annotation auto-approved it.
-	ReasonReadOnlyHint
-	// ReasonDefault: nothing matched; the user must confirm.
-	ReasonDefault
+	// team-level custom rules) produced a definitive Allow/Deny/Ask
+	// verdict. PermissionDecision.Source identifies which checker.
+	ReasonChecker PermissionReason = iota
+	// ReasonMode: no custom rule matched; the session's safety mode
+	// was applied against the call's safety label.
+	ReasonMode
 )
 
-// NamedChecker pairs a [permissions.Checker] with a human-readable source
-// label (e.g. "session permissions", "permissions configuration") used to
-// construct denial messages and debug logs.
+// Tier identifies which layer a permission checker belongs to. Session
+// rules are direct user intent (interactive grants, the session
+// permissions API); team rules come from the agent YAML and user-global
+// config. The tiers differ in one way: a session `ask:` rule always
+// prompts, while a team `ask:` rule yields to a user-chosen
+// auto-approving mode (Balanced / Autonomous).
+type Tier int
+
+const (
+	TierSession Tier = iota
+	TierTeam
+)
+
+// NamedChecker pairs a [permissions.Checker] with its [Tier] and a
+// human-readable source label (e.g. "session permissions",
+// "permissions configuration") used in denial messages and debug logs.
 type NamedChecker struct {
 	Checker *permissions.Checker
 	Source  string
+	Tier    Tier
 }
 
 // PermissionDecision is the result of [Decide]: an outcome plus the
-// reason and (when the reason is [ReasonChecker]) the source label of the
-// checker that produced it.
+// reason and the source that produced it — a checker label when the
+// reason is [ReasonChecker], an ApprovalSource* constant when the
+// reason is [ReasonMode].
 type PermissionDecision struct {
 	Outcome PermissionOutcome
 	Reason  PermissionReason
 	Source  string
 }
 
-// Decide resolves the final permission outcome for a tool call by walking
-// the configured pipeline in priority order:
+// Decide resolves the permission outcome for a tool call:
 //
-//  1. checkers (in order; typically session-level first, then team-level)
-//     — the first checker that returns Allow / Deny / ForceAsk wins.
-//     However, if the outcome is ForceAsk and yoloApproved is true,
-//     YOLO overrides ForceAsk and auto-allows the call.
-//  2. yoloApproved (--yolo) — auto-allow everything else.
-//  3. readOnlyHint — auto-allow.
-//  4. default — Ask.
+//  1. Custom rules, walked in checker order (session tier first, then
+//     team tier). Deny and Allow win outright — a deny rule blocks
+//     even Autonomous, an allow rule silences even Strict. An explicit
+//     ask rule prompts, except that a team-tier ask yields to
+//     Balanced/Autonomous (the user's chosen mode outranks the agent
+//     author's advisory).
+//  2. No rule matched: the (mode × label) table via [applyMode].
 //
-// Decide is pure (no I/O, no side effects) so the entire approval matrix
-// can be exhaustively unit-tested without a runtime.
+// Decide is pure (no I/O, no side effects) so the entire approval
+// matrix can be exhaustively unit-tested without a runtime.
 func Decide(
-	yoloApproved bool,
+	mode session.SafetyPolicy,
+	label safety.Label,
 	checkers []NamedChecker,
 	toolName string,
 	toolArgs map[string]any,
-	readOnlyHint bool,
 ) PermissionDecision {
+	autoApproving := mode == session.SafetyPolicyBalanced || mode == session.SafetyPolicyAutonomous
 	for _, pc := range checkers {
 		switch pc.Checker.CheckWithArgs(toolName, toolArgs) {
 		case permissions.Deny:
@@ -82,21 +94,54 @@ func Decide(
 		case permissions.Allow:
 			return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonChecker, Source: pc.Source}
 		case permissions.ForceAsk:
-			if yoloApproved {
-				return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonYolo}
+			if pc.Tier == TierSession || !autoApproving {
+				return PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonChecker, Source: pc.Source}
 			}
-			return PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonChecker, Source: pc.Source}
+			// Team-tier ask is advisory under Balanced/Autonomous;
+			// fall through to the mode.
 		case permissions.Ask:
 			// No explicit match at this level; fall through to next checker.
 		}
 	}
+	return applyMode(mode, label)
+}
 
-	if yoloApproved {
-		return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonYolo}
+// applyMode implements the (mode × label) → verdict table:
+//
+//	              safe     destructive   unknown
+//	strict        ask      ask           ask
+//	balanced      ALLOW    ask           ask
+//	autonomous    ALLOW    ALLOW         ALLOW
+//	"" (legacy)   ask*     ask           ask
+//
+// (*) the legacy default — a session whose mode was never explicitly
+// chosen — additionally auto-approves annotation-safe (read-only
+// hinted) calls, but only AFTER the default pre_tool_use hook chain
+// has had its turn; see the dispatcher's approveAndRun. That keeps the
+// pre-modes contract: hooks can veto read-only calls, and read-only
+// tools never prompt. Unrecognised modes are treated as strict so an
+// invalid value can never widen approval.
+func applyMode(mode session.SafetyPolicy, label safety.Label) PermissionDecision {
+	switch mode {
+	case session.SafetyPolicyAutonomous:
+		return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonMode, Source: ApprovalSourceYolo}
+	case session.SafetyPolicyBalanced:
+		if label.Class == safety.ClassSafe {
+			return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonMode, Source: ApprovalSourceModeBalanced}
+		}
+		return PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonMode, Source: ApprovalSourceModeBalanced}
+	case session.SafetyPolicyStrict:
+		return PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonMode, Source: ApprovalSourceModeStrict}
+	default:
+		return PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonMode, Source: ApprovalSourceModeLegacy}
 	}
+}
 
-	if readOnlyHint {
-		return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonReadOnlyHint}
-	}
-	return PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonDefault}
+// legacyReadOnlyAutoApprove reports whether the legacy default mode
+// auto-approves this call: no mode was ever chosen and the tool
+// advertises itself read-only via annotations. Classifier-derived
+// safety deliberately does not qualify — the legacy default predates
+// the classifier and must not widen.
+func legacyReadOnlyAutoApprove(mode session.SafetyPolicy, label safety.Label) bool {
+	return mode == "" && label.Class == safety.ClassSafe && label.Origin == safety.OriginAnnotation
 }

@@ -56,6 +56,6 @@ type ConfirmModel struct {
 func (c *ConfirmModel) Render(width int) []string {
 	lines := []string{Truncate(StWarning().Render("● Approve tool call"), width)}
 	lines = append(lines, RenderTool(c.View, width)...)
-	lines = append(lines, Truncate(StMuted().Render("[y] yes   [a] always this tool   [s] whole session   [n] no"), width))
+	lines = append(lines, Truncate(StMuted().Render("[y] yes   [a] always this tool   [b] auto-approve safe   [s] whole session   [n] no"), width))
 	return lines
 }

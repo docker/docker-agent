@@ -15,11 +15,14 @@ func TestIsValidResumeType(t *testing.T) {
 		want bool
 	}{
 		{"approve", ResumeTypeApprove, true},
+		{"approve-balanced", ResumeTypeApproveBalanced, true},
+		{"approve-autonomous", ResumeTypeApproveAutonomous, true},
+		{"approve-tool", ResumeTypeApproveTool, true},
+		{"reject", ResumeTypeReject, true},
+		// Legacy verbs stay accepted for older clients.
 		{"approve-session", ResumeTypeApproveSession, true},
 		{"approve-safe", ResumeTypeApproveSafe, true},
 		{"approve-safer", ResumeTypeApproveSafer, true},
-		{"approve-tool", ResumeTypeApproveTool, true},
-		{"reject", ResumeTypeReject, true},
 		{"empty", ResumeType(""), false},
 		{"unknown", ResumeType("yolo"), false},
 	}
@@ -29,6 +32,25 @@ func TestIsValidResumeType(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, IsValidResumeType(tt.in))
 		})
+	}
+}
+
+func TestNormalizeResumeType(t *testing.T) {
+	t.Parallel()
+
+	cases := map[ResumeType]ResumeType{
+		ResumeTypeApprove:           ResumeTypeApprove,
+		ResumeTypeApproveBalanced:   ResumeTypeApproveBalanced,
+		ResumeTypeApproveAutonomous: ResumeTypeApproveAutonomous,
+		ResumeTypeApproveTool:       ResumeTypeApproveTool,
+		ResumeTypeReject:            ResumeTypeReject,
+		ResumeTypeApproveSession:    ResumeTypeApproveAutonomous,
+		ResumeTypeApproveSafe:       ResumeTypeApproveBalanced,
+		ResumeTypeApproveSafer:      ResumeTypeApproveBalanced,
+		ResumeType("bogus"):         ResumeType("bogus"),
+	}
+	for in, want := range cases {
+		assert.Equalf(t, want, NormalizeResumeType(in), "NormalizeResumeType(%q)", in)
 	}
 }
 
@@ -44,9 +66,8 @@ func TestValidResumeTypes(t *testing.T) {
 
 	assert.ElementsMatch(t, []ResumeType{
 		ResumeTypeApprove,
-		ResumeTypeApproveSession,
-		ResumeTypeApproveSafe,
-		ResumeTypeApproveSafer,
+		ResumeTypeApproveBalanced,
+		ResumeTypeApproveAutonomous,
 		ResumeTypeApproveTool,
 		ResumeTypeReject,
 	}, got)
@@ -63,28 +84,26 @@ func TestResumeApproveHelpers(t *testing.T) {
 		assert.Empty(t, r.ToolName)
 	})
 
-	t.Run("approve-session", func(t *testing.T) {
+	t.Run("approve-balanced", func(t *testing.T) {
+		t.Parallel()
+		r := ResumeApproveBalanced()
+		assert.Equal(t, ResumeTypeApproveBalanced, r.Type)
+		assert.Empty(t, r.Reason)
+		assert.Empty(t, r.ToolName)
+	})
+
+	t.Run("approve-autonomous", func(t *testing.T) {
+		t.Parallel()
+		r := ResumeApproveAutonomous()
+		assert.Equal(t, ResumeTypeApproveAutonomous, r.Type)
+		assert.Empty(t, r.Reason)
+		assert.Empty(t, r.ToolName)
+	})
+
+	t.Run("approve-session is a deprecated alias for autonomous", func(t *testing.T) {
 		t.Parallel()
 		r := ResumeApproveSession()
-		assert.Equal(t, ResumeTypeApproveSession, r.Type)
-		assert.Empty(t, r.Reason)
-		assert.Empty(t, r.ToolName)
-	})
-
-	t.Run("approve-safe", func(t *testing.T) {
-		t.Parallel()
-		r := ResumeApproveSafe()
-		assert.Equal(t, ResumeTypeApproveSafe, r.Type)
-		assert.Empty(t, r.Reason)
-		assert.Empty(t, r.ToolName)
-	})
-
-	t.Run("approve-safer", func(t *testing.T) {
-		t.Parallel()
-		r := ResumeApproveSafer()
-		assert.Equal(t, ResumeTypeApproveSafer, r.Type)
-		assert.Empty(t, r.Reason)
-		assert.Empty(t, r.ToolName)
+		assert.Equal(t, ResumeTypeApproveAutonomous, r.Type)
 	})
 
 	t.Run("approve-tool", func(t *testing.T) {

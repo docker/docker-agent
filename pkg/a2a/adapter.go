@@ -76,7 +76,7 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		if existing, err := sessStore.GetSession(ctx, sessionID); err == nil && existing != nil {
 			sess = existing
 			sess.AddMessage(session.UserMessage(message))
-			sess.ToolsApproved = true
+			sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
 			sess.NonInteractive = true
 		} else {
 			workingDir, _ := os.Getwd()

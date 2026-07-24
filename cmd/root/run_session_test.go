@@ -52,8 +52,7 @@ func TestCreateLocalRuntimeAndSession_ExplicitExistingIDResumes(t *testing.T) {
 }
 
 // Resuming with --yolo a session created without it backfills
-// SafetyPolicy=unsafe (issue #3479), so safer_shell stays silent like on
-// fresh --yolo sessions.
+// SafetyPolicy=autonomous (issue #3479), matching fresh --yolo sessions.
 func TestCreateLocalRuntimeAndSession_ResumeWithYoloBackfillsSafetyPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -66,7 +65,7 @@ func TestCreateLocalRuntimeAndSession_ResumeWithYoloBackfillsSafetyPolicy(t *tes
 	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
 	assert.True(t, sess.ToolsApproved)
-	assert.Equal(t, session.SafetyPolicyUnsafe, sess.SafetyPolicy)
+	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
 }
 
 // An explicit stored SafetyPolicy survives a --yolo resume: the backfill
@@ -77,7 +76,7 @@ func TestCreateLocalRuntimeAndSession_ResumeKeepsExplicitSafetyPolicy(t *testing
 	store := session.NewInMemorySessionStore()
 	require.NoError(t, store.AddSession(t.Context(), session.New(
 		session.WithID("existing"),
-		session.WithSafetyPolicy(session.SafetyPolicySafer),
+		session.WithSafetyPolicy(session.SafetyPolicyBalanced),
 	)))
 
 	f := &runExecFlags{}
@@ -85,7 +84,7 @@ func TestCreateLocalRuntimeAndSession_ResumeKeepsExplicitSafetyPolicy(t *testing
 
 	_, sess, err := f.createLocalRuntimeAndSession(t.Context(), newSessionTestLoadResult(), req, store)
 	require.NoError(t, err)
-	assert.Equal(t, session.SafetyPolicySafer, sess.SafetyPolicy)
+	assert.Equal(t, session.SafetyPolicyBalanced, sess.SafetyPolicy)
 }
 
 // A relative ref (e.g. -1) is resume-only: it must resolve against existing

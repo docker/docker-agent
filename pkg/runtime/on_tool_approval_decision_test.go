@@ -64,7 +64,7 @@ func TestExecuteOnToolApprovalDecisionHooks_ForwardsVerdictAndSource(t *testing.
 			Arguments: `{"path":"/tmp/x"}`,
 		},
 	}
-	r.executeOnToolApprovalDecisionHooks(t.Context(), sess, a, tc, ApprovalDecisionAllow, ApprovalSourceReadOnlyHint)
+	r.executeOnToolApprovalDecisionHooks(t.Context(), sess, a, tc, ApprovalDecisionAllow, ApprovalSourceReadOnlyHint, "safe")
 
 	got := rb.snapshot()
 	require.Len(t, got, 1)
@@ -73,6 +73,7 @@ func TestExecuteOnToolApprovalDecisionHooks_ForwardsVerdictAndSource(t *testing.
 	assert.Equal(t, "call-1", in.ToolUseID)
 	assert.Equal(t, ApprovalDecisionAllow, in.ApprovalDecision)
 	assert.Equal(t, ApprovalSourceReadOnlyHint, in.ApprovalSource)
+	assert.Equal(t, "safe", in.SafetyLabel)
 }
 
 // TestApprovalSourceMappersAreStable pins the stable classifier

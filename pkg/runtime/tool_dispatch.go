@@ -55,7 +55,9 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 }
 
 // permissionCheckers returns the ordered list of permission checkers to
-// evaluate (session-level first, then team-level).
+// evaluate (session-level first, then team-level). The tiers matter:
+// session ask rules beat every safety mode, team ask rules yield to
+// Balanced/Autonomous — see [toolexec.Decide].
 func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.NamedChecker {
 	var checkers []toolexec.NamedChecker
 	if perms := sess.ClonePermissions(); perms != nil {
@@ -66,12 +68,14 @@ func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.Name
 				Deny:  perms.Deny,
 			}),
 			Source: "session permissions",
+			Tier:   toolexec.TierSession,
 		})
 	}
 	if tc := r.team.Permissions(); tc != nil {
 		checkers = append(checkers, toolexec.NamedChecker{
 			Checker: tc,
 			Source:  "permissions configuration",
+			Tier:    toolexec.TierTeam,
 		})
 	}
 	return checkers
@@ -126,8 +130,8 @@ func (h *hookDispatcher) NotifyUserInput(ctx context.Context, sessionID, label s
 	h.r.executeOnUserInputHooks(ctx, sessionID, label)
 }
 
-func (h *hookDispatcher) NotifyApprovalDecision(ctx context.Context, sess *session.Session, a *agent.Agent, tc tools.ToolCall, decision, source string) {
-	h.r.executeOnToolApprovalDecisionHooks(ctx, sess, a, tc, decision, source)
+func (h *hookDispatcher) NotifyApprovalDecision(ctx context.Context, sess *session.Session, a *agent.Agent, tc tools.ToolCall, decision, source, safetyLabel string) {
+	h.r.executeOnToolApprovalDecisionHooks(ctx, sess, a, tc, decision, source, safetyLabel)
 }
 
 // allowSourceFor maps a permission-checker source label to the

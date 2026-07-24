@@ -281,6 +281,11 @@ func (d *toolConfirmationDialog) executeAction(decision toolconfirm.Decision) (l
 			core.CmdHandler(CloseDialogMsg{}),
 			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveTool.Resume(d.permissionPattern, "")}),
 		)
+	case toolconfirm.ApproveBalanced:
+		return d, tea.Sequence(
+			core.CmdHandler(CloseDialogMsg{}),
+			core.CmdHandler(RuntimeResumeMsg{Request: toolconfirm.ApproveBalanced.Resume("", "")}),
+		)
 	case toolconfirm.ApproveSession:
 		d.sessionState.SetYoloMode(true)
 		return d, tea.Sequence(
