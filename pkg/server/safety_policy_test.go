@@ -93,3 +93,18 @@ func TestToggleToolApproval_RoundTripsThroughSafetyMode(t *testing.T) {
 	assert.Equal(t, session.SafetyPolicy(""), sess.GetSafetyPolicy())
 	assert.False(t, sess.IsToolsApproved())
 }
+
+// An explicit balanced choice must survive a toggle round-trip instead
+// of being discarded for the legacy default.
+func TestToggleToolApproval_RestoresExplicitMode(t *testing.T) {
+	t.Parallel()
+	sess := session.New(session.WithID("s3"), session.WithSafetyPolicy(session.SafetyPolicyBalanced))
+	sm := newTestSessionManager(t, sess, &resumeRecordingRuntime{})
+
+	require.NoError(t, sm.ToggleToolApproval(t.Context(), sess.ID))
+	assert.Equal(t, session.SafetyPolicyAutonomous, sess.GetSafetyPolicy())
+
+	require.NoError(t, sm.ToggleToolApproval(t.Context(), sess.ID))
+	assert.Equal(t, session.SafetyPolicyBalanced, sess.GetSafetyPolicy())
+	assert.False(t, sess.IsToolsApproved())
+}

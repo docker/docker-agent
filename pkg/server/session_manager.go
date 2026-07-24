@@ -1146,34 +1146,23 @@ func (sm *SessionManager) ResumeElicitation(ctx context.Context, sessionID, acti
 }
 
 // ToggleToolApproval toggles the legacy blanket tool approval for a
-// session. Routed through the safety mode (Autonomous ⟷ Strict) so the
-// two signals cannot disagree and a toggle-off genuinely revokes the
-// blanket approval.
+// session. Routed through the safety mode (see [session.Session.ToggleYolo])
+// so the two signals cannot disagree, a toggle-off genuinely revokes the
+// blanket approval, and an explicit Balanced/Strict choice survives a
+// toggle round-trip.
 func (sm *SessionManager) ToggleToolApproval(ctx context.Context, sessionID string) error {
 	sm.mux.Lock()
 	defer sm.mux.Unlock()
 
-	setPolicy := func(sess *session.Session) {
-		if sess.GetSafetyPolicy() == session.SafetyPolicyAutonomous {
-			// Back to the legacy default (not explicit Strict) so a
-			// toggle round-trip restores today's behavior: read-only
-			// tools auto-approve, everything else asks.
-			sess.SetSafetyPolicy("")
-		} else {
-			sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
-		}
-	}
-
 	// Mirror onto the live runtime session so the dispatcher picks up
 	// the change on the next tool call, not just the next turn. If the
-	// store write fails, restore the previous mode so the live session
-	// never diverges from what a reload would produce — the caller got
-	// an error, so the toggle must not have half-happened.
+	// store write fails, toggle back (ToggleYolo is its own inverse) so
+	// the live session never diverges from what a reload would produce —
+	// the caller got an error, so the toggle must not have half-happened.
 	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
-		prev := rt.session.GetSafetyPolicy()
-		setPolicy(rt.session)
+		rt.session.ToggleYolo()
 		if err := sm.sessionStore.UpdateSession(ctx, rt.session); err != nil {
-			rt.session.SetSafetyPolicy(prev)
+			rt.session.ToggleYolo()
 			return err
 		}
 		return nil
@@ -1183,7 +1172,7 @@ func (sm *SessionManager) ToggleToolApproval(ctx context.Context, sessionID stri
 	if err != nil {
 		return err
 	}
-	setPolicy(sess)
+	sess.ToggleYolo()
 	return sm.sessionStore.UpdateSession(ctx, sess)
 }
 

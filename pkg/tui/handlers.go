@@ -421,11 +421,7 @@ func (m *appModel) handleSwitchToAgentByIndex(index int) (tea.Model, tea.Cmd) {
 // as the server's ToggleToolApproval.
 func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
 	sess := m.application.Session()
-	if sess.GetSafetyPolicy() == session.SafetyPolicyAutonomous {
-		sess.SetSafetyPolicy("")
-	} else {
-		sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
-	}
+	sess.ToggleYolo()
 	m.sessionState.SetYoloMode(sess.IsToolsApproved())
 	return m.forwardChat(messages.SessionToggleChangedMsg{})
 }

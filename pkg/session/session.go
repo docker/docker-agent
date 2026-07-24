@@ -218,6 +218,12 @@ type Session struct {
 	// [SafetyPolicy] type doc for the three modes and empty-value semantics.
 	SafetyPolicy SafetyPolicy `json:"safety_policy,omitempty"`
 
+	// PriorSafetyPolicy remembers the mode that was active before a yolo
+	// toggle escalated to Autonomous, so toggling off restores it instead
+	// of discarding an explicit Balanced/Strict choice. Managed by
+	// [Session.ToggleYolo]; empty outside a toggle escalation.
+	PriorSafetyPolicy SafetyPolicy `json:"prior_safety_policy,omitempty"`
+
 	// NonInteractive indicates the session is running in a non-interactive context
 	// (e.g. MCP server, A2A adapter, evaluation framework) where there is no user
 	// to provide input. This is distinct from ToolsApproved which can also be set
@@ -1533,6 +1539,32 @@ func (s *Session) SetSafetyPolicy(policy SafetyPolicy) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.SafetyPolicy = policy.Normalize()
+	s.ToolsApproved = s.SafetyPolicy == SafetyPolicyAutonomous
+	// An explicit choice invalidates the yolo-toggle memory: toggling
+	// off later must not resurrect a mode the user has since replaced.
+	s.PriorSafetyPolicy = ""
+}
+
+// ToggleYolo flips the session between Autonomous and the mode that was
+// active before the escalation, so an explicit Balanced/Strict choice
+// survives a toggle round-trip. A session that was never escalated from
+// a named mode drops back to the legacy default (""). The method is its
+// own inverse, which callers use to roll back a toggle whose
+// persistence failed.
+func (s *Session) ToggleYolo() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.SafetyPolicy.Normalize()
+	if current == "" && s.ToolsApproved {
+		current = SafetyPolicyAutonomous
+	}
+	if current == SafetyPolicyAutonomous {
+		s.SafetyPolicy = s.PriorSafetyPolicy.Normalize()
+		s.PriorSafetyPolicy = ""
+	} else {
+		s.PriorSafetyPolicy = current
+		s.SafetyPolicy = SafetyPolicyAutonomous
+	}
 	s.ToolsApproved = s.SafetyPolicy == SafetyPolicyAutonomous
 }
 

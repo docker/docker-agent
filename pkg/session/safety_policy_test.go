@@ -148,3 +148,78 @@ func TestWithSafetyPolicy_EmptyIsNoOp(t *testing.T) {
 		"the --yolo backfill must survive an empty WithSafetyPolicy")
 	assert.True(t, s.ToolsApproved)
 }
+
+// ToggleYolo must restore the mode that was active before the
+// escalation: an explicit balanced/strict choice survives a toggle
+// round-trip instead of resetting to the legacy default.
+func TestToggleYolo_RestoresPriorMode(t *testing.T) {
+	t.Parallel()
+	s := New(WithSafetyPolicy(SafetyPolicyBalanced))
+
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicyAutonomous, s.GetSafetyPolicy())
+	assert.True(t, s.IsToolsApproved())
+
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicyBalanced, s.GetSafetyPolicy())
+	assert.False(t, s.IsToolsApproved())
+	assert.Equal(t, SafetyPolicy(""), s.PriorSafetyPolicy, "toggle memory must be consumed")
+}
+
+// A session that never chose a named mode keeps the historical
+// contract: toggle-off lands on the legacy default, not strict.
+func TestToggleYolo_LegacyRoundTrip(t *testing.T) {
+	t.Parallel()
+	s := New()
+
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicyAutonomous, s.GetSafetyPolicy())
+
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicy(""), s.GetSafetyPolicy())
+	assert.False(t, s.ToolsApproved)
+}
+
+// A legacy --yolo session (raw flag, no explicit policy) toggles off
+// to the legacy default.
+func TestToggleYolo_LegacyToolsApprovedSession(t *testing.T) {
+	t.Parallel()
+	s := New(WithToolsApproved(true))
+	require.Equal(t, SafetyPolicyAutonomous, s.GetSafetyPolicy())
+
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicy(""), s.GetSafetyPolicy())
+	assert.False(t, s.ToolsApproved)
+}
+
+// An explicit SetSafetyPolicy invalidates the toggle memory: toggling
+// off later must not resurrect a mode the user has since replaced.
+func TestToggleYolo_ExplicitSetClearsMemory(t *testing.T) {
+	t.Parallel()
+	s := New(WithSafetyPolicy(SafetyPolicyBalanced))
+	s.ToggleYolo()
+	require.Equal(t, SafetyPolicyBalanced, s.PriorSafetyPolicy)
+
+	s.SetSafetyPolicy(SafetyPolicyStrict)
+	assert.Equal(t, SafetyPolicy(""), s.PriorSafetyPolicy)
+
+	s.ToggleYolo()
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicyStrict, s.GetSafetyPolicy(),
+		"round-trip must land on the replacing mode, not the stale one")
+}
+
+// ToggleYolo is its own inverse — the server relies on this to roll
+// back a toggle whose persistence failed.
+func TestToggleYolo_Involution(t *testing.T) {
+	t.Parallel()
+	s := New(WithSafetyPolicy(SafetyPolicyBalanced))
+	s.ToggleYolo() // escalate: autonomous, remembering balanced
+
+	// A failed off-toggle rolled back by toggling again must restore
+	// the exact pre-rollback state, memory included.
+	s.ToggleYolo()
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicyAutonomous, s.GetSafetyPolicy())
+	assert.Equal(t, SafetyPolicyBalanced, s.PriorSafetyPolicy)
+}
