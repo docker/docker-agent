@@ -346,24 +346,28 @@ func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 		return d, nil
 	}
 
-	// Render the help keys and strip ANSI to get plain text for
-	// hit-testing. RenderHelpKeys center-aligns within contentWidth, so
-	// the stripped string already carries the centering spaces — trim
-	// them, or the first segment would start on padding and clicks on
-	// the leading action key would dispatch on a space and no-op.
+	// Hit-test against the line the user actually saw: take the clicked
+	// row from the rendered dialog and locate the options text inside
+	// it. Reconstructing the left offset from frame sizes plus the
+	// centering padding is fragile — any extra inset between the frame
+	// and the help line shifts every click.
 	_, contentWidth := d.dialogDimensions()
-	options := d.renderOptions(contentWidth)
-	optionsPlain := strings.TrimSpace(ansi.Strip(options))
+	optionsPlain := strings.TrimSpace(ansi.Strip(d.renderOptions(contentWidth)))
+	if optionsPlain == "" {
+		return d, nil
+	}
+	renderedLines := strings.Split(ansi.Strip(renderedDialog), "\n")
+	rowIdx := msg.Y - dialogRow
+	if rowIdx < 0 || rowIdx >= len(renderedLines) {
+		return d, nil
+	}
+	contentStart := strings.Index(renderedLines[rowIdx], optionsPlain)
+	if contentStart < 0 {
+		return d, nil
+	}
 
-	// Content starts after left border + padding.
-	frameLeft := styles.DialogStyle.GetBorderLeftSize() + styles.DialogStyle.GetPaddingLeft()
-
-	// Re-derive the centering offset from the trimmed content; lipgloss
-	// puts the shorter half of an odd padding on the left, matching
-	// this floor division.
 	plainLen := len(optionsPlain)
-	leadingSpaces := max(0, (contentWidth-plainLen)/2)
-	relX := msg.X - dialogCol - frameLeft - leadingSpaces
+	relX := msg.X - dialogCol - contentStart
 	if relX < 0 || relX >= plainLen {
 		return d, nil
 	}
@@ -371,28 +375,32 @@ func (d *toolConfirmationDialog) handleMouseClick(msg tea.MouseClickMsg) (layout
 	// The help line is built by helpKeysLine as "<KEY> <label>" segments
 	// joined with two spaces, e.g.:
 	//
-	//	"Y yes  N no  T always allow rm*  B auto-approve safe  A all tools"
+	//	"Y yes  N no  T always allow rm*  B balanced  A all tools"
 	//
 	// Map the click onto its segment and dispatch on the segment's leading
 	// action key. Labels can contain uppercase letters (the always-allow
 	// label echoes the command pattern), so scanning the clicked character
-	// itself could fire the wrong action. A click in the separator gap
-	// resolves to the segment on its left — for the B/A boundary that is
-	// also the milder action (Balanced, not Autonomous) when a click near
-	// the boundary misses.
+	// itself could fire the wrong action. Separator gaps are dead zones:
+	// attributing them to either neighbour would fire some action on a
+	// near-miss, and no attribution is uniformly the safer one (left
+	// makes the Y/N gap approve, right makes the B/A gap go autonomous).
 	start := 0
 	for start < plainLen {
-		segEnd := plainLen
+		textEnd := plainLen
 		if sep := strings.Index(optionsPlain[start:], "  "); sep >= 0 {
-			segEnd = start + sep + 2 // the separator belongs to this segment
+			textEnd = start + sep
 		}
-		if relX < segEnd {
+		if relX < textEnd {
 			if decision, ok := toolconfirm.DecisionForAction(string(optionsPlain[start])); ok {
 				return d.executeAction(decision)
 			}
 			return d, nil
 		}
-		start = segEnd
+		if relX < textEnd+2 {
+			// Inside the separator gap.
+			return d, nil
+		}
+		start = textEnd + 2
 	}
 
 	return d, nil
