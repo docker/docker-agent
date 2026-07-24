@@ -63,7 +63,8 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 
 	if current := m.application.Session(); current != nil {
 		newSess.HideToolResults = current.HideToolResults
-		newSess.ToolsApproved = current.ToolsApproved
+		// Carries live mid-session mode changes the store copy may lack.
+		newSess.SetSafetyPolicy(current.GetSafetyPolicy())
 	}
 
 	// Preserve sidebar settings across branch

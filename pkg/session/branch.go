@@ -85,6 +85,7 @@ func (s *Session) Clone() *Session {
 		EvalResult:              cloneEvalResult(s.EvalResult),
 		CreatedAt:               s.CreatedAt,
 		ToolsApproved:           s.ToolsApproved,
+		SafetyPolicy:            s.SafetyPolicy,
 		NonInteractive:          s.NonInteractive,
 		HideToolResults:         s.HideToolResults,
 		WorkingDir:              s.WorkingDir,
@@ -197,6 +198,7 @@ func copySessionMetadata(dst, src *Session, title string) {
 	}
 	dst.SetTitle(title)
 	dst.ToolsApproved = src.ToolsApproved
+	dst.SafetyPolicy = src.SafetyPolicy
 	dst.HideToolResults = src.HideToolResults
 	dst.WorkingDir = src.WorkingDir
 	dst.SendUserMessage = src.SendUserMessage
