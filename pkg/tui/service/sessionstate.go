@@ -93,7 +93,7 @@ func NewSessionState(s *session.Session) *SessionState {
 		expandThinking: settings.GetExpandThinking(),
 	}
 	if s != nil {
-		state.yoloMode = s.ToolsApproved
+		state.yoloMode = s.IsToolsApproved()
 		state.hideToolResults = s.HideToolResults
 		state.sessionTitle = s.Title
 	}

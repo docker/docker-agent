@@ -415,10 +415,17 @@ func (m *appModel) handleSwitchToAgentByIndex(index int) (tea.Model, tea.Cmd) {
 
 // --- Toggles ---
 
+// handleToggleYolo goes through the safety mode, not the raw ToolsApproved
+// flag, so toggle-off genuinely revokes an autonomous mode. Same contract
+// as the server's ToggleToolApproval.
 func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
 	sess := m.application.Session()
-	sess.ToolsApproved = !sess.ToolsApproved
-	m.sessionState.SetYoloMode(sess.ToolsApproved)
+	if sess.GetSafetyPolicy() == session.SafetyPolicyAutonomous {
+		sess.SetSafetyPolicy("")
+	} else {
+		sess.SetSafetyPolicy(session.SafetyPolicyAutonomous)
+	}
+	m.sessionState.SetYoloMode(sess.IsToolsApproved())
 	return m.forwardChat(messages.SessionToggleChangedMsg{})
 }
 
@@ -530,7 +537,7 @@ func (m *appModel) handleDropAttachedFile(path string) (tea.Model, tea.Cmd) {
 func (m *appModel) handleShowPermissionsDialog() (tea.Model, tea.Cmd) {
 	perms := m.application.PermissionsInfo()
 	sess := m.application.Session()
-	yoloEnabled := sess != nil && sess.ToolsApproved
+	yoloEnabled := sess != nil && sess.IsToolsApproved()
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewPermissionsDialog(perms, yoloEnabled),
 	})
