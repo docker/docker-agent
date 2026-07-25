@@ -1039,9 +1039,13 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		defer cancel()
 		defer runtimeSession.streaming.Unlock()
 
-		// Start title generation in parallel if needed
+		// Start title generation in parallel if needed, coordinating via WaitGroup
+		// so close(streamChan) does not fire while generateTitle is still sending.
+		var wg sync.WaitGroup
 		if needsTitle {
-			go sm.generateTitle(ctx, sess, titleGen, userMessages, streamChan)
+			wg.Go(func() {
+				sm.generateTitle(ctx, sess, titleGen, userMessages, streamChan)
+			})
 		} else if titleToEmit != "" {
 			// Re-emit the existing title so late-joining SSE consumers
 			// and boards can pick it up without an extra API call.
@@ -1051,9 +1055,16 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		stream := runtimeSession.runtime.RunStream(streamCtx, sess)
 		for event := range stream {
 			if streamCtx.Err() != nil {
-				return
+				break
 			}
 			streamChan <- event
+		}
+
+		// Ensure title generation finishes before defers run close(streamChan).
+		wg.Wait()
+
+		if streamCtx.Err() != nil {
+			return
 		}
 
 		if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
