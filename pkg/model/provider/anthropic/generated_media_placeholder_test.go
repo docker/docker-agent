@@ -16,6 +16,17 @@ import (
 // runtime-normalized shape rather than an arbitrary placeholder string.
 const generatedMediaPlaceholderText = "[Generated media omitted from history 1/1: cat.png (image/png)]"
 
+// generatedMediaPlaceholderText1and2 are the exact runtime-normalized
+// per-artifact placeholder strings pkg/runtime's
+// generatedMediaPlaceholderTexts produces for a TWO-artifact turn, in
+// source order — the review's "robust multi-artifact" regression exercises
+// provider conversion of these exact shapes rather than a single-artifact
+// placeholder.
+const (
+	generatedMediaPlaceholderText1 = "[Generated media omitted from history 1/2: cat.png (image/png)]"
+	generatedMediaPlaceholderText2 = "[Generated media omitted from history 2/2: dog.jpg (image/jpeg)]"
+)
+
 // mediaOnlyPlaceholderMessage is the exact shape
 // pkg/runtime.stripGeneratedMediaTransform produces for a media-only
 // assistant turn once its generated artifact is stripped: Content carries
@@ -44,6 +55,36 @@ func mixedTextPlaceholderMessage() chat.Message {
 		MultiContent: []chat.MessagePart{
 			{Type: chat.MessagePartTypeText, Text: "here you go"},
 			{Type: chat.MessagePartTypeText, Text: generatedMediaPlaceholderText},
+		},
+	}
+}
+
+// mediaOnlyMultiPlaceholderMessage is the two-artifact counterpart of
+// mediaOnlyPlaceholderMessage: both per-artifact placeholders are joined
+// by a newline into Content, and each survives as its own MultiContent
+// text part, in source order.
+func mediaOnlyMultiPlaceholderMessage() chat.Message {
+	return chat.Message{
+		Role:    chat.MessageRoleAssistant,
+		Content: generatedMediaPlaceholderText1 + "\n" + generatedMediaPlaceholderText2,
+		MultiContent: []chat.MessagePart{
+			{Type: chat.MessagePartTypeText, Text: generatedMediaPlaceholderText1},
+			{Type: chat.MessagePartTypeText, Text: generatedMediaPlaceholderText2},
+		},
+	}
+}
+
+// mixedMultiPlaceholderMessage is the two-artifact counterpart of
+// mixedTextPlaceholderMessage: the original text is kept, followed by both
+// per-artifact placeholders, in source order.
+func mixedMultiPlaceholderMessage() chat.Message {
+	return chat.Message{
+		Role:    chat.MessageRoleAssistant,
+		Content: "here you go\n" + generatedMediaPlaceholderText1 + "\n" + generatedMediaPlaceholderText2,
+		MultiContent: []chat.MessagePart{
+			{Type: chat.MessagePartTypeText, Text: "here you go"},
+			{Type: chat.MessagePartTypeText, Text: generatedMediaPlaceholderText1},
+			{Type: chat.MessagePartTypeText, Text: generatedMediaPlaceholderText2},
 		},
 	}
 }
@@ -139,4 +180,59 @@ func TestConvertBetaMessages_GeneratedMediaPlaceholder_Mixed(t *testing.T) {
 	text := out[0].Content[0].OfText.Text
 	assert.Contains(t, text, "here you go")
 	assert.Contains(t, text, generatedMediaPlaceholderText)
+}
+
+// TestConvertMessages_GeneratedMediaPlaceholder_MultipleArtifacts_MediaOnly
+// is the review's "robust multi-artifact placeholder" regression for the
+// legacy Anthropic converter: since it reads only msg.Content, BOTH
+// per-artifact placeholders (joined by stripGeneratedMediaTransform's
+// newline-separated mergeWithPlaceholder) must survive as a single text
+// block — not just the first artifact's placeholder.
+func TestConvertMessages_GeneratedMediaPlaceholder_MultipleArtifacts_MediaOnly(t *testing.T) {
+	t.Parallel()
+
+	msgs := []chat.Message{mediaOnlyMultiPlaceholderMessage()}
+
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
+	require.Len(t, out, 1, "the media-only multi-artifact placeholder turn must not be dropped")
+
+	b, err := json.Marshal(out[0])
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(b, &m))
+	content, ok := m["content"].([]any)
+	require.True(t, ok)
+	require.Len(t, content, 1, "the legacy converter emits exactly one text block from Content")
+	cb, ok := content[0].(map[string]any)
+	require.True(t, ok)
+	text, _ := cb["text"].(string)
+	assert.Contains(t, text, generatedMediaPlaceholderText1)
+	assert.Contains(t, text, generatedMediaPlaceholderText2)
+}
+
+// TestConvertMessages_GeneratedMediaPlaceholder_MultipleArtifacts_Mixed is
+// the mixed text+multi-artifact-media counterpart.
+func TestConvertMessages_GeneratedMediaPlaceholder_MultipleArtifacts_Mixed(t *testing.T) {
+	t.Parallel()
+
+	msgs := []chat.Message{mixedMultiPlaceholderMessage()}
+
+	out, err := testClient().convertMessages(t.Context(), msgs)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+
+	b, err := json.Marshal(out[0])
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(b, &m))
+	content, ok := m["content"].([]any)
+	require.True(t, ok)
+	require.Len(t, content, 1)
+	cb, ok := content[0].(map[string]any)
+	require.True(t, ok)
+	text, _ := cb["text"].(string)
+	assert.Contains(t, text, "here you go")
+	assert.Contains(t, text, generatedMediaPlaceholderText1)
+	assert.Contains(t, text, generatedMediaPlaceholderText2)
 }

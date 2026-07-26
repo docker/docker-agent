@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -190,6 +191,84 @@ func TestStripUnsupportedModalitiesTransform_EmitsDebugLog(t *testing.T) {
 		assert.Contains(t, logged, "model does not support "+kind+" input",
 			"stripped %s part must be logged with a reason", kind)
 	}
+}
+
+// TestStripUnsupportedMediaContent_PreservesGeneratedMediaIndependently is
+// the review's "unsupported-modality transform independence" regression:
+// stripUnsupportedMediaContent (the shared helper stripUnsupportedModalitiesTransform
+// calls) must never strip a generated-media document part on its own,
+// even when invoked directly with a capability set that would otherwise
+// reject its MIME kind and even though [BuiltinStripGeneratedMedia] never
+// ran first. This is deliberately independent of transform REGISTRATION
+// ORDER: it calls the low-level helper directly rather than going through
+// RunStream/NewLocalRuntime, so a future reordering of runtime.go's
+// transform chain cannot silently reintroduce the bug this guards against
+// (see isGeneratedMediaPart's use inside stripUnsupportedMediaContent).
+// The production-order integration coverage in
+// TestRunStream_MediaOnlyAssistantHistoryRemainsCoherent_UnknownModel stays
+// in place alongside this test, not replaced by it.
+//
+// Both an owner-qualified marker (ArtifactOwnerSessionID set, the shape
+// every current write path produces) and a legacy ownerless marker
+// (ArtifactOwnerSessionID empty, the shape a message persisted before
+// owner-qualified references existed would still carry) are covered: the
+// guard is [isGeneratedMediaPart], which keys off ArtifactPath alone, so
+// an old, ownerless marker must survive identically rather than being
+// silently treated as an ordinary attachment now that it lacks an owner.
+func TestStripUnsupportedMediaContent_PreservesGeneratedMediaIndependently(t *testing.T) {
+	t.Parallel()
+
+	// Text-only: image support is off, so an ordinary (non-generated) image
+	// part would normally be stripped by this exact call.
+	mc := modelinfo.CapsWith(false, false, false, false)
+
+	ownerQualified := chat.MessagePart{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+		Name: "cat.png", MimeType: "image/png",
+		Source: chat.DocumentSource{ArtifactPath: "cat.png", ArtifactOwnerSessionID: "sess-1"},
+	}}
+	legacyOwnerless := chat.MessagePart{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+		Name: "dog.jpg", MimeType: "image/jpeg",
+		Source: chat.DocumentSource{ArtifactPath: "dog.jpg"},
+	}}
+
+	msgs := []chat.Message{
+		{
+			Role:    chat.MessageRoleAssistant,
+			Content: "here you go",
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeText, Text: "here you go"},
+				ownerQualified,
+				legacyOwnerless,
+				// An ordinary user-attached image (no ArtifactPath) in the same
+				// message must still be stripped, proving the guard is scoped to
+				// generated-media parts only, not a blanket image exemption.
+				{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+			},
+		},
+	}
+
+	out := stripUnsupportedMediaContent(t.Context(), msgs, mc)
+	require.Len(t, out, 1)
+
+	var sawOwnerQualified, sawLegacyOwnerless, sawImageURL bool
+	for _, p := range out[0].MultiContent {
+		switch {
+		case isGeneratedMediaPart(p) && p.Document.Source.ArtifactOwnerSessionID != "":
+			assert.Equal(t, ownerQualified, p, "an owner-qualified generated-media marker must survive byte-identical")
+			sawOwnerQualified = true
+		case isGeneratedMediaPart(p):
+			assert.Equal(t, legacyOwnerless, p, "a legacy ownerless generated-media marker must survive byte-identical")
+			sawLegacyOwnerless = true
+		}
+		if p.Type == chat.MessagePartTypeImageURL {
+			sawImageURL = true
+		}
+	}
+	assert.True(t, sawOwnerQualified,
+		"an owner-qualified generated-media part must survive stripUnsupportedMediaContent independently of strip_generated_media having run first")
+	assert.True(t, sawLegacyOwnerless,
+		"a legacy ownerless generated-media part must survive stripUnsupportedMediaContent independently of strip_generated_media having run first")
+	assert.False(t, sawImageURL, "an ordinary user-attached image without ArtifactPath must still be stripped")
 }
 
 // path: a runtime with no registered transforms returns the input
@@ -508,6 +587,107 @@ func TestStripGeneratedMediaTransform(t *testing.T) {
 	assert.Contains(t, out[1].MultiContent[1].Text, "image/png")
 }
 
+// TestStripGeneratedMediaTransform_MultipleArtifacts_MediaOnly is the
+// review's "robust multi-artifact placeholder" regression for a media-only
+// assistant turn: THREE stripped artifacts in a single message must
+// produce exactly one placeholder [chat.MessagePart] PER artifact (never
+// one combined blob), each carrying the canonical i/N string in the
+// artifacts' original source order, with safe (sanitized) name and MIME
+// type metadata.
+func TestStripGeneratedMediaTransform_MultipleArtifacts_MediaOnly(t *testing.T) {
+	t.Parallel()
+
+	msgs := []chat.Message{
+		{
+			Role:    chat.MessageRoleAssistant,
+			Content: "",
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+					Name: "cat.png", MimeType: "image/png",
+					Source: chat.DocumentSource{ArtifactPath: "cat.png", ArtifactOwnerSessionID: "sess-multi"},
+				}},
+				{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+					Name: "dog.jpg", MimeType: "image/jpeg",
+					Source: chat.DocumentSource{ArtifactPath: "dog.jpg", ArtifactOwnerSessionID: "sess-multi"},
+				}},
+				{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+					Name: "fish.gif", MimeType: "image/gif",
+					Source: chat.DocumentSource{ArtifactPath: "fish.gif", ArtifactOwnerSessionID: "sess-multi"},
+				}},
+			},
+		},
+	}
+
+	out, err := stripGeneratedMediaTransform(t.Context(), nil, msgs)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+
+	assistant := out[0]
+	require.Len(t, assistant.MultiContent, 3, "one placeholder part per stripped artifact, never a single combined blob")
+
+	want := []string{
+		"[Generated media omitted from history 1/3: cat.png (image/png)]",
+		"[Generated media omitted from history 2/3: dog.jpg (image/jpeg)]",
+		"[Generated media omitted from history 3/3: fish.gif (image/gif)]",
+	}
+	for i, w := range want {
+		assert.Equal(t, chat.MessagePartTypeText, assistant.MultiContent[i].Type)
+		assert.Equal(t, w, assistant.MultiContent[i].Text, "placeholder %d must be in the artifacts' original source order", i+1)
+	}
+	assert.Equal(t, strings.Join(want, "\n"), assistant.Content, "Content must mirror the same per-artifact placeholders, in order, for Content-only readers")
+}
+
+// TestStripGeneratedMediaTransform_MultipleArtifacts_Mixed is the mixed
+// text+media counterpart: the assistant's original text must survive
+// untouched (in both Content and MultiContent) alongside one placeholder
+// part per stripped artifact, in source order.
+func TestStripGeneratedMediaTransform_MultipleArtifacts_Mixed(t *testing.T) {
+	t.Parallel()
+
+	msgs := []chat.Message{
+		{
+			Role:    chat.MessageRoleAssistant,
+			Content: "here are three images",
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeText, Text: "here are three images"},
+				{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+					Name: "cat.png", MimeType: "image/png",
+					Source: chat.DocumentSource{ArtifactPath: "cat.png", ArtifactOwnerSessionID: "sess-multi"},
+				}},
+				{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+					Name: "dog.jpg", MimeType: "image/jpeg",
+					Source: chat.DocumentSource{ArtifactPath: "dog.jpg", ArtifactOwnerSessionID: "sess-multi"},
+				}},
+				{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+					Name: "fish.gif", MimeType: "image/gif",
+					Source: chat.DocumentSource{ArtifactPath: "fish.gif", ArtifactOwnerSessionID: "sess-multi"},
+				}},
+			},
+		},
+	}
+
+	out, err := stripGeneratedMediaTransform(t.Context(), nil, msgs)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+
+	assistant := out[0]
+	require.Len(t, assistant.MultiContent, 4, "original text part plus one placeholder part per stripped artifact")
+	assert.Equal(t, chat.MessagePartTypeText, assistant.MultiContent[0].Type)
+	assert.Equal(t, "here are three images", assistant.MultiContent[0].Text, "original text must be preserved verbatim")
+
+	want := []string{
+		"[Generated media omitted from history 1/3: cat.png (image/png)]",
+		"[Generated media omitted from history 2/3: dog.jpg (image/jpeg)]",
+		"[Generated media omitted from history 3/3: fish.gif (image/gif)]",
+	}
+	for i, w := range want {
+		assert.Equal(t, chat.MessagePartTypeText, assistant.MultiContent[i+1].Type)
+		assert.Equal(t, w, assistant.MultiContent[i+1].Text, "placeholder %d must be in the artifacts' original source order", i+1)
+	}
+	assert.Equal(t, "here are three images\n"+strings.Join(want, "\n"), assistant.Content,
+		"Content must keep the original text then mirror every per-artifact placeholder, in order")
+}
+
 // TestStripGeneratedMediaTransform_ResanitizesLegacyUnsafeName is the
 // defense-in-depth regression for the plan's "sanitize twice" requirement:
 // materializeGeneratedMedia already sanitizes Document.Name before it is
@@ -541,6 +721,105 @@ func TestStripGeneratedMediaTransform_ResanitizesLegacyUnsafeName(t *testing.T) 
 	require.Len(t, out[0].MultiContent, 1)
 	assert.NotContains(t, out[0].MultiContent[0].Text, "..")
 	assert.NotContains(t, out[0].MultiContent[0].Text, "/etc/passwd")
+}
+
+// TestStripGeneratedMediaTransform_EmptyNameAndMimeFallback is the plan's
+// "empty name/MIME placeholder fallback" regression: an empty (or
+// all-whitespace) display name and an empty MIME type are both values a
+// real provider can legitimately send (e.g. a media delta with no
+// InlineData.DisplayName at all). generatedMediaPlaceholderTexts must
+// deterministically substitute fallbackDisplayName/fallbackMimeType for
+// each rather than ever rendering an empty or malformed "()" in the
+// placeholder.
+func TestStripGeneratedMediaTransform_EmptyNameAndMimeFallback(t *testing.T) {
+	t.Parallel()
+
+	msgs := []chat.Message{
+		{
+			Role: chat.MessageRoleAssistant,
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+					Name: "   ", MimeType: "",
+					Source: chat.DocumentSource{ArtifactPath: "generated/blank.bin", ArtifactOwnerSessionID: "sess-1"},
+				}},
+			},
+		},
+	}
+
+	out, err := stripGeneratedMediaTransform(t.Context(), nil, msgs)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+
+	want := "[Generated media omitted from history 1/1: generated media (application/octet-stream)]"
+	assert.Equal(t, want, out[0].Content)
+	require.Len(t, out[0].MultiContent, 1)
+	assert.Equal(t, want, out[0].MultiContent[0].Text)
+}
+
+// assertBoundedSingleLineUTF8 asserts the cross-output invariant every
+// final placeholder or [WarningEvent] line must satisfy regardless of how
+// overlong or malformed the provider-supplied metadata that fed it was:
+// valid UTF-8 (never a truncated multi-byte rune), no control characters
+// or newlines (so it can never split into, or masquerade as, an extra
+// terminal/log line), and no more than [maxPlaceholderOrWarningBytes] —
+// the final backstop applied independently of the smaller
+// [chat.MaxSanitizedFieldBytes] bound already enforced on each individual
+// field. Shared by the placeholder tests here and the WarningEvent tests
+// in materialize_generated_media_test.go so both output kinds are held to
+// exactly the same bound.
+func assertBoundedSingleLineUTF8(t *testing.T, s string) {
+	t.Helper()
+	assert.True(t, utf8.ValidString(s), "must be valid UTF-8, never a truncated multi-byte rune")
+	assert.LessOrEqual(t, len(s), maxPlaceholderOrWarningBytes, "must never exceed the final formatted-line byte cap")
+	for _, r := range s {
+		assert.Falsef(t, r < 0x20 || r == 0x7f, "must not contain a control character or newline, got %q in %q", r, s)
+	}
+}
+
+// TestStripGeneratedMediaTransform_OverlongMetadataStaysBounded is the
+// plan's "overlong metadata" regression for the placeholder output: a
+// provider-supplied display name and MIME type both well past
+// [chat.MaxSanitizedFieldBytes] (128 bytes) — the name built from a
+// multi-byte rune so truncation must land on a rune boundary, not merely
+// an ASCII one — must still yield a placeholder that is valid UTF-8,
+// single-line, control-character-free, and within
+// [maxPlaceholderOrWarningBytes] overall, without ever weakening either
+// sanitizer's own field bound.
+func TestStripGeneratedMediaTransform_OverlongMetadataStaysBounded(t *testing.T) {
+	t.Parallel()
+
+	// "é" is 2 UTF-8 bytes; 200 repetitions is 400 bytes, comfortably past
+	// the 128-byte field bound, and an odd byte-count truncation point
+	// would split the rune if TruncateUTF8Bytes were not rune-boundary safe.
+	longName := strings.Repeat("é", 200)
+	longMimeType := "image/" + strings.Repeat("x", 300)
+
+	msgs := []chat.Message{
+		{
+			Role: chat.MessageRoleAssistant,
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+					Name: longName, MimeType: longMimeType,
+					Source: chat.DocumentSource{ArtifactPath: "generated/overlong.bin", ArtifactOwnerSessionID: "sess-1"},
+				}},
+			},
+		},
+	}
+
+	out, err := stripGeneratedMediaTransform(t.Context(), nil, msgs)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0].MultiContent, 1)
+
+	placeholder := out[0].MultiContent[0].Text
+	assert.Equal(t, out[0].Content, placeholder, "Content must mirror the MultiContent placeholder exactly")
+	assertBoundedSingleLineUTF8(t, placeholder)
+
+	// The raw overlong fields must never survive verbatim: only their
+	// sanitized, field-bounded (<=128 bytes) forms may appear.
+	assert.NotContains(t, placeholder, longName, "the full 400-byte name must have been truncated, not passed through")
+	assert.NotContains(t, placeholder, longMimeType, "the full 306-byte MIME type must have been truncated, not passed through")
+	assert.Contains(t, placeholder, "é", "the sanitized (truncated) multi-byte name must still be present")
 }
 
 // TestRunStream_GeneratedMediaAbsentFromNextTurnHistory is the end-to-end

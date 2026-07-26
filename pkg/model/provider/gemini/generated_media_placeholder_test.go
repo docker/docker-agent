@@ -17,6 +17,16 @@ import (
 // runtime-normalized shape rather than an arbitrary placeholder string.
 const generatedMediaPlaceholderText = "[Generated media omitted from history 1/1: cat.png (image/png)]"
 
+// generatedMediaPlaceholderText1/2 are the exact runtime-normalized
+// per-artifact placeholder strings for a TWO-artifact turn, in source
+// order — the review's "robust multi-artifact" regression exercises
+// conversion of these exact shapes rather than a single-artifact
+// placeholder.
+const (
+	generatedMediaPlaceholderText1 = "[Generated media omitted from history 1/2: cat.png (image/png)]"
+	generatedMediaPlaceholderText2 = "[Generated media omitted from history 2/2: dog.jpg (image/jpeg)]"
+)
+
 // TestConvertMessagesToGemini_GeneratedMediaPlaceholder_MediaOnly verifies
 // a media-only assistant turn whose generated artifact was stripped by
 // pkg/runtime.stripGeneratedMediaTransform (Content and MultiContent both
@@ -73,4 +83,61 @@ func TestConvertMessagesToGemini_GeneratedMediaPlaceholder_Mixed(t *testing.T) {
 	require.Len(t, assistant.Parts, 2, "original text part plus one placeholder part")
 	assert.Equal(t, "here you go", assistant.Parts[0].Text)
 	assert.Equal(t, generatedMediaPlaceholderText, assistant.Parts[1].Text)
+}
+
+// TestConvertMessagesToGemini_GeneratedMediaPlaceholder_MultipleArtifacts_MediaOnly
+// is the review's "robust multi-artifact placeholder" regression: a
+// media-only turn with TWO stripped artifacts must convert to exactly two
+// Gemini text parts, one per artifact, in source order — not one combined
+// part and not a dropped/truncated turn.
+func TestConvertMessagesToGemini_GeneratedMediaPlaceholder_MultipleArtifacts_MediaOnly(t *testing.T) {
+	t.Parallel()
+
+	messages := []chat.Message{
+		{Role: chat.MessageRoleUser, Content: "draw two things"},
+		{
+			Role:    chat.MessageRoleAssistant,
+			Content: generatedMediaPlaceholderText1 + "\n" + generatedMediaPlaceholderText2,
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeText, Text: generatedMediaPlaceholderText1},
+				{Type: chat.MessagePartTypeText, Text: generatedMediaPlaceholderText2},
+			},
+		},
+	}
+
+	contents := convertMessagesToGemini(t.Context(), messages, modelsdev.ID{}, modelsdev.NewDatabaseStore(&modelsdev.Database{}), nil)
+
+	require.Len(t, contents, 2, "the media-only multi-artifact placeholder turn must not be dropped")
+	assistant := contents[1]
+	require.Len(t, assistant.Parts, 2, "one Gemini part per stripped artifact, in source order")
+	assert.Equal(t, generatedMediaPlaceholderText1, assistant.Parts[0].Text)
+	assert.Equal(t, generatedMediaPlaceholderText2, assistant.Parts[1].Text)
+}
+
+// TestConvertMessagesToGemini_GeneratedMediaPlaceholder_MultipleArtifacts_Mixed
+// is the mixed text+multi-artifact-media counterpart.
+func TestConvertMessagesToGemini_GeneratedMediaPlaceholder_MultipleArtifacts_Mixed(t *testing.T) {
+	t.Parallel()
+
+	messages := []chat.Message{
+		{Role: chat.MessageRoleUser, Content: "draw two things"},
+		{
+			Role:    chat.MessageRoleAssistant,
+			Content: "here you go\n" + generatedMediaPlaceholderText1 + "\n" + generatedMediaPlaceholderText2,
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeText, Text: "here you go"},
+				{Type: chat.MessagePartTypeText, Text: generatedMediaPlaceholderText1},
+				{Type: chat.MessagePartTypeText, Text: generatedMediaPlaceholderText2},
+			},
+		},
+	}
+
+	contents := convertMessagesToGemini(t.Context(), messages, modelsdev.ID{}, modelsdev.NewDatabaseStore(&modelsdev.Database{}), nil)
+
+	require.Len(t, contents, 2)
+	assistant := contents[1]
+	require.Len(t, assistant.Parts, 3, "original text part plus one placeholder part per stripped artifact")
+	assert.Equal(t, "here you go", assistant.Parts[0].Text)
+	assert.Equal(t, generatedMediaPlaceholderText1, assistant.Parts[1].Text)
+	assert.Equal(t, generatedMediaPlaceholderText2, assistant.Parts[2].Text)
 }

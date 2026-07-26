@@ -1329,17 +1329,14 @@ func sanitizeToolCallName(name string) string {
 // [session.ResolveWorkingDir]) through [workspacemedia.Write] and returns
 // the corresponding document parts, so the persisted assistant message
 // keeps only a relative, owner-qualified workspace reference
-// ([chat.ArtifactRootWorkspace]) rather than raw bytes — session JSON never
-// carries generated image base64. sess.ID becomes the reference's permanent
-// owner (see chat.DocumentSource) — it never changes even if this message
-// is later copied into a branched or forked session.
+// ([chat.ArtifactRootWorkspace]) rather than raw bytes. sess.ID becomes the
+// reference's permanent owner (see chat.DocumentSource) — it never changes
+// even if this message is later copied into a branched or forked session.
 //
-// The requested filename is the provider-supplied display name when one
+// The requested filename is the sanitized provider display name when one
 // exists, otherwise a generic "generated-N"; the writer owns MIME/extension
 // correction and collision suffixing, and the part persists the exact final
-// relative path it returns. A display name the writer refuses (e.g.
-// absolute, traversing, or Windows-reserved) falls back to the generic name
-// rather than losing the item. Explicit prompt-directed naming (and its
+// relative path it returns. Explicit prompt-directed naming (and its
 // out-of-workspace confirmation flow) is intentionally not implemented
 // here yet.
 //
@@ -1348,26 +1345,50 @@ func sanitizeToolCallName(name string) string {
 // per-item warning contract as a write failure — there is deliberately no
 // data-dir fallback, so generated files never land outside the workspace.
 //
-// A materialization failure drops that one media item, logs a warning, and
-// emits a runtime [WarningEvent] so the failure is observable to the
-// user/caller rather than debug-log-only: a write failure must not silently
-// vanish, and must not lose the (already generated) accompanying text
-// either.
+// A materialization failure drops that one media item, logs the detailed
+// error (including the workspace root) to the debug log only, and emits a
+// runtime [WarningEvent] carrying nothing but safe display metadata — the
+// exact 1-based failed item index and total batch count, the sanitized MIME
+// type, and the sanitized provider-supplied name (or [fallbackDisplayName]
+// when that name is empty, whitespace-only, or missing — never omitted,
+// exactly like the strip_generated_media.go placeholder) — so the failure
+// is observable to the user/caller without leaking the absolute workspace
+// path or a raw OS error (which could contain that path) into a surface a
+// user might paste into a bug report or share screen. Both the name AND the
+// MIME type are provider-supplied, untrusted strings — sanitizeMimeType
+// (shared with strip_generated_media.go's placeholder text) strips control
+// characters and newlines the same way chat.SanitizeDisplayName does for
+// the name, applies the same [chat.MaxSanitizedFieldBytes] field bound, and
+// falls back to [fallbackMimeType] for empty/invalid input. Every formatted
+// warning/notice is additionally capped at [maxPlaceholderOrWarningBytes].
+// Only the sanitized MIME type is ever persisted into the resulting
+// [chat.Document]. One item's failure must not affect a sibling that saves
+// successfully in the same reply, and must not lose the (already generated)
+// accompanying text either.
 func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *session.Session, media []chat.MediaDelta, agentName string, events EventSink) []chat.MessagePart {
 	root, rootErr := session.ResolveWorkingDir(ctx, sess, r.sessionLookup())
 	if rootErr != nil {
-		slog.WarnContext(ctx, "No workspace root for generated media; dropping every media item, keeping the rest of the turn",
+		slog.DebugContext(ctx, "No workspace root for generated media; dropping every media item, keeping the rest of the turn",
 			"agent", agentName, "session_id", sess.ID, "error", rootErr)
 	}
 
 	parts := make([]chat.MessagePart, 0, len(media))
 	for i, m := range media {
+		safeName := chat.SanitizeDisplayName(m.Name)
+		safeMimeType := sanitizeMimeType(m.MimeType)
 		warnItemFailed := func(err error) {
-			slog.WarnContext(ctx, "Failed to materialize generated media into the workspace; dropping it, keeping the rest of the turn",
+			slog.DebugContext(ctx, "Failed to materialize generated media into the workspace; dropping it, keeping the rest of the turn",
 				"agent", agentName, "session_id", sess.ID, "workspace_root", root, "mime_type", m.MimeType, "index", i+1, "error", err)
-			if events != nil {
-				events.Emit(Warning(fmt.Sprintf("Failed to save generated %s media: %v", m.MimeType, err), agentName))
+			if events == nil {
+				return
 			}
+			displayName := safeName
+			if displayName == "" {
+				displayName = fallbackDisplayName
+			}
+			warning := fmt.Sprintf("Failed to save generated media item %d/%d (%s, %s); see debug log for details",
+				i+1, len(media), safeMimeType, displayName)
+			events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
 		}
 
 		if rootErr != nil {
@@ -1375,18 +1396,18 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 			continue
 		}
 
-		requested := m.Name
+		requested := safeName
 		generic := fmt.Sprintf("generated-%d", i+1)
 		if requested == "" {
 			requested = generic
 		}
-		res, err := workspacemedia.Write(root, requested, m.Data, m.MimeType)
+		res, err := workspacemediaWrite(root, requested, m.Data, m.MimeType)
 		if err != nil && requested != generic && errors.Is(err, workspacemedia.ErrPathEscape) {
-			// A provider display name the writer refuses (e.g. a Windows-reserved
-			// name like "CON.png") must not cost the user the item; there is no
-			// user-chosen path to honor at this stage, so fall back to the
-			// generic name.
-			res, err = workspacemedia.Write(root, generic, m.Data, m.MimeType)
+			// A provider display name the writer refuses even after display
+			// sanitization (e.g. a Windows-reserved name like "CON.png") must
+			// not cost the user the item; there is no user-chosen path to
+			// honor at this stage, so fall back to the generic name.
+			res, err = workspacemediaWrite(root, generic, m.Data, m.MimeType)
 		}
 		if err != nil {
 			warnItemFailed(err)
@@ -1397,7 +1418,7 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 			Type: chat.MessagePartTypeDocument,
 			Document: &chat.Document{
 				Name:     path.Base(res.RelPath),
-				MimeType: m.MimeType,
+				MimeType: safeMimeType,
 				Size:     m.Size,
 				Source: chat.DocumentSource{
 					ArtifactPath:           res.RelPath,
@@ -1418,6 +1439,13 @@ func (r *LocalRuntime) sessionLookup() session.Lookup {
 	}
 	return r.sessionStore.GetSession
 }
+
+// workspacemediaWrite is [workspacemedia.Write] behind a package-level
+// indirection so tests can inject a deterministic failure for one item in a
+// batch [LocalRuntime.materializeGeneratedMedia] call. Production code must
+// never reassign this; only *_test.go files do, always restoring it via
+// t.Cleanup.
+var workspacemediaWrite = workspacemedia.Write
 
 // usageHasTokens reports whether any billable tokens were recorded for a turn.
 // Used to suppress the missing-price warning for empty/no-op turns.
