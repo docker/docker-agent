@@ -91,12 +91,15 @@ func BuildPermissionPattern(toolCall tools.ToolCall) string {
 
 // AlwaysAllowLabel is the descriptive label of the "always allow" option
 // for a pattern from BuildPermissionPattern: the command pattern for shell
-// ("always allow ls*"), the tool name otherwise.
+// ("always allow ls*"), the tool name otherwise. Whitespace runs are
+// collapsed: the label feeds a single-line help row whose click
+// hit-testing treats "  " as the segment separator, so an interior
+// double space (or newline) would corrupt the segment walk.
 func AlwaysAllowLabel(pattern string) string {
 	if _, cmdPattern, ok := strings.Cut(pattern, ":cmd="); ok {
-		return "always allow " + cmdPattern
+		pattern = cmdPattern
 	}
-	return "always allow " + pattern
+	return "always allow " + strings.Join(strings.Fields(pattern), " ")
 }
 
 // ActionKeys are the uppercase action letters of the decision row, in

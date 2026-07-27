@@ -73,6 +73,12 @@ func TestAlwaysAllowLabel(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "always allow ls*", AlwaysAllowLabel("shell:cmd=ls*"))
 	assert.Equal(t, "always allow write_file", AlwaysAllowLabel("write_file"))
+
+	// Whitespace runs collapse: the click hit-test walks the rendered
+	// help row using "  " as the segment separator, and a newline would
+	// wrap the row and break row-based hit-testing entirely.
+	assert.Equal(t, "always allow docker run*", AlwaysAllowLabel("shell:cmd=docker  run*"))
+	assert.Equal(t, "always allow echo hi", AlwaysAllowLabel("shell:cmd=echo\nhi"))
 }
 
 func TestOptionsHelpUsesThePattern(t *testing.T) {
