@@ -339,6 +339,21 @@ func TestBranchSession(t *testing.T) {
 		assert.Equal(t, SafetyPolicyBalanced, branched.GetSafetyPolicy())
 	})
 
+	t.Run("preserves the yolo-toggle memory", func(t *testing.T) {
+		t.Parallel()
+		parent := New(WithSafetyPolicy(SafetyPolicyBalanced))
+		parent.ToggleYolo() // autonomous, remembering balanced
+		parent.AddMessage(UserMessage("hi"))
+
+		branched, err := BranchSession(parent, 1)
+		require.NoError(t, err)
+		assert.Equal(t, SafetyPolicyAutonomous, branched.GetSafetyPolicy())
+
+		branched.ToggleYolo()
+		assert.Equal(t, SafetyPolicyBalanced, branched.GetSafetyPolicy(),
+			"the branch must keep the parent's toggle-back destination")
+	})
+
 	t.Run("deep-copies pointer fields in MultiContent", func(t *testing.T) {
 		t.Parallel()
 		// Regression test: MultiContent pointer fields must not be shared

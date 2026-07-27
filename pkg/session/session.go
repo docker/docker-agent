@@ -1545,6 +1545,14 @@ func (s *Session) SetSafetyPolicy(policy SafetyPolicy) {
 	s.PriorSafetyPolicy = ""
 }
 
+// GetPriorSafetyPolicy returns the yolo-toggle memory (see
+// [Session.ToggleYolo]). Safe for concurrent use.
+func (s *Session) GetPriorSafetyPolicy() SafetyPolicy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.PriorSafetyPolicy
+}
+
 // ToggleYolo flips the session between Autonomous and the mode that was
 // active before the escalation, so an explicit Balanced/Strict choice
 // survives a toggle round-trip. A session that was never escalated from

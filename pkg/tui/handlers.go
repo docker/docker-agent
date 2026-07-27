@@ -63,6 +63,10 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 	if current := m.application.Session(); current != nil {
 		newSess.HideToolResults = current.HideToolResults
 		newSess.SetSafetyPolicy(current.GetSafetyPolicy())
+		// SetSafetyPolicy clears the toggle memory; restore the live one
+		// so a branch taken while escalated keeps its toggle-back
+		// destination. newSess is not yet shared — direct write is safe.
+		newSess.PriorSafetyPolicy = current.GetPriorSafetyPolicy()
 	}
 
 	if err := store.AddSession(ctx, newSess); err != nil {
