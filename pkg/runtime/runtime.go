@@ -711,7 +711,29 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	// [builtins.ApplyAgentDefaults] (or a user's hooks YAML directly),
 	// so the rewrite path is the same for every leak vector and there
 	// is no flag-only code path to keep in sync.
+	//
+	// Ordering matters: strip_generated_media MUST run before
+	// strip_unsupported_modalities. The latter strips any image/audio/
+	// video-kind document part the resolved model can't accept,
+	// regardless of whether that part is a runtime-materialized generated
+	// artifact or a user attachment — it has no placeholder logic. If it
+	// ran first, a capability-less or unknown model would have a
+	// media-only generated-media assistant message stripped down to
+	// nothing right there, and strip_generated_media would then see no
+	// generated-media part left to react to: its placeholder would never
+	// fire, and the turn would silently vanish from outgoing history.
+	// Running strip_generated_media first guarantees its placeholder text
+	// is already in place — as ordinary text, not a media part — by the
+	// time strip_unsupported_modalities runs, so there is nothing left for
+	// it to strip from that message.
 	r.transforms = append(r.transforms,
+		// strip_generated_media has no runtime state to capture (the policy
+		// is unconditional), so it registers the free function directly
+		// rather than a method value like the transform below.
+		registeredTransform{
+			name: BuiltinStripGeneratedMedia,
+			fn:   stripGeneratedMediaTransform,
+		},
 		registeredTransform{
 			name: BuiltinStripUnsupportedModalities,
 			fn:   r.stripUnsupportedModalitiesTransform,

@@ -2,8 +2,10 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -38,6 +40,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 	"github.com/docker/docker-agent/pkg/userconfig"
+	"github.com/docker/docker-agent/pkg/workspacemedia"
 )
 
 // registerDefaultTools wires up the built-in tool handlers (delegation,
@@ -871,7 +874,7 @@ func (r *LocalRuntime) runTurn(
 	if res.FinishReason == chat.FinishReasonRefusal {
 		slog.WarnContext(ctx, "Model refused to respond", "agent", a.Name(), "model", modelID.String(), "session_id", sess.ID)
 		events.Emit(Warning(fmt.Sprintf("Model %s refused to respond (stop reason: refusal).", modelID.String()), a.Name()))
-	} else if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 {
+	} else if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 {
 		// Surface otherwise-silent empty turns. recordAssistantMessage skips a
 		// turn with no content and no tool calls, which previously left the user
 		// staring at silence with no explanation. See emptyTurnWarning for the
@@ -895,7 +898,7 @@ func (r *LocalRuntime) runTurn(
 		}
 	}
 
-	msgUsage := r.recordAssistantMessage(sess, a, res, agentTools, modelID.String(), msgCost, events)
+	msgUsage := r.recordAssistantMessage(ctx, sess, a, res, agentTools, modelID.String(), msgCost, events)
 
 	usage := SessionUsage(sess, contextLimit, a.CompactionThreshold())
 	usage.LastMessage = msgUsage
@@ -1162,6 +1165,7 @@ func shouldWarnOnCacheMiss(sess *session.Session, usage *MessageUsage) bool {
 // cost is the precomputed per-turn cost (see computeMessageCost); nil records
 // as 0, matching the previous "no pricing data" behaviour.
 func (r *LocalRuntime) recordAssistantMessage(
+	ctx context.Context,
 	sess *session.Session,
 	a *agent.Agent,
 	res streamResult,
@@ -1170,8 +1174,8 @@ func (r *LocalRuntime) recordAssistantMessage(
 	cost *float64,
 	events EventSink,
 ) *MessageUsage {
-	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 {
-		slog.Debug("Skipping empty assistant message (no content and no tool calls)", "agent", a.Name())
+	if strings.TrimSpace(res.Content) == "" && len(res.Calls) == 0 && len(res.Media) == 0 {
+		slog.DebugContext(ctx, "Skipping empty assistant message (no content, no tool calls, and no generated media)", "agent", a.Name())
 		return nil
 	}
 
@@ -1184,7 +1188,7 @@ func (r *LocalRuntime) recordAssistantMessage(
 	for i, tc := range calls {
 		if !validToolNameRe.MatchString(tc.Function.Name) {
 			safe := sanitizeToolCallName(tc.Function.Name)
-			slog.Warn("Sanitizing malformed tool call name",
+			slog.WarnContext(ctx, "Sanitizing malformed tool call name",
 				"agent", a.Name(),
 				"original", tc.Function.Name,
 				"sanitized", safe,
@@ -1218,7 +1222,7 @@ func (r *LocalRuntime) recordAssistantMessage(
 	if cost != nil {
 		messageCost = *cost
 	} else if usageHasTokens(res.Usage) {
-		slog.Warn("Model is missing from the pricing catalogue; recording $0 cost despite token usage",
+		slog.WarnContext(ctx, "Model is missing from the pricing catalogue; recording $0 cost despite token usage",
 			"agent", a.Name(),
 			"model", modelID,
 			"input_tokens", res.Usage.InputTokens,
@@ -1244,8 +1248,24 @@ func (r *LocalRuntime) recordAssistantMessage(
 		FinishReason:      res.FinishReason,
 	}
 
+	if len(res.Media) > 0 {
+		mediaParts := r.materializeGeneratedMedia(ctx, sess, res.Media, a.Name(), events)
+		if len(mediaParts) > 0 && strings.TrimSpace(res.Content) != "" {
+			// Providers that treat MultiContent as authoritative once it is
+			// non-empty (e.g. pkg/model/provider/oaistream, which reads ONLY
+			// MultiContent's text-type parts and ignores .Content entirely
+			// in that case) would otherwise silently drop the assistant's
+			// text the moment a document part is present alongside it.
+			assistantMessage.MultiContent = append(assistantMessage.MultiContent, chat.MessagePart{
+				Type: chat.MessagePartTypeText,
+				Text: res.Content,
+			})
+		}
+		assistantMessage.MultiContent = append(assistantMessage.MultiContent, mediaParts...)
+	}
+
 	addAgentMessage(sess, a, &assistantMessage, events)
-	slog.Debug("Added assistant message to session", "agent", a.Name(), "total_messages", len(sess.GetAllMessages()))
+	slog.DebugContext(ctx, "Added assistant message to session", "agent", a.Name(), "total_messages", len(sess.GetAllMessages()))
 
 	// Build per-message usage for the event.
 	if res.Usage == nil {
@@ -1286,6 +1306,101 @@ func sanitizeToolCallName(name string) string {
 		return "unknown_tool"
 	}
 	return name
+}
+
+// materializeGeneratedMedia writes each streamed [chat.MediaDelta] into the
+// owning session's workspace (the effective WorkingDir resolved via
+// [session.ResolveWorkingDir]) through [workspacemedia.Write] and returns
+// the corresponding document parts, so the persisted assistant message
+// keeps only a relative, owner-qualified workspace reference
+// ([chat.ArtifactRootWorkspace]) rather than raw bytes — session JSON never
+// carries generated image base64. sess.ID becomes the reference's permanent
+// owner (see chat.DocumentSource) — it never changes even if this message
+// is later copied into a branched or forked session.
+//
+// The requested filename is the provider-supplied display name when one
+// exists, otherwise a generic "generated-N"; the writer owns MIME/extension
+// correction and collision suffixing, and the part persists the exact final
+// relative path it returns. A display name the writer refuses (e.g.
+// absolute, traversing, or Windows-reserved) falls back to the generic name
+// rather than losing the item. Explicit prompt-directed naming (and its
+// out-of-workspace confirmation flow) is intentionally not implemented
+// here yet.
+//
+// When no workspace root is available (no provenance anywhere in the parent
+// chain, or a malformed stored value) every item fails with the same
+// per-item warning contract as a write failure — there is deliberately no
+// data-dir fallback, so generated files never land outside the workspace.
+//
+// A materialization failure drops that one media item, logs a warning, and
+// emits a runtime [WarningEvent] so the failure is observable to the
+// user/caller rather than debug-log-only: a write failure must not silently
+// vanish, and must not lose the (already generated) accompanying text
+// either.
+func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *session.Session, media []chat.MediaDelta, agentName string, events EventSink) []chat.MessagePart {
+	root, rootErr := session.ResolveWorkingDir(ctx, sess, r.sessionLookup())
+	if rootErr != nil {
+		slog.WarnContext(ctx, "No workspace root for generated media; dropping every media item, keeping the rest of the turn",
+			"agent", agentName, "session_id", sess.ID, "error", rootErr)
+	}
+
+	parts := make([]chat.MessagePart, 0, len(media))
+	for i, m := range media {
+		warnItemFailed := func(err error) {
+			slog.WarnContext(ctx, "Failed to materialize generated media into the workspace; dropping it, keeping the rest of the turn",
+				"agent", agentName, "session_id", sess.ID, "workspace_root", root, "mime_type", m.MimeType, "index", i+1, "error", err)
+			if events != nil {
+				events.Emit(Warning(fmt.Sprintf("Failed to save generated %s media: %v", m.MimeType, err), agentName))
+			}
+		}
+
+		if rootErr != nil {
+			warnItemFailed(rootErr)
+			continue
+		}
+
+		requested := m.Name
+		generic := fmt.Sprintf("generated-%d", i+1)
+		if requested == "" {
+			requested = generic
+		}
+		res, err := workspacemedia.Write(root, requested, m.Data, m.MimeType)
+		if err != nil && requested != generic && errors.Is(err, workspacemedia.ErrPathEscape) {
+			// A provider display name the writer refuses (e.g. a Windows-reserved
+			// name like "CON.png") must not cost the user the item; there is no
+			// user-chosen path to honor at this stage, so fall back to the
+			// generic name.
+			res, err = workspacemedia.Write(root, generic, m.Data, m.MimeType)
+		}
+		if err != nil {
+			warnItemFailed(err)
+			continue
+		}
+
+		parts = append(parts, chat.MessagePart{
+			Type: chat.MessagePartTypeDocument,
+			Document: &chat.Document{
+				Name:     path.Base(res.RelPath),
+				MimeType: m.MimeType,
+				Size:     m.Size,
+				Source: chat.DocumentSource{
+					ArtifactPath:           res.RelPath,
+					ArtifactRoot:           chat.ArtifactRootWorkspace,
+					ArtifactOwnerSessionID: sess.ID,
+				},
+			},
+		})
+	}
+	return parts
+}
+
+// sessionLookup adapts the runtime's session store to [session.Lookup] for
+// parent-chain WorkingDir resolution; nil when no store is configured.
+func (r *LocalRuntime) sessionLookup() session.Lookup {
+	if r.sessionStore == nil {
+		return nil
+	}
+	return r.sessionStore.GetSession
 }
 
 // usageHasTokens reports whether any billable tokens were recorded for a turn.
