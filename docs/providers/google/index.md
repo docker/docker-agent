@@ -64,29 +64,46 @@ models:
 
 Some Gemini models (e.g. `gemini-2.5-flash-image`) are designed to generate
 an image directly as part of their reply, not just describe one. Docker
-Agent's Gemini request path doesn't yet ask for that image output — that
-support is still being completed — so today a request like this gets a
-text-only reply. See
-[Generated Media](../../features/tui/index.md#generated-media) for the
-current, verified state.
+Agent requests that image output on supported Google surfaces — the models
+gateway, direct Gemini API, and Vertex AI — when models.dev reports that the
+model can generate images or `output_capabilities.image` explicitly enables
+it. An explicit `false` overrides the catalogue and keeps the model text-only.
+Each ordinary chat request then asks for text *and* image output, and every
+image the model returns is saved into the session's workspace and rendered
+inline in the TUI — see [Generated Media](../../features/tui/index.md#generated-media)
+for file naming, collision handling, and rendering details.
 
 ```yaml
-agents:
-  root:
-    model: google/gemini-2.5-flash-image
+models:
+  gemini-image:
+    provider: google
+    model: gemini-2.5-flash-image
+    output_capabilities:
+      image: true
 ```
 
-When the model is accessed through a Docker AI Gateway and explicitly
-declared image-output-capable with
-[`output_capabilities.image: true`](../../configuration/models/index.md#output-capabilities),
-Docker Agent has verified that request combined with custom function tools,
-a built-in tool (e.g. `google_search`), or structured output gets rejected
-by the gateway with an opaque, empty-body HTTP 400. To avoid that, Docker
-Agent rejects such a combination itself, before any request is sent, with a
-clear error naming which feature is incompatible. Plain text requests to
-that model (no tools, no structured output) are unaffected, as is every
-other route: direct Gemini API/Vertex AI calls, and gateway calls to a model
-without the declaration.
+When `output_capabilities.image` is omitted, Docker Agent uses models.dev
+output modalities. Set it explicitly for custom models or to override
+incorrect catalogue data; capability is never guessed from the model name.
+Title generation and compaction remain text-only.
+
+Image-output requests with tools or structured output are rejected locally
+before any request is sent on every supported Google surface. When only custom
+tools conflict, Docker Agent uses models.dev's `tool_call` capability to clarify
+whether the model cannot call tools at all or supports tools only outside an
+image-output request. Unknown catalogue data keeps the conservative generic
+message. Gateway probing confirms these combinations are rejected; direct
+Gemini API and Vertex AI must pass live acceptance checks before that
+conservative restriction is relaxed.
+
+A few provider-side behaviors to know:
+
+- **The provider decides the image format** (typically PNG). Asking for a
+  `.gif` or `.svg` filename does not transcode anything — the saved file's
+  extension is corrected to match the data actually returned.
+- **An image is not guaranteed.** Even a correctly configured image model
+  can answer with text only and generate no image; reword or repeat the
+  prompt.
 
 ## Thinking Budget
 
