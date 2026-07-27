@@ -102,6 +102,47 @@ func TestToolConfirmationDialog_RendersSafetyWarning(t *testing.T) {
 		"the plain Metadata section must not render when only convention keys are present")
 }
 
+// The runtime attaches safety_label to every confirmation for API
+// consumers; the dialog must not leak it as a raw metadata row.
+func TestToolConfirmationDialog_SafetyLabelNeverRendersRaw(t *testing.T) {
+	t.Parallel()
+
+	dialog := NewToolConfirmationDialog(
+		newConfirmationEvent(map[string]string{
+			"safety_label": "destructive",
+			"blast_radius": "high",
+			"reason":       "Command matches destructive operation: rm -rf <path>",
+		}),
+		&service.SessionState{},
+	)
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	view := ansi.Strip(dialog.View())
+	assert.Contains(t, view, "Destructive command")
+	assert.NotContains(t, view, "safety_label:",
+		"programmatic classifier state must not render as a raw pair")
+}
+
+// An unrecognised command must not be presented as destructive: crying
+// wolf on every unlisted command would erode trust in real warnings.
+func TestToolConfirmationDialog_UnknownRadiusIsNotDestructive(t *testing.T) {
+	t.Parallel()
+
+	dialog := NewToolConfirmationDialog(
+		newConfirmationEvent(map[string]string{
+			"safety_label": "unknown",
+			"blast_radius": "unknown",
+			"reason":       "Shell command is not positively recognised by the safety classifier.",
+		}),
+		&service.SessionState{},
+	)
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+
+	view := ansi.Strip(dialog.View())
+	assert.Contains(t, view, "Unrecognised command")
+	assert.NotContains(t, view, "Destructive command")
+}
+
 // TestToolConfirmationDialog_RendersSafetyWarningPlusExtraMetadata
 // covers the case where a permission_request hook contributes its own
 // metadata alongside safer_shell's verdict. The warning block uses

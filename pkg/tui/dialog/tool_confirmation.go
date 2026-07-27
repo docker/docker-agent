@@ -138,6 +138,7 @@ var safetyConventionKeys = map[string]struct{}{
 	"blast_radius": {},
 	"category":     {},
 	"reason":       {},
+	"safety_label": {},
 }
 
 // blastRadiusBadge maps the safer_shell builtin's blast_radius
@@ -173,10 +174,16 @@ func (d *toolConfirmationDialog) renderSafetyWarning(contentWidth int) string {
 	}
 
 	var heading string
-	if radius == "safe" {
+	switch radius {
+	case "safe":
 		heading = styles.BaseStyle.Bold(true).Foreground(styles.Success).
 			Render("✓ Read-only command — " + blastRadiusBadge(radius))
-	} else {
+	case "unknown":
+		// Not positively recognised ≠ destructive: crying wolf on every
+		// unlisted command would teach users to ignore the real warnings.
+		heading = styles.BaseStyle.Bold(true).Foreground(styles.Warning).
+			Render("⚠  Unrecognised command — not classified as safe")
+	default:
 		heading = styles.BaseStyle.Bold(true).Foreground(styles.Warning).
 			Render(fmt.Sprintf("⚠  Destructive command — %s blast radius", blastRadiusBadge(radius)))
 	}
