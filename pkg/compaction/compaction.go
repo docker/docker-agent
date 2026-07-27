@@ -246,13 +246,28 @@ func promptAndTotalTokens(msg *chat.Message) (prompt, total int64) {
 // text), reasoning content and tool-call payloads, plus a flat charge
 // per binary attachment and a small per-message overhead for
 // role/metadata tokens.
+//
+// Runtime-generated assistant messages deliberately mirror Content into a
+// MultiContent text part with the exact same string (see
+// pkg/runtime.recordAssistantMessage and stripGeneratedMediaTransform's
+// doc comments) so that providers treating a non-empty MultiContent as
+// authoritative (e.g. pkg/model/provider/oaistream) don't silently lose
+// the text. Counting both would double the estimate for every such
+// message, so the first MultiContent text part that exactly matches
+// Content is skipped — it is the same content already counted above, not
+// additional text.
 func heuristicMessageTokens(msg *chat.Message) int64 {
 	var chars int
 	chars += len(msg.Content)
 	chars += len(msg.ReasoningContent)
 
 	var attachments int64
+	skippedContentMirror := msg.Content == ""
 	for _, part := range msg.MultiContent {
+		if !skippedContentMirror && part.Type == chat.MessagePartTypeText && part.Text == msg.Content {
+			skippedContentMirror = true
+			continue
+		}
 		chars += len(part.Text)
 		if part.Document != nil {
 			chars += len(part.Document.Source.InlineText)
