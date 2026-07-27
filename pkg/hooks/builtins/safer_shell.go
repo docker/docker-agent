@@ -27,7 +27,9 @@ const SaferShell = "safer_shell"
 // warnSaferShellOnce surfaces the behavior change to operators whose
 // YAMLs still pin the builtin for enforcement: it used to emit ask/deny
 // verdicts (preempting --yolo on destructive commands) and now only
-// labels. Logged at first invocation, once per process.
+// labels. Logged once per process at the hook's first invocation —
+// deliberately before the shell-tool guard, because the deprecation
+// concerns the configuration being present, not any particular call.
 var warnSaferShellOnce = sync.OnceFunc(func() {
 	slog.Warn("The safer_shell hook is deprecated and no longer blocks or asks; " +
 		"it only attaches classification metadata. Approval is decided by the " +
