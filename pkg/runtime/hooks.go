@@ -45,6 +45,7 @@ func (r *LocalRuntime) buildHooksExecutors() {
 		if cfg == nil {
 			continue
 		}
+		builtins.WarnIfSaferShellConfigured(cfg)
 		r.hooksExecByAgent[name] = hooks.NewExecutorWithRegistry(cfg, r.workingDir, r.env, r.hooksRegistry)
 	}
 }
