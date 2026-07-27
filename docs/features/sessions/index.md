@@ -29,34 +29,21 @@ Override the location with `-s`/`--session-db`, or by overriding the data direct
 $ docker agent run agent.yaml --session-db ./sessions.db
 ```
 
-## Generated-Media Artifacts
+## Generated Media Files
 
-Some models (e.g. Gemini image-output models) can generate binary media — typically an image — as part of a reply. Docker Agent writes that data to a managed **artifact root** kept outside `session.db`: `<data-dir>/session_artifacts/<session-id>/` (`~/.cagent/session_artifacts/<session-id>/` by default). The session message itself keeps only a relative reference plus safe display metadata (MIME type, sanitized name, size) — never the raw bytes. See [Generated Media](../tui/index.md#generated-media) in the Terminal UI docs for the full placeholder, no-resend, and sanitization mechanics; this section covers only where and how the artifacts themselves are stored, referenced, and cleaned up.
-
-### Owner-Qualified References
-
-`<session-id>` in the artifact path is always the **owning** session — the session that was active when the media was generated — not necessarily whichever session currently holds the message. That owning session ID is recorded on the message itself and never changes, so branching or forking a session (see [Browsing Sessions in the TUI](#browsing-sessions-in-the-tui) below) keeps every generated-media reference resolving under the *original* artifact directory instead of a nonexistent one under the new session's ID.
-
-References materialized before this owner-qualified scheme existed carry no owner and cannot be resolved at all: there is no session ID left to safely resolve them against, so they surface as an unresolvable attachment rather than risk silently reading the wrong (or no) file under a guessed session.
-
-### Independent of `session.db`
-
-The artifact root and the session database are two independent stores that happen to share the same default parent directory:
-
-- `--data-dir` moves both by default — `session.db` and `session_artifacts/` relocate together under the new data directory.
-- `-s`/`--session-db` moves *only* the database. Pointing it at a path outside the data directory does **not** relocate `session_artifacts/`, which always stays under `<data-dir>/session_artifacts/` regardless of where the database file itself ends up.
-- Copying, moving, or backing up one of the two without the other silently leaves generated-media references unresolvable on whichever side didn't move.
-
-### No Automatic Cleanup
-
-Deleting a session — from `/sessions` in the TUI, or by removing its row from `session.db` directly — does **not** delete its generated artifacts, and no automatic garbage collection exists today: the artifact files and the session record are independent stores that are never reconciled for you.
-
-To reclaim space or fully remove a session's generated media, delete its subdirectory under `session_artifacts/` yourself once you no longer need it. This is safe: each session's artifacts live in their own subdirectory, so removing one never touches another session's files or the session database itself.
-
-```bash
-# Remove one session's generated-media artifacts.
-$ rm -rf ~/.cagent/session_artifacts/<session-id>/
-```
+Some models (e.g. Gemini image-output models) can generate an image as part
+of a reply. Docker Agent saves each generated image into the session's
+workspace — the directory the session was started in — as an ordinary,
+untracked file, not into `session.db` or the data directory. The session
+keeps only a reference to that file: reopening the session in the TUI
+re-renders the image from the workspace file, so a valid image file
+replaced at the same path renders its current bytes. If the file has
+since been deleted, moved, replaced by a symlink, become an invalid
+image, or grown too large, the transcript shows a short "unavailable"
+note instead. The files themselves are yours — edit, commit,
+or delete them like any other workspace file. See
+[Generated Media](../tui/index.md#generated-media) in the Terminal UI docs
+for naming, collision handling, and rendering details.
 
 ## Resuming a Session
 
