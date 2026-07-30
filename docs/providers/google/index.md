@@ -60,6 +60,34 @@ models:
 | `gemini-2.5-flash` | Fast inference, cost-effective  |
 | `gemini-2.5-pro`   | Strong reasoning, large context |
 
+## Generated Images
+
+Some Gemini models (e.g. `gemini-2.5-flash-image`) are designed to generate
+an image directly as part of their reply, not just describe one. Docker
+Agent's Gemini request path doesn't yet ask for that image output — that
+support is still being completed — so today a request like this gets a
+text-only reply. See
+[Generated Media](../../features/tui/index.md#generated-media) for the
+current, verified state.
+
+```yaml
+agents:
+  root:
+    model: google/gemini-2.5-flash-image
+```
+
+When the model is accessed through a Docker AI Gateway and explicitly
+declared image-output-capable with
+[`output_capabilities.image: true`](../../configuration/models/index.md#output-capabilities),
+Docker Agent has verified that request combined with custom function tools,
+a built-in tool (e.g. `google_search`), or structured output gets rejected
+by the gateway with an opaque, empty-body HTTP 400. To avoid that, Docker
+Agent rejects such a combination itself, before any request is sent, with a
+clear error naming which feature is incompatible. Plain text requests to
+that model (no tools, no structured output) are unaffected, as is every
+other route: direct Gemini API/Vertex AI calls, and gateway calls to a model
+without the declaration.
+
 ## Thinking Budget
 
 Gemini supports two approaches depending on the model version:
