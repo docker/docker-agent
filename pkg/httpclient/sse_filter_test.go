@@ -153,7 +153,7 @@ func TestSSEFilter_LargeEvent(t *testing.T) {
 	t.Parallel()
 
 	largeData := "data: " + strings.Repeat("x", 256*1024) + "\n\n"
-	r := newSSEFilterReader(io.NopCloser(strings.NewReader(largeData)))
+	r := newSSEFilterReader(io.NopCloser(strings.NewReader(largeData)), false)
 
 	output, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -167,7 +167,7 @@ func TestSSEFilter_PartialReads(t *testing.T) {
 	t.Parallel()
 
 	input := "data: test1\n\ndata: test2\n\n"
-	r := newSSEFilterReader(io.NopCloser(strings.NewReader(input)))
+	r := newSSEFilterReader(io.NopCloser(strings.NewReader(input)), false)
 
 	var output []byte
 	buf := make([]byte, 5)
@@ -192,7 +192,7 @@ func TestSSEFilter_IncompleteEventAtEOF(t *testing.T) {
 	t.Parallel()
 
 	input := "data: complete\n\ndata: incomplete"
-	r := newSSEFilterReader(io.NopCloser(strings.NewReader(input)))
+	r := newSSEFilterReader(io.NopCloser(strings.NewReader(input)), false)
 
 	output, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -204,7 +204,7 @@ func TestSSEFilter_IncompleteEventAtEOF(t *testing.T) {
 func TestSSEFilter_EmptyInput(t *testing.T) {
 	t.Parallel()
 
-	r := newSSEFilterReader(io.NopCloser(strings.NewReader("")))
+	r := newSSEFilterReader(io.NopCloser(strings.NewReader("")), false)
 
 	output, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -218,7 +218,7 @@ func TestSSEFilter_OnlyComments(t *testing.T) {
 	t.Parallel()
 
 	input := ": comment1\n\n: comment2\n\n"
-	r := newSSEFilterReader(io.NopCloser(strings.NewReader(input)))
+	r := newSSEFilterReader(io.NopCloser(strings.NewReader(input)), false)
 
 	output, err := io.ReadAll(r)
 	require.NoError(t, err)
@@ -230,7 +230,7 @@ func TestSSEFilter_OnlyComments(t *testing.T) {
 func TestSSEFilter_ScannerError(t *testing.T) {
 	t.Parallel()
 
-	r := newSSEFilterReader(io.NopCloser(&errorReader{err: io.ErrUnexpectedEOF}))
+	r := newSSEFilterReader(io.NopCloser(&errorReader{err: io.ErrUnexpectedEOF}), false)
 
 	_, err := io.ReadAll(r)
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
@@ -256,7 +256,7 @@ func TestSSEFilter_CloseWithoutRead(t *testing.T) {
 		onClose: func() { closed = true },
 	}
 
-	r := newSSEFilterReader(tracker)
+	r := newSSEFilterReader(tracker, false)
 	require.NoError(t, r.Close())
 	assert.True(t, closed, "underlying reader should be closed")
 }
@@ -343,4 +343,155 @@ func fetchThroughFilter(t *testing.T, url string) string {
 	body, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 	return string(body)
+}
+
+// Gemini-shaped data chunks used by the keepalive tests: a text delta and a
+// media (inlineData) delta of the kind an image-output model streams.
+const (
+	geminiTextChunk  = `data: {"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"}}]}` + "\n\n"
+	geminiMediaChunk = `data: {"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}],"role":"model"},"finishReason":"STOP"}]}` + "\n\n"
+	keepaliveFrame   = "event: keepalive\ndata: {}\n\n"
+)
+
+// TestSSEFilter_KeepaliveMode covers the opt-in keepalive-dropping mode used
+// by the Gemini gateway client: payload-free `event: keepalive` frames are
+// removed while every other frame — including named events with meaningful
+// data — passes through verbatim.
+func TestSSEFilter_KeepaliveMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			// The gateway scenario: keepalive frames interleaved with
+			// real text and media chunks during a long image generation.
+			name: "drops keepalive frames interleaved with data and media chunks",
+			in:   keepaliveFrame + geminiTextChunk + keepaliveFrame + keepaliveFrame + geminiMediaChunk,
+			want: geminiTextChunk + geminiMediaChunk,
+		},
+		{
+			name: "drops keepalive without a space after data:",
+			in:   "event: keepalive\ndata:{}\n\n" + geminiTextChunk,
+			want: geminiTextChunk,
+		},
+		{
+			name: "drops keepalive with an empty data payload",
+			in:   "event: keepalive\ndata:\n\n" + geminiTextChunk,
+			want: geminiTextChunk,
+		},
+		{
+			// Anthropic-style framing: a named event with meaningful data
+			// must never be touched, even in keepalive mode.
+			name: "preserves named events with meaningful data",
+			in:   "event: content_block_delta\ndata: {\"delta\":{\"text\":\"hi\"}}\n\n",
+			want: "event: content_block_delta\ndata: {\"delta\":{\"text\":\"hi\"}}\n\n",
+		},
+		{
+			// Conservative: only payload-free keepalives are dropped. A
+			// keepalive-named event carrying real data is preserved.
+			name: "preserves keepalive-named event with meaningful data",
+			in:   "event: keepalive\ndata: {\"note\":\"x\"}\n\n",
+			want: "event: keepalive\ndata: {\"note\":\"x\"}\n\n",
+		},
+		{
+			// The base filter's behavior is unchanged by keepalive mode.
+			name: "still drops comment-only and no-data event frames",
+			in:   ": ping\n\nevent: ping\nid: abc\n\n" + geminiTextChunk,
+			want: geminiTextChunk,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := newSSEFilterReader(io.NopCloser(strings.NewReader(tt.in)), true)
+			out, err := io.ReadAll(r)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, string(out))
+		})
+	}
+}
+
+// TestSSEFilter_KeepaliveMode_OutputParsableByGenaiStyleParser feeds a
+// keepalive-interleaved Gemini stream through the keepalive-mode filter and
+// verifies the result against the constraint that made the fix necessary:
+// genai's iterateResponseStream (google.golang.org/genai api_client.go)
+// treats ANY non-blank line without a `data:` prefix as a fatal invalid
+// chunk. Every data payload must survive, in order.
+func TestSSEFilter_KeepaliveMode_OutputParsableByGenaiStyleParser(t *testing.T) {
+	t.Parallel()
+
+	in := keepaliveFrame + geminiTextChunk + keepaliveFrame + geminiMediaChunk + keepaliveFrame
+	r := newSSEFilterReader(io.NopCloser(strings.NewReader(in)), true)
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+
+	var payloads []string
+	for line := range strings.Lines(string(out)) {
+		line = strings.TrimSuffix(line, "\n")
+		if line == "" {
+			continue
+		}
+		require.True(t, strings.HasPrefix(line, "data:"), "genai would reject this line as an invalid stream chunk: %q", line)
+		payloads = append(payloads, strings.TrimPrefix(line, "data: "))
+	}
+
+	require.Len(t, payloads, 2)
+	assert.Contains(t, payloads[0], `"text":"hi"`)
+	assert.Contains(t, payloads[1], `"inlineData"`)
+}
+
+// TestSSEFilter_SharedPathKeepsKeepaliveFrames pins that the shared default
+// filter (used by every other provider) does NOT gain keepalive dropping:
+// an `event: keepalive` frame has a data line, so it passes through
+// verbatim, exactly like Anthropic's meaningful named events.
+func TestSSEFilter_SharedPathKeepsKeepaliveFrames(t *testing.T) {
+	t.Parallel()
+
+	in := keepaliveFrame +
+		"event: content_block_delta\ndata: {\"delta\":{\"text\":\"hi\"}}\n\n"
+
+	assert.Equal(t, in, fetchSSE(t, in))
+}
+
+// TestNewHTTPClient_SSEKeepaliveFilterOptIn verifies the option wiring end
+// to end through NewHTTPClient: keepalive frames are dropped only when
+// WithSSEKeepaliveFilter is passed, and the default client leaves them in.
+func TestNewHTTPClient_SSEKeepaliveFilterOptIn(t *testing.T) {
+	t.Parallel()
+
+	in := keepaliveFrame + geminiTextChunk
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, in)
+	}))
+	t.Cleanup(srv.Close)
+
+	fetch := func(t *testing.T, client *http.Client) string {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+		require.NoError(t, err)
+		res, err := client.Do(req)
+		require.NoError(t, err)
+		defer func() { _ = res.Body.Close() }()
+		body, err := io.ReadAll(res.Body)
+		require.NoError(t, err)
+		return string(body)
+	}
+
+	t.Run("opted in drops keepalive frames", func(t *testing.T) {
+		t.Parallel()
+		client := NewHTTPClient(t.Context(), WithSSEKeepaliveFilter())
+		assert.Equal(t, geminiTextChunk, fetch(t, client))
+	})
+
+	t.Run("default keeps keepalive frames", func(t *testing.T) {
+		t.Parallel()
+		client := NewHTTPClient(t.Context())
+		assert.Equal(t, in, fetch(t, client))
+	})
 }

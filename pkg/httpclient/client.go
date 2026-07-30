@@ -19,6 +19,10 @@ type HTTPOptions struct {
 	Header http.Header
 	Query  url.Values
 
+	// dropSSEKeepaliveEvents enables keepalive-frame dropping in the SSE
+	// filter transport; see WithSSEKeepaliveFilter.
+	dropSSEKeepaliveEvents bool
+
 	// cagentID resolves the persistent install UUID stamped as
 	// `X-Cagent-Id` on gateway-bound requests. It defaults to
 	// [userid.Get]; tests inject their own source via
@@ -52,7 +56,10 @@ func NewHTTPClient(ctx context.Context, opts ...Opt) *http.Client {
 
 	var wrapped http.RoundTripper = &userAgentTransport{
 		httpOptions: httpOptions,
-		rt:          &sseFilterTransport{base: rt},
+		rt: &sseFilterTransport{
+			base:                rt,
+			dropKeepaliveEvents: httpOptions.dropSSEKeepaliveEvents,
+		},
 	}
 	if httpOptions.refreshAuth != nil {
 		// Outermost, so a replayed request goes through the whole chain again.
@@ -184,6 +191,19 @@ func WithModelName(name string) Opt {
 func WithQuery(query url.Values) Opt {
 	return func(o *HTTPOptions) {
 		o.Query = query
+	}
+}
+
+// WithSSEKeepaliveFilter makes the SSE filter transport also drop whole
+// `event: keepalive` frames whose data carries no payload (`data: {}` or
+// empty). The Docker AI Gateway emits such frames during long generations
+// (e.g. Gemini image output), and google.golang.org/genai's SSE parser
+// treats any `event:` line as a fatal invalid chunk. Only enable this for
+// clients whose SDK cannot tolerate `event:` lines — providers like
+// Anthropic rely on `event:` headers as meaningful framing.
+func WithSSEKeepaliveFilter() Opt {
+	return func(o *HTTPOptions) {
+		o.dropSSEKeepaliveEvents = true
 	}
 }
 

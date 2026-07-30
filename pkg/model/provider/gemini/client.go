@@ -179,6 +179,12 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 				}
 			}
 
+			// The gateway keeps long generations alive with `event: keepalive`
+			// + `data: {}` frames, which genai's SSE parser rejects as fatal
+			// invalid chunks. Drop them here, on the gateway path only — direct
+			// Gemini/Vertex clients never receive them.
+			httpOptions = append(httpOptions, httpclient.WithSSEKeepaliveFilter())
+
 			gatewayHTTPClient := httpclient.NewHTTPClient(ctx, httpOptions...)
 			globalOptions.WrapTransport(ctx, gatewayHTTPClient)
 

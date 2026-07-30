@@ -30,8 +30,17 @@ import (
 // (comment-only events, or events bearing only `event:` / `id:` headers)
 // never reach the SDK. Well-formed events pass through verbatim, and the
 // filter is a no-op on non-SSE responses.
+//
+// dropKeepaliveEvents additionally drops whole `event: keepalive` frames
+// whose data carries no payload (`data: {}` or empty). The Docker AI
+// Gateway emits such frames during long generations; the genai SDK's SSE
+// parser hard-fails on ANY `event:` line, so they must never reach it. The
+// mode is opt-in (see WithSSEKeepaliveFilter) because other providers —
+// Anthropic in particular — use `event:` headers as meaningful framing that
+// must pass through untouched.
 type sseFilterTransport struct {
-	base http.RoundTripper
+	base                http.RoundTripper
+	dropKeepaliveEvents bool
 }
 
 func (t *sseFilterTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -42,7 +51,7 @@ func (t *sseFilterTransport) RoundTrip(req *http.Request) (*http.Response, error
 	// Match the prefix so charset suffixes (e.g. "text/event-stream;
 	// charset=utf-8") still trigger filtering.
 	if strings.HasPrefix(strings.ToLower(res.Header.Get("Content-Type")), "text/event-stream") {
-		res.Body = newSSEFilterReader(res.Body)
+		res.Body = newSSEFilterReader(res.Body, t.dropKeepaliveEvents)
 	}
 	return res, err
 }
@@ -58,15 +67,19 @@ type sseFilterReader struct {
 	out     bytes.Buffer // bytes ready to hand back to the caller
 	pending bytes.Buffer // accumulated lines for the current event
 	hasData bool         // saw at least one `data:` line in `pending`
+
+	dropKeepaliveEvents bool // see sseFilterTransport
+	isKeepalive         bool // current event is named `keepalive`
+	hasMeaningfulData   bool // saw a `data:` line whose payload isn't empty or `{}`
 }
 
-func newSSEFilterReader(src io.ReadCloser) *sseFilterReader {
+func newSSEFilterReader(src io.ReadCloser, dropKeepaliveEvents bool) *sseFilterReader {
 	scn := bufio.NewScanner(src)
 	// SSE events can be large (long completion tokens, image URLs, …). Match
 	// the buffer size used by openai-go's own SSE decoder so we don't trip
 	// `bufio.ErrTooLong` on payloads it would happily accept.
 	scn.Buffer(make([]byte, 0, 64*1024), bufio.MaxScanTokenSize<<9)
-	return &sseFilterReader{src: src, scn: scn}
+	return &sseFilterReader{src: src, scn: scn, dropKeepaliveEvents: dropKeepaliveEvents}
 }
 
 func (r *sseFilterReader) Read(p []byte) (int, error) {
@@ -85,22 +98,45 @@ func (r *sseFilterReader) Read(p []byte) (int, error) {
 func (r *sseFilterReader) consumeLine(line []byte) {
 	switch {
 	case len(line) == 0:
-		// Event boundary: emit the buffered event iff it had data.
-		if r.hasData {
+		// Event boundary: emit the buffered event iff it had data and is
+		// not a payload-free keepalive frame in keepalive-dropping mode.
+		if r.hasData && (!r.isKeepalive || r.hasMeaningfulData) {
 			r.out.Write(r.pending.Bytes())
 			r.out.WriteByte('\n')
 		}
 		r.pending.Reset()
 		r.hasData = false
+		r.isKeepalive = false
+		r.hasMeaningfulData = false
 	case line[0] == ':':
 		// SSE comment — drop entirely.
 	default:
 		r.pending.Write(line)
 		r.pending.WriteByte('\n')
-		if bytes.HasPrefix(line, []byte("data:")) {
+		if value, ok := fieldValue(line, "data"); ok {
 			r.hasData = true
+			if r.dropKeepaliveEvents {
+				if payload := bytes.TrimSpace(value); len(payload) > 0 && !bytes.Equal(payload, []byte("{}")) {
+					r.hasMeaningfulData = true
+				}
+			}
+		} else if r.dropKeepaliveEvents {
+			if value, ok := fieldValue(line, "event"); ok && string(bytes.TrimSpace(value)) == "keepalive" {
+				r.isKeepalive = true
+			}
 		}
 	}
+}
+
+// fieldValue returns the value of an SSE line whose field name is `name`,
+// with the single optional leading space the SSE grammar allows already
+// removed.
+func fieldValue(line []byte, name string) ([]byte, bool) {
+	value, ok := bytes.CutPrefix(line, []byte(name+":"))
+	if !ok {
+		return nil, false
+	}
+	return bytes.TrimPrefix(value, []byte(" ")), true
 }
 
 func (r *sseFilterReader) Close() error {
