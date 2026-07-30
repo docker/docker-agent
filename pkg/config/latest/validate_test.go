@@ -74,6 +74,8 @@ func TestModelConfigValidateFirstAvailable(t *testing.T) {
 		{name: "with compaction_model", model: ModelConfig{FirstAvailable: candidates, CompactionModel: "small"}, wantErr: "first_available cannot be combined with compaction_model"},
 		{name: "with compaction_threshold", model: ModelConfig{FirstAvailable: candidates, CompactionThreshold: new(0.5)}, wantErr: "first_available cannot be combined with compaction_threshold"},
 		{name: "with cost", model: ModelConfig{FirstAvailable: candidates, Cost: &CostConfig{Input: 1}}, wantErr: "first_available cannot be combined with cost"},
+		{name: "with output_capabilities", model: ModelConfig{FirstAvailable: candidates, OutputCapabilities: &OutputCapabilitiesConfig{Image: new(true)}}, wantErr: "first_available cannot be combined with output_capabilities"},
+		{name: "with output_capabilities false", model: ModelConfig{FirstAvailable: candidates, OutputCapabilities: &OutputCapabilitiesConfig{Image: new(false)}}, wantErr: "first_available cannot be combined with output_capabilities"},
 	}
 
 	for _, tt := range tests {

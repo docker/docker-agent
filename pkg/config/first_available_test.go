@@ -108,6 +108,42 @@ func TestResolveFirstAvailableModels_NamedCandidate(t *testing.T) {
 	assert.Equal(t, "claude-sonnet-4-6", got.Model)
 }
 
+// TestResolveFirstAvailableModels_PreservesConcreteCandidateOutputCapabilities is
+// the regression for a selected candidate's owner-declared
+// output_capabilities.image: resolveCandidate returns a named model's
+// ModelConfig as-is (see resolveCandidate in first_available.go), but a
+// future change to that path (e.g. rebuilding the struct field-by-field, or
+// routing through ParseModelRef) could silently drop it. A selector itself
+// can never carry output_capabilities (see TestValidateFirstAvailable's
+// "combined with output_capabilities" cases) — only a concrete candidate can
+// — so this is the only place that guarantee can be pinned end to end.
+func TestResolveFirstAvailableModels_PreservesConcreteCandidateOutputCapabilities(t *testing.T) {
+	t.Parallel()
+
+	cfg := &latest.Config{
+		Models: map[string]latest.ModelConfig{
+			"gemini_image": {
+				Provider:           "google",
+				Model:              "gemini-2.5-flash-image",
+				OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)},
+			},
+			"smart": {FirstAvailable: []string{"gemini_image", "dmr/ai/qwen3"}},
+		},
+	}
+
+	env := environment.NewMapEnvProvider(map[string]string{"GEMINI_API_KEY": "test-key"})
+
+	require.NoError(t, ResolveFirstAvailableModels(t.Context(), cfg, "", env))
+
+	got := cfg.Models["smart"]
+	assert.Equal(t, "google", got.Provider)
+	assert.Equal(t, "gemini-2.5-flash-image", got.Model)
+	require.NotNil(t, got.OutputCapabilities,
+		"the selected concrete candidate's output_capabilities block must survive selection/resolution")
+	require.NotNil(t, got.OutputCapabilities.Image)
+	assert.True(t, *got.OutputCapabilities.Image)
+}
+
 func TestResolveFirstAvailableModels_SkipsRoutingCandidateWithMissingCredentials(t *testing.T) {
 	t.Parallel()
 
@@ -372,6 +408,16 @@ func TestValidateFirstAvailable(t *testing.T) {
 			name:    "combined with auth",
 			model:   latest.ModelConfig{FirstAvailable: []string{"anthropic/claude-sonnet-4-6"}, Auth: &latest.AuthConfig{Type: "anthropic_wif"}},
 			wantErr: "cannot be combined with auth",
+		},
+		{
+			name:    "combined with output_capabilities",
+			model:   latest.ModelConfig{FirstAvailable: []string{"google/gemini-2.5-flash-image"}, OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)}},
+			wantErr: "cannot be combined with output_capabilities",
+		},
+		{
+			name:    "combined with output_capabilities false",
+			model:   latest.ModelConfig{FirstAvailable: []string{"google/gemini-2.5-flash-image"}, OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(false)}},
+			wantErr: "cannot be combined with output_capabilities",
 		},
 		{
 			name:    "empty candidate",

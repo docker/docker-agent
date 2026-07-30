@@ -172,6 +172,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	if m.Cost != nil {
 		return errors.New("first_available cannot be combined with cost (set it on the candidate models instead)")
 	}
+	if m.OutputCapabilities != nil {
+		return errors.New("first_available cannot be combined with output_capabilities (set output_capabilities.image on the candidate models instead)")
+	}
 	for i, ref := range m.FirstAvailable {
 		if strings.TrimSpace(ref) == "" {
 			return fmt.Errorf("first_available[%d] must not be empty", i)

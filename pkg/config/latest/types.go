@@ -128,6 +128,16 @@ func (b *BudgetConfig) validate() error {
 	return nil
 }
 
+// Bool returns a pointer to value. It is primarily useful in configuration
+// literals where a nil pointer means no override.
+//
+// Deprecated: use new(value) in new code.
+//
+//nolint:modernize // Compatibility API for configuration literals.
+func Bool(value bool) *bool {
+	return &value
+}
+
 // SafetyMode is a declarative safety-mode default that agent authors
 // (runtime.safety, agents.<name>.safety) and users (settings.safety,
 // alias safety) can put in YAML. Only the four canonical session modes
@@ -1154,9 +1164,14 @@ type ModelConfig struct {
 	// of 0.9 applies. Useful next to CompactionModel: a model that compacts
 	// with a slower/smaller summarizer may want to trigger earlier.
 	CompactionThreshold *float64 `json:"compaction_threshold,omitempty"`
-	// Capabilities optionally declares the model's attachment capabilities,
-	// overriding the automatic models.dev-based detection. See [CapabilitiesConfig].
+	// Capabilities optionally declares the model's attachment (input)
+	// capabilities, overriding the automatic models.dev-based detection. See
+	// [CapabilitiesConfig].
 	Capabilities *CapabilitiesConfig `json:"capabilities,omitempty"`
+	// OutputCapabilities optionally overrides the model's generative *output*
+	// capabilities. An omitted flag is resolved from the models.dev catalogue;
+	// an explicit value takes precedence. See [OutputCapabilitiesConfig].
+	OutputCapabilities *OutputCapabilitiesConfig `json:"output_capabilities,omitempty"`
 	// Cost optionally declares the model's token pricing explicitly,
 	// overriding the models.dev catalogue. See [CostConfig].
 	Cost *CostConfig `json:"cost,omitempty"`
@@ -1222,6 +1237,15 @@ type CapabilitiesConfig struct {
 	Audio bool `json:"audio,omitempty"`
 	// Video reports whether the model accepts video attachments.
 	Video bool `json:"video,omitempty"`
+}
+
+// OutputCapabilitiesConfig overrides model generative *output* capabilities.
+// A nil flag defers to models.dev, while an explicit true or false is
+// authoritative. Custom models not found in the catalogue conservatively
+// resolve as unable to generate image output.
+type OutputCapabilitiesConfig struct {
+	// Image reports whether the model can generate image output.
+	Image *bool `json:"image,omitempty"`
 }
 
 // IsFirstAvailable reports whether this model is a first-available selector
@@ -1401,6 +1425,7 @@ func (f *FlexibleModelConfig) isShorthandOnly() bool {
 		f.CompactionModel == "" &&
 		f.CompactionThreshold == nil &&
 		f.Capabilities == nil &&
+		f.OutputCapabilities == nil &&
 		f.Cost == nil
 }
 
