@@ -8,6 +8,38 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
+func TestResolveToolCallSupport(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"tool-model":    {ToolCall: true},
+			"no-tool-model": {ToolCall: false},
+		}},
+	}})
+
+	tests := []struct {
+		name  string
+		store *modelsdev.Store
+		model string
+		want  ToolCallSupport
+	}{
+		{name: "catalogue true", store: store, model: "tool-model", want: ToolCallSupported},
+		{name: "catalogue false", store: store, model: "no-tool-model", want: ToolCallUnsupported},
+		{name: "missing model", store: store, model: "missing", want: ToolCallSupportUnknown},
+		{name: "nil store", model: "tool-model", want: ToolCallSupportUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ResolveToolCallSupport(t.Context(), tt.store, modelsdev.NewID("google", tt.model))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestResolveOutputImage(t *testing.T) {
 	t.Parallel()
 

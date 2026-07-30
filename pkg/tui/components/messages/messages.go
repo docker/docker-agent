@@ -109,6 +109,11 @@ type Model interface {
 	// VisualGeneration increments only when Update changes rendered output.
 	VisualGeneration() uint64
 
+	// MessageTypeCount returns how many messages currently in the list have
+	// the given type. Read-only introspection for callers (e.g. tests) that
+	// need to observe real list state rather than trust a call was made.
+	MessageTypeCount(t types.MessageType) int
+
 	// IsScrollbarDragging returns true when the scrollbar thumb is being dragged.
 	IsScrollbarDragging() bool
 
@@ -2218,6 +2223,18 @@ func (m *model) createMessageView(msg *types.Message) layout.Model {
 
 func (m *model) RemoveSpinner() {
 	m.removeSpinner()
+}
+
+// MessageTypeCount returns how many messages currently in the list have the
+// given type, by scanning the real message slice — never a call counter.
+func (m *model) MessageTypeCount(t types.MessageType) int {
+	count := 0
+	for _, msg := range m.messages {
+		if msg.Type == t {
+			count++
+		}
+	}
+	return count
 }
 
 func (m *model) removeSpinner() {

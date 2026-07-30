@@ -40,7 +40,7 @@ func TestNewRequestShape_Minimal(t *testing.T) {
 	config := client.buildConfig()
 	config.Tools = client.builtInTools()
 
-	shape := newRequestShape(client, config, 0)
+	shape := newRequestShape(client, config, 0, false)
 
 	assert.False(t, shape.ResponseModalitiesSet)
 	assert.Empty(t, shape.ResponseModalities)
@@ -52,9 +52,8 @@ func TestNewRequestShape_Minimal(t *testing.T) {
 	assert.False(t, shape.ThinkingConfigSet)
 	assert.False(t, shape.NoThinkingRequested)
 	assert.Equal(t, apiSurfaceGeminiAPI, shape.APISurface)
-	// No authoritative output-capability source exists yet: diagnostics must
-	// report "unknown", never guess from the model ID.
-	assert.False(t, shape.OutputCapabilityKnown)
+	// No output_capabilities declaration on this ModelConfig: diagnostics
+	// must report "unknown", never guess from the model ID.
 	assert.False(t, shape.OutputCapabilityEnabled)
 }
 
@@ -93,7 +92,7 @@ func TestNewRequestShape_ToolsAndBuiltIns(t *testing.T) {
 		config.ToolConfig.IncludeServerSideToolInvocations = new(true)
 	}
 
-	shape := newRequestShape(client, config, len(requestTools))
+	shape := newRequestShape(client, config, len(requestTools), false)
 
 	assert.Equal(t, 2, shape.BuiltInToolCount)
 	assert.ElementsMatch(t, []string{"google_search", "google_maps"}, shape.BuiltInToolKinds)
@@ -114,7 +113,7 @@ func TestNewRequestShape_ResponseModalitiesNormalized(t *testing.T) {
 	config := client.buildConfig()
 	config.ResponseModalities = []string{" text ", "IMAGE", "text", ""}
 
-	shape := newRequestShape(client, config, 0)
+	shape := newRequestShape(client, config, 0, false)
 
 	assert.True(t, shape.ResponseModalitiesSet)
 	assert.Equal(t, []string{"TEXT", "IMAGE"}, shape.ResponseModalities)
@@ -135,7 +134,7 @@ func TestNewRequestShape_NoThinkingRequested(t *testing.T) {
 	}
 	config := client.buildConfig()
 
-	shape := newRequestShape(client, config, 0)
+	shape := newRequestShape(client, config, 0, false)
 
 	assert.True(t, shape.ThinkingConfigSet)
 	assert.True(t, shape.NoThinkingRequested)
@@ -156,7 +155,7 @@ func TestNewRequestShape_StructuredOutputPresent(t *testing.T) {
 	}
 	config := client.buildConfig()
 
-	shape := newRequestShape(client, config, 0)
+	shape := newRequestShape(client, config, 0, false)
 
 	require.True(t, shape.StructuredOutputPresent)
 
@@ -165,6 +164,46 @@ func TestNewRequestShape_StructuredOutputPresent(t *testing.T) {
 		if s, ok := attr.(string); ok {
 			assert.NotContains(t, s, "secret_field_name")
 		}
+	}
+}
+
+// TestNewRequestShape_OutputCapabilityUsesResolvedValue pins that diagnostics
+// distinguish an explicit override while reporting the resolved capability.
+func TestNewRequestShape_OutputCapabilityUsesResolvedValue(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		outputCapabilities *latest.OutputCapabilitiesConfig
+		resolvedEnabled    bool
+		wantKnown          bool
+		wantEnabled        bool
+	}{
+		{name: "catalogue enabled", outputCapabilities: nil, resolvedEnabled: true, wantKnown: false, wantEnabled: true},
+		{name: "declared false", outputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(false)}, wantKnown: true, wantEnabled: false},
+		{name: "declared true", outputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)}, resolvedEnabled: true, wantKnown: true, wantEnabled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := &Client{
+				Config: base.Config{
+					ModelConfig: latest.ModelConfig{
+						Provider:           "google",
+						Model:              "gemini-2.5-flash-image",
+						OutputCapabilities: tt.outputCapabilities,
+					},
+				},
+				apiSurface: apiSurfaceGeminiAPI,
+			}
+			config := client.buildConfig()
+
+			shape := newRequestShape(client, config, 0, tt.resolvedEnabled)
+			assert.Equal(t, tt.wantKnown, shape.OutputCapabilityKnown)
+			assert.Equal(t, tt.wantEnabled, shape.OutputCapabilityEnabled)
+		})
 	}
 }
 
@@ -189,7 +228,7 @@ func TestRequestShape_LogAttrsNeverLeaksToolSchemas(t *testing.T) {
 	require.NoError(t, err)
 	config.Tools = allTools
 
-	shape := newRequestShape(client, config, len(requestTools))
+	shape := newRequestShape(client, config, len(requestTools), false)
 
 	for _, attr := range flattenAttrs(shape.LogAttrs()) {
 		assert.NotContains(t, attr, marker, "RequestShape must never carry tool descriptions or schemas")

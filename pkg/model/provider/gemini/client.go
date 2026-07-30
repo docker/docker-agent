@@ -729,6 +729,17 @@ func stringifyEnumValues(values []any) []string {
 	return out
 }
 
+// wantsImageResponseModalities reports whether this ordinary chat request
+// should ask Gemini for TEXT+IMAGE output.
+func (c *Client) wantsImageResponseModalities(imageOutputEnabled bool) bool {
+	switch c.apiSurface {
+	case apiSurfaceGateway, apiSurfaceGeminiAPI, apiSurfaceVertexAI:
+	default:
+		return false
+	}
+	return imageOutputEnabled && !c.ModelOptions.GeneratingTitle() && !c.ModelOptions.Compacting()
+}
+
 // CreateChatCompletionStream creates a streaming chat completion request
 func (c *Client) CreateChatCompletionStream(
 	ctx context.Context,
@@ -740,9 +751,15 @@ func (c *Client) CreateChatCompletionStream(
 	}
 
 	config := c.buildConfig()
+	imageOutputEnabled := c.ImageOutputEnabled(ctx)
+
+	if c.wantsImageResponseModalities(imageOutputEnabled) {
+		config.ResponseModalities = []string{string(genai.ModalityText), string(genai.ModalityImage)}
+	}
 
 	// Start with Google built-in tools (search, maps, code execution) from provider_opts
-	config.Tools = c.builtInTools()
+	builtInTools := c.builtInTools()
+	config.Tools = builtInTools
 
 	// Add tools to config if provided
 	if len(requestTools) > 0 {
@@ -767,7 +784,11 @@ func (c *Client) CreateChatCompletionStream(
 		}
 	}
 
-	shape := newRequestShape(c, config, len(requestTools))
+	if err := c.checkImageOutputRequestCompatibility(ctx, imageOutputEnabled, config, builtInTools, len(requestTools)); err != nil {
+		return nil, err
+	}
+
+	shape := newRequestShape(c, config, len(requestTools), imageOutputEnabled)
 	slog.DebugContext(ctx, "Gemini request shape", shape.LogAttrs()...)
 
 	contents := convertMessagesToGemini(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())

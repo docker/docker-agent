@@ -713,6 +713,42 @@ func LoadCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) Mode
 	return capsFromModalities(model.Modalities.Input)
 }
 
+// ToolCallSupport is the models.dev catalogue's tri-state tool-call capability.
+type ToolCallSupport uint8
+
+const (
+	ToolCallSupportUnknown ToolCallSupport = iota
+	ToolCallUnsupported
+	ToolCallSupported
+)
+
+// ResolveToolCallSupport reports whether models.dev says a model supports tool
+// calls. Missing catalogue data remains unknown rather than being treated as a
+// negative capability claim.
+func ResolveToolCallSupport(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) ToolCallSupport {
+	if store == nil {
+		return ToolCallSupportUnknown
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, loadCapsTimeout)
+	defer cancel()
+
+	model, err := store.GetModel(ctx, id)
+	if err != nil {
+		if ctx.Err() != nil {
+			slog.WarnContext(ctx, "modelinfo: models.dev tool-call lookup timed out, leaving support unknown",
+				"model", id.String(), "timeout", loadCapsTimeout)
+		} else {
+			warnCapsLookupMiss(ctx, id, err)
+		}
+		return ToolCallSupportUnknown
+	}
+	if model.ToolCall {
+		return ToolCallSupported
+	}
+	return ToolCallUnsupported
+}
+
 // ResolveOutputImage applies an explicit image-output override when present;
 // otherwise it derives support from the models.dev output modalities. Missing
 // catalogue data conservatively disables image output.
