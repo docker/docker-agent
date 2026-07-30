@@ -35,11 +35,13 @@ models:
     parallel_tool_calls: boolean # Optional: allow parallel tool calls
     track_usage: boolean # Optional: track token usage
     routing: [list] # Optional: rule-based model routing
-    capabilities: # Optional: override attachment capabilities
+    capabilities: # Optional: override attachment (input) capabilities
       image: boolean # Optional: whether the model accepts image attachments
       pdf: boolean # Optional: whether the model accepts PDF attachments
       audio: boolean # Optional: whether the model accepts audio attachments
       video: boolean # Optional: whether the model accepts video attachments
+    output_capabilities: # Optional: owner-declared generative output capabilities (never inferred)
+      image: boolean # Optional: whether the model is declared able to generate image output
     cost: # Optional: explicit token pricing (USD per 1M tokens)
       input: float # Optional: price per 1M input tokens
       output: float # Optional: price per 1M output tokens
@@ -73,7 +75,8 @@ models:
 | `parallel_tool_calls` | boolean    | ✗        | Allow model to call multiple tools at once                                            |
 | `track_usage`         | boolean    | ✗        | Track and report token usage for this model                                           |
 | `routing`             | array      | ✗        | Rule-based routing to different models. See [Model Routing](../routing/index.md). |
-| `capabilities`        | object     | ✗        | Override attachment capabilities for this model. See [Attachment Capability Overrides](#attachment-capability-overrides). |
+| `capabilities`        | object     | ✗        | Override attachment (input) capabilities for this model. See [Attachment Capability Overrides](#attachment-capability-overrides). |
+| `output_capabilities` | object     | ✗        | Owner-declared generative output capabilities for this model, e.g. image generation. Never inferred. Cannot be combined with `first_available`. See [Output Capabilities](#output-capabilities). |
 | `cost`                | object     | ✗        | Explicit token pricing in USD per 1M tokens, overriding the built-in catalogue. See [Custom Token Pricing](#custom-token-pricing). |
 | `provider_opts`       | object     | ✗        | Provider-specific options (see provider pages)                                        |
 | `title_model`         | string     | ✗        | Model used for session-title generation. Can be a named model from the `models:` section or an inline `provider/model` string. When omitted, the agent's primary model generates titles. Cannot be combined with `first_available`. |
@@ -147,6 +150,41 @@ the conservative text-only default and have their media parts stripped.
 See [`examples/capability-overrides.yaml`](https://github.com/docker/docker-agent/blob/main/examples/capability-overrides.yaml) for a complete example, and
 [`examples/strip-unsupported-media.yaml`](https://github.com/docker/docker-agent/blob/main/examples/strip-unsupported-media.yaml) for a fixture demonstrating the
 stripping behaviour with and without an override.
+
+## Output Capabilities
+
+`output_capabilities` declares what a model can generate, as opposed to
+`capabilities`, which declares what it accepts as input. There is no
+automatic detection for output capabilities: no catalogue of
+output-capable models exists, and matching on the model name string is
+deliberately avoided as unreliable. A model's output capabilities are
+therefore always unknown/off unless the owner declares them.
+
+```yaml
+models:
+  gemini-image:
+    provider: google
+    model: gemini-2.5-flash-image
+    output_capabilities:
+      image: true # this model is declared able to generate image output
+```
+
+| Field                       | Type    | Description                                                  |
+| --------------------------- | ------- | -------------------------------------------------------------|
+| `output_capabilities.image` | boolean | Whether the model is declared able to generate image output  |
+
+Omitting `output_capabilities`, or leaving `image` unset or `false`, always
+preserves existing behavior. Setting it to `true` only opts the model into
+behavior that specifically keys off a declared image-output capability (for
+example, a provider-specific request-shape guard); it does not by itself
+change what Docker Agent sends to or renders from the model.
+
+> [!WARNING]
+> **Constraint**
+>
+> `output_capabilities` cannot be combined with `first_available` model selection — the combination is rejected at validation time. Declare it on the concrete candidate models instead.
+
+See [`examples/gemini_image_output.yaml`](https://github.com/docker/docker-agent/blob/main/examples/gemini_image_output.yaml) for a complete example.
 
 ## Custom Token Pricing
 

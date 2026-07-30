@@ -1,0 +1,30 @@
+# Gemini image-output model: the model can generate an image directly as
+# part of its reply, instead of only describing one.
+#
+# The `gemini-image` model below declares `output_capabilities.image: true` —
+# an explicit, owner-provided statement that this model can generate image
+# output. It is never inferred from the model name or any catalogue; omit
+# it, or leave it false, and behavior is unchanged.
+#
+# Native generated images aren't currently presented inline in the
+# terminal UI, so the model's text reply is what you'll see today.
+#
+# Try it out:
+#   docker agent run examples/gemini_image_output.yaml \
+#     "Generate an image of a red panda working at a terminal"
+#   docker agent run examples/gemini_image_output.yaml \
+#     "Generate an image of a lighthouse at sunset, and describe the color palette you used"
+models:
+  gemini-image:
+    provider: google
+    model: gemini-2.5-flash-image
+    output_capabilities:
+      image: true
+
+agents:
+  root:
+    model: gemini-image
+    description: Minimal agent for exercising Gemini native image-output generation.
+    instruction: |
+      When asked to draw or generate an image, do so directly using your
+      native image-generation capability. Briefly describe what you made.
