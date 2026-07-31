@@ -761,6 +761,7 @@ func (c *Client) CreateChatCompletionStream(
 
 	if c.wantsImageResponseModalities(imageOutputEnabled) {
 		config.ResponseModalities = []string{string(genai.ModalityText), string(genai.ModalityImage)}
+		applyImageOutputMediaFileInstruction(config)
 	}
 
 	// Start with Google built-in tools (search, maps, code execution) from provider_opts

@@ -27,10 +27,11 @@ type MediaDelta struct {
 	// (e.g. echoed from an "as sunshine.jpg" instruction), when one exists.
 	// It is untrusted model input: the runtime routes it through
 	// workspacemedia.ClassifyRequestedPath, and a path escaping the workspace
-	// requires an explicit user confirmation before it is honored. Response
-	// marker extraction (the "[media-file: ...]" protocol) will populate it;
-	// until that lands, providers leave it empty and materialization falls
-	// back to Name.
+	// requires an explicit user confirmation before it is honored. The
+	// runtime's response marker filter (the "[media-file: ...]" protocol,
+	// pkg/runtime/generated_media_markers.go) populates it by pairing marker
+	// paths with blobs in response order; blobs no marker names keep it empty
+	// and materialization falls back to Name, then a generic name.
 	RequestedPath string `json:"requested_path,omitempty"`
 
 	// Size is the byte length of Data, cached because Data itself is
