@@ -39,7 +39,11 @@ type DocumentSource struct {
 	//
 	//   - ArtifactRootWorkspace: relative, slash-separated — never absolute,
 	//     never containing ".." — resolved against the owning session's
-	//     workspace root, exactly as returned by workspacemedia.Write.
+	//     workspace root, exactly as returned by workspacemedia.Write. The
+	//     path alone is never trusted to read a workspace file back —
+	//     resolution must also verify the (owner session, path) pair against
+	//     the generated-media manifest (session.GeneratedMediaManifest),
+	//     which only materialization writes.
 	//   - empty: the root is unknown — never resolved; the part surfaces
 	//     as unavailable.
 	ArtifactPath string `json:"artifact_path,omitempty"`

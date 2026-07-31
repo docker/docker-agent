@@ -445,6 +445,24 @@ func getAllMigrations() []Migration {
 			UpSQL:       `ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'run'`,
 			DownSQL:     `ALTER TABLE sessions DROP COLUMN origin`,
 		},
+		{
+			ID:          28,
+			Name:        "028_add_generated_media_manifest_table",
+			Description: "Record which workspace files generated-media materialization wrote, keyed by owning session and workspace-relative path",
+			// No foreign key to sessions(id): materialization may record a file
+			// before the (lazily persisted) session row exists. DeleteSession
+			// prunes manifest rows explicitly instead.
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS generated_media_manifest (
+					session_id TEXT NOT NULL,
+					rel_path TEXT NOT NULL,
+					mime_type TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					PRIMARY KEY (session_id, rel_path)
+				)
+			`,
+			DownSQL: `DROP TABLE IF EXISTS generated_media_manifest`,
+		},
 	}
 }
 

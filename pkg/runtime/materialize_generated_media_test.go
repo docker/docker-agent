@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,16 +21,16 @@ import (
 )
 
 // newMediaTestRuntime builds the minimal LocalRuntime materialization needs:
-// a session store (for parent-chain WorkingDir lookup). It also confines the
-// process data dir to a throwaway temp dir so every test can prove no
-// generated file falls back there.
+// a session store (for parent-chain WorkingDir lookup and the generated-media
+// manifest) and a clock. It also confines the process data dir to a throwaway
+// temp dir so every test can prove no generated file falls back there.
 func newMediaTestRuntime(t *testing.T) (*LocalRuntime, session.Store, string) {
 	t.Helper()
 	dataDir := t.TempDir()
 	paths.SetDataDir(dataDir)
 	t.Cleanup(func() { paths.SetDataDir("") })
 	store := session.NewInMemorySessionStore()
-	return &LocalRuntime{sessionStore: store}, store, dataDir
+	return &LocalRuntime{sessionStore: store, now: time.Now}, store, dataDir
 }
 
 // workspaceSession returns a session owning a real, writable workspace root.
@@ -39,8 +40,15 @@ func workspaceSession(t *testing.T, id string) (*session.Session, string) {
 	return &session.Session{ID: id, WorkingDir: root}, root
 }
 
+func manifestOf(t *testing.T, store session.Store) session.GeneratedMediaManifest {
+	t.Helper()
+	manifest, ok := store.(session.GeneratedMediaManifest)
+	require.True(t, ok, "the built-in store must implement the generated-media manifest")
+	return manifest
+}
+
 // assertNoFilesUnder proves the no-data-dir-fallback contract: materialization
-// must never create a file under the managed data dir.
+// must never create a file under the managed data dir anymore.
 func assertNoFilesUnder(t *testing.T, dir string) {
 	t.Helper()
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
@@ -74,13 +82,13 @@ func (s *collectingSink) warnings() []*WarningEvent {
 	return out
 }
 
-// TestMaterializeGeneratedMedia_WritesIntoWorkspace is the core contract:
-// a generated item lands in the owning session's workspace at the exact
-// final relative path the writer returns, the persisted part carries the
-// workspace root kind plus that path, and nothing is created under the
-// managed data dir (no fallback).
+// TestMaterializeGeneratedMedia_WritesIntoWorkspace is the core Phase-2.3
+// contract: a generated item lands in the owning session's workspace at the
+// exact final relative path the writer returns, the persisted part carries
+// the workspace root kind plus that path, the manifest records the write,
+// and nothing is created under the managed data dir (no fallback).
 func TestMaterializeGeneratedMedia_WritesIntoWorkspace(t *testing.T) {
-	r, _, dataDir := newMediaTestRuntime(t)
+	r, store, dataDir := newMediaTestRuntime(t)
 	sess, root := workspaceSession(t, "sess-workspace")
 
 	sink := &collectingSink{}
@@ -104,7 +112,89 @@ func TestMaterializeGeneratedMedia_WritesIntoWorkspace(t *testing.T) {
 	require.NoError(t, err, "the generated file must be a real, visible workspace file")
 	assert.Equal(t, []byte{0x01, 0x02}, data)
 
+	file, err := manifestOf(t, store).LookupGeneratedFile(t.Context(), sess.ID, "cat.png")
+	require.NoError(t, err, "a successful write must be recorded in the manifest")
+	assert.Equal(t, "image/png", file.MimeType)
+	assert.False(t, file.CreatedAt.IsZero())
+
 	assertNoFilesUnder(t, dataDir)
+}
+
+// TestMaterializeGeneratedMedia_InheritsWorkspaceFromParent proves the root
+// comes from session.ResolveWorkingDir with the runtime's store as parent
+// lookup: a sub-session without provenance of its own writes into its
+// parent's workspace.
+func TestMaterializeGeneratedMedia_InheritsWorkspaceFromParent(t *testing.T) {
+	r, store, _ := newMediaTestRuntime(t)
+	parent, root := workspaceSession(t, "parent")
+	require.NoError(t, store.AddSession(t.Context(), parent))
+	sub := &session.Session{ID: "sub", ParentID: parent.ID}
+
+	sink := &collectingSink{}
+	parts := r.materializeGeneratedMedia(t.Context(), sub, []chat.MediaDelta{
+		{Data: []byte{0x01}, MimeType: "image/png", Name: "cat.png", Size: 1},
+	}, "root", sink)
+
+	require.Len(t, parts, 1)
+	assert.Empty(t, sink.warnings())
+	assert.FileExists(t, filepath.Join(root, "cat.png"))
+	assert.Equal(t, "sub", parts[0].Document.Source.ArtifactOwnerSessionID,
+		"the owner is the generating session, even when the root comes from an ancestor")
+}
+
+// TestMaterializeGeneratedMedia_CollisionWritesSuffixedPath pins that an
+// existing workspace file is never overwritten: the writer's dash-suffixed
+// result is what gets persisted, displayed, and recorded in the manifest.
+func TestMaterializeGeneratedMedia_CollisionWritesSuffixedPath(t *testing.T) {
+	r, store, _ := newMediaTestRuntime(t)
+	sess, root := workspaceSession(t, "sess-collision")
+	require.NoError(t, os.WriteFile(filepath.Join(root, "cat.png"), []byte("user file"), 0o644))
+
+	sink := &collectingSink{}
+	parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
+		{Data: []byte{0x01}, MimeType: "image/png", Name: "cat.png", Size: 1},
+	}, "root", sink)
+
+	require.Len(t, parts, 1)
+	assert.Empty(t, sink.warnings())
+	assert.Equal(t, "cat-1.png", parts[0].Document.Source.ArtifactPath)
+	assert.Equal(t, "cat-1.png", parts[0].Document.Name)
+
+	existing, err := os.ReadFile(filepath.Join(root, "cat.png"))
+	require.NoError(t, err)
+	assert.Equal(t, "user file", string(existing), "the pre-existing workspace file must be untouched")
+	assert.FileExists(t, filepath.Join(root, "cat-1.png"))
+
+	_, err = manifestOf(t, store).LookupGeneratedFile(t.Context(), sess.ID, "cat-1.png")
+	require.NoError(t, err, "the manifest must record the FINAL (suffixed) path")
+	_, err = manifestOf(t, store).LookupGeneratedFile(t.Context(), sess.ID, "cat.png")
+	require.ErrorIs(t, err, session.ErrGeneratedFileNotFound, "the user's colliding file must never enter the manifest")
+}
+
+// TestMaterializeGeneratedMedia_ExtensionCorrectedNotice covers the writer's
+// MIME/extension correction surfacing as a bounded, user-visible notice that
+// names the exact final path.
+func TestMaterializeGeneratedMedia_ExtensionCorrectedNotice(t *testing.T) {
+	r, _, _ := newMediaTestRuntime(t)
+	sess, root := workspaceSession(t, "sess-mime")
+
+	sink := &collectingSink{}
+	parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
+		{Data: []byte{0x01}, MimeType: "image/png", Name: "photo.jpg", Size: 1},
+	}, "root", sink)
+
+	require.Len(t, parts, 1)
+	assert.Equal(t, "photo.png", parts[0].Document.Source.ArtifactPath)
+	assert.Equal(t, "image/png", parts[0].Document.MimeType)
+	assert.FileExists(t, filepath.Join(root, "photo.png"))
+
+	warnings := sink.warnings()
+	require.Len(t, warnings, 1, "the correction must surface exactly one notice")
+	msg := warnings[0].Message
+	assert.Contains(t, msg, "photo.png", "the notice must name the final path the user will find")
+	assert.Contains(t, msg, ".jpg", "the notice must mention the requested extension that was replaced")
+	assert.Contains(t, msg, "image/png")
+	assertBoundedSingleLineUTF8(t, msg)
 }
 
 // TestMaterializeGeneratedMedia_EmptyNameFallback: a media delta with no
@@ -155,7 +245,7 @@ func TestMaterializeGeneratedMedia_ReservedProviderNameFallsBackToGeneric(t *tes
 // parts (the caller keeps the turn's text), and never falls back to the
 // managed data dir.
 func TestMaterializeGeneratedMedia_NoWorkspaceRoot(t *testing.T) {
-	r, _, dataDir := newMediaTestRuntime(t)
+	r, store, dataDir := newMediaTestRuntime(t)
 	sess := &session.Session{ID: "sess-no-root"}
 
 	var logBuf bytes.Buffer
@@ -182,6 +272,8 @@ func TestMaterializeGeneratedMedia_NoWorkspaceRoot(t *testing.T) {
 	}
 
 	assertNoFilesUnder(t, dataDir)
+	_, err := manifestOf(t, store).LookupGeneratedFile(t.Context(), sess.ID, "cat.png")
+	require.ErrorIs(t, err, session.ErrGeneratedFileNotFound, "nothing was written, so nothing may be recorded")
 
 	// The detailed cause (including the session ID) belongs in the debug
 	// log, where an operator investigating the failure should look.
@@ -212,10 +304,11 @@ func TestMaterializeGeneratedMedia_UnwritableRoot(t *testing.T) {
 
 // TestMaterializeGeneratedMedia_PartialSuccess_SingleBatchCall: ONE call with
 // a two-item batch where exactly one sibling fails (injected through the
-// workspacemediaWrite seam) must keep the surviving sibling's file and
-// part, and warn only for the failing one.
+// workspacemediaWrite seam) must keep the surviving sibling's file, part,
+// and manifest record, and warn only for the failing one — the manifest is
+// written strictly per successful write.
 func TestMaterializeGeneratedMedia_PartialSuccess_SingleBatchCall(t *testing.T) {
-	r, _, _ := newMediaTestRuntime(t)
+	r, store, _ := newMediaTestRuntime(t)
 	sess, root := workspaceSession(t, "sess-partial")
 
 	orig := workspacemediaWrite
@@ -246,6 +339,41 @@ func TestMaterializeGeneratedMedia_PartialSuccess_SingleBatchCall(t *testing.T) 
 	data, err := os.ReadFile(filepath.Join(root, "cat.png"))
 	require.NoError(t, err, "the surviving sibling must actually be readable back from the workspace")
 	assert.Equal(t, []byte{0x01}, data)
+
+	_, err = manifestOf(t, store).LookupGeneratedFile(t.Context(), sess.ID, "cat.png")
+	require.NoError(t, err)
+	_, err = manifestOf(t, store).LookupGeneratedFile(t.Context(), sess.ID, "dog.jpg")
+	require.ErrorIs(t, err, session.ErrGeneratedFileNotFound, "a failed write must never be recorded in the manifest")
+}
+
+// storeWithoutManifest hides the built-in store's GeneratedMediaManifest
+// implementation: interface embedding only promotes session.Store's own
+// method set, so the type assertion in recordGeneratedFile fails.
+type storeWithoutManifest struct{ session.Store }
+
+// TestMaterializeGeneratedMedia_ManifestFailureKeepsFileAndWarns: when the
+// manifest cannot record a successful write, the file is already a real
+// workspace deliverable — the reference is kept and the user is warned that
+// inline display may refuse to render it (resolution fails closed on the
+// missing manifest record).
+func TestMaterializeGeneratedMedia_ManifestFailureKeepsFileAndWarns(t *testing.T) {
+	r, _, _ := newMediaTestRuntime(t)
+	r.sessionStore = storeWithoutManifest{r.sessionStore}
+	sess, root := workspaceSession(t, "sess-no-manifest")
+
+	sink := &collectingSink{}
+	parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
+		{Data: []byte{0x01}, MimeType: "image/png", Name: "cat.png", Size: 1},
+	}, "root", sink)
+
+	require.Len(t, parts, 1, "the written workspace file must keep its reference")
+	assert.FileExists(t, filepath.Join(root, "cat.png"))
+
+	warnings := sink.warnings()
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0].Message, "cat.png")
+	assert.Contains(t, warnings[0].Message, "record")
+	assertBoundedSingleLineUTF8(t, warnings[0].Message)
 }
 
 // TestMaterializeGeneratedMedia_OneFailure_MaliciousMimeType covers the
