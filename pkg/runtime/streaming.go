@@ -129,6 +129,42 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 		toolDefMap[t.Name] = t
 	}
 
+	// markerFilter strips [media-file: ...] naming markers from the assistant
+	// text BEFORE it is emitted or accumulated, so markers never flash in the
+	// TUI and never reach the persisted message. Provider-neutral: the strict
+	// line grammar is a no-op on streams that never emit markers.
+	var markerFilter mediaFileMarkerFilter
+
+	// appendContent accumulates and emits assistant text that survived the
+	// marker filter, keeping the live event text and fullContent identical
+	// while gating raw <tool_call> XML out of the event stream.
+	appendContent := func(content string) {
+		if content == "" {
+			return
+		}
+		if !xmlToolCallGate {
+			tagIdx := strings.Index(content, "<tool_call>")
+			if tagIdx < 0 {
+				events.Emit(AgentChoice(a.Name(), sess.ID, content))
+			} else {
+				xmlToolCallGate = true
+				if tagIdx > 0 {
+					events.Emit(AgentChoice(a.Name(), sess.ID, content[:tagIdx]))
+				}
+			}
+		}
+		fullContent.WriteString(content)
+	}
+
+	// finishAssistantText flushes the marker filter's withheld tail and pairs
+	// the extracted requested paths onto the accumulated media. Called on
+	// every successful completion path (terminal finish reason or bare EOF),
+	// before any XML tool-call fallback parsing.
+	finishAssistantText := func() {
+		appendContent(markerFilter.Finish())
+		applyMediaFileRequestedPaths(media, markerFilter.paths)
+	}
+
 	// applyXMLFallback extracts <tool_call> blocks from accumulated content when
 	// no structured tool calls were received. Called from both the early-return
 	// and EOF paths.
@@ -291,6 +327,7 @@ mainLoop:
 			}
 
 			if choice.FinishReason == chat.FinishReasonStop || choice.FinishReason == chat.FinishReasonLength || choice.FinishReason == chat.FinishReasonRefusal {
+				finishAssistantText()
 				recordUsage()
 				finishReason := choice.FinishReason
 				if finishReason == chat.FinishReasonRefusal {
@@ -340,18 +377,7 @@ mainLoop:
 			}
 
 			if choice.Delta.Content != "" {
-				if !xmlToolCallGate {
-					tagIdx := strings.Index(choice.Delta.Content, "<tool_call>")
-					if tagIdx < 0 {
-						events.Emit(AgentChoice(a.Name(), sess.ID, choice.Delta.Content))
-					} else {
-						xmlToolCallGate = true
-						if tagIdx > 0 {
-							events.Emit(AgentChoice(a.Name(), sess.ID, choice.Delta.Content[:tagIdx]))
-						}
-					}
-				}
-				fullContent.WriteString(choice.Delta.Content)
+				appendContent(markerFilter.Push(choice.Delta.Content))
 			}
 
 		case <-ctx.Done():
@@ -374,6 +400,8 @@ mainLoop:
 				idleTimeout, errStreamIdle)
 		}
 	}
+
+	finishAssistantText()
 
 	recordUsage()
 
