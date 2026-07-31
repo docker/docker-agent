@@ -171,11 +171,12 @@ type Page interface {
 	// the current app.Session().ID after a session restore or in-place
 	// replace.
 	SetRoutingID(id string)
-	// TakeRoutedTimers returns and clears the routed one-shot timer commands
-	// armed by the most recent Update. The active page's Update already
-	// returns them inside its regular command; the appModel calls this for
-	// background pages — whose regular commands are discarded — so
-	// presentation deadlines keep running while a tab is hidden.
+	// TakeRoutedTimers returns and clears the routed one-shot commands
+	// (presentation timers, generated-media resolution) armed by the most
+	// recent Update. The active page's Update already returns them inside
+	// its regular command; the appModel calls this for background pages —
+	// whose regular commands are discarded — so those deadlines and
+	// resolutions keep running while a tab is hidden.
 	TakeRoutedTimers() tea.Cmd
 	VisualGeneration() uint64
 }
@@ -226,9 +227,10 @@ type chatPage struct {
 	// addressed to; empty for standalone pages (timers then fire unrouted,
 	// which is correct when this is the only page).
 	routingID string
-	// pendingTimers holds the routed timer commands armed by the current
-	// Update, so they can be re-collected via TakeRoutedTimers when the
-	// regular command is discarded (background tabs).
+	// pendingTimers holds the routed one-shot commands (presentation timers,
+	// generated-media resolution) armed by the current Update, so they can be
+	// re-collected via TakeRoutedTimers when the regular command is discarded
+	// (background tabs).
 	pendingTimers []tea.Cmd
 
 	// Track whether we've received content from an assistant response
@@ -493,7 +495,11 @@ func (p *chatPage) Init() tea.Cmd {
 	if sess := p.app.Session(); sess != nil {
 		p.sidebar.LoadFromSession(sess)
 		if len(sess.Messages) > 0 {
-			cmds = append(cmds, p.messages.LoadFromSession(sess))
+			restoredMedia, mediaRequests := p.collectRestoredGeneratedMedia(sess)
+			cmds = append(cmds, p.messages.LoadFromSession(sess, restoredMedia))
+			if resolve := p.resolveGeneratedMediaCmd(mediaRequests); resolve != nil {
+				cmds = append(cmds, resolve)
+			}
 		}
 	}
 
@@ -624,6 +630,9 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 
 	case msgtypes.ClearQueueMsg:
 		return p.handleClearQueue()
+
+	case generatedMediaResolvedMsg:
+		return p, p.messages.UpdateAssistantMedia(msg.media)
 
 	case msgtypes.ThemeChangedMsg:
 		// Theme changed - forward to all child components to invalidate caches

@@ -117,7 +117,7 @@ func TestLoadFromSessionIncludesReasoningContent(t *testing.T) {
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// Expect: user message + reasoning block + assistant content = 3 messages
 	require.Len(t, m.messages, 3)
@@ -165,7 +165,7 @@ func TestLoadFromSessionReasoningOrderWithToolCalls(t *testing.T) {
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// Expect: reasoning block (reasoning only) + assistant content + standalone tool call = 3 messages
 	// The content breaks the reasoning block chain, so tool calls become standalone
@@ -207,7 +207,7 @@ func TestLoadFromSessionReasoningOnlyNoContent(t *testing.T) {
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// Expect: just the reasoning block (no assistant content)
 	require.Len(t, m.messages, 1)
@@ -246,7 +246,7 @@ func TestLoadFromSessionToolCallsOnlyNoReasoning(t *testing.T) {
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// Expect: assistant content + standalone tool call = 2 messages
 	// Tool calls without reasoning should NOT go into a reasoning block
@@ -314,7 +314,7 @@ func TestLoadFromSessionWithToolResults(t *testing.T) {
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// Expect: reasoning block (reasoning + 2 tool calls with results) + assistant content = 2 messages
 	require.Len(t, m.messages, 2)
@@ -427,7 +427,7 @@ func TestLoadFromSessionCombinesConsecutiveReasoningBlocks(t *testing.T) {
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// Should have: 1 combined reasoning block + 1 assistant content = 2 messages
 	require.Len(t, m.messages, 2, "consecutive reasoning blocks should be combined into one")
@@ -493,7 +493,7 @@ func TestLoadFromSessionStandaloneToolCallsWithResults(t *testing.T) {
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// Expect: standalone tool call (not in reasoning block)
 	require.Len(t, m.messages, 1)
@@ -542,7 +542,7 @@ func TestLoadFromSessionToolCallsDuringReasoningNoContent(t *testing.T) {
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// Expect: reasoning block only (tool call inside it)
 	require.Len(t, m.messages, 1)
@@ -590,7 +590,7 @@ func TestLoadFromSessionReasoningWithContentToolResultsStandalone(t *testing.T) 
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	require.Len(t, m.messages, 3)
 
@@ -656,7 +656,7 @@ func TestLoadFromSessionMultipleStandaloneToolCallsWithContentAndResults(t *test
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	require.Len(t, m.messages, 3)
 
@@ -1325,7 +1325,7 @@ func TestLoadFromSessionReasoningBlockAgentBadges(t *testing.T) {
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// user + (reasoning block + content) x 2
 	require.Len(t, m.messages, 5)
@@ -1376,7 +1376,7 @@ func TestLoadFromSessionReasoningAfterTransferTaskShowsAgentBadge(t *testing.T) 
 		},
 	}
 
-	m.LoadFromSession(sess)
+	m.LoadFromSession(sess, nil)
 
 	// standalone transfer_task tool call + developer reasoning block
 	require.Len(t, m.messages, 2)
@@ -1734,7 +1734,7 @@ func TestMessageCacheBoundsHistoricalRerender(t *testing.T) {
 		}
 		sess.Messages = append(sess.Messages, session.NewMessageItem(&session.Message{AgentName: "root", Message: chat.Message{Role: role, Content: body}}))
 	}
-	_ = m.LoadFromSession(sess)
+	_ = m.LoadFromSession(sess, nil)
 	_ = m.View()
 	require.False(t, m.renderDirty)
 	before := m.renderedItems.Len()
@@ -1745,4 +1745,77 @@ func TestMessageCacheBoundsHistoricalRerender(t *testing.T) {
 	_ = m.View()
 	require.False(t, m.renderDirty)
 	require.Equal(t, before, m.renderedItems.Len(), "single append does not trigger history-wide cache growth")
+}
+
+func assistantTestMedia(fallback string) []types.AssistantMedia {
+	return []types.AssistantMedia{{Fallback: fallback}}
+}
+
+func TestAppendAssistantMediaJoinsSameAgentAssistantMessage(t *testing.T) {
+	t.Parallel()
+
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+	m.AddUserMessage("draw")
+	m.AppendToLastMessage("root", "Here it is:")
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAssistant))
+
+	// The join path returns SetMessage's follow-up command, which is nil
+	// without markdown references — same contract as AppendToLastMessage —
+	// so assert on list state, not the command.
+	m.AppendAssistantMedia("root", assistantTestMedia("img-1"))
+
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAssistant),
+		"media must join the agent's current assistant message, not start a new one")
+	last := m.messages[len(m.messages)-1]
+	assert.Equal(t, "Here it is:", last.Content)
+	require.Len(t, last.AssistantMedia, 1)
+	assert.Equal(t, "img-1", last.AssistantMedia[0].Fallback)
+
+	m.AppendAssistantMedia("root", assistantTestMedia("img-2"))
+	require.Len(t, last.AssistantMedia, 2, "subsequent media joins the same turn")
+	assert.Equal(t, []string{"img-1", "img-2"}, []string{last.AssistantMedia[0].Fallback, last.AssistantMedia[1].Fallback},
+		"media order must follow append order")
+}
+
+func TestAppendAssistantMediaStartsMediaOnlyMessageAndReplacesSpinner(t *testing.T) {
+	t.Parallel()
+
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+	m.AddAssistantMessage("root", "")
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeSpinner))
+
+	require.NotNil(t, m.AppendAssistantMedia("root", assistantTestMedia("img-1")))
+
+	assert.Zero(t, m.MessageTypeCount(types.MessageTypeSpinner), "the pending spinner must be replaced by the media message")
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAssistant))
+	last := m.messages[len(m.messages)-1]
+	assert.Empty(t, last.Content)
+	assert.Equal(t, "root", last.Sender)
+	require.Len(t, last.AssistantMedia, 1)
+}
+
+func TestAppendAssistantMediaDifferentAgentStartsNewMessage(t *testing.T) {
+	t.Parallel()
+
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+	m.AddUserMessage("draw")
+	m.AppendToLastMessage("root", "parent text")
+	require.Equal(t, 1, m.MessageTypeCount(types.MessageTypeAssistant))
+
+	require.NotNil(t, m.AppendAssistantMedia("researcher", assistantTestMedia("img-1")))
+
+	require.Equal(t, 2, m.MessageTypeCount(types.MessageTypeAssistant),
+		"another agent's media must not be attached to the previous agent's message")
+	assert.Empty(t, m.messages[1].AssistantMedia)
+	assert.Equal(t, "researcher", m.messages[2].Sender)
+}
+
+func TestAppendAssistantMediaEmptyIsNoOp(t *testing.T) {
+	t.Parallel()
+
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+	m.AddAssistantMessage("root", "")
+
+	assert.Nil(t, m.AppendAssistantMedia("root", nil))
+	assert.Equal(t, 1, m.MessageTypeCount(types.MessageTypeSpinner), "empty media must not disturb the pending spinner")
 }

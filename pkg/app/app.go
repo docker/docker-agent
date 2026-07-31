@@ -1146,6 +1146,36 @@ type contextBreakdownProvider interface {
 	ContextBreakdown(ctx context.Context, sess *session.Session) (*runtime.ContextBreakdown, error)
 }
 
+// generatedFileResolver is an optional runtime capability: resolving one
+// recorded generated-media reference to its bytes and validated canonical
+// path, gated on the generated-media manifest and the owning session's
+// workspace (see [runtime.LocalRuntime.ResolveGeneratedFile]). Only the
+// local runtime implements it; remote runtimes never deliver generated-file
+// payloads, so UIs treat the missing capability as "nothing to resolve".
+type generatedFileResolver interface {
+	ResolveGeneratedFile(ctx context.Context, ref runtime.GeneratedFileRef) (*runtime.ResolvedGeneratedFile, error)
+}
+
+// CanResolveGeneratedFiles reports whether the runtime can resolve
+// generated-media references at all, letting UIs skip resolution work
+// entirely on runtimes without the capability.
+func (a *App) CanResolveGeneratedFiles() bool {
+	_, ok := a.runtime.(generatedFileResolver)
+	return ok
+}
+
+// ResolveGeneratedFile resolves one recorded generated-media reference.
+// Returns an error wrapping [runtime.ErrUnsupported] when the runtime does
+// not own local generated media (e.g. remote runtimes). Callers must treat
+// any error as "unavailable" — never surface its text to the user.
+func (a *App) ResolveGeneratedFile(ctx context.Context, ref runtime.GeneratedFileRef) (*runtime.ResolvedGeneratedFile, error) {
+	resolver, ok := a.runtime.(generatedFileResolver)
+	if !ok {
+		return nil, fmt.Errorf("generated file resolution: %w", runtime.ErrUnsupported)
+	}
+	return resolver.ResolveGeneratedFile(ctx, ref)
+}
+
 // ContextBreakdown returns the estimated context-window composition for the
 // current session. Returns an error wrapping [runtime.ErrUnsupported] when
 // the runtime cannot compute it (e.g. remote runtimes).

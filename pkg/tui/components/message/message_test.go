@@ -550,3 +550,78 @@ func TestAssistantRenderedSegmentsRebuildHeaderOnWidthChange(t *testing.T) {
 	require.Equal(t, linePlain(want), linePlain(got))
 	require.Equal(t, lineWidthsForMessage(want), lineWidthsForMessage(got))
 }
+
+func testInlineImage(t *testing.T, name string) tuiimage.Inline {
+	t.Helper()
+	img := stdimage.NewRGBA(stdimage.Rect(0, 0, 2, 1))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var data bytes.Buffer
+	require.NoError(t, png.Encode(&data, img))
+	inline, ok := tuiimage.FromBytes(name, "image/png", data.Bytes())
+	require.True(t, ok)
+	return inline
+}
+
+func TestAssistantMediaRendersInlineAfterText(t *testing.T) {
+	tuiimage.SetRenderingEnabled(true)
+
+	inline := testInlineImage(t, "cat.png")
+	msg := types.Agent(types.MessageTypeAssistant, "assistant", "Here is your cat:")
+	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: `Generated image "cat.png" saved to: /tmp/cat.png`}}
+	mv := New(animation.NewRuntime(), msg, nil)
+	mv.SetSize(80, 0)
+
+	view := mv.View()
+	assert.Contains(t, view, "cagent-image", "generated media must emit terminal image markers")
+	plain := ansi.Strip(view)
+	assert.Contains(t, plain, "cat.png", "image name must label the rendered image")
+	assert.NotContains(t, plain, "saved to:", "the textual fallback must not show when the image renders inline")
+	assert.Less(t, strings.Index(plain, "Here is your cat:"), strings.Index(view, "cagent-image"),
+		"streamed text must precede the generated media in the same turn")
+}
+
+func TestAssistantMediaOnlyReplacesSpinnerWithVisibleContent(t *testing.T) {
+	tuiimage.SetRenderingEnabled(true)
+
+	inline := testInlineImage(t, "cat.png")
+	msg := types.Agent(types.MessageTypeAssistant, "assistant", "")
+	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: `Generated image "cat.png" saved to: /tmp/cat.png`}}
+	mv := New(animation.NewRuntime(), msg, nil)
+	mv.SetSize(80, 0)
+
+	assert.False(t, mv.isSpinnerDriven(), "a media-only assistant message is real content, not a spinner placeholder")
+	view := mv.View()
+	assert.Contains(t, view, "cagent-image", "a media-only turn must render the image, not a spinner")
+	assert.Contains(t, ansi.Strip(view), "cat.png")
+}
+
+func TestAssistantMediaGraphicsDisabledShowsFallback(t *testing.T) {
+	tuiimage.SetRenderingEnabled(false)
+	defer tuiimage.SetRenderingEnabled(true)
+
+	inline := testInlineImage(t, "cat.png")
+	msg := types.Agent(types.MessageTypeAssistant, "assistant", "")
+	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: `Generated image "cat.png" saved to: /tmp/artifacts/sess/cat.png`}}
+	mv := New(animation.NewRuntime(), msg, nil)
+	mv.SetSize(80, 0)
+
+	view := mv.View()
+	assert.NotContains(t, view, "cagent-image", "no image markers may be emitted while graphics are disabled")
+	plain := ansi.Strip(view)
+	assert.Contains(t, plain, `Generated image "cat.png" saved to:`, "the fallback must make the generated file visible")
+	assert.Contains(t, strings.ReplaceAll(plain, "\n", ""), "/tmp/artifacts/sess/cat.png")
+}
+
+func TestAssistantMediaUnrenderableImageShowsFallback(t *testing.T) {
+	tuiimage.SetRenderingEnabled(true)
+
+	msg := types.Agent(types.MessageTypeAssistant, "assistant", "Result:")
+	msg.AssistantMedia = []types.AssistantMedia{{Fallback: `Generated image "cat.png" is unavailable.`}}
+	mv := New(animation.NewRuntime(), msg, nil)
+	mv.SetSize(80, 0)
+
+	plain := ansi.Strip(mv.View())
+	assert.Contains(t, plain, `Generated image "cat.png" is unavailable.`)
+	assert.Less(t, strings.Index(plain, "Result:"), strings.Index(plain, "unavailable"),
+		"text must keep preceding the failed media item")
+}

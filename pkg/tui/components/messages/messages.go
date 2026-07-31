@@ -87,13 +87,26 @@ type Model interface {
 	AppendToolOutput(msg *runtime.ToolCallOutputEvent) tea.Cmd
 	AddToolResult(msg *runtime.ToolCallResponseEvent, status types.ToolStatus) tea.Cmd
 	AppendToLastMessage(agentName, content string) tea.Cmd
+	// AppendAssistantMedia attaches generated media to the agent's current
+	// assistant message (or starts a media-only one), so it renders in the
+	// same assistant turn as the streamed text.
+	AppendAssistantMedia(agentName string, media []types.AssistantMedia) tea.Cmd
+	// UpdateAssistantMedia replaces previously attached media items —
+	// wherever they sit in the list — with the given resolved items, matched
+	// by types.AssistantMedia.ID. Items with unknown or zero IDs are
+	// ignored, so a stale asynchronous result is harmless.
+	UpdateAssistantMedia(media []types.AssistantMedia) tea.Cmd
 	AppendReasoning(agentName, content string) tea.Cmd
 	AddShellOutputMessage(content string) tea.Cmd
 	// AddAgentReturn appends the UI-only "child returned control to parent"
 	// delegation transition. It is never persisted, so it does not reappear
 	// when the session is reloaded.
 	AddAgentReturn(fromAgent, toAgent string) tea.Cmd
-	LoadFromSession(sess *session.Session) tea.Cmd
+	// LoadFromSession rebuilds the list from a persisted session.
+	// generatedMedia carries the restored generated-media items to attach,
+	// keyed by the owning message's index in sess.Messages; nil when the
+	// caller cannot resolve generated media.
+	LoadFromSession(sess *session.Session, generatedMedia map[int][]types.AssistantMedia) tea.Cmd
 
 	// StopAnimations unregisters every view from the animation coordinator.
 	// Call it when the list is discarded or its host view goes away, so
@@ -1318,7 +1331,7 @@ func (m *model) shouldCacheMessage(index int) bool {
 	case types.MessageTypeToolResult:
 		return true
 	case types.MessageTypeAssistant:
-		return strings.Trim(msg.Content, "\r\n\t ") != ""
+		return strings.Trim(msg.Content, "\r\n\t ") != "" || len(msg.AssistantMedia) > 0
 	case types.MessageTypeAssistantReasoningBlock:
 		// Cacheable once spinners/fades have settled. Content mutations go
 		// through invalidateItem, which drops any stale entry.
@@ -1743,7 +1756,7 @@ func (m *model) addMessage(msg *types.Message) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m *model) LoadFromSession(sess *session.Session) tea.Cmd {
+func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]types.AssistantMedia) tea.Cmd {
 	appendSessionMessage := func(msg *types.Message, view layout.Model) {
 		m.messages = append(m.messages, msg)
 		m.views = append(m.views, view)
@@ -1853,9 +1866,14 @@ func (m *model) LoadFromSession(sess *session.Session) tea.Cmd {
 				m.messages[lastIdx].Content += smsg.Message.ReasoningContent
 			}
 
-			// Step 2: Handle assistant content - this breaks the reasoning block chain
-			if hasContent {
+			// Step 2: Handle assistant content — this breaks the reasoning
+			// block chain. Restored generated media joins the same message
+			// (or forms a media-only one), mirroring AppendAssistantMedia's
+			// live behavior.
+			restoredMedia := generatedMedia[pos]
+			if hasContent || len(restoredMedia) > 0 {
 				msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, smsg.Message.Content)
+				msg.AssistantMedia = restoredMedia
 				appendSessionMessage(msg, m.createMessageView(msg))
 			}
 
@@ -2065,6 +2083,70 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 	}
 
 	return m.addMessage(types.Agent(types.MessageTypeAssistant, agentName, content))
+}
+
+// AppendAssistantMedia mirrors AppendToLastMessage for generated media: it
+// replaces a pending spinner and joins the agent's current assistant
+// message so the media renders inside the same turn as the streamed text,
+// or starts a media-only assistant message when there is none.
+func (m *model) AppendAssistantMedia(agentName string, media []types.AssistantMedia) tea.Cmd {
+	if len(media) == 0 {
+		return nil
+	}
+	m.removeSpinner()
+
+	if len(m.messages) > 0 {
+		lastIdx := len(m.messages) - 1
+		lastMsg := m.messages[lastIdx]
+		if lastMsg.Type == types.MessageTypeAssistant && lastMsg.Sender == agentName {
+			lastMsg.AssistantMedia = append(lastMsg.AssistantMedia, media...)
+			cmd := m.views[lastIdx].(message.Model).SetMessage(lastMsg)
+			m.invalidateItem(lastIdx)
+			return cmd
+		}
+	}
+
+	msg := types.Agent(types.MessageTypeAssistant, agentName, "")
+	msg.AssistantMedia = media
+	return m.addMessage(msg)
+}
+
+// UpdateAssistantMedia replaces attached media items in place by ID. See
+// Model.UpdateAssistantMedia.
+func (m *model) UpdateAssistantMedia(media []types.AssistantMedia) tea.Cmd {
+	byID := make(map[uint64]types.AssistantMedia, len(media))
+	for _, item := range media {
+		if item.ID != 0 {
+			byID[item.ID] = item
+		}
+	}
+	if len(byID) == 0 {
+		return nil
+	}
+
+	var cmds []tea.Cmd
+	for i, msg := range m.messages {
+		changed := false
+		for j, item := range msg.AssistantMedia {
+			if resolved, ok := byID[item.ID]; ok {
+				msg.AssistantMedia[j] = resolved
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+		if view, ok := m.views[i].(message.Model); ok {
+			if cmd := view.SetMessage(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		m.invalidateItem(i)
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *model) AppendReasoning(agentName, content string) tea.Cmd {
