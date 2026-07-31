@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"gotest.tools/v3/assert"
 
@@ -33,6 +34,10 @@ func TestMain(m *testing.M) {
 // It emits pre-configured events from RunStream and records Resume calls.
 type mockRuntime struct {
 	events []runtime.Event
+	// runStreamFn, when set, replaces the default pre-buffered RunStream —
+	// used to model a live runtime that only makes progress while the
+	// consumer keeps draining.
+	runStreamFn func(context.Context, *session.Session) <-chan runtime.Event
 
 	mu                    sync.Mutex
 	resumes               []runtime.ResumeRequest
@@ -145,7 +150,10 @@ func (m *mockRuntime) Resume(_ context.Context, req runtime.ResumeRequest) {
 	m.resumes = append(m.resumes, req)
 }
 
-func (m *mockRuntime) RunStream(_ context.Context, _ *session.Session) <-chan runtime.Event {
+func (m *mockRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan runtime.Event {
+	if m.runStreamFn != nil {
+		return m.runStreamFn(ctx, sess)
+	}
 	ch := make(chan runtime.Event, len(m.events))
 	for _, e := range m.events {
 		ch <- e
@@ -595,4 +603,52 @@ func TestErrorEventReturnedNotPrinted(t *testing.T) {
 	var runtimeErr RuntimeError
 	assert.Equal(t, errors.As(err, &runtimeErr), true)
 	assert.Equal(t, strings.Contains(buf.String(), "model failed"), false)
+}
+
+// A non-OAuth elicitation (e.g. the runtime's workspace-escape
+// confirmation) must be declined in CLI mode WITHOUT abandoning the event
+// stream: the runtime only makes progress while the consumer drains, so
+// returning early would stall the follow-up events (redirect warning,
+// assistant response) and lose the turn. The unbuffered stream below makes
+// the test fail (bounded, not wedged) if Run stops consuming after the
+// decline.
+func TestNonOAuthElicitationDeclinedAndStreamDrained(t *testing.T) {
+	t.Parallel()
+
+	drained := make(chan struct{})
+	rt := &mockRuntime{
+		runStreamFn: func(context.Context, *session.Session) <-chan runtime.Event {
+			ch := make(chan runtime.Event) // unbuffered: every send needs a live consumer
+			go func() {
+				defer close(ch)
+				defer close(drained)
+				ch <- &runtime.ElicitationRequestEvent{Type: "elicitation_request", Message: "Save outside the workspace?"}
+				ch <- runtime.Warning("Requested save location for generated media item 1/1 is outside the workspace and was not confirmed; saved as cat.png in the workspace instead", "test")
+				ch <- runtime.AgentChoice("test", "sess", "Saved your image.")
+			}()
+			return ch
+		},
+	}
+
+	var buf bytes.Buffer
+	out := NewPrinter(&buf)
+	sess := session.New()
+
+	err := Run(t.Context(), out, Config{}, rt, sess, []string{"hello"})
+	assert.NilError(t, err)
+
+	select {
+	case <-drained:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the CLI stopped draining the stream after declining the elicitation")
+	}
+
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	assert.Equal(t, rt.elicitationDeclines, 1)
+	assert.Equal(t, rt.elicitationLastAction, tools.ElicitationAction("decline"))
+	assert.Check(t, strings.Contains(buf.String(), "saved as cat.png in the workspace instead"),
+		"the redirect warning must be surfaced: %q", buf.String())
+	assert.Check(t, strings.Contains(buf.String(), "Saved your image."),
+		"the assistant response must still be printed: %q", buf.String())
 }

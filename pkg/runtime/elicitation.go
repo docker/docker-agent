@@ -455,19 +455,61 @@ func backgroundElicitationDeclinedNote(message string) string {
 	)
 }
 
+// elicitationSpec describes one elicitation request independently of its
+// origin: an MCP server (see elicitationHandler) or the runtime itself
+// (e.g. the generated-media workspace-escape confirmation in
+// media_escape.go). Both are answered through the same waiter registry and
+// ResumeElicitation plumbing.
+type elicitationSpec struct {
+	message string
+	mode    string
+	schema  any
+	url     string
+	// serverElicitationID is the originating MCP server's wire ID, if any.
+	// Informational only — never a routing key (#3584 review item 2a).
+	serverElicitationID string
+	meta                map[string]any
+	// agentName and sessionID override the runtime-derived defaults (the
+	// shared current-agent slot and the ctx conversation ID) when the caller
+	// knows the owning agent/session more precisely.
+	agentName string
+	sessionID string
+}
+
 // elicitationHandler is the MCP-toolset-side hook that turns an inbound
 // elicitation request from a server into an ElicitationRequest event and
 // waits for the embedder's response, correlated by elicitation ID.
 func (r *LocalRuntime) elicitationHandler(ctx context.Context, req *mcp.ElicitParams) (tools.ElicitationResult, error) {
 	slog.DebugContext(ctx, "Elicitation request received from MCP server", "message", req.Message)
+	return r.requestElicitation(ctx, elicitationSpec{
+		message:             req.Message,
+		mode:                req.Mode,
+		schema:              req.RequestedSchema,
+		url:                 req.URL,
+		serverElicitationID: req.ElicitationID,
+		meta:                req.Meta,
+	})
+}
 
+// requestElicitation emits spec as an ElicitationRequest event and waits for
+// the embedder's response, correlated by elicitation ID.
+func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationSpec) (tools.ElicitationResult, error) {
 	// In non-interactive mode (e.g., MCP serve), there is no user to respond
 	// to elicitation requests. Decline immediately instead of blocking forever.
 	if r.nonInteractive {
-		slog.DebugContext(ctx, "Declining elicitation in non-interactive mode", "message", req.Message)
+		slog.DebugContext(ctx, "Declining elicitation in non-interactive mode", "message", spec.message)
 		return tools.ElicitationResult{
 			Action: tools.ElicitationActionDecline,
 		}, nil
+	}
+
+	sessionID := spec.sessionID
+	if sessionID == "" {
+		sessionID = genai.ConversationIDFromContext(ctx)
+	}
+	agentName := spec.agentName
+	if agentName == "" {
+		agentName = r.currentAgentName()
 	}
 
 	// A background session (run_background_agent) marks its context so
@@ -479,8 +521,8 @@ func (r *LocalRuntime) elicitationHandler(ctx context.Context, req *mcp.ElicitPa
 	// all can answer this request. Decline immediately with a model-readable
 	// note instead of parking a goroutine forever (#3584).
 	if !tools.InteractivePromptsAllowed(ctx) && !r.hasElicitationSink() {
-		slog.WarnContext(ctx, "Declining elicitation: background session has no UI to answer it", "message", req.Message)
-		r.elicitationDeclines.record(genai.ConversationIDFromContext(ctx), backgroundElicitationDeclinedNote(req.Message))
+		slog.WarnContext(ctx, "Declining elicitation: background session has no UI to answer it", "message", spec.message)
+		r.elicitationDeclines.record(sessionID, backgroundElicitationDeclinedNote(spec.message))
 		return tools.ElicitationResult{
 			Action: tools.ElicitationActionDecline,
 		}, nil
@@ -494,7 +536,7 @@ func (r *LocalRuntime) elicitationHandler(ctx context.Context, req *mcp.ElicitPa
 
 	// The registry key (and the ElicitationID surfaced to clients for
 	// ResumeElicitation routing) is always a freshly generated, internal
-	// ID — never the MCP wire req.ElicitationID. The wire value is only
+	// ID — never the MCP wire elicitation ID. The wire value is only
 	// ever set for URL-mode elicitations and is chosen by the originating
 	// MCP server; two independent servers (e.g. two background jobs each
 	// talking to their own MCP process) can legitimately reuse the same
@@ -513,16 +555,15 @@ func (r *LocalRuntime) elicitationHandler(ctx context.Context, req *mcp.ElicitPa
 	defer r.elicitationWaiters.abandon(correlationID, wt)
 
 	slog.DebugContext(ctx, "Sending elicitation request event to client",
-		"message", req.Message,
-		"mode", req.Mode,
-		"requested_schema", req.RequestedSchema,
-		"url", req.URL,
+		"message", spec.message,
+		"mode", spec.mode,
+		"requested_schema", spec.schema,
+		"url", spec.url,
 		"elicitation_id", correlationID,
-		"server_elicitation_id", req.ElicitationID)
-	slog.DebugContext(ctx, "Elicitation request meta", "meta", req.Meta)
+		"server_elicitation_id", spec.serverElicitationID)
+	slog.DebugContext(ctx, "Elicitation request meta", "meta", spec.meta)
 
-	sessionID := genai.ConversationIDFromContext(ctx)
-	ev := ElicitationRequest(req.Message, req.Mode, req.RequestedSchema, req.URL, correlationID, req.ElicitationID, sessionID, req.Meta, r.currentAgentName())
+	ev := ElicitationRequest(spec.message, spec.mode, spec.schema, spec.url, correlationID, spec.serverElicitationID, sessionID, spec.meta, agentName)
 
 	// Reliable delivery: invoked synchronously, unconditionally, and exactly
 	// once, BEFORE anything that could block (#3584 review item 1). This
