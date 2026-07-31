@@ -113,6 +113,9 @@ func TestResolveWorkingDir_Failures(t *testing.T) {
 		{name: "dot root rejected", sess: &Session{ID: "s1", WorkingDir: "."}},
 		{name: "whitespace-padded root rejected", sess: &Session{ID: "s1", WorkingDir: " /work "}},
 		{name: "NUL root rejected", sess: &Session{ID: "s1", WorkingDir: "/work\x00evil"}},
+		{name: "unclean absolute root with traversal rejected", sess: &Session{ID: "s1", WorkingDir: "/workspace/../etc"}},
+		{name: "unclean absolute root with dot segment rejected", sess: &Session{ID: "s1", WorkingDir: "/work/./app"}},
+		{name: "unclean absolute root with trailing separator rejected", sess: &Session{ID: "s1", WorkingDir: "/work/app/"}},
 		{
 			name: "relative parent root rejected, not repaired",
 			sess: &Session{ID: "leaf", ParentID: "root"},

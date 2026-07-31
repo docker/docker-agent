@@ -587,6 +587,51 @@ func TestStripGeneratedMediaTransform(t *testing.T) {
 	assert.Contains(t, out[1].MultiContent[1].Text, "image/png")
 }
 
+// TestStripGeneratedMediaTransform_WorkspaceRootReference pins the strip
+// predicates for the workspace-materialized reference shape
+// (ArtifactRoot=workspace + workspace-relative ArtifactPath): both the
+// strip_generated_media placeholder replacement and the
+// strip_unsupported_modalities never-resend guard key on a non-empty
+// ArtifactPath, so a workspace-rooted part must behave exactly like a
+// legacy data-dir one — stripped with a placeholder by the former, never
+// silently dropped by the latter.
+func TestStripGeneratedMediaTransform_WorkspaceRootReference(t *testing.T) {
+	t.Parallel()
+
+	msgs := []chat.Message{
+		{
+			Role:    chat.MessageRoleAssistant,
+			Content: "here you go",
+			MultiContent: []chat.MessagePart{
+				{Type: chat.MessagePartTypeText, Text: "here you go"},
+				{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+					Name: "cat.png", MimeType: "image/png", Size: 4,
+					Source: chat.DocumentSource{
+						ArtifactPath:           "images/cat.png",
+						ArtifactRoot:           chat.ArtifactRootWorkspace,
+						ArtifactOwnerSessionID: "owner",
+					},
+				}},
+			},
+		},
+	}
+
+	out, err := stripGeneratedMediaTransform(t.Context(), nil, msgs)
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Len(t, out[0].MultiContent, 2, "original text part plus one placeholder part")
+	assert.Equal(t, chat.MessagePartTypeText, out[0].MultiContent[1].Type)
+	assert.Contains(t, out[0].MultiContent[1].Text, "cat.png")
+	assert.Equal(t, "here you go\n[Generated media omitted from history 1/1: cat.png (image/png)]", out[0].Content)
+
+	// The modality guard must retain (not silently drop) the workspace-rooted
+	// part even for a text-only model — strip_generated_media owns replacing it.
+	kept := stripUnsupportedMediaContent(t.Context(), msgs, modelinfo.ModelCapabilities{})
+	require.Len(t, kept, 1)
+	require.Len(t, kept[0].MultiContent, 2)
+	assert.Equal(t, "images/cat.png", kept[0].MultiContent[1].Document.Source.ArtifactPath)
+}
+
 // TestStripGeneratedMediaTransform_MultipleArtifacts_MediaOnly is the
 // review's "robust multi-artifact placeholder" regression for a media-only
 // assistant turn: THREE stripped artifacts in a single message must

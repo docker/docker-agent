@@ -1332,13 +1332,17 @@ func sanitizeToolCallName(name string) string {
 // ([chat.ArtifactRootWorkspace]) rather than raw bytes. sess.ID becomes the
 // reference's permanent owner (see chat.DocumentSource) — it never changes
 // even if this message is later copied into a branched or forked session.
+// Each successful write is also recorded in the session store's
+// generated-media manifest ([session.GeneratedMediaManifest]), the trust
+// anchor a resolver must consult before reading a workspace path back.
 //
 // The requested filename is the sanitized provider display name when one
 // exists, otherwise a generic "generated-N"; the writer owns MIME/extension
 // correction and collision suffixing, and the part persists the exact final
-// relative path it returns. Explicit prompt-directed naming (and its
-// out-of-workspace confirmation flow) is intentionally not implemented
-// here yet.
+// relative path it returns. A corrected extension additionally surfaces a
+// bounded user-visible notice naming the final path. Explicit
+// prompt-directed naming (and its out-of-workspace confirmation flow) is
+// intentionally not implemented here yet.
 //
 // When no workspace root is available (no provenance anywhere in the parent
 // chain, or a malformed stored value) every item fails with the same
@@ -1414,6 +1418,25 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 			continue
 		}
 
+		if err := r.recordGeneratedFile(ctx, sess.ID, res.RelPath, safeMimeType); err != nil {
+			// The file is already a real workspace deliverable, so keep the
+			// reference; without the manifest record inline display will
+			// refuse to render it (fail closed), which the user should hear
+			// about. res.RelPath is writer-sanitized and workspace-relative.
+			slog.DebugContext(ctx, "Failed to record generated media in the manifest; the file was written but may not display inline",
+				"agent", agentName, "session_id", sess.ID, "rel_path", res.RelPath, "error", err)
+			if events != nil {
+				warning := fmt.Sprintf("Saved generated media %s but failed to record it for display; see debug log for details", res.RelPath)
+				events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
+			}
+		}
+
+		if res.ExtensionCorrected && events != nil {
+			notice := fmt.Sprintf("Saved generated media as %s: the requested extension %q does not match the returned %s data",
+				res.RelPath, res.RequestedExtension, safeMimeType)
+			events.Emit(Warning(chat.TruncateUTF8Bytes(notice, maxPlaceholderOrWarningBytes), agentName))
+		}
+
 		parts = append(parts, chat.MessagePart{
 			Type: chat.MessagePartTypeDocument,
 			Document: &chat.Document{
@@ -1438,6 +1461,21 @@ func (r *LocalRuntime) sessionLookup() session.Lookup {
 		return nil
 	}
 	return r.sessionStore.GetSession
+}
+
+// recordGeneratedFile writes one manifest record after a successful
+// workspace write — materialization is the only writer of the manifest.
+func (r *LocalRuntime) recordGeneratedFile(ctx context.Context, sessionID, relPath, mimeType string) error {
+	manifest, ok := r.sessionStore.(session.GeneratedMediaManifest)
+	if !ok {
+		return fmt.Errorf("session store %T does not implement the generated-media manifest", r.sessionStore)
+	}
+	return manifest.AddGeneratedFile(ctx, session.GeneratedFile{
+		SessionID: sessionID,
+		RelPath:   relPath,
+		MimeType:  mimeType,
+		CreatedAt: r.now(),
+	})
 }
 
 // workspacemediaWrite is [workspacemedia.Write] behind a package-level
