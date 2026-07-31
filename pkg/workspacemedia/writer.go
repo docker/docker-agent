@@ -50,8 +50,9 @@ var ErrPathEscape = errors.New("path escapes the workspace or has invalid segmen
 
 // Result describes a completed write.
 type Result struct {
-	// RelPath is the exact final path written, relative to the workspace
-	// root and slash-separated. Persist this verbatim.
+	// RelPath is the exact final path written: relative to the workspace
+	// root and slash-separated for [Write], the absolute OS path for
+	// [WriteExternal]. Persist this verbatim.
 	RelPath string
 
 	// ExtensionCorrected reports that the requested filename's extension
@@ -293,6 +294,21 @@ var windowsReservedNames = map[string]bool{
 func isReservedName(segment string) bool {
 	name, _, _ := strings.Cut(segment, ".")
 	return windowsReservedNames[strings.ToUpper(name)]
+}
+
+// DefaultFilename returns the filename [Write] or [WriteExternal] would
+// claim for name with mimeType, before any collision suffixing: name keeps
+// its extension when compatible with the MIME type, otherwise the
+// MIME-derived one replaces (or supplies) it. Used to pre-resolve the exact
+// final name when a user-confirmed external target is a directory.
+func DefaultFilename(name, mimeType string) string {
+	ext := path.Ext(name)
+	if ext == name {
+		// Dotfile-style name (".name"): the whole segment is the base.
+		ext = ""
+	}
+	final, _ := finalExtension(ext, mimeType)
+	return strings.TrimSuffix(name, ext) + final
 }
 
 // finalExtension picks the filename extension: the MIME-derived one when

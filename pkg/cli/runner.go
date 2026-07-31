@@ -248,9 +248,14 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 			case *runtime.ElicitationRequestEvent:
 				serverURL, ok := e.Meta["docker-agent/server_url"].(string)
 				if !ok || serverURL == "" {
-					slog.WarnContext(ctx, "Skipping elicitation: missing or invalid server_url (non-interactive session?)")
+					// Non-OAuth elicitation (e.g. an MCP form or the runtime's
+					// workspace-escape confirmation): the CLI has no form UI, so
+					// decline — but keep draining the stream, otherwise the
+					// runtime blocks emitting the follow-up events (redirect
+					// warning, assistant response) and the turn never persists.
+					slog.WarnContext(ctx, "Declining elicitation without form support in CLI mode", "message", e.Message)
 					_ = rt.ResumeElicitation(ctx, "decline", nil, e.ElicitationID)
-					return nil
+					continue
 				}
 
 				result := out.PromptOAuthAuthorization(ctx, serverURL)

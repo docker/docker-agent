@@ -21,6 +21,15 @@ type ArtifactRootKind string
 // reference is never resolved and surfaces as unavailable.
 const ArtifactRootWorkspace ArtifactRootKind = "workspace"
 
+// ArtifactRootExternal means ArtifactPath is the ABSOLUTE path of a target
+// OUTSIDE the workspace that the user explicitly confirmed via a runtime
+// elicitation (see pkg/runtime's generated-media escape confirmation). It is
+// the one root kind whose path is not workspace-relative. Resolution must
+// still verify the (owner session, path) pair against the generated-media
+// manifest — an external reference in tampered session JSON selects nothing
+// without a matching manifest record.
+const ArtifactRootExternal ArtifactRootKind = "external"
+
 // DocumentSource holds the actual content of a document. Exactly one of the
 // fields should be set.
 type DocumentSource struct {
@@ -44,6 +53,9 @@ type DocumentSource struct {
 	//     resolution must also verify the (owner session, path) pair against
 	//     the generated-media manifest (session.GeneratedMediaManifest),
 	//     which only materialization writes.
+	//   - ArtifactRootExternal: the ABSOLUTE user-confirmed path, exactly as
+	//     returned by workspacemedia.WriteExternal, and equally gated on a
+	//     matching manifest record.
 	//   - empty: the root is unknown — never resolved; the part surfaces
 	//     as unavailable.
 	ArtifactPath string `json:"artifact_path,omitempty"`

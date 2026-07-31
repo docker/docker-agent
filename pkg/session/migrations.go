@@ -463,6 +463,12 @@ func getAllMigrations() []Migration {
 			`,
 			DownSQL: `DROP TABLE IF EXISTS generated_media_manifest`,
 		},
+		{
+			ID:          29,
+			Name:        "029_add_root_kind_to_generated_media_manifest",
+			Description: "Add root_kind to generated_media_manifest so user-confirmed out-of-workspace generated files stay manifest-gated alongside workspace-relative ones",
+			UpSQL:       `ALTER TABLE generated_media_manifest ADD COLUMN root_kind TEXT NOT NULL DEFAULT 'workspace'`,
+		},
 	}
 }
 
