@@ -62,6 +62,21 @@ const (
 	ToolStatusError
 )
 
+// AssistantMedia is one generated-media item attached to an assistant
+// message (an artifact-backed image produced by the model itself, resolved
+// by the chat page). Image is non-nil only when the artifact bytes were
+// resolved and decoded for terminal rendering; Fallback always carries the
+// safe textual description shown when inline rendering is unavailable
+// (graphics disabled, undecodable bytes, or unresolvable artifact).
+type AssistantMedia struct {
+	// ID links an item awaiting asynchronous resolution to the result that
+	// replaces it (see messages.Model.UpdateAssistantMedia). Zero means
+	// static: the item is final and never replaced.
+	ID       uint64
+	Image    *tuiimage.Inline
+	Fallback string
+}
+
 // Message represents a single message in the chat
 type Message struct {
 	Type           MessageType
@@ -72,6 +87,9 @@ type Message struct {
 	ToolStatus     ToolStatus            // Status for tool calls
 	ToolResult     *tools.ToolCallResult // Result of tool call (when completed)
 	Images         []tuiimage.Inline     // Prepared terminal images from the result
+	// AssistantMedia holds generated media rendered as part of an assistant
+	// turn, after the message's text content.
+	AssistantMedia []AssistantMedia
 	// StartedAt records when a tool call entered ToolStatusRunning.
 	// Used to display elapsed time for long-running tool calls.
 	StartedAt *time.Time

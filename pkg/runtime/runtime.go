@@ -254,12 +254,16 @@ type LocalRuntime struct {
 	elicitationSinkMu    sync.RWMutex
 	onElicitationRequest func(Event)
 	sessionStore         session.Store
-	workingDir           string   // Working directory for hooks execution
-	env                  []string // Environment variables for hooks execution
-	modelSwitcherCfg     *ModelSwitcherConfig
-	providerRegistry     *provider.Registry
-	gatewayModels        gatewayModelsCache
-	dmrModels            dmrModelsCache
+	// generatedFiles caches per-owner-session workspace roots and manifest
+	// records for [LocalRuntime.ResolveGeneratedFile]. Seeded by
+	// materialization, filled lazily for restored sessions.
+	generatedFiles   generatedFileCache
+	workingDir       string   // Working directory for hooks execution
+	env              []string // Environment variables for hooks execution
+	modelSwitcherCfg *ModelSwitcherConfig
+	providerRegistry *provider.Registry
+	gatewayModels    gatewayModelsCache
+	dmrModels        dmrModelsCache
 
 	// hooksRegistry is the runtime-private hooks.Registry used to build
 	// every Executor. It carries the runtime-owned builtin hooks

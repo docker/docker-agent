@@ -32,6 +32,7 @@ import (
 //   - AgentChoiceEvent         → Append text to message
 //   - AgentChoiceReasoningEvent → Append reasoning block
 //   - UserMessageEvent         → Replace loading with user message
+//   - MessageAddedEvent        → Render generated media (local runs only)
 //
 // Tool Events:
 //   - PartialToolCallEvent      → Show tool call in progress
@@ -91,6 +92,9 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	case *runtime.AgentChoiceReasoningEvent:
 		return true, p.handleAgentChoiceReasoning(msg)
+
+	case *runtime.MessageAddedEvent:
+		return true, p.handleMessageAdded(msg)
 
 	case *runtime.ShellOutputEvent:
 		return true, p.messages.AddShellOutputMessage(msg.Output)
