@@ -248,6 +248,10 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithSendUserMessage(false),
 		session.WithStructuredOutputDisabled(cfg.DisableStructuredOutput),
 		session.WithParentID(parent.ID),
+		// Delegated children run in the parent's workspace: the persisted
+		// WorkingDir is the workspace-root provenance later used to resolve
+		// files the child produced. Empty stays empty (headless parents).
+		session.WithWorkingDir(parent.WorkingDir),
 		session.WithAttachedFiles(attachedFiles),
 		session.WithAttributes(parent.AttributesSnapshot()),
 	}

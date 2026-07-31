@@ -193,6 +193,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	// An empty cwd is allowed: clients (e.g. zed) may not always supply a
 	// working directory at session creation. We persist it as empty and
 	// later prompts/tools fall back to the agent's default working dir.
+	// The persisted WorkingDir stays empty too: workspace provenance must
+	// come from the client, never be inferred from the server's process cwd.
 	if err := validateWorkingDir(workingDir); err != nil {
 		return acp.NewSessionResponse{}, err
 	}

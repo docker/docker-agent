@@ -144,6 +144,18 @@ func Run(ctx context.Context, agentFilename string, opts Options, ln net.Listene
 		opts.OnSafetyPolicy(resolvedSafety)
 	}
 
+	// Clients are remote, but tools run against the server's own local
+	// workspace; capture it once so per-request sessions don't depend on a
+	// cwd that may change while the server runs.
+	var configuredWd string
+	if opts.RunConfig != nil {
+		configuredWd = opts.RunConfig.WorkingDir
+	}
+	workingDir, err := session.CaptureLocalWorkingDir(configuredWd)
+	if err != nil {
+		return err
+	}
+
 	// Wrap with otelhttp so incoming /v1/chat/completions requests
 	// (including SSE streams) extract the caller's trace context.
 	// otelhttp ends the span when the response body is closed, so
@@ -157,6 +169,7 @@ func Run(ctx context.Context, agentFilename string, opts Options, ln net.Listene
 			conversations:     newConversationStore(opts.ConversationsMaxSessions, conversationTTL(opts)),
 			conversationLocks: newConversationLockSet(),
 			runtimes:          newRuntimePool(ctx, t, opts.MaxIdleRuntimes),
+			workingDir:        workingDir,
 		}, opts),
 		"chatserver",
 	)
@@ -218,6 +231,9 @@ type server struct {
 	conversations     *conversationStore
 	conversationLocks *conversationLockSet
 	runtimes          *runtimePool
+	// workingDir is the server's absolute workspace root, captured once at
+	// startup; every request session persists it as workspace provenance.
+	workingDir string
 }
 
 func newRouter(s *server, opts Options) http.Handler {
@@ -414,7 +430,7 @@ func (s *server) resolveSession(id string, msgs []ChatCompletionMessage) (*sessi
 			return working, nil
 		}
 	}
-	sess := buildSession(msgs)
+	sess := buildSession(msgs, s.workingDir)
 	if sess == nil {
 		return nil, errors.New("no user message provided")
 	}

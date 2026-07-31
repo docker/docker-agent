@@ -55,7 +55,8 @@ func SaveRunSessions(ctx context.Context, run *EvalRun, outputDir string) (strin
 
 // SessionFromEvents reconstructs a session from raw container output events.
 // This parses the JSON events emitted by docker agent run --exec --json and builds a session
-// with the conversation history.
+// with the conversation history. WorkingDir is intentionally left empty: the
+// transcript ran inside a container, so no host workspace owns it.
 func SessionFromEvents(events []map[string]any, title string, questions []string) *session.Session {
 	sess := session.New(
 		session.WithTitle(title),

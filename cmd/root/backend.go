@@ -214,6 +214,9 @@ func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadRes
 	sessTemplate := session.New(
 		session.WithToolsApproved(req.ToolsApproved),
 		session.WithSafetyPolicy(req.SafetyPolicy),
+		// WorkingDir is intentionally not sent: the client checkout is not the
+		// remote server's workspace. The server establishes its own workspace
+		// provenance for the session it creates (see server.SessionManager).
 	)
 
 	sess, err := client.CreateSession(ctx, sessTemplate)

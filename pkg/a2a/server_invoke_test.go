@@ -162,7 +162,7 @@ func startInvokeServer(t *testing.T, tm *team.Team, store session.Store, safety 
 
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	e, err := newServer(tm, "test.yaml", "root", store, safety, ln.Addr().String(), RunOptions{})
+	e, err := newServer(tm, "test.yaml", "root", store, safety, testWorkspaceRoot, ln.Addr().String(), RunOptions{})
 	require.NoError(t, err)
 	go func() { _ = e.Server.Serve(ln) }()
 	t.Cleanup(func() { require.NoError(t, e.Server.Close()) })

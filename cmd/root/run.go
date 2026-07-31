@@ -1303,6 +1303,14 @@ func (f *runExecFlags) scopedSafetyDefault(safety latestcfg.SafetyMode, legacyYo
 // createSessionSpawner creates a function that can spawn new sessions with different working directories.
 func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore session.Store) tui.SessionSpawner {
 	return func(spawnCtx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
+		// The spawn dialog may hand us a relative or empty path; pin the
+		// spawned session's workspace provenance to an absolute root now,
+		// before anything below captures it.
+		workingDir, err := session.CaptureLocalWorkingDir(workingDir)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
 		// Create a copy of the runtime config with the new working directory
 		runConfigCopy := f.runConfig.Clone()
 		runConfigCopy.WorkingDir = workingDir
