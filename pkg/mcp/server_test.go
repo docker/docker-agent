@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/httpsec"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -179,4 +180,19 @@ func TestCreateMCPServer_ToolNameRejectsMultipleAgents(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--tool-name")
 	assert.Contains(t, err.Error(), "exactly one agent")
+}
+
+func TestNewToolCallSession(t *testing.T) {
+	t.Parallel()
+
+	ag := agent.New("root", "test agent", agent.WithMaxIterations(7))
+	sess := newToolCallSession(ag, "hello", session.SafetyPolicyAutonomous, "/srv/workspace")
+
+	assert.Equal(t, "MCP tool call", sess.Title)
+	assert.Equal(t, 7, sess.MaxIterations)
+	assert.True(t, sess.ToolsApproved)
+	assert.True(t, sess.NonInteractive)
+	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
+	assert.Equal(t, "hello", sess.GetLastUserMessageContent())
+	assert.Equal(t, "/srv/workspace", sess.WorkingDir)
 }

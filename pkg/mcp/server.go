@@ -181,6 +181,11 @@ func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, ag
 		return nil, errors.New("--tool-name can only be used when exactly one agent is exposed")
 	}
 
+	workingDir, err := session.CaptureLocalWorkingDir(runConfig.WorkingDir)
+	if err != nil {
+		return nil, err
+	}
+
 	slog.DebugContext(ctx, "Adding MCP tools for agents", "count", len(agentNames))
 
 	for _, agentName := range agentNames {
@@ -208,17 +213,17 @@ func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, ag
 			OutputSchema: tools.MustSchemaFor[ToolOutput](),
 		}
 
-		mcp.AddTool(server, toolDef, createToolHandler(t, agentName, safety))
+		mcp.AddTool(server, toolDef, createToolHandler(t, agentName, safety, workingDir))
 	}
 
 	return server, nil
 }
 
-func CreateToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
-	return createToolHandler(t, agentName, safety)
+func CreateToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
+	return createToolHandler(t, agentName, safety, workingDir)
 }
 
-func createToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
+func createToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input ToolInput) (result *mcp.CallToolResult, output ToolOutput, err error) {
 		// Extract W3C trace context from `params._meta` (per the OTel
 		// MCP semconv) so the SERVER span chains onto the calling
@@ -245,17 +250,7 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 			return nil, ToolOutput{}, fmt.Errorf("failed to get agent: %w", err)
 		}
 
-		sessionOptions := []session.Opt{
-			session.WithTitle("MCP tool call"),
-			session.WithMaxIterations(ag.MaxIterations()),
-			session.WithMaxConsecutiveToolCalls(ag.MaxConsecutiveToolCalls()),
-			session.WithMaxOldToolCallTokens(ag.MaxOldToolCallTokens()),
-			session.WithMaxToolResultTokens(ag.MaxToolResultTokens()),
-			session.WithUserMessage(input.Message),
-			session.WithNonInteractive(true),
-			session.WithSafetyPolicy(safety),
-		}
-		sess := session.New(sessionOptions...)
+		sess := newToolCallSession(ag, input.Message, safety, workingDir)
 
 		rt, err := runtime.New(ctx, t,
 			runtime.WithCurrentAgent(agentName),
@@ -332,6 +327,21 @@ func agentToolAnnotations(ctx context.Context, ag *agent.Agent) (*mcp.ToolAnnota
 	}
 
 	return annotations, nil
+}
+
+func newToolCallSession(ag *agent.Agent, message string, safety session.SafetyPolicy, workingDir string) *session.Session {
+	return session.New(
+		session.WithTitle("MCP tool call"),
+		session.WithMaxIterations(ag.MaxIterations()),
+		session.WithMaxConsecutiveToolCalls(ag.MaxConsecutiveToolCalls()),
+		session.WithMaxOldToolCallTokens(ag.MaxOldToolCallTokens()),
+		session.WithMaxToolResultTokens(ag.MaxToolResultTokens()),
+		session.WithUserMessage(message),
+		session.WithToolsApproved(true),
+		session.WithNonInteractive(true),
+		session.WithSafetyPolicy(safety),
+		session.WithWorkingDir(workingDir),
+	)
 }
 
 // optionalBool returns the value of p, or fallback when p is nil.

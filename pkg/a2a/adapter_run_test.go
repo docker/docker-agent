@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -181,6 +180,8 @@ func (s *recordingStore) updatedSessions() []*session.Session {
 	return slices.Clone(s.updated)
 }
 
+const testWorkspaceRoot = "/srv/a2a-workspace"
+
 type yieldedEvent struct {
 	event *adksession.Event
 	err   error
@@ -188,7 +189,7 @@ type yieldedEvent struct {
 
 func collectRunEvents(ctx agent.InvocationContext, tm *team.Team, a *dagent.Agent, store session.Store, policy session.SafetyPolicy) []yieldedEvent {
 	var out []yieldedEvent
-	for ev, err := range runDockerAgent(ctx, tm, a.Name(), a, store, servesafety.Resolved{Policy: policy}) {
+	for ev, err := range runDockerAgent(ctx, tm, a.Name(), a, store, servesafety.Resolved{Policy: policy}, testWorkspaceRoot) {
 		out = append(out, yieldedEvent{event: ev, err: err})
 	}
 	return out
@@ -278,7 +279,7 @@ func TestRunDockerAgent_ConsumerStopsEarly(t *testing.T) {
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-early-stop", "Hi")
 
 	var events []*adksession.Event
-	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}) {
+	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot) {
 		require.NoError(t, err)
 		events = append(events, ev)
 		break
@@ -297,7 +298,7 @@ func TestRunDockerAgent_EndedInvocationStopsIteration(t *testing.T) {
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-ended", "Hi")
 
 	var events []*adksession.Event
-	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}) {
+	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot) {
 		require.NoError(t, err)
 		events = append(events, ev)
 		// Ending the invocation after the first chunk must stop the
@@ -330,12 +331,9 @@ func TestRunDockerAgent_NewSessionUsesA2ASettings(t *testing.T) {
 	assert.False(t, sess.ToolsApproved)
 	assert.True(t, sess.NonInteractive)
 
-	// runDockerAgent stamps new sessions with the process working directory
-	// via os.Getwd, so this assertion resolves the same value and relies on
-	// nothing in the test process changing directories.
-	workingDir, err := os.Getwd()
-	require.NoError(t, err)
-	assert.Equal(t, workingDir, sess.WorkingDir)
+	// runDockerAgent receives the server workspace at startup, so tests use a
+	// fixed value rather than reading the process working directory.
+	assert.Equal(t, testWorkspaceRoot, sess.WorkingDir)
 
 	msgs := sess.GetAllMessages()
 	require.NotEmpty(t, msgs)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
-	"os"
 	"strings"
 
 	"go.opentelemetry.io/otel"
@@ -29,7 +28,7 @@ import (
 // newDockerAgentAdapter creates a new ADK agent adapter from a docker agent team and agent name.
 // When agentName is empty, the team's default agent (one explicitly named "root" if it
 // exists, otherwise the first agent declared) is used.
-func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved) (agent.Agent, error) {
+func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir string) (agent.Agent, error) {
 	a, err := t.AgentOrDefault(agentName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get agent %s: %w", agentName, err)
@@ -42,13 +41,13 @@ func newDockerAgentAdapter(t *team.Team, agentName string, sessStore session.Sto
 		Name:        agentName,
 		Description: desc,
 		Run: func(ctx agent.InvocationContext) iter.Seq2[*adksession.Event, error] {
-			return runDockerAgent(ctx, t, agentName, a, sessStore, safety)
+			return runDockerAgent(ctx, t, agentName, a, sessStore, safety, workingDir)
 		},
 	})
 }
 
 // runDockerAgent executes a docker agent and returns ADK session events
-func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved) iter.Seq2[*adksession.Event, error] {
+func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string, a *dagent.Agent, sessStore session.Store, safety servesafety.Resolved, workingDir string) iter.Seq2[*adksession.Event, error] {
 	return func(yield func(*adksession.Event, error) bool) {
 		// Decorate the inbound `a2a.message` SERVER span (created by
 		// otelhttp.NewHandler in server.go) with the GenAI semconv
@@ -94,7 +93,6 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 				yield(nil, fmt.Errorf("check A2A context ID: %w", err))
 				return
 			default:
-				workingDir, _ := os.Getwd()
 				sess = session.New(
 					session.WithID(sessionID),
 					session.WithOrigin("a2a"),

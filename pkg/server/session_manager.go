@@ -584,6 +584,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 		opts = append(opts, session.WithTitle(title))
 	}
 
+	// A template without a working_dir creates an intentionally
+	// workspace-less session: the API caller is remote and the server must
+	// not guess its own process cwd as the session's workspace provenance.
 	if wd := strings.TrimSpace(sessionTemplate.WorkingDir); wd != "" {
 		// Refuse any raw ".." here in CreateSession, before filepath.Abs
 		// cleans it away: the traversal rejection is auditable on the raw

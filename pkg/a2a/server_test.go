@@ -109,7 +109,7 @@ func TestServerSecurity(t *testing.T) {
 
 	tm := team.New(team.WithAgents(agent.New("root", "test")))
 	store := session.NewInMemorySessionStore()
-	server, err := newServer(tm, "test.yaml", "root", store, servesafety.Resolved{}, "127.0.0.1:0", RunOptions{AuthToken: "secret", CORSOrigin: "https://app.example.com"})
+	server, err := newServer(tm, "test.yaml", "root", store, servesafety.Resolved{}, testWorkspaceRoot, "127.0.0.1:0", RunOptions{AuthToken: "secret", CORSOrigin: "https://app.example.com"})
 	require.NoError(t, err)
 
 	request := func(method, path string, headers map[string]string) *httptest.ResponseRecorder {

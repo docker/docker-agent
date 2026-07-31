@@ -119,6 +119,9 @@ type Session struct {
 	rt      runtimeRunner
 	session *session.Session
 	welcome string
+	// workingDir is the absolute workspace root captured once at New; every
+	// conversation session persists it as its workspace provenance.
+	workingDir string
 
 	mu           sync.Mutex
 	activeCancel context.CancelFunc
@@ -180,6 +183,12 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 	}
 
 	s := &Session{cfg: cfg, rt: rt}
+	// Capture the embedder's workspace root once, at initialization: a later
+	// process chdir must not change which workspace owns the conversations.
+	s.workingDir, err = session.CaptureLocalWorkingDir(runConfig.WorkingDir)
+	if err != nil {
+		return nil, fmt.Errorf("embeddedchat: capture working dir: %w", err)
+	}
 	if root, err := tm.DefaultAgent(); err == nil {
 		s.welcome = root.WelcomeMessage()
 	}
@@ -244,7 +253,9 @@ func (s *Session) Close() error {
 }
 
 func (s *Session) resetConversationLocked() {
-	opts := append([]session.Opt(nil), s.cfg.SessionOptions...)
+	// The captured root goes first so an embedder-supplied WithWorkingDir in
+	// SessionOptions still wins.
+	opts := append([]session.Opt{session.WithWorkingDir(s.workingDir)}, s.cfg.SessionOptions...)
 	s.session = session.New(opts...)
 }
 
