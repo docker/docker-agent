@@ -20,9 +20,9 @@ import (
 // generated media blob through the naming and workspace-escape policy.
 type generatedMediaItem struct {
 	workspaceRoot string
-	// requestedPath is the prompt-directed target (untrusted model input,
-	// see chat.MediaDelta.RequestedPath); empty when the model named
-	// nothing explicitly.
+	// requestedPath is the prompt-directed target (untrusted marker or
+	// user-prompt input, see chat.MediaDelta.RequestedPath); empty when
+	// nothing named the blob explicitly.
 	requestedPath string
 	// providerName is the sanitized provider display name; genericName the
 	// deterministic "generated-N" fallback.

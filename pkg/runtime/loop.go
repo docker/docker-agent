@@ -1318,10 +1318,12 @@ func sanitizeToolCallName(name string) string {
 // generated-media manifest ([session.GeneratedMediaManifest]), the trust
 // anchor a resolver must consult before reading a workspace path back.
 //
-// The requested filename is the prompt-directed path when the provider
-// surfaced one ([chat.MediaDelta.RequestedPath], populated by marker
-// extraction once that lands), otherwise the sanitized provider display
-// name, otherwise a generic "generated-N"; the writer owns MIME/extension
+// The requested filename is the prompt-directed path when one exists
+// ([chat.MediaDelta.RequestedPath], populated by media-file marker pairing
+// in handleStream, or — for a turn whose single blob no marker named — by
+// deterministic explicit-filename extraction from the triggering user
+// message, see [applyUserPromptRequestedPath]), otherwise the sanitized
+// provider display name, otherwise a generic "generated-N"; the writer owns MIME/extension
 // correction and collision suffixing, and the part persists the exact final
 // path it returns. A corrected extension additionally surfaces a bounded
 // user-visible notice naming the final path. A prompt-directed path that
@@ -1362,6 +1364,11 @@ func sanitizeToolCallName(name string) string {
 // successfully in the same reply, and must not lose the (already generated)
 // accompanying text either.
 func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *session.Session, media []chat.MediaDelta, agentName string, events EventSink) []chat.MessagePart {
+	// Runs after marker pairing (handleStream already filled RequestedPath
+	// for marker-named blobs) and before any write, so marker precedence and
+	// the untrusted-path pipeline below apply unchanged.
+	applyUserPromptRequestedPath(media, sess.GetLastUserMessageContent())
+
 	root, rootErr := session.ResolveWorkingDir(ctx, sess, r.sessionLookup())
 	if rootErr != nil {
 		slog.DebugContext(ctx, "No workspace root for generated media; dropping every media item, keeping the rest of the turn",
