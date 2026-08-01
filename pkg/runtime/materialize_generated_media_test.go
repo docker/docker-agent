@@ -3,11 +3,13 @@ package runtime
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -268,6 +270,8 @@ func TestMaterializeGeneratedMedia_NoWorkspaceRoot(t *testing.T) {
 	assert.Contains(t, warnings[1].Message, "2/2")
 	assert.Contains(t, warnings[1].Message, "dog.jpg")
 	for _, w := range warnings {
+		assert.Contains(t, w.Message, "No session workspace is available to save into.",
+			"a missing workspace must surface its classified reason")
 		assertSafeWarningMessage(t, w.Message, sess.ID, "")
 	}
 
@@ -298,6 +302,8 @@ func TestMaterializeGeneratedMedia_UnwritableRoot(t *testing.T) {
 	require.Len(t, warnings, 1)
 	assert.Contains(t, warnings[0].Message, "cat.png")
 	assert.Contains(t, warnings[0].Message, "1/1")
+	assert.Contains(t, warnings[0].Message, "The save location no longer exists.",
+		"a deleted workspace root must surface its classified reason")
 	assertSafeWarningMessage(t, warnings[0].Message, sess.ID, root)
 	assertNoFilesUnder(t, dataDir)
 }
@@ -334,6 +340,9 @@ func TestMaterializeGeneratedMedia_PartialSuccess_SingleBatchCall(t *testing.T) 
 	assert.Contains(t, warnings[0].Message, "2/2", "the failing item's index/total must reflect its real position in the batch")
 	assert.Contains(t, warnings[0].Message, "dog.jpg")
 	assert.Contains(t, warnings[0].Message, "image/jpeg")
+	assert.Contains(t, warnings[0].Message, retryWithDebugAdvice,
+		"an unclassified failure must carry the retry-with-debug advice")
+	assert.NotContains(t, warnings[0].Message, "injected failure", "the raw error text must never reach the warning")
 	assertSafeWarningMessage(t, warnings[0].Message, sess.ID, root)
 
 	data, err := os.ReadFile(filepath.Join(root, "cat.png"))
@@ -344,6 +353,82 @@ func TestMaterializeGeneratedMedia_PartialSuccess_SingleBatchCall(t *testing.T) 
 	require.NoError(t, err)
 	_, err = manifestOf(t, store).LookupGeneratedFile(t.Context(), sess.ID, "dog.jpg")
 	require.ErrorIs(t, err, session.ErrGeneratedFileNotFound, "a failed write must never be recorded in the manifest")
+}
+
+// TestMaterializeGeneratedMedia_ClassifiedWriteFailureReasons drives every
+// classified writer-failure category through the workspacemediaWrite seam
+// and proves the per-item warning carries exactly the fixed classified
+// sentence — while the raw error (with its embedded secret path) reaches
+// only the debug log, never the warning.
+func TestMaterializeGeneratedMedia_ClassifiedWriteFailureReasons(t *testing.T) {
+	const secretPath = "/secret/root/cat.png"
+
+	cases := []struct {
+		name       string
+		writeErr   error
+		wantReason string
+	}{
+		{
+			name:       "not writable",
+			writeErr:   fmt.Errorf("claim %q: %w", secretPath, fs.ErrPermission),
+			wantReason: "The save location is not writable.",
+		},
+		{
+			name:       "read-only filesystem",
+			writeErr:   fmt.Errorf("open workspace root: %w", &fs.PathError{Op: "open", Path: secretPath, Err: syscall.EROFS}),
+			wantReason: "The save location is not writable.",
+		},
+		{
+			name:       "collision exhaustion",
+			writeErr:   fmt.Errorf("%w: %q after 10000 attempts", workspacemedia.ErrNameExhausted, secretPath),
+			wantReason: "Every candidate filename is already taken.",
+		},
+		{
+			// The provider-named flow retries ErrPathEscape once under the
+			// generic name; the seam fails both attempts, so the refusal
+			// itself must reach the user as the classified reason.
+			name:       "requested path refused",
+			writeErr:   fmt.Errorf("%w: %q: absolute path", workspacemedia.ErrPathEscape, secretPath),
+			wantReason: "The requested save path was refused.",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _, dataDir := newMediaTestRuntime(t)
+			sess, root := workspaceSession(t, "sess-classified-"+tc.name)
+
+			var logBuf bytes.Buffer
+			prevLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+			orig := workspacemediaWrite
+			workspacemediaWrite = func(string, string, []byte, string) (workspacemedia.Result, error) {
+				return workspacemedia.Result{}, tc.writeErr
+			}
+			t.Cleanup(func() { workspacemediaWrite = orig })
+
+			sink := &collectingSink{}
+			parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
+				{Data: []byte{0x01}, MimeType: "image/png", Name: "cat.png", Size: 1},
+			}, "root", sink)
+
+			assert.Empty(t, parts)
+			warnings := sink.warnings()
+			require.Len(t, warnings, 1)
+			msg := warnings[0].Message
+			assert.Contains(t, msg, "1/1")
+			assert.Contains(t, msg, "cat.png")
+			assert.Contains(t, msg, tc.wantReason)
+			assert.NotContains(t, msg, retryWithDebugAdvice, "a classified failure must show its reason, not the debug fallback")
+			assert.NotContains(t, msg, secretPath, "the warning must never leak a path embedded in the error")
+			assertSafeWarningMessage(t, msg, sess.ID, root)
+
+			assert.Contains(t, logBuf.String(), secretPath, "the detailed error must still reach the debug log")
+			assertNoFilesUnder(t, dataDir)
+		})
+	}
 }
 
 // storeWithoutManifest hides the built-in store's GeneratedMediaManifest
@@ -372,7 +457,10 @@ func TestMaterializeGeneratedMedia_ManifestFailureKeepsFileAndWarns(t *testing.T
 	warnings := sink.warnings()
 	require.Len(t, warnings, 1)
 	assert.Contains(t, warnings[0].Message, "cat.png")
-	assert.Contains(t, warnings[0].Message, "record")
+	assert.Contains(t, warnings[0].Message, "could not record it for display")
+	assert.Contains(t, warnings[0].Message, retryWithDebugAdvice,
+		"the manifest cause is unclassified storage internals, so the warning must carry the retry-with-debug advice")
+	assert.NotContains(t, warnings[0].Message, "see debug log")
 	assertBoundedSingleLineUTF8(t, warnings[0].Message)
 }
 

@@ -227,6 +227,17 @@ func TestWrite_CollisionAfterExtensionCorrection(t *testing.T) {
 	assert.True(t, res.ExtensionCorrected)
 }
 
+func TestWrite_CollisionExhaustionReturnsErrNameExhausted(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "pic.png"), []byte("x"), 0o644))
+	for n := 1; n < maxNameAttempts; n++ {
+		require.NoError(t, os.WriteFile(filepath.Join(root, fmt.Sprintf("pic-%d.png", n)), []byte("x"), 0o644))
+	}
+
+	_, err := Write(root, "pic.png", pngData, "image/png")
+	require.ErrorIs(t, err, ErrNameExhausted)
+}
+
 func TestWrite_ConcurrentSameNameWriters(t *testing.T) {
 	root := t.TempDir()
 	const writers = 16
