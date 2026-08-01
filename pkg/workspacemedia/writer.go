@@ -63,14 +63,20 @@ type Result struct {
 }
 
 // maxNameAttempts bounds the dash-suffix collision retry so a pathological
-// directory cannot loop forever; exhaustion surfaces as a visible error.
+// directory cannot loop forever; exhaustion surfaces as [ErrNameExhausted].
 const maxNameAttempts = 10000
+
+// ErrNameExhausted classifies collision-suffix exhaustion: every candidate
+// name up to maxNameAttempts already exists. Match with errors.Is when the
+// failure must be explained without echoing the requested path.
+var ErrNameExhausted = errors.New("no free filename after exhausting collision suffixes")
 
 // Write stores data under workspaceRoot at requestedPath, sanitized and
 // collision-avoided per the package contract, and returns the exact
 // workspace-relative path written. Prompt-directed subdirectories in
 // requestedPath are created as needed. A rejected path returns an error
-// matching [ErrPathEscape]; any other failure (unwritable directory, full
+// matching [ErrPathEscape], collision-suffix exhaustion one matching
+// [ErrNameExhausted]; any other failure (unwritable directory, full
 // disk, ...) is returned as-is for the caller to surface.
 func Write(workspaceRoot, requestedPath string, data []byte, mimeType string) (Result, error) {
 	return write(workspaceRoot, requestedPath, bytes.NewReader(data), mimeType)
@@ -146,7 +152,7 @@ func claimAndPublish(root *os.Root, dir, base, ext string, r io.Reader) (string,
 		}
 		return rel, nil
 	}
-	return "", fmt.Errorf("no free name for %q after %d attempts", path.Join(dir, base+ext), maxNameAttempts)
+	return "", fmt.Errorf("%w: %q after %d attempts", ErrNameExhausted, path.Join(dir, base+ext), maxNameAttempts)
 }
 
 // publish writes r to a sibling temp file, syncs it, and renames it over

@@ -1353,9 +1353,11 @@ func sanitizeToolCallName(name string) string {
 // error (including the workspace root) to the debug log only, and emits a
 // runtime [WarningEvent] carrying nothing but safe display metadata — the
 // exact 1-based failed item index and total batch count, the sanitized MIME
-// type, and the sanitized provider-supplied name (or [fallbackDisplayName]
+// type, the sanitized provider-supplied name (or [fallbackDisplayName]
 // when that name is empty, whitespace-only, or missing — never omitted,
-// exactly like the strip_generated_media.go placeholder) — so the failure
+// exactly like the strip_generated_media.go placeholder), and a fixed
+// classified reason from [mediaSaveFailureReason] (a retry-with-debug
+// hint when the cause is unclassified, never raw error text) — so the failure
 // is observable to the user/caller without leaking the absolute workspace
 // path or a raw OS error (which could contain that path) into a surface a
 // user might paste into a bug report or share screen. Both the name AND the
@@ -1390,8 +1392,8 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 			if displayName == "" {
 				displayName = fallbackDisplayName
 			}
-			warning := fmt.Sprintf("Failed to save generated media item %d/%d (%s, %s); see debug log for details",
-				i+1, len(media), safeMimeType, displayName)
+			warning := fmt.Sprintf("Failed to save generated media item %d/%d (%s, %s). %s",
+				i+1, len(media), safeMimeType, displayName, mediaSaveFailureReason(err))
 			events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
 		}
 
@@ -1426,7 +1428,7 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 			slog.DebugContext(ctx, "Failed to record generated media in the manifest; the file was written but may not display inline",
 				"agent", agentName, "session_id", sess.ID, "rel_path", res.RelPath, "error", err)
 			if events != nil {
-				warning := fmt.Sprintf("Saved generated media %s but failed to record it for display; see debug log for details", res.RelPath)
+				warning := fmt.Sprintf("Saved generated media %s but could not record it for display; it may not render inline. %s", res.RelPath, retryWithDebugAdvice)
 				events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
 			}
 		}
