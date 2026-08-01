@@ -29,6 +29,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -1227,7 +1228,7 @@ func TestRuntimeForSession_RegistersSessionScopedElicitationSink(t *testing.T) {
 
 	require.False(t, sm.HasEventSource(sess.ID))
 
-	run, _, err := sm.runtimeForSession(ctx, sess, "agent.yaml", "", &config.RuntimeConfig{})
+	run, _, _, err := sm.runtimeForSession(ctx, sess, "agent.yaml", "", &config.RuntimeConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = run.Close() })
 
@@ -1753,7 +1754,7 @@ func TestDeleteSession_SilencesLiveRuntimeElicitationDelivery(t *testing.T) {
 	sources := config.Sources{"agent.yaml": config.NewBytesSource("agent.yaml", cfg)}
 	sm := NewSessionManager(ctx, sources, store, 0, &config.RuntimeConfig{})
 
-	run, _, err := sm.runtimeForSession(ctx, sess, "agent.yaml", "", &config.RuntimeConfig{})
+	run, _, _, err := sm.runtimeForSession(ctx, sess, "agent.yaml", "", &config.RuntimeConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = run.Close() })
 	lr, ok := run.(*runtime.LocalRuntime)
@@ -1983,6 +1984,151 @@ func TestBatchDeleteSessions_ToleratesNilRuntimeCancel(t *testing.T) {
 	assert.Empty(t, failed)
 	_, ok := sm.runtimeSessions.Load(sess.ID)
 	assert.False(t, ok, "the runtime entry must still be deregistered")
+}
+
+// stopCountingToolSet is a startable toolset that records how often it was
+// stopped, so teardown tests can assert that deleting a session actually
+// releases its toolset-owned resources (the stand-in for a stdio MCP
+// subprocess) instead of leaking them until process exit.
+type stopCountingToolSet struct {
+	stops atomic.Int32
+}
+
+func (s *stopCountingToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+func (s *stopCountingToolSet) Start(context.Context) error { return nil }
+
+func (s *stopCountingToolSet) Stop(context.Context) error {
+	s.stops.Add(1)
+	return nil
+}
+
+// newToolSetSession registers a session whose runtime carries a per-session
+// team with one started toolset, the shape runtimeForSession produces. It
+// returns the toolset so the caller can assert on teardown.
+func newToolSetSession(t *testing.T, sm *SessionManager, sess *session.Session) *stopCountingToolSet {
+	t.Helper()
+
+	ts := &stopCountingToolSet{}
+	tm := team.New(team.WithAgents(agent.New("root", "", agent.WithToolSets(ts))))
+
+	// Start the toolsets the way the runtime does; Agent.StopToolSets skips
+	// any that never started, so an unstarted toolset would pass vacuously.
+	agt, err := tm.AgentOrDefault("root")
+	require.NoError(t, err)
+	_, err = agt.Tools(t.Context())
+	require.NoError(t, err)
+
+	sm.runtimeSessions.Store(sess.ID, &activeRuntimes{
+		runtime: &fakeRuntime{},
+		session: sess,
+		team:    tm,
+	})
+	return ts
+}
+
+// TestDeleteSession_StopsSessionToolSets covers the leak this fix targets: a
+// per-session team's toolsets (stdio MCP subprocesses and the like) must be
+// stopped once the session is deleted and its stream has drained.
+func TestDeleteSession_StopsSessionToolSets(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	ts := newToolSetSession(t, sm, sess)
+
+	require.NoError(t, sm.DeleteSession(ctx, sess.ID))
+	require.NoError(t, sm.WaitStopped(ctx, sess.ID, 5*time.Second))
+
+	assert.Equal(t, int32(1), ts.stops.Load(), "delete must stop the session's tool sets")
+}
+
+// TestBatchDeleteSessions_StopsSessionToolSets is the batch counterpart: the
+// batch path must tear a session down exactly like DeleteSession does, and
+// WaitStopped must observe that teardown rather than reporting an immediate
+// false "already stopped".
+func TestBatchDeleteSessions_StopsSessionToolSets(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	ts := newToolSetSession(t, sm, sess)
+
+	deleted, failed := sm.BatchDeleteSessions(ctx, []string{sess.ID})
+	require.Equal(t, 1, deleted)
+	require.Empty(t, failed)
+
+	require.NoError(t, sm.WaitStopped(ctx, sess.ID, 5*time.Second))
+	assert.Equal(t, int32(1), ts.stops.Load(), "batch delete must stop the session's tool sets")
+}
+
+// TestWaitStopped_WaitsForToolSetTeardown pins the contract WaitStopped
+// advertises: it returns only once teardown has completed, tool sets included.
+// A stream still holding the streaming mutex parks it; releasing the stream
+// lets teardown finish, and the toolset is stopped by the time WaitStopped
+// returns.
+func TestWaitStopped_WaitsForToolSetTeardown(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	ts := newToolSetSession(t, sm, sess)
+
+	rs, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok)
+	rs.streaming.Lock() // stand in for an in-flight RunStream
+
+	require.NoError(t, sm.DeleteSession(ctx, sess.ID))
+
+	// Teardown is parked on the drain, so nothing has been stopped yet and a
+	// short wait must time out rather than report success.
+	assert.Equal(t, int32(0), ts.stops.Load())
+	require.Error(t, sm.WaitStopped(ctx, sess.ID, 100*time.Millisecond))
+
+	rs.streaming.Unlock()
+
+	require.NoError(t, sm.WaitStopped(ctx, sess.ID, 5*time.Second))
+	assert.Equal(t, int32(1), ts.stops.Load())
+}
+
+// TestDeleteSession_StopsSessionToolSetsOnlyOnce pins the idempotency the two
+// delete paths rely on: a second teardown of the same session must not stop an
+// already-stopped tool set again.
+func TestDeleteSession_StopsSessionToolSetsOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	ts := newToolSetSession(t, sm, sess)
+	rs, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok)
+
+	require.NoError(t, sm.DeleteSession(ctx, sess.ID))
+	require.NoError(t, sm.WaitStopped(ctx, sess.ID, 5*time.Second))
+	require.Equal(t, int32(1), ts.stops.Load())
+
+	// A repeated delete never reaches teardown — the session is already gone
+	// from the store — so drive the second teardown directly.
+	require.Error(t, sm.DeleteSession(ctx, sess.ID))
+	sm.stopSessionToolSets(ctx, rs)
+
+	assert.Equal(t, int32(1), ts.stops.Load(), "a stopped tool set must not be stopped twice")
 }
 
 type commandFakeRuntime struct {

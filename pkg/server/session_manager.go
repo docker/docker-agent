@@ -39,6 +39,18 @@ type activeRuntimes struct {
 	session  *session.Session        // The actual session object used by the runtime
 	titleGen *sessiontitle.Generator // Title generator (includes fallback models)
 
+	// team is the per-session team this manager built via teamloader in
+	// runtimeForSession. It is stopped (StopToolSets) on session teardown so
+	// stdio MCP subprocesses and other toolset-owned resources are released,
+	// not leaked until process exit. Nil for attached runtimes (AttachRuntime),
+	// whose team and toolset lifecycle belong to the external embedder.
+	team *team.Team
+
+	// stopped is closed once teardown has finished: the stream has drained
+	// and the toolsets have been stopped. Set by scheduleTeardown, which is
+	// the only writer; nil until the session is deleted.
+	stopped chan struct{}
+
 	streaming sync.Mutex // Held while a RunStream is in progress; serialises concurrent requests
 }
 
@@ -823,6 +835,91 @@ func (sm *SessionManager) GetSessions(ctx context.Context) ([]*session.Session, 
 	return sessions, nil
 }
 
+const (
+	// sessionDrainTimeout bounds how long teardown waits for a deleted
+	// session's stream to drain before giving up and stopping its toolsets
+	// anyway.
+	sessionDrainTimeout = 5 * time.Minute
+	// toolSetStopTimeout bounds StopToolSets. It is a separate budget from
+	// sessionDrainTimeout on purpose: a session that exhausted the drain
+	// budget must still get a live context to stop its toolsets with.
+	toolSetStopTimeout = 30 * time.Second
+)
+
+// scheduleTeardown detaches the post-delete teardown of a session's runtime and
+// runs it in the background: wait for the stream to drain, release the session's
+// toolset-owned resources, then drop the deletedSessions entry. Both delete
+// paths (DeleteSession and BatchDeleteSessions) go through here so they share
+// one teardown contract; callers hold sm.mux.
+//
+// The entry stays in deletedSessions for the duration so WaitStopped can observe
+// teardown after the runtime has been deregistered, and rs.stopped is closed
+// before the entry is dropped so a waiter never misses the completion signal.
+//
+// ctx only supplies values (trace and logging context): teardown outlives the
+// request that triggered the delete, so cancellation is stripped and each phase
+// carries its own deadline instead.
+func (sm *SessionManager) scheduleTeardown(ctx context.Context, sessionID string, rs *activeRuntimes) {
+	rs.stopped = make(chan struct{})
+	sm.deletedSessions.Store(sessionID, rs)
+
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		// Deferred LIFO: close(stopped) first, so a WaitStopped that still
+		// holds the entry is released before the entry disappears.
+		defer sm.deletedSessions.Delete(sessionID)
+		defer close(rs.stopped)
+
+		drainSessionStream(detached, rs)
+		sm.stopSessionToolSets(detached, rs)
+	}()
+}
+
+// drainSessionStream blocks until the session's RunStream has released the
+// streaming mutex, or until sessionDrainTimeout expires. Teardown continues
+// either way — the timeout exists so a wedged stream cannot pin the session's
+// toolsets forever.
+func drainSessionStream(ctx context.Context, rs *activeRuntimes) {
+	ctx, cancel := context.WithTimeout(ctx, sessionDrainTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if rs.streaming.TryLock() {
+			rs.streaming.Unlock()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// stopSessionToolSets releases the toolset-owned resources (e.g. stdio MCP
+// subprocesses) of a per-session team the manager built via teamloader —
+// otherwise they leak until the server process exits. It is a no-op for
+// attached runtimes, whose team is nil and whose toolset lifecycle belongs to
+// the external embedder. Call it only after the session's stream has drained,
+// so a toolset is never stopped mid-turn.
+func (sm *SessionManager) stopSessionToolSets(ctx context.Context, rs *activeRuntimes) {
+	if rs == nil || rs.team == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, toolSetStopTimeout)
+	defer cancel()
+
+	sid := ""
+	if rs.session != nil {
+		sid = rs.session.ID
+	}
+	if err := rs.team.StopToolSets(ctx); err != nil {
+		slog.ErrorContext(ctx, "Failed to stop session tool sets", "session_id", sid, "error", err)
+	}
+}
+
 // DeleteSession deletes a session by ID. It cancels the runtime context and
 // removes the session from all registries. Callers that need to wait for
 // the stream to fully stop should call WaitStopped afterwards.
@@ -852,32 +949,8 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) e
 		if sessionRuntime.cancel != nil {
 			sessionRuntime.cancel()
 		}
-		// Keep the entry in deletedSessions so WaitStopped can probe the
-		// streaming mutex after the runtime is deregistered.
-		sm.deletedSessions.Store(sess.ID, sessionRuntime)
+		sm.scheduleTeardown(ctx, sess.ID, sessionRuntime)
 		sm.runtimeSessions.Delete(sess.ID)
-
-		// Background cleanup: remove the deletedSessions entry once the
-		// stream goroutine has exited. This prevents a memory leak when
-		// the caller does not use ?wait=true.
-		go func() {
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-			deadline := time.After(5 * time.Minute)
-			for {
-				if sessionRuntime.streaming.TryLock() {
-					sessionRuntime.streaming.Unlock()
-					sm.deletedSessions.Delete(sess.ID)
-					return
-				}
-				select {
-				case <-deadline:
-					sm.deletedSessions.Delete(sess.ID)
-					return
-				case <-ticker.C:
-				}
-			}
-		}()
 	}
 	sm.dropEventLog(sess.ID)
 	sm.followUpInjectors.Delete(sess.ID)
@@ -887,33 +960,27 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) e
 	return nil
 }
 
-// WaitStopped blocks until the session's runtime stream goroutine has fully
-// exited (streaming mutex released), the timeout fires, or ctx is cancelled
-// (e.g. client disconnect). It should be called after DeleteSession.
-// Returns nil when the stream has stopped.
+// WaitStopped blocks until the session's teardown has fully completed — its
+// runtime stream goroutine has exited and its toolsets have been stopped — or
+// the timeout fires, or ctx is cancelled (e.g. client disconnect). It should be
+// called after DeleteSession or BatchDeleteSessions. Returns nil when teardown
+// has finished, including when there is nothing left to wait for.
 func (sm *SessionManager) WaitStopped(ctx context.Context, sessionID string, timeout time.Duration) error {
 	rs, ok := sm.deletedSessions.Load(sessionID)
 	if !ok {
 		return nil // already cleaned up
 	}
 
-	deadline := time.After(timeout)
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 
-	for {
-		if rs.streaming.TryLock() {
-			rs.streaming.Unlock()
-			sm.deletedSessions.Delete(sessionID)
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline:
-			return fmt.Errorf("timeout waiting for session %s to stop", sessionID)
-		case <-ticker.C:
-		}
+	select {
+	case <-rs.stopped:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-deadline.C:
+		return fmt.Errorf("timeout waiting for session %s to stop", sessionID)
 	}
 }
 
@@ -942,13 +1009,15 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	var titleGen *sessiontitle.Generator
 	if !exists {
 		var rt runtime.Runtime
-		rt, titleGen, err = sm.runtimeForSession(ctx, sess, agentFilename, currentAgent, sm.runConfig)
+		var tm *team.Team
+		rt, titleGen, tm, err = sm.runtimeForSession(ctx, sess, agentFilename, currentAgent, sm.runConfig)
 		if err != nil {
 			cancel()
 			return nil, err
 		}
 		runtimeSession = &activeRuntimes{
 			runtime:  rt,
+			team:     tm,
 			cancel:   cancel,
 			session:  sess,
 			titleGen: titleGen,
@@ -1416,7 +1485,7 @@ func (sm *SessionManager) generateTitle(ctx context.Context, sess *session.Sessi
 	}
 }
 
-func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.Session, agentFilename, currentAgent string, rc *config.RuntimeConfig) (_ runtime.Runtime, _ *sessiontitle.Generator, err error) {
+func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.Session, agentFilename, currentAgent string, rc *config.RuntimeConfig) (_ runtime.Runtime, _ *sessiontitle.Generator, _ *team.Team, err error) {
 	// Caller (RunSession) holds sm.mux and has already verified that no
 	// active runtime exists for this session. This function is purely a
 	// constructor: it must not touch sm.runtimeSessions, otherwise it would
@@ -1442,14 +1511,14 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 
 	loadResult, err := sm.loadTeamWithConfig(ctx, agentFilename, rc, teamloader.WithWorkingDir(sess.WorkingDir))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	t := loadResult.Team
 
 	// Resolve the team's default agent when no specific agent was requested.
 	agt, err := t.AgentOrDefault(currentAgent)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	currentAgent = agt.Name()
 	sess.MaxIterations = agt.MaxIterations()
@@ -1502,7 +1571,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 	}
 	run, err := newRuntime(ctx, t, opts...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// If any later construction step fails, close the runtime before
 	// returning: the caller only ever sees the error, so an unclosed
@@ -1546,7 +1615,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 
 	slog.DebugContext(ctx, "Runtime created for session", "session_id", sess.ID)
 
-	return run, titleGen, nil
+	return run, titleGen, t, nil
 }
 
 // applyAuthorSafetyDefault seeds an API-created session that carries no
@@ -2113,6 +2182,11 @@ func (sm *SessionManager) BatchDeleteSessions(ctx context.Context, sessionIDs []
 				if sessionRuntime.cancel != nil {
 					sessionRuntime.cancel()
 				}
+				// Same teardown as DeleteSession, so a batch-deleted session
+				// releases its toolset-owned resources (stdio MCP subprocesses
+				// etc.) and is observable through WaitStopped just like a
+				// singly-deleted one.
+				sm.scheduleTeardown(ctx, sessionID, sessionRuntime)
 				sm.runtimeSessions.Delete(sessionID)
 			}
 			sm.dropEventLog(sessionID)
