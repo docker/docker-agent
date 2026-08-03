@@ -11,6 +11,7 @@ import (
 
 	"github.com/goccy/go-yaml"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/team"
@@ -68,7 +69,7 @@ func buildInstructions(ctx context.Context, runConfig *config.RuntimeConfig, mod
 	usableProviders := config.AvailableProviders(ctx, runConfig.ModelsGateway, runConfig.EnvProvider())
 
 	var b strings.Builder
-	b.WriteString(agentBuilderInstructions)
+	b.WriteString(strings.ReplaceAll(agentBuilderInstructions, "{{docker_agent_command}}", invocation.DockerAgent()))
 	b.WriteString("\n\nPreferred model providers to use: ")
 	b.WriteString(strings.Join(usableProviders, ", "))
 	b.WriteString(". You must always use one or more of the following model configurations: \n")
@@ -136,7 +137,7 @@ func appendCustomProviderInstructions(ctx context.Context, b *strings.Builder, r
 		}
 		fmt.Fprintf(b, "\t\tmodels:\n\t\t\t%s:\n\t\t\t\tprovider: %s\n\t\t\t\tmodel: %s\n", name, name, model)
 		if model == "REPLACE_WITH_MODEL_ID" {
-			fmt.Fprintf(b, "\t\tAsk the user which model ID to use with %q (they can list them with `docker agent models --provider %s`).\n", name, name)
+			fmt.Fprintf(b, "\t\tAsk the user which model ID to use with %q (they can list them with `%s models --provider %s`).\n", name, invocation.DockerAgent(), name)
 		}
 	}
 }

@@ -30,8 +30,8 @@ Each type can be referenced under 'toolsets:' in an agent YAML file, for example
     - type: shell`,
 		GroupID: "diagnose",
 		Args:    cobra.NoArgs,
-		Example: `  docker agent toolsets
-  docker agent toolsets --format json`,
+		Example: `  docker-agent toolsets
+  docker-agent toolsets --format json`,
 		RunE: flags.run,
 	}
 

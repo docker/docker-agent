@@ -1,10 +1,12 @@
 package tour
 
 import (
+	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -46,8 +48,8 @@ func buildSteps() []step {
 		{
 			title: "Agents are just YAML",
 			body: "The agent you're talking to is one YAML file: a model, instructions, and tools.\n\n" +
-				"Build your own:\n  docker agent new\n\n" +
-				"Or run one from an OCI registry:\n  docker agent run myorg/agent:tag",
+				fmt.Sprintf("Build your own:\n  %s new\n\n", invocation.DockerAgent()) +
+				fmt.Sprintf("Or run one from an OCI registry:\n  %s run myorg/agent:tag", invocation.DockerAgent()),
 		},
 		{
 			title: "🎉 You're all set",

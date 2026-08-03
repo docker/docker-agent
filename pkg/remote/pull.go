@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/content"
 	desktoptransport "github.com/docker/docker-agent/pkg/desktop/transport"
 )
@@ -94,7 +95,7 @@ func Pull(ctx context.Context, registryRef string, force bool, opts ...crane.Opt
 		if meta, metaErr := store.GetArtifactMetadata(localRef); metaErr == nil {
 			if meta.Digest == remoteDigest {
 				if !hasCagentAnnotation(meta.Annotations) {
-					return "", fmt.Errorf("artifact %s found in store wasn't created by `docker agent share push`\nTry to push again with `docker agent share push`", localRef)
+					return "", fmt.Errorf("artifact %s found in store wasn't created by `%s share push`\nTry to push again with `%s share push`", localRef, invocation.DockerAgent(), invocation.DockerAgent())
 				}
 				return meta.Digest, nil
 			}
@@ -111,7 +112,7 @@ func Pull(ctx context.Context, registryRef string, force bool, opts ...crane.Opt
 		return "", fmt.Errorf("getting manifest from pulled image: %w", err)
 	}
 	if !hasCagentAnnotation(manifest.Annotations) {
-		return "", fmt.Errorf("artifact %s wasn't created by `docker agent share push`\nTry to push again with `docker agent share push`", localRef)
+		return "", fmt.Errorf("artifact %s wasn't created by `%s share push`\nTry to push again with `%s share push`", localRef, invocation.DockerAgent(), invocation.DockerAgent())
 	}
 
 	digest, err := storeArtifact(ctx, store, s, ref, localRef, img)
@@ -143,7 +144,7 @@ func storeArtifact(ctx context.Context, store *content.Store, s *session, ref na
 		return "", fmt.Errorf("getting manifest from pulled image: %w", err)
 	}
 	if !hasCagentAnnotation(manifest.Annotations) {
-		return "", fmt.Errorf("artifact %s wasn't created by `docker agent share push`\nTry to push again with `docker agent share push`", localRef)
+		return "", fmt.Errorf("artifact %s wasn't created by `%s share push`\nTry to push again with `%s share push`", localRef, invocation.DockerAgent(), invocation.DockerAgent())
 	}
 	return store.StoreArtifact(img, localRef)
 }

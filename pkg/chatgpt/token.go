@@ -14,6 +14,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/httpclient"
 )
 
@@ -93,8 +94,8 @@ func refreshCredentials(ctx context.Context, creds *Credentials) (*Credentials, 
 	if resp.StatusCode != http.StatusOK {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized {
-			return nil, fmt.Errorf("the ChatGPT session is no longer valid (HTTP %d: %s); sign in again with `docker agent setup`",
-				resp.StatusCode, strings.TrimSpace(string(detail)))
+			return nil, fmt.Errorf("the ChatGPT session is no longer valid (HTTP %d: %s); sign in again with `%s setup`",
+				resp.StatusCode, strings.TrimSpace(string(detail)), invocation.DockerAgent())
 		}
 		return nil, fmt.Errorf("failed to refresh the ChatGPT access token: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(detail)))
 	}

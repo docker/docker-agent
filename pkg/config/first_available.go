@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	modelprovider "github.com/docker/docker-agent/pkg/model/provider"
@@ -191,7 +192,7 @@ func (e *firstAvailableMissingEnvError) Error() string {
 	}
 	msg.WriteString("\n")
 	msg.WriteString(environment.SecretSourcesHelp(example))
-	msg.WriteString("\nOr run `docker agent setup` to configure a provider or local model interactively.\n")
+	fmt.Fprintf(&msg, "\nOr run `%s setup` to configure a provider or local model interactively.\n", invocation.DockerAgent())
 	fmt.Fprintf(&msg, "Step-by-step model setup (API key or local): %s\n", environment.ModelSetupDocsURL)
 
 	return msg.String()

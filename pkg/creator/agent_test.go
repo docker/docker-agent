@@ -1,11 +1,13 @@
 package creator
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
@@ -47,7 +49,9 @@ func TestBuildInstructions(t *testing.T) {
 	instructions := buildInstructions(ctx, runConfig, "")
 
 	// Verify the instructions contain the base instructions
-	assert.Contains(t, instructions, agentBuilderInstructions)
+	expectedBase := strings.ReplaceAll(agentBuilderInstructions, "{{docker_agent_command}}", invocation.DockerAgent())
+	assert.Contains(t, instructions, expectedBase)
+	assert.NotContains(t, instructions, "{{docker_agent_command}}")
 
 	// Verify the instructions contain provider guidance
 	assert.Contains(t, instructions, "Preferred model providers to use:")
@@ -87,7 +91,8 @@ func TestBuildInstructions_CustomProviders(t *testing.T) {
 		assert.Contains(t, instructions, "base_url: https://llm.corp.example.com/v1")
 		assert.Contains(t, instructions, "api_type: openai_chatcompletions")
 		assert.Contains(t, instructions, "token_key: MYPROVIDER_API_KEY")
-		assert.Contains(t, instructions, "docker agent models --provider myprovider")
+		assert.Contains(t, instructions, invocation.DockerAgent()+" run <file.yaml>")
+		assert.Contains(t, instructions, invocation.DockerAgent()+" models --provider myprovider")
 		assert.NotContains(t, instructions, "no-creds", "providers without credentials are excluded")
 	})
 

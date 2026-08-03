@@ -5,6 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/tui"
 	"github.com/docker/docker-agent/pkg/tui/tuitest"
 )
@@ -32,7 +33,7 @@ func TestTour_WalkThrough(t *testing.T) {
 		WaitFor(tuitest.Contains("Slash commands")).
 		Enter(). // skip step 4 (slash commands)
 		WaitFor(tuitest.Contains("Agents are just YAML")).
-		WaitFor(tuitest.Contains("docker agent new")).
+		WaitFor(tuitest.Contains(invocation.DockerAgent() + " new")).
 		Enter(). // read step
 		WaitFor(tuitest.Contains("You're all set")).
 		Enter(). // finish

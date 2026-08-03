@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
@@ -568,7 +569,7 @@ func printToolInstallAllowance(w io.Writer, kitResult *kit.Result) {
 		fmt.Fprintf(w, "  ! %s (using fallback host set)\n", e.Error())
 	}
 	if len(kitResult.ToolInstallHostsResolutionErr) > 0 {
-		fmt.Fprintln(w, "  hint: persist a missing host with `docker agent sandbox allow <host>`")
+		fmt.Fprintf(w, "  hint: persist a missing host with `%s sandbox allow <host>`\n", invocation.DockerAgent())
 	}
 }
 
@@ -595,7 +596,7 @@ func printUserSandboxAllowlist(w io.Writer, hosts []string) {
 	if len(hosts) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "User sandbox allowlist: allowlisting %d host(s) from `docker agent sandbox allow`:\n", len(hosts))
+	fmt.Fprintf(w, "User sandbox allowlist: allowlisting %d host(s) from `%s sandbox allow`:\n", len(hosts), invocation.DockerAgent())
 	for _, h := range hosts {
 		fmt.Fprintf(w, "  - %s\n", h)
 	}

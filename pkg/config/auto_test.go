@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chatgpt"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 )
@@ -1066,7 +1067,7 @@ func TestAutoModelFallbackError(t *testing.T) {
 		err := &AutoModelFallbackError{}
 		msg := err.Error()
 		assert.Contains(t, msg, "No model is currently available")
-		assert.Contains(t, msg, "docker agent setup")
+		assert.Contains(t, msg, invocation.DockerAgent()+" setup")
 		assert.Contains(t, msg, "docker model pull")
 		assert.Contains(t, msg, "ANTHROPIC_API_KEY")
 		assert.Contains(t, msg, environment.ModelSetupDocsURL)

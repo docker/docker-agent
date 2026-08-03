@@ -22,6 +22,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/cli"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -40,7 +41,7 @@ var errSetupCancelled = errors.New("setup cancelled")
 // errNoUsableModel is the concise error returned when the setup offer is
 // declined or cancelled: the full failure was already printed just above the
 // offer, so returning the original error would print it twice.
-var errNoUsableModel = errors.New("no usable model is configured; run `docker agent setup` or see `docker agent doctor`")
+var errNoUsableModel = invocationError("no usable model is configured; run `{{docker_agent_command}} setup` or see `{{docker_agent_command}} doctor`")
 
 // errClaudeHarnessConfigured ends an offered setup that took the Claude Code
 // harness path: the wizard configured an agent file for the external CLI,
@@ -48,7 +49,17 @@ var errNoUsableModel = errors.New("no usable model is configured; run `docker ag
 // never happened and must not exit as a success. The message stays concise:
 // the wizard already printed the agent file (or its content) and the exact
 // command to run.
-var errClaudeHarnessConfigured = errors.New("this run was not retried: setup configured a Claude Code harness agent; start it with the `docker agent run <file>` command shown above")
+var errClaudeHarnessConfigured = invocationError("this run was not retried: setup configured a Claude Code harness agent; start it with the `{{docker_agent_command}} run <file>` command shown above")
+
+// invocationError is a sentinel error whose message names the runnable
+// command for the current invocation mode. The {{docker_agent_command}}
+// placeholder (shared with pkg/creator/instructions.txt) is resolved at
+// Error() time so the mode is read when the message is rendered.
+type invocationError string
+
+func (e invocationError) Error() string {
+	return strings.ReplaceAll(string(e), "{{docker_agent_command}}", invocation.DockerAgent())
+}
 
 // setupResult reports what the wizard configured, so the caller that offered
 // setup after a failed run can retry with the new credential in place.
@@ -96,10 +107,11 @@ type setupWizard struct {
 }
 
 func newSetupCmd() *cobra.Command {
+	command := invocation.DockerAgent()
 	return &cobra.Command{
 		Use:   "setup",
 		Short: "Interactively set up a model (built-in provider, local, custom endpoint, or Claude Code)",
-		Long: `Set up a model for docker agent, interactively.
+		Long: fmt.Sprintf(`Set up a model for docker agent, interactively.
 
 Four paths:
   - Built-in cloud provider: pick a provider docker agent already knows
@@ -120,7 +132,7 @@ Four paths:
     credentials.
 
 Ends with the exact command to start chatting. Secret values are never
-printed. Check the result anytime with 'docker agent doctor'.`,
+printed. Check the result anytime with '%s doctor'.`, command),
 		Example:      `  docker-agent setup`,
 		GroupID:      "core",
 		Args:         cobra.NoArgs,
@@ -133,10 +145,10 @@ printed. Check the result anytime with 'docker agent doctor'.`,
 			}()
 
 			if !isatty.IsTerminal(os.Stdin.Fd()) || !isatty.IsTerminal(os.Stdout.Fd()) {
-				return fmt.Errorf("docker agent setup is interactive and needs a terminal\n"+
+				return fmt.Errorf("%s setup is interactive and needs a terminal\n"+
 					"Without one, set a provider API key directly (e.g. export ANTHROPIC_API_KEY=<value>)\n"+
 					"or pull a local model with `docker model pull ai/qwen3`.\n"+
-					"See %s for every secret source", environment.SecretsDocsURL)
+					"See %s for every secret source", command, environment.SecretsDocsURL)
 			}
 
 			wizard := newTerminalSetupWizard(cmd.InOrStdin(), cmd.OutOrStdout())
@@ -330,10 +342,10 @@ func (w *setupWizard) setupLocalModel(ctx context.Context) (*setupResult, error)
 	switch {
 	case errors.Is(err, dmr.ErrNotInstalled):
 		return nil, fmt.Errorf("cannot use a local model: Docker Model Runner is not installed.\n"+
-			"Install it (%s), then run `docker agent setup` again", dmrDocsURL)
+			"Install it (%s), then run `%s setup` again", dmrDocsURL, invocation.DockerAgent())
 	case err != nil:
 		return nil, fmt.Errorf("cannot use a local model: Docker Model Runner is not reachable: %w\n"+
-			"Start it (or install it: %s), then run `docker agent setup` again", err, dmrDocsURL)
+			"Start it (or install it: %s), then run `%s setup` again", err, dmrDocsURL, invocation.DockerAgent())
 	}
 
 	if len(models) > 0 {
@@ -509,7 +521,7 @@ func (w *setupWizard) promptCustomProviderModel(ctx context.Context, baseURL, ke
 		fmt.Fprintf(w.out, "The endpoint lists %d model(s):\n", len(models))
 		for i, m := range models {
 			if i == maxModelsShown {
-				fmt.Fprintf(w.out, "  ... and %d more (see `docker agent models`)\n", len(models)-maxModelsShown)
+				fmt.Fprintf(w.out, "  ... and %d more (see `%s models`)\n", len(models)-maxModelsShown, invocation.DockerAgent())
 				break
 			}
 			fmt.Fprintf(w.out, "  - %s\n", m)
@@ -566,8 +578,8 @@ func (w *setupWizard) setupClaudeHarness(ctx context.Context) (*setupResult, err
 	status := w.probeClaudeCLI(ctx)
 	if !status.Installed() {
 		return nil, fmt.Errorf("cannot use the Claude Code harness: the `claude` CLI was not found in PATH.\n"+
-			"Install Claude Code (%s) and log in with `%s`, then run `docker agent setup` again",
-			codingharness.ClaudeInstallDocsURL, codingharness.ClaudeLoginCommand)
+			"Install Claude Code (%s) and log in with `%s`, then run `%s setup` again",
+			codingharness.ClaudeInstallDocsURL, codingharness.ClaudeLoginCommand, invocation.DockerAgent())
 	}
 
 	if status.Authenticated() {
@@ -594,7 +606,7 @@ func (w *setupWizard) setupClaudeHarness(ctx context.Context) (*setupResult, err
 	fmt.Fprintln(w.out, "Heads-up: the harness runs the official `claude` CLI non-interactively with")
 	fmt.Fprintln(w.out, "its own tools and skips Claude Code's permission prompts")
 	fmt.Fprintln(w.out, "(--dangerously-skip-permissions). Use it in a repository you trust, and prefer")
-	fmt.Fprintln(w.out, "`docker agent run --worktree` to isolate its changes in a git worktree.")
+	fmt.Fprintf(w.out, "`%s run --worktree` to isolate its changes in a git worktree.\n", invocation.DockerAgent())
 	fmt.Fprintln(w.out, "`--sandbox` does not carry the `claude` CLI or its login into the sandbox;")
 	fmt.Fprintln(w.out, "use it only with a sandbox image that ships and authenticates the CLI.")
 
@@ -636,7 +648,7 @@ func (w *setupWizard) claudeLoginFlow(ctx context.Context, status codingharness.
 	answer = strings.TrimSpace(strings.ToLower(answer))
 	if answer != "y" && answer != "yes" {
 		return fmt.Errorf("the Claude Code CLI is not logged in.\n"+
-			"Run `%s` yourself, then run `docker agent setup` again", codingharness.ClaudeLoginCommand)
+			"Run `%s` yourself, then run `%s setup` again", codingharness.ClaudeLoginCommand, invocation.DockerAgent())
 	}
 
 	fmt.Fprintln(w.out)
@@ -646,9 +658,9 @@ func (w *setupWizard) claudeLoginFlow(ctx context.Context, status codingharness.
 
 	status = w.probeClaudeCLI(ctx)
 	if !status.Authenticated() {
-		return errors.New("the `claude` CLI still reports it is not logged in after the login attempt.\n" +
-			"Check `claude auth status` as the same OS user and environment that run docker agent,\n" +
-			"then run `docker agent setup` again")
+		return fmt.Errorf("the `claude` CLI still reports it is not logged in after the login attempt.\n"+
+			"Check `claude auth status` as the same OS user and environment that run docker agent,\n"+
+			"then run `%s setup` again", invocation.DockerAgent())
 	}
 
 	fmt.Fprintf(w.out, "Logged in (%s).\n", status.AuthSummary())
@@ -736,7 +748,7 @@ func (w *setupWizard) writeClaudeAgentFile(ctx context.Context, content []byte) 
 		answer = strings.TrimSpace(strings.ToLower(answer))
 		if answer != "y" && answer != "yes" {
 			fmt.Fprintf(w.out, "\nKeeping %s. Save this configuration to a file of your choice:\n\n%s\n", path, content)
-			fmt.Fprintln(w.out, "Then start it with `docker agent run <file>`.")
+			fmt.Fprintf(w.out, "Then start it with `%s run <file>`.\n", invocation.DockerAgent())
 			return "", nil
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -776,6 +788,7 @@ func atomicWriteFile(path string, content []byte) error {
 // printNextSteps ends the wizard with ready-to-copy commands.
 func (w *setupWizard) printNextSteps(result *setupResult) {
 	fmt.Fprintln(w.out)
+	command := invocation.DockerAgent()
 
 	// The harness runs through a generated agent file, not a --model flag:
 	// the harness model belongs to the external CLI, not to a docker agent
@@ -784,11 +797,11 @@ func (w *setupWizard) printNextSteps(result *setupResult) {
 		if result.AgentFile != "" {
 			fmt.Fprintln(w.out, "You're all set. Start the Claude Code agent with:")
 			fmt.Fprintln(w.out)
-			fmt.Fprintf(w.out, "  docker agent run %s\n", result.AgentFile)
+			fmt.Fprintf(w.out, "  %s run %s\n", command, result.AgentFile)
 			fmt.Fprintln(w.out)
-			fmt.Fprintf(w.out, "Check the harness anytime with `docker agent doctor %s`.\n", result.AgentFile)
+			fmt.Fprintf(w.out, "Check the harness anytime with `%s doctor %s`.\n", command, result.AgentFile)
 		} else {
-			fmt.Fprintln(w.out, "Check your setup anytime with `docker agent doctor <file>`.")
+			fmt.Fprintf(w.out, "Check your setup anytime with `%s doctor <file>`.\n", command)
 		}
 		return
 	}
@@ -800,29 +813,29 @@ func (w *setupWizard) printNextSteps(result *setupResult) {
 		if result.Model != "" {
 			fmt.Fprintln(w.out, "You're all set. Start chatting with:")
 			fmt.Fprintln(w.out)
-			fmt.Fprintf(w.out, "  docker agent run --model %s\n", result.Model)
+			fmt.Fprintf(w.out, "  %s run --model %s\n", command, result.Model)
 		} else {
 			fmt.Fprintf(w.out, "Provider %q is set up. List its models with:\n", result.ProviderName)
 			fmt.Fprintln(w.out)
-			fmt.Fprintf(w.out, "  docker agent models --provider %s\n", result.ProviderName)
+			fmt.Fprintf(w.out, "  %s models --provider %s\n", command, result.ProviderName)
 			fmt.Fprintln(w.out)
 			fmt.Fprintln(w.out, "Then start chatting with:")
 			fmt.Fprintln(w.out)
-			fmt.Fprintf(w.out, "  docker agent run --model %s/<model>\n", result.ProviderName)
+			fmt.Fprintf(w.out, "  %s run --model %s/<model>\n", command, result.ProviderName)
 		}
 		fmt.Fprintln(w.out)
-		fmt.Fprintln(w.out, "Check your setup anytime with `docker agent doctor`.")
+		fmt.Fprintf(w.out, "Check your setup anytime with `%s doctor`.\n", command)
 		return
 	}
 
 	fmt.Fprintln(w.out, "You're all set. Start chatting with:")
 	fmt.Fprintln(w.out)
-	fmt.Fprintln(w.out, "  docker agent run")
+	fmt.Fprintf(w.out, "  %s run\n", command)
 	fmt.Fprintln(w.out)
 	if result.Model != "" {
-		fmt.Fprintf(w.out, "Or pin the model explicitly: docker agent run --model %s\n", result.Model)
+		fmt.Fprintf(w.out, "Or pin the model explicitly: %s run --model %s\n", command, result.Model)
 	}
-	fmt.Fprintln(w.out, "Check your setup anytime with `docker agent doctor`.")
+	fmt.Fprintf(w.out, "Check your setup anytime with `%s doctor`.\n", command)
 }
 
 // promptChoice reads a 1-based menu choice, re-asking on invalid input. An

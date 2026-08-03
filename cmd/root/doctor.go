@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/docker/docker-agent/pkg/chatgpt"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -290,8 +291,8 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		if environment.IsTrustedDockerURL(f.runConfig.ModelsGateway) {
 			if _, ok := findSource(ctx, sources, environment.DockerDesktopTokenEnv); !ok {
 				autoStatus.Usable = false
-				autoIssues = append(autoIssues,
-					"the models gateway requires Docker Desktop sign-in and no DOCKER_TOKEN was found; sign in to Docker Desktop (check with `docker agent debug auth`)")
+				autoIssues = append(autoIssues, fmt.Sprintf(
+					"the models gateway requires Docker Desktop sign-in and no DOCKER_TOKEN was found; sign in to Docker Desktop (check with `%s debug auth`)", invocation.DockerAgent()))
 			}
 		}
 
@@ -306,8 +307,8 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		case dmrDown:
 			autoStatus.Usable = false
 			autoIssues = append(autoIssues, fmt.Sprintf(
-				"no usable model: no provider credential was found and Docker Model Runner is %s; run `docker agent setup`, or set an API key for one of the providers above (%s) or install Docker Model Runner (%s)",
-				describeDMRStatus(report.DMR.Status), environment.SecretsDocsURL, dmrDocsURL))
+				"no usable model: no provider credential was found and Docker Model Runner is %s; run `%s setup`, or set an API key for one of the providers above (%s) or install Docker Model Runner (%s)",
+				describeDMRStatus(report.DMR.Status), invocation.DockerAgent(), environment.SecretsDocsURL, dmrDocsURL))
 		case !slices.Contains(dmrModels, auto.Model):
 			autoStatus.Note = fmt.Sprintf("not pulled yet; run `docker model pull %s` or let the first run pull it", auto.Model)
 		}
@@ -485,7 +486,7 @@ func (f *doctorFlags) listDMRModels(ctx context.Context) ([]string, error) {
 // the rest at their API-key env var.
 func providerCredentialHint(provider, envVar string) string {
 	if provider == chatgpt.ProviderName {
-		return "sign in with `docker agent setup` (pick chatgpt) or set " + envVar
+		return fmt.Sprintf("sign in with `%s setup` (pick chatgpt) or set %s", invocation.DockerAgent(), envVar)
 	}
 	return "set " + envVar
 }

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/chatgpt"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 )
 
 // SecretsDocsURL is the documentation page describing every built-in secret
@@ -29,6 +30,7 @@ var _ error = &RequiredEnvError{}
 
 func (e *RequiredEnvError) Error() string {
 	var msg strings.Builder
+	command := invocation.DockerAgent()
 
 	fmt.Fprintln(&msg, "The following environment variables must be set:")
 	for _, v := range e.Missing {
@@ -43,12 +45,12 @@ func (e *RequiredEnvError) Error() string {
 	msg.WriteString(SecretSourcesHelp(example))
 
 	if slices.Contains(e.Missing, chatgpt.TokenEnvVar) {
-		fmt.Fprintf(&msg, "\n%s is normally supplied by signing in with your ChatGPT account: docker agent setup\n", chatgpt.TokenEnvVar)
+		fmt.Fprintf(&msg, "\n%s is normally supplied by signing in with your ChatGPT account: %s setup\n", chatgpt.TokenEnvVar, command)
 	}
 
 	if e.MissingModelCredentials {
-		msg.WriteString("\nNo API key? Run a local model instead: docker agent run --model dmr/ai/qwen3 ...\n(the model is pulled on first use; `docker model ls` shows models already pulled)\n")
-		msg.WriteString("Or run `docker agent setup` to configure a provider or local model interactively.\n")
+		fmt.Fprintf(&msg, "\nNo API key? Run a local model instead: %s run --model dmr/ai/qwen3 ...\n(the model is pulled on first use; `docker model ls` shows models already pulled)\n", command)
+		fmt.Fprintf(&msg, "Or run `%s setup` to configure a provider or local model interactively.\n", command)
 		fmt.Fprintf(&msg, "Step-by-step model setup (API key or local): %s\n", ModelSetupDocsURL)
 	}
 
@@ -64,10 +66,11 @@ func (e *RequiredEnvError) Error() string {
 // drifts between them.
 func SecretSourcesHelp(exampleVar string) string {
 	var b strings.Builder
+	command := invocation.DockerAgent()
 	b.WriteString("Provide them using any of these sources:\n")
 	fmt.Fprintf(&b, " - Shell environment:      export %s=<value>\n", exampleVar)
-	b.WriteString(" - Env file:               docker agent run --env-from-file <file> ...\n")
-	b.WriteString(" - Docker Agent env file:  docker agent setup (stores the key in ~/.config/cagent/.env)\n")
+	fmt.Fprintf(&b, " - Env file:               %s run --env-from-file <file> ...\n", command)
+	fmt.Fprintf(&b, " - Docker Agent env file:  %s setup (stores the key in ~/.config/cagent/.env)\n", command)
 	fmt.Fprintf(&b, "\nSee %s for details.\n", SecretsDocsURL)
 	return b.String()
 }

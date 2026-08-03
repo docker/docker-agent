@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -130,7 +131,7 @@ func TestDoctorCommand_ChatGPTDefaultModelWithoutLoginSuggestsSignIn(t *testing.
 
 	require.Error(t, err, "a default model without credentials is an issue")
 	assert.Regexp(t, `chatgpt\s+not set\s+CHATGPT_OAUTH_TOKEN`, output)
-	assert.Contains(t, output, "sign in with `docker agent setup` (pick chatgpt) or set CHATGPT_OAUTH_TOKEN")
+	assert.Contains(t, output, "sign in with `"+invocation.DockerAgent()+" setup` (pick chatgpt) or set CHATGPT_OAUTH_TOKEN")
 }
 
 func TestDoctorCommand_EmptyValueIsNotACredential(t *testing.T) {

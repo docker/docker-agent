@@ -16,6 +16,7 @@ import (
 	"github.com/docker/cli/cli/command"
 	"github.com/spf13/cobra"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/feedback"
 	"github.com/docker/docker-agent/pkg/logging"
 	"github.com/docker/docker-agent/pkg/paths"
@@ -56,9 +57,9 @@ func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "docker-agent",
 		Short: "Docker AI Agent Runner",
-		Long: `Docker AI Agent Runner.
+		Long: fmt.Sprintf(`Docker AI Agent Runner.
 
-New to docker agent? Take the hands-on tour: docker agent getting-started`,
+New to docker agent? Take the hands-on tour: %s getting-started`, invocation.DockerAgent()),
 		Example: `  docker-agent run
   docker-agent run ./agent.yaml`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {

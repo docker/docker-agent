@@ -1,10 +1,10 @@
 package root
 
 import (
-	"github.com/docker/cli/cli-plugins/plugin"
 	"github.com/spf13/cobra"
 
 	"github.com/docker/docker-agent/pkg/cli"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -24,13 +24,6 @@ func runVersionCommand(cmd *cobra.Command, args []string) {
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
 
-	commandName := "docker-agent"
-	if cmd.Parent() != nil {
-		commandName = cmd.Parent().Name()
-	}
-	if !plugin.RunningStandalone() {
-		commandName = "docker " + commandName
-	}
-	out.Printf("%s version %s\n", commandName, version.Version)
+	out.Printf("%s version %s\n", invocation.DockerAgent(), version.Version)
 	out.Printf("Commit: %s\n", version.Commit)
 }

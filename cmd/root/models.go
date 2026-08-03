@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/docker/docker-agent/pkg/cli"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
@@ -73,11 +74,11 @@ func newModelsCmd(opts ...modelsCmdOption) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "models",
 		Short: "List available models",
-		Long: `List models available for use with --model flag.
+		Long: fmt.Sprintf(`List models available for use with --model flag.
 
-Shows models that can be passed to 'docker agent run --model' or
-'docker agent new --model'. By default shows models from providers
-you have credentials for. Use --all to include all providers.`,
+Shows models that can be passed to '%s run --model' or
+'%s new --model'. By default shows models from providers
+you have credentials for. Use --all to include all providers.`, invocation.DockerAgent(), invocation.DockerAgent()),
 		GroupID: "diagnose",
 	}
 
@@ -104,10 +105,10 @@ func newModelsListCmd(flags *modelsListFlags) *cobra.Command {
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List available models",
-		Example: `  docker agent models
-  docker agent models list --provider openai
-  docker agent models ls --all
-  docker agent models --format json`,
+		Example: `  docker-agent models
+  docker-agent models list --provider openai
+  docker-agent models ls --all
+  docker-agent models --format json`,
 		Args: cobra.NoArgs,
 		RunE: flags.runModelsListCommand,
 	}

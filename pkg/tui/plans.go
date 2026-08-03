@@ -14,6 +14,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
@@ -448,7 +449,7 @@ func (m *appModel) handlePlanExportResult(msg planExportResultMsg) (tea.Model, t
 	switch {
 	case msg.exists:
 		return m, notification.ErrorCmd(
-			msg.path + " already exists — move it away, or export to a custom path with 'docker agent plans export'.")
+			fmt.Sprintf("%s already exists — move it away, or export to a custom path with '%s plans export'.", msg.path, invocation.DockerAgent()))
 	case msg.statErr != nil:
 		return m, notification.ErrorCmd(fmt.Sprintf("Cannot export to %s: %v", msg.path, msg.statErr))
 	case msg.err != nil:

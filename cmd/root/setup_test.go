@@ -13,16 +13,45 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/docker/cli/cli-plugins/metadata"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chatgpt"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 )
+
+func TestSetupWizard_CommandsMatchInvocation(t *testing.T) {
+	tests := []struct {
+		name        string
+		originalCLI string
+		command     string
+		unexpected  string
+	}{
+		{name: "standalone", command: "docker-agent", unexpected: "docker agent run"},
+		{name: "plugin", originalCLI: "docker", command: "docker agent", unexpected: "docker-agent run"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(metadata.ReexecEnvvar, test.originalCLI)
+
+			var out bytes.Buffer
+			wizard := &setupWizard{out: &out}
+			wizard.printNextSteps(&setupResult{ClaudeHarness: true, AgentFile: "claude-code-agent.yaml"})
+
+			assert.Contains(t, out.String(), test.command+" run claude-code-agent.yaml")
+			assert.Contains(t, out.String(), test.command+" doctor claude-code-agent.yaml")
+			assert.NotContains(t, out.String(), test.unexpected)
+			assert.Contains(t, errClaudeHarnessConfigured.Error(), test.command+" run <file>")
+		})
+	}
+}
 
 // fakeSecretStore records stored secrets in memory and can be made to fail.
 type fakeSecretStore struct {
@@ -103,9 +132,9 @@ func TestSetupWizard_CloudPathStoresKey(t *testing.T) {
 	assert.Contains(t, output, "anthropic credential", "the built-in prompt asks for a credential")
 	assert.NotContains(t, output, "anthropic API key", "not every built-in credential is an API key (docker/docker-agent#3805)")
 	assert.Contains(t, output, "Stored ANTHROPIC_API_KEY in the config-env-file (fake).")
-	assert.Contains(t, output, "docker agent run")
+	assert.Contains(t, output, invocation.DockerAgent()+" run")
 	assert.Contains(t, output, "--model anthropic/claude-sonnet-4-6")
-	assert.Contains(t, output, "docker agent doctor")
+	assert.Contains(t, output, invocation.DockerAgent()+" doctor")
 	assert.NotContains(t, output, "sk-cloud-key", "secret values must never be printed")
 }
 
@@ -236,7 +265,7 @@ func TestSetupWizard_LocalPathWithPulledModels(t *testing.T) {
 	assert.Empty(t, *pulled, "no pull needed when a model is already available")
 	assert.Equal(t, "dmr/ai/smollm2", result.Model)
 	assert.Contains(t, out.String(), "- ai/smollm2")
-	assert.Contains(t, out.String(), "docker agent run")
+	assert.Contains(t, out.String(), invocation.DockerAgent()+" run")
 }
 
 func TestSetupWizard_LocalPathPullsDefaultModel(t *testing.T) {
@@ -382,7 +411,7 @@ func TestSetupWizard_CustomPathSavesProviderAndKey(t *testing.T) {
 
 	output := out.String()
 	assert.Contains(t, output, "corp-model-a")
-	assert.Contains(t, output, "docker agent run --model myprovider/corp-model-a")
+	assert.Contains(t, output, invocation.DockerAgent()+" run --model myprovider/corp-model-a")
 	assert.NotContains(t, output, "sk-custom-key", "secret values must never be printed")
 }
 
@@ -409,8 +438,8 @@ func TestSetupWizard_CustomPathWithoutKeyOrModels(t *testing.T) {
 
 	output := out.String()
 	assert.Contains(t, output, "Could not list models from the endpoint")
-	assert.Contains(t, output, "docker agent models --provider local-vllm")
-	assert.Contains(t, output, "docker agent run --model local-vllm/<model>")
+	assert.Contains(t, output, invocation.DockerAgent()+" models --provider local-vllm")
+	assert.Contains(t, output, invocation.DockerAgent()+" run --model local-vllm/<model>")
 }
 
 func TestSetupWizard_CustomPathValidatesNameAndURL(t *testing.T) {
@@ -534,8 +563,8 @@ func TestSetupWizard_ClaudeHarnessAlreadyLoggedIn(t *testing.T) {
 	assert.Contains(t, output, "--dangerously-skip-permissions")
 	assert.Contains(t, output, "--worktree")
 	assert.Contains(t, output, "`--sandbox` does not carry the `claude` CLI or its login", "sandbox mode must not be presented as harness isolation")
-	assert.Contains(t, output, "docker agent run "+result.AgentFile)
-	assert.Contains(t, output, "docker agent doctor "+result.AgentFile)
+	assert.Contains(t, output, invocation.DockerAgent()+" run "+result.AgentFile)
+	assert.Contains(t, output, invocation.DockerAgent()+" doctor "+result.AgentFile)
 	assert.NotContains(t, output, "--model", "the harness model is not a docker agent provider model")
 }
 
@@ -718,7 +747,7 @@ func TestSetupWizard_ClaudeHarnessDoesNotOverwriteWithoutConfirmation(t *testing
 			assert.Contains(t, output, "already exists")
 			assert.Contains(t, output, "type: claude-code")
 			assert.Contains(t, output, "effort: medium")
-			assert.Contains(t, output, "docker agent run")
+			assert.Contains(t, output, invocation.DockerAgent()+" run")
 		})
 	}
 }
@@ -763,7 +792,7 @@ func TestCompleteOfferedSetup_ClaudeHarnessFailsWithoutRetry(t *testing.T) {
 
 		require.ErrorIs(t, err, errClaudeHarnessConfigured)
 		assert.False(t, retried, "the old configuration must not be retried")
-		assert.Contains(t, err.Error(), "docker agent run")
+		assert.Contains(t, err.Error(), invocation.DockerAgent()+" run")
 		assert.Empty(t, out.String(), "no retry banner when nothing is retried")
 	}
 }

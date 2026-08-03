@@ -17,6 +17,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/chatgpt"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -229,7 +230,7 @@ func TestChatGPTNotSignedInFailsFastWithGuidance(t *testing.T) {
 
 	_, err := NewClient(t.Context(), cfg, environment.NewNoEnvProvider())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "docker agent setup")
+	assert.Contains(t, err.Error(), invocation.DockerAgent()+" setup")
 	assert.Contains(t, err.Error(), chatgpt.TokenEnvVar)
 }
 

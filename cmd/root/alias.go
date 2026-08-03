@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/docker/docker-agent/pkg/cli"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
 	pathx "github.com/docker/docker-agent/pkg/path"
@@ -201,9 +202,9 @@ func runAliasAddCommand(cmd *cobra.Command, args []string, flags *aliasAddFlags)
 	}
 
 	if name == "default" {
-		out.Printf("\nYou can now run: docker agent run %s (or even docker agent run)\n", name)
+		out.Printf("\nYou can now run: %s run %s (or even %s run)\n", invocation.DockerAgent(), name, invocation.DockerAgent())
 	} else {
-		out.Printf("\nYou can now run: docker agent run %s\n", name)
+		out.Printf("\nYou can now run: %s run %s\n", invocation.DockerAgent(), name)
 	}
 
 	return nil
@@ -250,7 +251,7 @@ func runAliasListCommand(cmd *cobra.Command, args []string, asJSON bool) (comman
 
 	if len(allAliases) == 0 {
 		out.Println("No aliases registered.")
-		out.Println("\nCreate an alias with: docker agent alias add <name> <agent-path>")
+		out.Printf("\nCreate an alias with: %s alias add <name> <agent-path>\n", invocation.DockerAgent())
 		return nil
 	}
 
@@ -291,7 +292,7 @@ func runAliasListCommand(cmd *cobra.Command, args []string, asJSON bool) (comman
 		}
 	}
 
-	out.Println("\nRun an alias with: docker agent run <alias>")
+	out.Printf("\nRun an alias with: %s run <alias>\n", invocation.DockerAgent())
 
 	return nil
 }

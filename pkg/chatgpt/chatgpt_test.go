@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 )
 
 // makeJWT builds an unsigned JWT carrying the given claims. Signature
@@ -214,7 +216,7 @@ func TestAccessToken_RefreshRejectedSuggestsSigningInAgain(t *testing.T) {
 	})
 
 	_, err := AccessToken(t.Context())
-	require.ErrorContains(t, err, "docker agent setup")
+	require.ErrorContains(t, err, invocation.DockerAgent()+" setup")
 }
 
 func TestAccessToken_ExpiredWithoutRefreshToken(t *testing.T) {

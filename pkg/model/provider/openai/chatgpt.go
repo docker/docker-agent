@@ -15,6 +15,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/docker/docker-agent/pkg/chatgpt"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 )
@@ -52,7 +53,7 @@ func chatgptTokenSource(env environment.Provider, tokenKey string) func(context.
 		}
 		token, err := chatgpt.AccessToken(ctx)
 		if err != nil {
-			return "", fmt.Errorf("chatgpt provider: %w; sign in with `docker agent setup` or set %s", err, tokenKey)
+			return "", fmt.Errorf("chatgpt provider: %w; sign in with `%s setup` or set %s", err, invocation.DockerAgent(), tokenKey)
 		}
 		return token, nil
 	}

@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -212,7 +213,7 @@ func TestView_ReadStepShowsContinueHint(t *testing.T) {
 
 	view := m.view()
 	assert.Contains(t, view, "continue")
-	assert.Contains(t, view, "docker agent new")
+	assert.Contains(t, view, invocation.DockerAgent()+" new")
 }
 
 func TestView_LastStepShowsFinishHint(t *testing.T) {

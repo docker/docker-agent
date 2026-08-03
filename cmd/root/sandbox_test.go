@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/sandbox/kit"
 )
 
@@ -290,7 +291,7 @@ func TestPrintToolInstallAllowance(t *testing.T) {
 			want: "Tool install: agent has at least one MCP/LSP toolset, allowlisting 1 package host(s) in the sandbox proxy:\n" +
 				"  - api.github.com\n" +
 				"  ! resolving install hosts for \"gopls\"@\"golang/tools@v0.21.0\": boom (using fallback host set)\n" +
-				"  hint: persist a missing host with `docker agent sandbox allow <host>`\n",
+				"  hint: persist a missing host with `" + invocation.DockerAgent() + " sandbox allow <host>`\n",
 			wantNot: []string{},
 		},
 	}

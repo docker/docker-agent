@@ -189,5 +189,5 @@ agents:
 After writing the YAML file, tell the user to run their agent with:
 
 ```console
-docker agent run <file.yaml>
+{{docker_agent_command}} run <file.yaml>
 ```

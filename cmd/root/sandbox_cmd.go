@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/docker/docker-agent/pkg/cli"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -50,7 +51,7 @@ This is the recommended fix for "Blocked by network policy" 403s on a
 host the auto-installer can't infer (custom MCP endpoint, third-party
 API, registry not covered by the aqua resolver):
 
-  docker agent sandbox allow api.example.com`,
+  docker-agent sandbox allow api.example.com`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: runSandboxAllowCommand,
 	}
@@ -150,7 +151,7 @@ func runSandboxListCommand(cmd *cobra.Command, args []string) (commandErr error)
 
 	if len(cfg.SandboxAllowlist) == 0 {
 		out.Println("Persistent sandbox allowlist is empty.")
-		out.Println("\nAdd a host with: docker agent sandbox allow <host>")
+		out.Printf("\nAdd a host with: %s sandbox allow <host>\n", invocation.DockerAgent())
 		return nil
 	}
 

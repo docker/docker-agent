@@ -15,6 +15,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/input"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/jscommands"
@@ -284,7 +285,7 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 			return fmt.Errorf("failed to read from stdin: %w", err)
 		}
 		if strings.TrimSpace(string(buf)) == "" {
-			return errors.New(`no message received on stdin: with "-" the prompt is read from stdin, e.g. echo "Hello" | docker agent run <agent> -`)
+			return fmt.Errorf(`no message received on stdin: with "-" the prompt is read from stdin, e.g. echo "Hello" | %s run <agent> -`, invocation.DockerAgent())
 		}
 
 		if err := oneLoop(string(buf), os.Stdin); err != nil {
@@ -306,7 +307,7 @@ func Run(ctx context.Context, out *Printer, cfg Config, rt runtime.Runtime, sess
 		// Exiting 0 with no output on empty input (e.g. bare `docker agent`
 		// in CI) would be a silent no-op; fail with the next steps instead.
 		if strings.TrimSpace(string(buf)) == "" {
-			return errors.New("no message provided and stdin is not a terminal: pass a message (docker agent run <agent> \"<message>\"), pipe one on stdin, or run from an interactive terminal to use the chat UI")
+			return fmt.Errorf("no message provided and stdin is not a terminal: pass a message (%s run <agent> \"<message>\"), pipe one on stdin, or run from an interactive terminal to use the chat UI", invocation.DockerAgent())
 		}
 
 		if err := oneLoop(string(buf), os.Stdin); err != nil {

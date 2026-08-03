@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/chatgpt"
+	"github.com/docker/docker-agent/pkg/cli/invocation"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
@@ -52,7 +53,7 @@ var cloudProviders = []providerConfig{
 	// setup` sign-in, surfaced as a virtual env var by the "chatgpt-login"
 	// source. It is ordered after openai so adding a ChatGPT sign-in never
 	// changes auto-selection for users that already export OPENAI_API_KEY.
-	{"chatgpt", []string{chatgpt.TokenEnvVar}, "sign in with your ChatGPT account: `docker agent setup`", ""},
+	{"chatgpt", []string{chatgpt.TokenEnvVar}, "ChatGPT account sign-in", ""},
 	{"github-copilot", []string{"GITHUB_TOKEN", "GH_TOKEN"}, "GITHUB_TOKEN (or GH_TOKEN)", ""},
 	{"google", []string{
 		"GOOGLE_API_KEY",
@@ -122,7 +123,11 @@ type pullErrorSummarizer interface {
 func (e *AutoModelFallbackError) Error() string {
 	var hints []string
 	for _, p := range cloudProviders {
-		hints = append(hints, fmt.Sprintf("    - %s: %s", p.name, p.hint))
+		hint := p.hint
+		if p.name == "chatgpt" {
+			hint = fmt.Sprintf("sign in with your ChatGPT account: `%s setup`", invocation.DockerAgent())
+		}
+		hints = append(hints, fmt.Sprintf("    - %s: %s", p.name, hint))
 	}
 
 	var b strings.Builder
@@ -135,7 +140,7 @@ func (e *AutoModelFallbackError) Error() string {
 		}
 	}
 	b.WriteString("No model is currently available.\n\nTo fix this, you can:\n")
-	b.WriteString("  - Run `docker agent setup` to configure a provider API key or a local model interactively\n")
+	fmt.Fprintf(&b, "  - Run `%s setup` to configure a provider API key or a local model interactively\n", invocation.DockerAgent())
 	b.WriteString("  - Pull a Docker Model Runner model, e.g. `docker model pull ai/qwen3`\n")
 	b.WriteString("  - Install Docker Model Runner: https://docs.docker.com/ai/model-runner/get-started/\n")
 	b.WriteString("  - Configure an API key for a cloud provider:\n")
