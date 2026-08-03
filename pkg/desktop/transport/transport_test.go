@@ -336,6 +336,11 @@ func TestIsProxySocketError(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "proxyconnect tcp with dial tcp error",
+			errStr:   "proxyconnect tcp: dial tcp 10.0.0.1:443: connect: connection refused",
+			expected: true,
+		},
+		{
 			name:     "dial unix error",
 			errStr:   "dial unix /var/run/docker.sock: operation timed out",
 			expected: true,
@@ -343,6 +348,16 @@ func TestIsProxySocketError(t *testing.T) {
 		{
 			name:     "regular network error",
 			errStr:   "dial tcp 192.168.1.1:443: i/o timeout",
+			expected: false,
+		},
+		{
+			name:     "target TCP connection refused",
+			errStr:   "dial tcp 127.0.0.1:8080: connect: connection refused",
+			expected: false,
+		},
+		{
+			name:     "target HTTP request dial refusal",
+			errStr:   "Get \"http://127.0.0.1:8080\": dial tcp 127.0.0.1:8080: connect: connection refused",
 			expected: false,
 		},
 		{

@@ -296,12 +296,28 @@ func sanitizeForLog(value string) string {
 	}, value)
 }
 
+// isProxySocketError checks if the error indicates the proxy socket is unavailable.
+// Direct target TCP dial errors (e.g. dial tcp) return false to avoid disabling the proxy.
 func isProxySocketError(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	errStr := strings.ToLower(err.Error())
-	for _, pattern := range []string{"no such file or directory", "connect: connection refused", "proxyconnect tcp", "dial unix", "unix socket"} {
+
+	// Target TCP connection errors are target host errors, not proxy socket failures.
+	if strings.Contains(errStr, "dial tcp") && !strings.Contains(errStr, "proxyconnect tcp") {
+		return false
+	}
+
+	proxyErrorPatterns := []string{
+		"no such file or directory", // Socket file deleted
+		"proxyconnect tcp",          // Proxy connection failure
+		"dial unix",                 // Unix socket dial failure
+		"unix socket",               // Generic Unix socket error
+	}
+
+	for _, pattern := range proxyErrorPatterns {
 		if strings.Contains(errStr, pattern) {
 			return true
 		}
