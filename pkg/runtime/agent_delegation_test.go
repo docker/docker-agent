@@ -643,3 +643,53 @@ func TestTransferTask_PropagatesPermissions(t *testing.T) {
 	assert.Equal(t, []string{"safe_tool"}, parentClone.Allow,
 		"parent permissions must remain isolated from child mutations after transfer_task")
 }
+
+// TestHandleTaskTransfer_UsesPinnedSessionAgent verifies that transfer_task
+// inside a background sub-session resolves the caller from the session's
+// pinned agent, not the runtime's shared current-agent. Regression test for
+// the bug where a pipeline agent dispatched via run_background_agent could
+// not transfer_task to its own sub-agents because current-agent remained
+// the root coordinator.
+func TestHandleTaskTransfer_UsesPinnedSessionAgent(t *testing.T) {
+	t.Parallel()
+
+	childStream := newStreamBuilder().AddContent("done").AddStopWithUsage(10, 5).Build()
+	prov := &mockProvider{id: "test/mock-model", stream: childStream}
+
+	// root only knows pipeline; pipeline knows director.
+	director := agent.New("director", "Director agent", agent.WithModel(prov))
+	pipeline := agent.New("pipeline", "Pipeline agent", agent.WithModel(prov))
+	agent.WithSubAgents(director)(pipeline)
+	root := agent.New("root", "Root agent", agent.WithModel(prov))
+	agent.WithSubAgents(pipeline)(root)
+
+	tm := team.New(team.WithAgents(root, pipeline, director))
+	rt, err := NewLocalRuntime(t.Context(), tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+
+	// background sub-session pinned to pipeline (as run_background_agent does).
+	sess := session.New(
+		session.WithUserMessage("Please proceed."),
+		session.WithAgentName("pipeline"),
+		session.WithToolsApproved(true),
+	)
+	evts := make(chan Event, 128)
+
+	toolCall := tools.ToolCall{
+		ID:   "call_1",
+		Type: "function",
+		Function: tools.FunctionCall{
+			Name:      "transfer_task",
+			Arguments: `{"agent":"director","task":"write a prompt","expected_output":"prompt text"}`,
+		},
+	}
+
+	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.IsError,
+		"pipeline (pinned session) should be able to transfer to its sub-agent director; got: %s", result.Output)
+}
