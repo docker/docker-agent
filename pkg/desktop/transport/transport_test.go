@@ -346,6 +346,16 @@ func TestIsProxySocketError(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:     "bare connection refused (unix socket missing listener)",
+			errStr:   "connect: connection refused",
+			expected: true,
+		},
+		{
+			name:     "bare-TCP proxy failure (unsupported, should be rejected by guard)",
+			errStr:   "dial tcp 127.0.0.1:8080: connect: connection refused",
+			expected: false, // hit guard, returns false
+		},
+		{
 			name:     "regular network error",
 			errStr:   "dial tcp 192.168.1.1:443: i/o timeout",
 			expected: false,

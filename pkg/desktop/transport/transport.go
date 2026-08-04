@@ -306,15 +306,21 @@ func isProxySocketError(err error) bool {
 	errStr := strings.ToLower(err.Error())
 
 	// Target TCP connection errors are target host errors, not proxy socket failures.
+	// Note: If the agent were configured to use a bare-TCP direct dial proxy (rather than
+	// HTTP CONNECT), a proxy connection failure would produce a "dial tcp" error without
+	// "proxyconnect tcp", which would be falsely classified as a target host error here.
+	// In practice, Docker Agent only uses HTTP CONNECT proxies or Unix sockets, so this
+	// early return correctly protects target host outages from disabling the proxy.
 	if strings.Contains(errStr, "dial tcp") && !strings.Contains(errStr, "proxyconnect tcp") {
 		return false
 	}
 
 	proxyErrorPatterns := []string{
-		"no such file or directory", // Socket file deleted
-		"proxyconnect tcp",          // Proxy connection failure
-		"dial unix",                 // Unix socket dial failure
-		"unix socket",               // Generic Unix socket error
+		"no such file or directory",   // Socket file deleted
+		"connect: connection refused", // Socket exists but no listener (Unix or Windows named pipe)
+		"proxyconnect tcp",            // Proxy connection failure
+		"dial unix",                   // Unix socket dial failure
+		"unix socket",                 // Generic Unix socket error
 	}
 
 	for _, pattern := range proxyErrorPatterns {
