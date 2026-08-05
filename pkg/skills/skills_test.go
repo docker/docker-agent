@@ -1011,6 +1011,13 @@ func TestSkill_IsFork(t *testing.T) {
 }
 
 func TestProjectSearchDirs(t *testing.T) {
+	// On Windows, t.TempDir() is often inside %USERPROFILE% (AppData\Local\Temp).
+	// To ensure the first three tests behave exactly as they do on Unix (where /tmp
+	// is outside $HOME), we mock HOME to a sibling temp directory.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("USERPROFILE", fakeHome)
+
 	t.Run("in git repo", func(t *testing.T) {
 		tmpRepo := t.TempDir()
 		require.NoError(t, os.Mkdir(filepath.Join(tmpRepo, ".git"), 0o755))

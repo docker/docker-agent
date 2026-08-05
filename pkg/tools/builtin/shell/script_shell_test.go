@@ -290,7 +290,7 @@ func TestCreateScriptToolSet_EnvPrecedence(t *testing.T) {
 		},
 		Shell: map[string]latest.ScriptShellToolConfig{
 			"show_env": {
-				Cmd: "env",
+				Cmd: envDumpCmd(),
 				Env: map[string]string{
 					"SCRIPT_PREC_TOOL": "from-tool",
 				},
