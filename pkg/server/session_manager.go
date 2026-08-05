@@ -1043,6 +1043,11 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		// so close(streamChan) does not fire while generateTitle is still sending.
 		var wg sync.WaitGroup
 		if needsTitle {
+			// Note: generateTitle runs on the request ctx, so wg.Wait() only unblocks
+			// quickly when that context is cancelled. In the DeleteSession path
+			// (where the stream context is cancelled but the request context stays alive),
+			// the wait blocks until the title LLM call completes, delaying stream teardown.
+			// This bounded delay (first turn only) prioritizes persisting the title.
 			wg.Go(func() {
 				sm.generateTitle(ctx, sess, titleGen, userMessages, streamChan)
 			})
@@ -1060,7 +1065,6 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 			streamChan <- event
 		}
 
-		// Ensure title generation finishes before defers run close(streamChan).
 		wg.Wait()
 
 		if streamCtx.Err() != nil {
