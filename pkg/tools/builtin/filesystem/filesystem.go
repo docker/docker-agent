@@ -1641,15 +1641,27 @@ func (t *ToolSet) handleCreateDirectory(ctx context.Context, args CreateDirector
 	for _, path := range args.Paths {
 		resolvedPath, err := t.resolveAndCheckPath(path)
 		if err != nil {
-			return tools.ResultError(err.Error()), nil
+			return tools.ResultError(withCompletedWork(results, err.Error())), nil
 		}
 		if err := t.mkdirAll(resolvedPath, 0o755); err != nil {
-			return tools.ResultError(fmt.Sprintf("Error creating directory %s: %s", path, err)), nil
+			return tools.ResultError(withCompletedWork(results,
+				fmt.Sprintf("Error creating directory %s: %s", path, err))), nil
 		}
 		results = append(results, "Directory created successfully: "+path)
 	}
 
 	return tools.ResultSuccess(strings.Join(results, "\n")), nil
+}
+
+// withCompletedWork prefixes an error message with the operations that already
+// succeeded. These loops stop at the first error but do not roll back, so
+// reporting the error alone would read as a no-op and leave the caller unaware
+// of changes already made on disk.
+func withCompletedWork(completed []string, errMsg string) string {
+	if len(completed) == 0 {
+		return errMsg
+	}
+	return strings.Join(completed, "\n") + "\n" + errMsg
 }
 
 func (t *ToolSet) handleRemoveDirectory(ctx context.Context, args RemoveDirectoryArgs) (*tools.ToolCallResult, error) {
@@ -1664,11 +1676,12 @@ func (t *ToolSet) handleRemoveDirectory(ctx context.Context, args RemoveDirector
 	for _, path := range args.Paths {
 		resolvedPath, err := t.resolveAndCheckPath(path)
 		if err != nil {
-			return tools.ResultError(err.Error()), nil
+			return tools.ResultError(withCompletedWork(results, err.Error())), nil
 		}
 
 		if err := t.removeDir(resolvedPath); err != nil {
-			return tools.ResultError(fmt.Sprintf("Error removing directory %s: %s", path, err)), nil
+			return tools.ResultError(withCompletedWork(results,
+				fmt.Sprintf("Error removing directory %s: %s", path, err))), nil
 		}
 		results = append(results, "Directory removed successfully: "+path)
 	}
