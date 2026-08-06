@@ -1017,8 +1017,17 @@ func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools
 
 	var changes []string
 	for i, edit := range args.Edits {
-		if !strings.Contains(modifiedContent, edit.OldText) {
+		// Counted against the running content, not the original: an earlier edit
+		// may legitimately have removed a duplicate. Replacing an ambiguous match
+		// would silently pick the first occurrence, which the caller cannot tell
+		// apart from the site they meant.
+		switch n := strings.Count(modifiedContent, edit.OldText); {
+		case n == 0:
 			return tools.ResultError(fmt.Sprintf("Edit %d failed: old text not found", i+1)), nil
+		case n > 1:
+			return tools.ResultError(fmt.Sprintf(
+				"Edit %d failed: old text appears %d times; include more surrounding context so it matches exactly once",
+				i+1, n)), nil
 		}
 		modifiedContent = strings.Replace(modifiedContent, edit.OldText, edit.NewText, 1)
 		changes = append(changes, fmt.Sprintf("Edit %d: Replaced %d characters", i+1, len(edit.OldText)))
