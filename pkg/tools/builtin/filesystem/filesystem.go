@@ -997,6 +997,39 @@ func (t *ToolSet) editFileHandler() tools.ToolHandler {
 	}
 }
 
+// EditFailureReason reports why edit cannot be applied to content, or an empty
+// string when it can be applied to exactly one site.
+//
+// It is exported because the ACP toolset overrides edit_file with its own
+// client-backed handler while serving the same tool name and schema
+// (pkg/acp/filesystem.go). Both loops must agree on what a valid edit is, or the
+// same tool call means different things depending on transport — so the rule
+// lives here once rather than being duplicated per handler.
+//
+// Callers supply their own "Edit N failed: " prefix.
+func EditFailureReason(content string, edit Edit) string {
+	// strings.Contains always matches "" and strings.Replace would insert
+	// newText at offset 0, silently prepending to the file. Checked before the
+	// occurrence count because strings.Count(s, "") returns the rune count plus
+	// one, which would otherwise report a meaningless "appears 42 times".
+	if edit.OldText == "" {
+		return "oldText must not be empty"
+	}
+
+	switch n := strings.Count(content, edit.OldText); {
+	case n == 0:
+		return "old text not found"
+	case n > 1:
+		// Naming the count and both remedies matters: the model's intent may
+		// have been a single site (needs more context) or every site (needs one
+		// edit per occurrence, which is how this schema expresses replace-all).
+		// "Your text is wrong" alone would send it into a useless retry.
+		return fmt.Sprintf("old text appears %d times; include more surrounding context so it "+
+			"matches exactly once, or send one edit per occurrence to change several", n)
+	}
+	return ""
+}
+
 func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools.ToolCallResult, error) {
 	annotateFilesystemSpan(ctx, "edit_file", args.Path)
 	resolvedPath, err := t.resolveAndCheckPath(args.Path)
@@ -1017,17 +1050,10 @@ func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools
 
 	var changes []string
 	for i, edit := range args.Edits {
-		// Counted against the running content, not the original: an earlier edit
-		// may legitimately have removed a duplicate. Replacing an ambiguous match
-		// would silently pick the first occurrence, which the caller cannot tell
-		// apart from the site they meant.
-		switch n := strings.Count(modifiedContent, edit.OldText); {
-		case n == 0:
-			return tools.ResultError(fmt.Sprintf("Edit %d failed: old text not found", i+1)), nil
-		case n > 1:
-			return tools.ResultError(fmt.Sprintf(
-				"Edit %d failed: old text appears %d times; include more surrounding context so it matches exactly once",
-				i+1, n)), nil
+		// Checked against the running content, not the original: an earlier edit
+		// may legitimately have removed a duplicate.
+		if reason := EditFailureReason(modifiedContent, edit); reason != "" {
+			return tools.ResultError(fmt.Sprintf("Edit %d failed: %s", i+1, reason)), nil
 		}
 		modifiedContent = strings.Replace(modifiedContent, edit.OldText, edit.NewText, 1)
 		changes = append(changes, fmt.Sprintf("Edit %d: Replaced %d characters", i+1, len(edit.OldText)))

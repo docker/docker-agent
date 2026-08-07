@@ -282,8 +282,11 @@ func (t *FilesystemToolset) handleEditFile(ctx context.Context, toolCall tools.T
 	modifiedContent := resp.Content
 
 	for i, edit := range args.Edits {
-		if !strings.Contains(modifiedContent, edit.OldText) {
-			return tools.ResultError(fmt.Sprintf("Edit %d failed: old text not found", i+1)), nil
+		// Shared with the built-in filesystem toolset: this handler overrides the
+		// same edit_file tool name and schema, so both must agree on what a valid
+		// edit is or the call means different things depending on transport.
+		if reason := filesystem.EditFailureReason(modifiedContent, edit); reason != "" {
+			return tools.ResultError(fmt.Sprintf("Edit %d failed: %s", i+1, reason)), nil
 		}
 		modifiedContent = strings.Replace(modifiedContent, edit.OldText, edit.NewText, 1)
 	}
