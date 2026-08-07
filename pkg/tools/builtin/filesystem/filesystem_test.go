@@ -1426,7 +1426,7 @@ func TestFilesystemTool_DirectoryBatch_PartialFailureReportsCompletedWork(t *tes
 
 	// Nothing completed before the failure: the message must stay exactly as it
 	// was, with no empty leading line from an empty completed-work list.
-	t.Run("failure on the first path reports only the error", func(t *testing.T) {
+	t.Run("failure on the first path reports no completed work", func(t *testing.T) {
 		t.Parallel()
 		tmpDir := t.TempDir()
 		tool := New(tmpDir)
@@ -1441,6 +1441,99 @@ func TestFilesystemTool_DirectoryBatch_PartialFailureReportsCompletedWork(t *tes
 		assert.False(t, strings.HasPrefix(result.Output, "\n"),
 			"no blank leading line when nothing completed: %q", result.Output)
 		assert.DirExists(t, filepath.Join(tmpDir, "dir2"), "processing still stops at the first error")
+	})
+
+	// A single-path call has no completed work and no untouched tail, so it must
+	// keep the bare error message it has always had.
+	t.Run("single path failure keeps the bare error message", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		tool := New(tmpDir)
+
+		result, err := tool.handleRemoveDirectory(t.Context(), RemoveDirectoryArgs{
+			Paths: []string{"nonexistent"},
+		})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.NotContains(t, result.Output, "\n", "no extra lines for a single-path batch")
+		assert.NotContains(t, result.Output, "Stopped before")
+	})
+
+	// Reporting what already happened is only half the ambiguity: without the
+	// untouched tail the caller still cannot tell "not processed" from
+	// "processed but unreported".
+	t.Run("paths never attempted are named", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		tool := New(tmpDir)
+
+		for _, name := range []string{"a", "b", "d", "e"} {
+			require.NoError(t, os.Mkdir(filepath.Join(tmpDir, name), 0o755))
+		}
+		notEmpty := filepath.Join(tmpDir, "notempty")
+		require.NoError(t, os.Mkdir(notEmpty, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(notEmpty, "f.txt"), []byte("x"), 0o644))
+
+		result, err := tool.handleRemoveDirectory(t.Context(), RemoveDirectoryArgs{
+			Paths: []string{"a", "b", "notempty", "d", "e"},
+		})
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+
+		// a and b are gone; d and e were never touched.
+		require.NoDirExists(t, filepath.Join(tmpDir, "a"))
+		require.NoDirExists(t, filepath.Join(tmpDir, "b"))
+		require.DirExists(t, filepath.Join(tmpDir, "d"))
+		require.DirExists(t, filepath.Join(tmpDir, "e"))
+
+		assert.Contains(t, result.Output, "Directory removed successfully: a")
+		assert.Contains(t, result.Output, "Directory removed successfully: b")
+		assert.Contains(t, result.Output, "Stopped before: d, e")
+	})
+
+	// The two resolveAndCheckPath early returns are otherwise uncovered: the
+	// existing allow-list test rejects on the first path, so completed is always
+	// empty there and the reporting wiring never runs.
+	t.Run("allow-list rejection reports completed work and the untouched tail", func(t *testing.T) {
+		t.Parallel()
+		wd := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "outside")
+		require.NoError(t, os.Mkdir(outside, 0o755))
+		require.NoError(t, os.Mkdir(filepath.Join(wd, "gone"), 0o755))
+		require.NoError(t, os.Mkdir(filepath.Join(wd, "later"), 0o755))
+
+		tool := newTestToolSet(t, wd, WithAllowList([]string{"."}))
+
+		result, err := tool.handleRemoveDirectory(t.Context(), RemoveDirectoryArgs{
+			Paths: []string{"gone", outside, "later"},
+		})
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+
+		require.NoDirExists(t, filepath.Join(wd, "gone"))
+		require.DirExists(t, filepath.Join(wd, "later"))
+
+		assert.Contains(t, result.Output, "Directory removed successfully: gone")
+		assert.Contains(t, result.Output, "outside the allowed directories")
+		assert.Contains(t, result.Output, "Stopped before: later")
+	})
+
+	t.Run("create_directory names the untouched tail too", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		tool := New(tmpDir)
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "blocker"), []byte("x"), 0o644))
+
+		result, err := tool.handleCreateDirectory(t.Context(), CreateDirectoryArgs{
+			Paths: []string{"made1", filepath.Join("blocker", "sub"), "never"},
+		})
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+
+		require.DirExists(t, filepath.Join(tmpDir, "made1"))
+		require.NoDirExists(t, filepath.Join(tmpDir, "never"))
+		assert.Contains(t, result.Output, "Directory created successfully: made1")
+		assert.Contains(t, result.Output, "Stopped before: never")
 	})
 }
 
