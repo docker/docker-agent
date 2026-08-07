@@ -274,6 +274,13 @@ type Input struct {
 	ToolUseID    string         `json:"tool_use_id,omitempty"`
 	ToolInput    map[string]any `json:"tool_input,omitempty"`
 
+	// ToolReadOnly mirrors the dispatching tool's ReadOnlyHint annotation, so a
+	// hook can tell a tool that only observes from one that mutates something.
+	// False whenever the hint is absent or the tool is unknown to the agent,
+	// which keeps consumers fail-safe: a hook that acts only on read-only tools
+	// does nothing when the declaration is missing.
+	ToolReadOnly bool `json:"tool_read_only,omitempty"`
+
 	// SafetyPolicy mirrors the session's effective safety mode
 	// (strict / balanced / autonomous, empty for the legacy default;
 	// see [github.com/docker/docker-agent/pkg/session.SafetyPolicy])

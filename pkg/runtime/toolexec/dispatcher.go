@@ -1079,6 +1079,9 @@ func (c *call) applyToolResponseTransform(ctx context.Context, payload string, i
 	}
 	in := NewPostToolHooksInput(c.sess, c.tc, &tools.ToolCallResult{Output: payload, IsError: isError})
 	in.ToolCategory = c.tool.Category
+	// Zero when !c.available (the tool isn't in the agent's toolset), which is
+	// the fail-safe direction: consumers keyed on read-only-ness stay inert.
+	in.ToolReadOnly = c.tool.Annotations.ReadOnlyHint
 	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventToolResponseTransform, in)
 	if result == nil || result.UpdatedToolResponse == nil {
 		return payload

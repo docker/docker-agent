@@ -30,6 +30,11 @@
 //   - limit_large_tool_results
 //     (tool_response_transform) — store oversized tool output in a temp file
 //     and replace it with a bounded tail plus notice
+//   - elide_repeated_tool_results
+//     (tool_response_transform, session_end) — replace a read-only tool's
+//     output with a short marker when it is byte-for-byte identical to what
+//     the model already saw for the same arguments in this session. The tool
+//     always runs, so this cannot serve stale data; it saves tokens, not I/O.
 //   - safer_shell           (pre_tool_use)    — deprecated labeller
 //     shim. The runtime classifies shell commands
 //     natively via pkg/safety; pinned entries only
@@ -112,6 +117,7 @@ func Register(r *hooks.Registry, opts ...Option) error {
 		r.RegisterBuiltin(MaxIterations, maxIterations),
 		r.RegisterBuiltin(RedactSecrets, redactSecrets),
 		r.RegisterBuiltin(LimitLargeToolResults, limitLargeToolResults),
+		r.RegisterBuiltin(ElideRepeatedToolResults, elideRepeatedToolResults),
 		r.RegisterBuiltin(SaferShell, saferShell),
 		r.RegisterBuiltin(HTTPPost, newHTTPPost(o.httpPostClient)),
 		r.RegisterBuiltin(Unload, unload),
