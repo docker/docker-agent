@@ -1,6 +1,7 @@
 package builtins
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -11,9 +12,10 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 )
 
-// bigPayload returns a payload comfortably above minElidableBytes.
-func bigPayload(marker string) string {
-	return marker + strings.Repeat("x", minElidableBytes*2)
+// bigPayload returns a payload comfortably above the marker length and below
+// the limit_large_tool_results threshold.
+func bigPayload(seed string) string {
+	return seed + strings.Repeat("x", 1024)
 }
 
 // forgetAllElideState resets the package-level store between tests. These tests
@@ -23,6 +25,14 @@ func forgetAllElideState() {
 	elideStore.mu.Lock()
 	defer elideStore.mu.Unlock()
 	elideStore.seen = make(map[string]map[string][32]byte)
+	elideStore.order = nil
+}
+
+// elideStoreSessions reports how many sessions are currently tracked.
+func elideStoreSessions() int {
+	elideStore.mu.Lock()
+	defer elideStore.mu.Unlock()
+	return len(elideStore.seen)
 }
 
 // elideStoreLen reports how many call keys are recorded for a session.
@@ -37,6 +47,7 @@ func transformInput(sessionID, tool, payload string, args map[string]any) *hooks
 		HookEventName: hooks.EventToolResponseTransform,
 		SessionID:     sessionID,
 		ToolName:      tool,
+		ToolCategory:  "filesystem",
 		ToolReadOnly:  true,
 		ToolInput:     args,
 		ToolResponse:  payload,
@@ -253,4 +264,132 @@ func TestElideRepeatedToolResults_NilInput(t *testing.T) {
 	out, err := elideRepeatedToolResults(t.Context(), nil, nil)
 	require.NoError(t, err)
 	assert.Nil(t, out)
+}
+
+// limit_large_tool_results is auto-injected at the FRONT of
+// tool_response_transform and the first non-nil rewrite in config order wins, so
+// for payloads it handles an elision marker would be built and then thrown away.
+// Declining to act keeps the state honest instead of recording a fingerprint for
+// a marker that never reaches the model.
+func TestElideRepeatedToolResults_DeclinesPayloadsLimitLargeWillTruncate(t *testing.T) {
+	forgetAllElideState()
+
+	huge := strings.Repeat("x", maxToolCallResultBytes+1)
+	args := map[string]any{"path": "big.txt"}
+
+	require.Nil(t, elide(t, transformInput("s1", "read_file", huge, args)))
+	assert.Nil(t, elide(t, transformInput("s1", "read_file", huge, args)),
+		"a payload limit_large_tool_results will truncate must not be elided")
+	assert.Zero(t, elideStoreLen("s1"),
+		"and must not consume state for a marker that would be discarded")
+}
+
+// Compaction drops the messages a fingerprint stands for. Keeping it would tell
+// the model "nothing has changed" about bytes it can no longer see — for the
+// rest of the session, since only a byte change would release the payload again.
+func TestElideRepeatedToolResults_CompactionForgetsState(t *testing.T) {
+	forgetAllElideState()
+	payload := bigPayload("contents")
+	args := map[string]any{"path": "a.txt"}
+
+	require.Nil(t, elide(t, transformInput("s1", "read_file", payload, args)))
+	require.NotNil(t, elide(t, transformInput("s1", "read_file", payload, args)))
+
+	_, err := elideRepeatedToolResults(t.Context(), &hooks.Input{
+		HookEventName: hooks.EventAfterCompaction,
+		SessionID:     "s1",
+	}, nil)
+	require.NoError(t, err)
+
+	assert.Nil(t, elide(t, transformInput("s1", "read_file", payload, args)),
+		"after compaction the payload must be re-sent, not marked unchanged")
+}
+
+func TestElideRepeatedToolResults_SessionStartForgetsState(t *testing.T) {
+	forgetAllElideState()
+	payload := bigPayload("contents")
+	args := map[string]any{"path": "a.txt"}
+
+	require.Nil(t, elide(t, transformInput("s1", "read_file", payload, args)))
+	require.NotNil(t, elide(t, transformInput("s1", "read_file", payload, args)))
+
+	for _, source := range []string{"compact", "clear", "resume"} {
+		_, err := elideRepeatedToolResults(t.Context(), &hooks.Input{
+			HookEventName: hooks.EventSessionStart,
+			SessionID:     "s1",
+			Source:        source,
+		}, nil)
+		require.NoError(t, err)
+
+		assert.Nilf(t, elide(t, transformInput("s1", "read_file", payload, args)),
+			"session_start %q rebuilds the context, so state must be dropped", source)
+		require.NotNil(t, elide(t, transformInput("s1", "read_file", payload, args)))
+	}
+}
+
+// ReadOnlyHint is a declaration, not a proof: built-in tools set it for
+// approval-gating reasons while still having effects, and for MCP tools the
+// remote server supplies it.
+func TestElideRepeatedToolResults_CategoryMustAlsoBeElidable(t *testing.T) {
+	forgetAllElideState()
+	payload := bigPayload("contents")
+	args := map[string]any{"q": "x"}
+
+	// A read-only-declaring tool from a category this builtin does not own.
+	mk := func() *hooks.Input {
+		in := transformInput("s1", "search", payload, args)
+		in.ToolCategory = "mcp"
+		return in
+	}
+	require.Nil(t, elide(t, mk()))
+	assert.Nil(t, elide(t, mk()),
+		"a self-declared read-only MCP tool must not be able to suppress its own output")
+
+	// An empty category (tool unknown to the agent) is equally inert.
+	forgetAllElideState()
+	mkEmpty := func() *hooks.Input {
+		in := transformInput("s1", "read_file", payload, args)
+		in.ToolCategory = ""
+		return in
+	}
+	require.Nil(t, elide(t, mkEmpty()))
+	assert.Nil(t, elide(t, mkEmpty()))
+}
+
+// A fixed byte threshold does not hold for long tool names: the marker embeds
+// the name, so an MCP call at 30+ characters produces a marker longer than the
+// payload it would replace.
+func TestElideRepeatedToolResults_NeverGrowsTheConversation(t *testing.T) {
+	forgetAllElideState()
+
+	const longName = "mcp__github__list_pull_requests"
+	// Above the old fixed 256-byte threshold would have been elided; the marker
+	// for a name this long is larger still.
+	payload := strings.Repeat("y", 250)
+	args := map[string]any{"path": "a"}
+
+	require.Greater(t, len(elideMarker(longName, len(payload))), len(payload),
+		"fixture must exercise the case where the marker is the larger of the two")
+
+	in := func() *hooks.Input {
+		i := transformInput("s1", longName, payload, args)
+		i.ToolCategory = "filesystem"
+		return i
+	}
+	require.Nil(t, elide(t, in()))
+	assert.Nil(t, elide(t, in()),
+		"eliding must never replace a payload with something longer")
+}
+
+// Cleanup depends on a session_end entry the operator has to wire up, and an
+// abnormally-ended session never fires one.
+func TestElideRepeatedToolResults_SessionCountIsBounded(t *testing.T) {
+	forgetAllElideState()
+	payload := bigPayload("contents")
+
+	for i := range maxElideSessions + 100 {
+		elide(t, transformInput(fmt.Sprintf("s%d", i), "read_file", payload, map[string]any{"path": "a"}))
+	}
+	assert.LessOrEqual(t, elideStoreSessions(), maxElideSessions,
+		"tracked session count must stay bounded without session_end")
 }
