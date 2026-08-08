@@ -274,11 +274,17 @@ type Input struct {
 	ToolUseID    string         `json:"tool_use_id,omitempty"`
 	ToolInput    map[string]any `json:"tool_input,omitempty"`
 
-	// ToolReadOnly mirrors the dispatching tool's ReadOnlyHint annotation, so a
-	// hook can tell a tool that only observes from one that mutates something.
-	// False whenever the hint is absent or the tool is unknown to the agent,
-	// which keeps consumers fail-safe: a hook that acts only on read-only tools
-	// does nothing when the declaration is missing.
+	// ToolReadOnly mirrors the dispatching tool's ReadOnlyHint annotation on
+	// every tool event, so a hook can tell a tool that only observes from one
+	// that mutates something. False whenever the hint is absent or the tool is
+	// unknown to the agent, which keeps consumers fail-safe: a hook that acts
+	// only on read-only tools does nothing when the declaration is missing.
+	//
+	// Treat it as a declaration, not a proof. Several built-in tools set the
+	// hint for approval-gating reasons while still having effects (create_todo,
+	// handoff), and for MCP tools it is copied verbatim from the remote server —
+	// so a third-party server decides its own value. A hook that must not act on
+	// a tool with side effects should pair this with [Input.ToolCategory].
 	ToolReadOnly bool `json:"tool_read_only,omitempty"`
 
 	// SafetyPolicy mirrors the session's effective safety mode
