@@ -1,0 +1,50 @@
+#!/usr/bin/env docker-agent run
+#
+# Opt in to eliding repeated read-only tool results.
+#
+# When a read-only tool returns output byte-for-byte identical to what the model
+# already saw for the same arguments in this session, the payload is replaced
+# with a one-line marker instead of being repeated. An agent that re-reads the
+# same file across turns pays for it once.
+#
+# This is NOT a cache: the tool always runs and its fresh output is what gets
+# hashed, so a changed file can never be served stale. The saving is in tokens,
+# not latency.
+#
+# Whether the marker is good for model behaviour is unmeasured — some models may
+# re-request the file anyway — which is why this is opt-in rather than on by
+# default.
+
+agents:
+  root:
+    model: claude
+    description: An agent that does not pay twice for the same file.
+    instruction: |
+      You are a helpful assistant working in a code repository.
+      Read files as you need them.
+    toolsets:
+      - type: filesystem
+    hooks:
+      tool_response_transform:
+        - matcher: "*"
+          hooks:
+            - type: builtin
+              command: elide_repeated_tool_results
+      # State is per session. Wire all three cleanup legs: session_end frees it,
+      # and compaction or a context reset removes the very messages a
+      # fingerprint stands for — keeping it would tell the model "nothing has
+      # changed" about bytes it can no longer see.
+      session_end:
+        - type: builtin
+          command: elide_repeated_tool_results
+      after_compaction:
+        - type: builtin
+          command: elide_repeated_tool_results
+      session_start:
+        - type: builtin
+          command: elide_repeated_tool_results
+
+models:
+  claude:
+    provider: anthropic
+    model: claude-sonnet-4-5

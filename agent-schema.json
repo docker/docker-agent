@@ -1336,7 +1336,7 @@
         },
         "tool_response_transform": {
           "type": "array",
-          "description": "Hooks that fire between a tool's execution and the runtime's emission/record of the response, with the rewrite reaching event consumers, the persisted session, the post_tool_use hook input, and the next LLM call. A hook may rewrite the tool's textual output by setting hookSpecificOutput.updated_tool_response \u2014 the symmetric counterpart of pre_tool_use's updated_input, applied to tool RESULTS instead of tool ARGUMENTS. The redact_secrets builtin uses this event for the third leg of the redact_secrets feature; custom rewriters can also truncate excessive output, scrub PII, or normalise tool dialects. Tool-matched, like pre_tool_use / post_tool_use.",
+          "description": "Hooks that fire between a tool's execution and the runtime's emission/record of the response, with the rewrite reaching event consumers, the persisted session, the post_tool_use hook input, and the next LLM call. A hook may rewrite the tool's textual output by setting hookSpecificOutput.updated_tool_response \u2014 the symmetric counterpart of pre_tool_use's updated_input, applied to tool RESULTS instead of tool ARGUMENTS. The redact_secrets builtin uses this event for the third leg of the redact_secrets feature, and the opt-in elide_repeated_tool_results builtin uses it to replace a read-only tool's output with a short marker when it repeats what the model already saw; custom rewriters can also truncate excessive output, scrub PII, or normalise tool dialects. Tool-matched, like pre_tool_use / post_tool_use.",
           "items": {
             "$ref": "#/definitions/HookMatcherConfig"
           }
