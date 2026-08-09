@@ -268,6 +268,73 @@ func resourceMetadataFromWWWAuth(wwwAuth string) string {
 	return params["resource"]
 }
 
+// protectedResourceMetadataOptions configures fetchProtectedResourceMetadata.
+type protectedResourceMetadataOptions struct {
+	// FallbackCandidateURLs are additional protected-resource metadata URLs
+	// tried, in order, only after the primary resourceURL 404s. Leave this
+	// empty for runtime callers, which must preserve the existing
+	// single-candidate, supplied-origin-default behavior exactly. Computing
+	// these candidates (RFC 9728 path-insertion, then origin-root) is the
+	// standalone CLI discovery flow's responsibility, not this helper's.
+	FallbackCandidateURLs []string
+}
+
+// fetchProtectedResourceMetadata fetches and decodes RFC 9728 OAuth
+// protected-resource metadata for a challenged MCP server, deduplicating
+// logic shared by the runtime-managed and docker-agent-driven unmanaged
+// OAuth flows.
+//
+// resourceURL is the primary candidate (normally the challenge's
+// resource_metadata, or otherwise authServer's
+// /.well-known/oauth-protected-resource). A 404 on a candidate is not an
+// error: it is treated as an empty metadata document, matching current
+// runtime behavior, and AuthorizationServers is defaulted to authServer
+// below once every candidate has been tried.
+//
+// Any decode failure or non-404/non-200 response (including another 2xx
+// like 201 or 204) on any attempted candidate is a hard error: no further
+// candidate is tried and the caller must not proceed to authorization-server
+// discovery, DCR, or token work.
+func fetchProtectedResourceMetadata(ctx context.Context, client *http.Client, resourceURL, authServer string, opts protectedResourceMetadataOptions) (protectedResourceMetadata, error) {
+	candidates := append([]string{resourceURL}, opts.FallbackCandidateURLs...)
+
+	var metadata protectedResourceMetadata
+	for _, candidateURL := range candidates {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, candidateURL, http.NoBody)
+		if err != nil {
+			return protectedResourceMetadata{}, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return protectedResourceMetadata{}, err
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			resp.Body.Close()
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			_, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return protectedResourceMetadata{}, errors.New("failed to fetch protected resource metadata")
+		}
+
+		decodeErr := json.NewDecoder(resp.Body).Decode(&metadata)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return protectedResourceMetadata{}, decodeErr
+		}
+		break
+	}
+
+	if len(metadata.AuthorizationServers) == 0 {
+		slog.DebugContext(ctx, "No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
+		metadata.AuthorizationServers = []string{authServer}
+	}
+
+	return metadata, nil
+}
+
 // parseAuthParams parses the top-level auth-params across every challenge
 // in a WWW-Authenticate header value (RFC 7235 auth-param, as profiled by
 // RFC 6750 for the Bearer scheme) into a single lowercase-key map. It is
@@ -1148,30 +1215,9 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	resourceURL := cmp.Or(resourceMetadataFromWWWAuth(wwwAuth), authServer+"/.well-known/oauth-protected-resource")
 
 	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "fetch_protected_resource_metadata")))
-	resourceReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, http.NoBody)
+	resourceMetadata, err := fetchProtectedResourceMetadata(ctx, t.oauthClient(), resourceURL, authServer, protectedResourceMetadataOptions{})
 	if err != nil {
 		return err
-	}
-	resp, err := t.oauthClient().Do(resourceReq)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		_, _ = io.ReadAll(resp.Body)
-		return errors.New("failed to fetch protected resource metadata")
-	}
-	var resourceMetadata protectedResourceMetadata
-	if resp.StatusCode == http.StatusOK {
-		if err := json.NewDecoder(resp.Body).Decode(&resourceMetadata); err != nil {
-			return err
-		}
-	}
-
-	if len(resourceMetadata.AuthorizationServers) == 0 {
-		slog.DebugContext(ctx, "No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
-		resourceMetadata.AuthorizationServers = []string{authServer}
 	}
 
 	oauth := &oauth{metadataClient: t.oauthClient()}
@@ -1438,30 +1484,9 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	resourceURL := cmp.Or(resourceMetadataFromWWWAuth(wwwAuth), authServer+"/.well-known/oauth-protected-resource")
 
 	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "fetch_protected_resource_metadata")))
-	resourceReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, http.NoBody)
+	resourceMetadata, err := fetchProtectedResourceMetadata(ctx, t.oauthClient(), resourceURL, authServer, protectedResourceMetadataOptions{})
 	if err != nil {
 		return err
-	}
-	resp, err := t.oauthClient().Do(resourceReq)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		_, _ = io.ReadAll(resp.Body)
-		return errors.New("failed to fetch protected resource metadata")
-	}
-	var resourceMetadata protectedResourceMetadata
-	if resp.StatusCode == http.StatusOK {
-		if err := json.NewDecoder(resp.Body).Decode(&resourceMetadata); err != nil {
-			return err
-		}
-	}
-
-	if len(resourceMetadata.AuthorizationServers) == 0 {
-		slog.DebugContext(ctx, "No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
-		resourceMetadata.AuthorizationServers = []string{authServer}
 	}
 
 	oauth := &oauth{metadataClient: t.oauthClient()}
