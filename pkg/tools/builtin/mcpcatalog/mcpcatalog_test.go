@@ -1756,7 +1756,10 @@ func writeJSONRPC(t *testing.T, w http.ResponseWriter, id json.RawMessage, resul
 //   - the MCP endpoint challenges with 401 + WWW-Authenticate (or at
 //     least surfaces a reachable origin),
 //   - <baseURL>/.well-known/oauth-protected-resource is reachable (200
-//     or 404 — either is fine, the WWW-Authenticate fallback covers 404),
+//     or 404 — either is fine: it is only the last of the ordered
+//     protected-resource metadata candidates pkg/tools/mcp/oauth_login.go
+//     walks, after the challenge's exact resource_metadata and the RFC
+//     9728 §3.1 path-insertion URL),
 //   - the authorization-server metadata advertises an HTTPS
 //     `registration_endpoint` (Dynamic Client Registration is REQUIRED
 //     by pkg/tools/mcp/oauth_login.go: without it docker-agent cannot

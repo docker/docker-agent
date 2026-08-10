@@ -277,6 +277,16 @@ type protectedResourceMetadataOptions struct {
 	// these candidates (RFC 9728 path-insertion, then origin-root) is the
 	// standalone CLI discovery flow's responsibility, not this helper's.
 	FallbackCandidateURLs []string
+
+	// NotFoundIsHardError turns a 404 on the candidate it is checked against
+	// into a hard error (no fallback tried, metadata not defaulted) instead
+	// of the default "treat as empty metadata" outcome. Default-off (false)
+	// so every runtime call site keeps its existing 404-tolerant behavior
+	// unmodified. The standalone CLI sets this only when the sole candidate
+	// is the exact challenged resource_metadata URL: a 404 on that
+	// authoritative URL must stop discovery rather than silently fall
+	// through to a guessed authorization server.
+	NotFoundIsHardError bool
 }
 
 // fetchProtectedResourceMetadata fetches and decodes RFC 9728 OAuth
@@ -286,10 +296,12 @@ type protectedResourceMetadataOptions struct {
 //
 // resourceURL is the primary candidate (normally the challenge's
 // resource_metadata, or otherwise authServer's
-// /.well-known/oauth-protected-resource). A 404 on a candidate is not an
-// error: it is treated as an empty metadata document, matching current
-// runtime behavior, and AuthorizationServers is defaulted to authServer
-// below once every candidate has been tried.
+// /.well-known/oauth-protected-resource). By default a 404 on a candidate
+// is not an error: it is treated as an empty metadata document, matching
+// current runtime behavior, and AuthorizationServers is defaulted to
+// authServer below once every candidate has been tried. Callers that set
+// opts.NotFoundIsHardError opt out of that tolerance: a 404 is then a hard
+// error like any other non-404/non-200 response.
 //
 // Any decode failure or non-404/non-200 response (including another 2xx
 // like 201 or 204) on any attempted candidate is a hard error: no further
@@ -311,6 +323,9 @@ func fetchProtectedResourceMetadata(ctx context.Context, client *http.Client, re
 
 		if resp.StatusCode == http.StatusNotFound {
 			resp.Body.Close()
+			if opts.NotFoundIsHardError {
+				return protectedResourceMetadata{}, errors.New("failed to fetch protected resource metadata")
+			}
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
