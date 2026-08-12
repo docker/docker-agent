@@ -43,19 +43,42 @@ type Server struct {
 	heartbeatInterval time.Duration
 }
 
-func New(ctx context.Context, sessionStore session.Store, runConfig *config.RuntimeConfig, refreshInterval time.Duration, agentSources config.Sources, authToken string) (*Server, error) {
-	return NewWithManager(NewSessionManager(ctx, agentSources, sessionStore, refreshInterval, runConfig), authToken), nil
+func New(ctx context.Context, sessionStore session.Store, runConfig *config.RuntimeConfig, refreshInterval time.Duration, agentSources config.Sources, authToken string, maxRequestBytes int64, opts ...SessionManagerOpt) (*Server, error) {
+	return NewWithManager(NewSessionManager(ctx, agentSources, sessionStore, refreshInterval, runConfig, opts...), authToken, WithMaxRequestBytes(maxRequestBytes)), nil
 }
 
 const defaultMaxRequestBytes int64 = 1 << 20 // 1 MiB
 
+// Option configures a [Server] at construction time.
+type Option func(*serverOptions)
+
+type serverOptions struct {
+	maxRequestBytes int64
+}
+
+// WithMaxRequestBytes sets the maximum request body size in bytes. Requests
+// whose body exceeds the limit are rejected with HTTP 413. Zero or negative
+// values fall back to the default (1 MiB).
+func WithMaxRequestBytes(n int64) Option {
+	return func(o *serverOptions) { o.maxRequestBytes = n }
+}
+
 // NewWithManager builds a Server around an already-constructed SessionManager.
 // Useful when the runtime is owned by another component (e.g. the TUI) and
 // only needs to be exposed over HTTP.
-func NewWithManager(sm *SessionManager, authToken string) *Server {
+func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Server {
+	var o serverOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	maxBytes := o.maxRequestBytes
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxRequestBytes
+	}
+
 	e := echo.New()
 	e.Use(echolog.RedactedRequestLogger())
-	e.Use(middleware.BodyLimit(strconv.FormatInt(defaultMaxRequestBytes, 10)))
+	e.Use(middleware.BodyLimit(strconv.FormatInt(maxBytes, 10)))
 	e.Use(echo.WrapMiddleware(upstream.Handler))
 
 	// Add bearer token middleware if token is configured
@@ -267,6 +290,9 @@ func (s *Server) createSession(c echo.Context) error {
 
 	sess, err := s.sm.CreateSession(c.Request().Context(), &sessionTemplate)
 	if err != nil {
+		if errors.Is(err, ErrInvalidWorkingDir) {
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to create session: %v", err))
 	}
 

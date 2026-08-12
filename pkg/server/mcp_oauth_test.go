@@ -44,7 +44,7 @@ func startServerBare(t *testing.T, ctx context.Context) string {
 	runConfig := config.RuntimeConfig{}
 	sources, err := config.ResolveSources(t.TempDir(), nil)
 	require.NoError(t, err)
-	srv, err := New(ctx, store, &runConfig, 0, sources, "")
+	srv, err := New(ctx, store, &runConfig, 0, sources, "", 0)
 	require.NoError(t, err)
 
 	socketPath := "unix://" + filepath.Join(t.TempDir(), "sock")

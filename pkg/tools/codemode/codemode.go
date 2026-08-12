@@ -79,7 +79,7 @@ func (c *codeModeTool) Tools(ctx context.Context) ([]tools.Tool, error) {
 			if isExcludedTool(tool) {
 				excludedTools = append(excludedTools, tool)
 			} else {
-				functionsDoc = append(functionsDoc, toolToJsDoc(tool))
+				functionsDoc = append(functionsDoc, toolToTypeScript(tool))
 			}
 		}
 	}

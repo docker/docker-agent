@@ -2,6 +2,7 @@ package root
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -80,6 +81,17 @@ func setupWorkingDirectory(workingDir string) error {
 	_ = os.Setenv("PWD", absWd)
 	slog.Debug("Working directory set", "path", absWd)
 
+	return nil
+}
+
+// validateSessionWorkingDirRoot rejects a --session-workingdir-root value
+// that trims to empty (e.g. an unresolved shell variable): the operator
+// asked for containment, so silently disabling it would be invisible and
+// dangerous. An empty value (flag unset) means unrestricted and is valid.
+func validateSessionWorkingDirRoot(root string) error {
+	if root != "" && strings.TrimSpace(root) == "" {
+		return errors.New("--session-workingdir-root: value is empty after trimming whitespace")
+	}
 	return nil
 }
 

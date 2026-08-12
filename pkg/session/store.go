@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -82,6 +83,7 @@ type Summary struct {
 	Starred     bool
 	NumMessages int
 	WorkingDir  string
+	Attributes  map[string]string
 }
 
 // Store defines the interface for session storage
@@ -185,6 +187,7 @@ func (s *InMemorySessionStore) GetSessionSummaries(_ context.Context) ([]Summary
 			Starred:     value.Starred,
 			NumMessages: value.MessageCount(),
 			WorkingDir:  value.WorkingDir,
+			Attributes:  value.AttributesSnapshot(),
 		})
 		return true
 	})
@@ -235,6 +238,7 @@ func (s *InMemorySessionStore) UpdateSession(_ context.Context, session *Session
 		OutputTokens:        session.OutputTokens,
 		Cost:                session.Cost,
 		Permissions:         session.Permissions.Clone(),
+		Attributes:          maps.Clone(session.Attributes),
 		AgentModelOverrides: cloneStringMap(session.AgentModelOverrides),
 		CustomModelsUsed:    cloneStringSlice(session.CustomModelsUsed),
 		InstructionContext:  cloneInstructionContext(session.InstructionContext),
@@ -376,7 +380,7 @@ type SQLiteSessionStore struct {
 // sessionSelectColumns is the canonical SELECT list for the sessions table.
 // The column order matches what scanSession expects; all read paths use this
 // constant so that adding a column requires updating exactly one place.
-const sessionSelectColumns = `id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id, instruction_context`
+const sessionSelectColumns = `id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id, instruction_context, attributes`
 
 // sessionPersistedFields holds the encoded form of a Session's JSON-bearing
 // columns plus the SQL representation of parent_id (nil for the empty
@@ -386,6 +390,7 @@ type sessionPersistedFields struct {
 	AgentModelOverridesJSON string
 	CustomModelsUsedJSON    string
 	InstructionContextJSON  string
+	AttributesJSON          string
 	ParentID                any // string or nil
 }
 
@@ -395,6 +400,16 @@ type sessionPersistedFields struct {
 // in one place.
 func sessionPersistedFieldsOf(session *Session) (sessionPersistedFields, error) {
 	var f sessionPersistedFields
+
+	attributes := session.AttributesSnapshot()
+	f.AttributesJSON = "{}"
+	if len(attributes) > 0 {
+		attributesBytes, err := json.Marshal(attributes)
+		if err != nil {
+			return f, err
+		}
+		f.AttributesJSON = string(attributesBytes)
+	}
 
 	if session.Permissions != nil {
 		permBytes, err := json.Marshal(session.Permissions)
@@ -541,12 +556,12 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 		`INSERT INTO sessions (
 			id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, permissions, agent_model_overrides,
-			custom_models_used, thinking, parent_id, instruction_context
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			custom_models_used, thinking, parent_id, instruction_context, attributes
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens, session.Title,
 		session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
 		session.CreatedAt.Format(time.RFC3339), fields.PermissionsJSON, fields.AgentModelOverridesJSON,
-		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON)
+		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON)
 	if err != nil {
 		return err
 	}
@@ -578,6 +593,7 @@ func scanSession(scanner interface {
 		agentModelOverridesJSON string
 		customModelsUsedJSON    string
 		instructionContextJSON  sql.NullString
+		attributesJSON          sql.NullString
 		createdAtStr            string
 		thinking                bool // discarded
 	)
@@ -586,7 +602,7 @@ func scanSession(scanner interface {
 		&sess.ID, &sess.ToolsApproved, &safetyPolicy, &sess.InputTokens, &sess.OutputTokens,
 		&sess.Title, &sess.Cost, &sess.SendUserMessage, &sess.MaxIterations,
 		&workingDir, &createdAtStr, &sess.Starred, &permissionsJSON,
-		&agentModelOverridesJSON, &customModelsUsedJSON, &thinking, &parentID, &instructionContextJSON,
+		&agentModelOverridesJSON, &customModelsUsedJSON, &thinking, &parentID, &instructionContextJSON, &attributesJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -623,7 +639,26 @@ func scanSession(scanner interface {
 		}
 	}
 
+	sess.Attributes, err = decodeAttributes(attributesJSON)
+	if err != nil {
+		return nil, fmt.Errorf("unmarshaling session attributes: %w", err)
+	}
+
 	return &sess, nil
+}
+
+func decodeAttributes(value sql.NullString) (map[string]string, error) {
+	if !value.Valid || strings.TrimSpace(value.String) == "" {
+		return nil, nil
+	}
+	var attributes map[string]string
+	if err := json.Unmarshal([]byte(value.String), &attributes); err != nil {
+		return nil, err
+	}
+	if len(attributes) == 0 {
+		return nil, nil
+	}
+	return attributes, nil
 }
 
 // GetSession retrieves a session by ID
@@ -808,7 +843,7 @@ func (s *SQLiteSessionStore) GetSessions(ctx context.Context) ([]*Session, error
 // This is much faster than GetSessions as it doesn't load message content.
 func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT s.id, s.title, s.created_at, s.starred, s.working_dir,
+		`SELECT s.id, s.title, s.created_at, s.starred, s.working_dir, s.attributes,
 		        (SELECT COUNT(*) FROM session_items si WHERE si.session_id = s.id AND si.item_type = 'message')
 		 FROM sessions s
 		 WHERE s.parent_id IS NULL OR s.parent_id = ''
@@ -821,15 +856,20 @@ func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary
 	var summaries []Summary
 	for rows.Next() {
 		var (
-			summary      Summary
-			createdAtStr string
-			workingDir   sql.NullString
+			summary        Summary
+			createdAtStr   string
+			workingDir     sql.NullString
+			attributesJSON sql.NullString
 		)
-		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &workingDir, &summary.NumMessages); err != nil {
+		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &workingDir, &attributesJSON, &summary.NumMessages); err != nil {
 			return nil, err
 		}
 		summary.CreatedAt = parseCreatedAt(createdAtStr)
 		summary.WorkingDir = workingDir.String
+		summary.Attributes, err = decodeAttributes(attributesJSON)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshaling session attributes for %s: %w", summary.ID, err)
+		}
 		summaries = append(summaries, summary)
 	}
 
@@ -892,6 +932,7 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		OutputTokens:        session.OutputTokens,
 		Cost:                session.Cost,
 		Permissions:         session.Permissions.Clone(),
+		Attributes:          maps.Clone(session.Attributes),
 		AgentModelOverrides: cloneStringMap(session.AgentModelOverrides),
 		CustomModelsUsed:    cloneStringSlice(session.CustomModelsUsed),
 		InstructionContext:  cloneInstructionContext(session.InstructionContext),
@@ -916,9 +957,9 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		`INSERT INTO sessions (
 			id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
-			custom_models_used, thinking, parent_id, instruction_context
+			custom_models_used, thinking, parent_id, instruction_context, attributes
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   title = excluded.title,
 		   tools_approved = excluded.tools_approved,
@@ -935,11 +976,12 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		   custom_models_used = excluded.custom_models_used,
 		   thinking = excluded.thinking,
 		   parent_id = excluded.parent_id,
-		   instruction_context = excluded.instruction_context`,
+		   instruction_context = excluded.instruction_context,
+		   attributes = excluded.attributes`,
 		snapshot.ID, snapshot.ToolsApproved, string(snapshot.SafetyPolicy), snapshot.InputTokens, snapshot.OutputTokens,
 		snapshot.Title, snapshot.Cost, snapshot.SendUserMessage, snapshot.MaxIterations, snapshot.WorkingDir,
 		snapshot.CreatedAt.Format(time.RFC3339), snapshot.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
-		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON)
+		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON)
 	if err != nil {
 		return err
 	}
@@ -1086,14 +1128,14 @@ func (s *SQLiteSessionStore) addSessionTx(ctx context.Context, tx *sql.Tx, sessi
 		`INSERT INTO sessions (
 			id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
-			custom_models_used, thinking, parent_id, instruction_context
+			custom_models_used, thinking, parent_id, instruction_context, attributes
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		session.ID, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens,
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations,
 		session.WorkingDir, session.CreatedAt.Format(time.RFC3339), session.Starred,
 		fields.PermissionsJSON, fields.AgentModelOverridesJSON, fields.CustomModelsUsedJSON, false,
-		fields.ParentID, fields.InstructionContextJSON)
+		fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON)
 	return err
 }
 
