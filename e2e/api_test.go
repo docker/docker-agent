@@ -89,7 +89,7 @@ func startCagentAPI(t *testing.T, db string) string {
 		_ = sessionStore.Close()
 	})
 
-	srv, err := server.New(t.Context(), sessionStore, &config.RuntimeConfig{}, 0, nil, "")
+	srv, err := server.New(t.Context(), sessionStore, &config.RuntimeConfig{}, 0, nil, "", 0)
 	require.NoError(t, err)
 
 	done := make(chan struct{})

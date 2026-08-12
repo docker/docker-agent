@@ -243,6 +243,7 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithSendUserMessage(false),
 		session.WithParentID(parent.ID),
 		session.WithAttachedFiles(attachedFiles),
+		session.WithAttributes(parent.AttributesSnapshot()),
 	}
 	if cfg.PinAgent {
 		opts = append(opts, session.WithAgentName(cfg.AgentName))

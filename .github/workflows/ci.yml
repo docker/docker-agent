@@ -172,6 +172,9 @@ jobs:
   build-and-push-image:
     if: github.event_name != 'pull_request' && !github.event.repository.fork
     needs: [ lint, build-and-test, windows-tests, license-check ]
+    permissions:
+      contents: read
+      id-token: write
     # Build each platform on its own native runner in parallel, push by digest,
     # then assemble the multi-arch manifest in the merge job below.
     strategy:
@@ -192,11 +195,18 @@ jobs:
         env:
           platform: ${{ matrix.platform }}
 
+      - name: Get Docker Hub OIDC token
+        id: docker_oidc
+        uses: docker/oidc-action@b048fb089ace3e15a5fbdd784f4784d284ce5e8d # v1.1.0
+        with:
+          connection-id: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
+          expires-in: 3600
+
       - name: Hub login
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
-          username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
-          password: ${{ secrets.DOCKERPUBLICBOT_WRITE_PAT }}
+          username: docker
+          password: ${{ steps.docker_oidc.outputs.token }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
@@ -274,6 +284,9 @@ jobs:
   merge-and-push-image:
     if: github.event_name != 'pull_request' && !github.event.repository.fork
     needs: [ build-and-push-image ]
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - name: Download digests
@@ -283,11 +296,18 @@ jobs:
           pattern: digests-*
           merge-multiple: true
 
+      - name: Get Docker Hub OIDC token
+        id: docker_oidc
+        uses: docker/oidc-action@b048fb089ace3e15a5fbdd784f4784d284ce5e8d # v1.1.0
+        with:
+          connection-id: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
+          expires-in: 3600
+
       - name: Hub login
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
-          username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
-          password: ${{ secrets.DOCKERPUBLICBOT_WRITE_PAT }}
+          username: docker
+          password: ${{ steps.docker_oidc.outputs.token }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
@@ -319,6 +339,9 @@ jobs:
   merge-and-push-template:
     if: github.event_name != 'pull_request' && !github.event.repository.fork
     needs: [ build-and-push-image ]
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     steps:
       - name: Download template digests
@@ -328,11 +351,18 @@ jobs:
           pattern: template-digests-*
           merge-multiple: true
 
+      - name: Get Docker Hub OIDC token
+        id: docker_oidc
+        uses: docker/oidc-action@b048fb089ace3e15a5fbdd784f4784d284ce5e8d # v1.1.0
+        with:
+          connection-id: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
+          expires-in: 3600
+
       - name: Hub login
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
-          username: ${{ vars.DOCKERPUBLICBOT_USERNAME }}
-          password: ${{ secrets.DOCKERPUBLICBOT_WRITE_PAT }}
+          username: docker
+          password: ${{ steps.docker_oidc.outputs.token }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0

@@ -13,6 +13,7 @@ func TestSessionPersistedFieldsOf_Defaults(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Empty(t, got.PermissionsJSON, "nil permissions should serialise to empty string")
+	assert.Equal(t, "{}", got.AttributesJSON, "nil attributes should default to {}")
 	assert.Equal(t, "{}", got.AgentModelOverridesJSON, "nil overrides should default to {}")
 	assert.Equal(t, "[]", got.CustomModelsUsedJSON, "nil models should default to []")
 	assert.Nil(t, got.ParentID, "empty parent_id must encode as SQL NULL")
@@ -26,6 +27,7 @@ func TestSessionPersistedFieldsOf_PopulatedValues(t *testing.T) {
 		Permissions: &PermissionsConfig{
 			Allow: []string{"shell"},
 		},
+		Attributes:          map[string]string{"daw.workspace_path": "/workspace"},
 		AgentModelOverrides: map[string]string{"root": "openai/gpt-5"},
 		CustomModelsUsed:    []string{"openai/gpt-5"},
 	}
@@ -34,6 +36,7 @@ func TestSessionPersistedFieldsOf_PopulatedValues(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.JSONEq(t, `{"allow":["shell"]}`, got.PermissionsJSON)
+	assert.JSONEq(t, `{"daw.workspace_path":"/workspace"}`, got.AttributesJSON)
 	assert.JSONEq(t, `{"root":"openai/gpt-5"}`, got.AgentModelOverridesJSON)
 	assert.JSONEq(t, `["openai/gpt-5"]`, got.CustomModelsUsedJSON)
 	assert.Equal(t, "parent-1", got.ParentID)
@@ -44,10 +47,12 @@ func TestSessionPersistedFieldsOf_EmptyMapsAndSlicesUseDefaults(t *testing.T) {
 	// len() == 0 for non-nil empty values must take the default branch
 	// because JSON encoding "{}" / "[]" matches what the schema expects.
 	got, err := sessionPersistedFieldsOf(&Session{
+		Attributes:          map[string]string{},
 		AgentModelOverrides: map[string]string{},
 		CustomModelsUsed:    []string{},
 	})
 	require.NoError(t, err)
+	assert.Equal(t, "{}", got.AttributesJSON)
 	assert.Equal(t, "{}", got.AgentModelOverridesJSON)
 	assert.Equal(t, "[]", got.CustomModelsUsedJSON)
 }

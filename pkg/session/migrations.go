@@ -428,6 +428,13 @@ func getAllMigrations() []Migration {
 				ALTER TABLE session_items ADD COLUMN usage_json TEXT NOT NULL DEFAULT '';
 			`,
 		},
+		{
+			ID:          26,
+			Name:        "026_add_session_attributes_column",
+			Description: "Add generic attributes to sessions",
+			UpSQL:       `ALTER TABLE sessions ADD COLUMN attributes TEXT DEFAULT '{}'`,
+			DownSQL:     `ALTER TABLE sessions DROP COLUMN attributes`,
+		},
 	}
 }
 

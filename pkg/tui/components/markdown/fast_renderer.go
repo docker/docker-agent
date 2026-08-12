@@ -19,6 +19,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/lrucache"
+	"github.com/docker/docker-agent/pkg/tui/components/latex"
 	"github.com/docker/docker-agent/pkg/tui/components/mermaid"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -364,6 +365,8 @@ func (p *parser) parse() string {
 		switch {
 		case p.tryCodeBlock(line):
 			// handled inside
+		case p.tryLatexBlock(line):
+			// handled inside
 		case p.tryHeading(line):
 			// handled inside
 		case p.tryHorizontalRule(line):
@@ -414,6 +417,60 @@ func (p *parser) tryCodeBlock(line string) bool {
 	}
 
 	p.renderCodeBlock(code.String(), lang)
+	return true
+}
+
+// tryLatexBlock renders display math delimited by $$ or \[ at the start of a line.
+func (p *parser) tryLatexBlock(line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	var opening, closing string
+	switch {
+	case strings.HasPrefix(trimmed, "$$"):
+		opening, closing = "$$", "$$"
+	case strings.HasPrefix(trimmed, `\[`):
+		opening, closing = `\[`, `\]`
+	default:
+		return false
+	}
+
+	startLine := p.lineIdx
+	first := strings.TrimSpace(strings.TrimPrefix(trimmed, opening))
+	var source strings.Builder
+	closed := false
+	for {
+		if end := strings.Index(first, closing); end >= 0 {
+			source.WriteString(first[:end])
+			closed = true
+			p.lineIdx++
+			break
+		}
+		if source.Len() > 0 {
+			source.WriteByte('\n')
+		}
+		source.WriteString(first)
+		p.lineIdx++
+		if p.lineIdx >= len(p.lines) {
+			break
+		}
+		first = p.lines[p.lineIdx]
+	}
+
+	if closed {
+		if rendered, ok := latex.Render(strings.TrimSpace(source.String()), true); ok {
+			for renderedLine := range strings.SplitSeq(rendered, "\n") {
+				p.styles.ansiText.renderTo(&p.out, renderedLine)
+				p.out.WriteByte('\n')
+			}
+			p.out.WriteByte('\n')
+			return true
+		}
+	}
+
+	for i := startLine; i < p.lineIdx; i++ {
+		p.styles.ansiText.renderTo(&p.out, p.lines[i])
+		p.out.WriteByte('\n')
+	}
+	p.out.WriteByte('\n')
 	return true
 }
 
@@ -1463,6 +1520,8 @@ func isBlockStart(line string) bool {
 		return true
 	case strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~"):
 		return true
+	case strings.HasPrefix(trimmed, "$$") || strings.HasPrefix(trimmed, `\[`):
+		return true
 	case strings.HasPrefix(trimmed, ">"):
 		return true
 	case isListStart(trimmed):
@@ -1600,6 +1659,15 @@ func (p *parser) renderInlineWithStyleTo(out *strings.Builder, text string, rest
 	n := len(text)
 
 	for i < n {
+		// LaTeX must be recognized before backslash escape processing so \(...\)
+		// remains a math delimiter while escaped dollar signs remain literal.
+		if rendered, consumed, recognized := renderInlineLatex(text[i:]); recognized {
+			restoreStyle.renderTo(out, rendered)
+			width += textWidth(rendered)
+			i += consumed
+			continue
+		}
+
 		// Check for escaped characters
 		if text[i] == '\\' && i+1 < n {
 			out.WriteByte(text[i+1])
@@ -1874,7 +1942,7 @@ func isWord(b byte) bool {
 }
 
 // inlineMarkdownChars contains all characters that trigger inline markdown processing.
-const inlineMarkdownChars = "\\`*_~["
+const inlineMarkdownChars = "\\`*_~[$"
 
 // urlStopMarkdownChars is the subset of inline markdown markers that should
 // terminate auto-linked URL detection. Excludes _ and \\ because they appear
@@ -1912,10 +1980,95 @@ func hasInlineMarkdown(text string) bool {
 
 func isInlineMarker(b byte) bool {
 	switch b {
-	case '\\', '`', '*', '_', '~', '[':
+	case '\\', '`', '*', '_', '~', '[', '$':
 		return true
 	}
 	return false
+}
+
+func renderInlineLatex(source string) (string, int, bool) {
+	var opening, closing string
+	switch {
+	case strings.HasPrefix(source, `\(`):
+		opening, closing = `\(`, `\)`
+	case strings.HasPrefix(source, `\[`):
+		opening, closing = `\[`, `\]`
+	case strings.HasPrefix(source, "$$"):
+		opening, closing = "$$", "$$"
+	case strings.HasPrefix(source, "$") && (len(source) == 1 || !unicode.IsSpace(rune(source[1]))):
+		opening, closing = "$", "$"
+	default:
+		return "", 0, false
+	}
+
+	end := findUnescapedDelimiter(source, closing, len(opening))
+	if end < 0 {
+		pending := source[len(opening):]
+		if looksLikePendingMath(pending) && !containsMarkdownFormatting(pending) {
+			return source, len(source), true
+		}
+		return "", 0, false
+	}
+	inner := source[len(opening):end]
+	if inner == "" || strings.ContainsRune(inner, '\n') {
+		return "", 0, false
+	}
+	if opening == "$" {
+		after := source[end+1:]
+		if unicode.IsSpace(rune(inner[len(inner)-1])) || (after != "" && after[0] >= '0' && after[0] <= '9') || strings.ContainsRune(inner, '`') {
+			return "", 0, false
+		}
+		if shellVariableMath(inner, after) {
+			return "", 0, false
+		}
+	}
+
+	rawLength := end + len(closing)
+	rendered, ok := latex.Render(inner, false)
+	if !ok {
+		return source[:rawLength], rawLength, true
+	}
+	return rendered, rawLength, true
+}
+
+func findUnescapedDelimiter(source, delimiter string, start int) int {
+	for offset := start; offset <= len(source)-len(delimiter); {
+		relative := strings.Index(source[offset:], delimiter)
+		if relative < 0 {
+			return -1
+		}
+		index := offset + relative
+		backslashes := 0
+		for i := index - 1; i >= 0 && source[i] == '\\'; i-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			return index
+		}
+		offset = index + len(delimiter)
+	}
+	return -1
+}
+
+func containsMarkdownFormatting(source string) bool {
+	return strings.Contains(source, "**") || strings.Contains(source, "__") ||
+		strings.Contains(source, "~~") || strings.ContainsRune(source, '`')
+}
+
+func looksLikePendingMath(source string) bool {
+	return strings.ContainsAny(source, "_^=+*/<>()[|±≤≥≠≈∈→⇒∞∫∑√-") || strings.ContainsRune(source, '\\')
+}
+
+func shellVariableMath(inner, after string) bool {
+	if inner == "" || (inner[0] < 'A' || inner[0] > 'Z') && inner[0] != '_' {
+		return false
+	}
+	for _, r := range inner {
+		if !unicode.IsUpper(r) && !unicode.IsDigit(r) && r != '_' {
+			return false
+		}
+	}
+	return after != "" && (unicode.IsLetter(rune(after[0])) || after[0] == '_')
 }
 
 // renderCodeBlock renders a fenced code block with syntax highlighting.

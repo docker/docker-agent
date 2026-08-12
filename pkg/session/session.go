@@ -211,10 +211,9 @@ type Termination struct {
 
 // Session represents the agent's state including conversation history and variables
 type Session struct {
-	// mu protects Messages and the scalar metadata that is written
-	// cross-goroutine (Title, InputTokens, OutputTokens, Cost, ...) from
-	// concurrent read/write access. Shared-session readers must go through
-	// the locked accessors (TitleSnapshot, Usage, TokensAndCost, ...).
+	// mu protects Messages and metadata that is written cross-goroutine
+	// (Title, Attributes, InputTokens, OutputTokens, Cost, ...) from concurrent
+	// read/write access. Shared-session readers must use the locked accessors.
 	mu sync.RWMutex `json:"-"`
 
 	// now and newID are per-session sources of time and identity. They are
@@ -322,6 +321,11 @@ type Session struct {
 	// Permissions holds session-level permission overrides.
 	// When set, these are evaluated before team-level permissions.
 	Permissions *PermissionsConfig `json:"permissions,omitempty"`
+
+	// Attributes stores generic, namespaced metadata supplied by embedders.
+	// Shared-session callers must use AttributesSnapshot, SetAttribute, and
+	// DeleteAttribute rather than mutating this map directly.
+	Attributes map[string]string `json:"attributes,omitempty"`
 
 	// AgentModelOverrides stores per-agent model overrides for this session.
 	// Key is the agent name, value is the model reference (e.g., "openai/gpt-4o" or a named model from config).
@@ -784,6 +788,19 @@ func (s *Session) AddMessage(msg *Message) int {
 	}
 	s.Messages = append(s.Messages, NewMessageItem(msg))
 	return len(s.Messages) - 1
+}
+
+// MarshalJSON takes a consistent snapshot while encoding mutable session
+// state. In particular, SetAttribute may otherwise mutate a map while the JSON
+// encoder is iterating it.
+func (s *Session) MarshalJSON() ([]byte, error) {
+	if s == nil {
+		return []byte("null"), nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	type sessionJSON Session
+	return json.Marshal((*sessionJSON)(s))
 }
 
 // SetUsage records cumulative input/output token counts under s.mu.
@@ -1263,6 +1280,38 @@ func (s *Session) AttachedFilesSnapshot() []string {
 	return slices.Clone(s.AttachedFiles)
 }
 
+// AttributesSnapshot returns an independent copy of the session attributes.
+func (s *Session) AttributesSnapshot() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return maps.Clone(s.Attributes)
+}
+
+// SetAttribute sets a session attribute. Empty keys are ignored because they
+// cannot form a meaningful namespaced metadata key.
+func (s *Session) SetAttribute(key, value string) {
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Attributes == nil {
+		s.Attributes = make(map[string]string)
+	}
+	s.Attributes[key] = value
+}
+
+// DeleteAttribute deletes a session attribute. An empty key is a no-op,
+// matching SetAttribute and WithAttributes.
+func (s *Session) DeleteAttribute(key string) {
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.Attributes, key)
+}
+
 // DelegationLineageSnapshot returns a copy of the session's delegation
 // lineage. Callers may freely mutate the returned slice without affecting
 // the session.
@@ -1273,6 +1322,18 @@ func (s *Session) DelegationLineageSnapshot() []string {
 }
 
 type Opt func(s *Session)
+
+// WithAttributes sets generic session metadata from an independent copy of
+// attributes. Empty keys are discarded; empty values are preserved.
+func WithAttributes(attributes map[string]string) Opt {
+	cloned := maps.Clone(attributes)
+	delete(cloned, "")
+	return func(s *Session) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.Attributes = maps.Clone(cloned)
+	}
+}
 
 func WithUserMessage(content string) Opt {
 	return func(s *Session) {

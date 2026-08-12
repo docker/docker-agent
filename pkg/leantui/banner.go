@@ -1,24 +1,10 @@
 package leantui
 
+import tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
+
 const (
 	bannerTopPadding  = 1
 	bannerLeftPadding = 2
 )
 
-// bannerLines is a pre-rendered ASCII-art banner for the lean TUI welcome
-// screen. Each unpadded line fits within 56 columns.
-var bannerLines = []string{
-	`██████╗  ██████╗  ██████╗██╗  ██╗███████╗██████╗ `,
-	`██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝██╔════╝██╔══██╗`,
-	`██║  ██║██║   ██║██║     █████╔╝ █████╗  ██████╔╝`,
-	`██║  ██║██║   ██║██║     ██╔═██╗ ██╔══╝  ██╔══██╗`,
-	`██████╔╝╚██████╔╝╚██████╗██║  ██╗███████╗██║  ██║`,
-	`╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝`,
-	``,
-	`     █████╗  ██████╗ ███████╗███╗   ██╗████████╗`,
-	`    ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝`,
-	`    ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   `,
-	`    ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   `,
-	`    ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   `,
-	`    ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   `,
-}
+var bannerLines = tuibanner.Lines

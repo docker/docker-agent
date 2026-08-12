@@ -174,7 +174,7 @@ agent "planner" {
 }
 
 agent "reviewer" {
-  model = "google/gemini-3-pro-preview"
+  model = "google/gemini-3.1-pro-preview"
 
   instruction = <<-EOT
   Give me feedback about the local changes. Don't be too picky, think about code quality, security, duplication, idiomatic Go,

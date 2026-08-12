@@ -100,6 +100,7 @@ func (s *Session) Clone() *Session {
 		OutputTokens:            s.OutputTokens,
 		Cost:                    s.Cost,
 		Permissions:             s.Permissions.Clone(),
+		Attributes:              maps.Clone(s.Attributes),
 		AgentModelOverrides:     cloneStringMap(s.AgentModelOverrides),
 		CustomModelsUsed:        cloneStringSlice(s.CustomModelsUsed),
 		AttachedFiles:           cloneStringSlice(s.AttachedFiles),
@@ -228,6 +229,7 @@ func copySessionMetadata(dst, src *Session, title string) {
 	dst.MaxToolResultTokens = src.MaxToolResultTokens
 	dst.Starred = src.Starred
 	dst.Permissions = src.Permissions.Clone()
+	dst.Attributes = src.AttributesSnapshot()
 	dst.AgentModelOverrides = cloneStringMap(src.AgentModelOverrides)
 	dst.CustomModelsUsed = cloneStringSlice(src.CustomModelsUsed)
 	dst.AttachedFiles = src.AttachedFilesSnapshot()
