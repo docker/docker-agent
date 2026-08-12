@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
@@ -23,14 +24,117 @@ func newLayoutTestPage(t *testing.T, position msgtypes.SidebarPosition) *chatPag
 	t.Helper()
 	sessionState := &service.SessionState{}
 	p := &chatPage{
-		sidebar:      sidebar.New(animation.NewRuntime(), t.Context(), sessionState),
-		messages:     messages.New(animation.NewRuntime(), sessionState),
-		sessionState: sessionState,
-		width:        160,
-		height:       40,
+		sidebar:           sidebar.New(animation.NewRuntime(), t.Context(), sessionState),
+		messages:          messages.New(animation.NewRuntime(), sessionState),
+		sessionState:      sessionState,
+		width:             160,
+		height:            40,
+		showStartupBanner: true,
 	}
 	p.layoutSettings = msgtypes.LayoutSettings{SidebarPosition: position}
 	return p
+}
+
+func TestNewChatPageShowsBannerBeforeAgentInfo(t *testing.T) {
+	t.Parallel()
+
+	sessionState := &service.SessionState{}
+	p := New(animation.NewRuntime(), t.Context(), nil, sessionState).(*chatPage)
+	p.SetSize(160, 40)
+
+	assert.True(t, p.showStartupBanner)
+	assert.Contains(t, ansi.Strip(p.messagesView(p.computeSidebarLayout())), tuibanner.Lines[0])
+}
+
+func TestStartupBannerIsCenteredInEmptyChat(t *testing.T) {
+	t.Parallel()
+
+	p := newLayoutTestPage(t, msgtypes.SidebarRight)
+	p.showStartupBanner = true
+	p.SetSize(p.width, p.height)
+	sl := p.computeSidebarLayout()
+
+	lines := strings.Split(p.messagesView(sl), "\n")
+	require.Len(t, lines, sl.chatHeight)
+
+	firstBannerLine := -1
+	for i, line := range lines {
+		if strings.Contains(ansi.Strip(line), tuibanner.Lines[0]) {
+			firstBannerLine = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, firstBannerLine)
+	assert.Equal(t, (sl.chatHeight-len(tuibanner.Lines))/2, firstBannerLine)
+	assert.Equal(t, (sl.chatWidth-ansi.StringWidth(tuibanner.Lines[0]))/2,
+		strings.Index(ansi.Strip(lines[firstBannerLine]), "█"))
+}
+
+func TestStartupBannerHiddenWhenChatIsTooSmall(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{name: "too narrow", width: tuibanner.Width - 1, height: tuibanner.Height},
+		{name: "too short", width: tuibanner.Width, height: tuibanner.Height - 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newLayoutTestPage(t, msgtypes.SidebarRight)
+			p.showStartupBanner = true
+
+			assert.Empty(t, p.messagesView(sidebarLayout{
+				chatWidth:  tt.width,
+				chatHeight: tt.height,
+			}))
+		})
+	}
+}
+
+func TestEmptyAgentInfoDoesNotReactivateStartupBanner(t *testing.T) {
+	t.Parallel()
+
+	p := newLayoutTestPage(t, msgtypes.SidebarRight)
+	p.showStartupBanner = false
+	handled, _ := p.handleRuntimeEvent(runtime.AgentInfo("root", "model", "", ""))
+
+	require.True(t, handled)
+	assert.False(t, p.showStartupBanner)
+}
+
+func TestAgentWelcomeMessageControlsStartupBanner(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		welcomeMessage string
+		wantBanner     bool
+	}{
+		{name: "empty welcome", wantBanner: true},
+		{name: "configured welcome", welcomeMessage: "Welcome to the agent"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newLayoutTestPage(t, msgtypes.SidebarRight)
+			event := runtime.AgentInfo("root", "model", "", tt.welcomeMessage)
+			handled, _ := p.handleRuntimeEvent(event)
+
+			require.True(t, handled)
+			assert.Equal(t, tt.wantBanner, p.showStartupBanner)
+			out := ansi.Strip(p.messagesView(p.computeSidebarLayout()))
+			if tt.wantBanner {
+				assert.Contains(t, out, tuibanner.Lines[0])
+			} else {
+				assert.Contains(t, out, tt.welcomeMessage)
+				assert.NotContains(t, out, tuibanner.Lines[0])
+			}
+		})
+	}
 }
 
 func TestComputeSidebarLayout_RightDefault(t *testing.T) {

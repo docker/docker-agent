@@ -37,7 +37,7 @@ func (f *runExecFlags) recallCoordinatorOpt(ctx context.Context, rt runtime.Runt
 	sm := f.listenSM
 	exposed := sm != nil
 	if !exposed {
-		sm = server.NewSessionManager(ctx, nil, rt.SessionStore(), 0, &f.runConfig)
+		sm = server.NewSessionManager(ctx, nil, rt.SessionStore(), 0, &f.runConfig, server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
 	}
 	guard := sm.AttachRuntime(ctx, sess.ID, rt, sess)
 	return func(a *app.App) {
@@ -71,7 +71,7 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 		return f.recallCoordinatorOpt(ctx, rt, sess), nil
 	}
 
-	sm := server.NewSessionManager(ctx, nil, rt.SessionStore(), 0, &f.runConfig)
+	sm := server.NewSessionManager(ctx, nil, rt.SessionStore(), 0, &f.runConfig, server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
 	guard := sm.AttachRuntime(ctx, sess.ID, rt, sess)
 	// Publish the serving manager so sessions spawned later (TUI tabs) attach
 	// to it too (see recallCoordinatorOpt). Set before the TUI starts, so no

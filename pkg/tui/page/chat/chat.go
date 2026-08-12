@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
@@ -230,6 +231,7 @@ type chatPage struct {
 	// Track whether we've received content from an assistant response
 	// Used by --exit-after-response to ensure we don't exit before receiving content
 	hasReceivedAssistantContent bool
+	showStartupBanner           bool
 
 	// Message queue for enqueuing messages while agent is working
 	messageQueue []queuedMessage
@@ -374,14 +376,15 @@ func defaultKeyMap() KeyMap {
 // New creates a new chat page
 func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *service.SessionState, opts ...PageOption) Page {
 	p := &chatPage{
-		ar:            ar,
-		ctx:           func() context.Context { return context.WithoutCancel(ctx) },
-		sidebar:       sidebar.New(ar, ctx, sessionState),
-		messages:      messages.New(ar, sessionState),
-		app:           a,
-		keyMap:        defaultKeyMap(),
-		commandParser: commands.NewParser(),
-		sessionState:  sessionState,
+		ar:                ar,
+		ctx:               func() context.Context { return context.WithoutCancel(ctx) },
+		sidebar:           sidebar.New(ar, ctx, sessionState),
+		messages:          messages.New(ar, sessionState),
+		app:               a,
+		keyMap:            defaultKeyMap(),
+		commandParser:     commands.NewParser(),
+		sessionState:      sessionState,
+		showStartupBanner: true,
 	}
 
 	for _, opt := range opts {
@@ -723,11 +726,30 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 		Render(sidebarWithDivider)
 }
 
+func (p *chatPage) messagesView(sl sidebarLayout) string {
+	messagesView := p.messages.View()
+	if messagesView != "" || !p.showStartupBanner {
+		return messagesView
+	}
+	if sl.chatWidth < tuibanner.Width || sl.chatHeight < tuibanner.Height {
+		return ""
+	}
+
+	banner := styles.BaseStyle.Foreground(styles.Accent).Render(strings.Join(tuibanner.Lines, "\n"))
+	return lipgloss.Place(
+		sl.chatWidth,
+		sl.chatHeight,
+		lipgloss.Center,
+		lipgloss.Center,
+		banner,
+	)
+}
+
 // View renders the chat page (messages + sidebar only, no editor or resize handle)
 func (p *chatPage) View() string {
 	sl := p.computeSidebarLayout()
 
-	messagesView := p.messages.View()
+	messagesView := p.messagesView(sl)
 
 	var bodyContent string
 

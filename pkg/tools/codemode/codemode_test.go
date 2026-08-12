@@ -94,6 +94,26 @@ func TestCodeModeTool_Tools(t *testing.T) {
 }`, string(outputSchema))
 }
 
+func TestCodeModeTool_TypeScriptDeclarationsInDescription(t *testing.T) {
+	t.Parallel()
+
+	tool := Wrap(&testToolSet{tools: []tools.Tool{{
+		Name:         "find_item",
+		Description:  "Find an item",
+		Parameters:   map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string"}}, "required": []any{"id"}},
+		OutputSchema: map[string]any{"type": "boolean"},
+	}}})
+
+	allTools, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, allTools, 1)
+	assert.Contains(t, allTools[0].Description, "interface FindItemInput")
+	assert.Contains(t, allTools[0].Description, "id: string;")
+	assert.Contains(t, allTools[0].Description, "type FindItemOutput = boolean;")
+	assert.Contains(t, allTools[0].Description, "declare function FindItem(args: FindItemInput): FindItemOutput;")
+	assert.NotContains(t, allTools[0].Description, "Where Input follows the following JSON schema")
+}
+
 func TestCodeModeTool_Instructions(t *testing.T) {
 	t.Parallel()
 	tool := &codeModeTool{}
@@ -143,7 +163,7 @@ func TestCodeModeTool_CallHello(t *testing.T) {
 
 	result, err := allTools[0].Handler(t.Context(), tools.ToolCall{
 		Function: tools.FunctionCall{
-			Arguments: `{"script":"return hello_world();"}`,
+			Arguments: `{"script":"return HelloWorld();"}`,
 		},
 	}, tools.NopRuntime{})
 	require.NoError(t, err)
@@ -155,6 +175,38 @@ func TestCodeModeTool_CallHello(t *testing.T) {
 	require.Equal(t, "Hello, World!", scriptResult.Value)
 	require.Empty(t, scriptResult.StdErr)
 	require.Empty(t, scriptResult.StdOut)
+}
+
+func TestCodeModeTool_CallToolWithNonIdentifierName(t *testing.T) {
+	t.Parallel()
+	tool := Wrap(&testToolSet{
+		tools: []tools.Tool{
+			{
+				Name: "hello-world",
+				Handler: tools.NewHandler(func(ctx context.Context, args map[string]any) (*tools.ToolCallResult, error) {
+					return tools.ResultSuccess("Hello, World!"), nil
+				}),
+			},
+		},
+	})
+
+	allTools, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, allTools, 1)
+	assert.Contains(t, allTools[0].Description, "declare function HelloWorld(args: HelloWorldInput): HelloWorldOutput;")
+
+	result, err := allTools[0].Handler(t.Context(), tools.ToolCall{
+		Function: tools.FunctionCall{
+			Arguments: `{"script":"return HelloWorld();"}`,
+		},
+	}, tools.NopRuntime{})
+	require.NoError(t, err)
+
+	var scriptResult ScriptResult
+	err = json.Unmarshal([]byte(result.Output), &scriptResult)
+	require.NoError(t, err)
+
+	require.Equal(t, "Hello, World!", scriptResult.Value)
 }
 
 func TestCodeModeTool_CallEcho(t *testing.T) {

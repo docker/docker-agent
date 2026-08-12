@@ -1,11 +1,36 @@
 package session
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 
 	"github.com/docker/docker-agent/pkg/chat"
 )
+
+func TestSessionAttributesConcurrent(t *testing.T) {
+	t.Parallel()
+
+	s := New(WithAttributes(map[string]string{"daw.workspace_path": "/workspace"}))
+	var wg sync.WaitGroup
+	for range 100 {
+		wg.Go(func() {
+			s.SetAttribute("daw.worktree_id", "worktree")
+		})
+		wg.Go(func() {
+			_ = s.AttributesSnapshot()
+		})
+		wg.Go(func() {
+			s.DeleteAttribute("daw.worktree_id")
+		})
+		wg.Go(func() {
+			if _, err := json.Marshal(s); err != nil {
+				t.Errorf("Marshal: %v", err)
+			}
+		})
+	}
+	wg.Wait()
+}
 
 func TestAddMessageUsageRecordConcurrent(t *testing.T) {
 	t.Parallel()

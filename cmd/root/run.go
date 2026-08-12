@@ -101,15 +101,19 @@ type runExecFlags struct {
 	outputJSON    bool
 
 	// Run only
-	hideToolResults  bool
-	lean             bool
-	leanChanged      bool
-	appName          string
-	sidebar          bool
-	listenAddr       string
-	onEventSpecs     []string
-	disabledCommands []string
-	theme            string
+	hideToolResults bool
+	lean            bool
+	leanChanged     bool
+	appName         string
+	sidebar         bool
+	listenAddr      string
+	// sessionWorkingDirRoot confines the working_dir of sessions created
+	// through the --listen control plane; empty means unrestricted (see
+	// server.WithSessionWorkingDirRoot).
+	sessionWorkingDirRoot string
+	onEventSpecs          []string
+	disabledCommands      []string
+	theme                 string
 
 	// globalPermissions holds the user-level global permission checker built
 	// from user config settings. Nil when no global permissions are configured.
@@ -182,6 +186,8 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	_ = cmd.PersistentFlags().MarkHidden("exit-after-response")
 	cmd.PersistentFlags().StringVar(&flags.listenAddr, "listen", "", "Expose this run's control plane on the given address (e.g. 127.0.0.1:0)")
 	_ = cmd.PersistentFlags().MarkHidden("listen")
+	cmd.PersistentFlags().StringVar(&flags.sessionWorkingDirRoot, "session-workingdir-root", "", "Restrict the working_dir of sessions created via the --listen control plane to this directory and its descendants (empty = no restriction)")
+	_ = cmd.PersistentFlags().MarkHidden("session-workingdir-root")
 	cmd.PersistentFlags().StringArrayVar(&flags.onEventSpecs, "on-event", nil, "Run shell command on event: --on-event <type>=<cmd> (or *=<cmd> for any). Repeatable.")
 	cmd.PersistentFlags().StringVar(&flags.cpuProfile, "cpuprofile", "", "Write CPU profile to file")
 	_ = cmd.PersistentFlags().MarkHidden("cpuprofile")
@@ -268,6 +274,13 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	}
 	f.safetyChanged = cmd.Flags().Changed("safety")
 	f.yoloChanged = cmd.Flags().Changed("yolo")
+
+	// A --session-workingdir-root that trims to empty (e.g. an unresolved
+	// shell variable) must fail loudly instead of silently disabling the
+	// containment the operator asked for.
+	if err := validateSessionWorkingDirRoot(f.sessionWorkingDirRoot); err != nil {
+		return err
+	}
 
 	useTUI := !f.exec && (f.forceTUI || isatty.IsTerminal(os.Stdout.Fd()))
 	f.leanChanged = cmd.Flags().Changed("lean")

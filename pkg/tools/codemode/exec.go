@@ -83,7 +83,11 @@ func (c *codeModeTool) runJavascript(ctx context.Context, rt tools.Runtime, scri
 		}
 
 		for _, tool := range allTools {
-			_ = vm.Set(tool.Name, callTool(ctx, rt, tool, tracker))
+			call := callTool(ctx, rt, tool, tracker)
+			_ = vm.Set(tool.Name, call)
+			if name := typeName(tool.Name); name != tool.Name {
+				_ = vm.Set(name, call)
+			}
 		}
 	}
 

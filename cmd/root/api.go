@@ -21,14 +21,16 @@ import (
 )
 
 type apiFlags struct {
-	listenAddr       string
-	sessionDB        string
-	pullIntervalMins int
-	fakeResponses    string
-	recordPath       string
-	authToken        string
-	pprofAddr        string
-	runConfig        config.RuntimeConfig
+	listenAddr            string
+	sessionDB             string
+	pullIntervalMins      int
+	fakeResponses         string
+	recordPath            string
+	authToken             string
+	pprofAddr             string
+	maxRequestSize        int64
+	sessionWorkingDirRoot string
+	runConfig             config.RuntimeConfig
 }
 
 func newAPICmd() *cobra.Command {
@@ -47,6 +49,8 @@ func newAPICmd() *cobra.Command {
 	cmd.PersistentFlags().StringVar(&flags.fakeResponses, "fake", "", "Replay AI responses from cassette file (for testing)")
 	cmd.PersistentFlags().StringVar(&flags.recordPath, "record", "", "Record AI API interactions to cassette file")
 	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for API requests (empty = no authentication)")
+	cmd.PersistentFlags().Int64Var(&flags.maxRequestSize, "max-request-size", 1<<20, "Maximum request body size in bytes (default 1 MiB). Requests exceeding this limit are rejected with HTTP 413.")
+	cmd.PersistentFlags().StringVar(&flags.sessionWorkingDirRoot, "session-workingdir-root", "", "Restrict the working_dir of sessions created via POST /api/sessions to this directory and its descendants (empty = no restriction; recommended for multi-user deployments)")
 	cmd.PersistentFlags().StringVar(&flags.pprofAddr, "pprof-addr", "", "TCP host:port to expose Go pprof endpoints at /debug/pprof/ (e.g. 127.0.0.1:6060); also set via CAGENT_PPROF_ADDR")
 	_ = cmd.PersistentFlags().MarkHidden("pprof-addr")
 	cmd.MarkFlagsMutuallyExclusive("fake", "record")
@@ -64,6 +68,10 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	agentsPath := args[0]
+
+	if err := validateSessionWorkingDirRoot(f.sessionWorkingDirRoot); err != nil {
+		return err
+	}
 
 	// Make sure no question is ever asked to the user in api mode.
 	os.Stdin = nil
@@ -132,7 +140,8 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		return fmt.Errorf("resolving agent sources: %w", err)
 	}
 
-	s, err := server.New(ctx, sessionStore, &f.runConfig, time.Duration(f.pullIntervalMins)*time.Minute, sources, f.authToken)
+	s, err := server.New(ctx, sessionStore, &f.runConfig, time.Duration(f.pullIntervalMins)*time.Minute, sources, f.authToken, f.maxRequestSize,
+		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
 	if err != nil {
 		return fmt.Errorf("creating server: %w", err)
 	}
