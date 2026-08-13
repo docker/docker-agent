@@ -452,6 +452,16 @@ func callbackRedirectURLFrom(c *latest.RemoteOAuthConfig) string {
 	return c.CallbackRedirectURL
 }
 
+// callbackPortFrom is a nil-safe accessor for the optional CallbackPort
+// field on a RemoteOAuthConfig; zero means "let the OS pick a free port",
+// both here and as NewCallbackServerOnPort's port argument.
+func callbackPortFrom(c *latest.RemoteOAuthConfig) int {
+	if c == nil {
+		return 0
+	}
+	return c.CallbackPort
+}
+
 // oauthTransport wraps an HTTP transport with OAuth support
 type oauthTransport struct {
 	base http.RoundTripper
@@ -1243,11 +1253,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	slog.DebugContext(ctx, "Creating OAuth callback server")
-	var callbackPort int
-	if t.oauthConfig != nil {
-		callbackPort = t.oauthConfig.CallbackPort
-	}
-	callbackServer, err := NewCallbackServerOnPort(ctx, callbackPort)
+	callbackServer, err := NewCallbackServerOnPort(ctx, callbackPortFrom(t.oauthConfig))
 	if err != nil {
 		return fmt.Errorf("failed to create callback server: %w", err)
 	}

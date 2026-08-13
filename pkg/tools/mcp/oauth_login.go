@@ -61,11 +61,14 @@ func setOAuthLoginHTTPClientForTesting(c *http.Client) (restore func()) {
 // attempted candidate is a hard error: no later candidate, DCR, browser, or
 // token request follows.
 //
-// The callback/redirect mechanics below (NewCallbackServer, GetRedirectURI)
-// are deliberately left unchanged: aligning them with the runtime's
-// NewCallbackServerOnPort/ResolveRedirectURI (and honoring
-// RemoteOAuthConfig.CallbackPort/CallbackRedirectURL here) is a separate,
-// not-yet-made decision.
+// The callback/redirect mechanics below mirror the runtime's managed OAuth
+// flow exactly: NewCallbackServerOnPort honors RemoteOAuthConfig.CallbackPort
+// (0 lets the OS pick a free port, matching the prior NewCallbackServer
+// behavior) and ResolveRedirectURI honors CallbackRedirectURL (verbatim,
+// with the ${callbackPort} placeholder substituted; the local callback
+// server's own address is used unchanged when it is empty). The resolved
+// redirect URI is then reused, identically, for DCR, /authorize, and the
+// token exchange below.
 func PerformOAuthLogin(ctx context.Context, remote latest.Remote) error {
 	tokenStore := NewKeyringTokenStore()
 	client := oauthLoginHTTPClient()
@@ -94,8 +97,10 @@ func PerformOAuthLogin(ctx context.Context, remote latest.Remote) error {
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)
 	}
 
-	// Set up the callback server for the redirect.
-	callbackServer, err := NewCallbackServer(ctx)
+	// Set up the callback server for the redirect, honoring
+	// RemoteOAuthConfig.CallbackPort/CallbackRedirectURL exactly like the
+	// runtime's managed OAuth flow does.
+	callbackServer, err := NewCallbackServerOnPort(ctx, callbackPortFrom(remote.OAuth))
 	if err != nil {
 		return fmt.Errorf("failed to create callback server: %w", err)
 	}
@@ -113,7 +118,7 @@ func PerformOAuthLogin(ctx context.Context, remote latest.Remote) error {
 		return fmt.Errorf("failed to start callback server: %w", err)
 	}
 
-	redirectURI := callbackServer.GetRedirectURI()
+	redirectURI := callbackServer.ResolveRedirectURI(callbackRedirectURLFrom(remote.OAuth))
 
 	clientID, clientSecret, scopes, err := resolveStandaloneClientCredentials(
 		ctx, client, remote.OAuth, authServerMetadata, redirectURI,

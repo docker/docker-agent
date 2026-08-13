@@ -34,6 +34,35 @@ func TestFindMCPRemote_MatchesTopLevelMCPByName(t *testing.T) {
 	assert.Equal(t, []string{"scope-a"}, remote.OAuth.Scopes)
 }
 
+// TestFindMCPRemote_ForwardsCallbackPortAndRedirectURL proves the full
+// RemoteOAuthConfig — including CallbackPort and CallbackRedirectURL —
+// survives findMCPRemote's lookup verbatim, so PerformOAuthLogin's
+// runtime-aligned callback wiring (NewCallbackServerOnPort/
+// ResolveRedirectURI) sees the exact same per-toolset config the runtime
+// would use for the same remote MCP server.
+func TestFindMCPRemote_ForwardsCallbackPortAndRedirectURL(t *testing.T) {
+	t.Parallel()
+
+	oauthConfig := &latest.RemoteOAuthConfig{
+		CallbackPort:        8765,
+		CallbackRedirectURL: "https://proxy.example.test/cb?port=${callbackPort}",
+	}
+	cfg := &latest.Config{
+		MCPs: map[string]latest.MCPToolset{
+			"atlassian": {Toolset: latest.Toolset{
+				Type:   "mcp",
+				Remote: latest.Remote{URL: "https://mcp.atlassian.com/v1/mcp/authv2", OAuth: oauthConfig},
+			}},
+		},
+	}
+
+	remote, err := findMCPRemote(cfg, "atlassian")
+	require.NoError(t, err)
+	require.NotNil(t, remote.OAuth)
+	assert.Equal(t, 8765, remote.OAuth.CallbackPort)
+	assert.Equal(t, "https://proxy.example.test/cb?port=${callbackPort}", remote.OAuth.CallbackRedirectURL)
+}
+
 // TestFindMCPRemote_MatchesAgentEmbeddedToolsetByName covers the
 // agent.Toolsets lookup path (an MCP toolset declared inline on an agent
 // rather than in the top-level `mcps:` map).

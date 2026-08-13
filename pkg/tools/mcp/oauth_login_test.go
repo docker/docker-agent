@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -291,6 +293,407 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{"prm-scope"}, scopes, "PRM scopes_supported must be used when no configured or challenge scope is available")
 	})
+}
+
+// TestCallbackConfigAccessors pins the nil-safe accessors PerformOAuthLogin
+// uses to read RemoteOAuthConfig.CallbackPort/CallbackRedirectURL — the same
+// accessors the runtime's managed OAuth flow uses — so a nil Remote.OAuth
+// (the common case) behaves identically to an explicit zero-value config.
+func TestCallbackConfigAccessors(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 0, callbackPortFrom(nil))
+	assert.Empty(t, callbackRedirectURLFrom(nil))
+
+	assert.Equal(t, 0, callbackPortFrom(&latest.RemoteOAuthConfig{}))
+	assert.Empty(t, callbackRedirectURLFrom(&latest.RemoteOAuthConfig{}))
+
+	configured := &latest.RemoteOAuthConfig{CallbackPort: 8765, CallbackRedirectURL: "https://proxy.example.test/cb"}
+	assert.Equal(t, 8765, callbackPortFrom(configured))
+	assert.Equal(t, "https://proxy.example.test/cb", callbackRedirectURLFrom(configured))
+}
+
+// reserveFreeLoopbackPort returns a TCP port free on 127.0.0.1 at the time
+// of the call, for tests that need to pin RemoteOAuthConfig.CallbackPort to
+// a specific, real, bindable port. The listener is closed immediately so
+// the test's own call to NewCallbackServerOnPort can bind it.
+func reserveFreeLoopbackPort(t *testing.T) int {
+	t.Helper()
+
+	var lc net.ListenConfig
+	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := l.Addr().(*net.TCPAddr).Port
+	require.NoError(t, l.Close())
+	return port
+}
+
+// TestPerformOAuthLogin_DefaultCallback_UsesLoopbackRedirect_EndToEnd drives
+// PerformOAuthLogin end to end with no OAuth config at all (the common
+// case): the redirect URI used for /authorize and the token exchange must
+// be the local callback server's own loopback address, unchanged — the
+// behavior preserved from before this package honored
+// CallbackPort/CallbackRedirectURL.
+func TestPerformOAuthLogin_DefaultCallback_UsesLoopbackRedirect_EndToEnd(t *testing.T) {
+	resetDefaultStore(t)
+	store := NewInMemoryTokenStore()
+	SetDefaultTokenStoreFactory(func() OAuthTokenStore { return store })
+
+	captureFile := setupFakeBrowserOpener(t)
+
+	const mcpPath = "/mcp"
+	var tokenRedirectURI string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc(mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource"+mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{AuthorizationServers: []string{srv.URL}})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+		})
+	})
+	mux.HandleFunc("/register", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_id":"registered-id"}`))
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		tokenRedirectURI = r.FormValue("redirect_uri")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"exchanged-at","token_type":"Bearer","expires_in":3600}`))
+	})
+
+	defer setOAuthLoginHTTPClientForTesting(srv.Client())()
+
+	remote := latest.Remote{URL: srv.URL + mcpPath}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- PerformOAuthLogin(t.Context(), remote) }()
+
+	authURL := requireCapturedAuthorizeURL(t, captureFile)
+	deliverFakeCallback(t, authURL, "code-default-callback")
+
+	require.NoError(t, <-errCh)
+
+	parsedAuthURL, err := url.Parse(authURL)
+	require.NoError(t, err)
+	authorizeRedirectURI := parsedAuthURL.Query().Get("redirect_uri")
+	assert.Regexp(t, `^http://127\.0\.0\.1:\d+/callback$`, authorizeRedirectURI,
+		"with no OAuth config, the redirect URI must be the local loopback callback server's own address")
+	assert.Equal(t, authorizeRedirectURI, tokenRedirectURI,
+		"the token exchange must reuse the exact same redirect_uri as /authorize")
+}
+
+// TestPerformOAuthLogin_CallbackPort_UsesConfiguredPort_EndToEnd drives
+// PerformOAuthLogin end to end with RemoteOAuthConfig.CallbackPort set: the
+// local callback server must bind that exact port, and the redirect URI
+// used for /authorize and the token exchange must carry it — the same
+// contract NewCallbackServerOnPort gives the runtime's managed OAuth flow.
+func TestPerformOAuthLogin_CallbackPort_UsesConfiguredPort_EndToEnd(t *testing.T) {
+	resetDefaultStore(t)
+	store := NewInMemoryTokenStore()
+	SetDefaultTokenStoreFactory(func() OAuthTokenStore { return store })
+
+	captureFile := setupFakeBrowserOpener(t)
+	port := reserveFreeLoopbackPort(t)
+
+	const mcpPath = "/mcp"
+	var tokenRedirectURI string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc(mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource"+mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{AuthorizationServers: []string{srv.URL}})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+		})
+	})
+	mux.HandleFunc("/register", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_id":"registered-id"}`))
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		tokenRedirectURI = r.FormValue("redirect_uri")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"exchanged-at","token_type":"Bearer","expires_in":3600}`))
+	})
+
+	defer setOAuthLoginHTTPClientForTesting(srv.Client())()
+
+	remote := latest.Remote{
+		URL:   srv.URL + mcpPath,
+		OAuth: &latest.RemoteOAuthConfig{CallbackPort: port},
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- PerformOAuthLogin(t.Context(), remote) }()
+
+	authURL := requireCapturedAuthorizeURL(t, captureFile)
+	deliverFakeCallback(t, authURL, "code-configured-port")
+
+	require.NoError(t, <-errCh)
+
+	wantRedirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	parsedAuthURL, err := url.Parse(authURL)
+	require.NoError(t, err)
+	assert.Equal(t, wantRedirectURI, parsedAuthURL.Query().Get("redirect_uri"),
+		"the /authorize redirect_uri must carry the configured CallbackPort")
+	assert.Equal(t, wantRedirectURI, tokenRedirectURI,
+		"the token exchange must reuse the exact same configured-port redirect_uri as /authorize")
+}
+
+// TestPerformOAuthLogin_CallbackPortAlreadyInUse_HardErrors proves that a
+// configured CallbackPort docker-agent cannot bind is a hard error (no
+// fallback to a random port, no browser, no token stored) — the same
+// failure mode NewCallbackServerOnPort gives the runtime's managed flow.
+func TestPerformOAuthLogin_CallbackPortAlreadyInUse_HardErrors(t *testing.T) {
+	resetDefaultStore(t)
+	store := NewInMemoryTokenStore()
+	SetDefaultTokenStoreFactory(func() OAuthTokenStore { return store })
+
+	captureFile := setupFakeBrowserOpener(t)
+
+	held, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer held.Close()
+	port := held.Addr().(*net.TCPAddr).Port
+
+	const mcpPath = "/mcp"
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc(mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource"+mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{AuthorizationServers: []string{srv.URL}})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+		})
+	})
+
+	defer setOAuthLoginHTTPClientForTesting(srv.Client())()
+
+	remote := latest.Remote{
+		URL:   srv.URL + mcpPath,
+		OAuth: &latest.RemoteOAuthConfig{CallbackPort: port},
+	}
+
+	err = PerformOAuthLogin(t.Context(), remote)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to create callback server")
+
+	_, err = os.ReadFile(captureFile)
+	require.Error(t, err, "no browser must be opened when the configured callback port cannot be bound")
+	_, err = store.GetToken(remote.URL)
+	require.Error(t, err, "no token must be stored when the configured callback port cannot be bound")
+}
+
+// TestPerformOAuthLogin_CallbackRedirectURL_SubstitutedPlaceholderReachesEverySurface_EndToEnd
+// drives PerformOAuthLogin end to end with RemoteOAuthConfig.CallbackRedirectURL
+// set to an override carrying the ${callbackPort} placeholder: the resolved
+// redirect URI (override verbatim, with the placeholder substituted for the
+// local callback server's actual port) must be what reaches /authorize and
+// the token exchange, proving the override path — not the default loopback
+// address — was used.
+func TestPerformOAuthLogin_CallbackRedirectURL_SubstitutedPlaceholderReachesEverySurface_EndToEnd(t *testing.T) {
+	resetDefaultStore(t)
+	store := NewInMemoryTokenStore()
+	SetDefaultTokenStoreFactory(func() OAuthTokenStore { return store })
+
+	captureFile := setupFakeBrowserOpener(t)
+
+	const mcpPath = "/mcp"
+	var registerRedirectURIs []string
+	var tokenRedirectURI string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc(mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource"+mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{AuthorizationServers: []string{srv.URL}})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+		})
+	})
+	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			RedirectURIs []string `json:"redirect_uris"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		registerRedirectURIs = body.RedirectURIs
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_id":"registered-id"}`))
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		tokenRedirectURI = r.FormValue("redirect_uri")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"exchanged-at","token_type":"Bearer","expires_in":3600}`))
+	})
+
+	defer setOAuthLoginHTTPClientForTesting(srv.Client())()
+
+	remote := latest.Remote{
+		URL: srv.URL + mcpPath,
+		OAuth: &latest.RemoteOAuthConfig{
+			CallbackRedirectURL: "http://127.0.0.1:${callbackPort}/callback?viaProxy=1",
+		},
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- PerformOAuthLogin(t.Context(), remote) }()
+
+	authURL := requireCapturedAuthorizeURL(t, captureFile)
+	deliverFakeCallback(t, authURL, "code-redirect-override")
+
+	require.NoError(t, <-errCh)
+
+	parsedAuthURL, err := url.Parse(authURL)
+	require.NoError(t, err)
+	authorizeRedirectURI := parsedAuthURL.Query().Get("redirect_uri")
+	assert.Regexp(t, `^http://127\.0\.0\.1:\d+/callback\?viaProxy=1$`, authorizeRedirectURI,
+		"the /authorize redirect_uri must be the override with ${callbackPort} substituted, not the default loopback address")
+	require.Len(t, registerRedirectURIs, 1)
+	assert.Equal(t, authorizeRedirectURI, registerRedirectURIs[0],
+		"the DCR request's redirect_uris must carry the exact same resolved redirect URI as /authorize")
+	assert.Equal(t, authorizeRedirectURI, tokenRedirectURI,
+		"the token exchange must reuse the exact same resolved redirect URI as /authorize")
+}
+
+// TestPerformOAuthLogin_CallbackPortWithExplicitClient_EndToEnd proves
+// CallbackPort is honored on the explicit-client-credentials path too (no
+// DCR involved): the configured port must still reach /authorize and the
+// token exchange.
+func TestPerformOAuthLogin_CallbackPortWithExplicitClient_EndToEnd(t *testing.T) {
+	resetDefaultStore(t)
+	store := NewInMemoryTokenStore()
+	SetDefaultTokenStoreFactory(func() OAuthTokenStore { return store })
+
+	captureFile := setupFakeBrowserOpener(t)
+	port := reserveFreeLoopbackPort(t)
+
+	const mcpPath = "/mcp"
+	var registerCalls int
+	var tokenRedirectURI string
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc(mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource"+mcpPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{AuthorizationServers: []string{srv.URL}})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+		})
+	})
+	mux.HandleFunc("/register", func(w http.ResponseWriter, _ *http.Request) {
+		registerCalls++
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		tokenRedirectURI = r.FormValue("redirect_uri")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"exchanged-at","token_type":"Bearer","expires_in":3600}`))
+	})
+
+	defer setOAuthLoginHTTPClientForTesting(srv.Client())()
+
+	remote := latest.Remote{
+		URL: srv.URL + mcpPath,
+		OAuth: &latest.RemoteOAuthConfig{
+			ClientID:     "explicit-client",
+			ClientSecret: "explicit-secret",
+			CallbackPort: port,
+		},
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- PerformOAuthLogin(t.Context(), remote) }()
+
+	authURL := requireCapturedAuthorizeURL(t, captureFile)
+	deliverFakeCallback(t, authURL, "code-explicit-client-port")
+
+	require.NoError(t, <-errCh)
+
+	assert.Equal(t, 0, registerCalls, "explicit client credentials must never trigger DCR")
+
+	wantRedirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	parsedAuthURL, err := url.Parse(authURL)
+	require.NoError(t, err)
+	assert.Equal(t, wantRedirectURI, parsedAuthURL.Query().Get("redirect_uri"))
+	assert.Equal(t, wantRedirectURI, tokenRedirectURI)
 }
 
 // TestPerformOAuthLogin_ChallengeResourceMetadataAuthoritative_EndToEnd drives
