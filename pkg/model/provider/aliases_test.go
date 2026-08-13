@@ -63,6 +63,18 @@ func TestCatalogAliases(t *testing.T) {
 	}
 }
 
+func TestNebiusAliasUsesTokenFactoryEndpoint(t *testing.T) {
+	t.Parallel()
+
+	alias, ok := LookupAlias("nebius")
+	require.True(t, ok)
+	assert.Equal(t, Alias{
+		APIType:     "openai",
+		BaseURL:     "https://api.tokenfactory.nebius.com/v1",
+		TokenEnvVar: "NEBIUS_API_KEY",
+	}, alias)
+}
+
 // TestCloudflareAliases asserts the two Cloudflare aliases resolve to their
 // account/gateway-scoped, env-templated base URLs. Unlike the static aliases
 // above, their BaseURL carries ${...} references that are expanded at

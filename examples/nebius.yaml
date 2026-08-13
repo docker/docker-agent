@@ -1,15 +1,14 @@
 agents:
   root:
-    model: grok-model
-    description: A helpful AI assistant powered by Nebius
+    model: token-factory-model
+    description: A helpful AI assistant powered by Nebius Token Factory
     instruction: |
-      You are a LLM model, a helpful and maximally truthful AI built by Moonshotai.
+      You are a helpful and maximally truthful AI assistant.
       Be helpful, accurate, and concise in your responses.
-      You are not based on any other companies and their models.
 
 models:
-  grok-model:
+  token-factory-model:
     provider: nebius
-    model: moonshotai/Kimi-K2.5
-    max_tokens: 110000
+    model: openai/gpt-oss-120b
+    max_tokens: 8192
     temperature: 0.7
