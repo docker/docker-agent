@@ -28,8 +28,8 @@ import (
 func TestWantsImageResponseModalities(t *testing.T) {
 	t.Parallel()
 
-	declaredTrue := &latest.OutputCapabilitiesConfig{Image: latest.Bool(true)}
-	declaredFalse := &latest.OutputCapabilitiesConfig{Image: latest.Bool(false)}
+	declaredTrue := &latest.OutputCapabilitiesConfig{Image: new(true)}
+	declaredFalse := &latest.OutputCapabilitiesConfig{Image: new(false)}
 
 	tests := []struct {
 		name       string
@@ -174,7 +174,7 @@ func TestCreateChatCompletionStream_ImageResponseModalities_PositiveRoutes(t *te
 		{
 			name: "gateway",
 			cfg: func(string) *latest.ModelConfig {
-				return &latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash-image", OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: latest.Bool(true)}}
+				return &latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash-image", OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)}}
 			},
 			env:     map[string]string{environment.DockerDesktopTokenEnv: "test-dd-token"},
 			gateway: true,
@@ -182,7 +182,7 @@ func TestCreateChatCompletionStream_ImageResponseModalities_PositiveRoutes(t *te
 		{
 			name: "direct Gemini API",
 			cfg: func(serverURL string) *latest.ModelConfig {
-				return &latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash-image", BaseURL: serverURL, OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: latest.Bool(true)}}
+				return &latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash-image", BaseURL: serverURL, OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)}}
 			},
 			env: map[string]string{"GOOGLE_API_KEY": "test-key"},
 		},
@@ -235,7 +235,7 @@ func TestCreateChatCompletionStream_ImageResponseModalities_AbsentOnOtherRoutes(
 			cfg: func(string) *latest.ModelConfig {
 				return &latest.ModelConfig{
 					Provider: "google", Model: "gemini-2.5-flash-image",
-					OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: latest.Bool(false)},
+					OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(false)},
 				}
 			},
 			env:     map[string]string{environment.DockerDesktopTokenEnv: "test-dd-token"},
@@ -254,7 +254,7 @@ func TestCreateChatCompletionStream_ImageResponseModalities_AbsentOnOtherRoutes(
 			cfg: func(string) *latest.ModelConfig {
 				return &latest.ModelConfig{
 					Provider: "google", Model: "gemini-2.5-flash-image",
-					OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: latest.Bool(true)},
+					OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)},
 				}
 			},
 			env:     map[string]string{environment.DockerDesktopTokenEnv: "test-dd-token"},
@@ -266,7 +266,7 @@ func TestCreateChatCompletionStream_ImageResponseModalities_AbsentOnOtherRoutes(
 			cfg: func(string) *latest.ModelConfig {
 				return &latest.ModelConfig{
 					Provider: "google", Model: "gemini-2.5-flash-image",
-					OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: latest.Bool(true)},
+					OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)},
 				}
 			},
 			env:     map[string]string{environment.DockerDesktopTokenEnv: "test-dd-token"},
@@ -317,7 +317,7 @@ func TestRerank_NeverSetsResponseModalities(t *testing.T) {
 	cfg := &latest.ModelConfig{
 		Provider:           "google",
 		Model:              "gemini-2.5-flash-image",
-		OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: latest.Bool(true)},
+		OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)},
 	}
 	env := environment.NewMapEnvProvider(map[string]string{
 		environment.DockerDesktopTokenEnv: "test-dd-token",
@@ -347,7 +347,7 @@ func TestCreateChatCompletionStream_ImageResponseModalities_GuardRejectedRoutesN
 		cfg := &latest.ModelConfig{
 			Provider:           "google",
 			Model:              "gemini-2.5-flash-image",
-			OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: latest.Bool(true)},
+			OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)},
 		}
 		env := environment.NewMapEnvProvider(map[string]string{
 			environment.DockerDesktopTokenEnv: "test-dd-token",

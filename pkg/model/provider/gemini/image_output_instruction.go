@@ -2,8 +2,8 @@ package gemini
 
 import "google.golang.org/genai"
 
-// imageOutputMediaFileInstruction is appended as a system instruction on the
-// explicit image-output gateway route (see wantsImageResponseModalities) so
+// imageOutputMediaFileInstruction is appended as a system instruction on
+// declared image-output chat requests (see wantsImageResponseModalities) so
 // generated images arrive with a machine-readable filename: the runtime
 // strips these exact marker lines from the reply and uses the paths to name
 // the materialized workspace files (pkg/runtime/generated_media_markers.go).
@@ -21,7 +21,7 @@ Rules:
 // applyImageOutputMediaFileInstruction appends the marker-protocol
 // instruction to the request's system instruction, preserving any parts
 // already present. Callers gate it on wantsImageResponseModalities so only
-// the explicit image-output gateway chat route ever carries it.
+// declared image-output chat requests carry it.
 func applyImageOutputMediaFileInstruction(config *genai.GenerateContentConfig) {
 	if config.SystemInstruction == nil {
 		config.SystemInstruction = &genai.Content{}

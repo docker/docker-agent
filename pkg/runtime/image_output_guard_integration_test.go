@@ -20,7 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// TestRunStream_ImageOutputGuard_RejectsBeforeDispatch drives the gateway
+// TestRunStream_ImageOutputGuard_RejectsBeforeDispatch drives the
 // image-output request guard (pkg/model/provider/gemini/image_output_guard.go)
 // through the real run loop: a real *gemini.Client, talking to an httptest
 // gateway, behind a real [agent.Agent] and [LocalRuntime], through RunStream.
@@ -61,8 +61,7 @@ func TestRunStream_ImageOutputGuard_RejectsBeforeDispatch(t *testing.T) {
 
 	// A custom function tool is enough to trip the guard on its own (no
 	// ResponseModalities / rendering involved): declaring
-	// output_capabilities.image on the gateway route is incompatible with
-	// any custom tool.
+	// output_capabilities.image is incompatible with any custom tool.
 	readFileTool := tools.Tool{
 		Name:        "read_file",
 		Description: "reads a file from disk",

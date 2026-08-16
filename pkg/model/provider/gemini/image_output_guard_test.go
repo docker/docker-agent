@@ -19,8 +19,8 @@ import (
 )
 
 // TestCheckImageOutputRequestCompatibility_GateConditions exhaustively
-// covers when the guard does and does not apply: it must reject only on the
-// gateway surface, only for a model with output_capabilities.image: true,
+// covers when the guard does and does not apply: it must reject on each
+// supported Google surface, only for a model with image output enabled,
 // and only when the request also carries custom function tools, a built-in
 // tool, or structured output.
 func TestCheckImageOutputRequestCompatibility_GateConditions(t *testing.T) {
@@ -41,8 +41,8 @@ func TestCheckImageOutputRequestCompatibility_GateConditions(t *testing.T) {
 		{name: "gateway declared true, no extras: allowed", apiSurface: apiSurfaceGateway, declared: declaredTrue},
 		{name: "gateway declared false: never rejects even with tools", apiSurface: apiSurfaceGateway, declared: declaredFalse, requestTools: 1},
 		{name: "gateway undeclared: never rejects even with tools", apiSurface: apiSurfaceGateway, declared: nil, requestTools: 1},
-		{name: "direct Gemini API declared true: guard does not apply", apiSurface: apiSurfaceGeminiAPI, declared: declaredTrue, requestTools: 1},
-		{name: "Vertex AI declared true: guard does not apply", apiSurface: apiSurfaceVertexAI, declared: declaredTrue, requestTools: 1},
+		{name: "direct Gemini API declared true + tools: rejected", apiSurface: apiSurfaceGeminiAPI, declared: declaredTrue, requestTools: 1, wantReject: []imageOutputIncompatibility{imageOutputIncompatibleTools}},
+		{name: "Vertex AI declared true + tools: rejected", apiSurface: apiSurfaceVertexAI, declared: declaredTrue, requestTools: 1, wantReject: []imageOutputIncompatibility{imageOutputIncompatibleTools}},
 		{
 			name:       "gateway declared true + custom function tools: rejected",
 			apiSurface: apiSurfaceGateway, declared: declaredTrue, requestTools: 2,
@@ -232,9 +232,8 @@ func TestCreateChatCompletionStream_ImageOutputGuard_RejectsBeforeDispatch(t *te
 
 // TestCreateChatCompletionStream_ImageOutputGuard_PreservesNormalBehavior
 // proves the guard is a no-op (request reaches the provider) for every route
-// it must not touch: no extras on the declared route, tools/structured
-// output when the declaration is false/missing, and tools/structured output
-// on a direct (non-gateway) Gemini call even when declared true.
+// it must not touch: no extras on the declared route and tools/structured
+// output when the declaration is false or missing.
 func TestCreateChatCompletionStream_ImageOutputGuard_PreservesNormalBehavior(t *testing.T) {
 	t.Parallel()
 
@@ -336,31 +335,16 @@ func TestCreateChatCompletionStream_ImageOutputGuard_PreservesNormalBehavior(t *
 		assert.Positive(t, counter.calls.Load())
 	})
 
-	t.Run("direct (non-gateway) Gemini call with tools, declared true: guard does not apply", func(t *testing.T) {
+	t.Run("direct Gemini call with tools, resolved image output: rejected before dispatch", func(t *testing.T) {
 		t.Parallel()
 		var counter geminiCountingTransport
-		cfg := &latest.ModelConfig{
-			Provider:           "google",
-			Model:              "gemini-2.5-flash-image",
-			BaseURL:            server.URL,
-			OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)},
-		}
-		env := environment.NewMapEnvProvider(map[string]string{
-			"GOOGLE_API_KEY": "test-key",
-		})
-		client, err := NewClient(t.Context(), cfg, env,
-			options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
-				counter.base = base
-				return &counter
-			}),
-		)
+		cfg := &latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash-image", BaseURL: server.URL, OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)}}
+		env := environment.NewMapEnvProvider(map[string]string{"GOOGLE_API_KEY": "test-key"})
+		client, err := NewClient(t.Context(), cfg, env, options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper { counter.base = base; return &counter }))
 		require.NoError(t, err)
-
-		stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{
-			{Role: chat.MessageRoleUser, Content: "hello"},
-		}, []tools.Tool{{Name: "read_file", Description: "reads a file", Parameters: map[string]any{"type": "object"}}})
-		require.NoError(t, err)
-		drain(t, stream)
-		assert.Positive(t, counter.calls.Load())
+		stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, []tools.Tool{{Name: "read_file", Description: "reads a file", Parameters: map[string]any{"type": "object"}}})
+		require.Nil(t, stream)
+		require.Error(t, err)
+		assert.Zero(t, counter.calls.Load())
 	})
 }

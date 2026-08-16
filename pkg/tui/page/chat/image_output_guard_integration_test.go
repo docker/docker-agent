@@ -72,7 +72,7 @@ func (r *recordingMessages) RemoveSpinner() {
 }
 
 // TestImageOutputGuard_RuntimeToTUI_RejectsBeforeDispatchAndClearsSpinner
-// drives the gateway image-output request guard
+// drives the image-output request guard
 // (pkg/model/provider/gemini/image_output_guard.go) through its real
 // pre-dispatch path — a real *gemini.Client talking to an httptest gateway —
 // and then through the exact production event flow the run loop uses to
@@ -124,8 +124,7 @@ func TestImageOutputGuard_RuntimeToTUI_RejectsBeforeDispatchAndClearsSpinner(t *
 
 	// A custom function tool is enough to trip the guard on its own (no
 	// ResponseModalities / rendering involved): declaring
-	// output_capabilities.image on the gateway route is incompatible with
-	// any custom tool.
+	// output_capabilities.image is incompatible with any custom tool.
 	readFileTool := tools.Tool{
 		Name:        "read_file",
 		Description: "reads a file from disk",
