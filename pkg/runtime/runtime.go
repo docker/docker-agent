@@ -125,7 +125,8 @@ type Runtime interface {
 	UpdateSessionTitle(ctx context.Context, sess *session.Session, title string) error
 
 	// TitleGenerator returns a generator for automatic session titles, or nil
-	// if the runtime does not support local title generation (e.g. remote runtimes).
+	// if the runtime does not support local title generation (e.g. remote
+	// runtimes) or no configured model is a usable title candidate.
 	TitleGenerator(ctx context.Context) *sessiontitle.Generator
 
 	// Steer enqueues a user message for urgent mid-turn injection into the
@@ -1387,17 +1388,15 @@ func (r *LocalRuntime) ExecuteMCPPrompt(ctx context.Context, promptName string, 
 	return "", fmt.Errorf("MCP prompt '%s' not found in any active toolset", promptName)
 }
 
-// TitleGenerator returns a title generator for automatic session title generation.
+// TitleGenerator returns a title generator for automatic session title
+// generation, or nil when no configured model is a usable title candidate
+// (see [sessiontitle.New]).
 func (r *LocalRuntime) TitleGenerator(ctx context.Context) *sessiontitle.Generator {
 	a := r.CurrentAgent()
 	if a == nil {
 		return nil
 	}
-	models := a.TitleModels(ctx)
-	if len(models) == 0 {
-		return nil
-	}
-	return sessiontitle.New(models[0], models[1:]...)
+	return sessiontitle.New(a.TitleModels(ctx)...)
 }
 
 // getAgentModelID returns the model ID for an agent. The zero ID is

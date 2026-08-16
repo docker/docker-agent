@@ -320,7 +320,10 @@ func (f *debugFlags) runDebugTitleCommand(cmd *cobra.Command, args []string) (co
 	if len(models) == 0 {
 		return fmt.Errorf("agent %q has no model configured", agent.Name())
 	}
-	gen := sessiontitle.New(models[0], models[1:]...)
+	gen := sessiontitle.New(models...)
+	if gen == nil {
+		return fmt.Errorf("agent %q has no usable title model", agent.Name())
+	}
 
 	title, err := gen.Generate(ctx, "debug", []string{args[1]})
 	if err != nil {
