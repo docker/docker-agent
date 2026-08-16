@@ -16,6 +16,57 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
+// AddMedia appends a chunk carrying a generated-media delta (e.g. an inline
+// image blob), the way the Gemini adapter surfaces InlineData parts. name may
+// be empty to exercise the provider-omits-a-name path.
+func (b *streamBuilder) AddMedia(data []byte, mimeType, name string) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index: 0,
+			Delta: chat.MessageDelta{Media: []chat.MediaDelta{{
+				Data:     data,
+				MimeType: mimeType,
+				Name:     name,
+				Size:     int64(len(data)),
+			}}},
+		}},
+	})
+	return b
+}
+
+// AddMultiMedia appends a SINGLE chunk carrying multiple generated-media
+// blobs at once, the way Gemini can pack several inline parts (across parts
+// or candidates) into one chunk.
+func (b *streamBuilder) AddMultiMedia(blobs ...chat.MediaDelta) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index: 0,
+			Delta: chat.MessageDelta{Media: blobs},
+		}},
+	})
+	return b
+}
+
+// AddMediaWithStop appends a SINGLE terminal chunk carrying both a
+// generated-media blob and a terminal finish_reason, the way a provider can
+// pack the final image and "stop" into one chunk.
+func (b *streamBuilder) AddMediaWithStop(data []byte, mimeType, name string, finishReason chat.FinishReason) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index:        0,
+			FinishReason: finishReason,
+			Delta: chat.MessageDelta{Media: []chat.MediaDelta{{
+				Data:     data,
+				MimeType: mimeType,
+				Name:     name,
+				Size:     int64(len(data)),
+			}}},
+		}},
+		Usage: &chat.Usage{InputTokens: 1, OutputTokens: 1},
+	})
+	return b
+}
+
 // AddToolCallWithStop appends a single chunk that carries BOTH a complete tool
 // call AND a terminal finish_reason ("stop"), the way LiteLLM/Gemini emit a
 // function call atomically. The OpenAI-native streaming protocol never does
@@ -161,6 +212,140 @@ func TestHandleStream_ToolCallThenSeparateStop(t *testing.T) {
 	assert.JSONEq(t, `{"query":"x"}`, res.Calls[0].Function.Arguments)
 	assert.Equal(t, chat.FinishReasonToolCalls, res.FinishReason)
 	assert.False(t, res.Stopped)
+}
+
+// TestHandleStream_MediaAccumulatesAlongsideText verifies that a
+// generated-media delta streamed alongside text is accumulated into
+// streamResult.Media without disturbing the existing text/finish-reason
+// handling.
+func TestHandleStream_MediaAccumulatesAlongsideText(t *testing.T) {
+	t.Parallel()
+
+	imgBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	stream := newStreamBuilder().
+		AddContent("here is your image").
+		AddMedia(imgBytes, "image/png", "cat.png").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, "here is your image", res.Content, "text must survive alongside media")
+	require.Len(t, res.Media, 1)
+	assert.Equal(t, imgBytes, res.Media[0].Data)
+	assert.Equal(t, "image/png", res.Media[0].MimeType)
+	assert.Equal(t, "cat.png", res.Media[0].Name)
+	assert.Equal(t, chat.FinishReasonStop, res.FinishReason)
+	assert.True(t, res.Stopped)
+}
+
+// TestHandleStream_MediaOnlyTurnNotTreatedAsEmpty is a regression test: a
+// turn that streams ONLY a generated image (no text, no tool calls) and
+// ends with a bare EOF must not be misclassified as the "no output" stall
+// case — it is a normal completion and must report Stopped=true (turn
+// ends) without going through the no-output warning path.
+func TestHandleStream_MediaOnlyTurnNotTreatedAsEmpty(t *testing.T) {
+	t.Parallel()
+
+	imgBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	stream := newStreamBuilder().
+		AddMedia(imgBytes, "image/png", "").
+		Build() // no terminal chunk: bare EOF, no finish reason
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	assert.Empty(t, res.Content)
+	require.Len(t, res.Media, 1, "the generated image must be accumulated")
+	assert.True(t, res.Stopped, "a media-only turn is a normal completion, not a stall")
+}
+
+// TestHandleStream_MultipleMediaBlobsInOneChunk verifies that every inline
+// blob a provider packs into a SINGLE chunk is retained, not just the last
+// one — a provider (Gemini in particular) can return more than one
+// generated image across parts/candidates in the same streaming chunk.
+func TestHandleStream_MultipleMediaBlobsInOneChunk(t *testing.T) {
+	t.Parallel()
+
+	blob1 := chat.MediaDelta{Data: []byte{0x01}, MimeType: "image/png", Name: "one.png", Size: 1}
+	blob2 := chat.MediaDelta{Data: []byte{0x02}, MimeType: "image/jpeg", Name: "two.jpg", Size: 1}
+	blob3 := chat.MediaDelta{Data: []byte{0x03}, MimeType: "image/webp", Name: "three.webp", Size: 1}
+
+	stream := newStreamBuilder().
+		AddMultiMedia(blob1, blob2, blob3).
+		AddStopWithUsage(1, 1).
+		Build()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	require.Len(t, res.Media, 3, "every blob in the chunk must be retained, not just the last one")
+	assert.Equal(t, blob1, res.Media[0])
+	assert.Equal(t, blob2, res.Media[1])
+	assert.Equal(t, blob3, res.Media[2])
+}
+
+// TestHandleStream_MediaInTerminalChunkIsAccumulated verifies that a
+// generated-media blob packed into the SAME chunk as a terminal finish
+// reason ("stop", "length", or "refusal") is accumulated before the early
+// return, matching the same-chunk tool-call fix above. Accumulating after
+// the terminal-finish-reason check would return before this chunk's media
+// was ever added, silently dropping it.
+func TestHandleStream_MediaInTerminalChunkIsAccumulated(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		finishReason chat.FinishReason
+	}{
+		{"stop", chat.FinishReasonStop},
+		{"length", chat.FinishReasonLength},
+		{"refusal", chat.FinishReasonRefusal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			imgBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+			stream := newStreamBuilder().
+				AddMediaWithStop(imgBytes, "image/png", "cat.png", tc.finishReason).
+				Build()
+
+			a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+			sess := session.New(session.WithUserMessage("go"))
+
+			evCh := make(chan Event, 64)
+			res, err := handleStream(
+				t.Context(), nil, stream, a, nil, sess, nil,
+				defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+			)
+			require.NoError(t, err)
+
+			require.Len(t, res.Media, 1, "media sharing a chunk with the terminal finish reason must not be dropped")
+			assert.Equal(t, imgBytes, res.Media[0].Data)
+			assert.Equal(t, tc.finishReason, res.FinishReason)
+		})
+	}
 }
 
 // TestHandleStream_WhitespaceOnlyContentStops is a regression test for an
