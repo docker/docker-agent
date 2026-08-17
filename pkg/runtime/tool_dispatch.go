@@ -57,7 +57,7 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 // permissionCheckers returns the ordered list of permission checkers to
 // evaluate (session-level first, then team-level). The tiers matter:
 // session ask rules beat every safety mode, team ask rules yield to
-// Balanced/Autonomous — see [toolexec.Decide].
+// Balanced/Restricted/Autonomous — see [toolexec.Decide].
 func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.NamedChecker {
 	var checkers []toolexec.NamedChecker
 	if perms := sess.ClonePermissions(); perms != nil {

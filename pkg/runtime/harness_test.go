@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/js"
+	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -49,7 +50,20 @@ func TestMain(m *testing.M) {
 	}
 	harnessBinDir = dir
 
+	// The package's user-config reads (cache_stable_prompts, cache_miss_warnings)
+	// must see library defaults, not a developer's real ~/.config/cagent/config.yaml.
+	// Set once before m.Run and never mutated, so it stays safe for parallel tests.
+	//nolint:forbidigo // TestMain has no *testing.T, so t.TempDir is unavailable.
+	configDir, err := os.MkdirTemp("", "runtime-test-config-*")
+	if err != nil {
+		panic(err)
+	}
+	paths.SetConfigDir(configDir)
+
 	code := m.Run()
+
+	paths.SetConfigDir("")
+	_ = os.RemoveAll(configDir)
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }

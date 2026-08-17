@@ -118,6 +118,14 @@ func TestCreateLocalRuntimeAndSession_FreshSessionSafetyResolution(t *testing.T)
 			wantEffective: session.SafetyPolicyStrict,
 		},
 		{
+			name:          "user-owned restricted wins over author defaults",
+			rootSafety:    latest.SafetyModeAutonomous,
+			runtimeSafety: latest.SafetyModeAutonomous,
+			req:           runtime.CreateSessionRequest{SafetyPolicy: session.SafetyPolicyRestricted},
+			wantStored:    session.SafetyPolicyRestricted,
+			wantEffective: session.SafetyPolicyRestricted,
+		},
+		{
 			name:          "legacy user yolo wins over author defaults",
 			rootSafety:    latest.SafetyModeStrict,
 			req:           runtime.CreateSessionRequest{ToolsApproved: true},

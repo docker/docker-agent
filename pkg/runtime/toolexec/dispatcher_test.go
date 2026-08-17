@@ -692,6 +692,96 @@ func TestDispatcher_BalancedClassifiesShellCommands(t *testing.T) {
 	})
 }
 
+// Restricted is the fail-closed profile for unattended runs: safe
+// calls auto-run, everything else is rejected outright — no
+// confirmation prompt, no tool execution — with the stable
+// mode_restricted audit source on both legs.
+func TestDispatcher_RestrictedFailClosed(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+
+	t.Run("safe command auto-approves", func(t *testing.T) {
+		t.Parallel()
+		sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyRestricted))
+
+		var ran bool
+		tool := tools.Tool{
+			Name: "shell",
+			Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+				ran = true
+				return tools.ResultSuccess("ok"), nil
+			},
+		}
+		hd := &stubHookDispatcher{}
+		d := &toolexec.Dispatcher{
+			AgentFor: func(*session.Session) *agent.Agent { return a },
+			Hooks:    hd,
+		}
+		em := &captureEmitter{}
+
+		d.Process(t.Context(), sess, []tools.ToolCall{{
+			ID:       "s",
+			Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"git status"}`},
+		}}, []tools.Tool{tool}, em)
+
+		assert.True(t, ran, "restricted must auto-approve classifier-safe shell commands")
+		assert.Empty(t, em.confirmations)
+		require.Len(t, hd.approvals, 1)
+		assert.Equal(t, approvalRecord{Decision: toolexec.ApprovalDecisionAllow, Source: toolexec.ApprovalSourceModeRestricted}, hd.approvals[0])
+	})
+
+	denyCases := []struct {
+		name string
+		tool string
+		args string
+	}{
+		{name: "destructive command is denied without prompting", tool: "shell", args: `{"cmd":"rm -rf /tmp/x"}`},
+		{name: "unknown tool is denied without prompting", tool: "custom_tool", args: "{}"},
+	}
+	for _, tc := range denyCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyRestricted))
+
+			tool := tools.Tool{
+				Name: tc.tool,
+				Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+					panic("must not run under restricted")
+				},
+			}
+			hd := &stubHookDispatcher{}
+			// No Resume channel: if the dispatcher wrongly asked for
+			// confirmation it would block, so cancel on the first
+			// confirmation event to fail cleanly instead of hanging.
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+			d := &toolexec.Dispatcher{
+				AgentFor: func(*session.Session) *agent.Agent { return a },
+				Hooks:    hd,
+			}
+			em := &captureEmitter{confirmed: make(chan struct{})}
+			go func() {
+				<-em.confirmed
+				cancel()
+			}()
+
+			d.Process(ctx, sess, []tools.ToolCall{{
+				ID:       "x",
+				Function: tools.FunctionCall{Name: tc.tool, Arguments: tc.args},
+			}}, []tools.Tool{tool}, em)
+
+			assert.Empty(t, em.confirmations, "restricted must deny without asking for confirmation")
+			require.Len(t, em.responses, 1)
+			assert.True(t, em.responses[0].IsError)
+			assert.Contains(t, em.responses[0].Output, "restricted safety mode")
+			assert.Contains(t, em.responses[0].Output, "the mode's fallback denies instead of asking",
+				"deny message must blame the mode fallback, not the whole session — ask rules and preempt hooks can still prompt")
+			require.Len(t, hd.approvals, 1)
+			assert.Equal(t, approvalRecord{Decision: toolexec.ApprovalDecisionDeny, Source: toolexec.ApprovalSourceModeRestricted}, hd.approvals[0])
+		})
+	}
+}
+
 // A custom deny rule blocks a call even under Autonomous.
 func TestDispatcher_DenyRuleBlocksUnderAutonomous(t *testing.T) {
 	t.Parallel()

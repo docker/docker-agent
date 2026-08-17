@@ -82,6 +82,7 @@ type Summary struct {
 	CreatedAt   time.Time
 	Starred     bool
 	NumMessages int
+	Cost        float64
 	WorkingDir  string
 	Attributes  map[string]string
 }
@@ -180,12 +181,14 @@ func (s *InMemorySessionStore) GetSessionSummaries(_ context.Context) ([]Summary
 		if value.ParentID != "" {
 			return true
 		}
+		_, _, cost := value.TokensAndCost()
 		summaries = append(summaries, Summary{
 			ID:          value.ID,
 			Title:       value.TitleSnapshot(),
 			CreatedAt:   value.CreatedAt,
 			Starred:     value.Starred,
 			NumMessages: value.MessageCount(),
+			Cost:        cost,
 			WorkingDir:  value.WorkingDir,
 			Attributes:  value.AttributesSnapshot(),
 		})
@@ -843,7 +846,7 @@ func (s *SQLiteSessionStore) GetSessions(ctx context.Context) ([]*Session, error
 // This is much faster than GetSessions as it doesn't load message content.
 func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT s.id, s.title, s.created_at, s.starred, s.working_dir, s.attributes,
+		`SELECT s.id, s.title, s.created_at, s.starred, s.cost, s.working_dir, s.attributes,
 		        (SELECT COUNT(*) FROM session_items si WHERE si.session_id = s.id AND si.item_type = 'message')
 		 FROM sessions s
 		 WHERE s.parent_id IS NULL OR s.parent_id = ''
@@ -861,7 +864,7 @@ func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary
 			workingDir     sql.NullString
 			attributesJSON sql.NullString
 		)
-		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &workingDir, &attributesJSON, &summary.NumMessages); err != nil {
+		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &summary.Cost, &workingDir, &attributesJSON, &summary.NumMessages); err != nil {
 			return nil, err
 		}
 		summary.CreatedAt = parseCreatedAt(createdAtStr)

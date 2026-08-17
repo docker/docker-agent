@@ -16,6 +16,7 @@ import (
 // authInfo holds the parsed JWT authentication information.
 type authInfo struct {
 	Token     string    `json:"token"`
+	Source    string    `json:"source,omitempty"`
 	Subject   string    `json:"subject,omitempty"`
 	Issuer    string    `json:"issuer,omitempty"`
 	IssuedAt  time.Time `json:"issued_at,omitzero"`
@@ -30,7 +31,7 @@ func newDebugAuthCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "auth",
-		Short: "Print Docker Desktop authentication information",
+		Short: "Print Docker authentication information",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) (commandErr error) {
 			ctx := cmd.Context()
@@ -41,14 +42,14 @@ func newDebugAuthCmd() *cobra.Command {
 
 			w := cmd.OutOrStdout()
 
-			token := desktop.GetToken(ctx)
+			token, source := desktop.GetTokenWithSource(ctx)
 			if token == "" {
 				if jsonOutput {
 					return json.NewEncoder(w).Encode(map[string]string{
-						"error": "no token found (is Docker Desktop running and are you logged in?)",
+						"error": "no token found (is Docker Desktop running, or are you logged in with `docker login`?)",
 					})
 				}
-				fmt.Fprintln(w, "No token found. Is Docker Desktop running and are you logged in?")
+				fmt.Fprintln(w, "No token found. Is Docker Desktop running, or are you logged in with `docker login`?")
 				return nil
 			}
 
@@ -56,6 +57,7 @@ func newDebugAuthCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to parse JWT: %w", err)
 			}
+			info.Source = string(source)
 
 			userInfo := desktop.GetUserInfo(ctx)
 			info.Username = userInfo.Username
@@ -112,6 +114,9 @@ func printAuthInfoText(w io.Writer, info *authInfo) {
 		fmt.Fprintf(w, "Token:      %s...%s\n", info.Token[:previewLen], info.Token[len(info.Token)-previewLen:])
 	}
 
+	if info.Source != "" {
+		fmt.Fprintf(w, "Source:     %s\n", info.Source)
+	}
 	if info.Username != "" {
 		fmt.Fprintf(w, "Username:   %s\n", info.Username)
 	}

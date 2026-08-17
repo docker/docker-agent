@@ -664,9 +664,10 @@
           "enum": [
             "strict",
             "balanced",
+            "restricted",
             "autonomous"
           ],
-          "description": "Safety mode new sessions started on this agent default to when the user has not chosen one (no --safety/--yolo flag, no alias option, no user-config setting). Takes precedence over the config-wide runtime.safety. A default only: it never overrides a user choice and never replaces the mode stored on a resumed session. Trust warning: 'autonomous' auto-approves every tool call — review configs from URLs or OCI registries before running them."
+          "description": "Safety mode new sessions started on this agent default to when the user has not chosen one (no --safety/--yolo flag, no alias option, no user-config setting). Takes precedence over the config-wide runtime.safety. A default only: it never overrides a user choice and never replaces the mode stored on a resumed session. 'restricted' is the fail-closed profile for unattended runs: safe calls auto-approve, every other unmatched call is denied without prompting. Trust warning: 'autonomous' auto-approves every tool call — review configs from URLs or OCI registries before running them."
         },
         "redact_secrets": {
           "type": "boolean",
@@ -797,6 +798,15 @@
               "type": "boolean",
               "description": "Enable strict schema adherence (OpenAI only). When true, all properties must be in required array.",
               "default": false
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "native",
+                "tool"
+              ],
+              "description": "How the schema is enforced. 'native' (default) passes it to the provider's native structured-output support. 'tool' exposes an internal tool the model must call with the final JSON; the runtime validates the arguments against the schema. Works with any tool-calling provider.",
+              "default": "native"
             },
             "schema": {
               "type": "object",
@@ -1855,9 +1865,10 @@
           "enum": [
             "strict",
             "balanced",
+            "restricted",
             "autonomous"
           ],
-          "description": "Safety mode new sessions default to when the user has not chosen one (no --safety/--yolo flag, no alias option, no user-config setting). A per-agent 'safety' takes precedence over this config-wide default. A default only: it never overrides a user choice and never replaces the mode stored on a resumed session. Trust warning: 'autonomous' auto-approves every tool call — review configs from URLs or OCI registries before running them."
+          "description": "Safety mode new sessions default to when the user has not chosen one (no --safety/--yolo flag, no alias option, no user-config setting). A per-agent 'safety' takes precedence over this config-wide default. A default only: it never overrides a user choice and never replaces the mode stored on a resumed session. 'restricted' is the fail-closed profile for unattended runs: safe calls auto-approve, every other unmatched call is denied without prompting. Trust warning: 'autonomous' auto-approves every tool call — review configs from URLs or OCI registries before running them."
         }
       },
       "additionalProperties": false
@@ -2352,7 +2363,7 @@
         },
         "safer": {
           "type": "boolean",
-          "description": "Deprecated and ignored (only valid for type 'shell'). The runtime now classifies every shell command natively (safe / destructive / unknown) and gates it through the session's safety mode (strict / balanced / autonomous), so the opt-in is meaningless. Kept so existing YAMLs with safer: true still parse."
+          "description": "Deprecated and ignored (only valid for type 'shell'). The runtime now classifies every shell command natively (safe / destructive / unknown) and gates it through the session's safety mode (strict / balanced / restricted / autonomous), so the opt-in is meaningless. Kept so existing YAMLs with safer: true still parse."
         },
         "url": {
           "type": "string",

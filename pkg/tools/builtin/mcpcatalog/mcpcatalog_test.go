@@ -17,11 +17,13 @@ import (
 	"testing"
 	"time"
 
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
+	"github.com/docker/docker-agent/pkg/tools/mcp/oauthflow"
 )
 
 // stubStartOK swaps the Toolset's synchronous-Start seam for a no-op so
@@ -889,6 +891,202 @@ func TestToolsExposesEnabledServerTools(t *testing.T) {
 
 	// Cleanup so the test doesn't leak the supervisor's watch goroutine.
 	require.NoError(t, ts.Stop(ctx))
+}
+
+// TestHandleEnable_OAuthDCR_ChallengePRMScopeFallback drives
+// enable_remote_mcp_server for a synthetic "oauth" catalog entry through a
+// real (un-stubbed) mcp.Toolset.Start() against local httptest fixtures.
+//
+// handleEnable always constructs the inner toolset with a nil
+// *latest.RemoteOAuthConfig (mcp.NewRemoteToolset(id, server.URL,
+// server.Transport, nil, nil)) — every catalog server relies entirely on
+// pkg/tools/mcp/oauth.go's discovery-based scope selection. This test
+// proves that product path itself, not just the already unit-tested
+// selectDCRScopes helper, falls back from an unscoped 401 challenge to the
+// protected-resource metadata's scopes_supported, carries that exact scope
+// through a successful dynamic client registration, and reaches both the
+// /authorize URL and the stored token's RequestedScopes bookkeeping without
+// panicking.
+func TestHandleEnable_OAuthDCR_ChallengePRMScopeFallback(t *testing.T) {
+	// Swaps the process-wide OAuth HTTP client (so DCR/PRM/token requests
+	// can reach the httptest server's loopback address) and the process-wide
+	// browser opener for the duration of the test — incompatible with
+	// t.Parallel(), like the equivalent pkg/tools/mcp/oauth_test.go fixture.
+	restoreHTTPClient := oauthflow.SetHTTPClientForTesting(oauthflow.HTTPClientForAllowPrivateIPs(true))
+	defer restoreHTTPClient()
+	urlCh := fakeCatalogBrowserOpener(t)
+
+	prmScopes := []string{"catalog-scope-a", "catalog-scope-b"}
+	var capturedScope string
+	srv := newOAuthDCRFakeMCPServer(t, prmScopes, &capturedScope)
+	defer srv.Close()
+
+	ts := New()
+	ts.SetManagedOAuth(true)
+	ts.SetElicitationHandler(func(context.Context, *gomcp.ElicitParams) (tools.ElicitationResult, error) {
+		return tools.ElicitationResult{Action: tools.ElicitationActionAccept}, nil
+	})
+
+	const id = "test-oauth-dcr-server"
+	server := Server{
+		ID:        id,
+		Title:     "OAuth DCR Test Server",
+		URL:       srv.URL,
+		Transport: "streamable-http",
+		Auth:      Auth{Type: "oauth"},
+	}
+	ts.catalog.Servers = append(ts.catalog.Servers, server)
+	ts.byID[id] = server
+
+	type enableOutcome struct {
+		res *tools.ToolCallResult
+		err error
+	}
+	done := make(chan enableOutcome, 1)
+	go func() {
+		res, err := ts.handleEnable(t.Context(), EnableArgs{ID: id})
+		done <- enableOutcome{res, err}
+	}()
+
+	authURL := requireCapturedCatalogAuthorizeURL(t, urlCh)
+	deliverFakeCatalogOAuthCallback(t, authURL, "catalog-test-authorization-code")
+
+	var outcome enableOutcome
+	select {
+	case outcome = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for handleEnable to complete")
+	}
+	require.NoError(t, outcome.err)
+	require.False(t, outcome.res.IsError, "enable: %s", outcome.res.Output)
+
+	require.NotEmpty(t, capturedScope, "DCR request must carry a scope field")
+	expectedScope := strings.Join(prmScopes, " ")
+	assert.Equal(t, expectedScope, capturedScope,
+		"nil oauthConfig must fall back to the PRM scopes_supported for DCR since the 401 challenge carried no scope")
+
+	parsedAuthURL, err := url.Parse(authURL)
+	require.NoError(t, err)
+	assert.Equal(t, expectedScope, parsedAuthURL.Query().Get("scope"),
+		"the /authorize URL must carry the exact same scope sent to DCR")
+
+	tok, err := mcptools.NewKeyringTokenStore().GetToken(srv.URL)
+	require.NoError(t, err)
+	require.NotNil(t, tok)
+	assert.Equal(t, prmScopes, tok.RequestedScopes,
+		"the stored token's RequestedScopes must match the PRM-fallback scope reached through the nil-oauthConfig catalog path")
+
+	require.NoError(t, ts.Stop(t.Context()))
+}
+
+// fakeCatalogBrowserOpener swaps the process-wide browser opener for one
+// that captures the authorization URL into a buffered channel instead of
+// launching a real browser. Restores the original on cleanup.
+// Mutating the process-wide opener is incompatible with t.Parallel.
+func fakeCatalogBrowserOpener(t *testing.T) <-chan string {
+	t.Helper()
+	urlCh := make(chan string, 1)
+	restore := oauthflow.SetBrowserOpenerForTesting(func(_ context.Context, rawURL string) error {
+		select {
+		case urlCh <- rawURL:
+		default:
+		}
+		return nil
+	})
+	t.Cleanup(restore)
+	return urlCh
+}
+
+func requireCapturedCatalogAuthorizeURL(t *testing.T, urlCh <-chan string) string {
+	t.Helper()
+	select {
+	case u := <-urlCh:
+		return u
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for the fake browser opener to receive the authorize URL")
+		return ""
+	}
+}
+
+func deliverFakeCatalogOAuthCallback(t *testing.T, authURL, code string) {
+	t.Helper()
+
+	parsed, err := url.Parse(authURL)
+	require.NoError(t, err)
+	redirectURI := parsed.Query().Get("redirect_uri")
+	require.NotEmpty(t, redirectURI, "authorize URL must carry redirect_uri")
+	state := parsed.Query().Get("state")
+	require.NotEmpty(t, state, "authorize URL must carry state")
+
+	cbURL, err := url.Parse(redirectURI)
+	require.NoError(t, err)
+	cbQuery := cbURL.Query()
+	cbQuery.Set("code", code)
+	cbQuery.Set("state", state)
+	cbURL.RawQuery = cbQuery.Encode()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, cbURL.String(), http.NoBody)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "fake OAuth callback must be accepted")
+}
+
+// newOAuthDCRFakeMCPServer builds an httptest server that 401s any MCP
+// request lacking a bearer token with a bare "WWW-Authenticate: Bearer"
+// challenge (no scope= parameter — the shape a real provider's unscoped
+// challenge takes; see the atlassian-mcp-oauth-scopes plan), serves
+// protected-resource and authorization-server metadata, captures the scope
+// requested at dynamic client registration into *capturedScope, and
+// completes the initialize/tools handshake exactly like newFakeMCPServer
+// once a bearer token is attached.
+func newOAuthDCRFakeMCPServer(t *testing.T, prmScopesSupported []string, capturedScope *string) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	authenticatedMCP := mcpHandler(t, false)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		authenticatedMCP(w, r)
+	})
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
+		origin := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resource":              origin,
+			"authorization_servers": []string{origin},
+			"scopes_supported":      prmScopesSupported,
+		})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
+		origin := "http://" + r.Host
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"issuer":                 origin,
+			"authorization_endpoint": origin + "/authorize",
+			"token_endpoint":         origin + "/token",
+			"registration_endpoint":  origin + "/register",
+		})
+	})
+	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Scope string `json:"scope"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		*capturedScope = body.Scope
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_id":"catalog-dcr-client","client_secret":"catalog-dcr-secret"}`))
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"catalog-access-token","token_type":"Bearer","expires_in":3600}`))
+	})
+	return httptest.NewServer(mux)
 }
 
 // TestResetAuthForwardsToTokenStore verifies that reset_remote_mcp_server_auth

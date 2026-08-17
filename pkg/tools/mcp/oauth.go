@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -31,22 +30,21 @@ import (
 	"github.com/docker/docker-agent/pkg/upstream"
 )
 
-// resourceMetadataFromWWWAuth extracts resource metadata URL from WWW-Authenticate header.
-var resourceMetadataRe = regexp.MustCompile(`(?i)(?:^|[,\s])resource_metadata\s*=\s*(?:"([^"]+)"|([^,\s]+))`)
-
-var resourceRe = regexp.MustCompile(`(?i)(?:^|[,\s])resource\s*=\s*(?:"([^"]+)"|([^,\s]+))`)
-
-// errorCodeRe extracts the RFC 6750 error= parameter from a WWW-Authenticate header.
-var errorCodeRe = regexp.MustCompile(`error="([^"]+)"`)
-
 // errorCodeFromWWWAuth returns the RFC 6750 error code from a WWW-Authenticate
 // header value (e.g. "invalid_token"), or an empty string when absent.
 func errorCodeFromWWWAuth(wwwAuth string) string {
-	matches := errorCodeRe.FindStringSubmatch(wwwAuth)
-	if len(matches) == 2 {
-		return matches[1]
+	return parseAuthParams(wwwAuth)["error"]
+}
+
+// challengeScopesFromWWWAuth returns the space-delimited scopes advertised by
+// a 401 challenge's WWW-Authenticate header (RFC 6750 scope=), or nil when
+// the header carries no scope parameter.
+func challengeScopesFromWWWAuth(wwwAuth string) []string {
+	scope := parseAuthParams(wwwAuth)["scope"]
+	if scope == "" {
+		return nil
 	}
-	return ""
+	return strings.Fields(scope)
 }
 
 // unmanagedOAuthWaitTimeout is the default upper bound on how long the
@@ -263,21 +261,171 @@ func createDefaultMetadata(authServerURL string) *AuthorizationServerMetadata {
 }
 
 func resourceMetadataFromWWWAuth(wwwAuth string) string {
-	if resourceMetadata := wwwAuthParam(resourceMetadataRe, wwwAuth); resourceMetadata != "" {
+	params := parseAuthParams(wwwAuth)
+	if resourceMetadata := params["resource_metadata"]; resourceMetadata != "" {
 		return resourceMetadata
 	}
-	return wwwAuthParam(resourceRe, wwwAuth)
+	return params["resource"]
 }
 
-func wwwAuthParam(re *regexp.Regexp, wwwAuth string) string {
-	matches := re.FindStringSubmatch(wwwAuth)
-	if len(matches) != 3 {
-		return ""
+// protectedResourceMetadataOptions configures fetchProtectedResourceMetadata.
+type protectedResourceMetadataOptions struct {
+	// FallbackCandidateURLs are additional protected-resource metadata URLs
+	// tried, in order, only after the primary resourceURL 404s. Leave this
+	// empty for runtime callers, which must preserve the existing
+	// single-candidate, supplied-origin-default behavior exactly. Computing
+	// these candidates (RFC 9728 path-insertion, then origin-root) is the
+	// standalone CLI discovery flow's responsibility, not this helper's.
+	FallbackCandidateURLs []string
+}
+
+// fetchProtectedResourceMetadata fetches and decodes RFC 9728 OAuth
+// protected-resource metadata for a challenged MCP server, deduplicating
+// logic shared by the runtime-managed and docker-agent-driven unmanaged
+// OAuth flows.
+//
+// resourceURL is the primary candidate (normally the challenge's
+// resource_metadata, or otherwise authServer's
+// /.well-known/oauth-protected-resource). A 404 on a candidate is not an
+// error: it is treated as an empty metadata document, matching current
+// runtime behavior, and AuthorizationServers is defaulted to authServer
+// below once every candidate has been tried.
+//
+// Any decode failure or non-404/non-200 response (including another 2xx
+// like 201 or 204) on any attempted candidate is a hard error: no further
+// candidate is tried and the caller must not proceed to authorization-server
+// discovery, DCR, or token work.
+func fetchProtectedResourceMetadata(ctx context.Context, client *http.Client, resourceURL, authServer string, opts protectedResourceMetadataOptions) (protectedResourceMetadata, error) {
+	candidates := append([]string{resourceURL}, opts.FallbackCandidateURLs...)
+
+	var metadata protectedResourceMetadata
+	for _, candidateURL := range candidates {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, candidateURL, http.NoBody)
+		if err != nil {
+			return protectedResourceMetadata{}, err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return protectedResourceMetadata{}, err
+		}
+
+		if resp.StatusCode == http.StatusNotFound {
+			resp.Body.Close()
+			continue
+		}
+		if resp.StatusCode != http.StatusOK {
+			_, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return protectedResourceMetadata{}, errors.New("failed to fetch protected resource metadata")
+		}
+
+		decodeErr := json.NewDecoder(resp.Body).Decode(&metadata)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return protectedResourceMetadata{}, decodeErr
+		}
+		break
 	}
-	if matches[1] != "" {
-		return matches[1]
+
+	if len(metadata.AuthorizationServers) == 0 {
+		slog.DebugContext(ctx, "No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
+		metadata.AuthorizationServers = []string{authServer}
 	}
-	return matches[2]
+
+	return metadata, nil
+}
+
+// parseAuthParams parses the top-level auth-params across every challenge
+// in a WWW-Authenticate header value (RFC 7235 auth-param, as profiled by
+// RFC 6750 for the Bearer scheme) into a single lowercase-key map. It is
+// quote-aware: a comma or "name=" sequence inside another parameter's
+// quoted value (e.g. error_description="insufficient scope=read") is part
+// of that value, never a new top-level parameter. Only genuine top-level
+// auth-params can match a key such as "scope" or "resource_metadata".
+//
+// RFC 7235 allows a header to list multiple challenges separated by commas
+// (e.g. `Basic realm="corp", Bearer resource_metadata="..."`). Each
+// challenge's own auth-scheme token has no "=" following it, so the scanner
+// skips it and keeps going rather than stopping there — otherwise every
+// param of a later challenge (notably a later Bearer's resource_metadata,
+// scope, or error) would be lost. Callers that care about a single specific
+// challenge (e.g. only the Bearer one) are not distinguished here; if two
+// challenges share a param name, the later one wins.
+func parseAuthParams(wwwAuth string) map[string]string {
+	params := make(map[string]string)
+
+	s := strings.TrimSpace(wwwAuth)
+	// Skip the leading auth-scheme token (e.g. "Bearer").
+	i := strings.IndexAny(s, " \t")
+	if i < 0 {
+		return params
+	}
+	s = strings.TrimLeft(s[i+1:], " \t")
+
+	for s != "" {
+		s = strings.TrimLeft(s, " \t,")
+		if s == "" {
+			break
+		}
+
+		nameEnd := strings.IndexAny(s, "= \t,")
+		if nameEnd <= 0 {
+			break
+		}
+		name := strings.ToLower(s[:nameEnd])
+		s = strings.TrimLeft(s[nameEnd:], " \t")
+		if !strings.HasPrefix(s, "=") {
+			// A bare token rather than a name=value auth-param. In a
+			// multi-challenge header this is the next challenge's
+			// auth-scheme token (e.g. "Bearer" in
+			// `Basic realm="corp", Bearer resource_metadata="..."`), so we
+			// must keep scanning rather than stop, or every auth-param of
+			// later challenges would be silently dropped. This also means a
+			// token68 credential (RFC 7235) is skipped rather than
+			// consumed: any "=" padding within it is then misread as the
+			// start of a name=value pair on the next iteration. Accepted
+			// limitation — see TestParseAuthParams_MultiChallenge for the
+			// documented, deterministic behavior on such input.
+			continue
+		}
+		s = strings.TrimLeft(s[1:], " \t")
+
+		var value string
+		if strings.HasPrefix(s, `"`) {
+			value, s = consumeQuotedString(s)
+		} else {
+			end := strings.IndexAny(s, ", \t")
+			if end < 0 {
+				end = len(s)
+			}
+			value, s = s[:end], s[end:]
+		}
+		params[name] = value
+	}
+
+	return params
+}
+
+// consumeQuotedString consumes a leading RFC 7230 quoted-string from s
+// (which must start with '"'), honoring backslash escapes, and returns the
+// unescaped value plus the remainder of s after the closing quote. An
+// unterminated quoted string consumes the rest of s as its value.
+func consumeQuotedString(s string) (value, rest string) {
+	var b strings.Builder
+	i := 1
+	for i < len(s) {
+		switch {
+		case s[i] == '\\' && i+1 < len(s):
+			b.WriteByte(s[i+1])
+			i += 2
+		case s[i] == '"':
+			return b.String(), s[i+1:]
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return b.String(), ""
 }
 
 // callbackRedirectURLFrom is a nil-safe accessor for the optional
@@ -933,16 +1081,26 @@ func (t *oauthTransport) refreshStoredToken(ctx context.Context, prev *OAuthToke
 //     forcing a re-auth on upgrade.
 //   - Otherwise, every configured scope must appear in the token's
 //     RequestedScopes.
+//
+// Both sides are compared through normalizeScopes: selectDCRScopes stamps
+// the normalized (trimmed, deduplicated) form of the configured scopes onto
+// RequestedScopes on a successful DCR grant, so comparing that against raw
+// config entries would fail whenever the config has stray whitespace or
+// duplicates — discarding an otherwise-sufficient token and forcing a fresh
+// OAuth flow on every single preflight check. This is strictly a
+// normalization-consistency fix: coverage stays config-only, and no
+// challenge/PRM input reaches this comparison.
 func (t *oauthTransport) tokenCoversConfiguredScopes(token *OAuthToken) bool {
-	configured := configuredScopes(t.oauthConfig)
+	configured := normalizeScopes(configuredScopes(t.oauthConfig))
 	if len(configured) == 0 {
 		return true
 	}
-	if len(token.RequestedScopes) == 0 {
+	storedScopes := normalizeScopes(token.RequestedScopes)
+	if len(storedScopes) == 0 {
 		return true
 	}
-	stored := make(map[string]struct{}, len(token.RequestedScopes))
-	for _, s := range token.RequestedScopes {
+	stored := make(map[string]struct{}, len(storedScopes))
+	for _, s := range storedScopes {
 		stored[s] = struct{}{}
 	}
 	for _, s := range configured {
@@ -960,6 +1118,57 @@ func configuredScopes(c *latest.RemoteOAuthConfig) []string {
 		return nil
 	}
 	return c.Scopes
+}
+
+// normalizeScopes trims each entry, drops empties, and de-duplicates while
+// preserving order, so the same scope list compares equal regardless of
+// which upstream source (config, challenge, PRM) it came from.
+func normalizeScopes(scopes []string) []string {
+	if len(scopes) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(scopes))
+	out := make([]string, 0, len(scopes))
+	for _, s := range scopes {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// selectDCRScopes deterministically picks the scope list to request for a
+// newly dynamically-registered (RFC 7591) OAuth client, in priority order:
+//
+//  1. The scopes explicitly configured for this toolset.
+//  2. The scope the server's 401 challenge advertised (RFC 6750 scope=).
+//  3. The scopes the protected-resource metadata declares as supported
+//     (RFC 8707/9728 scopes_supported).
+//
+// Returns nil when none of the three are available: omitting the parameter
+// lets the authorization server apply its own default rather than us
+// guessing one.
+//
+// The caller must reuse the exact same return value for the DCR request,
+// the /authorize URL, and the resulting token's RequestedScopes, so a later
+// refresh or scope-coverage check sees what was actually granted.
+func selectDCRScopes(configured, challengeScopes, prmScopesSupported []string) []string {
+	if scopes := normalizeScopes(configured); scopes != nil {
+		return scopes
+	}
+	if scopes := normalizeScopes(challengeScopes); scopes != nil {
+		return scopes
+	}
+	return normalizeScopes(prmScopesSupported)
 }
 
 // handleOAuthFlow performs the OAuth flow when a 401 response is received
@@ -1006,30 +1215,9 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	resourceURL := cmp.Or(resourceMetadataFromWWWAuth(wwwAuth), authServer+"/.well-known/oauth-protected-resource")
 
 	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "fetch_protected_resource_metadata")))
-	resourceReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, http.NoBody)
+	resourceMetadata, err := fetchProtectedResourceMetadata(ctx, t.oauthClient(), resourceURL, authServer, protectedResourceMetadataOptions{})
 	if err != nil {
 		return err
-	}
-	resp, err := t.oauthClient().Do(resourceReq)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		_, _ = io.ReadAll(resp.Body)
-		return errors.New("failed to fetch protected resource metadata")
-	}
-	var resourceMetadata protectedResourceMetadata
-	if resp.StatusCode == http.StatusOK {
-		if err := json.NewDecoder(resp.Body).Decode(&resourceMetadata); err != nil {
-			return err
-		}
-	}
-
-	if len(resourceMetadata.AuthorizationServers) == 0 {
-		slog.DebugContext(ctx, "No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
-		resourceMetadata.AuthorizationServers = []string{authServer}
 	}
 
 	oauth := &oauth{metadataClient: t.oauthClient()}
@@ -1065,7 +1253,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	redirectURI := callbackServer.ResolveRedirectURI(callbackRedirectURLFrom(t.oauthConfig))
 	slog.DebugContext(ctx, "Using redirect URI", "uri", redirectURI)
 
-	clientID, clientSecret, scopes, err := t.resolveClientCredentials(ctx, authServerMetadata, redirectURI)
+	clientID, clientSecret, scopes, err := t.resolveClientCredentials(ctx, authServerMetadata, redirectURI, challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported)
 	if err != nil {
 		return err
 	}
@@ -1158,7 +1346,15 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 // attempt RFC 7591 Dynamic Client Registration against the authorization
 // server. When registration is unsupported or fails, we fall back to asking
 // the user for pre-registered client credentials via a form elicitation.
-func (t *oauthTransport) resolveClientCredentials(ctx context.Context, authServerMetadata *AuthorizationServerMetadata, redirectURI string) (clientID, clientSecret string, scopes []string, err error) {
+//
+// challengeScopes and prmScopesSupported feed selectDCRScopes: on a
+// successful dynamic registration the returned scopes are deterministically
+// chosen (configured > challenge > PRM > none) and are the exact scopes
+// requested at DCR, so callers must reuse them for /authorize and the
+// stored token's RequestedScopes. The explicit-credentials and prompt-
+// fallback branches never widen scope via discovery: they always return
+// only the configured scopes (nil when none are configured).
+func (t *oauthTransport) resolveClientCredentials(ctx context.Context, authServerMetadata *AuthorizationServerMetadata, redirectURI string, challengeScopes, prmScopesSupported []string) (clientID, clientSecret string, scopes []string, err error) {
 	switch {
 	case t.oauthConfig != nil && t.oauthConfig.ClientID != "":
 		// Use explicit credentials from config
@@ -1166,12 +1362,16 @@ func (t *oauthTransport) resolveClientCredentials(ctx context.Context, authServe
 		return t.oauthConfig.ClientID, t.oauthConfig.ClientSecret, t.oauthConfig.Scopes, nil
 	case authServerMetadata.RegistrationEndpoint != "":
 		slog.DebugContext(ctx, "Attempting dynamic client registration")
+		// Select before registering so the exact same scopes go into the
+		// DCR request and are returned for reuse at /authorize and on the
+		// stored token.
+		requestedScopes := selectDCRScopes(configuredScopes(t.oauthConfig), challengeScopes, prmScopesSupported)
 		clientID, clientSecret, err = oauthflow.RegisterClientWithClient(
 			ctx,
 			t.oauthClient(),
 			authServerMetadata,
 			redirectURI,
-			nil,
+			requestedScopes,
 		)
 		if err != nil {
 			slog.DebugContext(ctx, "Dynamic registration failed, asking the user for client credentials", "error", err)
@@ -1181,7 +1381,7 @@ func (t *oauthTransport) resolveClientCredentials(ctx context.Context, authServe
 			}
 			return promptedID, promptedSecret, configuredScopes(t.oauthConfig), nil
 		}
-		return clientID, clientSecret, nil, nil
+		return clientID, clientSecret, requestedScopes, nil
 	default:
 		slog.DebugContext(ctx, "Authorization server does not support dynamic client registration, asking the user for client credentials")
 		promptedID, promptedSecret, promptErr := t.promptForClientCredentials(ctx, "The authorization server does not support dynamic client registration.")
@@ -1284,30 +1484,9 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	resourceURL := cmp.Or(resourceMetadataFromWWWAuth(wwwAuth), authServer+"/.well-known/oauth-protected-resource")
 
 	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "fetch_protected_resource_metadata")))
-	resourceReq, err := http.NewRequestWithContext(ctx, http.MethodGet, resourceURL, http.NoBody)
+	resourceMetadata, err := fetchProtectedResourceMetadata(ctx, t.oauthClient(), resourceURL, authServer, protectedResourceMetadataOptions{})
 	if err != nil {
 		return err
-	}
-	resp, err := t.oauthClient().Do(resourceReq)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-		_, _ = io.ReadAll(resp.Body)
-		return errors.New("failed to fetch protected resource metadata")
-	}
-	var resourceMetadata protectedResourceMetadata
-	if resp.StatusCode == http.StatusOK {
-		if err := json.NewDecoder(resp.Body).Decode(&resourceMetadata); err != nil {
-			return err
-		}
-	}
-
-	if len(resourceMetadata.AuthorizationServers) == 0 {
-		slog.DebugContext(ctx, "No authorization servers in resource metadata, using auth server from WWW-Authenticate header")
-		resourceMetadata.AuthorizationServers = []string{authServer}
 	}
 
 	oauth := &oauth{metadataClient: t.oauthClient()}
@@ -1344,7 +1523,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	)
 
 	if driveFlow {
-		clientID, clientSecret, scopes, err = t.resolveClientCredentials(ctx, authServerMetadata, redirectURI)
+		clientID, clientSecret, scopes, err = t.resolveClientCredentials(ctx, authServerMetadata, redirectURI, challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported)
 		if err != nil {
 			return err
 		}

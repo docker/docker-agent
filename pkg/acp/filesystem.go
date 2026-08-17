@@ -282,6 +282,13 @@ func (t *FilesystemToolset) handleEditFile(ctx context.Context, toolCall tools.T
 	modifiedContent := resp.Content
 
 	for i, edit := range args.Edits {
+		// strings.Contains always matches "" and strings.Replace would insert
+		// newText at offset 0, silently prepending to the file. Mirrors the
+		// guard in the built-in filesystem toolset, which serves the same
+		// edit_file tool name and schema over a different transport.
+		if edit.OldText == "" {
+			return tools.ResultError(fmt.Sprintf("Edit %d failed: oldText must not be empty", i+1)), nil
+		}
 		if !strings.Contains(modifiedContent, edit.OldText) {
 			return tools.ResultError(fmt.Sprintf("Edit %d failed: old text not found", i+1)), nil
 		}

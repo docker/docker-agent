@@ -31,7 +31,7 @@ func TestRunOrExec_InvalidUserConfigFailsClearly(t *testing.T) {
 	err := f.runOrExec(t.Context(), cli.NewPrinter(io.Discard), nil, false)
 	require.ErrorContains(t, err, "loading user config")
 	require.ErrorContains(t, err, "settings.safety")
-	require.ErrorContains(t, err, "strict, balanced, autonomous")
+	require.ErrorContains(t, err, "strict, balanced, restricted, autonomous")
 }
 
 // Same for an invalid alias safety value: the error names the alias.

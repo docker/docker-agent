@@ -80,11 +80,19 @@ func TestRunAliasAddCommand_Safety(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "Safety: balanced")
 
+	err = runAliasAddCommand(cmd, []string{"headless", "myorg/coder"}, &aliasAddFlags{safety: "restricted"})
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "Safety: restricted")
+
 	cfg, err := userconfig.Load()
 	require.NoError(t, err)
 	alias, ok := cfg.GetAlias("careful")
 	require.True(t, ok)
 	assert.Equal(t, latestcfg.SafetyModeBalanced, alias.Safety)
+
+	alias, ok = cfg.GetAlias("headless")
+	require.True(t, ok)
+	assert.Equal(t, latestcfg.SafetyModeRestricted, alias.Safety)
 }
 
 func TestRunAliasAddCommand_InvalidSafety(t *testing.T) {
@@ -98,7 +106,7 @@ func TestRunAliasAddCommand_InvalidSafety(t *testing.T) {
 	cmd.SetOut(&buf)
 	err := runAliasAddCommand(cmd, []string{"careful", "myorg/coder"}, &aliasAddFlags{safety: "yolo"})
 	require.ErrorContains(t, err, "invalid --safety value")
-	require.ErrorContains(t, err, "strict, balanced, autonomous")
+	require.ErrorContains(t, err, "strict, balanced, restricted, autonomous")
 
 	cfg, err := userconfig.Load()
 	require.NoError(t, err)

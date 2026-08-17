@@ -3,9 +3,11 @@ package desktop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +26,96 @@ func TestGetToken(t *testing.T) {
 
 		assert.Equal(t, valid, GetToken(t.Context()))
 		assert.Equal(t, 0, backend.refreshes())
+	})
+
+	t.Run("expired token replaced by a minted one", func(t *testing.T) {
+		backend := &fakeBackend{token: expired}
+		installFakeBackend(t, backend)
+		mintToken = func(context.Context) (string, error) { return valid, nil }
+
+		token, source := GetTokenWithSource(t.Context())
+		assert.Equal(t, valid, token)
+		assert.Equal(t, SourceMinted, source)
+		assert.Equal(t, 0, backend.refreshes(), "minting makes nudging Desktop unnecessary")
+	})
+
+	t.Run("a usable token is served from memory", func(t *testing.T) {
+		backend := &fakeBackend{token: valid}
+		installFakeBackend(t, backend)
+
+		token, source := GetTokenWithSource(t.Context())
+		assert.Equal(t, valid, token)
+		assert.Equal(t, SourceDesktop, source)
+
+		// Desktop is not asked again: gateway clients call this per request.
+		backend.setFailTokenFetch(true)
+		assert.Equal(t, valid, GetToken(t.Context()))
+	})
+
+	t.Run("an invalidated token is fetched again", func(t *testing.T) {
+		backend := &fakeBackend{token: valid}
+		installFakeBackend(t, backend)
+		require.Equal(t, valid, GetToken(t.Context()))
+
+		other := makeToken(t, time.Now().Add(time.Hour))
+		backend.setToken(other)
+		InvalidateToken(valid)
+
+		assert.Equal(t, other, GetToken(t.Context()))
+	})
+
+	t.Run("a refused token is not served again", func(t *testing.T) {
+		// Docker Desktop keeps serving the token Docker refused: it has no way
+		// of knowing, so minting is the only way out.
+		backend := &fakeBackend{token: valid}
+		installFakeBackend(t, backend)
+		require.Equal(t, valid, GetToken(t.Context()))
+
+		minted := makeToken(t, time.Now().Add(time.Hour))
+		mintToken = func(context.Context) (string, error) { return minted, nil }
+		InvalidateToken(valid)
+
+		token, source := GetTokenWithSource(t.Context())
+		assert.Equal(t, minted, token)
+		assert.Equal(t, SourceMinted, source)
+	})
+
+	t.Run("a refused token is not served again when minting is unavailable", func(t *testing.T) {
+		// The forced refresh polls Docker Desktop, which serves the refused
+		// token until it renews its session: accepting it would send Docker a
+		// token it just refused, and pin it in the cache for its whole life.
+		backend := &fakeBackend{token: valid, loggedIn: true}
+		installFakeBackend(t, backend) // minting unavailable: no PAT, or Hub is down
+		require.Equal(t, valid, GetToken(t.Context()))
+
+		InvalidateToken(valid)
+
+		token, source := GetTokenWithSource(t.Context())
+		assert.Empty(t, token, "a refused token must never be served again")
+		assert.Equal(t, SourceNone, source)
+
+		// Desktop eventually renews its session: the next token is served.
+		fresh := makeToken(t, time.Now().Add(time.Hour))
+		backend.setToken(fresh)
+		assert.Equal(t, fresh, GetToken(t.Context()))
+	})
+
+	t.Run("a refused token is not reused from the last refresh result", func(t *testing.T) {
+		// The refresh is rate-limited, and its result is reused while it lasts:
+		// not once Docker has refused that token.
+		backend := &fakeBackend{token: expired, loggedIn: true}
+		backend.onRefresh = func() { backend.setToken(valid) }
+		installFakeBackend(t, backend)
+		require.Equal(t, valid, GetToken(t.Context()))
+		require.Equal(t, 1, backend.refreshes())
+
+		backend.setToken(expired)
+		InvalidateToken(valid)
+
+		// The last resort is the stale token Desktop still serves, never the
+		// refused one.
+		assert.Equal(t, expired, GetToken(t.Context()))
+		assert.Equal(t, 1, backend.refreshes(), "still rate-limited")
 	})
 
 	t.Run("expired token triggers forced refresh", func(t *testing.T) {
@@ -132,18 +224,140 @@ func TestGetToken(t *testing.T) {
 	})
 }
 
-func TestTokenExpired(t *testing.T) {
-	assert.False(t, tokenExpired(makeToken(t, time.Now().Add(time.Minute))))
-	assert.False(t, tokenExpired(makeToken(t, time.Now().Add(-10*time.Second))), "within clock-skew leeway")
-	assert.True(t, tokenExpired(makeToken(t, time.Now().Add(-time.Minute))))
-	assert.False(t, tokenExpired("not-a-jwt"))
+func TestGetTokenSignedOutStillMints(t *testing.T) {
+	valid := makeToken(t, time.Now().Add(time.Hour))
+
+	// A `docker login` PAT works even when Docker Desktop is signed out or
+	// not running at all.
+	backend := &fakeBackend{}
+	installFakeBackend(t, backend)
+	mintToken = func(context.Context) (string, error) { return valid, nil }
+
+	assert.Equal(t, valid, GetToken(t.Context()))
+	assert.Equal(t, 0, backend.refreshes())
 }
 
-func makeToken(t *testing.T, exp time.Time) string {
+// TestCachedTokenIsRecheckedPeriodically covers a `docker logout` or an account while a minted token — which can be valid for hours — is cached:
+// waiting for its expiry would keep the previous account's token in play.
+func TestCachedTokenIsRecheckedPeriodically(t *testing.T) {
+	minted := makeToken(t, time.Now().Add(4*time.Hour))
+
+	// Docker Desktop signed out, or not running at all: the token can only
+	// come from the credential store.
+	installFakeBackend(t, &fakeBackend{})
+	mints := 0
+	mintToken = func(context.Context) (string, error) {
+		mints++
+		return minted, nil
+	}
+
+	require.Equal(t, minted, GetToken(t.Context()))
+	require.Equal(t, minted, GetToken(t.Context()))
+	require.Equal(t, 1, mints, "a fresh token is served from memory")
+
+	expireCache()
+	mintToken = func(context.Context) (string, error) {
+		return "", errors.New("no Docker access token in the credential store")
+	}
+
+	assert.Empty(t, GetToken(t.Context()), "a logout must stop the previous account's token from being served")
+}
+
+// TestTokenInvalidatedDuringLookupIsNotServed covers the window between
+// checking a token and caching it: another request's 401 lands in between, so
+// the token must not be handed out even though it looked fine when fetched.
+func TestTokenInvalidatedDuringLookupIsNotServed(t *testing.T) {
+	valid := makeToken(t, time.Now().Add(time.Hour))
+	installFakeBackend(t, &fakeBackend{token: valid, loggedIn: true})
+
+	require.True(t, usable(valid))
+	InvalidateToken(valid) // the gateway answered 401 to a concurrent request
+
+	assert.False(t, remember(valid, SourceDesktop),
+		"a token refused while it was being looked up must not be served")
+
+	token, source := GetTokenWithSource(t.Context())
+	assert.Empty(t, token)
+	assert.Equal(t, SourceNone, source)
+}
+
+// TestEveryRefusedTokenStaysRefused covers Docker Desktop regressing to a token
+// refused before the one it serves now: a single tombstone would let the older
+// one back in.
+func TestEveryRefusedTokenStaysRefused(t *testing.T) {
+	first := makeToken(t, time.Now().Add(time.Hour))
+	second := makeToken(t, time.Now().Add(time.Hour))
+
+	backend := &fakeBackend{token: first, loggedIn: true}
+	installFakeBackend(t, backend)
+
+	require.Equal(t, first, GetToken(t.Context()))
+	InvalidateToken(first)
+
+	backend.setToken(second)
+	require.Equal(t, second, GetToken(t.Context()))
+	InvalidateToken(second)
+
+	backend.setToken(first)
+	assert.Empty(t, GetToken(t.Context()), "the first refused token must stay refused")
+}
+
+func TestGetUserInfo(t *testing.T) {
+	t.Run("prefers what Docker Desktop reports", func(t *testing.T) {
+		backend := &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")}
+		backend.info = &DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}
+		installFakeBackend(t, backend)
+
+		assert.Equal(t, DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}, GetUserInfo(t.Context()))
+	})
+
+	t.Run("falls back to the token claims", func(t *testing.T) {
+		// Docker Desktop is not around (or not signed in): the token itself
+		// says who we are.
+		backend := &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")}
+		installFakeBackend(t, backend)
+
+		assert.Equal(t, DockerHubInfo{Username: "claims-user", Email: "claims@example.com"}, GetUserInfo(t.Context()))
+	})
+
+	t.Run("reports nothing without a token", func(t *testing.T) {
+		installFakeBackend(t, &fakeBackend{})
+
+		assert.Equal(t, DockerHubInfo{}, GetUserInfo(t.Context()))
+	})
+}
+
+// expireCache ages the cached token past its re-check window, so the next call
+// consults Docker Desktop and the credential store again.
+func expireCache() {
+	cache.Lock()
+	defer cache.Unlock()
+	cache.staleAt = time.Now().Add(-time.Second)
+}
+
+// tokenSerial keeps successive tokens distinct: Docker never issues the same
+// JWT twice, and a test that tells two tokens apart must not depend on the
+// second they were signed in.
+var tokenSerial atomic.Int64
+
+func makeToken(t *testing.T, exp time.Time, claims ...func(jwt.MapClaims)) string {
 	t.Helper()
-	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"exp": exp.Unix()}).SignedString([]byte("secret"))
+	mapClaims := jwt.MapClaims{"exp": exp.Unix(), "jti": tokenSerial.Add(1)}
+	for _, claim := range claims {
+		claim(mapClaims)
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, mapClaims).SignedString([]byte("secret"))
 	require.NoError(t, err)
 	return token
+}
+
+// makeIdentityToken signs a token carrying an account, the way Docker's tokens
+// do.
+func makeIdentityToken(t *testing.T, username, email string) string {
+	t.Helper()
+	return makeToken(t, time.Now().Add(time.Hour), func(c jwt.MapClaims) {
+		c["https://hub.docker.com"] = map[string]any{"username": username, "email": email}
+	})
 }
 
 // fakeBackend emulates Docker Desktop's backend API: GET /registry/token
@@ -153,6 +367,7 @@ func makeToken(t *testing.T, exp time.Time) string {
 type fakeBackend struct {
 	mu             sync.Mutex
 	token          string
+	info           *DockerHubInfo
 	loggedIn       bool
 	failTokenFetch bool
 	refreshCalls   int
@@ -195,6 +410,17 @@ func (b *fakeBackend) handler() http.Handler {
 		b.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(loggedIn)
 	})
+	mux.HandleFunc("GET /registry/info", func(w http.ResponseWriter, _ *http.Request) {
+		b.mu.Lock()
+		info := b.info
+		b.mu.Unlock()
+		if info == nil {
+			http.Error(w, "not signed in", http.StatusNotFound)
+			return
+		}
+		// Docker Desktop reports the username in an "id" field.
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": info.Username, "email": info.Email})
+	})
 	mux.HandleFunc("POST /registry/credstore-updated", func(http.ResponseWriter, *http.Request) {
 		b.mu.Lock()
 		b.refreshCalls++
@@ -209,6 +435,22 @@ func (b *fakeBackend) handler() http.Handler {
 
 func installFakeBackend(t *testing.T, backend *fakeBackend) {
 	t.Helper()
+
+	// Minting is exercised on its own in pkg/hubauth; here it must never
+	// reach the developer's credential store or the real Docker Hub.
+	oldMint := mintToken
+	mintToken = func(context.Context) (string, error) {
+		return "", errors.New("no Docker access token in the credential store")
+	}
+	t.Cleanup(func() { mintToken = oldMint })
+
+	clearCache := func() {
+		cache.Lock()
+		defer cache.Unlock()
+		cache.token, cache.source, cache.staleAt, cache.rejected = "", SourceNone, time.Time{}, nil
+	}
+	clearCache()
+	t.Cleanup(clearCache)
 
 	ln := newMemListener()
 	server := &http.Server{Handler: backend.handler()}

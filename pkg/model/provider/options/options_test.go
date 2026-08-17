@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
 // sentinelTransport is a minimal http.RoundTripper used only for identity checks.
@@ -39,6 +41,48 @@ func TestTransportWrapper_NilByDefault(t *testing.T) {
 	t.Parallel()
 	var opts ModelOptions
 	assert.Nil(t, opts.TransportWrapper())
+}
+
+func TestWithStructuredOutput_ModeHandling(t *testing.T) {
+	t.Parallel()
+
+	schema := map[string]any{"type": "object"}
+
+	tests := []struct {
+		name      string
+		so        *latest.StructuredOutput
+		wantNativ bool
+	}{
+		{name: "nil clears", so: nil, wantNativ: false},
+		{name: "mode absent forwarded", so: &latest.StructuredOutput{Name: "x", Schema: schema}, wantNativ: true},
+		{name: "mode native forwarded", so: &latest.StructuredOutput{Name: "x", Schema: schema, Mode: latest.StructuredOutputModeNative}, wantNativ: true},
+		{name: "mode tool suppressed", so: &latest.StructuredOutput{Name: "x", Schema: schema, Mode: latest.StructuredOutputModeTool}, wantNativ: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			opts := Apply(WithStructuredOutput(tt.so))
+			if tt.wantNativ {
+				require.Same(t, tt.so, opts.StructuredOutput())
+			} else {
+				assert.Nil(t, opts.StructuredOutput(), "providers must not receive native structured output")
+			}
+		})
+	}
+}
+
+// TestWithStructuredOutput_ToolModeOverridesEarlier proves a later tool-mode
+// opt clears a previously set native structured output, matching the
+// "later opts override earlier ones" contract.
+func TestWithStructuredOutput_ToolModeOverridesEarlier(t *testing.T) {
+	t.Parallel()
+
+	native := &latest.StructuredOutput{Name: "x", Schema: map[string]any{"type": "object"}}
+	toolMode := &latest.StructuredOutput{Name: "x", Schema: map[string]any{"type": "object"}, Mode: latest.StructuredOutputModeTool}
+
+	opts := Apply(WithStructuredOutput(native), WithStructuredOutput(toolMode))
+	assert.Nil(t, opts.StructuredOutput())
 }
 
 func TestFromModelOptions_RoundTripsTransportWrapper(t *testing.T) {

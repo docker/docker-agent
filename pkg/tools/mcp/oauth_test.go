@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/mcp/oauthflow"
 )
 
 // newTestTransport returns a transport private to the test. Parallel tests
@@ -158,12 +159,13 @@ func TestGetValidToken_UsesStoredCredentialsForRefresh(t *testing.T) {
 	// Pre-populate an expired token with stored client credentials.
 	store := NewInMemoryTokenStore()
 	expiredToken := &OAuthToken{
-		AccessToken:  "old-at",
-		TokenType:    "Bearer",
-		RefreshToken: "old-rt",
-		ExpiresAt:    time.Now().Add(-1 * time.Hour), // expired
-		ClientID:     "stored-cid",
-		ClientSecret: "stored-csec",
+		AccessToken:     "old-at",
+		TokenType:       "Bearer",
+		RefreshToken:    "old-rt",
+		ExpiresAt:       time.Now().Add(-1 * time.Hour), // expired
+		ClientID:        "stored-cid",
+		ClientSecret:    "stored-csec",
+		RequestedScopes: []string{"read", "write"},
 	}
 	if err := store.StoreToken(srv.URL, expiredToken); err != nil {
 		t.Fatal(err)
@@ -198,6 +200,8 @@ func TestGetValidToken_UsesStoredCredentialsForRefresh(t *testing.T) {
 	if updated.ClientSecret != "stored-csec" {
 		t.Errorf("stored ClientSecret = %q, want %q", updated.ClientSecret, "stored-csec")
 	}
+	assert.Equal(t, []string{"read", "write"}, updated.RequestedScopes,
+		"RequestedScopes must survive a silent refresh unchanged")
 }
 
 // TestGetValidToken_UsesStoredAuthServerForRefresh verifies that silent
@@ -733,6 +737,36 @@ func TestGetValidToken_ReturnsTokenWhenScopesSatisfied(t *testing.T) {
 	}
 }
 
+// TestGetValidToken_AcceptsDiscoveredWideScopesWhenNoneConfigured proves
+// that a token stamped with discovery-derived RequestedScopes (e.g. an
+// unconfigured DCR client that fell back to PRM scopes_supported) is still
+// accepted once the config declares no scopes: sufficiency stays
+// config-only and never re-derives or narrows against discovery.
+func TestGetValidToken_AcceptsDiscoveredWideScopesWhenNoneConfigured(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemoryTokenStore()
+	if err := store.StoreToken("https://mcp.example.com", &OAuthToken{
+		AccessToken:     "good-at",
+		TokenType:       "Bearer",
+		RequestedScopes: []string{"repo", "profile", "admin:everything"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &oauthTransport{
+		base:       newTestTransport(t),
+		tokenStore: store,
+		baseURL:    "https://mcp.example.com",
+		// No oauthConfig at all (nil), matching the Catalog product path.
+	}
+
+	got := transport.getValidToken(t.Context())
+	if got == nil || got.AccessToken != "good-at" {
+		t.Fatalf("expected the discovered-scope token to be accepted unchanged, got %+v", got)
+	}
+}
+
 // TestGetValidToken_LeavesLegacyTokenAlone verifies that stored tokens
 // that predate the RequestedScopes field (empty slice) are treated as
 // sufficient, so an upgrade doesn't forcibly invalidate every existing
@@ -760,6 +794,48 @@ func TestGetValidToken_LeavesLegacyTokenAlone(t *testing.T) {
 
 	if got := transport.getValidToken(t.Context()); got == nil {
 		t.Fatal("legacy token without RequestedScopes should not be invalidated on scope mismatch")
+	}
+}
+
+// TestGetValidToken_ConfiguredScopeNormalizationMatchesDCRSelection guards
+// against a reauth loop: selectDCRScopes stamps the normalized (trimmed,
+// deduplicated) form of the configured scopes onto a newly-issued token's
+// RequestedScopes, so tokenCoversConfiguredScopes must normalize the
+// configured side of the coverage check the very same way. Comparing raw
+// config entries (with stray whitespace or duplicates) against the
+// already-normalized stored scopes would otherwise fail on every single
+// preflight, discarding an otherwise-sufficient token and forcing a fresh
+// DCR/consent flow every time the config is checked — not just once.
+func TestGetValidToken_ConfiguredScopeNormalizationMatchesDCRSelection(t *testing.T) {
+	t.Parallel()
+
+	configured := []string{" read ", "read", "write "}
+
+	store := NewInMemoryTokenStore()
+	if err := store.StoreToken("https://mcp.example.com", &OAuthToken{
+		AccessToken: "good-at",
+		TokenType:   "Bearer",
+		// What a prior successful DCR selection actually stamped: the
+		// normalized form of these same configured scopes.
+		RequestedScopes: selectDCRScopes(configured, nil, nil),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := &oauthTransport{
+		base:        newTestTransport(t),
+		tokenStore:  store,
+		baseURL:     "https://mcp.example.com",
+		oauthConfig: &latest.RemoteOAuthConfig{Scopes: configured},
+	}
+
+	// Repeated preflight checks (e.g. successive tool calls) must all see the
+	// same sufficient token; a normalization mismatch would discard it on
+	// the first call and keep discarding the freshly re-issued one forever.
+	for i := range 3 {
+		got := transport.getValidToken(t.Context())
+		require.NotNil(t, got, "preflight %d: whitespace/duplicate configured scopes must not discard a sufficient token", i)
+		assert.Equal(t, "good-at", got.AccessToken)
 	}
 }
 
@@ -2791,7 +2867,9 @@ func clientCredsElicit(captured **gomcp.ElicitParams, result tools.ElicitationRe
 // TestResolveClientCredentials_NoDCR_PromptsUser verifies the fallback when
 // the authorization server does not advertise a registration endpoint: the
 // user is asked for pre-registered client credentials via a form
-// elicitation, and the configured scopes are preserved on accept.
+// elicitation, and the configured scopes are preserved on accept. Non-empty
+// challenge and PRM scopes are supplied to prove this prompt-fallback
+// branch stays configured-only and never widens via discovery.
 func TestResolveClientCredentials_NoDCR_PromptsUser(t *testing.T) {
 	t.Parallel()
 
@@ -2809,12 +2887,13 @@ func TestResolveClientCredentials_NoDCR_PromptsUser(t *testing.T) {
 	}
 
 	clientID, clientSecret, scopes, err := transport.resolveClientCredentials(
-		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb")
+		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb",
+		[]string{"challenge-scope"}, []string{"prm-scope"})
 	require.NoError(t, err)
 	assert.Equal(t, "user-client-id", clientID)
 	assert.Equal(t, "user-secret", clientSecret)
 	assert.Equal(t, []string{"read", "write"}, scopes,
-		"configured scopes must be preserved when the user supplies the client credentials")
+		"configured scopes must be preserved, never widened by the challenge scope or PRM scopes_supported, when the user supplies the client credentials")
 
 	require.NotNil(t, captured, "a client-credentials elicitation must have been sent")
 	assert.Equal(t, "oauth_client_credentials", captured.Meta["docker-agent/type"])
@@ -2826,7 +2905,9 @@ func TestResolveClientCredentials_NoDCR_PromptsUser(t *testing.T) {
 
 // TestResolveClientCredentials_DCRFails_PromptsUser verifies that a failing
 // dynamic client registration falls back to asking the user, instead of
-// aborting the flow outright.
+// aborting the flow outright. Non-empty challenge and PRM scopes are
+// supplied, with no scopes configured, to prove this branch omits the
+// scope entirely rather than falling back to what discovery advertised.
 func TestResolveClientCredentials_DCRFails_PromptsUser(t *testing.T) {
 	t.Parallel()
 
@@ -2851,14 +2932,71 @@ func TestResolveClientCredentials_DCRFails_PromptsUser(t *testing.T) {
 		t.Context(),
 		&AuthorizationServerMetadata{RegistrationEndpoint: srv.URL},
 		"https://example.test/cb",
+		[]string{"challenge-scope"}, []string{"prm-scope"},
 	)
 	require.NoError(t, err)
 	assert.Equal(t, int32(1), registerCalls.Load(), "dynamic registration must be attempted first")
 	assert.Equal(t, "user-client-id", clientID)
 	assert.Empty(t, clientSecret, "client_secret is optional")
-	assert.Nil(t, scopes, "no scopes configured, none returned")
+	assert.Nil(t, scopes, "no scopes configured: the scope must be omitted, not filled in from the challenge or PRM scopes_supported")
 	require.NotNil(t, captured)
 	assert.Equal(t, "oauth_client_credentials", captured.Meta["docker-agent/type"])
+}
+
+// TestResolveClientCredentials_ExplicitClientID_ConfiguredOnly verifies the
+// explicit-credentials branch (t.oauthConfig.ClientID set): it must return
+// exactly the configured client_id/client_secret/scopes and never attempt
+// dynamic client registration, even when the authorization server
+// advertises a registration endpoint and non-empty challenge/PRM scopes are
+// available. Absent configured scopes must come back as nil (omitted),
+// never auto-filled from discovery.
+func TestResolveClientCredentials_ExplicitClientID_ConfiguredOnly(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		configured []string
+		wantScopes []string
+	}{
+		{name: "configured scopes are returned exactly", configured: []string{"read", "write"}, wantScopes: []string{"read", "write"}},
+		{name: "absent configured scopes are omitted", configured: nil, wantScopes: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var registerCalls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				registerCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"client_id":"should-not-be-used"}`))
+			}))
+			defer srv.Close()
+
+			transport := &oauthTransport{
+				baseURL: "https://mcp.example.test/mcp",
+				oauthConfig: &latest.RemoteOAuthConfig{
+					ClientID:     "explicit-client-id",
+					ClientSecret: "explicit-secret",
+					Scopes:       tt.configured,
+				},
+				oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(true),
+			}
+
+			clientID, clientSecret, scopes, err := transport.resolveClientCredentials(
+				t.Context(),
+				&AuthorizationServerMetadata{RegistrationEndpoint: srv.URL},
+				"https://example.test/cb",
+				[]string{"challenge-scope"}, []string{"prm-scope"},
+			)
+			require.NoError(t, err)
+			assert.Equal(t, "explicit-client-id", clientID)
+			assert.Equal(t, "explicit-secret", clientSecret, "the explicit client secret must be forwarded unchanged")
+			assert.Equal(t, tt.wantScopes, scopes)
+			assert.Equal(t, int32(0), registerCalls.Load(),
+				"an explicit client_id must never trigger a dynamic client registration request")
+		})
+	}
 }
 
 // TestResolveClientCredentials_PromptDeclined verifies decline and cancel
@@ -2879,7 +3017,7 @@ func TestResolveClientCredentials_PromptDeclined(t *testing.T) {
 			}
 
 			clientID, clientSecret, _, err := transport.resolveClientCredentials(
-				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb")
+				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil)
 			require.Error(t, err)
 			assert.Empty(t, clientID)
 			assert.Empty(t, clientSecret)
@@ -2914,7 +3052,7 @@ func TestResolveClientCredentials_PromptMissingClientID(t *testing.T) {
 			}
 
 			clientID, clientSecret, _, err := transport.resolveClientCredentials(
-				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb")
+				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil)
 			require.Error(t, err)
 			assert.Empty(t, clientID)
 			assert.Empty(t, clientSecret)
@@ -2933,7 +3071,7 @@ func TestResolveClientCredentials_NoElicitationBridgeDefersAuth(t *testing.T) {
 	transport := &oauthTransport{baseURL: "https://mcp.example.test/mcp"}
 
 	clientID, clientSecret, _, err := transport.resolveClientCredentials(
-		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb")
+		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil)
 	require.Error(t, err)
 	assert.Empty(t, clientID)
 	assert.Empty(t, clientSecret)
@@ -3112,4 +3250,633 @@ func TestManagedOAuthFlow_NoDCR_PromptsForCredentialsThenHonorsConsentDecline(t 
 		"token endpoint must NOT be hit after the consent decline")
 	_, getErr := store.GetToken(srv.URL)
 	require.Error(t, getErr, "no token must be stored after a declined consent")
+}
+
+// --------- DCR scope selection & propagation (issue #3879) ---------
+//
+// A successful dynamic client registration previously always registered
+// with no scope at all, regardless of what was configured, challenged, or
+// advertised by the server. These tests lock in the deterministic
+// selection contract (configured > challenge > PRM scopes_supported > none)
+// and prove the same selected scopes reach every downstream consumer: the
+// DCR request itself, the /authorize URL, and the stored token's
+// RequestedScopes.
+
+func TestSelectDCRScopes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		configured      []string
+		challengeScopes []string
+		prmScopes       []string
+		want            []string
+	}{
+		{
+			name:            "configured wins over challenge and PRM",
+			configured:      []string{"read", "write"},
+			challengeScopes: []string{"admin"},
+			prmScopes:       []string{"everything"},
+			want:            []string{"read", "write"},
+		},
+		{
+			name:            "challenge scope used when nothing is configured",
+			challengeScopes: []string{"repo"},
+			prmScopes:       []string{"everything"},
+			want:            []string{"repo"},
+		},
+		{
+			name:      "PRM scopes_supported used when configured and challenge are both empty",
+			prmScopes: []string{"read", "write"},
+			want:      []string{"read", "write"},
+		},
+		{
+			name: "omitted entirely (nil) when none of the three are available",
+			want: nil,
+		},
+		{
+			name:            "a challenge scope of only whitespace falls through to PRM",
+			challengeScopes: []string{"  "},
+			prmScopes:       []string{"read"},
+			want:            []string{"read"},
+		},
+		{
+			name:       "duplicates and surrounding whitespace are normalized, order preserved",
+			configured: []string{" read ", "write", "read"},
+			want:       []string{"read", "write"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, selectDCRScopes(tt.configured, tt.challengeScopes, tt.prmScopes))
+		})
+	}
+}
+
+func TestChallengeScopesFromWWWAuth(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		wwwAuth string
+		want    []string
+	}{
+		{
+			name:    "quoted multi-value scope",
+			wwwAuth: `Bearer resource="https://x", scope="read write"`,
+			want:    []string{"read", "write"},
+		},
+		{name: "unquoted single scope", wwwAuth: `Bearer scope=read`, want: []string{"read"}},
+		{name: "no scope parameter", wwwAuth: `Bearer resource="https://x"`, want: nil},
+		{name: "empty header", wwwAuth: "", want: nil},
+		{
+			// The literal text "scope=read" is entirely inside the quoted
+			// value of error_description, not a top-level auth-param: a
+			// naive regex scan of the raw header would still match it and
+			// inject a bogus scope into DCR selection.
+			name:    "scope= text inside another parameter's quoted value is ignored",
+			wwwAuth: `Bearer error="insufficient_scope", error_description="Missing scope=read write; please retry"`,
+			want:    nil,
+		},
+		{
+			name:    "a genuine top-level scope param survives alongside a decoy quoted one",
+			wwwAuth: `Bearer error_description="try scope=bogus", scope="read write"`,
+			want:    []string{"read", "write"},
+		},
+		{
+			name:    "parameter name is case-insensitive",
+			wwwAuth: `Bearer SCOPE="read write"`,
+			want:    []string{"read", "write"},
+		},
+		{
+			name:    "parameter ordering does not matter",
+			wwwAuth: `Bearer scope="read write", resource="https://x", resource_metadata="https://y"`,
+			want:    []string{"read", "write"},
+		},
+		{
+			// The scanner must not stop at Basic's bare-token-less realm
+			// challenge boundary and miss the Bearer challenge that follows.
+			name:    "multi-challenge: scope on a later Bearer challenge survives",
+			wwwAuth: `Basic realm="corp", Bearer scope="read write"`,
+			want:    []string{"read", "write"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, challengeScopesFromWWWAuth(tt.wwwAuth))
+		})
+	}
+}
+
+// TestResourceMetadataFromWWWAuth_IgnoresQuotedValueFalsePositive proves
+// resourceMetadataFromWWWAuth is quote-aware the same way
+// challengeScopesFromWWWAuth is: "resource_metadata=" (or "resource=") text
+// that appears inside another parameter's quoted value must never be read
+// as a top-level auth-param, and a genuine top-level param must still be
+// found alongside such a decoy.
+func TestResourceMetadataFromWWWAuth_IgnoresQuotedValueFalsePositive(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		wwwAuth string
+		want    string
+	}{
+		{
+			name:    "resource_metadata= text inside a quoted value is ignored",
+			wwwAuth: `Bearer error="invalid_request", error_description="see resource_metadata=\"https://evil.test\""`,
+			want:    "",
+		},
+		{
+			name:    "resource= text inside a quoted value is ignored",
+			wwwAuth: `Bearer error_description="try resource=https://evil.test instead"`,
+			want:    "",
+		},
+		{
+			name:    "a genuine top-level resource_metadata param survives alongside a decoy quoted one",
+			wwwAuth: `Bearer error_description="see resource_metadata=https://evil.test", resource_metadata="https://real.test/prm"`,
+			want:    "https://real.test/prm",
+		},
+		{
+			// Live Atlassian-shaped example: a Basic
+			// challenge precedes the Bearer one carrying resource_metadata.
+			name:    "multi-challenge: resource_metadata on a later Bearer challenge survives",
+			wwwAuth: `Basic realm="corp", Bearer resource_metadata="https://real.test/prm"`,
+			want:    "https://real.test/prm",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, resourceMetadataFromWWWAuth(tt.wwwAuth))
+		})
+	}
+}
+
+// TestParseAuthParams_MultiChallenge proves the quote-aware auth-param
+// scanner continues scanning after a bare auth-scheme token instead of
+// stopping there, so a valid RFC 7235 multi-challenge WWW-Authenticate
+// header does not lose the params carried by a later challenge.
+func TestParseAuthParams_MultiChallenge(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Basic then Bearer: resource_metadata on the later challenge survives", func(t *testing.T) {
+		t.Parallel()
+		wwwAuth := `Basic realm="corp", Bearer resource_metadata="https://real.test/prm"`
+		assert.Equal(t, map[string]string{
+			"realm":             "corp",
+			"resource_metadata": "https://real.test/prm",
+		}, parseAuthParams(wwwAuth))
+		assert.Equal(t, "https://real.test/prm", resourceMetadataFromWWWAuth(wwwAuth))
+	})
+
+	t.Run("Basic then Bearer: scope and error on the later challenge both survive", func(t *testing.T) {
+		t.Parallel()
+		wwwAuth := `Basic realm="corp", Bearer error="invalid_token", scope="read write"`
+		assert.Equal(t, []string{"read", "write"}, challengeScopesFromWWWAuth(wwwAuth))
+		assert.Equal(t, "invalid_token", errorCodeFromWWWAuth(wwwAuth))
+	})
+
+	t.Run("quoted commas and name= text spanning the challenge boundary do not confuse the scan", func(t *testing.T) {
+		t.Parallel()
+		// realm's quoted value contains a comma, and error_description's
+		// quoted value contains decoy "scope=" and "resource_metadata="
+		// text; only the genuine top-level params after the Bearer scheme
+		// token must be extracted.
+		wwwAuth := `Basic realm="corp, still corp", Bearer error_description="try scope=bogus, resource_metadata=https://evil.test", scope="read write", resource_metadata="https://real.test/prm"`
+		assert.Equal(t, []string{"read", "write"}, challengeScopesFromWWWAuth(wwwAuth))
+		assert.Equal(t, "https://real.test/prm", resourceMetadataFromWWWAuth(wwwAuth))
+	})
+
+	t.Run("single-challenge behavior is unchanged", func(t *testing.T) {
+		t.Parallel()
+		wwwAuth := `Bearer resource_metadata="https://real.test/prm", scope="read write", error="invalid_token"`
+		assert.Equal(t, map[string]string{
+			"resource_metadata": "https://real.test/prm",
+			"scope":             "read write",
+			"error":             "invalid_token",
+		}, parseAuthParams(wwwAuth))
+	})
+
+	t.Run("token68 credential with no '=' padding: later Bearer scope still found", func(t *testing.T) {
+		t.Parallel()
+		// The token68 credential has no auth-params of its own, so skipping
+		// it as a bare token and continuing is safe: it never appears as a
+		// map key (the leading auth-scheme, "Negotiate", is stripped once
+		// up front, same as for a single-challenge header).
+		wwwAuth := `Negotiate YWxhZGRpbjpvcGVuc2VzYW1l, Bearer scope="read"`
+		assert.Equal(t, map[string]string{"scope": "read"}, parseAuthParams(wwwAuth))
+	})
+
+	t.Run("token68 credential with '=' padding: accepted limitation, pinned", func(t *testing.T) {
+		t.Parallel()
+		// RFC 7235 token68 syntax allows trailing "=" padding, which this
+		// scanner cannot distinguish from a bare name followed by "=value"
+		// once it has skipped past the credential's start. The padded
+		// token68 is therefore misread as its own (bogus, harmless) param
+		// instead of being recognized as one opaque credential. This is a
+		// documented, deterministic limitation — not a crash or data loss
+		// — and it does not prevent the later Bearer challenge's genuine
+		// scope from being found.
+		wwwAuth := `Negotiate YWxhZGRpbjpvcGVuc2VzYW1l=, Bearer scope="read"`
+		got := parseAuthParams(wwwAuth)
+		assert.Equal(t, "read", got["scope"])
+		assert.Empty(t, got["ywxhzgrpbjpvcgvuc2vzyw1l"])
+		assert.Len(t, got, 2)
+	})
+}
+
+// TestResolveClientCredentials_DCRSuccess_ScopeSelection drives the real
+// RFC 7591 registration request against a local httptest server and
+// verifies both that the deterministic priority order is respected and
+// that resolveClientCredentials returns exactly the scopes it sent to the
+// registration endpoint, across the "nothing available" case too (the
+// scope field must be omitted entirely, not sent as empty).
+func TestResolveClientCredentials_DCRSuccess_ScopeSelection(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		configured      []string
+		challengeScopes []string
+		prmScopes       []string
+		wantScope       string // exact "scope" field the DCR request must carry; empty means the field must be absent
+	}{
+		{
+			name:            "configured scopes take priority",
+			configured:      []string{"read", "write"},
+			challengeScopes: []string{"admin"},
+			prmScopes:       []string{"everything"},
+			wantScope:       "read write",
+		},
+		{
+			name:            "challenge scope used when nothing configured",
+			challengeScopes: []string{"repo"},
+			prmScopes:       []string{"everything"},
+			wantScope:       "repo",
+		},
+		{
+			name:      "PRM scopes_supported used when configured and challenge are both empty",
+			prmScopes: []string{"read", "write"},
+			wantScope: "read write",
+		},
+		{
+			name: "scope omitted entirely when none of the three are available",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var gotBody map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"client_id":"registered-client-id"}`))
+			}))
+			defer srv.Close()
+
+			var oauthConfig *latest.RemoteOAuthConfig
+			if len(tt.configured) > 0 {
+				oauthConfig = &latest.RemoteOAuthConfig{Scopes: tt.configured}
+			}
+			transport := &oauthTransport{
+				baseURL:         "https://mcp.example.test/mcp",
+				oauthConfig:     oauthConfig,
+				oauthHTTPClient: oauthHTTPClientForAllowPrivateIPs(true),
+			}
+
+			clientID, _, scopes, err := transport.resolveClientCredentials(
+				t.Context(),
+				&AuthorizationServerMetadata{RegistrationEndpoint: srv.URL},
+				"https://example.test/cb",
+				tt.challengeScopes,
+				tt.prmScopes,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, "registered-client-id", clientID)
+
+			gotScope, hadScope := gotBody["scope"]
+			if tt.wantScope == "" {
+				assert.False(t, hadScope, "DCR request must omit the scope field entirely, not send it empty")
+				assert.Nil(t, scopes)
+			} else {
+				assert.Equal(t, tt.wantScope, gotScope, "DCR request must carry the selected scopes")
+				assert.Equal(t, strings.Fields(tt.wantScope), scopes,
+					"resolveClientCredentials must return the exact scopes sent to the DCR request")
+			}
+		})
+	}
+}
+
+// TestUnmanagedOAuthFlow_DriveFlow_DCRSuccess_ScopesPropagate exercises the
+// full docker-agent-driven unmanaged flow end to end with an empty
+// challenge scope, proving the PRM scopes_supported fallback reaches every
+// downstream consumer: the DCR request, the /authorize URL sent to the
+// client, and the stored token's RequestedScopes used later for refresh and
+// scope-coverage checks.
+func TestUnmanagedOAuthFlow_DriveFlow_DCRSuccess_ScopesPropagate(t *testing.T) {
+	t.Parallel()
+
+	var registerScope string
+	var haveRegisterScope bool
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{
+			Resource:             srv.URL,
+			AuthorizationServers: []string{srv.URL},
+			ScopesSupported:      []string{"repo", "profile"},
+		})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+		})
+	})
+	mux.HandleFunc("/.well-known/openid-configuration", http.NotFound)
+	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if s, ok := body["scope"].(string); ok {
+			registerScope, haveRegisterScope = s, true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_id":"registered-client-id","client_secret":"registered-secret"}`))
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"exchanged-at","token_type":"Bearer","expires_in":3600}`))
+	})
+	// The 401 challenge carries no scope parameter: the flow must fall
+	// through to PRM scopes_supported rather than skip scope selection.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", `Bearer resource="`+srv.URL+`/.well-known/oauth-protected-resource"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	const redirectURI = "https://example.test/oauth/cb"
+	var authorizeURL string
+	capture := &elicitCaptured{}
+	capture.replyFn = func(req *gomcp.ElicitParams) tools.ElicitationResult {
+		authorizeURL, _ = req.Meta["docker-agent/authorize_url"].(string)
+		state, _ := req.Meta["docker-agent/state"].(string)
+		return tools.ElicitationResult{
+			Action:  tools.ElicitationActionAccept,
+			Content: map[string]any{"code": "abc", "state": state},
+		}
+	}
+	transport, client := newUnmanagedTestTransport(t, srv.URL, redirectURI, capture)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := transport.RoundTrip(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	require.True(t, haveRegisterScope, "DCR request must carry a scope field")
+	assert.Equal(t, "repo profile", registerScope, "DCR must request the PRM scopes_supported fallback")
+
+	authURL, err := url.Parse(authorizeURL)
+	require.NoError(t, err)
+	assert.Equal(t, "repo profile", authURL.Query().Get("scope"),
+		"the /authorize request must carry the exact same scopes sent to DCR")
+
+	tok, err := client.tokenStore.GetToken(srv.URL)
+	require.NoError(t, err)
+	require.NotNil(t, tok)
+	assert.Equal(t, []string{"repo", "profile"}, tok.RequestedScopes,
+		"the stored token's RequestedScopes must match the scopes sent to DCR and /authorize")
+}
+
+// TestHandleManagedOAuthFlow_DCRSuccess_ConfiguredScopesWinOverChallengeAndPRM
+// proves the browser-driven managed flow (the other resolveClientCredentials
+// call site) wires the challenge scope and PRM scopes_supported through
+// correctly too, and that configured scopes still win the priority order
+// there. The consent dialog is declined so the flow stops right after DCR,
+// before it would open a real browser tab via RequestAuthorizationCode.
+func TestHandleManagedOAuthFlow_DCRSuccess_ConfiguredScopesWinOverChallengeAndPRM(t *testing.T) {
+	t.Parallel()
+
+	var registerScope string
+	var haveRegisterScope bool
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{
+			Resource:             srv.URL,
+			AuthorizationServers: []string{srv.URL},
+			ScopesSupported:      []string{"prm-scope"},
+		})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+		})
+	})
+	mux.HandleFunc("/.well-known/openid-configuration", http.NotFound)
+	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if s, ok := body["scope"].(string); ok {
+			registerScope, haveRegisterScope = s, true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_id":"registered-client-id"}`))
+	})
+
+	capture := &elicitCaptured{reply: tools.ElicitationResult{Action: tools.ElicitationActionDecline}}
+	transport := &oauthTransport{
+		base:               newTestTransport(t),
+		requestElicitation: capture.handler,
+		tokenStore:         NewInMemoryTokenStore(),
+		baseURL:            srv.URL,
+		managed:            true,
+		oauthConfig:        &latest.RemoteOAuthConfig{Scopes: []string{"configured-scope"}},
+		oauthHTTPClient:    oauthHTTPClientForAllowPrivateIPs(true),
+	}
+
+	// The challenge advertises a different scope than configured; it must
+	// lose to the configured scope per the deterministic selection order.
+	err := transport.handleManagedOAuthFlow(t.Context(), srv.URL, `Bearer scope="challenge-scope"`)
+	require.EqualError(t, err, "user declined OAuth authorization")
+
+	require.True(t, haveRegisterScope, "DCR request must carry a scope field")
+	assert.Equal(t, "configured-scope", registerScope,
+		"configured scopes must win over both the challenge scope and PRM scopes_supported")
+}
+
+// fakeBrowserOpener swaps the process-wide browser opener for one that
+// captures the authorization URL into a buffered channel instead of launching
+// a real browser. This makes browser-fixture tests host-independent (no POSIX
+// PATH shim, no platform-specific launcher). Restores the original on cleanup.
+// Mutating the process-wide opener is incompatible with t.Parallel.
+func fakeBrowserOpener(t *testing.T) <-chan string {
+	t.Helper()
+	urlCh := make(chan string, 1)
+	restore := oauthflow.SetBrowserOpenerForTesting(func(_ context.Context, rawURL string) error {
+		select {
+		case urlCh <- rawURL:
+		default:
+		}
+		return nil
+	})
+	t.Cleanup(restore)
+	return urlCh
+}
+
+// requireCapturedAuthorizeURL waits for the fake browser opener to deliver
+// the authorization URL, timing out after 15 seconds.
+func requireCapturedAuthorizeURL(t *testing.T, urlCh <-chan string) string {
+	t.Helper()
+	select {
+	case u := <-urlCh:
+		return u
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for the fake browser opener to receive the authorize URL")
+		return ""
+	}
+}
+
+// deliverFakeCallback simulates the browser completing the authorization
+// consent screen and being redirected back to the local loopback callback
+// server: it extracts redirect_uri and state from authURL and issues the
+// callback request itself, standing in for the human + IdP round trip.
+func deliverFakeCallback(t *testing.T, authURL, code string) {
+	t.Helper()
+
+	parsed, err := url.Parse(authURL)
+	require.NoError(t, err)
+	redirectURI := parsed.Query().Get("redirect_uri")
+	require.NotEmpty(t, redirectURI, "authorize URL must carry redirect_uri")
+	state := parsed.Query().Get("state")
+	require.NotEmpty(t, state, "authorize URL must carry state")
+
+	cbURL, err := url.Parse(redirectURI)
+	require.NoError(t, err)
+	cbQuery := cbURL.Query()
+	cbQuery.Set("code", code)
+	cbQuery.Set("state", state)
+	cbURL.RawQuery = cbQuery.Encode()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, cbURL.String(), http.NoBody)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "fake OAuth callback must be accepted")
+}
+
+// TestHandleManagedOAuthFlow_DCRSuccess_EndToEndScopeEquality drives the
+// managed flow all the way to completion — consent accept, the (faked)
+// browser hand-off, the loopback callback, code exchange, and token
+// storage — and proves the exact same selected scope set reaches every
+// place that must agree on it: the DCR registration request body, the
+// /authorize URL's scope parameter, and the stored token's RequestedScopes.
+func TestHandleManagedOAuthFlow_DCRSuccess_EndToEndScopeEquality(t *testing.T) {
+	urlCh := fakeBrowserOpener(t)
+
+	var registerScope string
+	var haveRegisterScope bool
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(protectedResourceMetadata{
+			Resource:             srv.URL,
+			AuthorizationServers: []string{srv.URL},
+			ScopesSupported:      []string{"prm-scope"},
+		})
+	})
+	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthorizationServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+		})
+	})
+	mux.HandleFunc("/.well-known/openid-configuration", http.NotFound)
+	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if s, ok := body["scope"].(string); ok {
+			registerScope, haveRegisterScope = s, true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"client_id":"registered-client-id","client_secret":"registered-secret"}`))
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"exchanged-at","token_type":"Bearer","expires_in":3600}`))
+	})
+
+	capture := &elicitCaptured{reply: tools.ElicitationResult{Action: tools.ElicitationActionAccept}}
+	store := NewInMemoryTokenStore()
+	transport := &oauthTransport{
+		base:               newTestTransport(t),
+		requestElicitation: capture.handler,
+		tokenStore:         store,
+		baseURL:            srv.URL,
+		managed:            true,
+		oauthConfig:        &latest.RemoteOAuthConfig{Scopes: []string{"configured-scope"}},
+		oauthHTTPClient:    oauthHTTPClientForAllowPrivateIPs(true),
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		// The challenge advertises a different scope than configured, and
+		// PRM scopes_supported advertises a third: configured scopes must
+		// still win the priority order all the way through to a stored token.
+		errCh <- transport.handleManagedOAuthFlow(t.Context(), srv.URL, `Bearer scope="challenge-scope"`)
+	}()
+
+	authURL := requireCapturedAuthorizeURL(t, urlCh)
+	deliverFakeCallback(t, authURL, "test-authorization-code")
+
+	require.NoError(t, <-errCh)
+
+	require.True(t, haveRegisterScope, "DCR request must carry a scope field")
+	assert.Equal(t, "configured-scope", registerScope, "DCR registration request must carry the selected scope")
+
+	parsedAuthURL, err := url.Parse(authURL)
+	require.NoError(t, err)
+	assert.Equal(t, "configured-scope", parsedAuthURL.Query().Get("scope"),
+		"the /authorize URL must carry the exact same scope sent to DCR")
+
+	tok, err := store.GetToken(srv.URL)
+	require.NoError(t, err)
+	require.NotNil(t, tok)
+	assert.Equal(t, []string{"configured-scope"}, tok.RequestedScopes,
+		"the stored token's RequestedScopes must match the scope sent to DCR and /authorize")
 }

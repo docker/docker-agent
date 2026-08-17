@@ -130,7 +130,7 @@ func (b *BudgetConfig) validate() error {
 
 // SafetyMode is a declarative safety-mode default that agent authors
 // (runtime.safety, agents.<name>.safety) and users (settings.safety,
-// alias safety) can put in YAML. Only the three canonical session modes
+// alias safety) can put in YAML. Only the four canonical session modes
 // are accepted; the legacy aliases the session layer still normalizes
 // (unsafe, safer, safe-auto) are not valid in configuration files.
 //
@@ -143,17 +143,21 @@ const (
 	SafetyModeStrict SafetyMode = "strict"
 	// SafetyModeBalanced auto-approves classifier-safe calls only.
 	SafetyModeBalanced SafetyMode = "balanced"
+	// SafetyModeRestricted auto-approves classifier-safe calls and
+	// denies everything else without prompting (fail-closed default
+	// for unattended runs; custom permission rules still win).
+	SafetyModeRestricted SafetyMode = "restricted"
 	// SafetyModeAutonomous auto-approves every call (legacy yolo).
 	SafetyModeAutonomous SafetyMode = "autonomous"
 )
 
-// Validate accepts the three canonical modes and empty (unset).
+// Validate accepts the four canonical modes and empty (unset).
 func (m SafetyMode) Validate() error {
 	switch m {
-	case "", SafetyModeStrict, SafetyModeBalanced, SafetyModeAutonomous:
+	case "", SafetyModeStrict, SafetyModeBalanced, SafetyModeRestricted, SafetyModeAutonomous:
 		return nil
 	}
-	return fmt.Errorf("invalid safety mode %q (valid: strict, balanced, autonomous)", string(m))
+	return fmt.Errorf("invalid safety mode %q (valid: strict, balanced, restricted, autonomous)", string(m))
 }
 
 // RuntimeDefaults captures execution-time defaults the agent author
@@ -1995,6 +1999,17 @@ func (t TaskBudget) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]any{"type": t.Type, "total": t.Total})
 }
 
+// Structured-output enforcement modes. See [StructuredOutput.Mode].
+const (
+	// StructuredOutputModeNative passes the schema to the provider's
+	// native structured-output support (the default).
+	StructuredOutputModeNative = "native"
+	// StructuredOutputModeTool withholds the schema from providers and
+	// instead exposes an internal tool the model must call with the final
+	// JSON; the runtime validates the arguments against the schema.
+	StructuredOutputModeTool = "tool"
+)
+
 // StructuredOutput defines a JSON schema for structured output
 type StructuredOutput struct {
 	// Name is the name of the response format
@@ -2005,6 +2020,32 @@ type StructuredOutput struct {
 	Schema map[string]any `json:"schema"`
 	// Strict enables strict schema adherence (OpenAI only)
 	Strict bool `json:"strict,omitempty"`
+	// Mode selects how the schema is enforced: "native" (or empty, the
+	// default) uses the provider's native structured-output support;
+	// "tool" makes the runtime expose an internal tool the model calls
+	// with the final JSON, validated against Schema.
+	Mode string `json:"mode,omitempty"`
+}
+
+// ToolMode reports whether s opted into tool-based structured-output
+// enforcement. Safe on a nil receiver so callers can chain it off
+// optional config fields.
+func (s *StructuredOutput) ToolMode() bool {
+	return s != nil && s.Mode == StructuredOutputModeTool
+}
+
+// validate rejects unknown structured_output modes. nil is valid (no
+// structured output configured).
+func (s *StructuredOutput) validate() error {
+	if s == nil {
+		return nil
+	}
+	switch s.Mode {
+	case "", StructuredOutputModeNative, StructuredOutputModeTool:
+		return nil
+	default:
+		return fmt.Errorf("unsupported mode %q (must be one of: native, tool)", s.Mode)
+	}
 }
 
 // RAGToolConfig represents tool-specific configuration for a RAG source
@@ -2451,12 +2492,13 @@ type RAGFusionConfig struct {
 }
 
 // PermissionsConfig configures custom per-tool rules that layer on
-// top of the session's safety mode (strict / balanced / autonomous):
+// top of the session's safety mode (strict / balanced / restricted /
+// autonomous):
 //   - Allow: matching tools auto-approve, even under strict
 //   - Deny: matching tools are rejected, even under autonomous
 //   - Ask: matching tools require user approval. Rules from this config
-//     (the agent-author tier) yield to a user-chosen balanced/autonomous
-//     mode; session-scoped ask rules always prompt.
+//     (the agent-author tier) yield to a user-chosen balanced/restricted/
+//     autonomous mode; session-scoped ask rules always prompt.
 //
 // Patterns support glob-style matching (e.g., "shell", "read_*",
 // "mcp:github:*", "shell:cmd=git status*"). Within a config the

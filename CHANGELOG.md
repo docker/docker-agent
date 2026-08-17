@@ -3,6 +3,46 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.124.0] - 2026-08-10
+
+This release adds LaTeX rendering and a startup banner to the TUI, introduces a configurable request size limit for the API server, and includes security fixes for session working directory path traversal.
+
+## What's New
+
+- Adds LaTeX-to-Unicode rendering for inline and display math in TUI markdown
+- Adds a startup banner to the normal TUI, shown as a centered empty state when no welcome message is configured
+- Adds a configurable `--max-request-size` flag to `serve api`, allowing the HTTP request size limit to be adjusted (default remains 1 MiB; requests exceeding the limit return HTTP 413)
+- Adds concurrency-safe, namespaced string attributes to sessions, persisted in SQLite and preserved across JSON round trips, metadata updates, clones, branches, and derived sessions
+
+## Bug Fixes
+
+- Fixes path traversal vulnerability in API session working directories by rejecting traversal, sibling-directory, and symlink escapes when a `--session-workingdir-root` boundary is configured
+- Fixes startup banner display in small viewports by hiding it when the viewport is too small
+- Fixes startup banner ordering to appear before startup info
+- Fixes TUI markdown rendering to preserve content after unclosed math expressions
+- Fixes TUI matrix rendering to display columns without separators
+- Updates gopher example files to reference `gemini-3.1-pro-preview` after `gemini-3-pro-preview` was removed from the model catalog
+
+## Technical Changes
+
+- Migrates Docker Hub push jobs in CI from PAT-based login to short-lived OIDC tokens
+- Uses TypeScript types for codemode
+### Pull Requests
+
+- [#3916](https://github.com/docker/docker-agent/pull/3916) - fix(server): contain API session working directories
+- [#3931](https://github.com/docker/docker-agent/pull/3931) - docs: update CHANGELOG.md for v1.123.0
+- [#3932](https://github.com/docker/docker-agent/pull/3932) - ci: migrate Hub logins to OIDC
+- [#3938](https://github.com/docker/docker-agent/pull/3938) - feat(api): add configurable --max-request-size flag to serve api
+- [#3949](https://github.com/docker/docker-agent/pull/3949) - feat: add startup banner to normal TUI
+- [#3950](https://github.com/docker/docker-agent/pull/3950) - feat(tui): render LaTeX in markdown
+- [#3953](https://github.com/docker/docker-agent/pull/3953) - docs: auto-update for merged PRs (2026-08-07)
+- [#3954](https://github.com/docker/docker-agent/pull/3954) - chore(deps): bump google.golang.org/grpc from 1.81.1 to 1.82.1 in the go_modules group across 1 directory
+- [#3956](https://github.com/docker/docker-agent/pull/3956) - Use typescript types for codemode
+- [#3958](https://github.com/docker/docker-agent/pull/3958) - feat: persist generic session attributes
+- [#3961](https://github.com/docker/docker-agent/pull/3961) - fix: update gopher examples to gemini-3.1-pro-preview (model removed from catalog)
+- [#3963](https://github.com/docker/docker-agent/pull/3963) - docs: clarify request-size limits and large input strategies
+
+
 ## [v1.123.0] - 2026-08-06
 
 This release adds Alt+Enter follow-up messaging in the TUI and session recovery error exports, along with several bug fixes for Windows reliability and context overflow messaging.
@@ -5407,3 +5447,5 @@ This release improves the terminal user interface with better error handling and
 [v1.122.0]: https://github.com/docker/docker-agent/releases/tag/v1.122.0
 
 [v1.123.0]: https://github.com/docker/docker-agent/releases/tag/v1.123.0
+
+[v1.124.0]: https://github.com/docker/docker-agent/releases/tag/v1.124.0

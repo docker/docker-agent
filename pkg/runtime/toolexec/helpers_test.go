@@ -38,6 +38,15 @@ type stubHookDispatcher struct {
 	// in order. Tests assert against this to pin negative cases —
 	// "this event must NOT have been dispatched in pipeline X."
 	dispatched []hooks.EventType
+	// approvals records every NotifyApprovalDecision call so tests can
+	// assert the audit decision/source the dispatcher resolved.
+	approvals []approvalRecord
+}
+
+// approvalRecord captures one NotifyApprovalDecision call.
+type approvalRecord struct {
+	Decision string
+	Source   string
 }
 
 func (s *stubHookDispatcher) Dispatch(_ context.Context, _ *agent.Agent, event hooks.EventType, in *hooks.Input) *hooks.Result {
@@ -51,5 +60,8 @@ func (s *stubHookDispatcher) Dispatch(_ context.Context, _ *agent.Agent, event h
 }
 
 func (s *stubHookDispatcher) NotifyUserInput(context.Context, string, string) {}
-func (s *stubHookDispatcher) NotifyApprovalDecision(context.Context, *session.Session, *agent.Agent, tools.ToolCall, string, string, string) {
+func (s *stubHookDispatcher) NotifyApprovalDecision(_ context.Context, _ *session.Session, _ *agent.Agent, _ tools.ToolCall, decision, source, _ string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.approvals = append(s.approvals, approvalRecord{Decision: decision, Source: source})
 }

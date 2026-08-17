@@ -275,7 +275,8 @@ type Input struct {
 	ToolInput    map[string]any `json:"tool_input,omitempty"`
 
 	// SafetyPolicy mirrors the session's effective safety mode
-	// (strict / balanced / autonomous, empty for the legacy default;
+	// (strict / balanced / restricted / autonomous, empty for the
+	// legacy default;
 	// see [github.com/docker/docker-agent/pkg/session.SafetyPolicy])
 	// on tool-call events. Typed as string to avoid a session dep.
 	SafetyPolicy string `json:"safety_policy,omitempty"`

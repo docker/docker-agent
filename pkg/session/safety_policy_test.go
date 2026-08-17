@@ -13,6 +13,7 @@ func TestSafetyPolicy_IsValid(t *testing.T) {
 		"":                     true,
 		SafetyPolicyStrict:     true,
 		SafetyPolicyBalanced:   true,
+		SafetyPolicyRestricted: true,
 		SafetyPolicyAutonomous: true,
 		// Legacy aliases stay accepted on input.
 		"unsafe":              true,
@@ -32,6 +33,7 @@ func TestSafetyPolicy_Normalize(t *testing.T) {
 		"":                     "",
 		SafetyPolicyStrict:     SafetyPolicyStrict,
 		SafetyPolicyBalanced:   SafetyPolicyBalanced,
+		SafetyPolicyRestricted: SafetyPolicyRestricted,
 		SafetyPolicyAutonomous: SafetyPolicyAutonomous,
 		"unsafe":               SafetyPolicyAutonomous,
 		"safer":                SafetyPolicyBalanced,
@@ -56,6 +58,10 @@ func TestWithSafetyPolicy_SyncsToolsApproved(t *testing.T) {
 	s = New(WithSafetyPolicy(SafetyPolicyBalanced))
 	assert.Equal(t, SafetyPolicyBalanced, s.SafetyPolicy)
 	assert.False(t, s.ToolsApproved)
+
+	s = New(WithSafetyPolicy(SafetyPolicyRestricted))
+	assert.Equal(t, SafetyPolicyRestricted, s.SafetyPolicy)
+	assert.False(t, s.ToolsApproved, "restricted must not grant blanket approval")
 
 	// Legacy alias normalizes at the boundary.
 	s = New(WithSafetyPolicy("unsafe"))
@@ -164,6 +170,21 @@ func TestToggleYolo_RestoresPriorMode(t *testing.T) {
 	assert.Equal(t, SafetyPolicyBalanced, s.GetSafetyPolicy())
 	assert.False(t, s.IsToolsApproved())
 	assert.Equal(t, SafetyPolicy(""), s.PriorSafetyPolicy, "toggle memory must be consumed")
+}
+
+// Restricted participates in the yolo toggle like any other explicit
+// mode: escalate to autonomous, toggle back restores restricted.
+func TestToggleYolo_RestoresRestricted(t *testing.T) {
+	t.Parallel()
+	s := New(WithSafetyPolicy(SafetyPolicyRestricted))
+
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicyAutonomous, s.GetSafetyPolicy())
+	assert.True(t, s.IsToolsApproved())
+
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicyRestricted, s.GetSafetyPolicy())
+	assert.False(t, s.IsToolsApproved())
 }
 
 // A session that never chose a named mode keeps the historical

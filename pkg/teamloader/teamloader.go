@@ -320,6 +320,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithSessionCompaction(agentConfig.SessionCompactionEnabled()),
 			agent.WithCommands(expander.ExpandCommands(ctx, agentConfig.Commands)),
 			agent.WithHooks(config.MergeHooks(config.MergeHooks(agentConfig.Hooks, globalHooks), cliHooks)),
+			agent.WithStructuredOutput(agentConfig.StructuredOutput),
 		}
 
 		if agentConfig.Cache != nil && agentConfig.Cache.Enabled {
@@ -423,6 +424,15 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		opts = append(opts, agent.WithToolSets(agentTools...))
 
 		ag := agent.New(agentConfig.Name, expander.Expand(ctx, agentConfig.Instruction, nil), opts...)
+
+		// Tool-mode structured output needs a compilable JSON schema; catch a
+		// broken one at load time instead of on the first model turn. Going
+		// through the agent's lazy cache also pre-compiles the tool the
+		// runtime will reuse on every turn.
+		if _, err := ag.StructuredOutputTool(); err != nil {
+			return nil, fmt.Errorf("agent %s: structured_output: %w", agentConfig.Name, err)
+		}
+
 		agents = append(agents, ag)
 		agentsByName[agentConfig.Name] = ag
 	}

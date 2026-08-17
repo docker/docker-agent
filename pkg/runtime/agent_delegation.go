@@ -161,6 +161,11 @@ type SubSessionConfig struct {
 	// top of the agent's own toolsets. Used by fork-mode skills that declare
 	// assistive toolsets.
 	ExtraToolSets []tools.ToolSet
+	// DisableStructuredOutput exempts the child session from tool-mode
+	// structured-output enforcement. Set only by fork-mode skills, whose
+	// answer is free-form text for the calling agent; ordinary delegations
+	// and background agents stay enforced.
+	DisableStructuredOutput bool
 	// DelegationLineage is the chain of agents that delegated to produce this
 	// child session (parent lineage plus the delegating caller), as computed
 	// by validateDelegation. Set only for true delegation edges
@@ -241,6 +246,7 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithSafetyPolicy(cfg.SafetyPolicy),
 		session.WithNonInteractive(cfg.NonInteractive),
 		session.WithSendUserMessage(false),
+		session.WithStructuredOutputDisabled(cfg.DisableStructuredOutput),
 		session.WithParentID(parent.ID),
 		session.WithAttachedFiles(attachedFiles),
 		session.WithAttributes(parent.AttributesSnapshot()),
