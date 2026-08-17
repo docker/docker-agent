@@ -96,6 +96,7 @@ for details.
 | Cloudflare AI Gateway | `cloudflare-ai-gateway` | Multi-provider gateway         | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
 | Requesty            | `requesty`       | Multi-provider gateway               | `REQUESTY_API_KEY`                  |
 | OpenRouter          | `openrouter`     | Multi-provider gateway               | `OPENROUTER_API_KEY`                |
+| Atlas Cloud         | `atlascloud`     | Qwen and other open models           | `ATLASCLOUD_API_KEY`                |
 | Azure OpenAI        | `azure`          | gpt-4o, gpt-5 on Azure               | `AZURE_API_KEY` + `base_url`        |
 | [Ollama](../../providers/local/index.md) | `ollama` | Any local Ollama model | None (local; optional `base_url`) |
 | GitHub Copilot      | `github-copilot` | Copilot-hosted OpenAI/Anthropic      | `GITHUB_TOKEN` (PAT with `copilot`) |

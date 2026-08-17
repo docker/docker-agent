@@ -2,7 +2,7 @@
 title: "Atlas Cloud"
 description: "Use Atlas Cloud models with Docker Agent."
 keywords: docker agent, ai agents, model providers, llm, atlas cloud
-weight: 235
+weight: 25
 canonical: https://docs.docker.com/ai/docker-agent/providers/atlascloud/
 ---
 

@@ -157,6 +157,8 @@
       url: /providers/overview/
     - title: Anthropic
       url: /providers/anthropic/
+    - title: Atlas Cloud
+      url: /providers/atlascloud/
     - title: AWS Bedrock
       url: /providers/bedrock/
     - title: Baseten
