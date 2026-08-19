@@ -1,6 +1,7 @@
 package builtins
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -10,6 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	"github.com/docker/docker-agent/pkg/tools/builtin/git"
+	"github.com/docker/docker-agent/pkg/tools/builtin/lsp"
+	"github.com/docker/docker-agent/pkg/tools/builtin/memory"
+	"github.com/docker/docker-agent/pkg/tools/builtin/rag"
 )
 
 // bigPayload returns a payload comfortably above the marker length and below
@@ -392,4 +399,111 @@ func TestElideRepeatedToolResults_SessionCountIsBounded(t *testing.T) {
 	}
 	assert.LessOrEqual(t, elideStoreSessions(), maxElideSessions,
 		"tracked session count must stay bounded without session_end")
+}
+
+// limit_large_tool_results rejects on line count as well as byte size, so a
+// payload well under the byte cap can still be truncated first and win. A
+// byte-only gate here would build a marker that is discarded and record a
+// fingerprint for it.
+func TestElideRepeatedToolResults_DeclinesLineCountLimitLargeWillTruncate(t *testing.T) {
+	forgetAllElideState()
+
+	manyLines := strings.Repeat("y\n", largeToolCallResultTailLines+1)
+	require.Less(t, len(manyLines), maxToolCallResultBytes,
+		"the point of this case is a payload under the byte cap")
+	args := map[string]any{"path": "many-lines.txt"}
+
+	require.Nil(t, elide(t, transformInput("s1", "read_file", manyLines, args)))
+	assert.Nil(t, elide(t, transformInput("s1", "read_file", manyLines, args)),
+		"a payload limit_large_tool_results will truncate on line count must not be elided")
+	assert.Zero(t, elideStoreLen("s1"),
+		"and must not consume state for a marker that would be discarded")
+}
+
+// The competing builtin only covers its own categories, so its thresholds must
+// not be applied to categories it never rewrites. Reading the threshold alone
+// and ignoring the category gate would make every large lsp, memory or git
+// result permanently inelidable for no reason.
+func TestElideRepeatedToolResults_SizeGateFollowsLimitLargeCategories(t *testing.T) {
+	forgetAllElideState()
+
+	manyLines := strings.Repeat("y\n", largeToolCallResultTailLines+1)
+	args := map[string]any{"symbol": "Foo"}
+	mk := func() *hooks.Input {
+		in := transformInput("s1", "lsp_definition", manyLines, args)
+		in.ToolCategory = "lsp"
+		return in
+	}
+
+	require.False(t, largeResultCategories["lsp"],
+		"this control is only meaningful while limit_large_tool_results skips lsp")
+	require.Nil(t, elide(t, mk()))
+	assert.NotNil(t, elide(t, mk()),
+		"a category limit_large_tool_results never rewrites stays elidable at any size")
+}
+
+// The allow-list is matched against tools.Tool.Category at runtime, so an entry
+// that no toolset registers is dead configuration that reads as coverage. This
+// is not hypothetical: the RAG toolset registers "knowledge", and an earlier
+// revision of this list said "rag".
+func TestElidableCategoriesAreRegistered(t *testing.T) {
+	dir := t.TempDir()
+
+	toolsets := map[string]interface {
+		Tools(ctx context.Context) ([]tools.Tool, error)
+	}{
+		"filesystem": filesystem.New(dir),
+		"lsp":        lsp.New("", nil, nil, dir),
+		"knowledge":  rag.New(nil, "search_knowledge"),
+		"memory":     memory.New(nil),
+		"git":        git.New(dir),
+	}
+
+	registered := map[string]bool{}
+	for name, ts := range toolsets {
+		got, err := ts.Tools(t.Context())
+		require.NoErrorf(t, err, "listing tools for %s", name)
+		require.NotEmptyf(t, got, "%s registered no tools", name)
+		for _, tool := range got {
+			registered[tool.Category] = true
+		}
+	}
+
+	for category := range elidableCategories {
+		assert.Truef(t, registered[category],
+			"elidableCategories names %q, which no toolset registers — it would never match", category)
+	}
+}
+
+// A config that opts into the transform leg alone would keep fingerprints
+// across a compaction that removed the payloads they stand for — telling the
+// model "nothing has changed" about bytes it can no longer see, for the rest
+// of the session. The cleanup legs are part of the feature, not a preference.
+func TestApplyAgentDefaults_CompletesElideCleanupLegs(t *testing.T) {
+	elideEntry := hooks.Hook{Type: hooks.HookTypeBuiltin, Command: ElideRepeatedToolResults}
+
+	cfg := ApplyAgentDefaults(&hooks.Config{
+		ToolResponseTransform: []hooks.MatcherConfig{{
+			Matcher: "*",
+			Hooks:   []hooks.Hook{elideEntry},
+		}},
+	}, AgentDefaults{})
+	require.NotNil(t, cfg)
+
+	assert.Contains(t, cfg.SessionEnd, elideEntry)
+	assert.Contains(t, cfg.AfterCompaction, elideEntry)
+	assert.Contains(t, cfg.SessionStart, elideEntry)
+}
+
+// The completion is scoped to configs that asked for the builtin: it must not
+// wire a feature nobody opted into.
+func TestApplyAgentDefaults_LeavesElideAloneWhenUnused(t *testing.T) {
+	elideEntry := hooks.Hook{Type: hooks.HookTypeBuiltin, Command: ElideRepeatedToolResults}
+
+	cfg := ApplyAgentDefaults(&hooks.Config{}, AgentDefaults{AddDate: true})
+	require.NotNil(t, cfg)
+
+	assert.NotContains(t, cfg.SessionEnd, elideEntry)
+	assert.NotContains(t, cfg.AfterCompaction, elideEntry)
+	assert.NotContains(t, cfg.SessionStart, elideEntry)
 }
