@@ -34,6 +34,9 @@ type stubHookDispatcher struct {
 	mu                sync.Mutex
 	on                map[hooks.EventType]*hooks.Result
 	lastPostToolInput *hooks.Input
+	// inputs records the last Input seen per event, so tests can assert on
+	// the fields the dispatcher populated rather than only on the outcome.
+	inputs map[hooks.EventType]*hooks.Input
 	// dispatched records every event the dispatcher asked us to fire,
 	// in order. Tests assert against this to pin negative cases —
 	// "this event must NOT have been dispatched in pipeline X."
@@ -53,6 +56,10 @@ func (s *stubHookDispatcher) Dispatch(_ context.Context, _ *agent.Agent, event h
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dispatched = append(s.dispatched, event)
+	if s.inputs == nil {
+		s.inputs = map[hooks.EventType]*hooks.Input{}
+	}
+	s.inputs[event] = in
 	if event == hooks.EventPostToolUse {
 		s.lastPostToolInput = in
 	}

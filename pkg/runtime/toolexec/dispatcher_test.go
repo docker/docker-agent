@@ -1819,3 +1819,62 @@ func TestDispatcher_NonInteractiveDefaultAskAutoDenies(t *testing.T) {
 	assert.True(t, em.responses[0].IsError)
 	assert.Contains(t, em.responses[0].Output, "non-interactive")
 }
+
+// TestDispatcher_ToolEventsCarryCategoryAndReadOnly pins the contract the
+// hooks documentation states: every tool event carries tool_category and
+// tool_read_only. Each of the four sites builds its Input separately, so a new
+// event or a refactor can silently leave one behind — which is how
+// permission_request came to advertise both fields and send neither.
+func TestDispatcher_ToolEventsCarryCategoryAndReadOnly(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	// Strict prompts on every call, including classifier-safe ones, so a
+	// read-only tool still reaches permission_request — the only way to see
+	// tool_read_only:true on that event rather than a vacuous false.
+	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyStrict))
+
+	tool := tools.Tool{
+		Name:        "read_file",
+		Category:    "filesystem",
+		Annotations: tools.ToolAnnotations{ReadOnlyHint: true},
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			return &tools.ToolCallResult{Output: "contents"}, nil
+		},
+	}
+
+	// Allowed by the permission_request hook so the call proceeds through the
+	// transform and post-tool legs in one pass.
+	hd := &stubHookDispatcher{
+		on: map[hooks.EventType]*hooks.Result{
+			hooks.EventPermissionRequest: {Allowed: true, Decision: "approve"},
+		},
+	}
+
+	resume := make(chan toolexec.ResumeRequest, 1)
+	resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeApprove}
+
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Hooks:    hd,
+		Resume:   resume,
+	}
+
+	d.Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "x",
+		Function: tools.FunctionCall{Name: "read_file", Arguments: "{}"},
+	}}, []tools.Tool{tool}, &captureEmitter{})
+
+	for _, event := range []hooks.EventType{
+		hooks.EventPreToolUse,
+		hooks.EventPermissionRequest,
+		hooks.EventToolResponseTransform,
+		hooks.EventPostToolUse,
+	} {
+		in := hd.inputs[event]
+		if !assert.NotNilf(t, in, "%s was never dispatched", event) {
+			continue
+		}
+		assert.Equalf(t, "filesystem", in.ToolCategory, "%s must carry tool_category", event)
+		assert.Truef(t, in.ToolReadOnly, "%s must carry tool_read_only", event)
+	}
+}
