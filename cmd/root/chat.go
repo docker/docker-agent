@@ -1,6 +1,8 @@
 package root
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -9,6 +11,8 @@ import (
 	"github.com/docker/docker-agent/pkg/chatserver"
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/servesafety"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry"
 )
 
@@ -23,6 +27,8 @@ type chatFlags struct {
 	conversationsMaxItems int
 	conversationTTL       time.Duration
 	maxIdleRuntimes       int
+	safety                string
+	insecureNoAuth        bool
 	runConfig             config.RuntimeConfig
 }
 
@@ -48,6 +54,8 @@ agent without any custom integration.`,
 	cmd.Flags().StringVar(&flags.corsOrigin, "cors-origin", "", "Allowed CORS origin (e.g. https://example.com); empty disables CORS entirely")
 	cmd.Flags().StringVar(&flags.apiKey, "api-key", "", "Required Bearer token clients must present (Authorization: Bearer <token>); empty disables auth")
 	cmd.Flags().StringVar(&flags.apiKeyEnv, "api-key-env", "", "Read the API key from this environment variable instead of the command line")
+	cmd.Flags().StringVar(&flags.safety, "safety", "", "Tool safety policy (strict, balanced, restricted, autonomous)")
+	cmd.Flags().BoolVar(&flags.insecureNoAuth, "insecure-no-auth", false, "Allow unauthenticated non-loopback binding (insecure)")
 	cmd.Flags().Int64Var(&flags.maxRequestSize, "max-request-size", 1<<20, "Maximum request body size in bytes (default 1 MiB)")
 	cmd.Flags().DurationVar(&flags.requestTimeout, "request-timeout", 5*time.Minute, "Per-request timeout (covers model + tool calls + streaming)")
 	cmd.Flags().IntVar(&flags.conversationsMaxItems, "conversations-max", 0, "Cache up to N conversations server-side, keyed by X-Conversation-Id (0 disables; clients must resend full history)")
@@ -65,6 +73,21 @@ func (f *chatFlags) runChatCommand(cmd *cobra.Command, args []string) (commandEr
 		telemetry.TrackCommandError(ctx, "serve", append([]string{"chat"}, args...), commandErr)
 	}()
 
+	if err := validateSafetyFlag(f.safety); err != nil {
+		return err
+	}
+
+	apiKey := f.apiKey
+	if f.apiKeyEnv != "" {
+		apiKey = os.Getenv(f.apiKeyEnv)
+		if apiKey == "" {
+			return fmt.Errorf("environment variable %q is empty or not set", f.apiKeyEnv)
+		}
+	}
+	if !isLoopbackListenAddr(f.listenAddr) && apiKey == "" && !f.insecureNoAuth {
+		return errors.New("non-loopback chat listeners require --api-key, --api-key-env, or --insecure-no-auth")
+	}
+
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	agentFilename := args[0]
 
@@ -77,13 +100,6 @@ func (f *chatFlags) runChatCommand(cmd *cobra.Command, args []string) (commandEr
 	out.Println("Listening on", ln.Addr().String())
 	out.Println("OpenAI-compatible chat completions endpoint: http://" + ln.Addr().String() + "/v1/chat/completions")
 
-	apiKey := f.apiKey
-	if f.apiKeyEnv != "" {
-		if v := os.Getenv(f.apiKeyEnv); v != "" {
-			apiKey = v
-		}
-	}
-
 	return chatserver.Run(ctx, agentFilename, chatserver.Options{
 		AgentName:                f.agentName,
 		RunConfig:                &f.runConfig,
@@ -94,5 +110,9 @@ func (f *chatFlags) runChatCommand(cmd *cobra.Command, args []string) (commandEr
 		ConversationsMaxSessions: f.conversationsMaxItems,
 		ConversationTTL:          f.conversationTTL,
 		MaxIdleRuntimes:          f.maxIdleRuntimes,
+		CLISafety:                session.SafetyPolicy(f.safety),
+		OnSafetyPolicy: func(resolved servesafety.Resolved) {
+			out.Printf("Tool safety policy: %s (source: %s)\n", resolved.Policy, resolved.Source)
+		},
 	}, ln)
 }

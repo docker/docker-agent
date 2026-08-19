@@ -158,4 +158,52 @@ func TestNewVCSMatcher(t *testing.T) {
 
 		assert.True(t, m.ShouldIgnore(filepath.Join(sub, "debug.log")))
 	})
+
+	// A path outside the repository must never be matched against the
+	// repository's patterns. A plain string-prefix containment test has no
+	// path-component boundary, so "<root>-sibling" looks like it lives under
+	// "<root>" and filepath.Rel yields "../<root>-sibling/...", whose trailing
+	// component then matches a basename pattern such as "*.log".
+	t.Run("sibling directory sharing the root name prefix is outside the repository", func(t *testing.T) {
+		t.Parallel()
+		parent := t.TempDir()
+
+		repo := filepath.Join(parent, "repo")
+		require.NoError(t, os.Mkdir(repo, 0o755))
+		writeGitDir(t, repo)
+		require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.log\n"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "app.log"), nil, 0o644))
+
+		sibling := filepath.Join(parent, "repo-sibling")
+		require.NoError(t, os.Mkdir(sibling, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(sibling, "app.log"), nil, 0o644))
+
+		unrelated := filepath.Join(parent, "other")
+		require.NoError(t, os.Mkdir(unrelated, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(unrelated, "app.log"), nil, 0o644))
+
+		m, err := NewVCSMatcher(repo)
+		require.NoError(t, err)
+		require.NotNil(t, m)
+
+		assert.True(t, m.ShouldIgnore(filepath.Join(repo, "app.log")),
+			"a matching file inside the repository is still ignored")
+		assert.False(t, m.ShouldIgnore(filepath.Join(sibling, "app.log")),
+			"a file in a sibling directory is outside the repository")
+		assert.False(t, m.ShouldIgnore(filepath.Join(unrelated, "app.log")),
+			"a file in an unrelated directory is outside the repository")
+	})
+
+	t.Run("repository root itself is matched against its own patterns", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeGitDir(t, dir)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n"), 0o644))
+
+		m, err := NewVCSMatcher(dir)
+		require.NoError(t, err)
+		require.NotNil(t, m)
+
+		assert.False(t, m.ShouldIgnore(dir), "the root is not itself ignored")
+	})
 }

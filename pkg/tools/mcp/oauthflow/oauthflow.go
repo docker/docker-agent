@@ -68,6 +68,29 @@ func SetHTTPClientForTesting(c *http.Client) (restore func()) {
 	return func() { defaultHTTPClient.Store(prev) }
 }
 
+// BrowserOpener opens urlToOpen in the user's default browser. It is the
+// seam through which RequestAuthorizationCode delivers the authorization URL;
+// tests replace it to capture the URL without launching a real browser.
+type BrowserOpener func(ctx context.Context, urlToOpen string) error
+
+// browserOpener is the process-wide opener. Production uses browser.Open;
+// tests replace it via SetBrowserOpenerForTesting.
+var browserOpener = func() *atomic.Pointer[BrowserOpener] {
+	p := &atomic.Pointer[BrowserOpener]{}
+	def := BrowserOpener(browser.Open)
+	p.Store(&def)
+	return p
+}()
+
+// SetBrowserOpenerForTesting replaces the browser opener and returns a
+// function restoring the previous one. It exists only so tests can intercept
+// the authorization URL without launching a real browser (and without relying
+// on host-OS launchers). Never call it in production code.
+func SetBrowserOpenerForTesting(opener BrowserOpener) (restore func()) {
+	prev := browserOpener.Swap(&opener)
+	return func() { browserOpener.Store(prev) }
+}
+
 // HTTPClientForAllowPrivateIPs returns the shared SSRF-safe client, or a
 // variant that may reach private IPs when allowPrivateIPs is set (used by
 // configurations that explicitly opt in to talking to a server on a private
@@ -274,7 +297,7 @@ func parseTokenResponse(body io.Reader) (*OAuthToken, error) {
 
 // RequestAuthorizationCode requests the user to open the authorization URL and waits for the callback
 func RequestAuthorizationCode(ctx context.Context, authURL string, callbackServer *CallbackServer, expectedState string) (string, string, error) {
-	if err := browser.Open(ctx, authURL); err != nil {
+	if err := (*browserOpener.Load())(ctx, authURL); err != nil {
 		return "", "", err
 	}
 

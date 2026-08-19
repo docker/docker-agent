@@ -3,21 +3,27 @@ package root
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/spf13/cobra"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/mcp"
 	"github.com/docker/docker-agent/pkg/runregistry"
+	"github.com/docker/docker-agent/pkg/servesafety"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry"
 )
 
 type mcpFlags struct {
-	agentName  string
-	http       bool
-	listenAddr string
-	attach     string
-	runConfig  config.RuntimeConfig
+	agentName      string
+	http           bool
+	listenAddr     string
+	attach         string
+	safety         string
+	authToken      string
+	insecureNoAuth bool
+	runConfig      config.RuntimeConfig
 }
 
 func newMCPCmd() *cobra.Command {
@@ -41,6 +47,9 @@ func newMCPCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&flags.listenAddr, "listen", "l", "127.0.0.1:8081", "Address to listen on")
 	cmd.PersistentFlags().StringVar(&flags.attach, "attach", "", "Attach to a running TUI run by pid, address, or session id (or empty for the most recent)")
 	cmd.PersistentFlags().Lookup("attach").NoOptDefVal = "latest"
+	cmd.PersistentFlags().StringVar(&flags.safety, "safety", "", "Tool safety policy (strict, balanced, restricted, autonomous); only valid with --http")
+	cmd.PersistentFlags().StringVar(&flags.authToken, "auth-token", "", "Bearer token required for HTTP MCP requests; only valid with --http")
+	cmd.PersistentFlags().BoolVar(&flags.insecureNoAuth, "insecure-no-auth", false, "Allow unauthenticated non-loopback HTTP binding (insecure); only valid with --http")
 	cmd.PersistentFlags().StringVar(&flags.runConfig.MCPToolName, "tool-name", "", "Override the MCP tool identifier clients call (defaults to agent name); only valid when exposing a single agent")
 	cmd.PersistentFlags().DurationVar(&flags.runConfig.MCPKeepAlive, "mcp-keepalive", 0, "Interval between MCP keep-alive pings (e.g. 30s); 0 disables keep-alive")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
@@ -56,7 +65,17 @@ func (f *mcpFlags) runMCPCommand(cmd *cobra.Command, args []string) (commandErr 
 	}()
 
 	if f.attach != "" {
+		if f.http || f.safety != "" || f.authToken != "" || f.insecureNoAuth {
+			return errors.New("--http-only safety and authentication flags cannot be used with --attach")
+		}
 		return f.runAttach(ctx)
+	}
+
+	if !f.http && (f.safety != "" || f.authToken != "" || f.insecureNoAuth) {
+		return errors.New("--safety, --auth-token, and --insecure-no-auth require --http")
+	}
+	if err := validateSafetyFlag(f.safety); err != nil {
+		return err
 	}
 
 	if len(args) == 0 {
@@ -68,13 +87,23 @@ func (f *mcpFlags) runMCPCommand(cmd *cobra.Command, args []string) (commandErr 
 		return mcp.StartMCPServer(ctx, agentFilename, f.agentName, &f.runConfig)
 	}
 
+	if !isLoopbackListenAddr(f.listenAddr) && f.authToken == "" && !f.insecureNoAuth {
+		return errors.New("non-loopback MCP HTTP listeners require --auth-token or --insecure-no-auth")
+	}
+
 	ln, cleanup, err := newListener(ctx, f.listenAddr)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	return mcp.StartHTTPServer(ctx, agentFilename, f.agentName, &f.runConfig, ln)
+	return mcp.StartHTTPServer(ctx, agentFilename, f.agentName, &f.runConfig, ln, mcp.HTTPOptions{
+		CLISafety: session.SafetyPolicy(f.safety),
+		AuthToken: f.authToken,
+		OnSafetyPolicy: func(resolved servesafety.Resolved) {
+			fmt.Fprintf(cmd.OutOrStdout(), "Tool safety policy: %s (source: %s)\n", resolved.Policy, resolved.Source)
+		},
+	})
 }
 
 func (f *mcpFlags) runAttach(ctx context.Context) error {

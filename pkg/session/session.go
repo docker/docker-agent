@@ -34,9 +34,9 @@ const (
 )
 
 // SafetyPolicy is the per-session safety mode. The runtime routes
-// tool calls to allow/ask through the (mode × safety-label) table in
-// pkg/runtime/toolexec; custom permission rules always win over the
-// mode.
+// tool calls to allow/ask/deny through the (mode × safety-label)
+// table in pkg/runtime/toolexec; custom permission rules always win
+// over the mode.
 //
 // Empty means "never explicitly chosen": tool calls behave like the
 // pre-modes default (read-only-annotated tools auto-approve, everything
@@ -51,6 +51,12 @@ const (
 	// (safe-listed shell commands, read-only-annotated tools); asks
 	// on destructive and unknown.
 	SafetyPolicyBalanced SafetyPolicy = "balanced"
+	// SafetyPolicyRestricted is the fail-closed mode for unattended /
+	// headless runs: classifier-safe calls auto-approve, destructive
+	// and unknown calls are denied without ever prompting. Custom
+	// rules still win (an explicit allow can approve a destructive
+	// call, a deny always blocks, a session ask still prompts).
+	SafetyPolicyRestricted SafetyPolicy = "restricted"
 	// SafetyPolicyAutonomous auto-approves every call (legacy yolo).
 	// Only custom deny/ask rules and preempt hooks still gate.
 	SafetyPolicyAutonomous SafetyPolicy = "autonomous"
@@ -65,7 +71,7 @@ const (
 	legacyPolicySafeAuto SafetyPolicy = "safe-auto"
 )
 
-// Normalize maps legacy policy values onto the current three-mode
+// Normalize maps legacy policy values onto the current mode
 // vocabulary: unsafe → autonomous, safer / safe-auto → balanced
 // (the cautious mapping: old "safer" also waved unknown calls
 // through, balanced asks about them). Current values and empty pass
@@ -73,7 +79,7 @@ const (
 // unknown input can never widen approval.
 func (p SafetyPolicy) Normalize() SafetyPolicy {
 	switch p {
-	case "", SafetyPolicyStrict, SafetyPolicyBalanced, SafetyPolicyAutonomous:
+	case "", SafetyPolicyStrict, SafetyPolicyBalanced, SafetyPolicyRestricted, SafetyPolicyAutonomous:
 		return p
 	case legacyPolicyUnsafe:
 		return SafetyPolicyAutonomous
@@ -84,10 +90,43 @@ func (p SafetyPolicy) Normalize() SafetyPolicy {
 	}
 }
 
+// MinSafetyPolicy returns the more restrictive of two concrete safety modes.
+// Under NonInteractive, strict and balanced deny calls that need confirmation,
+// restricted permits only classifier-safe calls, and autonomous never asks.
+// Empty is an unset legacy mode rather than an ordered policy, so an empty input
+// yields empty; callers applying a policy ceiling must handle it explicitly.
+func MinSafetyPolicy(a, b SafetyPolicy) SafetyPolicy {
+	a = a.Normalize()
+	b = b.Normalize()
+	if a == "" || b == "" {
+		return ""
+	}
+
+	if safetyPolicyRank(a) <= safetyPolicyRank(b) {
+		return a
+	}
+	return b
+}
+
+func safetyPolicyRank(policy SafetyPolicy) int {
+	switch policy {
+	case SafetyPolicyStrict:
+		return 0
+	case SafetyPolicyBalanced:
+		return 1
+	case SafetyPolicyRestricted:
+		return 2
+	case SafetyPolicyAutonomous:
+		return 3
+	default:
+		return 0
+	}
+}
+
 // IsValid accepts current values, the legacy aliases, and empty.
 func (p SafetyPolicy) IsValid() bool {
 	switch p {
-	case "", SafetyPolicyStrict, SafetyPolicyBalanced, SafetyPolicyAutonomous,
+	case "", SafetyPolicyStrict, SafetyPolicyBalanced, SafetyPolicyRestricted, SafetyPolicyAutonomous,
 		legacyPolicyUnsafe, legacyPolicySafer, legacyPolicySafeAuto:
 		return true
 	}
@@ -229,6 +268,9 @@ type Session struct {
 	// ID is the unique identifier for the session
 	ID string `json:"id"`
 
+	// Origin identifies the protocol surface that created this session.
+	Origin string `json:"origin,omitempty"`
+
 	// InputID is an optional caller-supplied correlation ID read from the eval
 	// input file's "input_id" field. It is carried through to the output as-is
 	// and never used internally. The session's own "id" is always a fresh UUID.
@@ -255,7 +297,7 @@ type Session struct {
 	ToolsApproved bool `json:"tools_approved"`
 
 	// SafetyPolicy is the per-session safety preference. See the
-	// [SafetyPolicy] type doc for the three modes and empty-value semantics.
+	// [SafetyPolicy] type doc for the modes and empty-value semantics.
 	SafetyPolicy SafetyPolicy `json:"safety_policy,omitempty"`
 
 	// PriorSafetyPolicy remembers the mode that was active before a yolo
@@ -361,6 +403,15 @@ type Session struct {
 	// that declare assistive toolsets. Their tools bypass the AllowedTools
 	// filter (the skill explicitly asked for them).
 	ExtraToolSets []tools.ToolSet `json:"-"`
+
+	// DisableStructuredOutput, when true, exempts this session from tool-mode
+	// structured-output enforcement: the internal output tool is not offered
+	// and plain-text finals are accepted. Used by fork-mode skill
+	// sub-sessions, whose answer is free-form text for the calling agent, not
+	// the agent's schema-constrained final output. Not persisted: like the
+	// other transient sub-session state, a restored or branched session
+	// starts with enforcement re-enabled.
+	DisableStructuredOutput bool `json:"-"`
 
 	// AgentName, when set, tells RunStream which agent to use for this session
 	// instead of reading from the shared runtime currentAgent field. This is
@@ -1387,6 +1438,12 @@ func WithMaxToolResultTokens(n int) Opt {
 	}
 }
 
+func WithOrigin(origin string) Opt {
+	return func(s *Session) {
+		s.Origin = origin
+	}
+}
+
 func WithWorkingDir(workingDir string) Opt {
 	return func(s *Session) {
 		s.WorkingDir = workingDir
@@ -1418,7 +1475,7 @@ func WithToolsApproved(toolsApproved bool) Opt {
 }
 
 // WithSafetyPolicy sets the session's safety mode. The input is
-// normalized (legacy aliases map onto the three-mode vocabulary) and
+// normalized (legacy aliases map onto the current mode vocabulary) and
 // ToolsApproved is kept in sync so legacy readers of that flag agree
 // with the mode. Empty means "no explicit choice" and is a no-op, so
 // the option composes with [WithToolsApproved] regardless of order
@@ -1538,6 +1595,15 @@ func WithAllowedTools(names []string) Opt {
 func WithExtraToolSets(toolSets []tools.ToolSet) Opt {
 	return func(s *Session) {
 		s.ExtraToolSets = toolSets
+	}
+}
+
+// WithStructuredOutputDisabled exempts the session from tool-mode
+// structured-output enforcement. Used by fork-mode skill sub-sessions whose
+// answers are free-form text for the calling agent.
+func WithStructuredOutputDisabled(disabled bool) Opt {
+	return func(s *Session) {
+		s.DisableStructuredOutput = disabled
 	}
 }
 
@@ -1792,6 +1858,7 @@ func (s *Session) newID() string {
 // New creates a new agent session
 func New(opts ...Opt) *Session {
 	s := &Session{
+		Origin:          "run",
 		SendUserMessage: true,
 	}
 

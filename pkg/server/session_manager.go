@@ -2011,6 +2011,7 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 		ID:         sess.ID,
 		Title:      title,
 		CreatedAt:  sess.CreatedAt,
+		Origin:     sess.Origin,
 		WorkingDir: sess.WorkingDir,
 		// SafetyPolicy must travel with ToolsApproved: omitting it would
 		// reset a strict/balanced session to the legacy default on reload.

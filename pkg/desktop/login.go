@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/docker/docker-agent/pkg/hubauth"
 )
 
 type DockerHubInfo struct {
@@ -16,37 +16,169 @@ type DockerHubInfo struct {
 	Email    string `json:"email,omitempty"`
 }
 
-// GetToken returns Docker Desktop's access token. Desktop's newer auth stack
-// (auth v2) serves whatever its in-memory token source holds and never
-// refreshes on GET, so a stuck background refresher makes it return the same
-// expired JWT forever — or nothing at all when its read-time refresh failed.
-// When that happens we force a refresh on Desktop's side.
+// Source says where a token came from, for diagnostics.
+type Source string
+
+const (
+	SourceNone    Source = "none"
+	SourceDesktop Source = "docker desktop"
+	SourceMinted  Source = "minted from the stored access token"
+)
+
+// mintToken exchanges the stored access token for a fresh one. A var so tests
+// never reach the real credential store or Docker Hub.
+var mintToken = hubauth.Token
+
+// cache holds the last token known to be usable. Gateway clients are rebuilt
+// for every request and each one asks for a token, so without this every LLM
+// call would pay a round-trip to Docker Desktop over its socket.
+var cache struct {
+	sync.Mutex
+
+	token   string
+	source  Source
+	staleAt time.Time // time from which the token must be looked up again
+
+	// rejected holds the tokens Docker refused, until they expire. Docker
+	// Desktop keeps serving one — it has no idea it was refused, and can't be
+	// told — and can regress to an earlier one, so a single tombstone would let
+	// a refused token back in.
+	rejected map[string]struct{}
+}
+
+// cacheTTL bounds how long a token is served from memory before Docker Desktop
+// and the credential store are consulted again. Expiry alone would not do: a
+// minted token can be valid for hours, and a `docker logout` or an account
+// switch in between must not keep the previous account's token in play.
+const cacheTTL = 30 * time.Second
+
+// GetToken returns the user's Docker access token, or "" when there is none.
 func GetToken(ctx context.Context) string {
+	token, _ := GetTokenWithSource(ctx)
+	return token
+}
+
+// GetTokenWithSource returns the user's Docker access token and where it came
+// from. Docker Desktop's newer auth stack (auth v2) serves whatever its
+// in-memory token source holds and never refreshes on GET, so a stuck
+// background refresher makes it return the same expired JWT forever — or
+// nothing at all when its read-time refresh failed. When that happens we mint
+// a token ourselves from the access token `docker login` stored, and only then
+// fall back to nudging Desktop.
+func GetTokenWithSource(ctx context.Context) (string, Source) {
+	if token, source, ok := cached(); ok {
+		return token, source
+	}
+
 	token, err := fetchToken(ctx)
-	if err == nil && token != "" && !tokenExpired(token) {
-		return token
+	if err == nil && usable(token) && remember(token, SourceDesktop) {
+		return token, SourceDesktop
 	}
 
 	logUnusableToken(ctx, token, err)
 
+	// Minting needs no help from Desktop and, unlike a forced refresh, is
+	// deterministic: try it first. hubauth keeps its own in-memory copy and
+	// re-checks the credential store, so cacheTTL bounds how long a minted
+	// token is served without it being asked again.
+	minted, mintErr := mintToken(ctx)
+	if mintErr == nil && usable(minted) && remember(minted, SourceMinted) {
+		return minted, SourceMinted
+	}
+	slog.DebugContext(ctx, "Could not mint a Docker token from the credential store", "error", mintErr)
+
 	// Signed out: a forced refresh can't help and would delay every caller.
 	if token == "" && !isLoggedIn(ctx) {
-		return ""
+		return "", SourceNone
 	}
 
-	if fresh := forceTokenRefresh(ctx); fresh != "" {
+	if fresh := forceTokenRefresh(ctx); fresh != "" && remember(fresh, SourceDesktop) {
 		slog.InfoContext(ctx, "Recovered a fresh token from Docker Desktop",
 			"fingerprint", tokenFingerprint(fresh))
-		return fresh
+		return fresh, SourceDesktop
 	}
-	if token == "" {
+	if token == "" || wasRejected(token) {
 		slog.WarnContext(ctx, "Token refresh failed, no token available")
-		return ""
+		return "", SourceNone
 	}
-	slog.WarnContext(ctx, "Token refresh failed, sending a token known to be expired",
+	slog.WarnContext(ctx, "Token refresh failed, sending a token that expired or is about to",
 		"fingerprint", tokenFingerprint(token),
-		"expired_for", expiredFor(token))
-	return token
+		"expires_in", expiresIn(token))
+	return token, SourceDesktop
+}
+
+// InvalidateToken forgets token, everywhere it may be cached, so the next
+// [GetToken] fetches or mints a new one. Called when Docker rejects a token we
+// believed to be valid: only the issuer knows for sure.
+func InvalidateToken(token string) {
+	if token == "" {
+		return
+	}
+
+	cache.Lock()
+	if cache.token == token {
+		cache.token, cache.source = "", SourceNone
+	}
+	if cache.rejected == nil {
+		cache.rejected = make(map[string]struct{})
+	}
+	// An expired token is refused by everyone anyway, and never served from
+	// here: forget it rather than grow the set for the life of the process.
+	for known := range cache.rejected {
+		if hubauth.Expiring(known) {
+			delete(cache.rejected, known)
+		}
+	}
+	cache.rejected[token] = struct{}{}
+	cache.Unlock()
+
+	hubauth.Invalidate(token)
+}
+
+func cached() (string, Source, bool) {
+	cache.Lock()
+	defer cache.Unlock()
+
+	if cache.token == "" || isRejected(cache.token) {
+		return "", SourceNone, false
+	}
+	if !time.Now().Before(cache.staleAt) || hubauth.Expiring(cache.token) {
+		return "", SourceNone, false
+	}
+	return cache.token, cache.source, true
+}
+
+// usable reports whether a token is worth handing to callers: one that dies
+// mid-request is no better than none, and one Docker already refused is worse.
+func usable(token string) bool {
+	return token != "" && !hubauth.Expiring(token) && !wasRejected(token)
+}
+
+func wasRejected(token string) bool {
+	cache.Lock()
+	defer cache.Unlock()
+
+	return isRejected(token)
+}
+
+// isRejected must be called with the cache lock held.
+func isRejected(token string) bool {
+	_, refused := cache.rejected[token]
+	return refused
+}
+
+// remember caches a token, reporting whether it may be served: the rejection
+// check and the write are a single operation, so a token invalidated while it
+// was being looked up is never handed out.
+func remember(token string, source Source) bool {
+	cache.Lock()
+	defer cache.Unlock()
+
+	if token == "" || isRejected(token) {
+		return false
+	}
+	cache.token, cache.source, cache.staleAt = token, source, time.Now().Add(cacheTTL)
+	return true
 }
 
 // logUnusableToken records why Docker Desktop's token can't be used as-is,
@@ -57,12 +189,15 @@ func logUnusableToken(ctx context.Context, token string, err error) {
 		slog.WarnContext(ctx, "Failed to fetch a token from Docker Desktop", "error", err)
 	case token == "":
 		slog.WarnContext(ctx, "Docker Desktop served an empty token")
+	case wasRejected(token):
+		slog.WarnContext(ctx, "Docker Desktop served a token Docker refused",
+			"fingerprint", tokenFingerprint(token))
 	default:
-		attrs := []any{"fingerprint", tokenFingerprint(token), "expired_for", expiredFor(token)}
-		if exp, ok := tokenExpiry(token); ok {
+		attrs := []any{"fingerprint", tokenFingerprint(token), "expires_in", expiresIn(token)}
+		if exp, ok := hubauth.Expiry(token); ok {
 			attrs = append(attrs, "expires_at", exp.UTC().Format(time.RFC3339))
 		}
-		slog.WarnContext(ctx, "Docker Desktop served an expired token", attrs...)
+		slog.WarnContext(ctx, "Docker Desktop served a token that expired or is about to", attrs...)
 	}
 }
 
@@ -72,33 +207,30 @@ func tokenFingerprint(token string) string {
 	return hex.EncodeToString(sum[:4])
 }
 
-// expiredFor returns how long ago the token's exp claim passed.
-func expiredFor(token string) string {
-	exp, ok := tokenExpiry(token)
+// expiresIn returns how long the token has left, negative once its exp claim
+// has passed.
+func expiresIn(token string) string {
+	exp, ok := hubauth.Expiry(token)
 	if !ok {
 		return "unknown"
 	}
-	return time.Since(exp).Round(time.Second).String()
+	return time.Until(exp).Round(time.Second).String()
 }
 
-// tokenExpiry returns the token's exp claim, or false when the token doesn't
-// parse or carries no exp claim.
-func tokenExpiry(token string) (time.Time, bool) {
-	parsed, _, err := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
-	if err != nil {
-		return time.Time{}, false
-	}
-	exp, err := parsed.Claims.GetExpirationTime()
-	if err != nil || exp == nil {
-		return time.Time{}, false
-	}
-	return exp.Time, true
-}
-
+// GetUserInfo returns the signed-in account. Docker Desktop knows it best, but
+// it is not always around: the token itself carries the same information.
 func GetUserInfo(ctx context.Context) DockerHubInfo {
 	var info DockerHubInfo
 	_ = ClientBackend.Get(ctx, "/registry/info", &info)
-	return info
+	if info.Username != "" {
+		return info
+	}
+
+	identity, ok := hubauth.IdentityFromToken(GetToken(ctx))
+	if !ok {
+		return info
+	}
+	return DockerHubInfo{Username: identity.Username, Email: identity.Email}
 }
 
 func fetchToken(ctx context.Context) (string, error) {
@@ -114,19 +246,6 @@ func isLoggedIn(ctx context.Context) bool {
 	}
 	return loggedIn
 }
-
-// tokenExpired reports whether the JWT's exp claim is in the past, with
-// leeway for clock skew between this machine and the token issuer.
-// Tokens that don't parse or carry no exp claim are treated as valid.
-func tokenExpired(token string) bool {
-	exp, ok := tokenExpiry(token)
-	if !ok {
-		return false
-	}
-	return exp.Before(time.Now().Add(-expiryLeeway))
-}
-
-const expiryLeeway = 30 * time.Second
 
 var refreshState struct {
 	sync.Mutex
@@ -166,7 +285,7 @@ func forceTokenRefresh(ctx context.Context) string {
 		// result if still valid.
 		token := refreshState.result
 		refreshState.Unlock()
-		if token != "" && !tokenExpired(token) {
+		if usable(token) {
 			return token
 		}
 		return ""
@@ -222,8 +341,10 @@ func runTokenRefresh(ctx context.Context) string {
 	defer ticker.Stop()
 
 	for {
-		// Check right away: Desktop may have refreshed synchronously.
-		if token, err := fetchToken(ctx); err == nil && token != "" && !tokenExpired(token) {
+		// Check right away: Desktop may have refreshed synchronously. A token
+		// Docker refused doesn't count: Desktop serves it until it renews its
+		// session, and accepting it here would cache it for its whole life.
+		if token, err := fetchToken(ctx); err == nil && usable(token) {
 			return token
 		}
 		select {

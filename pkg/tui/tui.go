@@ -296,6 +296,11 @@ type appModel struct {
 	// Shared by every tab and managed via /settings.
 	sendMode messages.SendMode
 
+	// interruptMode is how Esc interrupts a running stream (confirmation
+	// dialog, double-tap, or immediate). Shared by every tab and managed
+	// via /settings.
+	interruptMode messages.InterruptMode
+
 	// buildCommandCategories is a function that returns the list of command categories.
 	buildCommandCategories func(context.Context, tea.Model) []commands.Category
 
@@ -529,6 +534,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		editorLines:                   3,
 		layoutSettings:                layoutSettingsFromConfig(userSettings.GetLayout()),
 		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
+		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
 		appName:                       "docker agent",
@@ -658,6 +664,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithCommandParser(commands.NewParser(m.commandCategories()...)),
 		chat.WithLayoutSettings(m.layoutSettings),
 		chat.WithSendMode(m.sendMode),
+		chat.WithInterruptMode(m.interruptMode),
 	}
 
 	if m.leanMode {

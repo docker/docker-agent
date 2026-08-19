@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -397,4 +398,136 @@ func TestFilesystemToolset_ReadFileRejectsInvalidRange(t *testing.T) {
 	}
 
 	assert.Empty(t, responder.recordedRequests(), "invalid ranges must be rejected before any RPC")
+}
+
+// editFileResponder answers both fs/read_text_file and fs/write_text_file so an
+// edit_file round trip can be driven over a real AgentSideConnection. Written
+// content is recorded, which is what lets a test assert that a refused edit
+// never reached the client.
+type editFileResponder struct {
+	t       *testing.T
+	peer    io.Writer
+	content string
+
+	mu      sync.Mutex
+	written []string
+}
+
+func (p *editFileResponder) Write(b []byte) (int, error) {
+	var msg struct {
+		ID     json.RawMessage `json:"id"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(b, &msg); err != nil {
+		p.t.Errorf("peer received malformed JSON-RPC message %q: %v", b, err)
+		return 0, err
+	}
+
+	var result any
+	switch msg.Method {
+	case acpsdk.ClientMethodFsReadTextFile:
+		result = acpsdk.ReadTextFileResponse{Content: p.content}
+	case acpsdk.ClientMethodFsWriteTextFile:
+		var req acpsdk.WriteTextFileRequest
+		if err := json.Unmarshal(msg.Params, &req); err != nil {
+			p.t.Errorf("peer failed to decode %s params: %v", msg.Method, err)
+			return 0, err
+		}
+		p.mu.Lock()
+		p.written = append(p.written, req.Content)
+		p.mu.Unlock()
+		result = acpsdk.WriteTextFileResponse{}
+	default:
+		err := fmt.Errorf("peer cannot answer JSON-RPC message %q (id %s)", msg.Method, msg.ID)
+		p.t.Error(err)
+		return 0, err
+	}
+
+	response, err := json.Marshal(struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  any             `json:"result"`
+	}{JSONRPC: "2.0", ID: msg.ID, Result: result})
+	if err != nil {
+		return 0, fmt.Errorf("marshal response: %w", err)
+	}
+	if _, err := p.peer.Write(append(response, '\n')); err != nil {
+		return 0, err
+	}
+	return len(b), nil
+}
+
+func (p *editFileResponder) writes() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.written...)
+}
+
+// newEditFileFixture wires a FilesystemToolset to a real AgentSideConnection
+// whose peer answers reads with content and records writes.
+func newEditFileFixture(t *testing.T, content string) (*FilesystemToolset, context.Context, *editFileResponder) {
+	t.Helper()
+
+	workingDir := t.TempDir()
+	const sessionID = "edit-session"
+
+	acpAgent := &Agent{
+		sessions: map[string]*Session{sessionID: {id: sessionID, workingDir: workingDir}},
+		clientFS: acpsdk.FileSystemCapabilities{ReadTextFile: true, WriteTextFile: true},
+	}
+
+	peerReader, peerWriter := io.Pipe()
+	responder := &editFileResponder{t: t, peer: peerWriter, content: content}
+	conn := acpsdk.NewAgentSideConnection(acpAgent, responder, peerReader)
+	conn.SetLogger(slog.New(slog.DiscardHandler))
+	acpAgent.SetAgentConnection(conn)
+	t.Cleanup(func() {
+		_ = peerWriter.Close()
+		select {
+		case <-conn.Done():
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for ACP connection shutdown")
+		}
+	})
+
+	return NewFilesystemToolset(acpAgent, workingDir), withSessionID(t.Context(), sessionID), responder
+}
+
+// The ACP toolset serves the same edit_file tool name and schema as the built-in
+// filesystem toolset, so it must refuse an empty oldText for the same reason:
+// strings.Contains always matches "" and strings.Replace would prepend.
+func TestFilesystemToolset_EditFileRejectsEmptyOldText(t *testing.T) {
+	t.Parallel()
+
+	const original = "line one\nline two\n"
+	ts, ctx, responder := newEditFileFixture(t, original)
+
+	result, err := ts.handleEditFile(ctx, tools.ToolCall{
+		Function: tools.FunctionCall{
+			Name:      filesystem.ToolNameEditFile,
+			Arguments: `{"path":"f.txt","edits":[{"oldText":"","newText":"INJECTED"}]}`,
+		},
+	}, nil)
+	require.NoError(t, err)
+	assert.True(t, result.IsError, result.Output)
+	assert.Contains(t, result.Output, "oldText must not be empty")
+	assert.Empty(t, responder.writes(), "a refused edit must never reach the client")
+}
+
+// A normal edit still works, so the guard is not over-broad.
+func TestFilesystemToolset_EditFileAppliesNonEmptyEdit(t *testing.T) {
+	t.Parallel()
+
+	ts, ctx, responder := newEditFileFixture(t, "line one\nline two\n")
+
+	result, err := ts.handleEditFile(ctx, tools.ToolCall{
+		Function: tools.FunctionCall{
+			Name:      filesystem.ToolNameEditFile,
+			Arguments: `{"path":"f.txt","edits":[{"oldText":"line one","newText":"LINE ONE"}]}`,
+		},
+	}, nil)
+	require.NoError(t, err)
+	require.False(t, result.IsError, result.Output)
+	assert.Equal(t, []string{"LINE ONE\nline two\n"}, responder.writes())
 }

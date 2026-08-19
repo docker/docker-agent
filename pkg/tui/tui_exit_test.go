@@ -33,6 +33,9 @@ import (
 // mockChatPage implements chat.Page for testing.
 type mockChatPage struct {
 	compactCalls []string // AdditionalPrompt of each CompactSession call
+
+	// interruptMode records the last SetInterruptMode value.
+	interruptMode messages.InterruptMode
 }
 
 func (m *mockChatPage) Init() tea.Cmd                          { return nil }
@@ -58,13 +61,15 @@ func (m *mockChatPage) SetSidebarSettings(chat.SidebarSettings)  {}
 func (m *mockChatPage) SetLayoutSettings(messages.LayoutSettings) tea.Cmd {
 	return nil
 }
-func (m *mockChatPage) SetSendMode(messages.SendMode)           {}
-func (m *mockChatPage) SetInterruptMode(messages.InterruptMode) {}
-func (m *mockChatPage) SetRoutingID(string)                     {}
-func (m *mockChatPage) TakeRoutedTimers() tea.Cmd               { return nil }
-func (m *mockChatPage) VisualGeneration() uint64                { return 0 }
-func (m *mockChatPage) Bindings() []key.Binding                 { return nil }
-func (m *mockChatPage) Help() help.KeyMap                       { return nil }
+func (m *mockChatPage) SetSendMode(messages.SendMode) {}
+func (m *mockChatPage) SetInterruptMode(mode messages.InterruptMode) {
+	m.interruptMode = mode
+}
+func (m *mockChatPage) SetRoutingID(string)       {}
+func (m *mockChatPage) TakeRoutedTimers() tea.Cmd { return nil }
+func (m *mockChatPage) VisualGeneration() uint64  { return 0 }
+func (m *mockChatPage) Bindings() []key.Binding   { return nil }
+func (m *mockChatPage) Help() help.KeyMap         { return nil }
 
 type countingChatPage struct {
 	mockChatPage

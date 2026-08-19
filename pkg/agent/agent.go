@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/structuredoutput"
 )
 
 // Agent represents an AI agent
@@ -54,6 +55,12 @@ type Agent struct {
 	harness                 *latest.HarnessConfig
 	hooks                   *latest.HooksConfig
 	cache                   *cache.Cache
+	structuredOutput        *latest.StructuredOutput
+	// structuredOutputTool lazily compiles the tool-mode output tool once
+	// per agent (sync.OnceValues over structuredoutput.New); nil when the
+	// agent has no tool-mode structured output. WithStructuredOutput
+	// replaces the closure, which resets the cache.
+	structuredOutputTool func() (*structuredoutput.OutputTool, error)
 
 	// warningsMu guards pendingWarnings. AddToolWarning and DrainWarnings
 	// may be called concurrently from the runtime loop, the MCP server,
@@ -390,6 +397,25 @@ func (a *Agent) HarnessType() string {
 // Hooks returns the hooks configuration for this agent.
 func (a *Agent) Hooks() *latest.HooksConfig {
 	return a.hooks
+}
+
+// StructuredOutput returns the agent's structured-output configuration, or
+// nil when none was configured. The runtime uses it to enforce tool-mode
+// structured output; native mode is handled by the providers themselves.
+func (a *Agent) StructuredOutput() *latest.StructuredOutput {
+	return a.structuredOutput
+}
+
+// StructuredOutputTool returns the compiled tool-mode structured-output
+// tool, building it on first use and caching both the tool and the error
+// (schema compilation is not free, and the runtime asks on every turn).
+// It returns (nil, nil) when the agent has no tool-mode structured output
+// configured; native mode never compiles anything here.
+func (a *Agent) StructuredOutputTool() (*structuredoutput.OutputTool, error) {
+	if a.structuredOutputTool == nil {
+		return nil, nil
+	}
+	return a.structuredOutputTool()
 }
 
 // Cache returns the response cache configured for this agent, or nil when

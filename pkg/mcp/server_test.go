@@ -1,6 +1,9 @@
 package mcp
 
 import (
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -18,6 +22,52 @@ func annot(readOnly, idempotent bool, destructive, openWorld *bool) tools.ToolAn
 		IdempotentHint:  idempotent,
 		DestructiveHint: destructive,
 		OpenWorldHint:   openWorld,
+	}
+}
+
+func TestStartHTTPServer_RejectsAutonomousYAMLSafety(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "DUMMY")
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	err = StartHTTPServer(t.Context(), "testdata/autonomous.yaml", "root", &config.RuntimeConfig{}, ln, HTTPOptions{})
+	require.ErrorContains(t, err, "--safety autonomous")
+}
+
+func TestCreateMCPServer_AcceptsAutonomousYAMLSafetyForStdio(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "DUMMY")
+
+	server, cleanup, err := createMCPServer(t.Context(), "testdata/autonomous.yaml", "root", &config.RuntimeConfig{})
+	require.NoError(t, err)
+	require.NotNil(t, server)
+	cleanup()
+}
+
+func TestHTTPBearerAuth(t *testing.T) {
+	t.Parallel()
+
+	handler := httpsec.BearerAuth("secret")(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   int
+	}{
+		{name: "missing", want: http.StatusUnauthorized},
+		{name: "wrong", header: "Bearer wrong", want: http.StatusUnauthorized},
+		{name: "correct", header: "Bearer secret", want: http.StatusNoContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", http.NoBody)
+			req.Header.Set("Authorization", tc.header)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, tc.want, rec.Code)
+		})
 	}
 }
 

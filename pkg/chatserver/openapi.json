@@ -17,7 +17,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Static token configured via --api-key. When --api-key is not set the server is unauthenticated."
+        "description": "Static token configured via --api-key or --api-key-env. Non-loopback listeners require authentication unless --insecure-no-auth is explicitly set."
       }
     },
     "schemas": {
@@ -217,7 +217,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid bearer token (only when --api-key is set).",
+            "description": "Missing or invalid bearer token (when authentication is configured).",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ErrorResponse" }

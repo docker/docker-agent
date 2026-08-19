@@ -3,6 +3,98 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.126.0] - 2026-08-18
+
+This release adds evaluation regression gating, session comparison for replay, and significant hardening of served-agent safety controls across A2A, MCP HTTP, and chat surfaces.
+
+## What's New
+
+- Adds `--baseline` and `--regression-tolerance` flags to `docker agent eval`, enabling CI-style regression detection by comparing a run against a previously saved baseline and failing on quality regression
+- Adds `docker agent sessions diff` command to compare the behavior of two recorded sessions, reporting the first point of divergence between runs
+- Adds unattended tool execution restrictions for A2A, requiring explicit security configuration for network listeners
+- Adds centralized unattended safety resolution for served agents, with ordered concrete safety policies and hardened HTTP serving for MCP and chat surfaces
+- Adds session-origin isolation for A2A session resumes
+
+## Bug Fixes
+
+- Fixes the baseline gate to be grounded on the file that eval writes, and fails closed on error
+- Fixes replay comparison to handle sub-agent turns, compare arguments semantically, and sanitize output
+- Fixes A2A session resumes to be isolated by origin
+
+## Technical Changes
+
+- Refactors `sessions diff` CLI command to resolve session references
+- Refactors safety flag validation to be shared across CLI surfaces
+- Refactors HTTP auth and origin matchers into a shared `httpsec` package
+- Refactors A2A server assembly, extracting it from `Run`
+- Replaces `CAGENT_MODELS_GATEWAY` with `DOCKER_AGENT_MODELS_GATEWAY` in docs and samples
+- Documents the evaluation regression gate and its two flags, the `docker agent sessions diff` command, and served-agent safety controls
+### Pull Requests
+
+- [#3946](https://github.com/docker/docker-agent/pull/3946) - feat(eval): compare a run against a saved baseline and fail on regression
+- [#3948](https://github.com/docker/docker-agent/pull/3948) - feat(replay): compare the behaviour of two recorded sessions
+- [#3995](https://github.com/docker/docker-agent/pull/3995) - docs: update CHANGELOG.md for v1.125.0
+- [#3997](https://github.com/docker/docker-agent/pull/3997) - docs: replace CAGENT_MODELS_GATEWAY with DOCKER_AGENT_MODELS_GATEWAY in docs and samples
+- [#4000](https://github.com/docker/docker-agent/pull/4000) - feat: harden served-agent safety controls
+
+
+## [v1.125.0] - 2026-08-17
+
+This release adds several new features including Docker token minting, structured output mode, restricted safety mode, and harness session resumption, alongside multiple bug fixes for file editing, caching, attachment handling, and OAuth flows.
+
+## What's New
+
+- Adds the ability to mint Docker tokens from the stored access token, enabling authentication without Docker Desktop running (`feat(auth): mint Docker tokens from the stored access token`)
+- Adds a tool-based structured output mode as an opt-in alternative to native structured output (`feat: add tool-based structured output mode`)
+- Adds a restricted safety mode for unattended and headless runs, allowing classifier-safe calls while denying unmatched destructive or unknown calls without prompting (`feat(safety): add restricted mode for unattended runs`)
+- Adds the ability to resume external harness sessions on later turns instead of starting a new session each time (`feat(runtime): resume external harness sessions`)
+- Includes session cost in session summaries (`feat: include cost in session summaries`)
+
+## Bug Fixes
+
+- Fixes a path containment bug in VCS ignore logic where a repository root like `/work/repo` incorrectly matched sibling paths like `/work/repo-sibling` (`fix(pkg/fsx/vcs.go)`)
+- Fixes `edit_file` silently prepending content when `oldText` is empty; empty `oldText` is now refused (`fix(acp): refuse edit_file edits with an empty oldText`)
+- Fixes a file backend cache bug where entries written by a sibling process remained invisible to `Lookup` indefinitely (`fix(pkg/cache/cache.go)`)
+- Fixes attachment content being able to close its own envelope delimiter, and labels the region as untrusted to prevent content injection (`fix(attachment): stop attachment content from closing its own envelope`)
+- Fixes a self-closing envelope delimiter bypass in attachment handling (`fix(attachment): defuse the self-closing envelope delimiter too`)
+- Fixes malformed tool call names (e.g. attribute-style syntax hallucinated by a model) being persisted to session, which caused non-retriable errors on replay (`fix(runtime): sanitize malformed tool call names before persisting to session`)
+- Fixes standalone OAuth login discovery to correctly forward remote metadata, match names/URLs exactly, and use authoritative challenge metadata (`fix(mcp): repair standalone OAuth login discovery`)
+- Fixes standalone OAuth login to honor `CallbackPort` and `CallbackRedirectURL` configuration, matching the behavior of the managed OAuth flow (`fix(mcp): honor callback configuration in standalone OAuth login`)
+- Fixes the TUI not retaining the interrupt confirmation setting across restarts and page rebuilds (`fix(tui): retain interrupt confirmation setting`)
+
+## Technical Changes
+
+- Refactors MCP protected resource metadata discovery into a shared helper to eliminate duplication between managed and unmanaged OAuth flows (`refactor(mcp): share protected resource metadata discovery`)
+- Propagates OAuth scopes through dynamic registration in MCP (`fix(mcp): propagate OAuth scopes through dynamic registration`)
+- Isolates `pkg/runtime` tests from the real user config directory to prevent local settings from affecting test outcomes (`test(runtime): isolate pkg/runtime tests from the real user config`)
+- Refreshes the embedded models.dev catalog snapshot (`chore: refresh embedded models.dev snapshot`)
+### Pull Requests
+
+- [#3923](https://github.com/docker/docker-agent/pull/3923) - fix(fsx): test repository containment on a path boundary, not a string prefix
+- [#3926](https://github.com/docker/docker-agent/pull/3926) - fix(filesystem): refuse edit_file edits with an empty oldText
+- [#3928](https://github.com/docker/docker-agent/pull/3928) - fix(cache): adopt the on-disk state read during `Store`, not just its mtime
+- [#3935](https://github.com/docker/docker-agent/pull/3935) - feat(auth): mint Docker tokens from the stored access token
+- [#3942](https://github.com/docker/docker-agent/pull/3942) - fix(attachment): stop attachment content from closing its own envelope, and label the region untrusted
+- [#3955](https://github.com/docker/docker-agent/pull/3955) - refactor(mcp): share protected resource metadata discovery
+- [#3959](https://github.com/docker/docker-agent/pull/3959) - fix(mcp): repair standalone OAuth login discovery
+- [#3964](https://github.com/docker/docker-agent/pull/3964) - docs: update CHANGELOG.md for v1.124.0
+- [#3966](https://github.com/docker/docker-agent/pull/3966) - feat: add tool-based structured output mode
+- [#3969](https://github.com/docker/docker-agent/pull/3969) - docs: auto-update for merged PRs (2026-08-13)
+- [#3970](https://github.com/docker/docker-agent/pull/3970) - feat(safety): add restricted mode for unattended runs
+- [#3972](https://github.com/docker/docker-agent/pull/3972) - docs: remove internal issue/PR references from plan tool page
+- [#3973](https://github.com/docker/docker-agent/pull/3973) - docs: add missing built-in tools to concepts overview
+- [#3974](https://github.com/docker/docker-agent/pull/3974) - fix(runtime): sanitize malformed tool call names before persisting to session
+- [#3979](https://github.com/docker/docker-agent/pull/3979) - test(mcp): make OAuth browser launch injectable across platforms
+- [#3980](https://github.com/docker/docker-agent/pull/3980) - chore(deps): update reviewed Go dependencies
+- [#3981](https://github.com/docker/docker-agent/pull/3981) - test(runtime): isolate user config in tests
+- [#3987](https://github.com/docker/docker-agent/pull/3987) - fix(mcp): honor callback configuration in standalone OAuth login
+- [#3989](https://github.com/docker/docker-agent/pull/3989) - feat(runtime): resume external harness sessions
+- [#3990](https://github.com/docker/docker-agent/pull/3990) - docs: auto-update for merged PRs (2026-08-16)
+- [#3991](https://github.com/docker/docker-agent/pull/3991) - feat: include cost in session summaries
+- [#3992](https://github.com/docker/docker-agent/pull/3992) - chore: refresh embedded models.dev snapshot
+- [#3994](https://github.com/docker/docker-agent/pull/3994) - fix(tui): retain interrupt confirmation setting
+
+
 ## [v1.124.0] - 2026-08-10
 
 This release adds LaTeX rendering and a startup banner to the TUI, introduces a configurable request size limit for the API server, and includes security fixes for session working directory path traversal.
@@ -363,6 +455,12 @@ This release adds sandbox authentication improvements, compaction-model context 
 
 
 ## [Unreleased]
+
+- Harden served-agent safety and network controls:
+  - A2A, MCP HTTP, and chat now default to restricted tool safety; autonomous execution requires `--safety autonomous`, and `safety: autonomous` in YAML fails startup with guidance to use that flag.
+  - Non-loopback listeners require authentication or `--insecure-no-auth`; Unix sockets remain exempt. A2A and MCP HTTP use `--auth-token`, while chat continues to use `--api-key`; A2A and chat can explicitly allow browser origins with `--cors-origin`.
+  - A2A context IDs cannot access sessions created by another serve surface. The session-schema migration records session origins; older binaries reject upgraded databases with a newer-database error.
+  - `mcp.CreateToolHandler` now requires an explicit safety policy.
 
 ## What's New
 
@@ -5449,3 +5547,7 @@ This release improves the terminal user interface with better error handling and
 [v1.123.0]: https://github.com/docker/docker-agent/releases/tag/v1.123.0
 
 [v1.124.0]: https://github.com/docker/docker-agent/releases/tag/v1.124.0
+
+[v1.125.0]: https://github.com/docker/docker-agent/releases/tag/v1.125.0
+
+[v1.126.0]: https://github.com/docker/docker-agent/releases/tag/v1.126.0

@@ -51,10 +51,11 @@ const (
 	// auto-approve of read-only-annotated tools (sessions that never
 	// chose an explicit safety mode).
 	ApprovalSourceReadOnlyHint = "readonly_hint"
-	// ApprovalSourceModeBalanced / ModeStrict / ModeLegacy identify
-	// verdicts produced by the (mode × label) table. Autonomous
-	// allows keep the stable "yolo" source above.
+	// ApprovalSourceModeBalanced / ModeRestricted / ModeStrict /
+	// ModeLegacy identify verdicts produced by the (mode × label)
+	// table. Autonomous allows keep the stable "yolo" source above.
 	ApprovalSourceModeBalanced           = "mode_balanced"
+	ApprovalSourceModeRestricted         = "mode_restricted"
 	ApprovalSourceModeStrict             = "mode_strict"
 	ApprovalSourceModeLegacy             = "mode_legacy"
 	ApprovalSourceUserApproved           = "user_approved"
@@ -478,9 +479,9 @@ func (c *call) approveAndRun(ctx context.Context, runTool func() CallOutcome) Ca
 		c.notifyApproval(ctx, ApprovalDecisionAllow, allowSourceForDecision(decision))
 		return runTool()
 	case OutcomeDeny:
-		slog.DebugContext(ctx, "Tool denied by permissions", "tool", c.tc.Function.Name, "source", decision.Source, "session_id", c.sess.ID)
-		c.notifyApproval(ctx, ApprovalDecisionDeny, denySourceForChecker(decision.Source))
-		c.errorResponse(ctx, fmt.Sprintf("Tool '%s' is denied by %s.", c.tc.Function.Name, decision.Source))
+		slog.DebugContext(ctx, "Tool denied", "tool", c.tc.Function.Name, "source", decision.Source, "session_id", c.sess.ID)
+		c.notifyApproval(ctx, ApprovalDecisionDeny, denySourceForDecision(decision))
+		c.errorResponse(ctx, denyErrorMessage(decision, c.tc.Function.Name))
 		return CallOutcome{}
 	case OutcomeAsk:
 		if decision.Reason == ReasonChecker {
@@ -748,6 +749,27 @@ func denySourceForChecker(checkerSource string) string {
 		return ApprovalSourceSessionPermissionsDeny
 	}
 	return ApprovalSourceTeamPermissionsDeny
+}
+
+// denySourceForDecision mirrors allowSourceForDecision for the deny
+// path: mode decisions (only Restricted denies) already carry the
+// ApprovalSource* constant in Source.
+func denySourceForDecision(d PermissionDecision) string {
+	if d.Reason == ReasonMode {
+		return d.Source
+	}
+	return denySourceForChecker(d.Source)
+}
+
+// denyErrorMessage renders the tool-error text for an [OutcomeDeny]
+// decision. Checker denials name the rule source; a mode denial (only
+// the restricted mode denies) explains the fail-closed fallback so the
+// model can adapt instead of blindly retrying.
+func denyErrorMessage(d PermissionDecision, toolName string) string {
+	if d.Reason == ReasonMode {
+		return fmt.Sprintf("Tool '%s' is denied by the restricted safety mode: the call is not classified safe, and the mode's fallback denies instead of asking for confirmation.", toolName)
+	}
+	return fmt.Sprintf("Tool '%s' is denied by %s.", toolName, d.Source)
 }
 
 // askUser sends a confirmation event and waits for the user's response

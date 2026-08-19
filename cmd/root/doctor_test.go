@@ -254,7 +254,8 @@ func TestDoctorCommand_DockerGatewayNeedsSignIn(t *testing.T) {
 		withDoctorTestEnv(nil, nil, dmr.ErrNotInstalled))
 
 	require.Error(t, err)
-	assert.Contains(t, output, "requires Docker Desktop sign-in")
+	assert.Contains(t, output, "requires a Docker sign-in")
+	assert.Contains(t, output, "docker login")
 
 	output, err = executeDoctor(t, []string{"--models-gateway", "https://api.docker.com/gateway"},
 		withDoctorTestEnv(map[string]string{"DOCKER_TOKEN": "jwt"}, nil, dmr.ErrNotInstalled))
