@@ -25,6 +25,10 @@ type HTTPOptions struct {
 	// [userid.Get]; tests inject their own source via
 	// [withCagentIDSource] to stay independent of global state.
 	cagentID func() string
+
+	// refreshAuth re-authenticates a request the server answered with 401.
+	// Set through [WithUnauthorizedRetry]; nil leaves 401s to the caller.
+	refreshAuth func(ctx context.Context, rejected string) (string, error)
 }
 
 type Opt func(*HTTPOptions)
@@ -47,11 +51,24 @@ func NewHTTPClient(ctx context.Context, opts ...Opt) *http.Client {
 	// See https://github.com/docker/docker-agent/issues/1956
 	rt := newTransport(ctx)
 
-	return &http.Client{
-		Transport: WrapWithOTel(&userAgentTransport{
-			httpOptions: httpOptions,
-			rt:          &sseFilterTransport{base: rt},
-		}),
+	var wrapped http.RoundTripper = &userAgentTransport{
+		httpOptions: httpOptions,
+		rt:          &sseFilterTransport{base: rt},
+	}
+	if httpOptions.refreshAuth != nil {
+		// Outermost, so a replayed request goes through the whole chain again.
+		wrapped = &authRetryTransport{base: wrapped, refresh: httpOptions.refreshAuth}
+	}
+
+	return &http.Client{Transport: WrapWithOTel(wrapped)}
+}
+
+// WithUnauthorizedRetry re-authenticates and replays a request once when the
+// server rejects the token it presented. refresh receives the rejected token
+// and returns its replacement.
+func WithUnauthorizedRetry(refresh func(ctx context.Context, rejected string) (string, error)) Opt {
+	return func(o *HTTPOptions) {
+		o.refreshAuth = refresh
 	}
 }
 

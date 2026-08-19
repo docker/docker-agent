@@ -77,6 +77,31 @@ func (r *LocalRuntime) tryReplayCachedResponse(
 		return false
 	}
 
+	// Tool-mode structured output only ever accepts schema-valid JSON as the
+	// final answer, so a cached entry must pass the same validation before
+	// being replayed. A stale entry (e.g. plain text stored before the agent
+	// switched to tool mode) is treated as a miss and the model is called;
+	// a valid one is replayed in its canonical compacted form. Sessions that
+	// disable structured output (fork-mode skill children) skip this and
+	// replay any cached text as-is.
+	if structuredOutputEnabled(sess, a) {
+		ot, otErr := a.StructuredOutputTool()
+		if otErr != nil {
+			// Uncompilable schema: fall through so getTools surfaces the
+			// configuration error on the regular model path.
+			return false
+		}
+		if ot != nil {
+			validated, err := ot.Validate(cached)
+			if err != nil {
+				slog.DebugContext(ctx, "Response cache hit is not valid structured output; treating as miss",
+					"agent", a.Name(), "session_id", sess.ID, "error", err)
+				return false
+			}
+			cached = validated
+		}
+	}
+
 	slog.DebugContext(ctx, "Response cache hit; replaying cached answer",
 		"agent", a.Name(), "session_id", sess.ID)
 	modelID := a.Model(ctx).ID().String()

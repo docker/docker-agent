@@ -123,10 +123,11 @@ func TestAgentConfigValidateHarness(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		harness         *HarnessConfig
-		compactionModel string
-		wantErr         string
+		name             string
+		harness          *HarnessConfig
+		compactionModel  string
+		structuredOutput *StructuredOutput
+		wantErr          string
 	}{
 		{name: "nil harness", harness: nil},
 		{name: "nil harness with compaction model", harness: nil, compactionModel: "fast"},
@@ -148,12 +149,16 @@ func TestAgentConfigValidateHarness(t *testing.T) {
 		{name: "thinking on opencode", harness: &HarnessConfig{Type: "opencode", Thinking: true}},
 		{name: "thinking on wrong type", harness: &HarnessConfig{Type: "codex", Thinking: true}, wantErr: "harness.thinking can only be used with harness.type 'opencode'"},
 		{name: "compaction model on harness", harness: &HarnessConfig{Type: "claude-code"}, compactionModel: "fast", wantErr: "compaction_model cannot be used with a harness"},
+		{name: "nil harness with tool-mode structured output", harness: nil, structuredOutput: &StructuredOutput{Mode: StructuredOutputModeTool}},
+		{name: "native structured output on harness", harness: &HarnessConfig{Type: "claude-code"}, structuredOutput: &StructuredOutput{Mode: StructuredOutputModeNative}},
+		{name: "default-mode structured output on harness", harness: &HarnessConfig{Type: "claude-code"}, structuredOutput: &StructuredOutput{Name: "out"}},
+		{name: "tool-mode structured output on harness", harness: &HarnessConfig{Type: "claude-code"}, structuredOutput: &StructuredOutput{Mode: StructuredOutputModeTool}, wantErr: "structured_output.mode 'tool' cannot be used with a harness"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			agent := AgentConfig{Name: "root", Harness: tt.harness, CompactionModel: tt.compactionModel}
+			agent := AgentConfig{Name: "root", Harness: tt.harness, CompactionModel: tt.compactionModel, StructuredOutput: tt.structuredOutput}
 			err := agent.validateHarness()
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
@@ -566,7 +571,7 @@ func TestConfigValidateErrorWrapping(t *testing.T) {
 		{
 			name:    "runtime safety error",
 			config:  Config{Runtime: &RuntimeDefaults{Safety: "yolo"}},
-			wantErr: "runtime.safety: invalid safety mode \"yolo\" (valid: strict, balanced, autonomous)",
+			wantErr: "runtime.safety: invalid safety mode \"yolo\" (valid: strict, balanced, restricted, autonomous)",
 		},
 		{
 			name:    "runtime safety legacy alias rejected",
@@ -576,7 +581,7 @@ func TestConfigValidateErrorWrapping(t *testing.T) {
 		{
 			name:    "agent safety error",
 			config:  Config{Agents: Agents{{Name: "root", Safety: "Strict"}}},
-			wantErr: "agents.root.safety: invalid safety mode \"Strict\" (valid: strict, balanced, autonomous)",
+			wantErr: "agents.root.safety: invalid safety mode \"Strict\" (valid: strict, balanced, restricted, autonomous)",
 		},
 	}
 
@@ -617,7 +622,7 @@ func TestConfigValidateValidConfig(t *testing.T) {
 		Toolsets: map[string]Toolset{
 			"web": {Type: "fetch", AllowedDomains: []string{"example.com", "*.example.org"}},
 		},
-		// All three canonical modes are explicitly permitted at runtime and
+		// All four canonical modes are explicitly permitted at runtime and
 		// agent scope, autonomous included.
 		Runtime: &RuntimeDefaults{Safety: SafetyModeAutonomous},
 		Agents: Agents{
@@ -635,6 +640,7 @@ func TestConfigValidateValidConfig(t *testing.T) {
 				Hooks: &HooksConfig{Stop: HookDefinitions{{Type: "command", Command: "echo done"}}},
 			},
 			{Name: "careful", Model: "main", Safety: SafetyModeStrict},
+			{Name: "headless", Model: "main", Safety: SafetyModeRestricted},
 		},
 	}
 
@@ -648,15 +654,17 @@ func TestSafetyModeValidate(t *testing.T) {
 		"":                   true,
 		SafetyModeStrict:     true,
 		SafetyModeBalanced:   true,
+		SafetyModeRestricted: true,
 		SafetyModeAutonomous: true,
 
 		// Legacy session aliases and near-misses are rejected: only the
-		// three canonical modes may appear in YAML safety fields.
-		"unsafe":    false,
-		"safer":     false,
-		"safe-auto": false,
-		"yolo":      false,
-		"Balanced":  false, // case-sensitive on purpose
+		// four canonical modes may appear in YAML safety fields.
+		"unsafe":     false,
+		"safer":      false,
+		"safe-auto":  false,
+		"yolo":       false,
+		"Balanced":   false, // case-sensitive on purpose
+		"Restricted": false,
 	}
 
 	for in, wantOK := range cases {
@@ -665,7 +673,72 @@ func TestSafetyModeValidate(t *testing.T) {
 			require.NoErrorf(t, err, "SafetyMode(%q).Validate()", string(in))
 		} else {
 			require.ErrorContainsf(t, err, "invalid safety mode", "SafetyMode(%q).Validate()", string(in))
-			require.ErrorContainsf(t, err, "strict, balanced, autonomous", "SafetyMode(%q).Validate()", string(in))
+			require.ErrorContainsf(t, err, "strict, balanced, restricted, autonomous", "SafetyMode(%q).Validate()", string(in))
 		}
 	}
+}
+
+func TestStructuredOutputValidateMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		so      *StructuredOutput
+		wantErr string
+	}{
+		{name: "nil is valid", so: nil},
+		{name: "mode absent", so: &StructuredOutput{Name: "x", Schema: map[string]any{"type": "object"}}},
+		{name: "mode native", so: &StructuredOutput{Name: "x", Mode: StructuredOutputModeNative}},
+		{name: "mode tool", so: &StructuredOutput{Name: "x", Mode: StructuredOutputModeTool}},
+		{name: "unknown mode", so: &StructuredOutput{Name: "x", Mode: "json"}, wantErr: `unsupported mode "json" (must be one of: native, tool)`},
+		{name: "case sensitive", so: &StructuredOutput{Name: "x", Mode: "Tool"}, wantErr: "unsupported mode"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := tt.so.validate()
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestConfigValidateStructuredOutputMode pins that an unknown
+// structured_output.mode is rejected at config level with the agent's name
+// in the error, and the two documented modes (plus absent) pass.
+func TestConfigValidateStructuredOutputMode(t *testing.T) {
+	t.Parallel()
+
+	build := func(mode string) *Config {
+		return &Config{Agents: []AgentConfig{{
+			Name: "root",
+			StructuredOutput: &StructuredOutput{
+				Name:   "result",
+				Schema: map[string]any{"type": "object"},
+				Mode:   mode,
+			},
+		}}}
+	}
+
+	require.NoError(t, build("").Validate())
+	require.NoError(t, build(StructuredOutputModeNative).Validate())
+	require.NoError(t, build(StructuredOutputModeTool).Validate())
+
+	err := build("strict").Validate()
+	require.ErrorContains(t, err, "agents.root.structured_output")
+	require.ErrorContains(t, err, `unsupported mode "strict"`)
+}
+
+func TestStructuredOutputToolMode(t *testing.T) {
+	t.Parallel()
+
+	var nilSO *StructuredOutput
+	require.False(t, nilSO.ToolMode())
+	require.False(t, (&StructuredOutput{}).ToolMode())
+	require.False(t, (&StructuredOutput{Mode: StructuredOutputModeNative}).ToolMode())
+	require.True(t, (&StructuredOutput{Mode: StructuredOutputModeTool}).ToolMode())
 }

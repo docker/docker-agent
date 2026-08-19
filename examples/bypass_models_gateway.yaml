@@ -1,6 +1,6 @@
 # Demonstrates `bypass_models_gateway`, which forces a specific model to
 # connect directly to its provider instead of routing through a models gateway
-# (configured via --models-gateway / CAGENT_MODELS_GATEWAY).
+# (configured via --models-gateway / DOCKER_AGENT_MODELS_GATEWAY).
 #
 # This is useful when most models should go through a central gateway (for
 # billing, auditing, or shared credentials) but one model must talk to its

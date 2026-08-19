@@ -294,11 +294,10 @@ func TestInMemoryStoreGranularUpdatesConcurrent(t *testing.T) {
 }
 
 // TestInMemoryStoreGetSessionSummariesConcurrent pins the read-side of the
-// same fix: GetSessionSummaries reads each live session's Title, so it must
-// go through the locked accessor (TitleSnapshot) to stay safe against
-// concurrent SetTitle/granular store updates on the shared pointer. Run
-// with -race; with a direct value.Title read the detector flags the
-// concurrent SetTitle write.
+// same fix: GetSessionSummaries reads each live session's Title and Cost, so
+// it must use locked accessors to stay safe against concurrent metadata
+// updates on the shared pointer. Run with -race; direct field reads make the
+// detector flag the concurrent writes.
 func TestInMemoryStoreGetSessionSummariesConcurrent(t *testing.T) {
 	t.Parallel()
 
@@ -342,5 +341,9 @@ func TestInMemoryStoreGetSessionSummariesConcurrent(t *testing.T) {
 	}
 	if got := summaries[0].Title; got != "concurrent title" && got != "direct title" {
 		t.Errorf("unexpected title %q", got)
+	}
+	_, _, wantCost := sess.TokensAndCost()
+	if got := summaries[0].Cost; got != wantCost {
+		t.Errorf("expected cost %v, got %v", wantCost, got)
 	}
 }

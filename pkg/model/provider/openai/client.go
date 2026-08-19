@@ -164,6 +164,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 			// Configure a custom HTTP client to inject headers and query params used by the Gateway.
 			httpOptions := base.GatewayHTTPOptions(url, "https://api.openai.com/v1", cfg, &globalOptions)
+			httpOptions = append(httpOptions, base.GatewayAuthRetry(env, gateway)...)
 
 			gatewayHTTPClient := httpclient.NewHTTPClient(ctx, httpOptions...)
 			globalOptions.WrapTransport(ctx, gatewayHTTPClient)

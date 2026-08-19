@@ -130,6 +130,10 @@ func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, 
 			ExcludedTools:       []string{skills.ToolNameRunSkill},
 			AllowedTools:        prepared.AllowedTools,
 			ExtraToolSets:       prepared.ToolSets,
+			// A fork skill's answer is free-form text consumed by the calling
+			// agent, not the agent's schema-constrained final output, so the
+			// child is exempt from tool-mode structured-output enforcement.
+			DisableStructuredOutput: true,
 		},
 	})
 }

@@ -30,8 +30,8 @@ type Alias struct {
 	// Safety: autonomous; when both are set, Safety wins.
 	Yolo bool `yaml:"yolo,omitempty" json:"yolo,omitempty"`
 	// Safety is the default safety mode applied when the alias is run and
-	// no explicit --safety/--yolo flag was passed: strict, balanced, or
-	// autonomous. Wins over the legacy Yolo flag.
+	// no explicit --safety/--yolo flag was passed: strict, balanced,
+	// restricted, or autonomous. Wins over the legacy Yolo flag.
 	Safety latest.SafetyMode `yaml:"safety,omitempty" json:"safety,omitempty"`
 	// Model overrides the agent's model (format: [agent=]provider/model)
 	Model string `yaml:"model,omitempty" json:"model,omitempty"`
@@ -90,7 +90,7 @@ type Settings struct {
 	YOLO bool `yaml:"YOLO,omitempty"`
 	// Safety is the global default safety mode applied when no explicit
 	// --safety/--yolo flag and no alias safety option was given: strict,
-	// balanced, or autonomous. Wins over the legacy YOLO flag.
+	// balanced, restricted, or autonomous. Wins over the legacy YOLO flag.
 	Safety latest.SafetyMode `yaml:"safety,omitempty"`
 	// Lean makes the simplified TUI with minimal chrome the default UI.
 	Lean bool `yaml:"lean,omitempty"`

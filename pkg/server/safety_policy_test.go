@@ -73,6 +73,11 @@ func TestSetSessionSafetyPolicy_NormalizesAndDowngrades(t *testing.T) {
 	assert.Equal(t, session.SafetyPolicyStrict, sess.GetSafetyPolicy())
 	assert.False(t, sess.IsToolsApproved())
 
+	// Restricted is a first-class mode on the API surface.
+	require.NoError(t, sm.SetSessionSafetyPolicy(t.Context(), sess.ID, session.SafetyPolicyRestricted))
+	assert.Equal(t, session.SafetyPolicyRestricted, sess.GetSafetyPolicy())
+	assert.False(t, sess.IsToolsApproved())
+
 	// Invalid values are rejected.
 	assert.Error(t, sm.SetSessionSafetyPolicy(t.Context(), sess.ID, "bogus"))
 }

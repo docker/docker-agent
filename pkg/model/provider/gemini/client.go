@@ -153,6 +153,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			baseURL := fmt.Sprintf("%s://%s%s/", url.Scheme, url.Host, url.Path)
 
 			httpOptions := base.GatewayHTTPOptions(url, "https://generativelanguage.googleapis.com/", cfg, &globalOptions)
+			httpOptions = append(httpOptions, base.GatewayAuthRetry(env, gateway)...)
 
 			httpOpts := genai.HTTPOptions{
 				BaseURL: baseURL,

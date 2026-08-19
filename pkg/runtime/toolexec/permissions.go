@@ -40,7 +40,7 @@ const (
 // permissions API); team rules come from the agent YAML and user-global
 // config. The tiers differ in one way: a session `ask:` rule always
 // prompts, while a team `ask:` rule yields to a user-chosen
-// auto-approving mode (Balanced / Autonomous).
+// auto-deciding mode (Balanced / Restricted / Autonomous).
 type Tier int
 
 const (
@@ -71,10 +71,12 @@ type PermissionDecision struct {
 //
 //  1. Custom rules, walked in checker order (session tier first, then
 //     team tier). Deny and Allow win outright — a deny rule blocks
-//     even Autonomous, an allow rule silences even Strict. An explicit
-//     ask rule prompts, except that a team-tier ask yields to
-//     Balanced/Autonomous (the user's chosen mode outranks the agent
-//     author's advisory).
+//     even Autonomous, an allow rule silences even Strict and
+//     overrides Restricted's fail-closed fallback. An explicit ask
+//     rule prompts, except that a team-tier ask yields to
+//     Balanced/Restricted/Autonomous (the user's chosen mode outranks
+//     the agent author's advisory; under Restricted this keeps the
+//     profile prompt-free instead of introducing implicit asks).
 //  2. No rule matched: the (mode × label) table via [applyMode].
 //
 // Decide is pure (no I/O, no side effects) so the entire approval
@@ -86,7 +88,9 @@ func Decide(
 	toolName string,
 	toolArgs map[string]any,
 ) PermissionDecision {
-	autoApproving := mode == session.SafetyPolicyBalanced || mode == session.SafetyPolicyAutonomous
+	autoDeciding := mode == session.SafetyPolicyBalanced ||
+		mode == session.SafetyPolicyRestricted ||
+		mode == session.SafetyPolicyAutonomous
 	for _, pc := range checkers {
 		switch pc.Checker.CheckWithArgs(toolName, toolArgs) {
 		case permissions.Deny:
@@ -94,11 +98,11 @@ func Decide(
 		case permissions.Allow:
 			return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonChecker, Source: pc.Source}
 		case permissions.ForceAsk:
-			if pc.Tier == TierSession || !autoApproving {
+			if pc.Tier == TierSession || !autoDeciding {
 				return PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonChecker, Source: pc.Source}
 			}
-			// Team-tier ask is advisory under Balanced/Autonomous;
-			// fall through to the mode.
+			// Team-tier ask is advisory under Balanced/Restricted/
+			// Autonomous; fall through to the mode.
 		case permissions.Ask:
 			// No explicit match at this level; fall through to next checker.
 		}
@@ -111,6 +115,7 @@ func Decide(
 //	              safe     destructive   unknown
 //	strict        ask      ask           ask
 //	balanced      ALLOW    ask           ask
+//	restricted    ALLOW    DENY          DENY
 //	autonomous    ALLOW    ALLOW         ALLOW
 //	"" (legacy)   ask*     ask           ask
 //
@@ -119,8 +124,10 @@ func Decide(
 // hinted) calls, but only AFTER the default pre_tool_use hook chain
 // has had its turn; see the dispatcher's approveAndRun. That keeps the
 // pre-modes contract: hooks can veto read-only calls, and read-only
-// tools never prompt. Unrecognised modes are treated as strict so an
-// invalid value can never widen approval.
+// tools never prompt. Restricted is the fail-closed profile for
+// unattended runs: it never prompts, denying whatever it would not
+// allow. Unrecognised modes are treated as strict so an invalid value
+// can never widen approval.
 func applyMode(mode session.SafetyPolicy, label safety.Label) PermissionDecision {
 	switch mode {
 	case session.SafetyPolicyAutonomous:
@@ -130,6 +137,11 @@ func applyMode(mode session.SafetyPolicy, label safety.Label) PermissionDecision
 			return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonMode, Source: ApprovalSourceModeBalanced}
 		}
 		return PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonMode, Source: ApprovalSourceModeBalanced}
+	case session.SafetyPolicyRestricted:
+		if label.Class == safety.ClassSafe {
+			return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonMode, Source: ApprovalSourceModeRestricted}
+		}
+		return PermissionDecision{Outcome: OutcomeDeny, Reason: ReasonMode, Source: ApprovalSourceModeRestricted}
 	case session.SafetyPolicyStrict:
 		return PermissionDecision{Outcome: OutcomeAsk, Reason: ReasonMode, Source: ApprovalSourceModeStrict}
 	default:

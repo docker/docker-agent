@@ -19,9 +19,11 @@ import (
 )
 
 var (
-	ErrEmptyID       = errors.New("session ID cannot be empty")
-	ErrNotFound      = errors.New("session not found")
-	ErrNewerDatabase = errors.New("session database was created by a newer version of docker-agent")
+	ErrEmptyID        = errors.New("session ID cannot be empty")
+	ErrNotFound       = errors.New("session not found")
+	ErrAlreadyExists  = errors.New("session already exists")
+	ErrOriginMismatch = errors.New("session origin cannot be changed")
+	ErrNewerDatabase  = errors.New("session database was created by a newer version of docker-agent")
 )
 
 // IsRelativeSessionRef reports whether ref is a relative session reference
@@ -82,6 +84,7 @@ type Summary struct {
 	CreatedAt   time.Time
 	Starred     bool
 	NumMessages int
+	Cost        float64
 	WorkingDir  string
 	Attributes  map[string]string
 }
@@ -90,7 +93,10 @@ type Summary struct {
 type Store interface {
 	// === Core session operations ===
 	AddSession(ctx context.Context, session *Session) error
+	// GetSession retrieves a session by ID.
 	GetSession(ctx context.Context, id string) (*Session, error)
+	// GetSessionByOrigin retrieves a session by ID only when it belongs to origin.
+	GetSessionByOrigin(ctx context.Context, id, origin string) (*Session, error)
 	GetSessions(ctx context.Context) ([]*Session, error)
 	GetSessionSummaries(ctx context.Context) ([]Summary, error)
 	DeleteSession(ctx context.Context, id string) error
@@ -150,7 +156,9 @@ func (s *InMemorySessionStore) AddSession(_ context.Context, session *Session) e
 	if session.ID == "" {
 		return ErrEmptyID
 	}
-	s.sessions.Store(session.ID, session)
+	if _, loaded := s.sessions.LoadOrStore(session.ID, session); loaded {
+		return fmt.Errorf("add session %q: %w", session.ID, ErrAlreadyExists)
+	}
 	return nil
 }
 
@@ -160,6 +168,17 @@ func (s *InMemorySessionStore) GetSession(_ context.Context, id string) (*Sessio
 	}
 	session, exists := s.sessions.Load(id)
 	if !exists {
+		return nil, ErrNotFound
+	}
+	return session, nil
+}
+
+func (s *InMemorySessionStore) GetSessionByOrigin(_ context.Context, id, origin string) (*Session, error) {
+	if id == "" {
+		return nil, ErrEmptyID
+	}
+	session, exists := s.sessions.Load(id)
+	if !exists || session.Origin != origin {
 		return nil, ErrNotFound
 	}
 	return session, nil
@@ -180,12 +199,14 @@ func (s *InMemorySessionStore) GetSessionSummaries(_ context.Context) ([]Summary
 		if value.ParentID != "" {
 			return true
 		}
+		_, _, cost := value.TokensAndCost()
 		summaries = append(summaries, Summary{
 			ID:          value.ID,
 			Title:       value.TitleSnapshot(),
 			CreatedAt:   value.CreatedAt,
 			Starred:     value.Starred,
 			NumMessages: value.MessageCount(),
+			Cost:        cost,
 			WorkingDir:  value.WorkingDir,
 			Attributes:  value.AttributesSnapshot(),
 		})
@@ -224,6 +245,7 @@ func (s *InMemorySessionStore) UpdateSession(_ context.Context, session *Session
 	session.mu.RLock()
 	newSession := &Session{
 		ID:                  session.ID,
+		Origin:              session.Origin,
 		Title:               session.Title,
 		Evals:               session.Evals,
 		CreatedAt:           session.CreatedAt,
@@ -247,9 +269,13 @@ func (s *InMemorySessionStore) UpdateSession(_ context.Context, session *Session
 	}
 	session.mu.RUnlock()
 
-	// Preserve existing messages if session already exists
+	// Preserve existing messages and reject origin changes if session already exists.
 	if existing, exists := s.sessions.Load(session.ID); exists {
 		existing.mu.RLock()
+		if existing.Origin != newSession.Origin {
+			existing.mu.RUnlock()
+			return fmt.Errorf("update session %q: %w", session.ID, ErrOriginMismatch)
+		}
 		newSession.Messages = make([]Item, len(existing.Messages))
 		copy(newSession.Messages, existing.Messages)
 		existing.mu.RUnlock()
@@ -380,7 +406,7 @@ type SQLiteSessionStore struct {
 // sessionSelectColumns is the canonical SELECT list for the sessions table.
 // The column order matches what scanSession expects; all read paths use this
 // constant so that adding a column requires updating exactly one place.
-const sessionSelectColumns = `id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id, instruction_context, attributes`
+const sessionSelectColumns = `id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id, instruction_context, attributes`
 
 // sessionPersistedFields holds the encoded form of a Session's JSON-bearing
 // columns plus the SQL representation of parent_id (nil for the empty
@@ -554,11 +580,11 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO sessions (
-			id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
+			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, permissions, agent_model_overrides,
 			custom_models_used, thinking, parent_id, instruction_context, attributes
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens, session.Title,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.ID, session.Origin, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens, session.Title,
 		session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
 		session.CreatedAt.Format(time.RFC3339), fields.PermissionsJSON, fields.AgentModelOverridesJSON,
 		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON)
@@ -599,7 +625,7 @@ func scanSession(scanner interface {
 	)
 
 	err := scanner.Scan(
-		&sess.ID, &sess.ToolsApproved, &safetyPolicy, &sess.InputTokens, &sess.OutputTokens,
+		&sess.ID, &sess.Origin, &sess.ToolsApproved, &safetyPolicy, &sess.InputTokens, &sess.OutputTokens,
 		&sess.Title, &sess.Cost, &sess.SendUserMessage, &sess.MaxIterations,
 		&workingDir, &createdAtStr, &sess.Starred, &permissionsJSON,
 		&agentModelOverridesJSON, &customModelsUsedJSON, &thinking, &parentID, &instructionContextJSON, &attributesJSON,
@@ -784,10 +810,37 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 	return items, nil
 }
 
+func (s *SQLiteSessionStore) GetSessionByOrigin(ctx context.Context, id, origin string) (*Session, error) {
+	if id == "" {
+		return nil, ErrEmptyID
+	}
+	return s.loadSessionByOrigin(ctx, s.db, id, origin)
+}
+
 // loadSession retrieves a session by ID using the supplied querier.
 func (s *SQLiteSessionStore) loadSession(ctx context.Context, q querier, id string) (*Session, error) {
 	row := q.QueryRowContext(ctx,
 		"SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ?", id)
+
+	sess, err := scanSession(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	sess.Messages, err = s.loadSessionItems(ctx, q, id)
+	if err != nil {
+		return nil, fmt.Errorf("loading session items: %w", err)
+	}
+
+	return sess, nil
+}
+
+func (s *SQLiteSessionStore) loadSessionByOrigin(ctx context.Context, q querier, id, origin string) (*Session, error) {
+	row := q.QueryRowContext(ctx,
+		"SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ? AND origin = ?", id, origin)
 
 	sess, err := scanSession(row)
 	if err != nil {
@@ -843,7 +896,7 @@ func (s *SQLiteSessionStore) GetSessions(ctx context.Context) ([]*Session, error
 // This is much faster than GetSessions as it doesn't load message content.
 func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT s.id, s.title, s.created_at, s.starred, s.working_dir, s.attributes,
+		`SELECT s.id, s.title, s.created_at, s.starred, s.cost, s.working_dir, s.attributes,
 		        (SELECT COUNT(*) FROM session_items si WHERE si.session_id = s.id AND si.item_type = 'message')
 		 FROM sessions s
 		 WHERE s.parent_id IS NULL OR s.parent_id = ''
@@ -861,7 +914,7 @@ func (s *SQLiteSessionStore) GetSessionSummaries(ctx context.Context) ([]Summary
 			workingDir     sql.NullString
 			attributesJSON sql.NullString
 		)
-		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &workingDir, &attributesJSON, &summary.NumMessages); err != nil {
+		if err := rows.Scan(&summary.ID, &summary.Title, &createdAtStr, &summary.Starred, &summary.Cost, &workingDir, &attributesJSON, &summary.NumMessages); err != nil {
 			return nil, err
 		}
 		summary.CreatedAt = parseCreatedAt(createdAtStr)
@@ -919,6 +972,7 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 	session.mu.RLock()
 	snapshot := &Session{
 		ID:                  session.ID,
+		Origin:              session.Origin,
 		Title:               session.Title,
 		CreatedAt:           session.CreatedAt,
 		ToolsApproved:       session.ToolsApproved,
@@ -953,13 +1007,13 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 	defer func() { _ = tx.Rollback() }()
 
 	// Use INSERT OR REPLACE for upsert behavior - creates if not exists, updates if exists
-	_, err = tx.ExecContext(ctx,
+	result, err := tx.ExecContext(ctx,
 		`INSERT INTO sessions (
-			id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
+			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
 			custom_models_used, thinking, parent_id, instruction_context, attributes
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   title = excluded.title,
 		   tools_approved = excluded.tools_approved,
@@ -977,13 +1031,21 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		   thinking = excluded.thinking,
 		   parent_id = excluded.parent_id,
 		   instruction_context = excluded.instruction_context,
-		   attributes = excluded.attributes`,
-		snapshot.ID, snapshot.ToolsApproved, string(snapshot.SafetyPolicy), snapshot.InputTokens, snapshot.OutputTokens,
+		   attributes = excluded.attributes
+		 WHERE sessions.origin = excluded.origin`,
+		snapshot.ID, snapshot.Origin, snapshot.ToolsApproved, string(snapshot.SafetyPolicy), snapshot.InputTokens, snapshot.OutputTokens,
 		snapshot.Title, snapshot.Cost, snapshot.SendUserMessage, snapshot.MaxIterations, snapshot.WorkingDir,
 		snapshot.CreatedAt.Format(time.RFC3339), snapshot.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
 		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON)
 	if err != nil {
 		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("update session %q: %w", session.ID, ErrOriginMismatch)
 	}
 
 	// Note: Messages are NOT persisted here. They are persisted via events
@@ -1126,12 +1188,12 @@ func (s *SQLiteSessionStore) addSessionTx(ctx context.Context, tx *sql.Tx, sessi
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO sessions (
-			id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
+			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
 			custom_models_used, thinking, parent_id, instruction_context, attributes
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.ID, session.Origin, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens,
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations,
 		session.WorkingDir, session.CreatedAt.Format(time.RFC3339), session.Starred,
 		fields.PermissionsJSON, fields.AgentModelOverridesJSON, fields.CustomModelsUsedJSON, false,

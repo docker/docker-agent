@@ -302,6 +302,74 @@ func TestAfterLLMCallHook_HarnessUsageWithoutCostIsUnpriced(t *testing.T) {
 		"a harness that reports no cost must yield nil cost (unpriced), not 0 (free)")
 }
 
+// TestSanitizeToolCallName unit-tests the name sanitization function that
+// prevents malformed model-emitted tool call names from poisoning session
+// history and causing non-retriable ValidationExceptions on strict providers
+// (e.g. AWS Bedrock Converse).
+func TestSanitizeToolCallName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"read_file", "read_file"},
+		{"my-tool_v2", "my-tool_v2"},
+		// Exact incident: attribute syntax leaked into name field
+		{`view_file" path="install/step4.php" startLine="27" endLine="60`, "view_file"},
+		// Colon and slash — common in MCP server-qualified names
+		{"server:tool", "server"},
+		{"server/tool", "server"},
+		// Dot — e.g. "server.tool"
+		{"server.tool", "server"},
+		// Space
+		{"my tool", "my"},
+		// Name starting with invalid char falls back to unknown_tool
+		{`" path="foo"`, "unknown_tool"},
+		{"", "unknown_tool"},
+		// Name longer than 64 chars is capped
+		{string(make([]byte, 80)), "unknown_tool"}, // all zero bytes are invalid
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, sanitizeToolCallName(tt.input))
+		})
+	}
+}
+
+// TestMalformedToolCallNameSanitizedBeforeStore is a regression test for the
+// incident where a model emitted `view_file" path="..."` as a tool call name.
+// The assistant message written to the session must carry the sanitized name
+// so that replay to strict providers (AWS Bedrock) does not fail.
+func TestMalformedToolCallNameSanitizedBeforeStore(t *testing.T) {
+	t.Parallel()
+
+	malformedName := `view_file" path="install/step4.php" startLine="27" endLine="60`
+
+	stream := newStreamBuilder().
+		AddToolCallName("tc-1", malformedName).
+		AddToolCallArguments("tc-1", `{}`).
+		AddToolCallStopWithUsage(10, 5).
+		Build()
+
+	sess := session.New(session.WithUserMessage("show me step4.php"))
+	events := runSession(t, sess, stream)
+
+	var assistantMsg *session.Message
+	for _, ev := range events {
+		if e, ok := ev.(*MessageAddedEvent); ok && e.Message != nil && e.Message.Message.Role == chat.MessageRoleAssistant {
+			assistantMsg = e.Message
+		}
+	}
+
+	require.NotNil(t, assistantMsg, "expected an assistant message to be persisted")
+	require.Len(t, assistantMsg.Message.ToolCalls, 1)
+	assert.Equal(t, "view_file", assistantMsg.Message.ToolCalls[0].Function.Name,
+		"malformed name must be truncated at the first invalid character before storage")
+}
+
 // TestComputeMessageCost unit-tests the single cost-arithmetic source
 // shared by the persisted message and the after_llm_call payload,
 // including every branch that yields nil (unpriced).

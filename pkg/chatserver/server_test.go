@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,7 +16,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config"
 )
+
+func TestRun_RejectsAutonomousYAMLSafety(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "DUMMY")
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	err = Run(t.Context(), "testdata/autonomous.yaml", Options{RunConfig: &config.RuntimeConfig{}}, ln)
+	require.ErrorContains(t, err, "--safety autonomous")
+}
 
 func TestBuildSession_RequiresUserMessage(t *testing.T) {
 	t.Parallel()
@@ -58,7 +72,6 @@ func TestBuildSession_RequiresUserMessage(t *testing.T) {
 				return
 			}
 			require.NotNil(t, sess)
-			assert.True(t, sess.ToolsApproved)
 			assert.True(t, sess.NonInteractive)
 		})
 	}

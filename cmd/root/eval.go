@@ -1,6 +1,7 @@
 package root
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -25,6 +26,13 @@ type evalFlags struct {
 
 	runConfig config.RuntimeConfig
 	outputDir string
+
+	// baseline is a previously saved run (an -eval.json written by a prior
+	// invocation) to compare this run against; empty disables the check.
+	baseline string
+	// regressionTolerance is how far an aggregate quality rate may fall before
+	// the comparison fails. See evaluation.Compare for the exact semantics.
+	regressionTolerance float64
 }
 
 func newEvalCmd() *cobra.Command {
@@ -48,11 +56,18 @@ func newEvalCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&flags.KeepContainers, "keep-containers", false, "Keep containers after evaluation (don't use --rm)")
 	cmd.Flags().StringSliceVarP(&flags.EnvVars, "env", "e", nil, "Environment variables to pass to container (KEY or KEY=VALUE)")
 	cmd.Flags().IntVar(&flags.Repeat, "repeat", 1, "Number of times to repeat each evaluation (useful for computing baselines)")
+	cmd.Flags().StringVar(&flags.baseline, "baseline", "", "Compare against a previously saved run JSON (<output>/<run>.json) and exit non-zero on regression")
+	cmd.Flags().Float64Var(&flags.regressionTolerance, "regression-tolerance", 0, "How far an aggregate quality rate may fall before --baseline reports a regression (0-1)")
 
 	return cmd
 }
 
 func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) (commandErr error) {
+	if f.regressionTolerance > evaluation.MaxTolerance {
+		return fmt.Errorf("--regression-tolerance must be between 0 and %v; %v would disable the aggregate gate",
+			evaluation.MaxTolerance, f.regressionTolerance)
+	}
+
 	telemetry.TrackCommand(cmd.Context(), "eval", args)
 	defer func() { // do not inline this defer so that commandErr is not resolved early
 		telemetry.TrackCommandError(cmd.Context(), "eval", args, commandErr)
@@ -149,5 +164,41 @@ func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) (commandEr
 
 	fmt.Fprintf(teeOut, "Log: %s\n", logPath)
 
-	return evalErr
+	// Only compare a run that completed. A partial run's missing evaluations
+	// register as "absent" and do not gate, so comparing would print
+	// "✅ No regression against baseline" for a broken run and then exit
+	// non-zero — contradictory, and the reassuring half is the one people read.
+	if evalErr != nil {
+		if f.baseline != "" {
+			fmt.Fprintln(teeOut, "\nSkipping baseline comparison: the run did not complete.")
+		}
+		return evalErr
+	}
+
+	return f.checkBaseline(teeOut, run)
+}
+
+// checkBaseline compares run against the configured baseline and returns a
+// non-nil error when it regressed, so CI fails on the exit code. A no-op when
+// --baseline was not supplied.
+func (f *evalFlags) checkBaseline(out io.Writer, run *evaluation.EvalRun) error {
+	if f.baseline == "" {
+		return nil
+	}
+
+	baseline, err := evaluation.LoadBaseline(f.baseline)
+	if err != nil {
+		return err
+	}
+
+	comparison, err := evaluation.Compare(baseline, run, f.regressionTolerance)
+	if err != nil {
+		return err
+	}
+	evaluation.PrintComparison(out, comparison)
+
+	if comparison.Regressed {
+		return errors.New("evaluation regressed against baseline")
+	}
+	return nil
 }

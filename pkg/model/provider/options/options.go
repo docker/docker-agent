@@ -110,8 +110,17 @@ func WithGateway(gateway string) Opt {
 	}
 }
 
+// WithStructuredOutput sets the native structured-output configuration
+// forwarded to providers. Tool-mode structured output
+// (structured_output.mode: tool) is enforced by the runtime through an
+// internal tool, so it is deliberately dropped here: no provider must
+// constrain the response natively in that mode.
 func WithStructuredOutput(structuredOutput *latest.StructuredOutput) Opt {
 	return func(cfg *ModelOptions) {
+		if structuredOutput.ToolMode() {
+			cfg.structuredOutput = nil
+			return
+		}
 		cfg.structuredOutput = structuredOutput
 	}
 }

@@ -219,14 +219,15 @@ func (m *VCSMatcher) ShouldIgnore(path string) bool {
 		absPath = resolved
 	}
 
-	// Check if path is within this repository
-	if !strings.HasPrefix(absPath, m.repoRoot) {
-		return false
-	}
-
-	// Create a relative path from the repository root for matching
+	// Create a relative path from the repository root for matching. Rel doubles
+	// as the containment check: a path outside the repository climbs out with
+	// "..", which a string-prefix test would miss for a sibling directory whose
+	// name merely starts with the root's ("<root>-sibling").
 	relPath, err := filepath.Rel(m.repoRoot, absPath)
 	if err != nil {
+		return false
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
 		return false
 	}
 

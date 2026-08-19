@@ -168,7 +168,7 @@ func newRunCmd() *cobra.Command {
 func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().StringVarP(&flags.agentName, "agent", "a", "", "Name of the agent to run (defaults to the team's first agent)")
 	cmd.PersistentFlags().BoolVar(&flags.autoApprove, "yolo", false, "Automatically approve all tool calls without prompting (same as --safety autonomous)")
-	cmd.PersistentFlags().StringVar(&flags.safety, "safety", "", "Safety mode for tool approval: strict (ask for everything), balanced (auto-approve safe calls), or autonomous (approve everything)")
+	cmd.PersistentFlags().StringVar(&flags.safety, "safety", "", "Safety mode for tool approval: strict (ask for everything), balanced (auto-approve safe calls), restricted (auto-approve safe calls, deny the rest — for unattended runs), or autonomous (approve everything)")
 	cmd.PersistentFlags().BoolVar(&flags.hideToolResults, "hide-tool-results", false, "Hide tool call results")
 	cmd.PersistentFlags().StringVar(&flags.attachmentPath, "attach", "", "Attach an image file to the message")
 	cmd.PersistentFlags().StringArrayVar(&flags.promptFiles, "prompt-file", nil, "Append file contents to the prompt (repeatable)")
@@ -264,13 +264,8 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		}
 	}
 
-	// Same early-failure treatment for --safety: a typo must not
-	// silently collapse to strict. Legacy policy aliases are a wire
-	// compat concern; the new flag only takes the canonical modes.
-	switch session.SafetyPolicy(f.safety) {
-	case "", session.SafetyPolicyStrict, session.SafetyPolicyBalanced, session.SafetyPolicyAutonomous:
-	default:
-		return fmt.Errorf("invalid --safety value %q (valid: strict, balanced, autonomous)", f.safety)
+	if err := validateSafetyFlag(f.safety); err != nil {
+		return err
 	}
 	f.safetyChanged = cmd.Flags().Changed("safety")
 	f.yoloChanged = cmd.Flags().Changed("yolo")
@@ -1356,6 +1351,16 @@ func stopToolSets(ctx context.Context, t toolStopper) {
 	defer cancel()
 	if err := t.StopToolSets(ctx); err != nil {
 		slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
+	}
+}
+
+// validateSafetyFlag rejects non-canonical --safety values consistently across commands.
+func validateSafetyFlag(value string) error {
+	switch session.SafetyPolicy(value) {
+	case "", session.SafetyPolicyStrict, session.SafetyPolicyBalanced, session.SafetyPolicyRestricted, session.SafetyPolicyAutonomous:
+		return nil
+	default:
+		return fmt.Errorf("invalid --safety value %q (valid: strict, balanced, restricted, autonomous)", value)
 	}
 }
 

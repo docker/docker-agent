@@ -179,7 +179,7 @@ func startA2AServer(t *testing.T, agentFile string, runConfig *config.RuntimeCon
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = a2aserver.Run(t.Context(), agentFile, "root", sessionDB, runConfig, ln)
+		_ = a2aserver.Run(t.Context(), agentFile, "root", sessionDB, runConfig, ln, a2aserver.RunOptions{})
 	}()
 	// Run stops when t.Context() is canceled (just before cleanups run);
 	// closing the listener also covers the window before Serve starts. Wait

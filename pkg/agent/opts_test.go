@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -95,4 +96,69 @@ func TestStartableToolSet_RestartAfterStop(t *testing.T) {
 	require.NoError(t, ts.Start(ctx))
 	require.True(t, ts.IsStarted())
 	require.Equal(t, int64(2), inner.starts.Load())
+}
+
+// TestWithStructuredOutput verifies the original structured-output config is
+// retained on the agent so the runtime can enforce tool mode.
+func TestWithStructuredOutput(t *testing.T) {
+	t.Parallel()
+
+	so := &latest.StructuredOutput{
+		Name:   "result",
+		Schema: map[string]any{"type": "object"},
+		Mode:   latest.StructuredOutputModeTool,
+	}
+
+	a := New("root", "prompt", WithStructuredOutput(so))
+	require.Same(t, so, a.StructuredOutput())
+
+	require.Nil(t, New("bare", "prompt").StructuredOutput())
+}
+
+// TestStructuredOutputTool_CompiledOnceAndResetByOpt pins the lazy cache
+// contract: the tool-mode output tool is compiled once and reused across
+// calls, WithStructuredOutput resets the cache, native mode (and no
+// structured output) compiles nothing, and compile errors surface to the
+// caller.
+func TestStructuredOutputTool_CompiledOnceAndResetByOpt(t *testing.T) {
+	t.Parallel()
+
+	toolMode := &latest.StructuredOutput{
+		Name:   "result",
+		Mode:   latest.StructuredOutputModeTool,
+		Schema: map[string]any{"type": "object"},
+	}
+
+	a := New("root", "prompt", WithStructuredOutput(toolMode))
+	first, err := a.StructuredOutputTool()
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	second, err := a.StructuredOutputTool()
+	require.NoError(t, err)
+	require.Same(t, first, second, "repeated calls must return the cached tool")
+
+	WithStructuredOutput(toolMode)(a)
+	third, err := a.StructuredOutputTool()
+	require.NoError(t, err)
+	require.NotSame(t, first, third, "WithStructuredOutput must reset the compile cache")
+
+	native := New("native", "prompt", WithStructuredOutput(&latest.StructuredOutput{
+		Name:   "result",
+		Schema: map[string]any{"type": "object"},
+	}))
+	tool, err := native.StructuredOutputTool()
+	require.NoError(t, err)
+	require.Nil(t, tool, "native mode must not compile the output tool")
+
+	bare, err := New("bare", "prompt").StructuredOutputTool()
+	require.NoError(t, err)
+	require.Nil(t, bare)
+
+	broken := New("broken", "prompt", WithStructuredOutput(&latest.StructuredOutput{
+		Name:   "broken",
+		Mode:   latest.StructuredOutputModeTool,
+		Schema: map[string]any{"type": 42},
+	}))
+	_, err = broken.StructuredOutputTool()
+	require.ErrorContains(t, err, "schema")
 }

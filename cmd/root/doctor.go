@@ -291,7 +291,7 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 			if _, ok := findSource(ctx, sources, environment.DockerDesktopTokenEnv); !ok {
 				autoStatus.Usable = false
 				autoIssues = append(autoIssues,
-					"the models gateway requires Docker Desktop sign-in and no DOCKER_TOKEN was found; sign in to Docker Desktop (check with `docker agent debug auth`)")
+					"the models gateway requires a Docker sign-in and no DOCKER_TOKEN was found; sign in to Docker Desktop or run `docker login` (check with `docker agent debug auth`)")
 			}
 		}
 

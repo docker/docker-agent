@@ -13,6 +13,7 @@ func TestSafetyPolicy_IsValid(t *testing.T) {
 		"":                     true,
 		SafetyPolicyStrict:     true,
 		SafetyPolicyBalanced:   true,
+		SafetyPolicyRestricted: true,
 		SafetyPolicyAutonomous: true,
 		// Legacy aliases stay accepted on input.
 		"unsafe":              true,
@@ -32,6 +33,7 @@ func TestSafetyPolicy_Normalize(t *testing.T) {
 		"":                     "",
 		SafetyPolicyStrict:     SafetyPolicyStrict,
 		SafetyPolicyBalanced:   SafetyPolicyBalanced,
+		SafetyPolicyRestricted: SafetyPolicyRestricted,
 		SafetyPolicyAutonomous: SafetyPolicyAutonomous,
 		"unsafe":               SafetyPolicyAutonomous,
 		"safer":                SafetyPolicyBalanced,
@@ -42,6 +44,44 @@ func TestSafetyPolicy_Normalize(t *testing.T) {
 	}
 	for in, want := range cases {
 		assert.Equalf(t, want, in.Normalize(), "SafetyPolicy(%q).Normalize()", string(in))
+	}
+}
+
+func TestMinSafetyPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		a    SafetyPolicy
+		b    SafetyPolicy
+		want SafetyPolicy
+	}{
+		{"strict and strict", SafetyPolicyStrict, SafetyPolicyStrict, SafetyPolicyStrict},
+		{"strict and balanced", SafetyPolicyStrict, SafetyPolicyBalanced, SafetyPolicyStrict},
+		{"strict and restricted", SafetyPolicyStrict, SafetyPolicyRestricted, SafetyPolicyStrict},
+		{"strict and autonomous", SafetyPolicyStrict, SafetyPolicyAutonomous, SafetyPolicyStrict},
+		{"balanced and strict", SafetyPolicyBalanced, SafetyPolicyStrict, SafetyPolicyStrict},
+		{"balanced and balanced", SafetyPolicyBalanced, SafetyPolicyBalanced, SafetyPolicyBalanced},
+		{"balanced and restricted", SafetyPolicyBalanced, SafetyPolicyRestricted, SafetyPolicyBalanced},
+		{"balanced and autonomous", SafetyPolicyBalanced, SafetyPolicyAutonomous, SafetyPolicyBalanced},
+		{"restricted and strict", SafetyPolicyRestricted, SafetyPolicyStrict, SafetyPolicyStrict},
+		{"restricted and balanced", SafetyPolicyRestricted, SafetyPolicyBalanced, SafetyPolicyBalanced},
+		{"restricted and restricted", SafetyPolicyRestricted, SafetyPolicyRestricted, SafetyPolicyRestricted},
+		{"restricted and autonomous", SafetyPolicyRestricted, SafetyPolicyAutonomous, SafetyPolicyRestricted},
+		{"autonomous and strict", SafetyPolicyAutonomous, SafetyPolicyStrict, SafetyPolicyStrict},
+		{"autonomous and balanced", SafetyPolicyAutonomous, SafetyPolicyBalanced, SafetyPolicyBalanced},
+		{"autonomous and restricted", SafetyPolicyAutonomous, SafetyPolicyRestricted, SafetyPolicyRestricted},
+		{"autonomous and autonomous", SafetyPolicyAutonomous, SafetyPolicyAutonomous, SafetyPolicyAutonomous},
+		{"legacy alias", "unsafe", SafetyPolicyRestricted, SafetyPolicyRestricted},
+		{"unknown policy", "unknown", SafetyPolicyAutonomous, SafetyPolicyStrict},
+		{"unset left", "", SafetyPolicyRestricted, ""},
+		{"unset right", SafetyPolicyRestricted, "", ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, MinSafetyPolicy(test.a, test.b))
+		})
 	}
 }
 
@@ -56,6 +96,10 @@ func TestWithSafetyPolicy_SyncsToolsApproved(t *testing.T) {
 	s = New(WithSafetyPolicy(SafetyPolicyBalanced))
 	assert.Equal(t, SafetyPolicyBalanced, s.SafetyPolicy)
 	assert.False(t, s.ToolsApproved)
+
+	s = New(WithSafetyPolicy(SafetyPolicyRestricted))
+	assert.Equal(t, SafetyPolicyRestricted, s.SafetyPolicy)
+	assert.False(t, s.ToolsApproved, "restricted must not grant blanket approval")
 
 	// Legacy alias normalizes at the boundary.
 	s = New(WithSafetyPolicy("unsafe"))
@@ -164,6 +208,21 @@ func TestToggleYolo_RestoresPriorMode(t *testing.T) {
 	assert.Equal(t, SafetyPolicyBalanced, s.GetSafetyPolicy())
 	assert.False(t, s.IsToolsApproved())
 	assert.Equal(t, SafetyPolicy(""), s.PriorSafetyPolicy, "toggle memory must be consumed")
+}
+
+// Restricted participates in the yolo toggle like any other explicit
+// mode: escalate to autonomous, toggle back restores restricted.
+func TestToggleYolo_RestoresRestricted(t *testing.T) {
+	t.Parallel()
+	s := New(WithSafetyPolicy(SafetyPolicyRestricted))
+
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicyAutonomous, s.GetSafetyPolicy())
+	assert.True(t, s.IsToolsApproved())
+
+	s.ToggleYolo()
+	assert.Equal(t, SafetyPolicyRestricted, s.GetSafetyPolicy())
+	assert.False(t, s.IsToolsApproved())
 }
 
 // A session that never chose a named mode keeps the historical

@@ -21,7 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Session, a *agent.Agent, baseExtra, baseLegacy []chat.Message, baseSources []session.InstructionSource, events EventSink) string {
+func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) string {
 	ctx, span := r.startSpan(ctx, "runtime.harness", trace.WithAttributes(traceAttributesForHarness(sess, a)...))
 	defer span.End()
 
@@ -46,10 +46,9 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		r.executeTurnEndHooks(context.WithoutCancel(ctx), sess, a, endReason, events)
 	}()
 
-	turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
-	legacyExtras := append(slices.Clone(baseLegacy), turnStartMsgs.legacyMessages()...)
-	messages := r.messagesWithDynamicContext(ctx, sess, a,
-		instructionSources(baseExtra, nil, turnStartMsgs, baseSources...), legacyExtras)
+	// Harnesses own their context; run lifecycle hooks but do not forward injected instructions.
+	r.executeTurnStartHooks(ctx, sess, a, events)
+	messages := harnessInputMessages(sess)
 	stop, msg, rewritten := r.executeBeforeLLMCallHooks(ctx, sess, a, modelID, 1, messages)
 	if stop {
 		slog.WarnContext(ctx, "before_llm_call hook signalled run termination",
@@ -63,7 +62,16 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	}
 	messages = r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID, messages)
 
-	prompt := harnessPromptFromMessages(messages)
+	harnessSessionID := harnessSessionIDFor(sess, a)
+	prompt := strings.TrimSpace(harnessPrompt(messages))
+	if prompt == "" {
+		msg := "cannot run external harness without a user prompt"
+		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeModelError, msg))
+		r.notifyError(ctx, a, sess.ID, msg)
+		span.SetStatus(codes.Error, "harness prompt is empty")
+		endReason = turnEndReasonError
+		return endReason
+	}
 	var streamed strings.Builder
 	var finalResult string
 	var usage *chat.Usage
@@ -116,8 +124,11 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		}
 	}
 
-	err = baseharness.Run(ctx, provider, prompt, func(ev baseharness.Event) {
+	var reportedHarnessSessionID string
+	handleEvent := func(ev baseharness.Event) {
 		switch ev.Type {
+		case baseharness.EventSessionID:
+			reportedHarnessSessionID = strings.TrimSpace(ev.SessionID)
 		case baseharness.EventText:
 			if ev.Text == "" {
 				return
@@ -162,7 +173,12 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 				cost = ev.Usage.TotalCostUSD
 			}
 		}
-	})
+	}
+	if harnessSessionID == "" {
+		err = baseharness.Run(ctx, provider, prompt, handleEvent)
+	} else {
+		err = baseharness.Resume(ctx, provider, harnessSessionID, prompt, handleEvent)
+	}
 	if err != nil {
 		if ctx.Err() != nil {
 			completeRemainingToolCalls(tools.ResultError("External harness was canceled."))
@@ -179,6 +195,9 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		span.SetStatus(codes.Error, "harness run error")
 		endReason = turnEndReasonError
 		return endReason
+	}
+	if reportedHarnessSessionID != "" && reportedHarnessSessionID != harnessSessionID {
+		r.rememberHarnessSessionID(ctx, sess, a, reportedHarnessSessionID)
 	}
 
 	completeRemainingToolCalls(harnessToolCompletedResult())
@@ -380,16 +399,44 @@ func (r *LocalRuntime) recordHarnessAssistantMessage(sess *session.Session, a *a
 	}
 }
 
-func harnessPromptFromMessages(messages []chat.Message) string {
-	var b strings.Builder
-	for _, msg := range messages {
-		content := harnessMessageContent(msg)
-		if strings.TrimSpace(content) == "" {
-			continue
-		}
-		fmt.Fprintf(&b, "<%s>\n%s\n</%s>\n\n", msg.Role, content, msg.Role)
+func harnessSessionAttributeKey(sess *session.Session, a *agent.Agent) string {
+	return fmt.Sprintf("docker-agent.harness.session.%s.%s.%s", sess.ID, a.Name(), codingharness.Label(a.Harness()))
+}
+
+func harnessSessionIDFor(sess *session.Session, a *agent.Agent) string {
+	return sess.AttributesSnapshot()[harnessSessionAttributeKey(sess, a)]
+}
+
+func (r *LocalRuntime) rememberHarnessSessionID(ctx context.Context, sess *session.Session, a *agent.Agent, harnessSessionID string) {
+	sess.SetAttribute(harnessSessionAttributeKey(sess, a), harnessSessionID)
+	if sess.IsSubSession() {
+		// SubSessionCompleted persists the full child after its stream drains.
+		return
 	}
-	return strings.TrimSpace(b.String())
+	if r.sessionStore == nil {
+		return
+	}
+	if err := r.sessionStore.UpdateSession(context.WithoutCancel(ctx), sess); err != nil {
+		slog.WarnContext(ctx, "Failed to persist harness session ID", "session_id", sess.ID, "agent", a.Name(), "error", err)
+	}
+}
+
+func harnessInputMessages(sess *session.Session) []chat.Message {
+	for _, item := range slices.Backward(sess.MessagesSnapshot()) {
+		if item.Message != nil && !item.Message.Implicit && item.Message.Message.Role == chat.MessageRoleUser {
+			return []chat.Message{item.Message.Message}
+		}
+	}
+	return nil
+}
+
+func harnessPrompt(messages []chat.Message) string {
+	for _, message := range slices.Backward(messages) {
+		if message.Role == chat.MessageRoleUser {
+			return harnessMessageContent(message)
+		}
+	}
+	return ""
 }
 
 func harnessMessageContent(msg chat.Message) string {

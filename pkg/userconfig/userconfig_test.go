@@ -1440,6 +1440,21 @@ func TestConfig_Settings_Safety(t *testing.T) {
 	assert.Equal(t, latest.SafetyModeBalanced, cfg.GetSettings().GetSafety())
 }
 
+func TestConfig_Settings_SafetyRestricted(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`settings:
+  safety: restricted
+`), 0o644))
+
+	cfg, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	assert.Equal(t, latest.SafetyModeRestricted, cfg.GetSettings().Safety)
+	assert.Equal(t, latest.SafetyModeRestricted, cfg.GetSettings().GetSafety())
+}
+
 func TestConfig_Settings_InvalidSafetyFailsLoad(t *testing.T) {
 	t.Parallel()
 
@@ -1451,7 +1466,7 @@ func TestConfig_Settings_InvalidSafetyFailsLoad(t *testing.T) {
 
 	_, err := loadFrom(configFile, "")
 	require.ErrorContains(t, err, "settings.safety")
-	require.ErrorContains(t, err, `invalid safety mode "yolo" (valid: strict, balanced, autonomous)`)
+	require.ErrorContains(t, err, `invalid safety mode "yolo" (valid: strict, balanced, restricted, autonomous)`)
 }
 
 func TestConfig_Alias_InvalidSafetyFailsLoad(t *testing.T) {

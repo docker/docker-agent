@@ -68,7 +68,7 @@ You can optionally specify runtime options that will be applied whenever
 the alias is used:
 
   --yolo               Automatically approve all tool calls without prompting
-  --safety             Default safety mode: strict, balanced, or autonomous
+  --safety             Default safety mode: strict, balanced, restricted, or autonomous
   --model              Override the agent's model (format: [agent=]provider/model)
   --hide-tool-results  Hide tool call results in the TUI
   --sandbox            Always run the agent inside a Docker sandbox`,
@@ -99,7 +99,7 @@ the alias is used:
 	}
 
 	cmd.Flags().BoolVar(&flags.yolo, "yolo", false, "Automatically approve all tool calls without prompting")
-	cmd.Flags().StringVar(&flags.safety, "safety", "", "Default safety mode when running the alias: strict, balanced, or autonomous (wins over --yolo)")
+	cmd.Flags().StringVar(&flags.safety, "safety", "", "Default safety mode when running the alias: strict, balanced, restricted, or autonomous (wins over --yolo)")
 	cmd.Flags().StringVar(&flags.model, "model", "", "Override agent model (format: [agent=]provider/model)")
 	cmd.Flags().BoolVar(&flags.hideToolResults, "hide-tool-results", false, "Hide tool call results in the TUI")
 	cmd.Flags().BoolVar(&flags.sandbox, "sandbox", false, "Always run the agent inside a Docker sandbox")
@@ -145,7 +145,7 @@ func runAliasAddCommand(cmd *cobra.Command, args []string, flags *aliasAddFlags)
 	name := args[0]
 	agentPath := args[1]
 
-	// Fail fast on a typo: only the three canonical modes may be stored.
+	// Fail fast on a typo: only the canonical modes may be stored.
 	safety := latestcfg.SafetyMode(flags.safety)
 	if err := safety.Validate(); err != nil {
 		return fmt.Errorf("invalid --safety value: %w", err)

@@ -7,6 +7,7 @@ package attachment
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -54,21 +55,96 @@ func Decide(doc chat.Document, mc modelinfo.ModelCapabilities) (Strategy, string
 	return StrategyDrop, "no inline content"
 }
 
-// TXTEnvelope wraps text content in a unique XML-like tag derived from the
-// document name and MIME type. The tag name is a slug of both, making
-// accidental tag break-out in the content practically impossible without
-// escaping the body.
+// TXTEnvelope wraps text content in an XML-like tag derived from the document
+// name and MIME type.
 //
 // Example: a document named "report.md" with MIME "text/markdown" produces:
 //
 //	<document-report-md-text-markdown>
 //	…body…
 //	</document-report-md-text-markdown>
+//
+// # Delimiter safety
+//
+// The tag is a deterministic slug of the name and MIME type, so it is NOT a
+// secret: both inputs are routinely attacker-influenced (a downloaded file, a
+// fetched page), which means the tag is predictable to whoever supplied the
+// content. The body is therefore defused — any occurrence of this envelope's own
+// delimiter inside it is replaced — so content cannot close the region early and
+// make injected text appear to come from outside it.
+//
+// The tag is deliberately kept deterministic rather than randomised per call: a
+// per-call nonce would change the prompt prefix on every request and defeat
+// provider prompt caching for the attachment.
 func TXTEnvelope(name, mimeType, body string) string {
 	slug := slugify(name + "-" + mimeType)
 	tag := "document-" + slug
-	return fmt.Sprintf("<%s>\n%s\n</%s>", tag, body, tag)
+	return fmt.Sprintf("<%s>\n%s\n</%s>", tag, defuseDelimiters(body, tag), tag)
 }
+
+// delimiterPlaceholder replaces an envelope delimiter found inside a body. It is
+// visible on purpose: silently dropping the text would hide the attempt, and an
+// invisible substitution (a zero-width character) would be worse — it would look
+// like a working delimiter to a human reading the transcript.
+const delimiterPlaceholder = "[docker-agent: envelope delimiter removed]"
+
+// envelopeTagRe matches anything shaped like an envelope delimiter — any leading
+// mix of slashes and whitespace, an envelope-style tag name, then arbitrary
+// junk up to the closing bracket.
+//
+// Deliberately loose about what follows the tag name. Requiring only whitespace
+// or a slash there let `</document-x foo="1">` and `</document-x!>` through, and
+// an HTML parser (like a model reading the transcript) ignores trailing
+// attributes on an end tag, so those closed the region just as effectively as
+// the exact byte sequence.
+//
+// The tag name is captured rather than baked in so the pattern can be compiled
+// once instead of per attachment; [defuseDelimiters] decides whether a given
+// match belongs to the envelope being built.
+var envelopeTagRe = regexp.MustCompile(`(?i)<[\s/]*(document-[a-z0-9-]+)\b[^>]*>`)
+
+// defuseDelimiters replaces every occurrence of this envelope's own delimiter
+// inside body, in any spelling: closing or opening, upper or lower case,
+// whitespace-padded, self-closing, or carrying trailing attributes.
+//
+// Neutralization stays scoped to this envelope's tag, so unrelated markup in an
+// HTML or Markdown attachment (`</div>`, `</script>`, another document's tag) is
+// preserved verbatim. A tag that merely *extends* this one
+// (`</document-x-extra>` inside the `document-x` envelope) is defused too: it
+// cannot be a delimiter this envelope opened, but the cost of neutralising it is
+// a placeholder in someone else's markup, while the cost of missing it is a
+// break-out — so the check errs toward defusing.
+//
+// Replacement repeats until the output is stable, because one pass can leave a
+// delimiter-shaped residue behind: `</TAG</TAG>>` collapses to `[…removed]>` only
+// after the second pass.
+func defuseDelimiters(body, tag string) string {
+	if body == "" {
+		return body
+	}
+
+	lowerTag := strings.ToLower(tag)
+	for range maxDefusePasses {
+		defused := envelopeTagRe.ReplaceAllStringFunc(body, func(match string) string {
+			groups := envelopeTagRe.FindStringSubmatch(match)
+			if len(groups) < 2 || !strings.HasPrefix(strings.ToLower(groups[1]), lowerTag) {
+				return match
+			}
+			return delimiterPlaceholder
+		})
+		if defused == body {
+			return body
+		}
+		body = defused
+	}
+	return body
+}
+
+// maxDefusePasses bounds the replace-until-stable loop. Each pass strictly
+// shortens the body (a match is always longer than nothing and is replaced by a
+// constant), so this converges quickly; the bound only exists so a pathological
+// input cannot spin.
+const maxDefusePasses = 8
 
 // slugify converts s to a lowercase, alphanumeric-and-hyphens-only string.
 // Non-alphanumeric runes are replaced with hyphens; consecutive hyphens are
