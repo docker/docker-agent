@@ -25,24 +25,18 @@ agents:
     toolsets:
       - type: filesystem
     hooks:
+      # This entry is the whole opt-in. The builtin also needs its state
+      # dropped on session_end, after_compaction and session_start — compaction
+      # and a context reset remove the very messages a fingerprint stands for,
+      # and keeping it would tell the model "nothing has changed" about bytes it
+      # can no longer see. Those three legs are wired automatically from this
+      # one, so they are part of the feature rather than something to remember.
+      # Writing them out by hand is harmless: identical entries are deduplicated.
       tool_response_transform:
         - matcher: "*"
           hooks:
             - type: builtin
               command: elide_repeated_tool_results
-      # State is per session. Wire all three cleanup legs: session_end frees it,
-      # and compaction or a context reset removes the very messages a
-      # fingerprint stands for — keeping it would tell the model "nothing has
-      # changed" about bytes it can no longer see.
-      session_end:
-        - type: builtin
-          command: elide_repeated_tool_results
-      after_compaction:
-        - type: builtin
-          command: elide_repeated_tool_results
-      session_start:
-        - type: builtin
-          command: elide_repeated_tool_results
 
 models:
   claude:
