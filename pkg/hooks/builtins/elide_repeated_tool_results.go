@@ -33,15 +33,19 @@ import (
 //
 // [LimitLargeToolResults] is auto-injected at the FRONT of
 // tool_response_transform and the executor applies the first non-nil rewrite in
-// config order, so whenever that builtin fires (results over ~50 KiB or 2000
-// lines) its truncation wins and an elision marker would be discarded. Nothing
-// a user writes in YAML can precede an auto-injected entry, so this builtin
-// deliberately declines to act on payloads that large: eliding them is not
-// possible today, and recording a fingerprint for them would only waste memory.
+// config order, so whenever that builtin fires its truncation wins and an
+// elision marker would be discarded. Nothing a user writes in YAML can precede
+// an auto-injected entry, so this builtin declines whatever that one would
+// rewrite: eliding those payloads is not possible today, and recording a
+// fingerprint for them would only waste memory.
 //
-// The effective window is therefore (len(marker), maxToolCallResultBytes).
-// Repeats above it stay bounded by limit_large_tool_results, which caps a single
-// result but not the cost of repeating it.
+// The decision is delegated to [limitLargeToolResultsWouldRewrite] rather than
+// re-derived, because it is not a single byte threshold — that builtin also
+// rewrites results over 2000 lines whatever their size, and only for its own
+// categories, which leaves large lsp, memory and git results elidable here.
+//
+// Repeats it does decline stay bounded by limit_large_tool_results, which caps
+// a single result but not the cost of repeating it.
 const ElideRepeatedToolResults = "elide_repeated_tool_results"
 
 // elidableCategories lists the tool categories this builtin will act on.
@@ -53,10 +57,16 @@ const ElideRepeatedToolResults = "elide_repeated_tool_results"
 // have its repeated output suppressed from the transcript and the persisted
 // session. Pairing the hint with a category the agent's own toolsets own keeps
 // that decision local, the same way limit_large_tool_results scopes itself.
+//
+// The strings must be the categories the toolsets actually register, not the
+// names they are known by: the RAG toolset registers "knowledge". A category
+// that matches nothing is not a safe default — it is dead configuration that
+// reads as coverage, so TestElidableCategoriesAreRegistered pins each one
+// against the toolset that declares it.
 var elidableCategories = map[string]bool{
 	"filesystem": true,
 	"lsp":        true,
-	"rag":        true,
+	"knowledge":  true,
 	"memory":     true,
 	"git":        true,
 }
@@ -159,9 +169,12 @@ func elideRepeatedToolResponse(in *hooks.Input) *hooks.Output {
 		return nil
 	}
 
-	// Above this, limit_large_tool_results truncates first and wins, so an
-	// elision marker would be built and then discarded.
-	if len(payload) >= maxToolCallResultBytes {
+	// When limit_large_tool_results would rewrite this response it truncates
+	// first and wins, so an elision marker would be built and then discarded.
+	// Asking that builtin directly rather than re-deriving its threshold: it
+	// also rejects results over 2000 lines regardless of byte size, and it only
+	// covers its own categories, so a large lsp or memory result stays elidable.
+	if limitLargeToolResultsWouldRewrite(in.ToolCategory, payload) {
 		return nil
 	}
 

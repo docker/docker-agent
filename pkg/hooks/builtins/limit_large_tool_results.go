@@ -73,12 +73,8 @@ func limitLargeToolResults(ctx context.Context, in *hooks.Input, _ []string) (*h
 }
 
 func limitLargeToolResponse(ctx context.Context, in *hooks.Input) (*hooks.Output, error) {
-	if !largeResultCategories[in.ToolCategory] {
-		return nil, nil
-	}
-
 	payload, ok := in.ToolResponse.(string)
-	if !ok || !largeToolResultLimitExceeded(payload) {
+	if !ok || !limitLargeToolResultsWouldRewrite(in.ToolCategory, payload) {
 		return nil, nil
 	}
 
@@ -146,6 +142,20 @@ func readFileHeadNotice(toolInput map[string]any, payload, path string) string {
 
 func largeToolResultLimitExceeded(payload string) bool {
 	return len(payload) > maxToolCallResultBytes || lineCount(payload) > largeToolCallResultTailLines
+}
+
+// limitLargeToolResultsWouldRewrite reports whether limit_large_tool_results
+// would replace this response with its truncation notice.
+//
+// Exists so another tool_response_transform builtin can tell whether its own
+// rewrite would survive: ApplyAgentDefaults prepends limit_large_tool_results
+// and the executor keeps the first non-nil rewrite in config order, so
+// whenever this returns true nothing a user-configured hook produces for the
+// same response is ever seen. Both halves matter — the category gate as much
+// as the size, since a category this builtin does not cover is never rewritten
+// however large it is.
+func limitLargeToolResultsWouldRewrite(toolCategory, payload string) bool {
+	return largeResultCategories[toolCategory] && largeToolResultLimitExceeded(payload)
 }
 
 func lineCount(payload string) int {
