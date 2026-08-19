@@ -8,7 +8,7 @@ metadata:
     - deny: Tools matching these patterns are always rejected
     - allow: Tools matching these patterns are auto-approved
     - (default): Tools not matching either pattern fall through to the
-      session's safety mode (strict / balanced / autonomous)
+      session's safety mode (strict / balanced / restricted / autonomous)
 
     Evaluation order: Deny (first) -> Allow -> Ask -> safety mode
 

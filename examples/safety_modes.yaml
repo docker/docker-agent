@@ -2,8 +2,9 @@
 #   runtime.safety        — config-wide default for new sessions
 #   agents.<name>.safety  — per-agent override of the config default
 #
-# Only strict, balanced, and autonomous are accepted. These are DEFAULTS
-# only; precedence (highest first) when a new root session starts:
+# Only strict, balanced, restricted, and autonomous are accepted. These
+# are DEFAULTS only; precedence (highest first) when a new root session
+# starts:
 #
 #   --safety flag > --yolo flag > alias safety/yolo option >
 #   settings.safety/YOLO (user config) > agents.<name>.safety >
@@ -21,7 +22,7 @@ runtime:
 agents:
   root:
     model: anthropic/claude-haiku-4-5
-    description: Shell agent demonstrating the three safety modes
+    description: Shell agent demonstrating the safety modes
     welcome_message: |
       Every shell command is classified (safe / destructive / unknown)
       and gated by the session's safety mode:
@@ -29,16 +30,19 @@ agents:
         strict      — ask for every tool call
         balanced    — safe commands run silently; destructive and
                       unknown commands ask
+        restricted  — safe commands run silently; destructive and
+                      unknown commands are denied without asking
+                      (fail-closed, for unattended runs)
         autonomous  — everything runs (legacy --yolo); only custom
                       deny/ask rules still gate
 
       This config declares `runtime.safety: balanced`, so fresh sessions
       start balanced unless you choose otherwise (`--safety`, `--yolo`,
       an alias option, or `settings.safety` in your user config). The
-      `auditor` agent overrides the config default with `safety: strict`.
-      You can still escalate from a confirmation prompt ([B] balanced,
-      [A] autonomous). Custom permissions rules (see permissions.yaml)
-      always win over the mode.
+      `auditor` agent overrides the config default with `safety: strict`,
+      and `ci` with `safety: restricted`. You can still escalate from a
+      confirmation prompt ([B] balanced, [A] autonomous). Custom
+      permissions rules (see permissions.yaml) always win over the mode.
     instruction: Use the shell tool to run the command the user asks for.
     toolsets:
       - type: shell
@@ -52,5 +56,20 @@ agents:
     instruction: >
       Inspect the system with the shell tool. Prefer read-only commands
       and explain what each command does before running it.
+    toolsets:
+      - type: shell
+
+  # Fail-closed default for unattended runs: safe commands run, anything
+  # destructive or unknown is denied without prompting. Pair with an
+  # `allow:` permissions list for the commands the job actually needs
+  # (explicit rules win over the mode). Defense in depth, not isolation —
+  # use --sandbox for a real security boundary.
+  ci:
+    model: anthropic/claude-haiku-4-5
+    description: Headless agent that denies unmatched calls instead of prompting (restricted mode)
+    safety: restricted
+    instruction: >
+      Run the checks the user asks for with the shell tool. If a command
+      is denied, report it instead of working around the denial.
     toolsets:
       - type: shell

@@ -25,8 +25,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"net/url"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,7 +38,9 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/echolog"
+	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -56,6 +56,10 @@ type Options struct {
 	AgentName string
 	// RunConfig is the runtime configuration used to load the team.
 	RunConfig *config.RuntimeConfig
+	// CLISafety selects the server safety policy before agent and runtime YAML.
+	CLISafety session.SafetyPolicy
+	// OnSafetyPolicy receives the resolved policy after the team loads.
+	OnSafetyPolicy func(servesafety.Resolved)
 	// CORSOrigin is the allowed value for the Access-Control-Allow-Origin
 	// header. When empty, the CORS middleware is not registered at all
 	// (the server never emits any Access-Control-* response header).
@@ -127,6 +131,17 @@ func Run(ctx context.Context, agentFilename string, opts Options, ln net.Listene
 	if err != nil {
 		return err
 	}
+	selectedAgent, err := t.AgentOrDefault(opts.AgentName)
+	if err != nil {
+		return fmt.Errorf("failed to get agent: %w", err)
+	}
+	resolvedSafety, err := servesafety.Resolve(opts.CLISafety, string(selectedAgent.Safety()), string(t.RuntimeSafety()))
+	if err != nil {
+		return fmt.Errorf("resolve serve safety policy: %w", err)
+	}
+	if opts.OnSafetyPolicy != nil {
+		opts.OnSafetyPolicy(resolvedSafety)
+	}
 
 	// Wrap with otelhttp so incoming /v1/chat/completions requests
 	// (including SSE streams) extract the caller's trace context.
@@ -137,6 +152,7 @@ func Run(ctx context.Context, agentFilename string, opts Options, ln net.Listene
 		newRouter(&server{
 			team:              t,
 			policy:            policy,
+			safety:            resolvedSafety.Policy,
 			conversations:     newConversationStore(opts.ConversationsMaxSessions, conversationTTL(opts)),
 			conversationLocks: newConversationLockSet(),
 			runtimes:          newRuntimePool(ctx, t, opts.MaxIdleRuntimes),
@@ -197,6 +213,7 @@ func serve(ctx context.Context, httpServer *http.Server, ln net.Listener) error 
 type server struct {
 	team              *team.Team
 	policy            agentPolicy
+	safety            session.SafetyPolicy
 	conversations     *conversationStore
 	conversationLocks *conversationLockSet
 	runtimes          *runtimePool
@@ -268,71 +285,23 @@ func requestTimeoutMiddleware(d time.Duration) echo.MiddlewareFunc {
 // Returns an error when no entry parses successfully, in which case the
 // caller leaves the middleware unregistered.
 func corsMiddlewareConfig(spec string) (middleware.CORSConfig, error) {
-	var literals []string
-	var patterns []*regexp.Regexp
-	for raw := range strings.SplitSeq(spec, ",") {
-		entry := strings.TrimSpace(raw)
-		if entry == "" {
-			continue
-		}
-		if rest, ok := strings.CutPrefix(entry, "~"); ok {
-			re, err := regexp.Compile(rest)
-			if err != nil {
-				return middleware.CORSConfig{}, fmt.Errorf("invalid CORS regex %q: %w", rest, err)
-			}
-			patterns = append(patterns, re)
-			continue
-		}
-		if err := validateCORSOrigin(entry); err != nil {
-			return middleware.CORSConfig{}, err
-		}
-		literals = append(literals, entry)
-	}
-	if len(literals) == 0 && len(patterns) == 0 {
-		return middleware.CORSConfig{}, errors.New("no usable CORS origins")
+	origins, err := httpsec.ParseOrigins(spec)
+	if err != nil {
+		return middleware.CORSConfig{}, err
 	}
 
 	cfg := middleware.CORSConfig{
-		AllowOrigins: literals,
+		AllowOrigins: origins.Literals(),
 		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodOptions},
 		AllowHeaders: []string{"Authorization", "Content-Type", "Accept"},
 		MaxAge:       86400,
 	}
-	if len(patterns) > 0 {
+	if origins.HasPatterns() {
 		cfg.AllowOriginFunc = func(origin string) (bool, error) {
-			for _, re := range patterns {
-				if re.MatchString(origin) {
-					return true, nil
-				}
-			}
-			return false, nil
+			return origins.MatchPattern(origin), nil
 		}
 	}
 	return cfg, nil
-}
-
-// validateCORSOrigin sanity-checks a literal origin entry. The aim is to
-// reject obvious typos early ("http//foo.com", "https://foo.com/bar")
-// rather than to be a full URL parser — the echo middleware will still
-// do its own matching at request time.
-func validateCORSOrigin(o string) error {
-	if o == "*" {
-		return nil
-	}
-	u, err := url.Parse(o)
-	if err != nil {
-		return fmt.Errorf("invalid CORS origin %q: %w", o, err)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("invalid CORS origin %q: scheme must be http or https", o)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("invalid CORS origin %q: missing host", o)
-	}
-	if u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("invalid CORS origin %q: must not include path, query, or fragment", o)
-	}
-	return nil
 }
 
 // bearerAuthMiddleware enforces the static `Authorization: Bearer <token>`
@@ -440,6 +409,7 @@ func (s *server) resolveSession(id string, msgs []ChatCompletionMessage) (*sessi
 			if !appendLatestUser(working, msgs) {
 				return nil, errors.New("no user message provided")
 			}
+			working.SetSafetyPolicy(servesafety.ResumeCeiling(working.GetSafetyPolicy(), s.safety))
 			return working, nil
 		}
 	}
@@ -447,6 +417,7 @@ func (s *server) resolveSession(id string, msgs []ChatCompletionMessage) (*sessi
 	if sess == nil {
 		return nil, errors.New("no user message provided")
 	}
+	sess.SetSafetyPolicy(s.safety)
 	return sess, nil
 }
 

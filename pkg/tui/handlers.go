@@ -921,9 +921,10 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	model, cmd := m.applyLayoutSettings(preferences.Layout)
 
 	m.sendMode = messages.ParseSendMode(string(preferences.SendMode))
+	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
 	for _, page := range m.chatPages {
 		page.SetSendMode(m.sendMode)
-		page.SetInterruptMode(preferences.InterruptConfirmation)
+		page.SetInterruptMode(m.interruptMode)
 	}
 	if m.sessionState.SplitDiffView() != preferences.SplitDiffView {
 		m.sessionState.SetSplitDiffView(preferences.SplitDiffView)

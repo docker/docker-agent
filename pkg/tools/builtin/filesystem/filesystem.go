@@ -358,6 +358,7 @@ func ParseEditFileArgs(data []byte) (EditFileArgs, error) {
 		Edits json.RawMessage `json:"edits"`
 	}
 
+	didRepair := false
 	if err := json.Unmarshal(data, &raw); err != nil {
 		repaired, ok := tryRepairEditFileJSON(data)
 		if !ok {
@@ -367,6 +368,7 @@ func ParseEditFileArgs(data []byte) (EditFileArgs, error) {
 			return EditFileArgs{}, fmt.Errorf("failed to parse edit_file arguments after repair: %w", err)
 		}
 		slog.Debug("Repaired malformed edit_file JSON arguments")
+		didRepair = true
 	}
 
 	args := EditFileArgs{Path: raw.Path}
@@ -378,26 +380,33 @@ func ParseEditFileArgs(data []byte) (EditFileArgs, error) {
 	}
 
 	// Try parsing edits as an array first (normal case).
-	if err := json.Unmarshal(raw.Edits, &args.Edits); err == nil {
-		return args, nil
+	if err := json.Unmarshal(raw.Edits, &args.Edits); err != nil {
+		// Try unwrapping a double-serialized JSON string.
+		var editsStr string
+		if err := json.Unmarshal(raw.Edits, &editsStr); err != nil {
+			return EditFileArgs{}, fmt.Errorf("edits field is neither an array nor a JSON string: %w", err)
+		}
+		if err := json.Unmarshal([]byte(editsStr), &args.Edits); err != nil {
+			// The inner payload can carry the same brace/bracket-counting
+			// mistakes as the outer JSON, so give it the same repair pass.
+			repaired, ok := tryRepairEditFileJSON([]byte(editsStr))
+			if !ok {
+				return EditFileArgs{}, fmt.Errorf("failed to parse double-serialized edits string: %w", err)
+			}
+			if err := json.Unmarshal(repaired, &args.Edits); err != nil {
+				return EditFileArgs{}, fmt.Errorf("failed to parse double-serialized edits string after repair: %w", err)
+			}
+			slog.Debug("Repaired malformed double-serialized edits payload")
+			didRepair = true
+		}
 	}
 
-	// Try unwrapping a double-serialized JSON string.
-	var editsStr string
-	if err := json.Unmarshal(raw.Edits, &editsStr); err != nil {
-		return EditFileArgs{}, fmt.Errorf("edits field is neither an array nor a JSON string: %w", err)
-	}
-	if err := json.Unmarshal([]byte(editsStr), &args.Edits); err != nil {
-		// The inner payload can carry the same brace/bracket-counting
-		// mistakes as the outer JSON, so give it the same repair pass.
-		repaired, ok := tryRepairEditFileJSON([]byte(editsStr))
-		if !ok {
-			return EditFileArgs{}, fmt.Errorf("failed to parse double-serialized edits string: %w", err)
-		}
-		if err := json.Unmarshal(repaired, &args.Edits); err != nil {
-			return EditFileArgs{}, fmt.Errorf("failed to parse double-serialized edits string after repair: %w", err)
-		}
-		slog.Debug("Repaired malformed double-serialized edits payload")
+	// Validated once, for either repair path: a repair is only trustworthy if it
+	// removed a spurious character rather than a load-bearing one. Well-formed
+	// payloads are deliberately not second-guessed here — the TUI parses
+	// partially-streamed arguments with this function, where a not-yet-filled
+	// oldText is normal; handleEditFile is what refuses to apply it.
+	if didRepair {
 		if err := validateRepairedEdits(args.Edits); err != nil {
 			return EditFileArgs{}, err
 		}
@@ -407,10 +416,14 @@ func ParseEditFileArgs(data []byte) (EditFileArgs, error) {
 }
 
 // validateRepairedEdits guards against repair output that is structurally
-// valid but semantically corrupted. An empty oldText is never a meaningful
-// edit (handleEditFile's strings.Replace would silently insert newText at
-// the start of the file), so its presence after a repair means the repair
-// removed a load-bearing character rather than a spurious one.
+// valid but semantically corrupted: an empty oldText after a repair means the
+// repair removed a load-bearing character (a quote closing the string) rather
+// than a spurious one, so the whole repaired payload is untrustworthy.
+//
+// This is about distrusting the repair, not about protecting the edit loop —
+// handleEditFile refuses an empty oldText on its own. Rejecting here just
+// reports the real problem at the parse boundary, where the message can say
+// the payload was mis-repaired.
 func validateRepairedEdits(edits []Edit) error {
 	for i, edit := range edits {
 		if edit.OldText == "" {
@@ -1017,6 +1030,11 @@ func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools
 
 	var changes []string
 	for i, edit := range args.Edits {
+		// strings.Contains always matches "" and strings.Replace would insert
+		// newText at offset 0, silently prepending to the file.
+		if edit.OldText == "" {
+			return tools.ResultError(fmt.Sprintf("Edit %d failed: oldText must not be empty", i+1)), nil
+		}
 		if !strings.Contains(modifiedContent, edit.OldText) {
 			return tools.ResultError(fmt.Sprintf("Edit %d failed: old text not found", i+1)), nil
 		}

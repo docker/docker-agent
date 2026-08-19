@@ -1133,6 +1133,62 @@ func TestLoadPropagatesMaxToolResultTokens(t *testing.T) {
 	assert.Equal(t, 512, agt.MaxToolResultTokens())
 }
 
+// TestLoadPropagatesStructuredOutput verifies the original structured-output
+// config (including tool mode) travels from the YAML to the built agent,
+// where the runtime reads it via agent.StructuredOutput().
+func TestLoadPropagatesStructuredOutput(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	data := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    structured_output:
+      mode: tool
+      name: result
+      schema:
+        type: object
+        properties:
+          answer:
+            type: string
+        required: ["answer"]
+`)
+
+	team, err := Load(t.Context(), config.NewBytesSource("so.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
+	require.NoError(t, err)
+
+	agt, err := team.Agent("root")
+	require.NoError(t, err)
+	so := agt.StructuredOutput()
+	require.NotNil(t, so, "agent must retain the original structured-output config")
+	assert.Equal(t, "result", so.Name)
+	assert.True(t, so.ToolMode())
+	assert.Contains(t, so.Schema, "properties")
+}
+
+// TestLoadRejectsUncompilableToolModeSchema pins the load-time failure for
+// tool-mode structured output with a schema gojsonschema cannot compile.
+func TestLoadRejectsUncompilableToolModeSchema(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	data := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    structured_output:
+      mode: tool
+      name: result
+      schema:
+        type: object
+        properties:
+          answer:
+            type: 42
+`)
+
+	_, err := Load(t.Context(), config.NewBytesSource("bad-schema.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
+	require.ErrorContains(t, err, "agent root: structured_output")
+}
+
 // TestLoadPropagatesSafetyDefaults verifies the author-declared safety
 // defaults travel from the YAML config to the built team: runtime.safety
 // lands on the team (team.RuntimeSafety) and agents.<name>.safety on the
@@ -1147,6 +1203,10 @@ agents:
     model: openai/gpt-4o
     instruction: test
     safety: balanced
+  headless:
+    model: openai/gpt-4o
+    instruction: test
+    safety: restricted
   careful:
     model: openai/gpt-4o
     instruction: test
@@ -1160,6 +1220,10 @@ agents:
 	root, err := team.Agent("root")
 	require.NoError(t, err)
 	assert.Equal(t, latest.SafetyModeBalanced, root.Safety())
+
+	headless, err := team.Agent("headless")
+	require.NoError(t, err)
+	assert.Equal(t, latest.SafetyModeRestricted, headless.Safety())
 
 	careful, err := team.Agent("careful")
 	require.NoError(t, err)
@@ -1204,7 +1268,7 @@ agents:
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := Load(t.Context(), config.NewBytesSource("bad.yaml", []byte(tt.data)), &config.RuntimeConfig{}, withTestProviderRegistry()...)
 			require.ErrorContains(t, err, tt.wantErr)
-			require.ErrorContains(t, err, "strict, balanced, autonomous")
+			require.ErrorContains(t, err, "strict, balanced, restricted, autonomous")
 		})
 	}
 }

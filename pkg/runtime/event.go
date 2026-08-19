@@ -232,14 +232,15 @@ func AgentChoiceReasoning(agentName, sessionID, content string) Event {
 // messages for each shape (token-count overflow, wire-level body cap,
 // media-size rejection) instead of one generic "context window exceeded".
 const (
-	ErrorCodeModelError      = "model_error"
-	ErrorCodeRateLimited     = "rate_limited"
-	ErrorCodeContextExceeded = "context_exceeded"  // OverflowKindTokens
-	ErrorCodeRequestTooLarge = "request_too_large" // OverflowKindWire
-	ErrorCodeMediaTooLarge   = "media_too_large"   // OverflowKindMedia
-	ErrorCodeToolFailed      = "tool_failed"
-	ErrorCodeHookBlocked     = "hook_blocked"
-	ErrorCodeLoopDetected    = "loop_detected"
+	ErrorCodeModelError             = "model_error"
+	ErrorCodeRateLimited            = "rate_limited"
+	ErrorCodeContextExceeded        = "context_exceeded"  // OverflowKindTokens
+	ErrorCodeRequestTooLarge        = "request_too_large" // OverflowKindWire
+	ErrorCodeMediaTooLarge          = "media_too_large"   // OverflowKindMedia
+	ErrorCodeToolFailed             = "tool_failed"
+	ErrorCodeHookBlocked            = "hook_blocked"
+	ErrorCodeLoopDetected           = "loop_detected"
+	ErrorCodeStructuredOutputFailed = "structured_output_failed"
 )
 
 type ErrorEvent struct {

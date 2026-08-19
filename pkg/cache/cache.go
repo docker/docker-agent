@@ -19,9 +19,11 @@
 // back atomically via a temp file + rename. Two processes simultaneously
 // caching different keys both see their writes preserved; the lock
 // serializes the read-modify-write window so neither can clobber the
-// other. [Cache.Lookup] reloads the in-memory map when the file's mtime
-// has advanced since its last load, so cross-process writes become
-// visible without a restart.
+// other. Storing also adopts the state it read under the lock, so a
+// sibling's entries become visible to this process without waiting for a
+// reload. [Cache.Lookup] reloads the in-memory map when the file's mtime
+// has advanced since its last load, so cross-process writes made while
+// this process was idle become visible without a restart.
 //
 // Two normalization options are exposed:
 //
@@ -37,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,11 +171,11 @@ func (c *Cache) Store(question, response string) {
 
 // persistToDisk takes the cross-process lock on c.path's sibling .lock
 // file, reloads the on-disk entries, merges (key, response), writes
-// atomically, and refreshes c.mtime. The caller must hold c.mu.
+// atomically, and adopts the merged state. The caller must hold c.mu.
 //
-// Skips the write — but still refreshes c.mtime — when the on-disk
-// state already has key → response, which keeps cross-process replays
-// free of redundant disk traffic.
+// Skips the write — but still adopts the on-disk state — when it already
+// has key → response, which keeps cross-process replays free of redundant
+// disk traffic.
 func (c *Cache) persistToDisk(key, response string) error {
 	unlock, err := lockFile(c.path)
 	if err != nil {
@@ -186,7 +189,7 @@ func (c *Cache) persistToDisk(key, response string) error {
 	}
 
 	if existing, ok := entries[key]; ok && existing == response {
-		c.mtime = mtimeOf(c.path)
+		c.adopt(entries)
 		return nil
 	}
 
@@ -194,8 +197,33 @@ func (c *Cache) persistToDisk(key, response string) error {
 	if err := writeJSON(c.path, entries); err != nil {
 		return err
 	}
-	c.mtime = mtimeOf(c.path)
+	c.adopt(entries)
 	return nil
+}
+
+// adopt merges the on-disk state read under the lock into the in-memory map and
+// refreshes c.mtime. Both must happen together: advancing the mtime alone would
+// mark this instance up to date against a file whose sibling-written entries it
+// never loaded, and [Cache.maybeReload] would then never reload them.
+//
+// The merge is deliberate: replacing c.entries outright would discard every
+// in-memory entry the on-disk state does not mention, including one an earlier
+// failed [Cache.Store] kept on purpose.
+//
+// That preservation is narrow, and deliberately so — do not read it as making
+// unpersisted entries durable:
+//   - it lasts only until the next reload. [Cache.maybeReload] still replaces
+//     c.entries wholesale, so the first sibling write after a failed Store drops
+//     an unpersisted entry anyway.
+//   - it covers only keys absent from disk. When the on-disk state does mention
+//     the key, the value read under the lock wins and overwrites the in-memory
+//     one. Converging on what the lock protected is the right call for a cache,
+//     and [Cache.Store] overwrites by key by design.
+//
+// The caller must hold c.mu.
+func (c *Cache) adopt(entries map[string]string) {
+	maps.Copy(c.entries, entries)
+	c.mtime = mtimeOf(c.path)
 }
 
 // maybeReload reloads c.entries from disk when the file mtime has

@@ -39,6 +39,7 @@ func TestClone_CopiesScalarFields(t *testing.T) {
 		CustomModelsUsed:        []string{"openai/gpt-4o"},
 		AttachedFiles:           []string{"/abs/path.txt"},
 		ExcludedTools:           []string{"run_skill"},
+		DisableStructuredOutput: true,
 		AgentName:               "root",
 		ParentID:                "parent",
 		DelegationLineage:       []string{"coordinator"},
@@ -63,6 +64,7 @@ func TestClone_CopiesScalarFields(t *testing.T) {
 	assert.Equal(t, int64(11), clone.InputTokens)
 	assert.Equal(t, int64(22), clone.OutputTokens)
 	assert.InEpsilon(t, 1.5, clone.Cost, 1e-9)
+	assert.True(t, clone.DisableStructuredOutput)
 	assert.Equal(t, "root", clone.AgentName)
 	assert.Equal(t, "parent", clone.ParentID)
 	assert.Equal(t, []string{"coordinator"}, clone.DelegationLineage)

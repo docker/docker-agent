@@ -78,6 +78,9 @@ func (t *Config) Validate() error {
 		if err := agent.Safety.Validate(); err != nil {
 			return fmt.Errorf("agents.%s.safety: %w", agent.Name, err)
 		}
+		if err := agent.StructuredOutput.validate(); err != nil {
+			return fmt.Errorf("agents.%s.structured_output: %w", agent.Name, err)
+		}
 		if err := validateCompactionThreshold(agent.CompactionThreshold); err != nil {
 			return fmt.Errorf("agents.%s: %w", agent.Name, err)
 		}
@@ -216,6 +219,13 @@ func (a *AgentConfig) validateHarness() error {
 	// ignored.
 	if a.CompactionModel != "" {
 		return errors.New("compaction_model cannot be used with a harness; the harness manages its own context compaction")
+	}
+
+	// Harness agents also skip docker-agent's run loop, so the internal tool
+	// behind tool-mode structured output is never injected or enforced.
+	// Native mode stays accepted: the harness may support it itself.
+	if a.StructuredOutput.ToolMode() {
+		return errors.New("structured_output.mode 'tool' cannot be used with a harness; the harness does not run the tool loop that enforces it (use mode 'native')")
 	}
 
 	h := a.Harness

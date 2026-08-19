@@ -15,8 +15,11 @@ type OAuthToken struct {
 	ClientSecret string    `json:"client_secret,omitempty"`
 	AuthServer   string    `json:"auth_server,omitempty"`
 
-	// RequestedScopes records the scope list the config asked for when this
-	// token was obtained. Unlike Scope (which is whatever the authorization
+	// RequestedScopes records the scope list actually requested when this
+	// token was obtained: the configured scopes, or — on a successful
+	// dynamic client registration with no configured override — the
+	// challenge- or protected-resource-metadata-derived scopes selected by
+	// selectDCRScopes. Unlike Scope (which is whatever the authorization
 	// server chose to return, sometimes empty, sometimes comma/space
 	// separated), RequestedScopes reflects our intent and is used to detect
 	// when the config has changed and a new OAuth flow is required.

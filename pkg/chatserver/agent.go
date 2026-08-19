@@ -59,14 +59,13 @@ func (p agentPolicy) pick(model string) string {
 // assistant/tool turns are replayed verbatim so the agent sees the full
 // conversation, and the latest user message becomes the prompt.
 //
-// Tool approval and non-interactive mode are forced on: this is a headless
-// HTTP endpoint, there's no human in the loop to approve anything.
+// Tool approval is determined by the resolved server policy because this
+// endpoint has no interactive approval channel.
 //
 // Returns nil when the history contains no usable user message, in which
 // case the caller should reject the request.
 func buildSession(messages []ChatCompletionMessage) *session.Session {
 	sess := session.New(
-		session.WithToolsApproved(true),
 		session.WithNonInteractive(true),
 	)
 
@@ -202,13 +201,11 @@ type agentEmit struct {
 // runAgentLoop drives the runtime to completion, forwarding events to
 // the supplied callbacks.
 //
-// The session is built with ToolsApproved=true and NonInteractive=true,
-// which means the runtime auto-approves tool calls and auto-stops on
-// max-iterations. The handler cases below are intentionally kept as
-// defence-in-depth: if those session settings ever drift, this handler
-// still won't hang the request. Elicitation is the exception — the
-// runtime always blocks until we respond, so its case is required for
-// correctness, not just defence.
+// The session is built with NonInteractive=true and a resolved safety policy.
+// The handler cases below are intentionally kept as defence-in-depth: if
+// those session settings ever drift, this handler still won't hang the
+// request. Elicitation is the exception — the runtime always blocks until we
+// respond, so its case is required for correctness, not just defence.
 //
 // All ErrorEvents seen in the run are joined into the returned error so
 // callers can see the full picture; the loop keeps draining until the
@@ -233,7 +230,7 @@ func runAgentLoop(ctx context.Context, rt runtime.Runtime, sess *session.Session
 				toolIndex++
 			}
 		case *runtime.ToolCallConfirmationEvent:
-			// Defensive: should never fire while ToolsApproved=true.
+			// Defensive: resolved policy normally handles tool approval before this point.
 			rt.Resume(ctx, runtime.ResumeApprove())
 		case *runtime.ElicitationRequestEvent:
 			// Required: the runtime blocks until we respond, regardless

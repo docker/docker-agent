@@ -1014,7 +1014,7 @@ func TestGetTools_WarningHandling(t *testing.T) {
 			sessionSpan := trace.SpanFromContext(t.Context())
 
 			// First call
-			tools1, err := rt.getTools(t.Context(), root, sessionSpan, NewChannelSink(events), true)
+			tools1, err := rt.getTools(t.Context(), session.New(), root, sessionSpan, NewChannelSink(events), true)
 			require.NoError(t, err)
 			require.Len(t, tools1, tt.wantToolCount)
 

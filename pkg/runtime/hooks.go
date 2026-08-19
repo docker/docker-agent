@@ -465,6 +465,7 @@ const (
 	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
 	ApprovalSourceReadOnlyHint            = "readonly_hint"
 	ApprovalSourceModeBalanced            = "mode_balanced"
+	ApprovalSourceModeRestricted          = "mode_restricted"
 	ApprovalSourceModeStrict              = "mode_strict"
 	ApprovalSourceModeLegacy              = "mode_legacy"
 	ApprovalSourceUserApproved            = "user_approved"

@@ -818,6 +818,10 @@ func (s *RemoteSessionStore) GetSession(context.Context, string) (*session.Sessi
 	return nil, fmt.Errorf("get session: %w", ErrUnsupported)
 }
 
+func (s *RemoteSessionStore) GetSessionByOrigin(context.Context, string, string) (*session.Session, error) {
+	return nil, fmt.Errorf("get session by origin: %w", ErrUnsupported)
+}
+
 func (s *RemoteSessionStore) GetSessions(ctx context.Context) ([]*session.Session, error) {
 	sessions, err := s.client.GetAllSessions(ctx)
 	if err != nil {

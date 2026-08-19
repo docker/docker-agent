@@ -72,7 +72,7 @@ func listModelsWith(ctx context.Context, gatewayURL string, env environment.Prov
 	}
 
 	if client == nil {
-		client = httpclient.NewHTTPClient(ctx)
+		client = httpclient.NewHTTPClient(ctx, base.GatewayAuthRetry(env, gatewayURL)...)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

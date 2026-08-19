@@ -172,6 +172,19 @@ func TestNewSubSession(t *testing.T) {
 		// We can verify the user message is still the default.
 		assert.Equal(t, "Please proceed.", s.GetLastUserMessageContent())
 	})
+
+	t.Run("disable structured output", func(t *testing.T) {
+		cfg := SubSessionConfig{
+			Task:                    "run a fork skill",
+			AgentName:               "worker",
+			Title:                   "Skill task",
+			DisableStructuredOutput: true,
+		}
+
+		s := newSubSession(parent, cfg, childAgent)
+
+		assert.True(t, s.DisableStructuredOutput)
+	})
 }
 
 func TestSubSessionConfig_DefaultValues(t *testing.T) {
@@ -191,6 +204,7 @@ func TestSubSessionConfig_DefaultValues(t *testing.T) {
 
 	assert.False(t, s.ToolsApproved)
 	assert.False(t, s.SendUserMessage)
+	assert.False(t, s.DisableStructuredOutput)
 	assert.Empty(t, s.AgentName)
 }
 

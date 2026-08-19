@@ -162,8 +162,8 @@ type UpdateSessionPermissionsRequest struct {
 
 // UpdateSessionSafetyPolicyRequest represents a request to change a
 // session's safety mode mid-session. Accepts "strict", "balanced",
-// "autonomous", "" (legacy default), and the deprecated aliases
-// "unsafe" / "safer" / "safe-auto".
+// "restricted", "autonomous", "" (legacy default), and the deprecated
+// aliases "unsafe" / "safer" / "safe-auto".
 type UpdateSessionSafetyPolicyRequest struct {
 	SafetyPolicy session.SafetyPolicy `json:"safety_policy"`
 }

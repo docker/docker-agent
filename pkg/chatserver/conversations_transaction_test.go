@@ -23,6 +23,31 @@ func newConvServer(t *testing.T) *server {
 	}
 }
 
+func TestResolveSession_AppliesSafetyCeiling(t *testing.T) {
+	t.Parallel()
+	s := newConvServer(t)
+	s.safety = session.SafetyPolicyRestricted
+
+	seed := session.New(session.WithSafetyPolicy(session.SafetyPolicyAutonomous))
+	seed.AddMessage(session.UserMessage("first"))
+	s.conversations.Put("conv-1", seed)
+
+	working, err := s.resolveSession("conv-1", []ChatCompletionMessage{{Role: "user", Content: "second"}})
+	require.NoError(t, err)
+	assert.Equal(t, session.SafetyPolicyRestricted, working.GetSafetyPolicy())
+	assert.Equal(t, session.SafetyPolicyAutonomous, seed.GetSafetyPolicy(), "the cached session remains untouched until commit")
+}
+
+func TestResolveSession_AppliesSafetyToNewSession(t *testing.T) {
+	t.Parallel()
+	s := newConvServer(t)
+	s.safety = session.SafetyPolicyRestricted
+
+	working, err := s.resolveSession("", []ChatCompletionMessage{{Role: "user", Content: "first"}})
+	require.NoError(t, err)
+	assert.Equal(t, session.SafetyPolicyRestricted, working.GetSafetyPolicy())
+}
+
 // TestResolveSession_WorksOnClone verifies that continuing a cached
 // conversation mutates a copy, leaving the cached session untouched until
 // the caller commits.

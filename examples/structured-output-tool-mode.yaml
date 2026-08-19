@@ -1,0 +1,39 @@
+#!/usr/bin/env docker agent run
+
+# Tool-mode structured output: instead of asking the provider for native
+# structured output, the runtime exposes an internal tool whose parameters
+# are exactly the configured schema. The model keeps using its regular tools
+# and ends the conversation by calling that tool with the final JSON, which
+# the runtime validates against the schema. Works with any tool-calling
+# model, even without native structured-output support.
+
+agents:
+  root:
+    model: openai/gpt-4o
+    description: Agent that inspects files and reports findings as JSON
+    toolsets:
+      - type: filesystem
+    instruction: |
+      Inspect the files the user asks about, then report your findings.
+      Deliver the final report through the structured output tool.
+    structured_output:
+      mode: tool
+      name: file_report
+      description: Findings about the inspected files
+      schema:
+        type: object
+        properties:
+          files:
+            type: array
+            items:
+              type: object
+              properties:
+                path:
+                  type: string
+                summary:
+                  type: string
+              required: ["path", "summary"]
+          overall_summary:
+            type: string
+        required: ["files", "overall_summary"]
+        additionalProperties: false

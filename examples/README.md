@@ -68,7 +68,7 @@ Examples that wire up one of the toolsets shipped with docker-agent
 | [`background_jobs.yaml`](background_jobs.yaml) | `background_jobs` toolset for servers, watchers, and other long-running commands. |
 | [`shell_recall.yaml`](shell_recall.yaml) | `background_jobs` with recall enabled for finite long-running commands. |
 | [`docker-wiki.yaml`](docker-wiki.yaml) | OpenWiki-inspired documentation agent that initializes and updates a `docker-wiki/` directory with `/init`, `/update`, and `/status` commands. |
-| [`safety_modes.yaml`](safety_modes.yaml) | Shell agents demonstrating the three safety modes (strict / balanced / autonomous) and the declarative YAML defaults: a config-wide `runtime.safety` plus a per-agent `safety` override. User choices (CLI flags, alias options, user settings) always win over the YAML defaults. |
+| [`safety_modes.yaml`](safety_modes.yaml) | Shell agents demonstrating the four safety modes (strict / balanced / restricted / autonomous) and the declarative YAML defaults: a config-wide `runtime.safety` plus per-agent `safety` overrides. User choices (CLI flags, alias options, user settings) always win over the YAML defaults. |
 | [`filesystem.yaml`](filesystem.yaml) | Plain `filesystem` toolset. |
 | [`filesystem_allow_deny.yaml`](filesystem_allow_deny.yaml) | Restricting the filesystem tool with allow/deny path lists. |
 | [`script_shell.yaml`](script_shell.yaml) | Defining custom shell commands as named tools via `type: script`. |

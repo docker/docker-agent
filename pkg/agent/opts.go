@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"sync"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/cache"
@@ -8,6 +9,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/structuredoutput"
 )
 
 type Opt func(a *Agent)
@@ -256,6 +258,22 @@ func WithLoadTimeWarnings(warnings []string) Opt {
 func WithHooks(hooks *latest.HooksConfig) Opt {
 	return func(a *Agent) {
 		a.hooks = hooks
+	}
+}
+
+// WithStructuredOutput keeps the agent's original structured-output
+// configuration so the runtime can enforce tool-mode structured output.
+// In tool mode it also (re)arms the lazy compile-once cache behind
+// [Agent.StructuredOutputTool], so a reconfigured schema is recompiled.
+func WithStructuredOutput(structuredOutput *latest.StructuredOutput) Opt {
+	return func(a *Agent) {
+		a.structuredOutput = structuredOutput
+		a.structuredOutputTool = nil
+		if structuredOutput.ToolMode() {
+			a.structuredOutputTool = sync.OnceValues(func() (*structuredoutput.OutputTool, error) {
+				return structuredoutput.New(structuredOutput)
+			})
+		}
 	}
 }
 

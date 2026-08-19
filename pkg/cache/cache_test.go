@@ -385,3 +385,101 @@ func TestFileCache_lockFileNeverDeleted(t *testing.T) {
 	assert.Equal(t, info1.Sys(), info2.Sys(),
 		"lock file inode must be stable across Stores so flock semantics hold")
 }
+
+// TestFileCache_storeMakesSiblingEntriesVisible covers the in-memory half of
+// the cross-process contract. persistToDisk reads the current on-disk map,
+// merges its own key and writes it back — so a sibling's entries are preserved
+// on disk (asserted by TestFileCache_crossProcessConcurrentStoresPreserveAllEntries)
+// — but it also refreshes c.mtime. If the entries it just read are not adopted
+// into c.entries, the instance is marked up-to-date against a file it never
+// fully loaded, and maybeReload will never reload it: the sibling's entry stays
+// invisible to this process indefinitely.
+func TestFileCache_storeMakesSiblingEntriesVisible(t *testing.T) {
+	t.Parallel()
+
+	t.Run("after merging into an existing file", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "cache.json")
+
+		cA, err := New(Config{Enabled: true, Path: path})
+		require.NoError(t, err)
+		cB, err := New(Config{Enabled: true, Path: path})
+		require.NoError(t, err)
+
+		cB.Store("question-1", "answer-1")
+		cA.Store("question-2", "answer-2")
+
+		// Both keys are on disk; this is the part that already worked.
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		var onDisk map[string]string
+		require.NoError(t, json.Unmarshal(data, &onDisk))
+		require.Equal(t, map[string]string{"question-1": "answer-1", "question-2": "answer-2"}, onDisk)
+
+		got, ok := cA.Lookup("question-2")
+		assert.True(t, ok)
+		assert.Equal(t, "answer-2", got)
+
+		got, ok = cA.Lookup("question-1")
+		assert.True(t, ok, "the sibling's entry is in the cache file and must be visible")
+		assert.Equal(t, "answer-1", got)
+	})
+
+	// persistToDisk short-circuits when the on-disk state already maps
+	// key -> response, and refreshes c.mtime on that path too. It must adopt
+	// the entries it read there as well.
+	t.Run("after the redundant-write shortcut", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "cache.json")
+
+		cA, err := New(Config{Enabled: true, Path: path})
+		require.NoError(t, err)
+		cB, err := New(Config{Enabled: true, Path: path})
+		require.NoError(t, err)
+
+		cB.Store("shared", "same-answer")
+		cB.Store("only-b", "b-answer")
+
+		// Storing a pair the file already contains takes the shortcut.
+		cA.Store("shared", "same-answer")
+
+		got, ok := cA.Lookup("only-b")
+		assert.True(t, ok, "entries read during the shortcut must also become visible")
+		assert.Equal(t, "b-answer", got)
+	})
+}
+
+// TestFileCache_successfulStoreKeepsUnpersistedInMemoryEntry pins the contract
+// asserted by TestFileCache_persistenceFailureKeepsInMemory across a *later*
+// successful Store. Adopting the on-disk view by replacing c.entries would
+// discard entries that an earlier failed Store deliberately kept in memory,
+// so the adoption must merge.
+func TestFileCache_successfulStoreKeepsUnpersistedInMemoryEntry(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	dir := filepath.Join(root, "cache")
+	path := filepath.Join(dir, "cache.json")
+
+	c, err := New(Config{Enabled: true, Path: path})
+	require.NoError(t, err)
+
+	// A plain file where the cache directory belongs makes MkdirAll fail, so
+	// the first Store cannot persist and keeps its entry in memory only.
+	require.NoError(t, os.WriteFile(dir, []byte("blocker"), 0o600))
+	c.Store("kept-in-memory", "value-1")
+	require.NoFileExists(t, path)
+
+	// Unblock the directory so the next Store persists successfully.
+	require.NoError(t, os.Remove(dir))
+	c.Store("persisted", "value-2")
+	require.FileExists(t, path)
+
+	got, ok := c.Lookup("kept-in-memory")
+	assert.True(t, ok, "a later successful Store must not drop an in-memory-only entry")
+	assert.Equal(t, "value-1", got)
+
+	got, ok = c.Lookup("persisted")
+	assert.True(t, ok)
+	assert.Equal(t, "value-2", got)
+}

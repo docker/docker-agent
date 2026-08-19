@@ -24,6 +24,13 @@ func TestWithWorkingDir_EmptyReturnsNilAllowedDirs(t *testing.T) {
 	assert.Nil(t, s.AllowedDirectories())
 }
 
+func TestWithStructuredOutputDisabled(t *testing.T) {
+	t.Parallel()
+	assert.False(t, New().DisableStructuredOutput)
+	assert.False(t, New(WithStructuredOutputDisabled(false)).DisableStructuredOutput)
+	assert.True(t, New(WithStructuredOutputDisabled(true)).DisableStructuredOutput)
+}
+
 func TestNewSession_AllOptionsApplied(t *testing.T) {
 	t.Parallel()
 	s := New(

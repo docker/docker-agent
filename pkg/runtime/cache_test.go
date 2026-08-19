@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -15,13 +17,14 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 )
 
-func runWithCache(t *testing.T, c *cache.Cache, prov *messageRecordingProvider, sess *session.Session) []Event {
+func runWithCache(t *testing.T, c *cache.Cache, prov *messageRecordingProvider, sess *session.Session, extraOpts ...agent.Opt) []Event {
 	t.Helper()
 
-	root := agent.New("root", "You are a test agent",
+	opts := append([]agent.Opt{
 		agent.WithModel(prov),
 		agent.WithCache(c),
-	)
+	}, extraOpts...)
+	root := agent.New("root", "You are a test agent", opts...)
 	tm := team.New(team.WithAgents(root))
 
 	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
@@ -239,6 +242,62 @@ func TestCache_EmptyResponseIsNotCached(t *testing.T) {
 
 	_, found := c.Lookup("silent treatment")
 	assert.False(t, found, "empty assistant response must not appear in the cache")
+}
+
+// TestCache_ToolModeStaleHitFallsThroughToModel verifies that with tool-mode
+// structured output a cached plain-text answer (e.g. stored before the agent
+// switched to tool mode) fails revalidation and is treated as a miss: the
+// model is called, the valid output-tool call becomes the final answer, and
+// the stop hook replaces the stale entry with the validated JSON.
+func TestCache_ToolModeStaleHitFallsThroughToModel(t *testing.T) {
+	t.Parallel()
+
+	c, err := cache.New(cache.Config{Enabled: true})
+	require.NoError(t, err)
+	c.Store("Answer me", "a plain text answer from before tool mode")
+
+	prov := &messageRecordingProvider{
+		id:      "test/mock-model",
+		streams: []*mockStream{outputCallStream("call_1", `{"answer":"fresh"}`)},
+	}
+	sess := session.New(session.WithUserMessage("Answer me"))
+	events := runWithCache(t, c, prov, sess, agent.WithStructuredOutput(toolModeStructuredOutput()))
+
+	require.Empty(t, errorEvents(events))
+	prov.mu.Lock()
+	require.Len(t, prov.recordedMessages, 1, "a stale cache hit must fall through to the model")
+	prov.mu.Unlock()
+	assert.JSONEq(t, `{"answer":"fresh"}`, sess.GetLastAssistantMessageContent())
+
+	stored, ok := c.Lookup("Answer me")
+	require.True(t, ok)
+	assert.JSONEq(t, `{"answer":"fresh"}`, stored, "the validated JSON must replace the stale entry")
+}
+
+// TestCache_ToolModeValidHitReplaysWithoutModel verifies that a cached
+// schema-valid answer passes tool-mode revalidation and is replayed in its
+// canonical compacted form without calling the model.
+func TestCache_ToolModeValidHitReplaysWithoutModel(t *testing.T) {
+	t.Parallel()
+
+	c, err := cache.New(cache.Config{Enabled: true})
+	require.NoError(t, err)
+	c.Store("Answer me", "{\n  \"answer\": \"cached\"\n}")
+
+	prov := &messageRecordingProvider{id: "test/mock-model"}
+	sess := session.New(session.WithUserMessage("Answer me"))
+	events := runWithCache(t, c, prov, sess, agent.WithStructuredOutput(toolModeStructuredOutput()))
+
+	require.Empty(t, errorEvents(events))
+	prov.mu.Lock()
+	assert.Empty(t, prov.recordedMessages, "a valid structured hit must not call the model")
+	prov.mu.Unlock()
+	last := sess.GetLastAssistantMessageContent()
+	assert.JSONEq(t, `{"answer":"cached"}`, last)
+	// Canonicalization contract: the replayed content is the compacted form.
+	var compacted bytes.Buffer
+	require.NoError(t, json.Compact(&compacted, []byte(last)))
+	assert.Equal(t, compacted.String(), last, "the replayed content must be canonical compact JSON")
 }
 
 func hasAgentChoice(events []Event, content string) bool {

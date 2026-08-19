@@ -435,6 +435,15 @@ func getAllMigrations() []Migration {
 			UpSQL:       `ALTER TABLE sessions ADD COLUMN attributes TEXT DEFAULT '{}'`,
 			DownSQL:     `ALTER TABLE sessions DROP COLUMN attributes`,
 		},
+		// Revert PRs must retain this entry: upgraded databases keep the column,
+		// and removing it makes older binaries reject them as newer databases.
+		{
+			ID:          27,
+			Name:        "027_add_session_origin_column",
+			Description: "Record the protocol surface that created each session",
+			UpSQL:       `ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'run'`,
+			DownSQL:     `ALTER TABLE sessions DROP COLUMN origin`,
+		},
 	}
 }
 

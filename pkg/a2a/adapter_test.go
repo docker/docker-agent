@@ -8,6 +8,8 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/servesafety"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
@@ -24,7 +26,7 @@ func TestNewDockerAgentAdapter(t *testing.T) {
 		require.NoError(t, team.StopToolSets(t.Context()))
 	}()
 
-	adapter, err := newDockerAgentAdapter(team, "root", nil)
+	adapter, err := newDockerAgentAdapter(team, "root", nil, servesafety.Resolved{Policy: session.SafetyPolicyRestricted})
 
 	require.NoError(t, err)
 	assert.Equal(t, "root", adapter.Name())
@@ -43,7 +45,7 @@ func TestNewCAgentAdapter_NonExistent(t *testing.T) {
 		require.NoError(t, team.StopToolSets(t.Context()))
 	}()
 
-	_, err = newDockerAgentAdapter(team, "nonexistent", nil)
+	_, err = newDockerAgentAdapter(team, "nonexistent", nil, servesafety.Resolved{Policy: session.SafetyPolicyRestricted})
 
 	assert.Contains(t, err.Error(), "failed to get agent")
 }
