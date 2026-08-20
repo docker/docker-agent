@@ -237,6 +237,4 @@ require (
 	rsc.io/ordered v1.1.1 // indirect
 )
 
-replace github.com/charmbracelet/ultraviolet => github.com/dgageot/ultraviolet v0.0.0-20260313154905-9451997d56b6
-
 replace github.com/cyphar/filepath-securejoin => github.com/cyphar/filepath-securejoin v0.4.1

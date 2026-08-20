@@ -108,7 +108,6 @@ linters:
               desc: don't use testify in production code
     gomoddirectives:
       replace-allow-list:
-        - github.com/charmbracelet/ultraviolet
         - github.com/cyphar/filepath-securejoin
     gocritic:
       disabled-checks:
