@@ -425,7 +425,7 @@ func extractMimeType(dataURLPrefix string) string {
 	return "image/jpeg" // Default fallback
 }
 
-// buildConfig creates GenerateContentConfig from model config
+// BuildConfig creates GenerateContentConfig from model config.
 func (c *Client) buildConfig() *genai.GenerateContentConfig {
 	config := &genai.GenerateContentConfig{}
 	if c.ModelConfig.MaxTokens != nil {
@@ -453,7 +453,11 @@ func (c *Client) buildConfig() *genai.GenerateContentConfig {
 	// Apply thinking configuration for Gemini models.
 	// See https://ai.google.dev/gemini-api/docs/thinking
 	if c.ModelOptions.NoThinking() {
-		// NoThinking requested (e.g. title generation). For Gemini 3+ models
+		if c.ModelOptions.GeneratingTitle() {
+			return config
+		}
+
+		// NoThinking requested (e.g. MCP sampling). For Gemini 3+ models
 		// that always think, use the lowest level and bump MaxOutputTokens so
 		// internal reasoning doesn't consume the entire budget. Gemini 2.5 and
 		// older can fully disable thinking with ThinkingBudget=0.
