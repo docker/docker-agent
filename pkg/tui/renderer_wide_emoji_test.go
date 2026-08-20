@@ -3,9 +3,15 @@ package tui
 import (
 	"bytes"
 	"image/color"
+	"io"
+	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
@@ -21,22 +27,96 @@ const warning = "\u26a0\ufe0f"
 // bgParams is the truecolor SGR parameter string of the styled background.
 const bgParams = "48;2;30;60;90"
 
+// emojiFrameMsg swaps the content rendered by emojiFrameModel.
+type emojiFrameMsg string
+
+// emojiFrameModel is the minimal model driven by the wide-emoji regression
+// test: a fullscreen view (docker-agent's TUI runs fullscreen outside lean
+// mode) whose single status row the test replaces frame by frame. DEC mode
+// 2027 reports are forwarded to the test as a synchronization barrier:
+// bubbletea's event loop applies the renderer's width switch before the
+// report reaches Update, so once the test receives it the negotiation has
+// completed.
+type emojiFrameModel struct {
+	content string
+	// reports must have capacity for every 2027 report the test provokes
+	// (one), or Update would block the event loop.
+	reports chan tea.ModeReportMsg
+}
+
+func (m *emojiFrameModel) Init() tea.Cmd { return nil }
+
+func (m *emojiFrameModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case emojiFrameMsg:
+		m.content = string(msg)
+	case tea.ModeReportMsg:
+		if msg.Mode == ansi.ModeUnicodeCore {
+			m.reports <- msg
+		}
+	}
+	return m, nil
+}
+
+func (m *emojiFrameModel) View() tea.View {
+	view := tea.NewView(m.content)
+	view.AltScreen = true
+	return view
+}
+
+// terminalOutput is the program's terminal output: the renderer goroutine
+// writes whole flushes into it, the test goroutine reads stable snapshots.
+type terminalOutput struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *terminalOutput) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *terminalOutput) snapshot() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return bytes.Clone(w.buf.Bytes())
+}
+
 // TestRendererWideEmojiBackground pins the externally observable contract of
-// ultraviolet's TerminalRenderer for a styled status row that contains a
-// width-ambiguous emoji, across a partial text update and an unstyled
-// repaint. Ultraviolet revisions legitimately differ in strategy (full-row
-// repaint vs explicit reanchoring), so no raw bytes are compared; ansiScan
+// the production render path — a real tea.Program with bubbletea's default
+// ultraviolet-backed renderer, built like cmd/root's runTUIWrapped — for a
+// styled status row that contains a width-ambiguous emoji, across a partial
+// text update and an unstyled repaint.
+//
+// Both DEC mode 2027 negotiation outcomes are exercised by feeding raw DECRPM
+// replies through the program's input, covering the ultraviolet decoder,
+// Bubble Tea's input translation, and the renderer switch. Upstream
+// ultraviolet defaults screen buffers to conservative wcwidth — unlike the
+// dgageot/ultraviolet fork replaced in #3984, which defaulted to grapheme
+// widths — so until the terminal reports 2027 support the emitted stream must
+// be safe whether the terminal draws the emoji 1 or 2 columns wide, and a
+// supported report must switch the renderer to grapheme widths and enable the
+// mode on the terminal.
+//
+// Ultraviolet revisions legitimately differ in strategy (full-row repaint vs
+// explicit reanchoring), so no raw frame bytes are compared; ansiScan
 // enforces the invariants any safe escape stream satisfies, and the frame
-// loop asserts that the styled emoji, the truecolor background, and each
-// frame's text actually reach the terminal.
+// loop asserts that the styled emoji, the truecolor background, each frame's
+// text, and the negotiation bytes actually reach the terminal.
 func TestRendererWideEmojiBackground(t *testing.T) {
+	// The premise of the regression: the two width methods disagree on the
+	// emoji, which is what made docker-agent's status rows drift.
+	require.Equal(t, 1, ansi.WcWidth.StringWidth(warning))
+	require.Equal(t, 2, ansi.GraphemeWidth.StringWidth(warning))
+
 	const width, height = 20, 2
 	bgBlue := color.RGBA{R: 30, G: 60, B: 90, A: 255}
 	styled := "\x1b[" + bgParams + "m"
 
 	frames := []struct {
 		name     string
-		content  string      // drawn into the screen buffer
+		content  string      // rendered by the model's View
 		wantText string      // must appear among the frame's printed glyphs
 		emojiBg  color.Color // background required on the emoji; nil forbids printing it
 	}{
@@ -59,41 +139,145 @@ func TestRendererWideEmojiBackground(t *testing.T) {
 		},
 	}
 
-	var out bytes.Buffer
-	// CLICOLOR_FORCE keeps the truecolor profile even though the output is a
-	// bytes.Buffer instead of a TTY; otherwise the renderer strips colors.
-	renderer := uv.NewTerminalRenderer(&out, []string{
-		"TERM=xterm-256color", "COLORTERM=truecolor", "CLICOLOR_FORCE=1",
-	})
-	renderer.SetFullscreen(true)
-	renderer.Erase()
+	for _, tc := range []struct {
+		name       string
+		reply      string // raw DECRPM reply fed through the program input
+		wantReport ansi.ModeSetting
+		grapheme   bool // whether the reply must enable grapheme widths
+	}{
+		{
+			name:       "unrecognized mode 2027 keeps conservative wcwidth",
+			reply:      "\x1b[?2027;0$y",
+			wantReport: ansi.ModeNotRecognized,
+		},
+		{
+			name:       "supported mode 2027 enables grapheme width",
+			reply:      "\x1b[?2027;2$y",
+			wantReport: ansi.ModeReset,
+			grapheme:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			model := &emojiFrameModel{
+				content: frames[0].content,
+				reports: make(chan tea.ModeReportMsg, 1),
+			}
+			out := &terminalOutput{}
+			input, terminal := io.Pipe()
+			// The fallback cancel reader cannot interrupt a blocked pipe
+			// read; closing the write end releases the read loop after the
+			// program has shut down.
+			t.Cleanup(func() { _ = terminal.Close() })
 
-	// The buffer keeps ultraviolet's default width method, like bubbletea
-	// does before DEC mode 2027 negotiation, so the emitted stream must be
-	// safe whether the terminal draws the emoji 1 or 2 columns wide.
-	scr := uv.NewScreenBuffer(width, height)
-	scan := &ansiScan{t: t, width: width, height: height}
+			// Built like cmd/root's runTUIWrapped, with the test owning
+			// determinism: a fixed window size and environment instead of the
+			// ambient terminal's, and an explicit truecolor profile because
+			// the output buffer is not a TTY whose profile
+			// colorprofile.Detect could grade (production stdout is).
+			program := tea.NewProgram(model,
+				tea.WithContext(t.Context()),
+				tea.WithInput(input),
+				tea.WithOutput(out),
+				tea.WithEnvironment([]string{"TERM=xterm-256color"}),
+				tea.WithColorProfile(colorprofile.TrueColor),
+				tea.WithWindowSize(width, height),
+			)
+			done := make(chan error, 1)
+			go func() {
+				_, err := program.Run()
+				done <- err
+			}()
 
-	for i, frame := range frames {
-		out.Reset()
-		uv.NewStyledString(frame.content).Draw(scr, scr.Bounds())
-		renderer.Render(scr.RenderBuffer)
-		require.NoErrorf(t, renderer.Flush(), "frame %d (%s): Flush", i, frame.name)
+			scan := &ansiScan{
+				t: t, width: width, height: height,
+				// With non-TTY input bubbletea configures the renderer for a
+				// cooked-mode terminal that maps NL to CR-NL, except on
+				// Windows (see the mapNl wiring in tea.Run), so LF implies
+				// column 0 here.
+				mapNewline: runtime.GOOS != "windows",
+			}
 
-		printed, emojiPrints := scan.feed(out.Bytes(), frame.emojiBg)
-		require.Containsf(t, printed, frame.wantText,
-			"frame %d (%s): printed text of %q", i, frame.name, out.String())
-		if i == 0 {
-			// The first paint starts from a default pen and an empty screen,
-			// so it must transmit the emoji and the truecolor background.
-			require.Positivef(t, emojiPrints, "frame %d (%s): emoji never printed", i, frame.name)
-			require.Containsf(t, out.String(), bgParams,
-				"frame %d (%s): truecolor background bytes", i, frame.name)
-		}
-		if frame.emojiBg == nil {
-			require.NotContainsf(t, out.String(), bgParams,
-				"frame %d (%s): stale background bytes in %q", i, frame.name, out.String())
-		}
+			// waitFrame blocks until the terminal received output past mark
+			// containing wantText and returns that delta with the new mark.
+			// The renderer flushes a frame as a single write and an unchanged
+			// view produces no further output, so once the text is visible
+			// the delta is complete and stable until the next frame is sent.
+			waitFrame := func(mark int, wantText string) ([]byte, int) {
+				t.Helper()
+				var delta []byte
+				require.Eventuallyf(t, func() bool {
+					delta = out.snapshot()[mark:]
+					return strings.Contains(ansi.Strip(string(delta)), wantText)
+				}, 5*time.Second, time.Millisecond, "%q never reached the terminal", wantText)
+				return delta, mark + len(delta)
+			}
+
+			mark := 0
+			for i, frame := range frames {
+				if i > 0 {
+					program.Send(emojiFrameMsg(frame.content))
+				}
+				var delta []byte
+				delta, mark = waitFrame(mark, frame.wantText)
+				printed, emojiPrints := scan.feed(delta, frame.emojiBg)
+				require.Containsf(t, printed, frame.wantText,
+					"frame %d (%s): printed text of %q", i, frame.name, delta)
+
+				switch i {
+				case 0:
+					// The first paint starts from a default pen and an empty
+					// screen, so it must transmit the emoji and the truecolor
+					// background; startup must also have queried DEC 2027
+					// before any reply exists.
+					require.Positivef(t, emojiPrints, "frame %d (%s): emoji never printed", i, frame.name)
+					require.Containsf(t, string(delta), bgParams,
+						"frame %d (%s): truecolor background bytes", i, frame.name)
+					require.Containsf(t, string(delta), ansi.RequestModeUnicodeCore,
+						"frame %d (%s): startup DEC 2027 query", i, frame.name)
+
+					// Answer the query with this subtest's raw DECRPM reply,
+					// exercising terminal → ultraviolet decoder →
+					// ModeReportMsg → renderer negotiation. Receiving the
+					// forwarded report guarantees the event loop applied the
+					// outcome before the next frame renders.
+					_, err := terminal.Write([]byte(tc.reply))
+					require.NoError(t, err)
+					select {
+					case report := <-model.reports:
+						require.Equal(t, tc.wantReport, report.Value)
+					case <-time.After(5 * time.Second):
+						t.Fatal("DECRPM reply never surfaced as a ModeReportMsg")
+					}
+				case 1:
+					// The first flush after a successful negotiation carries
+					// the runtime switch to the terminal.
+					if tc.grapheme {
+						require.Containsf(t, string(delta), ansi.SetModeUnicodeCore,
+							"frame %d (%s): Unicode core enable bytes", i, frame.name)
+					}
+				}
+				if frame.emojiBg == nil {
+					require.NotContainsf(t, string(delta), bgParams,
+						"frame %d (%s): stale background bytes in %q", i, frame.name, delta)
+				}
+			}
+
+			program.Quit()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("program did not shut down")
+			}
+			if !tc.grapheme {
+				// The only way bubbletea leaves wcwidth is the negotiated
+				// switch, which always announces the mode to the terminal, so
+				// its absence over the whole session pins the conservative
+				// default.
+				require.NotContains(t, string(out.snapshot()), ansi.SetModeUnicodeCore,
+					"renderer must stay on wcwidth without a supported DEC 2027 report")
+			}
+		})
 	}
 }
 
@@ -116,14 +300,20 @@ func TestScreenBufferDefaultWidthMethod(t *testing.T) {
 // stream satisfies on a terminal whose glyph widths may disagree with the
 // model, without emulating cell contents. Because the terminal may draw the
 // ambiguous emoji 1 or 2 columns wide, the cursor column is tracked as an
-// interval [lo, hi]; absolute positioning (CR, CUP, CHA, HPA) collapses it.
-// Sequences that would move the cursor or shift cells in untracked ways fail
-// the test so they cannot silently undermine the scan.
+// interval [lo, hi]; absolute positioning (CR, CUP, CHA, HPA) collapses it,
+// and DECSET 2027 commits the terminal to grapheme widths, making prints
+// exact. Sequences that would move the cursor or shift cells in untracked
+// ways fail the test so they cannot silently undermine the scan.
 type ansiScan struct {
 	t             *testing.T
 	width, height int
-	row, lo, hi   int
-	pen           uv.Style
+	// mapNewline mirrors the renderer's newline mapping assumption: when the
+	// target terminal discipline maps NL to CR-NL, LF also returns the
+	// cursor to column 0.
+	mapNewline  bool
+	unicodeCore bool // DEC mode 2027 state announced to the terminal
+	row, lo, hi int
+	pen         uv.Style
 }
 
 // feed scans one flushed frame; cursor and pen state carry over between
@@ -160,7 +350,9 @@ func (s *ansiScan) feed(output []byte, emojiBg color.Color) (string, int) {
 func (s *ansiScan) print(g string) {
 	s.t.Helper()
 	wmin, wmax := ansi.WcWidth.StringWidth(g), ansi.GraphemeWidth.StringWidth(g)
-	if wmin > wmax {
+	if s.unicodeCore {
+		wmin = wmax // mode 2027 is set: the terminal measures graphemes
+	} else if wmin > wmax {
 		wmin, wmax = wmax, wmin
 	}
 	if strings.TrimSpace(g) != "" {
@@ -181,7 +373,12 @@ func (s *ansiScan) control(p *ansi.Parser, seq []byte) {
 		s.csi(p, seq)
 	case len(seq) == 1 && seq[0] == ansi.CR:
 		s.setCol(0)
-	case len(seq) == 1 && (seq[0] == ansi.LF || seq[0] == ansi.VT || seq[0] == ansi.FF):
+	case len(seq) == 1 && seq[0] == ansi.LF:
+		if s.mapNewline {
+			s.setCol(0)
+		}
+		s.setRow(s.row + 1)
+	case len(seq) == 1 && (seq[0] == ansi.VT || seq[0] == ansi.FF):
 		s.setRow(s.row + 1)
 	case len(seq) == 1 && (seq[0] == ansi.BS || seq[0] == ansi.HT),
 		ansi.HasEscPrefix(seq) && len(seq) == 2 && strings.ContainsRune("78DEHMc", rune(seq[1])):
@@ -199,7 +396,18 @@ func (s *ansiScan) csi(p *ansi.Parser, seq []byte) {
 	s.t.Helper()
 	cmd := ansi.Cmd(p.Command())
 	if cmd.Prefix() != 0 || cmd.Intermediate() != 0 {
-		return // mode toggles and the like: no cursor or cell motion
+		// Mode toggles and the like: no cursor or cell motion. DECSET/DECRST
+		// of mode 2027 changes how the terminal measures prints, so the scan
+		// tracks it.
+		if cmd.Prefix() == '?' && (cmd.Final() == 'h' || cmd.Final() == 'l') {
+			params := p.Params()
+			for i := range params {
+				if mode, _, _ := params.Param(i, 0); mode == 2027 {
+					s.unicodeCore = cmd.Final() == 'h'
+				}
+			}
+		}
+		return
 	}
 	one := func(i int) int {
 		v, _, _ := p.Params().Param(i, 1)
