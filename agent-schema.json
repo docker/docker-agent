@@ -1760,7 +1760,7 @@
         },
         "output_capabilities": {
           "$ref": "#/definitions/OutputCapabilitiesConfig",
-          "description": "Explicit, owner-declared generative output capabilities for this model. Never inferred from the model name or any catalogue — omit it, or leave a flag unset/false, to preserve existing behavior. Consumed by capability-gated request contracts (e.g. the Gemini gateway image-output route) that must not activate for a model unless its owner has affirmatively opted it in. Cannot be combined with first_available (set output_capabilities.image on the candidate models instead)."
+          "description": "Optional generative output capability override for this model. When omitted, Docker Agent detects output modalities from the models.dev catalogue. An explicit flag is authoritative, including false. Cannot be combined with first_available (set output_capabilities.image on the candidate models instead)."
         },
         "cost": {
           "$ref": "#/definitions/CostConfig",
@@ -1794,11 +1794,11 @@
     },
     "OutputCapabilitiesConfig": {
       "type": "object",
-      "description": "Explicit, owner-declared generative output capabilities for a model. There is no automatic detection — no catalogue of output-capable models exists, and matching on the model name string is deliberately avoided as unreliable — so this is nil/omitted by default. Omitted or false preserves existing behavior; only an explicit true opts a model into output-capability-gated behavior.",
+      "description": "Generative output capability overrides for a model. When omitted, Docker Agent detects output modalities from the models.dev catalogue. Explicit flags are authoritative, including false, and are useful for custom models or correcting catalogue metadata.",
       "properties": {
         "image": {
           "type": "boolean",
-          "description": "Whether the model is declared able to generate image output. Never inferred; must be set explicitly by the owner."
+          "description": "Whether the model can generate image output. When omitted, Docker Agent uses models.dev output modalities; an explicit value overrides the catalogue."
         }
       },
       "additionalProperties": false

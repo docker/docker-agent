@@ -1,6 +1,8 @@
 package base
 
 import (
+	"context"
+
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -75,6 +77,16 @@ func (c *Config) CapsOverride() *modelinfo.CapsOverride {
 		return nil
 	}
 	return &modelinfo.CapsOverride{Image: caps.Image, PDF: caps.PDF, Audio: caps.Audio, Video: caps.Video}
+}
+
+// ImageOutputEnabled resolves the model's image-output capability from its
+// explicit tri-state configuration and, when unset, the models.dev catalogue.
+func (c *Config) ImageOutputEnabled(ctx context.Context) bool {
+	var override *bool
+	if caps := c.ModelConfig.OutputCapabilities; caps != nil {
+		override = caps.Image
+	}
+	return modelinfo.ResolveOutputImage(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), override)
 }
 
 // EmbeddingResult contains the embedding and usage information
