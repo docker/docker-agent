@@ -361,7 +361,7 @@ func TestCreateChatCompletionStream_ImageResponseModalities_GuardRejectedRoutesN
 	assertRejectedWithNoDispatch := func(t *testing.T, err error, stream chat.MessageStream, captured *capturedRequests) {
 		t.Helper()
 		require.Nil(t, stream)
-		var incompatible *ImageOutputRequestIncompatibleError
+		var incompatible *base.OutputRequestIncompatibleError
 		require.ErrorAs(t, err, &incompatible)
 		assert.Empty(t, captured.all(), "guard rejection must dispatch nothing, so no modalities are ever serialized")
 	}

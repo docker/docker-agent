@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
@@ -94,7 +95,7 @@ func TestCreateChatCompletionStream_MediaFileInstruction_PositiveRoutes(t *testi
 			require.Len(t, bodies, 1)
 			texts := systemInstructionTextsInBody(t, bodies[0])
 			require.Len(t, texts, 1, "the instruction must be sent exactly once")
-			assert.Equal(t, imageOutputMediaFileInstruction, texts[0])
+			assert.Equal(t, base.MediaFileInstruction, texts[0])
 			assert.Equal(t, 1, strings.Count(texts[0], "[media-file: "), "the instruction must show the marker format exactly once")
 		})
 	}

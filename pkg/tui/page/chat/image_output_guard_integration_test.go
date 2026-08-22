@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/gemini"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelerrors"
@@ -136,7 +137,7 @@ func TestImageOutputGuard_RuntimeToTUI_RejectsBeforeDispatchAndClearsSpinner(t *
 	require.Nil(t, stream)
 	require.Error(t, dispatchErr)
 
-	var incompatible *gemini.ImageOutputRequestIncompatibleError
+	var incompatible *base.OutputRequestIncompatibleError
 	require.ErrorAs(t, dispatchErr, &incompatible, "expected the guard's rejection error")
 	require.Zero(t, providerCalls.Load(), "the guard must reject before any request reaches the provider")
 

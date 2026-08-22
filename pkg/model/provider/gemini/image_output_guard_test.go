@@ -36,32 +36,32 @@ func TestCheckImageOutputRequestCompatibility_GateConditions(t *testing.T) {
 		builtInTools []*genai.Tool
 		requestTools int
 		structured   bool
-		wantReject   []imageOutputIncompatibility
+		wantReject   []base.OutputIncompatibility
 	}{
 		{name: "gateway declared true, no extras: allowed", apiSurface: apiSurfaceGateway, declared: declaredTrue},
 		{name: "gateway declared false: never rejects even with tools", apiSurface: apiSurfaceGateway, declared: declaredFalse, requestTools: 1},
 		{name: "gateway undeclared: never rejects even with tools", apiSurface: apiSurfaceGateway, declared: nil, requestTools: 1},
-		{name: "direct Gemini API declared true + tools: rejected", apiSurface: apiSurfaceGeminiAPI, declared: declaredTrue, requestTools: 1, wantReject: []imageOutputIncompatibility{imageOutputIncompatibleTools}},
-		{name: "Vertex AI declared true + tools: rejected", apiSurface: apiSurfaceVertexAI, declared: declaredTrue, requestTools: 1, wantReject: []imageOutputIncompatibility{imageOutputIncompatibleTools}},
+		{name: "direct Gemini API declared true + tools: rejected", apiSurface: apiSurfaceGeminiAPI, declared: declaredTrue, requestTools: 1, wantReject: []base.OutputIncompatibility{base.OutputIncompatibleTools}},
+		{name: "Vertex AI declared true + tools: rejected", apiSurface: apiSurfaceVertexAI, declared: declaredTrue, requestTools: 1, wantReject: []base.OutputIncompatibility{base.OutputIncompatibleTools}},
 		{
 			name:       "gateway declared true + custom function tools: rejected",
 			apiSurface: apiSurfaceGateway, declared: declaredTrue, requestTools: 2,
-			wantReject: []imageOutputIncompatibility{imageOutputIncompatibleTools},
+			wantReject: []base.OutputIncompatibility{base.OutputIncompatibleTools},
 		},
 		{
 			name:       "gateway declared true + built-in tool: rejected",
 			apiSurface: apiSurfaceGateway, declared: declaredTrue, builtInTools: []*genai.Tool{{GoogleSearch: &genai.GoogleSearch{}}},
-			wantReject: []imageOutputIncompatibility{imageOutputIncompatibleBuiltInTools},
+			wantReject: []base.OutputIncompatibility{base.OutputIncompatibleBuiltInTools},
 		},
 		{
 			name:       "gateway declared true + structured output: rejected",
 			apiSurface: apiSurfaceGateway, declared: declaredTrue, structured: true,
-			wantReject: []imageOutputIncompatibility{imageOutputIncompatibleStructuredOutput},
+			wantReject: []base.OutputIncompatibility{base.OutputIncompatibleStructuredOutput},
 		},
 		{
 			name:       "gateway declared true + tools and structured output: both reported",
 			apiSurface: apiSurfaceGateway, declared: declaredTrue, requestTools: 1, structured: true,
-			wantReject: []imageOutputIncompatibility{imageOutputIncompatibleTools, imageOutputIncompatibleStructuredOutput},
+			wantReject: []base.OutputIncompatibility{base.OutputIncompatibleTools, base.OutputIncompatibleStructuredOutput},
 		},
 	}
 
@@ -90,18 +90,18 @@ func TestCheckImageOutputRequestCompatibility_GateConditions(t *testing.T) {
 				assert.NoError(t, err)
 				return
 			}
-			var incompatible *ImageOutputRequestIncompatibleError
-			require.ErrorAs(t, err, &incompatible, "expected an *ImageOutputRequestIncompatibleError, got %v", err)
+			var incompatible *base.OutputRequestIncompatibleError
+			require.ErrorAs(t, err, &incompatible, "expected an *base.OutputRequestIncompatibleError, got %v", err)
 			assert.Equal(t, tt.wantReject, incompatible.Incompatibilities)
 		})
 	}
 }
 
-func TestImageOutputRequestIncompatibleError_MessageNamesCategoriesOnly(t *testing.T) {
+func TestOutputRequestIncompatibleError_MessageNamesCategoriesOnly(t *testing.T) {
 	t.Parallel()
 
-	err := &ImageOutputRequestIncompatibleError{Incompatibilities: []imageOutputIncompatibility{
-		imageOutputIncompatibleTools, imageOutputIncompatibleStructuredOutput,
+	err := &base.OutputRequestIncompatibleError{Incompatibilities: []base.OutputIncompatibility{
+		base.OutputIncompatibleTools, base.OutputIncompatibleStructuredOutput,
 	}}
 	msg := err.Error()
 	assert.Contains(t, msg, "output_capabilities.image")
@@ -109,7 +109,7 @@ func TestImageOutputRequestIncompatibleError_MessageNamesCategoriesOnly(t *testi
 	assert.Contains(t, msg, "structured output")
 }
 
-// TestImageOutputRequestIncompatibleError_RoutesThroughExistingErrorSeam
+// TestOutputRequestIncompatibleError_RoutesThroughExistingErrorSeam
 // drives the guard's error through the same modelerrors.FormatError call the
 // runtime loop uses to build ErrorEvent.Error (pkg/runtime/loop_steps.go),
 // which the TUI renders verbatim (pkg/tui/page/chat/runtime_events.go). No
@@ -117,10 +117,10 @@ func TestImageOutputRequestIncompatibleError_MessageNamesCategoriesOnly(t *testi
 // overflow/truncation-shaped one, so FormatError must pass it through
 // unchanged, and ClassifyModelError must not mark it retryable (retrying
 // this exact request would just reject again).
-func TestImageOutputRequestIncompatibleError_RoutesThroughExistingErrorSeam(t *testing.T) {
+func TestOutputRequestIncompatibleError_RoutesThroughExistingErrorSeam(t *testing.T) {
 	t.Parallel()
 
-	err := &ImageOutputRequestIncompatibleError{Incompatibilities: []imageOutputIncompatibility{imageOutputIncompatibleBuiltInTools}}
+	err := &base.OutputRequestIncompatibleError{Incompatibilities: []base.OutputIncompatibility{base.OutputIncompatibleBuiltInTools}}
 
 	visible := modelerrors.FormatError(err)
 	assert.Equal(t, err.Error(), visible, "a plain incompatibility error must pass through FormatError unchanged")
@@ -174,9 +174,9 @@ func TestCreateChatCompletionStream_ImageOutputGuard_RejectsBeforeDispatch(t *te
 		}, []tools.Tool{{Name: "read_file", Description: "reads a file", Parameters: map[string]any{"type": "object"}}})
 
 		require.Nil(t, stream)
-		var incompatible *ImageOutputRequestIncompatibleError
+		var incompatible *base.OutputRequestIncompatibleError
 		require.ErrorAs(t, err, &incompatible)
-		assert.Equal(t, []imageOutputIncompatibility{imageOutputIncompatibleTools}, incompatible.Incompatibilities)
+		assert.Equal(t, []base.OutputIncompatibility{base.OutputIncompatibleTools}, incompatible.Incompatibilities)
 		assert.Zero(t, counter.calls.Load(), "guard must reject before any provider dispatch")
 	})
 
@@ -191,9 +191,9 @@ func TestCreateChatCompletionStream_ImageOutputGuard_RejectsBeforeDispatch(t *te
 		}, nil)
 
 		require.Nil(t, stream)
-		var incompatible *ImageOutputRequestIncompatibleError
+		var incompatible *base.OutputRequestIncompatibleError
 		require.ErrorAs(t, err, &incompatible)
-		assert.Equal(t, []imageOutputIncompatibility{imageOutputIncompatibleBuiltInTools}, incompatible.Incompatibilities)
+		assert.Equal(t, []base.OutputIncompatibility{base.OutputIncompatibleBuiltInTools}, incompatible.Incompatibilities)
 		assert.Zero(t, counter.calls.Load(), "guard must reject before any provider dispatch")
 	})
 
@@ -223,9 +223,9 @@ func TestCreateChatCompletionStream_ImageOutputGuard_RejectsBeforeDispatch(t *te
 		}, nil)
 
 		require.Nil(t, stream)
-		var incompatible *ImageOutputRequestIncompatibleError
+		var incompatible *base.OutputRequestIncompatibleError
 		require.ErrorAs(t, err, &incompatible)
-		assert.Equal(t, []imageOutputIncompatibility{imageOutputIncompatibleStructuredOutput}, incompatible.Incompatibilities)
+		assert.Equal(t, []base.OutputIncompatibility{base.OutputIncompatibleStructuredOutput}, incompatible.Incompatibilities)
 		assert.Zero(t, counter.calls.Load(), "guard must reject before any provider dispatch")
 	})
 }
