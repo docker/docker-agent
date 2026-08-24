@@ -570,10 +570,12 @@ func (r *LocalRuntime) executeAfterLLMCallHooks(ctx context.Context, sess *sessi
 
 // executeOnUserInputHooks fires on_user_input when the runtime is about
 // to wait for the user (tool confirmation, elicitation, max iterations,
-// stream stopped). Resolves the agent itself so callsites in code paths
-// without an agent handle (like the elicitation handler) stay short.
-func (r *LocalRuntime) executeOnUserInputHooks(ctx context.Context, sessionID, logContext string) {
-	a := r.CurrentAgent()
+// stream stopped). The agent is passed explicitly so callsites that
+// already resolved the session's agent (pinned sessions included)
+// attribute the event to that agent; paths without an agent handle
+// (like the elicitation handler) fall back to CurrentAgent at the
+// callsite. A nil agent is a no-op.
+func (r *LocalRuntime) executeOnUserInputHooks(ctx context.Context, a *agent.Agent, sessionID, logContext string) {
 	if a == nil {
 		return
 	}

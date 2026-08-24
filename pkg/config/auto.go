@@ -348,8 +348,8 @@ func PreferLocalDMRModels(ctx context.Context, cfg *latest.Config, selectorNames
 // the suffix has no slash, so a registry host:port like "registry:5000/ai/x"
 // is preserved.
 func dmrModelRepo(id string) string {
-	if i := strings.LastIndex(id, ":"); i >= 0 && !strings.Contains(id[i+1:], "/") {
-		return id[:i]
+	if before, after, ok := strings.CutLast(id, ":"); ok && !strings.Contains(after, "/") {
+		return before
 	}
 	return id
 }

@@ -48,7 +48,8 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 
 	// Harnesses own their context; run lifecycle hooks but do not forward injected instructions.
 	r.executeTurnStartHooks(ctx, sess, a, events)
-	messages := harnessInputMessages(sess)
+	harnessSessionID := harnessSessionIDFor(sess, a)
+	messages := harnessInputMessages(sess, harnessSessionID)
 	stop, msg, rewritten := r.executeBeforeLLMCallHooks(ctx, sess, a, modelID, 1, messages)
 	if stop {
 		slog.WarnContext(ctx, "before_llm_call hook signalled run termination",
@@ -61,8 +62,6 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		messages = rewritten
 	}
 	messages = r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID, messages)
-
-	harnessSessionID := harnessSessionIDFor(sess, a)
 	prompt := strings.TrimSpace(harnessPrompt(messages))
 	if prompt == "" {
 		msg := "cannot run external harness without a user prompt"
@@ -421,7 +420,22 @@ func (r *LocalRuntime) rememberHarnessSessionID(ctx context.Context, sess *sessi
 	}
 }
 
-func harnessInputMessages(sess *session.Session) []chat.Message {
+// harnessInputMessages selects the messages to use as the harness prompt.
+// On resume (harnessSessionID != "") only the latest non-implicit user turn is
+// sent; the harness already holds prior context from its own session.
+// On a fresh session (harnessSessionID == "") the full delegated context is
+// included — system/task message plus all user messages — because the harness
+// receives no system prompt of its own and the task can only arrive via prompt.
+func harnessInputMessages(sess *session.Session, harnessSessionID string) []chat.Message {
+	if harnessSessionID != "" {
+		return latestUserTurn(sess)
+	}
+	return freshHarnessMessages(sess)
+}
+
+// latestUserTurn returns the most recent non-implicit user message, used on
+// resume turns where the harness already holds the preceding context.
+func latestUserTurn(sess *session.Session) []chat.Message {
 	for _, item := range slices.Backward(sess.MessagesSnapshot()) {
 		if item.Message != nil && !item.Message.Implicit && item.Message.Message.Role == chat.MessageRoleUser {
 			return []chat.Message{item.Message.Message}
@@ -430,13 +444,46 @@ func harnessInputMessages(sess *session.Session) []chat.Message {
 	return nil
 }
 
-func harnessPrompt(messages []chat.Message) string {
-	for _, message := range slices.Backward(messages) {
-		if message.Role == chat.MessageRoleUser {
-			return harnessMessageContent(message)
+// freshHarnessMessages collects the full delegated context for a new harness
+// session: all system and user messages (including implicit ones) in order.
+// Returns nil when the session contains no meaningful content — i.e. only an
+// implicit filler with no system/task message and no real user text — so the
+// empty-prompt guard in runHarnessAgent can still catch that degenerate case.
+func freshHarnessMessages(sess *session.Session) []chat.Message {
+	var msgs []chat.Message
+	hasMeaningful := false
+	for _, item := range sess.MessagesSnapshot() {
+		if item.Message == nil {
+			continue
+		}
+		msg := item.Message.Message
+		switch msg.Role {
+		case chat.MessageRoleSystem:
+			msgs = append(msgs, msg)
+			hasMeaningful = true
+		case chat.MessageRoleUser:
+			msgs = append(msgs, msg)
+			if !item.Message.Implicit {
+				hasMeaningful = true
+			}
 		}
 	}
-	return ""
+	if !hasMeaningful {
+		return nil
+	}
+	return msgs
+}
+
+// harnessPrompt concatenates the content of all supplied messages (system and
+// user) to form the prompt string sent to the external harness binary.
+func harnessPrompt(messages []chat.Message) string {
+	var parts []string
+	for _, message := range messages {
+		if content := harnessMessageContent(message); content != "" {
+			parts = append(parts, content)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 func harnessMessageContent(msg chat.Message) string {

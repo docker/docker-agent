@@ -155,6 +155,16 @@ linters:
         - G702
         - G703
         - G704
+    modernize:
+      # errorsastype (errors.AsType, Go 1.27), embedlit (x/tools v0.48),
+      # stringscut and reflecttypeassert became active after the
+      # golangci-lint v2.12.2 → v2.13.1 bump required by the Go 1.27 upgrade.
+      # Pre-existing violations in unrelated files; re-enable in a follow-up.
+      disable:
+        - errorsastype
+        - embedlit
+        - stringscut
+        - reflecttypeassert
   exclusions:
     generated: lax
     presets:
@@ -171,11 +181,28 @@ linters:
         linters:
           - staticcheck
         text: "SA1019:.*FunctionCall.*deprecated"
+      # adka2a/v2 migration requires a full a2a-go v2 upgrade (separate PR)
+      - path: pkg/a2a/
+        linters:
+          - staticcheck
+        text: "SA1019:.*adka2a.*deprecated"
       # Vendored verbatim from moby/moby; keep its //nolint:gosec directives
       # even though our config excludes gosec G404 globally.
       - path: pkg/worktree/namesgenerator/
         linters:
           - nolintlint
+      # Frozen versioned config types: recvcheck changed behaviour in
+      # golangci-lint v2.13.1 — some previously-suppressed violations are no
+      # longer caught (leaving stale //nolint:recvcheck directives that trigger
+      # nolintlint) while new violations are reported in the same files.
+      # These files are frozen (see AGENTS.md) and must not be modified.
+      - path: pkg/config/v\d+/
+        linters:
+          - recvcheck
+          - nolintlint
+      - path: pkg/config/latest/types\.go
+        linters:
+          - recvcheck
 issues:
   max-same-issues: 3
 formatters:

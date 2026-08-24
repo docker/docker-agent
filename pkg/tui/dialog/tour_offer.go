@@ -99,13 +99,15 @@ func (d *tourOfferDialog) View() string {
 		AddSeparator().
 		AddSpace().
 		AddContent(styles.BaseStyle.Width(contentWidth).Render(
-			"First time here? Learn docker agent by doing: a hands-on tour, right in this chat. Takes two minutes, Esc leaves anytime."))
+			"First time here? Learn docker agent by doing: a hands-on tour, right in this chat. Takes two minutes, Esc leaves anytime.",
+		))
 
 	if d.showTelemetryNotice {
 		content = content.
 			AddSpace().
 			AddContent(styles.MutedStyle.Width(contentWidth).Render(
-				"Anonymous usage data helps improve docker agent. Opt out with TELEMETRY_ENABLED=false."))
+				"Anonymous usage data helps improve docker agent. Opt out with TELEMETRY_ENABLED=false.",
+			))
 	}
 
 	body := content.

@@ -127,6 +127,7 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 		SplitDiffView:      false,
 		ExpandThinking:     true,
 		HideToolResults:    true,
+		ShowBanner:         false,
 		YOLO:               true,
 		RestoreTabs:        true,
 		Snapshot:           true,
@@ -145,6 +146,7 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 	assert.Equal(t, preferences.SplitDiffView, settings.GetSplitDiffView())
 	assert.Equal(t, preferences.ExpandThinking, settings.GetExpandThinking())
 	assert.Equal(t, preferences.HideToolResults, settings.HideToolResults)
+	assert.Equal(t, preferences.ShowBanner, settings.GetShowBanner())
 	assert.Equal(t, preferences.YOLO, settings.YOLO)
 	assert.Equal(t, preferences.RestoreTabs, settings.GetRestoreTabs())
 	assert.Equal(t, preferences.Snapshot, settings.SnapshotsEnabled())
@@ -176,6 +178,7 @@ func TestSavePreferences_DefaultsClearEntries(t *testing.T) {
 		Layout:            messages.LayoutSettings{SidebarPosition: messages.SidebarRight, SectionSpacing: messages.SpacingNormal},
 		SendMode:          messages.SendModeSteer,
 		SplitDiffView:     true,
+		ShowBanner:        true,
 		TabTitleMaxLength: userconfig.DefaultTabTitleMaxLength,
 		SoundThreshold:    userconfig.DefaultSoundThreshold,
 	}))
@@ -187,6 +190,7 @@ func TestSavePreferences_DefaultsClearEntries(t *testing.T) {
 	assert.Nil(t, settings.Layout)
 	assert.Empty(t, settings.BusySendMode)
 	assert.Nil(t, settings.SplitDiffView)
+	assert.Nil(t, settings.ShowBanner)
 	assert.Nil(t, settings.ExpandThinking)
 	assert.Nil(t, settings.RestoreTabs)
 	assert.Nil(t, settings.Snapshot)

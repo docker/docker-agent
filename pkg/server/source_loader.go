@@ -9,6 +9,8 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 )
 
+var sourceRetrySchedule = []time.Duration{2 * time.Second, 15 * time.Second, 70 * time.Second}
+
 type sourceLoader struct {
 	inner           config.Source
 	refreshInterval time.Duration
@@ -25,6 +27,10 @@ func newSourceLoader(ctx context.Context, inner config.Source, refreshInterval t
 	}
 
 	sl.load(ctx)
+
+	if sl.hasError() {
+		go sl.retryStartup(ctx)
+	}
 
 	if refreshInterval > 0 {
 		go sl.refreshLoop(ctx)
@@ -65,6 +71,29 @@ func (sl *sourceLoader) load(ctx context.Context) {
 	} else {
 		sl.data = data
 		sl.err = nil
+	}
+}
+
+func (sl *sourceLoader) hasError() bool {
+	sl.mu.RLock()
+	defer sl.mu.RUnlock()
+	return sl.err != nil
+}
+
+func (sl *sourceLoader) retryStartup(ctx context.Context) {
+	for _, delay := range sourceRetrySchedule {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		sl.load(ctx)
+		if !sl.hasError() {
+			return
+		}
 	}
 }
 

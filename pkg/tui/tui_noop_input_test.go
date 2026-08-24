@@ -20,7 +20,7 @@ import (
 
 func populateScrollableRoot(t *testing.T) *appModel {
 	t.Helper()
-	root := wallClockRoot(t, 100, 35)
+	root, _, _ := wallClockRoot(t, 100, 35)
 	for i := range 30 {
 		msg := session.NewAgentMessage("root", &chat.Message{
 			Role:    chat.MessageRoleAssistant,
@@ -69,7 +69,7 @@ func TestStreamChunkRendersBeforeRecoveryClick(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root := wallClockRoot(t, 120, 40)
+			root, _, _ := wallClockRoot(t, 120, 40)
 			seed := session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "first chunk"})
 			root.application.Session().Messages = append(root.application.Session().Messages, session.NewMessageItem(seed))
 			_ = root.chatPage.Init()
@@ -161,7 +161,7 @@ func TestActualProgramWritesAfterEffectiveIdleInput(t *testing.T) {
 }
 
 func TestNoOpPointerAndWheelReuseRootCache(t *testing.T) {
-	root := wallClockRoot(t, 120, 40)
+	root, _, _ := wallClockRoot(t, 120, 40)
 	root.focusedPanel = PanelContent
 	_ = root.chatPage.FocusMessages()
 	_, _ = root.Update(tea.KeyPressMsg{Code: 'g'}) // top boundary

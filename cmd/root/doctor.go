@@ -221,7 +221,8 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		report.UserConfig.Error = err.Error()
 		report.Issues = append(report.Issues, fmt.Sprintf(
 			"the user config file %s cannot be parsed and is ignored (settings and aliases are unavailable): %v",
-			report.UserConfig.Path, err))
+			report.UserConfig.Path, err,
+		))
 	}
 
 	credFound := map[string]bool{}
@@ -302,12 +303,14 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 			autoStatus.Usable = false
 			autoIssues = append(autoIssues, fmt.Sprintf(
 				"the configured default model %s/%s needs Docker Model Runner, which is %s; install or start it (%s)",
-				auto.Provider, auto.Model, describeDMRStatus(report.DMR.Status), dmrDocsURL))
+				auto.Provider, auto.Model, describeDMRStatus(report.DMR.Status), dmrDocsURL,
+			))
 		case dmrDown:
 			autoStatus.Usable = false
 			autoIssues = append(autoIssues, fmt.Sprintf(
 				"no usable model: no provider credential was found and Docker Model Runner is %s; run `docker agent setup`, or set an API key for one of the providers above (%s) or install Docker Model Runner (%s)",
-				describeDMRStatus(report.DMR.Status), environment.SecretsDocsURL, dmrDocsURL))
+				describeDMRStatus(report.DMR.Status), environment.SecretsDocsURL, dmrDocsURL,
+			))
 		case !slices.Contains(dmrModels, auto.Model):
 			autoStatus.Note = fmt.Sprintf("not pulled yet; run `docker model pull %s` or let the first run pull it", auto.Model)
 		}
@@ -319,7 +322,8 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 			autoStatus.Usable = false
 			autoIssues = append(autoIssues, fmt.Sprintf(
 				"the configured default model %s/%s has no credential for provider %s; %s (%s)",
-				auto.Provider, auto.Model, auto.Provider, providerCredentialHint(auto.Provider, primaryEnvVar[auto.Provider]), environment.SecretsDocsURL))
+				auto.Provider, auto.Model, auto.Provider, providerCredentialHint(auto.Provider, primaryEnvVar[auto.Provider]), environment.SecretsDocsURL,
+			))
 		}
 	}
 
@@ -382,7 +386,8 @@ func (f *doctorFlags) checkAgentFile(ctx context.Context, ref string, cfg *lates
 	if len(missing) > 0 {
 		report.Issues = append(report.Issues, fmt.Sprintf(
 			"%s requires environment variables that are not set: %s (see %s)",
-			ref, strings.Join(missing, ", "), environment.SecretsDocsURL))
+			ref, strings.Join(missing, ", "), environment.SecretsDocsURL,
+		))
 	}
 
 	// The Claude Code harness runs the local `claude` CLI with its own login,

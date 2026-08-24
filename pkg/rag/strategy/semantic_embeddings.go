@@ -179,7 +179,8 @@ func NewSemanticEmbeddingsFromConfig(ctx context.Context, cfg latest.RAGStrategy
 
 	// Configure the embedding input builder to use the chat LLM
 	store.SetEmbeddingInputBuilder(newLLMSemanticEmbeddingBuilder(
-		chatProvider, js.NewJsExpander(buildCtx.Env), semanticPrompt, usageTracker, useASTContext))
+		chatProvider, js.NewJsExpander(buildCtx.Env), semanticPrompt, usageTracker, useASTContext,
+	))
 
 	return &Config{
 		Name:      strategyName,

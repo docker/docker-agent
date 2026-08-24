@@ -161,6 +161,9 @@ type Page interface {
 	SetSendMode(mode msgtypes.SendMode)
 	// SetInterruptMode sets how Esc interrupts a running stream.
 	SetInterruptMode(mode msgtypes.InterruptMode)
+	// SetShowBanner controls whether the ASCII-art startup banner is drawn
+	// on an empty conversation.
+	SetShowBanner(show bool)
 	// SetRoutingID records the tab identity used to address this page's
 	// one-shot UI timers back to it (messages.RoutedMsg.SessionID). The
 	// appModel keys its chat pages — and the supervisor its event routing —
@@ -232,6 +235,9 @@ type chatPage struct {
 	// Used by --exit-after-response to ensure we don't exit before receiving content
 	hasReceivedAssistantContent bool
 	showStartupBanner           bool
+	// hideBanner mirrors the user's show_banner setting; the zero value
+	// keeps the banner so page literals stay banner-enabled.
+	hideBanner bool
 
 	// Message queue for enqueuing messages while agent is working
 	messageQueue []queuedMessage
@@ -410,6 +416,14 @@ func WithHideSidebar() PageOption {
 	return func(p *chatPage) {
 		p.hideSidebar = true
 		p.keyMap.ToggleSidebar.SetEnabled(false)
+	}
+}
+
+// WithShowBanner controls whether the ASCII-art startup banner is drawn on
+// an empty conversation.
+func WithShowBanner(show bool) PageOption {
+	return func(p *chatPage) {
+		p.hideBanner = !show
 	}
 }
 
@@ -728,7 +742,7 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 
 func (p *chatPage) messagesView(sl sidebarLayout) string {
 	messagesView := p.messages.View()
-	if messagesView != "" || !p.showStartupBanner {
+	if messagesView != "" || !p.showStartupBanner || p.hideBanner {
 		return messagesView
 	}
 	if sl.chatWidth < tuibanner.Width || sl.chatHeight < tuibanner.Height {
@@ -1402,6 +1416,10 @@ func (p *chatPage) SetSendMode(mode msgtypes.SendMode) {
 
 func (p *chatPage) SetInterruptMode(mode msgtypes.InterruptMode) {
 	p.interruptMode = mode
+}
+
+func (p *chatPage) SetShowBanner(show bool) {
+	p.hideBanner = !show
 }
 
 // SetRoutingID records the tab identity this page's routed UI timers are

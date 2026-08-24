@@ -1747,12 +1747,18 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 	// Start every toolset concurrently so one slow start (e.g. an MCP server
 	// pulling an image) doesn't delay the others; the context is already
 	// non-interactive here so no start can block on a user-driven flow. Each
-	// start keeps its own bounded timeout, and outcomes are consumed in
-	// configuration order below so an early fast toolset is listed (and
-	// counted) without waiting for a slow later one. Peer-dependent toolsets
-	// (e.g. the deferred aggregator, whose Start lists its source toolsets'
-	// tools) start in a second wave, after the others have settled.
-	starts := make([]chan error, totalToolsets)
+	// start is non-blocking and bounded (tools.TryStartWithTimeout): a start
+	// already in flight is skipped rather than joined, a wedged start is
+	// abandoned at the timeout, and outcomes are consumed in configuration
+	// order below so an early fast toolset is listed (and counted) without
+	// waiting for a slow later one. Peer-dependent toolsets (e.g. the
+	// deferred aggregator, whose Start lists its source toolsets' tools)
+	// start in a second wave, after the others have settled.
+	type startOutcome struct {
+		started bool
+		err     error
+	}
+	starts := make([]chan startOutcome, totalToolsets)
 	var independents sync.WaitGroup
 	var dependents []int
 	for i, toolset := range toolsets {
@@ -1760,20 +1766,22 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 		if !ok {
 			continue
 		}
-		starts[i] = make(chan error, 1)
+		starts[i] = make(chan startOutcome, 1)
 		if _, ok := tools.As[tools.PeerDependent](startable); ok {
 			dependents = append(dependents, i)
 			continue
 		}
 		independents.Go(func() {
-			starts[i] <- startToolsetWithTimeout(ctx, startable, r.toolStartTimeout)
+			started, err := startable.TryStartWithTimeout(ctx, r.toolStartTimeout)
+			starts[i] <- startOutcome{started: started, err: err}
 		})
 	}
 	for _, i := range dependents {
 		startable := toolsets[i].(*tools.StartableToolSet)
 		go func() {
 			independents.Wait()
-			starts[i] <- startToolsetWithTimeout(ctx, startable, r.toolStartTimeout)
+			started, err := startable.TryStartWithTimeout(ctx, r.toolStartTimeout)
+			starts[i] <- startOutcome{started: started, err: err}
 		}()
 	}
 
@@ -1789,21 +1797,43 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 
 		// Handle the start outcome, including recovery: a previously-started
 		// toolset whose inner connection died (e.g. background invalid_token)
-		// had its recovery Start() called above so ShouldReportRecoveryFailure
-		// can fire the targeted re-auth notice. Start() is a no-op when the
-		// toolset is already healthy, so calling it unconditionally is safe.
+		// had its recovery start attempted above so ShouldReportRecoveryFailure
+		// can fire the targeted re-auth notice. The attempt is a no-op when the
+		// toolset is already healthy, so starting it unconditionally is safe.
 		if startable, ok := toolset.(*tools.StartableToolSet); ok {
-			if err := <-starts[i]; err != nil {
+			outcome := <-starts[i]
+			if err := outcome.err; err != nil {
 				desc := tools.DescribeToolSet(startable.ToolSet)
-				// A start that outlived its deadline (e.g. an MCP container
-				// stuck behind a wedged Docker daemon) is reported directly:
-				// the abandoned Start goroutine has not returned, so the
-				// once-per-streak guard below has recorded nothing and would
-				// silently swallow the warning.
-				if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-					slog.WarnContext(ctx, "Toolset start timed out; skipping",
-						"agent", a.Name(), "toolset", desc, "timeout", r.toolStartTimeout)
-					a.AddToolWarning(fmt.Sprintf("%s is taking too long to start (>%s) — it keeps starting in the background and its tools appear once it is ready", desc, r.toolStartTimeout))
+				// A cancellation-family error means the bounded attempt may
+				// have abandoned a wedged Start that keeps running in the
+				// background holding the toolset's single-flight lock. The
+				// failure reporters below share that lock, so consulting them
+				// here would block on the very attempt just abandoned — never
+				// touch them for these errors.
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					// Outer context done — possibly canceled after the
+					// top-of-loop check: the startup pass is being torn down,
+					// so return without a warning.
+					if ctx.Err() != nil {
+						return
+					}
+					if errors.Is(err, context.DeadlineExceeded) {
+						// A start that outlived its per-toolset deadline (e.g.
+						// an MCP container stuck behind a wedged Docker daemon)
+						// is reported directly: the abandoned Start goroutine
+						// has not returned, so the once-per-streak guard below
+						// has recorded nothing and would silently swallow the
+						// warning.
+						slog.WarnContext(ctx, "Toolset start timed out; skipping",
+							"agent", a.Name(), "toolset", desc, "timeout", r.toolStartTimeout)
+						a.AddToolWarning(fmt.Sprintf("%s is taking too long to start (>%s) — it keeps starting in the background and its tools appear once it is ready", desc, r.toolStartTimeout))
+						continue
+					}
+					// A Canceled error while the outer context is still live can
+					// only come from within the toolset's own Start; skip it for
+					// this pass like the agent's turn path does.
+					slog.DebugContext(ctx, "Toolset start canceled; skipping",
+						"agent", a.Name(), "toolset", desc, "cause", err)
 					continue
 				}
 				// IsAuthorizationRequired must be checked BEFORE
@@ -1844,6 +1874,17 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 				}
 				slog.WarnContext(ctx, "Toolset start failed; skipping", "agent", a.Name(), "toolset", desc, "error", err)
 				a.AddToolWarning(fmt.Sprintf("%s start failed: %v", desc, err))
+				continue
+			}
+			if !outcome.started {
+				// Another lifecycle operation holds the toolset's single-flight
+				// lock (e.g. a start abandoned by an earlier bounded attempt):
+				// skip the toolset for this startup pass — silently, because
+				// the failure reporters share that lock and consulting them
+				// would block on the very attempt being skipped. It is picked
+				// up once the attempt settles.
+				slog.DebugContext(ctx, "Toolset start already in flight; skipping",
+					"agent", a.Name(), "toolset", tools.DescribeToolSet(startable.ToolSet))
 				continue
 			}
 		}
@@ -1907,40 +1948,6 @@ func listToolsWithTimeout(ctx context.Context, toolset tools.ToolSet, timeout ti
 		return nil, toolCtx.Err()
 	case res := <-done:
 		return res.tools, res.err
-	}
-}
-
-// startToolsetWithTimeout starts a toolset under a bounded deadline, mirroring
-// listToolsWithTimeout. The deadline must be enforced by racing the call
-// against the timeout (not only via the context): the MCP connector detaches
-// the context it is handed with context.WithoutCancel, so a wedged initialize
-// handshake (e.g. Docker failing to start the server container) would ignore a
-// ctx deadline and block startup forever. On timeout it returns the context
-// error; the orphaned goroutine sends into a buffered channel and exits if the
-// call ever returns.
-//
-// The abandoned goroutine keeps holding the StartableToolSet's single-flight
-// lock, so later Start/Stop calls on the same toolset wait for the original
-// attempt rather than racing it — if it eventually completes, the toolset
-// becomes usable on the next turn; if it never does, the TUI shutdown safety
-// net still bounds the exit path.
-func startToolsetWithTimeout(ctx context.Context, toolset *tools.StartableToolSet, timeout time.Duration) error {
-	if timeout <= 0 {
-		timeout = defaultToolStartTimeout
-	}
-	startCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	done := make(chan error, 1) // buffered so a late send never blocks
-	go func() {
-		done <- toolset.Start(startCtx)
-	}()
-
-	select {
-	case <-startCtx.Done():
-		return startCtx.Err()
-	case err := <-done:
-		return err
 	}
 }
 

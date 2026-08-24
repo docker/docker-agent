@@ -448,7 +448,8 @@ func (m *appModel) handlePlanExportResult(msg planExportResultMsg) (tea.Model, t
 	switch {
 	case msg.exists:
 		return m, notification.ErrorCmd(
-			msg.path + " already exists — move it away, or export to a custom path with 'docker agent plans export'.")
+			msg.path + " already exists — move it away, or export to a custom path with 'docker agent plans export'.",
+		)
 	case msg.statErr != nil:
 		return m, notification.ErrorCmd(fmt.Sprintf("Cannot export to %s: %v", msg.path, msg.statErr))
 	case msg.err != nil:
@@ -654,7 +655,8 @@ func (m *appModel) handlePlanEditReady(msg planEditReadyMsg) (tea.Model, tea.Cmd
 	if msg.currentVersion != msg.expectedVersion {
 		cmds := []tea.Cmd{notification.WarningCmd(fmt.Sprintf(
 			"Plan %q is at v%d now (you read v%d). Data refreshed — review and press e again.",
-			msg.ref.Name, msg.currentVersion, msg.expectedVersion))}
+			msg.ref.Name, msg.currentVersion, msg.expectedVersion,
+		))}
 		cmds = m.appendPlanRefreshCmd(cmds)
 		return m, tea.Sequence(cmds...)
 	}
@@ -728,7 +730,8 @@ func (m *appModel) handlePlanEditorClosed(msg planEditorClosedMsg) (tea.Model, t
 		// exited non-zero); the draft is kept so no edit is ever lost.
 		return m, tea.Sequence(
 			notification.ErrorCmd(fmt.Sprintf("Editor error: %v", msg.err)),
-			notification.InfoCmd("Your draft is kept at "+msg.path))
+			notification.InfoCmd("Your draft is kept at "+msg.path),
+		)
 	}
 
 	// Both the draft read and the persistence call run in a command: reading
@@ -809,7 +812,8 @@ func (m *appModel) handlePlanWriteResult(msg planWriteResultMsg) (tea.Model, tea
 	case msg.readErr != nil:
 		return m, tea.Sequence(
 			notification.ErrorCmd(fmt.Sprintf("Failed to read edited plan: %v", msg.readErr)),
-			notification.InfoCmd("Your draft is kept at "+msg.draftPath))
+			notification.InfoCmd("Your draft is kept at "+msg.draftPath),
+		)
 	case msg.emptyDraft:
 		switch {
 		case msg.create:
@@ -852,11 +856,13 @@ func (m *appModel) planEditorFailureCmd(err error, draftPath string) tea.Cmd {
 	if errors.As(err, &conflict) {
 		text := fmt.Sprintf(
 			"Version conflict on %q: it is at v%d, you edited v%d. Your draft is kept at %s — refresh and retry from it.",
-			conflict.Name, conflict.Current, conflict.Expected, draftPath)
+			conflict.Name, conflict.Current, conflict.Expected, draftPath,
+		)
 		if conflict.Expected == 0 {
 			text = fmt.Sprintf(
 				"Plan %q already exists (v%d). Your draft is kept at %s — pick another name or edit the existing plan.",
-				conflict.Name, conflict.Current, draftPath)
+				conflict.Name, conflict.Current, draftPath,
+			)
 		}
 		cmds := []tea.Cmd{notification.ErrorCmd(text)}
 		cmds = m.appendPlanRefreshCmd(cmds)
@@ -875,7 +881,8 @@ func (m *appModel) planWriteFailureCmd(err error) tea.Cmd {
 	if errors.As(err, &conflict) {
 		cmds := []tea.Cmd{notification.ErrorCmd(fmt.Sprintf(
 			"Version conflict on %q: it changed to v%d since you read v%d. Data refreshed — review and retry.",
-			conflict.Name, conflict.Current, conflict.Expected))}
+			conflict.Name, conflict.Current, conflict.Expected,
+		))}
 		cmds = m.appendPlanRefreshCmd(cmds)
 		return tea.Sequence(cmds...)
 	}
@@ -892,7 +899,8 @@ func (m *appModel) planTimeoutCmd(err error) tea.Cmd {
 	}
 	return notification.ErrorCmd(fmt.Sprintf(
 		"Plan write timed out after %s — the plan store may be locked by another process. Retry shortly.",
-		m.planMutationTimeoutOrDefault()))
+		m.planMutationTimeoutOrDefault(),
+	))
 }
 
 // planReadFailureCmd reports a failed plan read (list, get, export, or the
@@ -905,7 +913,8 @@ func (m *appModel) planReadFailureCmd(err error) tea.Cmd {
 	}
 	return notification.ErrorCmd(fmt.Sprintf(
 		"Plan read timed out after %s — plan storage may be unavailable. Retry shortly.",
-		m.planReadTimeoutOrDefault()))
+		m.planReadTimeoutOrDefault(),
+	))
 }
 
 // planVersionOf reads a shared plan's version defensively; the service
@@ -931,7 +940,8 @@ func planErrorCmd(err error) tea.Cmd {
 	case errors.As(err, &conflict):
 		return notification.ErrorCmd(fmt.Sprintf(
 			"Version conflict on plan %q: expected v%d but it is at v%d. Refresh (r) and retry.",
-			conflict.Name, conflict.Expected, conflict.Current))
+			conflict.Name, conflict.Expected, conflict.Current,
+		))
 	case errors.As(err, &notFound):
 		return notification.WarningCmd(fmt.Sprintf("No %s plan %q — it may have been deleted; refresh (r).", notFound.Scope, notFound.Name))
 	case errors.As(err, &validation):
@@ -950,7 +960,8 @@ func planWarningsCmds(warnings []string) []tea.Cmd {
 		return nil
 	}
 	return []tea.Cmd{notification.WarningCmd(fmt.Sprintf(
-		"%d plan(s) could not be read: %s", len(warnings), strings.Join(warnings, "; ")))}
+		"%d plan(s) could not be read: %s", len(warnings), strings.Join(warnings, "; "),
+	))}
 }
 
 // handleSessionPlanUpdatedEvent forwards the event to the chat page like any

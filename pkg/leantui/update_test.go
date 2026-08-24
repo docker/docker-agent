@@ -87,9 +87,11 @@ func (r *cycleThinkingRuntime) UpdateSessionTitle(_ context.Context, sess *sessi
 	sess.Title = title
 	return nil
 }
+
 func (r *cycleThinkingRuntime) TitleGenerator(context.Context) *sessiontitle.Generator { return nil }
-func (r *cycleThinkingRuntime) Close() error                                           { return nil }
-func (r *cycleThinkingRuntime) Stop()                                                  {}
+
+func (r *cycleThinkingRuntime) Close() error { return nil }
+func (r *cycleThinkingRuntime) Stop()        {}
 func (r *cycleThinkingRuntime) Steer(_ context.Context, msg runtime.QueuedMessage) error {
 	if r.steerErr != nil {
 		return r.steerErr

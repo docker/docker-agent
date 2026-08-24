@@ -142,7 +142,8 @@ func (r *LocalRuntime) handleStructuredOutputCalls(
 		rejectMsg := fmt.Sprintf(
 			"Structured output rejected: %s must be the only tool call in the response. "+
 				"Finish any other tool use first, then call %s alone with the final answer.",
-			structuredoutput.ToolName, structuredoutput.ToolName)
+			structuredoutput.ToolName, structuredoutput.ToolName,
+		)
 		for _, tc := range outputCalls {
 			r.rejectStructuredOutputCall(ctx, sess, a, tc, tool, rejectMsg, events)
 		}
@@ -319,7 +320,8 @@ func (r *LocalRuntime) structuredOutputStop(
 	}
 	errMsg := fmt.Sprintf(
 		"Agent terminated: the model did not deliver structured output via the %s tool after %d reminders.",
-		structuredoutput.ToolName, maxStructuredOutputReminders)
+		structuredoutput.ToolName, maxStructuredOutputReminders,
+	)
 	slog.WarnContext(ctx, "Structured output failed: reminders exhausted",
 		"agent", a.Name(), "session_id", sess.ID, "max", maxStructuredOutputReminders)
 	events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeStructuredOutputFailed, errMsg))

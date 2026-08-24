@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"syscall/js"
 	"time"
@@ -773,9 +774,9 @@ func (rt *wasmRuntime) emitEvent(event map[string]any) {
 
 // lastAssistantContent returns the content of the last assistant message.
 func (rt *wasmRuntime) lastAssistantContent(messages []chat.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == chat.MessageRoleAssistant && messages[i].Content != "" {
-			return messages[i].Content
+	for _, msg := range slices.Backward(messages) {
+		if msg.Role == chat.MessageRoleAssistant && msg.Content != "" {
+			return msg.Content
 		}
 	}
 	return ""

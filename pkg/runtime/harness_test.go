@@ -165,6 +165,12 @@ func TestHarnessAgentResumesPersistedSession(t *testing.T) {
 	assert.Equal(t, "thread-123", harnessSessionIDFor(loaded, rt.CurrentAgent()))
 }
 
+// TestHarnessRejectsImplicitOrMissingUserPrompt checks the genuine empty-prompt
+// case: an implicit "Please proceed." with no task/system message is
+// meaningless to the harness, so the run must be rejected before launch.
+// Contrast with TestHarnessDelegatedTaskWithImplicitUserMessage below, which
+// verifies that a delegation carrying a real task (system message + implicit
+// user) succeeds.
 func TestHarnessRejectsImplicitOrMissingUserPrompt(t *testing.T) {
 	if stdruntime.GOOS == "windows" {
 		t.Skip("shell script shim test")
@@ -179,6 +185,41 @@ func TestHarnessRejectsImplicitOrMissingUserPrompt(t *testing.T) {
 	assert.True(t, hasEventType(t, events, &ErrorEvent{}))
 	_, err := os.Stat(filepath.Join(harnessBinDir, "codex.args"))
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+// TestHarnessDelegatedTaskWithImplicitUserMessage is a regression test for
+// https://github.com/docker/docker-agent/issues/4011. A transfer_task
+// delegation builds a sub-session where the task text lives in the system
+// message and the only user message is the implicit "Please proceed."
+// filler injected by newSubSession. Before the fix this was rejected with
+// "cannot run external harness without a user prompt"; now the full
+// delegated context (system/task + implicit user) must be forwarded as the
+// harness prompt.
+func TestHarnessDelegatedTaskWithImplicitUserMessage(t *testing.T) {
+	if stdruntime.GOOS == "windows" {
+		t.Skip("shell script shim test")
+	}
+
+	useHarnessShim(t, "codex", `{"type":"item.completed","item":{"type":"agent_message","text":"delegation done"}}
+`)
+	rt := newHarnessRuntime(t, "codex")
+	// Mirror exactly what newSubSession builds for a transfer_task delegation:
+	// the task goes into a system message and the user message is implicit.
+	task := "implement the widget"
+	sess := session.New(
+		session.WithSystemMessage(buildTaskSystemMessage(task, "a working widget", nil)),
+		session.WithImplicitUserMessage("Please proceed."),
+	)
+	events := collectRuntimeEvents(t, rt, sess)
+
+	// Must launch without error.
+	assert.False(t, hasEventType(t, events, &ErrorEvent{}))
+	assert.Equal(t, "delegation done", sess.GetLastAssistantMessageContent())
+
+	// Harness args must carry the task text so the harness can act on it.
+	args := harnessShimArgs(t, "codex")
+	assert.Contains(t, args, task)
+	assert.Contains(t, args, "<task>")
 }
 
 func TestHarnessSubSessionIDSurvivesReconstruction(t *testing.T) {

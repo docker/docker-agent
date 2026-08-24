@@ -1,6 +1,7 @@
 package plans
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -8,7 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -76,7 +77,7 @@ func (s *service) List(ctx context.Context, opts ListOptions) (ListResult, error
 	result.Warnings = append(result.Warnings, warnings...)
 	// The documented order is by name; enforce it here so it holds for any
 	// injected Storage, not only backends that happen to sort.
-	sort.SliceStable(summaries, func(i, j int) bool { return summaries[i].Name < summaries[j].Name })
+	slices.SortStableFunc(summaries, func(a, b plan.Summary) int { return cmp.Compare(a.Name, b.Name) })
 	for _, sum := range summaries {
 		result.Plans = append(result.Plans, Plan{
 			Scope:     ScopeShared,

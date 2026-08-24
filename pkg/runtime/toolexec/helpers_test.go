@@ -59,7 +59,7 @@ func (s *stubHookDispatcher) Dispatch(_ context.Context, _ *agent.Agent, event h
 	return s.on[event]
 }
 
-func (s *stubHookDispatcher) NotifyUserInput(context.Context, string, string) {}
+func (s *stubHookDispatcher) NotifyUserInput(context.Context, *agent.Agent, string, string) {}
 func (s *stubHookDispatcher) NotifyApprovalDecision(_ context.Context, _ *session.Session, _ *agent.Agent, _ tools.ToolCall, decision, source, _ string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

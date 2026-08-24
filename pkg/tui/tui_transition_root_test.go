@@ -63,7 +63,7 @@ func (m *transitionOwner) View() tea.View {
 }
 
 func TestActualRootTransitionLifecycle(t *testing.T) {
-	root := wallClockRoot(t, 120, 40)
+	root, _, _ := wallClockRoot(t, 120, 40)
 	root.ar = animation.NewRuntimeWithScheduler(&rootImmediateScheduler{now: time.Unix(1, 0)})
 	owner := newTransitionOwner(root)
 	cmd := owner.Init()

@@ -96,23 +96,10 @@ func SetBrowserOpenerForTesting(opener BrowserOpener) (restore func()) {
 // configurations that explicitly opt in to talking to a server on a private
 // network).
 func HTTPClientForAllowPrivateIPs(allowPrivateIPs bool) *http.Client {
-	if allowPrivateIPs {
-		// Clone keeps the default proxy/HTTP2/timeout behavior but gives the
-		// client its own connection pool: a nil Transport would share
-		// http.DefaultTransport's pool, which third parties may prune via
-		// CloseIdleConnections (httptest.Server.Close does).
-		transport, ok := http.DefaultTransport.(*http.Transport)
-		if !ok {
-			// Something replaced DefaultTransport (test helper, proxy shim);
-			// fall back to a fresh default rather than panicking.
-			transport = &http.Transport{}
-		}
-		return &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: transport.Clone(),
-		}
+	if !allowPrivateIPs {
+		return DefaultHTTPClient()
 	}
-	return DefaultHTTPClient()
+	return httpclient.ClientForAllowPrivateIPs(30*time.Second, true)
 }
 
 // GenerateState generates a random state parameter for OAuth CSRF protection

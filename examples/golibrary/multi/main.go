@@ -33,7 +33,8 @@ func run(ctx context.Context) error {
 			Provider: "openai",
 			Model:    "gpt-4o",
 		},
-		environment.NewDefaultProvider())
+		environment.NewDefaultProvider(),
+	)
 	if err != nil {
 		return err
 	}

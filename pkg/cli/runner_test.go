@@ -66,9 +66,13 @@ func (m *mockRuntime) CurrentAgentName(context.Context) string { return "test" }
 func (m *mockRuntime) CurrentAgentInfo(context.Context) runtime.CurrentAgentInfo {
 	return runtime.CurrentAgentInfo{Name: "test"}
 }
-func (m *mockRuntime) SetCurrentAgent(context.Context, string) error                        { return nil }
-func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error)              { return nil, nil }
-func (m *mockRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus                   { return nil }
+
+func (m *mockRuntime) SetCurrentAgent(context.Context, string) error { return nil }
+
+func (m *mockRuntime) CurrentAgentTools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+func (m *mockRuntime) CurrentAgentToolsetStatuses() []tools.ToolsetStatus { return nil }
+
 func (m *mockRuntime) RestartToolset(context.Context, string) error                         { return nil }
 func (m *mockRuntime) EmitStartupInfo(context.Context, *session.Session, runtime.EventSink) {}
 func (m *mockRuntime) EmitAgentInfo(context.Context, runtime.EventSink)                     {}
@@ -84,10 +88,13 @@ func (m *mockRuntime) ResumeElicitation(_ context.Context, action tools.Elicitat
 	m.elicitationLastAction = action
 	return nil
 }
+
 func (m *mockRuntime) SessionStore() session.Store                                            { return nil }
 func (m *mockRuntime) Summarize(context.Context, *session.Session, string, runtime.EventSink) {}
 func (m *mockRuntime) PermissionsInfo() *runtime.PermissionsInfo                              { return nil }
-func (m *mockRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet                         { return nil }
+
+func (m *mockRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet { return nil }
+
 func (m *mockRuntime) RunSkillFork(context.Context, *session.Session, skillstool.RunSkillArgs, runtime.EventSink) (*tools.ToolCallResult, error) {
 	return nil, nil
 }
@@ -99,14 +106,23 @@ func (m *mockRuntime) CurrentMCPPrompts(context.Context) map[string]mcptools.Pro
 func (m *mockRuntime) ExecuteMCPPrompt(context.Context, string, map[string]string) (string, error) {
 	return "", nil
 }
+
 func (m *mockRuntime) UpdateSessionTitle(context.Context, *session.Session, string) error { return nil }
-func (m *mockRuntime) TitleGenerator(context.Context) *sessiontitle.Generator             { return nil }
-func (m *mockRuntime) Close() error                                                       { return nil }
-func (m *mockRuntime) Steer(context.Context, runtime.QueuedMessage) error                 { return nil }
-func (m *mockRuntime) FollowUp(context.Context, runtime.QueuedMessage) error              { return nil }
-func (m *mockRuntime) QueueStatus() runtime.QueueStatus                                   { return runtime.QueueStatus{} }
-func (m *mockRuntime) TogglePause(context.Context) (bool, error)                          { return false, nil }
-func (m *mockRuntime) SetAgentModel(context.Context, string, string) error                { return nil }
+
+func (m *mockRuntime) TitleGenerator(context.Context) *sessiontitle.Generator { return nil }
+
+func (m *mockRuntime) Close() error { return nil }
+
+func (m *mockRuntime) Steer(context.Context, runtime.QueuedMessage) error { return nil }
+
+func (m *mockRuntime) FollowUp(context.Context, runtime.QueuedMessage) error { return nil }
+
+func (m *mockRuntime) QueueStatus() runtime.QueueStatus { return runtime.QueueStatus{} }
+
+func (m *mockRuntime) TogglePause(context.Context) (bool, error) { return false, nil }
+
+func (m *mockRuntime) SetAgentModel(context.Context, string, string) error { return nil }
+
 func (m *mockRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
@@ -114,7 +130,9 @@ func (m *mockRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.L
 func (m *mockRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
-func (m *mockRuntime) AvailableModels(context.Context) []runtime.ModelChoice                 { return nil }
+
+func (m *mockRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
+
 func (m *mockRuntime) SupportsModelSwitching() bool                                          { return false }
 func (m *mockRuntime) OnToolsChanged(func(runtime.Event))                                    {}
 func (m *mockRuntime) OnBackgroundEvent(func(runtime.Event))                                 {}

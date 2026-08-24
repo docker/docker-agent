@@ -8,7 +8,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -96,6 +98,31 @@ func (b *blockingStartToolSet) Start(context.Context) error {
 }
 func (b *blockingStartToolSet) Stop(context.Context) error                  { return nil }
 func (b *blockingStartToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+// inFlightStartToolSet is a blockingStartToolSet variant that signals when a
+// Start attempt is in flight (entered closes on the first call) and counts
+// underlying Start calls, so tests can wedge an attempt before exercising
+// the code under test.
+type inFlightStartToolSet struct {
+	entered   chan struct{}
+	release   <-chan struct{}
+	enterOnce sync.Once
+	starts    atomic.Int32
+}
+
+var (
+	_ tools.ToolSet   = (*inFlightStartToolSet)(nil)
+	_ tools.Startable = (*inFlightStartToolSet)(nil)
+)
+
+func (b *inFlightStartToolSet) Start(context.Context) error {
+	b.starts.Add(1)
+	b.enterOnce.Do(func() { close(b.entered) })
+	<-b.release
+	return nil
+}
+func (b *inFlightStartToolSet) Stop(context.Context) error                  { return nil }
+func (b *inFlightStartToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
 
 type mockStream struct {
 	responses []chat.MessageStreamResponse
@@ -1424,6 +1451,157 @@ func TestEmitStartupInfo_SkipsToolsetWhoseStartHangs(t *testing.T) {
 	assert.Contains(t, warning.Message, "taking too long to start")
 }
 
+// TestEmitStartupInfo_SkipsToolsetWhoseStartIsAlreadyInFlight pins the
+// skip-in-flight half of the bounded-start contract (tools.TryStartWithTimeout):
+// a toolset whose Start is already running — e.g. abandoned by an earlier
+// bounded attempt and still holding the single-flight lock — is skipped
+// immediately instead of joined, so startup neither burns the start budget
+// again nor emits a duplicate "taking too long" warning, and the fast
+// toolset is still counted.
+func TestEmitStartupInfo_SkipsToolsetWhoseStartIsAlreadyInFlight(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	release := make(chan struct{})
+	releaseWedged := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseWedged)
+
+	inFlight := &inFlightStartToolSet{entered: make(chan struct{}), release: release}
+	fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(inFlight, fast),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(t.Context(), tm,
+		WithCurrentAgent("root"),
+		WithModelStore(mockModelStore{}),
+		// Long enough that a regression to joining the in-flight attempt
+		// trips the prompt-return guard below instead of passing slowly.
+		WithToolStartTimeout(30*time.Second),
+	)
+	require.NoError(t, err)
+
+	// Wedge the toolset's Start before startup runs, as an earlier abandoned
+	// bounded attempt would: it keeps holding the single-flight lock.
+	startable, ok := root.ToolSets()[0].(*tools.StartableToolSet)
+	require.True(t, ok)
+	wedgedDone := make(chan error, 1)
+	go func() { wedgedDone <- startable.Start(t.Context()) }()
+	<-inFlight.entered
+
+	events := make(chan Event, 32)
+	done := make(chan struct{})
+	go func() {
+		rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+		close(events)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("EmitStartupInfo did not return promptly: an in-flight toolset start was joined instead of skipped")
+	}
+
+	var toolsetInfos []*ToolsetInfoEvent
+	var warnings []*WarningEvent
+	for e := range events {
+		switch ev := e.(type) {
+		case *ToolsetInfoEvent:
+			toolsetInfos = append(toolsetInfos, ev)
+		case *WarningEvent:
+			warnings = append(warnings, ev)
+		}
+	}
+
+	require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+	last := toolsetInfos[len(toolsetInfos)-1]
+	assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false so the sidebar resolves")
+	assert.Equal(t, 1, last.AvailableTools,
+		"the in-flight toolset is skipped; the fast toolset's single tool is still counted")
+	assert.Empty(t, warnings, "a skipped in-flight start must not surface a warning")
+	assert.EqualValues(t, 1, inFlight.starts.Load(), "the skip must not run a second underlying Start")
+
+	// Unblock the wedged attempt so its goroutine exits before the test ends.
+	releaseWedged()
+	require.NoError(t, <-wedgedDone)
+}
+
+// TestEmitStartupInfo_ReturnsOnCancelWhileStartIsWedged is the regression
+// test for the cancellation half of the bounded-start contract: when the
+// EmitStartupInfo context is canceled while TryStartWithTimeout has abandoned
+// a wedged Start that still holds the toolset's single-flight lock, the
+// startup pass must return instead of consulting the failure reporters,
+// which share that lock and would block on it forever. The bubble makes the
+// race deterministic: synctest.Wait parks the emit loop on the start outcome
+// — past its top-of-loop ctx check — before the cancel fires, and a
+// regression to the blocking reporters deadlocks the bubble.
+func TestEmitStartupInfo_ReturnsOnCancelWhileStartIsWedged(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+		// release is closed on cleanup so the wedged start goroutine (whose
+		// Start() ignores context cancellation) exits before the bubble is
+		// checked for leaked goroutines.
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+
+		wedged := &inFlightStartToolSet{entered: make(chan struct{}), release: release}
+
+		root := agent.New("root", "agent",
+			agent.WithModel(prov),
+			agent.WithToolSets(wedged),
+		)
+		tm := team.New(team.WithAgents(root))
+
+		rt, err := NewLocalRuntime(t.Context(), tm,
+			WithCurrentAgent("root"),
+			WithModelStore(mockModelStore{}),
+			// Long enough (in the bubble's fake time) that the per-toolset
+			// deadline cannot fire; only the cancel unblocks the attempt.
+			WithToolStartTimeout(time.Hour),
+		)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		events := make(chan Event, 32)
+		done := make(chan struct{})
+		go func() {
+			rt.EmitStartupInfo(ctx, nil, NewChannelSink(events))
+			close(done)
+		}()
+
+		// The startup pass's own bounded attempt has entered the wedged
+		// Start — it now holds the single-flight lock. Park every other
+		// goroutine (the emit loop is blocked on the start outcome, past its
+		// top-of-loop ctx check) before canceling, so the cancellation
+		// deterministically loses that check's race.
+		<-wedged.entered
+		synctest.Wait()
+		cancel()
+
+		// EmitStartupInfo must return while the underlying Start is still
+		// wedged: release is closed only by the cleanup above, after this
+		// receive. Before the fix, the emit loop hung on the failure
+		// reporters' lock here and the bubble deadlocked.
+		<-done
+
+		close(events)
+		for e := range events {
+			if w, ok := e.(*WarningEvent); ok {
+				t.Fatalf("cancellation during a wedged start must not surface a warning; got %q", w.Message)
+			}
+		}
+		assert.EqualValues(t, 1, wedged.starts.Load(), "exactly one underlying Start ran and stayed wedged")
+	})
+}
+
 // TestEmitStartupInfo_EmitsProgressWhileSlowToolsetStarts guards the
 // progressive contract of emitToolsProgressively: an early fast toolset must
 // be counted in a ToolsetInfo event while a later toolset is still starting,
@@ -1588,9 +1766,10 @@ type recoveryAuthToolSet struct {
 
 func (r *recoveryAuthToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
 func (r *recoveryAuthToolSet) Start(context.Context) error                 { r.started = true; return nil }
-func (r *recoveryAuthToolSet) Stop(context.Context) error                  { r.started = false; return nil }
-func (r *recoveryAuthToolSet) IsStarted() bool                             { return r.started }
-func (r *recoveryAuthToolSet) Restart(context.Context) error               { return r.restartErr }
+
+func (r *recoveryAuthToolSet) Stop(context.Context) error    { r.started = false; return nil }
+func (r *recoveryAuthToolSet) IsStarted() bool               { return r.started }
+func (r *recoveryAuthToolSet) Restart(context.Context) error { return r.restartErr }
 
 // TestEmitStartupInfo_RecoveryAuthNoticeEmittedOnce is the regression test for
 // blocking issue 3: when a toolset was previously started and working but the

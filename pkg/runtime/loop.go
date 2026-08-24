@@ -214,7 +214,13 @@ func (r *LocalRuntime) finalizeEventChannel(ctx context.Context, sess *session.S
 	// cleanup hooks run even when the stream was interrupted (e.g. Ctrl+C).
 	r.executeSessionEndHooks(context.WithoutCancel(ctx), sess, a)
 
-	r.executeOnUserInputHooks(ctx, sess.ID, "stream stopped")
+	// on_user_input means "the agent is now waiting for the user". Only a
+	// root interactive stream hands control back to a user when it ends;
+	// sub-session and non-interactive teardowns (background agents, MCP
+	// serve, A2A, evals) have nobody to wait for and must not fire it (#4004).
+	if !sess.IsSubSession() && !sess.NonInteractive {
+		r.executeOnUserInputHooks(ctx, a, sess.ID, "stream stopped")
+	}
 
 	r.telemetry.RecordSessionEnd(ctx)
 
@@ -670,12 +676,14 @@ func emptyTurnWarning(res streamResult, prevTurnMadeToolCalls bool, modelID stri
 			"Model %s produced only reasoning and no reply (stop reason: %s). "+
 				"Thinking-mode models can emit reasoning tokens without a final answer; "+
 				"the reasoning is not used as the response.",
-			modelID, reason)
+			modelID, reason,
+		)
 	default:
 		return fmt.Sprintf(
 			"Model %s returned an empty response (stop reason: %s). "+
 				"This usually means the provider rate-limited the request or the output token limit was reached.",
-			modelID, reason)
+			modelID, reason,
+		)
 	}
 }
 
@@ -929,7 +937,8 @@ func (r *LocalRuntime) runTurn(
 		errMsg := fmt.Sprintf(
 			"Agent terminated: detected %d consecutive identical calls to %s. "+
 				"This indicates a degenerate loop where the model is not making progress.",
-			consecutive, toolName)
+			consecutive, toolName,
+		)
 		// Mark the session span as Error so loop-termination shows up
 		// in trace status / error-rate dashboards instead of blending
 		// in with normal completions.

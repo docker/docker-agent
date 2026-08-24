@@ -40,6 +40,10 @@ const defaultWaitTimeout = 10 * time.Second
 // pollInterval is how often WaitFor re-checks the latest frame.
 const pollInterval = 5 * time.Millisecond
 
+// defaultStopTimeout bounds how long stop waits for the program's run loop to
+// exit after Quit before declaring the shutdown failed.
+const defaultStopTimeout = 5 * time.Second
+
 // programStarter is the subset of *tea.Program the driver relies on. It lets
 // tests inject a fake in the harness's own unit tests.
 type programStarter interface {
@@ -59,7 +63,14 @@ type Driver struct {
 	sink      frameSink
 	clipboard *clipboardStore
 
+	// cleanupModel releases model-managed resources after the program has
+	// stopped; nil when the model doesn't implement resourceCleaner.
+	cleanupModel func()
+
 	waitTimeout time.Duration
+	// stopTimeout bounds stop's wait for the run loop to exit. Unit tests of
+	// the harness shrink it to exercise the timeout path quickly.
+	stopTimeout time.Duration
 	runDone     chan struct{}
 }
 
@@ -107,6 +118,17 @@ type programReady interface {
 	SetProgram(p *tea.Program)
 }
 
+// resourceCleaner is the optional interface a model can implement to release
+// resources it manages outside the Bubble Tea loop (state stores, watchers,
+// supervisors). The driver invokes it once the program has fully stopped, so
+// files those resources hold open (e.g. a SQLite store under t.TempDir) are
+// closed before the test's temp dirs are removed — on Windows an open handle
+// makes that removal fail. tui.New's model satisfies it via CleanupForTesting,
+// which must be idempotent.
+type resourceCleaner interface {
+	CleanupForTesting()
+}
+
 // New starts model in a real, renderer-less tea.Program and returns a Driver.
 // width and height seed the initial window size. The program is stopped and
 // awaited automatically via t.Cleanup.
@@ -145,7 +167,11 @@ func New(tb testing.TB, model tea.Model, width, height int, opts ...Option) *Dri
 		sink:        sink,
 		clipboard:   clipboard,
 		waitTimeout: defaultWaitTimeout,
+		stopTimeout: defaultStopTimeout,
 		runDone:     make(chan struct{}),
+	}
+	if rc, ok := model.(resourceCleaner); ok {
+		d.cleanupModel = rc.CleanupForTesting
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -171,13 +197,19 @@ func New(tb testing.TB, model tea.Model, width, height int, opts ...Option) *Dri
 
 // stop quits the program and waits for the run loop to return so background
 // goroutines (supervisor subscriptions, streaming) are torn down before the
-// test ends.
+// test ends. Model-managed resources are released only once that wait
+// confirms the run loop exited: they must not be closed under a still-running
+// program, so on timeout the cleanup hook is skipped and the resources leak
+// into the failed test.
 func (d *Driver) stop() {
 	d.program.Quit()
 	select {
 	case <-d.runDone:
-	case <-time.After(5 * time.Second):
-		d.tb.Error("tuitest: program did not shut down within 5s")
+		if d.cleanupModel != nil {
+			d.cleanupModel()
+		}
+	case <-time.After(d.stopTimeout):
+		d.tb.Errorf("tuitest: program did not shut down within %s", d.stopTimeout)
 	}
 	if d.sink != nil {
 		if err := d.sink.err(); err != nil {

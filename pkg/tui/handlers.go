@@ -244,7 +244,8 @@ func (m *appModel) handleCompactSession(msg messages.CompactSessionMsg) (tea.Mod
 	}
 	return m, notification.InfoCmd(fmt.Sprintf(
 		"Compaction requested for %s; it runs at the session's next safe point.",
-		compactTargetLabel(msg)))
+		compactTargetLabel(msg),
+	))
 }
 
 // compactTargetsCurrentSession reports whether msg addresses the current
@@ -898,6 +899,7 @@ func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 		ExpandThinking:        settings.GetExpandThinking(),
 		HideToolResults:       settings.HideToolResults,
 		RenderImages:          settings.GetRenderImages(),
+		ShowBanner:            settings.GetShowBanner(),
 		YOLO:                  settings.YOLO,
 		RestoreTabs:           settings.GetRestoreTabs(),
 		Snapshot:              settings.SnapshotsEnabled(),
@@ -922,9 +924,11 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 
 	m.sendMode = messages.ParseSendMode(string(preferences.SendMode))
 	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
+	m.showBanner = preferences.ShowBanner
 	for _, page := range m.chatPages {
 		page.SetSendMode(m.sendMode)
 		page.SetInterruptMode(m.interruptMode)
+		page.SetShowBanner(m.showBanner)
 	}
 	if m.sessionState.SplitDiffView() != preferences.SplitDiffView {
 		m.sessionState.SetSplitDiffView(preferences.SplitDiffView)
@@ -1001,6 +1005,7 @@ func savePreferences(p messages.Preferences) error {
 		s.WarnOnCacheMiss = boolPreference(p.WarnOnCacheMiss, false)
 		s.HideToolResults = p.HideToolResults
 		s.RenderImages = boolPreference(p.RenderImages, true)
+		s.ShowBanner = boolPreference(p.ShowBanner, true)
 		s.YOLO = p.YOLO
 		s.Lean = p.Lean
 		s.Sound = p.Sound
@@ -1060,7 +1065,8 @@ func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.Send
 	return savePreferences(messages.Preferences{
 		Layout: layout, SendMode: mode, SplitDiffView: settings.GetSplitDiffView(),
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
-		RenderImages: settings.GetRenderImages(), YOLO: settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
+		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
+		YOLO: settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
 		CacheStablePrompts: settings.CacheStablePromptsEnabled(),
 		WarnOnCacheMiss:    settings.CacheMissWarningsEnabled(),
 		Lean:               settings.Lean, TabTitleMaxLength: settings.GetTabTitleMaxLength(),

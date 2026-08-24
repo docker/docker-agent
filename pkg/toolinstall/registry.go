@@ -162,14 +162,14 @@ var (
 // NewRegistry creates a new Registry with default settings.
 func NewRegistry() *Registry {
 	return &Registry{
-		// httpclient.NewSafeClient enforces dial-time SSRF protection
-		// even though baseURL is hard-coded — a hostname that today
-		// resolves to a public IP can be DNS-rebound to 127.0.0.1 or
-		// 169.254.169.254 and we want the request to fail at dial,
-		// not after exfiltration. The 30s timeout matches the de-facto
-		// upper bound the request context already enforces. The
-		// transport is OTel-wrapped inside NewSafeClient itself, so
-		// outbound registry calls inject `traceparent` when enabled.
+		// httpclient.NewSafeClient enforces SSRF protection: the Aqua
+		// registry at raw.githubusercontent.com is not in the Docker-owned
+		// allowlist, so it always uses the direct SSRF-guarded path (no
+		// Desktop proxy). Dial-time enforcement refuses non-public IPs,
+		// defeating DNS rebinding. The 30s timeout matches the de-facto
+		// upper bound the request context already enforces. The transport is
+		// OTel-wrapped inside NewSafeClient itself, so outbound registry
+		// calls inject `traceparent` when enabled.
 		httpClient: httpclient.NewSafeClient(30*time.Second, false),
 		baseURL:    registryBaseURL,
 		cacheDir:   RegistryDir(),

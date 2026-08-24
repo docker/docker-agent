@@ -486,7 +486,11 @@ func (r *LocalRuntime) elicitationHandler(ctx context.Context, req *mcp.ElicitPa
 		}, nil
 	}
 
-	r.executeOnUserInputHooks(ctx, "", "elicitation")
+	// No *agent.Agent is threaded into MCP handler callbacks, so fall back
+	// to the current agent here. The session ID is the conversation ID the
+	// run loop seeded into ctx (empty for elicitations outside a run, e.g.
+	// startup OAuth probes).
+	r.executeOnUserInputHooks(ctx, r.CurrentAgent(), genai.ConversationIDFromContext(ctx), "elicitation")
 
 	// The registry key (and the ElicitationID surfaced to clients for
 	// ResumeElicitation routing) is always a freshly generated, internal

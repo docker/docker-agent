@@ -743,7 +743,7 @@ func TestRenderCacheInvalidatesOnAnimationTickWithAnimatedContent(t *testing.T) 
 	// An animation tick must refresh the cache so the spinner frame advances.
 	// onAnimationTick now re-renders eagerly inside Update, so the resulting
 	// View() output stays consistent with the latest tick.
-	m.Update(animation.TickMsg{Frame: 1})
+	m.Update(animation.TickMsg{})
 
 	require.NotEmpty(t, m.renderedLines)
 	require.Contains(t, m.View(), "running_tool")
@@ -773,7 +773,7 @@ func TestRenderCacheNotInvalidatedOnAnimationTickWithoutAnimatedContent(t *testi
 	m.renderDirty = false
 
 	// Send animation tick - should NOT invalidate cache because no animated content
-	m.Update(animation.TickMsg{Frame: 1})
+	m.Update(animation.TickMsg{})
 
 	// Cache should still be clean (not dirty)
 	assert.False(t, m.renderDirty, "renderDirty should remain false after animation tick without animated content")
@@ -1689,6 +1689,18 @@ func TestAddAgentReturnWithoutSpinnerAppends(t *testing.T) {
 	assert.Len(t, m.messages, 2, "empty agent names add nothing")
 }
 
+func TestAppendFirstAssistantChunkAfterSpinnerRemoval(t *testing.T) {
+	t.Parallel()
+
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+	m.addMessage(types.Agent(types.MessageTypeSpinner, "root", "working"))
+	m.AppendToLastMessage("root", "first chunk")
+
+	require.Len(t, m.messages, 1)
+	assert.Equal(t, types.MessageTypeAssistant, m.messages[0].Type)
+	assert.Equal(t, "first chunk", m.messages[0].Content)
+}
+
 // TestAgentReturnIsInertInList verifies the transition is neither selectable
 // nor hoverable-for-copy nor animated: it must not be treated like assistant
 // or tool content by the list machinery.
@@ -1708,4 +1720,29 @@ func TestAgentReturnIsInertInList(t *testing.T) {
 	assert.Contains(t, out, "researcher")
 	assert.Contains(t, out, types.AgentReturnLabel)
 	assert.NotContains(t, out, types.MessageCopyLabel)
+}
+
+func TestMessageCacheBoundsHistoricalRerender(t *testing.T) {
+	runtime := animation.NewRuntime()
+	m := NewScrollableView(runtime, 120, 40, &service.SessionState{}).(*model)
+	sess := &session.Session{ID: "work"}
+	body := strings.Repeat("word ", 1000)
+	for i := range 1000 {
+		role := chat.MessageRoleUser
+		if i%2 == 1 {
+			role = chat.MessageRoleAssistant
+		}
+		sess.Messages = append(sess.Messages, session.NewMessageItem(&session.Message{AgentName: "root", Message: chat.Message{Role: role, Content: body}}))
+	}
+	_ = m.LoadFromSession(sess)
+	_ = m.View()
+	require.False(t, m.renderDirty)
+	before := m.renderedItems.Len()
+	_, _ = m.Update(animation.TickMsg{})
+	_ = m.View()
+	require.Equal(t, before, m.renderedItems.Len(), "unchanged tick preserves bounded cache")
+	_ = m.AppendToLastMessage("root", " small")
+	_ = m.View()
+	require.False(t, m.renderDirty)
+	require.Equal(t, before, m.renderedItems.Len(), "single append does not trigger history-wide cache growth")
 }

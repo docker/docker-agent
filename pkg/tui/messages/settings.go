@@ -161,6 +161,7 @@ type Preferences struct {
 	ExpandThinking        bool
 	HideToolResults       bool
 	RenderImages          bool
+	ShowBanner            bool
 	YOLO                  bool
 	RestoreTabs           bool
 	Snapshot              bool

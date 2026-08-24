@@ -1,10 +1,18 @@
+//nolint:unparam // Shared performance harness is activated by descendant benchmark tests.
 package tui
 
 import (
+	"fmt"
+	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/app"
+	chatmsg "github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
@@ -12,13 +20,47 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
 
-func wallClockRoot(tb testing.TB, width, height int) *appModel {
+type wallClockCountingWriter struct{ writes, bytes atomic.Uint64 }
+
+func (w *wallClockCountingWriter) Write(p []byte) (int, error) {
+	w.writes.Add(1)
+	w.bytes.Add(uint64(len(p)))
+	return len(p), nil
+}
+
+func mixedHistorySession(count int) (*session.Session, int, int) {
+	body := strings.Repeat("word ", 996) + "**bold** `code` λ界 end" // exactly 1,000 words
+	items := make([]session.Item, 0, count)
+	totalBytes := 0
+	for i := range count {
+		id := fmt.Sprintf("call-%04d", i)
+		var msg *session.Message
+		switch i % 5 {
+		case 0:
+			msg = session.UserMessage(body)
+		case 1:
+			msg = &session.Message{AgentName: "root", Message: chatmsg.Message{Role: chatmsg.MessageRoleAssistant, Content: "## Assistant\n\n" + body}}
+		case 2:
+			msg = &session.Message{AgentName: "root", Message: chatmsg.Message{Role: chatmsg.MessageRoleAssistant, Content: body, ReasoningContent: body}}
+		case 3:
+			msg = &session.Message{AgentName: "root", Message: chatmsg.Message{Role: chatmsg.MessageRoleAssistant, Content: body, ReasoningContent: body, ToolCalls: []tools.ToolCall{{ID: id, Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"fixture"}`}}}, ToolDefinitions: []tools.Tool{{Name: "read_file", Description: body}}}}
+		default:
+			msg = &session.Message{AgentName: "root", Message: chatmsg.Message{Role: chatmsg.MessageRoleTool, ToolCallID: fmt.Sprintf("call-%04d", i-1), Content: body}}
+		}
+		items = append(items, session.NewMessageItem(msg))
+		totalBytes += len(msg.Message.Content) + len(msg.Message.ReasoningContent)
+	}
+	return &session.Session{ID: "profile", Title: "profile", Messages: items}, count * 1000, totalBytes
+}
+
+func wallClockRoot(tb testing.TB, width, height int) (*appModel, time.Duration, runtime.MemStats) {
 	tb.Helper()
 	if setter, ok := tb.(interface{ Setenv(key, value string) }); ok {
 		home := tb.TempDir()
 		setter.Setenv("HOME", home)
 		setter.Setenv("USERPROFILE", home)
 	}
+	started := time.Now()
 	sess := &session.Session{ID: "profile", Title: "profile"}
 	a := app.New(tb.Context(), stubRuntime{}, sess)
 	m := New(tb.Context(), nil, a, "", func() {}, WithHideSidebar()).(*appModel)
@@ -39,5 +81,7 @@ func wallClockRoot(tb testing.TB, width, height int) *appModel {
 	m.handleWindowResize(width, height)
 	_ = m.Init() // synchronously loads the session; returned one-shot commands are warm-up only
 	_ = m.View()
-	return m
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	return m, time.Since(started), memory
 }

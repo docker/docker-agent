@@ -36,6 +36,9 @@ type mockChatPage struct {
 
 	// interruptMode records the last SetInterruptMode value.
 	interruptMode messages.InterruptMode
+
+	// showBanner records the last SetShowBanner value.
+	showBanner bool
 }
 
 func (m *mockChatPage) Init() tea.Cmd                          { return nil }
@@ -64,6 +67,10 @@ func (m *mockChatPage) SetLayoutSettings(messages.LayoutSettings) tea.Cmd {
 func (m *mockChatPage) SetSendMode(messages.SendMode) {}
 func (m *mockChatPage) SetInterruptMode(mode messages.InterruptMode) {
 	m.interruptMode = mode
+}
+
+func (m *mockChatPage) SetShowBanner(show bool) {
+	m.showBanner = show
 }
 func (m *mockChatPage) SetRoutingID(string)       {}
 func (m *mockChatPage) TakeRoutedTimers() tea.Cmd { return nil }

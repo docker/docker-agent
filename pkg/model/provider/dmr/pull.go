@@ -182,8 +182,8 @@ func cleanPullStderr(raw string) string {
 	var lines []string
 	for line := range strings.SplitSeq(raw, "\n") {
 		// Progress bars rewrite a line in place with '\r'; keep the last state.
-		if i := strings.LastIndex(line, "\r"); i >= 0 {
-			line = line[i+1:]
+		if _, after, ok := strings.CutLast(line, "\r"); ok {
+			line = after
 		}
 		line = strings.TrimRight(line, " \t")
 		if strings.TrimSpace(line) == "" {

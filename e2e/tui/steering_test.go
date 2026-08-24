@@ -10,6 +10,7 @@ package tui_test
 
 import (
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -33,13 +34,26 @@ func steeringProxyOptions() *fake.ProxyOptions {
 	}
 }
 
+// newStreamingTUI builds the steering harness and, on Windows only, raises
+// the WaitFor deadline to 30s: the simulated stream replays slower there
+// (issue #3983). Applied after construction because newTUIWithProxyOptions
+// does not forward tuitest options; it is safe before any interaction.
+func newStreamingTUI(t *testing.T) *tuitest.Driver {
+	t.Helper()
+	d := newTUIWithProxyOptions(t, "testdata/basic.yaml", 120, 40, steeringProxyOptions())
+	if runtime.GOOS == "windows" {
+		tuitest.WithTimeout(30 * time.Second)(d)
+	}
+	return d
+}
+
 // TestChat_SteerWhileStreaming submits a second message while the agent is
 // still streaming its first answer. The message must be steered into the
 // ongoing stream: the steering toast appears, no queue toast is shown, and
 // once the runtime drains the message the transcript shows the injected user
 // bubble followed by the agent's answer to it.
 func TestChat_SteerWhileStreaming(t *testing.T) {
-	d := newTUIWithProxyOptions(t, "testdata/basic.yaml", 120, 40, steeringProxyOptions())
+	d := newStreamingTUI(t)
 
 	// Draft the follow-up as a single paste so it costs one Update instead of
 	// one per keystroke (keystrokes are expensive under -race and would eat
@@ -71,7 +85,7 @@ func TestChat_SteerWhileStreaming(t *testing.T) {
 // producing a second turn with its own answer. The switch must also be
 // persisted to the user config.
 func TestChat_QueueSendModeWhileStreaming(t *testing.T) {
-	d := newTUIWithProxyOptions(t, "testdata/basic.yaml", 120, 40, steeringProxyOptions())
+	d := newStreamingTUI(t)
 
 	// Flip the send mode on the Behavior tab of /settings: open the dialog,
 	// switch tab, cycle Steer → Queue, apply.

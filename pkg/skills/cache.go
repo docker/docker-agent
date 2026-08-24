@@ -28,8 +28,10 @@ const remoteHTTPTimeout = 30 * time.Second
 // as instructions, so a hostile (or compromised) registry could otherwise
 // be used to read internal endpoints (loopback, RFC1918, link-local incl.
 // cloud metadata at 169.254.169.254) and exfiltrate them through prompt
-// injection. The SSRF-safe client refuses such targets at dial time, after
-// DNS resolution, defeating DNS rebinding.
+// injection. Remote skill hosts are not in the Docker-owned allowlist, so
+// they always use the direct SSRF-guarded path (no Desktop proxy): the
+// client refuses such targets at dial time, after DNS resolution, defeating
+// DNS rebinding.
 //
 // Tests in this package replace the var via TestMain (see main_test.go)
 // because httptest.NewServer binds to 127.0.0.1.

@@ -156,13 +156,16 @@ func (t *Team) Size() int {
 }
 
 func (t *Team) StopToolSets(ctx context.Context) error {
+	var errs []error
 	for _, agent := range t.agents {
+		// One agent failing to stop (e.g. a wedged toolset) must not leave
+		// later agents' toolsets running: keep stopping and aggregate.
 		if err := agent.StopToolSets(ctx); err != nil {
-			return fmt.Errorf("failed to stop tool sets: %w", err)
+			errs = append(errs, fmt.Errorf("failed to stop tool sets of agent %s: %w", agent.Name(), err))
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // AgentConfig returns the raw resolved config for the named agent and true

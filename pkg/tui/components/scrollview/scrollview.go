@@ -296,6 +296,57 @@ func (m *Model) ViewWithLines(visibleLines []string) string {
 	return m.viewWithLines(visibleLines, -1)
 }
 
+// ViewWithPaddedLines renders pre-sliced lines that are already exactly
+// ContentWidth columns wide. It skips ANSI/grapheme measurement and wrapping;
+// callers must uphold the width contract.
+func (m *Model) ViewWithPaddedLines(visibleLines []string) string {
+	if m.width <= 0 || m.height <= 0 {
+		return ""
+	}
+	m.syncScrollbar()
+	if m.NeedsScrollbar() && len(visibleLines) < m.height {
+		result := make([]string, m.height)
+		copy(result, visibleLines)
+		visibleLines = result
+	}
+	return m.composePadded(visibleLines)
+}
+
+func (m *Model) composePadded(lines []string) string {
+	switch {
+	case m.NeedsScrollbar():
+		sbLines := m.sb.ViewLines()
+		gap := strings.Repeat(" ", m.gapWidth)
+		var b strings.Builder
+		for i, line := range lines {
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(line)
+			b.WriteString(gap)
+			if i < len(sbLines) {
+				b.WriteString(sbLines[i])
+			} else {
+				b.WriteString(strings.Repeat(" ", scrollbar.Width))
+			}
+		}
+		return b.String()
+	case m.reserveScrollbarSpace:
+		blank := strings.Repeat(" ", m.gapWidth+scrollbar.Width)
+		var b strings.Builder
+		for i, line := range lines {
+			if i > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(line)
+			b.WriteString(blank)
+		}
+		return b.String()
+	default:
+		return strings.Join(lines, "\n")
+	}
+}
+
 // ViewWithRestyledLines is like [Model.ViewWithLines] for callers whose
 // visibleLines are sliced from the content set via [Model.SetContent] at the
 // current scroll offset (possibly restyled, e.g. selection or hover

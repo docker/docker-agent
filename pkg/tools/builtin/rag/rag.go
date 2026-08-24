@@ -87,9 +87,12 @@ func (t *ToolSet) Start(ctx context.Context) error {
 		return nil
 	}
 
-	// We create a child context so we can explicitly cancel the watcher and event goroutines
-	// when Stop() is called, preventing goroutine leaks if the parent context outlives this toolset.
-	watchCtx, cancel := context.WithCancel(ctx)
+	// The watcher and event forwarder are long-lived and owned by Stop() via
+	// cancelWatcher: detach them from the caller's cancellation — Start may
+	// run under a short-lived startup-probe context — while keeping its values
+	// (logging, tracing). Initialize below still uses the caller's ctx so a
+	// canceled startup aborts indexing.
+	watchCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	t.cancelWatcher = cancel
 
 	// Forward RAG manager events if a callback is set.

@@ -184,6 +184,7 @@ func (s *Server) sessionsReady(c echo.Context) error {
 }
 
 func (s *Server) getAgents(c echo.Context) error {
+	// A failing source must not hide healthy agents from callers.
 	agents := []api.Agent{}
 	for k, agentSource := range s.sm.Sources {
 		slog.Debug("API source", "source", agentSource.Name())
@@ -237,24 +238,22 @@ func agentsAPIEntry(name string, cfg *latest.Config) (api.Agent, bool) {
 }
 
 func (s *Server) getAgentConfig(c echo.Context) error {
-	agentID := c.Param("id")
-
-	for k, agentSource := range s.sm.Sources {
-		if k != agentID {
-			continue
-		}
-
-		slog.Debug("API source", "source", agentSource.Name())
-		cfg, err := config.Load(c.Request().Context(), agentSource)
-		if err != nil {
-			slog.Error("Failed to load config from API source", "key", k, "error", err)
-			continue
-		}
-
-		return c.JSON(http.StatusOK, cfg)
+	cfg, err := s.sm.LoadAgentConfig(c.Request().Context(), c.Param("id"))
+	if err != nil {
+		return agentSourceHTTPError("failed to load agent source", err)
 	}
+	return c.JSON(http.StatusOK, cfg)
+}
 
-	return echo.NewHTTPError(http.StatusNotFound)
+func agentSourceHTTPError(operation string, err error) error {
+	switch {
+	case errors.Is(err, ErrAgentNotFound):
+		return echo.NewHTTPError(http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrAgentSourceUnavailable):
+		return echo.NewHTTPError(http.StatusBadGateway, fmt.Sprintf("%s: %v", operation, err))
+	default:
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("%s: %v", operation, err))
+	}
 }
 
 func (s *Server) getSessions(c echo.Context) error {
@@ -293,7 +292,7 @@ func (s *Server) createSession(c echo.Context) error {
 		if errors.Is(err, ErrInvalidWorkingDir) {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to create session: %v", err))
+		return agentSourceHTTPError("failed to create session", err)
 	}
 
 	return c.JSON(http.StatusOK, sess)
@@ -431,7 +430,7 @@ func (s *Server) updateSessionSafetyPolicy(c echo.Context) error {
 func (s *Server) getAgentToolCount(c echo.Context) error {
 	count, err := s.sm.GetAgentToolCount(c.Request().Context(), c.Param("id"), c.Param("agent_name"))
 	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to get agent tool count: %v", err))
+		return agentSourceHTTPError("failed to get agent tool count", err)
 	}
 
 	return c.JSON(http.StatusOK, map[string]int{"available_tools": count})
@@ -519,7 +518,7 @@ func (s *Server) runAgent(c echo.Context) error {
 		if errors.Is(err, ErrModelSwitchingNotSupported) {
 			return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
 		}
-		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to run session: %v", err))
+		return agentSourceHTTPError("failed to run session", err)
 	}
 
 	c.Response().Header().Set("Content-Type", "text/event-stream")

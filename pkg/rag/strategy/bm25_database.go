@@ -135,7 +135,8 @@ func (d *bm25DB) GetAllDocuments(ctx context.Context) ([]database.Document, erro
 		`
 	SELECT id, source_path, chunk_index, content, file_hash, created_at
 	FROM %s
-	`, d.docsTable)
+	`, d.docsTable,
+	)
 
 	rows, err := d.db.QueryContext(ctx, query)
 	if err != nil {
@@ -181,7 +182,8 @@ func (d *bm25DB) SetFileMetadata(ctx context.Context, metadata database.FileMeta
 		file_hash = excluded.file_hash,
 		last_indexed = CURRENT_TIMESTAMP,
 		chunk_count = excluded.chunk_count
-	`, d.metadataTable)
+	`, d.metadataTable,
+	)
 
 	_, err := d.db.ExecContext(ctx, query, metadata.SourcePath, metadata.FileHash, metadata.ChunkCount)
 	return err

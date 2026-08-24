@@ -92,7 +92,9 @@ func (m *mockRuntime) Stop()                                                    
 func (m *mockRuntime) Steer(_ context.Context, _ runtime.QueuedMessage) error    { return nil }
 func (m *mockRuntime) FollowUp(_ context.Context, _ runtime.QueuedMessage) error { return nil }
 func (m *mockRuntime) QueueStatus() runtime.QueueStatus                          { return runtime.QueueStatus{} }
-func (m *mockRuntime) TogglePause(context.Context) (bool, error)                 { return false, nil }
+
+func (m *mockRuntime) TogglePause(context.Context) (bool, error) { return false, nil }
+
 func (m *mockRuntime) SetAgentModel(context.Context, string, string) error {
 	return nil
 }

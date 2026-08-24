@@ -44,11 +44,13 @@
 package mcpcatalog
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -491,7 +493,7 @@ func (t *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 	// Tools() invocations, but for a given snapshot we want a deterministic
 	// merged list so model-side prompt caches and TUI rendering don't
 	// flicker on each turn.
-	sort.Slice(enabled, func(i, j int) bool { return enabled[i].id < enabled[j].id })
+	slices.SortFunc(enabled, func(a, b enabledServer) int { return cmp.Compare(a.id, b.id) })
 
 	for _, e := range enabled {
 		if err := ctx.Err(); err != nil {
@@ -645,7 +647,7 @@ func (t *Toolset) handleSearch(_ context.Context, args SearchArgs) (*tools.ToolC
 		return tools.ResultError(fmt.Sprintf("no remote MCP servers match %q (catalog has %d entries)", args.Query, t.catalog.Count)), nil
 	}
 
-	sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+	slices.SortFunc(matches, func(a, b SearchResult) int { return cmp.Compare(a.ID, b.ID) })
 
 	out, err := json.Marshal(matches)
 	if err != nil {
@@ -695,7 +697,8 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 		// Live entry — nothing to do.
 		return tools.ResultSuccess(fmt.Sprintf(
 			"server %q is already enabled and connected. Its tools (names starting with %q) are live; proceed with the user's original request using them.",
-			id, id+"_")), nil
+			id, id+"_",
+		)), nil
 	}
 
 	var notify func()
@@ -765,7 +768,8 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 
 	return tools.ResultSuccess(fmt.Sprintf(
 		"enabled %q (%s). Its tools (names starting with %q) are now active. Proceed with the user's original request using them right away; do not stop to ask for confirmation.",
-		id, server.Title, id+"_")), nil
+		id, server.Title, id+"_",
+	)), nil
 }
 
 // handleEnableStartError translates a failed Start() into a model-facing
@@ -807,13 +811,15 @@ func (t *Toolset) handleEnableStartError(ctx context.Context, id string, server 
 		t.disableAfterDecline(ctx, id, wrapped)
 		return tools.ResultError(fmt.Sprintf(
 			"user declined the authorization dialog for %q (%s). No tools were activated — do NOT claim the server is connected and do NOT call any %q tools. Tell the user the request needs them to authorize the connection. If the user then says \"yes\", \"retry\", or re-asks for the same thing, call %s for %q again to surface a fresh authorization dialog.",
-			id, server.Title, id+"_", ToolNameEnable, id))
+			id, server.Title, id+"_", ToolNameEnable, id,
+		))
 	case mcp.IsAuthorizationRequired(err):
 		slog.DebugContext(ctx, "Remote MCP server enable deferred: authorization required, leaving in enabled set for next interactive Tools() / enable to retry",
 			"id", id, "error", err)
 		return tools.ResultSuccess(fmt.Sprintf(
 			"enable requested for %q (%s); authorization is required and the host will surface the dialog. On your next turn, if tools whose names start with %q appear in your available tools, proceed with the user's original request using them. If NO such tools appear, the user dismissed the dialog — tell them the request needs them to authorize, and call %s for %q again if they want to retry.",
-			id, server.Title, id+"_", ToolNameEnable, id))
+			id, server.Title, id+"_", ToolNameEnable, id,
+		))
 	case errors.Is(err, context.Canceled):
 		// Roll back. The cancellation reaches us via the parent-ctx
 		// stash that handleUnmanagedOAuthFlow observes (oauth.go's
@@ -829,12 +835,14 @@ func (t *Toolset) handleEnableStartError(ctx context.Context, id string, server 
 		t.disableAfterDecline(ctx, id, wrapped)
 		return tools.ResultError(fmt.Sprintf(
 			"enable cancelled for %q before the connection completed — the user stopped the turn while authorization was pending. No tools were activated. Tell the user the request needs them to authorize the connection. Only call %s for %q again if the user asks to retry.",
-			id, ToolNameEnable, id))
+			id, ToolNameEnable, id,
+		))
 	default:
 		t.disableAfterDecline(ctx, id, wrapped)
 		return tools.ResultError(fmt.Sprintf(
 			"failed to connect to %q (%s): %v. No tools were activated — do NOT claim the server is connected. Report the failure to the user; they may need to fix their network or, if the server's credentials changed, call %s for %q before re-enabling.",
-			id, server.Title, err, ToolNameResetAuth, id))
+			id, server.Title, err, ToolNameResetAuth, id,
+		))
 	}
 }
 
@@ -933,7 +941,7 @@ func (t *Toolset) handleList(_ context.Context, _ ListArgs) (*tools.ToolCallResu
 			Started: ts.IsStarted(),
 		})
 	}
-	sort.Slice(enabled, func(i, j int) bool { return enabled[i].ID < enabled[j].ID })
+	slices.SortFunc(enabled, func(a, b EnabledServer) int { return cmp.Compare(a.ID, b.ID) })
 
 	out, err := json.Marshal(enabled)
 	if err != nil {

@@ -301,6 +301,7 @@ func TestURLSource_Read_HTTPError(t *testing.T) {
 
 			_, err := newURLSourceForTest(server.URL, nil).Read(t.Context())
 			require.Error(t, err)
+			require.ErrorIs(t, err, ErrSourceFetchFailed)
 		})
 	}
 }
@@ -310,6 +311,7 @@ func TestURLSource_Read_ConnectionError(t *testing.T) {
 
 	_, err := newURLSourceForTest("http://invalid.invalid/config.yaml", nil).Read(t.Context())
 	require.Error(t, err)
+	require.ErrorIs(t, err, ErrSourceFetchFailed)
 }
 
 func TestURLSource_Read_CachesContent(t *testing.T) {
@@ -1094,4 +1096,30 @@ func TestResolveSources_URLReference_WithEnvProvider(t *testing.T) {
 	urlSrc, ok := source.(*urlSource)
 	require.True(t, ok)
 	assert.NotNil(t, urlSrc.envProvider)
+}
+
+func TestIsLocalhostHTTPHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		host     string
+		expected bool
+	}{
+		{"localhost", true},
+		{"LOCALHOST", true},
+		{"localhost.", true},      // trailing dot
+		{"LOCALHOST.", true},      // trailing dot, case insensitive
+		{"evil.localhost", false}, // *.localhost subdomains must be rejected
+		{"sub.localhost", false},
+		{"notlocalhost", false},
+		{"localhost.evil.com", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, isLocalhostHTTPHost(tt.host))
+		})
+	}
 }

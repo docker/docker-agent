@@ -377,7 +377,10 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		return tea.Batch(p.messages.ScrollToBottom(), sidebarCmd, p.setPendingResponse(true))
 	}
 
-	// Outermost stream stopped — fully clean up.
+	// Outermost stream stopped — fully clean up. This is the exact-content
+	// boundary for the active root response; nested stops leave the parent's
+	// deferred tail intact until the parent itself stops or the user re-enters it.
+	finalizeCmd := p.messages.FinalizeStream()
 	// Only play the success sound when the stream completed normally.
 	// Errors already trigger a failure sound via ErrorEvent, and
 	// user-initiated cancels don't warrant a chime.
@@ -402,7 +405,7 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		})
 	}
 
-	return tea.Batch(p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, queueCmd, exitCmd)
+	return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, queueCmd, exitCmd)
 }
 
 // handlePartialToolCall processes partial tool call events by rendering each

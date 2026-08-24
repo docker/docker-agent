@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.127.0] - 2026-08-21
+
+This release delivers Desktop PAC-aware egress with SSRF protections, several runtime and toolset fixes, and documentation updates for served-agent safety controls.
+
+## What's New
+
+- Adds Desktop PAC-aware egress for configured HTTP clients while preserving standalone proxy behavior and SSRF protections, covering agent/source fetches, sessions, tools, MCP HTTP transports, and MCP OAuth flows
+
+## Bug Fixes
+
+- Fixes slow toolset startup from blocking conversation turns; keeps turns responsive when a toolset start is already in progress or exceeds the start budget
+- Fixes `on_user_input` notifications firing incorrectly for sub-sessions, background agents, non-interactive runs, and canceled max-iteration waits — now only fires when an interactive root session is genuinely waiting for the next prompt
+- Fixes Desktop PAC transport detection, routing, and state retention across multiple egress and transport handling regressions
+- Fixes server to distinguish unavailable agent sources
+
+## Technical Changes
+
+- Extends Windows streaming TUI test timeouts to 30 seconds for simulated-stream scenarios
+- Updates CLI reference documentation for `serve a2a` safety flags (`--auth-token`, `--cors-origin`, `--insecure-no-auth`, `--safety`)
+- Adds documentation describing Desktop PAC egress controls and clarifying coverage for MCP OAuth and direct egress
+- Makes Desktop transport tests hermetic
+### Pull Requests
+
+- [#3999](https://github.com/docker/docker-agent/pull/3999) - fix: add Desktop PAC-aware egress with SSRF protections
+- [#4000](https://github.com/docker/docker-agent/pull/4000) - feat: harden served-agent safety controls
+- [#4002](https://github.com/docker/docker-agent/pull/4002) - docs: update CHANGELOG.md for v1.126.0
+- [#4003](https://github.com/docker/docker-agent/pull/4003) - docs: complete CLI reference for serve a2a safety flags
+- [#4005](https://github.com/docker/docker-agent/pull/4005) - test(e2e): extend Windows streaming TUI timeouts
+- [#4009](https://github.com/docker/docker-agent/pull/4009) - fix(tools): prevent slow startup from blocking turns
+- [#4010](https://github.com/docker/docker-agent/pull/4010) - fix(runtime): avoid false on_user_input notifications
+- [#4012](https://github.com/docker/docker-agent/pull/4012) - fix(runtime): scope harness prompt-selection to fresh vs resume session
+
+
 ## [v1.126.0] - 2026-08-18
 
 This release adds evaluation regression gating, session comparison for replay, and significant hardening of served-agent safety controls across A2A, MCP HTTP, and chat surfaces.
@@ -5551,3 +5584,5 @@ This release improves the terminal user interface with better error handling and
 [v1.125.0]: https://github.com/docker/docker-agent/releases/tag/v1.125.0
 
 [v1.126.0]: https://github.com/docker/docker-agent/releases/tag/v1.126.0
+
+[v1.127.0]: https://github.com/docker/docker-agent/releases/tag/v1.127.0

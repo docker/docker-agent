@@ -117,6 +117,7 @@ func TestCreateMCPTool_BareCommandNotFound_CreatesToolsetAnyway(t *testing.T) {
 	require.NotNil(t, tool)
 	assert.Equal(t, "mcp(stdio cmd=some-nonexistent-mcp-binary)", tools.DescribeToolSet(tool))
 } // TestCreateMCPTool_WorkingDir_ReachesSubprocess verifies that working_dir is
+
 // wired all the way through createMCPTool to the underlying stdio command (N5).
 func TestCreateMCPTool_WorkingDir_ReachesSubprocess(t *testing.T) {
 	t.Setenv("DOCKER_AGENT_TOOLS_DIR", t.TempDir())

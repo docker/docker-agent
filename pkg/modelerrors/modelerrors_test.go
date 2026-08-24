@@ -179,13 +179,15 @@ func TestClassifyOverflow(t *testing.T) {
 		{
 			name: "anthropic 413 with request_too_large body",
 			err: &StatusError{StatusCode: 413, Err: errors.New(
-				`POST "https://api.anthropic.com/v1/messages": 413 Payload Too Large {"type":"error","error":{"type":"request_too_large","message":"Request exceeds 32MB limit"}}`)},
+				`POST "https://api.anthropic.com/v1/messages": 413 Payload Too Large {"type":"error","error":{"type":"request_too_large","message":"Request exceeds 32MB limit"}}`,
+			)},
 			want: OverflowKindWire,
 		},
 		{
 			name: "openai context_length_exceeded structured code",
 			err: errors.New(
-				`POST "https://api.openai.com/v1/chat/completions": 400 Bad Request {"error":{"message":"maximum context length is 128000 tokens","type":"invalid_request_error","code":"context_length_exceeded"}}`),
+				`POST "https://api.openai.com/v1/chat/completions": 400 Bad Request {"error":{"message":"maximum context length is 128000 tokens","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+			),
 			want: OverflowKindTokens,
 		},
 		{
@@ -196,7 +198,8 @@ func TestClassifyOverflow(t *testing.T) {
 		{
 			name: "vertex 413 with prompt-too-long body — wire wins via 413",
 			err: &StatusError{StatusCode: 413, Err: errors.New(
-				`413 Payload Too Large {"error":{"message":"Prompt is too long"}}`)},
+				`413 Payload Too Large {"error":{"message":"Prompt is too long"}}`,
+			)},
 			want: OverflowKindWire,
 		},
 
@@ -204,13 +207,15 @@ func TestClassifyOverflow(t *testing.T) {
 		{
 			name: "anthropic 400 prompt too long",
 			err: errors.New(
-				`POST "https://api.anthropic.com/v1/messages": 400 Bad Request {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 137500 tokens > 135000 maximum"}}`),
+				`POST "https://api.anthropic.com/v1/messages": 400 Bad Request {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 137500 tokens > 135000 maximum"}}`,
+			),
 			want: OverflowKindTokens,
 		},
 		{
 			name: "gemini input token count exceeds maximum",
 			err: errors.New(
-				`googleapi: Error 400: input token count 200000 exceeds the maximum of 128000`),
+				`googleapi: Error 400: input token count 200000 exceeds the maximum of 128000`,
+			),
 			want: OverflowKindTokens,
 		},
 		{
@@ -260,7 +265,8 @@ func TestClassifyOverflow(t *testing.T) {
 		{
 			name: "anthropic image exceeds size",
 			err: errors.New(
-				`400 Bad Request {"error":{"message":"image exceeds 5 MB maximum: 5316852 bytes > 5242880 bytes"}}`),
+				`400 Bad Request {"error":{"message":"image exceeds 5 MB maximum: 5316852 bytes > 5242880 bytes"}}`,
+			),
 			want: OverflowKindMedia,
 		},
 		{
@@ -351,7 +357,8 @@ func TestOverflowKindOf(t *testing.T) {
 		t.Parallel()
 		// Anthropic 413 with structured body → wire
 		under := &StatusError{StatusCode: 413, Err: errors.New(
-			`413 Payload Too Large {"type":"error","error":{"type":"request_too_large","message":"too big"}}`)}
+			`413 Payload Too Large {"type":"error","error":{"type":"request_too_large","message":"too big"}}`,
+		)}
 		wrapped := NewContextOverflowError(under)
 		assert.Equal(t, OverflowKindWire, wrapped.Kind)
 

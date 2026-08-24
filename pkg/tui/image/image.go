@@ -110,6 +110,11 @@ type MarkdownReference struct {
 
 // MarkdownReferences extracts image references in document order.
 func MarkdownReferences(markdown string) []MarkdownReference {
+	// Plain text is overwhelmingly common during progressive streaming; avoid
+	// constructing a Goldmark AST until an image opener is even possible.
+	if !strings.Contains(markdown, "![") {
+		return nil
+	}
 	source := []byte(markdown)
 	document := goldmark.DefaultParser().Parse(text.NewReader(source))
 	var refs []MarkdownReference

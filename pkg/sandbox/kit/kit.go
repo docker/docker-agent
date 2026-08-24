@@ -24,6 +24,7 @@
 package kit
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -803,7 +804,7 @@ func (r *Result) PrintSummary(w io.Writer) {
 
 	skillFiles := r.skillFilesGrouped()
 	promptEntries := append([]Entry(nil), r.Manifest.PromptFiles...)
-	sort.Slice(promptEntries, func(i, j int) bool { return promptEntries[i].Target < promptEntries[j].Target })
+	slices.SortFunc(promptEntries, func(a, b Entry) int { return cmp.Compare(a.Target, b.Target) })
 
 	if len(skillFiles) == 0 && len(promptEntries) == 0 {
 		return
@@ -875,7 +876,7 @@ type skillGroup struct {
 // it sees exactly what the sandbox will see.
 func (r *Result) skillFilesGrouped() []skillGroup {
 	entries := append([]Entry(nil), r.Manifest.Skills...)
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Target < entries[j].Target })
+	slices.SortFunc(entries, func(a, b Entry) int { return cmp.Compare(a.Target, b.Target) })
 
 	groups := make([]skillGroup, 0, len(entries))
 	for _, e := range entries {

@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
@@ -920,6 +921,11 @@ func (sm *SessionManager) WaitStopped(ctx context.Context, sessionID string, tim
 // ErrSessionBusy is returned when a session is already processing a request.
 var ErrSessionBusy = errors.New("session is already processing a request")
 
+var (
+	ErrAgentNotFound          = errors.New("agent source not found")
+	ErrAgentSourceUnavailable = errors.New("agent source unavailable")
+)
+
 // RunSession runs a session with the given messages.
 //
 // When modelOverride is non-empty, it is applied to the session's current
@@ -1588,13 +1594,27 @@ func (sm *SessionManager) applyAuthorSafetyDefault(ctx context.Context, sess *se
 	}
 }
 
+func (sm *SessionManager) sourceLoadError(agentFilename string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, config.ErrSourceFetchFailed) {
+		return fmt.Errorf("%w: load %q: %w", ErrAgentSourceUnavailable, agentFilename, err)
+	}
+	return fmt.Errorf("load %q: %w", agentFilename, err)
+}
+
 func (sm *SessionManager) loadTeam(ctx context.Context, agentFilename string, runConfig *config.RuntimeConfig) (*team.Team, error) {
 	agentSource, err := sm.resolveSource(agentFilename)
 	if err != nil {
 		return nil, err
 	}
 
-	return teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
+	t, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
+	if err != nil {
+		return nil, sm.sourceLoadError(agentFilename, err)
+	}
+	return t, nil
 }
 
 // loadTeamWithConfig is like loadTeam but also returns the loaded model and
@@ -1606,7 +1626,26 @@ func (sm *SessionManager) loadTeamWithConfig(ctx context.Context, agentFilename 
 	}
 
 	allOpts := append(loaderdefaults.Opts(), opts...)
-	return teamloader.LoadWithConfig(ctx, agentSource, runConfig, allOpts...)
+	result, err := teamloader.LoadWithConfig(ctx, agentSource, runConfig, allOpts...)
+	if err != nil {
+		return nil, sm.sourceLoadError(agentFilename, err)
+	}
+	return result, nil
+}
+
+// LoadAgentConfig loads an agent configuration through the same source
+// resolution boundary as agent execution.
+func (sm *SessionManager) LoadAgentConfig(ctx context.Context, agentFilename string) (*latest.Config, error) {
+	agentSource, err := sm.resolveSource(agentFilename)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := config.Load(ctx, agentSource)
+	if err != nil {
+		return nil, sm.sourceLoadError(agentFilename, err)
+	}
+	return cfg, nil
 }
 
 // resolveSource looks up the agent source for agentFilename.
@@ -1640,7 +1679,7 @@ func (sm *SessionManager) resolveSource(agentFilename string) (config.Source, er
 		return match, nil
 	}
 
-	return nil, fmt.Errorf("agent not found: %s", agentFilename)
+	return nil, fmt.Errorf("%w: agent not found: %s", ErrAgentNotFound, agentFilename)
 }
 
 // applyRunModelOverride applies modelRef as the per-agent model override

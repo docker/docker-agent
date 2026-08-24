@@ -106,10 +106,7 @@ func (h *fetchHandler) CallTool(ctx context.Context, params ToolArgs) (*tools.To
 	// the unspecified address — even when DNS for an otherwise-public host
 	// resolves there. Operators who legitimately need to call internal
 	// services opt in via `allow_private_ips: true`.
-	var transport http.RoundTripper = httpclient.NewSSRFSafeTransport()
-	if h.allowPrivateIPs {
-		transport = http.DefaultTransport
-	}
+	transport := httpclient.TransportForAllowPrivateIPs(h.allowPrivateIPs)
 
 	headers := h.expander.ExpandMap(ctx, h.headers)
 

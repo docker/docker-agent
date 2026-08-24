@@ -11,7 +11,6 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
-	"github.com/docker/docker-agent/pkg/desktop/transport"
 	"github.com/docker/docker-agent/pkg/userid"
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -188,10 +187,9 @@ func WithQuery(query url.Values) Opt {
 	}
 }
 
-// newTransport returns an HTTP transport with automatic gzip compression disabled and using Docker Desktop proxy if available.
-func newTransport(ctx context.Context) http.RoundTripper {
-	// Get the base transport with Desktop proxy support
-	rt := transport.New(ctx)
+// newTransport returns an HTTP transport with automatic gzip compression disabled and Docker Desktop PAC support.
+func newTransport(_ context.Context) http.RoundTripper {
+	rt := newAllowPrivateIPsTransport()
 
 	// Disable compression for SSE streaming compatibility
 	// Handle both direct *http.Transport and the fallback transport wrapper

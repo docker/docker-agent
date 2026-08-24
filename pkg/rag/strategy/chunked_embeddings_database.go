@@ -78,7 +78,8 @@ func (d *chunkedVectorDB) createSchema(ctx context.Context) error {
 		PRIMARY KEY (source_path, chunk_index),
 		FOREIGN KEY (source_path) REFERENCES %s(source_path) ON DELETE CASCADE
 	);
-	`, d.filesTable, d.tablePrefix, d.filesTable, d.chunksTable, d.filesTable)
+	`, d.filesTable, d.tablePrefix, d.filesTable, d.chunksTable, d.filesTable,
+	)
 
 	_, err := d.db.ExecContext(ctx, schema)
 	return err
@@ -135,7 +136,8 @@ func (d *chunkedVectorDB) SearchSimilarVectors(ctx context.Context, queryEmbeddi
 	SELECT c.source_path, c.chunk_index, c.content, c.embedding, f.file_hash, f.indexed_at
 	FROM %s c
 	JOIN %s f ON c.source_path = f.source_path
-	`, d.chunksTable, d.filesTable)
+	`, d.chunksTable, d.filesTable,
+	)
 
 	rows, err := d.db.QueryContext(ctx, query)
 	if err != nil {

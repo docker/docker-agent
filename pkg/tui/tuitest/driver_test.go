@@ -2,6 +2,7 @@ package tuitest
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -91,6 +92,96 @@ func (m *quitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func TestDriver_SendSyncReturnsWhenMessageQuitsProgram(t *testing.T) {
 	d := New(t, &quitModel{}, 80, 24, WithTimeout(2*time.Second))
 	d.Press('q') // must not hang or fail even though no frame follows
+}
+
+// cleanupModel is a minimal model whose CleanupForTesting records when the
+// driver released model-managed resources and whether the program's run loop
+// had already exited at that point. The real TUI model owns OS resources
+// (the tui_state.db SQLite store) that must be closed after the program
+// stopped but before t.TempDir removal, which fails on Windows while the
+// file is still open.
+type cleanupModel struct {
+	runDone <-chan struct{}
+
+	// Written during the subtest's cleanup and read by the parent test after
+	// t.Run returned, so plain fields are safe.
+	calls        int
+	afterRunExit bool
+}
+
+func (m *cleanupModel) Init() tea.Cmd                       { return nil }
+func (m *cleanupModel) Update(tea.Msg) (tea.Model, tea.Cmd) { return m, nil }
+func (m *cleanupModel) View() tea.View                      { return tea.NewView("cleanup") }
+
+func (m *cleanupModel) CleanupForTesting() {
+	m.calls++
+	select {
+	case <-m.runDone:
+		m.afterRunExit = true
+	default:
+	}
+}
+
+func TestDriver_StopReleasesModelResources(t *testing.T) {
+	m := &cleanupModel{}
+	t.Run("session", func(t *testing.T) {
+		d := New(t, m, 80, 24)
+		m.runDone = d.runDone
+	})
+	// The subtest's cleanups have run, so stop() must have invoked the hook
+	// exactly once — and only once the run loop had exited, because resources
+	// must not be closed under a still-running program.
+	if m.calls != 1 {
+		t.Fatalf("CleanupForTesting calls = %d, want 1", m.calls)
+	}
+	if !m.afterRunExit {
+		t.Fatal("CleanupForTesting ran before the program's run loop exited")
+	}
+}
+
+// wedgedProgram is a programStarter whose Quit has no effect, standing in for
+// a Bubble Tea program whose run loop never exits during Driver.stop.
+type wedgedProgram struct{}
+
+func (wedgedProgram) Run() (tea.Model, error) { return nil, nil }
+func (wedgedProgram) Send(tea.Msg)            {}
+func (wedgedProgram) Quit()                   {}
+func (wedgedProgram) Wait()                   {}
+
+// recordingTB captures Error/Errorf calls so a test can assert on stop's
+// failure reporting without failing itself.
+type recordingTB struct {
+	testing.TB
+
+	errors []string
+}
+
+func (r *recordingTB) Error(args ...any) { r.errors = append(r.errors, fmt.Sprint(args...)) }
+func (r *recordingTB) Errorf(format string, args ...any) {
+	r.errors = append(r.errors, fmt.Sprintf(format, args...))
+}
+
+func TestDriver_StopSkipsCleanupWhenRunLoopHangs(t *testing.T) {
+	tb := &recordingTB{TB: t}
+	cleaned := false
+	d := &Driver{
+		tb:           tb,
+		program:      wedgedProgram{},
+		cleanupModel: func() { cleaned = true },
+		stopTimeout:  10 * time.Millisecond,
+		runDone:      make(chan struct{}), // never closed: the run loop hangs
+	}
+
+	d.stop()
+
+	// Releasing model resources under a possibly still-running program races
+	// the Bubble Tea loop, so a timed-out stop must skip the cleanup hook.
+	if cleaned {
+		t.Fatal("stop released model resources although the run loop never exited")
+	}
+	if len(tb.errors) != 1 || !strings.Contains(tb.errors[0], "did not shut down") {
+		t.Fatalf("stop errors = %q, want a single shutdown-timeout report", tb.errors)
+	}
 }
 
 func TestDriver_MouseHelpers(t *testing.T) {

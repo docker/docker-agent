@@ -104,7 +104,8 @@ func (m *MigrationManager) checkForUnknownMigrations(ctx context.Context) error 
 			"%w: you are running docker-agent %s which supports migrations up to %d, "+
 				"but the session database has migration %d from a newer version; "+
 				"please upgrade docker-agent to the latest version",
-			ErrNewerDatabase, version.Version, maxKnownID, maxAppliedID)
+			ErrNewerDatabase, version.Version, maxKnownID, maxAppliedID,
+		)
 	}
 
 	return nil

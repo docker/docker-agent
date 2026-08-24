@@ -301,6 +301,10 @@ type appModel struct {
 	// via /settings.
 	interruptMode messages.InterruptMode
 
+	// showBanner displays the ASCII-art startup banner on an empty
+	// conversation. Shared by every tab and managed via /settings.
+	showBanner bool
+
 	// buildCommandCategories is a function that returns the list of command categories.
 	buildCommandCategories func(context.Context, tea.Model) []commands.Category
 
@@ -535,6 +539,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		layoutSettings:                layoutSettingsFromConfig(userSettings.GetLayout()),
 		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
 		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
+		showBanner:                    userSettings.GetShowBanner(),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
 		appName:                       "docker agent",
@@ -665,6 +670,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithLayoutSettings(m.layoutSettings),
 		chat.WithSendMode(m.sendMode),
 		chat.WithInterruptMode(m.interruptMode),
+		chat.WithShowBanner(m.showBanner),
 	}
 
 	if m.leanMode {
@@ -3176,6 +3182,20 @@ func (m *appModel) cleanupManagedResources() {
 			m.supervisor.Shutdown()
 		}
 	})
+}
+
+// CleanupForTesting releases the model-managed resources (theme watcher, TUI
+// state store, session supervisor) without going through the interactive exit
+// flow. It must only be called after the Bubble Tea program has stopped —
+// running it against a live program races the event loop — and it is not a
+// production shutdown entrypoint. It covers only the model-managed resources
+// above, not the full interactive cleanupAll set (transcriber, editors, exit
+// safety net). External test harnesses call it — tuitest does so automatically
+// once the run loop has exited — so the SQLite state store's handle on
+// tui_state.db is released before t.TempDir removal, which otherwise fails on
+// Windows. Idempotent: it shares the once-guarded shutdown path.
+func (m *appModel) CleanupForTesting() {
+	m.cleanupManagedResources()
 }
 
 // cleanupAll cleans up all sessions, editors, and resources. It is invoked

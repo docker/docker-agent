@@ -65,7 +65,8 @@ func TestDoctorCommand_ReportsCredentialSource(t *testing.T) {
 
 	output, err := executeDoctor(t, nil, withDoctorTestEnv(
 		map[string]string{"ANTHROPIC_API_KEY": "sk-secret-value"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.Regexp(t, `anthropic\s+found\s+ANTHROPIC_API_KEY\s+environment`, output)
@@ -138,7 +139,8 @@ func TestDoctorCommand_EmptyValueIsNotACredential(t *testing.T) {
 
 	output, err := executeDoctor(t, nil, withDoctorTestEnv(
 		map[string]string{"OPENAI_API_KEY": "", "MISTRAL_API_KEY": "key"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.Regexp(t, `openai\s+not set`, output)
@@ -269,7 +271,8 @@ func TestDoctorCommand_JSON(t *testing.T) {
 
 	output, err := executeDoctor(t, []string{"--json"}, withDoctorTestEnv(
 		map[string]string{"OPENAI_API_KEY": "sk-json-secret"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.NotContains(t, output, "sk-json-secret", "secret values must never be printed")
@@ -299,7 +302,8 @@ func TestDoctorCommand_JSONReportsGitHubCopilot(t *testing.T) {
 
 	output, err := executeDoctor(t, []string{"--json"}, withDoctorTestEnv(
 		map[string]string{"GH_TOKEN": "gh-token"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.NotContains(t, output, "gh-token", "secret values must never be printed")
@@ -341,7 +345,8 @@ func TestDoctorCommand_AgentFileMissingVars(t *testing.T) {
 
 	output, err := executeDoctor(t, []string{path}, withDoctorTestEnv(
 		map[string]string{"ANTHROPIC_API_KEY": "key"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.Error(t, err)
 	statusErr, ok := errors.AsType[cli.StatusError](err)
@@ -360,7 +365,8 @@ func TestDoctorCommand_AgentFileVarsSatisfied(t *testing.T) {
 
 	output, err := executeDoctor(t, []string{path}, withDoctorTestEnv(
 		map[string]string{"OPENAI_API_KEY": "key"},
-		[]string{"ai/qwen3:latest"}, nil))
+		[]string{"ai/qwen3:latest"}, nil,
+	))
 
 	require.NoError(t, err)
 	assert.Regexp(t, `OPENAI_API_KEY\s+models\s+found\s+environment`, output)

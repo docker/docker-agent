@@ -80,7 +80,8 @@ func (d *semanticVectorDB) createSchema(ctx context.Context) error {
 		PRIMARY KEY (source_path, chunk_index),
 		FOREIGN KEY (source_path) REFERENCES %s(source_path) ON DELETE CASCADE
 	);
-	`, d.filesTable, d.tablePrefix, d.filesTable, d.chunksTable, d.filesTable)
+	`, d.filesTable, d.tablePrefix, d.filesTable, d.chunksTable, d.filesTable,
+	)
 
 	if _, err := d.db.ExecContext(ctx, schema); err != nil {
 		return err
@@ -142,7 +143,8 @@ func (d *semanticVectorDB) SearchSimilarVectors(ctx context.Context, queryEmbedd
 	SELECT c.source_path, c.chunk_index, c.content, c.embedding, c.embedding_input, f.file_hash, f.indexed_at
 	FROM %s c
 	JOIN %s f ON c.source_path = f.source_path
-	`, d.chunksTable, d.filesTable)
+	`, d.chunksTable, d.filesTable,
+	)
 
 	rows, err := d.db.QueryContext(ctx, query)
 	if err != nil {

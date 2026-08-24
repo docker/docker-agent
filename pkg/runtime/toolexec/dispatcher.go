@@ -117,8 +117,8 @@ type HookDispatcher interface {
 
 	// NotifyUserInput is invoked just before the dispatcher blocks waiting
 	// for the user (tool confirmation). Implementations typically fire
-	// [hooks.EventOnUserInput].
-	NotifyUserInput(ctx context.Context, sessionID, label string)
+	// [hooks.EventOnUserInput] attributed to the supplied agent.
+	NotifyUserInput(ctx context.Context, a *agent.Agent, sessionID, label string)
 
 	// NotifyApprovalDecision is invoked once per tool call after the
 	// approval pipeline (auto-allow, deny, user confirmation, ...) has
@@ -829,7 +829,7 @@ func (c *call) askUser(ctx context.Context, runTool func() CallOutcome) CallOutc
 	c.em.EmitToolCallConfirmation(c.tc, c.tool, c.a.Name(), c.confirmationMetadata(hookMeta))
 
 	if c.d.Hooks != nil {
-		c.d.Hooks.NotifyUserInput(ctx, c.sess.ID, "tool confirmation")
+		c.d.Hooks.NotifyUserInput(ctx, c.a, c.sess.ID, "tool confirmation")
 	}
 
 	select {

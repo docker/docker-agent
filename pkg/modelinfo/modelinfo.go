@@ -361,15 +361,13 @@ const openAIQualifierPrefix = "openai/"
 // [normalizeOpenAI], which strips that preserved "openai/" pair afterwards.
 func normalize(modelID string) string {
 	m := strings.ToLower(strings.TrimSpace(modelID))
-	i := strings.LastIndexByte(m, '/')
-	if i < 0 {
+	prefix, last, ok := strings.CutLast(m, "/")
+	if !ok {
 		return m
 	}
-	last := m[i+1:]
-	prefix := m[:i]
 	prevSeg := prefix
-	if j := strings.LastIndexByte(prefix, '/'); j >= 0 {
-		prevSeg = prefix[j+1:]
+	if _, seg, found := strings.CutLast(prefix, "/"); found {
+		prevSeg = seg
 	}
 	if prevSeg == "openai" {
 		return openAIQualifierPrefix + last

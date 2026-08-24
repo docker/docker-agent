@@ -1131,6 +1131,7 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt runtime.Runtime, sess 
 		wd, _ = os.Getwd()
 	}
 	renderImages := userconfig.Get().GetRenderImages() && tuiimage.SupportsKittyGraphics(os.Stdin, os.Stdout)
+	showBanner := userconfig.Get().GetShowBanner()
 	return leantui.Run(ctx, leantui.Config{
 		App:                    a,
 		WorkingDir:             wd,
@@ -1141,6 +1142,7 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt runtime.Runtime, sess 
 		AppName:                f.appName,
 		DisabledCommands:       f.disabledCommands,
 		RenderImages:           &renderImages,
+		ShowBanner:             &showBanner,
 	})
 }
 

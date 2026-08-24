@@ -20,6 +20,7 @@ package plan
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,7 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1098,8 +1099,8 @@ func (s *FilesystemStorage) List(ctx context.Context) ([]Summary, []string, erro
 		})
 	}
 
-	sort.Slice(plans, func(i, j int) bool {
-		return plans[i].Name < plans[j].Name
+	slices.SortFunc(plans, func(a, b Summary) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	return plans, warnings, nil

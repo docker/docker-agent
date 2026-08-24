@@ -654,6 +654,7 @@ func TestConfig_Settings_Empty(t *testing.T) {
 	assert.False(t, settings.Lean)
 	assert.False(t, settings.GetExpandThinking())
 	assert.True(t, settings.GetRenderImages())
+	assert.True(t, settings.GetShowBanner())
 }
 
 func TestConfig_Settings_RenderImages(t *testing.T) {
@@ -667,6 +668,20 @@ func TestConfig_Settings_RenderImages(t *testing.T) {
 	loaded, err := loadFrom(configFile, "")
 	require.NoError(t, err)
 	assert.False(t, loaded.Settings.GetRenderImages())
+}
+
+func TestConfig_Settings_ShowBanner(t *testing.T) {
+	t.Parallel()
+
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	showBanner := false
+	config := &Config{Settings: &Settings{ShowBanner: &showBanner}}
+	require.NoError(t, config.saveTo(configFile))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	assert.False(t, loaded.Settings.GetShowBanner())
+	assert.True(t, (*Settings)(nil).GetShowBanner(), "banner is shown by default")
 }
 
 func TestConfig_Settings_ExpandThinking(t *testing.T) {

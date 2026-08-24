@@ -1,6 +1,10 @@
 package runtime
 
-import "time"
+import (
+	"time"
+
+	"github.com/docker/docker-agent/pkg/tools"
+)
 
 // defaultEventChannelCapacity is the buffer size used for every Event
 // channel the runtime hands back to a caller. Sized large enough that a
@@ -62,7 +66,9 @@ const defaultToolListTimeout = 10 * time.Second
 // ToolsetInfo{Loading:false} event is never emitted and the sidebar animates
 // "tools available…" forever. A timed-out toolset is skipped for this startup
 // pass only — the original start attempt keeps running and the toolset is
-// picked up once it completes. It is longer than defaultToolListTimeout
+// picked up once it completes. It aliases the shared bounded-start default so
+// this startup probe and the agent's turn path give up on a wedged toolset
+// after the same grace period; it is longer than defaultToolListTimeout
 // because a cold start can legitimately include an image pull. Tests override
 // it via WithToolStartTimeout.
-const defaultToolStartTimeout = 30 * time.Second
+const defaultToolStartTimeout = tools.DefaultStartTimeout

@@ -28,6 +28,9 @@ type Config struct {
 	AppName          string
 	DisabledCommands []string
 	RenderImages     *bool
+	// ShowBanner displays the ASCII-art welcome banner. Defaults to true
+	// when nil.
+	ShowBanner *bool
 
 	// Banner overrides the ASCII-art welcome banner. When nil the built-in
 	// bannerLines ("docker agent") is used; embedders set it to brand the lean
@@ -168,6 +171,8 @@ type model struct {
 	banner           []string
 	disabledCommands map[string]bool
 	renderImages     bool
+	// hideBanner drops the ASCII-art welcome banner; the zero value keeps it.
+	hideBanner bool
 }
 
 func newModel(term *ui.Terminal, cfg Config) *model {
@@ -202,6 +207,7 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 		banner:           cfg.Banner,
 		disabledCommands: disabled,
 		renderImages:     renderImages,
+		hideBanner:       cfg.ShowBanner != nil && !*cfg.ShowBanner,
 	}
 }
 
@@ -223,6 +229,9 @@ func (m *model) commitWelcome() {
 	banner := m.banner
 	if len(banner) == 0 {
 		banner = bannerLines
+	}
+	if m.hideBanner {
+		banner = nil
 	}
 	m.screen.Transcript.AddBlock(func(int) []string {
 		lines := make([]string, 0, bannerTopPadding+len(banner)+2)

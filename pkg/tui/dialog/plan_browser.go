@@ -454,7 +454,8 @@ func planMutationGuard(p plans.Plan, action string) tea.Cmd {
 			return nil
 		}
 		return notification.InfoCmd(fmt.Sprintf(
-			"Session plans don't support %s: they belong to their session and carry no shared-plan metadata. Press e to edit the plan body, or use a shared plan.", action))
+			"Session plans don't support %s: they belong to their session and carry no shared-plan metadata. Press e to edit the plan body, or use a shared plan.", action,
+		))
 	}
 	if p.Version == nil {
 		return notification.ErrorCmd(fmt.Sprintf("Cannot %s %q: no version is known; refresh (r) and retry.", action, p.Name))

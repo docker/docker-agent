@@ -104,7 +104,8 @@ func (t *OutputTool) Definition() tools.Tool {
 		"Deliver the final answer of this conversation as structured output (%s). "+
 			"The arguments must be a JSON object matching the tool's parameter schema. "+
 			"Call this tool alone, with no other tool calls in the same response; a valid call ends the turn.",
-		t.cfg.Name)
+		t.cfg.Name,
+	)
 	if t.cfg.Description != "" {
 		description += " Expected content: " + t.cfg.Description
 	}
