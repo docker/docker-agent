@@ -287,6 +287,13 @@ type appModel struct {
 	// hideSidebar hides the sidebar and disables the ctrl+b toggle.
 	hideSidebar bool
 
+	// defaultNewSessionDir, when non-empty, is the directory generic
+	// new-session actions (/new, Ctrl+T, the tab-bar and status-bar "+")
+	// spawn in instead of opening the working-directory picker. Set only
+	// when --working-dir was explicitly supplied on the CLI; a directory
+	// carried by the spawn request still wins.
+	defaultNewSessionDir string
+
 	// layoutSettings is the active TUI layout customization (sidebar position
 	// and section visibility). Shared by every tab and managed via /settings.
 	layoutSettings messages.LayoutSettings
@@ -360,6 +367,16 @@ func WithHideSidebar() Option {
 func WithImageWriter(writer *tuiimage.Writer) Option {
 	return func(m *appModel) {
 		m.imageWriter = writer
+	}
+}
+
+// WithDefaultWorkingDir makes generic new-session actions (/new, Ctrl+T,
+// the tab-bar and status-bar "+") spawn in dir instead of opening the
+// working-directory picker. A directory carried by the spawn request still
+// wins. Used when --working-dir was explicitly supplied on the CLI.
+func WithDefaultWorkingDir(dir string) Option {
+	return func(m *appModel) {
+		m.defaultNewSessionDir = dir
 	}
 }
 
@@ -1804,7 +1821,11 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 
 // handleSpawnSession spawns a new session.
 func (m *appModel) handleSpawnSession(workingDir string) (tea.Model, tea.Cmd) {
-	// If no working dir specified, open the picker
+	// A generic request (no directory) inherits the explicit --working-dir
+	// default when one is configured; otherwise ask via the picker.
+	if workingDir == "" {
+		workingDir = m.defaultNewSessionDir
+	}
 	if workingDir == "" {
 		return m.openWorkingDirPicker()
 	}

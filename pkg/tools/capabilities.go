@@ -13,6 +13,16 @@ type Startable interface {
 	Stop(ctx context.Context) error
 }
 
+// StartReporter is implemented by toolsets whose live lifecycle state can
+// be queried independently of the StartableToolSet wrapper's latched state
+// (e.g. an MCP toolset whose supervisor lost the session in the background).
+// The wrapper consults it on Start to decide whether a recovery is needed,
+// and composite toolsets consult their inner toolsets' reporters to detect
+// an inner that started successfully and later died.
+type StartReporter interface {
+	IsStarted() bool
+}
+
 // PeerDependent is implemented by toolsets whose Start reads from the
 // agent's other toolsets (e.g. the deferred aggregator lists its source
 // toolsets' tools). Callers that start an agent's toolsets concurrently

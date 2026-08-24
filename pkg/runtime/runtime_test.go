@@ -1850,6 +1850,55 @@ func TestEmitStartupInfo_RecoveryAuthNoticeEmittedOnce(t *testing.T) {
 	require.Len(t, noticesPhase4, 1, "fresh failure after streak reset must emit a new notice")
 }
 
+// TestEmitStartupInfo_PartialStartStillCountsCodeModeTools is the runtime
+// regression test for #3978 degraded startup: when the codemode composite
+// starts partially (one inner MCP-like toolset fails), the composite is
+// latched as started and emitToolsProgressively must keep listing it — the
+// run_tools_with_javascript wrapper is counted in the sidebar's ToolsetInfo
+// — while the inner failure still surfaces as a warning.
+func TestEmitStartupInfo_PartialStartStillCountsCodeModeTools(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	healthy := newStubToolSet(nil, []tools.Tool{{Name: "fetch_url", Parameters: map[string]any{}}}, nil)
+	failing := newStubToolSet(errors.New("connection refused"), nil, nil)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(codemode.Wrap(healthy, failing)),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(t.Context(), tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := make(chan Event, 32)
+	rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+	close(events)
+
+	var toolsetInfos []*ToolsetInfoEvent
+	var warning *WarningEvent
+	for e := range events {
+		switch ev := e.(type) {
+		case *ToolsetInfoEvent:
+			toolsetInfos = append(toolsetInfos, ev)
+		case *WarningEvent:
+			warning = ev
+		}
+	}
+
+	require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+	last := toolsetInfos[len(toolsetInfos)-1]
+	assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false")
+	assert.Equal(t, 1, last.AvailableTools,
+		"the degraded codemode wrapper must still be listed and counted (run_tools_with_javascript)")
+
+	require.NotNil(t, warning, "the failed inner toolset must still surface a warning")
+	assert.Contains(t, warning.Message, "start failed")
+	assert.Contains(t, warning.Message, "connection refused")
+}
+
 // TestConfigureToolsetHandlers_ReachesThroughCodeModeWrapper is the
 // regression test for the sigma MCP OAuth bug: an agent with
 // code_mode_tools:true wraps all its toolsets in a single codemode

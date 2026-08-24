@@ -67,7 +67,13 @@ type runExecFlags struct {
 	// options and user settings (alias wins; within each scope safety wins
 	// over the legacy yolo/YOLO flag). Never populated from CLI flags or
 	// author YAML.
-	defaultSafety     session.SafetyPolicy
+	defaultSafety session.SafetyPolicy
+	// workingDirChanged records whether a non-empty --working-dir was
+	// explicitly passed on the command line. Captured before worktree and
+	// resume handling mutate runConfig.WorkingDir; only an explicit flag
+	// makes generic new-session actions in the TUI reuse the initial
+	// session's directory instead of opening the picker.
+	workingDirChanged bool
 	attachmentPath    string
 	remoteAddress     string
 	modelOverrides    []string
@@ -269,6 +275,9 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	}
 	f.safetyChanged = cmd.Flags().Changed("safety")
 	f.yoloChanged = cmd.Flags().Changed("yolo")
+	// Captured here because runOrExec later overwrites runConfig.WorkingDir
+	// for worktrees and resumed sessions.
+	f.workingDirChanged = cmd.Flags().Changed("working-dir") && f.runConfig.WorkingDir != ""
 
 	// A --session-workingdir-root that trims to empty (e.g. an unresolved
 	// shell variable) must fail loudly instead of silently disabling the
@@ -533,6 +542,10 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 
 	var rec *recorder.Recorder
+	tuiOptions := f.tuiOpts(args)
+	if dir := f.explicitDefaultWorkingDir(sess); dir != "" {
+		tuiOptions = append(tuiOptions, tui.WithDefaultWorkingDir(dir))
+	}
 	runErr := func() error {
 		if f.lean {
 			return f.runLeanTUI(ctx, rt, sess, cleanup, args, opts...)
@@ -544,9 +557,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 				rec = recorder.New(m)
 				return rec
 			}
-			return runTUIWrapped(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(args), wrap, opts...)
+			return runTUIWrapped(ctx, rt, sess, b.Spawner(rt), cleanup, tuiOptions, wrap, opts...)
 		}
-		return runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(args), opts...)
+		return runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, tuiOptions, opts...)
 	}()
 	if rec != nil && rec.HasInput() {
 		writeGeneratedTUITest(ctx, out, rec, cassettePath, agentFileName)
@@ -1081,6 +1094,23 @@ func (f *runExecFlags) tuiOpts(args []string) []tui.Option {
 		opts = append(opts, tui.WithTourOffer(telemetry.GetTelemetryEnabled()))
 	}
 	return opts
+}
+
+// explicitDefaultWorkingDir returns the working directory generic new-session
+// actions in the TUI should default to instead of opening the picker, or ""
+// when --working-dir was not explicitly supplied on this invocation. It
+// mirrors runTUIWrapped's resolution of the initial tab's directory (session
+// working dir, then process CWD) so new tabs open exactly where the initial
+// session did — the worktree or resume directory, not the raw flag value.
+func (f *runExecFlags) explicitDefaultWorkingDir(sess *session.Session) string {
+	if !f.workingDirChanged {
+		return ""
+	}
+	if sess.WorkingDir != "" {
+		return sess.WorkingDir
+	}
+	wd, _ := os.Getwd()
+	return wd
 }
 
 // shouldOfferTour reports whether this interactive run should show the

@@ -75,8 +75,10 @@ func (c *codeModeTool) runJavascript(ctx context.Context, rt tools.Runtime, scri
 	)
 	_ = vm.Set("console", console(&stdOut, &stdErr))
 
-	// Inject every tool as a javascript function.
-	for _, toolset := range c.toolsets {
+	// Inject every available tool as a javascript function. Toolsets whose
+	// start failed or that died since are omitted, matching the declarations
+	// listed by Tools().
+	for _, toolset := range c.availableToolsets() {
 		allTools, err := toolset.Tools(ctx)
 		if err != nil {
 			return ScriptResult{}, err
