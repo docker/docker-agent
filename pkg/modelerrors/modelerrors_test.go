@@ -944,3 +944,55 @@ func TestScalarStringEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+func TestRetryableHTTPStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		err      error
+		expected bool
+	}{
+		// Retryable HTTP codes via *StatusError.
+		{name: "429 rate-limit StatusError", err: &StatusError{StatusCode: 429, Err: errors.New("rate limited")}, expected: true},
+		{name: "408 request timeout StatusError", err: &StatusError{StatusCode: 408, Err: errors.New("timeout")}, expected: true},
+		{name: "500 server error StatusError", err: &StatusError{StatusCode: 500, Err: errors.New("internal server error")}, expected: true},
+		{name: "503 unavailable StatusError", err: &StatusError{StatusCode: 503, Err: errors.New("service unavailable")}, expected: true},
+		{name: "529 overloaded StatusError", err: &StatusError{StatusCode: 529, Err: errors.New("overloaded")}, expected: true},
+		// Non-retryable HTTP codes via *StatusError.
+		{name: "400 bad request StatusError", err: &StatusError{StatusCode: 400, Err: errors.New("bad request")}, expected: false},
+		{name: "401 unauthorized StatusError", err: &StatusError{StatusCode: 401, Err: errors.New("unauthorized")}, expected: false},
+		{name: "403 forbidden StatusError", err: &StatusError{StatusCode: 403, Err: errors.New("forbidden")}, expected: false},
+		{name: "404 not found StatusError", err: &StatusError{StatusCode: 404, Err: errors.New("not found")}, expected: false},
+		// Plain string errors without HTTP codes: must stay non-retryable so
+		// MCP/LSP "connection refused" errors are not paced.
+		{name: "connection refused", err: errors.New("connection refused: dial tcp 127.0.0.1:9999"), expected: false},
+		{name: "no such host", err: errors.New("no such host: example.invalid"), expected: false},
+		// Plain text that DOES contain a retryable HTTP code: the regex fallback
+		// in extractHTTPStatusCode must find it so any toolset (not just
+		// those wrapping *StatusError) is paced for real server errors.
+		{name: "503 in plain text", err: errors.New("upstream: 503 Service Unavailable"), expected: true},
+		{name: "429 in plain text", err: errors.New("provider said: 429 Too Many Requests"), expected: true},
+		// HTTP-status precedence: a StatusError{429} wrapped alongside
+		// context.DeadlineExceeded must return true — the HTTP signal wins.
+		{
+			name: "429 StatusError + DeadlineExceeded in chain",
+			err: fmt.Errorf("start budget exceeded: %w, provider said: %w",
+				context.DeadlineExceeded,
+				&StatusError{StatusCode: 429, Err: errors.New("rate limited")}),
+			expected: true,
+		},
+		// Bare context errors: no HTTP code, must return false.
+		{name: "bare DeadlineExceeded", err: context.DeadlineExceeded, expected: false},
+		{name: "bare Canceled", err: context.Canceled, expected: false},
+		{name: "nil error", err: nil, expected: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := RetryableHTTPStatus(tc.err)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}

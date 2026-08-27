@@ -645,10 +645,10 @@ func (a *Agent) ensureToolSetsAreStarted(ctx context.Context) {
 			continue
 		}
 		if toolSet.ShouldReportFailure() {
-			slog.WarnContext(ctx, "Toolset start failed; will retry on next turn", "agent", a.Name(), "toolset", desc, "error", err)
+			slog.WarnContext(ctx, "Toolset start failed; will retry (backoff may apply)", "agent", a.Name(), "toolset", desc, "error", err)
 			a.AddToolWarning(fmt.Sprintf("%s start failed: %v", desc, err))
 		} else {
-			slog.DebugContext(ctx, "Toolset still unavailable; retrying next turn", "agent", a.Name(), "toolset", desc, "error", err)
+			slog.DebugContext(ctx, "Toolset still unavailable; will retry (backoff may apply)", "agent", a.Name(), "toolset", desc, "error", err)
 		}
 	}
 }

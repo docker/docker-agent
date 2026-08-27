@@ -294,11 +294,44 @@ type StartableToolSet struct {
 	// emit a different, more targeted message (e.g. "needs re-auth" vs
 	// "start failed") for the recovery case.
 	recoveryStreak failureStreak
+
+	// startBackoff throttles retryable start failures via a wall-clock gate
+	// enforced in tryStartLocked (#4060). All fields guarded by mu.
+	startBackoffUntil   time.Time                         // zero means no active window
+	startBackoffAttempt int                               // consecutive retryable failures
+	startBackoffErr     error                             // retained cause returned while throttled
+	startJitter         func(time.Duration) time.Duration // nil uses additiveJitter; tests override via WithStartRetryJitter
+	now                 func() time.Time                  // nil uses time.Now; tests override via WithStartRetryClock
+}
+
+// StartableOption is a functional option for NewStartable.
+type StartableOption func(*StartableToolSet)
+
+// WithStartRetryJitter sets the jitter function for backoff delays; for testing.
+func WithStartRetryJitter(fn func(time.Duration) time.Duration) StartableOption {
+	return func(s *StartableToolSet) { s.startJitter = fn }
+}
+
+// WithStartRetryClock sets the clock used by the backoff gate; for testing.
+func WithStartRetryClock(now func() time.Time) StartableOption {
+	return func(s *StartableToolSet) { s.now = now }
 }
 
 // NewStartable wraps a ToolSet for lazy initialization.
-func NewStartable(ts ToolSet) *StartableToolSet {
-	return &StartableToolSet{ToolSet: ts}
+func NewStartable(ts ToolSet, opts ...StartableOption) *StartableToolSet {
+	s := &StartableToolSet{ToolSet: ts}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// nowFn returns s.now if set, otherwise time.Now.
+func (s *StartableToolSet) nowFn() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // IsStarted returns whether the toolset has been successfully started.
@@ -367,7 +400,7 @@ func (s *StartableToolSet) TryStart(ctx context.Context) (started bool, err erro
 			started = s.TryIsStarted()
 		}
 	}()
-	if err := s.startLocked(ctx); err != nil {
+	if err := s.tryStartLocked(ctx); err != nil {
 		return false, err
 	}
 	return s.started, nil
@@ -419,6 +452,51 @@ func (s *StartableToolSet) TryStartWithTimeout(ctx context.Context, timeout time
 	}
 }
 
+// resetStartBackoff clears all backoff state. s.mu must be held.
+func (s *StartableToolSet) resetStartBackoff() {
+	s.startBackoffUntil = time.Time{}
+	s.startBackoffAttempt = 0
+	s.startBackoffErr = nil
+}
+
+// setStartBackoff records a retryable start failure and arms the cooldown
+// gate. Non-retryable errors clear the window so the next attempt runs
+// immediately (preserving today’s prompt-fail behaviour for auth/config
+// errors). s.mu must be held.
+func (s *StartableToolSet) setStartBackoff(err error) {
+	if !startBackoffRetryable(err) {
+		s.resetStartBackoff()
+		return
+	}
+	s.startBackoffAttempt++
+	delay := computeStartBackoff(s.startBackoffAttempt, s.startJitter)
+	s.startBackoffUntil = s.nowFn().Add(delay)
+	s.startBackoffErr = err
+}
+
+// tryStartLocked enforces the backoff gate and adopts any external recovery
+// a live StartReporter reports. Only called from TryStart — blocking Start()
+// must never be gated. s.mu must be held.
+func (s *StartableToolSet) tryStartLocked(ctx context.Context) error {
+	// A live reporter while started==false and a window is armed means an
+	// external restart (e.g. /toolset-restart) cleared the failure; adopt it.
+	// Guard with the window check to leave non-gated TryStart semantics unchanged.
+	if !s.started && !s.startBackoffUntil.IsZero() {
+		if reporter, ok := As[StartReporter](s.ToolSet); ok && reporter.IsStarted() {
+			s.started = true
+			s.startStreak.reset()
+			s.recoveryStreak.reset()
+			s.resetStartBackoff()
+			return nil
+		}
+	}
+	// Gate: only the non-blocking TryStart paths enforce the schedule.
+	if !s.startBackoffUntil.IsZero() && s.nowFn().Before(s.startBackoffUntil) {
+		return s.startBackoffErr
+	}
+	return s.startLocked(ctx)
+}
+
 // startLocked implements the start sequence shared by Start and TryStart.
 // s.mu must be held.
 func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
@@ -430,6 +508,9 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 		s.started = false
 		recovering = true
 	}
+
+	// Gate is in tryStartLocked (TryStart only); blocking Start() always
+	// attempts the underlying to avoid delaying explicit starts.
 
 	// Span the toolset startup — MCP handshake, OAuth probes,
 	// tool discovery, etc. can take seconds to minutes and the
@@ -463,6 +544,7 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 		if err := restarter.Restart(ctx); err != nil {
 			s.startStreak.fail()
 			s.recoveryStreak.fail()
+			s.setStartBackoff(err)
 			return err
 		}
 	} else if startable, ok := As[Startable](s.ToolSet); ok {
@@ -482,12 +564,17 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 		if err := startable.Start(ctx); err != nil {
 			s.startStreak.fail()
 			var partial *PartialStartError
-			if errors.As(err, &partial) {
+			switch {
+			case errors.As(err, &partial):
 				// A partial start still latches started: the composite's
 				// healthy inner toolsets must stay listed and usable, and
 				// its StartReporter keeps returning false while degraded,
 				// so the failed subset is retried on the next Start.
 				s.started = true
+				// Known limitation: the failed subset's per-turn retry is
+				// not paced by the gate (code-mode composites are the main
+				// affected path). See issue #4067 for the follow-up fix.
+				s.resetStartBackoff()
 				// The latch makes every later Start a recovery run, so
 				// recovering alone cannot tell an inner that was started
 				// and lost from one that never came up (e.g. an initial
@@ -497,23 +584,27 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 				if partial.LostAfterStart {
 					s.recoveryStreak.fail()
 				}
-			} else if recovering {
+			case recovering:
 				// A failed recovery marks the recovery streak here too, not
 				// only in the Restartable branch above: toolsets recovering
 				// through plain Start (a StartReporter without Restartable,
 				// or a composite whose inner toolsets all went down) need
 				// the targeted re-auth notice as well.
 				s.recoveryStreak.fail()
+				s.setStartBackoff(err)
+			default:
+				s.setStartBackoff(err)
 			}
 			return err
 		}
 	}
 
-	// Successful start: clear the streak so any future failure is reported
-	// as fresh. This is the recovery path — it is intentionally silent.
+	// Successful start: clear streaks and backoff so any future failure is
+	// reported as fresh. This is the recovery path — it is intentionally silent.
 	s.started = true
 	s.startStreak.reset()
 	s.recoveryStreak.reset()
+	s.resetStartBackoff()
 	return nil
 }
 
@@ -592,6 +683,7 @@ func (s *StartableToolSet) stopLocked(ctx context.Context) error {
 	s.startStreak.reset()
 	s.listStreak.reset()
 	s.recoveryStreak.reset()
+	s.resetStartBackoff()
 	if startable, ok := As[Startable](s.ToolSet); ok {
 		return startable.Stop(ctx)
 	}

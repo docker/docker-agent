@@ -96,7 +96,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	case toolset.Command != "":
 		resolvedCommand, err := toolinstall.EnsureCommand(ctx, toolset.Command, toolset.Version)
 		if err != nil {
-			slog.WarnContext(ctx, "MCP command not yet available, will retry on next turn",
+			slog.WarnContext(ctx, "MCP command not yet available, will retry",
 				"command", toolset.Command, "error", err)
 			resolvedCommand = toolset.Command
 		}
