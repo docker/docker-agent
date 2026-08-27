@@ -174,6 +174,86 @@ chunking:
 >
 > Currently supports Go (`.go`) files. More languages will be added. Falls back to plain text chunking for unsupported file types.
 
+## Indexing failures, retries and backoff
+
+When a knowledge-base fails to start — because the embedding provider is rate-limiting
+your requests or returning a transient server error — Docker Agent spaces out retry
+attempts with bounded exponential backoff instead of hammering the provider on
+every agent turn.
+
+### What triggers backoff
+
+Backoff applies only to **structured HTTP rate-limit (429), request timeout (408), and server error (5xx)**
+responses from the embedding or model provider. These are the signals that mean
+"slow down", and spacing them out gives the provider room to recover:
+
+| Failure kind | Behaviour |
+|---|---|
+| HTTP 429 (rate limit) | Backoff: next attempt delayed |
+| HTTP 5xx / overload (500, 502, 503, 504, 529) | Backoff: next attempt delayed |
+| HTTP 408 (request timeout) | Backoff: next attempt delayed |
+| Bad config, invalid model, wrong API key (other 4xx errors) | Fail fast: retried every turn with no added delay |
+| Context cancellation or agent shutdown | Immediate: no delay |
+
+### Retry policy and parameters
+
+The backoff is **bounded exponential with additive jitter**:
+
+- **Base delay**: 15 seconds
+- **Maximum delay**: 5 minutes
+- **Growth**: doubles after each consecutive retryable failure (15s → 30s → 1m → 2m → 4m → 5m)
+- **Jitter**: each wait is a random value in `[nominal, 1.2×nominal]` (additive 0–20%)
+  so concurrent knowledge-base sources spread their retries and avoid
+  hammering the provider together
+
+The gate is a lightweight wall-clock check — it creates no background threads or
+timers. A Stop command or agent shutdown takes effect immediately regardless of
+how much of the backoff window remains.
+
+### Operational impact
+
+**Before**: a rate-limited knowledge base was re-indexed on every agent turn —
+`max_indexing_concurrency × max_embedding_concurrency` concurrent provider calls
+could relaunch within milliseconds, easily tripping rate limits for both the
+knowledge base and the agent's own model calls.
+
+**After**: retries are spaced out and jittered so the provider has room to recover
+before the next attempt. The agent continues working with any other toolsets that
+are not affected.
+
+### What you will see
+
+- Docker Agent logs a single warning when a knowledge base first fails to start.
+  Repeated failures in between are logged at debug level only, so you are not
+  flooded with alerts on every turn. Recovery is intentionally silent — the
+  tool appearing in the agent's tool list is the signal that indexing succeeded.
+- The knowledge-base tool does not appear in the agent's tool list until indexing
+  succeeds. A successful start is silent — the tool is listed and the agent uses it.
+
+### Troubleshooting repeated 429 errors
+
+If you see persistent `429` errors in the logs:
+
+1. **Check provider rate limits.** Your embedding API key may have a low requests-per-minute
+   quota. Upgrading the plan or using a different API key can help.
+2. **Reduce concurrency.** The chunked-embeddings and semantic-embeddings strategies
+   accept `max_indexing_concurrency` (default `3`) and `max_embedding_concurrency`
+   (default `3`) parameters. Lowering these reduces simultaneous requests:
+
+   ```yaml
+   rag:
+     name: docs
+     path: ./knowledge-base
+     strategy:
+       type: chunked-embeddings
+       params:
+         max_indexing_concurrency: 1
+         max_embedding_concurrency: 1
+   ```
+
+3. **Use a model with a higher quota.** Some providers offer higher rate limits on
+   specific embedding model tiers.
+
 ## Debugging RAG
 
 Enable debug logging to see retrieval details:

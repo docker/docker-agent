@@ -243,6 +243,8 @@ See [Per-Toolset Model Routing](../../configuration/tools/index.md#per-toolset-m
 
 Local stdio and remote MCP servers are supervised: crashed servers reconnect automatically with exponential backoff. **Remote** MCP servers (Streamable HTTP / SSE) also reconnect after idle/clean connection closes — services like Notion and Linear periodically close idle connections, and Docker Agent reconnects transparently. Tune the policy with the `lifecycle` block:
 
+**Startup failure behaviour:** local process failures (missing binary, connection refused, authentication error) fail fast — each turn retries immediately with no artificial delay added. Only structured HTTP rate-limit (HTTP 429) and server error (HTTP 5xx) responses from a backing model provider trigger a backoff window. See [Indexing failures, retries and backoff](../rag/index.md#indexing-failures-retries-and-backoff) for the full policy.
+
 ```yaml
 toolsets:
   - type: mcp

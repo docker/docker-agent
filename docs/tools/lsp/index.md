@@ -197,6 +197,8 @@ Available Capabilities:
 
 LSP toolsets are managed by the same supervisor as MCP toolsets, so a crashed `gopls` (or any other language server) is reconnected automatically with exponential backoff. Use the [`lifecycle`](../../configuration/tools/index.md#toolset-lifecycle) block to tune the policy per toolset — for example, mark `gopls` as `strict` if your CI flow requires it to be available, or use `/toolset-restart gopls` from the TUI to force a reconnect when the server gets stuck.
 
+**Startup failure behaviour:** local process failures such as a missing binary or server-unavailable error fail fast — each turn retries immediately with no artificial delay. The backoff described in [Indexing failures, retries and backoff](../rag/index.md#indexing-failures-retries-and-backoff) applies only to structured HTTP rate-limit and server-error responses from model providers, which local LSP process errors are not.
+
 ```yaml
 toolsets:
   - type: lsp
