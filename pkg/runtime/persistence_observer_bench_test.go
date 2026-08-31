@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -157,6 +158,12 @@ func BenchmarkPersistenceObserver_StreamingChunks_SQLite(b *testing.B) {
 
 func openBenchSQLiteStore(b *testing.B) *session.SQLiteSessionStore {
 	b.Helper()
+	// NewSQLiteSessionStoreFromDB logs migration INFO on every harness
+	// re-invocation; discard it so -bench output stays machine-parseable.
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.DiscardHandler))
+	b.Cleanup(func() { slog.SetDefault(prev) })
+
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(b, err)
 	b.Cleanup(func() { _ = db.Close() })
