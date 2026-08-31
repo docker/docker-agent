@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"database/sql"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -42,15 +43,12 @@ func (s *countingStore) UpdateMessage(ctx context.Context, messageID int64, msg 
 	return s.InMemorySessionStore.UpdateMessage(ctx, messageID, msg)
 }
 
-func setupPersistenceObserverBench(tb testing.TB) (*PersistenceObserver, *session.Session, *session.InMemorySessionStore) {
+func setupPersistenceObserverBench(tb testing.TB) (*PersistenceObserver, *session.InMemorySessionStore) {
 	tb.Helper()
 	store := session.NewInMemorySessionStore().(*session.InMemorySessionStore)
 	obs := newPersistenceObserver(store)
 	require.NotNil(tb, obs)
-
-	sess := session.New(session.WithID("bench-session"), session.WithUserMessage("hi"))
-	require.NoError(tb, store.AddSession(context.Background(), sess))
-	return obs, sess, store
+	return obs, store
 }
 
 func emitStreamingChunks(ctx context.Context, obs *PersistenceObserver, sess *session.Session, chunks int) {
@@ -120,13 +118,23 @@ func TestPersistenceObserver_StreamingContentAccumulates(t *testing.T) {
 
 func BenchmarkPersistenceObserver_StreamingChunks(b *testing.B) {
 	ctx := b.Context()
-	obs, sess, _ := setupPersistenceObserverBench(b)
+	obs, store := setupPersistenceObserverBench(b)
 
 	b.ReportAllocs()
 	b.ResetTimer()
-	for range b.N {
+	// Bound the store each iteration: UpdateMessage scans every session's
+	// messages, so a shared session (or accumulating sessions) makes ns/op
+	// a function of b.N rather than a per-turn baseline.
+	for i := range b.N {
+		sess := session.New(session.WithID(strconv.Itoa(i)), session.WithUserMessage("hi"))
+		if err := store.AddSession(ctx, sess); err != nil {
+			b.Fatal(err)
+		}
 		emitStreamingChunks(ctx, obs, sess, streamingBenchChunks)
 		finalizeStreamingMessage(ctx, obs, sess)
+		if err := store.DeleteSession(ctx, sess.ID); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
