@@ -30,6 +30,11 @@
 //   - limit_large_tool_results
 //     (tool_response_transform) — store oversized tool output in a temp file
 //     and replace it with a bounded tail plus notice
+//   - elide_repeated_tool_results
+//     (tool_response_transform, session_end) — replace a read-only tool's
+//     output with a short marker when it is byte-for-byte identical to what
+//     the model already saw for the same arguments in this session. The tool
+//     always runs, so this cannot serve stale data; it saves tokens, not I/O.
 //   - safer_shell           (pre_tool_use)    — deprecated labeller
 //     shim. The runtime classifies shell commands
 //     natively via pkg/safety; pinned entries only
@@ -112,6 +117,7 @@ func Register(r *hooks.Registry, opts ...Option) error {
 		r.RegisterBuiltin(MaxIterations, maxIterations),
 		r.RegisterBuiltin(RedactSecrets, redactSecrets),
 		r.RegisterBuiltin(LimitLargeToolResults, limitLargeToolResults),
+		r.RegisterBuiltin(ElideRepeatedToolResults, elideRepeatedToolResults),
 		r.RegisterBuiltin(SaferShell, saferShell),
 		r.RegisterBuiltin(HTTPPost, newHTTPPost(o.httpPostClient)),
 		r.RegisterBuiltin(Unload, unload),
@@ -190,10 +196,48 @@ func ApplyAgentDefaults(cfg *hooks.Config, d AgentDefaults) *hooks.Config {
 			Hooks:   []hooks.Hook{builtinHook(RedactSecrets)},
 		})
 	}
+	completeElideCleanupLegs(cfg)
+
 	if cfg.IsEmpty() {
 		return nil
 	}
 	return cfg
+}
+
+// completeElideCleanupLegs wires the state-dropping events of
+// [ElideRepeatedToolResults] whenever a config opts into its transform leg.
+//
+// The builtin remembers, per session, what the model has already been shown.
+// That memory is only true while the messages it stands for are still in
+// context, so session_end, after_compaction and session_start have to drop it.
+// Wiring them is not a preference: an operator who writes only the transform
+// leg gets a builtin that, after the first compaction, tells the model "nothing
+// has changed" about bytes that are no longer in its context — and keeps saying
+// so until the underlying output changes.
+//
+// This does not opt anybody in. It completes a feature the config already asked
+// for, the same way redact_secrets wires its three legs together, and the
+// dedup in Executor.hooksFor makes it idempotent against entries the operator
+// wrote by hand.
+func completeElideCleanupLegs(cfg *hooks.Config) {
+	if !declaresBuiltin(cfg.ToolResponseTransform, ElideRepeatedToolResults) {
+		return
+	}
+	cfg.SessionEnd = append(cfg.SessionEnd, builtinHook(ElideRepeatedToolResults))
+	cfg.AfterCompaction = append(cfg.AfterCompaction, builtinHook(ElideRepeatedToolResults))
+	cfg.SessionStart = append(cfg.SessionStart, builtinHook(ElideRepeatedToolResults))
+}
+
+// declaresBuiltin reports whether any matcher in entries runs the named builtin.
+func declaresBuiltin(entries []hooks.MatcherConfig, name string) bool {
+	for _, entry := range entries {
+		for _, h := range entry.Hooks {
+			if h.Type == hooks.HookTypeBuiltin && h.Command == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // builtinHook returns a hook entry that dispatches to the named builtin.

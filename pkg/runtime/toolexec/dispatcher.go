@@ -619,7 +619,7 @@ func (c *call) consultPreToolUsePreYolo(ctx context.Context) *hooks.Result {
 	if c.d.Hooks == nil {
 		return nil
 	}
-	c.preYoloResult = c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPreToolUsePreYolo, NewHooksInput(c.sess, c.tc))
+	c.preYoloResult = c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPreToolUsePreYolo, c.hooksInput())
 	return c.preYoloResult
 }
 
@@ -641,7 +641,7 @@ func (c *call) consultPreToolUseHook(ctx context.Context, runTool func() CallOut
 		return CallOutcome{}, false
 	}
 
-	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPreToolUse, NewHooksInput(c.sess, c.tc))
+	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPreToolUse, c.hooksInput())
 	if result == nil {
 		return CallOutcome{}, false
 	}
@@ -862,13 +862,7 @@ func (c *call) runPermissionRequestHook(ctx context.Context, runTool func() Call
 	}
 
 	toolName := c.tc.Function.Name
-	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPermissionRequest, &hooks.Input{
-		SessionID:    c.sess.ID,
-		ToolName:     toolName,
-		ToolUseID:    c.tc.ID,
-		ToolInput:    ParseToolInput(c.tc.Function.Arguments),
-		SafetyPolicy: string(c.sess.GetSafetyPolicy()),
-	})
+	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPermissionRequest, c.hooksInput())
 	if result == nil {
 		return CallOutcome{}, false, nil
 	}
@@ -1099,13 +1093,36 @@ func (c *call) applyToolResponseTransform(ctx context.Context, payload string, i
 	if c.d.Hooks == nil {
 		return payload
 	}
-	in := NewPostToolHooksInput(c.sess, c.tc, &tools.ToolCallResult{Output: payload, IsError: isError})
-	in.ToolCategory = c.tool.Category
+	in := c.postToolHooksInput(&tools.ToolCallResult{Output: payload, IsError: isError})
 	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventToolResponseTransform, in)
 	if result == nil || result.UpdatedToolResponse == nil {
 		return payload
 	}
 	return *result.UpdatedToolResponse
+}
+
+// hooksInput builds a tool-event [hooks.Input] carrying this call's tool
+// metadata. Every tool event goes through here so the metadata cannot be
+// present on one lane and missing on another.
+//
+// Category and ReadOnlyHint are zero when !c.available (the tool isn't in the
+// agent's toolset), which is the fail-safe direction: consumers keyed on
+// read-only-ness stay inert rather than guessing.
+func (c *call) hooksInput() *hooks.Input {
+	in := NewHooksInput(c.sess, c.tc)
+	in.ToolCategory = c.tool.Category
+	in.ToolReadOnly = c.tool.Annotations.ReadOnlyHint
+	return in
+}
+
+// postToolHooksInput is [call.hooksInput] plus the tool result.
+func (c *call) postToolHooksInput(res *tools.ToolCallResult) *hooks.Input {
+	in := c.hooksInput()
+	if res != nil {
+		in.ToolResponse = res.Output
+		in.ToolError = res.IsError
+	}
+	return in
 }
 
 // translateError converts a tool-handler error into a [tools.ToolCallResult]
@@ -1164,7 +1181,7 @@ func (c *call) postHook(ctx context.Context, res *tools.ToolCallResult) (stop bo
 	if c.d.Hooks == nil {
 		return false, ""
 	}
-	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPostToolUse, NewPostToolHooksInput(c.sess, c.tc, res))
+	result := c.d.Hooks.Dispatch(ctx, c.a, hooks.EventPostToolUse, c.postToolHooksInput(res))
 	if result == nil || result.Allowed {
 		return false, ""
 	}
