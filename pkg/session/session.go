@@ -642,7 +642,6 @@ type EvalResultChecks struct {
 	ToolCalls  *ToolCallsCheck  `json:"tool_calls,omitempty"`
 	Relevance  *RelevanceCheck  `json:"relevance,omitempty"`
 	Assertions *AssertionsCheck `json:"assertions,omitempty"`
-	Verify     *VerifyCheck     `json:"verify,omitempty"`
 }
 
 // SizeCheck contains the result of the response size check.
@@ -689,18 +688,10 @@ type AssertionResult struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// VerifyCheck contains the result of the post-agent verify script.
-type VerifyCheck struct {
-	Passed   bool   `json:"passed"`
-	ExitCode int    `json:"exit_code"`
-	Output   string `json:"output,omitempty"`
-}
-
 // EvalCriteria contains the evaluation criteria for a session.
 type EvalCriteria struct {
 	Relevance  []string    `json:"relevance"`             // Statements that should be true about the response
 	Assertions []Assertion `json:"assertions,omitempty"`  // Code-based assertions evaluated against the agent output
-	Verify     string      `json:"verify,omitempty"`      // Shell script for post-agent outcome verification
 	WorkingDir string      `json:"working_dir,omitempty"` // Subdirectory under evals/working_dirs/
 	Size       string      `json:"size,omitempty"`        // Expected response size: S, M, L, XL
 	Setup      string      `json:"setup,omitempty"`       // Optional sh script to run in the container before docker agent run --exec

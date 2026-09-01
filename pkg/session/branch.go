@@ -367,10 +367,6 @@ func cloneEvalResultChecks(src EvalResultChecks) EvalResultChecks {
 		assertions.Results = slices.Clone(src.Assertions.Results)
 		cp.Assertions = &assertions
 	}
-	if src.Verify != nil {
-		verify := *src.Verify
-		cp.Verify = &verify
-	}
 	return cp
 }
 

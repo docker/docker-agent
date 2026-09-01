@@ -521,14 +521,6 @@ func TestEvalCriteriaUnmarshalJSON(t *testing.T) {
 			},
 		},
 		{
-			name:  "valid with verify",
-			input: `{"relevance":[],"verify":"test -f output.txt"}`,
-			want: EvalCriteria{
-				Relevance: []string{},
-				Verify:    "test -f output.txt",
-			},
-		},
-		{
 			name:  "empty object",
 			input: `{}`,
 			want:  EvalCriteria{},
