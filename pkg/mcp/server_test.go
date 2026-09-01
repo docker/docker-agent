@@ -286,17 +286,17 @@ func TestStreamableHTTPHandler_StatelessNegotiates20260728(t *testing.T) {
 
 	rec := &recordingRoundTripper{}
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.1"}, nil)
-	session, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{
+	clientSession, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{
 		Endpoint:   httpSrv.URL,
 		HTTPClient: &http.Client{Transport: rec},
 	}, nil)
 	require.NoError(t, err)
-	defer session.Close()
+	defer clientSession.Close()
 
-	assert.Equal(t, "2026-07-28", session.InitializeResult().ProtocolVersion,
+	assert.Equal(t, "2026-07-28", clientSession.InitializeResult().ProtocolVersion,
 		"stateless handler must negotiate the 2026-07-28 revision with a v1.7 client")
 
-	toolsRes, err := session.ListTools(t.Context(), nil)
+	toolsRes, err := clientSession.ListTools(t.Context(), nil)
 	require.NoError(t, err)
 	require.Len(t, toolsRes.Tools, 1)
 	assert.Equal(t, "root", toolsRes.Tools[0].Name)
@@ -469,12 +469,12 @@ func TestStreamableHTTPHandler_ConcurrentStatelessClients(t *testing.T) {
 	for range 8 {
 		g.Go(func() error {
 			client := mcp.NewClient(&mcp.Implementation{Name: "concurrent-client", Version: "0.0.1"}, nil)
-			session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: httpSrv.URL}, nil)
+			clientSession, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: httpSrv.URL}, nil)
 			if err != nil {
 				return err
 			}
-			defer session.Close()
-			res, err := session.ListTools(ctx, nil)
+			defer clientSession.Close()
+			res, err := clientSession.ListTools(ctx, nil)
 			if err != nil {
 				return err
 			}
