@@ -73,6 +73,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "openrouter",
 		},
 		{
+			name: "orcarouter api key present",
+			envVars: map[string]string{
+				"ORCAROUTER_API_KEY": "test-key",
+			},
+			expectedProvider: "orcarouter",
+		},
+		{
 			name: "baseten api key present",
 			envVars: map[string]string{
 				"BASETEN_API_KEY": "test-key",
@@ -305,6 +312,15 @@ func TestAutoModelConfig(t *testing.T) {
 			expectedMaxTokens: 32000,
 		},
 		{
+			name: "orcarouter provider",
+			envVars: map[string]string{
+				"ORCAROUTER_API_KEY": "test-key",
+			},
+			expectedProvider:  "orcarouter",
+			expectedModel:     "orcarouter/auto",
+			expectedMaxTokens: 32000,
+		},
+		{
 			name: "baseten provider",
 			envVars: map[string]string{
 				"BASETEN_API_KEY": "test-key",
@@ -456,6 +472,10 @@ func TestPreferredMaxTokens(t *testing.T) {
 			expectedTokens: 32000,
 		},
 		{
+			provider:       "orcarouter",
+			expectedTokens: 32000,
+		},
+		{
 			provider:       "unknown-provider",
 			expectedTokens: 32000,
 		},
@@ -476,7 +496,7 @@ func TestDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Test that DefaultModels map has all expected providers
-	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "openrouter", "baseten", "ovhcloud", "groq", "fireworks", "deepseek", "cerebras", "together", "huggingface", "moonshot", "vercel", "amazon-bedrock", "opencode-zen", "opencode-go", "github-copilot"}
+	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "openrouter", "orcarouter", "baseten", "ovhcloud", "groq", "fireworks", "deepseek", "cerebras", "together", "huggingface", "moonshot", "vercel", "amazon-bedrock", "opencode-zen", "opencode-go", "github-copilot"}
 
 	for _, provider := range expectedProviders {
 		t.Run(provider, func(t *testing.T) {
@@ -494,6 +514,7 @@ func TestDefaultModels(t *testing.T) {
 	assert.Equal(t, "ai/qwen3:latest", DefaultModels["dmr"])
 	assert.Equal(t, "mistral-small-latest", DefaultModels["mistral"])
 	assert.Equal(t, "meta-llama/llama-3.3-70b-instruct", DefaultModels["openrouter"])
+	assert.Equal(t, "orcarouter/auto", DefaultModels["orcarouter"])
 	assert.Equal(t, "deepseek-ai/DeepSeek-V3.1", DefaultModels["baseten"])
 	assert.Equal(t, "Qwen3.5-397B-A17B", DefaultModels["ovhcloud"])
 	assert.Equal(t, "llama-3.3-70b-versatile", DefaultModels["groq"])
@@ -513,7 +534,7 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Verify that AutoModelConfig always returns a model from DefaultModels
-	providers := []string{"openai", "anthropic", "google", "mistral", "openrouter", "baseten", "ovhcloud", "groq", "fireworks", "deepseek", "cerebras", "together", "huggingface", "moonshot", "vercel", "opencode-zen", "github-copilot"}
+	providers := []string{"openai", "anthropic", "google", "mistral", "openrouter", "orcarouter", "baseten", "ovhcloud", "groq", "fireworks", "deepseek", "cerebras", "together", "huggingface", "moonshot", "vercel", "opencode-zen", "github-copilot"}
 
 	for _, provider := range providers {
 		t.Run(provider, func(t *testing.T) {
@@ -535,6 +556,8 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 				envVars["MISTRAL_API_KEY"] = "test-key"
 			case "openrouter":
 				envVars["OPENROUTER_API_KEY"] = "test-key"
+			case "orcarouter":
+				envVars["ORCAROUTER_API_KEY"] = "test-key"
 			case "baseten":
 				envVars["BASETEN_API_KEY"] = "test-key"
 			case "ovhcloud":

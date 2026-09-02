@@ -64,6 +64,11 @@ var Aliases = map[string]Alias{
 		BaseURL:     "https://openrouter.ai/api/v1",
 		TokenEnvVar: "OPENROUTER_API_KEY",
 	},
+	"orcarouter": {
+		APIType:     "openai",
+		BaseURL:     "https://api.orcarouter.ai/v1",
+		TokenEnvVar: "ORCAROUTER_API_KEY",
+	},
 	"mistral": {
 		APIType:     "openai",
 		BaseURL:     "https://api.mistral.ai/v1",
