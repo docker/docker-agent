@@ -51,7 +51,7 @@ var Aliases = map[string]Alias{
 	},
 	"nebius": {
 		APIType:     "openai",
-		BaseURL:     "https://api.studio.nebius.com/v1",
+		BaseURL:     "https://api.tokenfactory.nebius.com/v1",
 		TokenEnvVar: "NEBIUS_API_KEY",
 	},
 	"nvidia": {
