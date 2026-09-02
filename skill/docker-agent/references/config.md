@@ -1,8 +1,10 @@
 # Config schema reference
 
 Grounded in `agent-schema.json` (the authoritative, hand-maintained source —
-when this file and the schema disagree, the schema wins) and
-`docs/configuration/overview/index.md`. Add
+when this file and the schema disagree, the schema wins:
+<https://raw.githubusercontent.com/docker/docker-agent/main/agent-schema.json>)
+and the configuration docs at
+<https://docs.docker.com/ai/docker-agent/configuration/overview/>. Add
 `# yaml-language-server: $schema=https://raw.githubusercontent.com/docker/docker-agent/main/agent-schema.json`
 as the first line of a config for editor validation.
 
@@ -40,8 +42,8 @@ under different override names).
 | `rag` | Map of reusable RAG source definitions. |
 | `skills` | Map of reusable, named skill *groups*; an agent pulls one in via `use_skills`. (Distinct from the per-agent `skills:` field, which enables discovery/inline skills — see below.) |
 | `commands` | Map of reusable, named `/command` groups; an agent pulls one in via `use_commands`. |
-| `permissions` | Tool-approval rules (allow/deny lists) — see `docs/configuration/permissions/index.md`. |
-| `budget` / `budgets` | Run-wide spend ceiling / named, shared spend pots an agent opts into. See `examples/budget.yaml`. |
+| `permissions` | Tool-approval rules (allow/deny lists) — see <https://docs.docker.com/ai/docker-agent/configuration/permissions/>. |
+| `budget` / `budgets` | Run-wide spend ceiling / named, shared spend pots an agent opts into. See the budget example in `references/examples.md`. |
 | `runtime` | Execution-time defaults the config author wants (e.g. `sandbox: true`, `network_allowlist`, `safety`) — CLI flags and user config always override these. |
 | `flavors` | Named YAML patches (JSON Merge Patch semantics) enabled at run time with `--flavor <name>`. `key+:` appends to an array, `key-:` removes entries. |
 | `metadata` | Free-form metadata about the config itself (for distribution). |
@@ -55,8 +57,8 @@ Grouped by concern; every field is optional except `model`.
 exclusive with `instruction`; accepts a string or list of local paths,
 concatenated in order), `welcome_message`, `harness` (run this agent via an
 external coding harness instead of a docker-agent provider — see
-`docs/features/harnesses/index.md`), `add_date`, `add_environment_info`,
-`add_description_parameter`, `add_prompt_files`.
+<https://docs.docker.com/ai/docker-agent/features/harnesses/>), `add_date`,
+`add_environment_info`, `add_description_parameter`, `add_prompt_files`.
 
 **Tools**
 `toolsets` (inline list — see next section), `use_toolsets` (names from the
@@ -74,9 +76,9 @@ pipelines; must not cycle or self-reference).
 **Skills & commands**
 `skills` (bool or list — `true` loads all discovered local skills, a list
 mixes sources (`"local"`, an `http(s)://` URL), skill-name filters, and
-inline skill objects — see `examples/skills_inline.yaml` and
-`examples/skills_filter.yaml`), `use_skills` (named groups from top-level
-`skills:`), `commands` (named `/command` prompts), `use_commands`.
+inline skill objects — see `references/examples.md`'s inline-skills
+example), `use_skills` (named groups from top-level `skills:`), `commands`
+(named `/command` prompts), `use_commands`.
 
 **Safety, budget, limits**
 `safety` (default mode for new sessions on this agent — `strict` /
@@ -95,8 +97,8 @@ on Anthropic).
 
 **Other**
 `fallback` (automatic model failover), `hooks` (lifecycle shell commands —
-see `docs/configuration/hooks/index.md`), `cache` (replay identical prior
-answers).
+see <https://docs.docker.com/ai/docker-agent/configuration/hooks/>), `cache`
+(replay identical prior answers).
 
 ## Toolsets (`toolsets:` list, inline or under top-level `toolsets:`)
 
@@ -121,7 +123,7 @@ use `{ORIGINAL_INSTRUCTIONS}` to enrich rather than replace), `readonly`,
 ```yaml
 # 1. ref — Docker MCP Catalog server or a named top-level `mcps:` entry
 - type: mcp
-  ref: docker:context7          # or a name from mcps: (examples/mcp-definitions.yaml)
+  ref: docker:context7          # or a name from a top-level `mcps:` map
 
 # 2. command/args — arbitrary local MCP server subprocess
 - type: mcp
@@ -182,17 +184,17 @@ frequently-updated list rather than duplicating it here.
 ## Inline skills
 
 A `skills:` list item can be an object instead of a string — see
-`examples/skills_inline.yaml`. Required: `name`, `description`,
-`instructions`. Optional: `context: fork` (run as an isolated sub-agent),
-`model` (override for fork-mode), `allowed_tools`, `toolsets` (extra
-toolsets exposed to a fork-mode skill).
+`references/examples.md`'s inline-skills example. Required: `name`,
+`description`, `instructions`. Optional: `context: fork` (run as an isolated
+sub-agent), `model` (override for fork-mode), `allowed_tools`, `toolsets`
+(extra toolsets exposed to a fork-mode skill).
 
 ## `${env.VAR}` expansion
 
 `${env.VAR}` (canonical) works in most string fields (headers, env values,
 base_url, etc.); `$VAR`, `${VAR}`, and `~` are accepted aliases specifically
 on path/env-shaped fields. See
-`docs/configuration/overview/index.md#variable-expansion-in-config-fields`
+<https://docs.docker.com/ai/docker-agent/configuration/overview/#variable-expansion-in-config-fields>
 for the full per-field-type table — it differs by field, so check before
 assuming a form works everywhere.
 
@@ -200,16 +202,15 @@ assuming a form works everywhere.
 
 `version:` is one of `"0"`–`"15"`; omitting it targets latest (verified:
 `docker-agent debug config` on a version-less file fills in the current
-latest). Config packages `pkg/config/v0..vN` are frozen; new schema features
-land only in `pkg/config/latest`, mirrored into `agent-schema.json`'s
-`version` enum on each freeze (see `.agents/skills/bump-config-version/` in
-this repo if the version itself needs bumping — that's a different task from
-this skill).
+latest). Older versions are frozen for backward compatibility — pin one only
+if you need to match an existing, already-deployed config; a new config
+should simply omit `version:`.
 
 ## Reusable top-level sections
 
 Define once, reference by name to avoid duplicating config across agents —
-see `examples/mcp-definitions.yaml` for the pattern applied to `mcps:`; the
-same shape applies to `toolsets:` (via `use_toolsets`), `skills:` (via
-`use_skills`), and `commands:` (via `use_commands`). Inline definitions on an
-agent always take precedence over a same-named reusable one on conflict.
+see `references/examples.md`'s "reusable MCP definitions" example for the
+pattern applied to `mcps:`; the same shape applies to `toolsets:` (via
+`use_toolsets`), `skills:` (via `use_skills`), and `commands:` (via
+`use_commands`). Inline definitions on an agent always take precedence over
+a same-named reusable one on conflict.

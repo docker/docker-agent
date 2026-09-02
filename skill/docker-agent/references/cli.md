@@ -31,8 +31,8 @@ Don't guess these — they look plausible but aren't there:
 - **No top-level `chat`.** OpenAI-compatible serving is `serve chat`.
 - **No `catalog`/`feedback`/`readme` command.**
 - **`toolsets` lists built-in toolset *types*** (filesystem, shell, mcp, …),
-  not a browsable list of MCP Catalog servers. There is no CLI command to
-  browse the Docker MCP Catalog from this repo's binary.
+  not a browsable list of MCP Catalog servers. There is no CLI command in
+  `docker-agent` to browse the Docker MCP Catalog.
 
 ## `run` — run an agent
 
@@ -47,6 +47,12 @@ this way non-interactively; it will hang waiting for a terminal. Use
 ```
 docker-agent run ./agent.yaml --exec "do the thing" --safety restricted
 ```
+
+This is also the primary mechanism for **delegating a task to another
+agent** from inside your own session — shell out to it with `--exec`, add
+`--json` to get a parseable result. See `SKILL.md`'s
+[Delegating to another agent](../SKILL.md#delegating-to-another-agent)
+section and `examples.md`'s worked delegation flow.
 
 Selected flags (grouped by purpose — see `--help` for the complete list of
 ~50):

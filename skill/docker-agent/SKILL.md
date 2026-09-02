@@ -1,20 +1,27 @@
 ---
 name: docker-agent
-description: docker-agent (cagent) CLI and agent YAML config. Use to author or fix an agent or multi-agent config (models, toolsets, MCP servers, A2A, skills, sub-agents) against agent-schema.json, or to run, debug, evaluate, share via OCI, or serve (MCP/A2A/ACP/chat/API) a docker-agent agent. Covers every subcommand: run, new, eval, share, serve, doctor, alias, sandbox, sessions. Not for unrelated Go dev in this repo.
+description: Delegate to or operate the docker-agent (cagent) CLI as an external tool from any project or harness: run/exec a sub-agent non-interactively, author or validate an agent YAML config against agent-schema.json, or expose/consume agents via MCP/A2A/chat/API. Covers every subcommand: run, new, eval, share, serve, doctor, alias, sandbox, sessions.
 ---
 
 # docker-agent
 
-`docker-agent` builds and runs YAML-defined AI agents. The binary is
-`docker-agent`; as a Docker CLI plugin it is also invoked as `docker agent`
-(same commands, either prefix). This skill covers two jobs: **authoring** an
-agent config and **operating** the CLI. Exhaustive detail lives in
+`docker-agent` is a standalone CLI (and Docker CLI plugin, invoked as
+`docker agent` — same commands, either prefix) that runs YAML-defined AI
+agents. This skill is for using it **as an external tool from any project**
+— you don't need to be working inside docker-agent's own source code for any
+of this to apply. Two jobs: **delegating work to a docker-agent agent** and
+**authoring/operating** an agent config. Exhaustive detail lives in
 `references/` — read this file first, then follow a link when you need more.
+
+Check it's available: `docker-agent version` or `docker agent version`. If
+neither resolves, point the user at
+<https://docs.docker.com/ai/docker-agent/getting-started/installation/>.
 
 ## Start here
 
-| You want to...                                   | Do this                                                                          |
-| ------------------------------------------------- | --------------------------------------------------------------------------------- |
+| You want to...                                    | Do this                                                                          |
+| --------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Delegate a task to another agent (you are the orchestrator) | See [Delegating to another agent](#delegating-to-another-agent) below. |
 | Write or edit an agent/team YAML                  | Read `references/config.md`, copy a pattern from `references/examples.md`, then validate (below). Do **not** run `docker-agent new` for this — it's an interactive builder, not a way to script a config. |
 | Check a config is valid                           | `docker-agent debug config <file>` — fails loudly with the offending field on any schema error. |
 | Run an agent and see/send messages yourself       | `docker-agent run <file>` (interactive TUI; only when you have a real terminal). |
@@ -24,7 +31,38 @@ agent config and **operating** the CLI. Exhaustive detail lives in
 | Share a config via an OCI registry                | `docker-agent share push <file> <ref>` / `docker-agent share pull <ref>`. |
 | Expose an agent to another tool (MCP/A2A/ACP/OpenAI-chat/HTTP API) | `docker-agent serve mcp\|a2a\|acp\|chat\|api <file>`. |
 | Evaluate agent quality / check for regressions    | `docker-agent eval <file> [eval-dir]`, optionally `--baseline <run.json>`. |
-| See a full worked example                         | `references/examples.md` and the ~170 real configs under `examples/` in this repo. |
+| See a full worked example                         | `references/examples.md` — self-contained, copyable YAML for every pattern below. |
+
+## Delegating to another agent
+
+The most common reason to reach for `docker-agent` from inside another
+agent's session: you (an orchestrator, reviewer, or any agent) want a
+*different*, independently-configured agent to do a sub-task. Three ways,
+pick by how long-lived the relationship is:
+
+1. **One-shot delegation (default choice).** Shell out and capture the
+   result:
+   ```console
+   $ docker-agent run ./reviewer.yaml --exec "review this diff: <diff>" --safety restricted --json
+   ```
+   `--exec` is required (no TTY); `--json` gives you a machine-parseable
+   result; `--safety restricted` auto-approves safe tool calls and denies
+   the rest without prompting — the right default when nothing is watching
+   the terminal. Use `--model` to override the sub-agent's model without
+   editing its file, and `--working-dir` to point it at a specific
+   directory. See `references/examples.md` for a full worked example.
+2. **In-config delegation.** If you're authoring the config yourself (not
+   just invoking someone else's), declare the relationship directly: the
+   orchestrator agent's `sub_agents:` list names delegation targets (which
+   can themselves be OCI refs, e.g. `myorg/reviewer:latest`, not just local
+   agents), and the model decides when to delegate. `handoffs:` is similar
+   but transfers the whole conversation instead of a sub-task. See
+   `references/config.md`.
+3. **Long-lived, tool-shaped delegation.** If the target agent should look
+   like a registered tool to your harness (rather than something you shell
+   out to per task), expose it once with `docker-agent serve mcp ./agent.yaml`
+   (or `serve a2a`) and have your harness call it like any other MCP/A2A
+   tool instead of re-invoking the CLI each time.
 
 ## Non-negotiable rules
 
@@ -54,7 +92,7 @@ agent config and **operating** the CLI. Exhaustive detail lives in
 5. **Never invoke or document these — they're hidden on purpose:**
    `run`'s `--exit-after-response`, `--listen`, `--session-workingdir-root`,
    `--cpuprofile`, `--memprofile`, `--force-tui`, `--tour`; `serve api`'s
-   `--pprof-addr`; the `__askpass` command (internal, used by the sandbox).
+   `--pprof-addr`; the `__askpass` command (internal).
 6. **Validate before claiming success.** After writing or editing a config,
    run `docker-agent debug config <file>` and read the error — don't assume
    syntactically-valid YAML is schema-valid.
@@ -117,8 +155,5 @@ one (rule 4 above).
 - `references/config.md` — the full config schema: all top-level keys, every
   `AgentConfig` field, every toolset type, model config, skills, variable
   expansion, versioning.
-- `references/examples.md` — end-to-end worked flows, each pointing at a real
-  file under `examples/` in this repo.
-- `docker-agent new`'s system prompt (`pkg/creator/instructions.txt`) covers
-  similar config ground for an LLM builder session; if it and
-  `references/config.md` ever disagree, `agent-schema.json` is the tiebreaker.
+- `references/examples.md` — end-to-end worked flows as self-contained,
+  copyable YAML — including a full agent-delegation example.

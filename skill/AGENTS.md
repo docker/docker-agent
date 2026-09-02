@@ -1,22 +1,65 @@
 # Editorial policy for the docker-agent skill
 
-`SKILL.md` and `references/` here are read by every agent that has skills
-enabled and runs from (or above) this repo, or that installs this bundle in
-a later phase. A wrong line misleads every agent that reads it. This file
-is addressed to whoever — human or agent — edits the skill; it is not part
-of the installed content.
+`docker-agent/SKILL.md` and `docker-agent/references/` (siblings of this
+file, under `skill/`) are the redistributable master copy of an Agent Skill:
+content meant to be installed into **someone else's** project/harness so
+*their* agent can use the `docker-agent` CLI as an external tool. This file
+itself lives one level up (`skill/AGENTS.md`, not `skill/docker-agent/`)
+precisely so the whole `skill/docker-agent/` directory is the payload with
+nothing to exclude at install time. A wrong line in the payload misleads
+every agent that installs it. This file is addressed to whoever — human or
+agent — edits the skill; it is never itself installed.
+
+## The skill is for USING docker-agent, not for developing it
+
+This is the mistake v1 shipped with and had to be corrected after review
+(see task `65afbc73-1838-44b6-8485-02e3ecf5d52e`'s history): the bundle's
+source briefly lived at `.agents/skills/docker-agent/` in this repo, the
+same path/namespace as this repo's own hand-written *dev* skills (e.g.
+`bump-config-version`, for people contributing to docker-agent's own Go
+code). That both reads as "how to develop docker-agent" and is only ever
+self-discovered when docker-agent runs from inside its own source tree —
+irrelevant to the actual goal, which is an end user in some *other* project
+installing this so their agent can delegate to / operate `docker-agent` as
+an external tool (e.g. `docker-agent run <config> --exec` to run a
+sub-agent, or `serve mcp`/`serve a2a` to expose one for delegation).
+
+Concretely, this means:
+- **Never reference a repo-relative path** (`examples/foo.yaml`, `docs/...`,
+  `pkg/...`) in anything under `docker-agent/` — the installed reader has no
+  such directory. Use self-contained inline YAML in `references/examples.md`
+  and public URLs (`https://docs.docker.com/...`,
+  `https://raw.githubusercontent.com/docker/docker-agent/main/...`) for
+  everything else. Repo-relative paths are fine in *this* file, since it is
+  never installed.
+- **Never frame a recipe as if the reader is inside the docker-agent repo.**
+  Every recipe should read as "you are an agent in some arbitrary project;
+  `docker-agent` is available to you as a tool", not "see the example under
+  `examples/`".
+- **Delegation is the flagship use case, not an afterthought.** Keep
+  SKILL.md's "Delegating to another agent" section prominent and keep at
+  least one full worked delegation flow in `references/examples.md`.
 
 ## Never document what you have not observed
 
 Help text and doc comments state intent and drift from behavior. Before
 writing a claim about a command, flag, or config field, run it (or read the
 struct/schema definition directly) rather than paraphrasing a `--help`
-string or a doc page from memory. Two corrections made while writing v1
-came from doing exactly this: omitting `version:` targets the *latest*
-schema (verified via `debug config` on a version-less file — `pkg/config/
+string or a doc page from memory. Corrections made while writing v1 came
+from doing exactly this: omitting `version:` targets the *latest* schema
+(verified via `debug config` on a version-less file — `pkg/config/
 config.go`'s `cmp.Or(raw.Version, latest.Version)`), not an old pinned
-version; and `--yolo` does exist on `run` (it was just past an arbitrary
-`head` cutoff during a first pass).
+version; `--yolo` does exist on `run` (it was just past an arbitrary `head`
+cutoff during a first pass); `__askpass` is a `sudo_askpass` /
+`SUDO_ASKPASS` bridge for the `shell` toolset, not a git-credential helper
+and not sandbox-exclusive (`cmd/root/askpass.go`); and `fallback` is an
+`AgentConfig` field (automatic failover/retry), not a `ModelConfig` field —
+don't group it with `title_model`/`compaction_model` as if it were one
+(`agent-schema.json`'s `definitions.AgentConfig` vs `definitions.ModelConfig`).
+The same applies to eval fixtures: they are recorded-session JSON files
+captured via the TUI's `/eval` slash command (`docs/features/evaluation/`),
+**not** the cassette file `run --record` produces — those are two different
+formats for two different purposes; don't conflate them.
 
 ## Never document a command that blocks on a TTY, or a hidden flag/command
 
@@ -39,9 +82,10 @@ occurrence.
 
 ## Keep `SKILL.md` lean, and keep the frontmatter description safe
 
-Target SKILL.md's body under ~500 lines / ~5,000 tokens (currently ~120
-lines); push anything exhaustive into `references/`, one level deep.
-SKILL.md should read as judgment and workflow selection, not a flag dump.
+Target `docker-agent/SKILL.md`'s body under ~500 lines / ~5,000 tokens
+(currently ~160 lines); push anything exhaustive into `references/`, one
+level deep. SKILL.md should read as judgment and workflow selection, not a
+flag dump.
 
 **`description` must be a single physical line — no YAML line-folding.**
 `pkg/skills/frontmatter.go` is a line-based parser, not a real YAML parser:
