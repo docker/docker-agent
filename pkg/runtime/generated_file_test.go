@@ -204,9 +204,45 @@ func TestResolveGeneratedFile_ParentWorkingDirFallback(t *testing.T) {
 	assert.Equal(t, []byte("png"), resolved.Data)
 }
 
+func TestResolveGeneratedFile_BlobWithoutManifestIsRefused(t *testing.T) {
+	t.Parallel()
+	sess, _ := workspaceSession(t, "sess-forged-blob")
+	r, store := resolverTestRuntime(t, sess)
+	require.NoError(t, store.(session.GeneratedMediaBlobStore).AddGeneratedBlob(t.Context(), sess.ID, ".env", []byte("SECRET")))
+
+	_, err := r.ResolveGeneratedFile(t.Context(), workspaceRef(sess.ID, ".env"))
+	assert.ErrorIs(t, err, ErrGeneratedFileUnavailable)
+}
+
+func TestResolveGeneratedFile_PortableBlobWinsOverWorkspace(t *testing.T) {
+	t.Parallel()
+	sess, root := workspaceSession(t, "sess-portable")
+
+	r, store := resolverTestRuntime(t, sess)
+	recordWorkspaceFile(t, store, sess.ID, root, "cat.png", []byte("workspace"))
+	require.NoError(t, store.(session.GeneratedMediaBlobStore).AddGeneratedBlob(t.Context(), sess.ID, "cat.png", []byte("database")))
+	require.NoError(t, os.Remove(filepath.Join(root, "cat.png")))
+
+	resolved, err := r.ResolveGeneratedFile(t.Context(), workspaceRef(sess.ID, "cat.png"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("database"), resolved.Data)
+}
+
+func TestResolveGeneratedFile_LegacyManifestFallsBackToWorkspace(t *testing.T) {
+	t.Parallel()
+	sess, root := workspaceSession(t, "sess-legacy")
+	r, store := resolverTestRuntime(t, sess)
+	recordWorkspaceFile(t, store, sess.ID, root, "cat.png", []byte("legacy"))
+
+	resolved, err := r.ResolveGeneratedFile(t.Context(), workspaceRef(sess.ID, "cat.png"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("legacy"), resolved.Data)
+}
+
 func TestResolveGeneratedFile_NoWorkspaceRootRefused(t *testing.T) {
 	t.Parallel()
 	sess := &session.Session{ID: "sess-rootless"}
+
 	r, store := resolverTestRuntime(t, sess)
 	require.NoError(t, manifestOf(t, store).AddGeneratedFile(t.Context(), session.GeneratedFile{
 		SessionID: sess.ID, RelPath: "cat.png", Root: chat.ArtifactRootWorkspace, MimeType: "image/png", CreatedAt: time.Now(),
