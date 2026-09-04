@@ -8,9 +8,9 @@
 #
 # On the models gateway, direct Gemini API, and Vertex AI, Docker Agent
 # requests text AND image output for this image-capable model. Each
-# generated image is saved into the session's workspace as an ordinary file
-# and rendered inline in the TUI (terminals without graphics support print
-# the saved path instead).
+# generated image is saved into the session's workspace as an ordinary file,
+# stored with the session, and rendered inline in the TUI (terminals without
+# graphics support print the saved path instead).
 #
 # Notes:
 #   - Requests with tools or structured output are rejected locally before any

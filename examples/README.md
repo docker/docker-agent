@@ -216,7 +216,7 @@ remote MCP endpoints.
 | [`rule_based_routing.yaml`](rule_based_routing.yaml) | Cheap router model dispatches the user message to fast or capable models. |
 | [`structured-output.yaml`](structured-output.yaml) | Forces the model to return JSON matching a schema. |
 | [`google_search_grounding.yaml`](google_search_grounding.yaml) | Enables Google Search grounding on Gemini models. |
-| [`gemini_image_output.yaml`](gemini_image_output.yaml) | Gemini image-output model: generated images are saved into the workspace and rendered inline in the TUI. |
+| [`gemini_image_output.yaml`](gemini_image_output.yaml) | Gemini image-output model: generated images are saved into the workspace, stored portably with the session, and rendered inline in the TUI. |
 | [`sampling-opts.yaml`](sampling-opts.yaml) | Provider-specific sampling parameters (`top_k`, `repetition_penalty`, …). |
 | [`thinking_budget.yaml`](thinking_budget.yaml) | Reasoning/thinking budgets across OpenAI, Anthropic and Google. |
 | [`task_budget.yaml`](task_budget.yaml) | Anthropic `task_budget`: cap total tokens spent across a multi-step agentic task. |
