@@ -27,6 +27,34 @@ func manifestStores(t *testing.T, run func(t *testing.T, store Store, manifest G
 	})
 }
 
+func TestGeneratedMediaBlobStore_RoundTripAndCopy(t *testing.T) {
+	t.Parallel()
+	manifestStores(t, func(t *testing.T, _ Store, manifest GeneratedMediaManifest) {
+		t.Helper()
+		blobs, ok := manifest.(GeneratedMediaBlobStore)
+		require.True(t, ok)
+		ctx := t.Context()
+		input := make([]byte, (20<<20)+1)
+		copy(input, "portable image")
+		input[len(input)-1] = 0x7f
+		require.NoError(t, blobs.AddGeneratedBlob(ctx, "owner", "images/cat.png", input))
+		input[0] = 'X'
+
+		got, err := blobs.LookupGeneratedBlob(ctx, "owner", "images/cat.png")
+		require.NoError(t, err)
+		require.Len(t, got, len(input))
+		assert.Equal(t, byte('p'), got[0], "store must retain its own copy")
+		assert.Equal(t, byte(0x7f), got[len(got)-1], "large payload must round-trip through storage")
+		got[1] = 'X'
+		again, err := blobs.LookupGeneratedBlob(ctx, "owner", "images/cat.png")
+		require.NoError(t, err)
+		assert.Equal(t, byte('o'), again[1], "lookup must return a copy")
+
+		_, err = blobs.LookupGeneratedBlob(ctx, "owner", "missing.png")
+		require.ErrorIs(t, err, ErrGeneratedBlobNotFound)
+	})
+}
+
 func TestGeneratedMediaManifest_RoundTrip(t *testing.T) {
 	t.Parallel()
 	manifestStores(t, func(t *testing.T, _ Store, manifest GeneratedMediaManifest) {
@@ -237,5 +265,19 @@ func TestGeneratedMediaManifest_ReAddUpdatesRecord(t *testing.T) {
 		got, err := manifest.LookupGeneratedFile(ctx, "owner", "cat.png")
 		require.NoError(t, err)
 		assert.Equal(t, "image/webp", got.MimeType)
+	})
+}
+
+func TestGeneratedMediaManifest_DeleteSessionPrunesBlob(t *testing.T) {
+	t.Parallel()
+	manifestStores(t, func(t *testing.T, store Store, manifest GeneratedMediaManifest) {
+		t.Helper()
+		ctx := t.Context()
+		require.NoError(t, store.AddSession(ctx, New(WithID("doomed-blob"))))
+		blobs := manifest.(GeneratedMediaBlobStore)
+		require.NoError(t, blobs.AddGeneratedBlob(ctx, "doomed-blob", "cat.png", []byte("png")))
+		require.NoError(t, store.DeleteSession(ctx, "doomed-blob"))
+		_, err := blobs.LookupGeneratedBlob(ctx, "doomed-blob", "cat.png")
+		require.ErrorIs(t, err, ErrGeneratedBlobNotFound)
 	})
 }

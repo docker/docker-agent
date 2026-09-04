@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/concurrent"
 )
 
 var (
@@ -18,6 +19,8 @@ var (
 	// never recorded by materialization. Callers must treat it as "not a
 	// generated file" and refuse to read the workspace path.
 	ErrGeneratedFileNotFound = errors.New("generated file not found in manifest")
+
+	ErrGeneratedBlobNotFound = errors.New("generated media blob not found")
 
 	// ErrInvalidGeneratedFilePath is returned for a path that can never be a
 	// pkg/workspacemedia write result for its root kind (empty, traversal,
@@ -78,6 +81,14 @@ type GeneratedMediaManifest interface {
 	// (or ErrEmptyID) rather than being normalized. Callers must additionally
 	// require the returned Root to match their reference's ArtifactRoot.
 	LookupGeneratedFile(ctx context.Context, sessionID, relPath string) (*GeneratedFile, error)
+}
+
+// GeneratedMediaBlobStore persists portable copies of generated media. Blob
+// lookup remains manifest-gated: callers must first validate the corresponding
+// GeneratedFile record and its root kind.
+type GeneratedMediaBlobStore interface {
+	AddGeneratedBlob(ctx context.Context, sessionID, relPath string, data []byte) error
+	LookupGeneratedBlob(ctx context.Context, sessionID, relPath string) ([]byte, error)
 }
 
 // normalizeGeneratedFileRoot maps the zero value to the workspace root kind,
@@ -179,17 +190,74 @@ func (s *InMemorySessionStore) LookupGeneratedFile(_ context.Context, sessionID,
 
 // deleteGeneratedFiles prunes every manifest record owned by sessionID.
 func (s *InMemorySessionStore) deleteGeneratedFiles(sessionID string) {
+	deleteGeneratedKeys(s.generatedFiles, sessionID)
+}
+
+func (s *InMemorySessionStore) deleteGeneratedBlobs(sessionID string) {
+	deleteGeneratedKeys(s.generatedBlobs, sessionID)
+}
+
+func deleteGeneratedKeys[T any](entries *concurrent.Map[string, T], sessionID string) {
 	prefix := generatedFileKey(sessionID, "")
 	var doomed []string
-	s.generatedFiles.Range(func(key string, _ GeneratedFile) bool {
+	entries.Range(func(key string, _ T) bool {
 		if strings.HasPrefix(key, prefix) {
 			doomed = append(doomed, key)
 		}
 		return true
 	})
 	for _, key := range doomed {
-		s.generatedFiles.Delete(key)
+		entries.Delete(key)
 	}
+}
+
+func (s *InMemorySessionStore) AddGeneratedBlob(_ context.Context, sessionID, relPath string, data []byte) error {
+	if err := validateGeneratedFileKey(sessionID, relPath); err != nil {
+		return err
+	}
+	s.generatedBlobs.Store(generatedFileKey(sessionID, relPath), append([]byte(nil), data...))
+	return nil
+}
+
+func (s *InMemorySessionStore) LookupGeneratedBlob(_ context.Context, sessionID, relPath string) ([]byte, error) {
+	if err := validateGeneratedFileKey(sessionID, relPath); err != nil {
+		return nil, err
+	}
+	data, ok := s.generatedBlobs.Load(generatedFileKey(sessionID, relPath))
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrGeneratedBlobNotFound, relPath)
+	}
+	return append([]byte(nil), data...), nil
+}
+
+func (s *SQLiteSessionStore) AddGeneratedBlob(ctx context.Context, sessionID, relPath string, data []byte) error {
+	if err := validateGeneratedFileKey(sessionID, relPath); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO generated_media_blobs (session_id, rel_path, data)
+		VALUES (?, ?, ?)
+		ON CONFLICT (session_id, rel_path) DO UPDATE SET data = excluded.data
+	`, sessionID, relPath, data)
+	return err
+}
+
+func (s *SQLiteSessionStore) LookupGeneratedBlob(ctx context.Context, sessionID, relPath string) ([]byte, error) {
+	if err := validateGeneratedFileKey(sessionID, relPath); err != nil {
+		return nil, err
+	}
+	var data []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT data FROM generated_media_blobs
+		WHERE session_id = ? AND rel_path = ?
+	`, sessionID, relPath).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %q", ErrGeneratedBlobNotFound, relPath)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (s *SQLiteSessionStore) AddGeneratedFile(ctx context.Context, file GeneratedFile) error {

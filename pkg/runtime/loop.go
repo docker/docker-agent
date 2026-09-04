@@ -1427,7 +1427,9 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 		}
 		res := write.res
 
+		manifestRecorded := true
 		if err := r.recordGeneratedFile(ctx, sess.ID, write.root, res.RelPath, safeMimeType); err != nil {
+			manifestRecorded = false
 			// The file is already a real workspace deliverable, so keep the
 			// reference; without the manifest record inline display will
 			// refuse to render it (fail closed), which the user should hear
@@ -1437,6 +1439,17 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 			if events != nil {
 				warning := fmt.Sprintf("Saved generated media %s but could not record it for display; it may not render inline. %s", res.RelPath, retryWithDebugAdvice)
 				events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
+			}
+		}
+
+		if manifestRecorded {
+			if err := r.recordGeneratedBlob(ctx, sess.ID, res.RelPath, m.Data); err != nil {
+				slog.DebugContext(ctx, "Failed to store portable generated media; keeping the workspace file",
+					"agent", agentName, "session_id", sess.ID, "rel_path", res.RelPath, "error", err)
+				if events != nil {
+					warning := generatedBlobWarning(res.RelPath)
+					events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
+				}
 			}
 		}
 
@@ -1486,6 +1499,18 @@ func (r *LocalRuntime) recordGeneratedFile(ctx context.Context, sessionID string
 		MimeType:  mimeType,
 		CreatedAt: r.now(),
 	})
+}
+
+func (r *LocalRuntime) recordGeneratedBlob(ctx context.Context, sessionID, finalPath string, data []byte) error {
+	blobs, ok := r.sessionStore.(session.GeneratedMediaBlobStore)
+	if !ok {
+		return fmt.Errorf("session store %T does not implement generated-media blob storage", r.sessionStore)
+	}
+	return blobs.AddGeneratedBlob(ctx, sessionID, finalPath, data)
+}
+
+func generatedBlobWarning(finalPath string) string {
+	return fmt.Sprintf("Saved generated media %s in the workspace, but could not keep a portable copy with the session. %s", finalPath, retryWithDebugAdvice)
 }
 
 // workspacemediaWrite is [workspacemedia.Write] behind a package-level

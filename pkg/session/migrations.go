@@ -465,7 +465,21 @@ func getAllMigrations() []Migration {
 		},
 		{
 			ID:          29,
-			Name:        "029_add_root_kind_to_generated_media_manifest",
+			Name:        "029_add_generated_media_blob_table",
+			Description: "Store generated-media bytes in the session database for portable session rendering",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS generated_media_blobs (
+					session_id TEXT NOT NULL,
+					rel_path TEXT NOT NULL,
+					data BLOB NOT NULL,
+					PRIMARY KEY (session_id, rel_path)
+				)
+			`,
+			DownSQL: `DROP TABLE IF EXISTS generated_media_blobs`,
+		},
+		{
+			ID:          30,
+			Name:        "030_add_root_kind_to_generated_media_manifest",
 			Description: "Add root_kind to generated_media_manifest so user-confirmed out-of-workspace generated files stay manifest-gated alongside workspace-relative ones",
 			UpSQL:       `ALTER TABLE generated_media_manifest ADD COLUMN root_kind TEXT NOT NULL DEFAULT 'workspace'`,
 		},
