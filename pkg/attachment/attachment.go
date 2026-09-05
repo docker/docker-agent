@@ -115,9 +115,12 @@ var envelopeTagRe = regexp.MustCompile(`(?i)<[\s/]*(document-[a-z0-9-]+)\b[^>]*>
 // a placeholder in someone else's markup, while the cost of missing it is a
 // break-out — so the check errs toward defusing.
 //
-// Replacement repeats until the output is stable, because one pass can leave a
-// delimiter-shaped residue behind: `</TAG</TAG>>` collapses to `[…removed]>` only
-// after the second pass.
+// Replacement repeats until the output is stable. In practice one pass is
+// enough for every case covered by the tests, including the residue shape
+// `</TAG</TAG>>`: the pattern runs to the FIRST `>`, so that whole prefix is a
+// single match and collapses to `[…removed]>` in one go. The loop stays because
+// stability is the property that matters, and proving "one pass always suffices"
+// for every possible body is harder than simply iterating to a fixed point.
 func defuseDelimiters(body, tag string) string {
 	if body == "" {
 		return body
@@ -140,10 +143,20 @@ func defuseDelimiters(body, tag string) string {
 	return body
 }
 
-// maxDefusePasses bounds the replace-until-stable loop. Each pass strictly
-// shortens the body (a match is always longer than nothing and is replaced by a
-// constant), so this converges quickly; the bound only exists so a pathological
-// input cannot spin.
+// maxDefusePasses bounds the replace-until-stable loop.
+//
+// Termination does NOT come from the body shrinking -- it usually grows, because
+// delimiterPlaceholder is longer than the delimiters it replaces (`</document-x>`
+// is 13 bytes, the placeholder is 41). It comes from the placeholder containing
+// neither `<` nor `>`: it can never form part of a new match, so every pass
+// strictly reduces the number of delimiter-shaped tokens left in the body. That
+// count is a non-negative integer, so the loop reaches a fixed point.
+//
+// The bound is therefore belt-and-braces rather than the real guarantee, and it
+// is generous: every case in TestDefuseDelimitersConverges settles in one pass.
+// Note the loop returns whatever it has if the bound is ever hit, so if a future
+// change to envelopeTagRe or delimiterPlaceholder breaks the no-angle-brackets
+// property, that test is what will catch it.
 const maxDefusePasses = 8
 
 // slugify converts s to a lowercase, alphanumeric-and-hyphens-only string.
