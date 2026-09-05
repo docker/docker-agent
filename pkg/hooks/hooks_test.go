@@ -570,7 +570,7 @@ func TestExecuteStopReceivesResponseContent(t *testing.T) {
 
 	config := &Config{
 		Stop: []Hook{
-			{Type: HookTypeCommand, Command: printStdinJSONFieldCmd("stop_response"), Timeout: 5},
+			{Type: HookTypeCommand, Command: printStdinJSONFieldCmd(t, "stop_response"), Timeout: 5},
 		},
 	}
 

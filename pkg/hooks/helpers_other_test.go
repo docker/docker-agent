@@ -3,6 +3,7 @@
 package hooks
 
 import (
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,7 +32,20 @@ func emitContextEnvPwdCmd(envVars ...string) string {
 
 // printStdinJSONFieldCmd returns a command printing one field of the JSON
 // document the hook receives on stdin.
-func printStdinJSONFieldCmd(field string) string {
+//
+// This is the only test helper that needs a JSON parser in the shell, and POSIX
+// has no built-in one (the Windows mirror can lean on PowerShell's
+// ConvertFrom-Json). It shells out to jq and skips when jq is absent.
+//
+// The skip matters: without it the hook still runs, produces no output, and the
+// test fails on its content assertion instead -- reporting `"" does not contain
+// "final answer content"`, which reads as a defect in the hook plumbing rather
+// than a missing tool on the machine.
+func printStdinJSONFieldCmd(t *testing.T, field string) string {
+	t.Helper()
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not installed; it is required to read a JSON field from hook stdin")
+	}
 	return `cat | jq -r '.` + field + `'`
 }
 
