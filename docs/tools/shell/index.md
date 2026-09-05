@@ -67,7 +67,7 @@ The session's [safety mode](../../configuration/permissions/index.md#safety-mode
 
 Compound shell (`a && b`, `a; b`, `a | b`) is never matched against the safe allowlist; any destructive segment falls through to ask. The full taxonomy lives in [`pkg/safety/safety_patterns.json`](https://github.com/docker/docker-agent/blob/main/pkg/safety/safety_patterns.json).
 
-See [`examples/safety_modes.yaml`](https://github.com/docker/docker-agent/blob/main/examples/safety_modes.yaml) for a full example. The legacy `safer: true` toolset flag was removed in config version 15 (it is still accepted, and ignored, by older config versions).
+See [`examples/safety_modes.yaml`](https://github.com/docker/docker-agent/blob/main/examples/safety_modes.yaml) for a full example. The legacy `safer: true` toolset flag was removed in config version 15: a config declaring version 15 or later (including a version-less config, which resolves to the latest schema) now fails to load with `unknown field "safer"` if the flag is present — delete it, it has had no effect since v1.117.0. Configs pinned to `version: "14"` or lower still accept the flag and silently ignore it.
 
 ### Sudo support
 

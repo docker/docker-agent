@@ -1197,6 +1197,31 @@ agents:
 	assert.NotContains(t, err.Error(), "hint:")
 }
 
+// TestLoadRemovedFieldHint pins the fix for issue #4175: a version-less (or
+// explicit latest-version) config with a shell toolset's `safer: true` still
+// fails — the field was intentionally removed as of config v15 (PR #4169)
+// and stays removed — but the error now points out that `safer` used to be
+// part of config version 14 and should be deleted, instead of silently
+// suggesting a `version:` downgrade the way the newer-version hint's wording
+// would.
+func TestLoadRemovedFieldHint(t *testing.T) {
+	t.Parallel()
+
+	cfgStr := `agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    toolsets:
+      - type: shell
+        safer: true
+`
+	_, err := Load(t.Context(), NewBytesSource("test.yaml", []byte(cfgStr)))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown field "safer"`)
+	assert.Contains(t, err.Error(), "config version 14")
+	assert.Contains(t, err.Error(), "delete it from your config")
+}
+
 func TestLoadNewerVersionHintNumericOrdering(t *testing.T) {
 	t.Parallel()
 

@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 
 This release improves safety classification for background jobs and shell commands, enhances the `--key` option for share commands, and advances the internal config schema to v16.
 
+## Breaking Changes
+
+- The `safer` boolean flag removed from the shell toolset (see Technical Changes below) is now rejected outright: a config that still sets `safer: true` on a shell toolset fails to load with `unknown field "safer"` instead of loading silently, including version-less configs (which resolve to the latest schema). Delete the flag — it has had no effect since v1.117.0, superseded by session-wide [safety modes](https://github.com/docker/docker-agent/blob/main/examples/safety_modes.yaml). Pinning `version: "14"` (or lower) is not the fix, since frozen schema versions are not maintained long-term; the field must be removed from the YAML. The load-time error now includes a hint naming the last config version that accepted the field.
+
 ## What's New
 
 - Adds classification of `run_background_job` commands using the same safety rules as shell commands, so background jobs are now properly evaluated (and prompted or denied) based on their actual command content

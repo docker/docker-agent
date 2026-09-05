@@ -298,10 +298,10 @@ For YAML editor autocompletion and validation, use the [Docker Agent JSON Schema
 
 ## Config Versioning
 
-Docker Agent configs are versioned. The current version is `15`. Add the version at the top of your config:
+Docker Agent configs are versioned. The current version is `16`. Add the version at the top of your config:
 
 ```yaml
-version: 15
+version: 16
 
 agents:
   root:
@@ -318,6 +318,12 @@ hint: this syntax is supported by config version 12; update the top-level 'versi
 ```
 
 Bump the `version` field as directed to enable the new syntax.
+
+Conversely, if a key was valid in an older schema version but has since been removed (for example, the `safer` shell toolset flag removed in version 15 — see the [Shell tool docs](../../tools/shell/index.md)), the hint instead tells you the field is gone and should be deleted, rather than suggesting you lower `version`:
+
+```text
+hint: 'safer' was part of config version 14 but has since been removed; delete it from your config instead of lowering the top-level 'version' field
+```
 
 ## Metadata Section
 
