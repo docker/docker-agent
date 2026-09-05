@@ -20,6 +20,12 @@ const (
 	budgetLimitCost   budgetLimit = "max_cost"
 	budgetLimitTokens budgetLimit = "max_tokens"
 	budgetLimitTime   budgetLimit = "max_time"
+
+	// budgetWarnFraction is the share of a ceiling at which the runtime
+	// warns the agent once, before the hard stop at 100%. Internal, not
+	// a YAML knob: a run that still crosses the ceiling must stop the
+	// same way it does today.
+	budgetWarnFraction = 0.8
 )
 
 type budgetTracker struct {
@@ -32,6 +38,9 @@ type budgetTracker struct {
 	active    time.Duration
 	unpriced  bool
 	perAgent  map[string]*agentSpend
+	// warned records which limits have already emitted the 80% warning
+	// so each tracker warns at most once per limit.
+	warned map[budgetLimit]bool
 }
 
 type agentSpend struct {
@@ -164,6 +173,13 @@ func (br budgetBreach) Message() string {
 	)
 }
 
+func (br budgetBreach) WarnMessage() string {
+	return fmt.Sprintf(
+		"You are approaching the configured budget (used %s of %s %s). Prefer cheaper tools, avoid redundant calls, summarize, and finish soon. The run will stop if the limit is reached.",
+		br.Used, br.Max, br.configPath(),
+	)
+}
+
 func (br budgetBreach) configPath() string {
 	if br.Budget == "" || br.Budget == runBudgetName {
 		return "budget." + string(br.Limit)
@@ -177,7 +193,10 @@ func (b *budgetTracker) exceeded() *budgetBreach {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.exceededLocked()
+}
 
+func (b *budgetTracker) exceededLocked() *budgetBreach {
 	if b.maxCost > 0 && b.cost >= b.maxCost {
 		return &budgetBreach{
 			Limit: budgetLimitCost,
@@ -197,6 +216,94 @@ func (b *budgetTracker) exceeded() *budgetBreach {
 			Limit: budgetLimitTime,
 			Used:  b.active.Round(time.Second).String(),
 			Max:   b.maxTime.String(),
+		}
+	}
+	return nil
+}
+
+// approaching reports the first limit that has crossed budgetWarnFraction
+// but is not yet at its ceiling. Cost, then tokens, then time — the same
+// order as [exceeded]. Does not consult or mutate the warned set; use
+// [consumeApproaching] when emitting a one-shot warning.
+func (b *budgetTracker) approaching() *budgetBreach {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.approachingLocked()
+}
+
+// consumeApproaching returns the next unwarned approaching limit and
+// marks it warned. Returns nil when nothing is approaching, when the
+// ceiling is already exceeded, or when every approaching limit has
+// already been warned.
+func (b *budgetTracker) consumeApproaching() *budgetBreach {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.exceededLocked() != nil {
+		return nil
+	}
+	for _, limit := range []budgetLimit{budgetLimitCost, budgetLimitTokens, budgetLimitTime} {
+		if b.warned[limit] {
+			continue
+		}
+		br := b.breachIfApproachingLocked(limit)
+		if br == nil {
+			continue
+		}
+		if b.warned == nil {
+			b.warned = make(map[budgetLimit]bool)
+		}
+		b.warned[limit] = true
+		return br
+	}
+	return nil
+}
+
+func (b *budgetTracker) approachingLocked() *budgetBreach {
+	for _, limit := range []budgetLimit{budgetLimitCost, budgetLimitTokens, budgetLimitTime} {
+		if br := b.breachIfApproachingLocked(limit); br != nil {
+			return br
+		}
+	}
+	return nil
+}
+
+func (b *budgetTracker) breachIfApproachingLocked(limit budgetLimit) *budgetBreach {
+	switch limit {
+	case budgetLimitCost:
+		if b.maxCost > 0 && b.cost >= b.maxCost*budgetWarnFraction && b.cost < b.maxCost {
+			return &budgetBreach{
+				Limit: budgetLimitCost,
+				Used:  formatUSD(b.cost),
+				Max:   formatUSD(b.maxCost),
+			}
+		}
+	case budgetLimitTokens:
+		if b.maxTokens > 0 {
+			warnAt := int64(float64(b.maxTokens) * budgetWarnFraction)
+			if b.tokens >= warnAt && b.tokens < b.maxTokens {
+				return &budgetBreach{
+					Limit: budgetLimitTokens,
+					Used:  fmt.Sprintf("%d tokens", b.tokens),
+					Max:   fmt.Sprintf("%d tokens", b.maxTokens),
+				}
+			}
+		}
+	case budgetLimitTime:
+		if b.maxTime > 0 {
+			warnAt := time.Duration(float64(b.maxTime) * budgetWarnFraction)
+			if b.active >= warnAt && b.active < b.maxTime {
+				return &budgetBreach{
+					Limit: budgetLimitTime,
+					Used:  b.active.Round(time.Second).String(),
+					Max:   b.maxTime.String(),
+				}
+			}
 		}
 	}
 	return nil
@@ -341,8 +448,10 @@ func (r *LocalRuntime) enforceBudget(
 	a *agent.Agent,
 	events EventSink,
 ) iterationDecision {
-	breach := r.currentBudget().exceededFor(a.Name())
+	budgets := r.currentBudget()
+	breach := budgets.exceededFor(a.Name())
 	if breach == nil {
+		r.warnBudgetIfApproaching(ctx, sess, a, events, budgets)
 		return iterationContinue
 	}
 
@@ -372,9 +481,54 @@ func (r *LocalRuntime) enforceBudget(
 	return iterationStop
 }
 
+func (r *LocalRuntime) warnBudgetIfApproaching(
+	ctx context.Context,
+	sess *session.Session,
+	a *agent.Agent,
+	events EventSink,
+	budgets *budgetSet,
+) {
+	warn := budgets.consumeApproachingFor(a.Name())
+	if warn == nil {
+		return
+	}
+
+	msg := warn.WarnMessage()
+	slog.InfoContext(ctx, "Run budget approaching",
+		"agent", a.Name(),
+		"session_id", sess.ID,
+		"budget", warn.Budget,
+		"limit", string(warn.Limit),
+		"used", warn.Used,
+		"max", warn.Max,
+	)
+	events.Emit(Warning(msg, a.Name()))
+	addAgentMessage(sess, a, &chat.Message{
+		Role:      chat.MessageRoleSystem,
+		Content:   msg,
+		CreatedAt: r.now().Format(time.RFC3339),
+	}, events)
+}
+
 func (s *budgetSet) exceededFor(agentName string) *budgetBreach {
+	if s == nil {
+		return nil
+	}
 	for _, nt := range s.budgetsFor(agentName) {
 		if br := nt.Tracker.exceeded(); br != nil {
+			br.Budget = nt.Name
+			return br
+		}
+	}
+	return nil
+}
+
+func (s *budgetSet) consumeApproachingFor(agentName string) *budgetBreach {
+	if s == nil {
+		return nil
+	}
+	for _, nt := range s.budgetsFor(agentName) {
+		if br := nt.Tracker.consumeApproaching(); br != nil {
 			br.Budget = nt.Name
 			return br
 		}
