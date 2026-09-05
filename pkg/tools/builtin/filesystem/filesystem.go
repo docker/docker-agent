@@ -1656,18 +1656,40 @@ func (t *ToolSet) handleCreateDirectory(ctx context.Context, args CreateDirector
 		)
 	}
 	var results []string
-	for _, path := range args.Paths {
+	for i, path := range args.Paths {
 		resolvedPath, err := t.resolveAndCheckPath(path)
 		if err != nil {
-			return tools.ResultError(err.Error()), nil
+			return tools.ResultError(batchAbort(results, err.Error(), args.Paths[i+1:])), nil
 		}
 		if err := t.mkdirAll(resolvedPath, 0o755); err != nil {
-			return tools.ResultError(fmt.Sprintf("Error creating directory %s: %s", path, err)), nil
+			return tools.ResultError(batchAbort(results,
+				fmt.Sprintf("Error creating directory %s: %s", path, err), args.Paths[i+1:])), nil
 		}
 		results = append(results, "Directory created successfully: "+path)
 	}
 
 	return tools.ResultSuccess(strings.Join(results, "\n")), nil
+}
+
+// batchAbort renders the outcome of a path batch that stopped partway: what
+// already succeeded, the error that stopped it, and what was never attempted.
+//
+// All three parts are needed for the caller to know the filesystem state. These
+// loops stop at the first error but do not roll back, so the error alone reads
+// as a no-op; and without the untouched tail the caller still cannot tell "not
+// processed" from "processed but unreported", which is the retry ambiguity this
+// reporting exists to remove.
+//
+// Each part is omitted when empty, so a single-path failure keeps the bare error
+// message it has always had.
+func batchAbort(completed []string, errMsg string, remaining []string) string {
+	parts := make([]string, 0, len(completed)+2)
+	parts = append(parts, completed...)
+	parts = append(parts, errMsg)
+	if len(remaining) > 0 {
+		parts = append(parts, "Stopped before: "+strings.Join(remaining, ", "))
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (t *ToolSet) handleRemoveDirectory(ctx context.Context, args RemoveDirectoryArgs) (*tools.ToolCallResult, error) {
@@ -1679,14 +1701,15 @@ func (t *ToolSet) handleRemoveDirectory(ctx context.Context, args RemoveDirector
 		)
 	}
 	var results []string
-	for _, path := range args.Paths {
+	for i, path := range args.Paths {
 		resolvedPath, err := t.resolveAndCheckPath(path)
 		if err != nil {
-			return tools.ResultError(err.Error()), nil
+			return tools.ResultError(batchAbort(results, err.Error(), args.Paths[i+1:])), nil
 		}
 
 		if err := t.removeDir(resolvedPath); err != nil {
-			return tools.ResultError(fmt.Sprintf("Error removing directory %s: %s", path, err)), nil
+			return tools.ResultError(batchAbort(results,
+				fmt.Sprintf("Error removing directory %s: %s", path, err), args.Paths[i+1:])), nil
 		}
 		results = append(results, "Directory removed successfully: "+path)
 	}
