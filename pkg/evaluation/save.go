@@ -431,6 +431,7 @@ func SaveRunSessionsJSON(run *EvalRun, outputDir string) (string, error) {
 			Concurrency:      run.Config.Concurrency,
 			EvalsDir:         run.Config.EvalsDir,
 			BaseImage:        run.Config.BaseImage,
+			AgentImage:       ResolvedAgentImage(run.Config),
 			ContainerRuntime: run.Config.ContainerRuntime,
 		},
 		Summary:  run.Summary,

@@ -52,6 +52,8 @@ func newEvalCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flags.outputDir, "output", "", "Directory for results and logs (default: <eval-dir>/results)")
 	cmd.Flags().StringSliceVar(&flags.Only, "only", nil, "Only run evaluations with file names matching these patterns (can be specified multiple times)")
 	cmd.Flags().StringVar(&flags.BaseImage, "base-image", "", "Custom base image for running evaluations")
+	cmd.Flags().StringVar(&flags.AgentImage, "agent-image", "",
+		"docker-agent image to inject into eval containers (default: pinned to this CLI's own release version, e.g. docker/docker-agent:1.2.3; falls back to docker/docker-agent:edge for dev builds); pass \"none\" to skip injection and trust the base image's own binary")
 	cmd.Flags().StringVar(&flags.ContainerRuntime, "container-runtime", evaluation.DefaultContainerRuntime, "Container runtime executable for building and running evaluations")
 	cmd.Flags().BoolVar(&flags.KeepContainers, "keep-containers", false, "Keep containers after evaluation (don't use --rm)")
 	cmd.Flags().StringSliceVarP(&flags.EnvVars, "env", "e", nil, "Environment variables to pass to container (KEY or KEY=VALUE)")
@@ -118,6 +120,11 @@ func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) (commandEr
 	fmt.Fprintf(logFile, "Judge model: %s\n", f.JudgeModel)
 	fmt.Fprintf(logFile, "Concurrency: %d\n", f.Concurrency)
 	fmt.Fprintf(logFile, "Container runtime: %s\n", f.ContainerRuntime)
+	if agentImage := evaluation.ResolvedAgentImage(f.Config); agentImage != "" {
+		fmt.Fprintf(logFile, "Agent image: %s\n", agentImage)
+	} else {
+		fmt.Fprintf(logFile, "Agent image: (none, trusting base image binary)\n")
+	}
 	fmt.Fprintf(logFile, "\n")
 
 	// Create tee writer to write to both console and log file

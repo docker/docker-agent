@@ -218,6 +218,7 @@ $ docker agent eval <agent-file>|<registry-ref> [<eval-dir>|./evals]
 | `--output`          | `<eval-dir>/results`  | Directory for results, logs, and session databases                |
 | `--only`            | (all)                       | Only run evals with file names matching these patterns            |
 | `--base-image`      | (default)                   | Custom base image for eval containers (see [Custom Base Images](#custom-base-images)) |
+| `--agent-image`     | (this CLI's version)        | docker-agent image injected into eval containers; `none` skips injection (see [Custom Base Images](#custom-base-images)) |
 | `--container-runtime` | `docker`                  | Container runtime executable for building and running evaluations (e.g. `podman`) |
 | `--keep-containers` | `false`                     | Keep containers after evaluation (don't remove with `--rm`)       |
 | `-e, --env`         | (none)                      | Environment variables to pass to container (`KEY` or `KEY=VALUE`) |
@@ -299,7 +300,7 @@ evaluated agent run fails to authenticate.
 
 When `--base-image` is set, the eval harness builds a derived image on top of your base image at evaluation time. Two things happen automatically:
 
-1. **The docker-agent binary is injected** — it is copied from `docker/docker-agent:edge` into the derived image at build time, so you don't need to include it in your base image.
+1. **The docker-agent binary is injected** — by default it is copied from `docker/docker-agent:<version>`, pinned to this CLI's own release version, so eval results are reproducible against a known build rather than a moving target. A dev build (compiled from `main`, without a release version) falls back to `docker/docker-agent:edge`. This injection applies to every eval run, not just those using `--base-image`. Use `--agent-image <ref>` to inject a specific image instead — for example to pin CI to an older release, or to test against `docker/docker-agent:edge` deliberately. Pass `--agent-image none` to skip injection entirely and trust whatever `/docker-agent` binary is already present in your base image.
 2. **The entrypoint is overridden** — Docker Agent replaces your base image's entrypoint with its own `/run.sh` wrapper.
 
 Your base image therefore only needs to provide the runtime environment: language runtimes, installed dependencies, test fixtures, the appropriate working directory, and so on. Any `ENTRYPOINT` or `CMD` defined in your base image is ignored.
