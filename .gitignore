@@ -23,7 +23,7 @@ vendor
 /cagent
 /cagent-*
 /docker-mcp-*
-docker-agent
+/docker-agent
 
 # Generated wasm artifacts (built locally; see cmd/wasm/README.md)
 /wasm
