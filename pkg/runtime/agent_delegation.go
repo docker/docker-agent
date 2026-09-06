@@ -192,19 +192,29 @@ type SubSessionConfig struct {
 type delegationRequest struct {
 	SubSessionConfig
 
+	// CallerAgent is the agent that issued the delegating tool call,
+	// snapshotted by the caller before the dispatcher's parallel fan-out.
+	// runForwarding falls back to session resolution when it is nil.
+	CallerAgent *agent.Agent
+
+	// ConcurrentBatch reports that sibling delegations share this call's
+	// tool-call batch, so they run in parallel. Decided by the caller from
+	// the dispatcher's pre-fan-out tally, never by racing at runtime.
+	ConcurrentBatch bool
+
 	// SwitchCurrentAgent, when true, swaps r.currentAgent to AgentName
 	// for the lifetime of the call and emits AgentSwitching/AgentInfo
 	// events on entry and exit. Used by transfer_task. Mutually
 	// exclusive in spirit with PinAgent: pinning is for concurrent
 	// sub-sessions that must NOT share the runtime's mutable
-	// currentAgent, while switching is for sequential delegations where
-	// the parent loop is blocked anyway.
+	// currentAgent, while switching is for the one delegation that owns it.
 	//
-	// When the parent session is itself pinned (a background agent's
-	// session), runForwarding downgrades the switch to pinning the child
-	// to AgentName instead: the shared current agent belongs to the
-	// concurrent foreground loop and must not be mutated from a
-	// background task (#3886).
+	// runForwarding downgrades the switch to pinning the child to AgentName
+	// in two cases. When the parent session is itself pinned (a background
+	// agent's session), the shared current agent belongs to the concurrent
+	// foreground loop and must not be mutated from a background task (#3886).
+	// When sibling delegations share this call's tool-call batch, they all run
+	// in parallel and none may own the shared current agent (#4156).
 	SwitchCurrentAgent bool
 }
 
@@ -340,11 +350,14 @@ func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, f
 func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Session, evts EventSink, req delegationRequest) (*tools.ToolCallResult, error) {
 	span := trace.SpanFromContext(ctx)
 
-	// The caller resolves from the parent session, not the shared current
-	// agent: a nested transfer from a pinned background session must
-	// attribute events, hooks, and completion to the pinned agent, no
-	// matter where the concurrent foreground loop points (#3886).
-	callerAgent := r.resolveSessionAgent(parent)
+	// The caller never resolves from the shared current agent here: a nested
+	// transfer from a pinned background session must attribute events, hooks,
+	// and completion to the pinned agent (#3886), and a sibling call in the
+	// same parallel batch may already have swapped it (#4156).
+	callerAgent := req.CallerAgent
+	if callerAgent == nil {
+		callerAgent = r.resolveSessionAgent(parent)
+	}
 	if callerAgent == nil {
 		return nil, errors.New("no agent resolved for the parent session")
 	}
@@ -354,15 +367,23 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	}
 
 	if req.SwitchCurrentAgent {
-		if parent.AgentName == "" {
-			defer r.swapCurrentAgent(ctx, parent.ID, callerAgent, child, evts)()
-		} else {
+		switch {
+		case parent.AgentName != "":
 			// Pinned parent (background delegation): the shared current
 			// agent belongs to the concurrent foreground loop and must not
 			// be mutated. Pin the child to the target instead — RunStream
 			// resolves pinned sessions directly, so the child still
 			// executes as the target agent, without switch events/hooks.
 			req.PinAgent = true
+		case req.ConcurrentBatch:
+			// Sibling delegations run beside this one, and the current agent
+			// is a single shared field: whoever swapped it would misroute the
+			// others' turns. Pin every member of the batch rather than letting
+			// one win a race — the parallel children are isolated, and which
+			// child keeps switch events no longer varies per run (#4156).
+			req.PinAgent = true
+		default:
+			defer r.swapCurrentAgent(ctx, parent.ID, callerAgent, child, evts)()
 		}
 	}
 
@@ -420,14 +441,15 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 // Unlike runForwarding it does not emit AgentSwitching/AgentInfo events:
 // callers like background agents PinAgent the child session so the
 // runtime never mutates the shared currentAgent state.
-func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Session, cfg SubSessionConfig, onContent func(string)) *agenttool.RunResult {
-	// The caller resolves from the parent session, not the shared current
-	// agent: a nested background dispatch from a pinned session must
-	// attribute the child's completion to the pinned agent, no matter
-	// where the concurrent foreground loop points (#3886). Resolved once
-	// up front so the subagent_stop defer below can't drift to a
-	// different agent if the shared current changes mid-run.
-	callerAgent := r.resolveSessionAgent(parent)
+func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Session, caller *agent.Agent, cfg SubSessionConfig, onContent func(string)) *agenttool.RunResult {
+	// Resolved by the caller before dispatch, never from the shared current
+	// agent: a nested background dispatch from a pinned session must attribute
+	// the child's completion to the pinned agent (#3886), and the shared field
+	// may be swapped mid-run by a concurrent delegation (#4156).
+	callerAgent := caller
+	if callerAgent == nil {
+		callerAgent = r.resolveSessionAgent(parent)
+	}
 	if callerAgent == nil {
 		return &agenttool.RunResult{ErrMsg: "no agent resolved for the parent session"}
 	}
@@ -651,7 +673,7 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	if guardErr != "" {
 		return &agenttool.RunResult{ErrMsg: guardErr}
 	}
-	return r.runCollecting(ctx, params.ParentSession, SubSessionConfig{
+	return r.runCollecting(ctx, params.ParentSession, caller, SubSessionConfig{
 		Task:              params.Task,
 		ExpectedOutput:    params.ExpectedOutput,
 		AgentName:         params.AgentName,
@@ -665,7 +687,7 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	}, params.OnContent)
 }
 
-func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
 	var params struct {
 		Agent          string `json:"agent"`
 		Task           string `json:"task"`
@@ -675,10 +697,11 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// Resolve the caller session-aware: nested transfer_task from a pinned
-	// background session must attribute the call to the pinned agent, not
-	// the shared current agent (#3886).
-	a := r.resolveSessionAgent(sess)
+	// Resolve the caller from the dispatcher's batch snapshot: a nested
+	// transfer_task from a pinned background session must attribute the call to
+	// the pinned agent (#3886), and a sibling transfer_task in the same parallel
+	// batch may already have swapped the shared current agent (#4156).
+	a := r.callerAgent(rt, sess)
 	if a == nil {
 		return nil, errors.New("no agent resolved for the calling session")
 	}
@@ -735,6 +758,8 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 			NonInteractive:    sess.NonInteractive,
 			DelegationLineage: childLineage,
 		},
+		CallerAgent:        a,
+		ConcurrentBatch:    concurrentSiblings(rt) > 1,
 		SwitchCurrentAgent: true,
 	})
 }

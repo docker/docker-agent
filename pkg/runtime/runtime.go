@@ -1322,6 +1322,48 @@ func (r *LocalRuntime) resolveSessionAgent(sess *session.Session) *agent.Agent {
 	return r.agents.ResolveSession(sess)
 }
 
+// callerAgentProvider is the optional interface a [tools.Runtime] implements to
+// report the agent that owns the in-flight tool-call batch. [toolexec] snapshots
+// it once before dispatching the batch in parallel.
+type callerAgentProvider interface {
+	CallerAgent() *agent.Agent
+}
+
+// callerAgent returns the agent that issued the in-flight tool call. It prefers
+// rt's batch snapshot over resolving from the session: a sibling transfer_task
+// running in the same parallel batch may already have swapped the shared current
+// agent, which would misidentify this call's caller (#4156). Hosts without a
+// snapshot (NopRuntime in tests, standalone skill invocations) fall back to
+// session resolution.
+func (r *LocalRuntime) callerAgent(rt tools.Runtime, sess *session.Session) *agent.Agent {
+	if p, ok := rt.(callerAgentProvider); ok {
+		if a := p.CallerAgent(); a != nil {
+			return a
+		}
+	}
+	return r.resolveSessionAgent(sess)
+}
+
+// toolBatchProvider is the optional interface a [tools.Runtime] implements to
+// report the shape of the in-flight tool-call batch. [toolexec] counts it once
+// before dispatching the batch in parallel, so every sibling reads the same
+// number.
+type toolBatchProvider interface {
+	ConcurrentSiblings() int
+}
+
+// concurrentSiblings reports how many calls to the in-flight tool the current
+// batch carries, including this one. Hosts without a dispatcher batch
+// (NopRuntime in tests, standalone skill invocations) report a solo call.
+func concurrentSiblings(rt tools.Runtime) int {
+	if p, ok := rt.(toolBatchProvider); ok {
+		if n := p.ConcurrentSiblings(); n > 0 {
+			return n
+		}
+	}
+	return 1
+}
+
 // CurrentAgentSkillsToolset returns the skills toolset for the current agent, or nil if not enabled.
 func (r *LocalRuntime) CurrentAgentSkillsToolset() *skills.ToolSet {
 	return agentSkillsToolset(r.CurrentAgent())
