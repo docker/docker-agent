@@ -105,8 +105,13 @@ func validateStoredWorkingDir(dir string) error {
 	if !filepath.IsAbs(dir) {
 		return fmt.Errorf("working directory %q is not absolute", dir)
 	}
-	if cleaned := filepath.Clean(dir); !filepath.IsAbs(cleaned) {
-		return fmt.Errorf("working directory %q does not clean to an absolute path", dir)
+	// Every legitimate writer runs filepath.Clean before persisting (see
+	// CaptureLocalWorkingDir), so an unclean stored value — ".." segments,
+	// "." segments, doubled or trailing separators — is tampered or corrupt.
+	// Rejecting it here keeps traversal like "/workspace/../etc" from ever
+	// being handed out as a trusted workspace root.
+	if filepath.Clean(dir) != dir {
+		return fmt.Errorf("working directory %q is not a clean path", dir)
 	}
 	return nil
 }

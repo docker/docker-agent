@@ -65,6 +65,17 @@ func (r *LocalRuntime) stripUnsupportedModalitiesTransform(
 // Text parts, PDFs, and any other non-media content are preserved,
 // and the relative order of the surviving parts is unchanged.
 //
+// A part carrying an ArtifactPath (a runtime-materialized, model-generated
+// artifact — see [isGeneratedMediaPart]) is never stripped here, even when
+// its MIME kind would otherwise be unsupported: [BuiltinStripGeneratedMedia]
+// is registered to run first and is solely responsible for replacing that
+// part with a safe placeholder. This check makes that independent of
+// registration order — if the transform chain is ever reordered or this
+// transform is invoked directly (as some tests do, bypassing the chain),
+// a generated artifact still cannot be silently dropped without its
+// placeholder, which would otherwise strand a media-only assistant turn
+// with no content at all for a capability-less or unknown model.
+//
 // Lives next to [stripUnsupportedModalitiesTransform] (rather than in
 // streaming.go where its image-only ancestor originated) so the
 // builtin's registration, transform, and helper are co-located. Kept
@@ -81,6 +92,10 @@ func stripUnsupportedMediaContent(ctx context.Context, messages []chat.Message, 
 
 		var filtered []chat.MessagePart
 		for _, part := range msg.MultiContent {
+			if isGeneratedMediaPart(part) {
+				filtered = append(filtered, part)
+				continue
+			}
 			if kind := partMediaKind(part); kind != "" && !supportsMediaKind(mc, kind) {
 				slog.DebugContext(ctx, "strip_unsupported_modalities: stripped media part",
 					"kind", kind,
