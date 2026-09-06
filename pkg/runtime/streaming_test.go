@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -494,4 +495,185 @@ func TestHandleStream_ContextCancellation(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled, "error must be context.Canceled")
 	assert.True(t, res.Stopped)
+}
+
+// agentChoiceText drains every buffered event and concatenates the
+// AgentChoice content, i.e. exactly what a live consumer (TUI/API) rendered.
+func agentChoiceText(ch chan Event) string {
+	var b strings.Builder
+	for {
+		select {
+		case e := <-ch:
+			if c, ok := e.(*AgentChoiceEvent); ok {
+				b.WriteString(c.Content)
+			}
+		default:
+			return b.String()
+		}
+	}
+}
+
+// runMarkerStream runs handleStream over stream and returns the result plus
+// the concatenated live AgentChoice text.
+func runMarkerStream(t *testing.T, stream *mockStream) (streamResult, string) {
+	t.Helper()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+	return res, agentChoiceText(evCh)
+}
+
+// TestHandleStream_MediaFileMarkerStrippedAndPaired is the core streaming
+// contract of the naming protocol: a marker line split across chunks never
+// reaches the live event stream or the aggregated content, and its path is
+// paired onto the blob in [chat.MediaDelta.RequestedPath].
+func TestHandleStream_MediaFileMarkerStrippedAndPaired(t *testing.T) {
+	t.Parallel()
+
+	imgBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	stream := newStreamBuilder().
+		AddContent("Here you go!\n[media-fi").
+		AddContent("le: red-panda.png]\n").
+		AddMedia(imgBytes, "image/png", "provider-name.png").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Equal(t, "Here you go!\n", res.Content, "the marker line must be stripped from the persisted text")
+	assert.Equal(t, res.Content, live, "live event text and aggregated content must be identical")
+	require.Len(t, res.Media, 1)
+	assert.Equal(t, "red-panda.png", res.Media[0].RequestedPath)
+	assert.Equal(t, "provider-name.png", res.Media[0].Name, "the provider display name must survive for fallback")
+}
+
+// TestHandleStream_MarkerAtEOFWithoutNewline: a marker terminated by the end
+// of the stream (bare EOF, no trailing newline, media arrived first) is
+// still stripped and paired.
+func TestHandleStream_MarkerAtEOFWithoutNewline(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddMedia([]byte{0x01}, "image/png", "").
+		AddContent("[media-file: cat.png]").
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Empty(t, res.Content)
+	assert.Empty(t, live)
+	require.Len(t, res.Media, 1)
+	assert.Equal(t, "cat.png", res.Media[0].RequestedPath)
+	assert.True(t, res.Stopped)
+}
+
+// TestHandleStream_MarkerBlobCountMismatch pins the pairing rules when the
+// model misbehaves: markers pair positionally, extra blobs keep their
+// fallback naming, and extra markers are stripped but ignored.
+func TestHandleStream_MarkerBlobCountMismatch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fewer markers than blobs", func(t *testing.T) {
+		t.Parallel()
+
+		stream := newStreamBuilder().
+			AddContent("[media-file: only.png]\n").
+			AddMultiMedia(
+				chat.MediaDelta{Data: []byte{0x01}, MimeType: "image/png", Name: "a", Size: 1},
+				chat.MediaDelta{Data: []byte{0x02}, MimeType: "image/png", Name: "b", Size: 1},
+			).
+			AddStopWithUsage(1, 1).
+			Build()
+
+		res, live := runMarkerStream(t, stream)
+
+		assert.Empty(t, res.Content)
+		assert.Empty(t, live)
+		require.Len(t, res.Media, 2, "every blob must survive, marker or not")
+		assert.Equal(t, "only.png", res.Media[0].RequestedPath)
+		assert.Empty(t, res.Media[1].RequestedPath, "the unpaired blob falls back to its provider name")
+		assert.Equal(t, []byte{0x01}, res.Media[0].Data, "blob order must be preserved")
+	})
+
+	t.Run("more markers than blobs", func(t *testing.T) {
+		t.Parallel()
+
+		stream := newStreamBuilder().
+			AddContent("[media-file: one.png]\n[media-file: two.png]\n").
+			AddMedia([]byte{0x01}, "image/png", "").
+			AddStopWithUsage(1, 1).
+			Build()
+
+		res, live := runMarkerStream(t, stream)
+
+		assert.Empty(t, res.Content, "every valid marker line is stripped, even unpaired ones")
+		assert.Empty(t, live)
+		require.Len(t, res.Media, 1)
+		assert.Equal(t, "one.png", res.Media[0].RequestedPath)
+	})
+}
+
+// TestHandleStream_MultipleMarkersPairInOrder: marker i names blob i, in
+// response order, across separate chunks.
+func TestHandleStream_MultipleMarkersPairInOrder(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent("Two variations:\n[media-file: variant-one.png]\n").
+		AddMedia([]byte{0x01}, "image/png", "").
+		AddContent("[media-file: variant-two.png]\n").
+		AddMedia([]byte{0x02}, "image/png", "").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Equal(t, "Two variations:\n", res.Content)
+	assert.Equal(t, res.Content, live)
+	require.Len(t, res.Media, 2)
+	assert.Equal(t, "variant-one.png", res.Media[0].RequestedPath)
+	assert.Equal(t, "variant-two.png", res.Media[1].RequestedPath)
+}
+
+// TestHandleStream_MalformedMarkerStaysVisible: near-miss lines are ordinary
+// prose — visible live, persisted, and never consuming a pairing slot.
+func TestHandleStream_MalformedMarkerStaysVisible(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent(" [media-file: indented.png]\n[media-file: real.png]\n").
+		AddMedia([]byte{0x01}, "image/png", "").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Equal(t, " [media-file: indented.png]\n", res.Content)
+	assert.Equal(t, res.Content, live)
+	require.Len(t, res.Media, 1)
+	assert.Equal(t, "real.png", res.Media[0].RequestedPath, "the malformed line must not consume the pairing slot")
+}
+
+// TestHandleStream_TextWithoutMarkersUnchanged guards against the filter
+// perturbing ordinary streamed text, including bracketed prose.
+func TestHandleStream_TextWithoutMarkersUnchanged(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent("see [media docs] and ").
+		AddContent("[media-file spec] for details\n").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Equal(t, "see [media docs] and [media-file spec] for details\n", res.Content)
+	assert.Equal(t, res.Content, live)
+	assert.Empty(t, res.Media)
 }
