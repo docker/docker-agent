@@ -150,6 +150,7 @@ type Store interface {
 type InMemorySessionStore struct {
 	sessions       *concurrent.Map[string, *Session]
 	generatedFiles *concurrent.Map[string, GeneratedFile] // keyed by generatedFileKey
+	generatedBlobs *concurrent.Map[string, []byte]        // keyed by generatedFileKey
 	messageID      atomic.Int64                           // counter for message IDs, incremented via Add(1)
 }
 
@@ -157,6 +158,7 @@ func NewInMemorySessionStore() Store {
 	return &InMemorySessionStore{
 		sessions:       concurrent.NewMap[string, *Session](),
 		generatedFiles: concurrent.NewMap[string, GeneratedFile](),
+		generatedBlobs: concurrent.NewMap[string, []byte](),
 	}
 }
 
@@ -236,6 +238,7 @@ func (s *InMemorySessionStore) DeleteSession(_ context.Context, id string) error
 	}
 	s.sessions.Delete(id)
 	s.deleteGeneratedFiles(id)
+	s.deleteGeneratedBlobs(id)
 	return nil
 }
 
@@ -1002,14 +1005,22 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 		return ErrEmptyID
 	}
 
-	result, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
+	// These tables carry no foreign keys because media may be recorded before
+	// the lazily persisted session row exists, so prune them explicitly.
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = tx.Rollback() }()
 
-	// The manifest table carries no foreign key (see migration
-	// 028_add_generated_media_manifest_table), so prune explicitly.
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM generated_media_manifest WHERE session_id = ?", id); err != nil {
+	result, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM generated_media_blobs WHERE session_id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM generated_media_manifest WHERE session_id = ?", id); err != nil {
 		return err
 	}
 
@@ -1022,7 +1033,7 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 		return ErrNotFound
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 // UpdateSession updates an existing session's metadata, or creates it if it doesn't exist (upsert).

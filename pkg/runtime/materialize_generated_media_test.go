@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -431,7 +432,65 @@ func TestMaterializeGeneratedMedia_ClassifiedWriteFailureReasons(t *testing.T) {
 	}
 }
 
-// storeWithoutManifest hides the built-in store's GeneratedMediaManifest
+func TestMaterializeGeneratedMedia_StoresPortableBlob(t *testing.T) {
+	r, store, _ := newMediaTestRuntime(t)
+	sess, root := workspaceSession(t, "sess-portable")
+	data := make([]byte, (20<<20)+1)
+	copy(data, "portable")
+	data[len(data)-1] = 0x7f
+	sink := &collectingSink{}
+	parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
+		{Data: data, MimeType: "image/png", Name: "cat.png", Size: int64(len(data))},
+	}, "root", sink)
+	require.Len(t, parts, 1)
+	assert.FileExists(t, filepath.Join(root, "cat.png"))
+	stored, err := store.(session.GeneratedMediaBlobStore).LookupGeneratedBlob(t.Context(), sess.ID, "cat.png")
+	require.NoError(t, err)
+	require.Len(t, stored, len(data))
+	assert.Equal(t, byte(0x7f), stored[len(stored)-1])
+	assert.Empty(t, sink.warnings())
+}
+
+type failingBlobStore struct {
+	session.Store
+
+	err error
+}
+
+func (s failingBlobStore) AddGeneratedFile(ctx context.Context, file session.GeneratedFile) error {
+	return s.Store.(session.GeneratedMediaManifest).AddGeneratedFile(ctx, file)
+}
+
+func (s failingBlobStore) LookupGeneratedFile(ctx context.Context, sessionID, relPath string) (*session.GeneratedFile, error) {
+	return s.Store.(session.GeneratedMediaManifest).LookupGeneratedFile(ctx, sessionID, relPath)
+}
+
+func (s failingBlobStore) AddGeneratedBlob(context.Context, string, string, []byte) error {
+	return s.err
+}
+
+func (s failingBlobStore) LookupGeneratedBlob(ctx context.Context, sessionID, relPath string) ([]byte, error) {
+	return s.Store.(session.GeneratedMediaBlobStore).LookupGeneratedBlob(ctx, sessionID, relPath)
+}
+
+func TestMaterializeGeneratedMedia_BlobStoreFailureKeepsWorkspaceFileAndWarns(t *testing.T) {
+	r, _, _ := newMediaTestRuntime(t)
+	r.sessionStore = failingBlobStore{Store: r.sessionStore, err: errors.New("blob persistence failed")}
+	sess, root := workspaceSession(t, "sess-blob-failure")
+	sink := &collectingSink{}
+	parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
+		{Data: []byte("image"), MimeType: "image/png", Name: "cat.png", Size: 5},
+	}, "root", sink)
+	require.Len(t, parts, 1)
+	assert.FileExists(t, filepath.Join(root, "cat.png"))
+	warnings := sink.warnings()
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0].Message, "could not keep a portable copy with the session")
+	assert.Contains(t, warnings[0].Message, retryWithDebugAdvice)
+	assert.NotContains(t, warnings[0].Message, "too large")
+	assertBoundedSingleLineUTF8(t, warnings[0].Message)
+}
+
 // implementation: interface embedding only promotes session.Store's own
 // method set, so the type assertion in recordGeneratedFile fails.
 type storeWithoutManifest struct{ session.Store }

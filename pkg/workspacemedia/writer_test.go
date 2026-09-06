@@ -300,3 +300,23 @@ func TestWrite_ParentDirIsFileFails(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrPathEscape)
 }
+
+func TestDefaultFilename(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, mimeType, want string
+	}{
+		{"cat.png", "image/png", "cat.png"},
+		{"cat.jpeg", "image/jpeg", "cat.jpeg"},
+		{"cat.txt", "image/png", "cat.png"},
+		{"generated-1", "image/png", "generated-1.png"},
+		{"generated-1", "", "generated-1.bin"},
+		{".env", "image/png", ".env.png"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+"/"+tt.mimeType, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, DefaultFilename(tt.name, tt.mimeType))
+		})
+	}
+}

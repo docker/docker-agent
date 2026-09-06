@@ -2,10 +2,8 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -1336,13 +1334,21 @@ func sanitizeToolCallName(name string) string {
 // generated-media manifest ([session.GeneratedMediaManifest]), the trust
 // anchor a resolver must consult before reading a workspace path back.
 //
-// The requested filename is the sanitized provider display name when one
-// exists, otherwise a generic "generated-N"; the writer owns MIME/extension
+// The requested filename is the prompt-directed path when the provider
+// surfaced one ([chat.MediaDelta.RequestedPath], populated by marker
+// extraction once that lands), otherwise the sanitized provider display
+// name, otherwise a generic "generated-N"; the writer owns MIME/extension
 // correction and collision suffixing, and the part persists the exact final
-// relative path it returns. A corrected extension additionally surfaces a
-// bounded user-visible notice naming the final path. Explicit
-// prompt-directed naming (and its out-of-workspace confirmation flow) is
-// intentionally not implemented here yet.
+// path it returns. A corrected extension additionally surfaces a bounded
+// user-visible notice naming the final path. A prompt-directed path that
+// escapes the workspace (absolute, "..", or "~"-rooted) is refused unless
+// the user confirms the resolved target through a runtime-native
+// elicitation; refusal redirects the bytes into the workspace root under
+// the sanitized basename with a sanitized warning — see
+// [LocalRuntime.writeGeneratedMedia] in media_escape.go for the policy. An
+// accepted external write persists [chat.ArtifactRootExternal] plus the
+// confirmed absolute path and is manifest-gated exactly like a workspace
+// write.
 //
 // When no workspace root is available (no provenance anywhere in the parent
 // chain, or a malformed stored value) every item fails with the same
@@ -1402,25 +1408,28 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 			continue
 		}
 
-		requested := safeName
-		generic := fmt.Sprintf("generated-%d", i+1)
-		if requested == "" {
-			requested = generic
-		}
-		res, err := workspacemediaWrite(root, requested, m.Data, m.MimeType)
-		if err != nil && requested != generic && errors.Is(err, workspacemedia.ErrPathEscape) {
-			// A provider display name the writer refuses even after display
-			// sanitization (e.g. a Windows-reserved name like "CON.png") must
-			// not cost the user the item; there is no user-chosen path to
-			// honor at this stage, so fall back to the generic name.
-			res, err = workspacemediaWrite(root, generic, m.Data, m.MimeType)
-		}
+		write, err := r.writeGeneratedMedia(ctx, generatedMediaItem{
+			workspaceRoot: root,
+			requestedPath: m.RequestedPath,
+			providerName:  safeName,
+			genericName:   fmt.Sprintf("generated-%d", i+1),
+			data:          m.Data,
+			mimeType:      m.MimeType,
+			safeMimeType:  safeMimeType,
+			agentName:     agentName,
+			sessionID:     sess.ID,
+			index:         i + 1,
+			total:         len(media),
+		}, events)
 		if err != nil {
 			warnItemFailed(err)
 			continue
 		}
+		res := write.res
 
-		if err := r.recordGeneratedFile(ctx, sess.ID, res.RelPath, safeMimeType); err != nil {
+		manifestRecorded := true
+		if err := r.recordGeneratedFile(ctx, sess.ID, write.root, res.RelPath, safeMimeType); err != nil {
+			manifestRecorded = false
 			// The file is already a real workspace deliverable, so keep the
 			// reference; without the manifest record inline display will
 			// refuse to render it (fail closed), which the user should hear
@@ -1433,6 +1442,17 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 			}
 		}
 
+		if manifestRecorded {
+			if err := r.recordGeneratedBlob(ctx, sess.ID, res.RelPath, m.Data); err != nil {
+				slog.DebugContext(ctx, "Failed to store portable generated media; keeping the workspace file",
+					"agent", agentName, "session_id", sess.ID, "rel_path", res.RelPath, "error", err)
+				if events != nil {
+					warning := generatedBlobWarning(res.RelPath)
+					events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
+				}
+			}
+		}
+
 		if res.ExtensionCorrected && events != nil {
 			notice := fmt.Sprintf("Saved generated media as %s: the requested extension %q does not match the returned %s data",
 				res.RelPath, res.RequestedExtension, safeMimeType)
@@ -1442,12 +1462,12 @@ func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *sess
 		parts = append(parts, chat.MessagePart{
 			Type: chat.MessagePartTypeDocument,
 			Document: &chat.Document{
-				Name:     path.Base(res.RelPath),
+				Name:     generatedDocumentName(write.root, res.RelPath),
 				MimeType: safeMimeType,
 				Size:     m.Size,
 				Source: chat.DocumentSource{
 					ArtifactPath:           res.RelPath,
-					ArtifactRoot:           chat.ArtifactRootWorkspace,
+					ArtifactRoot:           write.root,
 					ArtifactOwnerSessionID: sess.ID,
 				},
 			},
@@ -1466,18 +1486,31 @@ func (r *LocalRuntime) sessionLookup() session.Lookup {
 }
 
 // recordGeneratedFile writes one manifest record after a successful
-// workspace write — materialization is the only writer of the manifest.
-func (r *LocalRuntime) recordGeneratedFile(ctx context.Context, sessionID, relPath, mimeType string) error {
+// write — materialization is the only writer of the manifest.
+func (r *LocalRuntime) recordGeneratedFile(ctx context.Context, sessionID string, root chat.ArtifactRootKind, finalPath, mimeType string) error {
 	manifest, ok := r.sessionStore.(session.GeneratedMediaManifest)
 	if !ok {
 		return fmt.Errorf("session store %T does not implement the generated-media manifest", r.sessionStore)
 	}
 	return manifest.AddGeneratedFile(ctx, session.GeneratedFile{
 		SessionID: sessionID,
-		RelPath:   relPath,
+		RelPath:   finalPath,
+		Root:      root,
 		MimeType:  mimeType,
 		CreatedAt: r.now(),
 	})
+}
+
+func (r *LocalRuntime) recordGeneratedBlob(ctx context.Context, sessionID, finalPath string, data []byte) error {
+	blobs, ok := r.sessionStore.(session.GeneratedMediaBlobStore)
+	if !ok {
+		return fmt.Errorf("session store %T does not implement generated-media blob storage", r.sessionStore)
+	}
+	return blobs.AddGeneratedBlob(ctx, sessionID, finalPath, data)
+}
+
+func generatedBlobWarning(finalPath string) string {
+	return fmt.Sprintf("Saved generated media %s in the workspace, but could not keep a portable copy with the session. %s", finalPath, retryWithDebugAdvice)
 }
 
 // workspacemediaWrite is [workspacemedia.Write] behind a package-level
