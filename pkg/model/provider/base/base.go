@@ -79,6 +79,11 @@ func (c *Config) CapsOverride() *modelinfo.CapsOverride {
 	return &modelinfo.CapsOverride{Image: caps.Image, PDF: caps.PDF, Audio: caps.Audio, Video: caps.Video}
 }
 
+// ToolCallSupport resolves the model's tool-call capability from models.dev.
+func (c *Config) ToolCallSupport(ctx context.Context) modelinfo.ToolCallSupport {
+	return modelinfo.ResolveToolCallSupport(ctx, c.ModelOptions.ModelsDevStore(), c.ID())
+}
+
 // ImageOutputEnabled resolves the model's image-output capability from its
 // explicit tri-state configuration and, when unset, the models.dev catalogue.
 func (c *Config) ImageOutputEnabled(ctx context.Context) bool {

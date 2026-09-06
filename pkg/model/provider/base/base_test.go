@@ -59,6 +59,22 @@ func TestConfigCapsOverride(t *testing.T) {
 	})
 }
 
+func TestConfigToolCallSupport(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"tool-model": {ToolCall: true},
+		}},
+	}})
+	cfg := Config{
+		ModelConfig:  latest.ModelConfig{Provider: "google", Model: "tool-model"},
+		ModelOptions: options.Apply(options.WithModelsDevStore(store)),
+	}
+
+	assert.Equal(t, modelinfo.ToolCallSupported, cfg.ToolCallSupport(t.Context()))
+}
+
 func TestConfigImageOutputEnabled(t *testing.T) {
 	t.Parallel()
 
