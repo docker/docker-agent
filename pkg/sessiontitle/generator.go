@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -46,15 +45,20 @@ type Generator struct {
 	models []provider.Provider
 }
 
-// New creates a new title Generator. The first model is the primary; any
-// additional ones are fallbacks tried in order if earlier attempts fail.
-// Nil providers are silently ignored.
-func New(model provider.Provider, fallbackModels ...provider.Provider) *Generator {
-	models := slices.DeleteFunc(
-		append([]provider.Provider{model}, fallbackModels...),
-		func(p provider.Provider) bool { return p == nil },
-	)
-	return &Generator{models: models}
+// New creates a title Generator from the ordered candidate models. Nil
+// providers are skipped. Image-output-capable providers remain eligible
+// because title-generation calls are explicitly text-only.
+func New(models ...provider.Provider) *Generator {
+	usable := make([]provider.Provider, 0, len(models))
+	for _, model := range models {
+		if model != nil {
+			usable = append(usable, model)
+		}
+	}
+	if len(usable) == 0 {
+		return nil
+	}
+	return &Generator{models: usable}
 }
 
 // Generate produces a title for a session based on the provided user messages.
