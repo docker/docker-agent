@@ -713,7 +713,42 @@ func LoadCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) Mode
 	return capsFromModalities(model.Modalities.Input)
 }
 
-// capsFromModalities maps a models.dev input-modality list to the capability
+// ResolveOutputImage applies an explicit image-output override when present;
+// otherwise it derives support from the models.dev output modalities. Missing
+// catalogue data conservatively disables image output.
+func ResolveOutputImage(ctx context.Context, store *modelsdev.Store, id modelsdev.ID, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+	if store == nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, loadCapsTimeout)
+	defer cancel()
+
+	model, err := store.GetModel(ctx, id)
+	if err != nil {
+		if ctx.Err() != nil {
+			slog.WarnContext(ctx, "modelinfo: models.dev output lookup timed out, disabling image output",
+				"model", id.String(), "timeout", loadCapsTimeout)
+		} else {
+			warnCapsLookupMiss(ctx, id, err)
+		}
+		return false
+	}
+	return hasOutputModality(model.Modalities.Output, "image")
+}
+
+func hasOutputModality(modalities []string, expected string) bool {
+	for _, modality := range modalities {
+		if strings.EqualFold(modality, expected) {
+			return true
+		}
+	}
+	return false
+}
+
 // booleans it grants. Unknown modality names are ignored.
 func capsFromModalities(input []string) ModelCapabilities {
 	var mc ModelCapabilities

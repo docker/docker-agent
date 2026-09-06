@@ -189,6 +189,91 @@ agents:
 	assert.True(t, result.Valid(), "expected schema to accept audio/video capabilities: %v", result.Errors())
 }
 
+// TestJsonSchemaRejectsMalformedOutputCapabilities mirrors
+// TestJsonSchemaRejectsMalformedCapabilities for output_capabilities.image: a
+// non-boolean value must fail schema validation rather than silently
+// coercing.
+func TestJsonSchemaRejectsMalformedOutputCapabilities(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	const in = `version: "15"
+models:
+  m:
+    provider: google
+    model: gemini-2.5-flash-image
+    output_capabilities:
+      image: "yes"
+agents:
+  root:
+    model: m
+    instruction: hi
+`
+
+	var rawJSON any
+	require.NoError(t, yaml.Unmarshal([]byte(in), &rawJSON))
+
+	result, err := schema.Validate(gojsonschema.NewRawLoader(rawJSON))
+	require.NoError(t, err)
+	assert.False(t, result.Valid(), "expected schema to reject a non-boolean output_capabilities.image")
+}
+
+// TestJsonSchemaAcceptsOutputCapabilities confirms output_capabilities.image
+// validates against the schema, both true and false, and that an unknown
+// key under output_capabilities is rejected (additionalProperties: false),
+// mirroring the strictness of CapabilitiesConfig.
+func TestJsonSchemaAcceptsOutputCapabilities(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	const base = `version: "15"
+models:
+  m:
+    provider: google
+    model: gemini-2.5-flash-image
+    output_capabilities:
+%s
+agents:
+  root:
+    model: m
+    instruction: hi
+`
+
+	tests := []struct {
+		name  string
+		field string
+		valid bool
+	}{
+		{name: "image true", field: "      image: true\n", valid: true},
+		{name: "image false", field: "      image: false\n", valid: true},
+		{name: "image omitted (empty block)", field: "      {}\n", valid: true},
+		{name: "unknown key", field: "      video: true\n", valid: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var rawJSON any
+			require.NoError(t, yaml.Unmarshal(fmt.Appendf(nil, base, tt.field), &rawJSON))
+
+			result, err := schema.Validate(gojsonschema.NewRawLoader(rawJSON))
+			require.NoError(t, err)
+			assert.Equal(t, tt.valid, result.Valid(), "output_capabilities %s: %v", tt.name, result.Errors())
+		})
+	}
+}
+
 // TestSchemaMatchesGoTypes verifies that every JSON-tagged field in the Go
 // config structs has a corresponding property in agent-schema.json (and
 // vice-versa). This prevents the schema from silently drifting out of sync

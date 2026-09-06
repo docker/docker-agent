@@ -1758,6 +1758,10 @@
           "$ref": "#/definitions/CapabilitiesConfig",
           "description": "Explicit attachment capability override for models the models.dev catalogue does not describe correctly (custom OpenAI-compatible providers, local models like Ollama, or dropped model versions). When set, the declared flags are authoritative and no models.dev lookup is performed; when omitted, capabilities are detected automatically. Without it, such models fall back to text-only and their image/PDF/audio/video attachments are silently dropped."
         },
+        "output_capabilities": {
+          "$ref": "#/definitions/OutputCapabilitiesConfig",
+          "description": "Optional generative output capability override for this model. When omitted, Docker Agent detects output modalities from the models.dev catalogue. An explicit flag is authoritative, including false. Cannot be combined with first_available (set output_capabilities.image on the candidate models instead)."
+        },
         "cost": {
           "$ref": "#/definitions/CostConfig",
           "description": "Explicit token pricing (USD per 1M tokens), overriding the models.dev catalogue. Used for per-turn cost computation, session cost tracking, the /model picker, and the after_llm_call hook's cost field. Makes an uncatalogued model (custom base_url provider, local or private deployment) 'priced' instead of billing $0. Prices must not be negative; an all-zero table means 'priced, free'. Cannot be combined with first_available."
@@ -1784,6 +1788,17 @@
         "video": {
           "type": "boolean",
           "description": "Whether the model accepts video attachments"
+        }
+      },
+      "additionalProperties": false
+    },
+    "OutputCapabilitiesConfig": {
+      "type": "object",
+      "description": "Generative output capability overrides for a model. When omitted, Docker Agent detects output modalities from the models.dev catalogue. Explicit flags are authoritative, including false, and are useful for custom models or correcting catalogue metadata.",
+      "properties": {
+        "image": {
+          "type": "boolean",
+          "description": "Whether the model can generate image output. When omitted, Docker Agent uses models.dev output modalities; an explicit value overrides the catalogue."
         }
       },
       "additionalProperties": false
