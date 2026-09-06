@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
+	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
 
 func TestBuildTaskSystemMessage(t *testing.T) {
@@ -1188,6 +1189,115 @@ func TestTransferTask_ConcurrentPinnedNestedTransfersStayIsolated(t *testing.T) 
 	require.NotNil(t, completedB)
 	assert.Equal(t, "workerB", completedB.GetAgentName())
 }
+
+// callerRuntime is a [tools.Runtime] reporting a fixed caller agent, standing in
+// for the per-call handle the dispatcher builds from its pre-fan-out snapshot.
+type callerRuntime struct {
+	tools.NopRuntime
+
+	caller *agent.Agent
+}
+
+func (r callerRuntime) CallerAgent() *agent.Agent { return r.caller }
+
+// TestTransferTask_UsesBatchCallerSnapshotNotSharedCurrentAgent pins the exact
+// failure reported in #4156: a sibling transfer_task from the same parallel
+// batch has already swapped the shared current agent to its own target, so
+// re-resolving the caller from it identified the target as its own caller and
+// rejected the transfer with "No agents are configured in this list".
+func TestTransferTask_UsesBatchCallerSnapshotNotSharedCurrentAgent(t *testing.T) {
+	t.Parallel()
+
+	drafter := agent.New("drafter", "Drafter agent", agent.WithModel(&mockProvider{
+		id:     "test/mock-model",
+		stream: newStreamBuilder().AddContent("drafter done").AddStopWithUsage(10, 5).Build(),
+	}))
+	root := agent.New("root", "Root agent",
+		agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}),
+		agent.WithSubAgents(drafter),
+	)
+
+	tm := team.New(team.WithAgents(root, drafter))
+	rt, err := NewLocalRuntime(t.Context(), tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+
+	// Stand in for the sibling that already claimed the shared current agent.
+	rt.setCurrentAgent("drafter")
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	result, err := rt.handleTaskTransfer(t.Context(), sess, transferToolCall("drafter"),
+		NewChannelSink(make(chan Event, 128)), callerRuntime{caller: root})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError,
+		"the caller must come from the batch snapshot (root), not the swapped current agent: %s", result.Output)
+	assert.Equal(t, "drafter done", result.Output)
+}
+
+// TestTransferTask_ConcurrentForegroundTransfersStayIsolated reproduces #4156:
+// the model issues three transfer_task calls in a single response and the
+// dispatcher runs them in parallel. Each goroutine used to re-read the shared
+// current agent that a sibling's swapCurrentAgent had already mutated, so the
+// later calls validated the target against the wrong caller and failed with
+// "target agent not in sub-agents list", while a child that did start could run
+// its turns as another sibling's agent. Every transfer must instead run as its
+// own target and leave the shared current agent back at root.
+func TestTransferTask_ConcurrentForegroundTransfersStayIsolated(t *testing.T) {
+	t.Parallel()
+
+	targets := []string{"drafter", "reviewer", "tester"}
+	subAgents := make([]*agent.Agent, 0, len(targets))
+	for _, name := range targets {
+		prov := &mockProvider{id: "test/mock-model", stream: newStreamBuilder().
+			AddContent(name+" done").AddStopWithUsage(10, 5).Build()}
+		subAgents = append(subAgents, agent.New(name, name+" agent", agent.WithModel(prov)))
+	}
+
+	// One assistant response carrying all three calls — the parallel tool use
+	// that triggers the race.
+	batch := newStreamBuilder()
+	for i, name := range targets {
+		id := transferCallID(i)
+		batch.AddToolCallName(id, transfertask.ToolNameTransferTask).
+			AddToolCallArguments(id, fmt.Sprintf(`{"agent":%q,"task":"chunk %d","expected_output":"result"}`, name, i))
+	}
+	rootProv := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+		batch.AddToolCallStopWithUsage(10, 5).Build(),
+		newStreamBuilder().AddContent("all delegated").AddStopWithUsage(10, 5).Build(),
+	}}
+
+	root := agent.New("root", "Root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(subAgents...),
+		agent.WithToolSets(transfertask.New()),
+	)
+
+	tm := team.New(team.WithAgents(append([]*agent.Agent{root}, subAgents...)...))
+	rt, err := NewLocalRuntime(t.Context(), tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	sess := session.New(session.WithUserMessage("split the diff"), session.WithToolsApproved(true))
+	_, err = rt.Run(t.Context(), sess)
+	require.NoError(t, err)
+
+	for i, name := range targets {
+		out := toolResultContent(t, sess, transferCallID(i))
+		assert.Equal(t, name+" done", out,
+			"transfer to %s must run as %s, not as a sibling's target", name, name)
+	}
+	assert.Equal(t, "root", rt.CurrentAgent().Name(),
+		"the shared current agent must be back at root once the batch drains")
+}
+
+// transferCallID names the nth transfer_task call of a parallel batch.
+func transferCallID(i int) string { return fmt.Sprintf("call_transfer_%d", i) }
 
 func TestTransferTask_DepthBoundary(t *testing.T) {
 	t.Parallel()
