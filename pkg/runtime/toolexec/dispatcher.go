@@ -1057,6 +1057,12 @@ func (r callRuntime) EmitOutput(ctx context.Context, output string) {
 	r.c.em.EmitToolCallOutput(r.c.tc.ID, r.c.tool, output, r.c.a.Name())
 }
 
+// CallerAgent reports the agent that owns this tool-call batch, snapshotted
+// by [Dispatcher.Process] before the parallel fan-out. Handlers must prefer it
+// over re-resolving from the session: a sibling transfer_task in the same batch
+// may already have swapped the runtime's shared current agent (#4156).
+func (r callRuntime) CallerAgent() *agent.Agent { return r.c.a }
+
 func (r callRuntime) Recall(ctx context.Context, message string) error {
 	if r.c.d.Recall == nil {
 		return tools.ErrRecallNotSupported

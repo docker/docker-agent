@@ -39,11 +39,13 @@ func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, 
 // tool call's runtime handle. Standalone invocations pass nil and skip embedded
 // commands because no tool call exists to own an approval prompt.
 func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, args skills.RunSkillArgs, evts EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
-	// The caller resolves from the session, not the shared current agent:
-	// a fork skill invoked from a pinned background session must use the
-	// pinned agent's skills, identity, and model override, no matter where
-	// the concurrent foreground loop points (#3886).
-	caller := r.resolveSessionAgent(sess)
+	// The caller never resolves from the shared current agent: a fork skill
+	// invoked from a pinned background session must use the pinned agent's
+	// skills, identity, and model override (#3886), and a sibling transfer_task
+	// in the same parallel batch may already have swapped it — which would run
+	// the skill as the wrong agent (#4156). rt is nil for standalone
+	// invocations; callerAgent falls back to session resolution there.
+	caller := r.callerAgent(rt, sess)
 	if caller == nil {
 		return nil, errors.New("no agent resolved for the calling session")
 	}
@@ -131,6 +133,7 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 	// session), pin the child to the same agent so RunStream resolves it
 	// as the pinned caller instead of the shared current agent.
 	return r.runForwarding(ctx, sess, evts, delegationRequest{
+		CallerAgent: caller,
 		SubSessionConfig: SubSessionConfig{
 			Task:                prepared.Task,
 			SystemMessage:       skills.BuildSkillSystemMessage(prepared, sess.AttachedFilesSnapshot()),
