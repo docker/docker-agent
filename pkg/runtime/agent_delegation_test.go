@@ -187,6 +187,44 @@ func TestNewSubSession(t *testing.T) {
 	})
 }
 
+func TestNewSubSession_WorkingDirInheritance(t *testing.T) {
+	t.Parallel()
+
+	childAgent := agent.New("worker", "a worker agent")
+	cfg := SubSessionConfig{Task: "do work", AgentName: "worker", Title: "Task"}
+
+	t.Run("child inherits parent workspace", func(t *testing.T) {
+		t.Parallel()
+		parent := session.New(session.WithWorkingDir("/work/project"))
+
+		child := newSubSession(parent, cfg, childAgent)
+
+		assert.Equal(t, "/work/project", child.WorkingDir)
+		assert.Equal(t, parent.AllowedDirectories(), child.AllowedDirectories())
+	})
+
+	t.Run("nested children keep the original workspace", func(t *testing.T) {
+		t.Parallel()
+		parent := session.New(session.WithWorkingDir("/work/project"))
+
+		child := newSubSession(parent, cfg, childAgent)
+		grandchild := newSubSession(child, cfg, childAgent)
+
+		assert.Equal(t, "/work/project", grandchild.WorkingDir)
+		assert.Equal(t, child.ID, grandchild.ParentID)
+	})
+
+	t.Run("workspace-less parent stays empty", func(t *testing.T) {
+		t.Parallel()
+		parent := session.New()
+
+		child := newSubSession(parent, cfg, childAgent)
+
+		assert.Empty(t, child.WorkingDir, "a headless parent must not make the child pick up a cwd")
+		assert.Nil(t, child.AllowedDirectories())
+	})
+}
+
 func TestSubSessionConfig_DefaultValues(t *testing.T) {
 	t.Parallel()
 

@@ -66,7 +66,7 @@ func TestBuildSession_RequiresUserMessage(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sess := buildSession(tc.messages)
+			sess := buildSession(tc.messages, "")
 			if tc.wantNil {
 				assert.Nil(t, sess)
 				return
@@ -77,6 +77,15 @@ func TestBuildSession_RequiresUserMessage(t *testing.T) {
 	}
 }
 
+func TestBuildSession_StampsWorkspaceProvenance(t *testing.T) {
+	t.Parallel()
+	sess := buildSession([]ChatCompletionMessage{
+		{Role: "user", Content: "hello"},
+	}, "/srv/workspace")
+	require.NotNil(t, sess)
+	assert.Equal(t, "/srv/workspace", sess.WorkingDir)
+}
+
 func TestBuildSession_PreservesHistory(t *testing.T) {
 	t.Parallel()
 	sess := buildSession([]ChatCompletionMessage{
@@ -84,7 +93,7 @@ func TestBuildSession_PreservesHistory(t *testing.T) {
 		{Role: "user", Content: "hello"},
 		{Role: "assistant", Content: "hi there"},
 		{Role: "user", Content: "how are you?"},
-	})
+	}, "")
 	require.NotNil(t, sess)
 
 	// GetAllMessages omits system messages.
@@ -111,7 +120,7 @@ func TestBuildSession_PreservesToolMessage(t *testing.T) {
 		{Role: "user", Content: "compute 2+2"},
 		{Role: "assistant", Content: ""}, // dropped: empty content
 		{Role: "tool", Content: "4", ToolCallID: "call_1"},
-	})
+	}, "")
 	require.NotNil(t, sess)
 
 	all := sess.GetAllMessages()
@@ -127,7 +136,7 @@ func TestBuildSession_UnknownRoleTreatedAsUser(t *testing.T) {
 	t.Parallel()
 	sess := buildSession([]ChatCompletionMessage{
 		{Role: "developer", Content: "do this"},
-	})
+	}, "")
 	require.NotNil(t, sess)
 
 	all := sess.GetAllMessages()
@@ -436,7 +445,7 @@ func TestBuildSession_AcceptsImageParts(t *testing.T) {
 			{Type: "text", Text: "What is this?"},
 			{Type: "image_url", ImageURL: &ContentImageURL{URL: "https://example.com/x.png"}},
 		},
-	}})
+	}}, "")
 	require.NotNil(t, sess)
 
 	all := sess.GetAllMessages()

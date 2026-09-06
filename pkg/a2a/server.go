@@ -102,7 +102,12 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	baseURL := &url.URL{Scheme: "http", Host: routableAddr(ln.Addr().String())}
 	slog.DebugContext(ctx, "A2A server listening", "url", baseURL.String())
 
-	e, err := newServer(t, agentFilename, agentName, sessStore, resolvedSafety, ln.Addr().String(), options)
+	workingDir, err := session.CaptureLocalWorkingDir(runConfig.WorkingDir)
+	if err != nil {
+		return err
+	}
+
+	e, err := newServer(t, agentFilename, agentName, sessStore, resolvedSafety, workingDir, ln.Addr().String(), options)
 	if err != nil {
 		return fmt.Errorf("failed to create A2A server: %w", err)
 	}
@@ -122,8 +127,8 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	return nil
 }
 
-func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, listenAddr string, options RunOptions) (*echo.Echo, error) {
-	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety)
+func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
+	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir)
 	if err != nil {
 		return nil, err
 	}
