@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -416,4 +417,84 @@ func TestMaterializeGeneratedMedia_EscapeDirectoryTargetGenericName(t *testing.T
 	assert.Equal(t, final, parts[0].Document.Source.ArtifactPath)
 	_, err := os.Stat(final)
 	require.NoError(t, err)
+}
+
+// TestMaterializeGeneratedMedia_EscapeTraversalRequested: a prompt-directed
+// "../" path is an escape like any absolute one — the user is asked about
+// the resolved absolute target and a decline redirects into the workspace.
+func TestMaterializeGeneratedMedia_EscapeTraversalRequested(t *testing.T) {
+	r, _ := newEscapeTestRuntime(t)
+	sess, root := workspaceSession(t, "sess-escape-traversal")
+
+	parts, sink, req := materializeWithAnswer(t, r, sess, escapeMedia("../escaped-cat.png"), tools.ElicitationActionDecline, nil)
+
+	resolvedTarget := filepath.Join(filepath.Dir(root), "escaped-cat.png")
+	assert.Contains(t, req.Message, resolvedTarget, "the user must see the resolved absolute target, not the raw ../ path")
+	_, err := os.Stat(resolvedTarget)
+	assert.True(t, os.IsNotExist(err), "nothing may be written outside the workspace on decline")
+
+	require.Len(t, parts, 2)
+	assert.Equal(t, "escaped-cat.png", parts[0].Document.Source.ArtifactPath)
+	assert.Equal(t, chat.ArtifactRootWorkspace, parts[0].Document.Source.ArtifactRoot)
+	require.Len(t, sink.warnings(), 1)
+	assert.Contains(t, sink.warnings()[0].Message, "outside the workspace")
+	assertSiblingPreserved(t, parts, root)
+}
+
+// TestMaterializeGeneratedMedia_EscapeTildeRequested: "~/..." expands to
+// the real home directory and is treated as an escape; without a user to
+// ask it redirects into the workspace and never touches home.
+func TestMaterializeGeneratedMedia_EscapeTildeRequested(t *testing.T) {
+	r, _ := newEscapeTestRuntime(t)
+	r.nonInteractive = true
+	r.OnElicitationRequest(func(e Event) { t.Errorf("no elicitation must be emitted in non-interactive mode, got %T", e) })
+	sess, root := workspaceSession(t, "sess-escape-tilde")
+	filename := fmt.Sprintf("cagent-test-escape-%d.png", time.Now().UnixNano())
+
+	sink := &collectingSink{}
+	parts := r.materializeGeneratedMedia(t.Context(), sess, escapeMedia("~/"+filename), "root", sink)
+
+	require.Len(t, parts, 2)
+	assert.Equal(t, filename, parts[0].Document.Source.ArtifactPath)
+	assert.Equal(t, chat.ArtifactRootWorkspace, parts[0].Document.Source.ArtifactRoot)
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+	_, err = os.Stat(filepath.Join(home, filename))
+	assert.True(t, os.IsNotExist(err), "a redirected tilde path must never be written under home")
+	require.Len(t, sink.warnings(), 1)
+	assert.Contains(t, sink.warnings()[0].Message, "outside the workspace")
+	assertSiblingPreserved(t, parts, root)
+}
+
+// TestMaterializeGeneratedMedia_SymlinkedParentRedirects: a lexically
+// workspace-relative path whose parent directory is a symlink out of the
+// workspace escapes at I/O time; the writer refuses it and the bytes are
+// redirected into the workspace root like any unconfirmed escape.
+func TestMaterializeGeneratedMedia_SymlinkedParentRedirects(t *testing.T) {
+	requireSymlinkSupport(t)
+	r, store := newEscapeTestRuntime(t)
+	r.OnElicitationRequest(func(e Event) { t.Errorf("a symlinked-parent escape must redirect, not elicit, got %T", e) })
+	sess, root := workspaceSession(t, "sess-escape-symlink-parent")
+	outside := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "link")))
+
+	sink := &collectingSink{}
+	parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
+		{Data: []byte{0xAA}, MimeType: "image/png", RequestedPath: "link/cat.png", Size: 1},
+	}, "root", sink)
+
+	require.Len(t, parts, 1)
+	doc := parts[0].Document
+	assert.Equal(t, "cat.png", doc.Source.ArtifactPath)
+	assert.Equal(t, chat.ArtifactRootWorkspace, doc.Source.ArtifactRoot)
+	entries, err := os.ReadDir(outside)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "nothing may be written through the symlinked parent")
+	data, err := os.ReadFile(filepath.Join(root, "cat.png"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte{0xAA}, data)
+	_, err = manifestOf(t, store).LookupGeneratedFile(t.Context(), sess.ID, "cat.png")
+	require.NoError(t, err)
+	require.Len(t, sink.warnings(), 1)
+	assert.Contains(t, sink.warnings()[0].Message, "escapes the workspace")
 }
