@@ -38,6 +38,8 @@ models:
     capabilities: # Optional: override attachment capabilities
       image: boolean # Optional: whether the model accepts image attachments
       pdf: boolean # Optional: whether the model accepts PDF attachments
+      audio: boolean # Optional: whether the model accepts audio attachments
+      video: boolean # Optional: whether the model accepts video attachments
     cost: # Optional: explicit token pricing (USD per 1M tokens)
       input: float # Optional: price per 1M input tokens
       output: float # Optional: price per 1M output tokens
@@ -83,9 +85,9 @@ models:
 
 For custom OpenAI-compatible providers, local models (Ollama, DMR), and any
 model the built-in catalogue does not describe, Docker Agent cannot
-auto-detect whether the endpoint accepts image or PDF attachments. When the
-model is absent from the catalogue, Docker Agent logs a diagnostic and falls
-back to text-only, silently dropping attachments.
+auto-detect whether the endpoint accepts image, PDF, audio, or video
+attachments. When the model is absent from the catalogue, Docker Agent logs a
+diagnostic and falls back to text-only, silently dropping attachments.
 
 Declare `capabilities` to make the model's attachment support authoritative
 and skip the catalogue lookup entirely:
@@ -105,19 +107,46 @@ models:
     capabilities:
       image: true
       pdf: true
+
+  proxy-multimodal:
+    provider: vision-proxy
+    model: gemini-2.5-pro
+    capabilities:
+      image: true
+      pdf: true
+      audio: true
+      video: true
 ```
 
 | Field                  | Type    | Description                                       |
-| ---------------------- | ------- | ------------------------------------------------- |
+| ---------------------- | ------- | -------------------------------------------------- |
 | `capabilities.image`   | boolean | Whether the model accepts image attachments       |
 | `capabilities.pdf`     | boolean | Whether the model accepts PDF attachments         |
+| `capabilities.audio`   | boolean | Whether the model accepts audio attachments       |
+| `capabilities.video`   | boolean | Whether the model accepts video attachments       |
 
 The flags must match what the endpoint actually accepts. Claiming a modality
 that the endpoint does not support leads to a provider-side API error. When
 `capabilities` is omitted the behaviour is unchanged (catalogue lookup then
 conservative text-only fallback).
 
-See [`examples/capability-overrides.yaml`](https://github.com/docker/docker-agent/blob/main/examples/capability-overrides.yaml) for a complete example.
+### Unsupported media is stripped before the call
+
+Before each model call, Docker Agent removes image, audio, and video message
+parts that the resolved capabilities of the active model do not cover, instead
+of letting the provider fail the whole request. Adjacent text (and PDF) parts
+are preserved in their original order, and each stripped part is reported in
+the debug log (`--debug`) with its media kind and reason.
+
+The stripping decision uses the same capability resolution as attachment
+routing: an explicit `capabilities` declaration is authoritative, so a model
+declared with `audio: true` keeps its audio parts even when the catalogue says
+otherwise. Models absent from the catalogue (without an override) resolve to
+the conservative text-only default and have their media parts stripped.
+
+See [`examples/capability-overrides.yaml`](https://github.com/docker/docker-agent/blob/main/examples/capability-overrides.yaml) for a complete example, and
+[`examples/strip-unsupported-media.yaml`](https://github.com/docker/docker-agent/blob/main/examples/strip-unsupported-media.yaml) for a fixture demonstrating the
+stripping behaviour with and without an override.
 
 ## Custom Token Pricing
 

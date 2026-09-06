@@ -66,12 +66,15 @@ func (c *Config) TrackUsageEnabled() bool {
 // pass the result to [modelinfo.ResolveCaps] so a user-declared override wins
 // over a models.dev lookup that would otherwise miss for custom/aliased
 // providers and degrade attachments to text-only (issue #2741).
+//
+// All four fields (Image, PDF, Audio, Video) are read from the config's
+// capabilities block when one is present.
 func (c *Config) CapsOverride() *modelinfo.CapsOverride {
 	caps := c.ModelConfig.Capabilities
 	if caps == nil {
 		return nil
 	}
-	return &modelinfo.CapsOverride{Image: caps.Image, PDF: caps.PDF}
+	return &modelinfo.CapsOverride{Image: caps.Image, PDF: caps.PDF, Audio: caps.Audio, Video: caps.Video}
 }
 
 // EmbeddingResult contains the embedding and usage information

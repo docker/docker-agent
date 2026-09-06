@@ -121,3 +121,36 @@ func TestLoadCaps_MissDiagnosticDedup(t *testing.T) {
 	assert.Contains(t, buf.String(), "not found in models.dev")
 	assert.Contains(t, buf.String(), "capabilities", "diagnostic should point at the config override")
 }
+
+// TestResolveCapsFromModel pins the store-free resolution path used by the
+// runtime's strip transform: same precedence contract as ResolveCaps, but
+// operating on an already-fetched models.dev record.
+func TestResolveCapsFromModel(t *testing.T) {
+	t.Parallel()
+
+	multimodal := &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text", "image", "audio", "video"}}}
+
+	cases := []struct {
+		name                     string
+		model                    *modelsdev.Model
+		override                 *CapsOverride
+		image, pdf, audio, video bool
+	}{
+		{name: "modalities drive caps", model: multimodal, image: true, audio: true, video: true},
+		{name: "override wins over modalities", model: multimodal, override: &CapsOverride{Audio: true}, audio: true},
+		{name: "override wins over nil model", model: nil, override: &CapsOverride{Image: true, PDF: true, Audio: true, Video: true}, image: true, pdf: true, audio: true, video: true},
+		{name: "nil model is conservative text-only", model: nil},
+		{name: "empty modalities are conservative text-only", model: &modelsdev.Model{}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc := ResolveCapsFromModel(tc.model, tc.override)
+			assert.Equal(t, tc.image, mc.SupportsImage())
+			assert.Equal(t, tc.pdf, mc.SupportsPDF())
+			assert.Equal(t, tc.audio, mc.SupportsAudio())
+			assert.Equal(t, tc.video, mc.SupportsVideo())
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
 // EventType identifies a hook event.
@@ -251,6 +252,18 @@ type Input struct {
 	// override would be invisible. Empty for events that aren't
 	// model-call-scoped.
 	ModelID string `json:"model_id,omitempty"`
+
+	// ModelCapabilities is the resolved attachment-capability set for
+	// [Input.ModelID], with any explicit `capabilities:` config override
+	// already applied — the same resolution providers use for attachment
+	// routing (see modelinfo.ResolveCapsFromModel). Like ModelID it is
+	// populated by the loop, but only for in-process before_llm_call
+	// message transforms; nil for every other event and for dispatch
+	// paths with no capability information (e.g. coding-harness labels).
+	// Capability-gated transforms must consume it instead of re-querying
+	// models.dev, which would ignore config overrides. Excluded from the
+	// JSON payload: cross-process hooks never see it.
+	ModelCapabilities *modelinfo.ModelCapabilities `json:"-"`
 
 	// Iteration is the 1-based run-loop iteration counter for the
 	// model call this dispatch is gating. Populated for
