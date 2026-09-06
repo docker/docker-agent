@@ -1,19 +1,40 @@
 # Gemini image-output model: the model can generate an image directly as
 # part of its reply, instead of only describing one.
 #
-# The `gemini-image` model below declares `output_capabilities.image: true` —
-# an explicit, owner-provided statement that this model can generate image
-# output. It is never inferred from the model name or any catalogue; omit
-# it, or leave it false, and behavior is unchanged.
+# The `gemini-image` model below explicitly overrides
+# `output_capabilities.image: true`. When this flag is omitted, Docker Agent
+# uses models.dev output modalities; explicit true or false takes precedence.
+# Capability is never guessed from the model name.
 #
-# Native generated images aren't currently presented inline in the
-# terminal UI, so the model's text reply is what you'll see today.
+# On the models gateway, direct Gemini API, and Vertex AI, Docker Agent
+# requests text AND image output for this image-capable model. Each
+# generated image is saved into the session's workspace as an ordinary file,
+# stored with the session, and rendered inline in the TUI (terminals without
+# graphics support print the saved path instead).
+#
+# Notes:
+#   - Requests with tools or structured output are rejected locally before any
+#     request is sent on every supported Google surface. For custom tools,
+#     models.dev metadata lets the error say whether the model lacks tool calls
+#     or only cannot combine them with image output; unknown metadata keeps a
+#     conservative generic message. Gateway probing confirms these combinations
+#     are rejected; direct Gemini API and Vertex AI must pass live acceptance
+#     checks before that conservative restriction is relaxed.
+#   - Naming: an explicit filename in the prompt is honored (subdirectories
+#     are created inside the workspace); otherwise the model picks a
+#     meaningful name. Extensions are corrected to match the returned data
+#     (the provider decides the format, typically PNG), and existing files
+#     are never overwritten — collisions get a dash suffix (logo-1.png).
+#   - The model may reply with text only and no image — that's provider
+#     behavior; reword or repeat the prompt.
 #
 # Try it out:
 #   docker agent run examples/gemini_image_output.yaml \
 #     "Generate an image of a red panda working at a terminal"
 #   docker agent run examples/gemini_image_output.yaml \
-#     "Generate an image of a lighthouse at sunset, and describe the color palette you used"
+#     "Generate an image of a lighthouse at sunset as assets/lighthouse.png"
+#   docker agent run examples/gemini_image_output.yaml \
+#     "Generate an image of a whale and save it as whale.jpg"
 models:
   gemini-image:
     provider: google
