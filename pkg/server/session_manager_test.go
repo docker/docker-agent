@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,6 +26,9 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
@@ -2300,4 +2304,81 @@ func TestExportSessionForRecovery_OmitsErrorsKeyWhenNone(t *testing.T) {
 
 	_, present := export["errors"]
 	assert.False(t, present)
+}
+
+type blockingStream struct {
+	chat.MessageStream
+
+	blocker  chan struct{}
+	returned bool
+}
+
+func (s *blockingStream) Recv() (chat.MessageStreamResponse, error) {
+	if !s.returned {
+		<-s.blocker
+		s.returned = true
+		return chat.MessageStreamResponse{
+			Choices: []chat.MessageStreamChoice{
+				{Delta: chat.MessageDelta{Content: "A Generated Title"}},
+			},
+		}, nil
+	}
+	return chat.MessageStreamResponse{}, io.EOF
+}
+
+func (s *blockingStream) Close() {}
+
+type blockingTitleProvider struct {
+	provider.Provider
+
+	blocker chan struct{}
+}
+
+func (p *blockingTitleProvider) ID() modelsdev.ID { return modelsdev.NewID("mock", "mock") }
+
+func (p *blockingTitleProvider) BaseConfig() base.Config { return base.Config{} }
+
+func (p *blockingTitleProvider) CreateChatCompletionStream(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
+	return &blockingStream{blocker: p.blocker}, nil
+}
+
+func TestRunSession_GenerateTitleConcurrentClosePanic(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	sess := session.New()
+
+	// Use fakeRuntime that ends the agent stream immediately by passing a nil release channel
+	fake := &fakeRuntime{}
+	sm := newTestSessionManager(t, sess, fake)
+
+	blocker := make(chan struct{})
+	mockProvider := &blockingTitleProvider{blocker: blocker}
+	titleGen := sessiontitle.New(mockProvider)
+
+	// Inject the mock title generator into the active runtime
+	rt, _ := sm.runtimeSessions.Load(sess.ID)
+	rt.titleGen = titleGen
+
+	// RunSession spawns generateTitle and fakeRuntime in parallel
+	streamChan, err := sm.RunSession(ctx, sess.ID, "agent", "root", []api.Message{{Content: "trigger title generation"}}, "")
+	require.NoError(t, err)
+
+	go func() {
+		// Drain the stream. It will close once the title generator unblocks and wg.Wait() returns.
+		for range streamChan {
+		}
+	}()
+
+	// Ensure the agent stream draining finishes, putting RunSession's defer stack
+	// in a position to execute if it weren't blocking on wg.Wait()
+	time.Sleep(50 * time.Millisecond) //nolint:forbidigo // giving the inner goroutine time to run past the fake stream and reach wg.Wait
+
+	// Unblock the title generator. Without wg.Wait(), the streamChan would already
+	// be closed and this would panic on send in generateTitle.
+	close(blocker)
+
+	// Test passes if it does not panic. Delete the session to clean up.
+	err = sm.DeleteSession(ctx, sess.ID)
+	require.NoError(t, err)
 }

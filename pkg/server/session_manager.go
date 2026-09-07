@@ -1039,9 +1039,18 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		defer cancel()
 		defer runtimeSession.streaming.Unlock()
 
-		// Start title generation in parallel if needed
+		// Start title generation in parallel if needed, coordinating via WaitGroup
+		// so close(streamChan) does not fire while generateTitle is still sending.
+		var wg sync.WaitGroup
 		if needsTitle {
-			go sm.generateTitle(ctx, sess, titleGen, userMessages, streamChan)
+			// Note: generateTitle runs on the request ctx, so wg.Wait() only unblocks
+			// quickly when that context is cancelled. In the DeleteSession path
+			// (where the stream context is cancelled but the request context stays alive),
+			// the wait blocks until the title LLM call completes, delaying stream teardown.
+			// This bounded delay (first turn only) prioritizes persisting the title.
+			wg.Go(func() {
+				sm.generateTitle(ctx, sess, titleGen, userMessages, streamChan)
+			})
 		} else if titleToEmit != "" {
 			// Re-emit the existing title so late-joining SSE consumers
 			// and boards can pick it up without an extra API call.
@@ -1051,9 +1060,15 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		stream := runtimeSession.runtime.RunStream(streamCtx, sess)
 		for event := range stream {
 			if streamCtx.Err() != nil {
-				return
+				break
 			}
 			streamChan <- event
+		}
+
+		wg.Wait()
+
+		if streamCtx.Err() != nil {
+			return
 		}
 
 		if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
