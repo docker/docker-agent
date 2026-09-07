@@ -132,6 +132,10 @@ This means OpenCode Go uses the same client as OpenAI, making it fully compatibl
 
 For Anthropic-compatible models (MiniMax, Qwen), Docker Agent uses a custom provider pointing to the Anthropic client at `https://opencode.ai/zen/go` with the same token.
 
+### Session Header
+
+OpenCode requires an `x-opencode-session` header carrying one stable ID per conversation; it is the key used for prompt-cache routing, and requests without it may be rejected. Docker Agent sends it automatically on every request to `opencode.ai` (built-in aliases and custom providers alike), deriving an opaque value from the agent session so each conversation keeps the same ID, including in `serve api` / `serve chat` deployments that multiplex many conversations. To pin your own value, set `provider_opts.http_headers.x-opencode-session`.
+
 ## Example: Code Assistant
 
 ```yaml

@@ -133,6 +133,13 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		// required Copilot-Integration-Id) and any provider-specific defaults.
 		clientOptions = append(clientOptions, buildHeaderOptions(cfg)...)
 
+		// OpenCode requires a per-conversation x-opencode-session header; the
+		// value comes from the request context, so it must be a middleware
+		// rather than a static header fixed at construction time.
+		if isOpenCodeProvider(cfg) {
+			clientOptions = append(clientOptions, option.WithMiddleware(opencodeSessionMiddleware()))
+		}
+
 		// Preserve full error details from non-OpenAI providers (e.g. GitHub
 		// Copilot returns a bare "400 Bad Request" whose body explains the
 		// actual cause); without this the SDK discards it.

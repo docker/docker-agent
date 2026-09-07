@@ -204,6 +204,10 @@ The same API key works for both OpenCode Go and OpenCode Zen — they are part o
 
 For Anthropic-compatible models, Docker Agent uses a custom provider pointing to the Anthropic client at `https://opencode.ai/zen` with the same token. For Google models, a custom provider points to the Google client at `https://opencode.ai/zen` (the Google SDK appends its own `/v1beta/models/...` path segment).
 
+### Session Header
+
+OpenCode requires an `x-opencode-session` header carrying one stable ID per conversation; it is the key used for prompt-cache routing, and requests without it may be rejected. Docker Agent sends it automatically on every request to `opencode.ai` (built-in aliases and custom providers alike), deriving an opaque value from the agent session so each conversation keeps the same ID, including in `serve api` / `serve chat` deployments that multiplex many conversations. To pin your own value, set `provider_opts.http_headers.x-opencode-session`.
+
 ### Differences from OpenCode Go
 
 | Aspect | OpenCode Zen | OpenCode Go |
