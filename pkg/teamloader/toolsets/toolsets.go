@@ -25,7 +25,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/rag"
 	"github.com/docker/docker-agent/pkg/tools/builtin/scheduler"
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
-	"github.com/docker/docker-agent/pkg/tools/builtin/sessionplan"
 	"github.com/docker/docker-agent/pkg/tools/builtin/shell"
 	"github.com/docker/docker-agent/pkg/tools/builtin/tasks"
 	"github.com/docker/docker-agent/pkg/tools/builtin/think"
@@ -64,7 +63,6 @@ func DefaultToolsetCreators() map[string]teamloader.ToolsetCreator {
 		"scheduler":         teamloader.Creator(scheduler.CreateToolSet),
 		"script":            shell.ScriptCreator,
 		"session_context":   teamloader.Creator(sessioncontext.CreateToolSet),
-		"session_plan":      teamloader.Creator(sessionplan.CreateToolSet),
 		"shell":             shell.Creator,
 		"tasks":             tasks.Creator,
 		"think":             teamloader.Creator(think.CreateToolSet),

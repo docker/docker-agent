@@ -33,7 +33,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
-	"github.com/docker/docker-agent/pkg/tools/builtin/sessionplan"
 	"github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -47,9 +46,6 @@ func (r *LocalRuntime) registerDefaultTools() {
 	r.toolMap[modelpicker.ToolNameChangeModel] = r.handleChangeModel
 	r.toolMap[modelpicker.ToolNameRevertModel] = r.handleRevertModel
 	r.toolMap[skills.ToolNameRunSkill] = r.handleRunSkill
-	r.toolMap[sessionplan.ToolNameWriteSessionPlan] = r.handleWriteSessionPlan
-	r.toolMap[sessionplan.ToolNameReadSessionPlan] = r.handleReadSessionPlan
-	r.toolMap[sessionplan.ToolNameExitPlanMode] = r.handleExitPlanMode
 	r.toolMap[sessioncontext.ToolNameListSessions] = r.handleListSessions
 	r.toolMap[sessioncontext.ToolNameReadSession] = r.handleReadSession
 
