@@ -39,10 +39,12 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
 
-// ToolHandlerFunc handles a runtime-managed tool call. rt is the dispatcher's
+// ToolHandlerFunc handles a runtime-managed tool call. a is the calling agent,
+// already resolved by the dispatcher before the parallel dispatch loop so
+// concurrent handlers don't race shared mutable state. rt is the dispatcher's
 // per-call handle, used by handlers that need to talk back to the in-flight
 // call (streaming output, asking the user to approve an action).
-type ToolHandlerFunc func(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, events EventSink, rt tools.Runtime) (*tools.ToolCallResult, error)
+type ToolHandlerFunc func(ctx context.Context, a *agent.Agent, sess *session.Session, toolCall tools.ToolCall, events EventSink, rt tools.Runtime) (*tools.ToolCallResult, error)
 
 // Runtime defines the contract for runtime execution
 type Runtime interface {

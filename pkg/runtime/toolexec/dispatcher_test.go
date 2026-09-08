@@ -270,7 +270,7 @@ func TestDispatcher_RoutesToRuntimeHandler(t *testing.T) {
 	d := &toolexec.Dispatcher{
 		AgentFor: func(*session.Session) *agent.Agent { return a },
 		Handlers: map[string]toolexec.ToolHandler{
-			"transfer_task": func(_ context.Context, _ *session.Session, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+			"transfer_task": func(_ context.Context, _ *agent.Agent, _ *session.Session, _ tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
 				handlerCalls++
 				return tools.ResultSuccess("transferred"), nil
 			},
@@ -306,7 +306,7 @@ func TestDispatcher_RuntimeHandlerPropagatesNestedStop(t *testing.T) {
 	d := &toolexec.Dispatcher{
 		AgentFor: func(*session.Session) *agent.Agent { return a },
 		Handlers: map[string]toolexec.ToolHandler{
-			"run_skill": func(ctx context.Context, _ *session.Session, _ tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
+			"run_skill": func(ctx context.Context, _ *agent.Agent, _ *session.Session, _ tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
 				_, err := rt.ConfirmAndRun(ctx, echoCommand, execDone)
 				if err != nil {
 					return nil, err

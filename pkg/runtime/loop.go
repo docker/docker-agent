@@ -54,7 +54,7 @@ func (r *LocalRuntime) registerDefaultTools() {
 	r.toolMap[sessioncontext.ToolNameReadSession] = r.handleReadSession
 
 	r.bgAgents.RegisterHandlers(func(name string, fn func(context.Context, *session.Session, tools.ToolCall) (*tools.ToolCallResult, error)) {
-		r.toolMap[name] = func(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+		r.toolMap[name] = func(ctx context.Context, _ *agent.Agent, sess *session.Session, tc tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 			return fn(ctx, sess, tc)
 		}
 	})

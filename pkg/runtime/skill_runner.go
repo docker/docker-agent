@@ -10,6 +10,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -18,7 +19,7 @@ import (
 
 // handleRunSkill unmarshals the run_skill tool arguments and delegates to
 // runSkillFork.
-func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleRunSkill(ctx context.Context, _ *agent.Agent, sess *session.Session, toolCall tools.ToolCall, evts EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
 	var args skills.RunSkillArgs
 	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)

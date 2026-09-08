@@ -137,7 +137,11 @@ type HookDispatcher interface {
 // ToolCall/ToolCallResponse themselves. Handlers that need to emit other
 // event types should be wired by the caller to capture the relevant
 // channel via closure when registering the handler.
-type ToolHandler func(ctx context.Context, sess *session.Session, tc tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error)
+//
+// a is the calling agent, already resolved by Process before the parallel
+// dispatch loop — handlers must use it instead of re-reading any shared
+// current-agent field, which may be mutated by a concurrent transfer.
+type ToolHandler func(ctx context.Context, a *agent.Agent, sess *session.Session, tc tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error)
 
 // ResumeRequest carries the user's response to a tool-confirmation prompt.
 // The runtime aliases this type publicly via runtime.ResumeRequest so the
@@ -1036,7 +1040,7 @@ func (c *call) runToolset(ctx context.Context) CallOutcome {
 func (c *call) runHandler(ctx context.Context, handler ToolHandler) CallOutcome {
 	_, stop := c.invoke(ctx, "runtime.tool.handler.runtime", func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
 		start := time.Now()
-		res, err := handler(ctx, c.sess, c.tc, callRuntime{c})
+		res, err := handler(ctx, c.a, c.sess, c.tc, callRuntime{c})
 		return res, time.Since(start), err
 	})
 	if stop != nil {

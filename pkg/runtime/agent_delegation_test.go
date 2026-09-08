@@ -636,7 +636,7 @@ func TestTransferTask_PropagatesPermissions(t *testing.T) {
 		},
 	}
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
+	result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(sess), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.IsError, "transfer to valid sub-agent should succeed")
@@ -819,7 +819,7 @@ func TestTransferTask_RejectsDirectCycle(t *testing.T) {
 	sess := session.New(session.WithUserMessage("Test"))
 	evts := make(chan Event, 128)
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, transferToolCall("root"), NewChannelSink(evts), tools.NopRuntime{})
+	result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(sess), sess, transferToolCall("root"), NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.IsError)
@@ -869,7 +869,7 @@ func TestTransferTask_NestedFromPinnedBackgroundSession(t *testing.T) {
 	evts := make(chan Event, 128)
 
 	// Delegating back to an ancestor from the pinned child is an indirect cycle.
-	result, err := rt.handleTaskTransfer(t.Context(), child, transferToolCall("root"), NewChannelSink(evts), tools.NopRuntime{})
+	result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(child), child, transferToolCall("root"), NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.IsError)
@@ -879,7 +879,7 @@ func TestTransferTask_NestedFromPinnedBackgroundSession(t *testing.T) {
 	// Acyclic delegation from the same pinned child is allowed. helper is
 	// not in root's sub-agents, so success also proves the caller resolved
 	// from the pinned session (worker), not the shared current agent (root).
-	result, err = rt.handleTaskTransfer(t.Context(), child, transferToolCall("helper"), NewChannelSink(evts), tools.NopRuntime{})
+	result, err = rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(child), child, transferToolCall("helper"), NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.IsError, "acyclic multi-level delegation must stay supported: %s", result.Output)
@@ -994,7 +994,7 @@ func TestTransferTask_PinnedParentDoesNotMutateSharedCurrentAgent(t *testing.T) 
 	require.Equal(t, "worker", child.AgentName, "background child session must be pinned")
 
 	evts := make(chan Event, 128)
-	result, err := rt.handleTaskTransfer(t.Context(), child, transferToolCall("helper"), NewChannelSink(evts), tools.NopRuntime{})
+	result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(child), child, transferToolCall("helper"), NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.IsError, "nested transfer must succeed: %s", result.Output)
@@ -1056,7 +1056,7 @@ func TestTransferTask_ForegroundSwitchesAndRestoresCurrentAgent(t *testing.T) {
 	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
 	evts := make(chan Event, 128)
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, transferToolCall("librarian"), NewChannelSink(evts), tools.NopRuntime{})
+	result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(sess), sess, transferToolCall("librarian"), NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.IsError, "transfer must succeed: %s", result.Output)
@@ -1147,7 +1147,7 @@ func TestTransferTask_ConcurrentPinnedNestedTransfersStayIsolated(t *testing.T) 
 		out := make(chan transferOutcome, 1)
 		go func() {
 			evts := make(chan Event, 128)
-			result, err := rt.handleTaskTransfer(t.Context(), child, transferToolCall(target), NewChannelSink(evts), tools.NopRuntime{})
+			result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(child), child, transferToolCall(target), NewChannelSink(evts), tools.NopRuntime{})
 			out <- transferOutcome{result: result, err: err, evts: evts}
 		}()
 		return out
@@ -1211,7 +1211,7 @@ func TestTransferTask_DepthBoundary(t *testing.T) {
 		)
 		evts := make(chan Event, 128)
 
-		result, err := rt.handleTaskTransfer(t.Context(), sess, transferToolCall("librarian"), NewChannelSink(evts), tools.NopRuntime{})
+		result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(sess), sess, transferToolCall("librarian"), NewChannelSink(evts), tools.NopRuntime{})
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.False(t, result.IsError, "delegation at the maximum depth must be allowed: %s", result.Output)
@@ -1228,7 +1228,7 @@ func TestTransferTask_DepthBoundary(t *testing.T) {
 		)
 		evts := make(chan Event, 128)
 
-		result, err := rt.handleTaskTransfer(t.Context(), sess, transferToolCall("librarian"), NewChannelSink(evts), tools.NopRuntime{})
+		result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(sess), sess, transferToolCall("librarian"), NewChannelSink(evts), tools.NopRuntime{})
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.True(t, result.IsError)
@@ -1633,7 +1633,7 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 	}
 	var listOut string
 	require.Eventually(t, func() bool {
-		res, err := listHandler(t.Context(), sess, listCall, NewChannelSink(make(chan Event, 4)), tools.NopRuntime{})
+		res, err := listHandler(t.Context(), rt.resolveSessionAgent(sess), sess, listCall, NewChannelSink(make(chan Event, 4)), tools.NopRuntime{})
 		if err != nil {
 			return false
 		}
@@ -1698,4 +1698,103 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 
 	assert.Equal(t, "root", rt.CurrentAgent().Name(),
 		"the shared current agent must still be root after the whole chain")
+}
+
+// TestTransferTask_ConcurrentFromUnpinnedForegroundSession is the core
+// regression test for the parallel-dispatch race: when the root (foreground,
+// unpinned) session emits two transfer_task calls in a single LLM response,
+// the dispatcher runs them in parallel via concurrent.MapSlice. Before the
+// fix, the second goroutine called resolveSessionAgent after the first had
+// already invoked swapCurrentAgent, so it resolved to the target agent
+// ("drafter") instead of the caller ("root"), and then failed validation
+// with "Agent drafter cannot transfer task to drafter".
+//
+// After the fix, the dispatcher pre-resolves the caller agent before the
+// parallel loop and passes it as a *agent.Agent parameter to the handler,
+// which never re-reads the shared mutable current-agent field.
+func TestTransferTask_ConcurrentFromUnpinnedForegroundSession(t *testing.T) {
+	t.Parallel()
+
+	// Each call to the drafter agent gets its own stream via a queueProvider
+	// so concurrent RunStream invocations don't fight over a single mock.
+	drafterProv := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+		newStreamBuilder().AddContent("draft chunk 1 done").AddStopWithUsage(10, 5).Build(),
+		newStreamBuilder().AddContent("draft chunk 2 done").AddStopWithUsage(10, 5).Build(),
+	}}
+
+	root := agent.New("root", "Root agent",
+		agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}),
+	)
+	drafter := agent.New("drafter", "Drafter agent",
+		agent.WithModel(drafterProv),
+	)
+	agent.WithSubAgents(drafter)(root)
+
+	tm := team.New(team.WithAgents(root, drafter))
+	rt, err := NewLocalRuntime(t.Context(), tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+
+	// The root session is unpinned (AgentName == ""), exactly like the
+	// foreground user session. resolveSessionAgent falls back to
+	// r.Current() for it, which is the field swapCurrentAgent mutates.
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	require.Empty(t, sess.AgentName, "root session must be unpinned to reproduce the race")
+
+	// Snapshot the caller agent once, before spawning goroutines — exactly
+	// what Dispatcher.Process does (a := d.AgentFor(sess)) before its
+	// concurrent.MapSlice loop. Before the fix, handlers re-resolved inside
+	// each goroutine and could read a post-swap value from r.current.
+	caller := rt.resolveSessionAgent(sess)
+	require.Equal(t, "root", caller.Name(), "pre-dispatch caller must be root")
+
+	// Simulate the parallel-dispatch pattern: two transfer_task calls for
+	// the same drafter agent (two diff chunks), exactly as the root
+	// pr-review agent would emit in a single LLM response.
+	type outcome struct {
+		result *tools.ToolCallResult
+		err    error
+	}
+	transfer := func(id, task string) chan outcome {
+		out := make(chan outcome, 1)
+		go func() {
+			evts := make(chan Event, 128)
+			tc := tools.ToolCall{
+				ID:   id,
+				Type: "function",
+				Function: tools.FunctionCall{
+					Name:      "transfer_task",
+					Arguments: fmt.Sprintf(`{"agent":"drafter","task":%q}`, task),
+				},
+			}
+			// Pass the pre-resolved caller (mirrors what the fixed dispatcher does).
+			result, err := rt.handleTaskTransfer(t.Context(), caller, sess, tc, NewChannelSink(evts), tools.NopRuntime{})
+			out <- outcome{result, err}
+		}()
+		return out
+	}
+
+	outA := transfer("call_chunk1", "review chunk 1")
+	outB := transfer("call_chunk2", "review chunk 2")
+	a := <-outA
+	b := <-outB
+
+	// Both must pass validation. The pre-fix failure was "Agent drafter
+	// cannot transfer task to drafter": the second goroutine mis-resolved
+	// the caller as "drafter" (post-swap) and then validated against the
+	// drafter's empty sub-agent list.
+	require.NoError(t, a.err)
+	require.NotNil(t, a.result)
+	assert.False(t, a.result.IsError,
+		"first concurrent transfer must pass validation, not: %s", a.result.Output)
+
+	require.NoError(t, b.err)
+	require.NotNil(t, b.result)
+	assert.False(t, b.result.IsError,
+		"second concurrent transfer must pass validation, not: %s", b.result.Output)
+
+	assert.Equal(t, "root", rt.CurrentAgent().Name(),
+		"shared current agent must be restored to root after both concurrent transfers complete")
 }

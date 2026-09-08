@@ -2716,7 +2716,7 @@ func TestTransferTaskRejectsNonSubAgent(t *testing.T) {
 		},
 	}
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
+	result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(sess), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.IsError, "transfer to non-sub-agent should return an error result")
@@ -2756,7 +2756,7 @@ func TestTransferTaskAllowsSubAgent(t *testing.T) {
 		},
 	}
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
+	result, err := rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(sess), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.IsError, "transfer to valid sub-agent should succeed")
@@ -2804,7 +2804,7 @@ func TestTransferTaskPersistsSubSessionOnError(t *testing.T) {
 
 	// runForwarding returns an error because the child emitted an ErrorEvent,
 	// but only *after* persisting the sub-session.
-	_, err = rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
+	_, err = rt.handleTaskTransfer(t.Context(), rt.resolveSessionAgent(sess), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.Error(t, err, "transfer should surface the sub-session error to the caller")
 
 	// The parent session must now hold a sub-session item — without the fix

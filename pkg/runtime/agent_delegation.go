@@ -192,6 +192,14 @@ type SubSessionConfig struct {
 type delegationRequest struct {
 	SubSessionConfig
 
+	// Caller, when non-nil, is used as the calling agent instead of
+	// re-resolving via resolveSessionAgent inside runForwarding. Callers
+	// that have already resolved the agent (e.g. handleTaskTransfer,
+	// which validates it before calling runForwarding) must set this to
+	// prevent a concurrent swapCurrentAgent from corrupting the identity
+	// read for a second, parallel tool call from the same LLM response.
+	Caller *agent.Agent
+
 	// SwitchCurrentAgent, when true, swaps r.currentAgent to AgentName
 	// for the lifetime of the call and emits AgentSwitching/AgentInfo
 	// events on entry and exit. Used by transfer_task. Mutually
@@ -340,11 +348,18 @@ func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, f
 func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Session, evts EventSink, req delegationRequest) (*tools.ToolCallResult, error) {
 	span := trace.SpanFromContext(ctx)
 
-	// The caller resolves from the parent session, not the shared current
-	// agent: a nested transfer from a pinned background session must
-	// attribute events, hooks, and completion to the pinned agent, no
-	// matter where the concurrent foreground loop points (#3886).
-	callerAgent := r.resolveSessionAgent(parent)
+	// Use the pre-resolved caller when provided: handleTaskTransfer already
+	// resolved and validated it before calling runForwarding, so re-reading
+	// the shared current-agent field here would race a concurrent
+	// swapCurrentAgent from a parallel tool call in the same LLM response.
+	// For callers that haven't pre-resolved, fall back to the session-aware
+	// resolver (pinned background sessions return their pinned agent; the
+	// foreground root session returns the shared current agent — safe here
+	// because those callers don't race their own swapCurrentAgent).
+	callerAgent := req.Caller
+	if callerAgent == nil {
+		callerAgent = r.resolveSessionAgent(parent)
+	}
 	if callerAgent == nil {
 		return nil, errors.New("no agent resolved for the parent session")
 	}
@@ -665,7 +680,7 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	}, params.OnContent)
 }
 
-func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, a *agent.Agent, sess *session.Session, toolCall tools.ToolCall, evts EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var params struct {
 		Agent          string `json:"agent"`
 		Task           string `json:"task"`
@@ -675,13 +690,11 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	// Resolve the caller session-aware: nested transfer_task from a pinned
-	// background session must attribute the call to the pinned agent, not
-	// the shared current agent (#3886).
-	a := r.resolveSessionAgent(sess)
-	if a == nil {
-		return nil, errors.New("no agent resolved for the calling session")
-	}
+	// a is the calling agent, pre-resolved by the dispatcher before the
+	// parallel tool-call loop. Using it directly avoids a race with a
+	// concurrent swapCurrentAgent from another transfer_task goroutine in
+	// the same LLM response batch (which would corrupt a re-read of the
+	// shared current-agent field via resolveSessionAgent).
 	if errResult := validateAgentInList(a.Name(), params.Agent, "transfer task to", "sub-agents list", a.SubAgents()); errResult != nil {
 		return errResult, nil
 	}
@@ -724,6 +737,7 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 	defer span.End()
 
 	return r.runForwarding(ctx, sess, evts, delegationRequest{
+		Caller: a,
 		SubSessionConfig: SubSessionConfig{
 			Task:              params.Task,
 			ExpectedOutput:    params.ExpectedOutput,
@@ -739,7 +753,7 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 	})
 }
 
-func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleHandoff(ctx context.Context, _ *agent.Agent, sess *session.Session, toolCall tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var params handoff.Args
 	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
