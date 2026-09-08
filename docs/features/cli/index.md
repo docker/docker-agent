@@ -723,7 +723,7 @@ $ docker agent plans get --session <session-id>       # a session's plan
 $ docker agent plans export --session <session-id> --output ./session-plan.md
 ```
 
-Plans live under the data directory (`~/.cagent/plans/` and `~/.cagent/session_plans/` by default), so `--data-dir` selects which store the commands operate on.
+Plans live under the data directory (`~/.cagent/plans/` by default), so `--data-dir` selects which store the commands operate on.
 
 ### `docker agent debug`
 

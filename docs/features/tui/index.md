@@ -81,7 +81,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/snapshots`       | List captured snapshots (only when snapshots are enabled)                            |
 | `/export`          | Export the session as HTML                                                           |
 | `/sessions`        | Browse and load past sessions                                                        |
-| `/plans`           | Browse and manage plans: every [shared plan](../../tools/plan/index.md) plus the current session's [session plan](../../tools/session_plan/index.md). Filter, open a detail view, refresh, export to a file, and — for shared plans — set status, edit/create in `$VISUAL`/`$EDITOR`, and delete, all guarded against concurrent edits. Not available in the lean TUI |
+| `/plans`           | Browse and manage [shared plans](../../tools/plan/index.md). Filter, open a detail view, refresh, export to a file, set status, edit/create in `$VISUAL`/`$EDITOR`, and delete, all guarded against concurrent edits. Not available in the lean TUI |
 | `/model`           | Change the model for the current agent                                               |
 | `/effort`          | Set the current model's reasoning-effort level (`/effort <none\|minimal\|low\|medium\|high\|xhigh\|max>`, or `/effort` alone to pick from the supported levels; reasoning models only). Press <kbd>Tab</kbd> after `/effort` and a space to complete a level the current model supports |
 | `/settings`        | Manage appearance, behavior, and notification preferences                           |

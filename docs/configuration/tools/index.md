@@ -26,7 +26,6 @@ Built-in tools are included with Docker Agent and require no external dependenci
 | `environment` | Report the OS and resolved shell (read-only, no arguments, auto-approved) | [Environment](../../tools/environment/index.md) |
 | `think` | Reasoning scratchpad | [Think](../../tools/think/index.md) |
 | `plan` | Shared persistent scratchpad for multi-agent collaboration | [Plan](../../tools/plan/index.md) |
-| `session_plan` | Per-session markdown plan for the draft-review-execute workflow | [Session Plan](../../tools/session_plan/index.md) |
 | `session_context` | Reference a previous session as context (read-only) | [Session Context](../../tools/session_context/index.md) |
 | `todo` | Task list management | [Todo](../../tools/todo/index.md) |
 | `memory` | Persistent key-value storage (SQLite) | [Memory](../../tools/memory/index.md) |

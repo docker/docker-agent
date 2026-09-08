@@ -142,7 +142,7 @@ $ docker agent plans update release --file ./plan.md --expected-version 1
 
 ### The `/plans` browser in the TUI
 
-Inside the full-screen TUI, the `/plans` slash command (also in the <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette) opens a plan browser over the same store the agents use, so changes made by agents mid-session appear immediately. The list shows every shared plan plus the current session's [session plan](../session_plan/index.md), with each plan's scope, identity (name, or session ID for the session plan), status, version (`-` for the unversioned session plan), last update time, and title.
+Inside the full-screen TUI, the `/plans` slash command (also in the <kbd>Ctrl</kbd>+<kbd>K</kbd> command palette) opens a plan browser over the same store the agents use, so changes made by agents mid-session appear immediately. The list shows every shared plan with its identity (name), status, version, last update time, and title.
 
 Keybindings:
 
@@ -151,7 +151,7 @@ Keybindings:
 | <kbd>↑</kbd>/<kbd>↓</kbd>, mouse | Navigate; <kbd>Enter</kbd> or double-click opens a detail view with the full metadata and scrollable markdown content |
 | <kbd>/</kbd> | Filter by name, title, status, or scope (<kbd>Esc</kbd> leaves filter mode) |
 | <kbd>r</kbd> | Refresh from storage |
-| <kbd>x</kbd> | Export the selected plan to `<name>.md` (shared) or `session-plan-<short-id>.md` (session) in the session's working directory. An existing file is never overwritten — the export fails with a notification instead |
+| <kbd>x</kbd> | Export the selected plan to `<name>.md` in the session's working directory. An existing file is never overwritten — the export fails with a notification instead |
 | <kbd>s</kbd> | Set a shared plan's free-form status via a small input dialog |
 | <kbd>e</kbd> | Edit a shared plan's content in `$VISUAL`/`$EDITOR` |
 | <kbd>n</kbd> | Create a new shared plan: pick a name, then draft the content in `$VISUAL`/`$EDITOR` (an empty draft aborts) |
