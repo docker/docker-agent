@@ -121,8 +121,8 @@ func TestSnapshotDateParses(t *testing.T) {
 // default. A snapshot ages purely with wall-clock time, so wiring this into
 // the normal `go test ./...` gate would eventually break unrelated work on
 // every fork and stale branch — a flaky, time-dependent failure. The actual
-// freshness mechanism is the weekly update-models workflow; this assertion is
-// a backstop the maintainer repo can opt into.
+// freshness mechanism is the automated update process; this assertion is a
+// backstop the maintainer repo can opt into.
 func TestSnapshotDateIsFresh(t *testing.T) {
 	t.Parallel()
 

@@ -1,8 +1,8 @@
 # Lints and tests the models-delta scripts (.github/scripts/models-delta*.jq,
-# scripts/models-delta*.sh) used by update-models.yml to compute a semantic
-# models.dev catalog diff. Split out from ci.yml's blanket lint job — which
-# runs on every PR/commit across the whole repo — since this only needs to
-# run when these scripts or their fixtures actually change.
+# scripts/models-delta*.sh) used by automated and local snapshot refreshes to
+# compute a semantic models.dev catalog diff. Split out from ci.yml's blanket
+# lint job — which runs on every PR/commit across the whole repo — since this
+# only needs to run when these scripts or their fixtures actually change.
 name: models-delta-lint
 
 permissions:

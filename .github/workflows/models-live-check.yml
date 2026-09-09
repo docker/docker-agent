@@ -18,7 +18,7 @@ concurrency:
 on:
   workflow_dispatch:
   schedule:
-    # Daily, 07:00 UTC (an hour after update-models' Monday 06:00 refresh).
+    # Daily, 07:00 UTC.
     - cron: "0 7 * * *"
 
 jobs:

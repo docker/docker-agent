@@ -3,8 +3,8 @@
 # models-delta jq scripts (.github/scripts/models-delta*.jq).
 #
 # These scripts have no Go equivalent to exercise them under `task test`,
-# and they run for real, unattended, only once a week (the update-models
-# schedule) — a silent regression here would go unnoticed until then.
+# and automated refreshes invoke them infrequently — a silent regression
+# could otherwise go unnoticed until the next snapshot update.
 # This runs the exact scripts against small fixtures and diffs the output
 # against checked-in golden files; run it directly or via `task test-models-delta`.
 set -euo pipefail

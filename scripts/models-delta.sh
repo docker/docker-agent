@@ -7,15 +7,15 @@
 # With no positional arguments, compares the version of
 # pkg/modelsdev/snapshot.json at HEAD against the current working-tree copy —
 # i.e. "what would `task update-models` change if I committed it right now".
-# This is also exactly what the update-models workflow runs after refreshing
-# the snapshot, so the local and CI code paths never drift apart.
+# This is also the interface used by automated snapshot refreshes, so local
+# and automated updates share the same delta implementation.
 #
 # OLD and NEW, when given, are paths to two snapshot.json files to compare
 # instead (e.g. two saved copies from different runs).
 #
 # The rendered markdown always goes to stdout. --json-out additionally writes
-# the structural delta (added/removed/changed) as JSON, which the workflow
-# uses to compute counts and a commit subject without re-running jq.
+# the structural delta (added/removed/changed) as JSON, which callers can use
+# to compute counts and deterministic update metadata without re-running jq.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
