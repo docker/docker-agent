@@ -31,7 +31,11 @@ func emitContextEnvPwdCmd(envVars ...string) string {
 
 // printStdinJSONFieldCmd returns a command printing one field of the JSON
 // document the hook receives on stdin.
-func printStdinJSONFieldCmd(field string) string {
+// Signature mirrors the POSIX helper, which needs *testing.T to skip when jq is
+// missing. PowerShell's ConvertFrom-Json is built in, so there is nothing to
+// skip on here.
+func printStdinJSONFieldCmd(t *testing.T, field string) string {
+	t.Helper()
 	return `([Console]::In.ReadToEnd() | ConvertFrom-Json).` + field
 }
 
