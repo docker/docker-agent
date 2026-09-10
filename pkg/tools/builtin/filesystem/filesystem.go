@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -249,9 +250,12 @@ func (t *ToolSet) Close() error {
 
 func (t *ToolSet) Instructions() string {
 	var b strings.Builder
-	b.WriteString(`## Filesystem Tools
-
-- Relative paths resolve from the working directory; absolute paths and ".." work as expected
+	b.WriteString("## Filesystem Tools\n")
+	if t.workingDir != "" {
+		fmt.Fprintf(&b, "\n- The working directory is %q; relative paths resolve from it", t.workingDir)
+	}
+	b.WriteString(`
+- Absolute paths must match the host OS (e.g. C:\... on Windows, /... on Unix)
 - Prefer read_multiple_files over sequential read_file calls
 - Use search_files_content to locate code or text across files
 - Use exclude patterns in searches and max_depth in directory_tree to limit output`)
@@ -634,9 +638,9 @@ func (t *ToolSet) executePostEditCommands(ctx context.Context, filePath string) 
 // resolvePath resolves a path relative to the working directory.
 // A leading "~" or "~/" is expanded to the user's home directory so that
 // LLM-supplied paths like "~/file.txt" work without the agent having to
-// know the user's home directory upfront. Relative paths (including ".")
-// are joined with the working directory. Absolute paths and paths
-// starting with ".." are used as-is.
+// know the user's home directory upfront. Absolute paths are used as-is;
+// everything else (including "." and "..") is joined with the working
+// directory.
 //
 // resolvePath does NOT enforce the allow- or deny-lists; callers should use
 // [resolveAndCheckPath] when those checks are required (i.e. for any path
@@ -650,6 +654,43 @@ func (t *ToolSet) resolvePath(path string) string {
 	}
 
 	return filepath.Clean(filepath.Join(t.workingDir, path))
+}
+
+// checkForeignPath rejects paths that are absolute in another OS's syntax
+// (e.g. "/mnt/c/..." on Windows, "C:\..." on Unix). filepath.IsAbs does not
+// recognize them, so resolvePath would silently join them onto the working
+// directory and the caller would get a baffling not-found for a mangled
+// path. An explicit "./" prefix bypasses the check for the rare legitimate
+// file whose name matches one of these shapes.
+func checkForeignPath(path, goos string) error {
+	if goos == "windows" {
+		switch {
+		// "//server/share" and "\\server\share" are valid UNC paths.
+		case strings.HasPrefix(path, "/") && !strings.HasPrefix(path, "//"):
+			return fmt.Errorf("path %q looks like a POSIX absolute path, but this host runs Windows; use a Windows path (e.g. C:\\...) or a path relative to the working directory", path)
+		case strings.HasPrefix(path, `\`) && !strings.HasPrefix(path, `\\`):
+			return fmt.Errorf("path %q is rooted but has no drive letter; use a full Windows path (e.g. C:\\...) or a path relative to the working directory", path)
+		case isDriveRelative(path):
+			return fmt.Errorf("path %q is drive-relative; use a full Windows path (e.g. C:\\...) or a path relative to the working directory", path)
+		}
+		return nil
+	}
+	if hasDrivePrefix(path) && len(path) > 2 && (path[2] == '/' || path[2] == '\\') {
+		return fmt.Errorf("path %q looks like a Windows absolute path, but this host runs %s; use a POSIX path (e.g. /home/...) or a path relative to the working directory", path, goos)
+	}
+	return nil
+}
+
+// hasDrivePrefix reports whether path starts with a drive letter and colon.
+func hasDrivePrefix(path string) bool {
+	return len(path) >= 2 && path[1] == ':' &&
+		('a' <= path[0] && path[0] <= 'z' || 'A' <= path[0] && path[0] <= 'Z')
+}
+
+// isDriveRelative reports whether path is like "C:" or "C:foo" — relative
+// to the current directory of drive C:, which filepath.Join cannot represent.
+func isDriveRelative(path string) bool {
+	return hasDrivePrefix(path) && (len(path) == 2 || path[2] != '/' && path[2] != '\\')
 }
 
 // resolveAndCheckPath is the canonical entry point used by every filesystem
@@ -695,6 +736,9 @@ func (t *ToolSet) resolveAndCheckPath(path string) (string, error) {
 	if t.sandboxBroken {
 		return "", errors.New("filesystem toolset is disabled due to invalid allow/deny list configuration")
 	}
+	if err := checkForeignPath(path, runtime.GOOS); err != nil {
+		return "", err
+	}
 
 	resolved := t.resolvePath(path)
 	if t.agentsIgnore.Match(resolved) {
@@ -714,6 +758,12 @@ func (t *ToolSet) resolveAndCheckPath(path string) (string, error) {
 		return "", fmt.Errorf("path %q is outside the allowed directories (%s)", path, t.allowList.describe())
 	}
 	return resolved, nil
+}
+
+// resolutionHint tells the model where a failed path actually pointed, so
+// it can correct a wrong base instead of retrying the same path.
+func (t *ToolSet) resolutionHint(resolved string) string {
+	return fmt.Sprintf(" (resolved to %q; relative paths resolve from the working directory %q)", resolved, t.workingDir)
 }
 
 // rootedAccess returns the [*os.Root] handle and rooted (slash-separated)
@@ -969,6 +1019,9 @@ func (t *ToolSet) handleEditFile(ctx context.Context, args EditFileArgs) (*tools
 
 	content, err := t.readFile(resolvedPath)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return tools.ResultError("not found" + t.resolutionHint(resolvedPath)), nil
+		}
 		return tools.ResultError(fmt.Sprintf("Error reading file: %s", err)), nil
 	}
 
@@ -1013,6 +1066,9 @@ func (t *ToolSet) handleListDirectory(ctx context.Context, args ListDirectoryArg
 
 	entries, err := t.readDir(resolvedPath)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return tools.ResultError("not found" + t.resolutionHint(resolvedPath)), nil
+		}
 		return tools.ResultError(fmt.Sprintf("Error reading directory: %s", err)), nil
 	}
 
@@ -1082,7 +1138,7 @@ func (t *ToolSet) handleReadFile(ctx context.Context, args ReadFileArgs) (*tools
 	if err != nil {
 		var errMsg string
 		if errors.Is(err, fs.ErrNotExist) {
-			errMsg = "not found"
+			errMsg = "not found" + t.resolutionHint(resolvedPath)
 		} else {
 			errMsg = err.Error()
 		}
@@ -1091,6 +1147,7 @@ func (t *ToolSet) handleReadFile(ctx context.Context, args ReadFileArgs) (*tools
 			Output:  errMsg,
 			IsError: true,
 			Meta: ReadFileMeta{
+				Path:  args.Path,
 				Error: errMsg,
 			},
 		}, nil
@@ -1318,7 +1375,7 @@ func (t *ToolSet) handleReadMultipleFiles(ctx context.Context, args ReadMultiple
 		if err != nil {
 			errMsg := err.Error()
 			if errors.Is(err, fs.ErrNotExist) {
-				errMsg = "not found"
+				errMsg = "not found" + t.resolutionHint(resolvedPath)
 			}
 			contents = append(contents, PathContent{
 				Path:    path,

@@ -294,6 +294,9 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 	toolChoiceRegex := regexp.MustCompile(`"tool_choice":"[^"]*",?`)
 	// Normalize prompt-file paths (they are machine-specific absolute paths).
 	promptFileRegex := regexp.MustCompile(`Instructions from: (?:[^\\"\r\n]|\\\\)+`)
+	// Normalize the working directory stated in the filesystem toolset
+	// instructions (machine-specific absolute path).
+	workingDirRegex := regexp.MustCompile(`The working directory is \\"(?:[^\\"\r\n]|\\\\)+\\"`)
 
 	return func(r *http.Request, i cassette.Request) bool {
 		if r.Body == nil || r.Body == http.NoBody {
@@ -325,12 +328,14 @@ func DefaultMatcher(onError func(err error)) recorder.MatcherFunc {
 		normalizedReq = reasoningRegex.ReplaceAllString(normalizedReq, "")
 		normalizedReq = toolChoiceRegex.ReplaceAllString(normalizedReq, "")
 		normalizedReq = promptFileRegex.ReplaceAllString(normalizedReq, "Instructions from: FILE")
+		normalizedReq = workingDirRegex.ReplaceAllString(normalizedReq, "The working directory is WD")
 		normalizedCassette := callIDRegex.ReplaceAllString(i.Body, "call_ID")
 		normalizedCassette = maxTokensRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = thinkingConfigRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = reasoningRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = toolChoiceRegex.ReplaceAllString(normalizedCassette, "")
 		normalizedCassette = promptFileRegex.ReplaceAllString(normalizedCassette, "Instructions from: FILE")
+		normalizedCassette = workingDirRegex.ReplaceAllString(normalizedCassette, "The working directory is WD")
 
 		return normalizedReq == normalizedCassette
 	}
