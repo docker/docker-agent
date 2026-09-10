@@ -141,7 +141,7 @@ func run(ctx context.Context) error {
 
 	// Attach the in-process MCP server as a remote toolset named "github". Its
 	// "search_repositories" tool is therefore exposed as "github_search_repositories".
-	githubTools := mcptools.NewRemoteToolset("github", mcpHTTP.URL, "streamable", nil, nil)
+	githubTools := mcptools.NewRemoteToolsetWithAllowPrivateIPs("github", mcpHTTP.URL, "streamable", nil, nil, true)
 
 	llm, err := gemini.NewClient(ctx, &latest.ModelConfig{
 		Provider: "google",

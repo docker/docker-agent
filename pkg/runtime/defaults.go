@@ -1,6 +1,10 @@
 package runtime
 
-import "time"
+import (
+	"time"
+
+	"github.com/docker/docker-agent/pkg/tools"
+)
 
 // defaultEventChannelCapacity is the buffer size used for every Event
 // channel the runtime hands back to a caller. Sized large enough that a
@@ -42,6 +46,15 @@ const defaultMaxOverflowCompactions = 1
 // allowed to wedge the caller indefinitely.
 const toolsChangedTimeout = 5 * time.Second
 
+// defaultStreamStoppedDeliveryTimeout bounds how long finalizeEventChannel
+// waits to deliver StreamStopped when the event buffer is full. 128 buffered
+// events at roughly a millisecond each for a synchronous per-delta SQLite
+// write (the common back-pressure source, see #4136) drain in ~130ms; 5s is
+// comfortably above that for any consumer still reading, while still bounding
+// teardown once a consumer has abandoned the channel (the #3070 deadlock this
+// replaces). Tests shrink it via the streamStoppedDeliveryTimeout field.
+const defaultStreamStoppedDeliveryTimeout = 5 * time.Second
+
 // defaultToolListTimeout bounds how long EmitStartupInfo waits for a single
 // toolset to enumerate its tools while populating the sidebar. A toolset
 // whose Tools() blocks indefinitely — e.g. an MCP stdio subprocess that
@@ -62,7 +75,9 @@ const defaultToolListTimeout = 10 * time.Second
 // ToolsetInfo{Loading:false} event is never emitted and the sidebar animates
 // "tools available…" forever. A timed-out toolset is skipped for this startup
 // pass only — the original start attempt keeps running and the toolset is
-// picked up once it completes. It is longer than defaultToolListTimeout
+// picked up once it completes. It aliases the shared bounded-start default so
+// this startup probe and the agent's turn path give up on a wedged toolset
+// after the same grace period; it is longer than defaultToolListTimeout
 // because a cold start can legitimately include an image pull. Tests override
 // it via WithToolStartTimeout.
-const defaultToolStartTimeout = 30 * time.Second
+const defaultToolStartTimeout = tools.DefaultStartTimeout

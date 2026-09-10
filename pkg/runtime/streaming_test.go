@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,57 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
+
+// AddMedia appends a chunk carrying a generated-media delta (e.g. an inline
+// image blob), the way the Gemini adapter surfaces InlineData parts. name may
+// be empty to exercise the provider-omits-a-name path.
+func (b *streamBuilder) AddMedia(data []byte, mimeType, name string) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index: 0,
+			Delta: chat.MessageDelta{Media: []chat.MediaDelta{{
+				Data:     data,
+				MimeType: mimeType,
+				Name:     name,
+				Size:     int64(len(data)),
+			}}},
+		}},
+	})
+	return b
+}
+
+// AddMultiMedia appends a SINGLE chunk carrying multiple generated-media
+// blobs at once, the way Gemini can pack several inline parts (across parts
+// or candidates) into one chunk.
+func (b *streamBuilder) AddMultiMedia(blobs ...chat.MediaDelta) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index: 0,
+			Delta: chat.MessageDelta{Media: blobs},
+		}},
+	})
+	return b
+}
+
+// AddMediaWithStop appends a SINGLE terminal chunk carrying both a
+// generated-media blob and a terminal finish_reason, the way a provider can
+// pack the final image and "stop" into one chunk.
+func (b *streamBuilder) AddMediaWithStop(data []byte, mimeType, name string, finishReason chat.FinishReason) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index:        0,
+			FinishReason: finishReason,
+			Delta: chat.MessageDelta{Media: []chat.MediaDelta{{
+				Data:     data,
+				MimeType: mimeType,
+				Name:     name,
+				Size:     int64(len(data)),
+			}}},
+		}},
+		Usage: &chat.Usage{InputTokens: 1, OutputTokens: 1},
+	})
+	return b
+}
 
 // AddToolCallWithStop appends a single chunk that carries BOTH a complete tool
 // call AND a terminal finish_reason ("stop"), the way LiteLLM/Gemini emit a
@@ -163,6 +215,141 @@ func TestHandleStream_ToolCallThenSeparateStop(t *testing.T) {
 	assert.False(t, res.Stopped)
 }
 
+// TestHandleStream_MediaAccumulatesAlongsideText verifies that a
+// generated-media delta streamed alongside text is accumulated into
+// streamResult.Media without disturbing the existing text/finish-reason
+// handling.
+func TestHandleStream_MediaAccumulatesAlongsideText(t *testing.T) {
+	t.Parallel()
+
+	imgBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	stream := newStreamBuilder().
+		AddContent("here is your image").
+		AddMedia(imgBytes, "image/png", "cat.png").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, "here is your image", res.Content, "text must survive alongside media")
+	require.Len(t, res.Media, 1)
+	assert.Equal(t, imgBytes, res.Media[0].Data)
+	assert.Equal(t, "image/png", res.Media[0].MimeType)
+	assert.Equal(t, "cat.png", res.Media[0].Name)
+	assert.Equal(t, chat.FinishReasonStop, res.FinishReason)
+	assert.True(t, res.Stopped)
+}
+
+// TestHandleStream_MediaOnlyTurnNotTreatedAsEmpty is a regression test: a
+// turn that streams ONLY a generated image (no text, no tool calls) and
+// ends with a bare EOF must not be misclassified as the "no output" stall
+// case — it is a normal completion and must report Stopped=true (turn
+// ends) without going through the no-output warning path.
+func TestHandleStream_MediaOnlyTurnNotTreatedAsEmpty(t *testing.T) {
+	t.Parallel()
+
+	imgBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	stream := newStreamBuilder().
+		AddMedia(imgBytes, "image/png", "").
+		Build() // no terminal chunk: bare EOF, no finish reason
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	assert.Empty(t, res.Content)
+	require.Len(t, res.Media, 1, "the generated image must be accumulated")
+	assert.True(t, res.Stopped, "a media-only turn is a normal completion, not a stall")
+	assert.Equal(t, chat.FinishReasonStop, res.FinishReason, "media-only bare EOF is successful output, not an unknown empty response")
+}
+
+// TestHandleStream_MultipleMediaBlobsInOneChunk verifies that every inline
+// blob a provider packs into a SINGLE chunk is retained, not just the last
+// one — a provider (Gemini in particular) can return more than one
+// generated image across parts/candidates in the same streaming chunk.
+func TestHandleStream_MultipleMediaBlobsInOneChunk(t *testing.T) {
+	t.Parallel()
+
+	blob1 := chat.MediaDelta{Data: []byte{0x01}, MimeType: "image/png", Name: "one.png", Size: 1}
+	blob2 := chat.MediaDelta{Data: []byte{0x02}, MimeType: "image/jpeg", Name: "two.jpg", Size: 1}
+	blob3 := chat.MediaDelta{Data: []byte{0x03}, MimeType: "image/webp", Name: "three.webp", Size: 1}
+
+	stream := newStreamBuilder().
+		AddMultiMedia(blob1, blob2, blob3).
+		AddStopWithUsage(1, 1).
+		Build()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	require.Len(t, res.Media, 3, "every blob in the chunk must be retained, not just the last one")
+	assert.Equal(t, blob1, res.Media[0])
+	assert.Equal(t, blob2, res.Media[1])
+	assert.Equal(t, blob3, res.Media[2])
+}
+
+// TestHandleStream_MediaInTerminalChunkIsAccumulated verifies that a
+// generated-media blob packed into the SAME chunk as a terminal finish
+// reason ("stop", "length", or "refusal") is accumulated before the early
+// return, matching the same-chunk tool-call fix above. Accumulating after
+// the terminal-finish-reason check would return before this chunk's media
+// was ever added, silently dropping it.
+func TestHandleStream_MediaInTerminalChunkIsAccumulated(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		finishReason chat.FinishReason
+	}{
+		{"stop", chat.FinishReasonStop},
+		{"length", chat.FinishReasonLength},
+		{"refusal", chat.FinishReasonRefusal},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			imgBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+			stream := newStreamBuilder().
+				AddMediaWithStop(imgBytes, "image/png", "cat.png", tc.finishReason).
+				Build()
+
+			a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+			sess := session.New(session.WithUserMessage("go"))
+
+			evCh := make(chan Event, 64)
+			res, err := handleStream(
+				t.Context(), nil, stream, a, nil, sess, nil,
+				defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+			)
+			require.NoError(t, err)
+
+			require.Len(t, res.Media, 1, "media sharing a chunk with the terminal finish reason must not be dropped")
+			assert.Equal(t, imgBytes, res.Media[0].Data)
+			assert.Equal(t, tc.finishReason, res.FinishReason)
+		})
+	}
+}
+
 // TestHandleStream_WhitespaceOnlyContentStops is a regression test for an
 // infinite-loop risk surfaced while reviewing #3145. A turn that streams only
 // whitespace content and ends with a bare EOF (no finish reason) must report
@@ -309,4 +496,185 @@ func TestHandleStream_ContextCancellation(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled, "error must be context.Canceled")
 	assert.True(t, res.Stopped)
+}
+
+// agentChoiceText drains every buffered event and concatenates the
+// AgentChoice content, i.e. exactly what a live consumer (TUI/API) rendered.
+func agentChoiceText(ch chan Event) string {
+	var b strings.Builder
+	for {
+		select {
+		case e := <-ch:
+			if c, ok := e.(*AgentChoiceEvent); ok {
+				b.WriteString(c.Content)
+			}
+		default:
+			return b.String()
+		}
+	}
+}
+
+// runMarkerStream runs handleStream over stream and returns the result plus
+// the concatenated live AgentChoice text.
+func runMarkerStream(t *testing.T, stream *mockStream) (streamResult, string) {
+	t.Helper()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess, nil,
+		defaultTelemetry{}, NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+	return res, agentChoiceText(evCh)
+}
+
+// TestHandleStream_MediaFileMarkerStrippedAndPaired is the core streaming
+// contract of the naming protocol: a marker line split across chunks never
+// reaches the live event stream or the aggregated content, and its path is
+// paired onto the blob in [chat.MediaDelta.RequestedPath].
+func TestHandleStream_MediaFileMarkerStrippedAndPaired(t *testing.T) {
+	t.Parallel()
+
+	imgBytes := []byte{0x89, 0x50, 0x4e, 0x47}
+	stream := newStreamBuilder().
+		AddContent("Here you go!\n[media-fi").
+		AddContent("le: red-panda.png]\n").
+		AddMedia(imgBytes, "image/png", "provider-name.png").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Equal(t, "Here you go!\n", res.Content, "the marker line must be stripped from the persisted text")
+	assert.Equal(t, res.Content, live, "live event text and aggregated content must be identical")
+	require.Len(t, res.Media, 1)
+	assert.Equal(t, "red-panda.png", res.Media[0].RequestedPath)
+	assert.Equal(t, "provider-name.png", res.Media[0].Name, "the provider display name must survive for fallback")
+}
+
+// TestHandleStream_MarkerAtEOFWithoutNewline: a marker terminated by the end
+// of the stream (bare EOF, no trailing newline, media arrived first) is
+// still stripped and paired.
+func TestHandleStream_MarkerAtEOFWithoutNewline(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddMedia([]byte{0x01}, "image/png", "").
+		AddContent("[media-file: cat.png]").
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Empty(t, res.Content)
+	assert.Empty(t, live)
+	require.Len(t, res.Media, 1)
+	assert.Equal(t, "cat.png", res.Media[0].RequestedPath)
+	assert.True(t, res.Stopped)
+}
+
+// TestHandleStream_MarkerBlobCountMismatch pins the pairing rules when the
+// model misbehaves: markers pair positionally, extra blobs keep their
+// fallback naming, and extra markers are stripped but ignored.
+func TestHandleStream_MarkerBlobCountMismatch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fewer markers than blobs", func(t *testing.T) {
+		t.Parallel()
+
+		stream := newStreamBuilder().
+			AddContent("[media-file: only.png]\n").
+			AddMultiMedia(
+				chat.MediaDelta{Data: []byte{0x01}, MimeType: "image/png", Name: "a", Size: 1},
+				chat.MediaDelta{Data: []byte{0x02}, MimeType: "image/png", Name: "b", Size: 1},
+			).
+			AddStopWithUsage(1, 1).
+			Build()
+
+		res, live := runMarkerStream(t, stream)
+
+		assert.Empty(t, res.Content)
+		assert.Empty(t, live)
+		require.Len(t, res.Media, 2, "every blob must survive, marker or not")
+		assert.Equal(t, "only.png", res.Media[0].RequestedPath)
+		assert.Empty(t, res.Media[1].RequestedPath, "the unpaired blob falls back to its provider name")
+		assert.Equal(t, []byte{0x01}, res.Media[0].Data, "blob order must be preserved")
+	})
+
+	t.Run("more markers than blobs", func(t *testing.T) {
+		t.Parallel()
+
+		stream := newStreamBuilder().
+			AddContent("[media-file: one.png]\n[media-file: two.png]\n").
+			AddMedia([]byte{0x01}, "image/png", "").
+			AddStopWithUsage(1, 1).
+			Build()
+
+		res, live := runMarkerStream(t, stream)
+
+		assert.Empty(t, res.Content, "every valid marker line is stripped, even unpaired ones")
+		assert.Empty(t, live)
+		require.Len(t, res.Media, 1)
+		assert.Equal(t, "one.png", res.Media[0].RequestedPath)
+	})
+}
+
+// TestHandleStream_MultipleMarkersPairInOrder: marker i names blob i, in
+// response order, across separate chunks.
+func TestHandleStream_MultipleMarkersPairInOrder(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent("Two variations:\n[media-file: variant-one.png]\n").
+		AddMedia([]byte{0x01}, "image/png", "").
+		AddContent("[media-file: variant-two.png]\n").
+		AddMedia([]byte{0x02}, "image/png", "").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Equal(t, "Two variations:\n", res.Content)
+	assert.Equal(t, res.Content, live)
+	require.Len(t, res.Media, 2)
+	assert.Equal(t, "variant-one.png", res.Media[0].RequestedPath)
+	assert.Equal(t, "variant-two.png", res.Media[1].RequestedPath)
+}
+
+// TestHandleStream_MalformedMarkerStaysVisible: near-miss lines are ordinary
+// prose — visible live, persisted, and never consuming a pairing slot.
+func TestHandleStream_MalformedMarkerStaysVisible(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent(" [media-file: indented.png]\n[media-file: real.png]\n").
+		AddMedia([]byte{0x01}, "image/png", "").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Equal(t, " [media-file: indented.png]\n", res.Content)
+	assert.Equal(t, res.Content, live)
+	require.Len(t, res.Media, 1)
+	assert.Equal(t, "real.png", res.Media[0].RequestedPath, "the malformed line must not consume the pairing slot")
+}
+
+// TestHandleStream_TextWithoutMarkersUnchanged guards against the filter
+// perturbing ordinary streamed text, including bracketed prose.
+func TestHandleStream_TextWithoutMarkersUnchanged(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent("see [media docs] and ").
+		AddContent("[media-file spec] for details\n").
+		AddStopWithUsage(1, 1).
+		Build()
+
+	res, live := runMarkerStream(t, stream)
+
+	assert.Equal(t, "see [media docs] and [media-file spec] for details\n", res.Content)
+	assert.Equal(t, res.Content, live)
+	assert.Empty(t, res.Media)
 }

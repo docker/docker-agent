@@ -1387,3 +1387,154 @@ func TestBuildTranscriptBudgetTermination(t *testing.T) {
 		assert.NotContains(t, transcript, "intruder")
 	})
 }
+
+func TestComputeRepeatMetrics_NilForSingleRun(t *testing.T) {
+	t.Parallel()
+	assert.Nil(t, computeRepeatMetrics(nil, 1))
+	assert.Nil(t, computeRepeatMetrics(nil, 0))
+	assert.Nil(t, computeRepeatMetrics([]Result{}, 3))
+}
+
+func TestComputeRepeatMetrics_AllPassEveryTime(t *testing.T) {
+	t.Parallel()
+	results := []Result{
+		{InputPath: "a.json", SizeExpected: "M", Size: "M"},
+		{InputPath: "a.json", SizeExpected: "M", Size: "M"},
+		{InputPath: "b.json", SizeExpected: "S", Size: "S"},
+		{InputPath: "b.json", SizeExpected: "S", Size: "S"},
+	}
+	m := computeRepeatMetrics(results, 2)
+	require.NotNil(t, m)
+	assert.Equal(t, 2, m.K)
+	assert.Equal(t, 2, m.Total)
+	assert.InDelta(t, 1.0, m.PassK, 1e-9)
+	assert.InDelta(t, 1.0, m.HatK, 1e-9)
+}
+
+func TestComputeRepeatMetrics_FlakyEval(t *testing.T) {
+	t.Parallel()
+	results := []Result{
+		{InputPath: "a.json", SizeExpected: "M", Size: "M"}, // pass
+		{InputPath: "a.json", SizeExpected: "M", Size: "S"}, // fail
+	}
+	m := computeRepeatMetrics(results, 2)
+	require.NotNil(t, m)
+	assert.InDelta(t, 1.0, m.PassK, 1e-9, "pass@k: passed at least once")
+	assert.InDelta(t, 0.0, m.HatK, 1e-9, "pass^k: did not pass every time")
+}
+
+func TestComputeRepeatMetrics_NeverPasses(t *testing.T) {
+	t.Parallel()
+	results := []Result{
+		{InputPath: "a.json", SizeExpected: "M", Size: "S"},
+		{InputPath: "a.json", SizeExpected: "M", Size: "S"},
+	}
+	m := computeRepeatMetrics(results, 2)
+	require.NotNil(t, m)
+	assert.InDelta(t, 0.0, m.PassK, 1e-9)
+	assert.InDelta(t, 0.0, m.HatK, 1e-9)
+}
+
+func TestComputeRepeatMetrics_MixedEvals(t *testing.T) {
+	t.Parallel()
+	// 3 unique evals repeated 2 times:
+	// a: pass, pass  → anyPass=true, allPass=true
+	// b: pass, fail  → anyPass=true, allPass=false
+	// c: fail, fail  → anyPass=false, allPass=false
+	results := []Result{
+		{InputPath: "a.json"},
+		{InputPath: "a.json"},
+		{InputPath: "b.json", SizeExpected: "M", Size: "M"},
+		{InputPath: "b.json", SizeExpected: "M", Size: "S"},
+		{InputPath: "c.json", Error: "boom"},
+		{InputPath: "c.json", Error: "boom"},
+	}
+	m := computeRepeatMetrics(results, 2)
+	require.NotNil(t, m)
+	assert.Equal(t, 3, m.Total)
+	assert.InDelta(t, 2.0/3.0, m.PassK, 1e-9, "2 of 3 evals passed at least once")
+	assert.InDelta(t, 1.0/3.0, m.HatK, 1e-9, "1 of 3 evals passed every time")
+}
+
+func TestPrintSummary_WithRepeatMetrics(t *testing.T) {
+	t.Parallel()
+	summary := Summary{
+		TotalEvals: 6,
+		RepeatMetrics: &RepeatMetrics{
+			K:     3,
+			PassK: 1.0,
+			HatK:  0.5,
+			Total: 2,
+		},
+	}
+	var buf bytes.Buffer
+	printSummary(&buf, summary, time.Minute)
+	output := buf.String()
+	assert.Contains(t, output, "pass@3")
+	assert.Contains(t, output, "pass^3")
+	assert.Contains(t, output, "100.0%")
+	assert.Contains(t, output, "50.0%")
+}
+
+func TestPrintSummary_NoRepeatMetricsWhenNil(t *testing.T) {
+	t.Parallel()
+	summary := Summary{TotalEvals: 2}
+	var buf bytes.Buffer
+	printSummary(&buf, summary, time.Minute)
+	output := buf.String()
+	assert.NotContains(t, output, "pass@")
+	assert.NotContains(t, output, "Repeat")
+}
+
+func TestResultCheckResults_AssertionsAllPass(t *testing.T) {
+	t.Parallel()
+	r := Result{
+		AssertionsTotal:  2,
+		AssertionsPassed: 2,
+		AssertionResults: []AssertionResult{
+			{Name: "a", Passed: true},
+			{Name: "b", Passed: true},
+		},
+	}
+	successes, failures := r.checkResults()
+	assert.Contains(t, successes, "assertions 2/2")
+	assert.Empty(t, failures)
+}
+
+func TestResultCheckResults_AssertionsPartialFail(t *testing.T) {
+	t.Parallel()
+	r := Result{
+		AssertionsTotal:  2,
+		AssertionsPassed: 1,
+		AssertionResults: []AssertionResult{
+			{Name: "has greeting", Type: "contains", Passed: true},
+			{Name: "no error", Type: "not_contains", Passed: false, Reason: `response contains "error"`},
+		},
+	}
+	successes, failures := r.checkResults()
+	assert.Empty(t, successes)
+	assert.Len(t, failures, 1)
+	assert.Contains(t, failures[0], "no error")
+	assert.Contains(t, failures[0], `response contains "error"`)
+}
+
+func TestResultCheckResults_AssertionsDoNotFireWhenZero(t *testing.T) {
+	t.Parallel()
+	r := Result{AssertionsTotal: 0}
+	successes, failures := r.checkResults()
+	assert.Empty(t, successes)
+	assert.Empty(t, failures)
+}
+
+func TestComputeSummary_Assertions(t *testing.T) {
+	t.Parallel()
+
+	results := []Result{
+		{Title: "a", AssertionsTotal: 3, AssertionsPassed: 2},
+		{Title: "b", AssertionsTotal: 2, AssertionsPassed: 2},
+		{Title: "c", Error: "boom", AssertionsTotal: 1},
+	}
+	s := computeSummary(results)
+	assert.Equal(t, 5, s.AssertionsTotal)
+	assert.Equal(t, 4, s.AssertionsPassed)
+}

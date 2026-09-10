@@ -7,6 +7,32 @@ import (
 	"testing"
 )
 
+func TestShellBaseName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		path     string
+		expected string
+	}{
+		{path: "/bin/zsh", expected: "zsh"},
+		{path: "/usr/local/bin/fish", expected: "fish"},
+		{path: "/bin/sh", expected: "sh"},
+		{path: `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, expected: "powershell"},
+		{path: `C:\Program Files\PowerShell\7\pwsh.exe`, expected: "pwsh"},
+		{path: `C:\Windows\System32\cmd.exe`, expected: "cmd"},
+		{path: "", expected: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
+			if got := ShellBaseName(tt.path); got != tt.expected {
+				t.Errorf("ShellBaseName(%q) = %q, want %q", tt.path, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestWindowsCmdExe_ComSpec(t *testing.T) {
 	t.Setenv("ComSpec", `C:\Custom\cmd.exe`)
 	got := WindowsCmdExe()

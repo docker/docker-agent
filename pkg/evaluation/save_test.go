@@ -333,6 +333,66 @@ func TestSaveRunSessionsJSONContainerRuntime(t *testing.T) {
 	})
 }
 
+// TestSaveRunSessionsJSONAgentImage covers the RunOutputConfig.AgentImage
+// cases: it records the resolved image (not the raw Config.AgentImage), and
+// unlike sibling fields it is never omitted, even when empty, so an explicit
+// --agent-image none (skip injection) is distinguishable from a run
+// predating this field.
+func TestSaveRunSessionsJSONAgentImage(t *testing.T) {
+	t.Parallel()
+
+	withVersion(t, "v1.133.0")
+
+	save := func(t *testing.T, cfg Config) []byte {
+		t.Helper()
+		run := &EvalRun{
+			Name:      "test-agent-image-001",
+			Timestamp: time.Now(),
+			Config:    cfg,
+		}
+
+		sessionsPath, err := SaveRunSessionsJSON(run, t.TempDir())
+		require.NoError(t, err)
+
+		data, err := os.ReadFile(sessionsPath)
+		require.NoError(t, err)
+		return data
+	}
+
+	t.Run("records the version-derived default", func(t *testing.T) {
+		t.Parallel()
+
+		data := save(t, Config{})
+
+		var output RunOutput
+		require.NoError(t, json.Unmarshal(data, &output))
+		assert.Equal(t, "docker/docker-agent:1.133.0", output.Config.AgentImage)
+	})
+
+	t.Run("records an explicit override", func(t *testing.T) {
+		t.Parallel()
+
+		data := save(t, Config{AgentImage: "docker/docker-agent:1.100.0"})
+
+		var output RunOutput
+		require.NoError(t, json.Unmarshal(data, &output))
+		assert.Equal(t, "docker/docker-agent:1.100.0", output.Config.AgentImage)
+	})
+
+	t.Run("present but empty when injection is skipped", func(t *testing.T) {
+		t.Parallel()
+
+		data := save(t, Config{AgentImage: NoAgentImage})
+
+		var raw struct {
+			Config map[string]any `json:"config"`
+		}
+		require.NoError(t, json.Unmarshal(data, &raw))
+		require.Contains(t, raw.Config, "agent_image")
+		assert.Empty(t, raw.Config["agent_image"])
+	})
+}
+
 func TestSaveRunSessionsWithCost(t *testing.T) {
 	t.Parallel()
 

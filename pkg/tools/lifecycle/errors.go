@@ -26,6 +26,17 @@ var (
 	// Restartable per policy.
 	ErrServerCrashed = errors.New("server crashed")
 
+	// ErrCrashLooping means the supervisor observed Policy.CrashLoop's
+	// threshold of ErrServerCrashed disconnects within its window and gave
+	// up restarting (state -> Failed) instead of relaunching again right
+	// away. Wraps the triggering ErrServerCrashed, so errors.Is(err,
+	// ErrServerCrashed) still matches. Produced only by Supervisor itself
+	// (watch's detector, reported once by the next Start) — never by
+	// Classify — so a single, isolated crash (handled by the ordinary
+	// restart policy, never escalated) can't be mistaken for a sustained
+	// loop.
+	ErrCrashLooping = errors.New("server crash-looping")
+
 	// ErrInitTimeout means the initialize handshake did not complete
 	// within the configured deadline.
 	ErrInitTimeout = errors.New("initialize timed out")

@@ -19,7 +19,7 @@ A Docker Agent config has these main sections:
 
 ```bash
 # 1. Version — configuration schema version (optional but recommended)
-version: 15
+version: 16
 
 # 2. Metadata — optional agent metadata for distribution
 metadata:
@@ -130,7 +130,7 @@ Models can be referenced inline or defined in the `models` section:
 
 ## Environment Variables
 
-API keys and secrets are read from environment variables — never stored in config files. See [Managing Secrets](../../guides/secrets/index.md) for all the ways to provide credentials (env files, Docker Compose secrets, the Docker Agent env file):
+Resolve API keys and secrets at runtime rather than embedding them in agent configs. Fields such as environment variables, headers, and URLs can contain literal secrets; use `${env.VAR}` references or the secret-management options below. See [Managing Secrets](../../guides/secrets/index.md) for all the ways to provide credentials (env files, Docker Compose secrets, the Docker Agent env file):
 
 | Variable                   | Provider                                            |
 | -------------------------- | --------------------------------------------------- |
@@ -164,11 +164,12 @@ API keys and secrets are read from environment variables — never stored in con
 | `DOCKER_AGENT_AUTO_UPDATE`          | Set to a truthy value (`1`, `true`, `yes`, `on`) to let standalone release binaries self-update before running. See [Optional Self-Updates](../../getting-started/installation/index.md#optional-self-updates). |
 | `DOCKER_AGENT_NO_TOKEN_EXCHANGE`    | Set to `1` to stop Docker Agent from exchanging the access token stored by `docker login` for a Docker token. See [Docker authentication](../../guides/secrets/index.md#docker-authentication). |
 | `DOCKER_AGENT_HUB_LOGIN_URL`        | Point the token exchange at a Docker staging environment. Ignored unless it is an HTTPS `docker.com` URL. |
+| `DOCKER_AGENT_DISABLE_DESKTOP_PROXY` | Set to a truthy value (`1`, `true`, `yes`, `on`) to bypass Docker Desktop's PAC adapter per request and restore standard `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` routing. |
 
 > [!NOTE]
 > **Legacy `CAGENT_*` aliases**
 >
-> The same variables are also accepted with the legacy `CAGENT_` prefix (e.g. `CAGENT_DEFAULT_MODEL`, `CAGENT_MODELS_GATEWAY`, `CAGENT_HIDE_TELEMETRY_BANNER`) for backward compatibility. Prefer the `DOCKER_AGENT_*` form in new setups.
+> The same variables are also accepted with the legacy `CAGENT_` prefix (e.g. `CAGENT_DEFAULT_MODEL`, `CAGENT_MODELS_GATEWAY`, `CAGENT_HIDE_TELEMETRY_BANNER`) for backward compatibility. `DOCKER_AGENT_DISABLE_DESKTOP_PROXY` is the exception: it has no legacy `CAGENT_*` alias. Prefer the `DOCKER_AGENT_*` form in new setups.
 
 > [!IMPORTANT]
 > Model references are case-sensitive: `openai/gpt-5` is not the same as `openai/GPT-5`.
@@ -297,10 +298,10 @@ For YAML editor autocompletion and validation, use the [Docker Agent JSON Schema
 
 ## Config Versioning
 
-Docker Agent configs are versioned. The current version is `15`. Add the version at the top of your config:
+Docker Agent configs are versioned. The current version is `16`. Add the version at the top of your config:
 
 ```yaml
-version: 15
+version: 16
 
 agents:
   root:
@@ -310,13 +311,19 @@ agents:
 
 When you load an older config, Docker Agent automatically migrates it to the latest schema. It's recommended to include the version to ensure consistent behavior.
 
-If you use a config key that requires a newer schema version, Docker Agent will fail with a strict-parse error and include a hint like:
+If you use a config key or value syntax that requires a newer schema version, Docker Agent will fail with a strict-parse error and include a hint like:
 
 ```text
-hint: this key is supported by config version 12; update the top-level 'version' field (currently 11)
+hint: this syntax is supported by config version 12; update the top-level 'version' field (currently 11)
 ```
 
-Bump the `version` field as directed to enable the new key.
+Bump the `version` field as directed to enable the new syntax.
+
+Conversely, if a key was valid in an older schema version but has since been removed (for example, the `safer` shell toolset flag removed in version 15 — see the [Shell tool docs](../../tools/shell/index.md)), the hint instead tells you the field is gone and should be deleted, rather than suggesting you lower `version`:
+
+```text
+hint: 'safer' was part of config version 14 but has since been removed; delete it from your config instead of lowering the top-level 'version' field
+```
 
 ## Metadata Section
 

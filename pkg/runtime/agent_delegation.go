@@ -248,6 +248,10 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithSendUserMessage(false),
 		session.WithStructuredOutputDisabled(cfg.DisableStructuredOutput),
 		session.WithParentID(parent.ID),
+		// Delegated children run in the parent's workspace: the persisted
+		// WorkingDir is the workspace-root provenance later used to resolve
+		// files the child produced. Empty stays empty (headless parents).
+		session.WithWorkingDir(parent.WorkingDir),
 		session.WithAttachedFiles(attachedFiles),
 		session.WithAttributes(parent.AttributesSnapshot()),
 	}
@@ -665,7 +669,7 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	}, params.OnContent)
 }
 
-func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var params struct {
 		Agent          string `json:"agent"`
 		Task           string `json:"task"`
@@ -739,7 +743,7 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 	})
 }
 
-func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var params handoff.Args
 	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -814,5 +818,6 @@ func (r *LocalRuntime) applyForceHandoff(ctx context.Context, sess *session.Sess
 			"off to agents that you see in the conversation history from previous agents, as those were " +
 			"available to different agents with different capabilities. Look at the conversation history " +
 			"for context, continue the work from where the previous agent stopped, and complete your " +
-			"part of the task."))
+			"part of the task.",
+	))
 }

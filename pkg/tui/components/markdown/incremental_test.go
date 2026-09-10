@@ -2,12 +2,56 @@ package markdown
 
 import (
 	_ "embed"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestIncrementalRenderedPartsPreserveMarkdownSemantics(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{"long heading": "# A long heading that wraps across multiple terminal rows while retaining heading styling and continuation indentation", "unordered list": "- first list item with enough words to wrap onto a continuation line that stays indented\n- second item", "ordered list": "1. first ordered item with enough words to wrap onto a continuation line that stays indented\n2. second item", "mixed blocks": "# Heading\n\nOpening **paragraph** with a [link](https://example.com).\n\n- list item\n  continued content\n\n1. ordered item\n2. next item\n\nFinal `code` paragraph."}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			for _, width := range []int{24, 47, 80} {
+				r := NewIncrementalRenderer(width)
+				for end := 1; end <= len(input); end++ {
+					parts, err := r.RenderParts(input[:end])
+					require.NoError(t, err)
+					got := r.joinPrefixAndTail(parts.StablePrefix, parts.MutableTail)
+					want, err := NewFastRenderer(width).Render(input[:end])
+					require.NoError(t, err)
+					require.Equal(t, want, got, "width %d byte %d", width, end)
+				}
+			}
+		})
+	}
+}
+
+func TestIncrementalRenderedPartsMatchOneShotAtEveryMarkdownBoundary(t *testing.T) {
+	const input = "Thinking… λ界\n\n# Heading\n\nParagraph with **bold**, `more`, and [link](https://example.com).\n\n- one\n- two\n\n```console\nroot\nmore\n```\n\n## Result\n\nDone."
+	for _, width := range []int{24, 47, 80} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			r := NewIncrementalRenderer(width)
+			for end := range len(input) + 1 {
+				if end < len(input) && !utf8.RuneStart(input[end]) {
+					continue
+				}
+				prefix := input[:end]
+				parts, err := r.RenderParts(prefix)
+				require.NoError(t, err)
+				got := r.joinPrefixAndTail(parts.StablePrefix, parts.MutableTail)
+				want, wantBlocks, err := NewFastRenderer(width).RenderWithCodeBlocks(prefix)
+				require.NoError(t, err)
+				require.Equal(t, want, got, "byte boundary %d", end)
+				require.Equal(t, wantBlocks, parts.CodeBlocks, "code blocks at byte boundary %d", end)
+			}
+		})
+	}
+}
 
 func TestIncrementalRenderedPartsMatchJoinedOutputAtEveryStep(t *testing.T) {
 	t.Parallel()

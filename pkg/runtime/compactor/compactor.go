@@ -223,6 +223,9 @@ func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
 	compactionSession := session.New(
 		session.WithTitle("Generating summary"),
 		session.WithMessages(toItems(messages)),
+		// The summarization run happens in the same workspace as the session
+		// being compacted; empty stays empty for workspace-less sessions.
+		session.WithWorkingDir(args.Session.WorkingDir),
 	)
 	seedLen := len(compactionSession.Messages)
 

@@ -1,17 +1,21 @@
 package httpclient
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
 	"runtime"
+	"strings"
 	"sync/atomic"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
-	"github.com/docker/docker-agent/pkg/desktop/transport"
 	"github.com/docker/docker-agent/pkg/userid"
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -19,6 +23,10 @@ import (
 type HTTPOptions struct {
 	Header http.Header
 	Query  url.Values
+
+	// dropSSEKeepaliveEvents enables keepalive-frame dropping in the SSE
+	// filter transport; see WithSSEKeepaliveFilter.
+	dropSSEKeepaliveEvents bool
 
 	// cagentID resolves the persistent install UUID stamped as
 	// `X-Cagent-Id` on gateway-bound requests. It defaults to
@@ -29,9 +37,41 @@ type HTTPOptions struct {
 	// refreshAuth re-authenticates a request the server answered with 401.
 	// Set through [WithUnauthorizedRetry]; nil leaves 401s to the caller.
 	refreshAuth func(ctx context.Context, rejected string) (string, error)
+
+	// encryptedConfigBody is the opaque encrypted agent config injected as a
+	// top-level field into the JSON request body of gateway-bound calls. Set
+	// through [WithEncryptedConfigBody]; empty leaves the body untouched. This
+	// exists so the (potentially large) encrypted config travels in the body
+	// rather than a header, sidestepping header-size limits.
+	encryptedConfigBody string
+}
+
+// EncryptedConfigBody returns the encrypted agent config queued for injection
+// into the gateway-bound request body, or "" when none was set. Exposed so
+// callers building options in another package (and tests) can assert what will
+// be forwarded without reaching into the transport.
+func (o *HTTPOptions) EncryptedConfigBody() string {
+	return o.encryptedConfigBody
 }
 
 type Opt func(*HTTPOptions)
+
+// EncryptedConfigBodyField is the top-level key under which the encrypted
+// agent config is carried: as a JSON field injected into a gateway-bound
+// request body, and as a YAML field a trusted Docker source uses to deliver
+// the encrypted config in a config-fetch response (stripped before parsing).
+// The Docker gateway proxy reads and removes this field; it is never forwarded
+// to any upstream provider, regardless of provider. Must stay in sync with the
+// Docker gateway (gordon proxy pkg/agents/handler.go).
+const EncryptedConfigBodyField = "encrypted_agent_config"
+
+// EncryptedConfigDigestHeader carries a short SHA-256 fingerprint (hex,
+// "sha256:...") of the encrypted agent config. A trusted Docker source sends it
+// alongside the config body on a 200, and — crucially — alone on a 304 Not
+// Modified response, where the full config is omitted to preserve the bandwidth
+// savings of conditional requests. A client that cached the config from an
+// earlier 200 uses the digest to confirm the cached value is still current.
+const EncryptedConfigDigestHeader = "X-Cagent-Encrypted-Config-Digest"
 
 func NewHTTPClient(ctx context.Context, opts ...Opt) *http.Client {
 	httpOptions := HTTPOptions{
@@ -53,7 +93,10 @@ func NewHTTPClient(ctx context.Context, opts ...Opt) *http.Client {
 
 	var wrapped http.RoundTripper = &userAgentTransport{
 		httpOptions: httpOptions,
-		rt:          &sseFilterTransport{base: rt},
+		rt: &sseFilterTransport{
+			base:                rt,
+			dropKeepaliveEvents: httpOptions.dropSSEKeepaliveEvents,
+		},
 	}
 	if httpOptions.refreshAuth != nil {
 		// Outermost, so a replayed request goes through the whole chain again.
@@ -61,6 +104,17 @@ func NewHTTPClient(ctx context.Context, opts ...Opt) *http.Client {
 	}
 
 	return &http.Client{Transport: WrapWithOTel(wrapped)}
+}
+
+// WithEncryptedConfigBody records the opaque encrypted agent config to inject
+// as a top-level field ([EncryptedConfigBodyField]) into the JSON body of
+// gateway-bound requests. An empty value is a no-op. Injection is confined to
+// gateway-bound requests (those carrying X-Cagent-Forward) and JSON bodies;
+// see [userAgentTransport.RoundTrip].
+func WithEncryptedConfigBody(value string) Opt {
+	return func(o *HTTPOptions) {
+		o.encryptedConfigBody = value
+	}
 }
 
 // WithUnauthorizedRetry re-authenticates and replays a request once when the
@@ -188,10 +242,19 @@ func WithQuery(query url.Values) Opt {
 	}
 }
 
-// newTransport returns an HTTP transport with automatic gzip compression disabled and using Docker Desktop proxy if available.
-func newTransport(ctx context.Context) http.RoundTripper {
-	// Get the base transport with Desktop proxy support
-	rt := transport.New(ctx)
+// WithSSEKeepaliveFilter strips payload-free events named "keepalive".
+// The Gemini gateway emits these transport frames, but the GenAI SDK rejects
+// event-prefixed lines even when their only data is {}. Other names and
+// keepalives with meaningful payloads are deliberately left unchanged.
+func WithSSEKeepaliveFilter() Opt {
+	return func(o *HTTPOptions) {
+		o.dropSSEKeepaliveEvents = true
+	}
+}
+
+// newTransport returns an HTTP transport with automatic gzip compression disabled and Docker Desktop PAC support.
+func newTransport(_ context.Context) http.RoundTripper {
+	rt := newAllowPrivateIPsTransport()
 
 	// Disable compression for SSE streaming compatibility
 	// Handle both direct *http.Transport and the fallback transport wrapper
@@ -233,6 +296,16 @@ func (u *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 				r2.Header.Set("X-Cagent-Id", id)
 			}
 		}
+
+		// Inject the encrypted agent config into the JSON body. Gated on
+		// X-Cagent-Forward (gateway-bound only) so the value never leaks onto
+		// direct provider requests or unrelated outbound HTTP. The gateway
+		// strips the field before forwarding upstream.
+		if u.httpOptions.encryptedConfigBody != "" {
+			if err := injectEncryptedConfigBody(r2, u.httpOptions.encryptedConfigBody); err != nil {
+				slog.WarnContext(r2.Context(), "Failed to inject encrypted agent config into request body; proceeding without it", "error", err)
+			}
+		}
 	}
 
 	if u.httpOptions.Query != nil {
@@ -246,4 +319,51 @@ func (u *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 
 	return u.rt.RoundTrip(r2)
+}
+
+// injectEncryptedConfigBody rewrites req's JSON body to carry the encrypted
+// agent config under [EncryptedConfigBodyField]. It is a no-op for non-JSON or
+// bodyless requests. The body is fully buffered and req.Body, req.ContentLength
+// and req.GetBody are all reset so downstream retries (see authRetryTransport)
+// can replay the request. Callers must pass a request clone; the body reader is
+// consumed.
+func injectEncryptedConfigBody(req *http.Request, enc string) error {
+	if req.Body == nil {
+		return nil
+	}
+	if ct := req.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(ct), "application/json") {
+		return nil
+	}
+
+	raw, err := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	if err != nil {
+		return fmt.Errorf("read request body: %w", err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		// Restore the original body so the request still goes out unmodified.
+		resetBody(req, raw)
+		return fmt.Errorf("decode JSON body: %w", err)
+	}
+	payload[EncryptedConfigBodyField] = enc
+
+	rewritten, err := json.Marshal(payload)
+	if err != nil {
+		resetBody(req, raw)
+		return fmt.Errorf("encode JSON body: %w", err)
+	}
+
+	resetBody(req, rewritten)
+	return nil
+}
+
+// resetBody points req at a fresh, replayable body backed by b.
+func resetBody(req *http.Request, b []byte) {
+	req.Body = io.NopCloser(bytes.NewReader(b))
+	req.ContentLength = int64(len(b))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(b)), nil
+	}
 }

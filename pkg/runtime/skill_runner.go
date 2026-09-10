@@ -16,21 +16,29 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/skills"
 )
 
-// handleRunSkill unmarshals the run_skill tool arguments and delegates
-// to RunSkillFork.
-func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink) (*tools.ToolCallResult, error) {
+// handleRunSkill unmarshals the run_skill tool arguments and delegates to
+// runSkillFork.
+func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
 	var args skills.RunSkillArgs
 	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	return r.RunSkillFork(ctx, sess, args, evts)
+	return r.runSkillFork(ctx, sess, args, evts, rt)
 }
 
 // RunSkillFork executes a `context: fork` skill as an isolated sub-session.
 // The expanded SKILL.md body becomes the child's first user message; the
-// agent's own system prompt is preserved. Shared by the run_skill tool
-// and the App's slash-command path.
+// agent's own system prompt is preserved. Entry point for callers outside a
+// tool call (the App's slash-command path); run_skill goes through
+// [LocalRuntime.handleRunSkill].
 func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, args skills.RunSkillArgs, evts EventSink) (*tools.ToolCallResult, error) {
+	return r.runSkillFork(ctx, sess, args, evts, nil)
+}
+
+// runSkillFork prepares and runs the fork sub-session. rt is the in-flight
+// tool call's runtime handle. Standalone invocations pass nil and skip embedded
+// commands because no tool call exists to own an approval prompt.
+func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, args skills.RunSkillArgs, evts EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
 	// The caller resolves from the session, not the shared current agent:
 	// a fork skill invoked from a pinned background session must use the
 	// pinned agent's skills, identity, and model override, no matter where
@@ -46,7 +54,14 @@ func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, 
 		return tools.ResultError("no skills are available for agent " + ca), nil
 	}
 
-	prepared, errResult := st.PrepareForkSubSession(ctx, args)
+	if rt == nil {
+		rt = tools.NopRuntime{}
+	}
+
+	prepared, errResult, err := st.PrepareForkSubSession(ctx, args, rt)
+	if err != nil {
+		return nil, err
+	}
 	if errResult != nil {
 		return errResult, nil
 	}

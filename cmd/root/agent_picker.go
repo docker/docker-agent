@@ -18,6 +18,7 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/paths"
@@ -106,7 +107,7 @@ func loadAgentChoices(ctx context.Context, refs []string, env environment.Provid
 	for _, ref := range refs {
 		choice := agentChoice{ref: ref}
 
-		source, err := config.Resolve(ref, env)
+		source, err := sources.Resolve(ref, env)
 		if err != nil {
 			choice.err = err
 			choices = append(choices, choice)

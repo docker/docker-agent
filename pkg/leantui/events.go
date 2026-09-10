@@ -146,6 +146,10 @@ func (m *model) handleSessionCompaction(ctx context.Context, e *runtime.SessionC
 // queued message, if any. It reports whether a queued run was started.
 func (m *model) finishBusy(ctx context.Context) bool {
 	m.screen.Transcript.FlushPending()
+	if m.cancelMarkerPending {
+		m.screen.Transcript.AddBlock(func(int) []string { return []string{ui.StWarning().Render("⏹ Cancelled")} })
+		m.cancelMarkerPending = false
+	}
 	m.busy = false
 	m.runCancel = nil
 

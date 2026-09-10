@@ -185,17 +185,23 @@ func (t *Toolset) Start(ctx context.Context) error {
 	// addresses (cloud metadata at 169.254.169.254 in particular). The
 	// `allow_private_ips: true` opt-in disables this for legitimate
 	// internal-service use.
-	resolver := agentcard.NewResolver(httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs))
-	card, err := resolver.Resolve(ctx, t.url)
-	if err != nil {
-		return fmt.Errorf("failed to fetch A2A agent card: %w", err)
-	}
-
-	httpClient := httpclient.NewSafeClient(t.timeout, t.allowPrivateIPs)
-	base := httpClient.Transport
+	client := httpclient.ClientForAllowPrivateIPs(t.timeout, t.allowPrivateIPs)
+	base := client.Transport
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	// Recorder sits only in front of the card-resolution GET(s); it never
+	// reaches the JSON-RPC transport chain built from base below.
+	rec := &retryAfterRecorder{base: base}
+	client.Transport = rec
+
+	resolver := agentcard.NewResolver(client)
+	card, err := resolver.Resolve(ctx, t.url)
+	if err != nil {
+		return enrichCardError(err, rec)
+	}
+
+	httpClient := client
 
 	endpointOrigin := t.url
 	if card.URL != "" {
@@ -204,7 +210,7 @@ func (t *Toolset) Start(ctx context.Context) error {
 	headers := t.expander.ExpandMap(ctx, t.headers)
 	httpClient.Transport = upstream.NewHeaderTransportForOrigin(base, endpointOrigin, headers)
 
-	client, err := a2aclient.NewFromCard(
+	a2aClient, err := a2aclient.NewFromCard(
 		ctx, card,
 		a2aclient.WithDefaultsDisabled(),
 		a2aclient.WithJSONRPCTransport(httpClient),
@@ -214,7 +220,7 @@ func (t *Toolset) Start(ctx context.Context) error {
 	}
 
 	t.mu.Lock()
-	t.client = client
+	t.client = a2aClient
 	t.card = card
 	t.mu.Unlock()
 

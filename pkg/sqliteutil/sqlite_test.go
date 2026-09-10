@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -105,4 +106,50 @@ func TestIsTransientError_SQLiteBusy(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, IsTransientError(err), "SQLITE_BUSY should be transient: %v", err)
 	assert.False(t, IsCantOpenError(err))
+}
+
+func TestCloseDB_WaitsForInFlightConnection(t *testing.T) {
+	t.Parallel()
+
+	db, err := OpenDB(t.Context(), filepath.Join(t.TempDir(), "close.db"))
+	require.NoError(t, err)
+
+	// Check out the single pooled connection and keep it busy until released.
+	conn, err := db.Conn(t.Context())
+	require.NoError(t, err)
+	released := make(chan struct{})
+	go func() {
+		<-released
+		_ = conn.Close()
+	}()
+
+	closed := make(chan error, 1)
+	go func() { closed <- CloseDB(db) }()
+
+	select {
+	case <-closed:
+		t.Fatal("CloseDB returned while a connection was still checked out")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(released)
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(closeDrainTimeout):
+		t.Fatal("CloseDB did not return after the connection was released")
+	}
+	assert.Zero(t, db.Stats().OpenConnections)
+}
+
+func TestCloseDB_IdleReturnsImmediately(t *testing.T) {
+	t.Parallel()
+
+	db, err := OpenDB(t.Context(), filepath.Join(t.TempDir(), "idle.db"))
+	require.NoError(t, err)
+
+	start := time.Now()
+	require.NoError(t, CloseDB(db))
+	assert.Less(t, time.Since(start), time.Second)
+	assert.Zero(t, db.Stats().OpenConnections)
 }

@@ -13,7 +13,7 @@ import (
 
 func newTestSettingsDialog(t *testing.T, layout messages.LayoutSettings) *settingsDialog {
 	t.Helper()
-	d, ok := NewSettingsDialog(messages.Preferences{Layout: layout, SendMode: messages.SendModeSteer, SplitDiffView: true, RenderImages: true, TabTitleMaxLength: 20, SoundThreshold: 10}, true).(*settingsDialog)
+	d, ok := NewSettingsDialog(messages.Preferences{Layout: layout, SendMode: messages.SendModeSteer, SplitDiffView: true, RenderImages: true, ShowBanner: true, TabTitleMaxLength: 20, SoundThreshold: 10}, true).(*settingsDialog)
 	require.True(t, ok)
 	d.Init()
 	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
@@ -62,10 +62,10 @@ func TestSettingsDialogNavigation(t *testing.T) {
 	for range 20 {
 		d.Update(down)
 	}
-	require.Equal(t, rowRenderImages, d.selected[tabAppearance], "down must stop at the last row")
+	require.Equal(t, rowShowBanner, d.selected[tabAppearance], "down must stop at the last row")
 
 	d.Update(up)
-	require.Equal(t, rowHideToolResults, d.selected[tabAppearance])
+	require.Equal(t, rowRenderImages, d.selected[tabAppearance])
 }
 
 func TestSettingsDialogTabSwitching(t *testing.T) {
@@ -316,6 +316,23 @@ func TestSettingsDialogTogglesCacheStablePrompts(t *testing.T) {
 	assert.Nil(t, cmd)
 	assert.True(t, d.current.CacheStablePrompts)
 	assert.Contains(t, ansi.Strip(d.View()), "Cache-stable dynamic prompts")
+}
+
+func TestSettingsDialogTogglesShowBanner(t *testing.T) {
+	t.Parallel()
+
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.selected[tabAppearance] = rowShowBanner
+	d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	require.False(t, d.current.ShowBanner)
+	assert.Contains(t, ansi.Strip(d.View()), "Show startup banner")
+
+	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	msgs := collectMsgs(cmd)
+	require.Len(t, msgs, 2, "apply must close the dialog and emit the settings")
+	applied, ok := msgs[1].(messages.ApplySettingsMsg)
+	require.True(t, ok)
+	assert.False(t, applied.Preferences.ShowBanner)
 }
 
 func TestSettingsDialogApplyEmitsApplySettings(t *testing.T) {

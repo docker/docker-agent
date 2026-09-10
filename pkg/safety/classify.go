@@ -172,7 +172,7 @@ func bestDestructiveMatch(command string, patterns []destructivePattern) *destru
 // from their first segment.
 func bestSafeMatch(command string, patterns []safePattern) *safePattern {
 	normalized := normalizeCommand(command)
-	if containsShellMetacharacter(command) {
+	if ContainsShellMetacharacter(command) {
 		return nil
 	}
 	for i := range patterns {
@@ -186,17 +186,23 @@ func bestSafeMatch(command string, patterns []safePattern) *safePattern {
 // carriesDenyFlag reports whether the command uses one of the pattern's
 // deny-listed flags — exec/write escape hatches inside otherwise
 // read-only commands (`rg --pre <cmd>`, `git log --output=<file>`) that
-// a trailing-wildcard pattern would otherwise vouch for. Tokens are
-// quote-trimmed so `"--pre=cmd"` is caught too; a false positive only
-// costs a confirmation prompt.
+// a trailing-wildcard pattern would otherwise vouch for. Quotes are
+// removed to catch concatenated flags; false positives only cost a prompt.
 func carriesDenyFlag(normalized string, flags []string) bool {
 	if len(flags) == 0 {
 		return false
 	}
+	if containsFlagExpansion(normalized) {
+		return true
+	}
 	for tok := range strings.FieldsSeq(normalized) {
-		tok = strings.Trim(tok, `"'`)
+		tok = strings.ReplaceAll(strings.ReplaceAll(tok, "'", ""), `"`, "")
 		for _, flag := range flags {
 			if tok == flag || strings.HasPrefix(tok, flag+"=") {
+				return true
+			}
+			// Short flags can be clustered or carry an attached value.
+			if len(flag) == 2 && flag[0] == '-' && strings.HasPrefix(tok, "-") && !strings.HasPrefix(tok, "--") && strings.ContainsRune(tok[1:], rune(flag[1])) {
 				return true
 			}
 		}
@@ -204,18 +210,96 @@ func carriesDenyFlag(normalized string, flags []string) bool {
 	return false
 }
 
-// containsShellMetacharacter returns true when the command contains a
-// character that can chain (`;`, `&`), pipe (`|`), redirect (`<`, `>`),
-// or substitute (backticks, `$(`) commands — with or without
-// surrounding whitespace, so `grep foo|rm -rf /` is caught just like
-// `grep foo | rm -rf /`. The safe list must never vouch for such a
-// string: a safe-looking prefix says nothing about what the rest does,
-// and trailing-wildcard patterns (`grep ...`) would otherwise cover the
-// injected tail. Erring toward "not safe" only costs a confirmation
-// prompt. Deliberately the same strictness as the runtime's
-// session-grant check for shell commands.
-func containsShellMetacharacter(command string) bool {
-	return strings.ContainsAny(command, ";&|<>`\n") || strings.Contains(command, "$(")
+// containsFlagExpansion rejects syntax that could introduce an unseen flag.
+// Quoted search expressions must not be mistaken for shell expansions.
+func containsFlagExpansion(command string) bool {
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if quote == '\'' {
+			if c == '\'' {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '$':
+			return true
+		case '\\':
+			if quote != '"' {
+				return true
+			}
+			i++
+		case '"':
+			if quote == '"' {
+				quote = 0
+			} else {
+				quote = '"'
+			}
+		case '\'':
+			if quote == 0 {
+				quote = '\''
+			}
+		case '*', '?', '[', '{', '(':
+			if quote == 0 {
+				return true
+			}
+		}
+	}
+	return quote != 0
+}
+
+// isShellMetacharAnchor reports whether c can start a pattern that
+// only makes sense as a shell operator (redirect, pipe, chain,
+// separator). Anchoring such patterns on `\b` is too weak — a word
+// boundary fires between any word char and the operator, so a
+// letter-adjacent `>` (e.g. inside `<EMAIL>` or a literal `"a>b"`)
+// would spuriously match `> <file>`.
+func isShellMetacharAnchor(c byte) bool {
+	switch c {
+	case '>', '<', '|', '&', ';':
+		return true
+	}
+	return false
+}
+
+// ContainsShellMetacharacter detects chaining, redirection and substitution
+// syntax for the classifier and session-grant checks. Quoted parentheses
+// remain useful in search expressions; unquoted ones can execute commands
+// via zsh's =(...) or fish's (...) substitution.
+func ContainsShellMetacharacter(command string) bool {
+	if strings.ContainsAny(command, ";&|<>`\n\r") || strings.Contains(command, "$(") {
+		return true
+	}
+	var quote byte
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		if quote == '\'' {
+			if c == '\'' {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\\':
+			i++
+		case '"':
+			if quote == '"' {
+				quote = 0
+			} else {
+				quote = '"'
+			}
+		case '\'':
+			if quote == 0 {
+				quote = '\''
+			}
+		case '(':
+			if quote == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // collectDestructiveEntries walks the JSON destructive section. The
@@ -300,9 +384,24 @@ func stringSlice(value any) []string {
 // matches anywhere in the normalised command. Destructive intent is
 // the priority — a destructive pattern hidden inside a larger
 // command (e.g. `cd /tmp && rm -rf foo`) should still match.
+//
+// A pattern that begins with a shell metacharacter (`>`, `<`, `|`,
+// `&`, `;`) is anchored on whitespace rather than a word boundary:
+// `>` between two word characters isn't a shell redirect, so a
+// placeholder like `<EMAIL>` or an inline `"a > b"` inside a quoted
+// argument must not match the `> <file>` truncate pattern. Trade-off:
+// fd-number redirects (`1> file`, `2> file`) no longer match either,
+// which drops the `2> /dev/null` false positive as a bonus. Gating
+// treats destructive and unknown identically, so this only affects
+// the label attached to the confirmation dialog.
 func patternToRegexp(pattern string) string {
 	var b strings.Builder
-	b.WriteString(`(?i)(?:^|.*\b)`)
+	b.WriteString(`(?i)`)
+	if pattern != "" && isShellMetacharAnchor(pattern[0]) {
+		b.WriteString(`(?:^|.*\s)`)
+	} else {
+		b.WriteString(`(?:^|.*\b)`)
+	}
 	for i := 0; i < len(pattern); {
 		switch pattern[i] {
 		case '<':
@@ -337,7 +436,18 @@ func patternToSafeRegexp(pattern string) string {
 		switch pattern[i] {
 		case '<':
 			if end := strings.IndexByte(pattern[i:], '>'); end >= 0 {
-				b.WriteString(`\S+`)
+				switch pattern[i : i+end+1] {
+				case "<number>":
+					b.WriteString(`[0-9]+`)
+				case "<sed-print>":
+					// A $ address is literal only inside single quotes.
+					b.WriteString(`(?:[0-9]+(?:,[0-9]+)?p|'[0-9]+(?:,(?:[0-9]+|\$))?p'|"[0-9]+(?:,[0-9]+)?p")`)
+				case "<read-path>":
+					// Forbid flags and unquoted expansions that could introduce flags.
+					b.WriteString(`(?:[a-z0-9_./][a-z0-9_./-]*|'[^-'][^']*'|"[^-"$\\][^"$\\]*")`)
+				default:
+					b.WriteString(`\S+`)
+				}
 				i += end + 1
 				continue
 			}

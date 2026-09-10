@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -28,6 +29,7 @@ type Model interface {
 	layout.Model
 	layout.Sizeable
 	SetMessage(msg *types.Message) tea.Cmd
+	AppendContent(content string) tea.Cmd
 	SetSelected(selected bool)
 	SetHovered(hovered bool)
 	CodeBlocks() []markdown.CodeBlock
@@ -41,6 +43,19 @@ type Model interface {
 	// to assert that finalized views have actually released their per-message
 	// render state without reaching into unexported fields via reflection.
 	HasLiveRenderState() bool
+	// RenderedSegments exposes immutable header/stable blocks separately from
+	// the mutable tail so transcript follow-tail rendering need not flatten the
+	// complete active response on every chunk.
+	RenderedSegments(width int) (AssistantSegments, bool)
+}
+
+// AssistantSegments is a line-oriented active assistant rendering. Header and
+// Stable are retained by the message view and immutable until the next width
+// change; Tail contains only the mutable markdown block.
+type AssistantSegments struct {
+	Header []string
+	Stable []string
+	Tail   []string
 }
 
 // messageModel implements Model
@@ -72,7 +87,11 @@ type messageModel struct {
 	// mdRenderer is reused across renders of an assistant message so that
 	// streamed-in chunks only re-render the trailing block instead of the whole
 	// accumulated markdown each time.
-	mdRenderer *markdown.IncrementalRenderer
+	mdRenderer        *markdown.IncrementalRenderer
+	streamLines       assistantStreamLines
+	segmentCodeBlocks []markdown.CodeBlock
+	contentBuf        strings.Builder
+	imageScanOffset   int
 
 	// finalized is set by Finalize() once the message is no longer the active
 	// streaming view. After it is set, Render() still produces correct output,
@@ -85,6 +104,14 @@ type messageModel struct {
 	markdownImages  map[string]tuiimage.Inline
 	loadingImages   map[string]bool
 	markdownImageID int
+}
+
+type assistantStreamLines struct {
+	width       int
+	stable      string
+	stableLines []string
+	headerKey   string
+	headerLines []string
 }
 
 type markdownImagesLoadedMsg struct {
@@ -119,13 +146,19 @@ type renderCache struct {
 
 // New creates a new message view
 func New(ar *animation.Runtime, msg, previous *types.Message) *messageModel {
+	imageScanOffset := -1
+	if msg != nil && msg.Type == types.MessageTypeAssistant {
+		refs := tuiimage.MarkdownReferences(msg.Content)
+		imageScanOffset = nextUnresolvedImageOpener(msg.Content, 0, refs)
+	}
 	return &messageModel{
-		message:  msg,
-		previous: previous,
-		width:    80, // Default width
-		height:   1,  // Will be calculated
-		focused:  false,
-		spinner:  spinner.New(ar, spinner.ModeBoth, styles.SpinnerDotsAccentStyle),
+		message:         msg,
+		previous:        previous,
+		width:           80, // Default width
+		height:          1,  // Will be calculated
+		focused:         false,
+		imageScanOffset: imageScanOffset,
+		spinner:         spinner.New(ar, spinner.ModeBoth, styles.SpinnerDotsAccentStyle),
 	}
 }
 
@@ -158,15 +191,79 @@ func (mv *messageModel) SetMessage(msg *types.Message) tea.Cmd {
 		mv.mdRenderer.Reset()
 	}
 	mv.message = msg
+	mv.contentBuf.Reset()
+	if msg != nil {
+		mv.contentBuf.WriteString(msg.Content)
+	}
+	mv.imageScanOffset = -1
 	mv.renderCache.valid = false
-	return mv.loadMarkdownImages(msg)
+	if msg == nil || msg.Type != types.MessageTypeAssistant {
+		return nil
+	}
+	refs := tuiimage.MarkdownReferences(msg.Content)
+	mv.imageScanOffset = nextUnresolvedImageOpener(msg.Content, 0, refs)
+	return mv.loadMarkdownImageReferences(refs)
+}
+
+func (mv *messageModel) AppendContent(content string) tea.Cmd {
+	if content == "" || mv.message == nil {
+		return nil
+	}
+	if mv.contentBuf.Len() == 0 && mv.message.Content != "" {
+		mv.contentBuf.WriteString(mv.message.Content)
+	}
+	oldLen := mv.contentBuf.Len()
+	mv.contentBuf.WriteString(content)
+	mv.message.Content = mv.contentBuf.String()
+	mv.renderCache.valid = false
+	// Keep only an offset into canonical content. The one-byte lookback finds an
+	// opener split as "!" then "[" without retaining or duplicating streamed text.
+	if mv.imageScanOffset < 0 {
+		scanStart := max(oldLen-1, 0)
+		if relative := strings.Index(mv.message.Content[scanStart:], "!["); relative >= 0 {
+			mv.imageScanOffset = scanStart + relative
+		}
+	}
+	if mv.imageScanOffset < 0 {
+		return nil
+	}
+	// Parse the complete document so Markdown context (notably inline and
+	// fenced code) decides whether a raw opener is actually an image.
+	refs := tuiimage.MarkdownReferences(mv.message.Content)
+	mv.imageScanOffset = nextUnresolvedImageOpener(mv.message.Content, mv.imageScanOffset, refs)
+	return mv.loadMarkdownImageReferences(refs)
+}
+
+func nextUnresolvedImageOpener(content string, start int, refs []tuiimage.MarkdownReference) int {
+	for start < len(content) {
+		relative := strings.Index(content[start:], "![")
+		if relative < 0 {
+			return -1
+		}
+		opener := start + relative
+		resolved := false
+		for _, ref := range refs {
+			if ref.Start <= opener && opener < ref.End {
+				resolved = true
+				break
+			}
+		}
+		if !resolved {
+			return opener
+		}
+		start = opener + 2
+	}
+	return -1
 }
 
 func (mv *messageModel) loadMarkdownImages(msg *types.Message) tea.Cmd {
 	if msg == nil || msg.Type != types.MessageTypeAssistant {
 		return nil
 	}
-	refs := tuiimage.MarkdownReferences(msg.Content)
+	return mv.loadMarkdownImageReferences(tuiimage.MarkdownReferences(msg.Content))
+}
+
+func (mv *messageModel) loadMarkdownImageReferences(refs []tuiimage.MarkdownReference) tea.Cmd {
 	pending := make([]tuiimage.MarkdownReference, 0, len(refs))
 	if mv.loadingImages == nil {
 		mv.loadingImages = make(map[string]bool)
@@ -260,6 +357,79 @@ func (mv *messageModel) IsToggleLine(lineIdx int) bool {
 	return lineIdx >= height-3
 }
 
+func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
+	msg := mv.message
+	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.Content == "" || mv.selected || len(mv.markdownImages) != 0 || len(msg.AssistantMedia) != 0 {
+		return AssistantSegments{}, false
+	}
+	messageStyle := styles.AssistantMessageStyle
+	innerWidth := width - messageStyle.GetHorizontalFrameSize()
+	if mv.mdRenderer == nil {
+		mv.mdRenderer = markdown.NewIncrementalRenderer(innerWidth)
+	} else {
+		mv.mdRenderer.SetWidth(innerWidth)
+	}
+	parts, err := mv.mdRenderer.RenderParts(msg.Content)
+	if err != nil {
+		return AssistantSegments{}, false
+	}
+	cache := &mv.streamLines
+	widthChanged := cache.width != width
+	if widthChanged || !strings.HasPrefix(parts.StablePrefix, cache.stable) {
+		cache.width, cache.stable = width, ""
+		cache.stableLines = nil
+	}
+	if cache.stable != parts.StablePrefix {
+		delta := parts.StablePrefix[len(cache.stable):]
+		if cache.stable != "" && strings.HasPrefix(delta, "\n") {
+			delta = strings.TrimPrefix(delta, "\n")
+		}
+		cache.stableLines = append(cache.stableLines, styledAssistantLines(messageStyle, width, delta)...)
+		cache.stable = parts.StablePrefix
+	}
+	header := actionRow(innerWidth, mv.hovered, types.MessageCopyLabel)
+	prefix := ""
+	if !mv.sameAgentAsPrevious(msg) {
+		prefix = mv.senderPrefix(msg.Sender)
+	}
+	headerKey := prefix + header
+	if cache.headerKey != headerKey || widthChanged {
+		cache.headerKey = headerKey
+		cache.headerLines = nil
+		if prefix != "" {
+			cache.headerLines = append(cache.headerLines, strings.Split(strings.TrimSuffix(prefix, "\n"), "\n")...)
+		}
+		cache.headerLines = append(cache.headerLines, styledAssistantLines(messageStyle, width, header)...)
+	}
+	tailLines := styledAssistantLines(messageStyle, width, parts.MutableTail)
+	if parts.MutableTail != "" && parts.StablePrefix != "" {
+		separator := styledAssistantLines(messageStyle, width, strings.Repeat(" ", max(innerWidth, 0)))
+		tailLines = append(separator, tailLines...)
+	}
+
+	prefixLines := len(cache.headerLines)
+	mv.segmentCodeBlocks = nil
+	if len(parts.CodeBlocks) > 0 {
+		mv.segmentCodeBlocks = make([]markdown.CodeBlock, len(parts.CodeBlocks))
+	}
+	for i, cb := range parts.CodeBlocks {
+		mv.segmentCodeBlocks[i] = markdown.CodeBlock{Content: cb.Content, Line: cb.Line + prefixLines}
+	}
+	if len(mv.segmentCodeBlocks) == 0 {
+		mv.codeBlocks = nil
+	} else {
+		mv.codeBlocks = append(mv.codeBlocks[:0], mv.segmentCodeBlocks...)
+	}
+	return AssistantSegments{Header: cache.headerLines, Stable: cache.stableLines, Tail: tailLines}, true
+}
+
+func styledAssistantLines(style lipgloss.Style, width int, content string) []string {
+	if content == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(style.Width(width).Render(content), "\n"), "\n")
+}
+
 // View renders the message view
 func (mv *messageModel) View() string {
 	return mv.Render(mv.width)
@@ -322,7 +492,7 @@ func (mv *messageModel) isSpinnerDriven() bool {
 	case types.MessageTypeSpinner, types.MessageTypeLoading:
 		return true
 	case types.MessageTypeAssistant:
-		return mv.message.Content == ""
+		return mv.message.Content == "" && len(mv.message.AssistantMedia) == 0
 	}
 	return false
 }
@@ -382,7 +552,7 @@ func (mv *messageModel) render(width int) string {
 		noTopPaddingStyle := messageStyle.PaddingTop(0)
 		return noTopPaddingStyle.Width(width).Render(topRow + "\n" + content)
 	case types.MessageTypeAssistant:
-		if msg.Content == "" {
+		if msg.Content == "" && len(msg.AssistantMedia) == 0 {
 			return mv.spinner.View()
 		}
 
@@ -399,6 +569,7 @@ func (mv *messageModel) render(width int) string {
 			codeBlocks = nil
 		}
 		rendered, codeBlocks = replaceMarkdownImagePlaceholders(rendered, codeBlocks, imagePlaceholders)
+		rendered = appendAssistantMediaLines(rendered, msg.AssistantMedia, innerRenderWidth)
 
 		var prefix string
 		if !mv.sameAgentAsPrevious(msg) {
@@ -565,6 +736,47 @@ func replaceMarkdownImagePlaceholders(rendered string, codeBlocks []markdown.Cod
 	return strings.Join(result, "\n"), codeBlocks
 }
 
+// appendAssistantMediaLines appends generated-media blocks after the
+// rendered markdown, preserving the text-then-media order of the assistant
+// turn. Appending never shifts earlier lines, so code-block coordinates
+// computed for the markdown remain valid.
+func appendAssistantMediaLines(rendered string, media []types.AssistantMedia, width int) string {
+	blocks := make([]string, 0, len(media))
+	for _, m := range media {
+		if lines := assistantMediaLines(m, width); len(lines) > 0 {
+			blocks = append(blocks, strings.Join(lines, "\n"))
+		}
+	}
+	if len(blocks) == 0 {
+		return rendered
+	}
+	joined := strings.Join(blocks, "\n\n")
+	if rendered = strings.TrimRight(rendered, "\n\r\t "); rendered == "" {
+		return joined
+	}
+	return rendered + "\n\n" + joined
+}
+
+// assistantMediaLines renders one generated-media item: a muted name label
+// plus kitty marker rows when the image is renderable (mirroring the
+// markdown-image layout above), or the item's safe textual fallback when
+// graphics are unavailable or the image never decoded.
+func assistantMediaLines(media types.AssistantMedia, width int) []string {
+	if media.Image != nil {
+		if markers := tuiimage.RenderMarkers(*media.Image, width); len(markers) > 0 {
+			lines := make([]string, 0, len(markers)+1)
+			if media.Image.Name != "" {
+				lines = append(lines, "  "+styles.MutedStyle.Render(media.Image.Name))
+			}
+			return append(lines, markers...)
+		}
+	}
+	if media.Fallback == "" {
+		return nil
+	}
+	return []string{styles.MutedStyle.Width(width).Render(media.Fallback)}
+}
+
 // renderAssistantMarkdown renders streamed assistant content using a per-message
 // IncrementalRenderer. The renderer remembers the last rendered stable prefix
 // so each new chunk only re-parses the trailing region. The first render at a
@@ -722,6 +934,7 @@ func (mv *messageModel) Finalize() {
 		return
 	}
 	mv.renderCache = renderCache{}
+	mv.imageScanOffset = -1
 	if mv.mdRenderer != nil {
 		mv.mdRenderer.Reset()
 		mv.mdRenderer = nil

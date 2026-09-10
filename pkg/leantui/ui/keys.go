@@ -14,7 +14,8 @@ const (
 	KeyRune
 	KeyPaste
 	KeyEnter
-	KeyAltEnter // insert a literal newline (multi-line input)
+	KeyShiftEnter // insert a literal newline (multi-line input)
+	KeyAltEnter   // submit an end-of-turn follow-up
 	KeyTab
 	KeyShiftTab
 	KeyBackspace
@@ -244,6 +245,55 @@ func parseCSI(b []byte) (int, Key) {
 		return consumed, Key{Typ: KeyEnd}
 	case 'Z':
 		return consumed, Key{Typ: KeyShiftTab}
+	case 'u':
+		parts := strings.Split(params, ";")
+		code, err := strconv.Atoi(strings.SplitN(parts[0], ":", 2)[0])
+		if err != nil {
+			return consumed, Key{Typ: KeyNone}
+		}
+		mod := modifier()
+		if (code == 127 || code == 8) && mod == "3" {
+			return consumed, Key{Typ: KeyCtrlW}
+		}
+		switch code {
+		case 9:
+			if mod == "2" {
+				return consumed, Key{Typ: KeyShiftTab}
+			}
+			return consumed, Key{Typ: KeyTab}
+		case 13:
+			switch mod {
+			case "2":
+				return consumed, Key{Typ: KeyShiftEnter}
+			case "3":
+				return consumed, Key{Typ: KeyAltEnter}
+			default:
+				return consumed, Key{Typ: KeyEnter}
+			}
+		case 27:
+			return consumed, Key{Typ: KeyEsc}
+		}
+		if mod == "5" {
+			switch code {
+			case 'a', 'A':
+				return consumed, Key{Typ: KeyHome}
+			case 'c', 'C':
+				return consumed, Key{Typ: KeyCtrlC}
+			case 'd', 'D':
+				return consumed, Key{Typ: KeyCtrlD}
+			case 'e', 'E':
+				return consumed, Key{Typ: KeyEnd}
+			case 'u', 'U':
+				return consumed, Key{Typ: KeyCtrlU}
+			case 'k', 'K':
+				return consumed, Key{Typ: KeyCtrlK}
+			case 'w', 'W':
+				return consumed, Key{Typ: KeyCtrlW}
+			case 'l', 'L':
+				return consumed, Key{Typ: KeyCtrlL}
+			}
+		}
+		return consumed, Key{Typ: KeyNone}
 	case '~':
 		switch n, _ := strconv.Atoi(strings.SplitN(params, ";", 2)[0]); n {
 		case 1, 7:

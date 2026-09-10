@@ -42,6 +42,10 @@ func (r *acpToolsetRegistry) CreateTool(ctx context.Context, toolset latest.Tool
 	return r.registry.CreateTool(ctx, toolset, parentDir, runConfig, agentName)
 }
 
+func (r *acpToolsetRegistry) Has(toolsetType string) bool {
+	return toolsetType == "filesystem" || r.registry.Has(toolsetType)
+}
+
 func filesystemOptions(toolset latest.Toolset) []filesystem.Opt {
 	opts := []filesystem.Opt{}
 

@@ -47,9 +47,13 @@ type streamResult struct {
 	ReasoningContent  string
 	ThinkingSignature string
 	ThoughtSignature  []byte
-	Stopped           bool
-	FinishReason      chat.FinishReason
-	Usage             *chat.Usage
+	// Media accumulates every [chat.MediaDelta] streamed during the turn
+	// (e.g. generated images). Populated regardless of provider — see
+	// chat.MessageDelta.Media.
+	Media        []chat.MediaDelta
+	Stopped      bool
+	FinishReason chat.FinishReason
+	Usage        *chat.Usage
 }
 
 // handleStream reads a chat.MessageStream to completion, emitting streaming
@@ -110,6 +114,7 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	var thinkingSignature string
 	var thoughtSignature []byte
 	var toolCalls []tools.ToolCall
+	var media []chat.MediaDelta
 	var messageUsage *chat.Usage
 	var providerFinishReason chat.FinishReason
 
@@ -122,6 +127,42 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	xmlToolCallGate := false
 	for _, t := range agentTools {
 		toolDefMap[t.Name] = t
+	}
+
+	// markerFilter strips [media-file: ...] naming markers from the assistant
+	// text BEFORE it is emitted or accumulated, so markers never flash in the
+	// TUI and never reach the persisted message. Provider-neutral: the strict
+	// line grammar is a no-op on streams that never emit markers.
+	var markerFilter mediaFileMarkerFilter
+
+	// appendContent accumulates and emits assistant text that survived the
+	// marker filter, keeping the live event text and fullContent identical
+	// while gating raw <tool_call> XML out of the event stream.
+	appendContent := func(content string) {
+		if content == "" {
+			return
+		}
+		if !xmlToolCallGate {
+			tagIdx := strings.Index(content, "<tool_call>")
+			if tagIdx < 0 {
+				events.Emit(AgentChoice(a.Name(), sess.ID, content))
+			} else {
+				xmlToolCallGate = true
+				if tagIdx > 0 {
+					events.Emit(AgentChoice(a.Name(), sess.ID, content[:tagIdx]))
+				}
+			}
+		}
+		fullContent.WriteString(content)
+	}
+
+	// finishAssistantText flushes the marker filter's withheld tail and pairs
+	// the extracted requested paths onto the accumulated media. Called on
+	// every successful completion path (terminal finish reason or bare EOF),
+	// before any XML tool-call fallback parsing.
+	finishAssistantText := func() {
+		appendContent(markerFilter.Finish())
+		applyMediaFileRequestedPaths(media, markerFilter.paths)
 	}
 
 	// applyXMLFallback extracts <tool_call> blocks from accumulated content when
@@ -205,6 +246,11 @@ mainLoop:
 				thoughtSignature = choice.Delta.ThoughtSignature
 			}
 
+			// A terminal chunk can also carry media; collect it before returning.
+			if len(choice.Delta.Media) > 0 {
+				media = append(media, choice.Delta.Media...)
+			}
+
 			// Accumulate tool call deltas from this chunk *before* evaluating the
 			// finish reason below. Some OpenAI-compatible providers (e.g. LiteLLM
 			// in front of Gemini) pack a complete tool call and a terminal
@@ -272,6 +318,7 @@ mainLoop:
 			}
 
 			if choice.FinishReason == chat.FinishReasonStop || choice.FinishReason == chat.FinishReasonLength || choice.FinishReason == chat.FinishReasonRefusal {
+				finishAssistantText()
 				recordUsage()
 				finishReason := choice.FinishReason
 				if finishReason == chat.FinishReasonRefusal {
@@ -296,6 +343,7 @@ mainLoop:
 					ReasoningContent:  fullReasoningContent.String(),
 					ThinkingSignature: thinkingSignature,
 					ThoughtSignature:  thoughtSignature,
+					Media:             media,
 					Stopped:           len(toolCalls) == 0, // stop only when there are no tool calls to execute
 					FinishReason:      finishReason,
 					Usage:             messageUsage,
@@ -320,18 +368,7 @@ mainLoop:
 			}
 
 			if choice.Delta.Content != "" {
-				if !xmlToolCallGate {
-					tagIdx := strings.Index(choice.Delta.Content, "<tool_call>")
-					if tagIdx < 0 {
-						events.Emit(AgentChoice(a.Name(), sess.ID, choice.Delta.Content))
-					} else {
-						xmlToolCallGate = true
-						if tagIdx > 0 {
-							events.Emit(AgentChoice(a.Name(), sess.ID, choice.Delta.Content[:tagIdx]))
-						}
-					}
-				}
-				fullContent.WriteString(choice.Delta.Content)
+				appendContent(markerFilter.Push(choice.Delta.Content))
 			}
 
 		case <-ctx.Done():
@@ -355,6 +392,8 @@ mainLoop:
 		}
 	}
 
+	finishAssistantText()
+
 	recordUsage()
 
 	applyXMLFallback()
@@ -362,6 +401,8 @@ mainLoop:
 	// Invariant: a bare-EOF turn (no per-choice finish_reason) is terminal
 	// whenever there are no tool calls — the outer loop has nothing to continue
 	// on. Turns with tool calls keep Stopped=false so the loop executes them.
+	// Media is irrelevant to this decision: with no tool calls pending, the turn
+	// is over either way (media or not) — stopping is what ends it correctly.
 	// NOTE(krissetto): this can likely be removed once compaction works properly with all providers (aka dmr)
 	stoppedNoToolCalls := len(toolCalls) == 0
 
@@ -376,7 +417,7 @@ mainLoop:
 		switch {
 		case len(toolCalls) > 0:
 			finishReason = chat.FinishReasonToolCalls
-		case fullContent.Len() > 0:
+		case fullContent.Len() > 0 || len(media) > 0:
 			finishReason = chat.FinishReasonStop
 		default:
 			finishReason = chat.FinishReasonNull
@@ -396,6 +437,7 @@ mainLoop:
 		ReasoningContent:  fullReasoningContent.String(),
 		ThinkingSignature: thinkingSignature,
 		ThoughtSignature:  thoughtSignature,
+		Media:             media,
 		Stopped:           stoppedNoToolCalls,
 		FinishReason:      finishReason,
 		Usage:             messageUsage,

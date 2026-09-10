@@ -24,6 +24,7 @@
 package kit
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -47,6 +48,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/paths"
@@ -77,7 +79,7 @@ type Options struct {
 	// and skills to ship.
 	AgentRef string
 
-	// EnvProvider is forwarded to [config.Resolve] so URL-sourced
+	// EnvProvider is forwarded to [sources.Resolve] so URL-sourced
 	// agents can pick up GITHUB_TOKEN. May be nil.
 	EnvProvider environment.Provider
 
@@ -415,7 +417,7 @@ func promote(stagingDir, finalDir string) error {
 }
 
 func loadConfig(ctx context.Context, opts Options) (*latestcfg.Config, error) {
-	source, err := config.Resolve(opts.AgentRef, opts.EnvProvider)
+	source, err := sources.Resolve(opts.AgentRef, opts.EnvProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -517,6 +519,10 @@ func localSkillFilter(cfg *latestcfg.Config) (map[string]bool, bool) {
 // surfaces through the live mount and the host-home one is staged
 // into the kit, exactly mirroring the runtime [promptfiles.Paths]
 // behaviour that returns up to two paths.
+//
+// The nested files listed by add_prompt_files_depth are not staged: they
+// live under workspace by construction and are read on demand through the
+// live mount.
 func stagePromptFiles(kitDir string, cfg *latestcfg.Config, hostCwd, hostHome, workspace string) ([]Entry, []Redaction, error) {
 	target := filepath.Join(kitDir, promptfiles.KitSubdir)
 	if err := os.MkdirAll(target, 0o750); err != nil {
@@ -803,7 +809,7 @@ func (r *Result) PrintSummary(w io.Writer) {
 
 	skillFiles := r.skillFilesGrouped()
 	promptEntries := append([]Entry(nil), r.Manifest.PromptFiles...)
-	sort.Slice(promptEntries, func(i, j int) bool { return promptEntries[i].Target < promptEntries[j].Target })
+	slices.SortFunc(promptEntries, func(a, b Entry) int { return cmp.Compare(a.Target, b.Target) })
 
 	if len(skillFiles) == 0 && len(promptEntries) == 0 {
 		return
@@ -875,7 +881,7 @@ type skillGroup struct {
 // it sees exactly what the sandbox will see.
 func (r *Result) skillFilesGrouped() []skillGroup {
 	entries := append([]Entry(nil), r.Manifest.Skills...)
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Target < entries[j].Target })
+	slices.SortFunc(entries, func(a, b Entry) int { return cmp.Compare(a.Target, b.Target) })
 
 	groups := make([]skillGroup, 0, len(entries))
 	for _, e := range entries {

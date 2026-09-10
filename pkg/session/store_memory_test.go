@@ -76,6 +76,94 @@ func TestNewSQLiteSessionStoreFromDB_RoundTripWithMessages(t *testing.T) {
 	assert.Equal(t, "world", got.Messages[1].Message.Message.Content)
 }
 
+// TestSessionOriginCannotChange verifies both stores reject an upsert that
+// attempts to reclassify a persisted session.
+func TestSessionOriginCannotChange(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	for name, newStore := range map[string]func() Store{
+		"in memory": NewInMemorySessionStore,
+		"sqlite":    func() Store { return openMemoryStore(t) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newStore()
+			existing := New(WithID("origin-immutable"), WithOrigin("run"), WithTitle("original"))
+			require.NoError(t, store.AddSession(ctx, existing))
+
+			replacement := New(WithID(existing.ID), WithOrigin("a2a"), WithTitle("replacement"))
+			require.ErrorIs(t, store.UpdateSession(ctx, replacement), ErrOriginMismatch)
+
+			got, err := store.GetSession(ctx, existing.ID)
+			require.NoError(t, err)
+			require.Equal(t, "run", got.Origin)
+			require.Equal(t, "original", got.Title)
+		})
+	}
+}
+
+// TestAddSessionRejectsConflictingOrigin verifies that adding a duplicate ID cannot
+// reclassify an existing session, including in the SQLite store used by A2A.
+func TestAddSessionRejectsConflictingOrigin(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	for name, newStore := range map[string]func() Store{
+		"in memory": NewInMemorySessionStore,
+		"sqlite":    func() Store { return openMemoryStore(t) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newStore()
+			existing := New(WithID("origin-add-conflict"), WithOrigin("run"), WithTitle("original"))
+			require.NoError(t, store.AddSession(ctx, existing))
+
+			err := store.AddSession(ctx, New(WithID(existing.ID), WithOrigin("a2a"), WithTitle("replacement")))
+			require.Error(t, err)
+			if name == "in memory" {
+				require.ErrorIs(t, err, ErrAlreadyExists)
+			}
+
+			got, err := store.GetSession(ctx, existing.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "run", got.Origin)
+			assert.Equal(t, "original", got.Title)
+		})
+	}
+}
+
+func TestSessionOriginRoundTripAndLookup(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+
+	for name, newStore := range map[string]func() Store{
+		"in memory": NewInMemorySessionStore,
+		"sqlite":    func() Store { return openMemoryStore(t) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newStore()
+			runSession := New(WithID("run-session"))
+			a2aSession := New(WithID("a2a-session"), WithOrigin("a2a"))
+			require.NoError(t, store.AddSession(ctx, runSession))
+			require.NoError(t, store.AddSession(ctx, a2aSession))
+
+			got, err := store.GetSessionByOrigin(ctx, a2aSession.ID, "a2a")
+			require.NoError(t, err)
+			assert.Equal(t, "a2a", got.Origin)
+
+			_, err = store.GetSessionByOrigin(ctx, runSession.ID, "a2a")
+			require.ErrorIs(t, err, ErrNotFound)
+			_, err = store.GetSessionByOrigin(ctx, "", "a2a")
+			require.ErrorIs(t, err, ErrEmptyID)
+
+			a2aSession.SetTitle("updated")
+			require.NoError(t, store.UpdateSession(ctx, a2aSession))
+			got, err = store.GetSession(ctx, a2aSession.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "a2a", got.Origin)
+		})
+	}
+}
+
 // TestMigration23_LegacySummaryRowsReadAsZeroCost simulates a database
 // created before migration 023 (no cost column on session_items, summary
 // rows written without one): opening the store applies the migration and
@@ -114,4 +202,5 @@ func TestMigration23_LegacySummaryRowsReadAsZeroCost(t *testing.T) {
 	assert.Equal(t, "old summary", got.Messages[0].Summary)
 	assert.Equal(t, 2, got.Messages[0].FirstKeptEntry)
 	assert.Zero(t, got.Messages[0].Cost, "legacy summary rows must read as cost 0")
+	assert.Equal(t, "run", got.Origin, "pre-origin sessions must be classified as normal runs")
 }

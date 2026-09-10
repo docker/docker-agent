@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -33,41 +34,38 @@ func TestComposeLineTruncatesLeft(t *testing.T) {
 	assert.Contains(t, out, "right")
 }
 
-func TestRenderBarWidth(t *testing.T) {
+func TestRenderContext(t *testing.T) {
 	t.Parallel()
-	assert.Equal(t, ContextBarWidth, DisplayWidth(RenderBar(0.5, 0)))
-	assert.Equal(t, ContextBarWidth, DisplayWidth(RenderBar(0, 0)))
-	assert.Equal(t, ContextBarWidth, DisplayWidth(RenderBar(1, 0)))
-	assert.Equal(t, ContextBarWidth, DisplayWidth(RenderBar(1.5, 0))) // clamped
-	assert.Equal(t, ContextBarWidth, DisplayWidth(RenderBar(0.8, 0.5)))
+	tests := []struct {
+		name string
+		d    StatusModel
+		want string
+	}{
+		{"before any usage", StatusModel{}, "0% · 0/0"},
+		{"limit known before usage", StatusModel{ContextLimit: 200_000}, "0% · 0/200.0k"},
+		{"usage within limit", StatusModel{ContextLength: 24_000, ContextLimit: 200_000}, "12% · 24.0k/200.0k"},
+		{"usage over limit clamps the percentage", StatusModel{ContextLength: 15_000, ContextLimit: 10_000}, "100% · 15.0k/10.0k"},
+		{"tokens without a known limit", StatusModel{Tokens: 1_200}, "1.2k tokens"},
+		{"compacting keeps the token counts", StatusModel{ContextLength: 9_000, ContextLimit: 10_000, Compacting: true}, "compacting… · 9.0k/10.0k"},
+		{"compacting without a known limit", StatusModel{Compacting: true}, "compacting…"},
+		{"cost is appended when known", StatusModel{ContextLength: 5_000, ContextLimit: 10_000, Cost: 0.05, CostKnown: true}, "50% · 5.0k/10.0k · $0.05"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, ansi.Strip(RenderContext(tt.d)))
+		})
+	}
 }
 
-func TestRenderContextShowsZerosBeforeUsage(t *testing.T) {
+func TestContextStyleEscalatesTowardsTheThreshold(t *testing.T) {
 	t.Parallel()
-	out := RenderContext(StatusModel{})
-	assert.NotContains(t, out, "context")
-	assert.Contains(t, out, "0% · 0/0")
-}
+	render := func(pct, threshold float64) string { return contextStyle(pct, threshold).Render("x") }
 
-func TestRenderContextCompacting(t *testing.T) {
-	t.Parallel()
-	d := StatusModel{ContextLength: 9_000, ContextLimit: 10_000, Compacting: true}
-
-	out := RenderContext(d)
-	assert.Contains(t, out, "compacting…")
-	assert.NotContains(t, out, "90%", "the percentage yields to the compacting indicator")
-	assert.Contains(t, out, "9.0k/10.0k", "token counts stay visible while compacting")
-
-	d.Compacting = false
-	out = RenderContext(d)
-	assert.Contains(t, out, "90%")
-	assert.NotContains(t, out, "compacting…")
-}
-
-func TestRenderContextCompactingWithoutLimit(t *testing.T) {
-	t.Parallel()
-	out := RenderContext(StatusModel{Compacting: true})
-	assert.Contains(t, out, "compacting…")
+	assert.Equal(t, StMuted().Render("x"), render(0.5, 0))
+	assert.Equal(t, StWarning().Render("x"), render(0.7, 0))
+	assert.Equal(t, StError().Render("x"), render(0.95, 0))
+	assert.Equal(t, StError().Render("x"), render(0.48, 0.5), "a configured threshold moves the bands")
 }
 
 func TestRenderStatusFitsWidth(t *testing.T) {

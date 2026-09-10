@@ -17,14 +17,15 @@ Built-in tools are included with Docker Agent and require no external dependenci
 
 | Type | Description | Page |
 | --- | --- | --- |
+| `file` | Read, write, and edit individual files | [File](../../tools/file/index.md) |
 | `filesystem` | Read, write, list, search, navigate | [Filesystem](../../tools/filesystem/index.md) |
 | `git` | Read-only repository inspection (status, log, branches, show, blame) | [Git](../../tools/git/index.md) |
 | `shell` | Execute shell commands synchronously | [Shell](../../tools/shell/index.md) |
 | `background_jobs` | Run and manage long-running shell commands | [Background Jobs](../../tools/background-jobs/index.md) |
 | `scheduler` | Schedule instructions to run at a time or on a recurring interval | [Scheduler](../../tools/scheduler/index.md) |
+| `environment` | Report the OS and resolved shell (read-only, no arguments, auto-approved) | [Environment](../../tools/environment/index.md) |
 | `think` | Reasoning scratchpad | [Think](../../tools/think/index.md) |
 | `plan` | Shared persistent scratchpad for multi-agent collaboration | [Plan](../../tools/plan/index.md) |
-| `session_plan` | Per-session markdown plan for the draft-review-execute workflow | [Session Plan](../../tools/session_plan/index.md) |
 | `session_context` | Reference a previous session as context (read-only) | [Session Context](../../tools/session_context/index.md) |
 | `todo` | Task list management | [Todo](../../tools/todo/index.md) |
 | `memory` | Persistent key-value storage (SQLite) | [Memory](../../tools/memory/index.md) |
@@ -256,7 +257,8 @@ Any field set on `lifecycle` overrides the profile preset, so you can mix-and-ma
 ```yaml
 toolsets:
   - type: mcp
-    command: ["docker", "mcp", "gateway"]
+    command: docker
+    args: ["mcp", "gateway"]
     lifecycle:
       profile: resilient
       max_restarts: 10        # keep trying longer than the default of 5
@@ -298,7 +300,7 @@ See [`examples/lifecycle.yaml`](https://github.com/docker/docker-agent/blob/main
 
 ## TOON-Encoded Tool Outputs
 
-Many MCP servers return verbose JSON responses that consume a lot of context budget. The `toon` field on a toolset transparently re-encodes matching tools' JSON output as [TOON](https://github.com/alpkeskin/gotoon) — a compact, model-friendly key/value format — before the result is shown to the model.
+Many MCP servers return verbose JSON responses that consume a lot of context budget. The `toon` field on a toolset transparently re-encodes matching tools' top-level JSON object output as [TOON](https://github.com/alpkeskin/gotoon) — a compact, model-friendly key/value format — before the result is shown to the model.
 
 ```yaml
 toolsets:
@@ -312,14 +314,14 @@ toolsets:
 
 | Property | Type   | Description |
 | -------- | ------ | ----------- |
-| `toon`   | string | Comma-delimited list of regular expressions matching tool names whose JSON output should be re-encoded as TOON. Non-JSON outputs and non-matching tools are passed through untouched. |
+| `toon`   | string | Comma-delimited regular expressions matching tool names whose top-level JSON object output should be re-encoded as TOON. Top-level arrays, non-null scalars, invalid JSON, and non-matching outputs pass through unchanged. A matching tool returning JSON `null` currently produces empty output. |
 
 When a tool's output is not valid JSON, it is returned unchanged — TOON encoding is best-effort and never breaks tools that emit plain text.
 
 > [!NOTE]
 > **When to use TOON**
 >
-> TOON typically yields 30-60% smaller payloads than equivalent JSON for MCP tools that return arrays of records (issue lists, search results, file listings, …). It works best when the schema is regular; one-off responses with deeply nested or heterogeneous shapes may benefit less.
+> TOON can reduce payload size for MCP tools returning JSON objects, including objects containing arrays of records. Top-level arrays currently pass through unchanged. It works best when the schema is regular; one-off responses with deeply nested or heterogeneous shapes may benefit less.
 
 ## Per-Toolset Model Routing
 

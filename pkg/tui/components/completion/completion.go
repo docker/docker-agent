@@ -340,13 +340,7 @@ func (c *manager) View() string {
 		visibleStart := c.scrollOffset
 		visibleEnd := min(c.scrollOffset+maxItems, len(c.filteredItems))
 
-		maxLabelLen := 0
-		for i := visibleStart; i < visibleEnd; i++ {
-			labelLen := lipgloss.Width(c.filteredItems[i].Label)
-			if labelLen > maxLabelLen {
-				maxLabelLen = labelLen
-			}
-		}
+		maxLabelLen := c.labelColumnWidth()
 
 		for i := visibleStart; i < visibleEnd; i++ {
 			item := c.filteredItems[i]
@@ -387,6 +381,14 @@ func (c *manager) View() string {
 
 	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	return styles.CompletionBoxStyle.Render(content)
+}
+
+func (c *manager) labelColumnWidth() int {
+	width := 0
+	for _, item := range c.items {
+		width = max(width, lipgloss.Width(item.Label))
+	}
+	return width
 }
 
 func (c *manager) GetLayers() []*lipgloss.Layer {

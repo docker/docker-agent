@@ -35,7 +35,7 @@ providers:
 models:
   my_model:
     provider: my_gateway
-    model: gpt-4o
+    model: gpt-5.6-sol
 
 agents:
   root:
@@ -56,7 +56,7 @@ providers:
 models:
   claude_smart:
     provider: my_anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     # Inherits max_tokens: 16384, thinking_budget: 8192
 
   claude_fast:
@@ -81,7 +81,7 @@ providers:
 models:
   gemini:
     provider: my_google
-    model: gemini-2.5-flash
+    model: gemini-3.8-flash
     # Inherits temperature: 0.3
 
 agents:
@@ -107,7 +107,7 @@ agents:
 | `parallel_tool_calls` | boolean    | Whether to enable parallel tool calls by default.                                     | —                        |
 | `track_usage`         | boolean    | Whether to track token usage by default.                                              | —                        |
 | `thinking_budget`     | string/int | Default reasoning effort/budget.                                                      | —                        |
-| `task_budget`         | int/object | Default total token budget for an agentic task (forwarded to Anthropic; honored by Claude Opus 4.7 today). Integer shorthand or `{type: tokens, total: N}`. | —                        |
+| `task_budget`         | int/object | Default total token budget for an agentic task (forwarded to Anthropic; honored by Claude Opus 4.7+ today). Integer shorthand or `{type: tokens, total: N}`. | —                        |
 | `compaction_model`    | string     | Default model used for session compaction (summary generation) by agents whose model uses this provider. Named model or inline `provider/model` string. Agent-level and model-level `compaction_model` take precedence. | —                        |
 | `provider_opts`       | object     | Provider-specific options passed through to the client.                               | —                        |
 
@@ -128,12 +128,12 @@ models:
   # Inherits everything from provider
   claude_default:
     provider: my_anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
 
   # Overrides temperature and thinking_budget, inherits the rest
   claude_custom:
     provider: my_anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     temperature: 0.2
     thinking_budget: low
 ```
@@ -149,9 +149,9 @@ Once a provider is defined, you can use the shorthand `provider_name/model` synt
 ```yaml
 agents:
   root:
-    model: my_gateway/gpt-4o-mini  # uses the provider's defaults
+    model: my_gateway/gpt-5.6-terra  # uses the provider's defaults
   researcher:
-    model: my_anthropic/claude-sonnet-4-5  # uses anthropic provider defaults
+    model: my_anthropic/claude-sonnet-5  # uses anthropic provider defaults
 ```
 
 ## API Types
@@ -192,7 +192,7 @@ providers:
 
 agents:
   root:
-    model: router/anthropic/claude-sonnet-4-5
+    model: router/anthropic/claude-sonnet-5
 ```
 
 ### Azure OpenAI
@@ -201,7 +201,7 @@ agents:
 models:
   azure_model:
     provider: azure
-    model: gpt-4o
+    model: gpt-5.6-sol
     base_url: https://your-llm.openai.azure.com
     provider_opts:
       api_version: 2024-12-01-preview
@@ -221,7 +221,7 @@ providers:
 models:
   architect:
     provider: team_anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
 
   reviewer:
     provider: team_anthropic
@@ -254,10 +254,10 @@ providers:
 
 agents:
   root:
-    model: smart_anthropic/claude-sonnet-4-5
+    model: smart_anthropic/claude-sonnet-5
     sub_agents: [helper]
   helper:
-    model: fast_openai/gpt-4o-mini
+    model: fast_openai/gpt-4.1-mini
 ```
 
 ## Global Providers (User Configuration)

@@ -99,7 +99,7 @@ func lookupSchema(name string) *latest.StructuredOutput {
 }
 
 // defaultShape passes the model's reply through as additional_context.
-// Useful for turn_start summarizers, post_tool_use commentary, etc. —
+// Useful for turn_start summarizers and other context events. —
 // any event where the runtime consumes AdditionalContext.
 func defaultShape(raw string, in *Input) (*Output, error) {
 	if in == nil {

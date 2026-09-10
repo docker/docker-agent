@@ -1,6 +1,8 @@
 package base
 
 import (
+	"context"
+
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -66,12 +68,30 @@ func (c *Config) TrackUsageEnabled() bool {
 // pass the result to [modelinfo.ResolveCaps] so a user-declared override wins
 // over a models.dev lookup that would otherwise miss for custom/aliased
 // providers and degrade attachments to text-only (issue #2741).
+//
+// All four fields (Image, PDF, Audio, Video) are read from the config's
+// capabilities block when one is present.
 func (c *Config) CapsOverride() *modelinfo.CapsOverride {
 	caps := c.ModelConfig.Capabilities
 	if caps == nil {
 		return nil
 	}
-	return &modelinfo.CapsOverride{Image: caps.Image, PDF: caps.PDF}
+	return &modelinfo.CapsOverride{Image: caps.Image, PDF: caps.PDF, Audio: caps.Audio, Video: caps.Video}
+}
+
+// ToolCallSupport resolves the model's tool-call capability from models.dev.
+func (c *Config) ToolCallSupport(ctx context.Context) modelinfo.ToolCallSupport {
+	return modelinfo.ResolveToolCallSupport(ctx, c.ModelOptions.ModelsDevStore(), c.ID())
+}
+
+// ImageOutputEnabled resolves the model's image-output capability from its
+// explicit tri-state configuration and, when unset, the models.dev catalogue.
+func (c *Config) ImageOutputEnabled(ctx context.Context) bool {
+	var override *bool
+	if caps := c.ModelConfig.OutputCapabilities; caps != nil {
+		override = caps.Image
+	}
+	return modelinfo.ResolveOutputImage(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), override)
 }
 
 // EmbeddingResult contains the embedding and usage information

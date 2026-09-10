@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/safety"
+	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -103,6 +106,18 @@ func TestRunShellArgs_UnmarshalJSON_AcceptsCmdAndCommand(t *testing.T) {
 			input:   `{}`,
 			wantCmd: "",
 		},
+		{
+			// encoding/json struct decoding would let a mixed-case key
+			// override the exact one the runtime classified.
+			name:    "mixed-case keys are not aliases",
+			input:   `{"cmd":"git status","CMD":"rm -rf /tmp/x","Command":"rm -rf /"}`,
+			wantCmd: "git status",
+		},
+		{
+			name:    "non-string cmd is ignored, alias runs",
+			input:   `{"cmd":42,"command":"from-command"}`,
+			wantCmd: "from-command",
+		},
 	}
 
 	for _, tt := range tests {
@@ -113,6 +128,12 @@ func TestRunShellArgs_UnmarshalJSON_AcceptsCmdAndCommand(t *testing.T) {
 			assert.Equal(t, tt.wantCmd, got.Cmd)
 			assert.Equal(t, tt.wantCwd, got.Cwd)
 			assert.Equal(t, tt.wantTO, got.Timeout)
+
+			// The executed command must be exactly what the runtime labels.
+			var fields map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tt.input), &fields))
+			classified, _ := safety.CommandArg(fields)
+			assert.Equal(t, classified, got.Cmd)
 		})
 	}
 }
@@ -200,7 +221,7 @@ func TestShellTool_Instructions(t *testing.T) {
 	instructions := tool.Instructions()
 
 	assert.Contains(t, instructions, "Shell Tools")
-	assert.Contains(t, instructions, shellBaseName(tool.handler.shell),
+	assert.Contains(t, instructions, shellpath.ShellBaseName(tool.handler.shell),
 		"instructions must name the resolved shell so the model uses its syntax")
 	assert.Contains(t, instructions, displayOS())
 	assert.NotContains(t, instructions, "run_background_job")
@@ -219,30 +240,157 @@ func TestShellTool_DescriptionNamesInterpreter(t *testing.T) {
 	require.Len(t, allTools, 1)
 
 	description := allTools[0].Description
-	assert.Contains(t, description, shellBaseName(tool.handler.shell))
+	assert.Contains(t, description, shellpath.ShellBaseName(tool.handler.shell))
 	assert.Contains(t, description, displayOS())
+	assert.Contains(t, description, "get_environment_info",
+		"description must point the model at the environment tool for edge cases the static hint doesn't cover")
 }
 
-func TestShellBaseName(t *testing.T) {
+func TestShellDialectHint(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		path     string
-		expected string
+		name     string
+		shell    string
+		output   string
+		wantHint string // substring the hint must contain; empty means no hint
 	}{
-		{path: "/bin/zsh", expected: "zsh"},
-		{path: "/usr/local/bin/fish", expected: "fish"},
-		{path: `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, expected: "powershell"},
-		{path: `C:\Program Files\PowerShell\7\pwsh.exe`, expected: "pwsh"},
-		{path: `C:\Windows\System32\cmd.exe`, expected: "cmd"},
+		{
+			name:     "powershell 5.1 && parse error",
+			shell:    "powershell",
+			output:   "At line:1 char:17\n+ docker ps && docker images\n+                 ~~\nThe token '&&' is not a valid statement separator in this version.",
+			wantHint: "chain commands with `;`",
+		},
+		{
+			name:     "powershell 5.1 || parse error",
+			shell:    "powershell",
+			output:   "The token '||' is not a valid statement separator in this version.",
+			wantHint: "chain commands with `;`",
+		},
+		{
+			name:     "powershell posix stderr redirection",
+			shell:    "powershell",
+			output:   `out-file : Could not find a part of the path 'C:\dev\null'.`,
+			wantHint: "2>$null",
+		},
+		{
+			name:     "powershell 5.1 grep not a cmdlet",
+			shell:    "powershell",
+			output:   "grep : The term 'grep' is not recognized as the name of a cmdlet, function, script file, or operable program.",
+			wantHint: "Select-String",
+		},
+		{
+			name:     "pwsh 7 head not a cmdlet",
+			shell:    "pwsh",
+			output:   "head : The term 'head' is not recognized as a name of a cmdlet, function, script file, or executable program.",
+			wantHint: "Select-Object -First",
+		},
+		{
+			name:     "cmd.exe unknown command",
+			shell:    "cmd",
+			output:   "'grep' is not recognized as an internal or external command,\noperable program or batch file.",
+			wantHint: "findstr",
+		},
+		{
+			name:     "powershell rejects posix short flag",
+			shell:    "powershell",
+			output:   "Get-ChildItem : A parameter cannot be found that matches parameter name 'la'.",
+			wantHint: "POSIX-style short flags",
+		},
+		{
+			name:     "zsh does not fire windows hints",
+			shell:    "zsh",
+			output:   "The token '&&' is not a valid statement separator in this version.",
+			wantHint: "",
+		},
+		{
+			name:     "powershell does not fire cmd.exe hint on child cmd failure",
+			shell:    "powershell",
+			output:   "'grep' is not recognized as an internal or external command,\noperable program or batch file.",
+			wantHint: "",
+		},
+		{
+			name:     "pwsh 7 does not fire powershell-5.1-only && hint",
+			shell:    "pwsh",
+			output:   "The token '&&' is not a valid statement separator in this version.",
+			wantHint: "",
+		},
+		{
+			name:     "benign output leaves no hint",
+			shell:    "powershell",
+			output:   "hello world",
+			wantHint: "",
+		},
+		{
+			name:     "docker error unrelated to shell dialect",
+			shell:    "powershell",
+			output:   "Error response from daemon: No such container: comfy-worker",
+			wantHint: "",
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.path, func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.expected, shellBaseName(tt.path))
+			got := shellDialectHint(tt.shell, tt.output)
+			if tt.wantHint == "" {
+				assert.Empty(t, got, "expected no hint for shell=%q output=%q", tt.shell, tt.output)
+				return
+			}
+			require.NotEmpty(t, got, "expected a hint for shell=%q output=%q", tt.shell, tt.output)
+			assert.Contains(t, got, tt.wantHint,
+				"hint for shell=%q output=%q missing %q; got %q", tt.shell, tt.output, tt.wantHint, got)
 		})
 	}
+}
+
+// TestShellSyntaxHint_pwshDoesNotClaimAmpAmpFails guards against copy-pasting
+// the powershell (5.1) `&&`-is-a-parse-error clause into the pwsh (7+) hint:
+// pipeline-chain operators shipped in PowerShell 7, and telling a pwsh session
+// to avoid them is actively wrong.
+func TestShellSyntaxHint_pwshDoesNotClaimAmpAmpFails(t *testing.T) {
+	t.Parallel()
+	assert.NotContains(t, shellSyntaxHint("pwsh"), "&&")
+}
+
+func TestFormatCommandOutput_PrependsHint(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+
+	raw := "The token '&&' is not a valid statement separator in this version."
+	got := formatCommandOutput(timeoutCtx, ctx, nil, raw, `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, time.Minute)
+
+	assert.True(t, strings.HasPrefix(got, "[shell-hint] "),
+		"hint must lead the output so the model sees it first; got %q", got)
+	assert.Contains(t, got, raw, "original output must be preserved after the hint")
+}
+
+// TestFormatCommandOutput_NoHintOnPosixShell: raw output mentioning a Windows
+// error string on a POSIX host must not trigger the hint.
+func TestFormatCommandOutput_NoHintOnPosixShell(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+
+	raw := "The token '&&' is not a valid statement separator in this version."
+	got := formatCommandOutput(timeoutCtx, ctx, nil, raw, "/bin/zsh", time.Minute)
+	assert.Equal(t, raw, got)
+}
+
+func TestFormatCommandOutput_NoHintOnBenignOutput(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+
+	got := formatCommandOutput(timeoutCtx, ctx, nil, "hello world", `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, time.Minute)
+	assert.Equal(t, "hello world", got)
 }
 
 func TestResolveWorkDir(t *testing.T) {

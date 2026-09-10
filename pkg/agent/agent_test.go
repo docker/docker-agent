@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/codemode"
 )
 
 // Safety returns the author-declared default set via WithSafety, empty
@@ -764,4 +765,612 @@ func TestAgentToolsRecoversWhenUnderlyingToolsetDies(t *testing.T) {
 	assert.Empty(t, a.DrainWarnings(), "silent recovery must not emit a warning")
 	assert.Equal(t, 1, stub.startCalls)
 	assert.Equal(t, 1, stub.restartCalls)
+}
+
+// countingToolSet is a Startable ToolSet with a stable description, a
+// mutable start error and start/stop counters, used to simulate healthy and
+// failing MCP-like toolsets aggregated inside a code-mode wrapper.
+type countingToolSet struct {
+	desc     string
+	startErr error
+	start    int
+	stop     int
+	stubs    []tools.Tool
+}
+
+var (
+	_ tools.ToolSet   = (*countingToolSet)(nil)
+	_ tools.Startable = (*countingToolSet)(nil)
+	_ tools.Describer = (*countingToolSet)(nil)
+)
+
+func (c *countingToolSet) Describe() string { return c.desc }
+
+func (c *countingToolSet) Start(context.Context) error {
+	c.start++
+	return c.startErr
+}
+
+func (c *countingToolSet) Stop(context.Context) error {
+	c.stop++
+	return nil
+}
+
+func (c *countingToolSet) Tools(context.Context) ([]tools.Tool, error) { return c.stubs, nil }
+
+// TestAgentToolsCodeModePartialStartKeepsCodeModeAvailable is the regression
+// test for #3978: with code_mode_tools enabled every toolset is aggregated
+// into a single codemode wrapper, and one failing MCP server used to take
+// down the whole wrapper — run_tools_with_javascript disappeared and the
+// healthy toolsets were rolled back. A failing inner toolset must instead
+// degrade the wrapper: healthy declarations stay available, the failure is
+// warned about once per streak, and the failed toolset is retried on
+// subsequent turns.
+func TestAgentToolsCodeModePartialStartKeepsCodeModeAvailable(t *testing.T) {
+	t.Parallel()
+
+	healthy := &countingToolSet{
+		desc:  "fetch built-in",
+		stubs: []tools.Tool{{Name: "fetch_url", Parameters: map[string]any{}}},
+	}
+	failing := &countingToolSet{
+		desc:     "mcp(ref=broken)",
+		startErr: errors.New("connection refused"),
+		stubs:    []tools.Tool{{Name: "broken_tool", Parameters: map[string]any{}}},
+	}
+	a := New("root", "test", WithToolSets(codemode.Wrap(healthy, failing)))
+
+	// Turn 1: code mode stays available with the healthy toolset only.
+	got, err := a.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got, 1, "turn 1: run_tools_with_javascript must survive a failing inner toolset")
+	assert.Equal(t, "run_tools_with_javascript", got[0].Name)
+	assert.Contains(t, got[0].Description, "FetchUrl", "healthy toolset must stay declared")
+	assert.NotContains(t, got[0].Description, "BrokenTool", "failed toolset must be omitted")
+	assert.Equal(t, 0, healthy.stop, "healthy toolset must not be rolled back on a peer's failure")
+
+	warnings := a.DrainWarnings()
+	require.Len(t, warnings, 1, "turn 1: the inner failure must still be surfaced")
+	assert.Contains(t, warnings[0], "start failed")
+	assert.Contains(t, warnings[0], "mcp(ref=broken)")
+	assert.Contains(t, warnings[0], "connection refused")
+
+	// Turn 2: the failed toolset is retried, without duplicate warnings and
+	// without restarting its healthy peer.
+	got, err = a.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got, 1, "turn 2: code mode must stay available while the failure persists")
+	assert.Equal(t, 2, failing.start, "turn 2: failed toolset must be retried")
+	assert.Equal(t, 1, healthy.start, "turn 2: healthy toolset must not be restarted")
+	assert.Empty(t, a.DrainWarnings(), "turn 2: no duplicate warning on repeated failure")
+
+	// Turn 3: recovery — the toolset's declarations reappear, silently.
+	failing.startErr = nil
+	got, err = a.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0].Description, "BrokenTool", "recovered toolset must be declared again")
+	assert.Empty(t, a.DrainWarnings(), "recovery must be silent")
+}
+
+// dyingToolSet extends countingToolSet with live lifecycle reporting
+// (tools.StartReporter) and in-place recovery (tools.Restartable),
+// mimicking a supervisor-backed MCP toolset whose session can die in the
+// background after a successful start.
+type dyingToolSet struct {
+	countingToolSet
+
+	started    bool
+	restarts   int
+	restartErr error
+}
+
+var (
+	_ tools.StartReporter = (*dyingToolSet)(nil)
+	_ tools.Restartable   = (*dyingToolSet)(nil)
+)
+
+func (d *dyingToolSet) Start(ctx context.Context) error {
+	if err := d.countingToolSet.Start(ctx); err != nil {
+		return err
+	}
+	d.started = true
+	return nil
+}
+
+func (d *dyingToolSet) Restart(context.Context) error {
+	d.restarts++
+	if d.restartErr != nil {
+		return d.restartErr
+	}
+	d.started = true
+	return nil
+}
+
+func (d *dyingToolSet) IsStarted() bool { return d.started }
+
+// TestAgentToolsCodeModeInnerDiesAfterStart covers the full agent-level arc
+// of an MCP-like inner toolset inside the codemode wrapper that starts
+// successfully and later dies (e.g. background session loss): the composite
+// must detect the death through the inner's StartReporter, degrade — the
+// healthy peer and run_tools_with_javascript stay available — warn once,
+// recover the dead inner via Restart (not a blind Start), and restore its
+// declarations silently once the recovery succeeds.
+func TestAgentToolsCodeModeInnerDiesAfterStart(t *testing.T) {
+	t.Parallel()
+
+	healthy := &countingToolSet{
+		desc:  "fetch built-in",
+		stubs: []tools.Tool{{Name: "fetch_url", Parameters: map[string]any{}}},
+	}
+	dying := &dyingToolSet{countingToolSet: countingToolSet{
+		desc:  "mcp(ref=github)",
+		stubs: []tools.Tool{{Name: "list_issues", Parameters: map[string]any{}}},
+	}}
+	a := New("root", "test", WithToolSets(codemode.Wrap(healthy, dying)))
+
+	// Turn 1: initial success — both toolsets declared, no warnings.
+	got, err := a.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0].Description, "FetchUrl")
+	assert.Contains(t, got[0].Description, "ListIssues")
+	assert.Empty(t, a.DrainWarnings())
+	assert.Equal(t, 1, dying.start)
+
+	// Background death: the inner reports dead and can't come back yet.
+	dying.started = false
+	dying.restartErr = errors.New("session lost")
+
+	// Turn 2: degraded — recovery goes through Restart, the failure is
+	// warned once, the healthy peer and the wrapper stay available.
+	got, err = a.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got, 1, "turn 2: run_tools_with_javascript must survive an inner death")
+	assert.Contains(t, got[0].Description, "FetchUrl", "healthy toolset must stay declared")
+	assert.NotContains(t, got[0].Description, "ListIssues", "dead toolset must be omitted")
+	assert.Equal(t, 1, dying.restarts, "turn 2: dead inner must be recovered via Restart")
+	assert.Equal(t, 1, dying.start, "turn 2: dead inner must not be blindly re-Started")
+	assert.Equal(t, 1, healthy.start, "turn 2: healthy peer must not be restarted")
+
+	warnings := a.DrainWarnings()
+	require.Len(t, warnings, 1, "turn 2: the death must be surfaced once")
+	assert.Contains(t, warnings[0], "mcp(ref=github)")
+	assert.Contains(t, warnings[0], "session lost")
+
+	// Turn 3: still dead — retried via Restart, no duplicate warning.
+	got, err = a.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, 2, dying.restarts, "turn 3: recovery retries must keep using Restart")
+	assert.Equal(t, 1, dying.start)
+	assert.Empty(t, a.DrainWarnings(), "turn 3: no duplicate warning on repeated failure")
+
+	// Turn 4: Restart succeeds — declarations reappear, silently.
+	dying.restartErr = nil
+	got, err = a.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0].Description, "ListIssues", "recovered toolset must be declared again")
+	assert.Equal(t, 3, dying.restarts)
+	assert.Equal(t, 1, dying.start, "recovery must never fall back to a blind Start")
+	assert.Empty(t, a.DrainWarnings(), "recovery must be silent")
+}
+
+// TestAgentToolsCodeModeInitialAuthDeferralStaysSilent is the regression
+// test for the initial-OAuth-deferral arc inside the codemode wrapper: an
+// inner toolset that defers on authorization at startup (it never worked
+// before) must stay silent across turns, even though the composite latches
+// started on the first partial start and every later Start takes the
+// recovery path. Before the LostAfterStart classification, turn 2 misread
+// the retried deferral as a formerly-healthy toolset dying and emitted the
+// "needs re-authentication" notice.
+func TestAgentToolsCodeModeInitialAuthDeferralStaysSilent(t *testing.T) {
+	t.Parallel()
+
+	healthy := &countingToolSet{
+		desc:  "fetch built-in",
+		stubs: []tools.Tool{{Name: "fetch_url", Parameters: map[string]any{}}},
+	}
+	unauthorized := &countingToolSet{
+		desc:     "mcp(ref=notion)",
+		startErr: &tools.AuthorizationRequiredError{URL: "https://example.test/mcp"},
+		stubs:    []tools.Tool{{Name: "search_pages", Parameters: map[string]any{}}},
+	}
+	a := New("root", "test", WithToolSets(codemode.Wrap(healthy, unauthorized)))
+
+	// Turns 1-3: the deferral is retried every turn and must never warn —
+	// the OAuth dialog appears naturally on the first interactive turn.
+	for turn := 1; turn <= 3; turn++ {
+		got, err := a.Tools(t.Context())
+		require.NoError(t, err)
+		require.Len(t, got, 1, "turn %d: code mode must stay available", turn)
+		assert.Contains(t, got[0].Description, "FetchUrl", "turn %d: healthy toolset must stay declared", turn)
+		assert.NotContains(t, got[0].Description, "SearchPages", "turn %d: deferred toolset must be omitted", turn)
+		assert.Empty(t, a.DrainWarnings(), "turn %d: initial OAuth deferral must stay silent", turn)
+		assert.Equal(t, turn, unauthorized.start, "turn %d: deferred toolset must be retried", turn)
+		assert.Equal(t, 1, healthy.start, "turn %d: healthy peer must not be restarted", turn)
+	}
+
+	// Authorization completes: declarations appear, still silently.
+	unauthorized.startErr = nil
+	got, err := a.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0].Description, "SearchPages", "authorized toolset must be declared")
+	assert.Empty(t, a.DrainWarnings(), "successful authorization must be silent")
+}
+
+// TestAgentToolsCodeModeTotalStartFailureNotExposed verifies that when
+// every inner toolset fails and none is available, the codemode wrapper
+// fails like a regular toolset: it is not latched, so
+// run_tools_with_javascript is not exposed with an empty function list,
+// the failure is warned once per streak, and a cold-start retry runs every
+// turn until recovery.
+func TestAgentToolsCodeModeTotalStartFailureNotExposed(t *testing.T) {
+	t.Parallel()
+
+	failingA := &countingToolSet{
+		desc:     "mcp(ref=broken-a)",
+		startErr: errors.New("connection refused"),
+		stubs:    []tools.Tool{{Name: "tool_a", Parameters: map[string]any{}}},
+	}
+	failingB := &countingToolSet{
+		desc:     "mcp(ref=broken-b)",
+		startErr: errors.New("no such host"),
+		stubs:    []tools.Tool{{Name: "tool_b", Parameters: map[string]any{}}},
+	}
+	a := New("root", "test", WithToolSets(codemode.Wrap(failingA, failingB)))
+
+	// Turn 1: nothing usable — code mode must not be listed at all.
+	got, err := a.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, got, "turn 1: code mode must not be exposed with an empty function list")
+
+	warnings := a.DrainWarnings()
+	require.Len(t, warnings, 1, "turn 1: the total failure must be surfaced once")
+	assert.Contains(t, warnings[0], "start failed")
+	assert.Contains(t, warnings[0], "mcp(ref=broken-a)")
+	assert.Contains(t, warnings[0], "mcp(ref=broken-b)")
+
+	// Turn 2: cold retry, no duplicate warning.
+	got, err = a.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, got, "turn 2: code mode must stay unlisted while the total failure persists")
+	assert.Equal(t, 2, failingA.start, "turn 2: total failure must keep the cold-start retry")
+	assert.Equal(t, 2, failingB.start, "turn 2: total failure must keep the cold-start retry")
+	assert.Empty(t, a.DrainWarnings(), "turn 2: no duplicate warning on repeated failure")
+
+	// Turn 3: recovery — code mode appears with both declarations, silently.
+	failingA.startErr = nil
+	failingB.startErr = nil
+	got, err = a.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0].Description, "ToolA", "recovered toolset must be declared")
+	assert.Contains(t, got[0].Description, "ToolB", "recovered toolset must be declared")
+	assert.Empty(t, a.DrainWarnings(), "recovery must be silent")
+}
+
+// TestAgentToolsCodeModeTotalMixedFailureWarnsRealCause pins the mixed
+// total failure (one inner deferred on OAuth, one failed for real): the
+// real failure must be warned about like any other start failure — the
+// deferral next to it must not reclassify the whole batch as a silent
+// auth-required wait — and code mode stays unlisted since nothing is
+// usable.
+func TestAgentToolsCodeModeTotalMixedFailureWarnsRealCause(t *testing.T) {
+	t.Parallel()
+
+	unauthorized := &countingToolSet{
+		desc:     "mcp(ref=notion)",
+		startErr: &tools.AuthorizationRequiredError{URL: "https://example.test/mcp"},
+		stubs:    []tools.Tool{{Name: "search_pages", Parameters: map[string]any{}}},
+	}
+	failing := &countingToolSet{
+		desc:     "mcp(ref=broken)",
+		startErr: errors.New("connection refused"),
+		stubs:    []tools.Tool{{Name: "broken_tool", Parameters: map[string]any{}}},
+	}
+	a := New("root", "test", WithToolSets(codemode.Wrap(unauthorized, failing)))
+
+	got, err := a.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, got, "code mode must not be exposed while every inner toolset is down")
+
+	warnings := a.DrainWarnings()
+	require.Len(t, warnings, 1, "the real failure must be surfaced despite the OAuth deferral next to it")
+	assert.Contains(t, warnings[0], "start failed")
+	assert.Contains(t, warnings[0], "mcp(ref=broken)")
+	assert.Contains(t, warnings[0], "connection refused")
+	assert.NotContains(t, warnings[0], "re-authentication",
+		"an initial mixed failure must not read as a re-auth notice")
+}
+
+// hungStartToolSet blocks in Start until release is closed; entered is
+// closed on the first call so tests can line up with the in-flight attempt.
+type hungStartToolSet struct {
+	stubToolSet
+
+	entered chan struct{}
+	release chan struct{}
+	calls   atomic.Int32
+	stops   atomic.Int32
+}
+
+func (h *hungStartToolSet) Start(context.Context) error {
+	if h.calls.Add(1) == 1 {
+		close(h.entered)
+	}
+	<-h.release
+	return nil
+}
+
+func (h *hungStartToolSet) Stop(context.Context) error {
+	h.stops.Add(1)
+	return nil
+}
+
+func toolNames(ts []tools.Tool) []string {
+	names := make([]string, len(ts))
+	for i, tool := range ts {
+		names[i] = tool.Name
+	}
+	return names
+}
+
+// TestAgentToolsSkipsStartAlreadyInFlight reproduces #4001: the runtime's
+// startup probe initiates Start, times out and abandons the goroutine, which
+// keeps holding the toolset's single-flight lock. The next turn must not
+// block behind that lock: Tools() returns promptly with the static tools and
+// the toolsets that are ready, emits no warning, and does not pile a second
+// underlying Start onto the wedged toolset.
+func TestAgentToolsSkipsStartAlreadyInFlight(t *testing.T) {
+	t.Parallel()
+
+	hung := &hungStartToolSet{
+		stubToolSet: stubToolSet{tools: []tools.Tool{{Name: "hung_tool", Parameters: map[string]any{}}}},
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	ready := newStubToolSet(nil, []tools.Tool{{Name: "ready_tool", Parameters: map[string]any{}}}, nil)
+	a := New("root", "test",
+		WithToolSets(hung, ready),
+		WithTools(tools.Tool{Name: "static_tool", Parameters: map[string]any{}}))
+
+	// Always unblock the wedged Start so no goroutine outlives the test.
+	releaseHung := sync.OnceFunc(func() { close(hung.release) })
+	t.Cleanup(releaseHung)
+
+	// Simulate the startup probe: Start is initiated and hangs, holding the
+	// single-flight lock past the probe's deadline.
+	probeDone := make(chan error, 1)
+	go func() { probeDone <- a.toolsets[0].Start(t.Context()) }()
+	<-hung.entered
+
+	type toolsResult struct {
+		tools []tools.Tool
+		err   error
+	}
+	turnDone := make(chan toolsResult, 1)
+	go func() {
+		got, err := a.Tools(t.Context())
+		turnDone <- toolsResult{tools: got, err: err}
+	}()
+
+	select {
+	case res := <-turnDone:
+		require.NoError(t, res.err)
+		assert.ElementsMatch(t, []string{"ready_tool", "static_tool"}, toolNames(res.tools))
+	case <-time.After(5 * time.Second):
+		t.Fatal("Agent.Tools blocked behind an in-flight toolset Start")
+	}
+
+	assert.Empty(t, a.DrainWarnings(), "a start already in flight must not surface a warning")
+	assert.EqualValues(t, 1, hung.calls.Load(), "the turn must not run a second underlying Start")
+
+	// Once the wedged start completes, the next turn picks the toolset up
+	// without another underlying Start.
+	releaseHung()
+	require.NoError(t, <-probeDone)
+
+	got, err := a.Tools(t.Context())
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"hung_tool", "ready_tool", "static_tool"}, toolNames(got))
+	assert.EqualValues(t, 1, hung.calls.Load())
+}
+
+// TestAgentToolsBoundsTurnInitiatedStart verifies the other half of #4001:
+// when the turn itself initiates a Start and the toolset wedges (ignoring
+// cancellation), the turn is bounded by tools.DefaultStartTimeout instead of
+// hanging. The abandoned attempt stays silent and finishes in the
+// background, so the next turn sees the toolset started.
+func TestAgentToolsBoundsTurnInitiatedStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hung := &hungStartToolSet{
+			stubToolSet: stubToolSet{tools: []tools.Tool{{Name: "hung_tool", Parameters: map[string]any{}}}},
+			entered:     make(chan struct{}),
+			release:     make(chan struct{}),
+		}
+		a := New("root", "test",
+			WithToolSets(hung),
+			WithTools(tools.Tool{Name: "static_tool", Parameters: map[string]any{}}))
+
+		begin := time.Now()
+		got, err := a.Tools(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, tools.DefaultStartTimeout, time.Since(begin), "the turn must give up exactly at the bound (fake time)")
+		assert.Equal(t, []string{"static_tool"}, toolNames(got))
+		assert.Empty(t, a.DrainWarnings(), "a start abandoned on timeout must be skipped silently")
+
+		// Let the abandoned attempt finish; it completes the start in the
+		// background under the single-flight lock.
+		close(hung.release)
+		synctest.Wait()
+
+		got, err = a.Tools(t.Context())
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"hung_tool", "static_tool"}, toolNames(got))
+		assert.EqualValues(t, 1, hung.calls.Load(), "the abandoned attempt is the only underlying Start")
+	})
+}
+
+// TestAgentStopToolSetsWaitsForInFlightStart pins the shutdown half of the
+// lifecycle contract: StopToolSets must not skip a toolset whose Start is
+// still in flight. It waits for the attempt to settle, so a start abandoned
+// by the turn path that eventually succeeds is still stopped instead of
+// leaking.
+func TestAgentStopToolSetsWaitsForInFlightStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hung := &hungStartToolSet{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		a := New("root", "test", WithToolSets(hung))
+
+		// Always unblock the wedged Start so no goroutine outlives the test.
+		releaseHung := sync.OnceFunc(func() { close(hung.release) })
+		t.Cleanup(releaseHung)
+
+		startDone := make(chan error, 1)
+		go func() { startDone <- a.toolsets[0].Start(t.Context()) }()
+		<-hung.entered
+
+		stopDone := make(chan error, 1)
+		go func() { stopDone <- a.StopToolSets(t.Context()) }()
+
+		// StopToolSets must wait for the in-flight Start to settle, not decide
+		// early that the toolset is unstarted. Once every goroutine is durably
+		// blocked, the stop must still be parked behind the wedged Start.
+		synctest.Wait()
+		select {
+		case err := <-stopDone:
+			t.Fatalf("StopToolSets returned (err=%v) while Start was still in flight", err)
+		default:
+		}
+
+		releaseHung()
+		require.NoError(t, <-startDone)
+		require.NoError(t, <-stopDone)
+		assert.EqualValues(t, 1, hung.stops.Load(), "the toolset that finished starting must be stopped, not leaked")
+	})
+}
+
+// TestAgentStopToolSetsHonorsContextWhileStartInFlight pins the other
+// shutdown half of the contract: when an in-flight Start ignores
+// cancellation and never settles, StopToolSets gives up with ctx.Err() at
+// the deadline instead of blocking shutdown forever, without running the
+// underlying Stop behind the wedged attempt. Once that attempt eventually
+// settles, the abandoned stop request still reaps the toolset.
+func TestAgentStopToolSetsHonorsContextWhileStartInFlight(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		hung := &hungStartToolSet{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		a := New("root", "test", WithToolSets(hung))
+
+		// Always unblock the wedged Start so no goroutine outlives the test.
+		releaseHung := sync.OnceFunc(func() { close(hung.release) })
+		t.Cleanup(releaseHung)
+
+		startDone := make(chan error, 1)
+		go func() { startDone <- a.toolsets[0].Start(t.Context()) }()
+		<-hung.entered
+
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		begin := time.Now()
+		err := a.StopToolSets(ctx)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Equal(t, time.Second, time.Since(begin), "StopToolSets must give up exactly at the deadline (fake time)")
+		assert.EqualValues(t, 0, hung.stops.Load(), "the underlying Stop must not run while Start is still wedged")
+
+		// The wedged Start eventually settles; the stop request abandoned at
+		// the deadline must reap the fresh start so it doesn't leak.
+		releaseHung()
+		require.NoError(t, <-startDone)
+		assert.EqualValues(t, 1, hung.stops.Load(), "a start that settles after the abandoned shutdown must still be stopped")
+	})
+}
+
+// stopRecordingToolSet starts immediately and records Stop calls; stopErr,
+// when set, is returned from every Stop.
+type stopRecordingToolSet struct {
+	stubToolSet
+
+	stopErr error
+	stops   atomic.Int32
+}
+
+func (s *stopRecordingToolSet) Stop(context.Context) error {
+	s.stops.Add(1)
+	return s.stopErr
+}
+
+// TestAgentStopToolSetsContinuesPastStopFailure pins the aggregation
+// contract of StopToolSets: a toolset whose Stop fails must not abandon
+// stopping the later toolsets, and every failure surfaces in the joined
+// error.
+func TestAgentStopToolSetsContinuesPastStopFailure(t *testing.T) {
+	t.Parallel()
+
+	errFirst := errors.New("first boom")
+	errSecond := errors.New("second boom")
+	failingFirst := &stopRecordingToolSet{stopErr: errFirst}
+	failingSecond := &stopRecordingToolSet{stopErr: errSecond}
+	healthy := &stopRecordingToolSet{}
+	a := New("root", "test", WithToolSets(failingFirst, failingSecond, healthy))
+	for _, ts := range a.toolsets {
+		require.NoError(t, ts.Start(t.Context()))
+	}
+
+	err := a.StopToolSets(t.Context())
+	require.ErrorIs(t, err, errFirst)
+	require.ErrorIs(t, err, errSecond)
+	assert.EqualValues(t, 1, failingFirst.stops.Load())
+	assert.EqualValues(t, 1, failingSecond.stops.Load(), "an earlier failed stop must not abandon the next toolset")
+	assert.EqualValues(t, 1, healthy.stops.Load(), "a failed stop must not abandon the later toolsets")
+}
+
+// TestAgentStopToolSetsStopsLaterToolsetsPastDeadline pins the other half of
+// the aggregation contract: a toolset wedged past the shutdown deadline
+// surfaces ctx.Err() but must not abandon the later toolsets — a responsive
+// started toolset is still stopped even though the deadline has already
+// expired by the time its StopIfStarted runs, via the uncontended fast path
+// in the lifecycle lock's LockContext.
+func TestAgentStopToolSetsStopsLaterToolsetsPastDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		wedged := &hungStartToolSet{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		responsive := &hungStartToolSet{
+			entered: make(chan struct{}),
+			release: make(chan struct{}),
+		}
+		close(responsive.release) // starts and stops without blocking
+		a := New("root", "test", WithToolSets(wedged, responsive))
+
+		// Always unblock the wedged Start so no goroutine outlives the test.
+		releaseWedged := sync.OnceFunc(func() { close(wedged.release) })
+		t.Cleanup(releaseWedged)
+
+		startDone := make(chan error, 1)
+		go func() { startDone <- a.toolsets[0].Start(t.Context()) }()
+		<-wedged.entered
+		require.NoError(t, a.toolsets[1].Start(t.Context()))
+
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		err := a.StopToolSets(ctx)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.EqualValues(t, 0, wedged.stops.Load(), "the underlying Stop must not run while Start is wedged")
+		assert.EqualValues(t, 1, responsive.stops.Load(), "a wedged earlier toolset must not abandon stopping the later ones")
+
+		// The wedged Start settles; the stop request abandoned at the
+		// deadline still reaps it.
+		releaseWedged()
+		require.NoError(t, <-startDone)
+		assert.EqualValues(t, 1, wedged.stops.Load(), "a start that settles after the abandoned shutdown must still be stopped")
+	})
 }

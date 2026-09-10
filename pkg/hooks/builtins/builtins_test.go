@@ -9,12 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/docker/portcullis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/internal/portcullistest"
 )
 
 // TestRegisterInstallsAllBuiltins pins the public contract of [Register]:
@@ -28,6 +30,7 @@ func TestRegisterInstallsAllBuiltins(t *testing.T) {
 	require.NoError(t, builtins.Register(r))
 
 	for _, name := range []string{
+		builtins.AddContext,
 		builtins.AddDate,
 		builtins.AddEnvironmentInfo,
 		builtins.AddPromptFiles,
@@ -132,6 +135,71 @@ func TestAddPromptFilesReadsFromCwd(t *testing.T) {
 	assert.Contains(t, source.ChangedContent, filepath.Join(dir, "PROMPT.md"))
 }
 
+// TestAddPromptFilesListsNestedFiles covers the monorepo case: the closest
+// file is loaded in full while the ones below the working dir are listed by
+// path only, as a separate instruction source.
+func TestAddPromptFilesListsNestedFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "PROMPT.md"), []byte("root rules"), 0o600))
+	nested := filepath.Join(dir, "service")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "PROMPT.md"), []byte("service rules"), 0o600))
+
+	fn := lookup(t, builtins.AddPromptFiles)
+
+	out, err := fn(t.Context(), &hooks.Input{SessionID: "s", Cwd: dir}, []string{"--depth=1", "PROMPT.md"})
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	require.Len(t, out.HookSpecificOutput.InstructionContext, 2)
+
+	loaded := out.HookSpecificOutput.InstructionContext[0]
+	assert.Contains(t, loaded.Content, "root rules")
+	assert.True(t, loaded.CompleteGroup)
+
+	index := out.HookSpecificOutput.InstructionContext[1]
+	assert.Equal(t, "core/prompt-file-index", index.Key)
+	assert.Contains(t, index.Content, "service/PROMPT.md")
+	assert.NotContains(t, index.Content, "service rules", "nested files are listed, not read")
+}
+
+// TestAddPromptFilesDepthArgIsNotAFilename pins that the --depth= argument is
+// consumed as an option: a stray file named after it must not be looked up.
+func TestAddPromptFilesDepthArgIsNotAFilename(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "PROMPT.md"), []byte("root rules"), 0o600))
+
+	fn := lookup(t, builtins.AddPromptFiles)
+
+	out, err := fn(t.Context(), &hooks.Input{SessionID: "s", Cwd: dir}, []string{"--depth=1", "PROMPT.md"})
+	require.NoError(t, err)
+	require.Len(t, out.HookSpecificOutput.InstructionContext, 1,
+		"only PROMPT.md resolves; --depth=1 is an option and nothing is nested")
+}
+
+// TestAddPromptFilesUnusableDepthIsIgnored documents that a malformed or
+// negative depth degrades to "no nested listing" instead of failing the turn.
+func TestAddPromptFilesUnusableDepthIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "PROMPT.md"), []byte("root rules"), 0o600))
+	nested := filepath.Join(dir, "service")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "PROMPT.md"), []byte("service rules"), 0o600))
+
+	fn := lookup(t, builtins.AddPromptFiles)
+
+	for _, arg := range []string{"--depth=-1", "--depth=deep", "--depth="} {
+		out, err := fn(t.Context(), &hooks.Input{SessionID: "s", Cwd: dir}, []string{arg, "PROMPT.md"})
+		require.NoError(t, err)
+		assert.Len(t, out.HookSpecificOutput.InstructionContext, 1, arg)
+	}
+}
+
 // TestAddPromptFilesMissingFileIsTolerated documents that missing configured
 // files do not prevent surviving files from contributing.
 func TestAddPromptFilesMissingFileIsTolerated(t *testing.T) {
@@ -217,6 +285,21 @@ func TestApplyAgentDefaultsAlwaysInjectsLargeResultLimiter(t *testing.T) {
 	assert.Equal(t, hooks.HookTypeBuiltin, cfg.ToolResponseTransform[0].Hooks[0].Type)
 	require.Len(t, cfg.SessionEnd, 1)
 	assert.Equal(t, builtins.LimitLargeToolResults, cfg.SessionEnd[0].Command)
+}
+
+// TestApplyAgentDefaultsPromptFilesDepth pins how the nested-scan depth
+// reaches the builtin: as a leading --depth= argument, so the hook's args
+// stay a flat []string.
+func TestApplyAgentDefaultsPromptFilesDepth(t *testing.T) {
+	t.Parallel()
+
+	cfg := builtins.ApplyAgentDefaults(nil, builtins.AgentDefaults{
+		AddPromptFiles:      []string{"PROMPT.md"},
+		AddPromptFilesDepth: 2,
+	})
+	require.NotNil(t, cfg)
+	require.Len(t, cfg.TurnStart, 1)
+	assert.Equal(t, []string{"--depth=2", "PROMPT.md"}, cfg.TurnStart[0].Args)
 }
 
 // TestApplyAgentDefaultsInjectsExpectedEvents verifies which event each
@@ -736,4 +819,56 @@ func TestApplyAgentDefaultsAppendsToUserHooks(t *testing.T) {
 	require.Len(t, got.TurnStart, 2)
 	assert.Equal(t, user, got.TurnStart[0])
 	assert.Equal(t, builtins.AddDate, got.TurnStart[1].Command)
+}
+
+func TestApplyAgentDefaultsOrdersTransformsBeforeLimiter(t *testing.T) {
+	t.Parallel()
+
+	for _, redact := range []bool{false, true} {
+		cfg := builtins.ApplyAgentDefaults(&hooks.Config{
+			ToolResponseTransform: []hooks.MatcherConfig{{Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "custom"}}}},
+		}, builtins.AgentDefaults{RedactSecrets: redact})
+		var names []string
+		for _, matcher := range cfg.ToolResponseTransform {
+			for _, hook := range matcher.Hooks {
+				names = append(names, hook.Command)
+			}
+		}
+		want := []string{"custom"}
+		if redact {
+			want = append(want, builtins.RedactSecrets)
+		}
+		want = append(want, builtins.LimitLargeToolResults)
+		assert.Equal(t, want, names)
+	}
+}
+
+func TestTransformPipelineRedactsBeforeSpillingLargeOutput(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+
+	secret := portcullistest.FakeGitHubPAT("cxLeRrvbJfmYdUtr70xnNE3Q7Gvli4")
+	original := secret + "\n" + strings.Repeat("safe output\n", 6000) + secret + "\n"
+	for _, manual := range []bool{false, true} {
+		cfg := &hooks.Config{}
+		if manual {
+			cfg.ToolResponseTransform = []hooks.MatcherConfig{{Hooks: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: builtins.RedactSecrets}}}}
+		}
+		cfg = builtins.ApplyAgentDefaults(cfg, builtins.AgentDefaults{RedactSecrets: !manual})
+		registry := hooks.NewRegistry()
+		require.NoError(t, builtins.Register(registry))
+		exec := hooks.NewExecutorWithRegistry(cfg, t.TempDir(), nil, registry)
+		result, err := exec.Dispatch(t.Context(), hooks.EventToolResponseTransform, &hooks.Input{
+			SessionID: "redaction-pipeline", ToolName: "shell", ToolCategory: "shell", ToolResponse: original,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result.UpdatedToolResponse)
+		updated := *result.UpdatedToolResponse
+		assert.Contains(t, updated, "Tool call result was too large")
+		assert.NotContains(t, updated, secret)
+		assert.Contains(t, updated, portcullis.Marker)
+
+		stored, err := os.ReadFile(extractLargeResultPath(t, updated))
+		require.NoError(t, err)
+		assert.Equal(t, portcullis.Redact(original), string(stored))
+	}
 }

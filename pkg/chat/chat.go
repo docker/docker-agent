@@ -153,6 +153,13 @@ type MessageDelta struct {
 	ThoughtSignature  []byte              `json:"thought_signature,omitempty"`
 	FunctionCall      *tools.FunctionCall `json:"function_call,omitempty"`
 	ToolCalls         []tools.ToolCall    `json:"tool_calls,omitempty"`
+	// Media carries provider-generated binary content (e.g. inline image
+	// blobs) streamed alongside or instead of text. A single chunk can carry
+	// more than one blob (e.g. Gemini returning multiple inline parts across
+	// candidates in one chunk), so this is a slice rather than a single
+	// pointer — a scalar field silently dropped every blob but the last. See
+	// [MediaDelta].
+	Media []MediaDelta `json:"media,omitempty"`
 }
 
 // MessageStreamChoice represents a choice in a streaming response
@@ -178,6 +185,11 @@ type Usage struct {
 	CachedInputTokens int64 `json:"cached_input_tokens"`
 	CacheWriteTokens  int64 `json:"cached_write_tokens"`
 	ReasoningTokens   int64 `json:"reasoning_tokens,omitempty"`
+}
+
+// PromptTokens sums the disjoint fresh, cache-read, and cache-write input buckets.
+func (u *Usage) PromptTokens() int64 {
+	return u.InputTokens + u.CachedInputTokens + u.CacheWriteTokens
 }
 
 // Add accumulates other's token counts into u. A nil other is a no-op so

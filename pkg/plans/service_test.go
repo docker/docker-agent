@@ -17,18 +17,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
-	"github.com/docker/docker-agent/pkg/tools/builtin/sessionplan"
 )
 
 // newTestService builds a Service over a fresh filesystem-backed shared
-// storage and an isolated session-plans directory, returning both directories
-// for tests that plant files directly.
-func newTestService(t *testing.T) (svc Service, sharedDir, sessionDir string) {
+// storage, returning the directory for tests that plant files directly.
+func newTestService(t *testing.T) (svc Service, sharedDir string) {
 	t.Helper()
 	sharedDir = t.TempDir()
-	sessionDir = t.TempDir()
-	svc = NewService(plan.NewFilesystemStorage(sharedDir), WithSessionDir(sessionDir))
-	return svc, sharedDir, sessionDir
+	svc = NewService(plan.NewFilesystemStorage(sharedDir))
+	return svc, sharedDir
 }
 
 func mustCreate(t *testing.T, svc Service, name, content string) Plan {
@@ -38,47 +35,29 @@ func mustCreate(t *testing.T, svc Service, name, content string) Plan {
 	return p
 }
 
-func writeSessionPlan(t *testing.T, dir, sessionID, content string) string {
-	t.Helper()
-	path, err := sessionplan.WriteContent(dir, sessionID, content)
-	require.NoError(t, err)
-	return path
-}
-
 // --- List --------------------------------------------------------------------
 
 func TestService_ListEmpty(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
-	result, err := svc.List(t.Context(), ListOptions{})
+	result, err := svc.List(t.Context())
 	require.NoError(t, err)
 	assert.NotNil(t, result.Plans)
 	assert.Empty(t, result.Plans)
 	assert.Empty(t, result.Warnings)
 }
 
-func TestService_ListEmptyWithSessionID(t *testing.T) {
-	t.Parallel()
-	svc, _, _ := newTestService(t)
-
-	// A missing session plan is not an error during List.
-	result, err := svc.List(t.Context(), ListOptions{SessionID: "sess-1"})
-	require.NoError(t, err)
-	assert.Empty(t, result.Plans)
-	assert.Empty(t, result.Warnings)
-}
-
 func TestService_ListSharedMetadataOnly(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	_, err := svc.Create(t.Context(), CreateRequest{Ref: SharedRef("beta"), Content: "b", Status: "draft"})
 	require.NoError(t, err)
 	_, err = svc.Create(t.Context(), CreateRequest{Ref: SharedRef("alpha"), Content: "a", Title: "Alpha", Author: "alice"})
 	require.NoError(t, err)
 
-	result, err := svc.List(t.Context(), ListOptions{})
+	result, err := svc.List(t.Context())
 	require.NoError(t, err)
 	require.Len(t, result.Plans, 2)
 
@@ -98,61 +77,13 @@ func TestService_ListSharedMetadataOnly(t *testing.T) {
 	assert.Equal(t, "draft", result.Plans[1].Status)
 }
 
-func TestService_ListIncludesCurrentSessionPlanFirst(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	mustCreate(t, svc, "alpha", "a")
-	path := writeSessionPlan(t, sessionDir, "sess-1", "# session plan")
-
-	result, err := svc.List(t.Context(), ListOptions{SessionID: "sess-1"})
-	require.NoError(t, err)
-	require.Len(t, result.Plans, 2)
-
-	sess := result.Plans[0]
-	assert.Equal(t, ScopeSession, sess.Scope)
-	assert.Equal(t, "sess-1", sess.Name)
-	assert.Equal(t, "sess-1", sess.SessionID)
-	assert.Equal(t, path, sess.Path)
-	assert.Nil(t, sess.Version, "session plans have no version")
-	assert.Empty(t, sess.Content, "List is metadata only")
-
-	// The timestamp comes from file metadata.
-	info, err := os.Stat(path)
-	require.NoError(t, err)
-	assert.True(t, sess.UpdatedAt.Equal(info.ModTime().UTC()))
-
-	assert.Equal(t, ScopeShared, result.Plans[1].Scope)
-	assert.Equal(t, "alpha", result.Plans[1].Name)
-}
-
-func TestService_ListConsultsOnlySuppliedSession(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	writeSessionPlan(t, sessionDir, "current", "mine")
-	writeSessionPlan(t, sessionDir, "stale-other", "left behind")
-
-	result, err := svc.List(t.Context(), ListOptions{SessionID: "current"})
-	require.NoError(t, err)
-	require.Len(t, result.Plans, 1)
-	assert.Equal(t, "current", result.Plans[0].Name)
-}
-
-func TestService_ListInvalidSessionID(t *testing.T) {
-	t.Parallel()
-	svc, _, _ := newTestService(t)
-
-	_, err := svc.List(t.Context(), ListOptions{SessionID: "../escape"})
-	var invalid *ValidationError
-	require.ErrorAs(t, err, &invalid)
-}
-
 func TestService_ListWarnsOnCorruptShared(t *testing.T) {
 	t.Parallel()
-	svc, sharedDir, _ := newTestService(t)
+	svc, sharedDir := newTestService(t)
 	mustCreate(t, svc, "good", "ok")
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDir, "bad.json"), []byte("{nope"), 0o600))
 
-	result, err := svc.List(t.Context(), ListOptions{})
+	result, err := svc.List(t.Context())
 	require.NoError(t, err)
 	require.Len(t, result.Plans, 1)
 	assert.Equal(t, "good", result.Plans[0].Name)
@@ -163,9 +94,9 @@ func TestService_ListWarnsOnCorruptShared(t *testing.T) {
 func TestService_ListStorageFailure(t *testing.T) {
 	t.Parallel()
 	base := errors.New("backend boom")
-	svc := NewService(failingStorage{err: base}, WithSessionDir(t.TempDir()))
+	svc := NewService(failingStorage{err: base})
 
-	_, err := svc.List(t.Context(), ListOptions{})
+	_, err := svc.List(t.Context())
 	var storageErr *StorageError
 	require.ErrorAs(t, err, &storageErr)
 	assert.Equal(t, ScopeShared, storageErr.Scope)
@@ -175,31 +106,28 @@ func TestService_ListStorageFailure(t *testing.T) {
 
 // TestService_ListSortsSharedPlansFromUnsortedStorage pins the documented
 // sort order independently of the backend: an injected Storage that lists in
-// arbitrary order must still yield a name-sorted listing, with the session
-// plan first.
+// arbitrary order must still yield a name-sorted listing.
 func TestService_ListSortsSharedPlansFromUnsortedStorage(t *testing.T) {
 	t.Parallel()
-	sessionDir := t.TempDir()
-	svc := NewService(unsortedStorage{names: []string{"zeta", "alpha", "mid"}}, WithSessionDir(sessionDir))
-	writeSessionPlan(t, sessionDir, "sess-1", "# session plan")
+	svc := NewService(unsortedStorage{names: []string{"zeta", "alpha", "mid"}})
 
-	result, err := svc.List(t.Context(), ListOptions{SessionID: "sess-1"})
+	result, err := svc.List(t.Context())
 	require.NoError(t, err)
-	require.Len(t, result.Plans, 4)
+	require.Len(t, result.Plans, 3)
 
 	names := make([]string, 0, len(result.Plans))
 	for _, p := range result.Plans {
 		names = append(names, p.Name)
 	}
-	assert.Equal(t, []string{"sess-1", "alpha", "mid", "zeta"}, names,
-		"the session plan comes first, shared plans sorted by name regardless of storage order")
+	assert.Equal(t, []string{"alpha", "mid", "zeta"}, names,
+		"shared plans sorted by name regardless of storage order")
 }
 
 // --- Get ---------------------------------------------------------------------
 
 func TestService_GetShared(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	_, err := svc.Create(t.Context(), CreateRequest{
 		Ref: SharedRef("release"), Content: "the body", Title: "Release", Author: "alice", Status: "draft",
 	})
@@ -216,13 +144,11 @@ func TestService_GetShared(t *testing.T) {
 	require.NotNil(t, p.Version)
 	assert.Equal(t, 1, *p.Version)
 	assert.False(t, p.UpdatedAt.IsZero())
-	assert.Empty(t, p.SessionID)
-	assert.Empty(t, p.Path)
 }
 
 func TestService_GetSharedNotFound(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	_, err := svc.Get(t.Context(), SharedRef("missing"))
 	var notFound *NotFoundError
@@ -233,7 +159,7 @@ func TestService_GetSharedNotFound(t *testing.T) {
 
 func TestService_GetSharedInvalidName(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	for _, name := range []string{"", "UPPER", "../escape", "a/b", "has space"} {
 		_, err := svc.Get(t.Context(), SharedRef(name))
@@ -245,7 +171,7 @@ func TestService_GetSharedInvalidName(t *testing.T) {
 
 func TestService_GetSharedCorrupt(t *testing.T) {
 	t.Parallel()
-	svc, sharedDir, _ := newTestService(t)
+	svc, sharedDir := newTestService(t)
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDir, "broken.json"), []byte("{not json"), 0o600))
 
 	_, err := svc.Get(t.Context(), SharedRef("broken"))
@@ -261,120 +187,9 @@ func TestService_GetSharedCorrupt(t *testing.T) {
 	require.NotErrorAs(t, err, &notFound, "a corrupt plan must not read as missing")
 }
 
-func TestService_GetSession(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	path := writeSessionPlan(t, sessionDir, "sess-1", "# my plan\nstep 1\n")
-
-	p, err := svc.Get(t.Context(), SessionRef("sess-1"))
-	require.NoError(t, err)
-	assert.Equal(t, ScopeSession, p.Scope)
-	assert.Equal(t, "sess-1", p.Name)
-	assert.Equal(t, "sess-1", p.SessionID)
-	assert.Equal(t, "# my plan\nstep 1\n", p.Content)
-	assert.Equal(t, path, p.Path)
-	assert.Nil(t, p.Version, "session plans must not expose a version")
-	assert.Empty(t, p.Status)
-
-	info, err := os.Stat(path)
-	require.NoError(t, err)
-	assert.True(t, p.UpdatedAt.Equal(info.ModTime().UTC()))
-}
-
-func TestService_GetSessionNotFound(t *testing.T) {
-	t.Parallel()
-	svc, _, _ := newTestService(t)
-
-	// Missing is not-found during Get, unlike List where it is skipped.
-	_, err := svc.Get(t.Context(), SessionRef("ghost"))
-	var notFound *NotFoundError
-	require.ErrorAs(t, err, &notFound)
-	assert.Equal(t, ScopeSession, notFound.Scope)
-	assert.Equal(t, "ghost", notFound.Name)
-}
-
-func TestService_GetSessionInvalidID(t *testing.T) {
-	t.Parallel()
-	svc, _, _ := newTestService(t)
-
-	for _, id := range []string{"", "../escape", "a/b"} {
-		_, err := svc.Get(t.Context(), SessionRef(id))
-		var invalid *ValidationError
-		require.ErrorAs(t, err, &invalid, "session ID %q should be invalid", id)
-	}
-}
-
-// TestService_GetSessionOversized proves the host read of session-plan
-// markdown is bounded: a file past the shared content cap is a typed
-// *CorruptError — the plan exists but cannot be treated as a plan — never an
-// unbounded read or a not-found.
-func TestService_GetSessionOversized(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	require.NoError(t, os.MkdirAll(sessionDir, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "sess-1.md"), make([]byte, plan.MaxPlanContentSize+1), 0o600))
-
-	_, err := svc.Get(t.Context(), SessionRef("sess-1"))
-	var corrupt *CorruptError
-	require.ErrorAs(t, err, &corrupt)
-	assert.Equal(t, ScopeSession, corrupt.Scope)
-	assert.Equal(t, "sess-1", corrupt.Name)
-	assert.Contains(t, err.Error(), "exceeds")
-
-	var notFound *NotFoundError
-	require.NotErrorAs(t, err, &notFound, "an oversized plan must not read as missing")
-
-	// Export goes through Get and must refuse the same way, writing nothing.
-	dest := filepath.Join(t.TempDir(), "export.md")
-	_, err = svc.Export(t.Context(), ExportRequest{Ref: SessionRef("sess-1"), Path: dest})
-	require.ErrorAs(t, err, &corrupt)
-	assert.NoFileExists(t, dest)
-
-	// List skips it with a warning, mirroring unreadable shared plans.
-	result, err := svc.List(t.Context(), ListOptions{SessionID: "sess-1"})
-	require.NoError(t, err)
-	assert.Empty(t, result.Plans)
-	require.Len(t, result.Warnings, 1)
-	assert.Contains(t, result.Warnings[0], "sess-1")
-	assert.Contains(t, result.Warnings[0], "exceeds")
-}
-
-// TestService_GetSessionAtSizeCap proves the bound is exact: a session plan
-// of exactly the content cap reads back whole.
-func TestService_GetSessionAtSizeCap(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	content := strings.Repeat("a", plan.MaxPlanContentSize)
-	writeSessionPlan(t, sessionDir, "sess-1", content)
-
-	p, err := svc.Get(t.Context(), SessionRef("sess-1"))
-	require.NoError(t, err)
-	assert.Len(t, p.Content, plan.MaxPlanContentSize)
-	assert.False(t, p.UpdatedAt.IsZero())
-}
-
-// TestService_GetSessionNotRegularFile proves a directory squatting on the
-// session plan path is a *CorruptError on Get and a warning on List.
-func TestService_GetSessionNotRegularFile(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	require.NoError(t, os.MkdirAll(filepath.Join(sessionDir, "sess-1.md"), 0o700))
-
-	_, err := svc.Get(t.Context(), SessionRef("sess-1"))
-	var corrupt *CorruptError
-	require.ErrorAs(t, err, &corrupt)
-	assert.Equal(t, ScopeSession, corrupt.Scope)
-
-	result, err := svc.List(t.Context(), ListOptions{SessionID: "sess-1"})
-	require.NoError(t, err)
-	assert.Empty(t, result.Plans)
-	require.Len(t, result.Warnings, 1)
-	assert.Contains(t, result.Warnings[0], "directory")
-}
-
 func TestService_GetUnknownScope(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	_, err := svc.Get(t.Context(), Ref{Scope: "bogus", Name: "p"})
 	var invalid *ValidationError
@@ -386,7 +201,7 @@ func TestService_GetUnknownScope(t *testing.T) {
 
 func TestService_Create(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	p, err := svc.Create(t.Context(), CreateRequest{
 		Ref: SharedRef("release"), Content: "v1", Title: "T", Author: "alice", Status: "draft",
@@ -404,7 +219,7 @@ func TestService_Create(t *testing.T) {
 
 func TestService_CreateIsCreateOnly(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "original")
 
 	// A second create conflicts instead of overwriting, exposing the
@@ -433,7 +248,7 @@ func TestService_CreateIsCreateOnly(t *testing.T) {
 // byte-identical, and creating under a fresh name keeps working.
 func TestService_CreateConflictsWithExistingRevisionZeroFile(t *testing.T) {
 	t.Parallel()
-	svc, sharedDir, _ := newTestService(t)
+	svc, sharedDir := newTestService(t)
 
 	original := `{"name":"planted","content":"precious content"}`
 	path := filepath.Join(sharedDir, "planted.json")
@@ -459,7 +274,7 @@ func TestService_CreateConflictsWithExistingRevisionZeroFile(t *testing.T) {
 
 func TestService_CreateValidation(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	_, err := svc.Create(t.Context(), CreateRequest{Ref: SharedRef("p"), Content: ""})
 	var invalid *ValidationError
@@ -478,7 +293,7 @@ func TestService_CreateValidation(t *testing.T) {
 // typed *ValidationError before the storage is touched.
 func TestService_ContentSizeCap(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	atCap := strings.Repeat("a", plan.MaxPlanContentSize)
 	p, err := svc.Create(t.Context(), CreateRequest{Ref: SharedRef("big"), Content: atCap})
@@ -509,7 +324,7 @@ func TestService_ContentSizeCap(t *testing.T) {
 // is size-capped (issue #3844: labels have no fixed vocabulary or size).
 func TestService_LargeMetadataAccepted(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	bigTitle := strings.Repeat("t", 5<<10)
 	bigAuthor := strings.Repeat("a", 5<<10)
@@ -543,7 +358,7 @@ func TestService_LargeMetadataAccepted(t *testing.T) {
 
 func TestService_UpdatePreservesOmittedMetadata(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	_, err := svc.Create(t.Context(), CreateRequest{
 		Ref: SharedRef("p"), Content: "v1", Title: "Original", Author: "alice", Status: "draft",
 	})
@@ -570,7 +385,7 @@ func TestService_UpdatePreservesOmittedMetadata(t *testing.T) {
 
 func TestService_UpdateStaleConflictPreservesNewerContent(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "v1")
 	_, err := svc.Update(t.Context(), UpdateRequest{Ref: SharedRef("p"), Content: "v2", ExpectedVersion: new(1)})
 	require.NoError(t, err)
@@ -589,7 +404,7 @@ func TestService_UpdateStaleConflictPreservesNewerContent(t *testing.T) {
 
 func TestService_UpdateForceReplacesUnconditionally(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "v1")
 	_, err := svc.Update(t.Context(), UpdateRequest{Ref: SharedRef("p"), Content: "v2", ExpectedVersion: new(1)})
 	require.NoError(t, err)
@@ -603,7 +418,7 @@ func TestService_UpdateForceReplacesUnconditionally(t *testing.T) {
 
 func TestService_UpdateNotFound(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	var notFound *NotFoundError
 
@@ -620,7 +435,7 @@ func TestService_UpdateNotFound(t *testing.T) {
 
 func TestService_UpdateEmptyContent(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "v1")
 
 	_, err := svc.Update(t.Context(), UpdateRequest{Ref: SharedRef("p"), Content: ""})
@@ -629,128 +444,11 @@ func TestService_UpdateEmptyContent(t *testing.T) {
 	assert.Contains(t, invalid.Message, "content must not be empty")
 }
 
-// --- UpdateSession -------------------------------------------------------------
-
-func TestService_UpdateSession(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	path := writeSessionPlan(t, sessionDir, "sess-1", "# old plan")
-
-	p, err := svc.UpdateSession(t.Context(), "sess-1", "# new plan\nstep 1\n")
-	require.NoError(t, err)
-	assert.Equal(t, ScopeSession, p.Scope)
-	assert.Equal(t, "sess-1", p.Name)
-	assert.Equal(t, "sess-1", p.SessionID)
-	assert.Equal(t, "# new plan\nstep 1\n", p.Content)
-	assert.Equal(t, path, p.Path)
-	assert.Nil(t, p.Version, "session plans must not expose a version")
-	assert.Empty(t, p.Status)
-	assert.False(t, p.UpdatedAt.IsZero())
-
-	got, err := svc.Get(t.Context(), SessionRef("sess-1"))
-	require.NoError(t, err)
-	assert.Equal(t, "# new plan\nstep 1\n", got.Content)
-}
-
-func TestService_UpdateSessionLastWriteWins(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	writeSessionPlan(t, sessionDir, "sess-1", "v1")
-
-	// Session plans have no versions: repeated writes simply replace.
-	_, err := svc.UpdateSession(t.Context(), "sess-1", "v2")
-	require.NoError(t, err)
-	p, err := svc.UpdateSession(t.Context(), "sess-1", "v3")
-	require.NoError(t, err)
-	assert.Equal(t, "v3", p.Content)
-	assert.Nil(t, p.Version)
-}
-
-func TestService_UpdateSessionInvalidID(t *testing.T) {
-	t.Parallel()
-	svc, _, _ := newTestService(t)
-
-	for _, id := range []string{"", "../escape", "a/b"} {
-		_, err := svc.UpdateSession(t.Context(), id, "content")
-		var invalid *ValidationError
-		require.ErrorAs(t, err, &invalid, "session ID %q should be invalid", id)
-	}
-}
-
-func TestService_UpdateSessionNeverCreates(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-
-	_, err := svc.UpdateSession(t.Context(), "ghost", "content")
-	var notFound *NotFoundError
-	require.ErrorAs(t, err, &notFound)
-	assert.Equal(t, ScopeSession, notFound.Scope)
-	assert.Equal(t, "ghost", notFound.Name)
-
-	_, err = svc.Get(t.Context(), SessionRef("ghost"))
-	require.ErrorAs(t, err, &notFound, "the refused update must not have created the plan")
-	assert.NoFileExists(t, filepath.Join(sessionDir, "ghost.md"))
-}
-
-func TestService_UpdateSessionValidation(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	writeSessionPlan(t, sessionDir, "sess-1", "# old plan")
-	var invalid *ValidationError
-
-	_, err := svc.UpdateSession(t.Context(), "sess-1", "")
-	require.ErrorAs(t, err, &invalid)
-	assert.Contains(t, invalid.Message, "content must not be empty")
-
-	_, err = svc.UpdateSession(t.Context(), "sess-1", strings.Repeat("a", plan.MaxPlanContentSize+1))
-	require.ErrorAs(t, err, &invalid)
-	assert.Contains(t, invalid.Message, "maximum plan size")
-
-	got, err := svc.Get(t.Context(), SessionRef("sess-1"))
-	require.NoError(t, err)
-	assert.Equal(t, "# old plan", got.Content, "a refused update must leave the plan untouched")
-}
-
-// TestService_UpdateSessionNotRegularFile proves a directory squatting on the
-// session plan path refuses the update as a *CorruptError, mirroring Get.
-func TestService_UpdateSessionNotRegularFile(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	require.NoError(t, os.MkdirAll(filepath.Join(sessionDir, "sess-1.md"), 0o700))
-
-	_, err := svc.UpdateSession(t.Context(), "sess-1", "content")
-	var corrupt *CorruptError
-	require.ErrorAs(t, err, &corrupt)
-	assert.Equal(t, ScopeSession, corrupt.Scope)
-	assert.Equal(t, "sess-1", corrupt.Name)
-}
-
-// TestService_UpdateSessionExpiredContext proves cancellation is observed
-// before persistence: an already-expired context never mutates the plan.
-func TestService_UpdateSessionExpiredContext(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	writeSessionPlan(t, sessionDir, "sess-1", "# old plan")
-
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	_, err := svc.UpdateSession(ctx, "sess-1", "new content")
-	var storageErr *StorageError
-	require.ErrorAs(t, err, &storageErr)
-	assert.Equal(t, ScopeSession, storageErr.Scope)
-	assert.Equal(t, "update", storageErr.Op)
-	require.ErrorIs(t, err, context.Canceled)
-
-	got, err := svc.Get(t.Context(), SessionRef("sess-1"))
-	require.NoError(t, err)
-	assert.Equal(t, "# old plan", got.Content, "an expired context must not mutate the plan")
-}
-
 // --- SetStatus ---------------------------------------------------------------
 
 func TestService_SetStatusFreeForm(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "body")
 
 	// Status is free-form: any non-empty string is accepted.
@@ -765,7 +463,7 @@ func TestService_SetStatusFreeForm(t *testing.T) {
 
 func TestService_SetStatusStaleConflict(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	_, err := svc.Create(t.Context(), CreateRequest{Ref: SharedRef("p"), Content: "body", Status: "draft"})
 	require.NoError(t, err)
 	_, err = svc.Update(t.Context(), UpdateRequest{Ref: SharedRef("p"), Content: "v2", ExpectedVersion: new(1)})
@@ -783,7 +481,7 @@ func TestService_SetStatusStaleConflict(t *testing.T) {
 
 func TestService_SetStatusValidation(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "body")
 
 	_, err := svc.SetStatus(t.Context(), SetStatusRequest{Ref: SharedRef("p"), Status: ""})
@@ -794,7 +492,7 @@ func TestService_SetStatusValidation(t *testing.T) {
 
 func TestService_SetStatusNotFound(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	_, err := svc.SetStatus(t.Context(), SetStatusRequest{Ref: SharedRef("ghost"), Status: "done"})
 	var notFound *NotFoundError
@@ -805,7 +503,7 @@ func TestService_SetStatusNotFound(t *testing.T) {
 
 func TestService_DeleteWithMatchingVersion(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "body")
 
 	require.NoError(t, svc.Delete(t.Context(), DeleteRequest{Ref: SharedRef("p"), ExpectedVersion: new(1)}))
@@ -817,7 +515,7 @@ func TestService_DeleteWithMatchingVersion(t *testing.T) {
 
 func TestService_DeleteStaleConflictPreservesPlan(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "v1")
 	_, err := svc.Update(t.Context(), UpdateRequest{Ref: SharedRef("p"), Content: "v2", ExpectedVersion: new(1)})
 	require.NoError(t, err)
@@ -834,7 +532,7 @@ func TestService_DeleteStaleConflictPreservesPlan(t *testing.T) {
 
 func TestService_DeleteForce(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "v1")
 
 	// nil expected version deletes unconditionally.
@@ -843,7 +541,7 @@ func TestService_DeleteForce(t *testing.T) {
 
 func TestService_DeleteNotFound(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 
 	err := svc.Delete(t.Context(), DeleteRequest{Ref: SharedRef("ghost")})
 	var notFound *NotFoundError
@@ -852,7 +550,7 @@ func TestService_DeleteNotFound(t *testing.T) {
 
 func TestService_DeleteCorrupt(t *testing.T) {
 	t.Parallel()
-	svc, sharedDir, _ := newTestService(t)
+	svc, sharedDir := newTestService(t)
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDir, "broken.json"), []byte("{nope"), 0o600))
 
 	// A guarded delete cannot verify the revision of a corrupt plan.
@@ -865,53 +563,11 @@ func TestService_DeleteCorrupt(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(sharedDir, "broken.json"))
 }
 
-// --- Session mutations are unsupported ----------------------------------------
-
-func TestService_SessionMutationsUnsupported(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	writeSessionPlan(t, sessionDir, "sess-1", "# plan")
-	ref := SessionRef("sess-1")
-	ctx := t.Context()
-
-	calls := map[string]func() error{
-		"create": func() error {
-			_, err := svc.Create(ctx, CreateRequest{Ref: ref, Content: "x"})
-			return err
-		},
-		"update": func() error {
-			_, err := svc.Update(ctx, UpdateRequest{Ref: ref, Content: "x"})
-			return err
-		},
-		"set_status": func() error {
-			_, err := svc.SetStatus(ctx, SetStatusRequest{Ref: ref, Status: "done"})
-			return err
-		},
-		"delete": func() error {
-			return svc.Delete(ctx, DeleteRequest{Ref: ref})
-		},
-	}
-
-	for op, call := range calls {
-		err := call()
-		var unsupported *UnsupportedError
-		require.ErrorAs(t, err, &unsupported, "op %s", op)
-		assert.Equal(t, ScopeSession, unsupported.Scope)
-		assert.Equal(t, op, unsupported.Op)
-		assert.NotEmpty(t, unsupported.Reason, "the error must tell the caller what to do instead")
-	}
-
-	// The session plan is untouched by the refused mutations.
-	p, err := svc.Get(ctx, ref)
-	require.NoError(t, err)
-	assert.Equal(t, "# plan", p.Content)
-}
-
 // --- Export ------------------------------------------------------------------
 
 func TestService_ExportShared(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "the body")
 
 	dest := filepath.Join(t.TempDir(), "nested", "export.md")
@@ -929,42 +585,20 @@ func TestService_ExportShared(t *testing.T) {
 	assert.Equal(t, "the body", string(data))
 }
 
-func TestService_ExportSession(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	writeSessionPlan(t, sessionDir, "sess-1", "# session plan")
-
-	dest := filepath.Join(t.TempDir(), "export.md")
-	result, err := svc.Export(t.Context(), ExportRequest{Ref: SessionRef("sess-1"), Path: dest})
-	require.NoError(t, err)
-	assert.Equal(t, ScopeSession, result.Scope)
-	assert.Equal(t, "sess-1", result.Name)
-	assert.Nil(t, result.Version, "session plans have no version to export")
-	assert.Equal(t, len("# session plan"), result.BytesWritten)
-
-	data, err := os.ReadFile(dest)
-	require.NoError(t, err)
-	assert.Equal(t, "# session plan", string(data))
-}
-
 func TestService_ExportNotFound(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	var notFound *NotFoundError
 
 	dest := filepath.Join(t.TempDir(), "export.md")
 	_, err := svc.Export(t.Context(), ExportRequest{Ref: SharedRef("ghost"), Path: dest})
 	require.ErrorAs(t, err, &notFound)
 	assert.NoFileExists(t, dest)
-
-	_, err = svc.Export(t.Context(), ExportRequest{Ref: SessionRef("ghost"), Path: dest})
-	require.ErrorAs(t, err, &notFound)
-	assert.NoFileExists(t, dest)
 }
 
 func TestService_ExportValidation(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "body")
 	var invalid *ValidationError
 
@@ -979,7 +613,7 @@ func TestService_ExportValidation(t *testing.T) {
 
 func TestService_ExportRefusesExistingDestination(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "new body")
 
 	dest := filepath.Join(t.TempDir(), "export.md")
@@ -997,7 +631,7 @@ func TestService_ExportRefusesExistingDestination(t *testing.T) {
 
 func TestService_ExportForceReplacesExistingFile(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "new body")
 
 	dest := filepath.Join(t.TempDir(), "export.md")
@@ -1014,7 +648,7 @@ func TestService_ExportForceReplacesExistingFile(t *testing.T) {
 
 func TestService_ExportForceStillRefusesDirectory(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "body")
 
 	var invalid *ValidationError
@@ -1031,7 +665,7 @@ func TestService_ExportForceStillRefusesDirectory(t *testing.T) {
 // split is not.
 func TestService_ExportConcurrentNonForceSingleWinner(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	const body = "# plan\nthe full body\n"
 	mustCreate(t, svc, "p", body)
 
@@ -1127,7 +761,7 @@ func TestPublishExportNoReplaceRefusesExistingDestination(t *testing.T) {
 func TestService_StorageFailuresAreTyped(t *testing.T) {
 	t.Parallel()
 	base := errors.New("backend boom")
-	svc := NewService(failingStorage{err: base}, WithSessionDir(t.TempDir()))
+	svc := NewService(failingStorage{err: base})
 	ctx := t.Context()
 
 	calls := map[string]func() error{
@@ -1169,7 +803,7 @@ func TestService_StorageFailuresAreTyped(t *testing.T) {
 // plan.Storage, not just the filesystem default.
 func TestService_InjectedInMemoryStorage(t *testing.T) {
 	t.Parallel()
-	svc := NewService(newMemStorage(), WithSessionDir(t.TempDir()))
+	svc := NewService(newMemStorage())
 	ctx := t.Context()
 
 	p, err := svc.Create(ctx, CreateRequest{Ref: SharedRef("p"), Content: "v1", Status: "draft"})
@@ -1185,7 +819,7 @@ func TestService_InjectedInMemoryStorage(t *testing.T) {
 	assert.Equal(t, 2, *p.Version)
 	assert.Equal(t, "draft", p.Status)
 
-	list, err := svc.List(ctx, ListOptions{})
+	list, err := svc.List(ctx)
 	require.NoError(t, err)
 	require.Len(t, list.Plans, 1)
 	assert.Equal(t, "p", list.Plans[0].Name)
@@ -1201,12 +835,6 @@ func TestNewService_NilStoragePanics(t *testing.T) {
 	assert.Panics(t, func() {
 		NewService(nil)
 	})
-}
-
-func TestScope_Mutable(t *testing.T) {
-	t.Parallel()
-	assert.True(t, ScopeShared.Mutable())
-	assert.False(t, ScopeSession.Mutable())
 }
 
 // --- Test doubles --------------------------------------------------------------

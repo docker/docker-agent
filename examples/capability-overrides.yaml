@@ -1,8 +1,8 @@
 # Demonstrates the `capabilities` override for models the models.dev catalogue
 # does not describe correctly. Custom OpenAI-compatible providers and local
 # models are not (always) in models.dev, so docker-agent cannot auto-detect
-# whether they accept image/PDF attachments and conservatively falls back to
-# text-only, silently dropping attachments (issue #2741).
+# whether they accept image/PDF/audio/video attachments and conservatively
+# falls back to text-only, silently dropping attachments (issue #2741).
 #
 # Declaring `capabilities` makes the model's attachment support authoritative
 # and skips the models.dev lookup entirely. The flags must match what the
@@ -37,6 +37,18 @@ models:
     capabilities:
       image: true
       pdf: true
+
+  # Custom gateway serving a model that also accepts audio and video
+  # attachments (e.g. a self-hosted Gemini-family model behind a proxy that
+  # models.dev has never seen).
+  proxy-multimodal:
+    provider: vision-proxy
+    model: gemini-2.5-pro
+    capabilities:
+      image: true
+      pdf: true
+      audio: true
+      video: true
 
 agents:
   root:

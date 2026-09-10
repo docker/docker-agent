@@ -1,12 +1,12 @@
 ---
 title: "Google Gemini"
-description: "Use Gemini 2.5 Flash, Gemini 3 Pro, and other Google models with Docker Agent."
+description: "Use Gemini 2.5 Flash, Gemini 3.1 Pro, and other Google models with Docker Agent."
 keywords: docker agent, ai agents, model providers, llm, google gemini
 weight: 120
 canonical: https://docs.docker.com/ai/docker-agent/providers/google/
 ---
 
-_Use Gemini 2.5 Flash, Gemini 3 Pro, and other Google models with Docker Agent._
+_Use Gemini 2.5 Flash, Gemini 3.1 Pro, and other Google models with Docker Agent._
 
 ## Setup
 
@@ -38,7 +38,7 @@ export GOOGLE_CLOUD_LOCATION="us-central1"
 ```yaml
 agents:
   root:
-    model: google/gemini-3.5-flash
+    model: google/gemini-3.8-flash
 ```
 
 ### Named Model
@@ -47,18 +47,87 @@ agents:
 models:
   gemini:
     provider: google
-    model: gemini-3.5-flash
+    model: gemini-3.8-flash
     temperature: 0.5
 ```
 
 ## Available Models
 
-| Model              | Best For                        |
-| ------------------ | ------------------------------- |
-| `gemini-3-pro`     | Most capable Gemini model       |
-| `gemini-3-flash`   | Fast, efficient, good balance   |
-| `gemini-2.5-flash` | Fast inference, cost-effective  |
-| `gemini-2.5-pro`   | Strong reasoning, large context |
+| Model                     | Best For                        |
+| -------------------------- | ------------------------------- |
+| `gemini-3.1-pro-preview`  | Most capable Gemini model       |
+| `gemini-3.8-flash`        | Fast, efficient, good balance   |
+| `gemini-2.5-flash`        | Fast inference, cost-effective  |
+| `gemini-2.5-pro`          | Strong reasoning, large context |
+
+## Generated Images
+
+Some Gemini models (e.g. `gemini-2.5-flash-image`) are designed to generate
+an image directly as part of their reply, not just describe one. Docker
+Agent requests that image output on supported Google surfaces — the models
+gateway, direct Gemini API, and Vertex AI — according to one binding policy:
+explicit `false`, explicit `true`, then an exact models.dev record whose
+`Modalities.Output` contains `image`. An omitted image flag, including
+`output_capabilities: {}`, uses that catalogue default. Unknown models or
+unavailable catalogue data leave image response modalities disabled; model
+names are never used to guess capability.
+Each eligible ordinary chat request asks for text *and* image output.
+Vertex AI has deterministic guard/predicate coverage; live image-generation
+validation is deferred.
+
+Docker Agent attempts to save each returned image and display it in the TUI — see [Generated Media](../../features/tui/index.md#generated-media)
+for file naming, collision handling, and rendering details.
+
+The workspace file is the visible deliverable. After that file and its manifest
+entry are saved, a portable copy is also stored in the session database and
+preferred when the session is reopened. It can render the original generated
+bytes even if the workspace file was edited, moved, or deleted.
+Generated-media storage and resolution do not impose a size cap. If portable
+persistence fails, the workspace file is still kept and the turn includes a
+warning.
+Sessions created before portable copies were introduced continue to use their
+manifest-gated workspace files.
+
+```yaml
+models:
+  gemini-image:
+    provider: google
+    model: gemini-2.5-flash-image
+```
+
+When `output_capabilities.image` is omitted, including in an empty block,
+Docker Agent uses models.dev output modalities for the exact known model. Set
+it explicitly for custom models or to override incorrect catalogue data;
+unknown or unavailable metadata remains disabled and capability is never
+guessed from the model name.
+
+Session-title and compaction requests omit image response modalities and
+bypass the guard even for image-output-capable models. They do not explicitly
+force TEXT-only output. Ordinary image-output requests with custom function tools or
+structured output are rejected locally before any request is sent. Google
+Search, Maps, and code-execution built-ins remain available. When custom
+tools conflict, Docker Agent uses models.dev's `tool_call` capability to clarify
+whether the model cannot call tools at all or supports tools only outside an
+image-output request. Unknown catalogue data keeps the conservative generic
+message.
+
+A few provider-side behaviors to know:
+
+- **The provider decides the image format** (typically PNG). Asking for a
+  `.gif` or `.svg` filename does not transcode anything — the saved file's
+  extension is corrected to match the data actually returned.
+- **An image is not guaranteed.** Even a correctly configured image model
+  can answer with text only and generate no image. At a text-only stop,
+  phrases such as "generate an image" or "draw a picture" in the last user
+  prompt trigger a nonfatal warning while preserving the reply:
+  `The model returned text but no image for this image-generation request. Try rephrasing the request.`
+  This phrase-based check is not semantic intent detection and does not
+  check output capability: negated or quoted phrases can match and other
+  wording can be missed. It does not track a whole submission across tool
+  calls, steering, stop hooks, or handoffs. A terminal provider error skips
+  this check, as does structured output configured on the current agent
+  model; per-call overrides and reply content are not independently
+  classified.
 
 ## Thinking Budget
 
@@ -93,14 +162,14 @@ models:
 
 ```yaml
 models:
-  gemini-3-pro:
+  gemini-pro:
     provider: google
-    model: gemini-3-pro
+    model: gemini-3.1-pro-preview
     thinking_budget: high # default for Pro: low | high
 
-  gemini-3-flash:
+  gemini-flash:
     provider: google
-    model: gemini-3-flash
+    model: gemini-3.8-flash
     thinking_budget: medium # default for Flash: minimal | low | medium | high
 ```
 
@@ -155,7 +224,7 @@ gcloud auth application-default login
 models:
   claude-on-vertex:
     provider: google
-    model: claude-sonnet-4-20250514
+    model: claude-sonnet-5
     provider_opts:
       project: my-gcp-project       # GCP project ID (or set GOOGLE_CLOUD_PROJECT)
       location: us-east5             # GCP region (or set GOOGLE_CLOUD_LOCATION)

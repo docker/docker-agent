@@ -47,7 +47,7 @@ $ docker agent new --model openai/gpt-5
 $ docker agent new --model dmr/ai/gemma3-qat:12B --max-iterations 15
 ```
 
-This generates an `agent.yaml` in the current directory. Then run it:
+The builder chooses a filename based on the agent's purpose. Run the file it creates; for example, if it creates `agent.yaml`:
 
 ```bash
 $ docker agent run agent.yaml

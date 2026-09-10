@@ -24,7 +24,7 @@ func TestConvertDocumentGemini_StrategyB64_Image(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	visionCaps := modelinfo.CapsWith(true, true)
+	visionCaps := modelinfo.CapsWith(true, true, false, false)
 	part, err := convertDocumentWithCaps(t.Context(), doc, visionCaps)
 	require.NoError(t, err)
 	require.NotNil(t, part, "expected a non-nil part for B64 image")
@@ -44,7 +44,7 @@ func TestConvertDocumentGemini_StrategyB64_ImageDropped(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	textOnlyCaps := modelinfo.CapsWith(false, false)
+	textOnlyCaps := modelinfo.CapsWith(false, false, false, false)
 	part, err := convertDocumentWithCaps(t.Context(), doc, textOnlyCaps)
 	require.NoError(t, err)
 	assert.Nil(t, part, "image should be dropped for text-only model")

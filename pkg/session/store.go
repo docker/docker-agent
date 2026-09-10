@@ -19,9 +19,11 @@ import (
 )
 
 var (
-	ErrEmptyID       = errors.New("session ID cannot be empty")
-	ErrNotFound      = errors.New("session not found")
-	ErrNewerDatabase = errors.New("session database was created by a newer version of docker-agent")
+	ErrEmptyID        = errors.New("session ID cannot be empty")
+	ErrNotFound       = errors.New("session not found")
+	ErrAlreadyExists  = errors.New("session already exists")
+	ErrOriginMismatch = errors.New("session origin cannot be changed")
+	ErrNewerDatabase  = errors.New("session database was created by a newer version of docker-agent")
 )
 
 // IsRelativeSessionRef reports whether ref is a relative session reference
@@ -91,7 +93,10 @@ type Summary struct {
 type Store interface {
 	// === Core session operations ===
 	AddSession(ctx context.Context, session *Session) error
+	// GetSession retrieves a session by ID.
 	GetSession(ctx context.Context, id string) (*Session, error)
+	// GetSessionByOrigin retrieves a session by ID only when it belongs to origin.
+	GetSessionByOrigin(ctx context.Context, id, origin string) (*Session, error)
 	GetSessions(ctx context.Context) ([]*Session, error)
 	GetSessionSummaries(ctx context.Context) ([]Summary, error)
 	DeleteSession(ctx context.Context, id string) error
@@ -104,15 +109,21 @@ type Store interface {
 	// Returns the ID of the created message item.
 	AddMessage(ctx context.Context, sessionID string, msg *Message) (int64, error)
 
-	// UpdateMessage updates an existing message by its ID.
+	// UpdateMessage updates a message belonging to sessionID by its ID.
 	// This is called on each streaming delta to keep the persisted message
 	// in sync with the in-progress content, and once more with the final
 	// payload when the message completes.
-	UpdateMessage(ctx context.Context, messageID int64, msg *Message) error
+	UpdateMessage(ctx context.Context, sessionID string, messageID int64, msg *Message) error
 
 	// AddSubSession creates a sub-session and links it to the parent.
 	// The sub-session is stored as a separate session row with parent_id set.
 	AddSubSession(ctx context.Context, parentSessionID string, subSession *Session) error
+
+	// PersistCompaction atomically upserts session metadata and its summary item.
+	// A missing row is created (matching UpdateSession); an existing row is only
+	// updated when its origin matches. Implementations must apply resulting cost
+	// and must not append twice when session aliases the stored live object.
+	PersistCompaction(ctx context.Context, session *Session, inputTokens, outputTokens int64, item Item) error
 
 	// AddSummary adds a summary item to a session at the next position.
 	// item.FirstKeptEntry is the index of the first message kept verbatim during
@@ -137,13 +148,17 @@ type Store interface {
 }
 
 type InMemorySessionStore struct {
-	sessions  *concurrent.Map[string, *Session]
-	messageID atomic.Int64 // counter for message IDs, incremented via Add(1)
+	sessions       *concurrent.Map[string, *Session]
+	generatedFiles *concurrent.Map[string, GeneratedFile] // keyed by generatedFileKey
+	generatedBlobs *concurrent.Map[string, []byte]        // keyed by generatedFileKey
+	messageID      atomic.Int64                           // counter for message IDs, incremented via Add(1)
 }
 
 func NewInMemorySessionStore() Store {
 	return &InMemorySessionStore{
-		sessions: concurrent.NewMap[string, *Session](),
+		sessions:       concurrent.NewMap[string, *Session](),
+		generatedFiles: concurrent.NewMap[string, GeneratedFile](),
+		generatedBlobs: concurrent.NewMap[string, []byte](),
 	}
 }
 
@@ -151,7 +166,9 @@ func (s *InMemorySessionStore) AddSession(_ context.Context, session *Session) e
 	if session.ID == "" {
 		return ErrEmptyID
 	}
-	s.sessions.Store(session.ID, session)
+	if _, loaded := s.sessions.LoadOrStore(session.ID, session); loaded {
+		return fmt.Errorf("add session %q: %w", session.ID, ErrAlreadyExists)
+	}
 	return nil
 }
 
@@ -161,6 +178,17 @@ func (s *InMemorySessionStore) GetSession(_ context.Context, id string) (*Sessio
 	}
 	session, exists := s.sessions.Load(id)
 	if !exists {
+		return nil, ErrNotFound
+	}
+	return session, nil
+}
+
+func (s *InMemorySessionStore) GetSessionByOrigin(_ context.Context, id, origin string) (*Session, error) {
+	if id == "" {
+		return nil, ErrEmptyID
+	}
+	session, exists := s.sessions.Load(id)
+	if !exists || session.Origin != origin {
 		return nil, ErrNotFound
 	}
 	return session, nil
@@ -209,6 +237,8 @@ func (s *InMemorySessionStore) DeleteSession(_ context.Context, id string) error
 		return ErrNotFound
 	}
 	s.sessions.Delete(id)
+	s.deleteGeneratedFiles(id)
+	s.deleteGeneratedBlobs(id)
 	return nil
 }
 
@@ -227,6 +257,7 @@ func (s *InMemorySessionStore) UpdateSession(_ context.Context, session *Session
 	session.mu.RLock()
 	newSession := &Session{
 		ID:                  session.ID,
+		Origin:              session.Origin,
 		Title:               session.Title,
 		Evals:               session.Evals,
 		CreatedAt:           session.CreatedAt,
@@ -250,9 +281,13 @@ func (s *InMemorySessionStore) UpdateSession(_ context.Context, session *Session
 	}
 	session.mu.RUnlock()
 
-	// Preserve existing messages if session already exists
+	// Preserve existing messages and reject origin changes if session already exists.
 	if existing, exists := s.sessions.Load(session.ID); exists {
 		existing.mu.RLock()
+		if existing.Origin != newSession.Origin {
+			existing.mu.RUnlock()
+			return fmt.Errorf("update session %q: %w", session.ID, ErrOriginMismatch)
+		}
 		newSession.Messages = make([]Item, len(existing.Messages))
 		copy(newSession.Messages, existing.Messages)
 		existing.mu.RUnlock()
@@ -296,32 +331,31 @@ func (s *InMemorySessionStore) AddMessage(_ context.Context, sessionID string, m
 	return id, nil
 }
 
-// UpdateMessage updates an existing message by its ID.
-func (s *InMemorySessionStore) UpdateMessage(_ context.Context, messageID int64, msg *Message) error {
+// UpdateMessage updates a message belonging to sessionID by its ID.
+func (s *InMemorySessionStore) UpdateMessage(_ context.Context, sessionID string, messageID int64, msg *Message) error {
+	if sessionID == "" {
+		return ErrEmptyID
+	}
+	session, exists := s.sessions.Load(sessionID)
+	if !exists {
+		return ErrNotFound
+	}
+
 	// Create a deep copy of the message to avoid mutating the caller's pointer,
 	// which may be shared with another Session object.
 	updated := cloneMessage(msg)
 	updated.ID = messageID
 
-	// For in-memory store, we need to find the message across all sessions
-	var found bool
-	s.sessions.Range(func(_ string, session *Session) bool {
-		session.mu.Lock()
-		defer session.mu.Unlock()
-		for i := range session.Messages {
-			if session.Messages[i].Message == nil || session.Messages[i].Message.ID != messageID {
-				continue
-			}
-			session.Messages[i].Message = updated
-			found = true
-			return false
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	for i := range session.Messages {
+		if session.Messages[i].Message == nil || session.Messages[i].Message.ID != messageID {
+			continue
 		}
-		return true
-	})
-	if !found {
-		return ErrNotFound
+		session.Messages[i].Message = updated
+		return nil
 	}
-	return nil
+	return ErrNotFound
 }
 
 // AddSubSession creates a sub-session and links it to the parent.
@@ -336,6 +370,60 @@ func (s *InMemorySessionStore) AddSubSession(_ context.Context, parentSessionID 
 	subSession.ParentID = parentSessionID
 	s.sessions.Store(subSession.ID, subSession)
 	parent.AddSubSession(subSession)
+	return nil
+}
+
+func compactionSessionSnapshot(session *Session, inputTokens, outputTokens int64, item Item) (*Session, float64) {
+	session.mu.RLock()
+	defer session.mu.RUnlock()
+	resultingCost := session.totalCostLocked() + item.Cost
+	return &Session{
+		ID:                  session.ID,
+		Origin:              session.Origin,
+		Title:               session.Title,
+		CreatedAt:           session.CreatedAt,
+		ToolsApproved:       session.ToolsApproved,
+		SafetyPolicy:        session.SafetyPolicy,
+		HideToolResults:     session.HideToolResults,
+		WorkingDir:          session.WorkingDir,
+		SendUserMessage:     session.SendUserMessage,
+		MaxIterations:       session.MaxIterations,
+		Starred:             session.Starred,
+		InputTokens:         inputTokens,
+		OutputTokens:        outputTokens,
+		Cost:                resultingCost,
+		Permissions:         session.Permissions.Clone(),
+		Attributes:          maps.Clone(session.Attributes),
+		AgentModelOverrides: cloneStringMap(session.AgentModelOverrides),
+		CustomModelsUsed:    cloneStringSlice(session.CustomModelsUsed),
+		InstructionContext:  cloneInstructionContext(session.InstructionContext),
+		ParentID:            session.ParentID,
+	}, resultingCost
+}
+
+// PersistCompaction atomically reflects a successful compaction in the stored
+// session and applies it to compacted. The common in-memory case stores the
+// live session pointer, so the operation must append exactly once.
+func (s *InMemorySessionStore) PersistCompaction(_ context.Context, compacted *Session, inputTokens, outputTokens int64, item Item) error {
+	if compacted.ID == "" {
+		return ErrEmptyID
+	}
+	snapshot, resultingCost := compactionSessionSnapshot(compacted, inputTokens, outputTokens, item)
+	stored, exists := s.sessions.Load(snapshot.ID)
+	if !exists {
+		compacted.applyCompaction(inputTokens, outputTokens, resultingCost, item)
+		s.sessions.Store(snapshot.ID, compacted)
+		return nil
+	}
+	if stored.Origin != snapshot.Origin {
+		return fmt.Errorf("persist compaction %q: %w", snapshot.ID, ErrOriginMismatch)
+	}
+	if stored == compacted {
+		compacted.applyCompaction(inputTokens, outputTokens, resultingCost, item)
+		return nil
+	}
+	stored.applyCompaction(inputTokens, outputTokens, resultingCost, item)
+	compacted.applyCompaction(inputTokens, outputTokens, resultingCost, item)
 	return nil
 }
 
@@ -383,7 +471,7 @@ type SQLiteSessionStore struct {
 // sessionSelectColumns is the canonical SELECT list for the sessions table.
 // The column order matches what scanSession expects; all read paths use this
 // constant so that adding a column requires updating exactly one place.
-const sessionSelectColumns = `id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id, instruction_context, attributes`
+const sessionSelectColumns = `id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message, max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides, custom_models_used, thinking, parent_id, instruction_context, attributes`
 
 // sessionPersistedFields holds the encoded form of a Session's JSON-bearing
 // columns plus the SQL representation of parent_id (nil for the empty
@@ -557,11 +645,11 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO sessions (
-			id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
+			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, permissions, agent_model_overrides,
 			custom_models_used, thinking, parent_id, instruction_context, attributes
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens, session.Title,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.ID, session.Origin, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens, session.Title,
 		session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
 		session.CreatedAt.Format(time.RFC3339), fields.PermissionsJSON, fields.AgentModelOverridesJSON,
 		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON)
@@ -602,7 +690,7 @@ func scanSession(scanner interface {
 	)
 
 	err := scanner.Scan(
-		&sess.ID, &sess.ToolsApproved, &safetyPolicy, &sess.InputTokens, &sess.OutputTokens,
+		&sess.ID, &sess.Origin, &sess.ToolsApproved, &safetyPolicy, &sess.InputTokens, &sess.OutputTokens,
 		&sess.Title, &sess.Cost, &sess.SendUserMessage, &sess.MaxIterations,
 		&workingDir, &createdAtStr, &sess.Starred, &permissionsJSON,
 		&agentModelOverridesJSON, &customModelsUsedJSON, &thinking, &parentID, &instructionContextJSON, &attributesJSON,
@@ -787,10 +875,37 @@ func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, se
 	return items, nil
 }
 
+func (s *SQLiteSessionStore) GetSessionByOrigin(ctx context.Context, id, origin string) (*Session, error) {
+	if id == "" {
+		return nil, ErrEmptyID
+	}
+	return s.loadSessionByOrigin(ctx, s.db, id, origin)
+}
+
 // loadSession retrieves a session by ID using the supplied querier.
 func (s *SQLiteSessionStore) loadSession(ctx context.Context, q querier, id string) (*Session, error) {
 	row := q.QueryRowContext(ctx,
 		"SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ?", id)
+
+	sess, err := scanSession(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+
+	sess.Messages, err = s.loadSessionItems(ctx, q, id)
+	if err != nil {
+		return nil, fmt.Errorf("loading session items: %w", err)
+	}
+
+	return sess, nil
+}
+
+func (s *SQLiteSessionStore) loadSessionByOrigin(ctx context.Context, q querier, id, origin string) (*Session, error) {
+	row := q.QueryRowContext(ctx,
+		"SELECT "+sessionSelectColumns+" FROM sessions WHERE id = ? AND origin = ?", id, origin)
 
 	sess, err := scanSession(row)
 	if err != nil {
@@ -889,8 +1004,22 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 		return ErrEmptyID
 	}
 
-	result, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
+	// These tables carry no foreign keys because media may be recorded before
+	// the lazily persisted session row exists, so prune them explicitly.
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM generated_media_blobs WHERE session_id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM generated_media_manifest WHERE session_id = ?", id); err != nil {
 		return err
 	}
 
@@ -903,7 +1032,7 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 		return ErrNotFound
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 // UpdateSession updates an existing session's metadata, or creates it if it doesn't exist (upsert).
@@ -922,6 +1051,7 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 	session.mu.RLock()
 	snapshot := &Session{
 		ID:                  session.ID,
+		Origin:              session.Origin,
 		Title:               session.Title,
 		CreatedAt:           session.CreatedAt,
 		ToolsApproved:       session.ToolsApproved,
@@ -956,13 +1086,13 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 	defer func() { _ = tx.Rollback() }()
 
 	// Use INSERT OR REPLACE for upsert behavior - creates if not exists, updates if exists
-	_, err = tx.ExecContext(ctx,
+	result, err := tx.ExecContext(ctx,
 		`INSERT INTO sessions (
-			id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
+			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
 			custom_models_used, thinking, parent_id, instruction_context, attributes
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
 		   title = excluded.title,
 		   tools_approved = excluded.tools_approved,
@@ -980,13 +1110,21 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		   thinking = excluded.thinking,
 		   parent_id = excluded.parent_id,
 		   instruction_context = excluded.instruction_context,
-		   attributes = excluded.attributes`,
-		snapshot.ID, snapshot.ToolsApproved, string(snapshot.SafetyPolicy), snapshot.InputTokens, snapshot.OutputTokens,
+		   attributes = excluded.attributes
+		 WHERE sessions.origin = excluded.origin`,
+		snapshot.ID, snapshot.Origin, snapshot.ToolsApproved, string(snapshot.SafetyPolicy), snapshot.InputTokens, snapshot.OutputTokens,
 		snapshot.Title, snapshot.Cost, snapshot.SendUserMessage, snapshot.MaxIterations, snapshot.WorkingDir,
 		snapshot.CreatedAt.Format(time.RFC3339), snapshot.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
 		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON)
 	if err != nil {
 		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("update session %q: %w", session.ID, ErrOriginMismatch)
 	}
 
 	// Note: Messages are NOT persisted here. They are persisted via events
@@ -1018,9 +1156,23 @@ func (s *SQLiteSessionStore) SetSessionStarred(ctx context.Context, id string, s
 	return nil
 }
 
-// Close closes the database connection
+// closeDrainTimeout bounds how long Close waits for in-use connections.
+const closeDrainTimeout = 5 * time.Second
+
+// Close closes the database connection, waiting for in-flight statements to
+// release it so the file can be removed immediately afterwards. sql.DB.Close
+// only closes idle connections; a background persistence write still holding
+// one keeps the file open on Windows until it returns.
+//
+// Mirrors sqliteutil.CloseDB; duplicated so pkg/session stays free of the
+// SQLite driver (see pkg/session/sqlitestore).
 func (s *SQLiteSessionStore) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	deadline := time.Now().Add(closeDrainTimeout)
+	for s.db.Stats().OpenConnections > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	return err
 }
 
 // AddMessage adds a message to a session at the next position.
@@ -1053,16 +1205,19 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, sessionID string, m
 	return id, nil
 }
 
-// UpdateMessage updates an existing message by its ID.
-func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, messageID int64, msg *Message) error {
+// UpdateMessage updates a message belonging to sessionID by its ID.
+func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string, messageID int64, msg *Message) error {
+	if sessionID == "" {
+		return ErrEmptyID
+	}
 	msgJSON, err := json.Marshal(msg.Message)
 	if err != nil {
 		return fmt.Errorf("marshaling message: %w", err)
 	}
 
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE session_items SET message_json = ?, implicit = ? WHERE id = ?`,
-		string(msgJSON), msg.Implicit, messageID)
+		`UPDATE session_items SET message_json = ?, implicit = ? WHERE session_id = ? AND id = ?`,
+		string(msgJSON), msg.Implicit, sessionID, messageID)
 	if err != nil {
 		return fmt.Errorf("updating message: %w", err)
 	}
@@ -1129,12 +1284,12 @@ func (s *SQLiteSessionStore) addSessionTx(ctx context.Context, tx *sql.Tx, sessi
 
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO sessions (
-			id, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
+			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
 			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
 			custom_models_used, thinking, parent_id, instruction_context, attributes
 		)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		session.ID, session.Origin, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens,
 		session.Title, session.Cost, session.SendUserMessage, session.MaxIterations,
 		session.WorkingDir, session.CreatedAt.Format(time.RFC3339), session.Starred,
 		fields.PermissionsJSON, fields.AgentModelOverridesJSON, fields.CustomModelsUsedJSON, false,
@@ -1215,6 +1370,68 @@ func (s *SQLiteSessionStore) addItemTx(ctx context.Context, tx *sql.Tx, sessionI
 	default:
 		return nil // Empty item, skip
 	}
+}
+
+// PersistCompaction commits the compaction metadata and summary row in one
+// transaction so a reload cannot observe only half of the continuation state.
+func (s *SQLiteSessionStore) PersistCompaction(ctx context.Context, compacted *Session, inputTokens, outputTokens int64, item Item) error {
+	if compacted.ID == "" {
+		return ErrEmptyID
+	}
+	usageJSON, err := summaryUsageJSON(item.Usage)
+	if err != nil {
+		return err
+	}
+	snapshot, resultingCost := compactionSessionSnapshot(compacted, inputTokens, outputTokens, item)
+	fields, err := sessionPersistedFieldsOf(snapshot)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx,
+		`INSERT INTO sessions (
+			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
+			max_iterations, working_dir, created_at, starred, permissions, agent_model_overrides,
+			custom_models_used, thinking, parent_id, instruction_context, attributes
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			input_tokens = excluded.input_tokens,
+			output_tokens = excluded.output_tokens,
+			cost = excluded.cost
+		WHERE sessions.origin = excluded.origin`,
+		snapshot.ID, snapshot.Origin, snapshot.ToolsApproved, string(snapshot.SafetyPolicy), snapshot.InputTokens, snapshot.OutputTokens,
+		snapshot.Title, snapshot.Cost, snapshot.SendUserMessage, snapshot.MaxIterations, snapshot.WorkingDir,
+		snapshot.CreatedAt.Format(time.RFC3339), snapshot.Starred, fields.PermissionsJSON, fields.AgentModelOverridesJSON,
+		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("persist compaction %q: %w", snapshot.ID, ErrOriginMismatch)
+	}
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO session_items (session_id, position, item_type, summary_text, first_kept_entry, cost, model, usage_json)
+		 VALUES (?, (SELECT COALESCE(MAX(position), -1) + 1 FROM session_items WHERE session_id = ?), 'summary', ?, ?, ?, ?, ?)`,
+		snapshot.ID, snapshot.ID, item.Summary, item.FirstKeptEntry, item.Cost, item.Model, usageJSON)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	compacted.applyCompaction(inputTokens, outputTokens, resultingCost, item)
+	return nil
 }
 
 // AddSummary adds a summary item to a session at the next position.

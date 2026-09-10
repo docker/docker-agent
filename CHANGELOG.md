@@ -3,6 +3,596 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.137.0] - 2026-09-09
+
+This release removes the `session_plan` toolset, adds audio/video/image input and output capability handling, expands hook functionality with new builtins and sequential pipelines, and includes several bug fixes and safety improvements.
+
+## Breaking Changes
+- Removes the `session_plan` toolset, including its tool handlers, stream event, plans service, TUI `/plans` browser, and `--session`/`--scope` addressing on the `plans` command
+
+## What's New
+- Adds detection and filtering of audio/video input modalities per request model, stripping unsupported media parts and preserving provider-specific fallbacks
+- Adds `output_capabilities.image` model override to resolve image output capability from models.dev metadata
+- Adds guard for image-output requests across Google (gateway, direct Gemini API, and Vertex) surfaces, rejecting incompatible custom tools and structured output before dispatch
+- Adds `add_context` builtin hook for dependency-free Go template-based context injection into the model's conversation
+- Adds sequential pipeline execution for `pre_tool_use`, `before_llm_call`, and `tool_response_transform` hooks, replacing the previous concurrent first-rewrite-wins strategy
+- Adds 56 new safe and 27 new destructive shell safety patterns, covering Git read operations, GitHub CLI queries, Go tooling, `rg`/`ripgrep`, and common inspection commands
+
+## Bug Fixes
+- Fixes Gemini keepalive SSE events (`event: keepalive` with `data: {}`) being passed to the SDK parser, causing parse failures; these frames are now dropped at the transport layer
+- Fixes image-output-capable models being incorrectly excluded from session title generation
+- Fixes shell metacharacter detection and corrects `gh`/`rg` pattern classifications
+- Fixes SQLite stores not being closed deterministically on Windows, causing `TempDir` cleanup failures in tests
+- Fixes `pkg/session` importing the SQLite driver, keeping the package free of that dependency
+
+## Technical Changes
+- Adds request-shape diagnostics for Gemini image requests (excluding prompt, schema, media-payload, and credential fields)
+- Adds shared UTF-8-safe display-name sanitization helpers
+- Classifies Gemini API 400 errors into bounded actionable categories
+- Adds documentation tip for injecting session ID into model context using a `session_start` hook
+### Pull Requests
+
+- [#3996](https://github.com/docker/docker-agent/pull/3996) - feat(#3996): detect audio/video input modalities
+- [#4016](https://github.com/docker/docker-agent/pull/4016) - feat(#3996): resolve and filter input media per request model
+- [#4017](https://github.com/docker/docker-agent/pull/4017) - fix(#3996): diagnose Gemini requests and sanitize API failures
+- [#4019](https://github.com/docker/docker-agent/pull/4019) - feat(#3996): resolve image output capability from models.dev
+- [#4020](https://github.com/docker/docker-agent/pull/4020) - feat(#3996): guard image-output requests across Google surfaces
+- [#4021](https://github.com/docker/docker-agent/pull/4021) - fix(#3996): keep image-output models eligible for session titles
+- [#4022](https://github.com/docker/docker-agent/pull/4022) - fix(#3996): filter gateway SSE keepalives and test image requests
+- [#4199](https://github.com/docker/docker-agent/pull/4199) - feat(plan)!: remove the session_plan toolset
+- [#4202](https://github.com/docker/docker-agent/pull/4202) - docs: update CHANGELOG.md for v1.136.0
+- [#4203](https://github.com/docker/docker-agent/pull/4203) - fix: drop Gemini keepalive SSE events before SDK parsing
+- [#4205](https://github.com/docker/docker-agent/pull/4205) - docs: add tip for injecting session ID with a session_start hook
+- [#4206](https://github.com/docker/docker-agent/pull/4206) - feat(hooks): add add_context builtin for dependency-free template context injection
+- [#4207](https://github.com/docker/docker-agent/pull/4207) - feat(hooks): sequential pipeline for pre_tool_use, before_llm_call, and tool_response_transform
+- [#4209](https://github.com/docker/docker-agent/pull/4209) - feat(safety): expand shell safety patterns and harden substitution checks
+- [#4210](https://github.com/docker/docker-agent/pull/4210) - fix(tui): close SQLite stores deterministically so Windows can delete t.TempDir
+
+
+## [v1.136.0] - 2026-09-08
+
+This release adds support for carrying encrypted agent config in the request body instead of headers, addressing potential header-size limit issues.
+
+## What's New
+- Adds support for carrying encrypted agent config in the request body (as `encrypted_agent_config` field) and config-load envelope, replacing the previous `X-Cagent-Encrypted-Config` header approach to avoid header-size limit constraints
+
+## Technical Changes
+- Updates `docker-agent-action` reference to v2.0.6 in the PR review workflow
+### Pull Requests
+
+- [#4196](https://github.com/docker/docker-agent/pull/4196) - docs: update CHANGELOG.md for v1.135.0
+- [#4200](https://github.com/docker/docker-agent/pull/4200) - chore: update docker-agent-action to v2.0.6
+- [#4201](https://github.com/docker/docker-agent/pull/4201) - feat(gateway): carry encrypted agent config in request body and config-load envelope
+
+
+## [v1.135.0] - 2026-09-08
+
+This release delivers a broad set of stability and security hardening fixes across session management, pricing, and background job handling, plus a new `/copy` command in the lean TUI.
+
+## What's New
+- Adds a `/copy` command to the lean TUI that copies the last assistant response to the clipboard via OSC 52 and the native clipboard API, with feedback on success or when no response exists
+- Adds per-runtime harness factory configuration via `WithHarnessFactory`
+- Adds per-instance command evaluator configuration for the runtime
+
+## Bug Fixes
+- Fixes delayed title events leaking across session streams
+- Fixes blocked session event sends not being cancelled
+- Fixes remote MCP connections to protect against SSRF
+- Fixes live session permission updates to be properly synchronized
+- Fixes ACP session turns to be serialized correctly
+- Fixes app turns being incorrectly shared across sessions instead of bound to their own session
+- Fixes OCI cache references to be scoped by registry
+- Fixes message updates to be scoped to their own session
+- Fixes session model switches to be serialized
+- Fixes background agent admission to be atomic
+- Fixes background jobs to terminate reliably
+- Fixes scheduled recalls to retry on failure
+- Fixes task description file reads to be confined
+- Fixes task store updates to be transactional
+- Fixes unreadable task stores being overwritten instead of preserved
+- Fixes stale Unix sockets to be safely reclaimed
+- Fixes remote agent configuration size to be limited
+- Fixes long-context model pricing tiers not being accounted for (e.g. GPT-5.4 above 272k tokens, Gemini 2.5 Pro above 200k tokens were previously billed at the base flat rate)
+- Fixes fallback model requests being billed against the primary model's rates instead of the model that actually handled the call
+- Fixes catalog refresh to be limited to long-context pricing tiers
+- Fixes config cost not being applied after fallback model resolution
+- Fixes WASM provider registration to be explicit, removing implicit inclusion of all browser-compatible SDKs
+
+## Technical Changes
+- Extracts a JavaScript-free HTTP tool client into a new `pkg/tools/builtin/api/client` leaf package, removing `goja`, `regexp2/v2`, `go-sourcemap`, and `google/pprof` from the dependency closure of non-JS embedders
+- Inlines the single-use context tier constant
+### Pull Requests
+
+- [#4185](https://github.com/docker/docker-agent/pull/4185) - fix: harden concurrent and external resource handling
+- [#4186](https://github.com/docker/docker-agent/pull/4186) - fix(http): bound the SSRF pre-check DNS lookup in desktopAwareTransport
+- [#4187](https://github.com/docker/docker-agent/pull/4187) - docs: update CHANGELOG.md for v1.134.0
+- [#4188](https://github.com/docker/docker-agent/pull/4188) - feat: add copy command to lean TUI
+- [#4189](https://github.com/docker/docker-agent/pull/4189) - fix: account for long-context tiers and fallback model pricing
+- [#4192](https://github.com/docker/docker-agent/pull/4192) - fix: make WASM provider registration explicit
+- [#4193](https://github.com/docker/docker-agent/pull/4193) - refactor(api): extract JavaScript-free HTTP client leaf and per-runtime factory options
+- [#4194](https://github.com/docker/docker-agent/pull/4194) - docs: auto-update for merged PRs (2026-09-08)
+
+
+## [v1.134.0] - 2026-09-07
+
+This release adds machine-readable output to debug commands, improves RAG indexing reliability, fixes config handling for removed fields, and includes a large batch of documentation corrections.
+
+## What's New
+
+- Adds `--json` flag to `debug toolsets` and `debug skills` subcommands for machine-readable output
+- Accepts positional flavor names on `debug config` (e.g., `docker agent debug config examples/flavors.yaml cheap with-shell`)
+- Decouples RAG indexing from the caller timeout via a new `indexing_timeout` config option, preventing large knowledge base indexing from being discarded when the 30s startup budget is exceeded
+- Pins the injected docker-agent image to the host CLI version by default in `docker agent eval`
+
+## Bug Fixes
+
+- Fixes config upgrade hinting at removed fields (e.g., `safer`) instead of silently re-adding them
+- Always records the resolved agent image in saved eval run JSON
+- Bounds the SSRF pre-check DNS lookup in `desktopAwareTransport` to 2 seconds to prevent hangs on corporate networks
+- Replaces removed `github-copilot/gpt-4.1` model with `gpt-5.5` in the models snapshot
+
+## Technical Changes
+
+- Freezes config schema v15 as an immutable package and advances `latest` to v16
+- Refreshes the embedded models.dev catalog snapshot (129 models added, 67 removed, ~322 updated)
+- Corrects 53 documentation inaccuracies across 34 files covering SDK examples, CLI flags, telemetry, permissions, and integrations
+### Pull Requests
+
+- [#4073](https://github.com/docker/docker-agent/pull/4073) - Merge pull request #4172 from docker/feat/4073-rag-indexing-timeout
+- [#4170](https://github.com/docker/docker-agent/pull/4170) - feat(config): freeze v15 and start v16 as latest
+- [#4171](https://github.com/docker/docker-agent/pull/4171) - docs: update CHANGELOG.md for v1.133.0
+- [#4172](https://github.com/docker/docker-agent/pull/4172) - feat(rag): decouple indexing from caller timeout via indexing_timeout config (#4073)
+- [#4173](https://github.com/docker/docker-agent/pull/4173) - feat(debug): add --json flag to debug toolsets and skills
+- [#4174](https://github.com/docker/docker-agent/pull/4174) - feat(debug): accept positional flavors on `debug config`
+- [#4176](https://github.com/docker/docker-agent/pull/4176) - feat(eval): pin injected docker-agent image to host CLI version by default
+- [#4177](https://github.com/docker/docker-agent/pull/4177) - fix(config): hint at removed fields instead of re-adding them
+- [#4178](https://github.com/docker/docker-agent/pull/4178) - docs: auto-update for merged PRs (2026-09-05)
+- [#4183](https://github.com/docker/docker-agent/pull/4183) - chore: refresh models.dev snapshot (+129 -67 ~322)
+- [#4184](https://github.com/docker/docker-agent/pull/4184) - docs: fix inaccuracies across SDK examples, CLI flags, telemetry, permissions, and integrations
+- [#4186](https://github.com/docker/docker-agent/pull/4186) - fix(http): bound the SSRF pre-check DNS lookup in desktopAwareTransport
+
+
+## [v1.133.0] - 2026-09-04
+
+This release improves safety classification for background jobs and shell commands, enhances the `--key` option for share commands, and advances the internal config schema to v16.
+
+## Breaking Changes
+
+- The `safer` boolean flag removed from the shell toolset (see Technical Changes below) is now rejected outright: a config that still sets `safer: true` on a shell toolset fails to load with `unknown field "safer"` instead of loading silently, including version-less configs (which resolve to the latest schema). Delete the flag — it has had no effect since v1.117.0, superseded by session-wide [safety modes](https://github.com/docker/docker-agent/blob/main/examples/safety_modes.yaml). Pinning `version: "14"` (or lower) is not the fix, since frozen schema versions are not maintained long-term; the field must be removed from the YAML. The load-time error now includes a hint naming the last config version that accepted the field.
+
+## What's New
+
+- Adds classification of `run_background_job` commands using the same safety rules as shell commands, so background jobs are now properly evaluated (and prompted or denied) based on their actual command content
+- The `--key` flag for `docker agent share push` and `docker agent share pull` now accepts either inline key material directly or a `file://`-prefixed path, in addition to the previous file path behavior
+
+## Bug Fixes
+
+- Fixes atomic per-file vector store persistence so that file hash updates and chunk deletions no longer occur prematurely during the embedding process
+- Fixes safety classification to resolve `cmd`/`command` arguments the same way the handlers do, ensuring the classified command matches what is actually executed
+
+## Technical Changes
+
+- Removes the deprecated `safer` boolean flag from the shell toolset in config version 15
+- Freezes config schema v15 as an immutable package and advances `latest` to v16
+### Pull Requests
+
+- [#4073](https://github.com/docker/docker-agent/pull/4073) - fix(rag): atomic per-file vector store persistence (#4073)
+- [#4158](https://github.com/docker/docker-agent/pull/4158) - fix(rag): atomic per-file vector store persistence (#4073)
+- [#4166](https://github.com/docker/docker-agent/pull/4166) - feat(safety): classify run_background_job commands like shell
+- [#4167](https://github.com/docker/docker-agent/pull/4167) - docs: update CHANGELOG.md for v1.132.0
+- [#4168](https://github.com/docker/docker-agent/pull/4168) - feat(share): accept inline key or file:// path for --key
+- [#4169](https://github.com/docker/docker-agent/pull/4169) - refactor(config): remove deprecated safer shell flag from v15
+- [#4170](https://github.com/docker/docker-agent/pull/4170) - feat(config): freeze v15 and start v16 as latest
+
+
+## [v1.132.0] - 2026-09-04
+
+This release adds OCI artifact signing/encryption for shared agents, live git branch updates in TUI footers, and a range of bug fixes across the OpenAI provider, runtime streaming, RAG toolsets, and schema handling.
+
+## What's New
+
+- Adds `--key` flag to `docker agent share push` to sign or encrypt agent YAML in OCI artifacts
+- Forwards encrypted agent config to the Docker models gateway at runtime for verification
+- Adds live git branch updates in TUI footers using an event-driven watcher (supports repositories and linked worktrees)
+- Accepts `instruction` as a list of strings in config, allowing flavors to append to a base prompt instead of replacing it wholesale
+- Adds `config.Requires` to audit a config's providers, toolsets, and features; adds `WithStrict` to reject configs using unenabled providers, toolsets, or features
+- Removes the context usage progress bar (`██████░░░░`) from the lean TUI footer
+- Adds non-blocking `StartableToolSet` status check to avoid blocking on long-running toolset starts
+- Adds `EmbeddedSnapshot` and `Fetch` helpers to the modelsdev package
+- Recognizes the `gpt-6` model family via generation-based parsing, enabling correct Responses API, reasoning effort, and token field handling
+
+## Improvements
+
+- Config now hints at the newer version on type errors, not just unknown keys
+- `docker agent share push` now pushes HCL configs as resolved, self-contained YAML (previously broken for HCL agents)
+- Exports per-toolset `Creator` funcs and `provider.Adapt` for hand-picked registries in lean YAML loading
+
+## Bug Fixes
+
+- Fixes TUI stuck on "Working…" after stream ends by delivering `StreamStopped` with a bounded blocking send and synthesizing it when the runtime stream closes without one
+- Fixes `oneOf`/`allOf` and `$defs`/`$ref` not being validated before enabling OpenAI strict mode, which could cause tool schema errors
+- Stops injecting `type:object` onto `anyOf`/`oneOf`/`allOf` nodes; handles Responses API `response.incomplete`/`failed` events
+- Fixes OpenAI provider to degrade gracefully on Chat Completions for `gpt-5.4+` when `tools+effort` is used, and warns on ignored `thinking_budget`
+- Fixes `protect` package to require signatures for asymmetric keys, harden key parsing, parse `authorized_keys` with options, tighten key-kind detection, reject impossible encrypted copies, fail closed on any PEM or OpenSSH marker in a key file, and match OpenSSH key-type markers as plain substrings
+- Fixes pacing of retryable partial-start failures in code-mode composites to prevent burst-retrying on every turn
+- Propagates sustained RAG 5xx/408 indexing failures to the backoff gate (previously only 429 was gated)
+- Fixes stale Fireworks `kimi-k2-instruct` model reference, replacing it with `accounts/fireworks/models/kimi-k3`
+- Fixes config handling of a forced reload that still returns 304
+- Fixes external agents to inherit every loader capability option
+- Fixes strict audit to run before any network or environment access
+- Fixes `provider` to serve OpenAI protocol variants from the `"openai"` factory
+- Fixes config to audit per-toolset and fork-skill model overrides in `Requires`
+- Fixes `tools` to keep config-free toolset packages free of `pkg/config`
+- Logs raw incomplete/unhandled Responses payloads untruncated; logs `response.incomplete` at debug level
+
+## Technical Changes
+
+- Splits agent config sources so embedders link only the source types they use
+- Refactors `teamloader` to probe Docker Model Runner through `dmrmodels` instead of the full provider
+- Makes JavaScript expansion and code mode opt-in in `teamloader`
+- Makes TOON output and deferred tools opt-in in `teamloader`
+- Merges sibling toolsets through `tools.Mergeable` instead of hardwiring LSP in `teamloader`
+- Runs harness agents through a registered driver in `runtime`
+- Adds scheduled models.dev live-catalog drift check in CI
+- Validates `DefaultModels` against the committed models.dev snapshot in tests
+- Makes `TestParseExamples` validate against the committed models.dev snapshot only (not live HTTP)
+### Pull Requests
+
+- [#4073](https://github.com/docker/docker-agent/pull/4073) - feat(tools): non-blocking StartableToolSet status check (#4073)
+- [#4097](https://github.com/docker/docker-agent/pull/4097) - fix(#4097): propagate sustained RAG 5xx/408 indexing failures to backoff gate
+- [#4106](https://github.com/docker/docker-agent/pull/4106) - fix(openai): reject oneOf/allOf and validate $defs/$ref before enabling strict mode (#4106)
+- [#4122](https://github.com/docker/docker-agent/pull/4122) - feat(leantui): support bang commands
+- [#4129](https://github.com/docker/docker-agent/pull/4129) - feat: live-update git branch in TUI footers
+- [#4136](https://github.com/docker/docker-agent/pull/4136) - fix(runtime): deliver StreamStopped with a bounded blocking send
+- [#4140](https://github.com/docker/docker-agent/pull/4140) - feat(shell): name PowerShell substitutes for the POSIX utilities models reach for
+- [#4141](https://github.com/docker/docker-agent/pull/4141) - feat(shell): correct known shell-dialect errors in the tool output
+- [#4143](https://github.com/docker/docker-agent/pull/4143) - docs: update CHANGELOG.md for v1.131.0
+- [#4144](https://github.com/docker/docker-agent/pull/4144) - feat: accept `instruction` as a list, let flavors append to it
+- [#4145](https://github.com/docker/docker-agent/pull/4145) - fix: update stale Fireworks kimi-k2-instruct model reference
+- [#4146](https://github.com/docker/docker-agent/pull/4146) - test(config): validate DefaultModels against the models.dev catalog
+- [#4147](https://github.com/docker/docker-agent/pull/4147) - test: make TestParseExamples validate against the committed models.dev snapshot
+- [#4148](https://github.com/docker/docker-agent/pull/4148) - feat(share): sign or encrypt agent YAML in OCI artifacts with --key
+- [#4149](https://github.com/docker/docker-agent/pull/4149) - feat: lean YAML loading with hand-picked registries and strict mode
+- [#4150](https://github.com/docker/docker-agent/pull/4150) - fix: pace retryable partial-start failures in code-mode composites
+- [#4151](https://github.com/docker/docker-agent/pull/4151) - fix(#4097): propagate sustained RAG 5xx/408 indexing failures to backoff gate
+- [#4152](https://github.com/docker/docker-agent/pull/4152) - fix(share): push HCL configs as resolved, self-contained YAML
+- [#4153](https://github.com/docker/docker-agent/pull/4153) - fix(runtime): deliver StreamStopped with a bounded blocking send
+- [#4154](https://github.com/docker/docker-agent/pull/4154) - fix(app): synthesize StreamStopped when the runtime stream closes without one
+- [#4155](https://github.com/docker/docker-agent/pull/4155) - fix(openai): reject oneOf/allOf and validate $defs/$ref before enabling strict mode (#4106)
+- [#4157](https://github.com/docker/docker-agent/pull/4157) - feat(leantui): remove context usage progress bar
+- [#4159](https://github.com/docker/docker-agent/pull/4159) - feat(tools): non-blocking StartableToolSet status check (#4073)
+- [#4160](https://github.com/docker/docker-agent/pull/4160) - docs: auto-update for merged PRs (2026-09-04)
+- [#4161](https://github.com/docker/docker-agent/pull/4161) - fix(tools,openai): don't inject type:object onto anyOf nodes; handle Responses API response.incomplete/failed
+- [#4163](https://github.com/docker/docker-agent/pull/4163) - feat: forward the encrypted agent config to the Docker models gateway
+- [#4165](https://github.com/docker/docker-agent/pull/4165) - fix(openai): recognise the gpt-6 family (Responses API, reasoning effort, token field)
+
+
+## [v1.131.0] - 2026-09-03
+
+This release brings significant enhancements to the Lean TUI experience, adds new evaluation and shell tooling capabilities, and improves startup reliability through expanded backoff handling.
+
+## What's New
+
+- Adds a `/sessions` command to the Lean TUI for browsing and resuming past sessions from the current directory
+- Adds support for `!` bang commands in the Lean TUI, running local shell commands directly without queuing an agent turn
+- Adds labels for pending steering and follow-up messages in the Lean TUI
+- Adds `add_prompt_files_depth` config attribute for discovering nested prompt files in monorepo subdirectories
+- Adds code-based assertion support to evaluation criteria, enabling declarative grading checks (`contains`, `not_contains`, `equals`, `regex`, `cost_threshold`, `tool_called`, and more)
+- Wires the assertion runner into the evaluation pipeline so assertions declared in eval JSON files execute after agent runs complete
+- Includes assertion pass rates and pass@k/pass^k consistency metrics in baseline regression comparison
+- Adds `get_environment_info` read-only tool for exposing environment details to the model
+- Adds PowerShell substitute names for common POSIX utilities in the shell tool description for Windows
+- Prepends a self-correction hint on known shell-syntax errors in the shell tool output
+
+## Bug Fixes
+
+- Fixes lean TUI not persisting prompt history to the shared global history used by the normal TUI
+- Fixes tool calls not being restored when resuming a saved session in the Lean TUI
+- Fixes Shift+Enter not inserting a newline in the Lean TUI (Kitty keyboard protocol support)
+- Fixes Shift+Tab thinking cycle broken by Kitty keyboard protocol changes in the Lean TUI
+- Fixes Escape not interrupting active agent runs and pending tool calls in the Lean TUI
+- Fixes Option+Backspace word deletion not working with Kitty keyboard mode enabled in the Lean TUI
+- Fixes Ctrl+A and Ctrl+E not recognized through the Kitty keyboard protocol in the Lean TUI
+- Fixes user messages not being visually highlighted in the Lean TUI
+- Fixes cancellation marker appearing before buffered partial responses in the Lean TUI
+- Fixes agent failing to start when a deferred MCP source is still initializing (`deferred start failed: toolset not started`)
+- Adds bounded jittered exponential backoff to `StartableToolSet` retry path to prevent burst retries on rate-limited or failing tool sources
+- Extends backoff gate to remote MCP HTTP errors (503/429/5xx during initialize handshake)
+- Extends backoff gate to A2A agent-card HTTP errors
+- Wires LSP crash-loop failures through the backoff gate to prevent persistently-crashing LSP servers from relaunching at full speed
+- Fixes security and robustness issues in `add_prompt_files_depth` implementation
+
+## Technical Changes
+
+- Simplifies the built-in coder agent by removing planner and librarian sub-agents, limiting it to file, shell, and fetch toolsets
+- Updates Go version declaration format in `go.mod` to use separate `go` (minimum) and `toolchain` (pinned) directives
+- Removes the Nebius example due to model availability issues
+### Pull Requests
+
+- [#4060](https://github.com/docker/docker-agent/pull/4060) - Merge pull request #4062 from docker/fix/startable-toolset-backoff
+- [#4062](https://github.com/docker/docker-agent/pull/4062) - fix(#4060): add bounded jittered backoff to StartableToolSet retry path
+- [#4074](https://github.com/docker/docker-agent/pull/4074) - fix(#4060): extend backoff gate to remote MCP HTTP errors
+- [#4088](https://github.com/docker/docker-agent/pull/4088) - feat: add assertions schema to EvalCriteria for code-based grading
+- [#4092](https://github.com/docker/docker-agent/pull/4092) - feat: expose pass@k and pass^k metrics for --repeat runs
+- [#4098](https://github.com/docker/docker-agent/pull/4098) - fix: extend backoff gate to A2A agent-card HTTP errors (#4098)
+- [#4100](https://github.com/docker/docker-agent/pull/4100) - feat: wire assertion runner into runSingleEval execution pipeline
+- [#4101](https://github.com/docker/docker-agent/pull/4101) - docs: update CHANGELOG.md for v1.130.0
+- [#4103](https://github.com/docker/docker-agent/pull/4103) - feat: include assertions and pass@k in baseline regression comparison
+- [#4104](https://github.com/docker/docker-agent/pull/4104) - fix(#4098): extend backoff gate to A2A agent-card HTTP errors
+- [#4105](https://github.com/docker/docker-agent/pull/4105) - refactor: update go version declaration format
+- [#4108](https://github.com/docker/docker-agent/pull/4108) - fix(#4060): wire LSP crash-loop pacing through backoff gate
+- [#4109](https://github.com/docker/docker-agent/pull/4109) - docs: auto-update for merged PRs (2026-09-02)
+- [#4110](https://github.com/docker/docker-agent/pull/4110) - ci(update-models): sign commits with bot identity, add semantic catalog diff
+- [#4111](https://github.com/docker/docker-agent/pull/4111) - feat: add add_prompt_files_depth for monorepo nested prompt file discovery
+- [#4113](https://github.com/docker/docker-agent/pull/4113) - Update linter config
+- [#4114](https://github.com/docker/docker-agent/pull/4114) - fix(deferred): don't fail to start when a source is still starting
+- [#4118](https://github.com/docker/docker-agent/pull/4118) - chore: simplify built-in coder agent
+- [#4119](https://github.com/docker/docker-agent/pull/4119) - feat(leantui): add sessions command
+- [#4120](https://github.com/docker/docker-agent/pull/4120) - fix(leantui): support shift-enter newlines
+- [#4121](https://github.com/docker/docker-agent/pull/4121) - chore: refresh models.dev snapshot (+79 -75 ~196)
+- [#4122](https://github.com/docker/docker-agent/pull/4122) - feat(leantui): support bang commands
+- [#4123](https://github.com/docker/docker-agent/pull/4123) - fix: highlight user messages in lean TUI
+- [#4124](https://github.com/docker/docker-agent/pull/4124) - fix(leantui): restore shift-tab thinking cycle
+- [#4125](https://github.com/docker/docker-agent/pull/4125) - feat(leantui): label steering and follow-up messages
+- [#4126](https://github.com/docker/docker-agent/pull/4126) - fix(leantui): restore interrupt and editing shortcuts
+- [#4127](https://github.com/docker/docker-agent/pull/4127) - fix: persist lean TUI prompt history
+- [#4128](https://github.com/docker/docker-agent/pull/4128) - fix(leantui): restore tool calls on session resume
+- [#4130](https://github.com/docker/docker-agent/pull/4130) - Remove the nebius example
+- [#4131](https://github.com/docker/docker-agent/pull/4131) - docs: auto-update for merged PRs (2026-09-03)
+- [#4138](https://github.com/docker/docker-agent/pull/4138) - fix(leantui): support ctrl+a and ctrl+e
+- [#4139](https://github.com/docker/docker-agent/pull/4139) - chore: bump stale model references to current-generation values
+- [#4140](https://github.com/docker/docker-agent/pull/4140) - feat(shell): name PowerShell substitutes for the POSIX utilities models reach for
+- [#4141](https://github.com/docker/docker-agent/pull/4141) - feat(shell): correct known shell-dialect errors in the tool output
+- [#4142](https://github.com/docker/docker-agent/pull/4142) - feat: add get_environment_info read-only tool
+
+
+## [v1.130.0] - 2026-09-01
+
+This release expands the safety classifier coverage, improves skills handling, and adds new evaluation capabilities including assertions, verify scripts, and pass@k metrics.
+
+## What's New
+
+- Adds `assertions` schema and `verify` field to `EvalCriteria` for code-based grading checks against agent output
+- Adds a verify script runner that executes a shell script via `docker exec` on the eval container after the agent completes
+- Upgrades the relevance judge prompt with a rubric, chain-of-thought guidance, and anti-bias rules for more consistent evaluation judgments
+- Exposes `pass@k` and `pass^k` metrics when using `--repeat` runs to quantify answer consistency across repetitions
+- Adds PowerShell `Remove-Item` and `Clear-Content` patterns to the safety classifier
+- Adds destructive SQL, app-CLI, and key-value-store patterns to the safety classifier
+- Safely gates embedded skill commands, asking user permission before running commands embedded in skills
+- Expands embedded commands in inline skills so they go through the normal approval path
+
+## Bug Fixes
+
+- Fixes flag-order variants for `docker system prune --volumes` and `compose down -v` in the safety classifier
+- Fixes shell-metachar patterns to anchor on whitespace instead of word boundaries in the safety classifier
+- Fixes safety classifier to use wildcards for flag-order and quoted-path gaps, and narrows SQL patterns
+- Fixes inline skills to override discovered skills when the same name exists in both
+- Fixes inline skill names to reject whitespace, preventing unreachable slash commands
+- Stabilizes slash command description alignment in the TUI completion list
+
+## Technical Changes
+
+- Refreshes the embedded models.dev catalog snapshot
+- Updates CI to run checks on pull requests targeting any base branch, not just `main`
+### Pull Requests
+
+- [#4075](https://github.com/docker/docker-agent/pull/4075) - ci: run ci and codeql checks on pull requests to any base branch
+- [#4078](https://github.com/docker/docker-agent/pull/4078) - chore: refresh embedded models.dev snapshot
+- [#4079](https://github.com/docker/docker-agent/pull/4079) - docs: update CHANGELOG.md for v1.129.0
+- [#4080](https://github.com/docker/docker-agent/pull/4080) - chore: bump direct Go dependencies
+- [#4081](https://github.com/docker/docker-agent/pull/4081) - safety: close four classifier coverage gaps
+- [#4088](https://github.com/docker/docker-agent/pull/4088) - feat: add assertions schema to EvalCriteria for code-based grading
+- [#4089](https://github.com/docker/docker-agent/pull/4089) - feat: add verify script runner for post-agent outcome verification
+- [#4090](https://github.com/docker/docker-agent/pull/4090) - fix(tui): stabilize slash command description alignment
+- [#4091](https://github.com/docker/docker-agent/pull/4091) - feat: upgrade relevance judge prompt with rubric, CoT, and anti-bias rules
+- [#4092](https://github.com/docker/docker-agent/pull/4092) - feat: expose pass@k and pass^k metrics for --repeat runs
+- [#4093](https://github.com/docker/docker-agent/pull/4093) - feat: safely gate embedded skill commands
+- [#4094](https://github.com/docker/docker-agent/pull/4094) - fix(skills): let inline skills override discovered ones
+- [#4095](https://github.com/docker/docker-agent/pull/4095) - fix(skills): reject whitespace in inline skill names
+- [#4096](https://github.com/docker/docker-agent/pull/4096) - feat(skills): expand embedded commands in inline skills
+
+
+## [v1.129.0] - 2026-08-31
+
+This release adds MCP protocol revision support, names the resolved shell in environment info, and migrates the A2A server to adka2a v2.
+
+## What's New
+- Adds support for MCP protocol revision `2026-07-28`, including stateless Streamable HTTP transport, updated protocol negotiation, and rejection of unsupported keep-alive combinations for HTTP and attach modes
+- Names the resolved shell in the environment info block so the model has explicit shell dialect context at the start of every session
+
+## Technical Changes
+- Migrates the A2A server from the deprecated `adka2a` compatibility shim to `adka2a/v2`, adapting artifact event normalization to the v2 iterator-based executor contract
+- Delegates `shellBaseName` resolution to `shellpath.ShellBaseName` in the shell tools layer
+### Pull Requests
+
+- [#4041](https://github.com/docker/docker-agent/pull/4041) - chore(a2a): migrate from adka2a to adka2a/v2
+- [#4044](https://github.com/docker/docker-agent/pull/4044) - feat(mcp): support protocol revision 2026-07-28
+- [#4071](https://github.com/docker/docker-agent/pull/4071) - docs: update CHANGELOG.md for v1.128.0
+- [#4072](https://github.com/docker/docker-agent/pull/4072) - hooks/builtins: name the resolved shell in the env block
+
+
+## [v1.128.0] - 2026-08-28
+
+This release adds a new file toolset, a configurable startup banner toggle, and several bug fixes including a GitHub MCP restart loop prevention and improved Code Mode partial startup handling. It also includes rendering performance improvements for long streamed responses.
+
+## What's New
+
+- Adds a `show_banner` setting to toggle the ASCII-art startup banner on or off, accessible via the Appearance tab in `/settings`
+- Adds a `file` toolset exposing `read_file`, `write_file`, and `edit_file` with support for `allow_list`, `deny_list`, and `post_edit` configuration
+
+## Improvements
+
+- Optimizes rendering of long streamed responses by caching more aggressively and avoiding full re-renders on each new chunk
+- Allows `/new [dir]` in the TUI to accept an optional working directory, resolving relative paths and validating directories before spawning a session
+- Reuses an explicit `--working-dir` value when opening new sessions via `/new`, Ctrl+T, or new-tab buttons
+
+## Bug Fixes
+
+- Fixes Code Mode partial startup: preserves successfully started toolsets, omits failed ones, and retries failures on later turns
+- Fixes terminal tool fade cache invalidation
+- Fixes compaction state persistence to be atomic, so compacted sessions restore correctly on reload
+- Fixes GitHub remote MCP server entering an endless reconnect loop after rejecting `subscriptions/listen`
+- Replaces removed `deepseek-chat` model with `deepseek-v4-pro` as the default DeepSeek model
+
+## Technical Changes
+
+- Upgrades to Go 1.27.0 and applies Go 1.27 modernizations
+- Migrates to OpenTelemetry SDK 1.45
+- Replaces `sort.Slice` calls with `slices.SortFunc` across several packages
+- Upgrades testify to v1.12.1
+- Refreshes embedded models.dev catalog snapshot
+### Pull Requests
+
+- [#4008](https://github.com/docker/docker-agent/pull/4008) - fix(codemode): preserve tools after partial startup
+- [#4013](https://github.com/docker/docker-agent/pull/4013) - docs: update CHANGELOG.md for v1.127.0
+- [#4014](https://github.com/docker/docker-agent/pull/4014) - feat(tui): add a show/hide banner setting
+- [#4015](https://github.com/docker/docker-agent/pull/4015) - chore: bump direct Go dependencies
+- [#4034](https://github.com/docker/docker-agent/pull/4034) - chore: replace sort.Slice with slices.SortFunc
+- [#4036](https://github.com/docker/docker-agent/pull/4036) - chore: upgrade to Go 1.27.0 and apply 1.27 modernizations
+- [#4037](https://github.com/docker/docker-agent/pull/4037) - TUI - Optimize rendering of long streaming responses
+- [#4038](https://github.com/docker/docker-agent/pull/4038) - docs: auto-update for merged PRs (2026-08-23)
+- [#4040](https://github.com/docker/docker-agent/pull/4040) - chore: refresh embedded models.dev snapshot
+- [#4042](https://github.com/docker/docker-agent/pull/4042) - fix(tui): reuse explicit working directory for new sessions
+- [#4043](https://github.com/docker/docker-agent/pull/4043) - chore(test): upgrade testify to v1.12.1
+- [#4045](https://github.com/docker/docker-agent/pull/4045) - chore: migrate to OpenTelemetry SDK 1.45
+- [#4049](https://github.com/docker/docker-agent/pull/4049) - test(a2a): apply invocation context deltas in fake
+- [#4050](https://github.com/docker/docker-agent/pull/4050) - fix(tui): allow overriding new session directory
+- [#4051](https://github.com/docker/docker-agent/pull/4051) - docs(telemetry): document semconv v1.43 schema URL compatibility
+- [#4056](https://github.com/docker/docker-agent/pull/4056) - docs: auto-update for merged PRs (2026-08-25)
+- [#4057](https://github.com/docker/docker-agent/pull/4057) - chore: update docker-agent-action to v2.0.5
+- [#4058](https://github.com/docker/docker-agent/pull/4058) - fix: replace removed deepseek-chat with deepseek-v4-pro
+- [#4059](https://github.com/docker/docker-agent/pull/4059) - docs: auto-update for merged PRs (2026-08-26)
+- [#4063](https://github.com/docker/docker-agent/pull/4063) - Fix terminal tool fade cache invalidation
+- [#4064](https://github.com/docker/docker-agent/pull/4064) - Persist compaction atomically
+- [#4069](https://github.com/docker/docker-agent/pull/4069) - fix(mcp): prevent GitHub restart loop
+- [#4070](https://github.com/docker/docker-agent/pull/4070) - feat: add file toolset
+
+
+## [v1.127.0] - 2026-08-21
+
+This release delivers Desktop PAC-aware egress with SSRF protections, several runtime and toolset fixes, and documentation updates for served-agent safety controls.
+
+## What's New
+
+- Adds Desktop PAC-aware egress for configured HTTP clients while preserving standalone proxy behavior and SSRF protections, covering agent/source fetches, sessions, tools, MCP HTTP transports, and MCP OAuth flows
+
+## Bug Fixes
+
+- Fixes slow toolset startup from blocking conversation turns; keeps turns responsive when a toolset start is already in progress or exceeds the start budget
+- Fixes `on_user_input` notifications firing incorrectly for sub-sessions, background agents, non-interactive runs, and canceled max-iteration waits — now only fires when an interactive root session is genuinely waiting for the next prompt
+- Fixes Desktop PAC transport detection, routing, and state retention across multiple egress and transport handling regressions
+- Fixes server to distinguish unavailable agent sources
+
+## Technical Changes
+
+- Extends Windows streaming TUI test timeouts to 30 seconds for simulated-stream scenarios
+- Updates CLI reference documentation for `serve a2a` safety flags (`--auth-token`, `--cors-origin`, `--insecure-no-auth`, `--safety`)
+- Adds documentation describing Desktop PAC egress controls and clarifying coverage for MCP OAuth and direct egress
+- Makes Desktop transport tests hermetic
+### Pull Requests
+
+- [#3999](https://github.com/docker/docker-agent/pull/3999) - fix: add Desktop PAC-aware egress with SSRF protections
+- [#4000](https://github.com/docker/docker-agent/pull/4000) - feat: harden served-agent safety controls
+- [#4002](https://github.com/docker/docker-agent/pull/4002) - docs: update CHANGELOG.md for v1.126.0
+- [#4003](https://github.com/docker/docker-agent/pull/4003) - docs: complete CLI reference for serve a2a safety flags
+- [#4005](https://github.com/docker/docker-agent/pull/4005) - test(e2e): extend Windows streaming TUI timeouts
+- [#4009](https://github.com/docker/docker-agent/pull/4009) - fix(tools): prevent slow startup from blocking turns
+- [#4010](https://github.com/docker/docker-agent/pull/4010) - fix(runtime): avoid false on_user_input notifications
+- [#4012](https://github.com/docker/docker-agent/pull/4012) - fix(runtime): scope harness prompt-selection to fresh vs resume session
+
+
+## [v1.126.0] - 2026-08-18
+
+This release adds evaluation regression gating, session comparison for replay, and significant hardening of served-agent safety controls across A2A, MCP HTTP, and chat surfaces.
+
+## What's New
+
+- Adds `--baseline` and `--regression-tolerance` flags to `docker agent eval`, enabling CI-style regression detection by comparing a run against a previously saved baseline and failing on quality regression
+- Adds `docker agent sessions diff` command to compare the behavior of two recorded sessions, reporting the first point of divergence between runs
+- Adds unattended tool execution restrictions for A2A, requiring explicit security configuration for network listeners
+- Adds centralized unattended safety resolution for served agents, with ordered concrete safety policies and hardened HTTP serving for MCP and chat surfaces
+- Adds session-origin isolation for A2A session resumes
+
+## Bug Fixes
+
+- Fixes the baseline gate to be grounded on the file that eval writes, and fails closed on error
+- Fixes replay comparison to handle sub-agent turns, compare arguments semantically, and sanitize output
+- Fixes A2A session resumes to be isolated by origin
+
+## Technical Changes
+
+- Refactors `sessions diff` CLI command to resolve session references
+- Refactors safety flag validation to be shared across CLI surfaces
+- Refactors HTTP auth and origin matchers into a shared `httpsec` package
+- Refactors A2A server assembly, extracting it from `Run`
+- Replaces `CAGENT_MODELS_GATEWAY` with `DOCKER_AGENT_MODELS_GATEWAY` in docs and samples
+- Documents the evaluation regression gate and its two flags, the `docker agent sessions diff` command, and served-agent safety controls
+### Pull Requests
+
+- [#3946](https://github.com/docker/docker-agent/pull/3946) - feat(eval): compare a run against a saved baseline and fail on regression
+- [#3948](https://github.com/docker/docker-agent/pull/3948) - feat(replay): compare the behaviour of two recorded sessions
+- [#3995](https://github.com/docker/docker-agent/pull/3995) - docs: update CHANGELOG.md for v1.125.0
+- [#3997](https://github.com/docker/docker-agent/pull/3997) - docs: replace CAGENT_MODELS_GATEWAY with DOCKER_AGENT_MODELS_GATEWAY in docs and samples
+- [#4000](https://github.com/docker/docker-agent/pull/4000) - feat: harden served-agent safety controls
+
+
+## [v1.125.0] - 2026-08-17
+
+This release adds several new features including Docker token minting, structured output mode, restricted safety mode, and harness session resumption, alongside multiple bug fixes for file editing, caching, attachment handling, and OAuth flows.
+
+## What's New
+
+- Adds the ability to mint Docker tokens from the stored access token, enabling authentication without Docker Desktop running (`feat(auth): mint Docker tokens from the stored access token`)
+- Adds a tool-based structured output mode as an opt-in alternative to native structured output (`feat: add tool-based structured output mode`)
+- Adds a restricted safety mode for unattended and headless runs, allowing classifier-safe calls while denying unmatched destructive or unknown calls without prompting (`feat(safety): add restricted mode for unattended runs`)
+- Adds the ability to resume external harness sessions on later turns instead of starting a new session each time (`feat(runtime): resume external harness sessions`)
+- Includes session cost in session summaries (`feat: include cost in session summaries`)
+
+## Bug Fixes
+
+- Fixes a path containment bug in VCS ignore logic where a repository root like `/work/repo` incorrectly matched sibling paths like `/work/repo-sibling` (`fix(pkg/fsx/vcs.go)`)
+- Fixes `edit_file` silently prepending content when `oldText` is empty; empty `oldText` is now refused (`fix(acp): refuse edit_file edits with an empty oldText`)
+- Fixes a file backend cache bug where entries written by a sibling process remained invisible to `Lookup` indefinitely (`fix(pkg/cache/cache.go)`)
+- Fixes attachment content being able to close its own envelope delimiter, and labels the region as untrusted to prevent content injection (`fix(attachment): stop attachment content from closing its own envelope`)
+- Fixes a self-closing envelope delimiter bypass in attachment handling (`fix(attachment): defuse the self-closing envelope delimiter too`)
+- Fixes malformed tool call names (e.g. attribute-style syntax hallucinated by a model) being persisted to session, which caused non-retriable errors on replay (`fix(runtime): sanitize malformed tool call names before persisting to session`)
+- Fixes standalone OAuth login discovery to correctly forward remote metadata, match names/URLs exactly, and use authoritative challenge metadata (`fix(mcp): repair standalone OAuth login discovery`)
+- Fixes standalone OAuth login to honor `CallbackPort` and `CallbackRedirectURL` configuration, matching the behavior of the managed OAuth flow (`fix(mcp): honor callback configuration in standalone OAuth login`)
+- Fixes the TUI not retaining the interrupt confirmation setting across restarts and page rebuilds (`fix(tui): retain interrupt confirmation setting`)
+
+## Technical Changes
+
+- Refactors MCP protected resource metadata discovery into a shared helper to eliminate duplication between managed and unmanaged OAuth flows (`refactor(mcp): share protected resource metadata discovery`)
+- Propagates OAuth scopes through dynamic registration in MCP (`fix(mcp): propagate OAuth scopes through dynamic registration`)
+- Isolates `pkg/runtime` tests from the real user config directory to prevent local settings from affecting test outcomes (`test(runtime): isolate pkg/runtime tests from the real user config`)
+- Refreshes the embedded models.dev catalog snapshot (`chore: refresh embedded models.dev snapshot`)
+### Pull Requests
+
+- [#3923](https://github.com/docker/docker-agent/pull/3923) - fix(fsx): test repository containment on a path boundary, not a string prefix
+- [#3926](https://github.com/docker/docker-agent/pull/3926) - fix(filesystem): refuse edit_file edits with an empty oldText
+- [#3928](https://github.com/docker/docker-agent/pull/3928) - fix(cache): adopt the on-disk state read during `Store`, not just its mtime
+- [#3935](https://github.com/docker/docker-agent/pull/3935) - feat(auth): mint Docker tokens from the stored access token
+- [#3942](https://github.com/docker/docker-agent/pull/3942) - fix(attachment): stop attachment content from closing its own envelope, and label the region untrusted
+- [#3955](https://github.com/docker/docker-agent/pull/3955) - refactor(mcp): share protected resource metadata discovery
+- [#3959](https://github.com/docker/docker-agent/pull/3959) - fix(mcp): repair standalone OAuth login discovery
+- [#3964](https://github.com/docker/docker-agent/pull/3964) - docs: update CHANGELOG.md for v1.124.0
+- [#3966](https://github.com/docker/docker-agent/pull/3966) - feat: add tool-based structured output mode
+- [#3969](https://github.com/docker/docker-agent/pull/3969) - docs: auto-update for merged PRs (2026-08-13)
+- [#3970](https://github.com/docker/docker-agent/pull/3970) - feat(safety): add restricted mode for unattended runs
+- [#3972](https://github.com/docker/docker-agent/pull/3972) - docs: remove internal issue/PR references from plan tool page
+- [#3973](https://github.com/docker/docker-agent/pull/3973) - docs: add missing built-in tools to concepts overview
+- [#3974](https://github.com/docker/docker-agent/pull/3974) - fix(runtime): sanitize malformed tool call names before persisting to session
+- [#3979](https://github.com/docker/docker-agent/pull/3979) - test(mcp): make OAuth browser launch injectable across platforms
+- [#3980](https://github.com/docker/docker-agent/pull/3980) - chore(deps): update reviewed Go dependencies
+- [#3981](https://github.com/docker/docker-agent/pull/3981) - test(runtime): isolate user config in tests
+- [#3987](https://github.com/docker/docker-agent/pull/3987) - fix(mcp): honor callback configuration in standalone OAuth login
+- [#3989](https://github.com/docker/docker-agent/pull/3989) - feat(runtime): resume external harness sessions
+- [#3990](https://github.com/docker/docker-agent/pull/3990) - docs: auto-update for merged PRs (2026-08-16)
+- [#3991](https://github.com/docker/docker-agent/pull/3991) - feat: include cost in session summaries
+- [#3992](https://github.com/docker/docker-agent/pull/3992) - chore: refresh embedded models.dev snapshot
+- [#3994](https://github.com/docker/docker-agent/pull/3994) - fix(tui): retain interrupt confirmation setting
+
+
 ## [v1.124.0] - 2026-08-10
 
 This release adds LaTeX rendering and a startup banner to the TUI, introduces a configurable request size limit for the API server, and includes security fixes for session working directory path traversal.
@@ -363,6 +953,12 @@ This release adds sandbox authentication improvements, compaction-model context 
 
 
 ## [Unreleased]
+
+- Harden served-agent safety and network controls:
+  - A2A, MCP HTTP, and chat now default to restricted tool safety; autonomous execution requires `--safety autonomous`, and `safety: autonomous` in YAML fails startup with guidance to use that flag.
+  - Non-loopback listeners require authentication or `--insecure-no-auth`; Unix sockets remain exempt. A2A and MCP HTTP use `--auth-token`, while chat continues to use `--api-key`; A2A and chat can explicitly allow browser origins with `--cors-origin`.
+  - A2A context IDs cannot access sessions created by another serve surface. The session-schema migration records session origins; older binaries reject upgraded databases with a newer-database error.
+  - `mcp.CreateToolHandler` now requires an explicit safety policy.
 
 ## What's New
 
@@ -5449,3 +6045,29 @@ This release improves the terminal user interface with better error handling and
 [v1.123.0]: https://github.com/docker/docker-agent/releases/tag/v1.123.0
 
 [v1.124.0]: https://github.com/docker/docker-agent/releases/tag/v1.124.0
+
+[v1.125.0]: https://github.com/docker/docker-agent/releases/tag/v1.125.0
+
+[v1.126.0]: https://github.com/docker/docker-agent/releases/tag/v1.126.0
+
+[v1.127.0]: https://github.com/docker/docker-agent/releases/tag/v1.127.0
+
+[v1.128.0]: https://github.com/docker/docker-agent/releases/tag/v1.128.0
+
+[v1.129.0]: https://github.com/docker/docker-agent/releases/tag/v1.129.0
+
+[v1.130.0]: https://github.com/docker/docker-agent/releases/tag/v1.130.0
+
+[v1.131.0]: https://github.com/docker/docker-agent/releases/tag/v1.131.0
+
+[v1.132.0]: https://github.com/docker/docker-agent/releases/tag/v1.132.0
+
+[v1.133.0]: https://github.com/docker/docker-agent/releases/tag/v1.133.0
+
+[v1.134.0]: https://github.com/docker/docker-agent/releases/tag/v1.134.0
+
+[v1.135.0]: https://github.com/docker/docker-agent/releases/tag/v1.135.0
+
+[v1.136.0]: https://github.com/docker/docker-agent/releases/tag/v1.136.0
+
+[v1.137.0]: https://github.com/docker/docker-agent/releases/tag/v1.137.0

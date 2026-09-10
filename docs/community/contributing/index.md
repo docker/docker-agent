@@ -12,7 +12,7 @@ _Docker Agent is open source. Here's how to set up your development environment 
 
 ### Prerequisites
 
-- [Go 1.26](https://go.dev/dl/) or higher
+- [Go 1.27](https://go.dev/dl/) or higher
 - API key(s) for your chosen AI provider
 - [Task](https://taskfile.dev/installation/)
 - [golangci-lint](https://golangci-lint.run/docs/welcome/install/local/)
@@ -44,9 +44,9 @@ export ANTHROPIC_API_KEY=your_key_here
 | ------------------ | ----------------------------------------------- |
 | `task build`       | Build the binary to `./bin/docker-agent`        |
 | `task test`        | Run all tests (clears API keys for determinism) |
-| `task lint`        | Run golangci-lint                               |
+| `task lint`        | Run golangci-lint, custom checks, and module tidiness checks |
 | `task format`      | Format code                                     |
-| `task dev`         | Run lint, test, and build in sequence           |
+| `task dev`         | Run lint, test, and build in parallel           |
 | `task build-local` | Build for local platform via Docker             |
 | `task cross`       | Cross-platform builds (all architectures)       |
 
@@ -98,7 +98,7 @@ File issues on the [GitHub issue tracker](https://github.com/docker/docker-agent
 1. **Fork** the repository and create a branch for your changes
 2. **Write** your code following the style and testing guidelines above
 3. **Test** your changes: run `task lint` and `task test`
-4. **Sign** your commits with `git commit -s` (DCO required)
+4. **Sign off** your commits with `git commit -s` (DCO required)
 5. **Open a pull request** against the `main` branch
 
 > [!TIP]
@@ -109,11 +109,15 @@ File issues on the [GitHub issue tracker](https://github.com/docker/docker-agent
 All contributions require a Developer Certificate of Origin (DCO) sign-off:
 
 ```bash
-# Sign commits automatically
-git config user.name "Your Name"
-git config user.email "your.email@example.com"
-git commit -s -m "Your commit message"
+# Set the identity used for the sign-off
+$ git config user.name "Your Name"
+$ git config user.email "your.email@example.com"
+
+# Add a DCO sign-off to this commit
+$ git commit -s -m "Your commit message"
 ```
+
+`-s` adds a `Signed-off-by` trailer; it does not cryptographically sign the commit. To also sign with a GPG or SSH key, configure Git signing and use `git commit -S -s`.
 
 ## Community
 

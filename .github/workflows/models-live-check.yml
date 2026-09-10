@@ -1,0 +1,59 @@
+# Validates every example's model reference against the LIVE models.dev API,
+# as opposed to ci.yml's `task test` (which runs TestParseExamples against
+# only the committed pkg/modelsdev/snapshot.json and is fully hermetic).
+#
+# This check is deliberately NOT part of ci.yml and NOT a required PR check:
+# a failure here means the external models.dev catalog has drifted since the
+# snapshot was last refreshed, which is unrelated to any PR's diff and can
+# strike any PR (or none) at any time. See issue #4134.
+name: models-live-check
+
+permissions:
+  contents: read
+
+concurrency:
+  group: models-live-check
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily, 07:00 UTC (an hour after update-models' Monday 06:00 refresh).
+    - cron: "0 7 * * *"
+
+jobs:
+  check:
+    if: github.repository == 'docker/docker-agent'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Install Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+        with:
+          version: 3.51.1
+
+      - name: Check examples against the live models.dev catalog
+        run: task check-models-live
+
+      - name: Explain failure
+        if: failure()
+        run: |
+          {
+            echo "### models.dev live-catalog drift detected"
+            echo
+            echo "This is **not** caused by any pull request's diff. This scheduled check"
+            echo "validates example model references against the live models.dev API, which"
+            echo "has moved on since \`pkg/modelsdev/snapshot.json\` was last refreshed."
+            echo
+            echo "The committed snapshot and \`TestParseExamples\` (the PR-blocking check) are"
+            echo "unaffected. Fix by refreshing the snapshot (\`task update-models\`) and/or"
+            echo "updating the affected example(s); see the failed step's log above for which."
+          } >> "$GITHUB_STEP_SUMMARY"

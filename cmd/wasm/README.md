@@ -169,10 +169,9 @@ These are not bugs to fix; they are direct consequences of `GOOS=js`:
 - **No sessions.** `pkg/session` and `pkg/memory/database/sqlite` pull in
   `modernc.org/libc` which does not have a js port. The browser caller is
   responsible for keeping the message history.
-- **No fallbacks, no rule-based routing.** The rule-based router uses bleve,
-  which depends on `mmap` / file-locking primitives that don't exist on
-  js/wasm. A js-only `factory_js.go` swaps the full provider factory for a
-  slim variant with only openai / anthropic / google.
+- **Explicit provider selection.** The demo registers OpenAI, Anthropic and
+  Google in `providers.go`. The shared core provider registry is empty on
+  every platform; embedders register only the implementations they need.
 - **No Docker Model Runner, no Bedrock, no Vertex AI.** Same reason —
   `dmr` shells out, `bedrock` and `vertexai` pull in cloud SDKs that don't
   cross-compile to wasm.
@@ -192,12 +191,37 @@ are intentionally tiny:
 | `pkg/desktop/sockets_js.go` | Returns empty Docker Desktop paths. |
 | `pkg/desktop/connection_js.go` | Refuses Unix-socket / named-pipe dials. |
 | `pkg/desktop/connection_other.go` | Build tag updated to `!windows && !js`. |
-| `pkg/model/provider/factory.go` | Build tag added: `!js`. |
-| `pkg/model/provider/factory_js.go` | js-only provider dispatch (openai / anthropic / google). |
+| `cmd/wasm/providers.go` | Explicit demo provider registry (OpenAI / Anthropic / Google). |
 
 Everything else compiles unchanged because docker-agent already had the
 `os/exec`, sandbox, sound, audio, server, browser, keyring code well-isolated
 behind their own packages — the wasm entry just doesn't import them.
+
+## Embedding with fewer providers
+
+`pkg/model/provider` shares its registry implementation between native and
+js/wasm builds and imports no concrete SDK-backed providers. Its
+`DefaultRegistry()` is empty: code that previously relied on the WASM defaults
+must now pass an explicit registry. The demo retains its provider set through
+`demoProviders`; a smaller application can register just Anthropic:
+
+```go
+registry := provider.NewRegistry(map[string]provider.Factory{
+    "anthropic": func(ctx context.Context, cfg *latest.ModelConfig,
+        env environment.Provider, opts ...options.Opt) (provider.Provider, error) {
+        return anthropic.NewClient(ctx, cfg, env, opts...)
+    },
+})
+```
+
+Pass it to `teamloader.WithProviderRegistry(registry)` when loading YAML and
+`runtime.WithProviderRegistry(registry)` when constructing a local runtime, so
+runtime model switching uses the same provider set. Register toolsets separately
+and use `teamloader.WithStrict()` to reject unsupported configuration features.
+Do not import `pkg/teamloader/defaults` or `pkg/model/provider/providers` in a
+restricted bootstrap: those deliberately wire the full implementations.
+
+This changes dependency wiring, not config-version support, schemas, or MCP.
 
 ## Sanity check
 
@@ -210,6 +234,9 @@ GOOS=js GOARCH=wasm go build -o /tmp/cagent.wasm ./cmd/wasm
 
 # Existing tests of the touched packages still pass.
 go test ./pkg/cache/... ./pkg/desktop/... ./pkg/model/provider/...
+
+# Provider registration and wire behavior under Node's Go/WASM runner.
+task test-wasm-providers
 
 # End-to-end runtime smoke test.
 node cmd/wasm/smoke_test.js

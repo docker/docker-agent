@@ -21,7 +21,7 @@ import (
 // blocking open.
 func TestPlansCreate_RejectsNamedPipe(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	fifo := filepath.Join(t.TempDir(), "content.pipe")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
@@ -56,7 +56,7 @@ func TestPlansCreate_RejectsNamedPipe(t *testing.T) {
 // regular file" message shows no read happened.
 func TestPlansCreate_RejectsDevice(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	if _, err := os.Stat("/dev/zero"); err != nil {
 		t.Skipf("/dev/zero not available: %v", err)
@@ -77,7 +77,7 @@ func TestPlansCreate_RejectsDevice(t *testing.T) {
 // a blocking open in the storage's load path.
 func TestPlansGetList_FIFOPlanFileFailsFast(t *testing.T) {
 	t.Parallel()
-	svc, sharedDir, _ := newPlansTestService(t)
+	svc, sharedDir := newPlansTestService(t)
 	mustCreatePlan(t, svc, "good", "content")
 
 	if err := syscall.Mkfifo(filepath.Join(sharedDir, "wedged.json"), 0o600); err != nil {

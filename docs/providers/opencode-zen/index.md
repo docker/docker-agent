@@ -152,7 +152,7 @@ providers:
 models:
   claude:
     provider: opencode-zen-claude
-    model: claude-sonnet-4-5
+    model: claude-sonnet-4-6
 
 agents:
   root:

@@ -43,10 +43,26 @@ tasks:
     cmds:
       - go generate ./pkg/modelsdev/...
 
+  models-delta:
+    desc: Show the models.dev catalog delta (HEAD vs the working-tree snapshot by default)
+    silent: true
+    cmds:
+      - bash ./scripts/models-delta.sh {{.CLI_ARGS}}
+
+  test-models-delta:
+    desc: Run the golden-fixture regression test for the models-delta jq scripts
+    cmds:
+      - bash ./scripts/models-delta-test.sh
+
   check-models-fresh:
     desc: Fail if the embedded models.dev snapshot is stale (run update-models to refresh)
     cmds:
       - CHECK_MODELS_SNAPSHOT_FRESHNESS=1 go test -run TestSnapshotDateIsFresh ./pkg/modelsdev/
+
+  check-models-live:
+    desc: Validate example model references against the live models.dev API (hits the network; not part of `task test` since drift here is external and must not block PRs — see issue #4134)
+    cmds:
+      - CHECK_MODELS_DEV_LIVE=1 go test -count=1 -run TestExamplesAgainstLiveModelsDev ./pkg/config/
 
   check-plan-cross:
     desc: Cross-compile the plan storage and host plans packages for every file-lock build-tag variant (plus the plan-consuming CLI and TUI packages on windows)
@@ -73,7 +89,7 @@ tasks:
       - go.mod
       - go.sum
     cmds:
-      - GOLANGCI_LINT_CACHE={{.TASKFILE_DIR}}/.cache/lint golangci-lint run
+      - GOLANGCI_LINT_CACHE={{.TASKFILE_DIR}}/.cache/lint golangci-lint run --allow-parallel-runners
       - go run ./lint .
       - go mod tidy --diff >/dev/null || (echo 'go.mod/go.sum files are not tidy' && exit 1)
 
@@ -90,6 +106,13 @@ tasks:
     dotenv: [.env.test]
     cmds:
       - go test ./...
+
+  test-wasm-providers:
+    desc: Test explicit provider registration in the WASM demo (requires Node)
+    cmds:
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" pkg/model/provider/factory_js_openai_vendor_test.go
+      - go test ./e2e -run '^TestWasmProviderDependencies$'
 
   test-binary:
     desc: Run tests on build binary

@@ -9,11 +9,24 @@ concurrency:
 
 on:
   workflow_dispatch:
+    inputs:
+      image_mode:
+        description: Publish on main with auto; test images without publishing on other branches or with build-only
+        type: choice
+        required: false
+        default: auto
+        options:
+          - auto
+          - build-only
+      expected_sha:
+        description: Optional immutable 40-character commit SHA to verify before authentication
+        type: string
+        required: false
+        default: ''
   push:
     branches: [ main ]
     tags: [ "v*" ]
   pull_request:
-    branches: [ main ]
 
 jobs:
   lint:
@@ -31,7 +44,7 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2
+          version: v2.13.1
 
       - name: Lint GitHub Actions
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
@@ -72,6 +85,9 @@ jobs:
         run: |
           task test
           task test-binary
+
+      - name: Test WASM provider registration
+        run: task test-wasm-providers
 
   # Native Windows tests. Plan storage relies on OS-specific file locking and
   # path semantics, so the full Go test suite runs natively on Windows in a
@@ -119,10 +135,28 @@ jobs:
         run: go-licenses check . --allowed_licenses=Apache-2.0,MIT,BSD-3-Clause,BSD-2-Clause --ignore modernc.org/mathutil --ignore github.com/hashicorp/hcl/v2
 
   build-image:
-    if: github.event_name == 'pull_request'
-    # Build each platform on its own native runner, in parallel. Building both
-    # platforms on a single runner serializes two CPU-bound cgo/zig compiles on
-    # 2 vCPUs (~8 min); splitting across native runners cuts wall-clock to ~4 min.
+    if: >-
+      github.repository == 'docker/docker-agent' &&
+      github.event.repository.fork == false && (
+        (github.event_name == 'pull_request' &&
+          github.event.pull_request.base.repo.full_name == github.repository &&
+          github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'workflow_dispatch' &&
+          startsWith(github.ref, 'refs/heads/') &&
+          (github.ref != 'refs/heads/main' || inputs.image_mode == 'build-only') &&
+          (inputs.image_mode == '' || inputs.image_mode == 'auto' || inputs.image_mode == 'build-only'))
+      )
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 30
+    env:
+      DOCKER_BUILD_CLOUD_ENDPOINT: docker/docker-agent
+      DOCKERHUB_OIDC_CONNECTION_ID: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+      DOCKER_BUILD_SUMMARY: 'false'
+    # Cloud workers compile each native platform in parallel; GitHub runners
+    # only orchestrate the builds.
     strategy:
       fail-fast: false
       matrix:
@@ -135,48 +169,185 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate Docker Build Cloud configuration
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_INPUT_SHA: ${{ inputs.expected_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Workflow run commit must be a lowercase 40-character SHA" >&2
+            exit 1
+          fi
+          if [[ -n "${EXPECTED_INPUT_SHA}" ]]; then
+            if [[ ! "${EXPECTED_INPUT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "expected_sha must be a lowercase 40-character SHA" >&2
+              exit 1
+            fi
+            if [[ "${EXPECTED_INPUT_SHA}" != "${EXPECTED_SHA}" ]]; then
+              echo "expected_sha does not match the workflow run commit" >&2
+              exit 1
+            fi
+          fi
+          if ! checked_out_sha="$(git rev-parse HEAD)"; then
+            echo "Unable to determine the checked out commit" >&2
+            exit 1
+          fi
+          if [[ "${checked_out_sha}" != "${EXPECTED_SHA}" ]]; then
+            echo "Checked out commit does not match the workflow run commit" >&2
+            exit 1
+          fi
+          if [[ -z "${DOCKERHUB_OIDC_CONNECTION_ID}" ]]; then
+            echo "DOCKERHUB_OIDC_CONNECTION_ID must be configured" >&2
+            exit 1
+          fi
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "GitHub Actions OIDC is unavailable for this workflow run" >&2
+            exit 1
+          fi
+
+      - name: Get Docker Build Cloud OIDC token
+        id: docker_oidc
+        uses: docker/oidc-action@b048fb089ace3e15a5fbdd784f4784d284ce5e8d # v1.1.0
+        with:
+          connection-id: ${{ env.DOCKERHUB_OIDC_CONNECTION_ID }}
+          expires-in: 3600
+
+      - name: Docker login
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          username: docker
+          password: ${{ steps.docker_oidc.outputs.token }}
+
+      - name: Set up Docker Build Cloud
+        id: buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver: cloud
+          endpoint: ${{ env.DOCKER_BUILD_CLOUD_ENDPOINT }}
+          version: lab:edge
+
+      - name: Build image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          platforms: ${{ matrix.platform }}
+          outputs: type=cacheonly
+          push: false
+          load: false
+          sbom: false
+          provenance: false
+          github-token: ''
+          build-args: |
+            GIT_TAG=pr
+            GIT_COMMIT=dev
+
+      - name: Build template
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: .
+          target: template
+          platforms: ${{ matrix.platform }}
+          outputs: type=cacheonly
+          push: false
+          load: false
+          sbom: false
+          provenance: false
+          github-token: ''
+          build-args: |
+            GIT_TAG=pr
+            GIT_COMMIT=dev
+
+  # Fork PRs cannot use repository variables or OIDC; build without credentials.
+  build-image-fork:
+    if: >-
+      github.repository == 'docker/docker-agent' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver: docker-container
+          cache-binary: false
 
       - name: Build image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          outputs: type=cacheonly
           push: false
+          load: false
           sbom: false
           provenance: false
+          github-token: ''
           build-args: |
             GIT_TAG=pr
             GIT_COMMIT=dev
-          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
-          cache-to: type=gha,mode=min,scope=buildx-${{ matrix.platform }}
 
-      # The sandbox template shares the builder-linux stage, so it reuses the
-      # binary compiled by the step above.
       - name: Build template
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           target: template
           platforms: ${{ matrix.platform }}
+          outputs: type=cacheonly
           push: false
+          load: false
           sbom: false
           provenance: false
+          github-token: ''
           build-args: |
             GIT_TAG=pr
             GIT_COMMIT=dev
-          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
 
   build-and-push-image:
-    if: github.event_name != 'pull_request' && !github.event.repository.fork
+    if: >-
+      github.repository == 'docker/docker-agent' &&
+      github.event.repository.fork == false && (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        (github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          (inputs.image_mode == '' || inputs.image_mode == 'auto'))
+      )
     needs: [ lint, build-and-test, windows-tests, license-check ]
     permissions:
       contents: read
       id-token: write
-    # Build each platform on its own native runner in parallel, push by digest,
-    # then assemble the multi-arch manifest in the merge job below.
+    env:
+      DOCKER_BUILD_CLOUD_ENDPOINT: docker/docker-agent
+      DOCKERHUB_OIDC_CONNECTION_ID: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+      DOCKER_BUILD_SUMMARY: 'false'
+    # Cloud workers build each native platform in parallel and push by digest;
+    # the merge jobs below assemble the multi-arch manifests.
     strategy:
       fail-fast: false
       matrix:
@@ -189,6 +360,47 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate Docker Build Cloud configuration
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_INPUT_SHA: ${{ inputs.expected_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Workflow run commit must be a lowercase 40-character SHA" >&2
+            exit 1
+          fi
+          if [[ -n "${EXPECTED_INPUT_SHA}" ]]; then
+            if [[ ! "${EXPECTED_INPUT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "expected_sha must be a lowercase 40-character SHA" >&2
+              exit 1
+            fi
+            if [[ "${EXPECTED_INPUT_SHA}" != "${EXPECTED_SHA}" ]]; then
+              echo "expected_sha does not match the workflow run commit" >&2
+              exit 1
+            fi
+          fi
+          if ! checked_out_sha="$(git rev-parse HEAD)"; then
+            echo "Unable to determine the checked out commit" >&2
+            exit 1
+          fi
+          if [[ "${checked_out_sha}" != "${EXPECTED_SHA}" ]]; then
+            echo "Checked out commit does not match the workflow run commit" >&2
+            exit 1
+          fi
+          if [[ -z "${DOCKERHUB_OIDC_CONNECTION_ID}" ]]; then
+            echo "DOCKERHUB_OIDC_CONNECTION_ID must be configured" >&2
+            exit 1
+          fi
+          if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+            echo "GitHub Actions OIDC is unavailable for this workflow run" >&2
+            exit 1
+          fi
 
       - name: Prepare platform name
         run: echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
@@ -199,7 +411,7 @@ jobs:
         id: docker_oidc
         uses: docker/oidc-action@b048fb089ace3e15a5fbdd784f4784d284ce5e8d # v1.1.0
         with:
-          connection-id: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
+          connection-id: ${{ env.DOCKERHUB_OIDC_CONNECTION_ID }}
           expires-in: 3600
 
       - name: Hub login
@@ -208,8 +420,13 @@ jobs:
           username: docker
           password: ${{ steps.docker_oidc.outputs.token }}
 
-      - name: Set up Docker Buildx
+      - name: Set up Docker Build Cloud
+        id: buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver: cloud
+          endpoint: ${{ env.DOCKER_BUILD_CLOUD_ENDPOINT }}
+          version: lab:edge
 
       - name: Docker metadata
         id: meta
@@ -222,17 +439,18 @@ jobs:
         id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          load: false
+          github-token: ''
           sbom: true
           provenance: mode=max
           outputs: type=image,name=docker/docker-agent,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             GIT_TAG=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
-          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=buildx-${{ matrix.platform }}
 
       - name: Export digest
         run: |
@@ -255,16 +473,18 @@ jobs:
         id: build-template
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: .
           target: template
           platforms: ${{ matrix.platform }}
+          load: false
+          github-token: ''
           sbom: true
           provenance: mode=max
           outputs: type=image,name=docker/docker-agent-sbx-templates,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             GIT_TAG=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
-          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
 
       - name: Export template digest
         env:
@@ -282,7 +502,15 @@ jobs:
           retention-days: 1
 
   merge-and-push-image:
-    if: github.event_name != 'pull_request' && !github.event.repository.fork
+    if: >-
+      github.repository == 'docker/docker-agent' &&
+      github.event.repository.fork == false && (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        (github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          (inputs.image_mode == '' || inputs.image_mode == 'auto'))
+      )
     needs: [ build-and-push-image ]
     permissions:
       contents: read
@@ -337,7 +565,15 @@ jobs:
           docker buildx imagetools inspect docker/docker-agent:${{ steps.meta.outputs.version }}
 
   merge-and-push-template:
-    if: github.event_name != 'pull_request' && !github.event.repository.fork
+    if: >-
+      github.repository == 'docker/docker-agent' &&
+      github.event.repository.fork == false && (
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+        (github.event_name == 'workflow_dispatch' &&
+          github.ref == 'refs/heads/main' &&
+          (inputs.image_mode == '' || inputs.image_mode == 'auto'))
+      )
     needs: [ build-and-push-image ]
     permissions:
       contents: read

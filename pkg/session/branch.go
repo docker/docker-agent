@@ -328,6 +328,7 @@ func cloneEvalCriteria(src *EvalCriteria) *EvalCriteria {
 	}
 	cp := *src
 	cp.Relevance = cloneStringSlice(src.Relevance)
+	cp.Assertions = slices.Clone(src.Assertions)
 	return &cp
 }
 
@@ -360,6 +361,11 @@ func cloneEvalResultChecks(src EvalResultChecks) EvalResultChecks {
 		relevance := *src.Relevance
 		relevance.Results = slices.Clone(src.Relevance.Results)
 		cp.Relevance = &relevance
+	}
+	if src.Assertions != nil {
+		assertions := *src.Assertions
+		assertions.Results = slices.Clone(src.Assertions.Results)
+		cp.Assertions = &assertions
 	}
 	return cp
 }

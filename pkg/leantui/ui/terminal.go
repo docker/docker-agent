@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/cancelreader"
 	"golang.org/x/term"
 )
@@ -57,6 +58,7 @@ func NewTerminal(in, out *os.File) (*Terminal, error) {
 
 	lipgloss.EnableLegacyWindowsANSI(out)
 	t.writeString(seqEnableBracketedPaste)
+	t.writeString(ansi.PushKittyKeyboard(ansi.KittyDisambiguateEscapeCodes))
 	t.flush()
 	t.startResizeWatcher()
 
@@ -143,6 +145,11 @@ func (t *Terminal) Writer() *bufio.Writer {
 	return t.writer
 }
 
+func (t *Terminal) SetClipboard(text string) {
+	t.writeString(ansi.SetSystemClipboard(text))
+	t.flush()
+}
+
 func (t *Terminal) writeString(s string) {
 	_, _ = t.writer.WriteString(s)
 }
@@ -155,6 +162,7 @@ func (t *Terminal) flush() {
 // the reader, restores the saved terminal state and stops watching for resizes.
 func (t *Terminal) Restore() {
 	t.writeString(seqDisableBracketedPaste)
+	t.writeString(ansi.PopKittyKeyboard(1))
 	t.writeString(seqShowCursor)
 	t.flush()
 

@@ -54,7 +54,7 @@ Before marking work as complete:
 - `task test` — Run Go tests (clears API keys to ensure deterministic tests)
 - `task lint` — Run golangci-lint (uses `.golangci.yml` configuration)
 - `task format` — Format code using golangci-lint fmt
-- `task dev` — Run lint, test, and build in sequence
+- `task dev` — Run lint, test, and build in parallel
 
 ## Docker and Cross-Platform Builds
 

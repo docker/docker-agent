@@ -238,6 +238,10 @@ type Handler struct {
 	runner Runner
 	wg     sync.WaitGroup
 	tasks  *concurrent.Map[string, *task]
+
+	admissionMu sync.Mutex
+	activeTasks int
+	stopping    bool
 }
 
 // NewHandler creates a new Handler with the given Runner.
@@ -268,6 +272,12 @@ func (h *Handler) totalTaskCount() int {
 }
 
 func (h *Handler) pruneCompleted() {
+	h.admissionMu.Lock()
+	defer h.admissionMu.Unlock()
+	h.pruneCompletedLocked()
+}
+
+func (h *Handler) pruneCompletedLocked() {
 	var toDelete []string
 	h.tasks.Range(func(id string, t *task) bool {
 		if s := t.loadStatus(); s != taskRunning {
@@ -315,18 +325,25 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 		return tools.ResultError(fmt.Sprintf("agent %q is not in the sub-agents list. This agent has no sub-agents configured.", params.Agent)), nil
 	}
 
-	// Enforce concurrency cap.
-	if h.runningTaskCount() >= maxConcurrentTasks {
+	// Admission, insertion, and pruning are one transaction. StopAll uses the
+	// same lock to prevent Wait racing a new WaitGroup task.
+	h.admissionMu.Lock()
+	if h.stopping {
+		h.admissionMu.Unlock()
+		return tools.ResultError("background agent handler is stopping"), nil
+	}
+	if h.activeTasks >= maxConcurrentTasks {
+		h.admissionMu.Unlock()
 		return tools.ResultError(fmt.Sprintf("maximum concurrent background agent tasks (%d) reached; stop or wait for existing tasks to complete", maxConcurrentTasks)), nil
 	}
-
-	// Enforce total cap, pruning finished tasks first.
 	if h.totalTaskCount() >= maxTotalTasks {
-		h.pruneCompleted()
+		h.pruneCompletedLocked()
 		if h.totalTaskCount() >= maxTotalTasks {
+			h.admissionMu.Unlock()
 			return tools.ResultError(fmt.Sprintf("maximum total background agent tasks (%d) reached; view and discard old tasks first", maxTotalTasks)), nil
 		}
 	}
+	h.activeTasks++
 
 	taskID := newTaskID()
 
@@ -354,6 +371,7 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 	h.tasks.Store(taskID, t)
 
 	h.wg.Go(func() {
+		defer h.releaseAdmission()
 		defer cancel()
 
 		// Each background task starts its own trace (WithNewRoot)
@@ -434,9 +452,16 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 			slog.DebugContext(tracedCtx, "Background agent task completed", "task_id", taskID, "agent", params.Agent)
 		}
 	})
+	h.admissionMu.Unlock()
 
 	return tools.ResultSuccess(fmt.Sprintf("Background agent task started with ID: %s\nAgent: %s\nTask: %s",
 		taskID, params.Agent, params.Task)), nil
+}
+
+func (h *Handler) releaseAdmission() {
+	h.admissionMu.Lock()
+	defer h.admissionMu.Unlock()
+	h.activeTasks--
 }
 
 // HandleList lists all background agent tasks.
@@ -505,12 +530,20 @@ func (h *Handler) HandleStop(_ context.Context, _ *session.Session, toolCall too
 // StopAll cancels all running tasks and waits for their goroutines to exit.
 // Called during runtime shutdown to ensure clean teardown.
 func (h *Handler) StopAll() {
+	var cancels []context.CancelFunc
+	h.admissionMu.Lock()
+	h.stopping = true
 	h.tasks.Range(func(_ string, t *task) bool {
 		if t.casStatus(taskRunning, taskStopped) {
-			t.cancel()
+			cancels = append(cancels, t.cancel)
 		}
 		return true
 	})
+	h.admissionMu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
 	h.wg.Wait()
 }
 

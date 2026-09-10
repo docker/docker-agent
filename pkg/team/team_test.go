@@ -1,6 +1,9 @@
 package team
 
 import (
+	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,10 +11,62 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func newAgent(name string) *agent.Agent {
 	return agent.New(name, "")
+}
+
+// stopRecordingToolSet is a Startable ToolSet whose Stop records calls and
+// returns stopErr.
+type stopRecordingToolSet struct {
+	stopErr error
+	stops   atomic.Int32
+}
+
+func (s *stopRecordingToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+func (s *stopRecordingToolSet) Start(context.Context) error                 { return nil }
+func (s *stopRecordingToolSet) Stop(context.Context) error {
+	s.stops.Add(1)
+	return s.stopErr
+}
+
+// TestStopToolSetsContinuesAcrossAgents pins the team-level aggregation
+// contract: an agent whose toolsets fail to stop must not abandon stopping
+// the later agents' toolsets, and every failure surfaces in the joined
+// error together with the owning agent's name.
+func TestStopToolSetsContinuesAcrossAgents(t *testing.T) {
+	t.Parallel()
+
+	errFirst := errors.New("first boom")
+	errSecond := errors.New("second boom")
+	tsFirst := &stopRecordingToolSet{stopErr: errFirst}
+	tsSecond := &stopRecordingToolSet{stopErr: errSecond}
+	tsHealthy := &stopRecordingToolSet{}
+
+	first := agent.New("first", "", agent.WithToolSets(tsFirst))
+	second := agent.New("second", "", agent.WithToolSets(tsSecond))
+	third := agent.New("third", "", agent.WithToolSets(tsHealthy))
+	tm := New(WithAgents(first, second, third))
+
+	// Start every toolset so StopToolSets has something to stop.
+	for _, a := range []*agent.Agent{first, second, third} {
+		for _, ts := range a.ToolSets() {
+			startable, ok := ts.(*tools.StartableToolSet)
+			require.True(t, ok)
+			require.NoError(t, startable.Start(t.Context()))
+		}
+	}
+
+	err := tm.StopToolSets(t.Context())
+	require.ErrorIs(t, err, errFirst)
+	require.ErrorIs(t, err, errSecond)
+	assert.Contains(t, err.Error(), "first")
+	assert.Contains(t, err.Error(), "second")
+	assert.EqualValues(t, 1, tsFirst.stops.Load())
+	assert.EqualValues(t, 1, tsSecond.stops.Load(), "an earlier failing agent must not abandon the next agent's toolsets")
+	assert.EqualValues(t, 1, tsHealthy.stops.Load(), "a failing earlier agent must not abandon stopping later agents' toolsets")
 }
 
 // RuntimeSafety returns the config-wide default set via WithRuntimeSafety,

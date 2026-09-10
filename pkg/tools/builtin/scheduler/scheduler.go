@@ -16,8 +16,9 @@ const (
 	ToolNameListSchedules  = "list_schedules"
 	ToolNameCancelSchedule = "cancel_schedule"
 
-	category    = "scheduler"
-	loopMaxWait = time.Minute
+	category         = "scheduler"
+	loopMaxWait      = time.Minute
+	recallRetryDelay = time.Minute
 )
 
 func CreateToolSet() (tools.ToolSet, error) {
@@ -96,8 +97,10 @@ func (t *ToolSet) fireDue(ctx context.Context, now time.Time) {
 	if rt == nil {
 		return
 	}
-	for _, sc := range t.store.popDue(now) {
-		if err := rt.Recall(ctx, formatFire(sc)); err != nil {
+	for _, sc := range t.store.claimDue(now) {
+		err := rt.Recall(ctx, formatFire(sc))
+		t.store.finishFire(sc.ID, now, err == nil)
+		if err != nil {
 			slog.WarnContext(ctx, "Failed to enqueue scheduled recall",
 				"schedule_id", sc.ID, "schedule_name", sc.Name, "error", err)
 		}

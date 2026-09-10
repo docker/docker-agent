@@ -75,25 +75,6 @@ func (m *appModel) plansService() plans.Service {
 	return m.plansSvc
 }
 
-// currentPlanSessionID identifies the active session whose plan is included
-// in listings. Only this session is ever consulted; plan files left behind
-// by other sessions are never enumerated.
-func (m *appModel) currentPlanSessionID() string {
-	if m.application == nil {
-		return ""
-	}
-	if sess := m.application.Session(); sess != nil {
-		return sess.ID
-	}
-	return ""
-}
-
-// planListOptions snapshots the listing options from model state; commands
-// run off the event loop and must not touch the model.
-func (m *appModel) planListOptions() plans.ListOptions {
-	return plans.ListOptions{SessionID: m.currentPlanSessionID()}
-}
-
 // planDialogOpen reports whether any dialog of the /plans flow is on the
 // stack — topmost or buried under another dialog — i.e. plan data is on
 // screen and worth live-refreshing.
@@ -124,43 +105,28 @@ func (m *appModel) planDetailOpen(ref plans.Ref) bool {
 
 func (m *appModel) handleShowPlanBrowser() (tea.Model, tea.Cmd) {
 	// One browser only: with a browser already on the stack (even buried) or
-	// its opening read already in flight for this session, a repeated /plans
-	// must not start a second List or stack a duplicate browser. A request
-	// for a different session may launch — the superseded read's result is
-	// dropped as stale in handlePlanBrowserLoaded.
-	if m.planBrowserOpen() {
-		return m, nil
-	}
-	svc, ctx, opts := m.plansService(), m.ctx(), m.planListOptions()
-	if m.planBrowserLoadInFlight && m.planBrowserLoadSessionID == opts.SessionID {
+	// its opening read already in flight, a repeated /plans must not start a
+	// second List or stack a duplicate browser.
+	if m.planBrowserOpen() || m.planBrowserLoadInFlight {
 		return m, nil
 	}
 	m.planBrowserLoadInFlight = true
-	m.planBrowserLoadSessionID = opts.SessionID
+	svc, ctx := m.plansService(), m.ctx()
 	timeout := m.planReadTimeoutOrDefault()
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		result, err := svc.List(ctx, opts)
-		return planBrowserLoadedMsg{sessionID: opts.SessionID, result: result, err: err}
+		result, err := svc.List(ctx)
+		return planBrowserLoadedMsg{result: result, err: err}
 	}
 }
 
 // handlePlanBrowserLoaded opens the /plans browser with the completed
-// listing. A result whose session no longer matches the active one is
-// dropped: the user switched tabs while the read was in flight, and popping
-// a browser that lists the previous tab's session plan would mislead.
+// listing.
 func (m *appModel) handlePlanBrowserLoaded(msg planBrowserLoadedMsg) (tea.Model, tea.Cmd) {
-	// Clear the guard first, whatever the outcome, so a failed or stale open
-	// never wedges /plans. A result whose session differs from the guard's
-	// belongs to a superseded launch; the guard keeps tracking the newer
-	// in-flight read.
-	if msg.sessionID == m.planBrowserLoadSessionID {
-		m.planBrowserLoadInFlight = false
-	}
-	if msg.sessionID != m.currentPlanSessionID() {
-		return m, nil
-	}
+	// Clear the guard first, whatever the outcome, so a failed open never
+	// wedges /plans.
+	m.planBrowserLoadInFlight = false
 	if msg.err != nil {
 		cmd := m.planReadFailureCmd(msg.err)
 		return m, cmd
@@ -196,7 +162,7 @@ func (m *appModel) planRefreshCmd(notifyWarnings bool) tea.Cmd {
 		return nil
 	}
 	m.planRefreshInFlight = true
-	svc, ctx, opts := m.plansService(), m.ctx(), m.planListOptions()
+	svc, ctx := m.plansService(), m.ctx()
 	timeout := m.planReadTimeoutOrDefault()
 	refs := m.openPlanDetailRefs()
 	return func() tea.Msg {
@@ -205,8 +171,8 @@ func (m *appModel) planRefreshCmd(notifyWarnings bool) tea.Cmd {
 		// refresh pipeline can never get stuck.
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		msg := planRefreshedMsg{sessionID: opts.SessionID, notifyWarnings: notifyWarnings}
-		msg.list, msg.listErr = svc.List(ctx, opts)
+		msg := planRefreshedMsg{notifyWarnings: notifyWarnings}
+		msg.list, msg.listErr = svc.List(ctx)
 		for _, ref := range refs {
 			p, err := svc.Get(ctx, ref)
 			msg.details = append(msg.details, planDetailFetch{ref: ref, plan: p, err: err})
@@ -229,10 +195,7 @@ func (m *appModel) appendPlanRefreshCmd(cmds []tea.Cmd) []tea.Cmd {
 // refresh pipeline can never wedge. With no plan dialog left the result —
 // data, errors, and warnings alike — is dropped along with any queued
 // follow-up: it has nowhere to land and a notification would reference
-// nothing on screen. A result read for another session's listing (the user
-// switched tabs while it was in flight) is dropped too, and exactly one
-// fresh reload for the current session replaces it, folding in the queued
-// intent. Otherwise the list data (or its failure) surfaces
+// nothing on screen. Otherwise the list data (or its failure) surfaces
 // unconditionally. Detail read failures surface only for a detail that is
 // the topmost dialog now, when the result is applied: a plan that
 // disappeared closes it — through the targeted ClosePlanDetailMsg, so
@@ -249,13 +212,6 @@ func (m *appModel) handlePlanRefreshed(msg planRefreshedMsg) (tea.Model, tea.Cmd
 		m.planRefreshQueued = false
 		m.planRefreshQueuedWarnings = false
 		return m, nil
-	}
-	if msg.sessionID != m.currentPlanSessionID() {
-		notify := msg.notifyWarnings || m.planRefreshQueuedWarnings
-		m.planRefreshQueued = false
-		m.planRefreshQueuedWarnings = false
-		cmd := m.planRefreshCmd(notify)
-		return m, cmd
 	}
 
 	var cmds []tea.Cmd
@@ -318,21 +274,16 @@ type planDetailFetch struct {
 }
 
 // planBrowserLoadedMsg reports the listing read that backs opening the
-// /plans browser. sessionID is the session the listing was requested for,
-// so a result that raced a tab switch can be told apart and dropped.
+// /plans browser.
 type planBrowserLoadedMsg struct {
-	sessionID string
-	result    plans.ListResult
-	err       error
+	result plans.ListResult
+	err    error
 }
 
 // planRefreshedMsg reports a completed asynchronous reload of the open plan
 // dialogs: the browser listing plus the full plan of every detail dialog
-// that was open when the reload started. sessionID is the session the
-// listing was read for, so a reload that raced a tab switch can be told
-// apart, dropped, and replaced by a fresh one.
+// that was open when the reload started.
 type planRefreshedMsg struct {
-	sessionID      string
 	list           plans.ListResult
 	listErr        error
 	details        []planDetailFetch
@@ -448,7 +399,8 @@ func (m *appModel) handlePlanExportResult(msg planExportResultMsg) (tea.Model, t
 	switch {
 	case msg.exists:
 		return m, notification.ErrorCmd(
-			msg.path + " already exists — move it away, or export to a custom path with 'docker agent plans export'.")
+			msg.path + " already exists — move it away, or export to a custom path with 'docker agent plans export'.",
+		)
 	case msg.statErr != nil:
 		return m, notification.ErrorCmd(fmt.Sprintf("Cannot export to %s: %v", msg.path, msg.statErr))
 	case msg.err != nil:
@@ -458,20 +410,10 @@ func (m *appModel) handlePlanExportResult(msg planExportResultMsg) (tea.Model, t
 	return m, notification.SuccessCmd(fmt.Sprintf("Exported %s plan to %s (%d bytes)", msg.result.Scope, msg.result.Path, msg.result.BytesWritten))
 }
 
-// planExportFilename is the deterministic default export target: the plan
-// name for shared plans, a short session marker for session plans.
+// planExportFilename is the deterministic default export target, named after
+// the plan.
 func planExportFilename(ref plans.Ref) string {
-	if ref.Scope == plans.ScopeSession {
-		return "session-plan-" + planShortSessionID(ref.SessionID) + ".md"
-	}
 	return ref.Name + ".md"
-}
-
-func planShortSessionID(id string) string {
-	if r := []rune(id); len(r) > 8 {
-		return string(r[:8])
-	}
-	return id
 }
 
 // activeWorkingDir is the working directory of the active tab's runtime,
@@ -615,8 +557,7 @@ func (m *appModel) handleEditPlan(msg messages.EditPlanMsg) (tea.Model, tea.Cmd)
 		ready.currentVersion = planVersionOf(p)
 		if ready.currentVersion != msg.ExpectedVersion {
 			// No draft for a drifted base; handlePlanEditReady refreshes
-			// instead of editing. Session plans never take this branch: they
-			// have no versions, so both sides are always 0.
+			// instead of editing.
 			return ready
 		}
 		ready.draftPath, ready.draftErr = planDraftFile(planDraftPattern(msg.Ref), p.Content)
@@ -654,7 +595,8 @@ func (m *appModel) handlePlanEditReady(msg planEditReadyMsg) (tea.Model, tea.Cmd
 	if msg.currentVersion != msg.expectedVersion {
 		cmds := []tea.Cmd{notification.WarningCmd(fmt.Sprintf(
 			"Plan %q is at v%d now (you read v%d). Data refreshed — review and press e again.",
-			msg.ref.Name, msg.currentVersion, msg.expectedVersion))}
+			msg.ref.Name, msg.currentVersion, msg.expectedVersion,
+		))}
 		cmds = m.appendPlanRefreshCmd(cmds)
 		return m, tea.Sequence(cmds...)
 	}
@@ -683,13 +625,9 @@ type planEditorClosedMsg struct {
 }
 
 // planDraftPattern names the temp draft of an editor-driven edit after the
-// plan's identity: the shared plan name, or a short session marker mirroring
-// planExportFilename. Both are service-validated identifiers by the time a
-// draft is created, so the pattern is filename-safe.
+// plan's name, a service-validated identifier by the time a draft is
+// created, so the pattern is filename-safe.
 func planDraftPattern(ref plans.Ref) string {
-	if ref.Scope == plans.ScopeSession {
-		return "cagent-plan-session-" + planShortSessionID(ref.SessionID) + "-*.md"
-	}
 	return "cagent-plan-" + ref.Name + "-*.md"
 }
 
@@ -728,7 +666,8 @@ func (m *appModel) handlePlanEditorClosed(msg planEditorClosedMsg) (tea.Model, t
 		// exited non-zero); the draft is kept so no edit is ever lost.
 		return m, tea.Sequence(
 			notification.ErrorCmd(fmt.Sprintf("Editor error: %v", msg.err)),
-			notification.InfoCmd("Your draft is kept at "+msg.path))
+			notification.InfoCmd("Your draft is kept at "+msg.path),
+		)
 	}
 
 	// Both the draft read and the persistence call run in a command: reading
@@ -752,14 +691,9 @@ func (m *appModel) handlePlanEditorClosed(msg planEditorClosedMsg) (tea.Model, t
 		}
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		switch {
-		case msg.create:
+		if msg.create {
 			result.plan, result.err = svc.Create(ctx, plans.CreateRequest{Ref: msg.ref, Content: content})
-		case msg.ref.Scope == plans.ScopeSession:
-			// Session plans have no versions: the replace is deliberately
-			// unguarded, last-write-wins.
-			result.plan, result.err = svc.UpdateSession(ctx, msg.ref.SessionID, content)
-		default:
+		} else {
 			expected := msg.expectedVersion
 			result.plan, result.err = svc.Update(ctx, plans.UpdateRequest{Ref: msg.ref, Content: content, ExpectedVersion: &expected})
 		}
@@ -809,16 +743,13 @@ func (m *appModel) handlePlanWriteResult(msg planWriteResultMsg) (tea.Model, tea
 	case msg.readErr != nil:
 		return m, tea.Sequence(
 			notification.ErrorCmd(fmt.Sprintf("Failed to read edited plan: %v", msg.readErr)),
-			notification.InfoCmd("Your draft is kept at "+msg.draftPath))
+			notification.InfoCmd("Your draft is kept at "+msg.draftPath),
+		)
 	case msg.emptyDraft:
-		switch {
-		case msg.create:
+		if msg.create {
 			return m, notification.InfoCmd(fmt.Sprintf("Plan %q not created: the draft was empty.", msg.ref.Name))
-		case msg.ref.Scope == plans.ScopeSession:
-			return m, notification.InfoCmd("Session plan left unchanged: an empty draft is never committed.")
-		default:
-			return m, notification.InfoCmd(fmt.Sprintf("Plan %q left unchanged: an empty draft is never committed.", msg.ref.Name))
 		}
+		return m, notification.InfoCmd(fmt.Sprintf("Plan %q left unchanged: an empty draft is never committed.", msg.ref.Name))
 	case msg.err != nil:
 		cmd := m.planEditorFailureCmd(msg.err, msg.draftPath)
 		return m, cmd
@@ -826,13 +757,9 @@ func (m *appModel) handlePlanWriteResult(msg planWriteResultMsg) (tea.Model, tea
 	_ = os.Remove(msg.draftPath)
 
 	var text string
-	switch {
-	case msg.create:
+	if msg.create {
 		text = fmt.Sprintf("Created shared plan %q (now v%d)", msg.plan.Name, planVersionOf(msg.plan))
-	case msg.ref.Scope == plans.ScopeSession:
-		// Session plans have no version to report.
-		text = "Updated the current session plan."
-	default:
+	} else {
 		text = fmt.Sprintf("Updated shared plan %q (now v%d)", msg.plan.Name, planVersionOf(msg.plan))
 	}
 	cmds := []tea.Cmd{notification.SuccessCmd(text)}
@@ -852,11 +779,13 @@ func (m *appModel) planEditorFailureCmd(err error, draftPath string) tea.Cmd {
 	if errors.As(err, &conflict) {
 		text := fmt.Sprintf(
 			"Version conflict on %q: it is at v%d, you edited v%d. Your draft is kept at %s — refresh and retry from it.",
-			conflict.Name, conflict.Current, conflict.Expected, draftPath)
+			conflict.Name, conflict.Current, conflict.Expected, draftPath,
+		)
 		if conflict.Expected == 0 {
 			text = fmt.Sprintf(
 				"Plan %q already exists (v%d). Your draft is kept at %s — pick another name or edit the existing plan.",
-				conflict.Name, conflict.Current, draftPath)
+				conflict.Name, conflict.Current, draftPath,
+			)
 		}
 		cmds := []tea.Cmd{notification.ErrorCmd(text)}
 		cmds = m.appendPlanRefreshCmd(cmds)
@@ -875,7 +804,8 @@ func (m *appModel) planWriteFailureCmd(err error) tea.Cmd {
 	if errors.As(err, &conflict) {
 		cmds := []tea.Cmd{notification.ErrorCmd(fmt.Sprintf(
 			"Version conflict on %q: it changed to v%d since you read v%d. Data refreshed — review and retry.",
-			conflict.Name, conflict.Current, conflict.Expected))}
+			conflict.Name, conflict.Current, conflict.Expected,
+		))}
 		cmds = m.appendPlanRefreshCmd(cmds)
 		return tea.Sequence(cmds...)
 	}
@@ -892,7 +822,8 @@ func (m *appModel) planTimeoutCmd(err error) tea.Cmd {
 	}
 	return notification.ErrorCmd(fmt.Sprintf(
 		"Plan write timed out after %s — the plan store may be locked by another process. Retry shortly.",
-		m.planMutationTimeoutOrDefault()))
+		m.planMutationTimeoutOrDefault(),
+	))
 }
 
 // planReadFailureCmd reports a failed plan read (list, get, export, or the
@@ -905,7 +836,8 @@ func (m *appModel) planReadFailureCmd(err error) tea.Cmd {
 	}
 	return notification.ErrorCmd(fmt.Sprintf(
 		"Plan read timed out after %s — plan storage may be unavailable. Retry shortly.",
-		m.planReadTimeoutOrDefault()))
+		m.planReadTimeoutOrDefault(),
+	))
 }
 
 // planVersionOf reads a shared plan's version defensively; the service
@@ -921,25 +853,23 @@ func planVersionOf(p plans.Plan) int {
 // user-facing notifications, never classifying by error text.
 func planErrorCmd(err error) tea.Cmd {
 	var (
-		conflict    *plans.ConflictError
-		notFound    *plans.NotFoundError
-		validation  *plans.ValidationError
-		corrupt     *plans.CorruptError
-		unsupported *plans.UnsupportedError
+		conflict   *plans.ConflictError
+		notFound   *plans.NotFoundError
+		validation *plans.ValidationError
+		corrupt    *plans.CorruptError
 	)
 	switch {
 	case errors.As(err, &conflict):
 		return notification.ErrorCmd(fmt.Sprintf(
 			"Version conflict on plan %q: expected v%d but it is at v%d. Refresh (r) and retry.",
-			conflict.Name, conflict.Expected, conflict.Current))
+			conflict.Name, conflict.Expected, conflict.Current,
+		))
 	case errors.As(err, &notFound):
 		return notification.WarningCmd(fmt.Sprintf("No %s plan %q — it may have been deleted; refresh (r).", notFound.Scope, notFound.Name))
 	case errors.As(err, &validation):
 		return notification.ErrorCmd("Invalid input: " + validation.Message)
 	case errors.As(err, &corrupt):
 		return notification.ErrorCmd(fmt.Sprintf("Plan %q is corrupt and cannot be read (%v). Delete it to recover.", corrupt.Name, corrupt.Err))
-	case errors.As(err, &unsupported):
-		return notification.InfoCmd("Unsupported: " + unsupported.Error())
 	default:
 		return notification.ErrorCmd("Plan storage failure: " + err.Error())
 	}
@@ -950,22 +880,8 @@ func planWarningsCmds(warnings []string) []tea.Cmd {
 		return nil
 	}
 	return []tea.Cmd{notification.WarningCmd(fmt.Sprintf(
-		"%d plan(s) could not be read: %s", len(warnings), strings.Join(warnings, "; ")))}
-}
-
-// handleSessionPlanUpdatedEvent forwards the event to the chat page like any
-// runtime event and live-refreshes open plan dialogs when the active
-// session's plan changed. The refresh reads run in a command, never here.
-func (m *appModel) handleSessionPlanUpdatedEvent(msg *runtime.SessionPlanUpdatedEvent) (tea.Model, tea.Cmd) {
-	if name := msg.GetAgentName(); name != "" {
-		m.sessionState.SetCurrentAgentName(name)
-	}
-	chatCmd := m.updateChatCmd(msg)
-	var refresh tea.Cmd
-	if m.planDialogOpen() && msg.SessionID == m.currentPlanSessionID() {
-		refresh = m.planRefreshCmd(false)
-	}
-	return m, tea.Batch(chatCmd, refresh)
+		"%d plan(s) could not be read: %s", len(warnings), strings.Join(warnings, "; "),
+	))}
 }
 
 // handlePlanChangedEvent live-refreshes open plan dialogs after an agent

@@ -128,4 +128,24 @@ func TestGatewayHTTPOptions(t *testing.T) {
 		assert.Empty(t, o.Header.Get("X-Cagent-GeneratingTitle"))
 		assert.Empty(t, o.Header.Get("X-Cagent-Compacting"))
 	})
+
+	t.Run("encrypted config forwarded to a trusted Docker gateway sets the body option, not a header", func(t *testing.T) {
+		t.Parallel()
+		cfg := &latest.ModelConfig{Provider: "openai", Model: "gpt-4o"}
+		modelOpts := options.Apply(options.WithEncryptedConfig("ENC-BLOB"))
+		o := apply(GatewayHTTPOptions(gatewayURL, "https://api.openai.com/v1", cfg, &modelOpts))
+		assert.Empty(t, o.Header.Get("X-Cagent-Encrypted-Config"), "encrypted config must not travel as a header")
+		assert.Equal(t, "ENC-BLOB", o.EncryptedConfigBody(), "encrypted config must be set as the body option")
+	})
+
+	t.Run("encrypted config is not forwarded to an untrusted gateway", func(t *testing.T) {
+		t.Parallel()
+		untrusted, err := url.Parse("https://gateway.example.com/v1")
+		require.NoError(t, err)
+		cfg := &latest.ModelConfig{Provider: "openai", Model: "gpt-4o"}
+		modelOpts := options.Apply(options.WithEncryptedConfig("ENC-BLOB"))
+		o := apply(GatewayHTTPOptions(untrusted, "https://api.openai.com/v1", cfg, &modelOpts))
+		assert.Empty(t, o.Header.Get("X-Cagent-Encrypted-Config"))
+		assert.Empty(t, o.EncryptedConfigBody(), "untrusted gateway must not receive the encrypted config")
+	})
 }

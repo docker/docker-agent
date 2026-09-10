@@ -211,3 +211,33 @@ func TestSourceLoader_SuccessThenError(t *testing.T) {
 		assert.Equal(t, []byte("initial data"), data)
 	})
 }
+
+func TestSourceLoaderRetriesFailedStartup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		inner := &mockSource{name: "test.yaml", err: errors.New("unavailable")}
+		sl := newSourceLoader(t.Context(), inner, 0)
+
+		synctest.Wait()
+		time.Sleep(2 * time.Second) //nolint:forbidigo // fake time inside a synctest bubble
+		synctest.Wait()
+		assert.Equal(t, 2, inner.getReadCount())
+
+		inner.setErr(nil)
+		inner.setData([]byte("recovered"))
+		time.Sleep(15 * time.Second) //nolint:forbidigo // fake time inside a synctest bubble
+		synctest.Wait()
+		assert.Equal(t, 3, inner.getReadCount())
+
+		data, err := sl.Read(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, []byte("recovered"), data)
+	})
+}
+
+func TestSourceRetryScheduleOutlivesDesktopDetectionCache(t *testing.T) {
+	var total time.Duration
+	for _, delay := range sourceRetrySchedule {
+		total += delay
+	}
+	assert.Greater(t, total, time.Minute)
+}

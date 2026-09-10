@@ -270,7 +270,8 @@ func TestClickOnCopyLabelFlashesCopied(t *testing.T) {
 
 	var line, col int
 	found := false
-	for i, rendered := range m.renderedLines {
+	for i := range m.totalHeight {
+		rendered := m.renderedLine(i)
 		plain := ansi.Strip(rendered)
 		if before, _, ok := strings.Cut(plain, types.MessageCopyLabel); ok {
 			line = i

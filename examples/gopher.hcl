@@ -1,6 +1,6 @@
 model "claude" {
   provider = "anthropic"
-  model    = "claude-opus-4-6"
+  model    = "claude-opus-5"
 }
 
 model "haiku" {

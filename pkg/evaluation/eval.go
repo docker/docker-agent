@@ -23,6 +23,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -64,7 +65,7 @@ func newRunner(agentSource config.Source, runConfig *config.RuntimeConfig, judge
 // ttyOut is used for progress bar rendering (should be the console/TTY).
 // out is used for results and status messages (can be tee'd to a log file).
 func Evaluate(ctx context.Context, ttyOut, out io.Writer, isTTY bool, runName string, runConfig *config.RuntimeConfig, cfg Config) (*EvalRun, error) {
-	agentSource, err := config.Resolve(cfg.AgentFilename, nil)
+	agentSource, err := sources.Resolve(cfg.AgentFilename, nil)
 	if err != nil {
 		return nil, fmt.Errorf("resolving agent: %w", err)
 	}
@@ -84,6 +85,7 @@ func Evaluate(ctx context.Context, ttyOut, out io.Writer, isTTY bool, runName st
 	duration := time.Since(startTime)
 
 	summary := computeSummary(results)
+	summary.RepeatMetrics = computeRepeatMetrics(results, cfg.Repeat)
 	printSummary(out, summary, duration)
 
 	run := &EvalRun{
@@ -329,6 +331,7 @@ func (r *Runner) runSingleEval(ctx context.Context, evalSess *InputSession) (Res
 		Question:          strings.Join(userMessages, "\n"),
 		SizeExpected:      evals.Size,
 		RelevanceExpected: float64(len(evals.Relevance)),
+		AssertionsTotal:   len(evals.Assertions),
 	}
 
 	expectedToolCalls := extractToolCalls(evalSess.Messages)
@@ -381,6 +384,17 @@ func (r *Runner) runSingleEval(ctx context.Context, evalSess *InputSession) (Res
 		}
 		result.RelevancePassed = passed
 		result.RelevanceResults = results
+	}
+
+	// Run code-based assertions against the agent output.
+	if len(evals.Assertions) > 0 {
+		assertionResults := runAssertions(evals.Assertions, response, cost, actualToolCalls)
+		result.AssertionResults = assertionResults
+		for _, ar := range assertionResults {
+			if ar.Passed {
+				result.AssertionsPassed++
+			}
+		}
 	}
 
 	slog.DebugContext(ctx, "Evaluation complete", "title", title, "duration", time.Since(startTime))

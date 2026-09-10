@@ -51,4 +51,4 @@ agents:
 models:
   gpt:
     provider: openai
-    model: gpt-4o
+    model: gpt-5.6-sol

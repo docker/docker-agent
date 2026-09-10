@@ -46,8 +46,10 @@ import (
 // the Responses API rather than the legacy Chat Completions API.
 //
 // The Responses API is the forward path for newer OpenAI models: gpt-4.1,
-// the o-series (o1/o3/o4), gpt-5 and Codex variants. Older models stay on
-// Chat Completions for compatibility.
+// the o-series (o1/o3/o4), gpt-5 and later generations (gpt-6+, matched via
+// [gptGeneration] so a naming convention rather than a per-id list picks up
+// new generations), and Codex variants. Older models stay on Chat
+// Completions for compatibility.
 func SupportsResponsesAPI(modelID string) bool {
 	m := normalizeOpenAI(modelID)
 	switch {
@@ -55,6 +57,9 @@ func SupportsResponsesAPI(modelID string) bool {
 		strings.HasPrefix(m, "gpt-5"),
 		strings.HasPrefix(m, "codex"),
 		strings.Contains(m, "-codex"):
+		return true
+	}
+	if maj, _, ok := gptGeneration(m); ok && maj >= 6 {
 		return true
 	}
 	return isOSeries(m)
@@ -66,7 +71,14 @@ func SupportsDeferredTools(provider, modelID string) bool {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	switch provider {
 	case "openai", "chatgpt":
-		switch normalizeOpenAI(modelID) {
+		m := normalizeOpenAI(modelID)
+		// gpt-6 is the next generation of the gpt-5.6 trio, which already
+		// supports deferred tool loading; every future generation inherits
+		// the capability without a per-id allow-list entry.
+		if maj, _, ok := gptGeneration(m); ok && maj >= 6 {
+			return true
+		}
+		switch m {
 		case "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra":
 			return true
 		case "gpt-5.4-pro":
@@ -92,12 +104,18 @@ func SupportsDeferredTools(provider, modelID string) bool {
 // UsesReasoningEffort reports whether an OpenAI model accepts the
 // `reasoning.effort` API parameter.
 //
-// All reasoning-capable OpenAI models do, except the gpt-5-chat variants
-// which are non-reasoning chat models at the API level.
+// All reasoning-capable OpenAI models do (gpt-5, gpt-6+, the o-series),
+// except the gpt-5-chat variants which are non-reasoning chat models at the
+// API level. This exclusion is NOT (yet) generation-agnostic: a future
+// "gpt-6-chat"-style non-reasoning id would need its own prefix check added
+// here, since the maj >= 6 branch below returns true unconditionally.
 func UsesReasoningEffort(modelID string) bool {
 	m := normalizeOpenAI(modelID)
 	if strings.HasPrefix(m, "gpt-5-chat") {
 		return false
+	}
+	if maj, _, ok := gptGeneration(m); ok && maj >= 6 {
+		return true
 	}
 	return isOSeries(m) || strings.HasPrefix(m, "gpt-5")
 }
@@ -232,6 +250,62 @@ func claudeOpusSonnetVersion(m string) (major, minor int, ok bool) {
 	return 0, 0, false
 }
 
+// gptGeneration extracts the major and minor version of a normalized OpenAI
+// GPT model id of the form "gpt-<major>[.<minor>][-suffix]", such as
+// "gpt-6-astra", "gpt-6.1-foo", or "gpt-5.6-terra". A bare major with no dot
+// ("gpt-6") yields minor 0. It reports ok=false for anything that isn't a
+// GPT-5-or-later id: pre-gpt-5 families ("gpt-4.1"), non-GPT ids, and
+// malformed/date-shaped runs (a major or minor wider than two digits, or a
+// suffix glued on without a '-' boundary, e.g. "gpt-5.20260709" or
+// "gpt-6foo").
+//
+// This is the family-agnostic sibling of [gptFiveMinor] in
+// thinking_levels.go: callers that need to compare across GPT generations
+// ("is this gpt-5.6 or later, including gpt-6+") use [atLeastGPT] built on
+// top of this, while gptFiveMinor stays the narrower gpt-5.x-only gate whose
+// callers and tests predate the gpt-6 family and must keep rejecting a bare
+// "gpt-5" (no minor) exactly as before.
+func gptGeneration(modelID string) (major, minor int, ok bool) {
+	m := normalizeOpenAI(modelID)
+	rest, found := strings.CutPrefix(m, "gpt-")
+	if !found {
+		return 0, 0, false
+	}
+	maj, w := leadingInt(rest)
+	if w == 0 || w > 2 || maj < 5 {
+		return 0, 0, false
+	}
+	rest = rest[w:]
+	switch {
+	case rest == "", rest[0] == '-':
+		return maj, 0, true
+	case rest[0] != '.':
+		return 0, 0, false
+	}
+	mn, mw := leadingInt(rest[1:])
+	if mw == 0 || mw > 2 {
+		return 0, 0, false
+	}
+	if tail := rest[1+mw:]; tail != "" && tail[0] != '-' {
+		return 0, 0, false
+	}
+	return maj, mn, true
+}
+
+// atLeastGPT reports whether modelID names an OpenAI GPT model at or above
+// the given generation (major, minor), e.g. atLeastGPT(id, 5, 6) is the
+// gpt-5.6-or-later threshold shared by several capability checks. It uses
+// [gptGeneration], so every later GPT generation (gpt-6, gpt-7, ...)
+// automatically satisfies any gpt-5.x-or-later threshold without a code
+// change; ok=false (non-GPT-5+ ids) reports false.
+func atLeastGPT(modelID string, major, minor int) bool {
+	maj, mn, ok := gptGeneration(modelID)
+	if !ok {
+		return false
+	}
+	return maj > major || (maj == major && mn >= minor)
+}
+
 // UsesThinkingLevel reports whether a Google Gemini model uses level-based
 // thinking configuration (`thinkingLevel`) rather than token-based budgets.
 //
@@ -361,15 +435,13 @@ const openAIQualifierPrefix = "openai/"
 // [normalizeOpenAI], which strips that preserved "openai/" pair afterwards.
 func normalize(modelID string) string {
 	m := strings.ToLower(strings.TrimSpace(modelID))
-	i := strings.LastIndexByte(m, '/')
-	if i < 0 {
+	prefix, last, ok := strings.CutLast(m, "/")
+	if !ok {
 		return m
 	}
-	last := m[i+1:]
-	prefix := m[:i]
 	prevSeg := prefix
-	if j := strings.LastIndexByte(prefix, '/'); j >= 0 {
-		prevSeg = prefix[j+1:]
+	if _, seg, found := strings.CutLast(prefix, "/"); found {
+		prevSeg = seg
 	}
 	if prevSeg == "openai" {
 		return openAIQualifierPrefix + last
@@ -467,17 +539,41 @@ func isOSeries(m string) bool {
 type ModelCapabilities struct {
 	supportsImage bool
 	supportsPDF   bool
+	supportsAudio bool
+	supportsVideo bool
+}
+
+// SupportsImage reports whether the model accepts image attachments.
+func (mc ModelCapabilities) SupportsImage() bool {
+	return mc.supportsImage
+}
+
+// SupportsPDF reports whether the model accepts application/pdf attachments.
+func (mc ModelCapabilities) SupportsPDF() bool {
+	return mc.supportsPDF
+}
+
+// SupportsAudio reports whether the model accepts audio attachments.
+func (mc ModelCapabilities) SupportsAudio() bool {
+	return mc.supportsAudio
+}
+
+// SupportsVideo reports whether the model accepts video attachments.
+func (mc ModelCapabilities) SupportsVideo() bool {
+	return mc.supportsVideo
 }
 
 // Supports reports whether the model can accept an attachment with the given
 // MIME type.
 //
-// Only three content families are recognised:
+// Only five content families are recognised:
 //   - image/* → requires the models.dev "image" input modality
 //   - application/pdf → requires the models.dev "pdf" input modality
+//   - audio/* → requires the models.dev "audio" input modality
+//   - video/* → requires the models.dev "video" input modality
 //   - text/* → always accepted (TXT envelope is universally safe)
 //
-// Everything else (audio, video, Office binaries, …) returns false.
+// Everything else (Office binaries, …) returns false.
 func (mc ModelCapabilities) Supports(mimeType string) bool {
 	mt := strings.ToLower(mimeType)
 	switch {
@@ -485,6 +581,10 @@ func (mc ModelCapabilities) Supports(mimeType string) bool {
 		return mc.supportsImage
 	case mt == "application/pdf":
 		return mc.supportsPDF
+	case strings.HasPrefix(mt, "audio/"):
+		return mc.supportsAudio
+	case strings.HasPrefix(mt, "video/"):
+		return mc.supportsVideo
 	case strings.HasPrefix(mt, "text/"):
 		return true
 	default:
@@ -540,6 +640,8 @@ func ContextLimit(ctx context.Context, store *modelsdev.Store, id modelsdev.ID, 
 type CapsOverride struct {
 	Image bool
 	PDF   bool
+	Audio bool
+	Video bool
 }
 
 // ResolveCaps returns the model's attachment capabilities, preferring an
@@ -552,7 +654,7 @@ type CapsOverride struct {
 // versions); see [github.com/docker/docker-agent/pkg/config/latest.CapabilitiesConfig].
 func ResolveCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID, override *CapsOverride) ModelCapabilities {
 	if override != nil {
-		return CapsWith(override.Image, override.PDF)
+		return CapsWith(override.Image, override.PDF, override.Audio, override.Video)
 	}
 	return LoadCaps(ctx, store, id)
 }
@@ -608,24 +710,130 @@ func LoadCaps(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) Mode
 		return ModelCapabilities{}
 	}
 
+	return capsFromModalities(model.Modalities.Input)
+}
+
+// ToolCallSupport is the models.dev catalogue's tri-state tool-call capability.
+type ToolCallSupport uint8
+
+const (
+	ToolCallSupportUnknown ToolCallSupport = iota
+	ToolCallUnsupported
+	ToolCallSupported
+)
+
+// ResolveToolCallSupport reports whether models.dev says a model supports tool
+// calls. Missing catalogue data remains unknown rather than being treated as a
+// negative capability claim.
+func ResolveToolCallSupport(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) ToolCallSupport {
+	if store == nil {
+		return ToolCallSupportUnknown
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, loadCapsTimeout)
+	defer cancel()
+
+	model, err := store.GetModel(ctx, id)
+	if err != nil {
+		if ctx.Err() != nil {
+			slog.WarnContext(ctx, "modelinfo: models.dev tool-call lookup timed out, leaving support unknown",
+				"model", id.String(), "timeout", loadCapsTimeout)
+		} else {
+			warnCapsLookupMiss(ctx, id, err)
+		}
+		return ToolCallSupportUnknown
+	}
+	if model.ToolCall {
+		return ToolCallSupported
+	}
+	return ToolCallUnsupported
+}
+
+// ResolveOutputImage applies an explicit image-output override when present;
+// otherwise it derives support from the models.dev output modalities. Missing
+// catalogue data conservatively disables image output.
+func ResolveOutputImage(ctx context.Context, store *modelsdev.Store, id modelsdev.ID, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+	if store == nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, loadCapsTimeout)
+	defer cancel()
+
+	model, err := store.GetModel(ctx, id)
+	if err != nil {
+		if ctx.Err() != nil {
+			slog.WarnContext(ctx, "modelinfo: models.dev output lookup timed out, disabling image output",
+				"model", id.String(), "timeout", loadCapsTimeout)
+		} else {
+			warnCapsLookupMiss(ctx, id, err)
+		}
+		return false
+	}
+	return hasOutputModality(model.Modalities.Output, "image")
+}
+
+func hasOutputModality(modalities []string, expected string) bool {
+	for _, modality := range modalities {
+		if strings.EqualFold(modality, expected) {
+			return true
+		}
+	}
+	return false
+}
+
+// booleans it grants. Unknown modality names are ignored.
+func capsFromModalities(input []string) ModelCapabilities {
 	var mc ModelCapabilities
-	for _, input := range model.Modalities.Input {
-		switch strings.ToLower(input) {
+	for _, modality := range input {
+		switch strings.ToLower(modality) {
 		case "image":
 			mc.supportsImage = true
 		case "pdf":
 			mc.supportsPDF = true
+		case "audio":
+			mc.supportsAudio = true
+		case "video":
+			mc.supportsVideo = true
 		}
 	}
 	return mc
 }
 
+// ResolveCapsFromModel applies the same precedence contract as [ResolveCaps]
+// — an explicit override wins, otherwise capabilities derive from the
+// models.dev record — for callers that fetch models through their own store
+// abstraction (e.g. the runtime's ModelStore interface) instead of a concrete
+// [*modelsdev.Store]. A nil model yields the same conservative text-only
+// default as a store miss in [LoadCaps].
+func ResolveCapsFromModel(model *modelsdev.Model, override *CapsOverride) ModelCapabilities {
+	if override != nil {
+		return CapsWith(override.Image, override.PDF, override.Audio, override.Video)
+	}
+	if model == nil {
+		return ModelCapabilities{}
+	}
+	return capsFromModalities(model.Modalities.Input)
+}
+
 // CapsWith constructs a ModelCapabilities value directly from booleans. This is
 // intended for use in tests and provider implementations that need to create a
 // capabilities value without hitting the network.
-func CapsWith(supportsImage, supportsPDF bool) ModelCapabilities {
+func CapsWith(supportsImage, supportsPDF bool, additional ...bool) ModelCapabilities {
+	supportsAudio, supportsVideo := false, false
+	if len(additional) > 0 {
+		supportsAudio = additional[0]
+	}
+	if len(additional) > 1 {
+		supportsVideo = additional[1]
+	}
 	return ModelCapabilities{
 		supportsImage: supportsImage,
 		supportsPDF:   supportsPDF,
+		supportsAudio: supportsAudio,
+		supportsVideo: supportsVideo,
 	}
 }

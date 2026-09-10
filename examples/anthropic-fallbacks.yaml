@@ -4,7 +4,7 @@
 models:
   fable:
     provider: anthropic
-    model: claude-fable-5
+    model: claude-fable-5-1
     provider_opts:
       fallbacks:
         - claude-opus-4-8

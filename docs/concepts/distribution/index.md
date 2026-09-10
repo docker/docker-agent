@@ -37,6 +37,54 @@ $ docker agent share pull docker.io/username/my-agent:latest
 $ docker agent share pull myorg/agent:tag
 ```
 
+## Signing and Encrypting Agents
+
+`share push --key <key>` protects the agent so that pullers holding the matching key can check it was published by you and has not been altered. The YAML is **always pushed in clear**; only the proof goes into the OCI manifest annotations. `share pull --key <key>` performs the check and refuses the artifact if it fails.
+
+The key is given inline, or as a path prefixed with `file://` (a plain prefix, not a URL: `file://./agent.key`, `file:///etc/agent.key`, `file://~/.ssh/id_ed25519` and `file://C:\keys\agent.key` all work; there is no percent-decoding). Inline material that itself starts with `file://` cannot be passed inline — use the file form instead. `DOCKER_AGENT_ENCRYPT_KEY` accepts the same forms and is used when `--key` is not set.
+
+```bash
+# Asymmetric: sign with a private key, verify with the public key
+$ docker agent share push ./agent.yaml myorg/agent:v1 --key file://~/.ssh/id_ed25519
+$ docker agent share pull myorg/agent:v1 --key file://~/.ssh/id_ed25519.pub
+
+# Symmetric: same secret on both sides
+$ openssl rand -hex 32 > agent.key
+$ docker agent share push ./agent.yaml myorg/agent:v1 --key file://agent.key
+$ docker agent share pull myorg/agent:v1 --key file://agent.key
+
+# Symmetric, inline
+$ docker agent share push ./agent.yaml myorg/agent:v1 --key "$(openssl rand -hex 32)"
+```
+
+### Key formats
+
+The key kind is detected from its contents:
+
+| Key contents                                               | Kind       | Sign | Verify | `--encrypt` |
+| ---------------------------------------------------------- | ---------- | ---- | ------ | ----------- |
+| PEM / OpenSSH **Ed25519** private key                      | asymmetric | ✓    | ✓      | ✗           |
+| PEM / OpenSSH **ECDSA** or **RSA** private key             | asymmetric | ✓    | ✓      | ✓           |
+| PEM / OpenSSH public key (`.pub`)                          | asymmetric | ✗    | ✓      | ✗           |
+| Anything else: a raw **secret** of at least 16 bytes       | symmetric  | ✓    | ✓      | ✓           |
+
+Passphrase-protected keys are not supported. Anything containing a PEM boundary (`-----BEGIN`) or an OpenSSH key-type marker (`ssh-`, `ecdsa-sha2-`, `sk-ssh-`, `sk-ecdsa-`) anywhere is treated as a key and rejected if it does not parse — a broken public key is never silently used as a secret. Symmetric secrets can be guessed offline against the public YAML, so use random material (`openssl rand -hex 32`), not a password.
+
+### Modes
+
+- **Sign** (default): records a signature (private key) or an HMAC (secret) of the YAML. Anyone with the public key or secret can verify integrity and provenance.
+- **Encrypt** (`--encrypt`): additionally records an authenticated encrypted copy of the whole YAML. Holders of the secret or private key can recover the YAML from the annotation alone, without the layer. With an asymmetric key this requires the private key and a signature is still recorded — a copy encrypted to a public key could have been produced by anyone, so it proves nothing on its own.
+
+The pull side never needs to choose: the annotations describe what was recorded, and verification checks whatever is present. With an asymmetric key the artifact must carry a signature, which also prevents downgrading a signed artifact to an encrypted-only one.
+
+### Verifying when running
+
+Programs embedding Docker Agent can pass `ocisource.WithVerificationKey(key)` to `sources.Resolve` or `ocisource.New` so an OCI-sourced agent is verified on every read. Import `pkg/config/sources` and `pkg/config/ocisource` from `github.com/docker/docker-agent`.
+
+### Limitations
+
+Signatures cover the YAML bytes only. Re-tagging a signed artifact, or serving an older signed version under the same tag, is not detected — pin digests (`myorg/agent@sha256:…`) when that matters.
+
 ## Running from a Registry
 
 Run agents directly from a registry without pulling first:
@@ -133,3 +181,5 @@ $ docker agent run http://127.0.0.1:8080/agent.yaml
 ```
 
 This is useful for iterating on agent configs served from a local dev server before pushing to a registry. Both `localhost` and `127.0.0.1` addresses are supported with plain `http://` URLs.
+
+Agent configurations loaded from HTTP(S) URLs or OCI artifacts are limited to 32 MiB after decompression.

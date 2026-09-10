@@ -188,3 +188,18 @@ func broadcastLSP(handlers []lspRouteTarget) tools.ToolHandler {
 		return tools.ResultSuccess(strings.Join(sections, "\n---\n")), nil
 	}
 }
+
+// MergeKey implements tools.Mergeable: LSP toolsets are merged per agent.
+func (t *ToolSet) MergeKey() string { return "lsp" }
+
+// Merge implements tools.Mergeable by combining the sibling LSP toolsets into
+// a single Multiplexer.
+func (t *ToolSet) Merge(siblings []tools.MergeSibling) tools.ToolSet {
+	backends := make([]Backend, 0, len(siblings))
+	for _, s := range siblings {
+		if lspTool, ok := s.Raw.(*ToolSet); ok {
+			backends = append(backends, Backend{LSP: lspTool, Toolset: s.Wrapped})
+		}
+	}
+	return NewLSPMultiplexer(backends)
+}

@@ -1,12 +1,12 @@
 ---
 title: "Anthropic"
-description: "Use Claude Sonnet 4, Claude Sonnet 4.5, and other Anthropic models with Docker Agent."
+description: "Use Claude Sonnet 5, Claude Opus 5, and other Anthropic models with Docker Agent."
 keywords: docker agent, ai agents, model providers, llm, anthropic
 weight: 20
 canonical: https://docs.docker.com/ai/docker-agent/providers/anthropic/
 ---
 
-_Use Claude Sonnet 4, Claude Sonnet 4.5, and other Anthropic models with Docker Agent._
+_Use Claude Sonnet 5, Claude Opus 5, and other Anthropic models with Docker Agent._
 
 ## Setup
 
@@ -41,7 +41,7 @@ providers:
 models:
   claude:
     provider: anthropic-wif
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
 ```
 
 `identity_token` accepts four mutually exclusive sources:
@@ -66,7 +66,7 @@ identity_token:
   response_field: value
 ```
 
-`auth:` is mutually exclusive with `--gateway`. Token-refresh failures are
+`auth:` is mutually exclusive with `--models-gateway`. Token-refresh failures are
 surfaced through the normal error path with a clear `anthropic workload
 identity federation: failed to refresh identity token from <kind> source
 (federation_rule=fdrl_…): ...` message in the TUI.
@@ -81,7 +81,7 @@ A complete walkthrough of all four sources lives in
 ```yaml
 agents:
   root:
-    model: anthropic/claude-sonnet-4-5
+    model: anthropic/claude-sonnet-5
 ```
 
 ### Named Model
@@ -90,7 +90,7 @@ agents:
 models:
   claude:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     max_tokens: 64000
 ```
 
@@ -99,9 +99,9 @@ models:
 | Model ID            | Description                                         |
 | ------------------- | --------------------------------------------------- |
 | `claude-opus-5`     | Highest-capability Opus model; full effort ladder (low–max) |
-| `claude-opus-4-7`   | Previous Opus flagship; supports task budget        |
-| `claude-sonnet-4-5` | Most capable Sonnet; supports extended thinking     |
-| `claude-sonnet-4-0` | Previous Sonnet generation, still supported         |
+| `claude-opus-4-8`   | Previous Opus flagship; supports task budget        |
+| `claude-sonnet-5`   | Most capable Sonnet; supports extended thinking     |
+| `claude-sonnet-4-6` | Previous Sonnet generation, still supported         |
 | `claude-haiku-4-5`  | Fast and inexpensive, good for tight loops          |
 
 ## Thinking Budget
@@ -114,7 +114,7 @@ Anthropic accepts either an integer token budget or a string effort value. Think
 models:
   claude-deep:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     thinking_budget: 16384 # must be < max_tokens
 ```
 
@@ -124,12 +124,12 @@ models:
 models:
   opus-adaptive:
     provider: anthropic
-    model: claude-opus-4-6
+    model: claude-opus-5
     thinking_budget: adaptive # model decides effort (defaults to high)
 
   opus-effort:
     provider: anthropic
-    model: claude-opus-4-6
+    model: claude-opus-5
     thinking_budget: high # low | medium | high | xhigh | max (same as adaptive/<effort>)
 ```
 
@@ -143,7 +143,7 @@ Auto-enabled whenever a thinking budget is configured on a Claude model. Allows 
 models:
   claude:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     provider_opts:
       interleaved_thinking: false # disable if needed
 ```
@@ -153,23 +153,22 @@ models:
 `task_budget` caps the **total** number of tokens the model may spend across a
 multi-step agentic task — combined thinking, tool calls, and final output. It
 is forwarded as
-[`output_config.task_budget`](https://platform.claude.com/docs/en/about-claude/models/whats-new-claude-4-7)
+[`output_config.task_budget`](https://platform.claude.com/docs/en/build-with-claude/task-budgets)
 and is ideal for letting long-running agents self-regulate effort without
 tightening `max_tokens` on every call.
 
 Docker Agent automatically attaches the required `task-budgets-2026-03-13`
 beta header whenever this field is set. You can configure `task_budget` on
-**any** Claude model — Docker Agent never gates it by model name. At the time
-of writing, only **Claude Opus 4.7** actually honors the field; other Claude
-models (Sonnet 4.5, Opus 4.5 / 4.6, etc.) are expected to reject requests
-that include it. Check the Anthropic release notes linked above for the
-current list of supported models.
+**any** Claude model — Docker Agent never gates it by model name. **Claude
+Opus 4.7, 4.8, and 5** all honor the field identically; other Claude models
+(Sonnet, Haiku, etc.) are expected to reject requests that include it. Check
+the Anthropic docs linked above for the current list of supported models.
 
 ```yaml
 models:
   opus:
     provider: anthropic
-    model: claude-opus-4-7
+    model: claude-opus-5
     task_budget: 128000 # integer shorthand → { type: tokens, total: 128000 }
     thinking_budget: adaptive
 ```
@@ -179,7 +178,7 @@ Object form (forward-compatible with future budget types):
 ```yaml
   opus:
     provider: anthropic
-    model: claude-opus-4-7
+    model: claude-opus-5
     task_budget:
       type: tokens
       total: 128000
@@ -198,7 +197,7 @@ the request with backup models in a single round trip. Set `fallbacks` in
 models:
   fable:
     provider: anthropic
-    model: claude-fable-5
+    model: claude-fable-5-1
     provider_opts:
       fallbacks:
         - claude-opus-4-8
@@ -221,9 +220,9 @@ Controls whether thinking blocks are returned in responses when thinking is enab
 
 ```yaml
 models:
-  claude-opus-4-7:
+  claude-opus-5:
     provider: anthropic
-    model: claude-opus-4-7
+    model: claude-opus-5
     thinking_budget: adaptive
     provider_opts:
       thinking_display: omitted # "summarized" or "omitted" ("display" on pre-4.6 models only)

@@ -818,6 +818,10 @@ func (s *RemoteSessionStore) GetSession(context.Context, string) (*session.Sessi
 	return nil, fmt.Errorf("get session: %w", ErrUnsupported)
 }
 
+func (s *RemoteSessionStore) GetSessionByOrigin(context.Context, string, string) (*session.Session, error) {
+	return nil, fmt.Errorf("get session by origin: %w", ErrUnsupported)
+}
+
 func (s *RemoteSessionStore) GetSessions(ctx context.Context) ([]*session.Session, error) {
 	sessions, err := s.client.GetAllSessions(ctx)
 	if err != nil {
@@ -851,12 +855,16 @@ func (s *RemoteSessionStore) AddMessage(context.Context, string, *session.Messag
 	return 0, fmt.Errorf("add message: %w", ErrUnsupported)
 }
 
-func (s *RemoteSessionStore) UpdateMessage(context.Context, int64, *session.Message) error {
+func (s *RemoteSessionStore) UpdateMessage(context.Context, string, int64, *session.Message) error {
 	return fmt.Errorf("update message: %w", ErrUnsupported)
 }
 
 func (s *RemoteSessionStore) AddSubSession(context.Context, string, *session.Session) error {
 	return fmt.Errorf("add sub session: %w", ErrUnsupported)
+}
+
+func (s *RemoteSessionStore) PersistCompaction(context.Context, *session.Session, int64, int64, session.Item) error {
+	return fmt.Errorf("persist compaction: %w", ErrUnsupported)
 }
 
 func (s *RemoteSessionStore) AddSummary(context.Context, string, session.Item) error {

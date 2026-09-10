@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -103,34 +104,29 @@ type RunShellArgs struct {
 // models (particularly ones biased by Anthropic's built-in bash tool and other
 // ecosystems that use "command") occasionally emit "command" instead. Accepting
 // both prevents a wasted turn on an empty-command error while keeping the
-// canonical contract unchanged. When "cmd" is present with a non-blank value
-// it wins; a blank (empty or whitespace-only) "cmd" falls back to "command"
-// so a valid alias is not silently shadowed.
+// canonical contract unchanged.
+//
+// The command is resolved by [safety.CommandArg] over an exact-key map rather
+// than by struct tags: encoding/json matches keys case-insensitively with
+// last-wins, so {"cmd":"ls","CMD":"rm -rf x"} would run a command the runtime
+// never classified. Sharing the resolver keeps the executed command identical
+// to the labelled one.
 func (a *RunShellArgs) UnmarshalJSON(data []byte) error {
 	var raw struct {
-		Cmd     string `json:"cmd"`
-		Command string `json:"command"`
 		Cwd     string `json:"cwd"`
 		Timeout int    `json:"timeout"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	a.Cmd = preferNonBlank(raw.Cmd, raw.Command)
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	a.Cmd, _ = safety.CommandArg(fields)
 	a.Cwd = raw.Cwd
 	a.Timeout = raw.Timeout
 	return nil
-}
-
-// preferNonBlank returns primary when it has a non-whitespace character;
-// otherwise it returns fallback. The chosen value is returned unmodified so
-// that whitespace inside a legitimate command (e.g. trailing newlines in a
-// heredoc) is preserved.
-func preferNonBlank(primary, fallback string) string {
-	if strings.TrimSpace(primary) != "" {
-		return primary
-	}
-	return fallback
 }
 
 func (h *shellHandler) RunShell(ctx context.Context, params RunShellArgs, rt tools.Runtime) (*tools.ToolCallResult, error) {
@@ -233,7 +229,7 @@ func (h *shellHandler) runNativeCommand(timeoutCtx, ctx context.Context, rt tool
 	case cmdErr = <-done:
 	}
 
-	formattedOutput := formatCommandOutput(timeoutCtx, ctx, cmdErr, output.String(), timeout)
+	formattedOutput := formatCommandOutput(timeoutCtx, ctx, cmdErr, output.String(), h.shell, timeout)
 	return tools.ResultSuccess(formattedOutput)
 }
 
@@ -342,7 +338,9 @@ func (h *shellHandler) resolveWorkDir(cwd string) string {
 }
 
 // formatCommandOutput formats command output handling timeout, cancellation, and errors.
-func formatCommandOutput(timeoutCtx, ctx context.Context, err error, rawOutput string, timeout time.Duration) string {
+// shellPath gates shellDialectHint: a raw substring match would false-positive on
+// macOS grep or docker logs from a Windows container.
+func formatCommandOutput(timeoutCtx, ctx context.Context, err error, rawOutput, shellPath string, timeout time.Duration) string {
 	var output string
 	if timeoutCtx.Err() != nil {
 		if ctx.Err() != nil {
@@ -356,7 +354,45 @@ func formatCommandOutput(timeoutCtx, ctx context.Context, err error, rawOutput s
 			output = fmt.Sprintf("Error executing command: %s\nOutput: %s", err, output)
 		}
 	}
-	return cmp.Or(strings.TrimSpace(output), "<no output>")
+	output = cmp.Or(strings.TrimSpace(output), "<no output>")
+	if hint := shellDialectHint(shellpath.ShellBaseName(shellPath), output); hint != "" {
+		output = "[shell-hint] " + hint + "\n\n" + output
+	}
+	return output
+}
+
+// shellDialectHint returns a corrective hint for known dialect errors. Gates on
+// shell because e.g. a "chain with &&" nudge is wrong when PowerShell is the
+// parent and a child cmd.exe fails.
+func shellDialectHint(shell, output string) string {
+	switch shell {
+	case "powershell":
+		switch {
+		case strings.Contains(output, "'&&' is not a valid statement separator"),
+			strings.Contains(output, "'||' is not a valid statement separator"):
+			return "You are on Windows PowerShell 5.1: chain commands with `;`, not `&&` or `||`. Retry with the corrected syntax."
+		case strings.Contains(output, `'C:\dev\null'`):
+			return "You are on Windows: redirect stderr with `2>$null` (PowerShell) or `2>nul` (cmd.exe), NOT `2>/dev/null`."
+		case strings.Contains(output, "is not recognized as the name of a cmdlet"):
+			return "You are on PowerShell: POSIX utilities are not available. Use `Select-String` (grep), `Select-Object -First N` (head), `Get-ChildItem` (ls), `Get-Content` (cat), `Test-Path` (test -f)."
+		case strings.Contains(output, "A parameter cannot be found that matches parameter name"):
+			return "You are on PowerShell: cmdlets do not accept POSIX-style short flags like `-la`. Use the cmdlet's own parameter names (e.g. `Get-ChildItem -Force -Recurse`, `Select-Object -First N`)."
+		}
+	case "pwsh":
+		switch {
+		case strings.Contains(output, `'C:\dev\null'`):
+			return "You are on Windows: redirect stderr with `2>$null` (PowerShell) or `2>nul` (cmd.exe), NOT `2>/dev/null`."
+		case strings.Contains(output, "is not recognized as a name of a cmdlet"):
+			return "You are on PowerShell: POSIX utilities are not available. Use `Select-String` (grep), `Select-Object -First N` (head), `Get-ChildItem` (ls), `Get-Content` (cat), `Test-Path` (test -f)."
+		case strings.Contains(output, "A parameter cannot be found that matches parameter name"):
+			return "You are on PowerShell: cmdlets do not accept POSIX-style short flags like `-la`. Use the cmdlet's own parameter names (e.g. `Get-ChildItem -Force -Recurse`, `Select-Object -First N`)."
+		}
+	case "cmd":
+		if strings.Contains(output, "is not recognized as an internal or external command") {
+			return "You are on cmd.exe: POSIX utilities are not available. Use `findstr` (grep), `type` (cat), `dir` (ls), and chain commands with `&` or `&&`."
+		}
+	}
+	return ""
 }
 
 func (t *ToolSet) Instructions() string {
@@ -368,7 +404,7 @@ func (t *ToolSet) Instructions() string {
 - Use "cwd" parameter instead of cd within commands
 - Combine operations with pipes, redirections, and heredocs
 - Non-zero exit codes return error info with output; timed-out commands are terminated`,
-		shellBaseName(t.handler.shell), displayOS())
+		shellpath.ShellBaseName(t.handler.shell), displayOS())
 }
 
 func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
@@ -407,44 +443,41 @@ func (t *ToolSet) Stop(context.Context) error {
 // Models default to POSIX syntax when the description only says "the
 // user's default shell", which wastes turns on Windows where the
 // resolved shell is PowerShell or cmd.exe (e.g. "pwd && ls -la" is a
-// parse error under Windows PowerShell 5.1).
+// parse error under Windows PowerShell 5.1). The trailing nudge points
+// the model at get_environment_info for edge cases the static hint
+// does not cover (custom shells, multi-agent handoffs, etc.).
 func shellToolDescription(shellPath string) string {
-	name := shellBaseName(shellPath)
+	name := shellpath.ShellBaseName(shellPath)
 	desc := fmt.Sprintf("Executes the given shell command with %s on %s.", name, displayOS())
 	if hint := shellSyntaxHint(name); hint != "" {
 		desc += " " + hint
 	}
+	desc += " If unsure which shell syntax to use, call get_environment_info first."
 	return desc
 }
 
 // shellSyntaxHint returns a dialect warning for shells that models
 // commonly mistake for a POSIX shell. Empty for shells where the name
-// alone is enough of a cue.
+// alone is enough of a cue. The substitution list names the utilities
+// that actually show up in observed failure traces, not a hypothetical
+// full mapping — 'grep'/'head'/'tail'/'wc'/'cat'/'gunzip' plus 'ls -la'
+// and '&&' cover the dominant error signatures.
 func shellSyntaxHint(name string) string {
 	switch name {
 	case "powershell":
-		// Windows PowerShell 5.1: '&&' / '||' are parse errors and
-		// POSIX flags don't exist ('ls -la' fails on the alias).
-		return `Use Windows PowerShell 5.1 syntax: chain commands with ";" (not "&&"), and avoid POSIX commands/flags like "ls -la".`
+		// Windows PowerShell: '&&' / '||' are parse errors before v7,
+		// and POSIX utilities are not available. Version is not
+		// asserted here — the binary name alone can't tell us which.
+		return `Windows PowerShell dialect. Chain commands with ";" (not "&&"; "&&" is a parse error on 5.1). POSIX utilities are not available — use Select-String (not grep), Select-Object -First N (not head), -Last N (not tail), Measure-Object -Line (not wc -l), Get-Content (not cat), Expand-Archive (not gunzip/tar). "ls -la" fails — use "ls" or "Get-ChildItem".`
 	case "pwsh":
-		return `Use PowerShell syntax; POSIX commands/flags like "ls -la" are not available.`
+		// PowerShell 7+: '&&' / '||' work, but POSIX utilities still
+		// don't exist as cmdlets.
+		return `PowerShell 7+ dialect. POSIX utilities are not available as cmdlets — use Select-String (not grep), Select-Object -First N (not head), -Last N (not tail), Measure-Object -Line (not wc -l), Get-Content (not cat), Expand-Archive (not gunzip/tar). "ls -la" fails — use "ls" or "Get-ChildItem".`
 	case "cmd":
-		return `Use cmd.exe syntax, not POSIX shell syntax.`
+		return `cmd.exe syntax, not POSIX. No POSIX utilities (grep, head, tail, wc, cat), no POSIX flags on built-ins, and variable expansion uses %VAR% (not $VAR).`
 	default:
 		return ""
 	}
-}
-
-// shellBaseName reduces a resolved shell path to a lowercase name the
-// model can recognize (C:\...\powershell.exe -> powershell, /bin/zsh -> zsh).
-// Splits on both separators instead of filepath.Base so the result is
-// deterministic regardless of the host OS the path came from.
-func shellBaseName(shellPath string) string {
-	base := shellPath
-	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
-		base = base[i+1:]
-	}
-	return strings.ToLower(strings.TrimSuffix(base, filepath.Ext(base)))
 }
 
 // displayOS returns a friendlier label for the common values of

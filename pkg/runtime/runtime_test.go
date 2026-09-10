@@ -8,7 +8,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -22,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelerrors"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/session"
@@ -96,6 +99,31 @@ func (b *blockingStartToolSet) Start(context.Context) error {
 }
 func (b *blockingStartToolSet) Stop(context.Context) error                  { return nil }
 func (b *blockingStartToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+// inFlightStartToolSet is a blockingStartToolSet variant that signals when a
+// Start attempt is in flight (entered closes on the first call) and counts
+// underlying Start calls, so tests can wedge an attempt before exercising
+// the code under test.
+type inFlightStartToolSet struct {
+	entered   chan struct{}
+	release   <-chan struct{}
+	enterOnce sync.Once
+	starts    atomic.Int32
+}
+
+var (
+	_ tools.ToolSet   = (*inFlightStartToolSet)(nil)
+	_ tools.Startable = (*inFlightStartToolSet)(nil)
+)
+
+func (b *inFlightStartToolSet) Start(context.Context) error {
+	b.starts.Add(1)
+	b.enterOnce.Do(func() { close(b.entered) })
+	<-b.release
+	return nil
+}
+func (b *inFlightStartToolSet) Stop(context.Context) error                  { return nil }
+func (b *inFlightStartToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
 
 type mockStream struct {
 	responses []chat.MessageStreamResponse
@@ -267,6 +295,52 @@ func runSession(t *testing.T, sess *session.Session, stream *mockStream) []Event
 		events = append(events, ev)
 	}
 	return events
+}
+
+func TestImageGenerationTextOnlyWarning(t *testing.T) {
+	t.Parallel()
+
+	warningFor := func(t *testing.T, prompt string, stream *mockStream) *WarningEvent {
+		t.Helper()
+		events := runSession(t, session.New(session.WithUserMessage(prompt)), stream)
+		for _, event := range events {
+			if warning, ok := event.(*WarningEvent); ok && warning.Message == missingGeneratedImageWarning {
+				return warning
+			}
+		}
+		return nil
+	}
+
+	t.Run("text-only image request", func(t *testing.T) {
+		t.Parallel()
+		sess := session.New(session.WithUserMessage("draw an image of Docker and friends"))
+		events := runSession(t, sess, newStreamBuilder().AddContent("Here's an image of Docker and its friends.").AddStopWithUsage(10, 8).Build())
+
+		var warning *WarningEvent
+		for _, event := range events {
+			if candidate, ok := event.(*WarningEvent); ok && candidate.Message == missingGeneratedImageWarning {
+				warning = candidate
+			}
+		}
+		require.NotNil(t, warning)
+		assert.Equal(t, "root", warning.AgentName)
+		assert.Equal(t, "Here's an image of Docker and its friends.", sess.GetLastAssistantMessageContent())
+	})
+
+	t.Run("ordinary text", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, warningFor(t, "Explain how image generation works", newStreamBuilder().AddContent("Image generation works by...").AddStopWithUsage(6, 8).Build()))
+	})
+
+	t.Run("text and media", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, warningFor(t, "create an image of a whale", newStreamBuilder().AddContent("Done").AddMedia([]byte("image"), "image/png", "whale.png").AddStopWithUsage(6, 8).Build()))
+	})
+
+	t.Run("media only", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, warningFor(t, "create an image of a whale", newStreamBuilder().AddMedia([]byte("image"), "image/png", "whale.png").AddStopWithUsage(6, 8).Build()))
+	})
 }
 
 func hasEventType(t *testing.T, events []Event, target Event) bool {
@@ -1424,6 +1498,157 @@ func TestEmitStartupInfo_SkipsToolsetWhoseStartHangs(t *testing.T) {
 	assert.Contains(t, warning.Message, "taking too long to start")
 }
 
+// TestEmitStartupInfo_SkipsToolsetWhoseStartIsAlreadyInFlight pins the
+// skip-in-flight half of the bounded-start contract (tools.TryStartWithTimeout):
+// a toolset whose Start is already running — e.g. abandoned by an earlier
+// bounded attempt and still holding the single-flight lock — is skipped
+// immediately instead of joined, so startup neither burns the start budget
+// again nor emits a duplicate "taking too long" warning, and the fast
+// toolset is still counted.
+func TestEmitStartupInfo_SkipsToolsetWhoseStartIsAlreadyInFlight(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	release := make(chan struct{})
+	releaseWedged := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseWedged)
+
+	inFlight := &inFlightStartToolSet{entered: make(chan struct{}), release: release}
+	fast := newStubToolSet(nil, []tools.Tool{{Name: "ready"}}, nil)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(inFlight, fast),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(t.Context(), tm,
+		WithCurrentAgent("root"),
+		WithModelStore(mockModelStore{}),
+		// Long enough that a regression to joining the in-flight attempt
+		// trips the prompt-return guard below instead of passing slowly.
+		WithToolStartTimeout(30*time.Second),
+	)
+	require.NoError(t, err)
+
+	// Wedge the toolset's Start before startup runs, as an earlier abandoned
+	// bounded attempt would: it keeps holding the single-flight lock.
+	startable, ok := root.ToolSets()[0].(*tools.StartableToolSet)
+	require.True(t, ok)
+	wedgedDone := make(chan error, 1)
+	go func() { wedgedDone <- startable.Start(t.Context()) }()
+	<-inFlight.entered
+
+	events := make(chan Event, 32)
+	done := make(chan struct{})
+	go func() {
+		rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+		close(events)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("EmitStartupInfo did not return promptly: an in-flight toolset start was joined instead of skipped")
+	}
+
+	var toolsetInfos []*ToolsetInfoEvent
+	var warnings []*WarningEvent
+	for e := range events {
+		switch ev := e.(type) {
+		case *ToolsetInfoEvent:
+			toolsetInfos = append(toolsetInfos, ev)
+		case *WarningEvent:
+			warnings = append(warnings, ev)
+		}
+	}
+
+	require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+	last := toolsetInfos[len(toolsetInfos)-1]
+	assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false so the sidebar resolves")
+	assert.Equal(t, 1, last.AvailableTools,
+		"the in-flight toolset is skipped; the fast toolset's single tool is still counted")
+	assert.Empty(t, warnings, "a skipped in-flight start must not surface a warning")
+	assert.EqualValues(t, 1, inFlight.starts.Load(), "the skip must not run a second underlying Start")
+
+	// Unblock the wedged attempt so its goroutine exits before the test ends.
+	releaseWedged()
+	require.NoError(t, <-wedgedDone)
+}
+
+// TestEmitStartupInfo_ReturnsOnCancelWhileStartIsWedged is the regression
+// test for the cancellation half of the bounded-start contract: when the
+// EmitStartupInfo context is canceled while TryStartWithTimeout has abandoned
+// a wedged Start that still holds the toolset's single-flight lock, the
+// startup pass must return instead of consulting the failure reporters,
+// which share that lock and would block on it forever. The bubble makes the
+// race deterministic: synctest.Wait parks the emit loop on the start outcome
+// — past its top-of-loop ctx check — before the cancel fires, and a
+// regression to the blocking reporters deadlocks the bubble.
+func TestEmitStartupInfo_ReturnsOnCancelWhileStartIsWedged(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+		// release is closed on cleanup so the wedged start goroutine (whose
+		// Start() ignores context cancellation) exits before the bubble is
+		// checked for leaked goroutines.
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+
+		wedged := &inFlightStartToolSet{entered: make(chan struct{}), release: release}
+
+		root := agent.New("root", "agent",
+			agent.WithModel(prov),
+			agent.WithToolSets(wedged),
+		)
+		tm := team.New(team.WithAgents(root))
+
+		rt, err := NewLocalRuntime(t.Context(), tm,
+			WithCurrentAgent("root"),
+			WithModelStore(mockModelStore{}),
+			// Long enough (in the bubble's fake time) that the per-toolset
+			// deadline cannot fire; only the cancel unblocks the attempt.
+			WithToolStartTimeout(time.Hour),
+		)
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		events := make(chan Event, 32)
+		done := make(chan struct{})
+		go func() {
+			rt.EmitStartupInfo(ctx, nil, NewChannelSink(events))
+			close(done)
+		}()
+
+		// The startup pass's own bounded attempt has entered the wedged
+		// Start — it now holds the single-flight lock. Park every other
+		// goroutine (the emit loop is blocked on the start outcome, past its
+		// top-of-loop ctx check) before canceling, so the cancellation
+		// deterministically loses that check's race.
+		<-wedged.entered
+		synctest.Wait()
+		cancel()
+
+		// EmitStartupInfo must return while the underlying Start is still
+		// wedged: release is closed only by the cleanup above, after this
+		// receive. Before the fix, the emit loop hung on the failure
+		// reporters' lock here and the bubble deadlocked.
+		<-done
+
+		close(events)
+		for e := range events {
+			if w, ok := e.(*WarningEvent); ok {
+				t.Fatalf("cancellation during a wedged start must not surface a warning; got %q", w.Message)
+			}
+		}
+		assert.EqualValues(t, 1, wedged.starts.Load(), "exactly one underlying Start ran and stayed wedged")
+	})
+}
+
 // TestEmitStartupInfo_EmitsProgressWhileSlowToolsetStarts guards the
 // progressive contract of emitToolsProgressively: an early fast toolset must
 // be counted in a ToolsetInfo event while a later toolset is still starting,
@@ -1588,9 +1813,10 @@ type recoveryAuthToolSet struct {
 
 func (r *recoveryAuthToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
 func (r *recoveryAuthToolSet) Start(context.Context) error                 { r.started = true; return nil }
-func (r *recoveryAuthToolSet) Stop(context.Context) error                  { r.started = false; return nil }
-func (r *recoveryAuthToolSet) IsStarted() bool                             { return r.started }
-func (r *recoveryAuthToolSet) Restart(context.Context) error               { return r.restartErr }
+
+func (r *recoveryAuthToolSet) Stop(context.Context) error    { r.started = false; return nil }
+func (r *recoveryAuthToolSet) IsStarted() bool               { return r.started }
+func (r *recoveryAuthToolSet) Restart(context.Context) error { return r.restartErr }
 
 // TestEmitStartupInfo_RecoveryAuthNoticeEmittedOnce is the regression test for
 // blocking issue 3: when a toolset was previously started and working but the
@@ -1669,6 +1895,55 @@ func TestEmitStartupInfo_RecoveryAuthNoticeEmittedOnce(t *testing.T) {
 	rt.emitToolsProgressively(ctx, root, nopSend)
 	noticesPhase4 := root.DrainWarnings()
 	require.Len(t, noticesPhase4, 1, "fresh failure after streak reset must emit a new notice")
+}
+
+// TestEmitStartupInfo_PartialStartStillCountsCodeModeTools is the runtime
+// regression test for #3978 degraded startup: when the codemode composite
+// starts partially (one inner MCP-like toolset fails), the composite is
+// latched as started and emitToolsProgressively must keep listing it — the
+// run_tools_with_javascript wrapper is counted in the sidebar's ToolsetInfo
+// — while the inner failure still surfaces as a warning.
+func TestEmitStartupInfo_PartialStartStillCountsCodeModeTools(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/startup-model", stream: &mockStream{}}
+
+	healthy := newStubToolSet(nil, []tools.Tool{{Name: "fetch_url", Parameters: map[string]any{}}}, nil)
+	failing := newStubToolSet(errors.New("connection refused"), nil, nil)
+
+	root := agent.New("root", "agent",
+		agent.WithModel(prov),
+		agent.WithToolSets(codemode.Wrap(healthy, failing)),
+	)
+	tm := team.New(team.WithAgents(root))
+
+	rt, err := NewLocalRuntime(t.Context(), tm, WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := make(chan Event, 32)
+	rt.EmitStartupInfo(t.Context(), nil, NewChannelSink(events))
+	close(events)
+
+	var toolsetInfos []*ToolsetInfoEvent
+	var warning *WarningEvent
+	for e := range events {
+		switch ev := e.(type) {
+		case *ToolsetInfoEvent:
+			toolsetInfos = append(toolsetInfos, ev)
+		case *WarningEvent:
+			warning = ev
+		}
+	}
+
+	require.NotEmpty(t, toolsetInfos, "expected at least one ToolsetInfo event")
+	last := toolsetInfos[len(toolsetInfos)-1]
+	assert.False(t, last.Loading, "final ToolsetInfo must report Loading=false")
+	assert.Equal(t, 1, last.AvailableTools,
+		"the degraded codemode wrapper must still be listed and counted (run_tools_with_javascript)")
+
+	require.NotNil(t, warning, "the failed inner toolset must still surface a warning")
+	assert.Contains(t, warning.Message, "start failed")
+	assert.Contains(t, warning.Message, "connection refused")
 }
 
 // TestConfigureToolsetHandlers_ReachesThroughCodeModeWrapper is the
@@ -2488,7 +2763,7 @@ func TestTransferTaskRejectsNonSubAgent(t *testing.T) {
 		},
 	}
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.IsError, "transfer to non-sub-agent should return an error result")
@@ -2528,7 +2803,7 @@ func TestTransferTaskAllowsSubAgent(t *testing.T) {
 		},
 	}
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.IsError, "transfer to valid sub-agent should succeed")
@@ -2576,7 +2851,7 @@ func TestTransferTaskPersistsSubSessionOnError(t *testing.T) {
 
 	// runForwarding returns an error because the child emitted an ErrorEvent,
 	// but only *after* persisting the sub-session.
-	_, err = rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	_, err = rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.Error(t, err, "transfer should surface the sub-session error to the caller")
 
 	// The parent session must now hold a sub-session item — without the fix
@@ -2764,11 +3039,12 @@ func TestSessionDenyOverridesYoloMode(t *testing.T) {
 	require.False(t, executed, "expected tool to NOT be executed in --yolo mode because session Deny wins")
 }
 
-func TestStripImageContent(t *testing.T) {
+func TestStripUnsupportedMediaContent(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
+		caps     modelinfo.ModelCapabilities // zero value = text-only
 		messages []chat.Message
 		want     []chat.Message
 	}{
@@ -2952,12 +3228,58 @@ func TestStripImageContent(t *testing.T) {
 				{Role: chat.MessageRoleAssistant, Content: "got it"},
 			},
 		},
+		{
+			name: "strips audio and video documents, preserves supported image",
+			caps: modelinfo.CapsWith(true, false, false, false),
+			messages: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeText, Text: "listen and watch"},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.wav", MimeType: "audio/wav", Source: chat.DocumentSource{InlineData: []byte{0x52}}}},
+						{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp4", MimeType: "video/mp4", Source: chat.DocumentSource{InlineData: []byte{0x00}}}},
+					},
+				},
+			},
+			want: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeText, Text: "listen and watch"},
+						{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+					},
+				},
+			},
+		},
+		{
+			name: "retains audio and video when supported",
+			caps: modelinfo.CapsWith(false, false, true, true),
+			messages: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp3", MimeType: "audio/mpeg", Source: chat.DocumentSource{InlineData: []byte{0x49}}}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.webm", MimeType: "video/webm", Source: chat.DocumentSource{InlineData: []byte{0x1a}}}},
+					},
+				},
+			},
+			want: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp3", MimeType: "audio/mpeg", Source: chat.DocumentSource{InlineData: []byte{0x49}}}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.webm", MimeType: "video/webm", Source: chat.DocumentSource{InlineData: []byte{0x1a}}}},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := stripImageContent(tt.messages)
+			got := stripUnsupportedMediaContent(t.Context(), tt.messages, tt.caps)
 			require.Equal(t, tt.want, got)
 		})
 	}
@@ -4409,6 +4731,22 @@ func TestRunAgentPersistsSubSessionOnError(t *testing.T) {
 	}
 	assert.Equal(t, 1, subSessionItems,
 		"parent session must record the sub-session even when the background agent errored")
+}
+
+func TestImageGenerationProviderErrorDoesNotEmitWarning(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProviderWithError{id: "test/mock-model"}
+	a := agent.New("root", "test agent", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(a)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := runAndCollect(t, rt, session.New(session.WithUserMessage("generate an image")))
+	for _, event := range events {
+		if warning, ok := event.(*WarningEvent); ok {
+			assert.NotEqual(t, missingGeneratedImageWarning, warning.Message)
+		}
+	}
 }
 
 // TestRunAgentImmediateFailureEmitsNoZeroUsageEvent guards runCollecting's

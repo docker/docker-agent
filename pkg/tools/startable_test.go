@@ -3,7 +3,12 @@ package tools_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -456,4 +461,736 @@ func TestStartableToolSet_ShouldReportRecoveryFailure_ResetsOnStop(t *testing.T)
 
 	assert.Check(t, s.Start(t.Context()) != nil)
 	assert.Check(t, is.Equal(s.ShouldReportRecoveryFailure(), true), "fresh recovery after Stop must report again")
+}
+
+// partialFlappyToolSet simulates a composite toolset (e.g. Code Mode) whose
+// Start returns a scripted sequence of errors — typically
+// *tools.PartialStartError values — and whose IsStarted reports true only
+// after a fully-successful Start, matching the tools.StartReporter contract
+// composites must implement for partial starts.
+type partialFlappyToolSet struct {
+	errs    []error
+	callIdx int
+	starts  int
+	healthy bool
+}
+
+func (p *partialFlappyToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return []tools.Tool{{Name: "partial_tool"}}, nil
+}
+
+func (p *partialFlappyToolSet) Start(context.Context) error {
+	p.starts++
+	if p.callIdx < len(p.errs) {
+		err := p.errs[p.callIdx]
+		p.callIdx++
+		if err != nil {
+			p.healthy = false
+			return err
+		}
+	}
+	p.healthy = true
+	return nil
+}
+
+func (p *partialFlappyToolSet) Stop(context.Context) error {
+	p.healthy = false
+	return nil
+}
+
+func (p *partialFlappyToolSet) IsStarted() bool { return p.healthy }
+
+// TestStartableToolSet_PartialStartLatchesStartedAndRetries pins the
+// PartialStartError contract (#3978): a partial start latches the wrapper as
+// started (the healthy subset stays listed via Tools), still returns the
+// error with once-per-streak reporting, keeps retrying the inner Start on
+// subsequent calls while the composite reports unstarted, and a
+// fully-successful retry resets the streak.
+func TestStartableToolSet_PartialStartLatchesStartedAndRetries(t *testing.T) {
+	t.Parallel()
+
+	partialErr := &tools.PartialStartError{Err: errors.New("mcp(ref=broken): boom")}
+	inner := &partialFlappyToolSet{errs: []error{partialErr, partialErr, nil}}
+	s := tools.NewStartable(inner)
+
+	// Turn 1: partial failure — wrapper must be started AND the error reported.
+	err := s.Start(t.Context())
+	assert.Check(t, err != nil, "partial start must still return the error")
+	assert.Check(t, is.Equal(tools.IsPartialStart(err), true))
+	assert.Check(t, is.Equal(s.IsStarted(), true), "partial start must latch the wrapper as started")
+	assert.Check(t, is.Equal(s.ShouldReportFailure(), true), "first partial failure must be reported")
+
+	// The healthy subset stays listed.
+	ta, listErr := s.Tools(t.Context())
+	assert.NilError(t, listErr)
+	assert.Check(t, is.Len(ta, 1))
+
+	// Turn 2: still partial — retried, still started, no duplicate report.
+	assert.Check(t, s.Start(t.Context()) != nil, "expected error on turn 2")
+	assert.Check(t, is.Equal(inner.starts, 2), "degraded composite must be retried")
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+	assert.Check(t, is.Equal(s.ShouldReportFailure(), false), "duplicate partial failure must not report")
+
+	// Turn 3: full success — streak resets silently, no more retries needed.
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(inner.starts, 3))
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(inner.starts, 3), "fully-started composite must not be re-started")
+
+	// A fresh partial failure after recovery starts a new streak.
+	inner.healthy = false
+	inner.errs = append(inner.errs, partialErr)
+	assert.Check(t, s.Start(t.Context()) != nil)
+	assert.Check(t, is.Equal(s.ShouldReportFailure(), true), "fresh failure after recovery must warn again")
+}
+
+// TestStartableToolSet_NonPartialFailureStaysUnstarted pins that the partial
+// latch does not weaken the plain-failure contract: a regular Start error
+// leaves the wrapper unstarted.
+func TestStartableToolSet_NonPartialFailureStaysUnstarted(t *testing.T) {
+	t.Parallel()
+
+	f := &flappyToolSet{errs: []error{errors.New("boom")}}
+	s := tools.NewStartable(f)
+
+	assert.Check(t, s.Start(t.Context()) != nil)
+	assert.Check(t, is.Equal(s.IsStarted(), false), "plain start failure must not latch started")
+}
+
+// TestStartableToolSet_RecoveryFailureViaStartMarksRecoveryStreak pins that
+// a failed recovery through the plain Startable branch — a toolset with a
+// StartReporter but no Restartable, like a composite that dispatches
+// Restart per inner toolset itself — marks the recovery streak, so the
+// targeted re-auth notice (ShouldReportRecoveryFailure) fires for
+// composites too, not only for Restartable toolsets.
+func TestStartableToolSet_RecoveryFailureViaStartMarksRecoveryStreak(t *testing.T) {
+	t.Parallel()
+
+	inner := &partialFlappyToolSet{errs: []error{nil, errors.New("session lost")}}
+	s := tools.NewStartable(inner)
+
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(s.ShouldReportRecoveryFailure(), false), "no recovery failure yet")
+
+	// Background death: the toolset reports dead, so the next Start takes
+	// the recovery path; the inner is not Restartable, so recovery goes
+	// through Start, which fails.
+	inner.healthy = false
+
+	assert.Check(t, s.Start(t.Context()) != nil, "expected error on recovery")
+	assert.Check(t, is.Equal(s.ShouldReportRecoveryFailure(), true),
+		"a recovery failure through the Startable branch must mark the recovery streak")
+	assert.Check(t, is.Equal(s.ShouldReportRecoveryFailure(), false), "second call in same streak must be false")
+}
+
+// TestStartableToolSet_PartialStartInitialFailureNeverMarksRecoveryStreak
+// pins that the started latch of a partial start does not turn retried
+// initial failures into recovery failures: a composite reporting a partial
+// failure without post-start loss (LostAfterStart=false, e.g. an inner
+// deferring OAuth on every turn) must stay silent on the recovery channel
+// even though every Start after the latch takes the recovery path.
+func TestStartableToolSet_PartialStartInitialFailureNeverMarksRecoveryStreak(t *testing.T) {
+	t.Parallel()
+
+	partialErr := &tools.PartialStartError{Err: errors.New("mcp(a): authorization deferred"), AuthOnly: true}
+	inner := &partialFlappyToolSet{errs: []error{partialErr, partialErr, partialErr}}
+	s := tools.NewStartable(inner)
+
+	for turn := 1; turn <= 3; turn++ {
+		assert.Check(t, s.Start(t.Context()) != nil, "turn %d: expected partial failure", turn)
+		assert.Check(t, is.Equal(s.ShouldReportRecoveryFailure(), false),
+			"turn %d: a retried initial failure must not mark the recovery streak", turn)
+	}
+	assert.Check(t, is.Equal(s.IsStarted(), true), "partial start must still latch the wrapper")
+}
+
+// TestStartableToolSet_PartialStartLostAfterStartMarksRecoveryStreak pins
+// the counterpart: a partial failure that includes an inner lost after a
+// successful start (LostAfterStart=true) marks the recovery streak so the
+// targeted re-auth notice fires, once per streak.
+func TestStartableToolSet_PartialStartLostAfterStartMarksRecoveryStreak(t *testing.T) {
+	t.Parallel()
+
+	lostErr := &tools.PartialStartError{Err: errors.New("mcp(a): session lost"), LostAfterStart: true}
+	inner := &partialFlappyToolSet{errs: []error{nil, lostErr}}
+	s := tools.NewStartable(inner)
+
+	assert.NilError(t, s.Start(t.Context()))
+
+	// Background death: the next Start is a recovery run and reports an
+	// inner that was started and lost.
+	inner.healthy = false
+
+	assert.Check(t, s.Start(t.Context()) != nil, "expected partial failure on recovery")
+	assert.Check(t, is.Equal(s.ShouldReportRecoveryFailure(), true),
+		"post-start loss inside a partial failure must mark the recovery streak")
+	assert.Check(t, is.Equal(s.ShouldReportRecoveryFailure(), false), "second call in same streak must be false")
+}
+
+// TestPartialStartError_NilSafety pins that Error() never panics on a
+// zero-value or nil PartialStartError (e.g. one constructed directly
+// without NewPartialStartError).
+func TestPartialStartError_NilSafety(t *testing.T) {
+	t.Parallel()
+
+	assert.Check(t, is.Equal((&tools.PartialStartError{}).Error(), "partial toolset start failure"))
+	var nilErr *tools.PartialStartError
+	assert.Check(t, is.Equal(nilErr.Error(), "partial toolset start failure"))
+}
+
+// TestTotalStartError_NilSafety mirrors TestPartialStartError_NilSafety for
+// the total-failure counterpart.
+func TestTotalStartError_NilSafety(t *testing.T) {
+	t.Parallel()
+
+	assert.Check(t, is.Equal((&tools.TotalStartError{}).Error(), "total toolset start failure"))
+	var nilErr *tools.TotalStartError
+	assert.Check(t, is.Equal(nilErr.Error(), "total toolset start failure"))
+}
+
+// TestIsAuthorizationRequired_PartialStartClassification pins how partial
+// starts interact with the OAuth-deferral special handling: a batch is only
+// authorization-required when ALL of its causes are. A mixed batch (auth +
+// real failure) must not match — otherwise the non-auth failure would be
+// hidden behind the silent auth-deferral path and never warned about.
+func TestIsAuthorizationRequired_PartialStartClassification(t *testing.T) {
+	t.Parallel()
+
+	authErr := &tools.AuthorizationRequiredError{URL: "https://example.test/mcp"}
+	connErr := errors.New("mcp(b): connection refused")
+
+	authOnly := tools.NewPartialStartError(fmt.Errorf("mcp(a): %w", authErr))
+	assert.Check(t, is.Equal(tools.IsPartialStart(authOnly), true))
+	assert.Check(t, is.Equal(tools.IsAuthorizationRequired(authOnly), true),
+		"auth-only batch must keep the silent deferral handling")
+
+	mixed := tools.NewPartialStartError(fmt.Errorf("mcp(a): %w", authErr), connErr)
+	assert.Check(t, is.Equal(tools.IsPartialStart(mixed), true))
+	assert.Check(t, is.Equal(tools.IsAuthorizationRequired(mixed), false),
+		"mixed batch must not be classified auth-only")
+	assert.Check(t, is.Equal(tools.IsAuthorizationRequired(fmt.Errorf("starting: %w", mixed)), false),
+		"classification must hold through further wrapping")
+
+	// errors.Is/As stay intact: both causes remain reachable.
+	assert.Check(t, errors.Is(mixed, connErr), "non-auth cause must stay reachable via errors.Is")
+	var target *tools.AuthorizationRequiredError
+	assert.Check(t, errors.As(mixed, &target), "auth cause must stay reachable via errors.As")
+
+	nonAuth := tools.NewPartialStartError(connErr)
+	assert.Check(t, is.Equal(tools.IsAuthorizationRequired(nonAuth), false))
+
+	// Plain (non-partial) auth errors keep matching as before.
+	assert.Check(t, is.Equal(tools.IsAuthorizationRequired(fmt.Errorf("x: %w", authErr)), true))
+}
+
+// TestIsAuthorizationRequired_TotalStartClassification mirrors the partial
+// classification for TotalStartError, the total-failure aggregate: the
+// batch is only authorization-required when ALL of its causes are, so a
+// mixed total failure cannot suppress its real causes behind the silent
+// auth-deferral handling, while remaining non-partial so StartableToolSet
+// never latches it.
+func TestIsAuthorizationRequired_TotalStartClassification(t *testing.T) {
+	t.Parallel()
+
+	authErr := &tools.AuthorizationRequiredError{URL: "https://example.test/mcp"}
+	connErr := errors.New("mcp(b): connection refused")
+
+	authOnly := tools.NewTotalStartError(fmt.Errorf("mcp(a): %w", authErr))
+	assert.Check(t, is.Equal(tools.IsPartialStart(authOnly), false),
+		"a total failure must never classify as partial")
+	assert.Check(t, is.Equal(tools.IsAuthorizationRequired(authOnly), true),
+		"all-auth total failure must keep the silent deferral handling")
+
+	mixed := tools.NewTotalStartError(fmt.Errorf("mcp(a): %w", authErr), connErr)
+	assert.Check(t, is.Equal(tools.IsPartialStart(mixed), false))
+	assert.Check(t, is.Equal(tools.IsAuthorizationRequired(mixed), false),
+		"mixed total failure must not be classified auth-only")
+	assert.Check(t, is.Equal(tools.IsAuthorizationRequired(fmt.Errorf("starting: %w", mixed)), false),
+		"classification must hold through further wrapping")
+
+	// errors.Is/As stay intact: both causes remain reachable.
+	assert.Check(t, errors.Is(mixed, connErr), "non-auth cause must stay reachable via errors.Is")
+	var target *tools.AuthorizationRequiredError
+	assert.Check(t, errors.As(mixed, &target), "auth cause must stay reachable via errors.As")
+
+	nonAuth := tools.NewTotalStartError(connErr)
+	assert.Check(t, is.Equal(tools.IsAuthorizationRequired(nonAuth), false))
+}
+
+// blockingToolSet blocks in Start until release is closed. entered is closed
+// on the first Start call so tests can line up with the in-flight attempt.
+type blockingToolSet struct {
+	entered  chan struct{}
+	release  chan struct{}
+	startErr error
+	calls    atomic.Int32
+	stops    atomic.Int32
+}
+
+func (b *blockingToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+func (b *blockingToolSet) Start(context.Context) error {
+	if b.calls.Add(1) == 1 {
+		close(b.entered)
+	}
+	<-b.release
+	return b.startErr
+}
+
+func (b *blockingToolSet) Stop(context.Context) error {
+	b.stops.Add(1)
+	return nil
+}
+
+// TestStartableToolSet_TryStartSkipsInFlightStart pins the TryStart contract
+// for #4001: while another Start holds the single-flight lock, TryStart
+// returns (false, nil) immediately — no second underlying Start, no failure
+// streak — and TryIsStarted reports not-ready without blocking.
+func TestStartableToolSet_TryStartSkipsInFlightStart(t *testing.T) {
+	t.Parallel()
+
+	inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+	s := tools.NewStartable(inner)
+
+	assert.Check(t, is.Equal(s.TryIsStarted(), false), "TryIsStarted is false while unstarted")
+
+	// Always unblock the wedged Start so no goroutine outlives the test.
+	release := sync.OnceFunc(func() { close(inner.release) })
+	t.Cleanup(release)
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- s.Start(t.Context()) }()
+	<-inner.entered
+
+	started, err := s.TryStart(t.Context())
+	assert.NilError(t, err, "an in-flight start must not surface as a failure")
+	assert.Check(t, !started, "TryStart must not join an in-flight start")
+	assert.Check(t, is.Equal(inner.calls.Load(), int32(1)), "TryStart must not run a second underlying Start")
+	assert.Check(t, is.Equal(s.TryIsStarted(), false), "TryIsStarted is false while a lifecycle operation is in flight")
+
+	release()
+	assert.NilError(t, <-startDone)
+
+	// The skipped TryStart must not have begun a failure streak.
+	assert.Check(t, is.Equal(s.ShouldReportFailure(), false), "skipped TryStart must not record a failure")
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+	assert.Check(t, is.Equal(s.TryIsStarted(), true), "TryIsStarted reads the settled state once the lock is free")
+
+	// Latched: a later TryStart reports started without another underlying call.
+	started, err = s.TryStart(t.Context())
+	assert.NilError(t, err)
+	assert.Check(t, started)
+	assert.Check(t, is.Equal(inner.calls.Load(), int32(1)))
+}
+
+// TestStartableToolSet_TryState pins the non-blocking status probe used by
+// runtime status/introspection paths that must never block behind a
+// legitimately long-running Start (e.g. RAG indexing a large knowledge
+// base, #4073): unstarted reports (false, false), an in-flight Start
+// reports (false, true) instead of blocking, and the settled state after
+// release reports (true, false).
+func TestStartableToolSet_TryState(t *testing.T) {
+	t.Parallel()
+
+	inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+	s := tools.NewStartable(inner)
+
+	started, inFlight := s.TryState()
+	assert.Check(t, is.Equal(started, false), "TryState reports unstarted before any Start")
+	assert.Check(t, is.Equal(inFlight, false), "TryState reports not in flight before any Start")
+
+	// Always unblock the wedged Start so no goroutine outlives the test.
+	release := sync.OnceFunc(func() { close(inner.release) })
+	t.Cleanup(release)
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- s.Start(t.Context()) }()
+	<-inner.entered
+
+	started, inFlight = s.TryState()
+	assert.Check(t, is.Equal(started, false), "TryState must not report started while Start is in flight")
+	assert.Check(t, is.Equal(inFlight, true), "TryState must report in flight without blocking on the wedged Start")
+
+	release()
+	assert.NilError(t, <-startDone)
+
+	started, inFlight = s.TryState()
+	assert.Check(t, is.Equal(started, true), "TryState reports started once settled")
+	assert.Check(t, is.Equal(inFlight, false), "TryState reports not in flight once settled")
+}
+
+// TestStartableToolSet_TryStartRunsStartLogic verifies that when the lock is
+// free, TryStart behaves exactly like Start: a failure records the
+// once-per-streak warning and a subsequent success latches the started state.
+func TestStartableToolSet_TryStartRunsStartLogic(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+	f := &flappyToolSet{errs: []error{errBoom, nil}}
+	s := tools.NewStartable(f)
+
+	started, err := s.TryStart(t.Context())
+	assert.Check(t, errors.Is(err, errBoom), "TryStart must surface the underlying start error")
+	assert.Check(t, !started)
+	assert.Check(t, is.Equal(s.ShouldReportFailure(), true), "a failed TryStart attempt reports like Start")
+
+	started, err = s.TryStart(t.Context())
+	assert.NilError(t, err)
+	assert.Check(t, started)
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+	assert.Check(t, is.Equal(f.startups, 1))
+}
+
+// TestStartableToolSet_TryStartWithTimeoutAbandonsWedgedStart pins the shared
+// bounded-start helper used by the agent turn path and the runtime startup
+// probe: a wedged Start (one that ignores cancellation) is abandoned exactly
+// at the bound with the bound's context error, an attempt already in flight
+// is skipped rather than joined, and the abandoned attempt keeps running in
+// the background under the single-flight lock so a later call picks up its
+// outcome.
+func TestStartableToolSet_TryStartWithTimeoutAbandonsWedgedStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+		s := tools.NewStartable(inner)
+
+		begin := time.Now()
+		started, err := s.TryStartWithTimeout(t.Context(), time.Second)
+		assert.Check(t, errors.Is(err, context.DeadlineExceeded), "a wedged attempt must be abandoned with the bound's error: %v", err)
+		assert.Check(t, !started)
+		assert.Check(t, is.Equal(time.Since(begin), time.Second), "the attempt must be abandoned exactly at the bound (fake time)")
+
+		// While the abandoned attempt holds the single-flight lock, a second
+		// bounded call skips it immediately instead of joining it.
+		started, err = s.TryStartWithTimeout(t.Context(), time.Second)
+		assert.NilError(t, err, "an in-flight start must not surface as a failure")
+		assert.Check(t, !started, "a bounded call must not join an in-flight start")
+		assert.Check(t, is.Equal(inner.calls.Load(), int32(1)), "the skip must not run a second underlying Start")
+
+		// The abandoned attempt settles in the background; a later call
+		// reports the latched start without another underlying Start.
+		close(inner.release)
+		synctest.Wait()
+		started, err = s.TryStartWithTimeout(t.Context(), time.Second)
+		assert.NilError(t, err)
+		assert.Check(t, started)
+		assert.Check(t, is.Equal(inner.calls.Load(), int32(1)))
+	})
+}
+
+// TestStartableToolSet_StopIfStartedLeavesNeverStartedUntouched pins the
+// shutdown intent carried over from Agent.StopToolSets: a toolset that was
+// never started must not have its underlying Stop called.
+func TestStartableToolSet_StopIfStartedLeavesNeverStartedUntouched(t *testing.T) {
+	t.Parallel()
+
+	inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+	s := tools.NewStartable(inner)
+
+	assert.NilError(t, s.StopIfStarted(t.Context()))
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(0)), "a toolset that was never started must not be stopped")
+}
+
+// TestStartableToolSet_StopIfStartedStopsStarted verifies the settled fast
+// path: a started toolset is stopped and unlatched.
+func TestStartableToolSet_StopIfStartedStopsStarted(t *testing.T) {
+	t.Parallel()
+
+	inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+	close(inner.release) // Start completes immediately
+	s := tools.NewStartable(inner)
+
+	assert.NilError(t, s.Start(t.Context()))
+	assert.NilError(t, s.StopIfStarted(t.Context()))
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(1)))
+	assert.Check(t, is.Equal(s.IsStarted(), false))
+}
+
+// TestStartableToolSet_StopIfStartedExpiredContextStopsResponsiveToolset pins
+// the deliberate fast path in lifecycleMutex.LockContext: an uncontended lock
+// is acquired even when ctx is already done, so a shutdown arriving with an
+// expired deadline still stops a responsive started toolset instead of
+// leaking it.
+func TestStartableToolSet_StopIfStartedExpiredContextStopsResponsiveToolset(t *testing.T) {
+	t.Parallel()
+
+	inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+	close(inner.release) // Start completes immediately, Stop never blocks
+	s := tools.NewStartable(inner)
+	assert.NilError(t, s.Start(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.NilError(t, s.StopIfStarted(ctx), "an already-canceled ctx must still stop an uncontended started toolset")
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(1)))
+	assert.Check(t, is.Equal(s.IsStarted(), false))
+}
+
+// TestStartableToolSet_StopIfStartedHonorsContext pins the deadline half of
+// the shutdown contract: while a wedged Start holds the single-flight lock,
+// StopIfStarted gives up with ctx.Err() instead of blocking, leaves the
+// underlying Stop unrun, and leaves the request pending for the wedged
+// attempt — whose lock release reaps the toolset when the attempt settles
+// successfully. A consumed request must not affect a later deliberate start.
+func TestStartableToolSet_StopIfStartedHonorsContext(t *testing.T) {
+	t.Parallel()
+
+	inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+	s := tools.NewStartable(inner)
+
+	// Always unblock the wedged Start so no goroutine outlives the test.
+	release := sync.OnceFunc(func() { close(inner.release) })
+	t.Cleanup(release)
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- s.Start(t.Context()) }()
+	<-inner.entered
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := s.StopIfStarted(ctx)
+	assert.Check(t, errors.Is(err, context.Canceled), "StopIfStarted must give up when ctx ends while Start is wedged: %v", err)
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(0)), "the underlying Stop must not run while Start is wedged")
+
+	// The wedged Start settles: the abandoned request reaps the toolset.
+	release()
+	assert.NilError(t, <-startDone)
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(1)), "a start that settles after the abandoned request must be stopped")
+	assert.Check(t, is.Equal(s.IsStarted(), false))
+
+	// The request was consumed by the reap: a later deliberate start must
+	// stay up.
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(1)), "a later deliberate start must not be reaped")
+}
+
+// TestStartableToolSet_StopIfStartedRequestDiscardedOnFailedStart verifies
+// that when the wedged Start fails after the stop request was abandoned,
+// there is nothing to reap: the request is consumed on lock release without
+// stopping anything, rather than left to stop an instance a later caller
+// deliberately starts.
+func TestStartableToolSet_StopIfStartedRequestDiscardedOnFailedStart(t *testing.T) {
+	t.Parallel()
+
+	errBoom := errors.New("boom")
+	inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{}), startErr: errBoom}
+	s := tools.NewStartable(inner)
+
+	// Always unblock the wedged Start so no goroutine outlives the test.
+	release := sync.OnceFunc(func() { close(inner.release) })
+	t.Cleanup(release)
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- s.Start(t.Context()) }()
+	<-inner.entered
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.Check(t, errors.Is(s.StopIfStarted(ctx), context.Canceled))
+
+	// The wedged Start fails: nothing started, nothing to stop.
+	release()
+	assert.Check(t, errors.Is(<-startDone, errBoom))
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(0)))
+
+	inner.startErr = nil
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(0)), "the discarded request must not reap the fresh start")
+}
+
+// barrierReporterToolSet is a startable toolset whose IsStarted reporter can
+// be armed to block once. startLocked probes the reporter (while holding the
+// lifecycle lock) when the wrapper is already latched started, so the barrier
+// keeps a non-starting lock holder busy through public behavior alone — long
+// enough for a StopIfStarted deadline to expire behind it.
+type barrierReporterToolSet struct {
+	entered chan struct{} // closed when the armed probe begins blocking
+	release chan struct{} // closed by the test to let the probe return
+	armed   atomic.Bool
+	started atomic.Bool
+	stops   atomic.Int32
+}
+
+func newBarrierReporterToolSet() *barrierReporterToolSet {
+	return &barrierReporterToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *barrierReporterToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+func (b *barrierReporterToolSet) Start(context.Context) error {
+	b.started.Store(true)
+	return nil
+}
+
+func (b *barrierReporterToolSet) Stop(context.Context) error {
+	b.stops.Add(1)
+	b.started.Store(false)
+	return nil
+}
+
+func (b *barrierReporterToolSet) IsStarted() bool {
+	if b.armed.CompareAndSwap(true, false) {
+		close(b.entered)
+		<-b.release
+	}
+	return b.started.Load()
+}
+
+// TestStartableToolSet_StopIfStartedRequestOutlivesLatchedStart pins the
+// removal of the stale-request compromise: a stop request that times out
+// while the lifecycle lock is held by a short, non-starting holder — here a
+// latched Start blocked in its reporter probe — must stop the still-started
+// toolset as soon as that holder releases the lock, and must not linger to
+// reap a later deliberate start.
+func TestStartableToolSet_StopIfStartedRequestOutlivesLatchedStart(t *testing.T) {
+	t.Parallel()
+
+	inner := newBarrierReporterToolSet()
+	s := tools.NewStartable(inner)
+	assert.NilError(t, s.Start(t.Context()))
+
+	// Wedge a latched Start inside the reporter probe: the lifecycle lock is
+	// held but nothing is being started.
+	inner.armed.Store(true)
+	releaseProbe := sync.OnceFunc(func() { close(inner.release) })
+	t.Cleanup(releaseProbe)
+	startDone := make(chan error, 1)
+	go func() { startDone <- s.Start(t.Context()) }()
+	<-inner.entered
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.Check(t, errors.Is(s.StopIfStarted(ctx), context.Canceled))
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(0)), "the underlying Stop must not run while the probe holds the lock")
+
+	// The probe returns: the holder consumes the abandoned request on lock
+	// release and stops the still-started toolset before Start returns.
+	releaseProbe()
+	assert.NilError(t, <-startDone)
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(1)), "the abandoned request must stop the toolset when the lock holder releases")
+	assert.Check(t, is.Equal(s.IsStarted(), false))
+
+	// The request was consumed: a later deliberate start stays up.
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(1)), "a later deliberate start must not be reaped")
+}
+
+// TestStartableToolSet_TryStartReportsReapedStart pins TryStart's return
+// value against the release handshake: when a shutdown request abandoned
+// during the attempt is consumed as TryStart releases the lock, the toolset
+// it just confirmed started is stopped again, and TryStart must report
+// (false, nil) rather than a started toolset that no longer is.
+func TestStartableToolSet_TryStartReportsReapedStart(t *testing.T) {
+	t.Parallel()
+
+	inner := newBarrierReporterToolSet()
+	s := tools.NewStartable(inner)
+	assert.NilError(t, s.Start(t.Context()))
+
+	inner.armed.Store(true)
+	releaseProbe := sync.OnceFunc(func() { close(inner.release) })
+	t.Cleanup(releaseProbe)
+
+	type result struct {
+		started bool
+		err     error
+	}
+	tryDone := make(chan result, 1)
+	go func() {
+		started, err := s.TryStart(t.Context())
+		tryDone <- result{started: started, err: err}
+	}()
+	<-inner.entered
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.Check(t, errors.Is(s.StopIfStarted(ctx), context.Canceled))
+
+	releaseProbe()
+	res := <-tryDone
+	assert.NilError(t, res.err)
+	assert.Check(t, !res.started, "TryStart must not report started after the pending request reaped the toolset")
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(1)))
+	assert.Check(t, is.Equal(s.IsStarted(), false))
+}
+
+// TestStartableToolSet_TryIsStartedReportsReapedStart is the TryIsStarted
+// analogue of the TryStart test above: when a pending shutdown request is
+// consumed as TryIsStarted releases the lock, the toolset it just observed
+// started is stopped again, and TryIsStarted must report false rather than
+// a started toolset that no longer is. The pending request is planted
+// directly because the window it models — a StopIfStarted that published its
+// request but lost the lifecycle-lock race to TryIsStarted before giving up
+// on its already-done context — cannot be sequenced deterministically through
+// the public API.
+func TestStartableToolSet_TryIsStartedReportsReapedStart(t *testing.T) {
+	t.Parallel()
+
+	inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+	close(inner.release) // Start completes immediately
+	s := tools.NewStartable(inner)
+	assert.NilError(t, s.Start(t.Context()))
+
+	s.ExportedPublishStopRequest(t.Context())
+
+	assert.Check(t, is.Equal(s.TryIsStarted(), false), "TryIsStarted must not report started after its own release reaped the toolset")
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(1)), "the pending request must stop the toolset on release")
+	assert.Check(t, is.Equal(s.IsStarted(), false))
+}
+
+// TestStartableToolSet_TryState_ReportsReapedStart is the TryState analogue
+// of TestStartableToolSet_TryIsStartedReportsReapedStart above: when a
+// pending shutdown request is consumed as TryState releases the lock, the
+// toolset it just observed started is stopped again, and TryState must
+// report (false, false) — reaped, not in flight — rather than a started
+// toolset that no longer is.
+func TestStartableToolSet_TryState_ReportsReapedStart(t *testing.T) {
+	t.Parallel()
+
+	inner := &blockingToolSet{entered: make(chan struct{}), release: make(chan struct{})}
+	close(inner.release) // Start completes immediately
+	s := tools.NewStartable(inner)
+	assert.NilError(t, s.Start(t.Context()))
+
+	s.ExportedPublishStopRequest(t.Context())
+
+	started, inFlight := s.TryState()
+	assert.Check(t, is.Equal(started, false), "TryState must not report started after its own release reaped the toolset")
+	assert.Check(t, is.Equal(inFlight, false), "a reaped start is settled, not in flight")
+	assert.Check(t, is.Equal(inner.stops.Load(), int32(1)), "the pending request must stop the toolset on release")
+	assert.Check(t, is.Equal(s.IsStarted(), false))
+}
+
+// TestStartableToolSet_ZeroValueIsUsable pins that a StartableToolSet
+// constructed without NewStartable — zero-value lock fields — does not
+// deadlock: the lifecycle mutex initializes lazily on first use, including
+// concurrent first use.
+func TestStartableToolSet_ZeroValueIsUsable(t *testing.T) {
+	t.Parallel()
+
+	s := &tools.StartableToolSet{ToolSet: &stubToolSet{}}
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			_ = s.IsStarted()
+		})
+	}
+	wg.Wait()
+
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(s.IsStarted(), true))
+
+	started, err := s.TryStart(t.Context())
+	assert.NilError(t, err)
+	assert.Check(t, started)
+	assert.Check(t, is.Equal(s.TryIsStarted(), true))
+
+	_, err = s.Tools(t.Context())
+	assert.NilError(t, err)
+
+	assert.NilError(t, s.StopIfStarted(t.Context()))
+	assert.Check(t, is.Equal(s.IsStarted(), false))
 }

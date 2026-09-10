@@ -1,0 +1,7 @@
+version: "15"
+
+agents:
+  root:
+    model: openai/gpt-3.5-turbo
+    safety: autonomous
+    instruction: Be helpful.

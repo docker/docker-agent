@@ -35,8 +35,8 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 	// toolexec.ToolHandler doesn't.
 	handlers := make(map[string]toolexec.ToolHandler, len(r.toolMap))
 	for name, h := range r.toolMap {
-		handlers[name] = func(ctx context.Context, sess *session.Session, tc tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
-			return h(ctx, sess, tc, events)
+		handlers[name] = func(ctx context.Context, sess *session.Session, tc tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
+			return h(ctx, sess, tc, events, rt)
 		}
 	}
 
@@ -126,8 +126,8 @@ func (h *hookDispatcher) Dispatch(ctx context.Context, a *agent.Agent, event hoo
 	return h.r.dispatchHook(ctx, a, event, in, h.events)
 }
 
-func (h *hookDispatcher) NotifyUserInput(ctx context.Context, sessionID, label string) {
-	h.r.executeOnUserInputHooks(ctx, sessionID, label)
+func (h *hookDispatcher) NotifyUserInput(ctx context.Context, a *agent.Agent, sessionID, label string) {
+	h.r.executeOnUserInputHooks(ctx, a, sessionID, label)
 }
 
 func (h *hookDispatcher) NotifyApprovalDecision(ctx context.Context, sess *session.Session, a *agent.Agent, tc tools.ToolCall, decision, source, safetyLabel string) {

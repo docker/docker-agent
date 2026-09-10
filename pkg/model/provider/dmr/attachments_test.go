@@ -80,7 +80,7 @@ func TestDMRConvertMessagesRespectsDeclaredCaps(t *testing.T) {
 
 	t.Run("image forwarded when supports_images declared", func(t *testing.T) {
 		t.Parallel()
-		c := &Client{attachmentCaps: modelinfo.CapsWith(true, false)}
+		c := &Client{attachmentCaps: modelinfo.CapsWith(true, false, false, false)}
 		msgs := c.convertMessages(t.Context(), docMessage("photo.png", "image/png", minPNG))
 		assert.Equal(t, 1, countImageParts(msgs), "image must be forwarded when supports_images is declared")
 	})
@@ -94,7 +94,7 @@ func TestDMRConvertMessagesRespectsDeclaredCaps(t *testing.T) {
 
 	t.Run("pdf forwarded as file part when supports_pdf declared", func(t *testing.T) {
 		t.Parallel()
-		c := &Client{attachmentCaps: modelinfo.CapsWith(false, true)}
+		c := &Client{attachmentCaps: modelinfo.CapsWith(false, true, false, false)}
 		msgs := c.convertMessages(t.Context(), docMessage("spec.pdf", "application/pdf", []byte("%PDF-1.4")))
 		assert.Equal(t, 1, countFileParts(msgs), "pdf must be forwarded as a file part when supports_pdf is declared")
 	})

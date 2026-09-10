@@ -13,7 +13,7 @@
 models:
   primary:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     # Generate session titles with the cheaper Haiku model instead of Sonnet.
     title_model: fast
   fast:

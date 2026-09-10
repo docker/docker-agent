@@ -50,6 +50,19 @@ func embeddedSnapshot() *Database {
 	return snapshotDB
 }
 
+// EmbeddedSnapshot returns the models.dev catalog committed to the repo at
+// pkg/modelsdev/snapshot.json and baked into the binary at build time. It
+// never touches the network or the filesystem cache, which makes it the
+// right catalog for hermetic tests that must validate against exactly what
+// is checked in — e.g. TestParseExamples — rather than whatever the live
+// models.dev API happens to say at the instant the test runs.
+//
+// The returned *Database is a shared, process-wide singleton: callers must
+// treat it as read-only.
+func EmbeddedSnapshot() *Database {
+	return embeddedSnapshot()
+}
+
 // SnapshotDate returns the time the embedded models.dev snapshot was
 // generated. The zero value is returned when the recorded date can't be
 // parsed.

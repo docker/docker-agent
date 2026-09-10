@@ -38,6 +38,54 @@ capabilities:
 	assert.False(t, rt.Capabilities.PDF)
 }
 
+func TestModelConfigCapabilitiesAudioVideoYAMLRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	const in = `provider: vision-proxy
+model: gemini-2.5-pro
+capabilities:
+  image: true
+  pdf: true
+  audio: true
+  video: true
+`
+	var f FlexibleModelConfig
+	require.NoError(t, yaml.Unmarshal([]byte(in), &f))
+
+	require.NotNil(t, f.Capabilities, "capabilities should be parsed")
+	assert.True(t, f.Capabilities.Audio)
+	assert.True(t, f.Capabilities.Video)
+
+	out, err := yaml.Marshal(f)
+	require.NoError(t, err)
+
+	var rt FlexibleModelConfig
+	require.NoError(t, yaml.Unmarshal(out, &rt))
+	require.NotNil(t, rt.Capabilities, "capabilities should survive a marshal round-trip; got:\n%s", out)
+	assert.True(t, rt.Capabilities.Audio)
+	assert.True(t, rt.Capabilities.Video)
+}
+
+// TestModelConfigCapabilitiesAudioVideoOmittedDefaultsFalse pins that, within
+// a present capabilities block, omitted audio/video resolve to false rather
+// than falling back to models.dev: any non-nil block is authoritative.
+func TestModelConfigCapabilitiesAudioVideoOmittedDefaultsFalse(t *testing.T) {
+	t.Parallel()
+
+	const in = `provider: ollama
+model: llava
+capabilities:
+  image: true
+  pdf: false
+`
+	var f FlexibleModelConfig
+	require.NoError(t, yaml.Unmarshal([]byte(in), &f))
+
+	require.NotNil(t, f.Capabilities)
+	assert.False(t, f.Capabilities.Audio)
+	assert.False(t, f.Capabilities.Video)
+}
+
 func TestModelConfigShorthandOnlyWithoutCapabilities(t *testing.T) {
 	t.Parallel()
 
@@ -80,13 +128,15 @@ func TestModelConfigCloneCopiesCapabilities(t *testing.T) {
 	orig := &ModelConfig{
 		Provider:     "my-proxy",
 		Model:        "gpt-4o",
-		Capabilities: &CapabilitiesConfig{Image: true, PDF: true},
+		Capabilities: &CapabilitiesConfig{Image: true, PDF: true, Audio: true, Video: true},
 	}
 
 	clone := orig.Clone()
 	require.NotNil(t, clone.Capabilities)
 	assert.True(t, clone.Capabilities.Image)
 	assert.True(t, clone.Capabilities.PDF)
+	assert.True(t, clone.Capabilities.Audio)
+	assert.True(t, clone.Capabilities.Video)
 
 	// Mutating the clone must not affect the original (deep copy).
 	clone.Capabilities.Image = false

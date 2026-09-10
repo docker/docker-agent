@@ -5,7 +5,6 @@
 package defaults
 
 import (
-	"github.com/docker/docker-agent/pkg/runtime/jscommands"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
@@ -13,7 +12,5 @@ import (
 // Opts returns team-loader options with docker-agent's full toolset and
 // provider registries, for embeddedchat.Config.LoadOpts.
 func Opts() []teamloader.Opt {
-	// Enable ${...} JavaScript expressions in slash-command instructions.
-	jscommands.Register()
 	return loaderdefaults.Opts()
 }

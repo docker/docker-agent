@@ -47,6 +47,44 @@ func TestSafetyPolicy_Normalize(t *testing.T) {
 	}
 }
 
+func TestMinSafetyPolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		a    SafetyPolicy
+		b    SafetyPolicy
+		want SafetyPolicy
+	}{
+		{"strict and strict", SafetyPolicyStrict, SafetyPolicyStrict, SafetyPolicyStrict},
+		{"strict and balanced", SafetyPolicyStrict, SafetyPolicyBalanced, SafetyPolicyStrict},
+		{"strict and restricted", SafetyPolicyStrict, SafetyPolicyRestricted, SafetyPolicyStrict},
+		{"strict and autonomous", SafetyPolicyStrict, SafetyPolicyAutonomous, SafetyPolicyStrict},
+		{"balanced and strict", SafetyPolicyBalanced, SafetyPolicyStrict, SafetyPolicyStrict},
+		{"balanced and balanced", SafetyPolicyBalanced, SafetyPolicyBalanced, SafetyPolicyBalanced},
+		{"balanced and restricted", SafetyPolicyBalanced, SafetyPolicyRestricted, SafetyPolicyBalanced},
+		{"balanced and autonomous", SafetyPolicyBalanced, SafetyPolicyAutonomous, SafetyPolicyBalanced},
+		{"restricted and strict", SafetyPolicyRestricted, SafetyPolicyStrict, SafetyPolicyStrict},
+		{"restricted and balanced", SafetyPolicyRestricted, SafetyPolicyBalanced, SafetyPolicyBalanced},
+		{"restricted and restricted", SafetyPolicyRestricted, SafetyPolicyRestricted, SafetyPolicyRestricted},
+		{"restricted and autonomous", SafetyPolicyRestricted, SafetyPolicyAutonomous, SafetyPolicyRestricted},
+		{"autonomous and strict", SafetyPolicyAutonomous, SafetyPolicyStrict, SafetyPolicyStrict},
+		{"autonomous and balanced", SafetyPolicyAutonomous, SafetyPolicyBalanced, SafetyPolicyBalanced},
+		{"autonomous and restricted", SafetyPolicyAutonomous, SafetyPolicyRestricted, SafetyPolicyRestricted},
+		{"autonomous and autonomous", SafetyPolicyAutonomous, SafetyPolicyAutonomous, SafetyPolicyAutonomous},
+		{"legacy alias", "unsafe", SafetyPolicyRestricted, SafetyPolicyRestricted},
+		{"unknown policy", "unknown", SafetyPolicyAutonomous, SafetyPolicyStrict},
+		{"unset left", "", SafetyPolicyRestricted, ""},
+		{"unset right", SafetyPolicyRestricted, "", ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, MinSafetyPolicy(test.a, test.b))
+		})
+	}
+}
+
 // WithSafetyPolicy keeps ToolsApproved in sync both ways so legacy
 // readers of the flag always agree with the mode.
 func TestWithSafetyPolicy_SyncsToolsApproved(t *testing.T) {

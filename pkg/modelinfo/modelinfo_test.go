@@ -9,6 +9,78 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
+// TestGPTGeneration exercises gptGeneration's parsing of "gpt-<major>[.<minor>]"
+// ids across generations (gpt-5.x and gpt-6+), including the syntactic
+// boundary rules it shares with gptFiveMinor: a malformed or date-shaped
+// digit run must not parse as a real minor version.
+func TestGPTGeneration(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model     string
+		wantMajor int
+		wantMinor int
+		wantOK    bool
+	}{
+		{"gpt-6-astra", 6, 0, true},
+		{"gpt-6.1-foo", 6, 1, true},
+		{"gpt-6", 6, 0, true},
+		{"openai/gpt-6-astra", 6, 0, true},
+		{"gpt-5.6-terra", 5, 6, true},
+		{"gpt-5.6", 5, 6, true},
+		{"gpt-5", 5, 0, true},
+		{"GPT-6-ASTRA", 6, 0, true},
+		{"gpt-7.2", 7, 2, true},
+
+		// Malformed / date-shaped / pre-gpt-5.
+		{"gpt-5.20260709", 0, 0, false},
+		{"gpt-6foo", 0, 0, false},
+		{"gpt-4.1", 0, 0, false},
+		{"gpt-5.6.1", 0, 0, false},
+		{"gpt-5.", 0, 0, false},
+		{"o3", 0, 0, false},
+		{"", 0, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			t.Parallel()
+			major, minor, ok := gptGeneration(tc.model)
+			require.Equal(t, tc.wantOK, ok, "ok mismatch")
+			if tc.wantOK {
+				assert.Equal(t, tc.wantMajor, major, "major mismatch")
+				assert.Equal(t, tc.wantMinor, minor, "minor mismatch")
+			}
+		})
+	}
+}
+
+// TestAtLeastGPT exercises the "is this GPT id at or above generation X.Y"
+// helper that every gpt-5.6-or-later threshold in this package is built on.
+func TestAtLeastGPT(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model        string
+		major, minor int
+		want         bool
+	}{
+		{"gpt-5.6-terra", 5, 6, true},
+		{"gpt-5.5", 5, 6, false},
+		{"gpt-6-astra", 5, 6, true},
+		{"gpt-6-astra", 6, 0, true},
+		{"gpt-7", 5, 6, true},
+		{"gpt-4.1", 5, 6, false},
+		{"claude-sonnet-4-5", 5, 6, false},
+		{"", 5, 6, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, atLeastGPT(tc.model, tc.major, tc.minor))
+		})
+	}
+}
+
 func TestSupportsResponsesAPI(t *testing.T) {
 	t.Parallel()
 
@@ -51,6 +123,12 @@ func TestSupportsResponsesAPI(t *testing.T) {
 		{"openai/gpt-5.6-sol", true},
 		{"OPENAI/gpt-4.1", true},
 		{"openai/gpt-4o", false},
+		// gpt-6 is the next generation of gpt-5.6, matched via gptGeneration
+		// rather than a per-id list.
+		{"gpt-6-astra", true},
+		{"gpt-6.1-foo", true},
+		{"gpt-6", true},
+		{"openai/gpt-6-astra", true},
 		// Unrelated provider-style prefixes must NOT be stripped: they are
 		// the model's actual catalog path, not an OpenAI wrapper.
 		{"ai/qwen3", false},
@@ -81,6 +159,10 @@ func TestSupportsDeferredTools(t *testing.T) {
 		{"openai", "gpt-5.6-luna", true},
 		{"openai", "gpt-5.6-sol", true},
 		{"openai", "gpt-5.6-terra", true},
+		// gpt-6 is the next generation of the gpt-5.6 trio.
+		{"openai", "gpt-6-astra", true},
+		{"openai", "gpt-6.1-foo", true},
+		{"chatgpt", "gpt-6-astra", true},
 		{"chatgpt", "gpt-5.4", true},
 		{"chatgpt", "gpt-5.4-pro", false},
 		{"openai", "gpt-5.3-codex-spark", false},
@@ -135,6 +217,12 @@ func TestUsesReasoningEffort(t *testing.T) {
 		{"gpt-5-mini", true},
 		{"gpt-5-turbo", true},
 		{"GPT-5", true},
+
+		// gpt-6 is the next generation of gpt-5, matched via gptGeneration.
+		{"gpt-6-astra", true},
+		{"gpt-6.1-foo", true},
+		{"gpt-6", true},
+		{"openai/gpt-6-astra", true},
 
 		// Provider-qualified ids (gateways/aggregators) match the bare name.
 		{"openai/gpt-5-nano", true},
@@ -198,6 +286,9 @@ func TestAlwaysReasons(t *testing.T) {
 		{"gpt-4o", false},
 		{"claude-sonnet-4-5", false},
 		{"", false},
+		// gpt-6 can also produce visible output without reasoning, same as
+		// gpt-5: it is not classified as "always reasons".
+		{"gpt-6-astra", false},
 		// Gateway "openai/" qualified ids resolve the same as the bare model.
 		{"openai/o3-mini", true},
 		{"openai/gpt-4o", false},
@@ -761,18 +852,49 @@ func TestLoadCaps_OfficeDocsNotAllowed(t *testing.T) {
 func TestCapsWith(t *testing.T) {
 	t.Parallel()
 
-	mc := CapsWith(true, false)
+	mc := CapsWith(true, false, false, false)
 	assert.True(t, mc.Supports("image/jpeg"))
 	assert.False(t, mc.Supports("application/pdf"))
 
-	mc2 := CapsWith(false, false)
+	mc2 := CapsWith(false, false, false, false)
 	assert.False(t, mc2.Supports("image/png"))
 }
 
-func TestSupports_AudioVideoRejected(t *testing.T) {
+// TestCapsWith_AudioVideo verifies the audio/video booleans passed to
+// CapsWith flow through to Supports and to the dedicated accessors, and that
+// each modality is independent of the others.
+func TestCapsWith_AudioVideo(t *testing.T) {
 	t.Parallel()
 
-	mc := CapsWith(true, true)
+	audioOnly := CapsWith(false, false, true, false)
+	assert.True(t, audioOnly.Supports("audio/mp3"))
+	assert.True(t, audioOnly.SupportsAudio())
+	assert.False(t, audioOnly.Supports("video/mp4"))
+	assert.False(t, audioOnly.SupportsVideo())
+	assert.False(t, audioOnly.Supports("image/jpeg"))
+	assert.False(t, audioOnly.Supports("application/pdf"))
+
+	videoOnly := CapsWith(false, false, false, true)
+	assert.True(t, videoOnly.Supports("video/webm"))
+	assert.True(t, videoOnly.SupportsVideo())
+	assert.False(t, videoOnly.Supports("audio/wav"))
+	assert.False(t, videoOnly.SupportsAudio())
+
+	all := CapsWith(true, true, true, true)
+	assert.True(t, all.SupportsImage())
+	assert.True(t, all.SupportsPDF())
+	assert.True(t, all.SupportsAudio())
+	assert.True(t, all.SupportsVideo())
+
+	none := CapsWith(false, false, false, false)
+	assert.False(t, none.SupportsAudio())
+	assert.False(t, none.SupportsVideo())
+}
+
+func TestSupports_AudioVideoRejectedWhenUnsupported(t *testing.T) {
+	t.Parallel()
+
+	mc := CapsWith(true, true, false, false)
 
 	for _, mime := range []string{
 		"audio/mp3",
@@ -788,4 +910,139 @@ func TestSupports_AudioVideoRejected(t *testing.T) {
 		assert.False(t, mc.Supports(mime),
 			"%q must not be supported", mime)
 	}
+}
+
+// TestLoadCaps_AudioVideoModel verifies that "audio" and "video" models.dev
+// input modalities are parsed into SupportsAudio/SupportsVideo, alongside a
+// regression check that image/pdf parsing (added earlier) is unaffected.
+func TestLoadCaps_AudioVideoModel(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {
+			Models: map[string]modelsdev.Model{
+				"gemini-2.5-pro": {
+					Name: "Gemini 2.5 Pro",
+					Modalities: modelsdev.Modalities{
+						Input:  []string{"text", "image", "audio", "video", "pdf"},
+						Output: []string{"text"},
+					},
+				},
+			},
+		},
+	}})
+
+	mc := LoadCaps(t.Context(), store, modelsdev.NewID("google", "gemini-2.5-pro"))
+
+	assert.True(t, mc.Supports("image/jpeg"), "regression: image parsing must still work")
+	assert.True(t, mc.Supports("application/pdf"), "regression: pdf parsing must still work")
+	assert.True(t, mc.Supports("audio/mp3"))
+	assert.True(t, mc.Supports("video/mp4"))
+	assert.True(t, mc.SupportsAudio())
+	assert.True(t, mc.SupportsVideo())
+}
+
+// TestLoadCaps_AudioOnlyModel verifies that a model declaring only "audio"
+// (no "video") does not also report video support, and vice versa.
+func TestLoadCaps_AudioOnlyModel(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"openai": {
+			Models: map[string]modelsdev.Model{
+				"gpt-4o-audio-preview": {
+					Name: "GPT-4o Audio",
+					Modalities: modelsdev.Modalities{
+						Input:  []string{"text", "audio"},
+						Output: []string{"text", "audio"},
+					},
+				},
+			},
+		},
+	}})
+
+	mc := LoadCaps(t.Context(), store, modelsdev.NewID("openai", "gpt-4o-audio-preview"))
+
+	assert.True(t, mc.SupportsAudio())
+	assert.False(t, mc.SupportsVideo())
+	assert.False(t, mc.SupportsImage())
+	assert.False(t, mc.SupportsPDF())
+}
+
+// TestLoadCaps_UnknownModelHasNoAudioVideo is the conservative-default
+// regression for audio/video: an uncatalogued model must not infer either
+// modality, matching the existing image/PDF posture (#2741).
+func TestLoadCaps_UnknownModelHasNoAudioVideo(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{}})
+
+	mc := LoadCaps(t.Context(), store, modelsdev.NewID("unknown", "nonexistent-model"))
+
+	assert.False(t, mc.SupportsAudio())
+	assert.False(t, mc.SupportsVideo())
+	assert.False(t, mc.SupportsImage())
+	assert.False(t, mc.SupportsPDF())
+	assert.True(t, mc.Supports("text/plain"))
+}
+
+// TestLoadCaps_MissingModalitiesHasNoAudioVideo covers a catalogued model
+// whose Modalities.Input is present but lists neither "audio" nor "video"
+// (only text/image): both new fields must stay conservative (false).
+func TestLoadCaps_MissingModalitiesHasNoAudioVideo(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"openai": {
+			Models: map[string]modelsdev.Model{
+				"gpt-4o": {
+					Name: "GPT-4o",
+					Modalities: modelsdev.Modalities{
+						Input:  []string{"text", "image"},
+						Output: []string{"text"},
+					},
+				},
+			},
+		},
+	}})
+
+	mc := LoadCaps(t.Context(), store, modelsdev.NewID("openai", "gpt-4o"))
+
+	assert.True(t, mc.SupportsImage())
+	assert.False(t, mc.SupportsAudio())
+	assert.False(t, mc.SupportsVideo())
+}
+
+// TestResolveCaps_OverrideAudioVideo verifies that CapsOverride's Audio/Video
+// fields flow through ResolveCaps and take precedence over models.dev, mirroring
+// the existing image/pdf override-precedence coverage in resolve_caps_test.go.
+func TestResolveCaps_OverrideAudioVideo(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"gemini-2.5-pro": {Modalities: modelsdev.Modalities{Input: []string{"text", "image", "audio", "video"}}},
+		}},
+	}})
+
+	// Override declares audio/video false even though the catalogue says
+	// true: the override is authoritative and wins.
+	override := &CapsOverride{Image: true, Audio: false, Video: false}
+	mc := ResolveCaps(t.Context(), store, modelsdev.NewID("google", "gemini-2.5-pro"), override)
+	assert.True(t, mc.SupportsImage())
+	assert.False(t, mc.SupportsAudio())
+	assert.False(t, mc.SupportsVideo())
+
+	// An override can also grant audio/video to an uncatalogued provider.
+	override2 := &CapsOverride{Audio: true, Video: true}
+	mc2 := ResolveCaps(t.Context(), store, modelsdev.NewID("custom-proxy", "some-model"), override2)
+	assert.True(t, mc2.SupportsAudio())
+	assert.True(t, mc2.SupportsVideo())
+	assert.False(t, mc2.SupportsImage())
+
+	// A nil override falls back to the models.dev lookup, which is fully
+	// multimodal for this model.
+	mc3 := ResolveCaps(t.Context(), store, modelsdev.NewID("google", "gemini-2.5-pro"), nil)
+	assert.True(t, mc3.SupportsAudio())
+	assert.True(t, mc3.SupportsVideo())
 }

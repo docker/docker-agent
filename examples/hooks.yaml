@@ -43,6 +43,7 @@
 #   builtin - in-process Go function registered by the runtime; reuses the
 #             `command` field for the builtin's name and the `args` field
 #             for parameters. Shipped builtins:
+#               add_context           (context events; args = Go templates)
 #               add_date              (turn_start)
 #               add_environment_info  (session_start)
 #               add_prompt_files      (turn_start; args = file names)
@@ -59,8 +60,8 @@
 # Requirements: the command-style hooks below pipe stdin through `jq` for
 # convenient JSON access. If you don't have jq installed (`brew install jq`
 # on macOS, `apt-get install jq` on Debian/Ubuntu), a hook will exit non-zero
-# and the runtime will log a 'Hook execution error' warning but otherwise
-# continue — use plain `awk`/`sed`/`grep` or any other parser if you prefer.
+# and fail-closed pre_tool_use hooks will deny the call; other events
+# follow on_error — use plain `awk`/`sed`/`grep` or any other parser if you prefer.
 #
 # Try these prompts:
 #   "Run: echo hello"           → allowed
@@ -185,6 +186,11 @@ agents:
       # and persists across turns and resumes.
       # ====================================================================
       session_start:
+        - type: builtin
+          command: add_context
+          args:
+            - "Current session ID: {{ .SessionID }}"
+
         # In-process Go function: reports working dir, OS, arch, git status.
         - type: builtin
           command: add_environment_info

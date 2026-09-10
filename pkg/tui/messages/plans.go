@@ -6,12 +6,10 @@ import "github.com/docker/docker-agent/pkg/plans"
 // intents; the app model services them through the pkg/plans host service and
 // pushes fresh data back into the open dialogs. Dialogs never touch storage.
 //
-// Shared-plan mutation messages carry the version that was displayed when
-// the user chose the action (never nil), so every shared write is guarded by
-// optimistic locking and a concurrent change surfaces as an actionable
-// conflict instead of a silent overwrite. The session plan has no versions:
-// its only mutation is an EditPlanMsg carrying the sentinel ExpectedVersion
-// 0, and the write is last-write-wins by design.
+// Mutation messages carry the version that was displayed when the user chose
+// the action (never nil), so every write is guarded by optimistic locking
+// and a concurrent change surfaces as an actionable conflict instead of a
+// silent overwrite.
 type (
 	// ShowPlanBrowserMsg opens the /plans browser dialog.
 	ShowPlanBrowserMsg struct{}
@@ -46,9 +44,7 @@ type (
 	CreatePlanMsg struct{ Name string }
 
 	// EditPlanMsg edits a plan's content in the external $VISUAL/$EDITOR.
-	// For shared plans ExpectedVersion is the displayed version guarding
-	// the write; for the session plan — which has no versions — it is the
-	// sentinel 0 and the write is unguarded.
+	// ExpectedVersion is the displayed version guarding the write.
 	EditPlanMsg struct {
 		Ref             plans.Ref
 		ExpectedVersion int

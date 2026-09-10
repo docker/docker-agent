@@ -363,6 +363,27 @@ func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool, fetch 
 	return database, true
 }
 
+// Fetch retrieves the models.dev catalog directly from the live API,
+// bypassing any on-disk cache or the embedded build-time snapshot. Unlike a
+// Store lookup, a failure here is always returned to the caller rather than
+// silently degraded to cached or embedded data — callers that need to detect
+// live-catalog drift (as opposed to resolving a model as best-effort) should
+// use this instead of GetDatabase.
+func Fetch(ctx context.Context) (*Database, error) {
+	db, _, err := fetchFromAPI(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	if db == nil {
+		// fetchFromAPI returns (nil, etag, nil) only for a 304 response, which
+		// requires a non-empty If-None-Match — unreachable with the empty etag
+		// passed above. Guard it anyway so a future change to fetchFromAPI
+		// can't silently turn this into a nil-database success.
+		return nil, errors.New("models.dev fetch returned no data")
+	}
+	return db, nil
+}
+
 // fetchFromAPI fetches the models.dev database.
 // If etag is non-empty it is sent as If-None-Match; a 304 response
 // returns (nil, etag, nil) to indicate no change.

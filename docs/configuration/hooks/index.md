@@ -33,7 +33,9 @@ Docker Agent dispatches the following hook events:
 
 | Event                       | When it fires                                                                     | Can block? |
 | --------------------------- | --------------------------------------------------------------------------------- | ---------- |
-| `pre_tool_use`              | Before a tool call executes                                                       | Yes        |
+| `pre_tool_use`              | Default lane: approval helper when the safety mode asks; skipped on auto-approved calls                                                       | Yes        |
+| `tool_input_transform`     | Before tool guards, permission rules, and safety classification, including auto-approved calls | Yes |
+| `tool_guard`               | Mandatory checks on transformed arguments, before approval                         | Yes |
 | `tool_response_transform`   | Between a tool's execution and the runtime's emission/record of the response      | No         |
 | `post_tool_use`             | After a tool completes — fires for both success and failure                       | Yes        |
 | `permission_request`        | Just before the runtime would prompt the user to approve a tool                   | Yes        |
@@ -64,6 +66,49 @@ Docker Agent dispatches the following hook events:
 > **Two compaction events**
 >
 > `pre_compact` and `before_compaction` both fire just before a compaction. `pre_compact` is the original event and is best-suited to _steering_ the LLM-generated summary by appending guidance via `additional_context`. `before_compaction` is the newer, structured event: it carries the input/output token counts, the model's context limit, and a `compaction_reason` so handlers can decide based on real session pressure, and it can _replace_ the LLM-generated summary verbatim via `hook_specific_output.summary`.
+
+## Event contracts
+
+These contracts describe the native runtime; the experimental WASM runtime does
+not yet implement the mandatory tool phases.
+
+The shared catalog in `pkg/hooks/events` drives configuration validation,
+dispatch strategy, output aggregation, and strict output validation. Tests keep
+this table, the configuration fields, and the JSON schema synchronized.
+“Context” means additional context is consumed by the runtime; `worktree_create`
+shows it to the CLI user. The internal preempting `pre_tool_use` lane is parallel,
+collects metadata, and does not rewrite input.
+
+| Event | Execution | Can block | Failure default | Context | Rewrite |
+| --- | --- | --- | --- | --- | --- |
+| `pre_tool_use` | sequential | yes | block | no | tool input |
+| `post_tool_use` | parallel | yes | warn | no | — |
+| `permission_request` | parallel | yes | warn | no | — |
+| `session_start` | parallel | no | warn | yes | — |
+| `user_prompt_submit` | parallel | yes | warn | yes | — |
+| `user_steering_messages_submit` | parallel | yes | warn | yes | — |
+| `user_followup_submit` | parallel | yes | warn | yes | — |
+| `turn_start` | parallel | no | warn | yes | — |
+| `turn_end` | parallel | no | warn | no | — |
+| `before_llm_call` | sequential | yes | warn | no | messages |
+| `after_llm_call` | parallel | no | warn | no | — |
+| `session_end` | parallel | no | warn | no | — |
+| `pre_compact` | parallel | yes | warn | yes | — |
+| `subagent_stop` | parallel | no | warn | no | — |
+| `on_user_input` | parallel | no | warn | no | — |
+| `stop` | parallel | no | warn | no | — |
+| `notification` | parallel | no | warn | no | — |
+| `on_error` | parallel | no | warn | no | — |
+| `on_max_iterations` | parallel | no | warn | no | — |
+| `on_agent_switch` | parallel | no | warn | no | — |
+| `on_session_resume` | parallel | no | warn | no | — |
+| `on_tool_approval_decision` | parallel | no | warn | no | — |
+| `before_compaction` | parallel | yes | warn | no | — |
+| `after_compaction` | parallel | no | warn | no | — |
+| `tool_response_transform` | sequential | no | warn | no | tool response |
+| `tool_input_transform` | sequential | yes | warn | no | tool input |
+| `tool_guard` | parallel | yes | block | no | — |
+| `worktree_create` | parallel | yes | warn | yes | — |
 
 ## Configuration
 
@@ -125,6 +170,27 @@ stop:
   type: command
   command: "./scripts/log-response.sh"
 ```
+
+### Hook identity and deduplication
+
+For each event dispatch, identical matching hook definitions run once, at the
+position of the first match. Identity includes every hook field: `name`, `type`,
+`command`, `args`, `timeout`, `env`, `working_dir`, `on_error`, `strict_output`, `model`, `prompt`,
+and `schema`. Sharing a name or command alone does not make two hooks duplicates.
+
+Hooks with different model prompts, environments, working directories, or other
+options all run. To deliberately run otherwise identical hooks twice, give them
+different names. Repeated dispatches still run the hooks again.
+
+Comparison uses configured values, without expanding environment variables or
+paths. Environment map ordering does not matter; argument ordering does. Empty
+and omitted `args` or `env` are equivalent. Explicit options such as `timeout: 60`
+and `on_error: warn` remain distinct from omitted options.
+
+This also applies to automatic built-ins: an identical explicit entry runs only
+once, but adding a name or changing an option makes it a separate invocation.
+Disable the corresponding agent flag when you want a custom entry *instead of*
+the automatic default.
 
 ## Global (user-level) hooks
 
@@ -205,8 +271,9 @@ Built-ins are typically zero-config and faster than equivalent shell hooks becau
 
 | Builtin                 | Event                                                                                     | Args                  | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ----------------------- | ----------------------------------------------------------------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `add_context` | [Context-contributing events](#context-contributing-events) | `[template1, template2, ...]` | Renders Go templates against hook input and joins non-empty results as additional context. No external dependencies. See [Template context](#template-context-with-add_context). |
 | `add_date`              | `turn_start`                                                                              | _none_                | Prepends `Today's date: YYYY-MM-DD` so the model always knows the current date.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `add_environment_info`  | `session_start`                                                                           | _none_                | Adds the working directory, git-repo status, OS, and CPU architecture.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `add_environment_info`  | `session_start`                                                                           | _none_                | Adds the working directory, git-repo status, OS, CPU architecture, and the resolved shell.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `add_prompt_files`      | `turn_start`                                                                              | `[file1, file2, ...]` | Reads each named file from the workdir hierarchy (walking up) and the home directory, and appends their contents.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `add_git_status`        | `turn_start`                                                                              | _none_                | Adds the output of `git status --short --branch` (no-op outside a git repo or when git isn't installed).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `add_git_diff`          | `turn_start`                                                                              | _none_, or `["full"]` | Adds `git diff --stat` by default. Pass `args: ["full"]` to emit the full unified diff. Output is capped to 4 KB.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -215,9 +282,9 @@ Built-ins are typically zero-config and faster than equivalent shell hooks becau
 | `add_recent_commits`    | `session_start`                                                                           | _none_, or `["<N>"]`  | Adds `git log --oneline -n N`. `N` defaults to 10; pass a positive integer to override.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `max_iterations`        | `before_llm_call`                                                                         | `["<N>"]` (required)  | Hard-stops the agent after `N` model calls. Stateless: the runtime supplies the iteration counter on every dispatch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `snapshot`              | `session_start`, `turn_start`, `turn_end`, `pre_tool_use`, `post_tool_use`, `session_end` | _none_                | Records filesystem snapshots in a shadow git repo under the Docker Agent data directory. No-op outside git repos; respects the source repo's ignore rules and skips newly-added files larger than 2 MiB.                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `redact_secrets`        | `pre_tool_use`, `before_llm_call`, `tool_response_transform`                              | _none_                | Scrubs detected secrets (API keys, tokens, private keys, …) out of tool call arguments, outgoing chat content, and tool output. The same builtin handles all three events and dispatches on the event name. Auto-registered on all three events by `redact_secrets: true` on the agent — see [`examples/redact_secrets_hooks.yaml`](https://github.com/docker/docker-agent/blob/main/examples/redact_secrets_hooks.yaml) for the manual wiring.                                                                                                                                                                                     |
+| `redact_secrets`        | `tool_input_transform`, `before_llm_call`, `tool_response_transform`                              | _none_                | Scrubs detected secrets (API keys, tokens, private keys, …) out of tool call arguments, outgoing chat content, and tool output. The same builtin handles all three events and dispatches on the event name. Auto-registered on all three events by `redact_secrets: true` on the agent — see [`examples/redact_secrets_hooks.yaml`](https://github.com/docker/docker-agent/blob/main/examples/redact_secrets_hooks.yaml) for the manual wiring.                                                                                                                                                                                     |
 | `limit_large_tool_results` | `tool_response_transform`, `session_end`                                               | _none_                | **Always-on safety hook** — automatically injected by the runtime, no configuration required. When a tool result from the `filesystem`, `shell`, `mcp`, or `a2a` categories exceeds 2,000 lines or 50 KiB, the full payload is written to a per-session temp file and replaced in the conversation with a notice plus a bounded excerpt (2,000 lines, up to 50 KiB): the tail for most tools, but the head for the built-in filesystem `read_file`, whose notice suggests a follow-up call with `line`/`limit` to continue reading. The `session_end` leg deletes the temp directory. Internal toolsets (`memory`, `plan`, `tasks`, `think`, …) are not affected. |
-| `safer_shell`           | `pre_tool_use`                                                                            | _none_                | **Deprecated compatibility shim.** The runtime now classifies every shell command natively (`safe` / `destructive` / `unknown`) and gates it through the session's [safety mode](../permissions/index.md#safety-modes), so this builtin no longer emits verdicts. Pinned entries keep working as pure labellers that attach classification metadata (`safety_label`, `blast_radius`, `category`, `reason`) to the call. Filters by tool name internally (no-op for non-shell calls). |
+| `safer_shell`           | `pre_tool_use`                                                                            | _none_                | **Deprecated compatibility shim.** The runtime now classifies every shell command natively (`safe` / `destructive` / `unknown`) and gates it through the session's [safety mode](../permissions/index.md#safety-modes), so this builtin no longer emits verdicts. Pinned entries keep working as pure labellers that attach classification metadata (`safety_label`, `blast_radius`, `category`, `reason`) to the call. Filters by tool name internally (no-op for calls other than `shell` and `run_background_job`). |
 | `unload`                | `on_agent_switch`                                                                         | _none_                | POSTs `{"model": "<id>"}` to each of the previous agent's DMR model endpoints (`/_unload` by default, overridable per-model via `unload_api`) to free the GPU/RAM the just-departing model was holding. Pure HTTP — reads the model snapshot the runtime ships on `on_agent_switch` and depends on no provider-specific runtime state. Non-DMR providers (OpenAI, Anthropic, …) are silently skipped, so cross-provider chains are safe. Errors are logged and swallowed; agent switching never blocks on a slow or unreachable engine (each call has a 10 s timeout). See [`examples/unload_on_switch.yaml`](https://github.com/docker/docker-agent/blob/main/examples/unload_on_switch.yaml). |
 
 > [!NOTE]
@@ -228,7 +295,7 @@ Built-ins are typically zero-config and faster than equivalent shell hooks becau
 > [!NOTE]
 > **Auto-injected built-ins**
 >
-> The agent flags `add_date: true`, `add_environment_info: true`, `add_prompt_files: [...]`, and `redact_secrets: true` are shorthands that auto-register the matching built-in hook. You don't need to repeat them under `hooks:` — set the flag _or_ the hook entry(ies), not both. `redact_secrets: true` auto-registers the same builtin on all three of `pre_tool_use`, `before_llm_call`, and `tool_response_transform`; you can also wire any subset of them by hand for finer-grained control (per-tool matchers, ordering with other rewriters, …).
+> The agent flags `add_date: true`, `add_environment_info: true`, `add_prompt_files: [...]`, and `redact_secrets: true` are shorthands that auto-register the matching built-in hook. You don't need to repeat them under `hooks:` — set the flag _or_ the hook entry(ies), not both. `redact_secrets: true` auto-registers the same builtin on all three of `tool_input_transform`, `before_llm_call`, and `tool_response_transform`; you can also wire any subset of them by hand for finer-grained control (per-tool matchers, ordering with other rewriters, …). Secret redaction is enabled even when `redact_secrets` is omitted; set it to `false` before configuring only selected redaction hooks manually.
 >
 > `limit_large_tool_results` is injected unconditionally by the runtime — it is always active and cannot be removed from config.
 
@@ -264,6 +331,40 @@ See [`examples/snapshot_hooks.yaml`](https://github.com/docker/docker-agent/blob
 > **Two flavors of `max_iterations`**
 >
 > The `max_iterations` agent field has its own UX (it pauses and asks the user to resume past the limit). The `max_iterations` built-in hook is a **hard stop with no resume** — when its counter trips, the agent terminates with a block decision. Use the agent field for interactive sessions and the built-in hook to enforce non-negotiable caps in unattended runs.
+
+### Template Context with add_context
+
+Use `add_context` to inject hook input into the conversation without a shell command, JSON parser, or model call:
+
+```yaml
+hooks:
+  session_start:
+    - type: builtin
+      command: add_context
+      args:
+        - "Current session ID: {{ .SessionID }}"
+        - "Agent: {{ .AgentName }}"
+        - "Working directory: {{ .Cwd }}"
+```
+
+Each argument is an independent Go [`text/template`](https://pkg.go.dev/text/template), rendered against the current [hook input](#hook-input). Templates use Go field names, **not JSON keys**: `.SessionID`, `.AgentName`, and `.Cwd`, rather than `.session_id`, `.agent_name`, and `.cwd`. Event-specific fields are also available, such as `.Prompt` for `user_prompt_submit` and `.ToolName` / `.ToolInput` for tool events. Only fields populated by the selected event carry values. Unknown fields and missing map keys are errors; guard optional maps with `{{ if .ToolInput }}` before accessing their keys. The map must also contain the requested key.
+
+Standard Go template functions and actions (`printf`, `if`, `range`, etc.) are supported. For example:
+
+```yaml
+hooks:
+  user_prompt_submit:
+    - type: builtin
+      command: add_context
+      args:
+        - '{{ if .Prompt }}User request for session {{ .SessionID }}: {{ .Prompt }}{{ end }}'
+```
+
+Non-blank results are joined in argument order with newlines and returned as `additional_context`; no arguments or only blank results contribute nothing. Rendered values remain plain text: they are not executed as commands, re-evaluated as templates, or interpreted as hook-output JSON. Template parse or execution errors discard the hook's entire output and follow its `on_error` policy.
+
+Choose an event that [consumes additional context](#context-contributing-events), such as `session_start`, `turn_start`, or `user_prompt_submit`. Use `turn_start` to recompute the context before every model call. This builtin adds model-visible context, not a visible chat message.
+
+See [`examples/context_hooks.yaml`](https://github.com/docker/docker-agent/blob/main/examples/context_hooks.yaml) for a complete agent configuration.
 
 ## Matcher Patterns
 
@@ -310,11 +411,13 @@ In addition to the common fields, each event ships its own payload:
 
 | Event                       | Extra fields                                                                                                          |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `tool_input_transform`     | `agent_name`, `tool_name`, `tool_use_id`, `tool_category`, `tool_input`, `safety_policy` |
+| `tool_guard`               | `agent_name`, `tool_name`, `tool_use_id`, `tool_category`, `tool_input`, `safety_policy` |
 | `pre_tool_use`              | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`                                                                |
 | `tool_response_transform`   | `tool_name`, `tool_use_id`, `tool_input`, `tool_response`                                                             |
 | `post_tool_use`             | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`, `tool_response`, `tool_error`                                 |
 | `permission_request`        | `agent_name`, `tool_name`, `tool_use_id`, `tool_input`                                                                |
-| `session_start`             | `source` — one of `startup`, `resume`, `clear`, `compact`                                                             |
+| `session_start`             | `source` — `startup` for each run stream                                                             |
 | `user_prompt_submit`        | `prompt` — the text the user just submitted                                                                           |
 | `user_steering_messages_submit` | `steering_messages` — the drained steering messages, in submission order                                         |
 | `user_followup_submit`      | `prompt` — the text of the dequeued follow-up message                                                                |
@@ -322,7 +425,7 @@ In addition to the common fields, each event ships its own payload:
 | `turn_end`                  | `agent_name`, `reason` — one of `normal`, `continue`, `steered`, `error`, `canceled`, `hook_blocked`, `loop_detected` |
 | `before_llm_call`           | `iteration` — 1-based run-loop iteration counter (the model call this hook is gating), `model_id`                    |
 | `after_llm_call`            | `agent_name`, `stop_response`, `last_user_message`, `model_id`, `usage`, `cost`                                       |
-| `session_end`               | `reason` — one of `clear`, `logout`, `prompt_input_exit`, `other`                                                     |
+| `session_end`               | `reason` — `stream_ended`                                                     |
 | `pre_compact`               | `source` — one of `manual`, `auto`, `overflow`, `tool_overflow`                                                       |
 | `before_compaction`         | `input_tokens`, `output_tokens`, `context_limit`, `compaction_reason` (one of `threshold`/`overflow`/`manual`)        |
 | `after_compaction`          | `input_tokens`, `output_tokens`, `context_limit`, `compaction_reason`, `summary`                                      |
@@ -350,7 +453,7 @@ Notes:
 - For [harness agents](../../features/harnesses/index.md), `cost` is the harness's own reported total for the call rather than a computed price, and is present only when the harness reported a non-zero cost (some harnesses, e.g. `codex`, report token counts but no cost — those turns carry `usage` with `cost` absent, even though the recorded message stores `0`).
 - `after_llm_call` fires for **every** model call, including calls made inside sub-sessions (transferred tasks, background agents, skills). For those, `session_id` is the sub-session's id. Summing `cost` across `after_llm_call` events therefore captures **all** spend, including sub-sessions (and even sub-sessions that error before their cost is persisted). Do **not** add a separately-queried session cost total on top: the runtime's own total already recurses into and includes completed sub-session spend, so combining the two double-counts. Pick one source — the summed hook costs — as the authoritative ledger.
 - `context_limit` is `0` when the model definition is unavailable (treat `0` as "unknown", not as a real limit).
-- `approval_decision` is one of `allow`, `deny`, `canceled`. `approval_source` is a stable classifier of which step decided (e.g. `yolo`, `session_permissions_allow`, `session_permissions_deny`, `team_permissions_allow`, `team_permissions_deny`, `pre_tool_use_hook_allow`, `pre_tool_use_hook_deny`, `readonly_hint`, `user_approved`, `user_approved_session`, `user_approved_safe`, `user_approved_tool`, `user_rejected`, `context_canceled`).
+- `approval_decision` is one of `allow`, `deny`, `canceled`. `approval_source` is a stable classifier of which step decided (e.g. `yolo`, `session_permissions_allow`, `session_permissions_deny`, `team_permissions_allow`, `team_permissions_deny`, `pre_tool_use_hook_allow`, `pre_tool_use_hook_deny`, `tool_input_transform_deny`, `tool_guard_deny`, `readonly_hint`, `user_approved`, `user_approved_session`, `user_approved_safe`, `user_approved_tool`, `user_rejected`, `context_canceled`).
 
 ## Hook Output
 
@@ -381,23 +484,103 @@ All fields are optional. Returning `{}` (or no output at all) means "do nothing,
 | ----------------- | ------- | ----------------------------------------------- |
 | `continue`        | boolean | Whether to continue execution (default: `true`) |
 | `stop_reason`     | string  | Message to show when `continue=false`           |
-| `suppress_output` | boolean | Hide stdout from transcript                     |
+| `suppress_output` | boolean | Legacy compatibility field; has no effect and is rejected when true in strict mode |
 | `system_message`  | string  | Warning message to display to user              |
 | `decision`        | string  | For blocking: `block` to prevent operation      |
 | `reason`          | string  | Explanation for the decision                    |
 
 ### Pre-Tool-Use / Permission-Request Specific Output
 
-The `hook_specific_output` for `pre_tool_use` (and `permission_request`) supports:
+The following fields are supported by tool hooks as indicated:
 
 | Field                        | Type   | Description                             |
 | ---------------------------- | ------ | --------------------------------------- |
-| `permission_decision`        | string | `allow`, `deny`, or `ask`               |
+| `permission_decision`        | string | `allow`, `deny`, or `ask` for `tool_guard`, `pre_tool_use`, and `permission_request`               |
 | `permission_decision_reason` | string | Explanation for the decision            |
-| `updated_input`              | object | Modified tool input (replaces original) |
-| `metadata`                   | object | (`permission_request` and `pre_tool_use` entries with `preempt_yolo: true` only) string key/value annotations merged onto the tool-call confirmation prompt — see below |
+| `updated_input`              | object | Top-level patch to the current tool input (`tool_input_transform` or the `pre_tool_use` default lane); omitted keys are preserved |
+| `metadata`                   | object | (`tool_guard`, `permission_request`, and `pre_tool_use` entries with `preempt_yolo: true` only) string key/value annotations merged onto the tool-call confirmation prompt — see below |
+
+### Tool phases: transform, guard, approve
+
+Use separate events for operations that must run regardless of approval:
+
+1. **`tool_input_transform`** runs sequentially before safety classification or
+   permission checks. Return `hook_specific_output.updated_input` to patch the
+   arguments. Every later guard, prompt, and tool handler sees the final input.
+   `permission_decision` and `metadata` have no effect on this event.
+2. **`tool_guard`** runs mandatory checks against that input. Matching guards run
+   concurrently and combine verdicts using **deny > ask > allow**. They cannot
+   rewrite arguments.
+3. Existing **`pre_tool_use` with `preempt_yolo: true`** runs next, followed by
+   permission rules and the safety-mode decision.
+4. Ordinary **`pre_tool_use`** remains an approval helper: it runs only when the
+   safety mode asks. Auto-approved calls and explicit permission ask rules skip
+   it. Keep expensive LLM judges here unless they must inspect every call.
+5. **`permission_request`** and interactive confirmation remain the fallback.
+   A mandatory guard's `ask` skips approval helpers and forces confirmation.
+
+For `tool_guard`:
+
+- `deny`, `decision: block`, `continue: false`, or exit code `2` rejects the call.
+- `ask` requires approval for **this call**, even with `--yolo`, a permission
+  allow-rule, or a previous “always allow” grant. An explicit policy denial still
+  wins. Non-interactive sessions deny rather than wait for an unavailable user.
+- `allow` is advisory: permission rules and safety mode still apply.
+- No verdict leaves approval unchanged. `metadata` enriches confirmation;
+  guard keys win over static, permission-hook, safety-label, and legacy
+  preempt-hook metadata. Within the event, the last configured hook wins clashes.
+
+Both events use the existing tool-name `matcher` syntax and apply to nested
+shell actions such as commands embedded in skills. They run once per call;
+if a legacy `pre_tool_use` hook changes arguments afterwards, guards and rules
+are checked again against the rewritten call. Transforms and approval helpers
+are not rerun: legacy rewrites are not automatically re-redacted. A new ask
+during revalidation requires fresh approval, not an earlier session grant; it
+also skips `permission_request` approval helpers.
+A no-op patch does not trigger another guard invocation.
+Prefer `tool_input_transform` for new rewriters so guards only need one pass.
+
+```yaml
+hooks:
+  tool_input_transform:
+    - matcher: "shell"
+      hooks:
+        - type: command
+          command: ./normalize-tool-input.sh
+          on_error: block
+  tool_guard:
+    - matcher: "shell"
+      hooks:
+        - type: command
+          command: ./check-tool-policy.sh
+          timeout: 5
+  pre_tool_use:
+    - matcher: "shell"
+      hooks:
+        - type: model
+          model: openai/gpt-4o-mini
+          schema: pre_tool_use_decision
+          prompt: 'May this call be auto-approved? {{ .ToolInput | toJSON }}'
+```
+
+**Failures:** transform execution errors follow `on_error` (default `warn`);
+`on_error: block`, `decision: block`, `continue: false`, and exit `2` prevent
+execution. Guard execution errors and timeouts block regardless of `on_error`.
+Unexpected nonzero exits (including `1` and `127`), malformed JSON, and invalid
+verdicts are failures too: guards deny; transforms follow `on_error`.
+Successful no-op hooks must exit `0`.
+Neither event accepts `preempt_yolo`, since both already precede approval.
+
+The default secret-redaction argument hook now uses `tool_input_transform`, so
+redaction also applies under auto-approval. Explicit legacy `pre_tool_use`
+redactors keep their conditional behavior; move them to `tool_input_transform`
+to cover every call. See [the complete example](https://github.com/docker/docker-agent/blob/main/examples/tool_hook_phases.yaml).
 
 ### Preempting auto-approval from `pre_tool_use`
+
+For new mandatory checks, prefer `tool_guard`. The legacy `preempt_yolo` option
+remains supported, including its exception for session-scoped “always allow”
+grants. Unlike that option, a `tool_guard` ask always requires fresh approval.
 
 `pre_tool_use` entries default to firing AFTER the deterministic approval
 pipeline (custom allow rules / safety mode), so an auto-approved call
@@ -415,7 +598,7 @@ hooks:
           command: ./security-check.sh
 ```
 
-The entry then fires in a dedicated stage 0 BEFORE `Decide()`:
+The entry fires after `tool_input_transform` and `tool_guard`, before `Decide()`:
 
 - `deny` rejects the call outright; the user is not prompted.
 - `ask` forces user confirmation. The default `pre_tool_use` lane and
@@ -458,11 +641,65 @@ The `hook_specific_output` for `tool_response_transform` supports:
 | ----------------------- | ------ | --------------------------------------------- |
 | `updated_tool_response` | string | Rewritten tool output (replaces the original) |
 
-This is the symmetric counterpart of `pre_tool_use`'s `updated_input`, applied to tool **results** instead of tool **arguments**. The rewrite reaches every downstream consumer — event subscribers, the persisted session file, the `post_tool_use` hook input, and the next LLM call. Use it to truncate excessive output, scrub PII, or normalise tool dialects. The built-in `redact_secrets` registers itself on this event as the third leg of the redact_secrets feature.
+This is the symmetric counterpart of `tool_input_transform`'s `updated_input`, applied to tool **results** instead of tool **arguments**. The rewrite reaches every downstream consumer — event subscribers, the persisted session file, the `post_tool_use` hook input, and the next LLM call. Use it to truncate excessive output, scrub PII, or normalise tool dialects. The built-in `redact_secrets` registers itself on this event as the third leg of the redact_secrets feature.
+
+### Composing transformations
+
+Hooks for the following events run **sequentially in configuration order**:
+
+| Event | Rewrite field | What the next hook receives |
+| ----- | ------------- | --------------------------- |
+| `tool_input_transform` | `updated_input` | `tool_input` with the patch applied |
+| `pre_tool_use` (default lane) | `updated_input` | `tool_input` with the patch applied |
+| `before_llm_call` | `updated_messages` | The rewritten `messages` array |
+| `tool_response_transform` | `updated_tool_response` | The rewritten `tool_response` string |
+
+Every matching hook on these events participates in the sequence, whether it
+rewrites, observes, or returns a verdict. Each hook sees the most recent
+successful rewrite. Hooks that return no rewrite leave the current value
+unchanged; the runtime receives the final result of the sequence.
+
+`updated_input` patches replace only the top-level keys they supply. Other
+arguments are preserved; nested objects are replaced, not deep-merged. An empty
+patch does not clear the arguments. Omitting a key no longer removes it; this
+patch protocol does not support key deletion. `updated_messages` replaces the entire
+message array, with an empty array treated as no rewrite. An explicit empty
+`updated_tool_response` **does** clear the response.
+
+Verdicts still aggregate across all matching hooks: a later allow cannot undo
+a denial, and `pre_tool_use` keeps `deny > ask > allow` precedence. Blocking
+verdicts do not short-circuit the remaining hooks. Failed invocations contribute
+no rewrite and keep the existing error-policy behavior. Each hook retains its
+own timeout, so pipeline latency can add up across hooks.
+
+Other events, including `tool_guard`, `preempt_yolo: true` checks, and `before_compaction`,
+continue to run concurrently. Preempting checks do not apply input rewrites;
+compaction summaries still use the first non-empty result in configuration order.
+
+The automatically injected `limit_large_tool_results` hook is appended after
+configured response transformers and automatic secret redaction. This lets
+redaction scrub the full response **before** the limiter writes it to disk and
+returns a bounded excerpt. For example:
+
+```yaml
+hooks:
+  tool_response_transform:
+    - matcher: "*"
+      hooks:
+        - type: builtin
+          command: redact_secrets
+        - type: command
+          command: ./normalize-output.sh
+# The automatic large-result limiter follows these hooks.
+```
+
+`normalize-output.sh` receives the redacted `tool_response` and can return its
+own `updated_tool_response`. Place redaction before any custom hook that must
+not receive raw secrets. See [the example configuration](https://github.com/docker/docker-agent/blob/main/examples/redact_secrets_hooks.yaml).
 
 ### Context-Contributing Events
 
-For `session_start`, `user_prompt_submit`, `user_steering_messages_submit`, `user_followup_submit`, `turn_start`, `post_tool_use`, `pre_compact`, and `stop`, hooks may set `hook_specific_output.additional_context` to inject text into the conversation. `turn_start` context is **transient** (recomputed every turn, never persisted); `session_start` context **persists** for the life of the session. `user_steering_messages_submit` and `user_followup_submit` context is **transient** like `user_prompt_submit` — it is spliced into the steered/follow-up turn only and never persisted. (`worktree_create` also surfaces stdout, but to the CLI user rather than the conversation — the session doesn't exist yet.)
+For `session_start`, `user_prompt_submit`, `user_steering_messages_submit`, `user_followup_submit`, `turn_start`, and `pre_compact`, hooks may set `hook_specific_output.additional_context` to inject text into the conversation. `turn_start` context is **transient** (recomputed every turn, never persisted); `session_start` context **persists** for the life of the session. `user_steering_messages_submit` and `user_followup_submit` context is **transient** like `user_prompt_submit` — it is spliced into the steered/follow-up turn only and never persisted. (`worktree_create` also surfaces stdout, but to the CLI user rather than the conversation — the session doesn't exist yet.)
 
 ### Before-Compaction Specific Output
 
@@ -481,7 +718,7 @@ Returning `decision: "block"` (or exit code 2) instead vetoes the compaction ent
 
 ### Plain Text Output
 
-For `session_start`, `user_prompt_submit`, `user_steering_messages_submit`, `user_followup_submit`, `turn_start`, `post_tool_use`, `pre_compact`, and `stop` hooks, plain text written to stdout (i.e., output that is not valid JSON) is captured as additional context for the agent. For `pre_compact` it is appended to the compaction prompt; for the others it is spliced into the conversation as a (transient or persisted) system message depending on the event.
+For `session_start`, `user_prompt_submit`, `user_steering_messages_submit`, `user_followup_submit`, `turn_start`, and `pre_compact` hooks, plain text written to stdout (i.e., output that does not start with `{`) is captured as additional context for the agent. For `pre_compact` it is appended to the compaction prompt; for the others it is spliced into the conversation as a (transient or persisted) system message depending on the event.
 
 ## Exit Codes
 
@@ -491,7 +728,7 @@ Hook exit codes have special meaning:
 | --------- | -------------------------------------- |
 | `0`       | Success — continue normally            |
 | `2`       | Blocking error — stop the operation    |
-| Other     | Error — logged but execution continues |
+| Other     | Failure — follows `on_error`; security guards fail closed |
 
 ## Per-hook options
 
@@ -512,14 +749,52 @@ hooks:
           on_error: warn # warn | ignore | block
 ```
 
-`pre_tool_use` is fail-closed for safety: a failed pre-tool hook blocks the tool call regardless of `on_error`.
+`pre_tool_use` (both lanes) and `tool_guard` fail closed on **all failures**,
+including exit codes such as `1` or `127`, regardless of `on_error`. Other events
+apply `on_error` consistently to execution errors, timeouts, unexpected nonzero
+exits, malformed JSON, and invalid verdicts. `warn` reports the hook name and
+event (also as a UI warning where the runtime has an event sink); `ignore` stays
+silent. `block` is accepted only on events capable of stopping an operation.
+Exit `2` is an explicit block on those events, not a recoverable error.
+
+**Compatibility:** scripts that previously exited nonzero to signal “no opinion”
+must now exit `0`. Use empty stdout or `{}` for a successful no-op. Parent
+cancellation is reported as cancellation, not a policy denial; a hook's own
+timeout remains a failure.
+
+Set `strict_output: true` for hooks that implement the structured protocol:
+
+```yaml
+hooks:
+  tool_guard:
+    - matcher: shell
+      hooks:
+        - name: project policy
+          type: command
+          command: ./check-command.sh
+          strict_output: true
+          timeout: 5
+```
+
+Strict hooks accept one JSON object or empty stdout. They reject plain text,
+unknown fields, event-name mismatches, invalid decisions, and output fields the
+event cannot consume (for example, `updated_input` on `tool_guard`). Direct Go
+outputs and model outputs receive the same capability checks. Without strict
+mode, plain text remains supported for context events and unknown fields remain
+compatible; malformed JSON beginning with `{` and invalid decisions are still
+failures. JSON followed by log text is also invalid; send diagnostics to stderr.
+Configuration loading validates matchers and error policies at
+load time rather than silently dropping invalid rules.
+
+`stop` and `post_tool_use` do not consume additional context; use a context event
+such as `turn_start` instead. Strict mode makes this mistake an error.
 
 `working_dir` and `env` apply to `command` and `builtin` hooks. For `builtin` hooks, `working_dir` is resolved with the same logic as `command` hooks (absolute path wins; relative paths join onto the executor directory). `working_dir` accepts `~`, `$VAR`, `${VAR}` and `${env.VAR}`; `env` values expand only the plain `${env.VAR}` form (resolved from the OS process environment), keeping any other `$` literal (see [Variable Expansion in Config Fields](../overview/index.md#variable-expansion-in-config-fields)). A `working_dir` that expands to an empty string (e.g. an unset variable) falls back to the executor's directory with a warning. For `model` hooks, both fields are accepted by the schema but have no effect: model hooks render a prompt template and call the LLM API directly — no subprocess is spawned and no file I/O is performed, so working directory and environment variables have no applicable semantics.
 
 > [!WARNING]
 > **Performance**
 >
-> Hooks run synchronously and can slow down agent execution. Keep hook scripts fast and efficient. Consider using `suppress_output: true` for logging hooks to reduce noise.
+> Hooks run synchronously and can slow down agent execution. Keep hook scripts fast and efficient. Write diagnostics to stderr and protocol output to stdout.
 
 > [!NOTE]
 > **Session End and Cancellation**
@@ -949,4 +1224,4 @@ $ docker agent run myorg/coder \
 > [!NOTE]
 > **Merging behavior**
 >
-> Agent-config, global, drop-in, and CLI hooks are additive. For each event, hooks run in this order: agent-config hooks first, then global hooks from `settings.hooks`, then [hook drop-ins](#hook-drop-in-files-hooksd) from `hooks.d/`, then CLI hooks. No source replaces another, and individual agents cannot opt out of global hooks.
+> Agent-config, global, drop-in, and CLI hooks are additive. For each event, configuration order is: agent-config hooks first, then global hooks from `settings.hooks`, then [hook drop-ins](#hook-drop-in-files-hooksd) from `hooks.d/`, then CLI hooks. Transformation pipelines execute in this order; concurrent events aggregate results in this order. No source replaces another, and individual agents cannot opt out of global hooks.

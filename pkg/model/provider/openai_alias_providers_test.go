@@ -61,7 +61,7 @@ var openAIAliasProviders = []openAIAliasProvider{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",
-		model:    "deepseek-chat",
+		model:    "deepseek-v4-pro",
 		greeting: "Hello from DeepSeek",
 	},
 	{
@@ -76,7 +76,7 @@ var openAIAliasProviders = []openAIAliasProvider{
 		provider:             "fireworks",
 		envVar:               "FIREWORKS_API_KEY",
 		testKey:              "fw-test-fireworks-key",
-		model:                "accounts/fireworks/models/kimi-k2-instruct",
+		model:                "accounts/fireworks/models/kimi-k3",
 		greeting:             "Hello from Fireworks",
 		mergesSystemMessages: true,
 	},

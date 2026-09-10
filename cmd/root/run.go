@@ -67,7 +67,13 @@ type runExecFlags struct {
 	// options and user settings (alias wins; within each scope safety wins
 	// over the legacy yolo/YOLO flag). Never populated from CLI flags or
 	// author YAML.
-	defaultSafety     session.SafetyPolicy
+	defaultSafety session.SafetyPolicy
+	// workingDirChanged records whether a non-empty --working-dir was
+	// explicitly passed on the command line. Captured before worktree and
+	// resume handling mutate runConfig.WorkingDir; only an explicit flag
+	// makes generic new-session actions in the TUI reuse the initial
+	// session's directory instead of opening the picker.
+	workingDirChanged bool
 	attachmentPath    string
 	remoteAddress     string
 	modelOverrides    []string
@@ -264,16 +270,14 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		}
 	}
 
-	// Same early-failure treatment for --safety: a typo must not
-	// silently collapse to strict. Legacy policy aliases are a wire
-	// compat concern; the new flag only takes the canonical modes.
-	switch session.SafetyPolicy(f.safety) {
-	case "", session.SafetyPolicyStrict, session.SafetyPolicyBalanced, session.SafetyPolicyRestricted, session.SafetyPolicyAutonomous:
-	default:
-		return fmt.Errorf("invalid --safety value %q (valid: strict, balanced, restricted, autonomous)", f.safety)
+	if err := validateSafetyFlag(f.safety); err != nil {
+		return err
 	}
 	f.safetyChanged = cmd.Flags().Changed("safety")
 	f.yoloChanged = cmd.Flags().Changed("yolo")
+	// Captured here because runOrExec later overwrites runConfig.WorkingDir
+	// for worktrees and resumed sessions.
+	f.workingDirChanged = cmd.Flags().Changed("working-dir") && f.runConfig.WorkingDir != ""
 
 	// A --session-workingdir-root that trims to empty (e.g. an unresolved
 	// shell variable) must fail loudly instead of silently disabling the
@@ -538,6 +542,10 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 
 	var rec *recorder.Recorder
+	tuiOptions := f.tuiOpts(args)
+	if dir := f.explicitDefaultWorkingDir(sess); dir != "" {
+		tuiOptions = append(tuiOptions, tui.WithDefaultWorkingDir(dir))
+	}
 	runErr := func() error {
 		if f.lean {
 			return f.runLeanTUI(ctx, rt, sess, cleanup, args, opts...)
@@ -549,9 +557,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 				rec = recorder.New(m)
 				return rec
 			}
-			return runTUIWrapped(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(args), wrap, opts...)
+			return runTUIWrapped(ctx, rt, sess, b.Spawner(rt), cleanup, tuiOptions, wrap, opts...)
 		}
-		return runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(args), opts...)
+		return runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, tuiOptions, opts...)
 	}()
 	if rec != nil && rec.HasInput() {
 		writeGeneratedTUITest(ctx, out, rec, cassettePath, agentFileName)
@@ -671,7 +679,7 @@ func (f *runExecFlags) applyAliasOptions(ctx context.Context, alias *userconfig.
 }
 
 // aliasOptions resolves the alias options for an agent reference from an
-// already-loaded user config, mirroring config.ResolveAlias: the empty
+// already-loaded user config, mirroring sources.ResolveAlias: the empty
 // reference maps to the "default" alias, and an alias without options is
 // not returned.
 func aliasOptions(cfg *userconfig.Config, agentFileName string) *userconfig.Alias {
@@ -877,6 +885,7 @@ func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig 
 		Models:             loadResult.Models,
 		Providers:          loadResult.Providers,
 		ModelsGateway:      runConfig.ModelsGateway,
+		EncryptedConfig:    loadResult.EncryptedConfig,
 		EnvProvider:        runConfig.EnvProvider(),
 		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
@@ -1088,6 +1097,23 @@ func (f *runExecFlags) tuiOpts(args []string) []tui.Option {
 	return opts
 }
 
+// explicitDefaultWorkingDir returns the working directory generic new-session
+// actions in the TUI should default to instead of opening the picker, or ""
+// when --working-dir was not explicitly supplied on this invocation. It
+// mirrors runTUIWrapped's resolution of the initial tab's directory (session
+// working dir, then process CWD) so new tabs open exactly where the initial
+// session did — the worktree or resume directory, not the raw flag value.
+func (f *runExecFlags) explicitDefaultWorkingDir(sess *session.Session) string {
+	if !f.workingDirChanged {
+		return ""
+	}
+	if sess.WorkingDir != "" {
+		return sess.WorkingDir
+	}
+	wd, _ := os.Getwd()
+	return wd
+}
+
 // shouldOfferTour reports whether this interactive run should show the
 // first-run dialog offering the getting-started tour. Automation and
 // replay/record contexts never see the offer, and neither does a run that
@@ -1136,6 +1162,7 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt runtime.Runtime, sess 
 		wd, _ = os.Getwd()
 	}
 	renderImages := userconfig.Get().GetRenderImages() && tuiimage.SupportsKittyGraphics(os.Stdin, os.Stdout)
+	showBanner := userconfig.Get().GetShowBanner()
 	return leantui.Run(ctx, leantui.Config{
 		App:                    a,
 		WorkingDir:             wd,
@@ -1146,6 +1173,7 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt runtime.Runtime, sess 
 		AppName:                f.appName,
 		DisabledCommands:       f.disabledCommands,
 		RenderImages:           &renderImages,
+		ShowBanner:             &showBanner,
 	})
 }
 
@@ -1275,6 +1303,14 @@ func (f *runExecFlags) scopedSafetyDefault(safety latestcfg.SafetyMode, legacyYo
 // createSessionSpawner creates a function that can spawn new sessions with different working directories.
 func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore session.Store) tui.SessionSpawner {
 	return func(spawnCtx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
+		// The spawn dialog may hand us a relative or empty path; pin the
+		// spawned session's workspace provenance to an absolute root now,
+		// before anything below captures it.
+		workingDir, err := session.CaptureLocalWorkingDir(workingDir)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
 		// Create a copy of the runtime config with the new working directory
 		runConfigCopy := f.runConfig.Clone()
 		runConfigCopy.WorkingDir = workingDir
@@ -1356,6 +1392,16 @@ func stopToolSets(ctx context.Context, t toolStopper) {
 	defer cancel()
 	if err := t.StopToolSets(ctx); err != nil {
 		slog.ErrorContext(ctx, "Failed to stop tool sets", "error", err)
+	}
+}
+
+// validateSafetyFlag rejects non-canonical --safety values consistently across commands.
+func validateSafetyFlag(value string) error {
+	switch session.SafetyPolicy(value) {
+	case "", session.SafetyPolicyStrict, session.SafetyPolicyBalanced, session.SafetyPolicyRestricted, session.SafetyPolicyAutonomous:
+		return nil
+	default:
+		return fmt.Errorf("invalid --safety value %q (valid: strict, balanced, restricted, autonomous)", value)
 	}
 }
 

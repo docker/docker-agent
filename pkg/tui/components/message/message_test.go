@@ -8,8 +8,10 @@ import (
 	"image/color"
 	"image/png"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
@@ -22,6 +24,71 @@ import (
 )
 
 var ansiEscape = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func TestAssistantRenderedSegmentsMatchViewAtEveryMarkdownBoundary(t *testing.T) {
+	const input = "Thinking… λ界\n\n# Heading\n\nParagraph with **bold**, `more`, and [link](https://example.com).\n\n- one\n- two\n\n```console\nroot\nmore\n```\n\n## Result\n\nDone."
+	for _, width := range []int{24, 47, 80} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			msg := types.Agent(types.MessageTypeAssistant, "root", "")
+			m := New(animation.NewRuntime(), msg, nil)
+			for end := range len(input) + 1 {
+				if end < len(input) && !utf8.RuneStart(input[end]) {
+					continue
+				}
+				msg.Content = input[:end]
+				_ = m.SetMessage(msg)
+				if msg.Content == "" {
+					continue
+				}
+				segments, ok := m.RenderedSegments(width)
+				require.True(t, ok)
+				segmentedBlocks := append([]markdown.CodeBlock(nil), m.CodeBlocks()...)
+				got := append(append(append([]string{}, segments.Header...), segments.Stable...), segments.Tail...)
+				want := strings.Split(strings.TrimSuffix(m.Render(width), "\n"), "\n")
+				oneShotBlocks := append([]markdown.CodeBlock(nil), m.CodeBlocks()...)
+				require.Equal(t, linePlain(want), linePlain(got), "byte boundary %d", end)
+				require.Equal(t, lineWidthsForMessage(want), lineWidthsForMessage(got), "widths at byte boundary %d", end)
+				require.Equal(t, oneShotBlocks, segmentedBlocks, "code block metadata at byte boundary %d", end)
+			}
+		})
+	}
+}
+
+func linePlain(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = ansi.Strip(line)
+	}
+	return out
+}
+
+func lineWidthsForMessage(lines []string) []int {
+	out := make([]int, len(lines))
+	for i, line := range lines {
+		out[i] = ansi.StringWidth(line)
+	}
+	return out
+}
+
+func TestAssistantRenderedSegmentsMatchViewAcrossStreamingBoundariesAndWidth(t *testing.T) {
+	runtime := animation.NewRuntime()
+	msg := types.Agent(types.MessageTypeAssistant, "root", "")
+	m := New(runtime, msg, nil)
+	chunks := []string{"unfinished *em", "phasis* and [li", "nk](https://example.com)\n\n", "```go\nfmt.Print(\"λ界\")", "\n```\n\n- one", "\n- two\n\nfinal"}
+	for _, width := range []int{80, 37, 100} {
+		for _, chunk := range chunks {
+			msg.Content += chunk
+			_ = m.SetMessage(msg)
+			segments, ok := m.RenderedSegments(width)
+			require.True(t, ok)
+			lines := make([]string, 0, len(segments.Header)+len(segments.Stable)+len(segments.Tail))
+			lines = append(lines, segments.Header...)
+			lines = append(lines, segments.Stable...)
+			lines = append(lines, segments.Tail...)
+			require.Equal(t, strings.Split(strings.TrimSuffix(m.Render(width), "\n"), "\n"), lines)
+		}
+	}
+}
 
 func stripANSI(s string) string {
 	return ansiEscape.ReplaceAllString(s, "")
@@ -463,4 +530,98 @@ func TestAgentReturnRespectsNarrowWidths(t *testing.T) {
 				"width %d: line %d must not overflow", width, i)
 		}
 	}
+}
+
+func TestAssistantRenderedSegmentsRebuildHeaderOnWidthChange(t *testing.T) {
+	msg := types.Agent(types.MessageTypeAssistant, "root", "streamed response")
+	m := New(animation.NewRuntime(), msg, nil)
+
+	wide, ok := m.RenderedSegments(80)
+	require.True(t, ok)
+	narrow, ok := m.RenderedSegments(32)
+	require.True(t, ok)
+
+	require.NotEqual(t, lineWidthsForMessage(wide.Header), lineWidthsForMessage(narrow.Header))
+	for _, line := range narrow.Header {
+		require.LessOrEqual(t, ansi.StringWidth(line), 32)
+	}
+	want := strings.Split(strings.TrimSuffix(m.Render(32), "\n"), "\n")
+	got := append(append(append([]string{}, narrow.Header...), narrow.Stable...), narrow.Tail...)
+	require.Equal(t, linePlain(want), linePlain(got))
+	require.Equal(t, lineWidthsForMessage(want), lineWidthsForMessage(got))
+}
+
+func testInlineImage(t *testing.T, name string) tuiimage.Inline {
+	t.Helper()
+	img := stdimage.NewRGBA(stdimage.Rect(0, 0, 2, 1))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var data bytes.Buffer
+	require.NoError(t, png.Encode(&data, img))
+	inline, ok := tuiimage.FromBytes(name, "image/png", data.Bytes())
+	require.True(t, ok)
+	return inline
+}
+
+func TestAssistantMediaRendersInlineAfterText(t *testing.T) {
+	tuiimage.SetRenderingEnabled(true)
+
+	inline := testInlineImage(t, "cat.png")
+	msg := types.Agent(types.MessageTypeAssistant, "assistant", "Here is your cat:")
+	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: `Generated image "cat.png" saved to: /tmp/cat.png`}}
+	mv := New(animation.NewRuntime(), msg, nil)
+	mv.SetSize(80, 0)
+
+	view := mv.View()
+	assert.Contains(t, view, "cagent-image", "generated media must emit terminal image markers")
+	plain := ansi.Strip(view)
+	assert.Contains(t, plain, "cat.png", "image name must label the rendered image")
+	assert.NotContains(t, plain, "saved to:", "the textual fallback must not show when the image renders inline")
+	assert.Less(t, strings.Index(plain, "Here is your cat:"), strings.Index(view, "cagent-image"),
+		"streamed text must precede the generated media in the same turn")
+}
+
+func TestAssistantMediaOnlyReplacesSpinnerWithVisibleContent(t *testing.T) {
+	tuiimage.SetRenderingEnabled(true)
+
+	inline := testInlineImage(t, "cat.png")
+	msg := types.Agent(types.MessageTypeAssistant, "assistant", "")
+	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: `Generated image "cat.png" saved to: /tmp/cat.png`}}
+	mv := New(animation.NewRuntime(), msg, nil)
+	mv.SetSize(80, 0)
+
+	assert.False(t, mv.isSpinnerDriven(), "a media-only assistant message is real content, not a spinner placeholder")
+	view := mv.View()
+	assert.Contains(t, view, "cagent-image", "a media-only turn must render the image, not a spinner")
+	assert.Contains(t, ansi.Strip(view), "cat.png")
+}
+
+func TestAssistantMediaGraphicsDisabledShowsFallback(t *testing.T) {
+	tuiimage.SetRenderingEnabled(false)
+	defer tuiimage.SetRenderingEnabled(true)
+
+	inline := testInlineImage(t, "cat.png")
+	msg := types.Agent(types.MessageTypeAssistant, "assistant", "")
+	msg.AssistantMedia = []types.AssistantMedia{{Image: &inline, Fallback: `Generated image "cat.png" saved to: /tmp/artifacts/sess/cat.png`}}
+	mv := New(animation.NewRuntime(), msg, nil)
+	mv.SetSize(80, 0)
+
+	view := mv.View()
+	assert.NotContains(t, view, "cagent-image", "no image markers may be emitted while graphics are disabled")
+	plain := ansi.Strip(view)
+	assert.Contains(t, plain, `Generated image "cat.png" saved to:`, "the fallback must make the generated file visible")
+	assert.Contains(t, strings.ReplaceAll(plain, "\n", ""), "/tmp/artifacts/sess/cat.png")
+}
+
+func TestAssistantMediaUnrenderableImageShowsFallback(t *testing.T) {
+	tuiimage.SetRenderingEnabled(true)
+
+	msg := types.Agent(types.MessageTypeAssistant, "assistant", "Result:")
+	msg.AssistantMedia = []types.AssistantMedia{{Fallback: `Generated image "cat.png" is unavailable.`}}
+	mv := New(animation.NewRuntime(), msg, nil)
+	mv.SetSize(80, 0)
+
+	plain := ansi.Strip(mv.View())
+	assert.Contains(t, plain, `Generated image "cat.png" is unavailable.`)
+	assert.Less(t, strings.Index(plain, "Result:"), strings.Index(plain, "unavailable"),
+		"text must keep preceding the failed media item")
 }

@@ -60,9 +60,10 @@ type ToolSet struct {
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet      = (*ToolSet)(nil)
-	_ tools.Startable    = (*ToolSet)(nil)
-	_ tools.Instructable = (*ToolSet)(nil)
+	_ tools.ToolSet       = (*ToolSet)(nil)
+	_ tools.Startable     = (*ToolSet)(nil)
+	_ tools.Instructable  = (*ToolSet)(nil)
+	_ tools.StartReporter = (*ToolSet)(nil)
 )
 
 type lspHandler struct {
@@ -431,6 +432,20 @@ func (t *ToolSet) Stop(ctx context.Context) error {
 	return t.handler.supervisor.Stop(ctx)
 }
 
+// IsStarted implements tools.StartReporter: reports whether the supervisor
+// requires external action (Start/Restart) to serve requests again.
+// Deliberately looser than the MCP toolset's IsStarted (which tracks
+// Ready/Degraded only): a transient Restarting still reports true here,
+// since the supervisor already self-heals a one-off crash on its own
+// watcher goroutine and every per-request call (ensureInitialized) retries
+// eagerly regardless. Only a give-up — Failed (crash loop, exhausted
+// restarts) or Stopped — reports false, so StartableToolSet gets involved
+// (via Restart) exactly when the supervisor needs a caller-paced retry, not
+// on every ordinary transient reconnect.
+func (t *ToolSet) IsStarted() bool {
+	return !t.handler.supervisor.State().State.IsTerminal()
+}
+
 // State returns a snapshot of the underlying supervisor's lifecycle state,
 // suitable for the /tools dialog and lifecycle log messages.
 func (t *ToolSet) State() lifecycle.StateInfo {
@@ -712,7 +727,17 @@ func (h *lspHandler) ensureInitialized(ctx context.Context) error {
 
 	// Lazy-start through the supervisor. Concurrent ensureInitialized
 	// callers serialize inside Supervisor.Start.
+	//
+	// A pending crash-loop report is checked first and, if present,
+	// returned as-is without calling Start: this per-request path bypasses
+	// StartableToolSet's backoff gate entirely (it isn't the wrapper's
+	// paced TryStart), so it must not be the one to consume — and thereby
+	// reconnect on behalf of — a one-shot report meant for the gate to
+	// pace. Only the gate's own eventual Start call clears it.
 	if !h.supervisor.IsReady() {
+		if err := h.supervisor.PendingCrashLoopError(); err != nil {
+			return fmt.Errorf("failed to start LSP server: %w", err)
+		}
 		if err := h.supervisor.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start LSP server: %w", err)
 		}

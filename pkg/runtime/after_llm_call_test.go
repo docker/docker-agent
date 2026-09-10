@@ -398,4 +398,28 @@ func TestComputeMessageCost(t *testing.T) {
 		expected := (10*rate.Input + 5*rate.Output + 4*rate.CacheRead + 2*rate.CacheWrite) / 1e6
 		assert.InDelta(t, expected, *got, 1e-9)
 	})
+	t.Run("long prompt is billed at the long-context tier for every token class", func(t *testing.T) {
+		t.Parallel()
+		// openai/gpt-5.4: base band up to 272k prompt tokens, double above.
+		tiered := &modelsdev.Cost{
+			Input: 2.5, Output: 15, CacheRead: 0.25,
+			Tiers: []modelsdev.CostTier{{
+				Rates: modelsdev.Rates{Input: 5, Output: 22.5, CacheRead: 0.5},
+				Tier:  modelsdev.TierSpec{Type: "context", Size: 272_000},
+			}},
+		}
+		m := &modelsdev.Model{Cost: tiered}
+
+		// Fresh + cached input sum to exactly the threshold: base band.
+		atLimit := &chat.Usage{InputTokens: 72_000, CachedInputTokens: 200_000, OutputTokens: 1_000}
+		got := computeMessageCost(atLimit, m)
+		require.NotNil(t, got)
+		assert.InDelta(t, (72_000*2.5+200_000*0.25+1_000*15)/1e6, *got, 1e-9)
+
+		// One more cached token tips the whole request into the tier.
+		over := &chat.Usage{InputTokens: 72_000, CachedInputTokens: 200_001, OutputTokens: 1_000}
+		got = computeMessageCost(over, m)
+		require.NotNil(t, got)
+		assert.InDelta(t, (72_000*5+200_001*0.5+1_000*22.5)/1e6, *got, 1e-9)
+	})
 }

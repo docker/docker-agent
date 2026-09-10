@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -13,8 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/adk/agent"
-	adksession "google.golang.org/adk/session"
+	"google.golang.org/adk/v2/agent"
+	adksession "google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 
 	dagent "github.com/docker/docker-agent/pkg/agent"
@@ -22,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -108,13 +108,18 @@ func (s fakeADKSession) LastUpdateTime() time.Time { return time.Time{} }
 
 // fakeInvocationContext implements agent.InvocationContext with the minimal
 // behavior runDockerAgent relies on: the embedded context, Session().ID(),
-// UserContent(), and Ended().
+// UserContent(), and Ended(). WithContext and WithICDelta return a shallow
+// copy with the requested fields applied, so context changes are not
+// silently dropped.
 type fakeInvocationContext struct {
 	context.Context //nolint:containedctx // agent.InvocationContext embeds context.Context
 
-	sess        adksession.Session
-	userContent *genai.Content
-	ended       *atomic.Bool
+	sess           adksession.Session
+	userContent    *genai.Content
+	agent          agent.Agent
+	branch         string
+	isolationScope string
+	ended          *atomic.Bool
 }
 
 func newFakeInvocationContext(ctx context.Context, sessionID, userMessage string) *fakeInvocationContext {
@@ -126,24 +131,46 @@ func newFakeInvocationContext(ctx context.Context, sessionID, userMessage string
 	}
 }
 
-func (c *fakeInvocationContext) Agent() agent.Agent          { return nil }
-func (c *fakeInvocationContext) Artifacts() agent.Artifacts  { return nil }
-func (c *fakeInvocationContext) Memory() agent.Memory        { return nil }
-func (c *fakeInvocationContext) Session() adksession.Session { return c.sess }
-func (c *fakeInvocationContext) InvocationID() string        { return "test-invocation" }
-func (c *fakeInvocationContext) Branch() string              { return "" }
-func (c *fakeInvocationContext) UserContent() *genai.Content { return c.userContent }
-func (c *fakeInvocationContext) RunConfig() *agent.RunConfig { return nil }
-func (c *fakeInvocationContext) EndInvocation()              { c.ended.Store(true) }
-func (c *fakeInvocationContext) Ended() bool                 { return c.ended.Load() }
+func (c *fakeInvocationContext) Agent() agent.Agent              { return c.agent }
+func (c *fakeInvocationContext) Artifacts() agent.Artifacts      { return nil }
+func (c *fakeInvocationContext) Memory() agent.Memory            { return nil }
+func (c *fakeInvocationContext) Session() adksession.Session     { return c.sess }
+func (c *fakeInvocationContext) InvocationID() string            { return "test-invocation" }
+func (c *fakeInvocationContext) Branch() string                  { return c.branch }
+func (c *fakeInvocationContext) IsolationScope() string          { return c.isolationScope }
+func (c *fakeInvocationContext) UserContent() *genai.Content     { return c.userContent }
+func (c *fakeInvocationContext) RunConfig() *agent.RunConfig     { return nil }
+func (c *fakeInvocationContext) EndInvocation()                  { c.ended.Store(true) }
+func (c *fakeInvocationContext) Ended() bool                     { return c.ended.Load() }
+func (c *fakeInvocationContext) ResumedInput(string) (any, bool) { return nil, false }
 
 func (c *fakeInvocationContext) WithContext(ctx context.Context) agent.InvocationContext {
-	return &fakeInvocationContext{
-		Context:     ctx,
-		sess:        c.sess,
-		userContent: c.userContent,
-		ended:       c.ended,
+	res := *c
+	res.Context = ctx
+	return &res
+}
+
+func (c *fakeInvocationContext) WithICDelta(d *agent.InvocationContextDelta) agent.InvocationContext {
+	if d == nil {
+		return c
 	}
+	res := *c
+	if d.Context != nil {
+		res.Context = *d.Context
+	}
+	if d.UserContent != nil {
+		res.userContent = *d.UserContent
+	}
+	if d.Agent != nil {
+		res.agent = *d.Agent
+	}
+	if d.Branch != nil {
+		res.branch = *d.Branch
+	}
+	if d.IsolationScope != nil {
+		res.isolationScope = *d.IsolationScope
+	}
+	return &res
 }
 
 // recordingStore captures the live *session.Session pointers the runtime
@@ -174,14 +201,16 @@ func (s *recordingStore) updatedSessions() []*session.Session {
 	return slices.Clone(s.updated)
 }
 
+const testWorkspaceRoot = "/srv/a2a-workspace"
+
 type yieldedEvent struct {
 	event *adksession.Event
 	err   error
 }
 
-func collectRunEvents(ctx agent.InvocationContext, tm *team.Team, a *dagent.Agent, store session.Store) []yieldedEvent {
+func collectRunEvents(ctx agent.InvocationContext, tm *team.Team, a *dagent.Agent, store session.Store, policy session.SafetyPolicy) []yieldedEvent {
 	var out []yieldedEvent
-	for ev, err := range runDockerAgent(ctx, tm, a.Name(), a, store) {
+	for ev, err := range runDockerAgent(ctx, tm, a.Name(), a, store, servesafety.Resolved{Policy: policy}, testWorkspaceRoot) {
 		out = append(out, yieldedEvent{event: ev, err: err})
 	}
 	return out
@@ -196,6 +225,80 @@ func eventText(t *testing.T, ev *adksession.Event) string {
 	return ev.Content.Parts[0].Text
 }
 
+// Guards the harness itself: a WithICDelta that returns the receiver
+// unchanged would let adapter tests pass without exercising the state
+// changes ADK's agent.Run requests through the delta. Also proves
+// WithContext swaps only the embedded context.Context.
+func TestFakeInvocationContext_WithICDelta(t *testing.T) {
+	t.Parallel()
+
+	orig := newFakeInvocationContext(t.Context(), "a2a-ctx-delta", "original question")
+	origContent := orig.UserContent()
+
+	assert.Same(t, orig, orig.WithICDelta(nil), "nil delta must return the original context")
+
+	type ctxKey struct{}
+	newCtx := context.WithValue(t.Context(), ctxKey{}, "delta-value")
+	newContent := genai.NewContentFromText("delta question", genai.RoleUser)
+	newAgent, err := agent.New(agent.Config{Name: "delta-agent"})
+	require.NoError(t, err)
+	branch := "delta-branch"
+	scope := "delta-scope"
+
+	applied := orig.WithICDelta(&agent.InvocationContextDelta{
+		Context:        &newCtx,
+		UserContent:    &newContent,
+		Agent:          &newAgent,
+		Branch:         &branch,
+		IsolationScope: &scope,
+	})
+
+	require.NotSame(t, orig, applied, "the delta must be applied to a copy")
+	assert.Equal(t, "delta-value", applied.Value(ctxKey{}))
+	assert.Same(t, newContent, applied.UserContent())
+	assert.Same(t, newAgent, applied.Agent())
+	assert.Equal(t, "delta-branch", applied.Branch())
+	assert.Equal(t, "delta-scope", applied.IsolationScope())
+	assert.Equal(t, "a2a-ctx-delta", applied.Session().ID(), "untargeted fields carry over")
+
+	// The original context is not mutated.
+	assert.Nil(t, orig.Value(ctxKey{}))
+	assert.Same(t, origContent, orig.UserContent())
+	assert.Nil(t, orig.Agent())
+	assert.Empty(t, orig.Branch())
+	assert.Empty(t, orig.IsolationScope())
+
+	// A non-nil outer pointer to a nil content explicitly clears UserContent.
+	var noContent *genai.Content
+	cleared := applied.WithICDelta(&agent.InvocationContextDelta{UserContent: &noContent})
+	assert.Nil(t, cleared.UserContent())
+	assert.Same(t, newContent, applied.UserContent(), "clearing must not touch the source context")
+
+	// Nil delta fields keep the current values, including the context.
+	otherBranch := "other-branch"
+	partial := applied.WithICDelta(&agent.InvocationContextDelta{Branch: &otherBranch})
+	assert.Equal(t, "other-branch", partial.Branch())
+	assert.Equal(t, "delta-value", partial.Value(ctxKey{}))
+	assert.Same(t, newContent, partial.UserContent())
+	assert.Same(t, newAgent, partial.Agent())
+	assert.Equal(t, "delta-scope", partial.IsolationScope())
+
+	// WithContext replaces only the context.Context; everything else is the
+	// same shallow-copied state.
+	type swapKey struct{}
+	swapCtx := context.WithValue(t.Context(), swapKey{}, "swap-value")
+	swapped := applied.WithContext(swapCtx)
+	require.NotSame(t, applied, swapped, "WithContext must return a copy")
+	assert.Equal(t, "swap-value", swapped.Value(swapKey{}))
+	assert.Nil(t, swapped.Value(ctxKey{}), "the previous context must be replaced, not wrapped")
+	assert.Same(t, newContent, swapped.UserContent())
+	assert.Same(t, newAgent, swapped.Agent())
+	assert.Equal(t, "delta-branch", swapped.Branch())
+	assert.Equal(t, "delta-scope", swapped.IsolationScope())
+	assert.Equal(t, "a2a-ctx-delta", swapped.Session().ID())
+	assert.Equal(t, "delta-value", applied.Value(ctxKey{}), "the source keeps its own context")
+}
+
 func TestRunDockerAgent_StreamsPartialAndFinalEvents(t *testing.T) {
 	t.Parallel()
 
@@ -203,7 +306,7 @@ func TestRunDockerAgent_StreamsPartialAndFinalEvents(t *testing.T) {
 	store := session.NewInMemorySessionStore()
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-events", "Hi there")
 
-	events := collectRunEvents(ctx, tm, root, store)
+	events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyRestricted)
 
 	require.Len(t, events, 3)
 	for _, e := range events {
@@ -241,7 +344,7 @@ func TestRunDockerAgent_ErrorEventStopsIteration(t *testing.T) {
 	store := session.NewInMemorySessionStore()
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-error", "Hi")
 
-	events := collectRunEvents(ctx, tm, root, store)
+	events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyRestricted)
 
 	require.Len(t, events, 1)
 	assert.Nil(t, events[0].event)
@@ -258,7 +361,7 @@ func TestRunDockerAgent_EmptyStreamEmitsNoFinalEvent(t *testing.T) {
 	store := session.NewInMemorySessionStore()
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-empty", "Hi")
 
-	events := collectRunEvents(ctx, tm, root, store)
+	events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyRestricted)
 
 	assert.Empty(t, events)
 }
@@ -271,7 +374,7 @@ func TestRunDockerAgent_ConsumerStopsEarly(t *testing.T) {
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-early-stop", "Hi")
 
 	var events []*adksession.Event
-	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store) {
+	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot) {
 		require.NoError(t, err)
 		events = append(events, ev)
 		break
@@ -290,7 +393,7 @@ func TestRunDockerAgent_EndedInvocationStopsIteration(t *testing.T) {
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-ended", "Hi")
 
 	var events []*adksession.Event
-	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store) {
+	for ev, err := range runDockerAgent(ctx, tm, root.Name(), root, store, servesafety.Resolved{Policy: session.SafetyPolicyRestricted}, testWorkspaceRoot) {
 		require.NoError(t, err)
 		events = append(events, ev)
 		// Ending the invocation after the first chunk must stop the
@@ -309,7 +412,7 @@ func TestRunDockerAgent_NewSessionUsesA2ASettings(t *testing.T) {
 	store := newRecordingStore()
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-new", "What is Docker?")
 
-	events := collectRunEvents(ctx, tm, root, store)
+	events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyRestricted)
 	require.Len(t, events, 2)
 
 	updated := store.updatedSessions()
@@ -317,16 +420,15 @@ func TestRunDockerAgent_NewSessionUsesA2ASettings(t *testing.T) {
 	sess := updated[0]
 
 	assert.Equal(t, "a2a-ctx-new", sess.ID)
+	assert.Equal(t, "a2a", sess.Origin)
 	assert.Equal(t, "A2A Session a2a-ctx-new", sess.Title)
-	assert.True(t, sess.ToolsApproved)
+	assert.Equal(t, session.SafetyPolicyRestricted, sess.GetSafetyPolicy())
+	assert.False(t, sess.ToolsApproved)
 	assert.True(t, sess.NonInteractive)
 
-	// runDockerAgent stamps new sessions with the process working directory
-	// via os.Getwd, so this assertion resolves the same value and relies on
-	// nothing in the test process changing directories.
-	workingDir, err := os.Getwd()
-	require.NoError(t, err)
-	assert.Equal(t, workingDir, sess.WorkingDir)
+	// runDockerAgent receives the server workspace at startup, so tests use a
+	// fixed value rather than reading the process working directory.
+	assert.Equal(t, testWorkspaceRoot, sess.WorkingDir)
 
 	msgs := sess.GetAllMessages()
 	require.NotEmpty(t, msgs)
@@ -336,7 +438,106 @@ func TestRunDockerAgent_NewSessionUsesA2ASettings(t *testing.T) {
 	stored, err := store.GetSession(t.Context(), "a2a-ctx-new")
 	require.NoError(t, err)
 	assert.Equal(t, "a2a-ctx-new", stored.ID)
+	assert.Equal(t, "a2a", stored.Origin)
 	assert.Equal(t, "A2A Session a2a-ctx-new", stored.Title)
+}
+
+func TestRunDockerAgent_RejectsNonA2ASessionCollision(t *testing.T) {
+	t.Parallel()
+
+	for _, origin := range []string{"run", "", "acp"} {
+		t.Run(origin, func(t *testing.T) {
+			tm, root := newMockTeam("answer")
+			store := newRecordingStore()
+			existing := session.New(
+				session.WithID("a2a-ctx-collision"),
+				session.WithOrigin(origin),
+				session.WithTitle("Private Session"),
+				session.WithUserMessage("private history"),
+			)
+			require.NoError(t, store.AddSession(t.Context(), existing))
+
+			ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-collision", "A2A request")
+			for range 2 {
+				events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyRestricted)
+				require.Len(t, events, 1)
+				require.ErrorContains(t, events[0].err, "context ID is not available")
+			}
+
+			stored, err := store.GetSession(t.Context(), "a2a-ctx-collision")
+			require.NoError(t, err)
+			assert.Equal(t, origin, stored.Origin)
+			assert.Equal(t, "Private Session", stored.Title)
+			assert.Len(t, stored.GetAllMessages(), 1)
+			assert.Empty(t, store.updatedSessions())
+		})
+	}
+}
+
+func TestRunDockerAgent_ExplicitSafety(t *testing.T) {
+	t.Parallel()
+
+	for _, policy := range []session.SafetyPolicy{
+		session.SafetyPolicyStrict,
+		session.SafetyPolicyBalanced,
+		session.SafetyPolicyRestricted,
+		session.SafetyPolicyAutonomous,
+	} {
+		t.Run(string(policy), func(t *testing.T) {
+			t.Parallel()
+
+			tm, root := newMockTeam("answer")
+			store := newRecordingStore()
+			ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-"+string(policy), "What is Docker?")
+
+			collectRunEvents(ctx, tm, root, store, policy)
+
+			updated := store.updatedSessions()
+			require.NotEmpty(t, updated)
+			assert.Equal(t, policy, updated[0].GetSafetyPolicy())
+			assert.Equal(t, policy == session.SafetyPolicyAutonomous, updated[0].ToolsApproved)
+		})
+	}
+}
+
+func TestRunDockerAgent_ResumedSessionDoesNotExceedServerSafety(t *testing.T) {
+	t.Parallel()
+
+	tm, root := newMockTeam("answer")
+	store := newRecordingStore()
+	existing := session.New(
+		session.WithID("a2a-ctx-ceiling"),
+		session.WithOrigin("a2a"),
+		session.WithSafetyPolicy(session.SafetyPolicyAutonomous),
+	)
+	require.NoError(t, store.AddSession(t.Context(), existing))
+
+	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-ceiling", "follow-up question")
+	collectRunEvents(ctx, tm, root, store, session.SafetyPolicyBalanced)
+
+	assert.Equal(t, session.SafetyPolicyBalanced, existing.GetSafetyPolicy())
+	assert.False(t, existing.ToolsApproved)
+	assert.True(t, existing.NonInteractive)
+}
+
+func TestRunDockerAgent_ResumedSaferSessionIsPreserved(t *testing.T) {
+	t.Parallel()
+
+	tm, root := newMockTeam("answer")
+	store := newRecordingStore()
+	existing := session.New(
+		session.WithID("a2a-ctx-preserve"),
+		session.WithOrigin("a2a"),
+		session.WithSafetyPolicy(session.SafetyPolicyStrict),
+	)
+	require.NoError(t, store.AddSession(t.Context(), existing))
+
+	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-preserve", "follow-up question")
+	collectRunEvents(ctx, tm, root, store, session.SafetyPolicyAutonomous)
+
+	assert.Equal(t, session.SafetyPolicyStrict, existing.GetSafetyPolicy())
+	assert.False(t, existing.ToolsApproved)
+	assert.True(t, existing.NonInteractive)
 }
 
 func TestRunDockerAgent_ResumesExistingSession(t *testing.T) {
@@ -345,12 +546,16 @@ func TestRunDockerAgent_ResumesExistingSession(t *testing.T) {
 	tm, root := newMockTeam("resumed answer")
 	store := newRecordingStore()
 
-	existing := session.New(session.WithID("a2a-ctx-resume"), session.WithTitle("Existing Title"))
+	existing := session.New(
+		session.WithID("a2a-ctx-resume"),
+		session.WithOrigin("a2a"),
+		session.WithTitle("Existing Title"),
+	)
 	require.NoError(t, store.AddSession(t.Context(), existing))
 
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-resume", "follow-up question")
 
-	events := collectRunEvents(ctx, tm, root, store)
+	events := collectRunEvents(ctx, tm, root, store, session.SafetyPolicyRestricted)
 	require.Len(t, events, 2)
 
 	updated := store.updatedSessions()
@@ -358,7 +563,8 @@ func TestRunDockerAgent_ResumesExistingSession(t *testing.T) {
 	assert.Same(t, existing, updated[0], "the stored session should be resumed, not recreated")
 
 	assert.Equal(t, "Existing Title", existing.Title)
-	assert.True(t, existing.ToolsApproved)
+	assert.Equal(t, session.SafetyPolicyRestricted, existing.GetSafetyPolicy())
+	assert.False(t, existing.ToolsApproved)
 	assert.True(t, existing.NonInteractive)
 
 	msgs := existing.GetAllMessages()
@@ -383,7 +589,7 @@ func TestRunDockerAgent_RuntimeCreationError(t *testing.T) {
 	store := session.NewInMemorySessionStore()
 	ctx := newFakeInvocationContext(t.Context(), "a2a-ctx-no-team", "Hi")
 
-	events := collectRunEvents(ctx, emptyTeam, root, store)
+	events := collectRunEvents(ctx, emptyTeam, root, store, session.SafetyPolicyRestricted)
 
 	require.Len(t, events, 1)
 	assert.Nil(t, events[0].event)

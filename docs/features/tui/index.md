@@ -13,7 +13,7 @@ _Docker Agent's default interface is a rich, interactive terminal UI with file a
 
 ## Launching the TUI
 
-Both the full TUI and the lean TUI display a centered ASCII art Docker Agent banner on startup when the chat is empty. The banner is automatically hidden once the agent starts responding or when a custom welcome message is configured.
+Both the full TUI and the lean TUI display a centered ASCII art Docker Agent banner on startup when the chat is empty. The banner is automatically hidden once the agent starts responding or when a custom welcome message is configured. You can disable the banner entirely from the **Appearance** tab of `/settings`, or by setting `show_banner: false` in your [user settings](../../configuration/user-settings/index.md).
 
 ```bash
 # Launch with a config
@@ -59,9 +59,11 @@ settings:
 
 Omit `lean` or set it to `false` to keep the full TUI as the default. You can still use `--lean` for a single run, or `--lean=false` to use the full TUI when `settings.lean` is enabled. See [User Settings](../../configuration/user-settings/index.md) for the full precedence rules between flags and user config.
 
-The lean TUI supports **steering** and **follow-ups** while the agent is running. Press <kbd>Enter</kbd> to steer the active turn, or <kbd>Alt</kbd>+<kbd>Enter</kbd> to queue the message as a separate turn after the current one finishes. Pending messages appear with muted styling at the end of the live stream.
+The lean TUI supports **steering** and **follow-ups** while the agent is running. Press <kbd>Enter</kbd> to steer the active turn, or <kbd>Alt</kbd>+<kbd>Enter</kbd> to queue the message as a separate turn after the current one finishes. Pending messages appear with muted styling at the end of the live stream, labeled `Steering:` or `Follow-up:` so it's clear which turn each one will land on.
 
-The lean TUI supports a focused set of slash commands: `/new`, `/compact`, `/model`, `/effort`, `/clear`, `/help`, `/exit` (alias: `/quit`), plus any agent-defined commands. Type `/model` (or `/model <provider/model>`) to switch the active model inline — the command opens a fuzzy-searchable list of available models.
+The lean TUI supports a focused set of slash commands: `/new`, `/sessions`, `/compact`, `/model`, `/effort`, `/copy`, `/clear`, `/help`, `/exit` (alias: `/quit`), plus any agent-defined commands. Type `/model` (or `/model <provider/model>`) to switch the active model inline — the command opens a fuzzy-searchable list of available models. Type `/sessions` (or `/sessions <session-id>`) to browse and resume past sessions from the current working directory. Type `/copy` to copy the last assistant response to the clipboard.
+
+Prefix a message with `!` to run it as a shell command directly, without going through the agent — for example `!git status`. The command runs in your default shell and its output is shown inline in the transcript. Bang commands are disabled in read-only sessions.
 
 ## Slash Commands
 
@@ -69,7 +71,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 
 | Command            | Description                                                                          |
 | ------------------ | ------------------------------------------------------------------------------------ |
-| `/new`             | Start a new conversation                                                             |
+| `/new`             | Start a new conversation (usage: `/new [dir]`). With a directory — `~` and environment variables expand, relative paths resolve from the current session's working dir — the new session starts there; without one it reuses an explicit `--working-dir` default or opens the directory picker |
 | `/clear`           | Clear the current conversation (keep session, drop messages)                         |
 | `/compact`         | Summarize and compact the conversation history                                       |
 | `/fork`            | Fork the current session into a new branch                                           |
@@ -79,7 +81,7 @@ Type `/` during a session to see available commands, or press <kbd>Ctrl</kbd>+<k
 | `/snapshots`       | List captured snapshots (only when snapshots are enabled)                            |
 | `/export`          | Export the session as HTML                                                           |
 | `/sessions`        | Browse and load past sessions                                                        |
-| `/plans`           | Browse and manage plans: every [shared plan](../../tools/plan/index.md) plus the current session's [session plan](../../tools/session_plan/index.md). Filter, open a detail view, refresh, export to a file, and — for shared plans — set status, edit/create in `$VISUAL`/`$EDITOR`, and delete, all guarded against concurrent edits. Not available in the lean TUI |
+| `/plans`           | Browse and manage every [shared plan](../../tools/plan/index.md). Filter, open a detail view, refresh, export to a file, set status, edit/create in `$VISUAL`/`$EDITOR`, and delete, all guarded against concurrent edits. Not available in the lean TUI |
 | `/model`           | Change the model for the current agent                                               |
 | `/effort`          | Set the current model's reasoning-effort level (`/effort <none\|minimal\|low\|medium\|high\|xhigh\|max>`, or `/effort` alone to pick from the supported levels; reasoning models only). Press <kbd>Tab</kbd> after `/effort` and a space to complete a level the current model supports |
 | `/settings`        | Manage appearance, behavior, and notification preferences                           |
@@ -290,6 +292,115 @@ For large or frequently-reused documents, or for getting content to an agent ove
 
 Attached files are also recorded on the session so sub-agents spawned by task transfer can read them. To review what is attached, open `/context`: the dialog lists every attached file (and resolved prompt file) with a per-file token estimate and, when a compaction has occurred, displays the verbatim text of the most recent compaction summary. Use <kbd>↑</kbd>/<kbd>↓</kbd> to select an attached file and press <kbd>d</kbd> (or <kbd>x</kbd>/<kbd>Del</kbd>) to drop it, or run `/drop <path>` directly — press <kbd>Tab</kbd> after `/drop` and a space to complete the path from the currently attached files. Dropping stops sharing the file with sub-agents and skills; content already inlined in earlier messages stays in the conversation until compaction, and the file can always be re-attached with `@` or `/attach`.
 
+## Generated Media
+
+Some models (e.g. Gemini image-output models like `gemini-2.5-flash-image`)
+are designed to generate an image directly as part of their reply, not just
+describe one. When models.dev reports that a model can generate images, or
+[`output_capabilities.image: true`](../../configuration/models/index.md#output-capabilities)
+explicitly enables it, Docker Agent asks it for text *and* image output on the
+models gateway, direct Gemini API, and Vertex AI. An explicit `false` disables
+this behavior. See
+[Google Gemini: Generated Images](../../providers/google/index.md#generated-images)
+for exact configuration and limitations — ordinary image-output requests with
+custom tools or structured output are rejected locally before any request is
+sent. Session-title and compaction requests omit image response modalities and
+skip this guard; they do not explicitly force TEXT-only output. Google
+Search, Maps, and code-execution built-ins remain available. For custom tools,
+models.dev metadata lets the error distinguish
+a model that cannot call tools from an image-output request shape that cannot
+combine both capabilities; unknown metadata keeps a conservative generic
+message.
+
+At a text-only stop, Docker Agent checks the last user prompt for phrases
+such as "generate an image" or "draw a picture". A match preserves the reply
+and adds this nonfatal warning: `The model returned text but no image for this
+image-generation request. Try rephrasing the request.` Prompts without a
+matching phrase do not trigger it. This is phrase matching, not semantic
+intent detection: negated or quoted phrases can match, other wording can be
+missed, and the check does not require an image-output-capable model. It does
+not track a whole submission across tool calls, steering, stop hooks, or
+handoffs. A terminal provider error skips this check, as does structured
+output on the current agent model; the check does not inspect every override
+or parse the reply to determine whether it is structured.
+
+**Where images land.** Docker Agent attempts to save each generated image
+as an ordinary workspace file and record it in the session manifest. After
+both steps succeed, it stores a complete portable copy in the session database.
+A failed portable-copy write does not remove the saved workspace file and
+produces a per-item warning.
+Database upgrades are in-place and older binaries may not understand the
+upgraded schema — see [Sessions](../sessions/index.md#generated-media-files).
+Generated files are untracked workspace files, yours to edit, commit, move,
+or delete. A remote runtime writes to its own workspace; the local TUI does
+not receive a remote binary-rendering path from this feature.
+
+**Naming.** The model is instructed to honor an explicit prompt filename
+such as `assets/red-panda.jpg` in a private naming marker. This is a request,
+not a guarantee: emitted markers take precedence. When exactly one image is
+returned without a marker, a single explicit filename found by a conservative
+prompt parser is used. An unmarked item among several returned images does
+not qualify. Otherwise names come from the provider, then `generated-1`,
+`generated-2`, and so on. Parent directories are created when the validated
+save succeeds. Two rules always apply:
+
+- **The extension matches the data.** The image format is decided by the
+  provider (typically PNG) — asking for `sunshine.gif` or `diagram.svg`
+  does not transcode anything. If the model returns PNG data, the file is
+  saved as `sunshine.png` and a notice tells you so.
+- **Existing files are never overwritten.** A name collision gets a dash
+  suffix instead: a second `red-panda.jpg` is saved as `red-panda-1.jpg`.
+  Publication requires hard-link support; filesystems without it fail safely
+  with a save warning instead of using a replacing rename.
+
+**Paths stay in the workspace.** A prompt-directed target that is absolute,
+`~`-rooted, or climbs above the workspace with `..` is not written outside the
+owning session's workspace. Docker Agent discards the directory portion,
+sanitizes the basename, saves it at the workspace root, and adds a bounded
+warning to the turn. This does not prompt or wait for confirmation, including
+over ACP and other interfaces without an elicitation consumer. General MCP and
+tool elicitation is unaffected. If the owning session has no workspace root,
+the save fails instead of falling back to the data directory. Relative
+subdirectories remain supported after containment and symlink checks. An unusable
+basename falls back to `generated-N`; a redirected save can still fail and warn
+without discarding successful siblings or assistant text.
+
+**Rendering.** Successfully resolved images can appear inline in the same
+assistant turn, using Kitty-graphics support and `render_images` as described
+under [Markdown Images](#markdown-images). Graphics-disabled or unsupported
+terminals show a filename/path fallback. Resolution checks the owning session's
+manifest before preferring its portable database copy; saved bytes can survive
+workspace edits, deletion, or missing provenance. Without workspace provenance,
+the label uses the recorded relative path rather than a verified absolute file. It falls back to the manifest-gated workspace file only when the
+session store has no blob interface or the blob is not found. Other blob errors
+fail closed. Historical manifest entries that identify an external root are
+rejected. Stores without blob support and sessions created before portable
+blobs were introduced continue to use legacy workspace files.
+Generated-media resolution has no byte cap.
+
+Ordinary outgoing history replaces generated-media parts with metadata
+placeholders, so follow-up turns do not resend stored bytes. Explicitly
+attaching a generated file or asking a tool to read it can send its contents
+to a model. Legacy files still require manifest authorization, containment,
+regular-file and symlink checks. These are not content-integrity checks: an
+ordinary file's bytes may have changed. Failed resolution shows an unavailable
+label rather than reading an unauthorized fallback.
+This generated-media behavior is separate from the existing input bound for
+ordinary Markdown images rendered from assistant text.
+
+If a save fails (unwritable directory, full disk, …), only that image is
+dropped, with a concise warning — the reply text and any sibling images in
+the same turn are kept. If all saves in a media-only reply fail, an empty
+assistant record may remain alongside the warnings. Disk-full, quota, and
+unclassified failures currently use generic retry/debug advice.
+Note also that an image-capable model can answer
+with text only and generate no image at all; that is provider behavior, so
+reword or repeat the prompt.
+
+Inline image rendering in the TUI also covers a tool/MCP result that
+returns an image, or a Markdown image reference to a file a tool actually
+writes to disk — see [Markdown Images](#markdown-images) above.
+
 ### Team Context Budgets and Targeted Compaction
 
 The `/context` dialog also shows a **Live sessions** section: the current session plus every currently running sub-agent session (foreground children spawned by task transfer and long-running `run_background_agent` tasks). Each row shows the agent name, a short session ID (so two concurrent runs of the same agent stay distinguishable), and that session's context budget: used tokens, context limit, and percentage, or an explicit "limit unknown" reading when the model's window cannot be resolved. Live-sessions rows do not repeat the compaction-cap wording themselves — the dialog's header line is the sole authority on which model, if any, caps the effective limit.
@@ -448,7 +559,7 @@ The **Appearance** tab selects the theme and customizes the layout. Layout chang
 - **Section spacing**: `Compact`, `Normal` (default), or `Relaxed`, the number of blank lines between the sidebar sections (1, 2, or 3).
 - **Sidebar sections**: toggle the visibility of the **Session path** (the working directory line, including its git branch) and the **Token usage**, **Agents**, **Tools**, and **Todos** sections. The session title is always shown.
 
-Appearance also controls split-diff rendering, expanded thinking, and whether tool results are hidden by default. Select **Theme** to open the theme picker.
+Appearance also controls split-diff rendering, expanded thinking, whether tool results are hidden by default, and **Show startup banner** — the ASCII-art banner drawn on an empty conversation (persisted as `settings.show_banner: false` when turned off, and honored by the lean TUI too). Select **Theme** to open the theme picker.
 
 The **Behavior** tab controls busy-message handling, the auto-approve default, tab restoration, automatic snapshots, lean UI, and the maximum tab-title length. Restore-tabs and lean-UI changes take effect on the next launch. Enabling auto-approve requires confirmation.
 

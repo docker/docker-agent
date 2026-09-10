@@ -27,9 +27,3 @@ func TestNewProviderUsesConfiguredModel(t *testing.T) {
 	require.Contains(t, cmd, "--model 'claude-sonnet-4-5'")
 	require.Contains(t, cmd, "--effort high")
 }
-
-func TestLabel(t *testing.T) {
-	t.Parallel()
-	require.Equal(t, "codex", Label(&latest.HarnessConfig{Type: TypeCodex}))
-	require.Equal(t, "codex/gpt-5", Label(&latest.HarnessConfig{Type: TypeCodex, Model: "gpt-5"}))
-}

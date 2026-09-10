@@ -177,7 +177,7 @@ func (r *LocalRuntime) ContextBreakdown(ctx context.Context, sess *session.Sessi
 		b.ToolDefinitions.add(estimateToolDefinitionTokens(&agentTools[i]))
 	}
 
-	b.PromptFiles, b.PromptFileItems = r.promptFilesCategory(ctx, a.AddPromptFiles())
+	b.PromptFiles, b.PromptFileItems = r.promptFilesCategory(ctx, a.AddPromptFiles(), a.AddPromptFilesDepth())
 	b.AttachedFiles = attachedFilesInventory(ctx, estimator, sess.AttachedFilesSnapshot())
 
 	return b, nil
@@ -207,11 +207,12 @@ func estimateToolDefinitionTokens(tool *tools.Tool) int64 {
 // through the same lookup the hook uses (workdir hierarchy plus home or
 // staged kit, keyed off the runtime working directory the hooks executor is
 // built with) and sizes the joined contents as the single system message the
-// hook would produce. Items counts the files found, not the names configured.
-// The returned files detail the same lookup per resolved path; their
-// individual estimates each carry the per-message overhead the category
+// hook would produce. Items counts the files found, not the names configured;
+// the nested-file listing adds tokens but no item, since it is a note rather
+// than a file. The returned files detail the same lookup per resolved path;
+// their individual estimates each carry the per-message overhead the category
 // counts once, so their sum can slightly exceed the category total.
-func (r *LocalRuntime) promptFilesCategory(ctx context.Context, names []string) (ContextCategory, []ContextFile) {
+func (r *LocalRuntime) promptFilesCategory(ctx context.Context, names []string, depth int) (ContextCategory, []ContextFile) {
 	var category ContextCategory
 	var files []ContextFile
 	if len(names) == 0 {
@@ -219,6 +220,7 @@ func (r *LocalRuntime) promptFilesCategory(ctx context.Context, names []string) 
 	}
 	home, _ := os.UserHomeDir() // empty string disables the home-dir lookup
 	var parts []string
+	var loaded []string
 	for _, name := range names {
 		for _, path := range promptfiles.PathsFromEnv(r.workingDir, home, name) {
 			content, err := os.ReadFile(path)
@@ -226,6 +228,7 @@ func (r *LocalRuntime) promptFilesCategory(ctx context.Context, names []string) 
 				slog.WarnContext(ctx, "Context breakdown: failed to read prompt file", "path", path, "error", err)
 				continue
 			}
+			loaded = append(loaded, path)
 			parts = append(parts, string(content))
 			category.Items++
 			files = append(files, ContextFile{
@@ -236,6 +239,9 @@ func (r *LocalRuntime) promptFilesCategory(ctx context.Context, names []string) 
 				}),
 			})
 		}
+	}
+	if note := promptfiles.Index(ctx, r.workingDir, names, depth, loaded); note != "" {
+		parts = append(parts, note)
 	}
 	if len(parts) == 0 {
 		return category, files

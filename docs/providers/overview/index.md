@@ -63,7 +63,7 @@ Docker Agent also includes built-in aliases for these providers:
 | Atlas Cloud    | [`atlascloud`](../atlascloud/index.md) | `ATLASCLOUD_API_KEY`                |
 | Azure OpenAI   | `azure`          | `AZURE_API_KEY` + `base_url`        |
 | [Ollama](../local/index.md) | `ollama` | None (local; optional `base_url`) |
-| GitHub Copilot | `github-copilot` | `GITHUB_TOKEN` (PAT with `copilot` scope) |
+| GitHub Copilot | `github-copilot` | `GITHUB_TOKEN` or `GH_TOKEN` (PAT with `copilot` scope) |
 
 ```bash
 # Use built-in providers inline
@@ -85,11 +85,11 @@ Different agents can use different providers in the same configuration:
 models:
   claude:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     max_tokens: 64000
   gpt:
     provider: openai
-    model: gpt-5
+    model: gpt-5.6-sol
   local:
     provider: dmr
     model: ai/qwen3

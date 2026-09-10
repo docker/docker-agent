@@ -193,7 +193,6 @@ func TestNonStringEnumSchemaForGemini(t *testing.T) {
               "enum": ["1", "2.5"]
             },
             "state": {
-              "type": "object",
               "anyOf": [
                 {"type": "string", "enum": ["open"]},
                 {"type": "number", "enum": ["0"]}

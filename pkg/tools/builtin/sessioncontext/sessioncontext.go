@@ -4,8 +4,7 @@
 //
 // The toolset is a metadata stub — the runtime owns the handlers
 // (pkg/runtime/sessioncontext_handlers.go) so they can reach the live session
-// store and exclude the session that is currently running. This mirrors the
-// session_plan toolset, which is wired the same way.
+// store and exclude the session that is currently running.
 package sessioncontext
 
 import (
@@ -73,7 +72,7 @@ type ReadSessionArgs struct {
 }
 
 // Tools advertises the metadata only; Handler is intentionally nil so the
-// runtime's toolMap takes over (same pattern as session_plan and handoff).
+// runtime's toolMap takes over (same pattern as handoff).
 func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{

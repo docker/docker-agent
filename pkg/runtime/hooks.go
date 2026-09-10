@@ -35,10 +35,11 @@ func (r *LocalRuntime) buildHooksExecutors() {
 			continue
 		}
 		cfg := builtins.ApplyAgentDefaults(a.Hooks(), builtins.AgentDefaults{
-			AddDate:            a.AddDate(),
-			AddEnvironmentInfo: a.AddEnvironmentInfo(),
-			AddPromptFiles:     a.AddPromptFiles(),
-			RedactSecrets:      a.RedactSecrets(),
+			AddDate:             a.AddDate(),
+			AddEnvironmentInfo:  a.AddEnvironmentInfo(),
+			AddPromptFiles:      a.AddPromptFiles(),
+			AddPromptFilesDepth: a.AddPromptFilesDepth(),
+			RedactSecrets:       a.RedactSecrets(),
 		})
 		cfg = applyAutoInjectors(cfg, r.autoInjectors)
 		cfg = applyCacheDefault(cfg, a)
@@ -122,6 +123,9 @@ func (r *LocalRuntime) dispatchHook(
 	}
 	if err != nil {
 		slog.WarnContext(ctx, "Hook execution failed", "event", event, "agent", a.Name(), "error", err)
+		if hooks.EventContract(event).CanBlock {
+			return &hooks.Result{ExitCode: -1, Message: err.Error()}
+		}
 		return nil
 	}
 
@@ -151,13 +155,35 @@ func (r *LocalRuntime) executeTurnStartHooks(ctx context.Context, sess *session.
 }
 
 // Reason values reported in [hooks.Input.Reason] when [hooks.EventTurnEnd]
-// fires. The runtime guarantees that turn_end runs once per turn that
-// fired turn_start, no matter how the turn exited; the reason classifies
-// which exit path the runtime took.
+// fires. The same values (including the exported trio below, plus
+// hook_blocked/loop_detected/budget_exceeded) are also reported verbatim in
+// [runtime.StreamStoppedEvent.Reason] — loop.go passes its turnEndReason*
+// classification straight through to StreamStopped. The runtime guarantees
+// that turn_end runs once per turn that fired turn_start, no matter how the
+// turn exited; the reason classifies which exit path the runtime took.
 const (
-	// turnEndReasonNormal — the model finished the turn cleanly and the
+	// TurnEndReasonNormal — the model finished the turn cleanly and the
 	// run loop is about to break out (no further iterations).
-	turnEndReasonNormal = "normal"
+	TurnEndReasonNormal = "normal"
+	// TurnEndReasonError — the model call failed and the runtime is
+	// shutting down the run (handleStreamError returned non-retry).
+	TurnEndReasonError = "error"
+	// TurnEndReasonCanceled — the turn ended because the stream context
+	// was cancelled (e.g. user Ctrl+C). Includes deferred firing on
+	// any return path while ctx is done.
+	TurnEndReasonCanceled = "canceled"
+)
+
+// The remaining turnEndReason values below also end up in
+// StreamStoppedEvent.Reason via loop.go's streamReason/ls.exitReason
+// plumbing, same as the exported trio above. They stay unexported because
+// nothing outside pkg/runtime constructs one of these values directly —
+// consumers (e.g. the TUI's isSuccessfulStop) only ever compare against the
+// string, never need to produce it.
+const (
+	// turnEndReasonNormal aliases [TurnEndReasonNormal] to avoid churning
+	// the call sites below.
+	turnEndReasonNormal = TurnEndReasonNormal
 	// turnEndReasonContinue — the turn finished cleanly and the loop is
 	// about to start a new iteration (e.g. after tool calls, or after a
 	// stop with a queued follow-up).
@@ -165,13 +191,10 @@ const (
 	// turnEndReasonSteered — the turn finished and was followed by
 	// drained steered messages, prompting a new iteration.
 	turnEndReasonSteered = "steered"
-	// turnEndReasonError — the model call failed and the runtime is
-	// shutting down the run (handleStreamError returned non-retry).
-	turnEndReasonError = "error"
-	// turnEndReasonCanceled — the turn ended because the stream context
-	// was cancelled (e.g. user Ctrl+C). Includes deferred firing on
-	// any return path while ctx is done.
-	turnEndReasonCanceled = "canceled"
+	// turnEndReasonError aliases [TurnEndReasonError].
+	turnEndReasonError = TurnEndReasonError
+	// turnEndReasonCanceled aliases [TurnEndReasonCanceled].
+	turnEndReasonCanceled = TurnEndReasonCanceled
 	// turnEndReasonHookBlocked — a hook (before_llm_call or
 	// post_tool_use) signalled run termination via a deny verdict.
 	turnEndReasonHookBlocked = "hook_blocked"
@@ -463,6 +486,8 @@ const (
 	ApprovalSourceTeamPermissionsDeny     = "team_permissions_deny"
 	ApprovalSourcePreToolUseHookAllow     = "pre_tool_use_hook_allow"
 	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
+	ApprovalSourceToolInputTransformDeny  = toolexec.ApprovalSourceToolInputTransformDeny
+	ApprovalSourceToolGuardDeny           = toolexec.ApprovalSourceToolGuardDeny
 	ApprovalSourceReadOnlyHint            = "readonly_hint"
 	ApprovalSourceModeBalanced            = "mode_balanced"
 	ApprovalSourceModeRestricted          = "mode_restricted"
@@ -570,10 +595,12 @@ func (r *LocalRuntime) executeAfterLLMCallHooks(ctx context.Context, sess *sessi
 
 // executeOnUserInputHooks fires on_user_input when the runtime is about
 // to wait for the user (tool confirmation, elicitation, max iterations,
-// stream stopped). Resolves the agent itself so callsites in code paths
-// without an agent handle (like the elicitation handler) stay short.
-func (r *LocalRuntime) executeOnUserInputHooks(ctx context.Context, sessionID, logContext string) {
-	a := r.CurrentAgent()
+// stream stopped). The agent is passed explicitly so callsites that
+// already resolved the session's agent (pinned sessions included)
+// attribute the event to that agent; paths without an agent handle
+// (like the elicitation handler) fall back to CurrentAgent at the
+// callsite. A nil agent is a no-op.
+func (r *LocalRuntime) executeOnUserInputHooks(ctx context.Context, a *agent.Agent, sessionID, logContext string) {
 	if a == nil {
 		return
 	}

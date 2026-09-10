@@ -48,6 +48,9 @@ type Result struct {
 	RelevancePassed   float64           `json:"relevance"`
 	RelevanceExpected float64           `json:"relevance_expected"`
 	RelevanceResults  []RelevanceResult `json:"relevance_results,omitempty"`
+	AssertionResults  []AssertionResult `json:"assertion_results,omitempty"`
+	AssertionsPassed  int               `json:"assertions_passed"`
+	AssertionsTotal   int               `json:"assertions_total"`
 	Error             string            `json:"error,omitempty"`
 	RawOutput         []map[string]any  `json:"raw_output,omitempty"`
 	Session           *session.Session  `json:"-"` // Full session for database storage (not in JSON)
@@ -94,20 +97,42 @@ func (r *Result) checkResults() (successes, failures []string) {
 		}
 	}
 
+	// Check assertions
+	if r.AssertionsTotal > 0 {
+		if r.AssertionsPassed >= r.AssertionsTotal {
+			successes = append(successes, fmt.Sprintf("assertions %d/%d", r.AssertionsPassed, r.AssertionsTotal))
+		} else {
+			for _, ar := range r.AssertionResults {
+				if !ar.Passed {
+					if ar.Reason != "" {
+						failures = append(failures, fmt.Sprintf("assertion %s: %s", ar.Name, ar.Reason))
+					} else {
+						failures = append(failures, "assertion: "+ar.Name)
+					}
+				}
+			}
+		}
+	}
+
 	return successes, failures
 }
 
 // Summary contains aggregate statistics across all evaluations.
 type Summary struct {
-	TotalEvals      int     `json:"total_evals"`
-	FailedEvals     int     `json:"failed_evals"`
-	TotalCost       float64 `json:"total_cost"`
-	SizesPassed     int     `json:"sizes_passed"`
-	SizesTotal      int     `json:"sizes_total"`
-	ToolsF1Sum      float64 `json:"tools_f1_sum"`
-	ToolsCount      int     `json:"tools_count"`
-	RelevancePassed float64 `json:"relevance_passed"`
-	RelevanceTotal  float64 `json:"relevance_total"`
+	TotalEvals       int     `json:"total_evals"`
+	FailedEvals      int     `json:"failed_evals"`
+	TotalCost        float64 `json:"total_cost"`
+	SizesPassed      int     `json:"sizes_passed"`
+	SizesTotal       int     `json:"sizes_total"`
+	ToolsF1Sum       float64 `json:"tools_f1_sum"`
+	ToolsCount       int     `json:"tools_count"`
+	RelevancePassed  float64 `json:"relevance_passed"`
+	RelevanceTotal   float64 `json:"relevance_total"`
+	AssertionsPassed int     `json:"assertions_passed"`
+	AssertionsTotal  int     `json:"assertions_total"`
+
+	// RepeatMetrics is populated only when --repeat > 1.
+	RepeatMetrics *RepeatMetrics `json:"repeat_metrics,omitempty"`
 }
 
 // EvalRun contains the results and metadata for an evaluation run.
@@ -132,11 +157,16 @@ type RunOutput struct {
 
 // RunOutputConfig captures the evaluation run configuration.
 type RunOutputConfig struct {
-	Agent            string `json:"agent"`
-	JudgeModel       string `json:"judge_model,omitempty"`
-	Concurrency      int    `json:"concurrency"`
-	EvalsDir         string `json:"evals_dir"`
-	BaseImage        string `json:"base_image,omitempty"`
+	Agent       string `json:"agent"`
+	JudgeModel  string `json:"judge_model,omitempty"`
+	Concurrency int    `json:"concurrency"`
+	EvalsDir    string `json:"evals_dir"`
+	BaseImage   string `json:"base_image,omitempty"`
+	// AgentImage is the resolved docker-agent image (see ResolvedAgentImage),
+	// not the raw Config.AgentImage: always present, even when empty, so an
+	// explicit --agent-image none (skip injection) is distinguishable in
+	// saved run JSON from a run predating this field.
+	AgentImage       string `json:"agent_image"`
 	ContainerRuntime string `json:"container_runtime,omitempty"`
 }
 
@@ -149,6 +179,7 @@ type Config struct {
 	TTYFd            int      // File descriptor for terminal size queries (e.g., int(os.Stdout.Fd()))
 	Only             []string // Only run evaluations matching these patterns
 	BaseImage        string   // Custom base image for running evaluations
+	AgentImage       string   // docker-agent image injected into eval containers ("" = auto-pin to host CLI version, "none" = skip injection)
 	KeepContainers   bool     // If true, don't remove containers after evaluation (skip --rm)
 	EnvVars          []string // Environment variables to pass: KEY (value from env) or KEY=VALUE (explicit)
 	Repeat           int      // Number of times to repeat each evaluation (default 1)
@@ -158,6 +189,20 @@ type Config struct {
 // DefaultContainerRuntime is the container runtime executable used when
 // Config.ContainerRuntime is empty, keeping the historical Docker behavior.
 const DefaultContainerRuntime = "docker"
+
+// RepeatMetrics captures pass@k and pass^k statistics when --repeat > 1.
+//
+//   - pass@k: fraction of unique evaluations that passed at least once across
+//     k repetitions ("any pass"). Measures whether the agent can produce the
+//     correct answer at all.
+//   - pass^k: fraction of unique evaluations that passed every repetition
+//     ("all pass"). Measures determinism / reliability.
+type RepeatMetrics struct {
+	K     int     `json:"k"`
+	PassK float64 `json:"pass_at_k"`  // any-pass rate
+	HatK  float64 `json:"pass_hat_k"` // all-pass rate
+	Total int     `json:"total"`      // number of unique evaluations
+}
 
 // containerRuntimeOrDefault returns the container runtime executable to
 // invoke, falling back to DefaultContainerRuntime when none is configured.

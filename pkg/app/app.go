@@ -361,7 +361,12 @@ func (a *App) ResolveSkillCommand(ctx context.Context, input string) (string, er
 			return "", nil
 		}
 
-		content, err := st.ReadSkillContent(ctx, skill.Name)
+		// NopRuntime refuses the commands the body embeds instead of running
+		// them: input resolution is synchronous inside the UI loop, so there is
+		// no way to raise an approval prompt here. Each refusal is inlined in
+		// the content the agent receives, and the agent can still run the
+		// command itself through its own (gated) shell tool.
+		content, err := st.ReadSkillContent(ctx, skill.Name, tools.NopRuntime{})
 		if err != nil {
 			return "", fmt.Errorf("reading skill %q: %w", skill.Name, err)
 		}
@@ -416,6 +421,7 @@ func (a *App) RunSkillFork(ctx context.Context, cancel context.CancelFunc, skill
 	// so the supervisor marks the session idle.
 	go func() {
 		events := make(chan runtime.Event, defaultRuntimeEventBuffer)
+		var failed atomic.Bool
 		go func() {
 			defer close(events)
 			result, err := a.runtime.RunSkillFork(ctx, a.session, skillstool.RunSkillArgs{
@@ -425,16 +431,41 @@ func (a *App) RunSkillFork(ctx context.Context, cancel context.CancelFunc, skill
 			switch {
 			case errors.Is(err, runtime.ErrUnsupported):
 				slog.WarnContext(ctx, "Runtime does not support fork-mode skills; skill not executed", "skill", skillName)
+				failed.Store(true)
 				a.sendEvent(ctx, runtime.Error(fmt.Sprintf("Skill %q cannot run: this runtime does not support fork-mode skills.", skillName)))
 			case err != nil:
 				slog.ErrorContext(ctx, "Failed to run fork-mode skill", "skill", skillName, "error", err)
+				failed.Store(true)
 				a.sendEvent(ctx, runtime.Error(fmt.Sprintf("Skill %q failed: %v", skillName, err)))
 			case result != nil && result.IsError:
+				failed.Store(true)
 				a.sendEvent(ctx, runtime.Error(result.Output))
 			}
 		}()
 
+		// sawStop tracks ANY StreamStoppedEvent forwarded here — unlike
+		// forwardRunStreamEvents' root-only rule (#4136), every event on this
+		// channel belongs to the fork's own sub-session, so a root-session
+		// check would always be false here and synthesize a spurious
+		// duplicate stop on every fork run, successful or not.
+		var (
+			sawStop       bool
+			lastSessionID string
+			agentName     string
+		)
 		for event := range events {
+			if scoped, ok := event.(runtime.SessionScoped); ok {
+				if id := scoped.GetSessionID(); id != "" {
+					lastSessionID = id
+				}
+			}
+			if name := event.GetAgentName(); name != "" {
+				agentName = name
+			}
+			if _, ok := event.(*runtime.StreamStoppedEvent); ok {
+				sawStop = true
+			}
+
 			if ctx.Err() != nil {
 				if _, ok := event.(*runtime.StreamStoppedEvent); ok {
 					// ctx is cancelled; detach cancellation but keep its trace
@@ -444,6 +475,10 @@ func (a *App) RunSkillFork(ctx context.Context, cancel context.CancelFunc, skill
 				continue
 			}
 			a.sendEvent(ctx, event)
+		}
+
+		if !sawStop {
+			a.synthesizeStreamStopped(ctx, cmp.Or(lastSessionID, a.session.ID), agentName, failed.Load())
 		}
 	}()
 }
@@ -519,24 +554,28 @@ func (a *App) EmitStartupInfo(ctx context.Context, events chan runtime.Event) {
 // Run one agent loop
 func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string, attachments []messages.Attachment) {
 	a.cancel = cancel
+	sess := a.session
 
 	// If this is the first message and no title exists, start local title generation
-	if a.session.TitleSnapshot() == "" && a.titleGen != nil {
+	if sess.TitleSnapshot() == "" && a.titleGen != nil {
 		a.titleGenerating.Store(true)
-		go a.generateTitle(ctx, []string{message})
+		go a.generateTitle(ctx, sess, []string{message})
 	}
 
 	go func() {
 		release := a.acquireStreamGuard()
 		defer release()
+		if ctx.Err() != nil {
+			return
+		}
 
 		if len(attachments) > 0 {
-			multiContent := a.buildUserMultiContent(ctx, message, attachments)
-			a.session.AddMessage(session.UserMessage(message, multiContent...))
+			multiContent := a.buildUserMultiContent(ctx, sess, message, attachments)
+			sess.AddMessage(session.UserMessage(message, multiContent...))
 		} else {
-			a.session.AddMessage(session.UserMessage(message))
+			sess.AddMessage(session.UserMessage(message))
 		}
-		a.forwardRunStreamEvents(ctx, a.runtime.RunStream(ctx, a.session), nil)
+		a.forwardRunStreamEvents(ctx, sess, a.runtime.RunStream(ctx, sess), nil)
 	}()
 }
 
@@ -545,7 +584,7 @@ func (a *App) Run(ctx context.Context, cancel context.CancelFunc, message string
 // and inlined text files — keeping everything in one text block ensures the
 // model sees file content together with the message, rather than as separate
 // content blocks — followed by any binary parts (images, PDFs, …).
-func (a *App) buildUserMultiContent(ctx context.Context, message string, attachments []messages.Attachment) []chat.MessagePart {
+func (a *App) buildUserMultiContent(ctx context.Context, sess *session.Session, message string, attachments []messages.Attachment) []chat.MessagePart {
 	var textBuilder strings.Builder
 	textBuilder.WriteString(message)
 
@@ -561,7 +600,7 @@ func (a *App) buildUserMultiContent(ctx context.Context, message string, attachm
 			// dangling references to directories or missing paths. The editor
 			// resolves @-mentions to absolute paths before this point.
 			if a.processFileAttachment(ctx, att, &textBuilder, &binaryParts) {
-				a.session.AddAttachedFile(att.FilePath)
+				sess.AddAttachedFile(att.FilePath)
 			}
 		case att.Content != "":
 			// Inline content attachment (e.g. pasted text).
@@ -751,9 +790,38 @@ func mustSkipMirroredElicitation(rt runtime.Runtime) bool {
 // may itself veto forwarding an event by returning false. Retry uses it to
 // suppress the pre-StreamStarted re-emitted user message; Run and
 // RunWithMessage pass nil.
-func (a *App) forwardRunStreamEvents(ctx context.Context, ch <-chan runtime.Event, filter func(event runtime.Event) (forward bool)) {
+func (a *App) forwardRunStreamEvents(ctx context.Context, sess *session.Session, ch <-chan runtime.Event, filter func(event runtime.Event) (forward bool)) {
 	skipMirroredElicitation := mustSkipMirroredElicitation(a.runtime)
+
+	// sawRootStop/sawRootError/agentName drive the #4136 fallback below: the
+	// runtime documents channel close (not receipt of StreamStoppedEvent) as
+	// the terminal signal, and may drop the event under back-pressure
+	// (LocalRuntime.finalizeEventChannel). Only a root-session stop counts —
+	// a sub-session (delegation/fork) stop leaves the root stream running.
+	var (
+		sawRootStop  bool
+		sawRootError bool
+		agentName    string
+	)
+
 	for event := range ch {
+		isRoot := isRootSessionEvent(event, sess.ID)
+		if isRoot {
+			if name := event.GetAgentName(); name != "" {
+				agentName = name
+			}
+			switch event.(type) {
+			case *runtime.StreamStoppedEvent:
+				// Tracked here — before the cancellation/filter/dedupe checks
+				// below — so a filter that happens to veto a genuine root stop
+				// can never leave this bookkeeping thinking none arrived and
+				// synthesize a spurious duplicate.
+				sawRootStop = true
+			case *runtime.ErrorEvent:
+				sawRootError = true
+			}
+		}
+
 		// If context is cancelled, continue draining but don't forward events
 		// — except StreamStoppedEvent, which must always propagate so the
 		// supervisor can mark the session as no longer running.
@@ -786,6 +854,51 @@ func (a *App) forwardRunStreamEvents(ctx context.Context, ch <-chan runtime.Even
 
 		a.sendEvent(ctx, event)
 	}
+
+	if !sawRootStop {
+		a.synthesizeStreamStopped(ctx, sess.ID, agentName, sawRootError)
+	}
+}
+
+// isRootSessionEvent reports whether event belongs to the given root
+// session rather than a sub-session (delegation or fork-skill child).
+// Events that don't implement [runtime.SessionScoped], or that carry an
+// empty SessionID, are treated as root-scoped by convention — matching how
+// [runtime.SessionScoped] consumers elsewhere (e.g. the supervisor's
+// isTopLevelStream) already interpret an absent session id.
+func isRootSessionEvent(event runtime.Event, sessionID string) bool {
+	scoped, ok := event.(runtime.SessionScoped)
+	if !ok {
+		return true
+	}
+	id := scoped.GetSessionID()
+	return id == "" || id == sessionID
+}
+
+// synthesizeStreamStopped sends a StreamStoppedEvent for sessionID when the
+// runtime's event channel closed without forwarding one (#4136). Consumers
+// (the chat page, the supervisor) clear their "Working…" state only on
+// receipt of this event and treat channel close as the terminal signal only
+// in the runtime's documentation, not in their own code — so a dropped
+// event (see LocalRuntime.finalizeEventChannel's non-blocking emit) leaves
+// them stuck indefinitely without this fallback.
+func (a *App) synthesizeStreamStopped(ctx context.Context, sessionID, agentName string, sawError bool) {
+	reason := runtime.TurnEndReasonNormal
+	switch {
+	case ctx.Err() != nil:
+		reason = runtime.TurnEndReasonCanceled
+	case sawError:
+		reason = runtime.TurnEndReasonError
+	}
+	if agentName == "" {
+		agentName = a.runtime.CurrentAgentName(ctx)
+	}
+	slog.WarnContext(ctx, "runtime stream closed without a StreamStoppedEvent; synthesizing one",
+		"session_id", sessionID, "reason", reason)
+	// ctx may already be cancelled; detach cancellation but keep its trace
+	// context so the synthesized stop still reaches subscribers, mirroring
+	// the ctx-cancelled StreamStoppedEvent forwarding above.
+	a.sendEvent(context.WithoutCancel(ctx), runtime.StreamStopped(sessionID, agentName, reason))
 }
 
 // acquireStreamGuard locks a.streamGuard (set via WithStreamGuard) and
@@ -826,13 +939,17 @@ func (a *App) processInlineAttachment(att messages.Attachment, textBuilder *stri
 // arrive after StreamStarted and are forwarded normally.
 func (a *App) Retry(ctx context.Context, cancel context.CancelFunc) {
 	a.cancel = cancel
+	sess := a.session
 
 	go func() {
 		release := a.acquireStreamGuard()
 		defer release()
+		if ctx.Err() != nil {
+			return
+		}
 
 		streamStarted := false
-		a.forwardRunStreamEvents(ctx, a.runtime.RunStream(ctx, a.session), func(event runtime.Event) bool {
+		a.forwardRunStreamEvents(ctx, sess, a.runtime.RunStream(ctx, sess), func(event runtime.Event) bool {
 			switch event.(type) {
 			case *runtime.StreamStartedEvent:
 				streamStarted = true
@@ -850,9 +967,10 @@ func (a *App) Retry(ctx context.Context, cancel context.CancelFunc) {
 // This is used for special cases like image attachments.
 func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg *session.Message) {
 	a.cancel = cancel
+	sess := a.session
 
 	// If this is the first message and no title exists, start local title generation
-	if a.session.TitleSnapshot() == "" && a.titleGen != nil {
+	if sess.TitleSnapshot() == "" && a.titleGen != nil {
 		a.titleGenerating.Store(true)
 		// Extract text content from the message for title generation
 		userMessage := msg.Message.Content
@@ -864,15 +982,18 @@ func (a *App) RunWithMessage(ctx context.Context, cancel context.CancelFunc, msg
 				}
 			}
 		}
-		go a.generateTitle(ctx, []string{userMessage})
+		go a.generateTitle(ctx, sess, []string{userMessage})
 	}
 
 	go func() {
 		release := a.acquireStreamGuard()
 		defer release()
+		if ctx.Err() != nil {
+			return
+		}
 
-		a.session.AddMessage(msg)
-		a.forwardRunStreamEvents(ctx, a.runtime.RunStream(ctx, a.session), nil)
+		sess.AddMessage(msg)
+		a.forwardRunStreamEvents(ctx, sess, a.runtime.RunStream(ctx, sess), nil)
 	}()
 }
 
@@ -1027,7 +1148,7 @@ func (a *App) FollowUp(ctx context.Context, msg runtime.QueuedMessage) error {
 func (a *App) SteerMessage(ctx context.Context, content string, attachments []messages.Attachment) error {
 	msg := runtime.QueuedMessage{Content: content}
 	if len(attachments) > 0 {
-		msg.MultiContent = a.buildUserMultiContent(ctx, content, attachments)
+		msg.MultiContent = a.buildUserMultiContent(ctx, a.session, content, attachments)
 	}
 	return a.runtime.Steer(ctx, msg)
 }
@@ -1037,7 +1158,7 @@ func (a *App) SteerMessage(ctx context.Context, content string, attachments []me
 func (a *App) FollowUpMessage(ctx context.Context, content string, attachments []messages.Attachment) error {
 	msg := runtime.QueuedMessage{Content: content}
 	if len(attachments) > 0 {
-		msg.MultiContent = a.buildUserMultiContent(ctx, content, attachments)
+		msg.MultiContent = a.buildUserMultiContent(ctx, a.session, content, attachments)
 	}
 	return a.runtime.FollowUp(ctx, msg)
 }
@@ -1144,6 +1265,36 @@ func (a *App) Session() *session.Session {
 // don't, so the /context dialog reports the feature as unavailable.
 type contextBreakdownProvider interface {
 	ContextBreakdown(ctx context.Context, sess *session.Session) (*runtime.ContextBreakdown, error)
+}
+
+// generatedFileResolver is an optional runtime capability: resolving one
+// recorded generated-media reference to its bytes and validated canonical
+// path, gated on the generated-media manifest and the owning session's
+// workspace (see [runtime.LocalRuntime.ResolveGeneratedFile]). Only the
+// local runtime implements it; remote runtimes never deliver generated-file
+// payloads, so UIs treat the missing capability as "nothing to resolve".
+type generatedFileResolver interface {
+	ResolveGeneratedFile(ctx context.Context, ref runtime.GeneratedFileRef) (*runtime.ResolvedGeneratedFile, error)
+}
+
+// CanResolveGeneratedFiles reports whether the runtime can resolve
+// generated-media references at all, letting UIs skip resolution work
+// entirely on runtimes without the capability.
+func (a *App) CanResolveGeneratedFiles() bool {
+	_, ok := a.runtime.(generatedFileResolver)
+	return ok
+}
+
+// ResolveGeneratedFile resolves one recorded generated-media reference.
+// Returns an error wrapping [runtime.ErrUnsupported] when the runtime does
+// not own local generated media (e.g. remote runtimes). Callers must treat
+// any error as "unavailable" — never surface its text to the user.
+func (a *App) ResolveGeneratedFile(ctx context.Context, ref runtime.GeneratedFileRef) (*runtime.ResolvedGeneratedFile, error) {
+	resolver, ok := a.runtime.(generatedFileResolver)
+	if !ok {
+		return nil, fmt.Errorf("generated file resolution: %w", runtime.ErrUnsupported)
+	}
+	return resolver.ResolveGeneratedFile(ctx, ref)
 }
 
 // ContextBreakdown returns the estimated context-window composition for the
@@ -1876,7 +2027,7 @@ func (a *App) IsTitleGenerating() bool {
 // generateTitle generates a title using the local title generator.
 // This method always clears the titleGenerating flag when done (success or failure).
 // It should be called in a goroutine.
-func (a *App) generateTitle(ctx context.Context, userMessages []string) {
+func (a *App) generateTitle(ctx context.Context, sess *session.Session, userMessages []string) {
 	// Always clear the flag when done, whether success or failure
 	defer a.titleGenerating.Store(false)
 
@@ -1884,18 +2035,18 @@ func (a *App) generateTitle(ctx context.Context, userMessages []string) {
 		slog.DebugContext(ctx, "No title generator available, skipping title generation")
 		// Emit empty title event so the UI clears any title-generation spinner
 		select {
-		case a.events <- runtime.SessionTitle(a.session.ID, ""):
+		case a.events <- runtime.SessionTitle(sess.ID, ""):
 		case <-ctx.Done():
 		}
 		return
 	}
 
-	title, err := a.titleGen.Generate(ctx, a.session.ID, userMessages)
+	title, err := a.titleGen.Generate(ctx, sess.ID, userMessages)
 	if err != nil {
-		slog.ErrorContext(ctx, "Failed to generate session title", "session_id", a.session.ID, "error", err)
+		slog.ErrorContext(ctx, "Failed to generate session title", "session_id", sess.ID, "error", err)
 		// Emit empty title event so the UI clears any title-generation spinner
 		select {
-		case a.events <- runtime.SessionTitle(a.session.ID, ""):
+		case a.events <- runtime.SessionTitle(sess.ID, ""):
 		case <-ctx.Done():
 		}
 		return
@@ -1904,20 +2055,20 @@ func (a *App) generateTitle(ctx context.Context, userMessages []string) {
 	if title == "" {
 		// Emit empty title event so the UI clears any title-generation spinner
 		select {
-		case a.events <- runtime.SessionTitle(a.session.ID, ""):
+		case a.events <- runtime.SessionTitle(sess.ID, ""):
 		case <-ctx.Done():
 		}
 		return
 	}
 
 	// Persist the title
-	if err := a.runtime.UpdateSessionTitle(ctx, a.session, title); err != nil {
-		slog.ErrorContext(ctx, "Failed to persist title", "session_id", a.session.ID, "error", err)
+	if err := a.runtime.UpdateSessionTitle(ctx, sess, title); err != nil {
+		slog.ErrorContext(ctx, "Failed to persist title", "session_id", sess.ID, "error", err)
 	}
 
 	// Emit the title event to update the UI
 	select {
-	case a.events <- runtime.SessionTitle(a.session.ID, title):
+	case a.events <- runtime.SessionTitle(sess.ID, title):
 	case <-ctx.Done():
 	}
 }
@@ -1946,7 +2097,7 @@ func (a *App) RegenerateSessionTitle(ctx context.Context) error {
 			}
 		}
 
-		go a.generateTitle(ctx, userMessages)
+		go a.generateTitle(ctx, a.session, userMessages)
 		return nil
 	}
 

@@ -215,25 +215,7 @@ func (d *planBrowserDialog) selectedPlan() (plans.Plan, bool) {
 
 // planRef derives the service address of a listed plan.
 func planRef(p plans.Plan) plans.Ref {
-	if p.Scope == plans.ScopeSession {
-		return plans.SessionRef(p.SessionID)
-	}
 	return plans.SharedRef(p.Name)
-}
-
-// planCurrentSessionLabel is the browser-row identity of the listed session
-// plan. The service only ever lists the active session's plan, so labelling
-// it beats showing a bare session ID that means nothing at a glance; the
-// full ID stays visible in the footer and the detail dialog.
-const planCurrentSessionLabel = "current session"
-
-// planDisplayName is the identity a browser row shows: the shared plan's
-// name, or the current-session label for the session plan.
-func planDisplayName(p plans.Plan) string {
-	if p.Scope == plans.ScopeSession {
-		return planCurrentSessionLabel
-	}
-	return p.Name
 }
 
 func (d *planBrowserDialog) applyFilter() {
@@ -242,7 +224,6 @@ func (d *planBrowserDialog) applyFilter() {
 	for _, p := range d.all {
 		if query == "" ||
 			strings.Contains(strings.ToLower(p.Name), query) ||
-			strings.Contains(strings.ToLower(planDisplayName(p)), query) ||
 			strings.Contains(strings.ToLower(p.Title), query) ||
 			strings.Contains(strings.ToLower(p.Status), query) ||
 			strings.Contains(string(p.Scope), query) {
@@ -405,9 +386,8 @@ func (d *planBrowserDialog) openDetailCmd() tea.Cmd {
 }
 
 // guardedPlan returns the selected plan when the given action applies to it:
-// session plans support only edit, and shared plans must carry a displayed
-// version. A refused action yields an explanatory notification instead of a
-// failed service call.
+// plans must carry a displayed version. A refused action yields an
+// explanatory notification instead of a failed service call.
 func (d *planBrowserDialog) guardedPlan(action string) (plans.Plan, tea.Cmd, bool) {
 	p, ok := d.selectedPlan()
 	if !ok {
@@ -444,18 +424,9 @@ func (d *planBrowserDialog) editCmd() tea.Cmd {
 }
 
 // planMutationGuard returns an explanatory notification when the plan does
-// not support the action from the host: session plans support only edit —
-// they belong to their session and carry no shared-plan metadata — and a
-// shared plan without a version (which the service always provides) is
-// refused rather than mutated unguarded.
+// not support the action from the host: a plan without a version (which the
+// service always provides) is refused rather than mutated unguarded.
 func planMutationGuard(p plans.Plan, action string) tea.Cmd {
-	if p.Scope == plans.ScopeSession {
-		if action == "edit" {
-			return nil
-		}
-		return notification.InfoCmd(fmt.Sprintf(
-			"Session plans don't support %s: they belong to their session and carry no shared-plan metadata. Press e to edit the plan body, or use a shared plan.", action))
-	}
 	if p.Version == nil {
 		return notification.ErrorCmd(fmt.Sprintf("Cannot %s %q: no version is known; refresh (r) and retry.", action, p.Name))
 	}
@@ -553,7 +524,7 @@ func (d *planBrowserDialog) View() string {
 }
 
 // footerLine shows load warnings when present, otherwise the identity of the
-// selected plan (useful for truncated names such as session IDs).
+// selected plan (useful for truncated names).
 func (d *planBrowserDialog) footerLine(contentWidth int) string {
 	if len(d.warnings) > 0 {
 		text := fmt.Sprintf("⚠ %d plan(s) could not be read: %s", len(d.warnings), d.warnings[0])
@@ -580,9 +551,6 @@ func (d *planBrowserDialog) SetSize(width, height int) tea.Cmd {
 func (d *planBrowserDialog) renderPlan(p plans.Plan, selected bool, maxWidth int) string {
 	mainStyle, metaStyle := styles.PaletteUnselectedActionStyle, styles.PaletteUnselectedDescStyle
 	scopeStyle := styles.MutedStyle
-	if p.Scope == plans.ScopeSession {
-		scopeStyle = styles.WarningStyle
-	}
 	if selected {
 		mainStyle, metaStyle = styles.PaletteSelectedActionStyle, styles.PaletteSelectedDescStyle
 		scopeStyle = metaStyle
@@ -593,7 +561,7 @@ func (d *planBrowserDialog) renderPlan(p plans.Plan, selected bool, maxWidth int
 	titleWidth := max(0, maxWidth-fixed)
 
 	row := scopeStyle.Render(planCell(string(p.Scope), planColScope)) + gap +
-		mainStyle.Render(planCell(planDisplayName(p), planColName)) + gap +
+		mainStyle.Render(planCell(p.Name, planColName)) + gap +
 		metaStyle.Render(planCell(planLabel(p.Status), planColStatus)) + gap +
 		metaStyle.Render(planCell(planVersionLabel(p.Version), planColVersion)) + gap +
 		metaStyle.Render(planCell(planTimeAgo(d.now(), p.UpdatedAt), planColUpdated)) + gap +
@@ -617,8 +585,8 @@ func planLabel(s string) string {
 	return s
 }
 
-// planVersionLabel renders a shared plan's version and "-" for session
-// plans, which have none.
+// planVersionLabel renders a plan's version, defensively substituting "-"
+// when none is known.
 func planVersionLabel(version *int) string {
 	if version == nil {
 		return "-"
@@ -627,7 +595,7 @@ func planVersionLabel(version *int) string {
 }
 
 // planVersionOrZero reads a plan's displayed version, with 0 as the
-// no-version sentinel for session plans (shared versions start at 1).
+// no-version sentinel (versions start at 1).
 func planVersionOrZero(p plans.Plan) int {
 	if p.Version == nil {
 		return 0

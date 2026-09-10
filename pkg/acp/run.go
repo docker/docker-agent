@@ -9,13 +9,14 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 )
 
 func Run(ctx context.Context, agentFilename string, stdin io.Reader, stdout io.Writer, runConfig *config.RuntimeConfig, sessionDB string) error {
 	slog.DebugContext(ctx, "Starting ACP server", "agent", agentFilename, "session_db", sessionDB)
 
-	agentSource, err := config.Resolve(agentFilename, nil)
+	agentSource, err := sources.Resolve(agentFilename, nil)
 	if err != nil {
 		return err
 	}

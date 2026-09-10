@@ -1,31 +1,33 @@
 ---
 title: "Sandbox Mode"
-description: "Run agents in an isolated sandbox VM managed by sbx."
+description: "Run agents in an isolated Docker sandbox VM."
 keywords: docker agent, sbx, ai agents, configuration, yaml, sandbox mode
 weight: 80
 canonical: https://docs.docker.com/ai/docker-agent/configuration/sandbox/
 ---
 
-_Run agents in an isolated sandbox VM managed by [`sbx`](https://docs.docker.com/ai/sandboxes/)._
+_Run agents in an isolated [Docker sandbox VM](https://docs.docker.com/ai/sandboxes/)._
 
 ## Overview
 
-Sandbox mode is Docker Agent's integration with
-[`sbx`](https://docs.docker.com/ai/sandboxes/), Docker's sandbox product. `sbx`
-provides the runtime, CLI, and VM; Docker Agent is one of its built-in agents.
-The `--sandbox` flag asks `sbx` to create or reuse a VM and launches Docker
-Agent inside it.
+Sandbox mode integrates Docker Agent with [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/).
+Docker Agent prefers the standalone `sbx` CLI when available and otherwise
+uses the `docker sandbox` CLI plugin. `--sbx=false` forces the plugin backend.
+The `--sandbox` flag asks the selected backend to create or reuse a VM and
+launches Docker Agent inside it.
 
-All shell, filesystem, and process activity happens inside that VM, so a
-misbehaving agent cannot touch files outside the mounted working directory or
-reach long-lived host state. Docker Agent does not implement the sandbox or
-start a raw `docker run` container; it orchestrates the installed `sbx` CLI.
+Agent processes run inside the VM. The working directory is mounted read-write.
+The Docker Agent configuration directory and staged kit are mounted read-only;
+for a local agent config outside the working directory, its parent directory is
+also mounted read-only. An agent config inside the working directory remains on
+the read-write mount. Files exposed through these mounts remain accessible to the agent. Docker Agent does not implement the sandbox or
+start a raw `docker run` container; it orchestrates the selected sandbox CLI.
 
 > [!NOTE]
 > **Requirements**
 >
-> Install and configure the [`sbx` CLI](https://docs.docker.com/ai/sandboxes/) before
-> using `--sandbox`.
+> Install and configure [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) before
+> using `--sandbox`. The standalone `sbx` CLI is optional if `docker sandbox` is available.
 
 ## Usage
 
@@ -35,7 +37,7 @@ Enable sandbox mode with the `--sandbox` flag on the `docker agent run` command:
 docker agent run --sandbox agent.yaml
 ```
 
-Docker Agent asks `sbx` to launch or reuse a sandbox VM, mounts the current
+Docker Agent asks the selected sandbox backend to launch or reuse a sandbox VM, mounts the current
 working directory, and runs the agent inside it.
 
 ## Flags
@@ -43,7 +45,8 @@ working directory, and runs the agent inside it.
 | Flag          | Default                                      | Description                                                                                               |
 | ------------- | -------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | `--sandbox`   | `false`                                      | Enable sandbox mode.                                                                                      |
-| `--template`  | `docker/docker-agent-sbx-templates:latest`   | OCI image used as the sandbox template. Passed to `sbx create -t`. See [Sandbox templates](#sandbox-templates). |
+| `--template`  | `docker/docker-agent-sbx-templates:latest`   | OCI image used as the sandbox template. Passed to the selected backend's `create -t` command. See [Sandbox templates](#sandbox-templates). |
+| `--sbx` | `true` | Prefer standalone `sbx` when available; set `--sbx=false` to force `docker sandbox`. |
 | `--no-kit`    | `false`                                      | Disable the [auto-kit](#auto-kit) — do not stage skills or prompt files into the sandbox.                 |
 
 ```bash
@@ -115,9 +118,9 @@ runtime:
     - registry.npmjs.org
 ```
 
-Each entry is a hostname with an optional `:port` suffix. Commas and
-whitespace are rejected to keep a single entry from smuggling several
-rules into the policy engine. The runner prints the resulting allowlist
+Each entry is a hostname with an optional `:port` suffix. Entries containing commas or
+whitespace are ignored with a warning, preventing a single entry from
+smuggling several rules into the policy engine. The runner prints the resulting allowlist
 before launch so you can audit exactly which hosts the run opens up.
 
 ### Persist your own allowlist
@@ -148,8 +151,8 @@ fallback host set.
 
 A sandbox template is the OCI image the sandbox VM boots from. It determines
 the base OS and the tools available inside the VM, including whether the
-`docker-agent` binary is already there. `--template` (or `-t` on `sbx
-create`) selects it.
+`docker-agent` binary is already there. `--template` (or `-t` on the sandbox backend's
+`create` command) selects it.
 
 ### The default template
 
@@ -227,7 +230,7 @@ docker agent run --sandbox agent.yaml
 
 ## How It Works
 
-1. `--sandbox` tells Docker Agent to invoke the installed `sbx` CLI.
+1. `--sandbox` tells Docker Agent to invoke standalone `sbx` when available, or `docker sandbox` otherwise.
 2. A new sandbox VM is created from the image passed via `--template`.
 3. The current working directory is mounted into the VM; the agent binary is copied in.
 4. The [auto-kit](#auto-kit) is staged on the host and bind-mounted read-only into the VM, so the agent sees its skills and prompt files inside the sandbox.

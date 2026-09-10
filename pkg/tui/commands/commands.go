@@ -270,11 +270,11 @@ func builtInSessionCommands() []Item {
 			ID:           "session.new",
 			Label:        "New",
 			SlashCommand: "/new",
-			Description:  "Start a new conversation",
+			Description:  "Start a new conversation (usage: /new [dir])",
 			Category:     "Session",
 			Immediate:    true,
-			Execute: func(string) tea.Cmd {
-				return core.CmdHandler(messages.NewSessionMsg{})
+			Execute: func(arg string) tea.Cmd {
+				return core.CmdHandler(messages.NewSessionMsg{WorkingDir: strings.TrimSpace(arg)})
 			},
 		},
 		{

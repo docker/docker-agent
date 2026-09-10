@@ -54,8 +54,8 @@ func installGoPackage(ctx context.Context, pkg *Package, version string) (string
 
 	// Strip multi-module tag prefix: "gopls/v0.21.1" → "v0.21.1".
 	installVersion := version
-	if idx := strings.LastIndex(version, "/"); idx >= 0 {
-		installVersion = version[idx+1:]
+	if _, after, ok := strings.CutLast(version, "/"); ok {
+		installVersion = after
 	}
 	if !strings.HasPrefix(installVersion, "v") && installVersion != "latest" {
 		installVersion = "v" + installVersion

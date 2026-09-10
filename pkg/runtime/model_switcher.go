@@ -161,6 +161,10 @@ type ModelSwitcherConfig struct {
 	Providers map[string]latest.ProviderConfig
 	// ModelsGateway is the gateway URL if configured
 	ModelsGateway string
+	// EncryptedConfig is the opaque encrypted agent YAML forwarded to a trusted
+	// Docker models gateway on every request (X-Cagent-Encrypted-Config header).
+	// Empty disables forwarding.
+	EncryptedConfig string
 	// EnvProvider provides access to environment variables
 	EnvProvider environment.Provider
 	// ProviderRegistry instantiates providers for runtime model switching.
@@ -874,6 +878,7 @@ func modelHasAnthropicAuth(m latest.ModelConfig, providers map[string]latest.Pro
 func (r *LocalRuntime) createProviderFromConfig(ctx context.Context, cfg *latest.ModelConfig) (provider.Provider, error) {
 	opts := []options.Opt{
 		options.WithGateway(r.modelSwitcherCfg.ModelsGateway),
+		options.WithEncryptedConfig(r.modelSwitcherCfg.EncryptedConfig),
 		options.WithProviders(r.modelSwitcherCfg.Providers),
 	}
 

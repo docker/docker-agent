@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	acpsdk "github.com/coder/acp-go-sdk"
@@ -68,6 +69,19 @@ func TestBuildUserContent_ResourceLinkFallbackDoesNotExposeAbsoluteURI(t *testin
 	assert.Contains(t, content, "content unavailable")
 	assert.NotContains(t, content, uri)
 	assert.NotContains(t, content, "/var/folders")
+}
+
+func TestResourceLinkNameIsSafeAndBounded(t *testing.T) {
+	t.Parallel()
+
+	longName := strings.Repeat("é", 100) + "\nforged"
+	assert.Equal(t, chat.SanitizeDisplayName(longName), resourceLinkName(&acpsdk.ContentBlockResourceLink{Name: longName}))
+
+	got := resourceLinkName(&acpsdk.ContentBlockResourceLink{Uri: "file:///tmp/unsafe%0Aname.png"})
+	assert.Equal(t, "unsafe_name.png", got)
+	assert.LessOrEqual(t, len(got), chat.MaxSanitizedFieldBytes)
+
+	assert.Equal(t, "resource", resourceLinkName(&acpsdk.ContentBlockResourceLink{Uri: "https://example.com/private.png"}))
 }
 
 func TestBuildUserMessage_ImageContent(t *testing.T) {

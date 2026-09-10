@@ -21,13 +21,18 @@ func Push(ctx context.Context, reference string) error {
 		return fmt.Errorf("creating content store: %w", err)
 	}
 
-	img, err := store.GetArtifactImage(reference)
+	storeKey, err := FullyQualifiedReference(reference)
+	if err != nil {
+		return err
+	}
+
+	img, err := store.GetArtifactImage(storeKey)
 	if err != nil {
 		return fmt.Errorf("loading artifact from store: %w", err)
 	}
 
 	// Get metadata to restore annotations
-	metadata, err := store.GetArtifactMetadata(reference)
+	metadata, err := store.GetArtifactMetadata(storeKey)
 	if err != nil {
 		return fmt.Errorf("loading artifact metadata: %w", err)
 	}

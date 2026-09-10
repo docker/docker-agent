@@ -62,6 +62,17 @@ func TestSaferShell_AcceptsCommandAliasKey(t *testing.T) {
 	assert.Equal(t, "destructive", out.HookSpecificOutput.Metadata[safety.MetaSafetyLabel])
 }
 
+func TestSaferShell_LabelsBackgroundJobCommand(t *testing.T) {
+	out, err := saferShell(t.Context(), &hooks.Input{
+		HookEventName: hooks.EventPreToolUse,
+		ToolName:      safety.BackgroundJobToolName,
+		ToolInput:     map[string]any{"cmd": "rm -rf /tmp/x"},
+	}, nil)
+	require.NoError(t, err)
+	require.NotNil(t, out)
+	assert.Equal(t, "destructive", out.HookSpecificOutput.Metadata[safety.MetaSafetyLabel])
+}
+
 func TestSaferShell_NoOpForNonShellTool(t *testing.T) {
 	out, err := saferShell(t.Context(), &hooks.Input{
 		HookEventName: hooks.EventPreToolUse,

@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -31,7 +32,7 @@ func completeAlias(toComplete string) ([]string, cobra.ShellCompDirective) {
 	var candidates []string
 
 	// Add matching built-in agent names
-	for _, name := range config.BuiltinAgentNames() {
+	for _, name := range sources.BuiltinAgentNames() {
 		if strings.HasPrefix(name, toComplete) {
 			candidates = append(candidates, name+"\tbuilt-in agent")
 		}
@@ -59,7 +60,7 @@ func completeMessage(cmd *cobra.Command, args []string, toComplete string) ([]st
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	agentSource, err := config.Resolve(args[0], nil)
+	agentSource, err := sources.Resolve(args[0], nil)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

@@ -5,10 +5,10 @@
 #   docker agent run examples/flavors.yaml --flavor cheap --flavor verbose
 #
 # Objects merge recursively, scalars and arrays replace, and a null value
-# deletes a key. A key ending in '+' appends to an existing array; a key
-# ending in '-' removes entries (from an object by key name, from an array by
-# value or partial match). Requested flavors the file does not define are
-# ignored.
+# deletes a key. A key ending in '+' appends to an existing array (a scalar is
+# promoted to a one-element array first); a key ending in '-' removes entries
+# (from an object by key name, from an array by value or partial match).
+# Requested flavors the file does not define are ignored.
 
 agents:
   root:
@@ -23,7 +23,7 @@ agents:
 models:
   claude:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
 
 flavors:
   # Swap the model for a cheaper one.
@@ -47,6 +47,14 @@ flavors:
       root:
         toolsets+:
           - type: shell
+
+  # 'key+' also works on a string: the instruction becomes a list, which is
+  # joined back into one prompt with blank lines between the parts.
+  terse:
+    agents:
+      root:
+        instruction+:
+          - Answer in one sentence.
 
   # Remove entries with the 'key-' suffix: array elements are matched by
   # value or partial object match.

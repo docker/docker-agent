@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/docker/docker-agent/blob/main/agent-schema.json",
   "title": "Docker Agent Configuration",
-  "description": "Configuration schema for Docker Agent v15",
+  "description": "Configuration schema for Docker Agent v16",
   "type": "object",
   "properties": {
     "version": {
@@ -24,7 +24,8 @@
         "12",
         "13",
         "14",
-        "15"
+        "15",
+        "16"
       ],
       "examples": [
         "0",
@@ -42,7 +43,8 @@
         "12",
         "13",
         "14",
-        "15"
+        "15",
+        "16"
       ]
     },
     "providers": {
@@ -127,7 +129,7 @@
     },
     "flavors": {
       "type": "object",
-      "description": "Named YAML patches applied on top of the rest of the document when enabled at run time (e.g. 'docker agent run --flavor <name>'). Each flavor is a partial config document merged with JSON Merge Patch semantics: objects merge recursively, scalars and arrays replace, null deletes a key. A key ending in '+' appends its items to the existing array (e.g. 'toolsets+:'); a key ending in '-' removes entries — from an object by key name, from an array by scalar equality or partial object match (e.g. 'toolsets-: [{type: shell}]'). Enabled flavors are applied in the order they were requested; requested flavors not defined here are ignored.",
+      "description": "Named YAML patches applied on top of the rest of the document when enabled at run time (e.g. 'docker agent run --flavor <name>'). Each flavor is a partial config document merged with JSON Merge Patch semantics: objects merge recursively, scalars and arrays replace, null deletes a key. A key ending in '+' appends its items to the existing array (e.g. 'toolsets+:'); a scalar existing value is promoted to a one-element array first, so 'instruction+:' extends a string instruction. A key ending in '-' removes entries — from an object by key name, from an array by scalar equality or partial object match (e.g. 'toolsets-: [{type: shell}]'). Enabled flavors are applied in the order they were requested; requested flavors not defined here are ignored.",
       "additionalProperties": {
         "type": ["object", "null"]
       }
@@ -300,7 +302,7 @@
         },
         "provider_opts": {
           "type": "object",
-          "description": "Provider-specific options passed through to the underlying client.",
+          "description": "Provider-specific options passed through to the underlying client. OpenAI-compatible APIs: service_tier (string) selects the processing tier for Chat Completions and Responses requests; use 'fast' or 'priority' for Fast mode at premium pricing on supported models. Model-level options override these defaults.",
           "additionalProperties": true
         },
         "track_usage": {
@@ -604,8 +606,18 @@
           }
         },
         "instruction": {
-          "type": "string",
-          "description": "Instructions for the agent"
+          "description": "Instructions for the agent (the system prompt). Accepts a single string or a list of strings; list items are concatenated in order, separated by a blank line.",
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
         },
         "instruction_file": {
           "description": "Path(s) to a file or files, relative to the config file's directory, whose contents become the agent's instruction. Accepts a single string or a list of strings; when several files are given their contents are concatenated in order, separated by a blank line. Loaded at startup. Mutually exclusive with 'instruction'. Each path must be a local relative path inside the config directory (absolute paths and '..' traversal are rejected). Only supported for local file-based configs, not OCI/URL sources.",
@@ -672,7 +684,7 @@
         "redact_secrets": {
           "type": "boolean",
           "default": true,
-          "description": "Enabled by default. When true (the default), the runtime auto-installs the redact_secrets builtin on all three of pre_tool_use (scrubs detected secrets from tool arguments), before_llm_call (scrubs the messages sent to the LLM), and tool_response_transform (scrubs tool output before it reaches event consumers, the persisted session, the post_tool_use hook input, or the next LLM call). Set to false to opt out. The same hook entries can be authored directly in YAML for finer-grained control \u2014 see the hooks.tool_response_transform / hooks.before_llm_call / hooks.pre_tool_use sections. Detection uses the portcullis ruleset (GitHub PATs, AWS keys, Stripe / Slack / GitLab tokens, JWTs, private keys, etc.). Each detected span is replaced with the literal '[REDACTED]'."
+          "description": "Enabled by default. When true (the default), the runtime auto-installs the redact_secrets builtin on all three of tool_input_transform (scrubs detected secrets from tool arguments before approval), before_llm_call (scrubs the messages sent to the LLM), and tool_response_transform (scrubs tool output before it reaches event consumers, the persisted session, the post_tool_use hook input, or the next LLM call). Set to false to opt out. The same hook entries can be authored directly in YAML for finer-grained control \u2014 see the hooks.tool_response_transform / hooks.before_llm_call / hooks.tool_input_transform sections. Detection uses the portcullis ruleset (GitHub PATs, AWS keys, Stripe / Slack / GitLab tokens, JWTs, private keys, etc.). Each detected span is replaced with the literal '[REDACTED]'."
         },
         "max_iterations": {
           "type": "integer",
@@ -745,6 +757,11 @@
           "items": {
             "type": "string"
           }
+        },
+        "add_prompt_files_depth": {
+          "type": "integer",
+          "description": "Also list, by path only, the add_prompt_files names found up to this many directory levels below the working directory (1 = direct subdirectories). Contents are not loaded: the agent reads the ones it needs. Useful in monorepos where each sub-project carries its own AGENTS.md. 0 (default) disables the scan.",
+          "minimum": 0
         },
         "commands": {
           "description": "Named prompts for /commands. Supports simple string format or advanced object format with description and instruction.",
@@ -991,7 +1008,8 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Skill identifier used by read_skill / run_skill and the /<name> slash command."
+          "pattern": "^\\S+$",
+          "description": "Skill identifier used by read_skill / run_skill and the /<name> slash command. Must not contain whitespace, which the slash command parser uses to separate the name from its argument."
         },
         "description": {
           "type": "string",
@@ -1351,6 +1369,20 @@
             "$ref": "#/definitions/HookMatcherConfig"
           }
         },
+        "tool_input_transform": {
+          "type": "array",
+          "description": "Hooks that run before every tool call, ahead of the deterministic approval pipeline (safety mode, permission rules, --yolo) and of tool_guard. Hooks run sequentially, each seeing the preceding rewrite, and may patch tool arguments via hookSpecificOutput.updated_input exactly like pre_tool_use; the approval pipeline and every later hook see the rewritten arguments. Rewrite-only: verdicts belong on tool_guard. Failures follow the hook's on_error policy (default warn; block denies the call). The redact_secrets builtin's argument-scrubbing leg is auto-injected here. Tool-matched, like pre_tool_use; preempt_yolo is rejected because the event always preempts approval.",
+          "items": {
+            "$ref": "#/definitions/HookMatcherConfig"
+          }
+        },
+        "tool_guard": {
+          "type": "array",
+          "description": "Hooks that run after tool_input_transform and before the deterministic approval pipeline, so their verdict cannot be bypassed by any safety mode (including autonomous / --yolo) or permission allow-rule. Hooks run concurrently; hookSpecificOutput.permission_decision verdicts aggregate to the most restrictive (deny > ask > allow). deny rejects the call; ask forces the interactive prompt even when the session already allowed the tool; allow is advisory (the pipeline still runs). hookSpecificOutput.metadata is merged into the confirmation prompt. updated_input is ignored \u2014 use tool_input_transform to rewrite arguments. Hook execution failures fail closed (deny), like pre_tool_use. Tool-matched; preempt_yolo is rejected because the event always preempts approval.",
+          "items": {
+            "$ref": "#/definitions/HookMatcherConfig"
+          }
+        },
         "worktree_create": {
           "type": "array",
           "description": "Hooks that run once, just after `docker agent run --worktree` creates a git worktree and before the session starts. They execute inside the new worktree (their working directory is the fresh checkout), and the worktree path, branch, and source repository root are passed in worktree_path / worktree_branch / worktree_source_dir. Use them to prepare the checkout: copy untracked files like .env, install dependencies, warm caches, before the agent begins. A hook may abort the run by blocking (decision=block / continue=false / exit code 2); stdout is surfaced as additional context. Dispatched from the CLI rather than the run loop because the worktree (and the working directory every downstream component captures) must be settled before the runtime and session exist.",
@@ -1384,7 +1416,7 @@
         },
         "preempt_yolo": {
           "type": "boolean",
-          "description": "Opt a pre_tool_use entry into firing BEFORE the deterministic approval pipeline (custom allow/ask/deny rules + safety mode). A deny/ask verdict from a preempting hook cannot be bypassed by any safety mode (including autonomous) or permission allow-rules; an allow verdict is advisory (the pipeline still runs Decide() and the rest of pre_tool_use). Default pre_tool_use entries fire AFTER Decide(). Only meaningful on pre_tool_use; ignored on other events. Set it on hooks that implement a security-critical check that must not be bypassed by auto-approval."
+          "description": "Opt a pre_tool_use entry into firing BEFORE the deterministic approval pipeline (custom allow/ask/deny rules + safety mode). A deny/ask verdict from a preempting hook cannot be bypassed by any safety mode (including autonomous) or permission allow-rules; an allow verdict is advisory (the pipeline still runs Decide() and the rest of pre_tool_use). Default pre_tool_use entries fire AFTER Decide(). Only valid on pre_tool_use; rejected on every other event. Set it on hooks that implement a security-critical check that must not be bypassed by auto-approval."
         }
       },
       "required": [
@@ -1402,7 +1434,7 @@
         },
         "type": {
           "type": "string",
-          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime; 'model' asks an LLM and translates its reply into the hook's native output (used for LLM-as-a-judge pre_tool_use, summarizers, etc., with no Go code). The docker-agent runtime ships these builtins: 'add_date' (turn_start: today's date), 'add_environment_info' (session_start: cwd, git, OS, arch), 'add_prompt_files' (turn_start: contents of named files looked up in the workdir hierarchy and the home directory), 'add_git_status' (turn_start: `git status --short --branch`), 'add_git_diff' (turn_start: `git diff --stat`, or full diff with args=['full']), 'add_directory_listing' (session_start: top-level entries of cwd), 'add_user_info' (session_start: current OS user and hostname), 'add_recent_commits' (session_start: `git log --oneline -n N`, default N=10, override via args=['<N>']), 'max_iterations' (before_llm_call: hard stop after N model calls; args=['<N>'] required), 'redact_secrets' (pre_tool_use / before_llm_call / tool_response_transform: scrubs detected secrets from tool arguments, outgoing chat content, and tool output \u2014 the same builtin handles all three legs and dispatches on the event; the matching agent-level 'redact_secrets: true' flag auto-injects the entries for all three), 'unload' (on_agent_switch: POSTs `{\"model\": \"<id>\"}` to the previous agent's DMR model endpoints \u2014 e.g. asks Docker Model Runner to release the GPU/RAM held by the just-departing model so the next agent's model can claim it. Pure HTTP, no provider-specific runtime coupling; non-DMR providers are silently skipped. Opt in by adding the entry to the agent's hooks.on_agent_switch list).",
+          "description": "Type of hook. 'command' executes a shell command; 'builtin' invokes a named in-process Go function registered by the runtime; 'model' asks an LLM and translates its reply into the hook's native output (used for LLM-as-a-judge pre_tool_use, summarizers, etc., with no Go code). The docker-agent runtime ships these builtins: 'add_context' (context-contributing events: renders Go templates in args against hook input and joins non-empty results with newlines as additional context), 'add_date' (turn_start: today's date), 'add_environment_info' (session_start: cwd, git, OS, arch), 'add_prompt_files' (turn_start: contents of named files looked up in the workdir hierarchy and the home directory; args may include '--depth=<N>' to additionally list, by path only, the same filenames found up to N levels below the working directory), 'add_git_status' (turn_start: `git status --short --branch`), 'add_git_diff' (turn_start: `git diff --stat`, or full diff with args=['full']), 'add_directory_listing' (session_start: top-level entries of cwd), 'add_user_info' (session_start: current OS user and hostname), 'add_recent_commits' (session_start: `git log --oneline -n N`, default N=10, override via args=['<N>']), 'max_iterations' (before_llm_call: hard stop after N model calls; args=['<N>'] required), 'redact_secrets' (tool_input_transform or pre_tool_use / before_llm_call / tool_response_transform: scrubs detected secrets from tool arguments, outgoing chat content, and tool output \u2014 the same builtin handles all three legs and dispatches on the event; the matching agent-level 'redact_secrets: true' flag auto-injects the entries on tool_input_transform, before_llm_call, and tool_response_transform), 'unload' (on_agent_switch: POSTs `{\"model\": \"<id>\"}` to the previous agent's DMR model endpoints \u2014 e.g. asks Docker Model Runner to release the GPU/RAM held by the just-departing model so the next agent's model can claim it. Pure HTTP, no provider-specific runtime coupling; non-DMR providers are silently skipped. Opt in by adding the entry to the agent's hooks.on_agent_switch list).",
           "enum": [
             "command",
             "builtin",
@@ -1415,7 +1447,7 @@
         },
         "args": {
           "type": "array",
-          "description": "Arbitrary string arguments passed to the hook handler. Builtin handlers receive them as a typed parameter; e.g. 'add_prompt_files' takes the list of prompt files to load, 'add_recent_commits' optionally takes a positive integer commit limit, 'add_git_diff' accepts 'full' to emit the full unified diff, and 'max_iterations' takes a positive integer call limit.",
+          "description": "Arbitrary string arguments passed to the hook handler. Builtin handlers receive them as a typed parameter; e.g. 'add_context' takes Go text/template strings using hook input fields such as {{ .SessionID }}, 'add_prompt_files' takes the list of prompt files to load, 'add_recent_commits' optionally takes a positive integer commit limit, 'add_git_diff' accepts 'full' to emit the full unified diff, and 'max_iterations' takes a positive integer call limit.",
           "items": {
             "type": "string"
           }
@@ -1439,13 +1471,18 @@
         },
         "on_error": {
           "type": "string",
-          "description": "How non-fail-closed hook failures are handled. 'warn' logs and continues (default), 'ignore' continues silently, and 'block' denies the event.",
+          "description": "Policy for execution errors, timeouts, unexpected nonzero exits and invalid output. 'warn' reports and continues (default), 'ignore' continues silently, and 'block' denies block-capable events. pre_tool_use and tool_guard always fail closed. on_error=block is rejected on observational events.",
           "enum": [
             "warn",
             "ignore",
             "block"
           ],
           "default": "warn"
+        },
+        "strict_output": {
+          "type": "boolean",
+          "description": "Require a single JSON output object (or empty stdout), reject unknown fields and outputs unsupported by the hook event. Failures follow on_error; pre_tool_use and tool_guard fail closed.",
+          "default": false
         },
         "model": {
           "type": "string",
@@ -1595,11 +1632,11 @@
         },
         "bypass_models_gateway": {
           "type": "boolean",
-          "description": "When true, this model connects directly to its provider, ignoring any configured models gateway (--models-gateway / CAGENT_MODELS_GATEWAY). The model then authenticates with the provider's own credentials (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY, or token_key) instead of routing through the gateway. A custom base_url (set on the model or inherited from a custom provider definition) implies this bypass even when the flag is false."
+          "description": "When true, this model connects directly to its provider, ignoring any configured models gateway (--models-gateway / DOCKER_AGENT_MODELS_GATEWAY). The model then authenticates with the provider's own credentials (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY, or token_key) instead of routing through the gateway. A custom base_url (set on the model or inherited from a custom provider definition) implies this bypass even when the flag is false."
         },
         "provider_opts": {
           "type": "object",
-          "description": "Provider-specific options. Sampling parameters: top_k (integer, supported by anthropic, google, amazon-bedrock, and custom OpenAI-compatible providers like vLLM/Ollama), repetition_penalty (float, forwarded to custom OpenAI-compatible providers), min_p (float, forwarded to custom providers), seed (integer, forwarded to OpenAI). Lifecycle: unload_api (string) overrides the unload endpoint inherited from the provider config (relative path resolved against base_url's scheme+host, or an absolute URL); used by the runtime's `unload` on_agent_switch builtin hook to release model resources between agent switches. Infrastructure options: http_headers (map of string to string, adds custom HTTP headers to every request; used for OpenAI-compatible providers like github-copilot which requires Copilot-Integration-Id). dmr: runtime_flags; supports_images (boolean) and supports_pdf (boolean) declare which document attachment types the local model accepts. DMR-hosted models are not in the models.dev catalog, so attachment capabilities cannot be detected automatically and default to text-only; set supports_images: true for a vision model so image attachments are forwarded instead of silently dropped. anthropic/amazon-bedrock (Claude): interleaved_thinking (boolean, default true). anthropic: thinking_display ('summarized', 'omitted', or 'display') controls whether thinking blocks are returned in responses when thinking is enabled. Claude Opus 4.7 hides thinking by default ('omitted'); set thinking_display: summarized to receive thinking blocks. 'display' (full thinking blocks) is only accepted by pre-4.6 token-thinking models (e.g. Sonnet 4.5, Haiku 4.5); models from the adaptive-thinking generation onward (Opus/Sonnet 4.6+, Sonnet 5, Fable 5) reject it, and docker-agent fails fast with a configuration error (fallbacks models are validated too); fallbacks (array of model ID strings, in priority order; enables the server-side-fallback beta so requests refused by safety classifiers, e.g. on Claude Fable 5, are retried with the listed models in a single round trip). openai: transport ('sse' or 'websocket') to choose between SSE and WebSocket streaming for the Responses API. openai/anthropic/google: rerank_prompt (string) to fully override the system prompt used for RAG reranking (advanced - prefer using results.reranking.criteria for domain-specific guidance). Google: google_search (boolean) enables Google Search grounding, google_maps (boolean) enables Google Maps grounding, code_execution (boolean) enables server-side code execution.",
+          "description": "Provider-specific options. Sampling parameters: top_k (integer, supported by anthropic, google, amazon-bedrock, and custom OpenAI-compatible providers like vLLM/Ollama), repetition_penalty (float, forwarded to custom OpenAI-compatible providers), min_p (float, forwarded to custom providers), seed (integer, forwarded to OpenAI). Lifecycle: unload_api (string) overrides the unload endpoint inherited from the provider config (relative path resolved against base_url's scheme+host, or an absolute URL); used by the runtime's `unload` on_agent_switch builtin hook to release model resources between agent switches. Infrastructure options: http_headers (map of string to string, adds custom HTTP headers to every request; used for OpenAI-compatible providers like github-copilot which requires Copilot-Integration-Id). dmr: runtime_flags; supports_images (boolean) and supports_pdf (boolean) declare which document attachment types the local model accepts. DMR-hosted models are not in the models.dev catalog, so attachment capabilities cannot be detected automatically and default to text-only; set supports_images: true for a vision model so image attachments are forwarded instead of silently dropped. anthropic/amazon-bedrock (Claude): interleaved_thinking (boolean, default true). anthropic: thinking_display ('summarized', 'omitted', or 'display') controls whether thinking blocks are returned in responses when thinking is enabled. Claude Opus 4.7 hides thinking by default ('omitted'); set thinking_display: summarized to receive thinking blocks. 'display' (full thinking blocks) is only accepted by pre-4.6 token-thinking models (e.g. Sonnet 4.5, Haiku 4.5); models from the adaptive-thinking generation onward (Opus/Sonnet 4.6+, Sonnet 5, Fable 5) reject it, and docker-agent fails fast with a configuration error (fallbacks models are validated too); fallbacks (array of model ID strings, in priority order; enables the server-side-fallback beta so requests refused by safety classifiers, e.g. on Claude Fable 5, are retried with the listed models in a single round trip). OpenAI-compatible APIs: service_tier (string, forwarded unchanged to Chat Completions and Responses, including WebSocket and reranking; 'fast' or 'priority' enables Fast mode at premium pricing on supported models; omitted or empty leaves the API default, non-string values are ignored). openai: transport ('sse' or 'websocket') to choose between SSE and WebSocket streaming for the Responses API. openai/anthropic/google: rerank_prompt (string) to fully override the system prompt used for RAG reranking (advanced - prefer using results.reranking.criteria for domain-specific guidance). Google: google_search (boolean) enables Google Search grounding, google_maps (boolean) enables Google Maps grounding, code_execution (boolean) enables server-side code execution.",
           "additionalProperties": true
         },
         "track_usage": {
@@ -1738,7 +1775,11 @@
         },
         "capabilities": {
           "$ref": "#/definitions/CapabilitiesConfig",
-          "description": "Explicit attachment capability override for models the models.dev catalogue does not describe correctly (custom OpenAI-compatible providers, local models like Ollama, or dropped model versions). When set, the declared flags are authoritative and no models.dev lookup is performed; when omitted, capabilities are detected automatically. Without it, such models fall back to text-only and their image/PDF attachments are silently dropped."
+          "description": "Explicit attachment capability override for models the models.dev catalogue does not describe correctly (custom OpenAI-compatible providers, local models like Ollama, or dropped model versions). When set, the declared flags are authoritative and no models.dev lookup is performed; when omitted, capabilities are detected automatically. Without it, such models fall back to text-only and their image/PDF/audio/video attachments are silently dropped."
+        },
+        "output_capabilities": {
+          "$ref": "#/definitions/OutputCapabilitiesConfig",
+          "description": "Optional generative output capability override for this model. Resolution precedence is explicit false, explicit true, then the exact models.dev record's Modalities.Output=image for an omitted image flag (including an empty block). Unknown or unavailable catalogue metadata stays disabled; model names are never used to infer capability. Cannot be combined with first_available (set output_capabilities.image on the candidate models instead)."
         },
         "cost": {
           "$ref": "#/definitions/CostConfig",
@@ -1758,6 +1799,25 @@
         "pdf": {
           "type": "boolean",
           "description": "Whether the model accepts PDF (application/pdf) attachments"
+        },
+        "audio": {
+          "type": "boolean",
+          "description": "Whether the model accepts audio attachments"
+        },
+        "video": {
+          "type": "boolean",
+          "description": "Whether the model accepts video attachments"
+        }
+      },
+      "additionalProperties": false
+    },
+    "OutputCapabilitiesConfig": {
+      "type": "object",
+      "description": "Generative output capability overrides for a model. Resolution precedence is explicit false, explicit true, then the exact models.dev record's Modalities.Output=image when the image flag is omitted, including an empty block. Unknown or unavailable catalogue metadata stays disabled; model names are never used to infer capability.",
+      "properties": {
+        "image": {
+          "type": "boolean",
+          "description": "Whether the model can generate image output. Explicit false takes precedence over explicit true; when omitted, Docker Agent uses the exact models.dev record's output modalities and otherwise leaves image output disabled."
         }
       },
       "additionalProperties": false
@@ -2129,11 +2189,11 @@
             "think",
             "memory",
             "filesystem",
+            "file",
             "shell",
             "background_jobs",
             "tasks",
             "plan",
-            "session_plan",
             "session_context",
             "todo",
             "fetch",
@@ -2223,7 +2283,7 @@
         },
         "post_edit": {
           "type": "array",
-          "description": "Post-edit commands for filesystem tool",
+          "description": "Post-edit commands for filesystem and file tools",
           "items": {
             "$ref": "#/definitions/PostEditConfig"
           }
@@ -2247,7 +2307,7 @@
         },
         "allow_list": {
           "type": "array",
-          "description": "Allow-list of directories the filesystem tool is permitted to access (only valid for type 'filesystem'). Each entry may be '.' (the agent's working directory), '~' or '~/...' (the user's home directory), an absolute path, or a relative path (anchored at the working directory). Symlinks are followed before the containment check, so they cannot be used to escape the allow-list. An empty or omitted list preserves the default behaviour (any path the agent process can reach).",
+          "description": "Allow-list of directories the filesystem or file tool is permitted to access. Each entry may be '.' (the agent's working directory), '~' or '~/...' (the user's home directory), an absolute path, or a relative path (anchored at the working directory). Symlinks are followed before the containment check, so they cannot be used to escape the allow-list. An empty or omitted list preserves the default behaviour (any path the agent process can reach).",
           "items": {
             "type": "string"
           },
@@ -2267,7 +2327,7 @@
         },
         "deny_list": {
           "type": "array",
-          "description": "Deny-list of directories the filesystem tool is forbidden to access (only valid for type 'filesystem'). Uses the same expansion rules as 'allow_list'. The deny-list takes precedence over the allow-list: a path that matches both is rejected.",
+          "description": "Deny-list of directories the filesystem or file tool is forbidden to access. Uses the same expansion rules as 'allow_list'. The deny-list takes precedence over the allow-list: a path that matches both is rejected.",
           "items": {
             "type": "string"
           },
@@ -2351,7 +2411,7 @@
         },
         "allow_private_ips": {
           "type": "boolean",
-          "description": "Opt in to dialling non-public IP addresses (valid for type 'fetch', 'api', 'openapi', 'a2a', and remote MCP toolsets). By default protected HTTP clients refuse connections \u2014 after DNS resolution, so DNS rebinding is also blocked \u2014 to loopback, RFC1918 private ranges, link-local (including the cloud metadata endpoint at 169.254.169.254), multicast and the unspecified address. Set this to true when an agent legitimately needs to call internal services. For fetch, 'allowed_domains' / 'blocked_domains' are evaluated independently and still apply."
+          "description": "Opt in to dialling non-public IP addresses (valid for type 'fetch', 'api', 'openapi', 'a2a', and remote MCP toolsets). By default, on the direct path (Docker Desktop unavailable, disabled, or target host is not in the Docker-owned allowlist), protected HTTP clients refuse connections \u2014 after DNS resolution, defeating DNS rebinding \u2014 to loopback, RFC1918 private ranges, link-local (including the cloud metadata endpoint at 169.254.169.254), multicast and the unspecified address. When Docker Desktop is running, only Docker-owned hostnames (docker.com, docker.io families) go through its PAC proxy; dial-time enforcement does not apply on that path. Set this to true when an agent legitimately needs to call internal services. For fetch, 'allowed_domains' / 'blocked_domains' are evaluated independently and still apply."
         },
         "sudo_askpass": {
           "type": "boolean",
@@ -2360,10 +2420,6 @@
         "recall": {
           "type": "boolean",
           "description": "Opt in to background-job recall for the background_jobs toolset (only valid for type 'background_jobs'). When enabled, run_background_job exposes a recall boolean parameter. If the agent sets recall=true for a background job, the runtime injects a steering message with a short completion sentence and the job output when the job finishes. Default false."
-        },
-        "safer": {
-          "type": "boolean",
-          "description": "Deprecated and ignored (only valid for type 'shell'). The runtime now classifies every shell command natively (safe / destructive / unknown) and gates it through the session's safety mode (strict / balanced / restricted / autonomous), so the opt-in is meaningless. Kept so existing YAMLs with safer: true still parse."
         },
         "url": {
           "type": "string",
@@ -2474,12 +2530,12 @@
                 "think",
                 "memory",
                 "filesystem",
+                "file",
                 "shell",
                 "background_jobs",
                 "tasks",
                 "plan",
-                "session_plan",
-                "session_context",
+                    "session_context",
                 "todo",
                 "fetch",
                 "api",
@@ -2854,6 +2910,10 @@
           "type": "boolean",
           "description": "Whether to respect VCS ignore files (e.g., .gitignore) when collecting documents for indexing. When true (default), files matching ignore patterns will be excluded. Can be overridden per-strategy.",
           "default": true
+        },
+        "indexing_timeout": {
+          "type": "string",
+          "description": "Cap on a single indexing run started by this RAG source, detached from the much shorter 30s toolset-start wait budget: indexing keeps running in the background past that budget and the tool appears once it is ready, resuming from per-file progress on a later start. Go duration format (e.g. '30m', '2h'). Default '30m' when omitted; '0s' means no bound."
         },
         "strategies": {
           "type": "array",

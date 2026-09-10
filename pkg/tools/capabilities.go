@@ -13,11 +13,25 @@ type Startable interface {
 	Stop(ctx context.Context) error
 }
 
+// StartReporter is implemented by toolsets whose live lifecycle state can
+// be queried independently of the StartableToolSet wrapper's latched state
+// (e.g. an MCP toolset whose supervisor lost the session in the background).
+// The wrapper consults it on Start to decide whether a recovery is needed,
+// and composite toolsets consult their inner toolsets' reporters to detect
+// an inner that started successfully and later died.
+type StartReporter interface {
+	IsStarted() bool
+}
+
 // PeerDependent is implemented by toolsets whose Start reads from the
-// agent's other toolsets (e.g. the deferred aggregator lists its source
-// toolsets' tools). Callers that start an agent's toolsets concurrently
-// must start these only after every other toolset has settled, or their
-// Start would race the very toolsets it depends on.
+// agent's other toolsets. Callers that start an agent's toolsets
+// concurrently must start these only after every other toolset has
+// settled, or their Start would race the very toolsets it depends on.
+//
+// Note the guarantee is best-effort: a peer whose start is already in
+// flight elsewhere is skipped, not awaited, so a PeerDependent Start must
+// still tolerate a peer that is not ready yet. Prefer resolving peer state
+// lazily, as the deferred toolset does.
 type PeerDependent interface {
 	StartsAfterPeers()
 }

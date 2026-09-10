@@ -107,6 +107,7 @@ func NewSSRFSafeTransport() *http.Transport {
 	var t *http.Transport
 	if base, ok := http.DefaultTransport.(*http.Transport); ok {
 		t = base.Clone()
+		t.Proxy = environmentProxyFunc()
 	} else {
 		// http.DefaultTransport has been replaced by a wrapper (e.g. otelhttp).
 		// We can't clone settings we can't see, so fall back to a minimal
@@ -116,7 +117,7 @@ func NewSSRFSafeTransport() *http.Transport {
 			"NewSSRFSafeTransport is using a minimal fallback transport — "+
 			"proxy env vars are honoured but other DefaultTransport settings are not inherited",
 			"type", fmt.Sprintf("%T", http.DefaultTransport))
-		t = &http.Transport{Proxy: http.ProxyFromEnvironment}
+		t = &http.Transport{Proxy: environmentProxyFunc()}
 	}
 	proxies := proxyDialAllowlist()
 	guarded := &net.Dialer{

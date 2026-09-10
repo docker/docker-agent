@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 func TestAvailableProviders_NoGateway(t *testing.T) {
@@ -272,7 +273,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"ANTHROPIC_API_KEY": "test-key",
 			},
 			expectedProvider:  "anthropic",
-			expectedModel:     "claude-sonnet-4-6",
+			expectedModel:     "claude-sonnet-5",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -290,7 +291,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"GOOGLE_API_KEY": "test-key",
 			},
 			expectedProvider:  "google",
-			expectedModel:     "gemini-3.5-flash",
+			expectedModel:     "gemini-3.8-flash",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -308,7 +309,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"OPENROUTER_API_KEY": "test-key",
 			},
 			expectedProvider:  "openrouter",
-			expectedModel:     "meta-llama/llama-3.3-70b-instruct",
+			expectedModel:     "meta-llama/llama-4-maverick",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -317,7 +318,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"BASETEN_API_KEY": "test-key",
 			},
 			expectedProvider:  "baseten",
-			expectedModel:     "deepseek-ai/DeepSeek-V3.1",
+			expectedModel:     "deepseek-ai/DeepSeek-V4-Pro",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -344,7 +345,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"FIREWORKS_API_KEY": "test-key",
 			},
 			expectedProvider:  "fireworks",
-			expectedModel:     "accounts/fireworks/models/kimi-k2-instruct",
+			expectedModel:     "accounts/fireworks/models/kimi-k3",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -353,7 +354,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"DEEPSEEK_API_KEY": "test-key",
 			},
 			expectedProvider:  "deepseek",
-			expectedModel:     "deepseek-chat",
+			expectedModel:     "deepseek-v4-pro",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -389,7 +390,7 @@ func TestAutoModelConfig(t *testing.T) {
 				"MOONSHOT_API_KEY": "test-key",
 			},
 			expectedProvider:  "moonshot",
-			expectedModel:     "kimi-k2-0905-preview",
+			expectedModel:     "kimi-k3",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -413,7 +414,7 @@ func TestAutoModelConfig(t *testing.T) {
 			envVars:           map[string]string{},
 			gateway:           "gateway:8080",
 			expectedProvider:  "anthropic",
-			expectedModel:     "claude-sonnet-4-6",
+			expectedModel:     "claude-sonnet-5",
 			expectedMaxTokens: 32000,
 		},
 	}
@@ -495,24 +496,24 @@ func TestDefaultModels(t *testing.T) {
 
 	// Test specific model values
 	assert.Equal(t, "gpt-5.6", DefaultModels["openai"])
-	assert.Equal(t, "gpt-5.6", DefaultModels["github-copilot"])
-	assert.Equal(t, "claude-sonnet-4-6", DefaultModels["anthropic"])
-	assert.Equal(t, "gemini-3.5-flash", DefaultModels["google"])
+	assert.Equal(t, "gpt-5.6-sol", DefaultModels["github-copilot"])
+	assert.Equal(t, "claude-sonnet-5", DefaultModels["anthropic"])
+	assert.Equal(t, "gemini-3.8-flash", DefaultModels["google"])
 	assert.Equal(t, "ai/qwen3:latest", DefaultModels["dmr"])
 	assert.Equal(t, "mistral-small-latest", DefaultModels["mistral"])
-	assert.Equal(t, "meta-llama/llama-3.3-70b-instruct", DefaultModels["openrouter"])
+	assert.Equal(t, "meta-llama/llama-4-maverick", DefaultModels["openrouter"])
 	assert.Equal(t, "qwen/qwen3.8-max", DefaultModels["atlascloud"])
-	assert.Equal(t, "deepseek-ai/DeepSeek-V3.1", DefaultModels["baseten"])
+	assert.Equal(t, "deepseek-ai/DeepSeek-V4-Pro", DefaultModels["baseten"])
 	assert.Equal(t, "Qwen3.5-397B-A17B", DefaultModels["ovhcloud"])
 	assert.Equal(t, "llama-3.3-70b-versatile", DefaultModels["groq"])
-	assert.Equal(t, "accounts/fireworks/models/kimi-k2-instruct", DefaultModels["fireworks"])
-	assert.Equal(t, "deepseek-chat", DefaultModels["deepseek"])
+	assert.Equal(t, "accounts/fireworks/models/kimi-k3", DefaultModels["fireworks"])
+	assert.Equal(t, "deepseek-v4-pro", DefaultModels["deepseek"])
 	assert.Equal(t, "gpt-oss-120b", DefaultModels["cerebras"])
 	assert.Equal(t, "meta-llama/Llama-3.3-70B-Instruct-Turbo", DefaultModels["together"])
 	assert.Equal(t, "meta-llama/Llama-3.3-70B-Instruct", DefaultModels["huggingface"])
-	assert.Equal(t, "kimi-k2-0905-preview", DefaultModels["moonshot"])
+	assert.Equal(t, "kimi-k3", DefaultModels["moonshot"])
 	assert.Equal(t, "openai/gpt-5.6-sol", DefaultModels["vercel"])
-	assert.Equal(t, "global.anthropic.claude-sonnet-4-5-20250929-v1:0", DefaultModels["amazon-bedrock"])
+	assert.Equal(t, "global.anthropic.claude-sonnet-5", DefaultModels["amazon-bedrock"])
 	assert.Equal(t, "deepseek-v4-flash", DefaultModels["opencode-go"])
 	assert.Equal(t, "deepseek-v4-flash-free", DefaultModels["opencode-zen"])
 }
@@ -843,7 +844,7 @@ func TestAutoModelConfig_UserDefaultModel(t *testing.T) {
 			defaultModel:      nil,
 			envVars:           map[string]string{"GOOGLE_API_KEY": "test-key"},
 			expectedProvider:  "google",
-			expectedModel:     "gemini-3.5-flash",
+			expectedModel:     "gemini-3.8-flash",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -859,7 +860,7 @@ func TestAutoModelConfig_UserDefaultModel(t *testing.T) {
 			defaultModel:      &latest.ModelConfig{Provider: "openai", Model: ""},
 			envVars:           map[string]string{"ANTHROPIC_API_KEY": "test-key"},
 			expectedProvider:  "anthropic",
-			expectedModel:     "claude-sonnet-4-6",
+			expectedModel:     "claude-sonnet-5",
 			expectedMaxTokens: 32000,
 		},
 	}
@@ -1190,4 +1191,36 @@ func TestCloudProviderEnvVars(t *testing.T) {
 	})
 	require.GreaterOrEqual(t, copilotIdx, 0)
 	assert.Equal(t, []string{"GITHUB_TOKEN", "GH_TOKEN"}, providers[copilotIdx].EnvVars)
+}
+
+// TestDefaultModelsExistInModelsDev is the regression test for issue #4133:
+// DefaultModels must reference models that actually exist in the models.dev
+// catalog, since AutoModelConfig hands them straight to real users with no
+// other validation. modelsDevAbsentProviders and modelsDevCatalogProviders
+// (both defined in examples_test.go) are reused so providers legitimately
+// absent, or aliased under a different id, in the catalog don't produce
+// false failures.
+func TestDefaultModelsExistInModelsDev(t *testing.T) {
+	t.Parallel()
+
+	modelsStore, err := modelsdev.NewStore()
+	require.NoError(t, err)
+
+	for provider, model := range DefaultModels {
+		t.Run(provider, func(t *testing.T) {
+			t.Parallel()
+
+			if modelsDevAbsentProviders[provider] {
+				t.Skipf("provider %q is not expected to exist in the models.dev catalog", provider)
+			}
+
+			catalogProvider := provider
+			if id, ok := modelsDevCatalogProviders[provider]; ok {
+				catalogProvider = id
+			}
+
+			_, err := modelsStore.GetModel(t.Context(), modelsdev.NewID(catalogProvider, model))
+			require.NoError(t, err, "DefaultModels[%q] = %q must exist in the models.dev catalog", provider, model)
+		})
+	}
 }

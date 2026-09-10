@@ -93,6 +93,50 @@ func TestDriver_SendSyncReturnsWhenMessageQuitsProgram(t *testing.T) {
 	d.Press('q') // must not hang or fail even though no frame follows
 }
 
+// shutdownModel records whether the harness released its resources, and
+// whether the program had already stopped when it did.
+type shutdownModel struct {
+	echoModel
+
+	shutdownCalls   int
+	programWasDone  bool
+	programDone     <-chan struct{}
+	shutdownEntered chan struct{}
+}
+
+func (m *shutdownModel) Shutdown() {
+	m.shutdownCalls++
+	select {
+	case <-m.programDone:
+		m.programWasDone = true
+	default:
+	}
+	close(m.shutdownEntered)
+}
+
+func TestDriver_CleanupShutsDownModelAfterProgramStops(t *testing.T) {
+	m := &shutdownModel{shutdownEntered: make(chan struct{})}
+	var d *Driver
+	t.Run("driven", func(t *testing.T) {
+		d = New(t, m, 80, 24)
+		m.programDone = d.runDone
+		d.Type("hi").Assert(Contains("echo: hi"))
+	})
+
+	// t.Run returns only after the subtest's cleanups ran.
+	select {
+	case <-m.shutdownEntered:
+	default:
+		t.Fatal("Shutdown was not called by the driver's cleanup")
+	}
+	if m.shutdownCalls != 1 {
+		t.Fatalf("Shutdown called %d times, want 1", m.shutdownCalls)
+	}
+	if !m.programWasDone {
+		t.Fatal("Shutdown ran before the program had stopped")
+	}
+}
+
 func TestDriver_MouseHelpers(t *testing.T) {
 	d := New(t, &echoModel{}, 80, 24)
 	d.Type("target")

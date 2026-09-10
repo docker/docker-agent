@@ -20,13 +20,19 @@ type Schedule struct {
 func (s Schedule) Recurring() bool { return s.Interval > 0 }
 
 type store struct {
-	mu   sync.Mutex
-	seq  int
-	byID map[string]*Schedule
+	mu       sync.Mutex
+	seq      int
+	byID     map[string]*Schedule
+	inFlight map[string]time.Time
+	retryDue map[string]time.Time
 }
 
 func newStore() *store {
-	return &store{byID: make(map[string]*Schedule)}
+	return &store{
+		byID:     make(map[string]*Schedule),
+		inFlight: make(map[string]time.Time),
+		retryDue: make(map[string]time.Time),
+	}
 }
 
 func (s *store) add(name, prompt, when string, now time.Time) (Schedule, error) {
@@ -71,31 +77,64 @@ func (s *store) cancel(id string) bool {
 		return false
 	}
 	delete(s.byID, id)
+	delete(s.inFlight, id)
+	delete(s.retryDue, id)
 	return true
 }
 
-func (s *store) popDue(now time.Time) []Schedule {
+func (s *store) claimDue(now time.Time) []Schedule {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var fired []Schedule
+	var due []Schedule
 	for id, sc := range s.byID {
 		if sc.NextFire.After(now) {
 			continue
 		}
-		fired = append(fired, *sc)
-		if sc.Interval > 0 {
-			next := sc.NextFire.Add(sc.Interval)
-			for !next.After(now) {
-				next = next.Add(sc.Interval)
-			}
-			sc.NextFire = next
-		} else {
-			delete(s.byID, id)
+		if _, ok := s.inFlight[id]; ok {
+			continue
 		}
+		due = append(due, *sc)
+		logicalDue := sc.NextFire
+		if retryDue, ok := s.retryDue[id]; ok {
+			logicalDue = retryDue
+		}
+		s.inFlight[id] = logicalDue
 	}
-	sortSchedules(fired)
-	return fired
+	sortSchedules(due)
+	return due
+}
+
+func (s *store) finishFire(id string, now time.Time, success bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	due, ok := s.inFlight[id]
+	if !ok {
+		return
+	}
+	delete(s.inFlight, id)
+
+	sc, ok := s.byID[id]
+	if !ok {
+		return
+	}
+	if !success {
+		s.retryDue[id] = due
+		sc.NextFire = now.Add(recallRetryDelay)
+		return
+	}
+	delete(s.retryDue, id)
+	if !sc.Recurring() {
+		delete(s.byID, id)
+		return
+	}
+
+	next := due.Add(sc.Interval)
+	for !next.After(now) {
+		next = next.Add(sc.Interval)
+	}
+	sc.NextFire = next
 }
 
 func (s *store) untilNext(now time.Time) (time.Duration, bool) {
@@ -104,7 +143,10 @@ func (s *store) untilNext(now time.Time) (time.Duration, bool) {
 
 	var soonest time.Time
 	found := false
-	for _, sc := range s.byID {
+	for id, sc := range s.byID {
+		if _, ok := s.inFlight[id]; ok {
+			continue
+		}
 		if !found || sc.NextFire.Before(soonest) {
 			soonest = sc.NextFire
 			found = true

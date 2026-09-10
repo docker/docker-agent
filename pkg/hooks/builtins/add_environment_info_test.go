@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/shellpath"
 )
 
 func TestEnvironmentInfo(t *testing.T) {
@@ -49,12 +51,14 @@ func TestEnvironmentInfo(t *testing.T) {
 			if tt.expectGit {
 				gitStatus = "Yes"
 			}
+			shellPath, _ := shellpath.DetectShell()
 			expected := `Here is useful information about the environment you are running in:
 	<env>
 	Working directory: ` + dir + `
 	Is directory a git repo: ` + gitStatus + `
 	Operating System: ` + displayOS() + `
 	CPU Architecture: ` + displayArch() + `
+	Shell: ` + shellpath.ShellBaseName(shellPath) + ` (` + shellPath + `)
 	</env>`
 
 			assert.Equal(t, expected, environmentInfo(dir))

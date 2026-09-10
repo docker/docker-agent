@@ -11,6 +11,7 @@ import (
 
 type ModelOptions struct {
 	gateway          string
+	encryptedConfig  string
 	structuredOutput *latest.StructuredOutput
 	generatingTitle  bool
 	compacting       bool
@@ -24,6 +25,12 @@ type ModelOptions struct {
 
 func (c *ModelOptions) Gateway() string {
 	return c.gateway
+}
+
+// EncryptedConfig returns the opaque encrypted agent YAML to forward to a
+// trusted Docker models gateway, or "" when none was set.
+func (c *ModelOptions) EncryptedConfig() string {
+	return c.encryptedConfig
 }
 
 func (c *ModelOptions) StructuredOutput() *latest.StructuredOutput {
@@ -107,6 +114,14 @@ func Apply(opts ...Opt) ModelOptions {
 func WithGateway(gateway string) Opt {
 	return func(cfg *ModelOptions) {
 		cfg.gateway = gateway
+	}
+}
+
+// WithEncryptedConfig records the opaque encrypted agent YAML to forward to a
+// trusted Docker models gateway. An empty value is a no-op.
+func WithEncryptedConfig(encryptedConfig string) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.encryptedConfig = encryptedConfig
 	}
 }
 
@@ -212,6 +227,9 @@ func FromModelOptions(m ModelOptions) []Opt {
 	var out []Opt
 	if g := m.Gateway(); g != "" {
 		out = append(out, WithGateway(g))
+	}
+	if m.encryptedConfig != "" {
+		out = append(out, WithEncryptedConfig(m.encryptedConfig))
 	}
 	if m.structuredOutput != nil {
 		out = append(out, WithStructuredOutput(m.structuredOutput))

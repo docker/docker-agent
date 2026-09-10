@@ -53,6 +53,16 @@ func (s Skill) IsFork() bool {
 	return s.Context == "fork"
 }
 
+// ExpandsCommands reports whether !`command` patterns in the skill body may be
+// executed. Local files and the agent config are part of what the user chose to
+// run, and the config already dictates instructions, toolsets and permissions,
+// so a command embedded in it grants nothing it could not already do. A remote
+// body is data fetched from a third-party server at runtime and never earns
+// that authority.
+func (s Skill) ExpandsCommands() bool {
+	return s.Local || s.IsInline()
+}
+
 // Load discovers and loads skills from the given sources.
 // Each source is either "local" (for filesystem-based skills) or an HTTP/HTTPS
 // URL (for remote skills per the well-known skills discovery spec).

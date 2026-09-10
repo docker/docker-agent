@@ -31,9 +31,10 @@ func newDenyChecker(toolName string) *permissions.Checker {
 // fires (the field doubles as a witness that post_tool_use
 // participated at all).
 type stubHookDispatcher struct {
-	mu                sync.Mutex
-	on                map[hooks.EventType]*hooks.Result
-	lastPostToolInput *hooks.Input
+	mu                 sync.Mutex
+	on                 map[hooks.EventType]*hooks.Result
+	lastPostToolInput  *hooks.Input
+	lastTransformInput *hooks.Input
 	// dispatched records every event the dispatcher asked us to fire,
 	// in order. Tests assert against this to pin negative cases —
 	// "this event must NOT have been dispatched in pipeline X."
@@ -56,10 +57,13 @@ func (s *stubHookDispatcher) Dispatch(_ context.Context, _ *agent.Agent, event h
 	if event == hooks.EventPostToolUse {
 		s.lastPostToolInput = in
 	}
+	if event == hooks.EventToolResponseTransform {
+		s.lastTransformInput = in
+	}
 	return s.on[event]
 }
 
-func (s *stubHookDispatcher) NotifyUserInput(context.Context, string, string) {}
+func (s *stubHookDispatcher) NotifyUserInput(context.Context, *agent.Agent, string, string) {}
 func (s *stubHookDispatcher) NotifyApprovalDecision(_ context.Context, _ *session.Session, _ *agent.Agent, _ tools.ToolCall, decision, source, _ string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

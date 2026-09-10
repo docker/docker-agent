@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/history"
 )
 
 func TestEditorInsertAndText(t *testing.T) {
@@ -108,8 +110,8 @@ func TestEditorVerticalMovement(t *testing.T) {
 func TestEditorHistory(t *testing.T) {
 	t.Parallel()
 	e := NewEditor("")
-	e.RememberHistory("first")
-	e.RememberHistory("second")
+	require.NoError(t, e.RememberHistory("first"))
+	require.NoError(t, e.RememberHistory("second"))
 
 	e.SetText("draft")
 	e.HistoryPrev()
@@ -125,10 +127,27 @@ func TestEditorHistory(t *testing.T) {
 	assert.Equal(t, "draft", e.Text()) // restored draft
 }
 
+func TestEditorPersistentHistory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	store, err := history.New(dir)
+	require.NoError(t, err)
+	require.NoError(t, store.Add("from full tui"))
+
+	e := NewEditor("", store)
+	e.HistoryPrev()
+	assert.Equal(t, "from full tui", e.Text())
+
+	require.NoError(t, e.RememberHistory("from lean tui"))
+	reloaded, err := history.New(dir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"from full tui", "from lean tui"}, reloaded.Messages)
+}
+
 func TestEditorHistoryDeduplicates(t *testing.T) {
 	t.Parallel()
 	e := NewEditor("")
-	e.RememberHistory("same")
-	e.RememberHistory("same")
+	require.NoError(t, e.RememberHistory("same"))
+	require.NoError(t, e.RememberHistory("same"))
 	assert.Len(t, e.history, 1)
 }

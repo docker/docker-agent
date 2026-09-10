@@ -3,7 +3,6 @@ package codingharness
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	baseharness "github.com/rumpl/harness"
 	"github.com/rumpl/harness/claudecode"
@@ -38,17 +37,6 @@ func NewProvider(cfg *latest.HarnessConfig) (baseharness.Provider, error) {
 	default:
 		return nil, fmt.Errorf("unsupported harness type %q", cfg.Type)
 	}
-}
-
-func Label(cfg *latest.HarnessConfig) string {
-	if cfg == nil {
-		return ""
-	}
-	model := strings.TrimSpace(cfg.Model)
-	if model == "" {
-		return cfg.Type
-	}
-	return cfg.Type + "/" + model
 }
 
 func newClaudeCodeProvider(cfg *latest.HarnessConfig) baseharness.Provider {

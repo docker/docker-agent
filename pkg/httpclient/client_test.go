@@ -2,10 +2,13 @@ package httpclient
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -164,6 +167,100 @@ func TestSessionIDHeader_GatewayBoundOnly(t *testing.T) {
 				assert.Equal(t, tt.ctxSessionID, headers.Get("X-Cagent-Session-Id"))
 			} else {
 				assert.Empty(t, headers.Get("X-Cagent-Session-Id"))
+			}
+		})
+	}
+}
+
+func TestEncryptedConfigBodyInjection(t *testing.T) {
+	t.Parallel()
+
+	const enc = "ENCRYPTED-AGENT-CONFIG-BLOB"
+
+	tests := []struct {
+		name        string
+		opts        []Opt
+		contentType string
+		body        string
+		wantInject  bool
+		// wantBody, when set, asserts the body is forwarded verbatim (used for
+		// non-JSON and malformed-JSON pass-through cases).
+		wantBody string
+	}{
+		{
+			name:        "gateway-bound JSON body gets the field injected",
+			opts:        []Opt{WithProxiedBaseURL("https://gateway.example/v1"), WithEncryptedConfigBody(enc)},
+			contentType: "application/json",
+			body:        `{"model":"gpt-4o","stream":true}`,
+			wantInject:  true,
+		},
+		{
+			name:        "charset suffix on content-type still injects",
+			opts:        []Opt{WithProxiedBaseURL("https://gateway.example/v1"), WithEncryptedConfigBody(enc)},
+			contentType: "application/json; charset=utf-8",
+			body:        `{"model":"gpt-4o"}`,
+			wantInject:  true,
+		},
+		{
+			name:        "not gateway-bound (no X-Cagent-Forward) leaves body untouched",
+			opts:        []Opt{WithEncryptedConfigBody(enc)},
+			contentType: "application/json",
+			body:        `{"model":"gpt-4o"}`,
+			wantInject:  false,
+			wantBody:    `{"model":"gpt-4o"}`,
+		},
+		{
+			name:        "no encrypted config set leaves body untouched",
+			opts:        []Opt{WithProxiedBaseURL("https://gateway.example/v1")},
+			contentType: "application/json",
+			body:        `{"model":"gpt-4o"}`,
+			wantInject:  false,
+			wantBody:    `{"model":"gpt-4o"}`,
+		},
+		{
+			name:        "non-JSON content type passes through verbatim",
+			opts:        []Opt{WithProxiedBaseURL("https://gateway.example/v1"), WithEncryptedConfigBody(enc)},
+			contentType: "text/plain",
+			body:        "not json",
+			wantInject:  false,
+			wantBody:    "not json",
+		},
+		{
+			name:        "malformed JSON passes through verbatim",
+			opts:        []Opt{WithProxiedBaseURL("https://gateway.example/v1"), WithEncryptedConfigBody(enc)},
+			contentType: "application/json",
+			body:        `{not valid json`,
+			wantInject:  false,
+			wantBody:    `{not valid json`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var received []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				received, _ = io.ReadAll(r.Body)
+			}))
+			defer srv.Close()
+
+			client := NewHTTPClient(t.Context(), tt.opts...)
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader(tt.body))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", tt.contentType)
+
+			resp, err := client.Do(req)
+			require.NoError(t, err)
+			defer func() { _ = resp.Body.Close() }()
+
+			if tt.wantInject {
+				var payload map[string]any
+				require.NoError(t, json.Unmarshal(received, &payload))
+				assert.Equal(t, enc, payload[EncryptedConfigBodyField], "encrypted config must be injected under the body field")
+				assert.Equal(t, "gpt-4o", payload["model"], "original fields must be preserved")
+			} else {
+				assert.Equal(t, tt.wantBody, string(received))
 			}
 		})
 	}

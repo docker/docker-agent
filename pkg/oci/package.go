@@ -1,7 +1,6 @@
 package oci
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -16,13 +15,33 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 
 	"github.com/docker/docker-agent/pkg/config"
-	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/hcl"
 	"github.com/docker/docker-agent/pkg/content"
+	"github.com/docker/docker-agent/pkg/protect"
 	"github.com/docker/docker-agent/pkg/version"
 )
 
+type packageOptions struct {
+	key  *protect.Key
+	mode protect.Mode
+}
+
+type PackageOption func(*packageOptions)
+
+// WithProtection signs (ModeSign) or embeds an encrypted copy of (ModeEncrypt)
+// the packaged YAML in the manifest annotations, so holders of the matching
+// key can verify the artifact.
+func WithProtection(key *protect.Key, mode protect.Mode) PackageOption {
+	return func(o *packageOptions) { o.key, o.mode = key, mode }
+}
+
 // PackageFileAsOCIToStore creates an OCI artifact from a file and stores it in the content store
-func PackageFileAsOCIToStore(ctx context.Context, agentSource config.Source, artifactRef string, store *content.Store) (string, error) {
+func PackageFileAsOCIToStore(ctx context.Context, agentSource config.Source, artifactRef string, store *content.Store, opts ...PackageOption) (string, error) {
+	var o packageOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	if !strings.Contains(artifactRef, ":") {
 		artifactRef += ":latest"
 	}
@@ -40,20 +59,24 @@ func PackageFileAsOCIToStore(ctx context.Context, agentSource config.Source, art
 	if err != nil {
 		return "", fmt.Errorf("reading file: %w", err)
 	}
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return "", fmt.Errorf("looking for version in config file\n%s", yaml.FormatError(err, true, true))
+	isHCL := hcl.IsHCLSource(agentSource.Name(), data)
+	if !isHCL {
+		if err := yaml.Unmarshal(data, &raw); err != nil {
+			return "", fmt.Errorf("looking for version in config file\n%s", yaml.FormatError(err, true, true))
+		}
 	}
 
 	// Push a self-contained artifact. Normally we preserve the author's raw
 	// bytes (keeping comments and formatting), but we must serialize the
 	// resolved config instead when either:
-	//   - the config has no version (we inject the latest one), or
+	//   - the config has no version (config.Load injected the latest one),
+	//   - the config is HCL: its file() calls resolve against the local
+	//     directory, and the artifact is always stored as YAML, or
 	//   - any agent uses instruction_file: its contents have already been
 	//     inlined into Instruction by config.Load, and a pulled artifact has
 	//     no local directory to resolve the original path against, so the raw
 	//     reference would be unreadable.
-	if raw.Version == "" || configUsesInstructionFile(data) {
-		cfg.Version = cmp.Or(raw.Version, latest.Version)
+	if raw.Version == "" || isHCL || configUsesInstructionFile(data) {
 		data, err = yaml.MarshalWithOptions(cfg, yaml.Indent(2))
 		if err != nil {
 			return "", fmt.Errorf("marshaling config: %w", err)
@@ -78,6 +101,11 @@ func PackageFileAsOCIToStore(ctx context.Context, agentSource config.Source, art
 	}
 	if len(cfg.Metadata.Tags) > 0 {
 		annotations["io.docker.agent.tags"] = strings.Join(cfg.Metadata.Tags, ",")
+	}
+	if o.key != nil {
+		if err := o.key.Protect(annotations, data, o.mode); err != nil {
+			return "", fmt.Errorf("protecting config: %w", err)
+		}
 	}
 
 	layer := static.NewLayer(data, "application/yaml")

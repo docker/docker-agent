@@ -48,9 +48,114 @@ type Session struct {
 	id             string
 	sess           *session.Session
 	rt             runtime.Runtime
-	cancel         context.CancelFunc
 	workingDir     string
 	additionalDirs []string
+
+	mu sync.Mutex
+
+	turns      chan struct{}
+	cancel     context.CancelFunc
+	generation uint64
+	closed     bool
+}
+
+var errSessionClosed = errors.New("ACP session closed")
+
+func (s *Session) cancelTurn() {
+	s.mu.Lock()
+	cancel := s.cancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *Session) close() {
+	s.mu.Lock()
+	s.closed = true
+	cancel := s.cancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *Session) startTurn(ctx context.Context) (context.Context, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	turnCtx, cancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		cancel()
+		return nil, nil, errSessionClosed
+	}
+	if err := ctx.Err(); err != nil {
+		s.mu.Unlock()
+		cancel()
+		return nil, nil, err
+	}
+	if s.turns == nil {
+		s.turns = make(chan struct{}, 1)
+		s.turns <- struct{}{}
+	}
+	turns := s.turns
+	previous := s.cancel
+	s.generation++
+	generation := s.generation
+	s.cancel = cancel
+	s.mu.Unlock()
+
+	if previous != nil {
+		previous()
+	}
+
+	select {
+	case <-turnCtx.Done():
+		s.clearTurn(generation, cancel)
+		s.mu.Lock()
+		closed := s.closed
+		s.mu.Unlock()
+		if closed {
+			return nil, nil, errSessionClosed
+		}
+		return nil, nil, turnCtx.Err()
+	case <-turns:
+	}
+
+	s.mu.Lock()
+	closed := s.closed
+	current := s.generation == generation
+	err := turnCtx.Err()
+	s.mu.Unlock()
+	if closed || !current || err != nil {
+		turns <- struct{}{}
+		s.clearTurn(generation, cancel)
+		if closed {
+			return nil, nil, errSessionClosed
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, context.Canceled
+	}
+
+	finish := func() {
+		turns <- struct{}{}
+		s.clearTurn(generation, cancel)
+	}
+	return turnCtx, finish, nil
+}
+
+func (s *Session) clearTurn(generation uint64, cancel context.CancelFunc) {
+	cancel()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.generation == generation {
+		s.cancel = nil
+	}
 }
 
 // NewAgent creates a new ACP agent.
@@ -193,6 +298,8 @@ func (a *Agent) NewSession(ctx context.Context, params acp.NewSessionRequest) (a
 	// An empty cwd is allowed: clients (e.g. zed) may not always supply a
 	// working directory at session creation. We persist it as empty and
 	// later prompts/tools fall back to the agent's default working dir.
+	// The persisted WorkingDir stays empty too: workspace provenance must
+	// come from the client, never be inferred from the server's process cwd.
 	if err := validateWorkingDir(workingDir); err != nil {
 		return acp.NewSessionResponse{}, err
 	}
@@ -263,8 +370,8 @@ func (a *Agent) CloseSession(_ context.Context, params acp.CloseSessionRequest) 
 	}
 	a.mu.Unlock()
 
-	if ok && acpSess != nil && acpSess.cancel != nil {
-		acpSess.cancel()
+	if ok && acpSess != nil {
+		acpSess.close()
 	}
 
 	return acp.CloseSessionResponse{}, nil
@@ -373,8 +480,8 @@ func (a *Agent) Cancel(_ context.Context, params acp.CancelNotification) error {
 	acpSess, ok := a.sessions[sid]
 	a.mu.Unlock()
 
-	if ok && acpSess != nil && acpSess.cancel != nil {
-		acpSess.cancel()
+	if ok && acpSess != nil {
+		acpSess.cancelTurn()
 	}
 
 	return nil
@@ -393,22 +500,19 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 		return acp.PromptResponse{}, fmt.Errorf("session %s not found", sid)
 	}
 
-	// Cancel any previous turn
-	a.mu.Lock()
-	if acpSess.cancel != nil {
-		prev := acpSess.cancel
-		a.mu.Unlock()
-		prev()
-	} else {
-		a.mu.Unlock()
+	turnCtx, finish, err := acpSess.startTurn(ctx)
+	if err != nil {
+		if errors.Is(err, errSessionClosed) {
+			return acp.PromptResponse{}, fmt.Errorf("session %s not found", sid)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return acp.PromptResponse{StopReason: acp.StopReasonCancelled}, nil
+		}
+		return acp.PromptResponse{}, err
 	}
+	defer finish()
 
-	turnCtx, cancel := context.WithCancel(ctx)
-	a.mu.Lock()
-	acpSess.cancel = cancel
-	a.mu.Unlock()
-
-	userMsg := a.buildUserMessage(ctx, sid, params.Prompt)
+	userMsg := a.buildUserMessage(turnCtx, sid, params.Prompt)
 	if userMsg != nil && (userMsg.Message.Content != "" || len(userMsg.Message.MultiContent) > 0) {
 		acpSess.sess.AddMessage(userMsg)
 	}
@@ -419,10 +523,6 @@ func (a *Agent) Prompt(ctx context.Context, params acp.PromptRequest) (acp.Promp
 		}
 		return acp.PromptResponse{}, err
 	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	acpSess.cancel = nil
 
 	return acp.PromptResponse{StopReason: acp.StopReasonEndTurn}, nil
 }
@@ -535,11 +635,11 @@ func (a *Agent) readResourceLink(ctx context.Context, sessionID string, rl *acp.
 }
 
 func resourceLinkName(rl *acp.ContentBlockResourceLink) string {
-	if rl.Name != "" {
-		return rl.Name
+	if name := chat.SanitizeDisplayName(rl.Name); name != "" {
+		return name
 	}
 	if path, ok := resourceLinkPath(rl.Uri); ok {
-		if base := filepath.Base(path); base != "." && base != string(filepath.Separator) {
+		if base := chat.SanitizeDisplayName(filepath.Base(path)); base != "" && base != "." && base != string(filepath.Separator) {
 			return base
 		}
 	}
@@ -703,6 +803,9 @@ func (a *Agent) runAgent(ctx context.Context, acpSess *Session) error {
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return nil
 }
 

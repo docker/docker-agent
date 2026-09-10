@@ -657,7 +657,8 @@ func (d *multiChoiceDialog) renderOption(num int, label string, isSelected bool,
 	// Calculate available width for label (allow word wrap)
 	labelWidth := max(
 		// -1 for space between number box and label
-		contentWidth-numBoxWidth-1, multiChoiceMinLabelWidth)
+		contentWidth-numBoxWidth-1, multiChoiceMinLabelWidth,
+	)
 
 	// Apply width constraint for word wrapping
 	var labelRendered string

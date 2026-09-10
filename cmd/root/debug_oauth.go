@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tools/mcp"
 )
@@ -171,7 +172,7 @@ func newDebugOAuthLoginCmd() *cobra.Command {
 			mcpName := args[1]
 
 			// Load the agent config to find the MCP server URL.
-			agentSource, err := config.Resolve(agentFile, flags.runConfig.EnvProvider())
+			agentSource, err := sources.Resolve(agentFile, flags.runConfig.EnvProvider())
 			if err != nil {
 				return err
 			}
@@ -181,19 +182,19 @@ func newDebugOAuthLoginCmd() *cobra.Command {
 				return err
 			}
 
-			serverURL, err := findMCPRemoteURL(cfg, mcpName)
+			remote, err := findMCPRemote(cfg, mcpName)
 			if err != nil {
 				return err
 			}
 
 			w := cmd.OutOrStdout()
-			fmt.Fprintf(w, "Starting OAuth login for %s (%s)...\n", mcpName, serverURL)
+			fmt.Fprintf(w, "Starting OAuth login for %s (%s)...\n", mcpName, remote.URL)
 
-			if err := mcp.PerformOAuthLogin(ctx, serverURL); err != nil {
+			if err := mcp.PerformOAuthLogin(ctx, remote); err != nil {
 				return fmt.Errorf("OAuth login failed: %w", err)
 			}
 
-			fmt.Fprintf(w, "✅ OAuth login successful for %s\n", serverURL)
+			fmt.Fprintf(w, "✅ OAuth login successful for %s\n", remote.URL)
 			return nil
 		},
 	}
@@ -203,20 +204,26 @@ func newDebugOAuthLoginCmd() *cobra.Command {
 	return cmd
 }
 
-// findMCPRemoteURL looks up the remote URL for the named MCP server in the config.
-// It matches by name (top-level mcps key or toolset name), by URL substring,
-// or returns the only remote MCP if there is exactly one.
-func findMCPRemoteURL(cfg *latest.Config, name string) (string, error) {
-	// Collect all remote MCP URLs with their identifiers.
+// findMCPRemote looks up the full remote configuration for the named MCP
+// server in the config. It matches by exact name (top-level mcps key or
+// toolset name) or by exact URL equality; a URL substring or prefix does
+// not match.
+//
+// The returned latest.Remote is passed to PerformOAuthLogin verbatim:
+// Remote.URL is used as-is for the OAuth probe, resource indicator, and
+// token-store key, and Remote.OAuth carries any explicit client
+// credentials/scopes configured for this MCP server.
+func findMCPRemote(cfg *latest.Config, name string) (latest.Remote, error) {
+	// Collect all remote MCP entries with their identifiers.
 	type mcpEntry struct {
-		label string
-		url   string
+		label  string
+		remote latest.Remote
 	}
 	var all []mcpEntry
 
 	for k, m := range cfg.MCPs {
 		if m.Remote.URL != "" {
-			all = append(all, mcpEntry{label: k, url: m.Remote.URL})
+			all = append(all, mcpEntry{label: k, remote: m.Remote})
 		}
 	}
 	for _, agent := range cfg.Agents {
@@ -226,7 +233,7 @@ func findMCPRemoteURL(cfg *latest.Config, name string) (string, error) {
 				if label == "" {
 					label = ts.Remote.URL
 				}
-				all = append(all, mcpEntry{label: label, url: ts.Remote.URL})
+				all = append(all, mcpEntry{label: label, remote: ts.Remote})
 			}
 		}
 	}
@@ -234,14 +241,14 @@ func findMCPRemoteURL(cfg *latest.Config, name string) (string, error) {
 	// Exact match by name/label.
 	for _, e := range all {
 		if e.label == name {
-			return e.url, nil
+			return e.remote, nil
 		}
 	}
 
 	// Exact match by URL.
 	for _, e := range all {
-		if e.url == name {
-			return e.url, nil
+		if e.remote.URL == name {
+			return e.remote, nil
 		}
 	}
 
@@ -251,7 +258,7 @@ func findMCPRemoteURL(cfg *latest.Config, name string) (string, error) {
 		labels = append(labels, e.label)
 	}
 	if len(labels) > 0 {
-		return "", fmt.Errorf("MCP %q not found; available: %v", name, labels)
+		return latest.Remote{}, fmt.Errorf("MCP %q not found; available: %v", name, labels)
 	}
-	return "", fmt.Errorf("MCP %q not found; no remote MCPs found in config", name)
+	return latest.Remote{}, fmt.Errorf("MCP %q not found; no remote MCPs found in config", name)
 }

@@ -5,17 +5,15 @@ import "fmt"
 // NotFoundError reports that the addressed plan does not exist in its scope.
 type NotFoundError struct {
 	Scope Scope
-	// Name is the plan name or the session ID, matching Scope.
-	Name string
+	Name  string
 }
 
 func (e *NotFoundError) Error() string {
 	return fmt.Sprintf("%s plan %q not found", e.Scope, e.Name)
 }
 
-// ValidationError reports invalid caller input: a malformed plan name or
-// session ID, an unknown scope, empty or oversized content, or an empty
-// status.
+// ValidationError reports invalid caller input: a malformed plan name, an
+// unknown scope, empty or oversized content, or an empty status.
 type ValidationError struct {
 	Message string
 }
@@ -68,20 +66,4 @@ func (e *ConflictError) Error() string {
 		return fmt.Sprintf("plan %q already exists (current version %d); pick a different name, or update the existing plan", e.Name, e.Current)
 	}
 	return fmt.Sprintf("version conflict on plan %q: expected version %d does not match current version %d; re-read the plan and retry, or force to overwrite", e.Name, e.Expected, e.Current)
-}
-
-// UnsupportedError reports an operation the plan's scope does not support,
-// with Reason telling the caller what to do instead.
-type UnsupportedError struct {
-	Scope  Scope
-	Op     string
-	Reason string
-}
-
-func (e *UnsupportedError) Error() string {
-	msg := fmt.Sprintf("%s is not supported for %s plans", e.Op, e.Scope)
-	if e.Reason != "" {
-		msg += ": " + e.Reason
-	}
-	return msg
 }

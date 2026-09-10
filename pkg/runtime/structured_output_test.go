@@ -140,6 +140,23 @@ func assertNoOrphanToolCalls(t *testing.T, sess *session.Session) {
 	}
 }
 
+func TestStructuredOutputPlainTextRejectionDoesNotEmitImageWarning(t *testing.T) {
+	t.Parallel()
+
+	rt, _ := structuredOutputRuntime(t, toolModeStructuredOutput(), nil,
+		newStreamBuilder().AddContent("I created an image.").AddStopWithUsage(5, 5).Build(),
+		newStreamBuilder().AddContent("Still no structured output.").AddStopWithUsage(5, 5).Build(),
+		newStreamBuilder().AddContent("No tool call.").AddStopWithUsage(5, 5).Build(),
+	)
+	events := runAndCollect(t, rt, session.New(session.WithUserMessage("generate an image")))
+
+	for _, event := range events {
+		if warning, ok := event.(*WarningEvent); ok {
+			assert.NotEqual(t, missingGeneratedImageWarning, warning.Message)
+		}
+	}
+}
+
 // TestStructuredOutputToolMode_ExposesToolWithSchema proves the internal tool
 // is offered to the model in tool mode — with Parameters exactly equal to the
 // configured schema — and that native mode never exposes it.

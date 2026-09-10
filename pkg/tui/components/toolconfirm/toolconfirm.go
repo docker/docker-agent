@@ -18,6 +18,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -67,20 +68,22 @@ func (d Decision) Resume(pattern, reason string) runtime.ResumeRequest {
 }
 
 // BuildPermissionPattern creates the permission pattern granted by the
-// "always allow" decision. For shell commands it extracts the first word of
-// the command and creates a pattern like "shell:cmd=ls*" matching all
-// invocations of that command; for other tools it returns the tool name.
+// "always allow" decision. For command tools (shell, run_background_job)
+// it extracts the first word of the command and creates a pattern like
+// "shell:cmd=ls*" matching all invocations of that command; for other
+// tools it returns the tool name.
 func BuildPermissionPattern(toolCall tools.ToolCall) string {
 	toolName := toolCall.Function.Name
 
-	if toolName == "shell" {
-		var args struct {
-			Cmd string `json:"cmd"`
-		}
+	if safety.IsCommandTool(toolName) {
+		var args map[string]any
 		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err == nil {
-			// First word of the command ("ls -la /tmp" -> "ls"); the
-			// trailing * matches any arguments.
-			if fields := strings.Fields(args.Cmd); len(fields) > 0 {
+			// Resolve cmd/command the way the handler will, so the grant
+			// is built from the command that actually runs. First word
+			// only ("ls -la /tmp" -> "ls"); the trailing * matches any
+			// arguments.
+			cmd, _ := safety.CommandArg(args)
+			if fields := strings.Fields(cmd); len(fields) > 0 {
 				return toolName + ":cmd=" + fields[0] + "*"
 			}
 		}

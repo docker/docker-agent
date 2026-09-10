@@ -74,6 +74,9 @@ type Settings struct {
 	// RenderImages displays images returned by tools in supported terminals.
 	// Defaults to true when not set.
 	RenderImages *bool `yaml:"render_images,omitempty"`
+	// ShowBanner displays the ASCII-art startup banner in the TUI.
+	// Defaults to true when not set.
+	ShowBanner *bool `yaml:"show_banner,omitempty"`
 	// Theme is the default theme reference (e.g., "dark", "light")
 	// Theme files are loaded from ~/.cagent/themes/<theme>.yaml
 	// The special value "auto" follows the terminal's light/dark background,
@@ -250,6 +253,14 @@ func (s *Settings) GetRenderImages() bool {
 		return true
 	}
 	return *s.RenderImages
+}
+
+// GetShowBanner returns whether the startup banner is displayed, defaulting to true.
+func (s *Settings) GetShowBanner() bool {
+	if s == nil || s.ShowBanner == nil {
+		return true
+	}
+	return *s.ShowBanner
 }
 
 // GetRestoreTabs returns whether previously open tabs are restored on

@@ -104,7 +104,8 @@ func (m *MigrationManager) checkForUnknownMigrations(ctx context.Context) error 
 			"%w: you are running docker-agent %s which supports migrations up to %d, "+
 				"but the session database has migration %d from a newer version; "+
 				"please upgrade docker-agent to the latest version",
-			ErrNewerDatabase, version.Version, maxKnownID, maxAppliedID)
+			ErrNewerDatabase, version.Version, maxKnownID, maxAppliedID,
+		)
 	}
 
 	return nil
@@ -434,6 +435,53 @@ func getAllMigrations() []Migration {
 			Description: "Add generic attributes to sessions",
 			UpSQL:       `ALTER TABLE sessions ADD COLUMN attributes TEXT DEFAULT '{}'`,
 			DownSQL:     `ALTER TABLE sessions DROP COLUMN attributes`,
+		},
+		// Revert PRs must retain this entry: upgraded databases keep the column,
+		// and removing it makes older binaries reject them as newer databases.
+		{
+			ID:          27,
+			Name:        "027_add_session_origin_column",
+			Description: "Record the protocol surface that created each session",
+			UpSQL:       `ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'run'`,
+			DownSQL:     `ALTER TABLE sessions DROP COLUMN origin`,
+		},
+		{
+			ID:          28,
+			Name:        "028_add_generated_media_manifest_table",
+			Description: "Record which workspace files generated-media materialization wrote, keyed by owning session and workspace-relative path",
+			// No foreign key to sessions(id): materialization may record a file
+			// before the (lazily persisted) session row exists. DeleteSession
+			// prunes manifest rows explicitly instead.
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS generated_media_manifest (
+					session_id TEXT NOT NULL,
+					rel_path TEXT NOT NULL,
+					mime_type TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					PRIMARY KEY (session_id, rel_path)
+				)
+			`,
+			DownSQL: `DROP TABLE IF EXISTS generated_media_manifest`,
+		},
+		{
+			ID:          29,
+			Name:        "029_add_generated_media_blob_table",
+			Description: "Store generated-media bytes in the session database for portable session rendering",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS generated_media_blobs (
+					session_id TEXT NOT NULL,
+					rel_path TEXT NOT NULL,
+					data BLOB NOT NULL,
+					PRIMARY KEY (session_id, rel_path)
+				)
+			`,
+			DownSQL: `DROP TABLE IF EXISTS generated_media_blobs`,
+		},
+		{
+			ID:          30,
+			Name:        "030_add_root_kind_to_generated_media_manifest",
+			Description: "Add root_kind to generated_media_manifest so user-confirmed out-of-workspace generated files stay manifest-gated alongside workspace-relative ones",
+			UpSQL:       `ALTER TABLE generated_media_manifest ADD COLUMN root_kind TEXT NOT NULL DEFAULT 'workspace'`,
 		},
 	}
 }

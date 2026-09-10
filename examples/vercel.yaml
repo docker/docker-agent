@@ -3,7 +3,7 @@
 models:
   vercel_model:
     provider: vercel
-    model: openai/gpt-5
+    model: openai/gpt-5.6-sol
 
 agents:
   root:

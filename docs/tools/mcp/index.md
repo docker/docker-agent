@@ -99,11 +99,13 @@ toolsets:
 | ----------------------- | ------- | ----------- |
 | `remote.url`            | string  | Base URL of the MCP server. |
 | `remote.transport_type` | string  | `streamable` or `sse`. |
-| `remote.headers`        | object  | HTTP headers sent on every request. Values support `${env.VAR}` and `${headers.NAME}` placeholders, resolved per request. See [Remote MCP Servers](../../features/remote-mcp/index.md#per-request-header-template-expansion) for details. |
+| `remote.headers`        | object  | HTTP headers sent on every request. Values support `${env.VAR}` and `${headers.NAME}` placeholders, resolved per request. See [Remote MCP Servers](../../features/remote-mcp/index.md#configuration) for details. |
 | `remote.oauth`          | object  | Explicit OAuth client credentials for servers that don't support DCR. See [Remote MCP Servers](../../features/remote-mcp/index.md#oauth-for-servers-without-dynamic-client-registration). |
 | `allow_private_ips`     | boolean | Permit remote MCP OAuth helper requests to dial non-public IP addresses. Use only for trusted internal servers. |
 
 For a curated list of public remote MCP endpoints (Linear, GitHub, Vercel, Notion, …) and full OAuth configuration details, see [Remote MCP Servers](../../features/remote-mcp/index.md).
+
+When Docker Desktop is running, eligible MCP OAuth discovery, token, and helper requests use its PAC adapter before environment proxy settings, but remote MCP Streamable HTTP/SSE transport does not. Set `DOCKER_AGENT_DISABLE_DESKTOP_PROXY=1` (or `true`, `yes`, or `on`) to restore standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` routing; `NO_PROXY` does not bypass Docker Desktop PAC selection. Docker Agent does not evaluate PAC files or URLs directly—see [Docker Desktop proxy](../fetch/index.md#docker-desktop-proxy).
 
 ## MCP Prompts
 
@@ -255,6 +257,8 @@ toolsets:
 ```
 
 See [Toolset Lifecycle](../../configuration/tools/index.md#toolset-lifecycle) for all profiles and tuning knobs, and [`/toolset-restart`](../../features/tui/index.md) to force a reconnect from the TUI.
+
+**Startup failure behaviour:** local MCP failures (missing binary, connection refused, bad auth) fail fast — each turn retries immediately with no artificial delay. Remote MCP servers (Streamable HTTP / SSE) that respond with one of a fixed set of retryable HTTP statuses — 429 Too Many Requests, 408 Request Timeout, 500/502/503/504, or 529 (Anthropic-style "overloaded") — are paced by the same [bounded exponential backoff gate](../rag/index.md#indexing-failures-retries-and-backoff) that RAG embedding calls use, so a temporarily-overloaded remote MCP server does not trigger a new connect attempt on every agent turn. This is a fixed enumeration, not a full 5xx range: less-common codes such as 501, 505, or the Cloudflare 520–527 family do not arm the gate. MCP paces every connection attempt on this set; RAG's own trigger set differs slightly — 429 arms the gate on the very first failure, while 408/5xx only arm it once every file in an indexing run has hit one of these retryable statuses with none indexed successfully (see [RAG's retry-policy table](../rag/index.md#what-triggers-backoff)). This pacing also applies when toolsets are wrapped in [code mode](../../features/code-mode/index.md#limits--security-notes): a retryable failure in the degraded subset paces that subset's retry the same way, while the composite's healthy tools stay available.
 
 ## Combined Example
 

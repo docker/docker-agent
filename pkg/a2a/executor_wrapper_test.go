@@ -1,45 +1,43 @@
 package a2a
 
 import (
-	"context"
 	"encoding/json"
+	"errors"
+	"iter"
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	adka2a "google.golang.org/adk/v2/server/adka2a/v2"
 )
 
-type mockQueue struct {
-	events []a2a.Event
+func sourceOf(events ...a2a.Event) iter.Seq2[a2a.Event, error] {
+	return func(yield func(a2a.Event, error) bool) {
+		for _, event := range events {
+			if !yield(event, nil) {
+				return
+			}
+		}
+	}
 }
 
-func (m *mockQueue) Write(_ context.Context, event a2a.Event) error {
-	m.events = append(m.events, event)
-	return nil
+func collect(t *testing.T, events iter.Seq2[a2a.Event, error]) []a2a.Event {
+	t.Helper()
+	var collected []a2a.Event
+	for event, err := range events {
+		require.NoError(t, err)
+		collected = append(collected, event)
+	}
+	return collected
 }
 
-func (m *mockQueue) Read(context.Context) (a2a.Event, a2a.TaskVersion, error) {
-	return nil, a2a.TaskVersionMissing, nil
-}
-
-func (m *mockQueue) WriteVersioned(_ context.Context, event a2a.Event, _ a2a.TaskVersion) error {
-	m.events = append(m.events, event)
-	return nil
-}
-
-func (m *mockQueue) Close() error {
-	return nil
-}
-
-func TestFixingQueue_NilParts(t *testing.T) {
+func TestFixArtifactEvents_NilParts(t *testing.T) {
 	t.Parallel()
-	mock := &mockQueue{}
-	fq := &fixingQueue{queue: mock}
 
 	// Create an artifact update event with nil Parts
-	err := fq.Write(t.Context(), &a2a.TaskArtifactUpdateEvent{
+	source := sourceOf(&a2a.TaskArtifactUpdateEvent{
 		ContextID: "test-context",
 		TaskID:    "test-task",
 		Append:    true,
@@ -48,66 +46,115 @@ func TestFixingQueue_NilParts(t *testing.T) {
 			Parts: nil,
 		},
 	})
-	require.NoError(t, err)
-	require.Len(t, mock.events, 1)
 
-	written := mock.events[0].(*a2a.TaskArtifactUpdateEvent)
-	assert.NotNil(t, written.Artifact.Parts)
-	assert.Empty(t, written.Artifact.Parts)
+	events := collect(t, fixArtifactEvents(source))
+	require.Len(t, events, 1)
+
+	fixed := events[0].(*a2a.TaskArtifactUpdateEvent)
+	assert.NotNil(t, fixed.Artifact.Parts)
+	assert.Empty(t, fixed.Artifact.Parts)
 
 	// Verify it serializes correctly
-	data, err := json.Marshal(written.Artifact)
+	data, err := json.Marshal(fixed.Artifact)
 	require.NoError(t, err)
 
 	assert.JSONEq(t, `{"artifactId":"test-artifact","parts":[]}`, string(data))
 }
 
-func TestFixingQueue_WithParts(t *testing.T) {
+func TestFixArtifactEvents_WithParts(t *testing.T) {
 	t.Parallel()
-	mock := &mockQueue{}
-	fq := &fixingQueue{queue: mock}
 
 	// Create an artifact update event with actual parts
-	event := &a2a.TaskArtifactUpdateEvent{
+	source := sourceOf(&a2a.TaskArtifactUpdateEvent{
 		ContextID: "test-context",
 		TaskID:    "test-task",
 		Append:    true,
 		Artifact: &a2a.Artifact{
-			ID: "test-artifact",
-			Parts: []a2a.Part{
-				a2a.TextPart{Text: "Hello"},
-			},
+			ID:    "test-artifact",
+			Parts: a2a.ContentParts{a2a.NewTextPart("Hello")},
 		},
-	}
+	})
 
-	// Write the event through the fixing queue
-	err := fq.Write(t.Context(), event)
-	require.NoError(t, err)
+	events := collect(t, fixArtifactEvents(source))
+	require.Len(t, events, 1)
 
-	// Verify the event was written unchanged
-	require.Len(t, mock.events, 1)
-	written := mock.events[0].(*a2a.TaskArtifactUpdateEvent)
-
-	assert.Len(t, written.Artifact.Parts, 1)
+	// Verify the event was yielded unchanged
+	fixed := events[0].(*a2a.TaskArtifactUpdateEvent)
+	require.Len(t, fixed.Artifact.Parts, 1)
+	assert.Equal(t, "Hello", fixed.Artifact.Parts[0].Text())
 }
 
-func TestFixingQueue_NonArtifactEvent(t *testing.T) {
+func TestFixArtifactEvents_NonArtifactEvent(t *testing.T) {
 	t.Parallel()
-	mock := &mockQueue{}
-	fq := &fixingQueue{queue: mock}
 
 	// Create a different type of event
-	reqCtx := &a2asrv.RequestContext{
+	execCtx := &a2asrv.ExecutorContext{
 		TaskID:    "test-task",
 		ContextID: "test-context",
 	}
-	event := a2a.NewStatusUpdateEvent(reqCtx, a2a.TaskStateCompleted, nil)
+	event := a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateCompleted, nil)
 
-	// Write the event through the fixing queue
-	err := fq.Write(t.Context(), event)
-	require.NoError(t, err)
+	events := collect(t, fixArtifactEvents(sourceOf(event)))
 
-	// Verify the event was written unchanged
-	require.Len(t, mock.events, 1)
-	assert.IsType(t, &a2a.TaskStatusUpdateEvent{}, mock.events[0])
+	// Verify the event was yielded unchanged
+	require.Len(t, events, 1)
+	assert.Same(t, event, events[0])
+}
+
+func TestFixArtifactEvents_ErrorPassthrough(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("agent run failed")
+	source := func(yield func(a2a.Event, error) bool) {
+		yield(nil, wantErr)
+	}
+
+	var errs []error
+	for event, err := range fixArtifactEvents(source) {
+		assert.Nil(t, event)
+		errs = append(errs, err)
+	}
+	require.Len(t, errs, 1)
+	require.ErrorIs(t, errs[0], wantErr)
+}
+
+func TestFixArtifactEvents_StopsSourceWhenConsumerStops(t *testing.T) {
+	t.Parallel()
+
+	execCtx := &a2asrv.ExecutorContext{
+		TaskID:    "test-task",
+		ContextID: "test-context",
+	}
+	yielded := 0
+	source := func(yield func(a2a.Event, error) bool) {
+		for {
+			yielded++
+			if !yield(a2a.NewStatusUpdateEvent(execCtx, a2a.TaskStateWorking, nil), nil) {
+				return
+			}
+		}
+	}
+
+	for range fixArtifactEvents(source) {
+		break
+	}
+
+	assert.Equal(t, 1, yielded)
+}
+
+func TestExecutorWrapper_Cancel(t *testing.T) {
+	t.Parallel()
+
+	wrapper := newExecutorWrapper(adka2a.ExecutorConfig{})
+	execCtx := &a2asrv.ExecutorContext{
+		TaskID:    "test-task",
+		ContextID: "test-context",
+	}
+
+	events := collect(t, wrapper.Cancel(t.Context(), execCtx))
+	require.Len(t, events, 1)
+
+	statusEvent, ok := events[0].(*a2a.TaskStatusUpdateEvent)
+	require.True(t, ok)
+	assert.Equal(t, a2a.TaskStateCanceled, statusEvent.Status.State)
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/profiling"
 	"github.com/docker/docker-agent/pkg/server"
@@ -135,12 +136,12 @@ func (f *apiFlags) runAPICommand(cmd *cobra.Command, args []string) (commandErr 
 		}
 	}()
 
-	sources, err := config.ResolveSources(agentsPath, f.runConfig.EnvProvider())
+	agentSources, err := sources.ResolveSources(agentsPath, f.runConfig.EnvProvider())
 	if err != nil {
 		return fmt.Errorf("resolving agent sources: %w", err)
 	}
 
-	s, err := server.New(ctx, sessionStore, &f.runConfig, time.Duration(f.pullIntervalMins)*time.Minute, sources, f.authToken, f.maxRequestSize,
+	s, err := server.New(ctx, sessionStore, &f.runConfig, time.Duration(f.pullIntervalMins)*time.Minute, agentSources, f.authToken, f.maxRequestSize,
 		server.WithSessionWorkingDirRoot(f.sessionWorkingDirRoot))
 	if err != nil {
 		return fmt.Errorf("creating server: %w", err)

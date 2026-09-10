@@ -78,7 +78,6 @@ type Model interface {
 	// SetMirroredPadding swaps the horizontal edge padding so the sidebar hugs
 	// the terminal edge when rendered on the left of the chat.
 	SetMirroredPadding(mirrored bool)
-	VisualGeneration() uint64
 	SetAgentInfo(agentName, model, description string, contextLimit int64, compactionModel string, primaryContextLimit int64) tea.Cmd
 	SetTeamInfo(availableAgents []runtime.AgentDetails)
 	// SetAgentSwitching records the start (switching=true) or end of a
@@ -154,8 +153,25 @@ type Model interface {
 	SetTitleRegenerating(regenerating bool) tea.Cmd
 	// IsScrollbarDragging returns true when the scrollbar thumb is being dragged.
 	IsScrollbarDragging() bool
+	// VisualGeneration increments whenever an update changes rendered sidebar state.
+	VisualGeneration() uint64
 	// WorkingDirectory returns the working directory path displayed in the sidebar.
 	WorkingDirectory() string
+}
+
+type gitBranchChangedMsg string
+
+func waitForGitBranch(watcher *gitbranch.Watcher) tea.Cmd {
+	if watcher == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		branch, ok := <-watcher.Changes()
+		if !ok {
+			return nil
+		}
+		return gitBranchChangedMsg(branch)
+	}
 }
 
 // ragIndexingState tracks per-strategy indexing progress
@@ -318,7 +334,8 @@ type model struct {
 	rootSessionID        string   // Main (top-level) session, shown when no stream is active
 	scrollview           *scrollview.Model
 	workingDirectory     string
-	gitBranchName        string   // current git branch, empty if not in a repo
+	gitBranchName        string // current git branch, empty if not in a repo
+	gitBranchWatcher     *gitbranch.Watcher
 	queuedMessages       []string // Truncated preview of queued messages
 	streamCancelled      bool     // true after ESC cancel until next StreamStartedEvent
 	compacting           bool     // true while a session compaction runs (started → completed)
@@ -349,6 +366,7 @@ type model struct {
 	cachedNeedsScrollbar bool     // Whether scrollbar is needed for cached render
 	cacheDirty           bool     // True when cache needs rebuild
 	layoutDirty          bool     // True when a change may alter line count/scrollbar visibility (not just an animation frame)
+	visualGeneration     uint64
 
 	// Agent click zones: maps content line index to agent name for click detection
 	agentClickZones map[int]string // content line -> agent name
@@ -379,7 +397,9 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 	ti.CharLimit = 50
 	ti.Prompt = "" // No prompt to maximize usable width in collapsed sidebar
 
-	wd, branch := getCurrentWorkingDirectory()
+	rawDir, _ := os.Getwd()
+	wd, branch := formatWorkingDirectory(rawDir)
+	branchWatcher, _ := gitbranch.Watch(ctx, rawDir)
 
 	m := &model{
 		ctx:               func() context.Context { return context.WithoutCancel(ctx) },
@@ -400,6 +420,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		),
 		workingDirectory: wd,
 		gitBranchName:    branch,
+		gitBranchWatcher: branchWatcher,
 		preferredWidth:   DefaultWidth,
 		sectionGap:       defaultSectionGap,
 		titleInput:       ti,
@@ -411,7 +432,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 }
 
 func (m *model) Init() tea.Cmd {
-	return nil
+	return waitForGitBranch(m.gitBranchWatcher)
 }
 
 // needsSpinner returns true if any spinner-driving state is active.
@@ -446,11 +467,10 @@ func (m *model) stopSpinner() {
 // on the next View(). Use this for changes that may alter the rendered content
 // AND its line layout (todos, sizing, agents, theme, …): the next View()
 // re-probes scrollbar visibility via the two-pass render.
-func (m *model) VisualGeneration() uint64 { return 0 }
-
 func (m *model) invalidateCache() {
 	m.cacheDirty = true
 	m.layoutDirty = true
+	m.visualGeneration++
 }
 
 // invalidateAnimation marks the cache dirty for an animation-only change, i.e. a
@@ -460,6 +480,7 @@ func (m *model) invalidateCache() {
 // the sections only once.
 func (m *model) invalidateAnimation() {
 	m.cacheDirty = true
+	m.visualGeneration++
 }
 
 func (m *model) SetTokenUsage(event *runtime.TokenUsageEvent) {
@@ -999,7 +1020,12 @@ func (m *model) LoadFromSession(sess *session.Session) {
 
 	// Load working directory from session
 	if sess.WorkingDir != "" {
-		m.workingDirectory, m.gitBranchName = formatWorkingDirectory(sess.WorkingDir)
+		m.workingDirectory = pathx.ShortenHome(sess.WorkingDir)
+		if m.gitBranchWatcher != nil {
+			m.gitBranchName = m.gitBranchWatcher.SetDir(sess.WorkingDir)
+		} else {
+			m.gitBranchName = gitbranch.Current(sess.WorkingDir)
+		}
 	}
 
 	// Session has content if it has messages or token usage
@@ -1133,17 +1159,6 @@ func formatWorkingDirectory(rawDir string) (display, branch string) {
 	return pathx.ShortenHome(rawDir), gitbranch.Current(rawDir)
 }
 
-// getCurrentWorkingDirectory returns the current working directory with home directory
-// replaced by ~/, along with the current git branch name.
-func getCurrentWorkingDirectory() (string, string) {
-	pwd, err := os.Getwd()
-	if err != nil {
-		return "", ""
-	}
-
-	return formatWorkingDirectory(pwd)
-}
-
 // workingDirWithBranch returns the working directory path with the git branch
 // appended in muted style, suitable for rendering in the sidebar.
 func (m *model) workingDirWithBranch() string {
@@ -1170,12 +1185,21 @@ func (m *model) workingDirLine() string {
 // Update handles messages and updates the component state.
 func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case gitBranchChangedMsg:
+		m.gitBranchName = string(msg)
+		m.invalidateCache()
+		return m, waitForGitBranch(m.gitBranchWatcher)
 	case tea.WindowSizeMsg:
 		cmd := m.SetSize(msg.Width, msg.Height)
 		return m, cmd
 	case tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, messages.WheelCoalescedMsg:
 		if m.mode == ModeVertical {
+			beforeOffset := m.scrollview.ScrollOffset()
+			beforeDragging := m.scrollview.IsDragging()
 			_, cmd := m.scrollview.Update(msg)
+			if m.scrollview.ScrollOffset() != beforeOffset || m.scrollview.IsDragging() != beforeDragging {
+				m.visualGeneration++
+			}
 			return m, cmd
 		}
 		return m, nil
@@ -1428,6 +1452,8 @@ func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 }
+
+func (m *model) VisualGeneration() uint64 { return m.visualGeneration }
 
 // View renders the component
 func (m *model) View() string {
@@ -1953,15 +1979,18 @@ func (m *model) oneBudgetLine(s runtime.BudgetStatus, nameWidth int) string {
 	var parts []string
 	if s.MaxCost > 0 {
 		parts = append(parts, budgetPartStyle(s.Cost, s.MaxCost).Render(
-			toolcommon.FormatCostPrecise(s.Cost)+"/"+toolcommon.FormatCostPrecise(s.MaxCost)))
+			toolcommon.FormatCostPrecise(s.Cost)+"/"+toolcommon.FormatCostPrecise(s.MaxCost),
+		))
 	}
 	if s.MaxTokens > 0 {
 		parts = append(parts, budgetPartStyle(float64(s.Tokens), float64(s.MaxTokens)).Render(
-			toolcommon.FormatTokenCount(s.Tokens)+"/"+toolcommon.FormatTokenCount(s.MaxTokens)))
+			toolcommon.FormatTokenCount(s.Tokens)+"/"+toolcommon.FormatTokenCount(s.MaxTokens),
+		))
 	}
 	if s.MaxTimeSeconds > 0 {
 		parts = append(parts, budgetPartStyle(s.ElapsedSeconds, s.MaxTimeSeconds).Render(
-			formatBudgetDuration(s.ElapsedSeconds)+"/"+formatBudgetDuration(s.MaxTimeSeconds)))
+			formatBudgetDuration(s.ElapsedSeconds)+"/"+formatBudgetDuration(s.MaxTimeSeconds),
+		))
 	}
 	if len(parts) == 0 {
 		return ""

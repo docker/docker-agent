@@ -112,18 +112,22 @@ func (g *StreamAdapter) run() {
 		}
 
 		if resp != nil {
-			// Check for text content without using Text() to avoid warnings
+			// Check for text content and generated inline media without using
+			// Text() to avoid warnings
 			hasText := false
+			hasMedia := false
 			for _, candidate := range resp.Candidates {
 				if candidate.Content != nil {
 					for _, part := range candidate.Content.Parts {
 						if part.Text != "" {
 							hasText = true
-							break
+						}
+						if part.InlineData != nil && len(part.InlineData.Data) > 0 {
+							hasMedia = true
 						}
 					}
 				}
-				if hasText {
+				if hasText && hasMedia {
 					break
 				}
 			}
@@ -134,9 +138,9 @@ func (g *StreamAdapter) run() {
 			// calls. Forward such chunks so downstream can capture token usage.
 			hasUsage := resp.UsageMetadata != nil
 
-			// Send response if it has content, function calls, or usage metadata
-			if hasText || hasFuncs || hasUsage {
-				hasContent = hasContent || hasText
+			// Send response if it has content, generated media, function calls, or usage metadata
+			if hasText || hasMedia || hasFuncs || hasUsage {
+				hasContent = hasContent || hasText || hasMedia
 				hasToolCalls = hasToolCalls || hasFuncs
 				lastResponse = resp // Store for final message
 				if !g.send(result{resp: resp}) {
@@ -232,6 +236,7 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		var reasoningTextSb strings.Builder
 		var textContentSb strings.Builder
 		var thoughtSignature []byte
+		var media []chat.MediaDelta
 		for _, candidate := range res.resp.Candidates {
 			if candidate.Content != nil {
 				for _, part := range candidate.Content.Parts {
@@ -246,6 +251,21 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 							textContentSb.WriteString(part.Text)
 						}
 					}
+
+					// Inline generated media (e.g. an image from an
+					// image-output model). Gemini can return more than one
+					// inline blob per chunk — multiple parts in one candidate,
+					// or multiple candidates — so every blob is appended
+					// rather than overwriting a single field, which used to
+					// silently drop all but the last one.
+					if part.InlineData != nil && len(part.InlineData.Data) > 0 {
+						media = append(media, chat.MediaDelta{
+							Data:     part.InlineData.Data,
+							MimeType: part.InlineData.MIMEType,
+							Name:     part.InlineData.DisplayName,
+							Size:     int64(len(part.InlineData.Data)),
+						})
+					}
 				}
 			}
 		}
@@ -259,6 +279,9 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		}
 		if len(thoughtSignature) > 0 {
 			resp.Choices[0].Delta.ThoughtSignature = thoughtSignature
+		}
+		if len(media) > 0 {
+			resp.Choices[0].Delta.Media = media
 		}
 
 		// Handle function calls

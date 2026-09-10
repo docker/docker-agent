@@ -1,0 +1,15 @@
+agents:
+  root:
+    description: Queries GitHub repository metadata without JavaScript.
+    model: anthropic/claude-sonnet-4-6
+    instruction: Answer questions about GitHub repositories using the API tool.
+    toolsets:
+      - type: api
+        api_config:
+          name: repository
+          method: GET
+          endpoint: https://api.github.com/repos/${owner}/${repo}
+          args:
+            owner: {type: string}
+            repo: {type: string}
+          required: [owner, repo]

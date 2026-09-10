@@ -68,6 +68,35 @@ const (
 	RestartAlways
 )
 
+// CrashLoop configures the supervisor's crash-loop detector: Threshold
+// disconnects classified as ErrServerCrashed within Window stop the
+// supervisor (state -> Failed, wrapped in ErrCrashLooping) instead of
+// restarting again right away, so the caller's own backoff gate (e.g.
+// StartableToolSet) paces the next attempt. Zero values default to
+// Threshold=3, Window=1 minute.
+//
+// A single crash, or crashes spread out wider than Window apart, are
+// ordinary restarts handled entirely by Restart/Backoff above and never
+// trip this detector.
+type CrashLoop struct {
+	Threshold int
+	Window    time.Duration
+}
+
+func (c CrashLoop) threshold() int {
+	if c.Threshold <= 0 {
+		return 3
+	}
+	return c.Threshold
+}
+
+func (c CrashLoop) window() time.Duration {
+	if c.Window <= 0 {
+		return time.Minute
+	}
+	return c.Window
+}
+
 // Backoff parameters for restart attempts. Zero values default to
 // 1s..32s exponential (matching historical MCP behaviour).
 type Backoff struct {
@@ -119,6 +148,10 @@ type Policy struct {
 	// CallTimeout is carried through to the toolset for enforcement on
 	// individual tool calls; the Supervisor itself does not use it.
 	CallTimeout time.Duration
+
+	// CrashLoop tunes the crash-loop detector (see CrashLoop's doc). Zero
+	// value uses the CrashLoop defaults.
+	CrashLoop CrashLoop
 
 	// OnDisconnect is called when the session ends, with Wait()'s result.
 	// Useful for cache invalidation.
@@ -188,6 +221,18 @@ type Supervisor struct {
 	// shared MCP session.
 	inflightConnect *pendingConnect
 
+	// crashTimes holds the timestamps of recent ErrServerCrashed disconnects
+	// (watch), pruned to policy.CrashLoop.window() on every record. Cleared
+	// whenever crashLoopErr is consumed or set, and on Stop.
+	crashTimes []time.Time
+	// crashLoopErr is a one-shot report: set by watch when the crash-loop
+	// threshold is reached, and returned by the very next Start instead of
+	// reconnecting, then cleared so the Start after that attempts a genuine
+	// reconnect. The one-shot handshake exists because only the caller (the
+	// StartableToolSet backoff gate) knows when enough time has passed to
+	// retry for real.
+	crashLoopErr error
+
 	// randFloat is the jitter source; tests may override.
 	randFloat func() float64
 }
@@ -212,6 +257,20 @@ func (s *Supervisor) State() StateInfo { return s.tracker.Snapshot() }
 // IsReady reports whether the supervisor is in a state that should serve
 // requests (Ready or Degraded).
 func (s *Supervisor) IsReady() bool { return s.tracker.State().IsUsable() }
+
+// PendingCrashLoopError returns the crash-loop report awaiting the next
+// Start, without consuming it — a peek, unlike Start's one-shot read.
+// Repeated calls keep returning the same error until the Start that
+// actually consumes it runs. Callers that reach the supervisor outside
+// their own backoff gate (e.g. a toolset's lazy per-request start) should
+// check this before calling Start, so they fail fast on a known crash
+// loop instead of being the one to consume — and reconnect on behalf of
+// — a one-shot report the gate hasn't paced yet.
+func (s *Supervisor) PendingCrashLoopError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.crashLoopErr
+}
 
 // MarkReadyForTesting forces the supervisor into StateReady without going
 // through Connect. Test-only backdoor; production code must not call this.
@@ -245,6 +304,15 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	if s.stopping {
 		s.mu.Unlock()
 		return ErrNotStarted
+	}
+	// A crash loop detected by watch reports itself here exactly once
+	// (see crashLoopErr's doc): the very next Start after this one attempts
+	// a genuine reconnect rather than short-circuiting again.
+	if err := s.crashLoopErr; err != nil {
+		s.crashLoopErr = nil
+		s.crashTimes = nil
+		s.mu.Unlock()
+		return err
 	}
 	s.mu.Unlock()
 
@@ -416,6 +484,11 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	watchDone := s.watchDone
 	pending := s.inflightConnect
 	s.inflightConnect = nil
+	// A deliberate Stop discards any pending crash-loop verdict and its
+	// history: a future Start begins a fresh window rather than resuming
+	// one that spans an intentional stop/start cycle.
+	s.crashLoopErr = nil
+	s.crashTimes = nil
 	s.mu.Unlock()
 
 	s.tracker.Set(StateStopped)
@@ -541,6 +614,10 @@ func (s *Supervisor) watch(ctx context.Context) {
 		forced := s.forceRestart
 		s.forceRestart = false
 		s.session = nil
+		// Only an actual crash (not a forced/deliberate close, not a clean
+		// exit) ever counts toward the loop: those are handled entirely by
+		// the ordinary restart policy below.
+		crashLooping := !forced && errors.Is(waitErr, ErrServerCrashed) && s.recordCrashLocked(time.Now())
 		s.mu.Unlock()
 
 		s.tracker.Fail(StateRestarting, waitErr)
@@ -548,6 +625,27 @@ func (s *Supervisor) watch(ctx context.Context) {
 
 		if cb := s.policy.OnDisconnect; cb != nil {
 			cb(waitErr)
+		}
+
+		if crashLooping {
+			err := wrap(ErrCrashLooping, waitErr)
+			s.mu.Lock()
+			if s.stopping {
+				// Stop won the race (landed between the unlock above and here)
+				// and already set StateStopped: let it own the terminal state
+				// rather than clobbering it back to Failed.
+				s.mu.Unlock()
+				return
+			}
+			s.crashLoopErr = err
+			s.mu.Unlock()
+			s.tracker.Fail(StateFailed, err)
+			log.Error("supervisor: crash-looping; giving up", "name", s.name, "threshold", s.policy.CrashLoop.threshold(), "window", s.policy.CrashLoop.window())
+			if cb := s.policy.OnFailed; cb != nil {
+				cb(err)
+			}
+			s.signalDone()
+			return
 		}
 
 		if !s.shouldRestart(waitErr, forced) {
@@ -567,6 +665,21 @@ func (s *Supervisor) watch(ctx context.Context) {
 			cb(ctx)
 		}
 	}
+}
+
+// recordCrashLocked appends a crash observed at now to the crash-loop
+// window, pruning entries older than policy.CrashLoop.window(), and
+// reports whether the loop threshold has been reached. s.mu must be held.
+func (s *Supervisor) recordCrashLocked(now time.Time) bool {
+	cutoff := now.Add(-s.policy.CrashLoop.window())
+	kept := s.crashTimes[:0]
+	for _, t := range s.crashTimes {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	s.crashTimes = append(kept, now)
+	return len(s.crashTimes) >= s.policy.CrashLoop.threshold()
 }
 
 // shouldRestart applies the supervisor's restart policy to decide whether

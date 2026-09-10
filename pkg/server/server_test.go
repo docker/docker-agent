@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -204,9 +205,9 @@ func startServer(t *testing.T, ctx context.Context, agentsDir string) string {
 	var store mockStore
 	runConfig := config.RuntimeConfig{}
 
-	sources, err := config.ResolveSources(agentsDir, nil)
+	agentSources, err := sources.ResolveSources(agentsDir, nil)
 	require.NoError(t, err)
-	srv, err := New(ctx, store, &runConfig, 0, sources, "", 0)
+	srv, err := New(ctx, store, &runConfig, 0, agentSources, "", 0)
 	require.NoError(t, err)
 
 	socketPath := "unix://" + filepath.Join(t.TempDir(), "sock")
@@ -541,9 +542,9 @@ func startServerWithStore(t *testing.T, ctx context.Context, agentsDir string, s
 
 	runConfig := config.RuntimeConfig{}
 
-	sources, err := config.ResolveSources(agentsDir, nil)
+	agentSources, err := sources.ResolveSources(agentsDir, nil)
 	require.NoError(t, err)
-	srv, err := New(ctx, store, &runConfig, 0, sources, "", 0)
+	srv, err := New(ctx, store, &runConfig, 0, agentSources, "", 0)
 	require.NoError(t, err)
 
 	socketPath := "unix://" + filepath.Join(t.TempDir(), "sock")

@@ -36,22 +36,22 @@ providers:
 # Define models that use the providers
 models:
   # Model using the custom gateway provider
-  gateway_gpt4o:
+  gateway_gpt:
     provider: my_gateway
-    model: gpt-4o
+    model: gpt-5.6-sol
     max_tokens: 32768
     temperature: 0.7
 
   # Model using the responses provider
   responses_model:
     provider: responses_provider
-    model: gpt-5
+    model: gpt-5.6-sol
     max_tokens: 16000
 
   # Model using the Anthropic provider - inherits max_tokens and thinking_budget
   claude_model:
     provider: my_anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
 
   # Model overriding the provider's thinking_budget
   claude_fast:
@@ -70,14 +70,14 @@ agents:
   # Example using shorthand syntax: provider_name/model_name
   # The provider defaults (base_url, token_key, api_type) are automatically applied
   subagent:
-    model: my_gateway/gpt-4o-mini
+    model: my_gateway/gpt-5.6-terra
     description: Sub-agent for specialized tasks
     instruction: |
       You are a specialized assistant for specific tasks.
 
   # Example using Anthropic provider with shorthand
   researcher:
-    model: my_anthropic/claude-sonnet-4-5
+    model: my_anthropic/claude-sonnet-5
     description: Research assistant
     instruction: |
       You are a research assistant that provides thorough analysis.

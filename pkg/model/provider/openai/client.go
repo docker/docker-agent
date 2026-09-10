@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -44,6 +45,11 @@ type Client struct {
 	// wsPool is initialized in NewClient when transport=websocket is configured.
 	// It maintains a persistent WebSocket connection across requests.
 	wsPool *wsPool
+
+	// warnThinkingBudgetIgnoredOnce dedupes the "thinking_budget has no
+	// effect on this model" diagnostic (see [Client.warnThinkingBudgetIgnored])
+	// so a long-lived client warns at most once instead of on every request.
+	warnThinkingBudgetIgnoredOnce sync.Once
 }
 
 // NewClient creates a new OpenAI client from the provided configuration
@@ -401,8 +407,9 @@ func (c *Client) CreateChatCompletionStream(
 	trackUsage := c.TrackUsageEnabled()
 
 	params := openai.ChatCompletionNewParams{
-		Model:    c.ModelConfig.Model,
-		Messages: c.convertMessages(ctx, messages),
+		Model:       c.ModelConfig.Model,
+		ServiceTier: openai.ChatCompletionNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
+		Messages:    c.convertMessages(ctx, messages),
 		StreamOptions: openai.ChatCompletionStreamOptionsParam{
 			IncludeUsage: openai.Bool(trackUsage),
 		},
@@ -479,32 +486,55 @@ func (c *Client) CreateChatCompletionStream(
 	// noThinkingMinOutputTokens so residual hidden reasoning can't starve
 	// visible output. The nil-guard is intentional: when MaxTokens is unset
 	// the caller has imposed no cap, so there is nothing to floor.
-	if modelinfo.UsesReasoningEffort(c.ModelConfig.Model) {
-		if c.ModelOptions.NoThinking() {
-			reasoningEffort := "low"
-			if sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
-				reasoningEffort = "none"
-			}
-			params.ReasoningEffort = shared.ReasoningEffort(reasoningEffort)
-			// Hidden reasoning tokens count against the output budget even
-			// with low effort. Enforce a floor so visible text isn't starved.
-			if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
-				if !modelinfo.SupportsResponsesAPI(c.ModelConfig.Model) {
-					params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
-				} else {
-					params.MaxCompletionTokens = openai.Int(noThinkingMinOutputTokens)
-				}
-			}
-			slog.DebugContext(ctx, "OpenAI request using reasoning effort (NoThinking)", "reasoning_effort", reasoningEffort)
-		} else if c.ModelConfig.ThinkingBudget != nil {
-			effortStr, err := openAIReasoningEffort(c.ModelConfig.ThinkingBudget)
-			if err != nil {
-				slog.ErrorContext(ctx, "OpenAI request using thinking_budget failed", "error", err)
-				return nil, err
-			}
-			params.ReasoningEffort = shared.ReasoningEffort(effortStr)
-			slog.DebugContext(ctx, "OpenAI request using thinking_budget", "reasoning_effort", effortStr)
+	switch {
+	case !modelinfo.UsesReasoningEffort(c.ModelConfig.Model):
+		if c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled() {
+			c.warnThinkingBudgetIgnored(ctx)
 		}
+	case len(requestTools) > 0 && modelinfo.OpenAIRejectsToolsWithReasoningEffort(c.ModelConfig.Model):
+		// See modelinfo.OpenAIRejectsToolsWithReasoningEffort: gpt-5.4+
+		// (and every gpt-5.6+/gpt-6+ generation) reject an explicit
+		// reasoning_effort alongside function tools on Chat Completions;
+		// the API's own error points at /v1/responses. Reaching this path
+		// at all means the caller forced Chat Completions for a model
+		// that would otherwise auto-select the Responses API (an explicit
+		// api_type or custom-provider override). Dropping the field lets
+		// gpt-5.4/gpt-5.5 succeed with their implicit default effort;
+		// gpt-5.6+/gpt-6+ still 400 on tools with ANY reasoning_effort
+		// there (OpenAI has no combination that works on Chat Completions
+		// for those), but the request degrades instead of silently
+		// sending a value the caller can't see is the cause. Only warn
+		// when a value was actually about to be sent (NoThinking or an
+		// explicit ThinkingBudget); otherwise there is nothing dropped to
+		// report, and warning anyway would be misleading and would repeat
+		// on every turn of a long tool-using conversation.
+		if c.ModelOptions.NoThinking() || c.ModelConfig.ThinkingBudget != nil {
+			slog.WarnContext(ctx, "OpenAI: dropping reasoning_effort for a tools request forced onto Chat Completions; use api_type: openai_responses for tool calling on this model", "model", c.ModelConfig.Model)
+		}
+	case c.ModelOptions.NoThinking():
+		reasoningEffort := "low"
+		if sendsRealNoneEffort(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
+			reasoningEffort = "none"
+		}
+		params.ReasoningEffort = shared.ReasoningEffort(reasoningEffort)
+		// Hidden reasoning tokens count against the output budget even
+		// with low effort. Enforce a floor so visible text isn't starved.
+		if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
+			if !modelinfo.SupportsResponsesAPI(c.ModelConfig.Model) {
+				params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
+			} else {
+				params.MaxCompletionTokens = openai.Int(noThinkingMinOutputTokens)
+			}
+		}
+		slog.DebugContext(ctx, "OpenAI request using reasoning effort (NoThinking)", "reasoning_effort", reasoningEffort)
+	case c.ModelConfig.ThinkingBudget != nil:
+		effortStr, err := openAIReasoningEffort(c.ModelConfig.ThinkingBudget)
+		if err != nil {
+			slog.ErrorContext(ctx, "OpenAI request using thinking_budget failed", "error", err)
+			return nil, err
+		}
+		params.ReasoningEffort = shared.ReasoningEffort(effortStr)
+		slog.DebugContext(ctx, "OpenAI request using thinking_budget", "reasoning_effort", effortStr)
 	}
 
 	// Apply structured output configuration
@@ -545,6 +575,17 @@ func (c *Client) CreateChatCompletionStream(
 	return newStreamAdapter(stream, trackUsage), nil
 }
 
+// warnThinkingBudgetIgnored logs, once per client, that a configured and
+// enabled thinking_budget has no effect because this model does not accept
+// a reasoning-effort parameter at all (docker-agent#4162: previously
+// silent — the setting was accepted by config validation but dropped
+// without a trace here).
+func (c *Client) warnThinkingBudgetIgnored(ctx context.Context) {
+	c.warnThinkingBudgetIgnoredOnce.Do(func() {
+		slog.WarnContext(ctx, "OpenAI: thinking_budget is configured but this model does not support a reasoning effort parameter; the setting has no effect", "model", c.ModelConfig.Model)
+	})
+}
+
 func (c *Client) supportsDeferredTools() bool {
 	if enabled, ok := providerutil.GetProviderOptBool(c.ModelConfig.ProviderOpts, "supports_deferred_tools"); ok {
 		return enabled
@@ -569,7 +610,7 @@ func injectDeferredToolLoads(input []responses.ResponseInputItemUnionParam, requ
 		if item.OfFunctionCallOutput == nil {
 			continue
 		}
-		deferred := byCallID[item.OfFunctionCallOutput.CallID]
+		deferred := byCallID[item.OfFunctionCallOutput.CallID.Value]
 		if len(deferred) == 0 {
 			continue
 		}
@@ -591,7 +632,7 @@ func injectDeferredToolLoads(input []responses.ResponseInputItemUnionParam, requ
 			names = append(names, tool.Name)
 		}
 
-		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(item.OfFunctionCallOutput.CallID+":"+strings.Join(names, ","))))
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(item.OfFunctionCallOutput.CallID.Value+":"+strings.Join(names, ","))))
 		callID := "cagent_tool_load_" + digest[:16]
 		result = append(result,
 			responses.ResponseInputItemUnionParam{OfToolSearchCall: &responses.ResponseInputItemToolSearchCallParam{
@@ -636,7 +677,8 @@ func (c *Client) CreateResponseStream(
 	}
 
 	params := responses.ResponseNewParams{
-		Model: c.ModelConfig.Model,
+		Model:       c.ModelConfig.Model,
+		ServiceTier: responses.ResponseNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
 	}
 	params.Input.OfInputItemList = input
 
@@ -741,6 +783,8 @@ func (c *Client) CreateResponseStream(
 				slog.DebugContext(ctx, "OpenAI responses request using thinking_budget", "reasoning_effort", effortStr)
 			}
 		}
+	} else if c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled() {
+		c.warnThinkingBudgetIgnored(ctx)
 	}
 
 	// Apply structured output configuration
@@ -1010,7 +1054,7 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 		case chat.MessageRoleTool:
 			// Tool response message - convert to function call output
 			item.OfFunctionCallOutput = &responses.ResponseInputItemFunctionCallOutputParam{
-				CallID: msg.ToolCallID,
+				CallID: param.NewOpt(msg.ToolCallID),
 				Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 					OfString: param.NewOpt(msg.Content),
 				},
@@ -1087,14 +1131,14 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 			pendingCalls[item.OfFunctionCall.CallID] = true
 		}
 		if item.OfFunctionCallOutput != nil {
-			delete(pendingCalls, item.OfFunctionCallOutput.CallID)
+			delete(pendingCalls, item.OfFunctionCallOutput.CallID.Value)
 		}
 	}
 	for callID := range pendingCalls {
 		slog.WarnContext(ctx, "Injecting placeholder output for orphaned function call", "call_id", callID)
 		input = append(input, responses.ResponseInputItemUnionParam{
 			OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
-				CallID: callID,
+				CallID: param.NewOpt(callID),
 				Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
 					OfString: param.NewOpt("(no output — tool call was not executed)"),
 				},
@@ -1166,7 +1210,7 @@ func (c *Client) CreateBatchEmbedding(ctx context.Context, texts []string) (*bas
 	response, err := client.Embeddings.New(ctx, params)
 	if err != nil {
 		slog.ErrorContext(ctx, "OpenAI batch embedding request failed", "error", err)
-		return nil, fmt.Errorf("failed to create batch embeddings: %w", err)
+		return nil, fmt.Errorf("failed to create batch embeddings: %w", oaistream.WrapOpenAIError(err))
 	}
 
 	if len(response.Data) != len(texts) {
@@ -1233,7 +1277,8 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 	systemPrompt := prompts.BuildRerankSystemPrompt(documents, criteria, c.ModelConfig.ProviderOpts, jsonFormatInstruction)
 
 	params := openai.ChatCompletionNewParams{
-		Model: c.ModelConfig.Model,
+		Model:       c.ModelConfig.Model,
+		ServiceTier: openai.ChatCompletionNewParamsServiceTier(serviceTier(c.ModelConfig.ProviderOpts)),
 		Messages: []openai.ChatCompletionMessageParamUnion{
 			openai.SystemMessage(systemPrompt),
 			openai.UserMessage(userPrompt),

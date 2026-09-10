@@ -131,6 +131,20 @@ func TestConfigIsEmpty(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name: "with tool_input_transform",
+			config: Config{
+				ToolInputTransform: []MatcherConfig{{Matcher: "*"}},
+			},
+			expected: false,
+		},
+		{
+			name: "with tool_guard",
+			config: Config{
+				ToolGuard: []MatcherConfig{{Matcher: "*"}},
+			},
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -562,28 +576,21 @@ func TestExecuteStop(t *testing.T) {
 	result, err := exec.Dispatch(t.Context(), EventStop, input)
 	require.NoError(t, err)
 	assert.True(t, result.Allowed)
-	assert.Contains(t, result.AdditionalContext, "model stopped")
+	assert.Empty(t, result.AdditionalContext)
 }
 
 func TestExecuteStopReceivesResponseContent(t *testing.T) {
 	t.Parallel()
-
-	config := &Config{
-		Stop: []Hook{
-			{Type: HookTypeCommand, Command: printStdinJSONFieldCmd("stop_response"), Timeout: 5},
-		},
-	}
-
-	exec := NewExecutor(config, t.TempDir(), nil)
-	input := &Input{
-		SessionID:    "test-session",
-		StopResponse: "final answer content",
-	}
-
-	result, err := exec.Dispatch(t.Context(), EventStop, input)
+	// Exercise the process protocol directly: stop's stdout is observational.
+	factory, ok := NewRegistry().Lookup(HookTypeCommand)
+	require.True(t, ok)
+	handler, err := factory(HandlerEnv{WorkingDir: t.TempDir()}, Hook{Command: printStdinJSONFieldCmd("stop_response")})
 	require.NoError(t, err)
-	assert.True(t, result.Allowed)
-	assert.Contains(t, result.AdditionalContext, "final answer content")
+	input, err := (&Input{HookEventName: EventStop, StopResponse: "final answer content"}).ToJSON()
+	require.NoError(t, err)
+	result, err := handler.Run(t.Context(), input)
+	require.NoError(t, err)
+	assert.Contains(t, result.Stdout, "final answer content")
 }
 
 func TestExecuteNotification(t *testing.T) {
@@ -660,14 +667,10 @@ func TestExecuteHooksWithContextCancellation(t *testing.T) {
 	// silently allowed.
 	assert.False(t, result.Allowed)
 	assert.Equal(t, -1, result.ExitCode)
-	assert.Contains(t, result.Message, "PreToolUse hook failed to execute")
+	assert.Contains(t, result.Message, "pre_tool_use hook failed to execute")
 }
 
-// A hook that exits with a non-zero, non-2 code is a non-blocking error:
-// it is reported as such in the result but does not deny the tool call.
-// Pair this with TestExecuteHooksWithContextCancellation, which asserts the
-// opposite for execution failures (timeout, spawn error).
-func TestExecutePreToolUseAllowsNonBlockingExitCode(t *testing.T) {
+func TestExecutePreToolUseFailsClosedOnNonzeroExit(t *testing.T) {
 	t.Parallel()
 
 	config := &Config{
@@ -690,7 +693,8 @@ func TestExecutePreToolUseAllowsNonBlockingExitCode(t *testing.T) {
 
 	result, err := exec.Dispatch(t.Context(), EventPreToolUse, input)
 	require.NoError(t, err)
-	assert.True(t, result.Allowed)
+	assert.False(t, result.Allowed)
+	assert.Contains(t, result.Message, "exited with status 1")
 }
 
 // TestPlainStdoutBecomesAdditionalContext pins the contract that a
@@ -708,10 +712,10 @@ func TestPlainStdoutBecomesAdditionalContext(t *testing.T) {
 	t.Parallel()
 
 	contextEvents := []EventType{
-		EventSessionStart, EventTurnStart, EventPostToolUse, EventStop,
+		EventSessionStart, EventTurnStart,
 	}
 	observationalEvents := []EventType{
-		EventBeforeLLMCall, EventAfterLLMCall, EventOnError,
+		EventBeforeLLMCall, EventAfterLLMCall, EventOnError, EventPostToolUse, EventStop,
 		EventOnMaxIterations, EventNotification, EventOnUserInput, EventSessionEnd,
 		EventBeforeCompaction, EventAfterCompaction, EventTurnEnd,
 	}

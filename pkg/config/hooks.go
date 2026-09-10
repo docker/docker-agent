@@ -87,6 +87,8 @@ func MergeHooks(base, cli *latest.HooksConfig) *latest.HooksConfig {
 		BeforeCompaction:           slices.Concat(base.BeforeCompaction, cli.BeforeCompaction),
 		AfterCompaction:            slices.Concat(base.AfterCompaction, cli.AfterCompaction),
 		ToolResponseTransform:      slices.Concat(base.ToolResponseTransform, cli.ToolResponseTransform),
+		ToolInputTransform:         slices.Concat(base.ToolInputTransform, cli.ToolInputTransform),
+		ToolGuard:                  slices.Concat(base.ToolGuard, cli.ToolGuard),
 		WorktreeCreate:             slices.Concat(base.WorktreeCreate, cli.WorktreeCreate),
 	}
 	return merged

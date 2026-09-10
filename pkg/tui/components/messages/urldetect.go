@@ -332,10 +332,11 @@ func balanceParens(url string) string {
 // urlAt returns the URL at the given global line and display column, or empty string.
 func (m *model) urlAt(line, col int) string {
 	m.ensureAllItemsRendered()
-	if line < 0 || line >= len(m.renderedLines) {
+	if line < 0 || line >= m.totalHeight {
 		return ""
 	}
-	for _, span := range m.urlSpans.get(line, m.renderedLines[line]) {
+	rendered := m.renderedLine(line)
+	for _, span := range m.urlSpans.get(line, rendered) {
 		if col >= span.startCol && col < span.endCol {
 			return span.url
 		}
@@ -347,8 +348,9 @@ func (m *model) urlAt(line, col int) string {
 func (m *model) updateHoveredURL(line, col int) {
 	m.ensureAllItemsRendered()
 
-	if line >= 0 && line < len(m.renderedLines) {
-		for _, span := range m.urlSpans.get(line, m.renderedLines[line]) {
+	if line >= 0 && line < m.totalHeight {
+		rendered := m.renderedLine(line)
+		for _, span := range m.urlSpans.get(line, rendered) {
 			if col >= span.startCol && col < span.endCol {
 				newHover := &hoveredURL{line: line, startCol: span.startCol, endCol: span.endCol}
 				if m.hoveredURL == nil || *m.hoveredURL != *newHover {

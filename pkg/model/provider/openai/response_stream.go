@@ -2,6 +2,7 @@ package openai
 
 import (
 	"cmp"
+	"fmt"
 	"io"
 	"log/slog"
 
@@ -381,8 +382,48 @@ func (a *ResponseStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 				FinishReason: finishReason,
 			},
 		}
+	case "response.incomplete":
+		// Terminal event: the model stopped before producing a complete
+		// response. incomplete_details.reason is "max_output_tokens" or
+		// "content_filter". Usage is still reported and must not be dropped,
+		// and the reason must reach the loop as a finish reason so the empty
+		// turn is explained rather than reported as "stop reason: null".
+		reason := event.Response.IncompleteDetails.Reason
+		slog.Debug("Response incomplete",
+			"reason", reason,
+			"response_id", event.Response.ID,
+			"output_items", len(event.Response.Output),
+			"output_tokens", event.Response.Usage.OutputTokens,
+			"reasoning_tokens", event.Response.Usage.OutputTokensDetails.ReasoningTokens,
+			"response_raw", event.Response.RawJSON(),
+		)
+		u := event.Response.Usage
+		if u.TotalTokens > 0 {
+			response.Usage = &chat.Usage{
+				InputTokens:       u.InputTokens - u.InputTokensDetails.CachedTokens - u.InputTokensDetails.CacheWriteTokens,
+				OutputTokens:      u.OutputTokens,
+				CachedInputTokens: u.InputTokensDetails.CachedTokens,
+				CacheWriteTokens:  u.InputTokensDetails.CacheWriteTokens,
+				ReasoningTokens:   u.OutputTokensDetails.ReasoningTokens,
+			}
+		}
+		finishReason := chat.FinishReasonLength
+		if reason == "content_filter" {
+			finishReason = chat.FinishReasonRefusal
+		}
+		response.Choices = []chat.MessageStreamChoice{{FinishReason: finishReason}}
+
+	case "response.failed":
+		// Terminal event: the provider failed the response after accepting
+		// the request. Surface it as an error so the loop does not report an
+		// empty turn.
+		e := event.Response.Error
+		slog.Error("Response failed", "code", e.Code, "message", e.Message, "response_id", event.Response.ID)
+		return chat.MessageStreamResponse{}, fmt.Errorf("openai response failed (%s): %s [response_id=%s]", e.Code, e.Message, event.Response.ID)
+
 	default:
 		slog.Info("Unhandled stream event type", "type", event.Type)
+		slog.Debug("Unhandled stream event payload", "type", event.Type, "raw", event.RawJSON())
 	}
 
 	return response, nil

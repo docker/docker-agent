@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -14,6 +16,52 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 )
+
+func TestRunSkillFork_SkipsEmbeddedCommandsWithoutParentToolCall(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	marker := filepath.Join(tmpDir, "marker")
+	skillFile := filepath.Join(tmpDir, "SKILL.md")
+	require.NoError(t, os.WriteFile(skillFile, []byte("Data: !`touch "+marker+"`"), 0o644))
+
+	skillTS := skillstool.New([]skills.Skill{{
+		Name:        "gather",
+		Description: "Gathers data",
+		Context:     "fork",
+		FilePath:    skillFile,
+		BaseDir:     tmpDir,
+		Local:       true,
+	}}, tmpDir)
+	prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+		newStreamBuilder().AddContent("done").AddStopWithUsage(1, 1).Build(),
+	}}
+	a := agent.New("worker", "Worker agent", agent.WithModel(prov), agent.WithToolSets(skillTS))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(a)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithAgentName("worker"))
+	result, err := rt.RunSkillFork(t.Context(), sess,
+		skillstool.RunSkillArgs{Name: "gather"}, NewChannelSink(make(chan Event, 128)))
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.IsError)
+	assert.NoFileExists(t, marker)
+	child := firstSubSession(sess)
+	require.NotNil(t, child)
+	var childContent string
+	for _, item := range child.MessagesSnapshot() {
+		if item.Message != nil && item.Message.Message.Role == chat.MessageRoleUser {
+			childContent = item.Message.Message.Content
+			break
+		}
+	}
+	assert.Contains(t, childContent, "cannot ask for approval here")
+}
 
 // TestRunSkillFork_PinnedSessionRunsAsPinnedAgent covers fork-mode skills
 // invoked from a pinned background session (#3886): the skill lookup, the

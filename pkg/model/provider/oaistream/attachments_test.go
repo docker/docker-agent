@@ -27,7 +27,7 @@ func TestConvertDocument_StrategyB64_Image(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	visionCaps := modelinfo.CapsWith(true, true)
+	visionCaps := modelinfo.CapsWith(true, true, false, false)
 	parts, err := convertDocumentWithCaps(t.Context(), doc, visionCaps)
 	require.NoError(t, err)
 	require.Len(t, parts, 1, "expected exactly one image part")
@@ -52,7 +52,7 @@ func TestConvertDocument_StrategyB64_PDF(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: pdf},
 	}
 
-	pdfCaps := modelinfo.CapsWith(false, true)
+	pdfCaps := modelinfo.CapsWith(false, true, false, false)
 	parts, err := convertDocumentWithCaps(t.Context(), doc, pdfCaps)
 	require.NoError(t, err)
 	require.Len(t, parts, 1, "expected exactly one file part")
@@ -75,7 +75,7 @@ func TestConvertDocument_StrategyB64_PDFDropped(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: []byte("%PDF-1.4")},
 	}
 
-	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.CapsWith(true, false))
+	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.CapsWith(true, false, false, false))
 	require.NoError(t, err)
 	assert.Nil(t, parts, "pdf should be dropped when the model does not support PDF")
 }
@@ -97,7 +97,7 @@ func TestConvertMessagesWithCaps(t *testing.T) {
 		}},
 	}}
 
-	withVision := ConvertMessagesWithCaps(t.Context(), messages, modelinfo.CapsWith(true, false))
+	withVision := ConvertMessagesWithCaps(t.Context(), messages, modelinfo.CapsWith(true, false, false, false))
 	require.Len(t, withVision, 1)
 	require.NotNil(t, withVision[0].OfUser)
 	require.Len(t, withVision[0].OfUser.Content.OfArrayOfContentParts, 1)
@@ -122,7 +122,7 @@ func TestConvertMessagesWithCaps(t *testing.T) {
 		}},
 	}}
 
-	withPDF := ConvertMessagesWithCaps(t.Context(), pdfMessages, modelinfo.CapsWith(false, true))
+	withPDF := ConvertMessagesWithCaps(t.Context(), pdfMessages, modelinfo.CapsWith(false, true, false, false))
 	require.Len(t, withPDF, 1)
 	require.NotNil(t, withPDF[0].OfUser)
 	require.Len(t, withPDF[0].OfUser.Content.OfArrayOfContentParts, 1)
@@ -144,7 +144,7 @@ func TestConvertDocument_StrategyB64_ImageDropped(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	textOnlyCaps := modelinfo.CapsWith(false, false)
+	textOnlyCaps := modelinfo.CapsWith(false, false, false, false)
 	parts, err := convertDocumentWithCaps(t.Context(), doc, textOnlyCaps)
 	require.NoError(t, err)
 	assert.Nil(t, parts, "image should be dropped for text-only model")

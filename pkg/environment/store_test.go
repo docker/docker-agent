@@ -44,7 +44,8 @@ func TestEnvFileStore_CreatesFileAndDirectory(t *testing.T) {
 func TestEnvFileStore_UpdatesExistingKeyAndPreservesOtherLines(t *testing.T) {
 	dir := withTempConfigDir(t)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte(
-		"# my keys\nOPENAI_API_KEY=old\nANTHROPIC_API_KEY=keep\n"), 0o600))
+		"# my keys\nOPENAI_API_KEY=old\nANTHROPIC_API_KEY=keep\n",
+	), 0o600))
 
 	store := NewConfigEnvFileStore()
 	require.NoError(t, store.Store(t.Context(), "OPENAI_API_KEY", "new"))

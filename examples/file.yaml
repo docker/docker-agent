@@ -1,0 +1,9 @@
+agents:
+  root:
+    model: openai/gpt-5-mini
+    description: An agent that can read, write, and edit files in the working directory
+    instruction: Work only with files whose paths are provided by the user.
+    toolsets:
+      - type: file
+        allow_list:
+          - "."

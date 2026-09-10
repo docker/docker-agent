@@ -161,6 +161,9 @@ type Page interface {
 	SetSendMode(mode msgtypes.SendMode)
 	// SetInterruptMode sets how Esc interrupts a running stream.
 	SetInterruptMode(mode msgtypes.InterruptMode)
+	// SetShowBanner controls whether the ASCII-art startup banner is drawn
+	// on an empty conversation.
+	SetShowBanner(show bool)
 	// SetRoutingID records the tab identity used to address this page's
 	// one-shot UI timers back to it (messages.RoutedMsg.SessionID). The
 	// appModel keys its chat pages — and the supervisor its event routing —
@@ -168,11 +171,12 @@ type Page interface {
 	// the current app.Session().ID after a session restore or in-place
 	// replace.
 	SetRoutingID(id string)
-	// TakeRoutedTimers returns and clears the routed one-shot timer commands
-	// armed by the most recent Update. The active page's Update already
-	// returns them inside its regular command; the appModel calls this for
-	// background pages — whose regular commands are discarded — so
-	// presentation deadlines keep running while a tab is hidden.
+	// TakeRoutedTimers returns and clears the routed one-shot commands
+	// (presentation timers, generated-media resolution) armed by the most
+	// recent Update. The active page's Update already returns them inside
+	// its regular command; the appModel calls this for background pages —
+	// whose regular commands are discarded — so those deadlines and
+	// resolutions keep running while a tab is hidden.
 	TakeRoutedTimers() tea.Cmd
 	VisualGeneration() uint64
 }
@@ -211,6 +215,7 @@ type chatPage struct {
 	sendMode       msgtypes.SendMode
 
 	msgCancel       context.CancelFunc
+	cancel          context.CancelFunc
 	streamCancelled bool
 	// streamDepth is the nesting depth of active streams (StreamStarted++,
 	// StreamStopped--). >0 during a root compaction marks it as automatic
@@ -223,15 +228,19 @@ type chatPage struct {
 	// addressed to; empty for standalone pages (timers then fire unrouted,
 	// which is correct when this is the only page).
 	routingID string
-	// pendingTimers holds the routed timer commands armed by the current
-	// Update, so they can be re-collected via TakeRoutedTimers when the
-	// regular command is discarded (background tabs).
+	// pendingTimers holds the routed one-shot commands (presentation timers,
+	// generated-media resolution) armed by the current Update, so they can be
+	// re-collected via TakeRoutedTimers when the regular command is discarded
+	// (background tabs).
 	pendingTimers []tea.Cmd
 
 	// Track whether we've received content from an assistant response
 	// Used by --exit-after-response to ensure we don't exit before receiving content
 	hasReceivedAssistantContent bool
 	showStartupBanner           bool
+	// hideBanner mirrors the user's show_banner setting; the zero value
+	// keeps the banner so page literals stay banner-enabled.
+	hideBanner bool
 
 	// Message queue for enqueuing messages while agent is working
 	messageQueue []queuedMessage
@@ -375,10 +384,12 @@ func defaultKeyMap() KeyMap {
 
 // New creates a new chat page
 func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *service.SessionState, opts ...PageOption) Page {
+	pageCtx, cancel := context.WithCancel(ctx)
 	p := &chatPage{
 		ar:                ar,
+		cancel:            cancel,
 		ctx:               func() context.Context { return context.WithoutCancel(ctx) },
-		sidebar:           sidebar.New(ar, ctx, sessionState),
+		sidebar:           sidebar.New(ar, pageCtx, sessionState),
 		messages:          messages.New(ar, sessionState),
 		app:               a,
 		keyMap:            defaultKeyMap(),
@@ -410,6 +421,14 @@ func WithHideSidebar() PageOption {
 	return func(p *chatPage) {
 		p.hideSidebar = true
 		p.keyMap.ToggleSidebar.SetEnabled(false)
+	}
+}
+
+// WithShowBanner controls whether the ASCII-art startup banner is drawn on
+// an empty conversation.
+func WithShowBanner(show bool) PageOption {
+	return func(p *chatPage) {
+		p.hideBanner = !show
 	}
 }
 
@@ -470,20 +489,34 @@ func agentInfoMode(mode msgtypes.SidebarInfoMode) sidebar.AgentInfoMode {
 func (p *chatPage) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
-	cmds = append(cmds,
-		p.sidebar.Init(),
-		p.messages.Init(),
-	)
+	cmds = append(cmds, p.messages.Init())
 
 	// Load state from existing session (for session restore and branching)
 	if sess := p.app.Session(); sess != nil {
 		p.sidebar.LoadFromSession(sess)
 		if len(sess.Messages) > 0 {
-			cmds = append(cmds, p.messages.LoadFromSession(sess))
+			restoredMedia, mediaRequests := p.collectRestoredGeneratedMedia(sess)
+			cmds = append(cmds, p.messages.LoadFromSession(sess, restoredMedia))
+			if resolve := p.resolveGeneratedMediaCmd(mediaRequests); resolve != nil {
+				cmds = append(cmds, resolve)
+			}
 		}
 	}
 
 	return tea.Batch(cmds...)
+}
+
+func WatchGitBranch(page Page) tea.Cmd {
+	if p, ok := page.(*chatPage); ok {
+		return p.sidebar.Init()
+	}
+	return nil
+}
+
+func Cleanup(page Page) {
+	if p, ok := page.(*chatPage); ok {
+		p.cancel()
+	}
 }
 
 // Update handles messages and updates the page state
@@ -611,6 +644,9 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	case msgtypes.ClearQueueMsg:
 		return p.handleClearQueue()
 
+	case generatedMediaResolvedMsg:
+		return p, p.messages.UpdateAssistantMedia(msg.media)
+
 	case msgtypes.ThemeChangedMsg:
 		// Theme changed - forward to all child components to invalidate caches
 		var cmds []tea.Cmd
@@ -728,7 +764,7 @@ func (p *chatPage) renderCollapsedSidebar(sl sidebarLayout) string {
 
 func (p *chatPage) messagesView(sl sidebarLayout) string {
 	messagesView := p.messages.View()
-	if messagesView != "" || !p.showStartupBanner {
+	if messagesView != "" || !p.showStartupBanner || p.hideBanner {
 		return messagesView
 	}
 	if sl.chatWidth < tuibanner.Width || sl.chatHeight < tuibanner.Height {
@@ -1402,6 +1438,10 @@ func (p *chatPage) SetSendMode(mode msgtypes.SendMode) {
 
 func (p *chatPage) SetInterruptMode(mode msgtypes.InterruptMode) {
 	p.interruptMode = mode
+}
+
+func (p *chatPage) SetShowBanner(show bool) {
+	p.hideBanner = !show
 }
 
 // SetRoutingID records the tab identity this page's routed UI timers are

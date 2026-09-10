@@ -23,16 +23,46 @@ type CommandEvaluator interface {
 
 // commandEvaluatorFactory builds the CommandEvaluator used by
 // ResolveCommand. It is empty until a JS engine is registered: calling
-// jscommands.Register (done by teamloader, the CLI and
+// jscommands.Register (done by loaderdefaults.Opts, the CLI and
 // embeddedchat/defaults) wires in the goja-backed evaluator from pkg/js.
 // The indirection keeps the JS engine out of pkg/runtime's import graph for
 // embedders that build teams in code and never use JS command expressions.
-var commandEvaluatorFactory atomic.Pointer[func(agentTools []tools.Tool) CommandEvaluator]
+var commandEvaluatorFactory atomic.Pointer[CommandEvaluatorFactory]
 
 // RegisterCommandEvaluator installs the factory ResolveCommand uses to
 // expand ${...} expressions. See pkg/runtime/jscommands.
-func RegisterCommandEvaluator(factory func(agentTools []tools.Tool) CommandEvaluator) {
+// Prefer [WithCommandEvaluatorFactory] to configure independent runtimes.
+func RegisterCommandEvaluator(factory CommandEvaluatorFactory) {
 	commandEvaluatorFactory.Store(&factory)
+}
+
+// CommandEvaluatorFactory builds an evaluator with the current agent's tools.
+type CommandEvaluatorFactory = func(agentTools []tools.Tool) CommandEvaluator
+
+// WithCommandEvaluatorFactory selects the slash-command evaluator for this runtime.
+// Passing nil leaves JavaScript expressions unexpanded, even when a global
+// evaluator is registered. Without this option, the global evaluator is used.
+func WithCommandEvaluatorFactory(factory CommandEvaluatorFactory) Opt {
+	return func(r *LocalRuntime) {
+		r.commandEvaluator = &factory
+	}
+}
+
+// CommandEvaluatorFactory returns the effective slash-command evaluator factory.
+// Runtime decorators passed to ResolveCommand should forward this method to
+// preserve instance configuration, including an explicitly disabled evaluator.
+func (r *LocalRuntime) CommandEvaluatorFactory() CommandEvaluatorFactory {
+	if r.commandEvaluator != nil {
+		return *r.commandEvaluator
+	}
+	return globalCommandFactory()
+}
+
+func globalCommandFactory() CommandEvaluatorFactory {
+	if factory := commandEvaluatorFactory.Load(); factory != nil {
+		return *factory
+	}
+	return nil
 }
 
 // argsPlaceholderRegex matches ${args...} patterns to check if args are used.
@@ -93,14 +123,20 @@ func ResolveCommand(ctx context.Context, rt Runtime, userInput string) string {
 	// Execute JavaScript expressions (${...} syntax) with args array
 	// We execute JS first to prevent tool output (from !tool commands) from being evaluated as JS,
 	// which would be a security vulnerability (injection).
-	if factory := commandEvaluatorFactory.Load(); factory == nil {
+	factory := globalCommandFactory()
+	if local, ok := rt.(interface {
+		CommandEvaluatorFactory() CommandEvaluatorFactory
+	}); ok {
+		factory = local.CommandEvaluatorFactory()
+	}
+	if factory == nil {
 		if strings.Contains(instruction, "${") {
 			slog.WarnContext(ctx, "No JavaScript evaluator registered; ${...} expressions left unexpanded (call jscommands.Register to enable them)")
 		}
 	} else if agentTools, err := rt.CurrentAgentTools(ctx); err != nil {
 		slog.WarnContext(ctx, "Failed to get agent tools for JS expression execution", "error", err)
 	} else {
-		instruction = (*factory)(agentTools).Evaluate(ctx, instruction, args)
+		instruction = factory(agentTools).Evaluate(ctx, instruction, args)
 	}
 
 	// Execute tool commands and substitute their output (legacy !tool() syntax)

@@ -55,4 +55,22 @@ func TestCapabilityOverride_SurvivesProviderConstruction(t *testing.T) {
 		bc := p.BaseConfig()
 		assert.Nil(t, bc.CapsOverride())
 	})
+
+	t.Run("audio/video override flows through to the built provider", func(t *testing.T) {
+		t.Parallel()
+		cfg := &latest.ModelConfig{
+			Provider:     "openai",
+			Model:        "gpt-4o",
+			BaseURL:      "https://llm.internal.example.com/v1",
+			Capabilities: &latest.CapabilitiesConfig{Image: true, PDF: true, Audio: true, Video: true},
+		}
+
+		p, err := fullTestRegistry().New(t.Context(), cfg, env)
+		require.NoError(t, err)
+
+		bc := p.BaseConfig()
+		got := bc.CapsOverride()
+		require.NotNil(t, got, "audio/video override must survive provider construction")
+		assert.Equal(t, &modelinfo.CapsOverride{Image: true, PDF: true, Audio: true, Video: true}, got)
+	})
 }

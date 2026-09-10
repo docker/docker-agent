@@ -300,6 +300,45 @@ func TestFetchProtectedResourceMetadata_FallbackHardStopsAndExhaustion(t *testin
 	}
 }
 
+// TestFetchProtectedResourceMetadata_NotFoundIsHardError proves the opt-in
+// NotFoundIsHardError flag turns a 404 on the primary candidate into a hard
+// error with zero fallback and zero further requests, while the flag stays
+// default-off (false, the zero value) for every existing call and
+// therefore never changes runtime behavior.
+func TestFetchProtectedResourceMetadata_NotFoundIsHardError(t *testing.T) {
+	t.Parallel()
+
+	var primaryCalls, fallbackCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/primary", func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/fallback", func(w http.ResponseWriter, _ *http.Request) {
+		fallbackCalls.Add(1)
+		w.WriteHeader(http.StatusNotFound)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	_, err := fetchProtectedResourceMetadata(
+		t.Context(), srv.Client(),
+		srv.URL+"/primary",
+		srv.URL,
+		protectedResourceMetadataOptions{
+			// A fallback candidate is set to prove it is never tried: the
+			// hard error on the primary candidate must stop the walk before
+			// it ever reaches a fallback.
+			FallbackCandidateURLs: []string{srv.URL + "/fallback"},
+			NotFoundIsHardError:   true,
+		},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to fetch protected resource metadata")
+	assert.Equal(t, int32(1), primaryCalls.Load())
+	assert.Equal(t, int32(0), fallbackCalls.Load(), "NotFoundIsHardError must stop before any fallback candidate is tried")
+}
+
 // TestHandleManagedOAuthFlow_ProtectedResourceMetadataHardErrorStopsFlow and
 // its unmanaged counterpart below prove that a hard PRM error (non-404/
 // non-200, or a decode failure) returned by fetchProtectedResourceMetadata

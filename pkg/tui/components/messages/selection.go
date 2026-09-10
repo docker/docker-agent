@@ -161,6 +161,7 @@ type DebouncedCopyMsg struct {
 func (m *model) autoScroll() tea.Cmd {
 	const scrollThreshold = 2
 	direction := 0
+	var scrollCmd tea.Cmd
 
 	// Use stored screen Y coordinate to check if mouse is in autoscroll region
 	// mouseToLineCol subtracts 2 for header, so viewport-relative Y is mouseY - 2
@@ -179,7 +180,7 @@ func (m *model) autoScroll() tea.Cmd {
 		maxScrollOffset := max(0, m.totalHeight-m.height)
 		if m.scrollOffset < maxScrollOffset {
 			direction = 1
-			m.scrollDown()
+			scrollCmd = m.scrollDown()
 			// Update endLine to reflect new scroll position
 			m.selection.endLine++
 		}
@@ -189,21 +190,20 @@ func (m *model) autoScroll() tea.Cmd {
 		return nil
 	}
 
-	return tea.Tick(20*time.Millisecond, func(time.Time) tea.Msg {
+	return tea.Batch(scrollCmd, tea.Tick(20*time.Millisecond, func(time.Time) tea.Msg {
 		return AutoScrollTickMsg{Direction: direction}
-	})
+	}))
 }
 
 // selectWordAt selects the word at the given line and column position.
 // It reports whether a word was actually selected.
 func (m *model) selectWordAt(line, col int) bool {
 	m.ensureAllItemsRendered()
-	lines := m.renderedLines
-	if line < 0 || line >= len(lines) {
+	if line < 0 || line >= m.totalHeight {
 		return false
 	}
 
-	originalLine := lines[line]
+	originalLine := m.renderedLine(line)
 	plainLine := stripBorderChars(ansi.Strip(originalLine))
 	if plainLine == "" {
 		return false
@@ -250,12 +250,11 @@ func (m *model) selectWordAt(line, col int) bool {
 // It reports whether a non-blank line was actually selected.
 func (m *model) selectLineAt(line int) bool {
 	m.ensureAllItemsRendered()
-	lines := m.renderedLines
-	if line < 0 || line >= len(lines) {
+	if line < 0 || line >= m.totalHeight {
 		return false
 	}
 
-	originalLine := lines[line]
+	originalLine := m.renderedLine(line)
 	plainLine := ansi.Strip(originalLine)
 	trimmedLine := strings.TrimSpace(plainLine)
 	if trimmedLine == "" {

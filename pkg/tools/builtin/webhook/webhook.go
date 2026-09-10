@@ -184,7 +184,8 @@ func (t *ToolSet) send(ctx context.Context, args SendArgs, rt tools.Runtime) (*t
 	}
 	if wait, limited := t.rateLimited(now); limited {
 		return tools.ResultError(fmt.Sprintf(
-			"Error: rate limited; wait %s before sending another notification.", wait.Round(time.Millisecond))), nil
+			"Error: rate limited; wait %s before sending another notification.", wait.Round(time.Millisecond),
+		)), nil
 	}
 	t.markSent(args, now)
 
@@ -200,7 +201,8 @@ func (t *ToolSet) send(ctx context.Context, args SendArgs, rt tools.Runtime) (*t
 			})
 			return tools.ResultSuccess(fmt.Sprintf(
 				"Queued delivery to the %s webhook. You will only be notified if it ultimately fails.",
-				normalizeProvider(t.cfg.Provider))), nil
+				normalizeProvider(t.cfg.Provider),
+			)), nil
 		}
 		cancel()
 	}

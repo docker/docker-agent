@@ -90,6 +90,39 @@ func (p SafetyPolicy) Normalize() SafetyPolicy {
 	}
 }
 
+// MinSafetyPolicy returns the more restrictive of two concrete safety modes.
+// Under NonInteractive, strict and balanced deny calls that need confirmation,
+// restricted permits only classifier-safe calls, and autonomous never asks.
+// Empty is an unset legacy mode rather than an ordered policy, so an empty input
+// yields empty; callers applying a policy ceiling must handle it explicitly.
+func MinSafetyPolicy(a, b SafetyPolicy) SafetyPolicy {
+	a = a.Normalize()
+	b = b.Normalize()
+	if a == "" || b == "" {
+		return ""
+	}
+
+	if safetyPolicyRank(a) <= safetyPolicyRank(b) {
+		return a
+	}
+	return b
+}
+
+func safetyPolicyRank(policy SafetyPolicy) int {
+	switch policy {
+	case SafetyPolicyStrict:
+		return 0
+	case SafetyPolicyBalanced:
+		return 1
+	case SafetyPolicyRestricted:
+		return 2
+	case SafetyPolicyAutonomous:
+		return 3
+	default:
+		return 0
+	}
+}
+
 // IsValid accepts current values, the legacy aliases, and empty.
 func (p SafetyPolicy) IsValid() bool {
 	switch p {
@@ -235,6 +268,9 @@ type Session struct {
 	// ID is the unique identifier for the session
 	ID string `json:"id"`
 
+	// Origin identifies the protocol surface that created this session.
+	Origin string `json:"origin,omitempty"`
+
 	// InputID is an optional caller-supplied correlation ID read from the eval
 	// input file's "input_id" field. It is carried through to the output as-is
 	// and never used internally. The session's own "id" is always a fresh UUID.
@@ -334,12 +370,11 @@ type Session struct {
 	Attributes map[string]string `json:"attributes,omitempty"`
 
 	// AgentModelOverrides stores per-agent model overrides for this session.
-	// Key is the agent name, value is the model reference (e.g., "openai/gpt-4o" or a named model from config).
-	// When a session is loaded, these overrides are reapplied to the runtime.
+	// Shared-session callers must use the model-state accessors below.
 	AgentModelOverrides map[string]string `json:"agent_model_overrides,omitempty"`
 
 	// CustomModelsUsed tracks custom models (provider/model format) used during this session.
-	// These are shown in the model picker for easy re-selection.
+	// Shared-session callers must use the model-state accessors below.
 	CustomModelsUsed []string `json:"custom_models_used,omitempty"`
 
 	// AttachedFiles records absolute paths of files the user attached to this
@@ -602,9 +637,10 @@ type EvalResult struct {
 // EvalResultChecks groups the individual check results.
 // Only checks that were evaluated will be present (omitted if nil).
 type EvalResultChecks struct {
-	Size      *SizeCheck      `json:"size,omitempty"`
-	ToolCalls *ToolCallsCheck `json:"tool_calls,omitempty"`
-	Relevance *RelevanceCheck `json:"relevance,omitempty"`
+	Size       *SizeCheck       `json:"size,omitempty"`
+	ToolCalls  *ToolCallsCheck  `json:"tool_calls,omitempty"`
+	Relevance  *RelevanceCheck  `json:"relevance,omitempty"`
+	Assertions *AssertionsCheck `json:"assertions,omitempty"`
 }
 
 // SizeCheck contains the result of the response size check.
@@ -635,13 +671,43 @@ type RelevanceCriterionResult struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
+// AssertionsCheck contains the results of code-based assertion evaluations.
+type AssertionsCheck struct {
+	Passed      bool              `json:"passed"`
+	PassedCount int               `json:"passed_count"`
+	Total       int               `json:"total"`
+	Results     []AssertionResult `json:"results"`
+}
+
+// AssertionResult records the outcome of a single assertion.
+type AssertionResult struct {
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	Passed bool   `json:"passed"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // EvalCriteria contains the evaluation criteria for a session.
 type EvalCriteria struct {
-	Relevance  []string `json:"relevance"`             // Statements that should be true about the response
-	WorkingDir string   `json:"working_dir,omitempty"` // Subdirectory under evals/working_dirs/
-	Size       string   `json:"size,omitempty"`        // Expected response size: S, M, L, XL
-	Setup      string   `json:"setup,omitempty"`       // Optional sh script to run in the container before docker agent run --exec
-	Image      string   `json:"image,omitempty"`       // Custom Docker image for this eval (overrides --base-image)
+	Relevance  []string    `json:"relevance"`             // Statements that should be true about the response
+	Assertions []Assertion `json:"assertions,omitempty"`  // Code-based assertions evaluated against the agent output
+	WorkingDir string      `json:"working_dir,omitempty"` // Subdirectory under evals/working_dirs/
+	Size       string      `json:"size,omitempty"`        // Expected response size: S, M, L, XL
+	Setup      string      `json:"setup,omitempty"`       // Optional sh script to run in the container before docker agent run --exec
+	Image      string      `json:"image,omitempty"`       // Custom Docker image for this eval (overrides --base-image)
+}
+
+// Assertion defines a single code-based grading check evaluated against agent output.
+type Assertion struct {
+	// Name identifies this assertion in logs and results.
+	Name string `json:"name"`
+	// Type selects the evaluator: "contains", "not_contains", "equals",
+	// "starts_with", "ends_with", "regex", "json_path", "cost_threshold",
+	// or "tool_called".
+	Type string `json:"type"`
+	// Value is the expected string, regex pattern, JSONPath expression, or
+	// threshold against which the agent output is checked.
+	Value string `json:"value"`
 }
 
 // UnmarshalJSON implements custom JSON unmarshaling for EvalCriteria that
@@ -878,15 +944,25 @@ func (s *Session) TitleSnapshot() string {
 	return s.Title
 }
 
-// ApplyCompaction atomically resets the session's cumulative token
-// counts and appends a summary item under s.mu so concurrent readers
-// (e.g. the persistence observer's UpdateSession snapshot) cannot
-// observe the new tokens without the matching summary item.
+// ApplyCompaction atomically resets the session's cumulative token counts,
+// derives scalar cost from canonical item history including the new summary,
+// and appends that summary under s.mu.
 func (s *Session) ApplyCompaction(inputTokens, outputTokens int64, item Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.applyCompactionLocked(inputTokens, outputTokens, s.totalCostLocked()+item.Cost, item)
+}
+
+func (s *Session) applyCompaction(inputTokens, outputTokens int64, resultingCost float64, item Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyCompactionLocked(inputTokens, outputTokens, resultingCost, item)
+}
+
+func (s *Session) applyCompactionLocked(inputTokens, outputTokens int64, resultingCost float64, item Item) {
 	s.InputTokens = inputTokens
 	s.OutputTokens = outputTokens
+	s.Cost = resultingCost
 	s.Messages = append(s.Messages, item)
 }
 
@@ -1402,6 +1478,12 @@ func WithMaxToolResultTokens(n int) Opt {
 	}
 }
 
+func WithOrigin(origin string) Opt {
+	return func(s *Session) {
+		s.Origin = origin
+	}
+}
+
 func WithWorkingDir(workingDir string) Opt {
 	return func(s *Session) {
 		s.WorkingDir = workingDir
@@ -1624,7 +1706,10 @@ func (s *Session) MessagesSnapshot() []Item {
 func (s *Session) TotalCost() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.totalCostLocked()
+}
 
+func (s *Session) totalCostLocked() float64 {
 	var cost float64
 	for _, item := range s.Messages {
 		switch {
@@ -1697,6 +1782,46 @@ func (s *Session) GetSafetyPolicy() SafetyPolicy {
 	return policy
 }
 
+// ModelStateSnapshot returns independent copies of the session's model state.
+func (s *Session) ModelStateSnapshot() (map[string]string, []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneStringMap(s.AgentModelOverrides), cloneStringSlice(s.CustomModelsUsed)
+}
+
+// AgentModelOverride returns the override for agentName, if present.
+func (s *Session) AgentModelOverride(agentName string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	modelRef, ok := s.AgentModelOverrides[agentName]
+	return modelRef, ok
+}
+
+// SetAgentModelOverride updates an override and custom-model history atomically.
+func (s *Session) SetAgentModelOverride(agentName, modelRef string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if modelRef == "" {
+		delete(s.AgentModelOverrides, agentName)
+		return
+	}
+	if s.AgentModelOverrides == nil {
+		s.AgentModelOverrides = make(map[string]string)
+	}
+	s.AgentModelOverrides[agentName] = modelRef
+	if strings.Contains(modelRef, "/") && !slices.Contains(s.CustomModelsUsed, modelRef) {
+		s.CustomModelsUsed = append(s.CustomModelsUsed, modelRef)
+	}
+}
+
+// ReplaceModelState atomically restores model state from independent copies.
+func (s *Session) ReplaceModelState(overrides map[string]string, customModels []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AgentModelOverrides = cloneStringMap(overrides)
+	s.CustomModelsUsed = cloneStringSlice(customModels)
+}
+
 // ClonePermissions returns a deep copy of the session's PermissionsConfig.
 // This is safe to call concurrently with session mutations.
 func (s *Session) ClonePermissions() *PermissionsConfig {
@@ -1709,7 +1834,7 @@ func (s *Session) ClonePermissions() *PermissionsConfig {
 func (s *Session) SetPermissions(perms *PermissionsConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Permissions = perms
+	s.Permissions = perms.Clone()
 }
 
 // SetToolsApproved is the legacy --yolo toggle. Prefer
@@ -1816,6 +1941,7 @@ func (s *Session) newID() string {
 // New creates a new agent session
 func New(opts ...Opt) *Session {
 	s := &Session{
+		Origin:          "run",
 		SendUserMessage: true,
 	}
 

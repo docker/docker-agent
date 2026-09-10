@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"strings"
@@ -22,36 +23,41 @@ const (
 	ToolNameAddTool    = "add_tool"
 )
 
-type deferredToolEntry struct {
-	tool   tools.Tool
-	source tools.ToolSet
-}
-
+// ToolSet exposes search_tool/add_tool over the deferred tools of its
+// sources. Each source is snapshotted lazily, on the first search/add after
+// it can be listed, rather than at start: the sources are the agent's other
+// toolsets and may still be starting when the first turn runs, so a
+// start-time snapshot would race them and fail the whole toolset.
 type ToolSet struct {
 	mu             sync.RWMutex
-	deferredTools  map[string]deferredToolEntry
 	activatedTools map[string]tools.Tool
-	sources        []deferredSource
+	sources        []*deferredSource
 }
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet       = (*ToolSet)(nil)
-	_ tools.Startable     = (*ToolSet)(nil)
-	_ tools.Instructable  = (*ToolSet)(nil)
-	_ tools.Named         = (*ToolSet)(nil)
-	_ tools.PeerDependent = (*ToolSet)(nil)
+	_ tools.ToolSet      = (*ToolSet)(nil)
+	_ tools.Instructable = (*ToolSet)(nil)
+	_ tools.Named        = (*ToolSet)(nil)
 )
 
 type deferredSource struct {
 	toolset  tools.ToolSet
 	deferAll bool
 	tools    []string
+
+	// snapshot holds the source's deferred tools once listed successfully;
+	// listed stays false while the source is unavailable so it is retried.
+	snapshot []tools.Tool
+	listed   bool
+}
+
+func (s *deferredSource) defers(name string) bool {
+	return s.deferAll || slices.Contains(s.tools, name)
 }
 
 func New() *ToolSet {
 	return &ToolSet{
-		deferredTools:  make(map[string]deferredToolEntry),
 		activatedTools: make(map[string]tools.Tool),
 	}
 }
@@ -61,15 +67,11 @@ func (d *ToolSet) Name() string {
 	return "deferred"
 }
 
-// StartsAfterPeers implements tools.PeerDependent: Start lists the source
-// toolsets' tools, so they must be started first.
-func (d *ToolSet) StartsAfterPeers() {}
-
 func (d *ToolSet) AddSource(toolset tools.ToolSet, deferAll bool, toolNames []string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.sources = append(d.sources, deferredSource{
+	d.sources = append(d.sources, &deferredSource{
 		toolset:  toolset,
 		deferAll: deferAll,
 		tools:    toolNames,
@@ -101,11 +103,70 @@ type AddToolArgs struct {
 	Name string `json:"name" jsonschema:"The name of the tool to activate"`
 }
 
-func (d *ToolSet) handleSearchTool(ctx context.Context, args SearchToolArgs) (*tools.ToolCallResult, error) {
-	queryRunes := []rune(strings.ToLower(strings.TrimSpace(args.Query)))
+// snapshotPendingSources lists every source not yet snapshotted. Sources are
+// listed without holding d.mu (an MCP list may be a network round-trip);
+// a source that cannot list yet (typically still starting) is skipped and
+// retried on the next call, so its tools show up once it is ready.
+func (d *ToolSet) snapshotPendingSources(ctx context.Context) {
+	d.mu.RLock()
+	var pending []*deferredSource
+	for _, source := range d.sources {
+		if !source.listed {
+			pending = append(pending, source)
+		}
+	}
+	d.mu.RUnlock()
+
+	for _, source := range pending {
+		allTools, err := source.toolset.Tools(ctx)
+		if err != nil {
+			slog.DebugContext(ctx, "Deferred source unavailable; skipping", "source", tools.DescribeToolSet(source.toolset), "error", err)
+			continue
+		}
+
+		var snapshot []tools.Tool
+		for _, tool := range allTools {
+			if source.defers(tool.Name) {
+				snapshot = append(snapshot, tool)
+			}
+		}
+
+		d.mu.Lock()
+		// A concurrent call may have snapshotted the same source; first wins.
+		if !source.listed {
+			source.snapshot = snapshot
+			source.listed = true
+		}
+		d.mu.Unlock()
+	}
+}
+
+// deferredTools returns the not-yet-activated deferred tools across all
+// listed sources, first source winning on duplicate names.
+func (d *ToolSet) deferredTools(ctx context.Context) map[string]tools.Tool {
+	d.snapshotPendingSources(ctx)
 
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+
+	result := make(map[string]tools.Tool)
+	for _, source := range d.sources {
+		for _, tool := range source.snapshot {
+			if _, active := d.activatedTools[tool.Name]; active {
+				continue
+			}
+			if _, exists := result[tool.Name]; !exists {
+				result[tool.Name] = tool
+			}
+		}
+	}
+	return result
+}
+
+func (d *ToolSet) handleSearchTool(ctx context.Context, args SearchToolArgs) (*tools.ToolCallResult, error) {
+	queryRunes := []rune(strings.ToLower(strings.TrimSpace(args.Query)))
+
+	deferredTools := d.deferredTools(ctx)
 
 	type scoredDeferredTool struct {
 		result SearchToolResult
@@ -113,19 +174,19 @@ func (d *ToolSet) handleSearchTool(ctx context.Context, args SearchToolArgs) (*t
 	}
 
 	var matches []scoredDeferredTool
-	for name, entry := range d.deferredTools {
+	for name, tool := range deferredTools {
 		if len(queryRunes) == 0 {
 			matches = append(matches, scoredDeferredTool{
 				result: SearchToolResult{
 					Name:        name,
-					Description: entry.tool.Description,
+					Description: tool.Description,
 				},
 				score: 0,
 			})
 			continue
 		}
 
-		chars := util.ToChars([]byte(name + " " + entry.tool.Description))
+		chars := util.ToChars([]byte(name + " " + tool.Description))
 		res, _ := algo.FuzzyMatchV2(
 			false, // caseSensitive
 			true,  // normalize
@@ -140,7 +201,7 @@ func (d *ToolSet) handleSearchTool(ctx context.Context, args SearchToolArgs) (*t
 			matches = append(matches, scoredDeferredTool{
 				result: SearchToolResult{
 					Name:        name,
-					Description: entry.tool.Description,
+					Description: tool.Description,
 				},
 				score: res.Score,
 			})
@@ -161,7 +222,7 @@ func (d *ToolSet) handleSearchTool(ctx context.Context, args SearchToolArgs) (*t
 			attribute.String("cagent.tool.deferred.op", "search_tool"),
 			attribute.String("cagent.tool.deferred.query", args.Query),
 			attribute.Int("cagent.tool.deferred.match_count", len(results)),
-			attribute.Int("cagent.tool.deferred.pool_size", len(d.deferredTools)),
+			attribute.Int("cagent.tool.deferred.pool_size", len(deferredTools)),
 		)
 	}
 
@@ -177,39 +238,58 @@ func (d *ToolSet) handleSearchTool(ctx context.Context, args SearchToolArgs) (*t
 	return tools.ResultSuccess(fmt.Sprintf("Found %d deferred tool(s):\n%s", len(results), string(output))), nil
 }
 
-func (d *ToolSet) handleAddTool(ctx context.Context, args AddToolArgs) (*tools.ToolCallResult, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+type addOutcome string
 
-	span := trace.SpanFromContext(ctx)
-	annotate := func(outcome string) {
-		if !span.IsRecording() {
-			return
-		}
+const (
+	outcomeActivated     addOutcome = "activated"
+	outcomeAlreadyActive addOutcome = "already_active"
+	outcomeNotFound      addOutcome = "not_found"
+)
+
+func (d *ToolSet) handleAddTool(ctx context.Context, args AddToolArgs) (*tools.ToolCallResult, error) {
+	d.snapshotPendingSources(ctx)
+
+	// Decide and apply under one lock so concurrent add_tool calls for the
+	// same name report exactly one activation.
+	d.mu.Lock()
+	outcome, tool := d.activateLocked(args.Name)
+	activatedCount := len(d.activatedTools)
+	d.mu.Unlock()
+
+	if span := trace.SpanFromContext(ctx); span.IsRecording() {
 		span.SetAttributes(
 			attribute.String("cagent.tool.deferred.op", "add_tool"),
 			attribute.String("cagent.tool.deferred.tool_name", args.Name),
-			attribute.String("cagent.tool.deferred.outcome", outcome),
-			attribute.Int("cagent.tool.deferred.activated_count", len(d.activatedTools)),
+			attribute.String("cagent.tool.deferred.outcome", string(outcome)),
+			attribute.Int("cagent.tool.deferred.activated_count", activatedCount),
 		)
 	}
 
-	if _, exists := d.activatedTools[args.Name]; exists {
-		annotate("already_active")
+	switch outcome {
+	case outcomeAlreadyActive:
 		return tools.ResultSuccess(fmt.Sprintf("Tool '%s' is already active", args.Name)), nil
-	}
-
-	entry, exists := d.deferredTools[args.Name]
-	if !exists {
-		annotate("not_found")
+	case outcomeActivated:
+		return tools.ResultSuccess(fmt.Sprintf("Tool '%s' has been activated and is now available for use.\n\nDescription: %s", args.Name, tool.Description)), nil
+	default:
 		return tools.ResultError(fmt.Sprintf("Tool '%s' not found.", args.Name)), nil
 	}
+}
 
-	delete(d.deferredTools, args.Name)
-	d.activatedTools[args.Name] = entry.tool
-	annotate("activated")
-
-	return tools.ResultSuccess(fmt.Sprintf("Tool '%s' has been activated and is now available for use.\n\nDescription: %s", args.Name, entry.tool.Description)), nil
+// activateLocked activates name from the first listed source that defers it.
+// d.mu must be held for writing.
+func (d *ToolSet) activateLocked(name string) (addOutcome, tools.Tool) {
+	if tool, active := d.activatedTools[name]; active {
+		return outcomeAlreadyActive, tool
+	}
+	for _, source := range d.sources {
+		for _, tool := range source.snapshot {
+			if tool.Name == name {
+				d.activatedTools[name] = tool
+				return outcomeActivated, tool
+			}
+		}
+	}
+	return outcomeNotFound, tools.Tool{}
 }
 
 func (d *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
@@ -248,36 +328,4 @@ func (d *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	}
 
 	return result, nil
-}
-
-func (d *ToolSet) Start(ctx context.Context) error {
-	// Note: we are not responsible for starting the underlying toolsets here
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	for _, source := range d.sources {
-		allTools, err := source.toolset.Tools(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to get tools from source: %w", err)
-		}
-
-		for _, tool := range allTools {
-			if !source.deferAll && !slices.Contains(source.tools, tool.Name) {
-				continue
-			}
-
-			if _, exists := d.deferredTools[tool.Name]; !exists {
-				d.deferredTools[tool.Name] = deferredToolEntry{
-					tool:   tool,
-					source: source.toolset,
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-func (d *ToolSet) Stop(context.Context) error {
-	return nil
 }

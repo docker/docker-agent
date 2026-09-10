@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"syscall/js"
 	"time"
@@ -76,7 +77,7 @@ func buildRuntime(ctx context.Context, cfg *latest.Config, env environment.Provi
 			return nil, fmt.Errorf("agent %q: %w", agentCfg.Name, err)
 		}
 
-		prov, err := provider.NewWithModels(ctx, &modelCfg, cfg.Models, env, options.WithProviders(cfg.Providers))
+		prov, err := demoProviders.NewWithModels(ctx, &modelCfg, cfg.Models, env, options.WithProviders(cfg.Providers))
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: building model provider: %w", agentCfg.Name, err)
 		}
@@ -89,7 +90,7 @@ func buildRuntime(ctx context.Context, cfg *latest.Config, env environment.Provi
 				slog.WarnContext(ctx, "Skipping fallback model", "agent", agentCfg.Name, "model", fbModel, "error", err)
 				continue
 			}
-			fbProv, err := provider.NewWithModels(ctx, &fbCfg, cfg.Models, env, options.WithProviders(cfg.Providers))
+			fbProv, err := demoProviders.NewWithModels(ctx, &fbCfg, cfg.Models, env, options.WithProviders(cfg.Providers))
 			if err != nil {
 				slog.WarnContext(ctx, "Skipping fallback model", "agent", agentCfg.Name, "model", fbModel, "error", err)
 				continue
@@ -773,9 +774,9 @@ func (rt *wasmRuntime) emitEvent(event map[string]any) {
 
 // lastAssistantContent returns the content of the last assistant message.
 func (rt *wasmRuntime) lastAssistantContent(messages []chat.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == chat.MessageRoleAssistant && messages[i].Content != "" {
-			return messages[i].Content
+	for _, msg := range slices.Backward(messages) {
+		if msg.Role == chat.MessageRoleAssistant && msg.Content != "" {
+			return msg.Content
 		}
 	}
 	return ""

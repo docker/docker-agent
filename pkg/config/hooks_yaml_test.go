@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/goccy/go-yaml"
@@ -198,4 +199,80 @@ after_llm_call:
 
 	assert.False(t, (&latest.HooksConfig{BeforeLLMCall: cfg.BeforeLLMCall}).IsEmpty())
 	assert.False(t, (&latest.HooksConfig{AfterLLMCall: cfg.AfterLLMCall}).IsEmpty())
+}
+
+// TestHooksConfig_ToolInputTransformAndToolGuard_YAML pins the two
+// pre-approval tool events: both parse as tool-matched entries and
+// reject preempt_yolo, which is meaningless on events that always run
+// before approval.
+func TestHooksConfig_ToolInputTransformAndToolGuard_YAML(t *testing.T) {
+	t.Parallel()
+
+	const src = `
+tool_input_transform:
+  - matcher: shell
+    hooks:
+      - type: builtin
+        command: redact_secrets
+tool_guard:
+  - matcher: "*"
+    hooks:
+      - type: command
+        command: ./scripts/guard.sh
+`
+
+	var cfg latest.HooksConfig
+	require.NoError(t, yaml.Unmarshal([]byte(src), &cfg))
+	require.NoError(t, cfg.Validate())
+
+	require.Len(t, cfg.ToolInputTransform, 1)
+	assert.Equal(t, "shell", cfg.ToolInputTransform[0].Matcher)
+	assert.Equal(t, "redact_secrets", cfg.ToolInputTransform[0].Hooks[0].Command)
+	require.Len(t, cfg.ToolGuard, 1)
+	assert.Equal(t, "./scripts/guard.sh", cfg.ToolGuard[0].Hooks[0].Command)
+
+	assert.False(t, (&latest.HooksConfig{ToolInputTransform: cfg.ToolInputTransform}).IsEmpty())
+	assert.False(t, (&latest.HooksConfig{ToolGuard: cfg.ToolGuard}).IsEmpty())
+
+	preempt := true
+	for _, tc := range []struct {
+		name string
+		cfg  latest.HooksConfig
+	}{
+		{"tool_input_transform", latest.HooksConfig{ToolInputTransform: latest.HookMatcherConfigs{{PreemptYolo: &preempt, Hooks: cfg.ToolGuard[0].Hooks}}}},
+		{"tool_guard", latest.HooksConfig{ToolGuard: latest.HookMatcherConfigs{{PreemptYolo: &preempt, Hooks: cfg.ToolGuard[0].Hooks}}}},
+	} {
+		err := tc.cfg.Validate()
+		require.Error(t, err, tc.name)
+		assert.Contains(t, err.Error(), "hooks."+tc.name+"[0]: preempt_yolo is only valid on pre_tool_use")
+	}
+
+	// Only pre_tool_use accepts the legacy lane option.
+	legacy := latest.HooksConfig{
+		PreToolUse:  latest.HookMatcherConfigs{{PreemptYolo: &preempt, Hooks: cfg.ToolGuard[0].Hooks}},
+		PostToolUse: latest.HookMatcherConfigs{{PreemptYolo: &preempt, Hooks: cfg.ToolGuard[0].Hooks}},
+	}
+	require.ErrorContains(t, legacy.Validate(), "preempt_yolo is only valid on pre_tool_use")
+	legacy.PostToolUse = nil
+	require.NoError(t, legacy.Validate())
+
+	// Malformed entries are still caught on the new events.
+	err := (&latest.HooksConfig{ToolGuard: latest.HookMatcherConfigs{{Matcher: "*"}}}).Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hooks.tool_guard[0]: at least one hook is required")
+}
+
+func TestMergeHooksIncludesEveryEvent(t *testing.T) {
+	t.Parallel()
+	base, extra := &latest.HooksConfig{}, &latest.HooksConfig{}
+	for _, cfg := range []*latest.HooksConfig{base, extra} {
+		v := reflect.ValueOf(cfg).Elem()
+		for _, field := range v.Fields() {
+			field.Set(reflect.MakeSlice(field.Type(), 1, 1))
+		}
+	}
+	merged := reflect.ValueOf(MergeHooks(base, extra)).Elem()
+	for i := range merged.NumField() {
+		assert.Equal(t, 2, merged.Field(i).Len(), merged.Type().Field(i).Name)
+	}
 }

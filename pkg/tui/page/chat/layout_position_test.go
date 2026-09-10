@@ -95,6 +95,20 @@ func TestStartupBannerHiddenWhenChatIsTooSmall(t *testing.T) {
 	}
 }
 
+func TestStartupBannerHiddenWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	p := newLayoutTestPage(t, msgtypes.SidebarRight)
+	p.showStartupBanner = true
+	p.SetShowBanner(false)
+	p.SetSize(p.width, p.height)
+
+	assert.Empty(t, p.messagesView(p.computeSidebarLayout()))
+
+	p.SetShowBanner(true)
+	assert.Contains(t, ansi.Strip(p.messagesView(p.computeSidebarLayout())), tuibanner.Lines[0])
+}
+
 func TestEmptyAgentInfoDoesNotReactivateStartupBanner(t *testing.T) {
 	t.Parallel()
 

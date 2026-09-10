@@ -77,6 +77,8 @@ func (f *fakeDoer) lastBody(t *testing.T) map[string]string {
 }
 
 type fakeRuntime struct {
+	tools.NopRuntime
+
 	mu      sync.Mutex
 	recalls []string
 	recall  bool

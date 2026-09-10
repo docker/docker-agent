@@ -53,7 +53,6 @@ Docker Agent ships with several built-in tools that require no external dependen
 | [Scheduler](../../tools/scheduler/index.md) | Schedule instructions to run at a time or on a recurring interval |
 | [Webhook](../../tools/webhook/index.md) | Outbound notifications to Slack, Discord, Telegram, IFTTT, and more |
 | [Plan](../../tools/plan/index.md) | Shared persistent scratchpad for multi-agent collaboration |
-| [Session Plan](../../tools/session_plan/index.md) | Per-session plan tracker for the draft/review/execute workflow |
 | [Session Context](../../tools/session_context/index.md) | Reference a previous session as context |
 
 ## MCP Tools

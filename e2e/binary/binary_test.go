@@ -1,5 +1,4 @@
 //go:build binary_required
-// +build binary_required
 
 package binary
 

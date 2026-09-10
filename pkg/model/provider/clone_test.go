@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
@@ -174,6 +175,21 @@ func TestCloneWithOptions_PreservesMaxTokens(t *testing.T) {
 		"MaxTokens should be preserved after cloning with unrelated options")
 	assert.Equal(t, maxTokens, *clonedConfig.ModelConfig.MaxTokens,
 		"MaxTokens value should be unchanged after cloning")
+}
+
+func TestCloneWithOptions_PreservesOutputCapabilities(t *testing.T) {
+	t.Parallel()
+
+	image := true
+	cfg := base.Config{ModelConfig: latest.ModelConfig{
+		OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: &image},
+	}}
+
+	cloned, _ := mergeCloneOptions(cfg, []options.Opt{options.WithGeneratingTitle()})
+
+	require.NotNil(t, cloned.OutputCapabilities)
+	require.NotNil(t, cloned.OutputCapabilities.Image)
+	assert.True(t, *cloned.OutputCapabilities.Image)
 }
 
 func TestCloneWithOptions_OverridesMaxTokens(t *testing.T) {

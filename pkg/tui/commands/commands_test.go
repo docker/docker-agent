@@ -205,6 +205,42 @@ func TestParseSlashCommand_OtherCommands(t *testing.T) {
 	})
 }
 
+// TestParseSlashCommand_New is a regression test for #4046: /new must
+// forward its optional directory argument instead of dropping it.
+func TestParseSlashCommand_New(t *testing.T) {
+	t.Parallel()
+	parser := newTestParser()
+
+	parseNew := func(t *testing.T, input string) messages.NewSessionMsg {
+		t.Helper()
+		cmd := parser.Parse(input)
+		require.NotNil(t, cmd)
+		newMsg, ok := cmd().(messages.NewSessionMsg)
+		require.True(t, ok, "should return NewSessionMsg")
+		return newMsg
+	}
+
+	t.Run("new without argument keeps the generic behavior", func(t *testing.T) {
+		t.Parallel()
+		assert.Empty(t, parseNew(t, "/new").WorkingDir)
+	})
+
+	t.Run("new with directory argument", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "/tmp/project", parseNew(t, "/new /tmp/project").WorkingDir)
+	})
+
+	t.Run("new trims whitespace around the argument", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "/tmp/project", parseNew(t, "/new   /tmp/project  ").WorkingDir)
+	})
+
+	t.Run("new with whitespace-only argument behaves like no argument", func(t *testing.T) {
+		t.Parallel()
+		assert.Empty(t, parseNew(t, "/new   ").WorkingDir)
+	})
+}
+
 func TestParseSlashCommand_Compact(t *testing.T) {
 	t.Parallel()
 	parser := newTestParser()

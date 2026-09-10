@@ -96,7 +96,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	case toolset.Command != "":
 		resolvedCommand, err := toolinstall.EnsureCommand(ctx, toolset.Command, toolset.Version)
 		if err != nil {
-			slog.WarnContext(ctx, "MCP command not yet available, will retry on next turn",
+			slog.WarnContext(ctx, "MCP command not yet available, will retry",
 				"command", toolset.Command, "error", err)
 			resolvedCommand = toolset.Command
 		}
@@ -252,7 +252,7 @@ func NewRemoteToolset(name, urlString, transport string, headers map[string]stri
 }
 
 // NewRemoteToolsetWithAllowPrivateIPs creates a new remote MCP toolset and
-// optionally permits OAuth helper requests to dial non-public IP addresses.
+// optionally permits requests to dial non-public IP addresses.
 func NewRemoteToolsetWithAllowPrivateIPs(
 	name, urlString, transport string,
 	headers map[string]string,

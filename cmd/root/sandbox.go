@@ -19,6 +19,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/paths"
@@ -50,7 +51,7 @@ func resolveSandboxDefault(ctx context.Context, agentRef string, current bool, f
 	if current {
 		return current, cfg
 	}
-	if alias := config.ResolveAlias(agentRef); alias != nil && alias.Sandbox {
+	if alias := sources.ResolveAlias(agentRef); alias != nil && alias.Sandbox {
 		return true, cfg
 	}
 	return cfg != nil && cfg.Runtime != nil && cfg.Runtime.Sandbox, cfg
@@ -85,7 +86,7 @@ func loadAgentConfig(ctx context.Context, agentRef string, flavors []string) *la
 	if agentRef == "" {
 		return nil
 	}
-	source, err := config.Resolve(agentRef, nil)
+	source, err := sources.Resolve(agentRef, nil)
 	if err != nil {
 		return nil
 	}

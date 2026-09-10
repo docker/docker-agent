@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,6 +19,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/modelerrors"
+	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 	"github.com/docker/docker-agent/pkg/upstream"
 )
 
@@ -92,7 +96,7 @@ func TestRemoteClientCustomHeaders(t *testing.T) {
 		"Authorization": "Bearer custom-token",
 	}
 
-	client := newRemoteClient(server.URL, "sse", expectedHeaders, NewInMemoryTokenStore(), nil, false, nil)
+	client := newRemoteClient(server.URL, "sse", expectedHeaders, NewInMemoryTokenStore(), nil, true, nil)
 
 	// Try to initialize (which will make the HTTP request)
 	// We don't care if it succeeds or fails, we just need it to make the request
@@ -120,14 +124,28 @@ func TestRemoteClientHeadersWithStreamable(t *testing.T) {
 	var capturedRequest *http.Request
 	requestCaptured := make(chan bool, 1)
 
-	// Create a test server for streamable transport
+	// Create a test server for streamable transport. The go-sdk client
+	// sends several JSON-RPC calls (server/discover, then initialize), so
+	// echo each request's id — a response with a non-matching id would
+	// leave the call awaiting forever. The mock deliberately answers every
+	// non-notification request with the same minimal initialize-shaped body;
+	// its bogus protocol version makes Initialize fail fast, which the test
+	// ignores: only headers matter.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedRequest = r
 
-		// Send a minimal response
+		var req struct {
+			ID json.RawMessage `json:"id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.ID == nil {
+			// Notification: no response expected.
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"jsonrpc":"2.0","result":{"protocolVersion":"1.0.0","capabilities":{},"serverInfo":{"name":"test","version":"1.0.0"}},"id":1}`)
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","result":{"protocolVersion":"1.0.0","capabilities":{},"serverInfo":{"name":"test","version":"1.0.0"}},"id":%s}`, req.ID)
 
 		select {
 		case requestCaptured <- true:
@@ -141,7 +159,7 @@ func TestRemoteClientHeadersWithStreamable(t *testing.T) {
 		"X-Custom-Auth": "custom-auth-value",
 	}
 
-	client := newRemoteClient(server.URL, "streamable", expectedHeaders, NewInMemoryTokenStore(), nil, false, nil)
+	client := newRemoteClient(server.URL, "streamable", expectedHeaders, NewInMemoryTokenStore(), nil, true, nil)
 
 	// Try to initialize
 	_, _ = client.Initialize(t.Context(), nil)
@@ -181,7 +199,7 @@ func TestRemoteClientNoHeaders(t *testing.T) {
 	defer server.Close()
 
 	// Create remote client without custom headers (nil)
-	client := newRemoteClient(server.URL, "sse", nil, NewInMemoryTokenStore(), nil, false, nil)
+	client := newRemoteClient(server.URL, "sse", nil, NewInMemoryTokenStore(), nil, true, nil)
 
 	_, _ = client.Initialize(t.Context(), nil)
 
@@ -217,7 +235,7 @@ func TestRemoteClientEmptyHeaders(t *testing.T) {
 	defer server.Close()
 
 	// Create remote client with empty headers map
-	client := newRemoteClient(server.URL, "sse", map[string]string{}, NewInMemoryTokenStore(), nil, false, nil)
+	client := newRemoteClient(server.URL, "sse", map[string]string{}, NewInMemoryTokenStore(), nil, true, nil)
 
 	_, _ = client.Initialize(t.Context(), nil)
 
@@ -321,7 +339,7 @@ func TestInitialize_SurfacesServerErrorInReturnedError(t *testing.T) {
 	store := NewInMemoryTokenStore()
 	require.NoError(t, store.StoreToken(server.URL, &OAuthToken{AccessToken: "at", TokenType: "Bearer"}))
 
-	client := newRemoteClient(server.URL, "streamable", nil, store, nil, false, nil)
+	client := newRemoteClient(server.URL, "streamable", nil, store, nil, true, nil)
 
 	_, err := client.Initialize(t.Context(), nil)
 	require.Error(t, err, "Initialize should fail against a server that rejects initialize")
@@ -353,7 +371,7 @@ func TestInitialize_NonInteractiveCtxDefersOAuthAndDoesNotBlock(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newRemoteClient(server.URL, "streamable", nil, NewInMemoryTokenStore(), nil, false, nil)
+	client := newRemoteClient(server.URL, "streamable", nil, NewInMemoryTokenStore(), nil, true, nil)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
@@ -428,7 +446,7 @@ func TestInitialize_OAuthDefersWhenElicitationBridgeNotReady(t *testing.T) {
 	// flow runs. That path reaches requestElicitation without needing
 	// dynamic client registration, which keeps the test focused on the
 	// bridge-not-ready behaviour.
-	client := newRemoteClient(srv.URL, "streamable", nil, NewInMemoryTokenStore(), nil, false, nil)
+	client := newRemoteClient(srv.URL, "streamable", nil, NewInMemoryTokenStore(), nil, true, nil)
 
 	// Plain interactive ctx (no WithoutInteractivePrompts marker). The
 	// elicitation handler is intentionally not wired up.
@@ -478,7 +496,7 @@ func TestCreateHTTPClient_PersistsCookies(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newRemoteClient(server.URL, "streamable", nil, NewInMemoryTokenStore(), nil, false, nil)
+	client := newRemoteClient(server.URL, "streamable", nil, NewInMemoryTokenStore(), nil, true, nil)
 	httpClient, _, err := client.createHTTPClient()
 	require.NoError(t, err)
 	require.NotNil(t, httpClient.Jar, "createHTTPClient must attach a cookie jar so sticky sessions stick")
@@ -496,6 +514,44 @@ func TestCreateHTTPClient_PersistsCookies(t *testing.T) {
 	_ = resp2.Body.Close()
 
 	require.Equal(t, int32(2), requestCount.Load(), "handler should have served both requests")
+}
+
+func TestRemoteClientRejectsPrivateIPsByDefault(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := newRemoteClient(server.URL, "streamable", map[string]string{"X-Test": "value"}, NewInMemoryTokenStore(), nil, false, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := (&http.Client{Transport: client.headerTransport()}).Do(req)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
+	require.Error(t, err)
+	assert.Zero(t, hits.Load())
+}
+
+func TestRemoteClientAllowsPrivateIPsWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	client := newRemoteClient(server.URL, "streamable", nil, NewInMemoryTokenStore(), nil, true, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := (&http.Client{Transport: client.headerTransport()}).Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusNoContent, resp.StatusCode)
 }
 
 func TestNewRemoteToolsetWithAllowPrivateIPsPropagatesToClient(t *testing.T) {
@@ -569,7 +625,7 @@ func TestRemoteClientCallToolAbortsOnContextDeadline(t *testing.T) {
 	httpServer := httptest.NewServer(gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return server }, nil))
 	defer httpServer.Close()
 
-	client := newRemoteClient(httpServer.URL, "streamable", nil, NewInMemoryTokenStore(), nil, false, nil)
+	client := newRemoteClient(httpServer.URL, "streamable", nil, NewInMemoryTokenStore(), nil, true, nil)
 	_, err := client.Initialize(t.Context(), nil)
 	require.NoError(t, err)
 	defer func() { _ = client.Close(context.WithoutCancel(t.Context())) }()
@@ -589,6 +645,113 @@ func TestRemoteClientCallToolAbortsOnContextDeadline(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("server-side tool handler never observed context cancellation; the client's POST was not aborted at the deadline")
 	}
+}
+
+// TestRemoteClientCallToolMRTRElicitation covers MCP 2026-07-28
+// multi-round-trip elicitation (SEP-2322) through the real remote client
+// wiring. The server runs in stateless mode — the transport mode our own
+// HTTP server ships with — where mid-call server-initiated JSON-RPC requests
+// are impossible, so the tool handler returns CallToolResult.InputRequests
+// plus an opaque RequestState instead. The go-sdk client middleware must
+// fulfill that request through the repository-level tools.ElicitationHandler
+// wired via SetElicitationHandler, retry the call with the elicitation
+// response and the echoed RequestState, and surface only the completed
+// result to the caller.
+func TestRemoteClientCallToolMRTRElicitation(t *testing.T) {
+	t.Parallel()
+
+	const (
+		elicitMessage = "Deploy to production?"
+		requestState  = "deploy-state-42"
+	)
+
+	// The tool handler runs on HTTP server goroutines, so no require/t.Fatal
+	// here: observations travel over a buffered channel and atomics to the
+	// test goroutine, which asserts after CallTool returns.
+	type retryCall struct {
+		requestState string
+		response     gomcp.InputResponse
+	}
+	var toolCalls atomic.Int32
+	retryCh := make(chan retryCall, 1)
+
+	server := gomcp.NewServer(&gomcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	gomcp.AddTool(server, &gomcp.Tool{Name: "deploy", Description: "asks for confirmation"},
+		func(_ context.Context, req *gomcp.CallToolRequest, _ struct{}) (*gomcp.CallToolResult, any, error) {
+			toolCalls.Add(1)
+			if len(req.Params.InputResponses) == 0 {
+				return &gomcp.CallToolResult{
+					InputRequests: gomcp.InputRequestMap{"confirm": &gomcp.ElicitParams{Message: elicitMessage}},
+					RequestState:  requestState,
+				}, nil, nil
+			}
+			select {
+			case retryCh <- retryCall{
+				requestState: req.Params.RequestState,
+				response:     req.Params.InputResponses["confirm"],
+			}:
+			default:
+			}
+			return &gomcp.CallToolResult{Content: []gomcp.Content{&gomcp.TextContent{Text: "deployed"}}}, nil, nil
+		})
+
+	httpServer := httptest.NewServer(gomcp.NewStreamableHTTPHandler(
+		func(*http.Request) *gomcp.Server { return server },
+		&gomcp.StreamableHTTPOptions{Stateless: true},
+	))
+	defer httpServer.Close()
+
+	client := newRemoteClient(httpServer.URL, "streamable", nil, NewInMemoryTokenStore(), nil, true, nil)
+
+	var elicitCalls atomic.Int32
+	elicitMessages := make(chan string, 1)
+	client.SetElicitationHandler(func(_ context.Context, req *gomcp.ElicitParams) (tools.ElicitationResult, error) {
+		elicitCalls.Add(1)
+		select {
+		case elicitMessages <- req.Message:
+		default:
+		}
+		return tools.ElicitationResult{
+			Action:  tools.ElicitationActionAccept,
+			Content: map[string]any{"confirmed": true},
+		}, nil
+	})
+
+	_, err := client.Initialize(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = client.Close(context.WithoutCancel(t.Context())) }()
+
+	result, err := client.CallTool(t.Context(), &gomcp.CallToolParams{Name: "deploy"})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	require.Equal(t, int32(1), elicitCalls.Load(), "elicitation handler must run exactly once")
+	select {
+	case msg := <-elicitMessages:
+		assert.Equal(t, elicitMessage, msg, "handler must receive the server's elicitation message")
+	default:
+		t.Fatal("elicitation handler never recorded the message it received")
+	}
+
+	require.Equal(t, int32(2), toolCalls.Load(), "tool handler must run exactly twice: initial call + middleware retry")
+	var retry retryCall
+	select {
+	case retry = <-retryCh:
+	default:
+		t.Fatal("server never observed the retry carrying the input responses")
+	}
+	assert.Equal(t, requestState, retry.requestState, "retry must echo the exact RequestState of the input-required result")
+	elicitResult, ok := retry.response.(*gomcp.ElicitResult)
+	require.True(t, ok, "retry must carry the keyed *gomcp.ElicitResult, got %T", retry.response)
+	assert.Equal(t, string(tools.ElicitationActionAccept), elicitResult.Action)
+	assert.Equal(t, map[string]any{"confirmed": true}, elicitResult.Content)
+
+	assert.False(t, result.NeedsInput(), "final result must be complete, not input-required")
+	assert.False(t, result.IsError)
+	require.Len(t, result.Content, 1)
+	text, ok := result.Content[0].(*gomcp.TextContent)
+	require.True(t, ok, "expected text content, got %T", result.Content[0])
+	assert.Equal(t, "deployed", text.Text)
 }
 
 // mutableEnvProvider is a context-aware, mutable environment.Provider for
@@ -672,7 +835,7 @@ func TestRemoteClient_ExpandsEnvHeadersPerRequest(t *testing.T) {
 
 	env := &mutableEnvProvider{vals: map[string]string{"TOKEN": "token-1"}}
 	headers := map[string]string{"X-Env-Token": "${env.TOKEN}"}
-	client := newRemoteClient(srv.URL, "streamable", headers, NewInMemoryTokenStore(), nil, false, env)
+	client := newRemoteClient(srv.URL, "streamable", headers, NewInMemoryTokenStore(), nil, true, env)
 
 	_, err := client.Initialize(t.Context(), nil)
 	require.NoError(t, err)
@@ -718,7 +881,7 @@ func TestRemoteClient_ResolvesUpstreamHeaderPlaceholdersPerRequest(t *testing.T)
 		"Authorization": "${headers.Authorization}",
 		"X-Env-Token":   "${env.TOKEN}",
 	}
-	client := newRemoteClient(srv.URL, "streamable", headers, NewInMemoryTokenStore(), nil, false, env)
+	client := newRemoteClient(srv.URL, "streamable", headers, NewInMemoryTokenStore(), nil, true, env)
 
 	_, err := client.Initialize(t.Context(), nil)
 	require.NoError(t, err)
@@ -766,7 +929,7 @@ func TestRemoteClient_ExpandsMixedEnvAndUpstreamPlaceholdersInOneValue(t *testin
 
 	env := &mutableEnvProvider{vals: map[string]string{"SCHEME": "Env"}}
 	headers := map[string]string{"X-Combined": "${env.SCHEME} ${headers.X-Upstream-Token}"}
-	client := newRemoteClient(srv.URL, "streamable", headers, NewInMemoryTokenStore(), nil, false, env)
+	client := newRemoteClient(srv.URL, "streamable", headers, NewInMemoryTokenStore(), nil, true, env)
 
 	_, err := client.Initialize(t.Context(), nil)
 	require.NoError(t, err)
@@ -859,4 +1022,469 @@ func TestOAuthHTTPClientWithHeaders_ResolverKeepsEnvHeadersFreshAndHostScoped(t 
 	v, _ := thirdPartyHeader.Load().(string)
 	assert.Empty(t, v,
 		"requests to a third-party host must NOT carry the configured header even with a resolver (credential-leak guard)")
+}
+
+// githubStyleMCPServer mimics GitHub's MCP endpoint (docker/docker-agent#4068):
+// it serves both handshake generations but rejects subscriptions/listen with
+// HTTP 404 + JSON-RPC -32601.
+type githubStyleMCPServer struct {
+	*httptest.Server
+
+	discovers   atomic.Int64
+	initializes atomic.Int64
+	listens     atomic.Int64
+	toolsLists  atomic.Int64
+}
+
+// handshakes counts connection setups. Max, not sum: one setup may combine a
+// discover probe with an initialize fallback.
+func (s *githubStyleMCPServer) handshakes() int64 {
+	return max(s.discovers.Load(), s.initializes.Load())
+}
+
+func newGitHubStyleMCPServer(t *testing.T) *githubStyleMCPServer {
+	t.Helper()
+
+	srv := &githubStyleMCPServer{}
+	srv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+			Params struct {
+				ProtocolVersion string `json:"protocolVersion"`
+			} `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if req.ID == nil {
+			// Notification: no response expected.
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+
+		result := func(result string) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":%s}`, req.ID, result)
+		}
+		methodNotFound := func() {
+			msg, err := json.Marshal(fmt.Sprintf("method not found: %q", req.Method))
+			require.NoError(t, err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":%s}}`, req.ID, msg)
+		}
+
+		switch req.Method {
+		case "server/discover":
+			srv.discovers.Add(1)
+			result(`{"supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":true},"prompts":{"listChanged":true}}}`)
+		case "subscriptions/listen":
+			srv.listens.Add(1)
+			methodNotFound()
+		case "initialize":
+			srv.initializes.Add(1)
+			version := req.Params.ProtocolVersion
+			if version == "" {
+				version = "2025-11-25"
+			}
+			result(fmt.Sprintf(`{"protocolVersion":%q,"capabilities":{"tools":{"listChanged":true},"prompts":{"listChanged":true}},"serverInfo":{"name":"github-mcp-stub","version":"0.0.1"}}`, version))
+		case "tools/list":
+			srv.toolsLists.Add(1)
+			result(`{"tools":[{"name":"issue_read","description":"Read a GitHub issue","inputSchema":{"type":"object"}}]}`)
+		case "prompts/list":
+			result(`{"prompts":[]}`)
+		default:
+			methodNotFound()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestRemoteToolset_SurvivesSubscriptionsListenRejection is the regression
+// test for docker/docker-agent#4068: against a server that rejects
+// subscriptions/listen the way GitHub MCP does, the toolset must serve
+// tools/list and stay Ready without reconnecting.
+func TestRemoteToolset_SurvivesSubscriptionsListenRejection(t *testing.T) {
+	t.Parallel()
+
+	srv := newGitHubStyleMCPServer(t)
+
+	client := newRemoteClient(srv.URL, "streamable", nil, NewInMemoryTokenStore(), nil, true, nil)
+	ts := &Toolset{
+		name:      "github",
+		mcpClient: client,
+		logID:     sanitizeRemoteAddress(srv.URL),
+	}
+	ts.supervisor = newSupervisor(ts, remotePolicy(lifecycle.Policy{
+		Backoff: lifecycle.Backoff{Initial: 10 * time.Millisecond, Max: 40 * time.Millisecond},
+	}))
+
+	require.NoError(t, ts.Start(t.Context()), "Start must succeed against a GitHub-style MCP endpoint")
+	t.Cleanup(func() { _ = ts.Stop(context.WithoutCancel(t.Context())) })
+	restarted := ts.supervisor.Restarted()
+
+	toolList, err := ts.Tools(t.Context())
+	require.NoError(t, err, "Tools must succeed after Start")
+	require.Len(t, toolList, 1)
+	assert.Equal(t, "github_issue_read", toolList[0].Name)
+	require.Positive(t, srv.toolsLists.Load(), "tools/list must actually reach the server")
+
+	select {
+	case <-restarted:
+		t.Fatal("reconnect cycle observed: the session died and the supervisor restarted it")
+	case <-time.After(500 * time.Millisecond):
+	}
+	assert.LessOrEqual(t, srv.handshakes(), int64(1),
+		"handshake must run at most once (discover=%d initialize=%d)", srv.discovers.Load(), srv.initializes.Load())
+	// The pinned go-sdk (with go-sdk#1193) sends exactly one
+	// subscriptions/listen probe and tolerates its rejection.
+	assert.Equal(t, int64(1), srv.listens.Load(),
+		"subscriptions/listen probe must run exactly once, not be retried in a loop")
+	assert.Equal(t, lifecycle.StateReady, ts.State().State, "toolset must stay Ready through the observation window")
+}
+
+// TestEnrichConnectError_RetryableStatusSurfacesAsStatusError verifies that
+// enrichConnectError wraps retryable HTTP errors (5xx/429) in a *StatusError
+// so the StartableToolSet backoff gate can arm on them.
+func TestEnrichConnectError_RetryableStatusSurfacesAsStatusError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		status        int
+		wantRetryable bool
+	}{
+		{"503 service unavailable", http.StatusServiceUnavailable, true},
+		{"429 too many requests", http.StatusTooManyRequests, true},
+		{"500 internal server error", http.StatusInternalServerError, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = fmt.Fprintf(w, `{"error":{"message":"server error %d"}}`, tc.status)
+			}))
+			defer srv.Close()
+
+			store := NewInMemoryTokenStore()
+			require.NoError(t, store.StoreToken(srv.URL, &OAuthToken{AccessToken: "tok", TokenType: "Bearer"}))
+
+			client := newRemoteClient(srv.URL, "streamable", nil, store, nil, true, nil)
+
+			_, err := client.Initialize(t.Context(), nil)
+			require.Error(t, err)
+
+			var se *modelerrors.StatusError
+			require.ErrorAs(t, err, &se, "a %d response must surface as *StatusError", tc.status)
+			assert.Equal(t, tc.status, se.StatusCode)
+			assert.True(t, modelerrors.RetryableHTTPStatus(se),
+				"status %d must be classified retryable by the backoff gate", tc.status)
+		})
+	}
+}
+
+// TestEnrichConnectError_NonRetryableStatusDoesNotArm verifies that a 4xx
+// client-error response wraps in *StatusError but is NOT classified retryable,
+// so bad-config / auth failures fail promptly without triggering pacing.
+func TestEnrichConnectError_NonRetryableStatusDoesNotArm(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden) // 403
+		_, _ = fmt.Fprint(w, `{"error":{"message":"access denied"}}`)
+	}))
+	defer srv.Close()
+
+	store := NewInMemoryTokenStore()
+	require.NoError(t, store.StoreToken(srv.URL, &OAuthToken{AccessToken: "tok", TokenType: "Bearer"}))
+
+	client := newRemoteClient(srv.URL, "streamable", nil, store, nil, true, nil)
+
+	_, err := client.Initialize(t.Context(), nil)
+	require.Error(t, err)
+
+	var se *modelerrors.StatusError
+	require.ErrorAs(t, err, &se, "403 must still surface as *StatusError (wrapped for structured access)")
+	assert.Equal(t, http.StatusForbidden, se.StatusCode)
+	assert.False(t, modelerrors.RetryableHTTPStatus(se),
+		"403 must NOT be classified retryable — client errors fail promptly")
+}
+
+// TestEnrichConnectError_NoStatusNoStatusError verifies that when there is no
+// recorded HTTP server error (e.g. a network-level failure before any HTTP
+// response), the error does not carry a *StatusError so the gate does not arm.
+func TestEnrichConnectError_NoStatusNoStatusError(t *testing.T) {
+	t.Parallel()
+
+	// Point at a closed port so there is never an HTTP response.
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	client := newRemoteClient("http://"+addr, "streamable", nil, NewInMemoryTokenStore(), nil, true, nil)
+
+	_, err = client.Initialize(t.Context(), nil)
+	require.Error(t, err)
+
+	var se *modelerrors.StatusError
+	assert.NotErrorAs(t, err, &se,
+		"a plain network failure must not carry a *StatusError (would arm the gate spuriously)")
+}
+
+// TestEnrichConnectError_EmptyBodyStatusStillArms verifies that a retryable
+// HTTP status with an EMPTY response body (common for load-balancer or
+// rate-limit responses that carry no JSON payload) still surfaces as a
+// *modelerrors.StatusError. An earlier version of enrichConnectError gated
+// the wrap on the extracted message being non-empty, which silently dropped
+// the StatusError wrap — and with it, all backoff pacing — whenever the
+// server didn't bother sending a body alongside the status code.
+func TestEnrichConnectError_EmptyBodyStatusStillArms(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"503 empty body", http.StatusServiceUnavailable},
+		{"429 empty body", http.StatusTooManyRequests},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				// No Content-Type, no body — exactly what many load balancers
+				// and rate limiters send.
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			store := NewInMemoryTokenStore()
+			require.NoError(t, store.StoreToken(srv.URL, &OAuthToken{AccessToken: "tok", TokenType: "Bearer"}))
+
+			client := newRemoteClient(srv.URL, "streamable", nil, store, nil, true, nil)
+
+			_, err := client.Initialize(t.Context(), nil)
+			require.Error(t, err)
+
+			var se *modelerrors.StatusError
+			require.ErrorAs(t, err, &se,
+				"an empty-body %d response must still surface as *StatusError", tc.status)
+			assert.Equal(t, tc.status, se.StatusCode)
+			assert.True(t, modelerrors.RetryableHTTPStatus(se),
+				"empty-body status %d must still be classified retryable", tc.status)
+		})
+	}
+}
+
+// TestEnrichConnectError_RetryAfterHonoured verifies that a server-supplied
+// Retry-After header on a 429 response is parsed through to the resulting
+// *modelerrors.StatusError, matching the handling in the sibling model-adapter
+// paths (see modelerrors.WrapHTTPError).
+func TestEnrichConnectError_RetryAfterHonoured(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	store := NewInMemoryTokenStore()
+	require.NoError(t, store.StoreToken(srv.URL, &OAuthToken{AccessToken: "tok", TokenType: "Bearer"}))
+
+	client := newRemoteClient(srv.URL, "streamable", nil, store, nil, true, nil)
+
+	_, err := client.Initialize(t.Context(), nil)
+	require.Error(t, err)
+
+	var se *modelerrors.StatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusTooManyRequests, se.StatusCode)
+	assert.Equal(t, 120*time.Second, se.RetryAfter,
+		"the server's Retry-After header must be parsed onto the StatusError")
+}
+
+// TestEnrichConnectError_NoRetryAfterHeaderLeavesZero verifies that when the
+// server does not send a Retry-After header, RetryAfter stays zero (the
+// gate then falls back to its own computed delay).
+func TestEnrichConnectError_NoRetryAfterHeaderLeavesZero(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	store := NewInMemoryTokenStore()
+	require.NoError(t, store.StoreToken(srv.URL, &OAuthToken{AccessToken: "tok", TokenType: "Bearer"}))
+
+	client := newRemoteClient(srv.URL, "streamable", nil, store, nil, true, nil)
+
+	_, err := client.Initialize(t.Context(), nil)
+	require.Error(t, err)
+
+	var se *modelerrors.StatusError
+	require.ErrorAs(t, err, &se)
+	assert.Zero(t, se.RetryAfter, "no Retry-After header means the gate computes its own delay")
+}
+
+// TestBackoffGate_RemoteMCPRetryableStatusPacesReconnect is an end-to-end
+// regression test: it drives a REAL *Toolset (built via NewRemoteToolset,
+// exactly as production wiring does) through tools.StartableToolSet.TryStart
+// against a mock server that always answers 503. It proves the whole chain —
+// enrichConnectError -> Toolset.Start -> supervisor.Start -> the backoff
+// gate in tryStartLocked — stays intact end to end, rather than relying on
+// enrichConnectError-only unit tests that would miss error-chain loss
+// introduced anywhere between remote.go and mcp.go's Initialize wrapping.
+func TestBackoffGate_RemoteMCPRetryableStatusPacesReconnect(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	toolset := NewRemoteToolsetWithAllowPrivateIPs("test", srv.URL, "streamable", nil, nil, true)
+
+	now := time.Now()
+	clock := func() time.Time { return now }
+	identityJitter := func(d time.Duration) time.Duration { return d }
+
+	s := tools.NewStartable(toolset, tools.WithStartRetryClock(clock), tools.WithStartRetryJitter(identityJitter))
+
+	// Attempt 1: gate is idle, the real connect attempt runs and fails,
+	// arming the gate. The transport may issue more than one HTTP request
+	// per logical connect attempt (e.g. a standalone SSE probe), so assert
+	// relative growth rather than an exact per-call count.
+	started, err := s.TryStart(t.Context())
+	assert.False(t, started)
+	require.Error(t, err)
+	afterFirst := attempts.Load()
+	assert.Positive(t, afterFirst, "first TryStart must hit the server")
+
+	var se *modelerrors.StatusError
+	require.ErrorAs(t, err, &se, "the gate-arming error must carry the StatusError")
+	assert.Equal(t, http.StatusServiceUnavailable, se.StatusCode)
+
+	// Immediately after: gate armed, TryStart returns without a new
+	// connect attempt reaching the server.
+	started, err = s.TryStart(t.Context())
+	assert.False(t, started)
+	require.Error(t, err)
+	assert.Equal(t, afterFirst, attempts.Load(), "gate must block the retry from reaching the server")
+
+	// Advance the fake clock past the backoff window (comfortably beyond
+	// the documented 5-minute cap, without depending on the unexported
+	// base/max constants which aren't visible across package test
+	// boundaries): gate opens, a new connect attempt reaches the server.
+	now = now.Add(6 * time.Minute)
+	started, err = s.TryStart(t.Context())
+	assert.False(t, started)
+	require.Error(t, err)
+	assert.Greater(t, attempts.Load(), afterFirst, "gate must open and retry once the window elapses")
+}
+
+// TestBackoffGate_RemoteMCPNonRetryableStatusFailsPromptly is the negative
+// counterpart: a 403 (bad config / auth) must fail every turn without any
+// pacing, through the same real TryStart path.
+func TestBackoffGate_RemoteMCPNonRetryableStatusFailsPromptly(t *testing.T) {
+	t.Parallel()
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	toolset := NewRemoteToolsetWithAllowPrivateIPs("test", srv.URL, "streamable", nil, nil, true)
+	s := tools.NewStartable(toolset)
+
+	var prev int32
+	for range 3 {
+		started, err := s.TryStart(t.Context())
+		assert.False(t, started)
+		require.Error(t, err)
+		cur := attempts.Load()
+		assert.Greater(t, cur, prev, "403 must reach the server every turn, no pacing")
+		prev = cur
+	}
+}
+
+// TestBackoffGate_RemoteMCPRecoversAfterBackoffWindow closes the "repeated
+// failures then eventual success" recovery criterion at the MCP integration
+// layer (mirrored from the generic gate recovery tests in #4062): a remote
+// MCP server that answers 503 arms the gate, then recovers to a real,
+// working MCP handshake — the next TryStart after the window elapses must
+// actually start the toolset, not merely stop erroring.
+func TestBackoffGate_RemoteMCPRecoversAfterBackoffWindow(t *testing.T) {
+	t.Parallel()
+
+	var failing atomic.Bool
+	failing.Store(true)
+
+	mcpServer := gomcp.NewServer(&gomcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	streamableHandler := gomcp.NewStreamableHTTPHandler(func(*http.Request) *gomcp.Server { return mcpServer }, nil)
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		if failing.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		streamableHandler.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+
+	toolset := NewRemoteToolsetWithAllowPrivateIPs("test", srv.URL, "streamable", nil, nil, true)
+
+	now := time.Now()
+	clock := func() time.Time { return now }
+	identityJitter := func(d time.Duration) time.Duration { return d }
+
+	s := tools.NewStartable(toolset, tools.WithStartRetryClock(clock), tools.WithStartRetryJitter(identityJitter))
+
+	// Attempt 1: server failing, connect fails, gate arms.
+	started, err := s.TryStart(t.Context())
+	assert.False(t, started)
+	require.Error(t, err)
+	afterFirst := attempts.Load()
+	assert.Positive(t, afterFirst, "first TryStart must hit the server")
+
+	// The server recovers, but the gate is still armed: an immediate retry
+	// must still be blocked (recovery alone doesn't bypass the window).
+	failing.Store(false)
+	started, err = s.TryStart(t.Context())
+	assert.False(t, started)
+	require.Error(t, err)
+	assert.Equal(t, afterFirst, attempts.Load(),
+		"gate must still block immediately after arming, even though the server has recovered")
+
+	// Advance past the backoff window: gate opens, and this time the real
+	// MCP handshake completes successfully — the toolset actually starts.
+	now = now.Add(6 * time.Minute)
+	started, err = s.TryStart(t.Context())
+	assert.True(t, started, "toolset must start once the server has recovered and the gate opens: %v", err)
+	require.NoError(t, err)
+	assert.Greater(t, attempts.Load(), afterFirst, "gate must open and retry once the window elapses")
 }

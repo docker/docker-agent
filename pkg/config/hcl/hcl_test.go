@@ -246,3 +246,48 @@ func TestLooksLikeHCL(t *testing.T) {
 		})
 	}
 }
+
+func TestToYAML_ToolPhaseHookBlocksAggregateIntoLists(t *testing.T) {
+	t.Parallel()
+
+	src := []byte(`
+agent "root" {
+  instruction = "x"
+  model       = "auto"
+
+  hooks {
+    tool_input_transform {
+      matcher = "shell"
+      hook {
+        type    = "builtin"
+        command = "redact_secrets"
+      }
+    }
+    tool_guard {
+      hook {
+        type    = "command"
+        command = "./guard-a.sh"
+      }
+    }
+    tool_guard {
+      hook {
+        type    = "command"
+        command = "./guard-b.sh"
+      }
+    }
+  }
+}
+`)
+
+	m, err := ToMap(src, "test.hcl")
+	require.NoError(t, err)
+	agents := m["agents"].(yaml.MapSlice)
+	root := agents[0].Value.(map[string]any)
+	hooks := root["hooks"].(map[string]any)
+
+	transform := hooks["tool_input_transform"].([]any)
+	require.Len(t, transform, 1)
+	assert.Equal(t, "shell", transform[0].(map[string]any)["matcher"])
+	guards := hooks["tool_guard"].([]any)
+	require.Len(t, guards, 2, "repeated 0-label blocks aggregate into a list")
+}

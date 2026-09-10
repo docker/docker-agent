@@ -277,6 +277,16 @@ type protectedResourceMetadataOptions struct {
 	// these candidates (RFC 9728 path-insertion, then origin-root) is the
 	// standalone CLI discovery flow's responsibility, not this helper's.
 	FallbackCandidateURLs []string
+
+	// NotFoundIsHardError turns a 404 on the candidate it is checked against
+	// into a hard error (no fallback tried, metadata not defaulted) instead
+	// of the default "treat as empty metadata" outcome. Default-off (false)
+	// so every runtime call site keeps its existing 404-tolerant behavior
+	// unmodified. The standalone CLI sets this only when the sole candidate
+	// is the exact challenged resource_metadata URL: a 404 on that
+	// authoritative URL must stop discovery rather than silently fall
+	// through to a guessed authorization server.
+	NotFoundIsHardError bool
 }
 
 // fetchProtectedResourceMetadata fetches and decodes RFC 9728 OAuth
@@ -286,10 +296,12 @@ type protectedResourceMetadataOptions struct {
 //
 // resourceURL is the primary candidate (normally the challenge's
 // resource_metadata, or otherwise authServer's
-// /.well-known/oauth-protected-resource). A 404 on a candidate is not an
-// error: it is treated as an empty metadata document, matching current
-// runtime behavior, and AuthorizationServers is defaulted to authServer
-// below once every candidate has been tried.
+// /.well-known/oauth-protected-resource). By default a 404 on a candidate
+// is not an error: it is treated as an empty metadata document, matching
+// current runtime behavior, and AuthorizationServers is defaulted to
+// authServer below once every candidate has been tried. Callers that set
+// opts.NotFoundIsHardError opt out of that tolerance: a 404 is then a hard
+// error like any other non-404/non-200 response.
 //
 // Any decode failure or non-404/non-200 response (including another 2xx
 // like 201 or 204) on any attempted candidate is a hard error: no further
@@ -311,6 +323,9 @@ func fetchProtectedResourceMetadata(ctx context.Context, client *http.Client, re
 
 		if resp.StatusCode == http.StatusNotFound {
 			resp.Body.Close()
+			if opts.NotFoundIsHardError {
+				return protectedResourceMetadata{}, errors.New("failed to fetch protected resource metadata")
+			}
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
@@ -437,6 +452,16 @@ func callbackRedirectURLFrom(c *latest.RemoteOAuthConfig) string {
 	return c.CallbackRedirectURL
 }
 
+// callbackPortFrom is a nil-safe accessor for the optional CallbackPort
+// field on a RemoteOAuthConfig; zero means "let the OS pick a free port",
+// both here and as NewCallbackServerOnPort's port argument.
+func callbackPortFrom(c *latest.RemoteOAuthConfig) int {
+	if c == nil {
+		return 0
+	}
+	return c.CallbackPort
+}
+
 // oauthTransport wraps an HTTP transport with OAuth support
 type oauthTransport struct {
 	base http.RoundTripper
@@ -475,6 +500,12 @@ type oauthTransport struct {
 	// swallows in favor of a bare http.StatusText.
 	lastErrStatus int
 	lastErrBody   []byte
+	// lastErrRetryAfter captures the raw Retry-After header value (if any) of
+	// the most recent non-2xx response, so enrichConnectError can forward it
+	// to modelerrors.WrapHTTPError and have the StartableToolSet backoff gate
+	// honor a server-supplied retry hint instead of falling back to the
+	// generic computed delay.
+	lastErrRetryAfter string
 	// lastAuthRequired records when the transport short-circuited an
 	// interactive OAuth flow because the request context disallowed
 	// prompts (see WithoutInteractivePrompts). The MCP SDK wraps transport
@@ -849,6 +880,7 @@ func (t *oauthTransport) logErrorResponse(req *http.Request, resp *http.Response
 	t.mu.Lock()
 	t.lastErrStatus = resp.StatusCode
 	t.lastErrBody = body
+	t.lastErrRetryAfter = resp.Header.Get("Retry-After")
 	t.mu.Unlock()
 
 	slog.Warn("Authenticated MCP request was rejected by the server",
@@ -860,23 +892,33 @@ func (t *oauthTransport) logErrorResponse(req *http.Request, resp *http.Response
 	)
 }
 
-// lastServerError returns the status code and a short, human-readable
-// explanation drawn from the most recent non-2xx response seen by this
-// transport. The string is empty when no such response has been captured
-// or when the body yielded no useful text.
+// lastServerErrorSnapshot returns the status code, a short human-readable
+// explanation, and the raw Retry-After header value, all captured together
+// under a single lock from the most recent non-2xx response seen by this
+// transport. status is 0 when no such response has been captured; msg and
+// retryAfter are "" when the body yielded no useful text / no header was
+// present, respectively.
+//
+// The three fields are read under one lock (rather than via separate
+// accessors) so a caller building a combined error never pairs a status
+// captured from one response with a Retry-After header captured from a
+// different, concurrent one: this transport's RoundTrip can be invoked
+// concurrently for a single logical connect attempt (e.g. a standalone SSE
+// probe alongside the initialize call).
 //
 // This is how the transport surfaces provider-specific errors (e.g. Slack's
 // "App is not enabled for Slack MCP server access") that would otherwise
 // be hidden behind the MCP SDK's generic http.StatusText-derived messages.
-func (t *oauthTransport) lastServerError() (int, string) {
+func (t *oauthTransport) lastServerErrorSnapshot() (status int, msg, retryAfter string) {
 	t.mu.Lock()
-	status := t.lastErrStatus
+	status = t.lastErrStatus
 	body := t.lastErrBody
+	retryAfter = t.lastErrRetryAfter
 	t.mu.Unlock()
 	if status == 0 {
-		return 0, ""
+		return 0, "", ""
 	}
-	return status, extractServerMessage(body)
+	return status, extractServerMessage(body), retryAfter
 }
 
 // authorizationRequired reports whether the transport short-circuited an
@@ -1228,11 +1270,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	slog.DebugContext(ctx, "Creating OAuth callback server")
-	var callbackPort int
-	if t.oauthConfig != nil {
-		callbackPort = t.oauthConfig.CallbackPort
-	}
-	callbackServer, err := NewCallbackServerOnPort(ctx, callbackPort)
+	callbackServer, err := NewCallbackServerOnPort(ctx, callbackPortFrom(t.oauthConfig))
 	if err != nil {
 		return fmt.Errorf("failed to create callback server: %w", err)
 	}

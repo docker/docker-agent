@@ -34,8 +34,8 @@ func testCatalog() *modelsdev.Database {
 	return &modelsdev.Database{
 		Providers: map[string]modelsdev.Provider{
 			"anthropic": {Models: map[string]modelsdev.Model{
-				"claude-sonnet-4-6": {
-					Name:       "Claude Sonnet 4.6",
+				"claude-sonnet-5": {
+					Name:       "Claude Sonnet 5",
 					Modalities: modelsdev.Modalities{Output: []string{"text"}},
 				},
 				catalogOnlyModel: {
@@ -581,7 +581,7 @@ func TestModelsListCommand_GatewayNormalizesAndSorts(t *testing.T) {
 	gateway, _ := newGatewayServer(t, `{"object":"list","data":[
 		{"id":"openai/mock-b"},
 		{"id":"openai/mock-b"},
-		{"id":"anthropic/claude-sonnet-4-6"},
+		{"id":"anthropic/claude-sonnet-5"},
 		{"id":"openai/text-embedding-3"},
 		{"id":"google/vector-model"},
 		{"id":"openai/image-only"},
@@ -613,10 +613,10 @@ func TestModelsListCommand_GatewayNormalizesAndSorts(t *testing.T) {
 	var rows []modelRow
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &rows))
 
-	// anthropic/claude-sonnet-4-6 is the gateway auto-selection default and
+	// anthropic/claude-sonnet-5 is the gateway auto-selection default and
 	// is genuinely served, so it is marked and sorted first.
 	assert.Equal(t, []modelRow{
-		{Provider: "anthropic", Model: "claude-sonnet-4-6", Default: true},
+		{Provider: "anthropic", Model: "claude-sonnet-5", Default: true},
 		{Provider: "openai", Model: "bare-model"},
 		{Provider: "openai", Model: "mock-a"},
 		{Provider: "openai", Model: "mock-b"},
@@ -677,7 +677,7 @@ func TestModelsListCommand_GatewayKeepsCustomProviders(t *testing.T) {
 
 	assert.Contains(t, refs, "openai/mock-gpt")
 	assert.Contains(t, refs, "myprovider/corp-model-a", "custom providers serve their own endpoints and stay listed")
-	assert.NotContains(t, refs, "anthropic/claude-sonnet-4-6", "live gateway results replace the static defaults")
+	assert.NotContains(t, refs, "anthropic/claude-sonnet-5", "live gateway results replace the static defaults")
 	assert.NotContains(t, refs, "anthropic/"+catalogOnlyModel, "live gateway results replace the catalog")
 }
 
@@ -753,7 +753,7 @@ func TestModelsListCommand_GatewayFallback(t *testing.T) {
 			require.NoError(t, cmd.Execute())
 
 			output := buf.String()
-			assert.Contains(t, output, "claude-sonnet-4-6", "the direct anthropic provider must survive the gateway failure")
+			assert.Contains(t, output, "claude-sonnet-5", "the direct anthropic provider must survive the gateway failure")
 			assert.Contains(t, output, catalogOnlyModel, "the catalog fallback must be read")
 			assert.Contains(t, output, "corp-model-a", "a usable custom provider must survive the gateway failure")
 			if tt.wantNotQueried {
@@ -791,7 +791,7 @@ func TestModelsListCommand_GatewayTimeoutFallsBack(t *testing.T) {
 
 	assert.Less(t, time.Since(start), 3*time.Second, "the caller deadline must win over the 5s discovery budget")
 	output := buf.String()
-	assert.Contains(t, output, "claude-sonnet-4-6", "the direct anthropic provider must survive the gateway timeout")
+	assert.Contains(t, output, "claude-sonnet-5", "the direct anthropic provider must survive the gateway timeout")
 	assert.Contains(t, output, catalogOnlyModel, "the in-memory catalog fallback must be read")
 }
 

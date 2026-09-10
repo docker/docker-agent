@@ -48,7 +48,8 @@ agents:
 	}
 	require.NotNil(t, skillSet, "agent must expose a skills toolset")
 
-	prepared, errResult := skillSet.PrepareForkSubSession(t.Context(), skillstool.RunSkillArgs{Name: "builder", Task: "go"})
+	prepared, errResult, err := skillSet.PrepareForkSubSession(t.Context(), skillstool.RunSkillArgs{Name: "builder", Task: "go"}, tools.NopRuntime{})
+	require.NoError(t, err)
 	require.Nil(t, errResult)
 	require.NotNil(t, prepared)
 	assert.Len(t, prepared.ToolSets, 1, "fork skill must carry its resolved assistive toolset")
@@ -88,7 +89,8 @@ func TestForkSkillToolsets_AllowedToolsThreaded(t *testing.T) {
 	}
 	require.NotNil(t, skillSet)
 
-	prepared, errResult := skillSet.PrepareForkSubSession(t.Context(), skillstool.RunSkillArgs{Name: "auditor", Task: "go"})
+	prepared, errResult, err := skillSet.PrepareForkSubSession(t.Context(), skillstool.RunSkillArgs{Name: "auditor", Task: "go"}, tools.NopRuntime{})
+	require.NoError(t, err)
 	require.Nil(t, errResult)
 	require.NotNil(t, prepared)
 	assert.Equal(t, []string{"read_file"}, prepared.AllowedTools)
@@ -140,7 +142,8 @@ agents:
 	}
 	require.NotNil(t, skillSet)
 
-	prepared, errResult := skillSet.PrepareForkSubSession(t.Context(), skillstool.RunSkillArgs{Name: "builder", Task: "go"})
+	prepared, errResult, err := skillSet.PrepareForkSubSession(t.Context(), skillstool.RunSkillArgs{Name: "builder", Task: "go"}, tools.NopRuntime{})
+	require.NoError(t, err)
 	require.Nil(t, errResult)
 	require.Len(t, prepared.ToolSets, 1)
 

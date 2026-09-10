@@ -20,7 +20,7 @@ _Access Claude, Nova, Llama, and more through AWS infrastructure with enterprise
 models:
   bedrock-claude:
     provider: amazon-bedrock
-    model: global.anthropic.claude-sonnet-4-5-20250929-v1:0
+    model: global.anthropic.claude-sonnet-5
     max_tokens: 64000
     provider_opts:
       region: us-east-1
@@ -38,7 +38,7 @@ export AWS_BEARER_TOKEN_BEDROCK="your-key"
 models:
   bedrock:
     provider: amazon-bedrock
-    model: global.anthropic.claude-sonnet-4-5-20250929-v1:0
+    model: global.anthropic.claude-sonnet-5
     token_key: AWS_BEARER_TOKEN_BEDROCK # env var name
     provider_opts:
       region: us-east-1
@@ -52,7 +52,7 @@ Uses the standard AWS SDK credential chain: env vars → shared credentials → 
 models:
   bedrock:
     provider: amazon-bedrock
-    model: global.anthropic.claude-sonnet-4-5-20250929-v1:0
+    model: global.anthropic.claude-sonnet-5
     provider_opts:
       profile: my-aws-profile
       region: us-east-1
@@ -64,7 +64,7 @@ models:
 models:
   bedrock:
     provider: amazon-bedrock
-    model: global.anthropic.claude-sonnet-4-5-20250929-v1:0
+    model: global.anthropic.claude-sonnet-5
     provider_opts:
       role_arn: "arn:aws:iam::123456789012:role/BedrockAccessRole"
       external_id: "my-external-id"
@@ -115,7 +115,7 @@ Bedrock Claude models support extended thinking — an internal reasoning phase 
 models:
   bedrock-claude-thinking:
     provider: amazon-bedrock
-    model: global.anthropic.claude-sonnet-4-5-20250929-v1:0
+    model: global.anthropic.claude-sonnet-5
     thinking_budget: 8192   # tokens, or use an effort string like "medium"
     max_tokens: 16384       # must be > thinking_budget
     provider_opts:
@@ -153,7 +153,7 @@ Interleaved thinking lets the model reason between tool calls, not just at the s
 models:
   bedrock-claude-interleaved:
     provider: amazon-bedrock
-    model: global.anthropic.claude-sonnet-4-5-20250929-v1:0
+    model: global.anthropic.claude-sonnet-5
     thinking_budget: high
     provider_opts:
       region: us-east-1

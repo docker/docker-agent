@@ -108,7 +108,7 @@ func TestFileCache_dedupSkipsRedundantWrite(t *testing.T) {
 	c.Store("q", "a")
 	infoAfter, err := os.Stat(path)
 	require.NoError(t, err)
-	assert.Equal(t, infoBefore.ModTime(), infoAfter.ModTime(),
+	assert.True(t, infoBefore.ModTime().Equal(infoAfter.ModTime()),
 		"identical Store must not rewrite the cache file")
 
 	// Different value: must rewrite.

@@ -3,7 +3,7 @@
 //
 //	jscommands.Register()
 //
-// It is a separate package (called by teamloader, the docker-agent CLI and
+// It is a separate package (called by loaderdefaults.Opts, the docker-agent CLI and
 // embeddedchat/defaults) so embedders that build teams in code and don't use
 // JS command expressions never link the JS engine into their binary.
 package jscommands
@@ -17,7 +17,11 @@ import (
 // Register installs the goja-backed evaluator as the runtime's command
 // evaluator. It is idempotent and safe to call from multiple goroutines.
 func Register() {
-	runtime.RegisterCommandEvaluator(func(agentTools []tools.Tool) runtime.CommandEvaluator {
-		return js.NewEvaluator(agentTools)
-	})
+	runtime.RegisterCommandEvaluator(Factory)
+}
+
+// Factory builds the JavaScript evaluator without changing global registration.
+// Pass it to runtime.WithCommandEvaluatorFactory for instance-scoped wiring.
+func Factory(agentTools []tools.Tool) runtime.CommandEvaluator {
+	return js.NewEvaluator(agentTools)
 }

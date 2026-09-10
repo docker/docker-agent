@@ -17,6 +17,10 @@ func createProcessGroup(_ *os.Process) (*processGroup, error) {
 	return &processGroup{}, nil
 }
 
-func kill(proc *os.Process, _ *processGroup) error {
-	return syscall.Kill(-proc.Pid, syscall.SIGTERM)
+func terminateProcess(proc *os.Process, _ *processGroup, force bool) error {
+	signal := syscall.SIGTERM
+	if force {
+		signal = syscall.SIGKILL
+	}
+	return syscall.Kill(-proc.Pid, signal)
 }

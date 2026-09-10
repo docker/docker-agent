@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
 	"github.com/docker/docker-agent/pkg/history"
+	"github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
@@ -112,15 +114,11 @@ type appModel struct {
 	planRefreshQueued         bool
 	planRefreshQueuedWarnings bool
 
-	// planBrowserLoadInFlight and planBrowserLoadSessionID guard the /plans
-	// browser-opening read: a repeated request for the same session while its
-	// List is in flight is dropped, so duplicate browsers can never stack and
-	// no redundant read starts. A request for a different session (the user
-	// switched tabs) may launch; the superseded result is dropped as stale by
-	// its session stamp and only the matching result clears the guard. Both
-	// fields are touched exclusively from Update.
-	planBrowserLoadInFlight  bool
-	planBrowserLoadSessionID string
+	// planBrowserLoadInFlight guards the /plans browser-opening read: a
+	// repeated request while its List is in flight is dropped, so duplicate
+	// browsers can never stack and no redundant read starts. Touched
+	// exclusively from Update.
+	planBrowserLoadInFlight bool
 
 	// planDetailLoadsInFlight tracks the refs of running detail-opening
 	// reads, so repeated open requests for the same plan cannot pile up
@@ -287,6 +285,13 @@ type appModel struct {
 	// hideSidebar hides the sidebar and disables the ctrl+b toggle.
 	hideSidebar bool
 
+	// defaultNewSessionDir, when non-empty, is the directory generic
+	// new-session actions (/new, Ctrl+T, the tab-bar and status-bar "+")
+	// spawn in instead of opening the working-directory picker. Set only
+	// when --working-dir was explicitly supplied on the CLI; a directory
+	// carried by the spawn request still wins.
+	defaultNewSessionDir string
+
 	// layoutSettings is the active TUI layout customization (sidebar position
 	// and section visibility). Shared by every tab and managed via /settings.
 	layoutSettings messages.LayoutSettings
@@ -295,6 +300,15 @@ type appModel struct {
 	// steer into the ongoing stream (default) or queue until the turn ends.
 	// Shared by every tab and managed via /settings.
 	sendMode messages.SendMode
+
+	// interruptMode is how Esc interrupts a running stream (confirmation
+	// dialog, double-tap, or immediate). Shared by every tab and managed
+	// via /settings.
+	interruptMode messages.InterruptMode
+
+	// showBanner displays the ASCII-art startup banner on an empty
+	// conversation. Shared by every tab and managed via /settings.
+	showBanner bool
 
 	// buildCommandCategories is a function that returns the list of command categories.
 	buildCommandCategories func(context.Context, tea.Model) []commands.Category
@@ -351,6 +365,16 @@ func WithHideSidebar() Option {
 func WithImageWriter(writer *tuiimage.Writer) Option {
 	return func(m *appModel) {
 		m.imageWriter = writer
+	}
+}
+
+// WithDefaultWorkingDir makes generic new-session actions (/new, Ctrl+T,
+// the tab-bar and status-bar "+") spawn in dir instead of opening the
+// working-directory picker. A directory carried by the spawn request still
+// wins. Used when --working-dir was explicitly supplied on the CLI.
+func WithDefaultWorkingDir(dir string) Option {
+	return func(m *appModel) {
+		m.defaultNewSessionDir = dir
 	}
 }
 
@@ -529,6 +553,8 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		editorLines:                   3,
 		layoutSettings:                layoutSettingsFromConfig(userSettings.GetLayout()),
 		sendMode:                      messages.ParseSendMode(userSettings.GetBusySendMode()),
+		interruptMode:                 messages.ParseInterruptMode(userSettings.GetInterruptConfirmation()),
+		showBanner:                    userSettings.GetShowBanner(),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
 		appName:                       "docker agent",
@@ -658,6 +684,8 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithCommandParser(commands.NewParser(m.commandCategories()...)),
 		chat.WithLayoutSettings(m.layoutSettings),
 		chat.WithSendMode(m.sendMode),
+		chat.WithInterruptMode(m.interruptMode),
+		chat.WithShowBanner(m.showBanner),
 	}
 
 	if m.leanMode {
@@ -687,6 +715,9 @@ func (m *appModel) editorOpts() []editor.Option {
 // the given app and stores them in the per-session maps under tabID. The active
 // convenience pointers (m.chatPage, m.sessionState, m.editor) are also updated.
 func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session.Session) {
+	if old := m.chatPages[tabID]; old != nil {
+		chat.Cleanup(old)
+	}
 	ss := service.NewSessionState(sess)
 	cp := chat.New(m.ar, m.ctx(), a, ss, m.chatPageOpts()...)
 	cp.SetRoutingID(tabID)
@@ -708,6 +739,7 @@ func (m *appModel) initAndFocusComponents() tea.Cmd {
 	m.reapplyKeyboardEnhancements()
 	return tea.Batch(
 		m.chatPage.Init(),
+		chat.WatchGitBranch(m.chatPage),
 		m.editor.Init(),
 		m.editor.Focus(),
 		m.resizeAll(),
@@ -811,6 +843,7 @@ func (m *appModel) init() tea.Cmd {
 		shutdownCmd,
 		m.dialogMgr.Init(),
 		m.chatPage.Init(),
+		chat.WatchGitBranch(m.chatPage),
 		m.editor.Init(),
 		m.editor.Focus(),
 		m.application.SendFirstMessage(),
@@ -1162,9 +1195,6 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessionState.SetSessionTitle(msg.Title)
 		return m.forwardChat(msg)
 
-	case *runtime.SessionPlanUpdatedEvent:
-		return m.handleSessionPlanUpdatedEvent(msg)
-
 	case *runtime.PlanChangedEvent:
 		return m.handlePlanChangedEvent(msg)
 
@@ -1172,7 +1202,7 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case messages.NewSessionMsg:
 		// /new spawns a new tab when a session spawner is configured.
-		return m.handleSpawnSession("")
+		return m.handleNewSession(msg)
 
 	case messages.ClearSessionMsg:
 		// /clear resets the current tab with a fresh session in the same working dir.
@@ -1782,16 +1812,71 @@ func (m *appModel) handleClearSession() (tea.Model, tea.Cmd) {
 
 	m.reapplyKeyboardEnhancements()
 
-	return m, tea.Sequence(
-		m.chatPage.Init(),
-		m.resizeAll(),
-		m.editor.Focus(),
+	return m, tea.Batch(
+		tea.Sequence(
+			m.chatPage.Init(),
+			m.resizeAll(),
+			m.editor.Focus(),
+		),
+		chat.WatchGitBranch(m.chatPage),
 	)
+}
+
+// handleNewSession handles /new. Without a directory argument it keeps the
+// generic behavior (configured default or picker); with one it resolves and
+// validates the requested directory before spawning there, so an explicit
+// argument wins over the configured default.
+func (m *appModel) handleNewSession(msg messages.NewSessionMsg) (tea.Model, tea.Cmd) {
+	requested := strings.TrimSpace(msg.WorkingDir)
+	if requested == "" {
+		return m.handleSpawnSession("")
+	}
+	workingDir, err := m.resolveNewSessionDir(requested)
+	if err != nil {
+		return m, notification.ErrorCmd("Cannot start a new session: " + err.Error())
+	}
+	return m.handleSpawnSession(workingDir)
+}
+
+// resolveNewSessionDir turns a user-supplied /new argument into an absolute,
+// existing directory. ~ and environment variables are expanded; a relative
+// path resolves against the active session's working directory rather than
+// the process CWD.
+func (m *appModel) resolveNewSessionDir(requested string) (string, error) {
+	dir := path.ExpandPath(requested)
+	if dir == "" {
+		return "", fmt.Errorf("%q expands to an empty path", requested)
+	}
+	if !filepath.IsAbs(dir) {
+		var base string
+		if runner := m.supervisor.GetRunner(m.supervisor.ActiveID()); runner != nil {
+			base = runner.WorkingDir
+		}
+		dir = filepath.Join(base, dir)
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	switch {
+	case os.IsNotExist(err):
+		return "", fmt.Errorf("%s does not exist", abs)
+	case err != nil:
+		return "", err
+	case !info.IsDir():
+		return "", fmt.Errorf("%s is not a directory", abs)
+	}
+	return abs, nil
 }
 
 // handleSpawnSession spawns a new session.
 func (m *appModel) handleSpawnSession(workingDir string) (tea.Model, tea.Cmd) {
-	// If no working dir specified, open the picker
+	// A generic request (no directory) inherits the explicit --working-dir
+	// default when one is configured; otherwise ask via the picker.
+	if workingDir == "" {
+		workingDir = m.defaultNewSessionDir
+	}
 	if workingDir == "" {
 		return m.openWorkingDirPicker()
 	}
@@ -1942,7 +2027,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 
 	if !pageExists || !editorExists {
 		if !pageExists {
-			cmds = append(cmds, m.chatPage.Init())
+			cmds = append(cmds, m.chatPage.Init(), chat.WatchGitBranch(m.chatPage))
 		}
 		if !editorExists {
 			cmds = append(cmds, m.editor.Init())
@@ -2129,6 +2214,9 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 	nextActiveID := m.supervisor.CloseSession(sessionID)
 
 	// Clean up per-session state
+	if page, ok := m.chatPages[sessionID]; ok {
+		chat.Cleanup(page)
+	}
 	delete(m.chatPages, sessionID)
 	if ed, ok := m.editors[sessionID]; ok {
 		ed.Cleanup()
@@ -3171,6 +3259,18 @@ func (m *appModel) cleanupManagedResources() {
 	})
 }
 
+// Shutdown releases the resources the TUI owns (theme watcher, tab-state
+// store, session supervisor) and returns once they are closed. It is for
+// callers that stop the program without going through the exit dialogs —
+// notably the tuitest harness, which must have tui_state.db closed before
+// t.TempDir removes it (Windows cannot delete an open file). The context
+// watcher started by contextShutdownCmd performs the same once-guarded
+// cleanup, so calling both is safe: whichever runs second either finds the
+// work done or blocks until it is.
+func (m *appModel) Shutdown() {
+	m.cleanupManagedResources()
+}
+
 // cleanupAll cleans up all sessions, editors, and resources. It is invoked
 // from several message handlers (ExitSessionMsg, ExitConfirmedMsg, …) and may
 // be called more than once on the same model; the entire shutdown sequence is
@@ -3182,6 +3282,9 @@ func (m *appModel) cleanupAll() {
 		m.closeTranscriptCh()
 		for _, ed := range m.editors {
 			ed.Cleanup()
+		}
+		for _, page := range m.chatPages {
+			chat.Cleanup(page)
 		}
 
 		// Shut down managed resources (supervisor, TUI state store) in the

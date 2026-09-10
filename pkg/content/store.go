@@ -1,13 +1,11 @@
 package content
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +16,7 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/tarball"
 
+	"github.com/docker/docker-agent/pkg/configsize"
 	"github.com/docker/docker-agent/pkg/paths"
 )
 
@@ -234,14 +233,15 @@ func (s *Store) GetArtifact(identifier string) (string, error) {
 	}
 	defer rc.Close()
 
-	// Read the full layer content into memory.
-	// Any I/O error here means the artifact cannot be trusted.
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, rc); err != nil {
+	data, err := configsize.Read(rc)
+	if err != nil {
+		if errors.Is(err, configsize.ErrTooLarge) {
+			return "", err
+		}
 		return "", ErrStoreCorrupted
 	}
 
-	return buf.String(), nil
+	return string(data), nil
 }
 
 // ListArtifacts returns a list of all stored artifacts

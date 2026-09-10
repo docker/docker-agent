@@ -21,24 +21,19 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/gateway"
-	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/model/provider"
-	"github.com/docker/docker-agent/pkg/model/provider/dmr"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
-	"github.com/docker/docker-agent/pkg/remote"
-	"github.com/docker/docker-agent/pkg/runtime/jscommands"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
 	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
-	"github.com/docker/docker-agent/pkg/tools/builtin/lsp"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
-	"github.com/docker/docker-agent/pkg/tools/codemode"
 )
 
 var defaultMaxTokens int64 = 32000
@@ -49,7 +44,14 @@ type loadOptions struct {
 	promptFiles      []string
 	toolsetRegistry  ToolsetRegistry
 	providerRegistry *provider.Registry
+	sourceResolver   SourceResolver
+	newExpander      func(environment.Provider) Expander
+	codeMode         func(...tools.ToolSet) tools.ToolSet
+	toon             func(tools.ToolSet, string) tools.ToolSet
+	newDeferred      func() DeferredToolSet
 	modelOpts        []options.Opt
+	strict           bool
+	features         []config.Feature
 }
 
 type Opt func(*loadOptions) error
@@ -117,6 +119,76 @@ func WithModelOptions(opts ...options.Opt) Opt {
 	}
 }
 
+// SourceResolver turns an external agent reference (OCI reference or URL)
+// into a source. pkg/config/sources.Resolve is the full-featured
+// implementation.
+type SourceResolver func(ref string, env environment.Provider) (config.Source, error)
+
+// WithSourceResolver enables sub_agents, handoffs and force_handoff entries
+// that reference agents outside the config (OCI references, URLs). Without
+// it such references fail to load: teamloader deliberately has no default so
+// embedders only link the source types they use.
+func WithSourceResolver(resolver SourceResolver) Opt {
+	return func(opts *loadOptions) error {
+		opts.sourceResolver = resolver
+		return nil
+	}
+}
+
+// WithCodeMode enables `code_mode_tools` (and RuntimeConfig.GlobalCodeMode):
+// wrap is applied to an agent's toolsets so the model calls them from a single
+// JavaScript tool. Pass codemode.Wrap from pkg/tools/codemode. Without it,
+// configs asking for code mode fail to load.
+func WithCodeMode(wrap func(toolSets ...tools.ToolSet) tools.ToolSet) Opt {
+	return func(opts *loadOptions) error {
+		opts.codeMode = wrap
+		return nil
+	}
+}
+
+// WithToon enables the `toon` toolset field, which re-encodes matching tools'
+// JSON output in the compact TOON format. Pass toon.Wrap from pkg/tools/toon.
+// Without it, configs using `toon` fail to load.
+func WithToon(wrap func(inner tools.ToolSet, spec string) tools.ToolSet) Opt {
+	return func(opts *loadOptions) error {
+		opts.toon = wrap
+		return nil
+	}
+}
+
+// DeferredToolSet collects tools declared with `defer` so the model discovers
+// and activates them on demand; pkg/tools/builtin/deferred implements it.
+type DeferredToolSet interface {
+	tools.ToolSet
+	AddSource(toolset tools.ToolSet, deferAll bool, toolNames []string)
+	HasSources() bool
+}
+
+// WithDeferredTools enables the `defer` toolset field. Pass deferred.New from
+// pkg/tools/builtin/deferred. Without it, configs using `defer` fail to load.
+func WithDeferredTools[D DeferredToolSet](newDeferred func() D) Opt {
+	return func(opts *loadOptions) error {
+		opts.newDeferred = func() DeferredToolSet { return newDeferred() }
+		return nil
+	}
+}
+
+// WithStrict rejects configs that rely on anything the application did not
+// enable: a model provider missing from the provider registry, a toolset type
+// missing from the toolset registry, or a [config.Feature] not listed here.
+// Every unmet requirement is reported in one error before any model or
+// toolset is built (see [config.Requires]). Without it, unknown toolset types
+// are load-time warnings and unknown providers fail when their model is
+// built. External agents loaded through [config.FeatureExternalAgents] are
+// checked with the same rules.
+func WithStrict(features ...config.Feature) Opt {
+	return func(opts *loadOptions) error {
+		opts.strict = true
+		opts.features = append(opts.features, features...)
+		return nil
+	}
+}
+
 // LoadResult contains the result of loading an agent team, including
 // the team and configuration needed for runtime model switching.
 type LoadResult struct {
@@ -137,6 +209,12 @@ type LoadResult struct {
 	// referenced by several agents is one shared pot.
 	Budgets      map[string]latest.BudgetConfig
 	AgentBudgets map[string][]string
+
+	// EncryptedConfig is the encrypted agent config in effect for this load:
+	// either the explicit --encrypted-config / env value, or the one captured
+	// from the X-Cagent-Encrypted-Config response header when the agent YAML
+	// was fetched from a trusted Docker URL. Empty when neither applies.
+	EncryptedConfig string
 }
 
 // Load loads an agent team from the given source
@@ -151,10 +229,6 @@ func Load(ctx context.Context, agentSource config.Source, runConfig *config.Runt
 // LoadWithConfig loads an agent team and returns both the team and config info
 // needed for runtime model switching.
 func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *config.RuntimeConfig, opts ...Opt) (result *LoadResult, err error) {
-	// YAML-loaded teams may use ${...} JavaScript expressions in their
-	// slash-command instructions; code-built teams opt in explicitly.
-	jscommands.Register()
-
 	// Cold-start path: parses config, resolves model aliases, may pull
 	// referenced sub-agents over the network, and starts every toolset.
 	// All synchronous from the caller's perspective. The span makes the
@@ -174,6 +248,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	var loadOpts loadOptions
 	loadOpts.toolsetRegistry = NewDefaultToolsetRegistry()
 	loadOpts.providerRegistry = provider.DefaultRegistry()
+	loadOpts.newExpander = newEnvExpander
 
 	for _, o := range opts {
 		if err := o(&loadOpts); err != nil {
@@ -196,19 +271,23 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	if err != nil {
 		return nil, err
 	}
+
+	// When the agent YAML was fetched from a trusted Docker URL that returned
+	// the encrypted config in a response header, adopt it so it is forwarded to
+	// the Docker models gateway on model requests. An explicit --encrypted-config
+	// (or its env var) always wins.
+	if runConfig.EncryptedConfig == "" {
+		if ecs, ok := agentSource.(config.EncryptedConfigSource); ok {
+			if enc := ecs.EncryptedConfig(); enc != "" {
+				runConfig.EncryptedConfig = enc
+			}
+		}
+	}
 	if cfg != nil {
 		span.SetAttributes(
 			attribute.Int("cagent.teamloader.agent_count", len(cfg.Agents)),
 			attribute.Int("cagent.teamloader.model_count", len(cfg.Models)),
 		)
-	}
-
-	// Toolsets referencing an MCP catalog server (ref: docker:...) need the
-	// catalog to be built. Kick the fetch off now so its network round-trip
-	// overlaps model and environment resolution instead of stalling toolset
-	// creation later in this load.
-	if configUsesCatalogRefs(cfg) {
-		gateway.Prefetch(ctx)
 	}
 
 	// Merge user-level provider definitions (seeded into the runtime config
@@ -228,6 +307,25 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	// Apply model overrides from CLI flags before checking required env vars
 	if err := config.ApplyModelOverrides(cfg, loadOpts.modelOverrides); err != nil {
 		return nil, err
+	}
+
+	// Strict mode audits the config before anything reaches the network or
+	// the environment, so an unsupported provider is reported as such rather
+	// than as a missing credential. Models whose provider depends on the
+	// environment (first_available, auto) are checked once resolved below.
+	if loadOpts.strict {
+		reqs := config.Requires(cfg)
+		if err := reqs.Check(loadOpts.providerRegistry.Has, loadOpts.toolsetRegistry.Has, loadOpts.features); err != nil {
+			return nil, err
+		}
+	}
+
+	// Toolsets referencing an MCP catalog server (ref: docker:...) need the
+	// catalog to be built. Kick the fetch off now so its network round-trip
+	// overlaps model and environment resolution instead of stalling toolset
+	// creation later in this load.
+	if configUsesCatalogRefs(cfg) {
+		gateway.Prefetch(ctx)
 	}
 
 	// Early check for required env vars before loading models and tools.
@@ -255,7 +353,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	// returned set names selectors with no usable local model, so an
 	// initialization failure surfaces a "no model available" fallback rather
 	// than an opaque pull error.
-	dmrFallbackSelectors := config.PreferLocalDMRModels(ctx, cfg, firstAvailableSelectors, dmr.ListModels)
+	dmrFallbackSelectors := config.PreferLocalDMRModels(ctx, cfg, firstAvailableSelectors, dmrmodels.ListModels)
 
 	if modelsStore != nil {
 		config.ResolveModelAliases(ctx, cfg, modelsStore)
@@ -263,6 +361,16 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 
 	if err := config.CheckRequiredEnvVars(ctx, cfg, runConfig.ModelsGateway, env); err != nil {
 		return nil, err
+	}
+
+	autoModel := sync.OnceValue(func() latest.ModelConfig {
+		return config.AutoModelConfig(ctx, runConfig.ModelsGateway, env, runConfig.DefaultModel, dmrmodels.ListModels)
+	})
+
+	if loadOpts.strict {
+		if err := checkResolvedModels(cfg, firstAvailableSelectors, &loadOpts, autoModel); err != nil {
+			return nil, err
+		}
 	}
 
 	// Make model definitions available to toolset creators (e.g., RAG reranking)
@@ -279,11 +387,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	var agents []*agent.Agent
 	agentsByName := make(map[string]*agent.Agent)
 
-	autoModel := sync.OnceValue(func() latest.ModelConfig {
-		return config.AutoModelConfig(ctx, runConfig.ModelsGateway, env, runConfig.DefaultModel, dmr.ListModels)
-	})
-
-	expander := js.NewJsExpander(env)
+	expander := loadOpts.newExpander(env)
 
 	globalHooks := runConfig.GlobalHooks
 	cliHooks := runConfig.CLIHooks()
@@ -312,6 +416,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			agent.WithRedactSecrets(agentConfig.RedactSecretsEnabled()),
 			agent.WithSafety(agentConfig.Safety),
 			agent.WithAddPromptFiles(promptFiles),
+			agent.WithAddPromptFilesDepth(agentConfig.AddPromptFilesDepth),
 			agent.WithMaxIterations(agentConfig.MaxIterations),
 			agent.WithMaxConsecutiveToolCalls(agentConfig.MaxConsecutiveToolCalls),
 			agent.WithMaxOldToolCallTokens(agentConfig.MaxOldToolCallTokens),
@@ -340,12 +445,16 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		} else {
 			models, err := getModelsForAgent(ctx, cfg, &agentConfig, autoModel, dmrFallbackSelectors, runConfig, loadOpts.providerRegistry, loadOpts.modelOpts)
 			if err != nil {
-				// Return auto model fallback errors, DMR not installed errors,
-				// DMR pull failures, and DMR model-not-available errors directly
-				// without wrapping to provide cleaner, actionable messages.
-				_, isPull := errors.AsType[*dmr.PullFailedError](err)
-				_, isNotAvailable := errors.AsType[*dmr.ModelNotAvailableError](err)
-				if _, ok := errors.AsType[*config.AutoModelFallbackError](err); ok || errors.Is(err, dmr.ErrNotInstalled) || isPull || isNotAvailable {
+				// Return auto model fallback errors, DMR not installed errors and
+				// model pull/availability errors (which carry their own guidance
+				// via ModelPullErrorSummary) directly without wrapping to provide
+				// cleaner, actionable messages.
+				_, isAuto := errors.AsType[*config.AutoModelFallbackError](err)
+				_, hasSummary := errors.AsType[interface {
+					error
+					ModelPullErrorSummary() string
+				}](err)
+				if isAuto || hasSummary || errors.Is(err, dmrmodels.ErrNotInstalled) {
 					return nil, err
 				}
 				return nil, fmt.Errorf("failed to get models: %w", err)
@@ -394,7 +503,10 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			}
 		}
 
-		agentTools, warnings := getToolsForAgent(ctx, &agentConfig, parentDir, runConfig, loadOpts.toolsetRegistry, configName, expander)
+		agentTools, warnings, err := getToolsForAgent(ctx, &agentConfig, parentDir, runConfig, configName, &loadOpts, expander)
+		if err != nil {
+			return nil, fmt.Errorf("agent %s: %w", agentConfig.Name, err)
+		}
 		if len(warnings) > 0 {
 			opts = append(opts, agent.WithLoadTimeWarnings(warnings))
 		}
@@ -405,12 +517,15 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			loadedSkills = filterSkillsByName(loadedSkills, agentConfig.Skills.Include)
 			// Inline skills are defined in the agent config itself; they are
 			// always exposed and never subject to the include filter.
-			loadedSkills = append(loadedSkills, inlineSkills(agentConfig.Skills.Inline)...)
+			loadedSkills = overrideWithInlineSkills(loadedSkills, inlineSkills(agentConfig.Skills.Inline))
 			if len(loadedSkills) > 0 {
 				skillSet := skillstool.New(loadedSkills, workingDir)
 				// Resolve the additional toolsets each fork skill exposes in
 				// its sub-session from the top-level toolsets section.
-				forkToolSets, forkWarnings := forkSkillToolSets(ctx, cfg, &agentConfig, loadedSkills, parentDir, runConfig, loadOpts.toolsetRegistry, configName, expander)
+				forkToolSets, forkWarnings, err := forkSkillToolSets(ctx, cfg, &agentConfig, loadedSkills, parentDir, runConfig, configName, &loadOpts, expander)
+				if err != nil {
+					return nil, fmt.Errorf("agent %s: %w", agentConfig.Name, err)
+				}
 				if len(forkToolSets) > 0 {
 					skillSet.SetForkToolSets(forkToolSets)
 				}
@@ -520,6 +635,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		Budget:             cfg.Budget,
 		Budgets:            cfg.Budgets,
 		AgentBudgets:       agentBudgets,
+		EncryptedConfig:    runConfig.EncryptedConfig,
 	}, nil
 }
 
@@ -562,6 +678,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 
 		opts := []options.Opt{
 			options.WithGateway(runConfig.ModelsGateway),
+			options.WithEncryptedConfig(runConfig.EncryptedConfig),
 			options.WithStructuredOutput(a.StructuredOutput),
 			options.WithProviders(cfg.Providers),
 		}
@@ -628,6 +745,7 @@ func getFallbackModelsForAgent(ctx context.Context, cfg *latest.Config, a *lates
 
 		opts := []options.Opt{
 			options.WithGateway(runConfig.ModelsGateway),
+			options.WithEncryptedConfig(runConfig.EncryptedConfig),
 			options.WithStructuredOutput(a.StructuredOutput),
 			options.WithProviders(cfg.Providers),
 		}
@@ -694,6 +812,7 @@ func getTitleModelForAgent(ctx context.Context, cfg *latest.Config, a *latest.Ag
 
 	opts := []options.Opt{
 		options.WithGateway(runConfig.ModelsGateway),
+		options.WithEncryptedConfig(runConfig.EncryptedConfig),
 		options.WithStructuredOutput(a.StructuredOutput),
 		options.WithProviders(cfg.Providers),
 	}
@@ -748,6 +867,7 @@ func getCompactionModelForAgent(ctx context.Context, cfg *latest.Config, a *late
 
 	opts := []options.Opt{
 		options.WithGateway(runConfig.ModelsGateway),
+		options.WithEncryptedConfig(runConfig.EncryptedConfig),
 		options.WithStructuredOutput(a.StructuredOutput),
 		options.WithProviders(cfg.Providers),
 	}
@@ -783,14 +903,18 @@ func compactionThresholdForAgent(cfg *latest.Config, a *latest.AgentConfig) *flo
 // getToolsForAgent returns the tool definitions for an agent based on its
 // configuration. Toolset instructions support ${...} JavaScript placeholders
 // (e.g. ${env.X}); they are expanded here using the runtime env provider.
-func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir string, runConfig *config.RuntimeConfig, registry ToolsetRegistry, configName string, expander *js.Expander) ([]tools.ToolSet, []string) {
+func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir string, runConfig *config.RuntimeConfig, configName string, loadOpts *loadOptions, expander Expander) ([]tools.ToolSet, []string, error) {
 	var (
-		toolSets    []tools.ToolSet
-		warnings    []string
-		lspBackends []lsp.Backend
+		toolSets []tools.ToolSet
+		warnings []string
+		// Toolsets implementing tools.Mergeable are grouped by key and
+		// combined after the loop, in first-declaration order.
+		mergeGroups map[string][]tools.MergeSibling
+		mergeOrder  []string
 	)
+	registry := loadOpts.toolsetRegistry
 
-	deferredToolset := deferred.New()
+	var deferredToolset DeferredToolSet
 
 	for i := range a.Toolsets {
 		toolset := a.Toolsets[i]
@@ -806,11 +930,20 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 		wrapped := WithToolsFilter(tool, toolset.Tools...)
 		wrapped = WithReadOnlyFilter(wrapped, toolset.ReadOnly || a.ReadOnly)
 		wrapped = WithInstructions(wrapped, expander.Expand(ctx, toolset.Instruction, nil))
-		wrapped = WithToon(wrapped, toolset.Toon)
+		wrapped, err = loadOpts.withToon(wrapped, toolset.Toon)
+		if err != nil {
+			return nil, nil, err
+		}
 		wrapped = WithModelOverride(wrapped, toolset.Model)
 
 		// Handle deferred tools
 		if !toolset.Defer.IsEmpty() {
+			if loadOpts.newDeferred == nil {
+				return nil, nil, errors.New("toolset defer needs teamloader.WithDeferredTools (e.g. deferred.New from pkg/tools/builtin/deferred)")
+			}
+			if deferredToolset == nil {
+				deferredToolset = loadOpts.newDeferred()
+			}
 			deferredToolset.AddSource(wrapped, toolset.Defer.DeferAll, toolset.Defer.Tools)
 			if toolset.Defer.DeferAll {
 				wrapped = WithNoToolsFilter(wrapped)
@@ -819,30 +952,33 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 			}
 		}
 
-		// Collect LSP backends for multiplexing when there are multiple.
-		// Instead of adding them individually (which causes duplicate tool names),
-		// they are combined into a single Multiplexer after the loop.
-		if toolset.Type == "lsp" {
-			if lspTool, ok := tool.(*lsp.ToolSet); ok {
-				lspBackends = append(lspBackends, lsp.Backend{LSP: lspTool, Toolset: wrapped})
-				continue
+		if m, ok := tools.As[tools.Mergeable](tool); ok {
+			key := m.MergeKey()
+			if mergeGroups == nil {
+				mergeGroups = map[string][]tools.MergeSibling{}
 			}
-			slog.WarnContext(ctx, "Toolset configured as type 'lsp' but registry returned unexpected type; treating as regular toolset",
-				"type", fmt.Sprintf("%T", tool), "command", toolset.Command)
+			if _, seen := mergeGroups[key]; !seen {
+				mergeOrder = append(mergeOrder, key)
+			}
+			mergeGroups[key] = append(mergeGroups[key], tools.MergeSibling{Raw: m, Wrapped: wrapped})
+			continue
 		}
 
 		toolSets = append(toolSets, wrapped)
 	}
 
-	// Merge LSP backends: if there are multiple, combine them into a single
-	// multiplexer so the LLM sees one set of lsp_* tools instead of duplicates.
-	if len(lspBackends) > 1 {
-		toolSets = append(toolSets, lsp.NewLSPMultiplexer(lspBackends))
-	} else if len(lspBackends) == 1 {
-		toolSets = append(toolSets, lspBackends[0].Toolset)
+	// A single mergeable toolset is used as-is; several sharing a key are
+	// combined so the model sees one set of tools instead of duplicates.
+	for _, key := range mergeOrder {
+		group := mergeGroups[key]
+		if len(group) == 1 {
+			toolSets = append(toolSets, group[0].Wrapped)
+			continue
+		}
+		toolSets = append(toolSets, group[0].Raw.(tools.Mergeable).Merge(group))
 	}
 
-	if deferredToolset.HasSources() {
+	if deferredToolset != nil && deferredToolset.HasSources() {
 		toolSets = append(toolSets, deferredToolset)
 	}
 
@@ -857,10 +993,13 @@ func getToolsForAgent(ctx context.Context, a *latest.AgentConfig, parentDir stri
 	// This allows the agent to call multiple tools in a single response.
 	// It also allows to combine the results of multiple tools in a single response.
 	if a.CodeModeTools || runConfig.GlobalCodeMode {
-		toolSets = []tools.ToolSet{codemode.Wrap(toolSets...)}
+		if loadOpts.codeMode == nil {
+			return nil, nil, errors.New("code_mode_tools needs teamloader.WithCodeMode (e.g. codemode.Wrap from pkg/tools/codemode)")
+		}
+		toolSets = []tools.ToolSet{loadOpts.codeMode(toolSets...)}
 	}
 
-	return toolSets, warnings
+	return toolSets, warnings, nil
 }
 
 // inlineSkills converts inline skill definitions from the agent config into
@@ -885,6 +1024,33 @@ func inlineSkills(defs []latest.InlineSkill) []skills.Skill {
 	return out
 }
 
+// overrideWithInlineSkills folds inline skills into the discovered ones,
+// letting an inline definition win over a file- or URL-loaded skill of the
+// same name: the agent config is explicit, while local skills are picked up
+// from whatever happens to sit in the search paths. Appending blindly would
+// leave the shadowed skill advertised to the model — the same name listed
+// twice, with lookups resolving to the discovered one.
+func overrideWithInlineSkills(loaded, inline []skills.Skill) []skills.Skill {
+	if len(inline) == 0 {
+		return loaded
+	}
+
+	inlined := make(map[string]bool, len(inline))
+	for _, s := range inline {
+		inlined[s.Name] = true
+	}
+
+	merged := make([]skills.Skill, 0, len(loaded)+len(inline))
+	for _, s := range loaded {
+		if inlined[s.Name] {
+			slog.Warn("Inline skill overrides a discovered skill with the same name", "name", s.Name, "path", s.FilePath)
+			continue
+		}
+		merged = append(merged, s)
+	}
+	return append(merged, inline...)
+}
+
 // forkSkillToolSets builds, for each fork skill that declares toolsets, the
 // list of toolsets to expose while the skill runs in its sub-session. Toolset
 // names are resolved against the top-level `toolsets` section and instantiated
@@ -895,11 +1061,12 @@ func inlineSkills(defs []latest.InlineSkill) []skills.Skill {
 // skills without declared toolsets are skipped. Creation failures are
 // collected as warnings (parity with getToolsForAgent) rather than aborting
 // the load.
-func forkSkillToolSets(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, loadedSkills []skills.Skill, parentDir string, runConfig *config.RuntimeConfig, registry ToolsetRegistry, configName string, expander *js.Expander) (map[string][]tools.ToolSet, []string) {
+func forkSkillToolSets(ctx context.Context, cfg *latest.Config, a *latest.AgentConfig, loadedSkills []skills.Skill, parentDir string, runConfig *config.RuntimeConfig, configName string, loadOpts *loadOptions, expander Expander) (map[string][]tools.ToolSet, []string, error) {
 	var (
 		result   map[string][]tools.ToolSet
 		warnings []string
 	)
+	registry := loadOpts.toolsetRegistry
 	for i := range loadedSkills {
 		skill := loadedSkills[i]
 		if !skill.IsFork() || len(skill.Toolsets) == 0 {
@@ -924,7 +1091,10 @@ func forkSkillToolSets(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 			// a readonly agent must not gain mutating tools through a fork skill.
 			wrapped = WithReadOnlyFilter(wrapped, toolset.ReadOnly || a.ReadOnly)
 			wrapped = WithInstructions(wrapped, expander.Expand(ctx, toolset.Instruction, nil))
-			wrapped = WithToon(wrapped, toolset.Toon)
+			wrapped, err = loadOpts.withToon(wrapped, toolset.Toon)
+			if err != nil {
+				return nil, nil, err
+			}
 			wrapped = WithModelOverride(wrapped, toolset.Model)
 			// Wrap for lazy, single-flight start + failure-dedup, matching
 			// agent.WithToolSets. skillSubSessionTools calls Start() on every
@@ -938,7 +1108,18 @@ func forkSkillToolSets(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 			result[skill.Name] = built
 		}
 	}
-	return result, warnings
+	return result, warnings, nil
+}
+
+// withToon applies the configured TOON wrapper when a toolset asks for it.
+func (o *loadOptions) withToon(inner tools.ToolSet, spec string) (tools.ToolSet, error) {
+	if spec == "" {
+		return inner, nil
+	}
+	if o.toon == nil {
+		return nil, errors.New("toolset toon needs teamloader.WithToon (e.g. toon.Wrap from pkg/tools/toon)")
+	}
+	return o.toon(inner, spec), nil
 }
 
 // filterSkillsByName returns the subset of skills whose Name matches one of
@@ -1085,34 +1266,45 @@ func loadExternalAgent(ctx context.Context, ref string, runConfig *config.Runtim
 	// the registry every time the config is loaded, adding a digest lookup to
 	// startup even when the agent is never invoked. Digest-pinned references are
 	// served from the local cache with no network call, so nudge users to pin.
-	if config.IsOCIReference(ref) && !remote.IsDigestReference(ref) {
+	if config.IsOCIReference(ref) && !config.IsDigestReference(ref) {
 		slog.WarnContext(ctx, "External agent reference uses a tag, not a digest; it is re-resolved against the registry on every run. Pin it to a digest (ref@sha256:...) to avoid the per-run registry lookup.", "ref", ref)
 	}
 
-	source, err := config.Resolve(ref, runConfig.EnvProvider())
+	if loadOpts.sourceResolver == nil {
+		return nil, errors.New("external agent references need a source resolver: pass teamloader.WithSourceResolver (e.g. sources.Resolve from pkg/config/sources)")
+	}
+	source, err := loadOpts.sourceResolver(ref, runConfig.EnvProvider())
 	if err != nil {
 		return nil, err
 	}
 
-	var opts []Opt
-	if loadOpts.toolsetRegistry != nil {
-		opts = append(opts, WithToolsetRegistry(loadOpts.toolsetRegistry))
-	}
-
-	if loadOpts.providerRegistry != nil {
-		opts = append(opts, WithProviderRegistry(loadOpts.providerRegistry))
-	}
-
-	if len(loadOpts.modelOpts) > 0 {
-		opts = append(opts, WithModelOptions(loadOpts.modelOpts...))
-	}
-
-	result, err := Load(contextWithExternalDepth(ctx, depth+1), source, runConfig, opts...)
+	result, err := Load(contextWithExternalDepth(ctx, depth+1), source, runConfig, inheritOptions(loadOpts))
 	if err != nil {
 		return nil, err
 	}
 
 	return result.DefaultAgent()
+}
+
+// inheritOptions carries a parent load's capability options (registries,
+// resolver, expander, feature wrappers, strictness, model options) into the
+// load of an external agent, so it is built under the same rules. Per-load
+// inputs — working directory, model overrides, prompt files — are not
+// inherited.
+func inheritOptions(parent *loadOptions) Opt {
+	return func(opts *loadOptions) error {
+		opts.toolsetRegistry = parent.toolsetRegistry
+		opts.providerRegistry = parent.providerRegistry
+		opts.sourceResolver = parent.sourceResolver
+		opts.newExpander = parent.newExpander
+		opts.codeMode = parent.codeMode
+		opts.toon = parent.toon
+		opts.newDeferred = parent.newDeferred
+		opts.modelOpts = parent.modelOpts
+		opts.strict = parent.strict
+		opts.features = parent.features
+		return nil
+	}
 }
 
 // contextKey is an unexported type for context keys defined in this package.

@@ -159,7 +159,7 @@ func (t *Transcript) Lines(width, spinnerFrame int, busy bool, sessionState serv
 		lines = append(lines, spinnerLine(spinnerFrame), "")
 	}
 	for _, msg := range pendingUsers {
-		lines = append(lines, RenderPendingUserLines(msg.Display, width)...)
+		lines = append(lines, RenderPendingUserLines(msg, width)...)
 		lines = append(lines, "")
 	}
 	return lines

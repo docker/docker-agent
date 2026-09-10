@@ -152,24 +152,24 @@ func (e *AutoModelFallbackError) Unwrap() error { return e.Cause }
 var DefaultModels = map[string]string{
 	"openai":         "gpt-5.6",
 	"chatgpt":        "gpt-5.6",
-	"github-copilot": "gpt-5.6",
-	"anthropic":      "claude-sonnet-4-6",
-	"google":         "gemini-3.5-flash",
+	"github-copilot": "gpt-5.6-sol",
+	"anthropic":      "claude-sonnet-5",
+	"google":         "gemini-3.8-flash",
 	"dmr":            "ai/qwen3:latest",
 	"mistral":        "mistral-small-latest",
-	"openrouter":     "meta-llama/llama-3.3-70b-instruct",
+	"openrouter":     "meta-llama/llama-4-maverick",
 	"atlascloud":     "qwen/qwen3.8-max",
-	"baseten":        "deepseek-ai/DeepSeek-V3.1",
+	"baseten":        "deepseek-ai/DeepSeek-V4-Pro",
 	"ovhcloud":       "Qwen3.5-397B-A17B",
 	"groq":           "llama-3.3-70b-versatile",
-	"fireworks":      "accounts/fireworks/models/kimi-k2-instruct",
-	"deepseek":       "deepseek-chat",
+	"fireworks":      "accounts/fireworks/models/kimi-k3",
+	"deepseek":       "deepseek-v4-pro",
 	"cerebras":       "gpt-oss-120b",
 	"together":       "meta-llama/Llama-3.3-70B-Instruct-Turbo",
 	"huggingface":    "meta-llama/Llama-3.3-70B-Instruct",
-	"moonshot":       "kimi-k2-0905-preview",
+	"moonshot":       "kimi-k3",
 	"vercel":         "openai/gpt-5.6-sol",
-	"amazon-bedrock": "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+	"amazon-bedrock": "global.anthropic.claude-sonnet-5",
 	"opencode-go":    "deepseek-v4-flash",
 	"opencode-zen":   "deepseek-v4-flash-free",
 }
@@ -350,8 +350,8 @@ func PreferLocalDMRModels(ctx context.Context, cfg *latest.Config, selectorNames
 // the suffix has no slash, so a registry host:port like "registry:5000/ai/x"
 // is preserved.
 func dmrModelRepo(id string) string {
-	if i := strings.LastIndex(id, ":"); i >= 0 && !strings.Contains(id[i+1:], "/") {
-		return id[:i]
+	if before, after, ok := strings.CutLast(id, ":"); ok && !strings.Contains(after, "/") {
+		return before
 	}
 	return id
 }

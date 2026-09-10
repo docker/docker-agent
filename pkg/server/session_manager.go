@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -22,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
@@ -39,7 +42,9 @@ type activeRuntimes struct {
 	session  *session.Session        // The actual session object used by the runtime
 	titleGen *sessiontitle.Generator // Title generator (includes fallback models)
 
-	streaming sync.Mutex // Held while a RunStream is in progress; serialises concurrent requests
+	streaming   sync.Mutex  // Held while a RunStream is in progress; serialises concurrent requests
+	modelSwitch sync.Mutex  // Serialises model changes with manager-owned session persistence
+	deleting    atomic.Bool // Set before deletion waits for an in-flight model transaction
 }
 
 // SessionManager manages sessions for HTTP and Connect-RPC servers.
@@ -63,6 +68,12 @@ type SessionManager struct {
 	// constructor in runtimeForSession. Test seam: lets a build fail
 	// deterministically after the team has been loaded.
 	newRuntime func(context.Context, *team.Team, ...runtime.Opt) (runtime.Runtime, error)
+
+	// beforeRunModelSwitch is a test seam for the RunSession lock boundary.
+	beforeRunModelSwitch func()
+
+	// beforePersistActiveSession is a test seam for the persistence lock boundary.
+	beforePersistActiveSession func()
 
 	refreshInterval time.Duration
 
@@ -434,11 +445,10 @@ func (sm *SessionManager) AttachRuntime(ctx context.Context, sessionID string, r
 
 // GetSession retrieves a session by ID.
 func (sm *SessionManager) GetSession(ctx context.Context, id string) (*session.Session, error) {
-	sess, err := sm.sessionStore.GetSession(ctx, id)
-	if err != nil {
-		return nil, err
+	if rs, ok := sm.runtimeSessions.Load(id); ok && rs.session != nil {
+		return rs.session.Clone(), nil
 	}
-	return sess, nil
+	return sm.sessionStore.GetSession(ctx, id)
 }
 
 // WaitSessionAttached blocks until a runtime is attached for sessionID (i.e.
@@ -545,7 +555,7 @@ func (sm *SessionManager) GetSessionSnapshot(ctx context.Context, id string) (*a
 		Messages:      sess.GetAllMessages(),
 		ToolsApproved: sess.ToolsApproved,
 		SafetyPolicy:  sess.SafetyPolicy,
-		Permissions:   sess.Permissions,
+		Permissions:   sess.ClonePermissions(),
 		InputTokens:   inputTokens,
 		OutputTokens:  outputTokens,
 		Streaming:     streaming,
@@ -583,6 +593,9 @@ func (sm *SessionManager) CreateSession(ctx context.Context, sessionTemplate *se
 		opts = append(opts, session.WithTitle(title))
 	}
 
+	// A template without a working_dir creates an intentionally
+	// workspace-less session: the API caller is remote and the server must
+	// not guess its own process cwd as the session's workspace provenance.
 	if wd := strings.TrimSpace(sessionTemplate.WorkingDir); wd != "" {
 		// Refuse any raw ".." here in CreateSession, before filepath.Abs
 		// cleans it away: the traversal rejection is auditable on the raw
@@ -827,18 +840,62 @@ func (sm *SessionManager) GetSessions(ctx context.Context) ([]*session.Session, 
 // removes the session from all registries. Callers that need to wait for
 // the stream to fully stop should call WaitStopped afterwards.
 func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) error {
+	return sm.deleteSession(ctx, sessionID, true)
+}
+
+type deleteSessionFunc func(context.Context, string) error
+
+func runBatchDelete(ctx context.Context, sessionIDs []string, deleteSession deleteSessionFunc) (int, []string) {
+	deleted := 0
+	var failed []string
+	for _, sessionID := range sessionIDs {
+		if err := deleteSession(ctx, sessionID); err != nil {
+			failed = append(failed, sessionID)
+		} else {
+			deleted++
+		}
+	}
+	return deleted, failed
+}
+
+func (sm *SessionManager) deleteSession(ctx context.Context, sessionID string, trackStopped bool) error {
 	sm.mux.Lock()
-	defer sm.mux.Unlock()
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
 	if err != nil {
+		sm.mux.Unlock()
 		return err
 	}
+	sessionRuntime, active := sm.runtimeSessions.Load(sess.ID)
+	if !active {
+		if err := sm.sessionStore.DeleteSession(ctx, sessionID); err != nil {
+			sm.mux.Unlock()
+			return err
+		}
+		sm.finishSessionDeletion(sess.ID, nil, trackStopped)
+		sm.mux.Unlock()
+		return nil
+	}
+	sessionRuntime.deleting.Store(true)
+	sm.mux.Unlock()
 
+	sessionRuntime.modelSwitch.Lock()
 	if err := sm.sessionStore.DeleteSession(ctx, sessionID); err != nil {
+		sessionRuntime.deleting.Store(false)
+		sessionRuntime.modelSwitch.Unlock()
 		return err
 	}
+	sessionRuntime.modelSwitch.Unlock()
 
-	if sessionRuntime, ok := sm.runtimeSessions.Load(sess.ID); ok {
+	sm.mux.Lock()
+	defer sm.mux.Unlock()
+	sm.finishSessionDeletion(sess.ID, sessionRuntime, trackStopped)
+	return nil
+}
+
+// finishSessionDeletion removes manager state after the store row is gone.
+// The caller holds sm.mux.
+func (sm *SessionManager) finishSessionDeletion(sessionID string, sessionRuntime *activeRuntimes, trackStopped bool) {
+	if sessionRuntime != nil {
 		// Server-owned runtimes (done == nil) carry the manager's own
 		// elicitation sink (see runtimeForSession); clear it so a detached
 		// background job that elicits after this point hits the runtime's
@@ -852,39 +909,39 @@ func (sm *SessionManager) DeleteSession(ctx context.Context, sessionID string) e
 		if sessionRuntime.cancel != nil {
 			sessionRuntime.cancel()
 		}
-		// Keep the entry in deletedSessions so WaitStopped can probe the
-		// streaming mutex after the runtime is deregistered.
-		sm.deletedSessions.Store(sess.ID, sessionRuntime)
-		sm.runtimeSessions.Delete(sess.ID)
+		if current, ok := sm.runtimeSessions.Load(sessionID); ok && current == sessionRuntime {
+			sm.runtimeSessions.Delete(sessionID)
+		}
+		if trackStopped {
+			sm.deletedSessions.Store(sessionID, sessionRuntime)
+		}
 
-		// Background cleanup: remove the deletedSessions entry once the
-		// stream goroutine has exited. This prevents a memory leak when
-		// the caller does not use ?wait=true.
-		go func() {
-			ticker := time.NewTicker(100 * time.Millisecond)
-			defer ticker.Stop()
-			deadline := time.After(5 * time.Minute)
-			for {
-				if sessionRuntime.streaming.TryLock() {
-					sessionRuntime.streaming.Unlock()
-					sm.deletedSessions.Delete(sess.ID)
-					return
+		if trackStopped {
+			// Background cleanup prevents leaks when the caller omits ?wait=true.
+			go func() {
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				deadline := time.After(5 * time.Minute)
+				for {
+					if sessionRuntime.streaming.TryLock() {
+						sessionRuntime.streaming.Unlock()
+						sm.deletedSessions.Delete(sessionID)
+						return
+					}
+					select {
+					case <-deadline:
+						sm.deletedSessions.Delete(sessionID)
+						return
+					case <-ticker.C:
+					}
 				}
-				select {
-				case <-deadline:
-					sm.deletedSessions.Delete(sess.ID)
-					return
-				case <-ticker.C:
-				}
-			}
-		}()
+			}()
+		}
 	}
-	sm.dropEventLog(sess.ID)
-	sm.followUpInjectors.Delete(sess.ID)
-	sm.followUpKeys.Delete(sess.ID)
-	sm.pendingSafetyDefaults.Delete(sess.ID)
-
-	return nil
+	sm.dropEventLog(sessionID)
+	sm.followUpInjectors.Delete(sessionID)
+	sm.followUpKeys.Delete(sessionID)
+	sm.pendingSafetyDefaults.Delete(sessionID)
 }
 
 // WaitStopped blocks until the session's runtime stream goroutine has fully
@@ -920,6 +977,11 @@ func (sm *SessionManager) WaitStopped(ctx context.Context, sessionID string, tim
 // ErrSessionBusy is returned when a session is already processing a request.
 var ErrSessionBusy = errors.New("session is already processing a request")
 
+var (
+	ErrAgentNotFound          = errors.New("agent source not found")
+	ErrAgentSourceUnavailable = errors.New("agent source unavailable")
+)
+
 // RunSession runs a session with the given messages.
 //
 // When modelOverride is non-empty, it is applied to the session's current
@@ -930,20 +992,26 @@ var ErrSessionBusy = errors.New("session is already processing a request")
 // history.
 func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilename, currentAgent string, messages []api.Message, modelOverride string) (<-chan runtime.Event, error) {
 	sm.mux.Lock()
-	defer sm.mux.Unlock()
-	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-
 	runtimeSession, exists := sm.runtimeSessions.Load(sessionID)
 
 	streamCtx, cancel := context.WithCancel(ctx)
-	var titleGen *sessiontitle.Generator
+	var (
+		sess     *session.Session
+		titleGen *sessiontitle.Generator
+		err      error
+	)
 	if !exists {
+		sess, err = sm.sessionStore.GetSession(ctx, sessionID)
+		if err != nil {
+			sm.mux.Unlock()
+			cancel()
+			return nil, err
+		}
+
 		var rt runtime.Runtime
 		rt, titleGen, err = sm.runtimeForSession(ctx, sess, agentFilename, currentAgent, sm.runConfig)
 		if err != nil {
+			sm.mux.Unlock()
 			cancel()
 			return nil, err
 		}
@@ -965,6 +1033,7 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	// progress, which would produce a tool_use without a matching
 	// tool_result and cause provider errors.
 	if !runtimeSession.streaming.TryLock() {
+		sm.mux.Unlock()
 		cancel()
 		return nil, ErrSessionBusy
 	}
@@ -975,21 +1044,47 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	if runtimeSession.done == nil {
 		runtimeSession.cancel = cancel
 	}
+	sm.mux.Unlock()
+
+	// Model mutation may perform provider I/O. Coordinate it per session,
+	// outside sm.mux, while streaming excludes both direct and managed runs.
+	if sm.beforeRunModelSwitch != nil {
+		sm.beforeRunModelSwitch()
+	}
+	runtimeSession.modelSwitch.Lock()
+	defer runtimeSession.modelSwitch.Unlock()
+
+	if !sm.runtimeActive(sessionID, runtimeSession) {
+		runtimeSession.streaming.Unlock()
+		cancel()
+		return nil, ErrSessionNotRunning
+	}
+
+	if exists {
+		sess = runtimeSession.session
+	}
 
 	// Apply the model override (if any) before persisting the user
 	// messages so that an invalid ref does not leave an orphaned user
-	// message in the history. We hold both sm.mux and streaming, so we
-	// can mutate session fields directly; on store-write failure below
-	// we roll the runtime back to its previous override.
-	prevOverride, hadPrevOverride, undoModelOverride, err := sm.applyRunModelOverride(ctx, runtimeSession, modelOverride)
+	// message in the history. The streaming and modelSwitch locks keep the
+	// runtime, persisted snapshot, live session, and rollback in one transaction.
+	undoModelOverride, err := sm.applyRunModelOverride(ctx, runtimeSession, modelOverride)
 	if err != nil {
 		runtimeSession.streaming.Unlock()
 		cancel()
 		return nil, err
 	}
 
+	if modelOverride != "" {
+		if err := ctx.Err(); err != nil {
+			undoModelOverride(context.WithoutCancel(ctx))
+			runtimeSession.streaming.Unlock()
+			cancel()
+			return nil, err
+		}
+	}
 	if err := sm.applyAgentSwitchCommands(ctx, runtimeSession.runtime, messages); err != nil {
-		undoModelOverride(ctx, prevOverride, hadPrevOverride)
+		undoModelOverride(context.WithoutCancel(ctx))
 		runtimeSession.streaming.Unlock()
 		cancel()
 		return nil, err
@@ -1006,7 +1101,7 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	}
 
 	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
-		undoModelOverride(ctx, prevOverride, hadPrevOverride)
+		undoModelOverride(context.WithoutCancel(ctx))
 		runtimeSession.streaming.Unlock()
 		cancel()
 		return nil, err
@@ -1033,24 +1128,52 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		defer cancel()
 		defer runtimeSession.streaming.Unlock()
 
-		// Start title generation in parallel if needed
+		var titleEvents <-chan runtime.Event
 		if needsTitle {
-			go sm.generateTitle(ctx, sess, titleGen, userMessages, streamChan)
+			ch := make(chan runtime.Event, 1)
+			titleEvents = ch
+			go func() {
+				defer close(ch)
+				sm.generateTitle(ctx, sess, titleGen, userMessages, ch)
+			}()
 		} else if titleToEmit != "" {
 			// Re-emit the existing title so late-joining SSE consumers
 			// and boards can pick it up without an extra API call.
-			streamChan <- runtime.SessionTitle(sess.ID, titleToEmit)
+			if !sendStreamEvent(streamCtx, streamChan, runtime.SessionTitle(sess.ID, titleToEmit)) {
+				return
+			}
 		}
 
 		stream := runtimeSession.runtime.RunStream(streamCtx, sess)
-		for event := range stream {
-			if streamCtx.Err() != nil {
-				return
+		for stream != nil {
+			select {
+			case event, ok := <-titleEvents:
+				titleEvents = nil
+				if ok && !sendStreamEvent(streamCtx, streamChan, event) {
+					return
+				}
+			case event, ok := <-stream:
+				if !ok {
+					stream = nil
+					continue
+				}
+				if streamCtx.Err() != nil || !sendStreamEvent(streamCtx, streamChan, event) {
+					return
+				}
 			}
-			streamChan <- event
 		}
 
-		if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
+		// Forward a title that completed alongside the runtime without waiting
+		// for a slow title provider before finalizing the stream.
+		select {
+		case event, ok := <-titleEvents:
+			if ok && !sendStreamEvent(streamCtx, streamChan, event) {
+				return
+			}
+		default:
+		}
+
+		if err := sm.persistActiveSession(ctx, sessionID, runtimeSession, sess); err != nil {
 			return
 		}
 	}()
@@ -1058,14 +1181,34 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 	return streamChan, nil
 }
 
+func sendStreamEvent(ctx context.Context, events chan<- runtime.Event, event runtime.Event) bool {
+	select {
+	case events <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (sm *SessionManager) runtimeActive(sessionID string, rs *activeRuntimes) bool {
+	if rs.deleting.Load() {
+		return false
+	}
+	active, ok := sm.runtimeSessions.Load(sessionID)
+	return ok && active == rs
+}
+
 // ResumeSession resumes a paused session with an optional rejection reason or tool name.
 func (sm *SessionManager) ResumeSession(ctx context.Context, sessionID, confirmation, reason, toolName string) error {
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
 	rt, exists := sm.runtimeSessions.Load(sessionID)
 	if !exists {
 		return errors.New("session not found")
+	}
+
+	rt.modelSwitch.Lock()
+	defer rt.modelSwitch.Unlock()
+	if !sm.runtimeActive(sessionID, rt) {
+		return ErrSessionNotRunning
 	}
 
 	// Mirror + persist mid-turn session mutations synchronously —
@@ -1211,9 +1354,9 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 	}
 
 	runCtx, runCancel := context.WithCancel(context.WithoutCancel(ctx))
-	sm.mux.Lock()
-	if _, stillExists := sm.runtimeSessions.Load(sessionID); !stillExists {
-		sm.mux.Unlock()
+	rt.modelSwitch.Lock()
+	if !sm.runtimeActive(sessionID, rt) {
+		rt.modelSwitch.Unlock()
 		rt.streaming.Unlock()
 		runCancel()
 		return ErrSessionNotRunning
@@ -1223,7 +1366,7 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 		var err error
 		sess, err = sm.sessionStore.GetSession(ctx, sessionID)
 		if err != nil {
-			sm.mux.Unlock()
+			rt.modelSwitch.Unlock()
 			rt.streaming.Unlock()
 			runCancel()
 			return err
@@ -1231,7 +1374,7 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 	}
 	sess.AddMessage(session.UserMessage(msg.Content, msg.MultiContent...))
 	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
-		sm.mux.Unlock()
+		rt.modelSwitch.Unlock()
 		rt.streaming.Unlock()
 		runCancel()
 		return err
@@ -1242,7 +1385,7 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 	if rt.done == nil {
 		rt.cancel = runCancel
 	}
-	sm.mux.Unlock()
+	rt.modelSwitch.Unlock()
 
 	_, skipMirroredElicitation := rt.runtime.(elicitationSinkMirror)
 	go func() {
@@ -1261,12 +1404,7 @@ func (sm *SessionManager) recallSession(ctx context.Context, sessionID string, m
 				pe.log.append(event)
 			}
 		}
-		sm.mux.Lock()
-		defer sm.mux.Unlock()
-		if _, stillExists := sm.runtimeSessions.Load(sessionID); !stillExists {
-			return
-		}
-		if err := sm.sessionStore.UpdateSession(context.WithoutCancel(ctx), sess); err != nil {
+		if err := sm.persistActiveSession(context.WithoutCancel(ctx), sessionID, rt, sess); err != nil && !errors.Is(err, ErrSessionNotRunning) {
 			slog.WarnContext(ctx, "Failed to persist recalled session", "session_id", sessionID, "error", err)
 		}
 	}()
@@ -1294,21 +1432,17 @@ func (sm *SessionManager) ResumeElicitation(ctx context.Context, sessionID, acti
 // toggle round-trip.
 func (sm *SessionManager) ToggleToolApproval(ctx context.Context, sessionID string) error {
 	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
-	// Mirror onto the live runtime session so the dispatcher picks up
-	// the change on the next tool call, not just the next turn. If the
-	// store write fails, toggle back (ToggleYolo is its own inverse) so
-	// the live session never diverges from what a reload would produce —
-	// the caller got an error, so the toggle must not have half-happened.
-	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
-		rt.session.ToggleYolo()
-		if err := sm.sessionStore.UpdateSession(ctx, rt.session); err != nil {
-			rt.session.ToggleYolo()
-			return err
-		}
-		return nil
+	rt, active := sm.runtimeSessions.Load(sessionID)
+	if active && rt.session != nil {
+		sess := rt.session
+		sm.mux.Unlock()
+		return sm.updateActiveSession(ctx, sessionID, rt, sess, func() {
+			sess.ToggleYolo()
+		}, func() {
+			sess.ToggleYolo()
+		})
 	}
+	defer sm.mux.Unlock()
 
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
 	if err != nil {
@@ -1324,14 +1458,15 @@ func (sm *SessionManager) SetSessionSafetyPolicy(ctx context.Context, sessionID 
 		return fmt.Errorf("invalid safety_policy: %q", policy)
 	}
 	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
-	// Mirror onto the live runtime session so the dispatcher picks up
-	// the new policy on the next tool call, not just the next turn.
-	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
-		rt.session.SetSafetyPolicy(policy)
-		return sm.sessionStore.UpdateSession(ctx, rt.session)
+	rt, active := sm.runtimeSessions.Load(sessionID)
+	if active && rt.session != nil {
+		sess := rt.session
+		sm.mux.Unlock()
+		return sm.updateActiveSession(ctx, sessionID, rt, sess, func() {
+			sess.SetSafetyPolicy(policy)
+		}, nil)
 	}
+	defer sm.mux.Unlock()
 
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
 	if err != nil {
@@ -1344,15 +1479,47 @@ func (sm *SessionManager) SetSessionSafetyPolicy(ctx context.Context, sessionID 
 // UpdateSessionPermissions updates the permissions for a session.
 func (sm *SessionManager) UpdateSessionPermissions(ctx context.Context, sessionID string, perms *session.PermissionsConfig) error {
 	sm.mux.Lock()
+	rt, active := sm.runtimeSessions.Load(sessionID)
+	if active && rt.session != nil {
+		sess := rt.session
+		sm.mux.Unlock()
+		return sm.updateActiveSession(ctx, sessionID, rt, sess, func() {
+			sess.SetPermissions(perms)
+		}, nil)
+	}
 	defer sm.mux.Unlock()
+
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
 	if err != nil {
 		return err
 	}
-
-	sess.Permissions = perms
-
+	sess.SetPermissions(perms)
 	return sm.sessionStore.UpdateSession(ctx, sess)
+}
+
+func (sm *SessionManager) persistActiveSession(ctx context.Context, sessionID string, rt *activeRuntimes, sess *session.Session) error {
+	return sm.updateActiveSession(ctx, sessionID, rt, sess, nil, nil)
+}
+
+func (sm *SessionManager) updateActiveSession(ctx context.Context, sessionID string, rt *activeRuntimes, sess *session.Session, update, rollback func()) error {
+	if sm.beforePersistActiveSession != nil {
+		sm.beforePersistActiveSession()
+	}
+	rt.modelSwitch.Lock()
+	defer rt.modelSwitch.Unlock()
+	if !sm.runtimeActive(sessionID, rt) || rt.session != sess {
+		return ErrSessionNotRunning
+	}
+	if update != nil {
+		update()
+	}
+	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
+		if rollback != nil {
+			rollback()
+		}
+		return err
+	}
+	return nil
 }
 
 // UpdateSessionTitle updates the title for a session.
@@ -1360,15 +1527,16 @@ func (sm *SessionManager) UpdateSessionPermissions(ctx context.Context, sessionI
 // object to prevent subsequent runtime saves from overwriting the title.
 func (sm *SessionManager) UpdateSessionTitle(ctx context.Context, sessionID, title string) error {
 	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
-	// If session is actively running, update the in-memory session object directly.
-	// This ensures the runtime's saveSession won't overwrite our manual edit.
-	if rt, ok := sm.runtimeSessions.Load(sessionID); ok && rt.session != nil {
-		rt.session.SetTitle(title)
+	rt, active := sm.runtimeSessions.Load(sessionID)
+	if active && rt.session != nil {
+		sess := rt.session
+		sm.mux.Unlock()
 		slog.DebugContext(ctx, "Updated title for active session", "session_id", sessionID, "title", title)
-		return sm.sessionStore.UpdateSession(ctx, rt.session)
+		return sm.updateActiveSession(ctx, sessionID, rt, sess, func() {
+			sess.SetTitle(title)
+		}, nil)
 	}
+	defer sm.mux.Unlock()
 
 	// Session is not actively running, load from store and update
 	sess, err := sm.sessionStore.GetSession(ctx, sessionID)
@@ -1398,12 +1566,11 @@ func (sm *SessionManager) generateTitle(ctx context.Context, sess *session.Sessi
 		return
 	}
 
-	// Update the in-memory session
-	sess.SetTitle(title)
-
-	// Persist the title
-	if err := sm.sessionStore.UpdateSession(ctx, sess); err != nil {
-		slog.ErrorContext(ctx, "Failed to persist generated title", "session_id", sess.ID, "error", err)
+	// Persist only while this exact live session remains active.
+	rs, ok := sm.runtimeSessions.Load(sess.ID)
+	if !ok || sm.updateActiveSession(ctx, sess.ID, rs, sess, func() {
+		sess.SetTitle(title)
+	}, nil) != nil {
 		return
 	}
 
@@ -1473,6 +1640,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 		Models:             loadResult.Models,
 		Providers:          loadResult.Providers,
 		ModelsGateway:      rc.ModelsGateway,
+		EncryptedConfig:    loadResult.EncryptedConfig,
 		EnvProvider:        rc.EnvProvider(),
 		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
@@ -1532,13 +1700,12 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 	// Apply any stored per-agent model overrides so that a session
 	// resumed (or freshly created with overrides via CreateSession) uses
 	// the requested models instead of the agent's defaults.
-	applyStoredOverrides(ctx, sess.ID, run, sess.AgentModelOverrides)
+	overrides, _ := sess.ModelStateSnapshot()
+	applyStoredOverrides(ctx, sess.ID, run, overrides)
 
-	titleModels := agt.TitleModels(ctx)
-	var titleGen *sessiontitle.Generator
-	if len(titleModels) > 0 {
-		titleGen = sessiontitle.New(titleModels[0], titleModels[1:]...)
-	}
+	// May be nil when the agent has no configured title candidate; a nil
+	// generator skips title generation.
+	titleGen := sessiontitle.New(agt.TitleModels(ctx)...)
 
 	// Construction succeeded: the selected author default may now be
 	// committed and the pending marker consumed, exactly once.
@@ -1588,13 +1755,27 @@ func (sm *SessionManager) applyAuthorSafetyDefault(ctx context.Context, sess *se
 	}
 }
 
+func (sm *SessionManager) sourceLoadError(agentFilename string, err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if errors.Is(err, config.ErrSourceFetchFailed) {
+		return fmt.Errorf("%w: load %q: %w", ErrAgentSourceUnavailable, agentFilename, err)
+	}
+	return fmt.Errorf("load %q: %w", agentFilename, err)
+}
+
 func (sm *SessionManager) loadTeam(ctx context.Context, agentFilename string, runConfig *config.RuntimeConfig) (*team.Team, error) {
 	agentSource, err := sm.resolveSource(agentFilename)
 	if err != nil {
 		return nil, err
 	}
 
-	return teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
+	t, err := teamloader.Load(ctx, agentSource, runConfig, loaderdefaults.Opts()...)
+	if err != nil {
+		return nil, sm.sourceLoadError(agentFilename, err)
+	}
+	return t, nil
 }
 
 // loadTeamWithConfig is like loadTeam but also returns the loaded model and
@@ -1606,7 +1787,26 @@ func (sm *SessionManager) loadTeamWithConfig(ctx context.Context, agentFilename 
 	}
 
 	allOpts := append(loaderdefaults.Opts(), opts...)
-	return teamloader.LoadWithConfig(ctx, agentSource, runConfig, allOpts...)
+	result, err := teamloader.LoadWithConfig(ctx, agentSource, runConfig, allOpts...)
+	if err != nil {
+		return nil, sm.sourceLoadError(agentFilename, err)
+	}
+	return result, nil
+}
+
+// LoadAgentConfig loads an agent configuration through the same source
+// resolution boundary as agent execution.
+func (sm *SessionManager) LoadAgentConfig(ctx context.Context, agentFilename string) (*latest.Config, error) {
+	agentSource, err := sm.resolveSource(agentFilename)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := config.Load(ctx, agentSource)
+	if err != nil {
+		return nil, sm.sourceLoadError(agentFilename, err)
+	}
+	return cfg, nil
 }
 
 // resolveSource looks up the agent source for agentFilename.
@@ -1640,73 +1840,51 @@ func (sm *SessionManager) resolveSource(agentFilename string) (config.Source, er
 		return match, nil
 	}
 
-	return nil, fmt.Errorf("agent not found: %s", agentFilename)
+	return nil, fmt.Errorf("%w: agent not found: %s", ErrAgentNotFound, agentFilename)
 }
 
-// applyRunModelOverride applies modelRef as the per-agent model override
-// on the session backing rs. It mirrors the in-memory mutations that
-// SetSessionAgentModel performs, but without acquiring sm.mux (the
-// caller already holds it) and without an explicit store write — the
-// caller's pending UpdateSession persists the override alongside any
-// user messages in a single round trip.
-//
-// Returns the previous override value (and whether one existed) plus an
-// undo function. If the subsequent store write fails the caller must
-// invoke undo to roll the runtime override back; the in-memory session
-// fields are owned by the caller and rolled back inline.
-func (sm *SessionManager) applyRunModelOverride(ctx context.Context, rs *activeRuntimes, modelRef string) (prevOverride string, hadPrev bool, undo func(context.Context, string, bool), err error) {
-	noop := func(context.Context, string, bool) {}
+// applyRunModelOverride applies modelRef to the runtime and live session.
+// The caller holds modelSwitch and persists the resulting session snapshot.
+// The returned undo restores both runtime and complete model state.
+func (sm *SessionManager) applyRunModelOverride(ctx context.Context, rs *activeRuntimes, modelRef string) (undo func(context.Context), err error) {
+	noop := func(context.Context) {}
 	if modelRef == "" {
-		return "", false, noop, nil
+		return noop, nil
 	}
 	if !rs.runtime.SupportsModelSwitching() {
-		return "", false, noop, ErrModelSwitchingNotSupported
+		return noop, ErrModelSwitchingNotSupported
 	}
 
 	agentName := rs.runtime.CurrentAgentName(ctx)
 	sess := rs.session
-
-	if sess != nil && sess.AgentModelOverrides != nil {
-		prevOverride, hadPrev = sess.AgentModelOverrides[agentName]
+	var previousOverrides map[string]string
+	var previousCustomModels []string
+	if sess != nil {
+		previousOverrides, previousCustomModels = sess.ModelStateSnapshot()
 	}
+	prevOverride, hadPrev := previousOverrides[agentName]
 
 	if err := rs.runtime.SetAgentModel(ctx, agentName, modelRef); err != nil {
-		return "", false, noop, err
+		return noop, err
 	}
 
-	var appendedCustom bool
 	if sess != nil {
-		if sess.AgentModelOverrides == nil {
-			sess.AgentModelOverrides = make(map[string]string)
-		}
-		sess.AgentModelOverrides[agentName] = modelRef
-		if strings.Contains(modelRef, "/") && !slices.Contains(sess.CustomModelsUsed, modelRef) {
-			sess.CustomModelsUsed = append(sess.CustomModelsUsed, modelRef)
-			appendedCustom = true
-		}
+		sess.SetAgentModelOverride(agentName, modelRef)
 	}
 
-	undo = func(ctx context.Context, prev string, had bool) {
-		rollback := prev
-		if !had {
+	undo = func(ctx context.Context) {
+		rollback := prevOverride
+		if !hadPrev {
 			rollback = ""
 		}
 		if rbErr := rs.runtime.SetAgentModel(ctx, agentName, rollback); rbErr != nil {
 			slog.ErrorContext(ctx, "Failed to roll back runtime model override", "agent", agentName, "error", rbErr)
 		}
-		if sess == nil {
-			return
-		}
-		if had {
-			sess.AgentModelOverrides[agentName] = prev
-		} else {
-			delete(sess.AgentModelOverrides, agentName)
-		}
-		if appendedCustom {
-			sess.CustomModelsUsed = sess.CustomModelsUsed[:len(sess.CustomModelsUsed)-1]
+		if sess != nil {
+			sess.ReplaceModelState(previousOverrides, previousCustomModels)
 		}
 	}
-	return prevOverride, hadPrev, undo, nil
+	return undo, nil
 }
 
 // applyAgentSwitchCommands is the HTTP analogue of
@@ -1855,14 +2033,12 @@ func (sm *SessionManager) UpdateMessage(ctx context.Context, sessionID, msgID st
 		defer rt.streaming.Unlock()
 	}
 
-	// Parse msgID as int64
-	var msgPos int64
-	_, err := fmt.Sscanf(msgID, "%d", &msgPos)
+	msgPos, err := strconv.ParseInt(msgID, 10, 64)
 	if err != nil {
-		return fmt.Errorf("invalid message ID: %w", err)
+		return fmt.Errorf("invalid message ID %q: %w", msgID, err)
 	}
 
-	return sm.sessionStore.UpdateMessage(ctx, msgPos, msg)
+	return sm.sessionStore.UpdateMessage(ctx, sessionID, msgPos, msg)
 }
 
 // AddSummary adds a summary to a session.
@@ -1925,23 +2101,20 @@ func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID 
 
 	agentName := rs.runtime.CurrentAgentName(ctx)
 
-	// Snapshot the override and custom-model history under sm.mux so the
-	// read is atomic with respect to SetSessionAgentModel writes. The
-	// (potentially slow) runtime.AvailableModels call must NOT happen
-	// under sm.mux: it can perform network I/O (provider discovery,
-	// models.dev catalog lookup) and would block every other session
-	// operation in the manager.
-	sm.mux.Lock()
+	// Model state is protected by Session.mu; modelSwitch only serializes runtime
+	// calls and store transactions for this active runtime.
+	if rs.deleting.Load() {
+		return "", "", nil, ErrSessionNotRunning
+	}
+	rs.modelSwitch.Lock()
 	current := ""
 	var customRefs []string
 	if rs.session != nil {
-		current = rs.session.AgentModelOverrides[agentName]
-		if n := len(rs.session.CustomModelsUsed); n > 0 {
-			customRefs = make([]string, n)
-			copy(customRefs, rs.session.CustomModelsUsed)
-		}
+		overrides, refs := rs.session.ModelStateSnapshot()
+		current = overrides[agentName]
+		customRefs = refs
 	}
-	sm.mux.Unlock()
+	rs.modelSwitch.Unlock()
 
 	choices := runtime.DecorateModelChoices(rs.runtime.AvailableModels(ctx), current, customRefs)
 	return agentName, current, choices, nil
@@ -1968,30 +2141,24 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 		return "", "", ErrModelSwitchingNotSupported
 	}
 
-	agentName := rs.runtime.CurrentAgentName(ctx)
-	sess := rs.session
+	rs.modelSwitch.Lock()
+	defer rs.modelSwitch.Unlock()
 
-	// Snapshot current state so we can roll back if persistence fails
-	// after we've already mutated the runtime.
-	var (
-		hadOverride     bool
-		prevOverride    string
-		hadOverridesMap bool
-	)
-	if sess != nil {
-		sm.mux.Lock()
-		hadOverridesMap = sess.AgentModelOverrides != nil
-		if hadOverridesMap {
-			prevOverride, hadOverride = sess.AgentModelOverrides[agentName]
-		}
-		sm.mux.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
+	if !sm.runtimeActive(sessionID, rs) {
+		return "", "", ErrSessionNotRunning
 	}
 
-	// Runtime mutation runs without sm.mux so it doesn't block other
-	// session operations during slow provider creation. The per-session
-	// modelSwitch lock above keeps SetAgentModel + UpdateSession + any
-	// rollback atomic with respect to other model-switch calls on this
-	// session.
+	agentName := rs.runtime.CurrentAgentName(ctx)
+	sess := rs.session
+	var prevOverride string
+	var hadOverride bool
+	if sess != nil {
+		prevOverride, hadOverride = sess.AgentModelOverride(agentName)
+	}
+
 	if err := rs.runtime.SetAgentModel(ctx, agentName, modelRef); err != nil {
 		return "", "", err
 	}
@@ -2000,46 +2167,31 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 		return agentName, modelRef, nil
 	}
 
-	// Clone the session for the store write. We'll apply mutations to the
-	// clone, persist it, and only then update the live session. This ensures
-	// concurrent readers never observe a not-yet-persisted state.
-	// Title and the token/cost triple are taken through the locked accessors
-	// because the runtime stream goroutine writes them concurrently.
-	title := sess.TitleSnapshot()
-	inputTokens, outputTokens, cost := sess.TokensAndCost()
-	updatedSess := &session.Session{
-		ID:         sess.ID,
-		Title:      title,
-		CreatedAt:  sess.CreatedAt,
-		WorkingDir: sess.WorkingDir,
-		// SafetyPolicy must travel with ToolsApproved: omitting it would
-		// reset a strict/balanced session to the legacy default on reload.
-		SafetyPolicy:            sess.SafetyPolicy,
-		ToolsApproved:           sess.ToolsApproved,
-		Permissions:             sess.Permissions,
-		Attributes:              sess.AttributesSnapshot(),
-		MaxIterations:           sess.MaxIterations,
-		MaxConsecutiveToolCalls: sess.MaxConsecutiveToolCalls,
-		MaxOldToolCallTokens:    sess.MaxOldToolCallTokens,
-		MaxToolResultTokens:     sess.MaxToolResultTokens,
-		InputTokens:             inputTokens,
-		OutputTokens:            outputTokens,
-		Cost:                    cost,
-		Starred:                 sess.Starred,
+	if err := ctx.Err(); err != nil {
+		rollback := prevOverride
+		if !hadOverride {
+			rollback = ""
+		}
+		if rbErr := rs.runtime.SetAgentModel(context.WithoutCancel(ctx), agentName, rollback); rbErr != nil {
+			slog.ErrorContext(ctx, "Failed to roll back runtime model override", "session_id", sessionID, "agent", agentName, "error", rbErr)
+		}
+		return "", "", err
+	}
+	if !sm.runtimeActive(sessionID, rs) {
+		rollback := prevOverride
+		if !hadOverride {
+			rollback = ""
+		}
+		if err := rs.runtime.SetAgentModel(context.WithoutCancel(ctx), agentName, rollback); err != nil {
+			slog.ErrorContext(ctx, "Failed to roll back runtime model override", "session_id", sessionID, "agent", agentName, "error", err)
+		}
+		return "", "", ErrSessionNotRunning
 	}
 
-	// Clone the maps/slices under sm.mux to avoid data races
-	sm.mux.Lock()
-	if sess.AgentModelOverrides != nil {
-		updatedSess.AgentModelOverrides = maps.Clone(sess.AgentModelOverrides)
-	}
-	if len(sess.CustomModelsUsed) > 0 {
-		updatedSess.CustomModelsUsed = append([]string(nil), sess.CustomModelsUsed...)
-	}
-	sm.mux.Unlock()
-
-	// Apply the mutations to the cloned session
-	var appendedCustomUsed bool
+	// Persist a complete snapshot so model changes cannot discard messages or
+	// metadata added since the runtime was attached.
+	updatedSess := sess.Clone()
+	updatedSess.Origin = sess.Origin
 	if modelRef == "" {
 		delete(updatedSess.AgentModelOverrides, agentName)
 	} else {
@@ -2047,17 +2199,11 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 			updatedSess.AgentModelOverrides = make(map[string]string)
 		}
 		updatedSess.AgentModelOverrides[agentName] = modelRef
-
-		// Track inline provider/model references so they remain easy to
-		// re-select via the model picker (mirrors App.SetCurrentAgentModel).
 		if strings.Contains(modelRef, "/") && !slices.Contains(updatedSess.CustomModelsUsed, modelRef) {
 			updatedSess.CustomModelsUsed = append(updatedSess.CustomModelsUsed, modelRef)
-			appendedCustomUsed = true
 		}
 	}
 
-	// Persist the cloned session. If this fails, the live session is
-	// unchanged and we only need to roll back the runtime.
 	if err := sm.sessionStore.UpdateSession(ctx, updatedSess); err != nil {
 		rollback := prevOverride
 		if !hadOverride {
@@ -2069,22 +2215,7 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 		return "", "", fmt.Errorf("failed to persist model override: %w", err)
 	}
 
-	// Store write succeeded. Now apply the mutations to the live session
-	// under sm.mux so concurrent readers observe the change atomically.
-	sm.mux.Lock()
-	if modelRef == "" {
-		delete(sess.AgentModelOverrides, agentName)
-	} else {
-		if sess.AgentModelOverrides == nil {
-			sess.AgentModelOverrides = make(map[string]string)
-		}
-		sess.AgentModelOverrides[agentName] = modelRef
-
-		if appendedCustomUsed {
-			sess.CustomModelsUsed = append(sess.CustomModelsUsed, modelRef)
-		}
-	}
-	sm.mux.Unlock()
+	sess.SetAgentModelOverride(agentName, modelRef)
 
 	slog.DebugContext(ctx, "Updated session model override", "session_id", sessionID, "agent", agentName, "model", modelRef)
 	return agentName, modelRef, nil
@@ -2092,37 +2223,9 @@ func (sm *SessionManager) SetSessionAgentModel(ctx context.Context, sessionID, m
 
 // BatchDeleteSessions deletes multiple sessions in a single operation.
 func (sm *SessionManager) BatchDeleteSessions(ctx context.Context, sessionIDs []string) (int, []string) {
-	sm.mux.Lock()
-	defer sm.mux.Unlock()
-
-	deleted := 0
-	var failed []string
-
-	for _, sessionID := range sessionIDs {
-		if err := sm.sessionStore.DeleteSession(ctx, sessionID); err != nil {
-			failed = append(failed, sessionID)
-		} else {
-			deleted++
-			if sessionRuntime, ok := sm.runtimeSessions.Load(sessionID); ok {
-				// Same as DeleteSession: silence the manager-registered
-				// elicitation sink on server-owned runtimes so post-delete
-				// background elicitations fast-decline instead of parking.
-				if sessionRuntime.done == nil {
-					sessionRuntime.runtime.OnElicitationRequest(nil)
-				}
-				if sessionRuntime.cancel != nil {
-					sessionRuntime.cancel()
-				}
-				sm.runtimeSessions.Delete(sessionID)
-			}
-			sm.dropEventLog(sessionID)
-			sm.followUpInjectors.Delete(sessionID)
-			sm.followUpKeys.Delete(sessionID)
-			sm.pendingSafetyDefaults.Delete(sessionID)
-		}
-	}
-
-	return deleted, failed
+	return runBatchDelete(ctx, sessionIDs, func(ctx context.Context, sessionID string) error {
+		return sm.deleteSession(ctx, sessionID, false)
+	})
 }
 
 // BatchExportSessions exports multiple sessions as JSON
@@ -2181,7 +2284,7 @@ func (sm *SessionManager) ExportSessionForRecovery(ctx context.Context, sessionI
 		"output_tokens":  outputTokens,
 		"working_dir":    sess.WorkingDir,
 		"tools_approved": sess.ToolsApproved,
-		"permissions":    sess.Permissions,
+		"permissions":    sess.ClonePermissions(),
 	}
 	// Recorded errors are session items, not messages, so GetAllMessages
 	// drops them. Export them separately: recovery exports feed diagnostics,

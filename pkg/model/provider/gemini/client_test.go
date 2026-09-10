@@ -10,9 +10,73 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
+
+func TestBuildConfig_NoThinking(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		model         string
+		opts          []options.Opt
+		wantThinking  bool
+		wantMinTokens bool
+	}{
+		{
+			name:         "title generation omits thinking config",
+			model:        "gemini-3-flash",
+			opts:         []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
+			wantThinking: false,
+		},
+		{
+			name:          "MCP sampling disables Gemini 3 thinking",
+			model:         "gemini-3-flash",
+			opts:          []options.Opt{options.WithNoThinking()},
+			wantThinking:  true,
+			wantMinTokens: true,
+		},
+		{
+			name:         "MCP sampling disables Gemini 2.5 thinking",
+			model:        "gemini-2.5-flash",
+			opts:         []options.Opt{options.WithNoThinking()},
+			wantThinking: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := &Client{Config: base.Config{
+				ModelConfig: latest.ModelConfig{
+					Provider:       "google",
+					Model:          tt.model,
+					ThinkingBudget: &latest.ThinkingBudget{Effort: "high"},
+				},
+				ModelOptions: options.Apply(tt.opts...),
+			}}
+
+			config := client.buildConfig()
+			if !tt.wantThinking {
+				assert.Nil(t, config.ThinkingConfig)
+				return
+			}
+
+			require.NotNil(t, config.ThinkingConfig)
+			assert.False(t, config.ThinkingConfig.IncludeThoughts)
+			if tt.wantMinTokens {
+				assert.Equal(t, genai.ThinkingLevelLow, config.ThinkingConfig.ThinkingLevel)
+				assert.GreaterOrEqual(t, config.MaxOutputTokens, int32(200))
+				return
+			}
+			require.NotNil(t, config.ThinkingConfig.ThinkingBudget)
+			assert.Zero(t, *config.ThinkingConfig.ThinkingBudget)
+		})
+	}
+}
 
 func TestBuildConfig_Gemini25_ThinkingBudget(t *testing.T) {
 	t.Parallel()

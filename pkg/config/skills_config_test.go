@@ -503,3 +503,47 @@ func TestSkillsConfig_UnmarshalResetsReceiver(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"https://new.example.com"}, skills.Sources)
 }
+
+func TestValidateSkills_InlineSkillName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		skillName string
+		wantErr   string
+	}{
+		{name: "simple", skillName: "changelog"},
+		{name: "dashes and underscores", skillName: "bump-go_deps"},
+		{name: "digits and dots", skillName: "v2.check"},
+		// Only whitespace breaks the slash command; the rest resolve fine both
+		// as /<name> and through read_skill, so they stay valid.
+		{name: "non ascii", skillName: "café"},
+		{name: "colon", skillName: "release:v2"},
+		{name: "leading dot", skillName: ".hidden"},
+		{name: "empty", skillName: "", wantErr: "has an inline skill with no name"},
+		{name: "blank", skillName: "   ", wantErr: "has an inline skill with no name"},
+		{name: "space", skillName: "code review", wantErr: "must not have whitespace in its name"},
+		{name: "tab", skillName: "code\treview", wantErr: "must not have whitespace in its name"},
+		{name: "trailing space", skillName: "review ", wantErr: "must not have whitespace in its name"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sc := latest.SkillsConfig{
+				Inline: []latest.InlineSkill{{
+					Name:         tt.skillName,
+					Description:  "A skill.",
+					Instructions: "Do the thing.",
+				}},
+			}
+
+			err := validateSkills("agent 'root'", &sc)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}

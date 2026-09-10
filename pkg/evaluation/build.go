@@ -86,7 +86,9 @@ func (r *Runner) buildEvalImage(ctx context.Context, evals *session.EvalCriteria
 	var data struct {
 		CopyWorkingDir bool
 		BaseImage      string
+		AgentImage     string
 	}
+	data.AgentImage = ResolvedAgentImage(r.Config)
 
 	if evals.WorkingDir == "" {
 		buildContext = r.EvalsDir

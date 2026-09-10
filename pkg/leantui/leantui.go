@@ -3,6 +3,7 @@ package leantui
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/gitbranch"
+	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
@@ -20,6 +22,7 @@ type Config struct {
 	App        *app.App
 	WorkingDir string
 	Cleanup    func()
+	History    *history.History
 
 	FirstMessage           *string
 	FirstMessageAttachment string
@@ -28,6 +31,9 @@ type Config struct {
 	AppName          string
 	DisabledCommands []string
 	RenderImages     *bool
+	// ShowBanner displays the ASCII-art welcome banner. Defaults to true
+	// when nil.
+	ShowBanner *bool
 
 	// Banner overrides the ASCII-art welcome banner. When nil the built-in
 	// bannerLines ("docker agent") is used; embedders set it to brand the lean
@@ -47,8 +53,21 @@ func Run(ctx context.Context, cfg Config) error {
 	loopCtx, loopCancel := context.WithCancel(ctx)
 	defer loopCancel()
 
+	if cfg.History == nil {
+		cfg.History, err = history.New("")
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to initialize command history", "error", err)
+		}
+	}
+
 	m := newModel(term, cfg)
+	branchWatcher, err := gitbranch.Watch(loopCtx, cfg.WorkingDir)
+	if err != nil {
+		return err
+	}
+	m.status.Branch = branchWatcher.Current()
 	m.commitWelcome()
+	m.loadInitialSessionTranscript()
 	m.refreshCommands(loopCtx)
 
 	keys := make(chan ui.Key, 64)
@@ -88,11 +107,16 @@ func Run(ctx context.Context, cfg Config) error {
 		m.sendFirstMessage(loopCtx, first, cfg.FirstMessageAttachment)
 	}
 	for _, msg := range cfg.QueuedMessages {
+		if command, ok := strings.CutPrefix(strings.TrimSpace(msg), "!"); ok {
+			m.runBangCommand(loopCtx, command)
+			continue
+		}
 		m.enqueueFollowUp(msg, msg)
 	}
 
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	animationTicker := time.NewTicker(100 * time.Millisecond)
+	defer animationTicker.Stop()
+	branchChanges := branchWatcher.Changes()
 
 	m.render()
 	for !m.quitting {
@@ -109,11 +133,18 @@ func Run(ctx context.Context, cfg Config) error {
 			m.width, m.height = sz[0], sz[1]
 			m.r.SetSize(sz[0], sz[1])
 			m.render()
-		case <-ticker.C:
+		case <-animationTicker.C:
 			if m.busy {
 				m.spinnerFrame++
 				m.render()
 			}
+		case branch, ok := <-branchChanges:
+			if !ok {
+				branchChanges = nil
+				continue
+			}
+			m.status.Branch = branch
+			m.render()
 		}
 	}
 
@@ -156,18 +187,21 @@ type model struct {
 	sessionState *service.SessionState
 	usage        *ui.UsageTracker
 
-	busy         bool
-	spinnerFrame int
-	runCancel    context.CancelFunc
-	queue        []ui.PendingUserMessage
-	pendingUsers []ui.PendingUserMessage
-	ignoredUsers []string
+	busy                bool
+	spinnerFrame        int
+	runCancel           context.CancelFunc
+	cancelMarkerPending bool
+	queue               []ui.PendingUserMessage
+	pendingUsers        []ui.PendingUserMessage
+	ignoredUsers        []string
 
 	quitting         bool
 	appName          string
 	banner           []string
 	disabledCommands map[string]bool
 	renderImages     bool
+	// hideBanner drops the ASCII-art welcome banner; the zero value keeps it.
+	hideBanner bool
 }
 
 func newModel(term *ui.Terminal, cfg Config) *model {
@@ -188,20 +222,23 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 
 	renderImages := cfg.RenderImages == nil || *cfg.RenderImages
 
+	branch := gitbranch.Current(cfg.WorkingDir)
+
 	return &model{
 		app:              cfg.App,
 		term:             term,
 		r:                ui.NewRenderer(term.Writer(), w, h),
 		width:            w,
 		height:           h,
-		screen:           ui.NewScreen(cfg.WorkingDir, gitbranch.Current(cfg.WorkingDir), "Type a message, / for commands"),
-		status:           ui.StatusModel{WorkingDir: cfg.WorkingDir, Branch: gitbranch.Current(cfg.WorkingDir)},
+		screen:           ui.NewScreen(cfg.WorkingDir, branch, "Type a message, / for commands", cfg.History),
+		status:           ui.StatusModel{WorkingDir: cfg.WorkingDir, Branch: branch},
 		sessionState:     sessionState,
 		usage:            ui.NewUsageTracker(),
 		appName:          appName,
 		banner:           cfg.Banner,
 		disabledCommands: disabled,
 		renderImages:     renderImages,
+		hideBanner:       cfg.ShowBanner != nil && !*cfg.ShowBanner,
 	}
 }
 
@@ -223,6 +260,9 @@ func (m *model) commitWelcome() {
 	banner := m.banner
 	if len(banner) == 0 {
 		banner = bannerLines
+	}
+	if m.hideBanner {
+		banner = nil
 	}
 	m.screen.Transcript.AddBlock(func(int) []string {
 		lines := make([]string, 0, bannerTopPadding+len(banner)+2)

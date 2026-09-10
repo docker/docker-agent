@@ -110,6 +110,8 @@ linters:
       replace-allow-list:
         - github.com/charmbracelet/ultraviolet
         - github.com/cyphar/filepath-securejoin
+        # TODO(docker/docker-agent#4068): drop with the go.mod replace.
+        - github.com/modelcontextprotocol/go-sdk
     gocritic:
       disabled-checks:
         - dupImport
@@ -156,6 +158,16 @@ linters:
         - G702
         - G703
         - G704
+    modernize:
+      # errorsastype (errors.AsType, Go 1.27), embedlit (x/tools v0.48),
+      # stringscut and reflecttypeassert became active after the
+      # golangci-lint v2.12.2 → v2.13.1 bump required by the Go 1.27 upgrade.
+      # Pre-existing violations in unrelated files; re-enable in a follow-up.
+      disable:
+        - errorsastype
+        - embedlit
+        - stringscut
+        - reflecttypeassert
   exclusions:
     generated: lax
     presets:
@@ -172,11 +184,29 @@ linters:
         linters:
           - staticcheck
         text: "SA1019:.*FunctionCall.*deprecated"
+      # MCP sampling (SEP-2577) is deprecated upstream but functional during
+      # the deprecation window; migrating off it is a separate effort
+      - path: ^(e2e/sampling_test|pkg/runtime/sampling(_test)?|pkg/tools/sampling|pkg/tools/codemode/codemode_test|pkg/tools/mcp/(mcp|session_client)(_test)?)\.go$
+        linters:
+          - staticcheck
+        text: "SA1019:.*sampling feature is deprecated"
       # Vendored verbatim from moby/moby; keep its //nolint:gosec directives
       # even though our config excludes gosec G404 globally.
       - path: pkg/worktree/namesgenerator/
         linters:
           - nolintlint
+      # Frozen versioned config types: recvcheck changed behaviour in
+      # golangci-lint v2.13.1 — some previously-suppressed violations are no
+      # longer caught (leaving stale //nolint:recvcheck directives that trigger
+      # nolintlint) while new violations are reported in the same files.
+      # These files are frozen (see AGENTS.md) and must not be modified.
+      - path: pkg/config/v\d+/
+        linters:
+          - recvcheck
+          - nolintlint
+      - path: pkg/config/latest/types\.go
+        linters:
+          - recvcheck
 issues:
   max-same-issues: 3
 formatters:
@@ -196,4 +226,5 @@ formatters:
         - pattern: 'interface{}'
           replacement: 'any'
     gofumpt:
-      extra-rules: true
+      extra:
+        group-params: true

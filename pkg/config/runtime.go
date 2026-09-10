@@ -42,6 +42,14 @@ type Config struct {
 	Models         map[string]latest.ModelConfig
 	Providers      map[string]latest.ProviderConfig
 
+	// EncryptedConfig is an opaque, encrypted representation of the full agent
+	// YAML (as produced by `docker agent share push --key --encrypt`). When set
+	// and the configured models gateway is a trusted Docker gateway, it is
+	// forwarded to the gateway on every request via the
+	// `X-Cagent-Encrypted-Config` header. It is ignored for non-Docker
+	// gateways and when no gateway is configured.
+	EncryptedConfig string
+
 	// Flavors are the config flavor patches to enable when loading agent
 	// configs, applied in order. Names a config does not define are ignored.
 	Flavors []string

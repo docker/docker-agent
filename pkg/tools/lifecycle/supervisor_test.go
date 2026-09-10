@@ -3,6 +3,7 @@ package lifecycle_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -827,4 +828,409 @@ func TestSupervisor_StopConcurrent(t *testing.T) {
 	}
 	assert.Check(t, is.Equal(s.State().State, lifecycle.StateStopped))
 	assert.Check(t, sess.waitDone.Load(), "a Stop returned before watcher's Wait() completed")
+}
+
+// crashErr wraps err (typically a plain "boom"-style message) in
+// lifecycle.ErrServerCrashed, matching the shape lspSession.Wait produces
+// for a real crashed process.
+func crashErr(msg string) error {
+	return fmt.Errorf("%w: %s", lifecycle.ErrServerCrashed, msg)
+}
+
+// TestSupervisor_CrashLoopStopsRestartingAndReportsOnStart verifies the
+// full crash-loop lifecycle: the first two crashes (within the window) are
+// ordinary restarts handled entirely by the normal restart policy: no
+// pacing, state back to Ready each time. Only the third crash — reaching
+// CrashLoop.Threshold — stops the supervisor from reconnecting again and
+// reports ErrCrashLooping. That report is a one-shot: the Start that reads
+// it does not itself reconnect, but the Start after that does.
+func TestSupervisor_CrashLoopStopsRestartingAndReportsOnStart(t *testing.T) {
+	t.Parallel()
+
+	sess1, sess2, sess3, sess4 := newFakeSession(), newFakeSession(), newFakeSession(), newFakeSession()
+	c := newScriptedConnector(
+		scriptStep{session: sess1},
+		scriptStep{session: sess2},
+		scriptStep{session: sess3},
+		scriptStep{session: sess4},
+	)
+
+	restarted := make(chan struct{}, 4)
+	failed := make(chan error, 1)
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Backoff:   fastBackoff,
+		CrashLoop: lifecycle.CrashLoop{Threshold: 3, Window: time.Minute},
+		OnRestart: func(context.Context) {
+			select {
+			case restarted <- struct{}{}:
+			default:
+			}
+		},
+		OnFailed: func(err error) {
+			select {
+			case failed <- err:
+			default:
+			}
+		},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+
+	// Crash 1: an ordinary restart, not a loop yet.
+	sess1.fail(crashErr("boom"))
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not restart after the first crash")
+	}
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateReady), "a single crash must not trip the loop detector")
+
+	// Crash 2: still just an ordinary restart.
+	sess2.fail(crashErr("boom again"))
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not restart after the second crash")
+	}
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateReady), "two crashes must not trip the loop detector")
+
+	// Crash 3 reaches the threshold: give up, no further reconnect attempt.
+	sess3.fail(crashErr("boom a third time"))
+
+	var loopErr error
+	select {
+	case loopErr = <-failed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not report a crash loop")
+	}
+	assert.Check(t, errors.Is(loopErr, lifecycle.ErrCrashLooping))
+	assert.Check(t, errors.Is(loopErr, lifecycle.ErrServerCrashed), "ErrCrashLooping must still match ErrServerCrashed")
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateFailed))
+	assert.Check(t, is.Equal(c.Calls(), 3), "no reconnect attempt once the loop is detected")
+
+	// The next Start reports the loop once, without connecting again.
+	err := s.Start(t.Context())
+	assert.Check(t, errors.Is(err, lifecycle.ErrCrashLooping))
+	assert.Check(t, is.Equal(c.Calls(), 3), "the one-shot report must not itself connect")
+
+	// The Start after that attempts a genuine reconnect.
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(c.Calls(), 4))
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateReady))
+
+	assert.NilError(t, s.Stop(t.Context()))
+}
+
+// TestSupervisor_CrashLoopIgnoresCleanDisconnects verifies that a clean
+// exit (Wait returning nil) never counts toward the crash-loop threshold,
+// even when there are more of them than the threshold and RestartAlways
+// keeps reconnecting after every one.
+func TestSupervisor_CrashLoopIgnoresCleanDisconnects(t *testing.T) {
+	t.Parallel()
+
+	sessions := make([]*fakeSession, 5)
+	steps := make([]scriptStep, 5)
+	for i := range sessions {
+		sessions[i] = newFakeSession()
+		steps[i] = scriptStep{session: sessions[i]}
+	}
+	c := newScriptedConnector(steps...)
+
+	restarted := make(chan struct{}, 10)
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Restart:   lifecycle.RestartAlways,
+		Backoff:   fastBackoff,
+		CrashLoop: lifecycle.CrashLoop{Threshold: 3, Window: time.Minute},
+		OnRestart: func(context.Context) {
+			select {
+			case restarted <- struct{}{}:
+			default:
+			}
+		},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+	for i := range 4 {
+		_ = sessions[i].Close(t.Context()) // clean disconnect, not a crash
+		select {
+		case <-restarted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("supervisor did not restart after clean close %d", i+1)
+		}
+	}
+
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateReady),
+		"clean disconnects (more of them than the crash-loop threshold) must never trip the loop detector")
+	assert.Check(t, is.Equal(c.Calls(), 5))
+
+	assert.NilError(t, s.Stop(t.Context()))
+}
+
+// TestSupervisor_CrashLoopIgnoresForcedRestart verifies that a deliberate
+// RestartAndWait (e.g. /toolset-restart) never counts toward the
+// crash-loop threshold, even repeated more often than the threshold.
+func TestSupervisor_CrashLoopIgnoresForcedRestart(t *testing.T) {
+	t.Parallel()
+
+	sessions := make([]*fakeSession, 5)
+	steps := make([]scriptStep, 5)
+	for i := range sessions {
+		sessions[i] = newFakeSession()
+		steps[i] = scriptStep{session: sessions[i]}
+	}
+	c := newScriptedConnector(steps...)
+
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Backoff:   fastBackoff,
+		CrashLoop: lifecycle.CrashLoop{Threshold: 3, Window: time.Minute},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+	for i := range 4 {
+		sessions[i].waitParked(t)
+		assert.NilError(t, s.RestartAndWait(t.Context(), 2*time.Second))
+	}
+
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateReady),
+		"forced restarts (more of them than the crash-loop threshold) must never be counted as crashes")
+	assert.Check(t, is.Equal(c.Calls(), 5))
+
+	assert.NilError(t, s.Stop(t.Context()))
+}
+
+// TestSupervisor_CrashLoopStopIsClean verifies that Stop terminates cleanly
+// from a crash-loop Failed state — discarding the pending crash-loop
+// report and history as part of teardown — without hanging or leaving the
+// watcher goroutine behind.
+func TestSupervisor_CrashLoopStopIsClean(t *testing.T) {
+	t.Parallel()
+
+	sess1, sess2, sess3 := newFakeSession(), newFakeSession(), newFakeSession()
+	c := newScriptedConnector(
+		scriptStep{session: sess1},
+		scriptStep{session: sess2},
+		scriptStep{session: sess3},
+	)
+
+	failed := make(chan error, 1)
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Backoff:   fastBackoff,
+		CrashLoop: lifecycle.CrashLoop{Threshold: 3, Window: time.Minute},
+		OnFailed: func(err error) {
+			select {
+			case failed <- err:
+			default:
+			}
+		},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+	sess1.fail(crashErr("boom"))
+	sess2.fail(crashErr("boom again"))
+	sess3.fail(crashErr("boom a third time"))
+
+	select {
+	case <-failed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not report a crash loop")
+	}
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateFailed))
+
+	assert.NilError(t, s.Stop(t.Context()))
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateStopped))
+	// A permanently-stopped supervisor never restarts, crash loop or not.
+	assert.Check(t, errors.Is(s.Start(t.Context()), lifecycle.ErrNotStarted))
+}
+
+// TestSupervisor_PendingCrashLoopErrorIsNonConsuming verifies that
+// PendingCrashLoopError is a pure peek: repeated calls keep returning the
+// same report without ever connecting, and without disturbing Start's own
+// one-shot consume-then-reconnect contract.
+func TestSupervisor_PendingCrashLoopErrorIsNonConsuming(t *testing.T) {
+	t.Parallel()
+
+	sess1, sess2, sess3, sess4 := newFakeSession(), newFakeSession(), newFakeSession(), newFakeSession()
+	c := newScriptedConnector(
+		scriptStep{session: sess1},
+		scriptStep{session: sess2},
+		scriptStep{session: sess3},
+		scriptStep{session: sess4},
+	)
+
+	failed := make(chan error, 1)
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Backoff:   fastBackoff,
+		CrashLoop: lifecycle.CrashLoop{Threshold: 3, Window: time.Minute},
+		OnFailed: func(err error) {
+			select {
+			case failed <- err:
+			default:
+			}
+		},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+	sess1.fail(crashErr("boom"))
+	sess2.fail(crashErr("boom again"))
+	sess3.fail(crashErr("boom a third time"))
+
+	select {
+	case <-failed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not report a crash loop")
+	}
+
+	// Peeking repeatedly must not consume the report or trigger a connect.
+	for range 3 {
+		assert.Check(t, errors.Is(s.PendingCrashLoopError(), lifecycle.ErrCrashLooping))
+	}
+	assert.Check(t, is.Equal(c.Calls(), 3), "peeking must never itself connect")
+
+	// Start still reports it once, then reconnects for real on the next call.
+	err := s.Start(t.Context())
+	assert.Check(t, errors.Is(err, lifecycle.ErrCrashLooping))
+	assert.Check(t, s.PendingCrashLoopError() == nil, "Start must have consumed the report")
+	assert.Check(t, is.Equal(c.Calls(), 3))
+
+	assert.NilError(t, s.Start(t.Context()))
+	assert.Check(t, is.Equal(c.Calls(), 4))
+
+	assert.NilError(t, s.Stop(t.Context()))
+}
+
+// TestSupervisor_CrashLoopWindowPrunesOldCrashes verifies that crashes
+// spread out wider than CrashLoop.Window apart never accumulate toward
+// the threshold: each one ages out of the window before the next occurs,
+// so the supervisor keeps restarting normally instead of giving up.
+func TestSupervisor_CrashLoopWindowPrunesOldCrashes(t *testing.T) {
+	t.Parallel()
+
+	sessions := make([]*fakeSession, 5)
+	steps := make([]scriptStep, 5)
+	for i := range sessions {
+		sessions[i] = newFakeSession()
+		steps[i] = scriptStep{session: sessions[i]}
+	}
+	c := newScriptedConnector(steps...)
+
+	restarted := make(chan struct{}, 10)
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Backoff:   fastBackoff,
+		CrashLoop: lifecycle.CrashLoop{Threshold: 3, Window: 20 * time.Millisecond},
+		OnRestart: func(context.Context) {
+			select {
+			case restarted <- struct{}{}:
+			default:
+			}
+		},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+	for i := range 4 {
+		sessions[i].fail(crashErr("boom"))
+		select {
+		case <-restarted:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("supervisor did not restart after crash %d", i+1)
+		}
+		// Real time must actually pass beyond Window so the next crash finds
+		// this one already pruned; there is nothing to synchronize on here
+		// other than wall-clock time itself.
+		time.Sleep(30 * time.Millisecond) //nolint:forbidigo // proving the crash-loop window ages entries out; no event to synchronize on
+	}
+
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateReady),
+		"crashes spread wider than the window must never accumulate toward the threshold")
+	assert.Check(t, is.Equal(c.Calls(), 5))
+
+	assert.NilError(t, s.Stop(t.Context()))
+}
+
+// TestSupervisor_CrashLoopStopWinningRaceReportsStopped verifies that a
+// Stop landing between the crash-loop branch computing crashLooping
+// (unlocked) and it re-locking to record crashLoopErr leaves the
+// supervisor in StateStopped, not StateFailed: Stop, once it wins,
+// owns the terminal state rather than having it clobbered back to Failed.
+func TestSupervisor_CrashLoopStopWinningRaceReportsStopped(t *testing.T) {
+	t.Parallel()
+
+	sess1, sess2, sess3 := newFakeSession(), newFakeSession(), newFakeSession()
+	c := newScriptedConnector(
+		scriptStep{session: sess1},
+		scriptStep{session: sess2},
+		scriptStep{session: sess3},
+	)
+
+	disconnected := make(chan struct{})
+	release := make(chan struct{})
+	restarted := make(chan struct{}, 4)
+	var thirdCrash atomic.Bool
+	s := lifecycle.New("test", c, lifecycle.Policy{
+		Backoff:   fastBackoff,
+		CrashLoop: lifecycle.CrashLoop{Threshold: 3, Window: time.Minute},
+		OnRestart: func(context.Context) {
+			select {
+			case restarted <- struct{}{}:
+			default:
+			}
+		},
+		OnDisconnect: func(error) {
+			// OnDisconnect runs after crashLooping is already computed
+			// (true, for the third crash) but before crashLoopErr is
+			// recorded: exactly the race window under test. Park the
+			// watcher here so the test can land a concurrent Stop inside it.
+			if thirdCrash.Load() {
+				close(disconnected)
+				<-release
+			}
+		},
+	})
+
+	assert.NilError(t, s.Start(t.Context()))
+
+	// The first two crashes must actually land and restart (onto sess2,
+	// then sess3) before the third is fired, or thirdCrash could be set
+	// before the watcher has even processed the first one.
+	sess1.fail(crashErr("boom"))
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not restart after the first crash")
+	}
+
+	sess2.fail(crashErr("boom again"))
+	select {
+	case <-restarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervisor did not restart after the second crash")
+	}
+
+	// sess3 is now live; its crash is the third, tripping the loop.
+	thirdCrash.Store(true)
+	sess3.fail(crashErr("boom a third time"))
+	<-disconnected
+
+	stopDone := make(chan error, 1)
+	go func() { stopDone <- s.Stop(t.Context()) }()
+
+	// Wait for Stop to actually win the race and record StateStopped
+	// before releasing the parked crash-loop branch: Stop sets state
+	// synchronously, before it ever blocks waiting for the watcher to exit.
+	poll.WaitOn(t, func(poll.LogT) poll.Result {
+		if s.State().State == lifecycle.StateStopped {
+			return poll.Success()
+		}
+		return poll.Continue("supervisor state=%s", s.State().State)
+	}, poll.WithTimeout(2*time.Second), poll.WithDelay(5*time.Millisecond))
+	close(release)
+
+	select {
+	case err := <-stopDone:
+		assert.NilError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return")
+	}
+
+	assert.Check(t, is.Equal(s.State().State, lifecycle.StateStopped),
+		"Stop winning the race must leave the supervisor Stopped, not clobbered back to Failed")
 }

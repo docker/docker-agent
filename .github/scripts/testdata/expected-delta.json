@@ -1,0 +1,63 @@
+{
+  "added": [
+    {
+      "id": "acme/model-c",
+      "model": {
+        "name": "Model C",
+        "limit": {
+          "context": 500,
+          "output": 100
+        },
+        "tool_call": true
+      }
+    },
+    {
+      "id": "evil/weird|`model",
+      "model": {
+        "name": "Weird | Name `with backtick` and a very very very very very very very long tail that should be truncated by the safe() length cap",
+        "limit": {
+          "context": 1000000,
+          "output": 4096
+        },
+        "cost": {
+          "input": 3,
+          "output": 6
+        }
+      }
+    }
+  ],
+  "removed": [
+    {
+      "id": "legacy/old-model|`removed",
+      "model": {
+        "name": "Old Model | Removed `soon`",
+        "limit": {
+          "context": 4096,
+          "output": 1024
+        },
+        "cost": {
+          "input": 2,
+          "output": 4
+        }
+      }
+    }
+  ],
+  "changed": [
+    {
+      "id": "acme/model-a",
+      "fields": [
+        {
+          "field": "cost",
+          "before": {
+            "input": 1,
+            "output": 2
+          },
+          "after": {
+            "input": 5,
+            "output": 2
+          }
+        }
+      ]
+    }
+  ]
+}

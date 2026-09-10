@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -127,20 +128,33 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	// the new summary's estimated size.
 	preInputTokens, preOutputTokens := sess.Usage()
 
-	// Apply the summary to the session. This is intrinsically
-	// runtime-private: it mutates session-internal state and persists
-	// through the runtime's session store.
-	sess.ApplyCompaction(result.InputTokens, 0, session.Item{
+	// Apply and persist the summary as one intrinsic successful-compaction step.
+	// Manual Summarize calls do not pass through the RunStream observer chain,
+	// while normal observed runs do; marking the emitted event as persisted
+	// keeps the observer from appending a duplicate row.
+	item := session.Item{
 		Summary:        result.Summary,
 		FirstKeptEntry: result.FirstKeptEntry,
 		Cost:           result.Cost,
 		Model:          result.Model,
 		Usage:          summaryUsage(result),
-	})
-	_ = r.sessionStore.UpdateSession(ctx, sess)
+	}
+	// Atomically persist the metadata and summary before mutating the live
+	// session. A failed write is a failed compaction: no success summary event
+	// is emitted and the in-memory continuation remains unchanged.
+	if err := r.sessionStore.PersistCompaction(ctx, sess, result.InputTokens, 0, item); err != nil {
+		slog.ErrorContext(ctx, "Failed to persist session compaction", "session_id", sess.ID, "error", err)
+		events.Emit(ErrorForSession(sess.ID, fmt.Sprintf("Failed to persist session compaction: %v", err)))
+		outcome = CompactionOutcomeFailed
+		return
+	}
 
 	slog.DebugContext(ctx, "Generated session summary", "session_id", sess.ID, "summary_length", len(result.Summary))
-	events.Emit(SessionSummary(sess.ID, result.Summary, a.Name(), result.FirstKeptEntry, result.Cost, result.Model, summaryUsage(result)))
+	summaryEvent := SessionSummary(sess.ID, result.Summary, a.Name(), result.FirstKeptEntry, result.Cost, result.Model, summaryUsage(result))
+	if e, ok := summaryEvent.(*SessionSummaryEvent); ok {
+		e.persisted = true
+	}
+	events.Emit(summaryEvent)
 
 	// after_compaction: observational. Fired only when a summary was
 	// actually applied to the session. The hook receives the

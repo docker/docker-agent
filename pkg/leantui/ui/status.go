@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 
+	"charm.land/lipgloss/v2"
+
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -26,7 +28,7 @@ type StatusModel struct {
 	CostKnown     bool
 
 	// CompactionThreshold is the auto-compaction trigger fraction for the
-	// active agent (0 when unknown); the context bar colors against it.
+	// active agent (0 when unknown); the context percentage colors against it.
 	CompactionThreshold float64
 	// Compacting is true while a session compaction runs.
 	Compacting bool
@@ -35,7 +37,7 @@ type StatusModel struct {
 // RenderStatus builds the two-line footer:
 //
 //	<working dir>  ⎇ <branch>                          <agent>
-//	<context bar> <pct> · <tokens> · <cost>  <model> · <effort>
+//	<pct> · <tokens> · <cost>                 <model> · <effort>
 func RenderStatus(d StatusModel, width int) []string {
 	dir := StSecondary().Render(Truncate(pathx.ShortenHome(d.WorkingDir), max(10, width/2)))
 	left1 := dir
@@ -67,31 +69,30 @@ func RenderStatus(d StatusModel, width int) []string {
 
 // RenderContext renders the context and cost portion of the status.
 func RenderContext(d StatusModel) string {
-	Cost := renderCostSuffix(d)
+	cost := renderCostSuffix(d)
 	if d.ContextLimit <= 0 {
 		if d.Compacting {
-			return StWarning().Render("compacting…") + Cost
+			return StWarning().Render("compacting…") + cost
 		}
 		if d.Tokens > 0 {
-			return StMuted().Render(FormatTokens(d.Tokens)+" tokens") + Cost
+			return StMuted().Render(FormatTokens(d.Tokens)+" tokens") + cost
 		}
-		return RenderBar(0, 0) + StMuted().Render(" 0% · 0/0") + Cost
+		return StMuted().Render("0% · 0/0") + cost
 	}
 
 	pct := float64(d.ContextLength) / float64(d.ContextLimit)
 	if pct > 1 {
 		pct = 1
 	}
-	bar := RenderBar(pct, d.CompactionThreshold)
 	tokens := fmt.Sprintf(" · %s/%s",
 		FormatTokens(d.ContextLength),
 		FormatTokens(d.ContextLimit),
 	)
 	if d.Compacting {
-		return bar + StWarning().Render(" compacting…") + StMuted().Render(tokens) + Cost
+		return StWarning().Render("compacting…") + StMuted().Render(tokens) + cost
 	}
-	label := fmt.Sprintf(" %d%%", int(pct*100+0.5)) + tokens
-	return bar + StMuted().Render(label) + Cost
+	label := fmt.Sprintf("%d%%", int(pct*100+0.5)) + tokens
+	return contextStyle(pct, d.CompactionThreshold).Render(label) + cost
 }
 
 func renderCostSuffix(d StatusModel) string {
@@ -101,21 +102,17 @@ func renderCostSuffix(d StatusModel) string {
 	return StMuted().Render(" · ") + StAccent().Render(toolcommon.FormatCostUSD(d.Cost))
 }
 
-// ContextBarWidth is the cell width of the context-usage gauge.
-const ContextBarWidth = 10
-
-// RenderBar renders the context usage gauge, escalating its color as usage
-// approaches the auto-compaction threshold (0 uses the package default).
-func RenderBar(pct, threshold float64) string {
-	filled := min(int(pct*float64(ContextBarWidth)+0.5), ContextBarWidth)
-	style := StSuccess()
+// contextStyle escalates the context usage color as usage approaches the
+// auto-compaction threshold (0 uses the package default).
+func contextStyle(pct, threshold float64) lipgloss.Style {
 	switch styles.ContextGaugeLevelFor(pct, threshold) {
 	case styles.ContextGaugeCritical:
-		style = StError()
+		return StError()
 	case styles.ContextGaugeWarning:
-		style = StWarning()
+		return StWarning()
+	default:
+		return StMuted()
 	}
-	return style.Render(strings.Repeat("█", filled)) + StMuted().Render(strings.Repeat("░", ContextBarWidth-filled))
 }
 
 // ComposeLine right-aligns right within width, truncating left if necessary.

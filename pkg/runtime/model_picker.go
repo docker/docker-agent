@@ -30,7 +30,7 @@ func (r *LocalRuntime) findModelPickerTool() *modelpicker.ToolSet {
 }
 
 // handleChangeModel handles the change_model tool call by switching the current agent's model.
-func (r *LocalRuntime) handleChangeModel(ctx context.Context, _ *session.Session, toolCall tools.ToolCall, events EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleChangeModel(ctx context.Context, _ *session.Session, toolCall tools.ToolCall, events EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var params modelpicker.ChangeModelArgs
 	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -57,7 +57,7 @@ func (r *LocalRuntime) handleChangeModel(ctx context.Context, _ *session.Session
 }
 
 // handleRevertModel handles the revert_model tool call by reverting the current agent to its default model.
-func (r *LocalRuntime) handleRevertModel(ctx context.Context, _ *session.Session, _ tools.ToolCall, events EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleRevertModel(ctx context.Context, _ *session.Session, _ tools.ToolCall, events EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	return r.setModelAndEmitInfo(ctx, "", events)
 }
 

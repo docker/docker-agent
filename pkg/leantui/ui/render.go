@@ -6,17 +6,38 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/tui/components/markdown"
+	"github.com/docker/docker-agent/pkg/tui/styles"
+)
+
+const (
+	seqPromptStart = "\x1b]133;A;redraw=0\x07"
+	seqOutputStart = "\x1b]133;C\x07"
 )
 
 // RenderUserLines renders a submitted user message as committed scrollback,
 // echoing it with the same prompt marker used by the input box.
 func RenderUserLines(text string, width int) []string {
-	return RenderUserLinesWith(text, width, StAccent(), StPrimary())
+	if width < 1 {
+		width = 1
+	}
+	boxStyle := StUserBox(width)
+	innerWidth := max(width-boxStyle.GetHorizontalFrameSize(), 1)
+	textStyle := lipgloss.NewStyle().Foreground(styles.AgentBadgeFg)
+	content := strings.Join(RenderUserLinesWith(text, innerWidth, textStyle.Bold(true), textStyle), "\n")
+	lines := splitRenderedLines(styles.RenderComposite(boxStyle, content), width)
+	if len(lines) > 0 {
+		lines[0] = seqPromptStart + lines[0] + seqOutputStart
+	}
+	return lines
 }
 
-func RenderPendingUserLines(text string, width int) []string {
+func RenderPendingUserLines(msg PendingUserMessage, width int) []string {
+	label := "Steering: "
+	if msg.Kind == PendingUserFollowUp {
+		label = "Follow-up: "
+	}
 	muted := StMuted()
-	return RenderUserLinesWith(text, width, muted, muted)
+	return RenderUserLinesWith(label+msg.Display, width, muted, muted)
 }
 
 func RenderUserLinesWith(text string, width int, promptStyle, textStyle lipgloss.Style) []string {

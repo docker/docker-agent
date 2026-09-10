@@ -45,8 +45,8 @@ To expose the MCP server over streaming HTTP instead, pass `--http`:
 # Streaming HTTP transport on the default 127.0.0.1:8081
 $ docker agent serve mcp ./agent.yaml --http
 
-# Override the listen address / port
-$ docker agent serve mcp ./agent.yaml --http --listen 0.0.0.0:9090
+# Override the listen address / port; non-loopback HTTP requires authentication
+$ docker agent serve mcp ./agent.yaml --http --listen 0.0.0.0:9090 --auth-token "$MCP_BEARER_TOKEN"
 ```
 
 | Flag                   | Default            | Description                                                                                                  |
@@ -55,9 +55,18 @@ $ docker agent serve mcp ./agent.yaml --http --listen 0.0.0.0:9090
 | `-l`, `--listen`       | `127.0.0.1:8081`   | Address to listen on when `--http` is enabled.                                                               |
 | `-a`, `--agent`        | all agents         | Expose a single named agent instead of every agent in the config.                                            |
 | `--tool-name`          | (none)             | Override the MCP tool identifier clients call (defaults to agent name); only valid when exposing one agent.  |
-| `--mcp-keepalive`      | `0`                | Interval between MCP keep-alive pings (e.g. `30s`); `0` disables keep-alive.                                 |
+| `--auth-token`          | (none)             | Require this Bearer token for HTTP requests. Required for non-loopback HTTP unless explicitly overridden.       |
+| `--insecure-no-auth`    | `false`            | Permit unauthenticated non-loopback HTTP. Use only behind a trusted authentication boundary.                    |
+| `--safety`              | `restricted`       | Tool safety policy for HTTP requests. CLI value overrides agent/runtime configuration.                           |
+| `--mcp-keepalive`      | `0`                | Interval between MCP keep-alive pings (e.g. `30s`); `0` disables keep-alive. Only when serving an agent over stdio — rejected with `--http` and `--attach`.  |
 
 Runtime configuration flags such as `--working-dir`, `--env-from-file`, `--models-gateway`, and hook flags are also available — see the [CLI reference](../cli/index.md).
+
+The HTTP transport is **stateless**, per MCP spec revision `2026-07-28`: modern clients negotiate via `server/discover`, no `Mcp-Session-Id` is issued, and only POST requests are served (GET and DELETE answer `405 Method Not Allowed`). Clients speaking older protocol revisions keep working — the legacy `initialize` handshake is accepted with per-request state. However, older stateful clients that depend on a standalone GET stream or session `DELETE` teardown must upgrade to (or switch to) a client compatible with stateless streaming HTTP. Because the stateless transport has no server-initiated ping, `--mcp-keepalive` is rejected together with `--http`; keep-alive remains available on the stdio transport.
+
+## HTTP security
+
+HTTP MCP defaults to loopback binding. A non-loopback `--listen` address requires `--auth-token`; use `--insecure-no-auth` only when a trusted reverse proxy or network boundary authenticates clients. The safety policy is resolved in this order: `--safety`, agent configuration, runtime configuration, then `restricted`. These HTTP-only flags do not affect stdio or `--attach` operation.
 
 ## Using with Claude Desktop
 

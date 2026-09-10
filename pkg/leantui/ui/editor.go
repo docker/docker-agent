@@ -1,6 +1,10 @@
 package ui
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/docker/docker-agent/pkg/history"
+)
 
 // rowSpan identifies the slice of the editor buffer [start, end) shown on a
 // single visual row.
@@ -19,13 +23,19 @@ type Editor struct {
 
 	placeholder string
 
-	history   []string
-	histIndex int
-	draft     string
+	historyStore *history.History
+	history      []string
+	histIndex    int
+	draft        string
 }
 
-func NewEditor(placeholder string) *Editor {
-	return &Editor{placeholder: placeholder, histIndex: 0}
+func NewEditor(placeholder string, historyStore ...*history.History) *Editor {
+	e := &Editor{placeholder: placeholder}
+	if len(historyStore) > 0 {
+		e.historyStore = historyStore[0]
+	}
+	e.histIndex = len(e.historyMessages())
+	return e
 }
 
 func (e *Editor) Text() string { return string(e.value) }
@@ -35,7 +45,7 @@ func (e *Editor) IsEmpty() bool { return len(e.value) == 0 }
 func (e *Editor) Reset() {
 	e.value = nil
 	e.cursor = 0
-	e.histIndex = len(e.history)
+	e.histIndex = len(e.historyMessages())
 	e.draft = ""
 }
 
@@ -144,39 +154,55 @@ func (e *Editor) Down(termWidth int) bool {
 }
 
 // RememberHistory records a submitted entry and resets the history cursor.
-func (e *Editor) RememberHistory(s string) {
+func (e *Editor) RememberHistory(s string) error {
 	s = strings.TrimRight(s, "\n")
 	if s == "" {
-		return
+		return nil
 	}
-	if n := len(e.history); n == 0 || e.history[n-1] != s {
+	if e.historyStore != nil {
+		if err := e.historyStore.Add(s); err != nil {
+			e.histIndex = len(e.historyStore.Messages)
+			e.draft = ""
+			return err
+		}
+	} else if n := len(e.history); n == 0 || e.history[n-1] != s {
 		e.history = append(e.history, s)
 	}
-	e.histIndex = len(e.history)
+	e.histIndex = len(e.historyMessages())
 	e.draft = ""
+	return nil
+}
+
+func (e *Editor) historyMessages() []string {
+	if e.historyStore != nil {
+		return e.historyStore.Messages
+	}
+	return e.history
 }
 
 func (e *Editor) HistoryPrev() {
+	historyMessages := e.historyMessages()
 	if e.histIndex == 0 {
 		return
 	}
-	if e.histIndex == len(e.history) {
+	if e.histIndex == len(historyMessages) {
 		e.draft = e.Text()
 	}
 	e.histIndex--
-	e.SetText(e.history[e.histIndex])
+	e.SetText(historyMessages[e.histIndex])
 }
 
 func (e *Editor) HistoryNext() {
-	if e.histIndex >= len(e.history) {
+	historyMessages := e.historyMessages()
+	if e.histIndex >= len(historyMessages) {
 		return
 	}
 	e.histIndex++
-	if e.histIndex == len(e.history) {
+	if e.histIndex == len(historyMessages) {
 		e.SetText(e.draft)
 		return
 	}
-	e.SetText(e.history[e.histIndex])
+	e.SetText(historyMessages[e.histIndex])
 }
 
 // Layout renders the editor for the given terminal width, returning one styled

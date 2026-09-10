@@ -41,6 +41,10 @@ type modelWithFallback struct {
 // mutates the executor directly, so the executor itself must exist
 // before opts run; the field assignments after opts complete the wiring.
 type fallbackExecutor struct {
+	// prepareMessages applies runtime message transforms for the provider
+	// selected for each attempt. It is set by [NewLocalRuntime].
+	prepareMessages func(context.Context, *session.Session, *agent.Agent, provider.Provider, []chat.Message) []chat.Message
+
 	// retryOnRateLimit enables retry-with-backoff for HTTP 429 (rate limit)
 	// errors when no fallback models are configured. When false (default),
 	// 429 errors are treated as non-retryable and immediately fail or skip
@@ -259,6 +263,11 @@ func (e *fallbackExecutor) execute(
 		maxAttempts := 1 + fallbackRetries
 
 		for attempt := range maxAttempts {
+			attemptMessages := messages
+			if e.prepareMessages != nil {
+				attemptMessages = e.prepareMessages(ctx, sess, a, modelEntry.provider, messages)
+			}
+
 			// Check context before each attempt
 			if ctx.Err() != nil {
 				fbSpan.SetOutcome(genai.FallbackOutcomeContextCanceled)
@@ -306,7 +315,7 @@ func (e *fallbackExecutor) execute(
 			// the goroutine reading the response body.
 			streamCtx, streamCancel := context.WithCancelCause(ctx)
 
-			stream, err := modelEntry.provider.CreateChatCompletionStream(streamCtx, messages, agentTools)
+			stream, err := modelEntry.provider.CreateChatCompletionStream(streamCtx, attemptMessages, agentTools)
 			if err != nil {
 				streamCancel(nil)
 				lastErr = err

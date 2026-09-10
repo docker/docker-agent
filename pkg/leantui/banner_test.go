@@ -33,6 +33,22 @@ func TestCommitWelcomePadsBanner(t *testing.T) {
 	assert.True(t, strings.HasPrefix(helpLine, leftPad))
 }
 
+func TestCommitWelcomeSkipsHiddenBanner(t *testing.T) {
+	t.Parallel()
+	m := &model{screen: ui.NewScreen("", "", ""), hideBanner: true}
+	m.commitWelcome()
+
+	require.Equal(t, 1, m.screen.Transcript.BlockCount())
+	lines := m.screen.Transcript.BlockLines(0, 80)
+	for _, line := range lines {
+		assert.NotContains(t, ansi.Strip(line), bannerLines[0])
+	}
+
+	helpLine := ansi.Strip(lines[len(lines)-1])
+	assert.True(t, strings.HasPrefix(helpLine, strings.Repeat(" ", bannerLeftPadding)),
+		"the help hint survives a hidden banner")
+}
+
 func TestCommitWelcomeUsesConfiguredBanner(t *testing.T) {
 	t.Parallel()
 	custom := []string{"custom banner line one", "custom banner line two"}

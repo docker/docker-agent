@@ -29,7 +29,7 @@ func symlinkedDestination(t *testing.T, targetContent string) (link, target stri
 // file it points to untouched.
 func TestService_ExportRefusesSymlinkDestination(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "new body")
 	link, target := symlinkedDestination(t, "precious")
 
@@ -57,7 +57,7 @@ func TestService_ExportRefusesSymlinkDestination(t *testing.T) {
 // left behind.
 func TestService_ExportRefusesDanglingSymlinkDestination(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "new body")
 
 	dir := t.TempDir()
@@ -83,7 +83,7 @@ func TestService_ExportRefusesDanglingSymlinkDestination(t *testing.T) {
 // the exported body, and the file the link pointed to is never modified.
 func TestService_ExportForceReplacesSymlinkEntryNotTarget(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newTestService(t)
+	svc, _ := newTestService(t)
 	mustCreate(t, svc, "p", "new body")
 	link, target := symlinkedDestination(t, "precious")
 
@@ -99,31 +99,6 @@ func TestService_ExportForceReplacesSymlinkEntryNotTarget(t *testing.T) {
 	assert.Equal(t, "new body", string(data))
 
 	data, err = os.ReadFile(target)
-	require.NoError(t, err)
-	assert.Equal(t, "precious", string(data), "the symlink target must be untouched")
-}
-
-// TestService_UpdateSessionReplacesSymlinkEntryNotTarget proves the session
-// edit publishes through the atomic rename of sessionplan.WriteContent: a
-// symlink squatting on the plan path becomes a regular file holding the new
-// body, and the file the link pointed to is never modified.
-func TestService_UpdateSessionReplacesSymlinkEntryNotTarget(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newTestService(t)
-	target := filepath.Join(t.TempDir(), "target.md")
-	require.NoError(t, os.WriteFile(target, []byte("precious"), 0o600))
-	link := filepath.Join(sessionDir, "sess-1.md")
-	require.NoError(t, os.Symlink(target, link))
-
-	p, err := svc.UpdateSession(t.Context(), "sess-1", "new body")
-	require.NoError(t, err)
-	assert.Equal(t, "new body", p.Content)
-
-	info, err := os.Lstat(link)
-	require.NoError(t, err)
-	assert.True(t, info.Mode().IsRegular(), "the edit must replace the symlink entry itself, not write through it")
-
-	data, err := os.ReadFile(target)
 	require.NoError(t, err)
 	assert.Equal(t, "precious", string(data), "the symlink target must be untouched")
 }

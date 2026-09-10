@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/effort"
+	"github.com/docker/docker-agent/pkg/harness"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/httpclient"
@@ -38,8 +39,10 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
 
-// ToolHandlerFunc is a function type for handling tool calls
-type ToolHandlerFunc func(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, events EventSink) (*tools.ToolCallResult, error)
+// ToolHandlerFunc handles a runtime-managed tool call. rt is the dispatcher's
+// per-call handle, used by handlers that need to talk back to the in-flight
+// call (streaming output, asking the user to approve an action).
+type ToolHandlerFunc func(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, events EventSink, rt tools.Runtime) (*tools.ToolCallResult, error)
 
 // Runtime defines the contract for runtime execution
 type Runtime interface {
@@ -123,7 +126,8 @@ type Runtime interface {
 	UpdateSessionTitle(ctx context.Context, sess *session.Session, title string) error
 
 	// TitleGenerator returns a generator for automatic session titles, or nil
-	// if the runtime does not support local title generation (e.g. remote runtimes).
+	// if the runtime does not support local title generation (e.g. remote
+	// runtimes) or no configured model is a usable title candidate.
 	TitleGenerator(ctx context.Context) *sessiontitle.Generator
 
 	// Steer enqueues a user message for urgent mid-turn injection into the
@@ -228,6 +232,9 @@ type ModelStore interface {
 
 // LocalRuntime manages the execution of agents
 type LocalRuntime struct {
+	harnessFactory   *harness.Factory
+	commandEvaluator *CommandEvaluatorFactory
+
 	ctx                       func() context.Context
 	toolMap                   map[string]ToolHandlerFunc
 	toolDeferrals             tools.DeferralTracker
@@ -251,12 +258,16 @@ type LocalRuntime struct {
 	elicitationSinkMu    sync.RWMutex
 	onElicitationRequest func(Event)
 	sessionStore         session.Store
-	workingDir           string   // Working directory for hooks execution
-	env                  []string // Environment variables for hooks execution
-	modelSwitcherCfg     *ModelSwitcherConfig
-	providerRegistry     *provider.Registry
-	gatewayModels        gatewayModelsCache
-	dmrModels            dmrModelsCache
+	// generatedFiles caches per-owner-session workspace roots and manifest
+	// records for [LocalRuntime.ResolveGeneratedFile]. Seeded by
+	// materialization, filled lazily for restored sessions.
+	generatedFiles   generatedFileCache
+	workingDir       string   // Working directory for hooks execution
+	env              []string // Environment variables for hooks execution
+	modelSwitcherCfg *ModelSwitcherConfig
+	providerRegistry *provider.Registry
+	gatewayModels    gatewayModelsCache
+	dmrModels        dmrModelsCache
 
 	// hooksRegistry is the runtime-private hooks.Registry used to build
 	// every Executor. It carries the runtime-owned builtin hooks
@@ -399,6 +410,14 @@ type LocalRuntime struct {
 	// toolset to start before skipping it for the startup sidebar pass.
 	// Defaults to defaultToolStartTimeout; overridden via WithToolStartTimeout.
 	toolStartTimeout time.Duration
+
+	// streamStoppedDeliveryTimeout bounds how long finalizeEventChannel
+	// blocks trying to deliver StreamStopped when the event buffer is full.
+	// Defaults to defaultStreamStoppedDeliveryTimeout; tests shrink it to
+	// exercise the drop-when-abandoned path without a real-time wait. Zero
+	// falls back to the default (see streamStoppedTimeout), so runtimes built
+	// directly via a struct literal in tests still get bounded delivery.
+	streamStoppedDeliveryTimeout time.Duration
 
 	// pauseMu guards pauseCh.
 	pauseMu sync.Mutex
@@ -676,27 +695,29 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	}
 
 	r := &LocalRuntime{
-		ctx:                    func() context.Context { return context.WithoutCancel(ctx) },
-		toolMap:                make(map[string]ToolHandlerFunc),
-		liveSessions:           make(map[string]*liveSessionEntry),
-		team:                   agents,
-		agents:                 newAgentRouter(agents, defaultAgent.Name()),
-		resumeChan:             make(chan ResumeRequest),
-		steerQueue:             NewInMemoryMessageQueue(defaultSteerQueueCapacity),
-		followUpQueue:          NewInMemoryMessageQueue(defaultFollowUpQueueCapacity),
-		sessionCompaction:      true,
-		managedOAuth:           true,
-		sessionStore:           session.NewInMemorySessionStore(),
-		fallback:               newFallbackExecutor(),
-		now:                    time.Now,
-		telemetry:              defaultTelemetry{},
-		providerRegistry:       provider.DefaultRegistry(),
-		maxOverflowCompactions: defaultMaxOverflowCompactions,
-		toolListTimeout:        defaultToolListTimeout,
-		toolStartTimeout:       defaultToolStartTimeout,
-		dmrModelLister:         dmrmodels.ListModels,
+		ctx:                          func() context.Context { return context.WithoutCancel(ctx) },
+		toolMap:                      make(map[string]ToolHandlerFunc),
+		liveSessions:                 make(map[string]*liveSessionEntry),
+		team:                         agents,
+		agents:                       newAgentRouter(agents, defaultAgent.Name()),
+		resumeChan:                   make(chan ResumeRequest),
+		steerQueue:                   NewInMemoryMessageQueue(defaultSteerQueueCapacity),
+		followUpQueue:                NewInMemoryMessageQueue(defaultFollowUpQueueCapacity),
+		sessionCompaction:            true,
+		managedOAuth:                 true,
+		sessionStore:                 session.NewInMemorySessionStore(),
+		fallback:                     newFallbackExecutor(),
+		now:                          time.Now,
+		telemetry:                    defaultTelemetry{},
+		providerRegistry:             provider.DefaultRegistry(),
+		maxOverflowCompactions:       defaultMaxOverflowCompactions,
+		toolListTimeout:              defaultToolListTimeout,
+		toolStartTimeout:             defaultToolStartTimeout,
+		streamStoppedDeliveryTimeout: defaultStreamStoppedDeliveryTimeout,
+		dmrModelLister:               dmrmodels.ListModels,
 	}
 	r.bgAgents = agenttool.NewHandler(r)
+	r.fallback.prepareMessages = r.prepareMessagesForModel
 
 	// stripUnsupportedModalitiesTransform captures the runtime closure to
 	// resolve the agent from Input.AgentName, so it lives here rather
@@ -706,11 +727,33 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	// redact_secrets used to live here as a sibling [MessageTransform];
 	// it now ships entirely as a [hooks.BuiltinFunc] in
 	// pkg/hooks/builtins/redact_secrets.go and is wired into all three
-	// of pre_tool_use, before_llm_call, and tool_response_transform via
+	// of tool_input_transform, before_llm_call, and tool_response_transform via
 	// [builtins.ApplyAgentDefaults] (or a user's hooks YAML directly),
 	// so the rewrite path is the same for every leak vector and there
 	// is no flag-only code path to keep in sync.
+	//
+	// Ordering matters: strip_generated_media MUST run before
+	// strip_unsupported_modalities. The latter strips any image/audio/
+	// video-kind document part the resolved model can't accept,
+	// regardless of whether that part is a runtime-materialized generated
+	// artifact or a user attachment — it has no placeholder logic. If it
+	// ran first, a capability-less or unknown model would have a
+	// media-only generated-media assistant message stripped down to
+	// nothing right there, and strip_generated_media would then see no
+	// generated-media part left to react to: its placeholder would never
+	// fire, and the turn would silently vanish from outgoing history.
+	// Running strip_generated_media first guarantees its placeholder text
+	// is already in place — as ordinary text, not a media part — by the
+	// time strip_unsupported_modalities runs, so there is nothing left for
+	// it to strip from that message.
 	r.transforms = append(r.transforms,
+		// strip_generated_media has no runtime state to capture (the policy
+		// is unconditional), so it registers the free function directly
+		// rather than a method value like the transform below.
+		registeredTransform{
+			name: BuiltinStripGeneratedMedia,
+			fn:   stripGeneratedMediaTransform,
+		},
 		registeredTransform{
 			name: BuiltinStripUnsupportedModalities,
 			fn:   r.stripUnsupportedModalitiesTransform,
@@ -1027,13 +1070,17 @@ func toolsetStateBucket(s lifecycle.State) ToolsetState {
 }
 
 // startedToolNames returns the live tool names of ts, but only when it is a
-// started toolset; the boolean is false for not-yet-started toolsets so the
-// caller can fall back to the declared allow-list. context.TODO is safe here:
-// the toolset is already started, so listing returns its cached tools without
-// a cancellable round-trip.
+// started toolset; the boolean is false for a not-yet-started toolset, or one
+// whose Start is still in flight, so the caller can fall back to the declared
+// allow-list without blocking on a long-running Start (e.g. RAG indexing).
+// context.TODO is safe here: the toolset is already started, so listing
+// returns its cached tools without a cancellable round-trip.
 func startedToolNames(ctx context.Context, ts tools.ToolSet) ([]string, bool) {
 	s, ok := tools.As[*tools.StartableToolSet](ts)
-	if !ok || !s.IsStarted() {
+	if !ok {
+		return nil, false
+	}
+	if started, _ := s.TryState(); !started {
 		return nil, false
 	}
 	tl, err := s.Tools(ctx)
@@ -1188,11 +1235,24 @@ func toolsetStatusFor(ts tools.ToolSet) tools.ToolsetStatus {
 	return status
 }
 
+// lifecycleStateForUnsupervised reports the lifecycle state of a toolset with
+// no Statable supervisor, using the wrapper's own non-blocking status probe
+// so a toolset whose Start is legitimately still running (e.g. RAG indexing
+// a large knowledge base) never stalls a status/introspection caller.
 func lifecycleStateForUnsupervised(ts tools.ToolSet) lifecycle.State {
-	if s, ok := ts.(*tools.StartableToolSet); ok && !s.IsStarted() {
-		return lifecycle.StateStopped
+	s, ok := ts.(*tools.StartableToolSet)
+	if !ok {
+		return lifecycle.StateReady
 	}
-	return lifecycle.StateReady
+	started, inFlight := s.TryState()
+	switch {
+	case inFlight:
+		return lifecycle.StateStarting
+	case !started:
+		return lifecycle.StateStopped
+	default:
+		return lifecycle.StateReady
+	}
 }
 
 // nameFor picks a stable, user-visible name for a toolset. We look for
@@ -1359,17 +1419,15 @@ func (r *LocalRuntime) ExecuteMCPPrompt(ctx context.Context, promptName string, 
 	return "", fmt.Errorf("MCP prompt '%s' not found in any active toolset", promptName)
 }
 
-// TitleGenerator returns a title generator for automatic session title generation.
+// TitleGenerator returns a title generator for automatic session title
+// generation, or nil when no configured model is a usable title candidate
+// (see [sessiontitle.New]).
 func (r *LocalRuntime) TitleGenerator(ctx context.Context) *sessiontitle.Generator {
 	a := r.CurrentAgent()
 	if a == nil {
 		return nil
 	}
-	models := a.TitleModels(ctx)
-	if len(models) == 0 {
-		return nil
-	}
-	return sessiontitle.New(models[0], models[1:]...)
+	return sessiontitle.New(a.TitleModels(ctx)...)
 }
 
 // getAgentModelID returns the model ID for an agent. The zero ID is
@@ -1747,12 +1805,17 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 	// Start every toolset concurrently so one slow start (e.g. an MCP server
 	// pulling an image) doesn't delay the others; the context is already
 	// non-interactive here so no start can block on a user-driven flow. Each
-	// start keeps its own bounded timeout, and outcomes are consumed in
-	// configuration order below so an early fast toolset is listed (and
-	// counted) without waiting for a slow later one. Peer-dependent toolsets
-	// (e.g. the deferred aggregator, whose Start lists its source toolsets'
-	// tools) start in a second wave, after the others have settled.
-	starts := make([]chan error, totalToolsets)
+	// start is non-blocking and bounded (tools.TryStartWithTimeout): a start
+	// already in flight is skipped rather than joined, a wedged start is
+	// abandoned at the timeout, and outcomes are consumed in configuration
+	// order below so an early fast toolset is listed (and counted) without
+	// waiting for a slow later one. Peer-dependent toolsets start in a
+	// second wave, after the others have been attempted.
+	type startOutcome struct {
+		started bool
+		err     error
+	}
+	starts := make([]chan startOutcome, totalToolsets)
 	var independents sync.WaitGroup
 	var dependents []int
 	for i, toolset := range toolsets {
@@ -1760,20 +1823,22 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 		if !ok {
 			continue
 		}
-		starts[i] = make(chan error, 1)
+		starts[i] = make(chan startOutcome, 1)
 		if _, ok := tools.As[tools.PeerDependent](startable); ok {
 			dependents = append(dependents, i)
 			continue
 		}
 		independents.Go(func() {
-			starts[i] <- startToolsetWithTimeout(ctx, startable, r.toolStartTimeout)
+			started, err := startable.TryStartWithTimeout(ctx, r.toolStartTimeout)
+			starts[i] <- startOutcome{started: started, err: err}
 		})
 	}
 	for _, i := range dependents {
 		startable := toolsets[i].(*tools.StartableToolSet)
 		go func() {
 			independents.Wait()
-			starts[i] <- startToolsetWithTimeout(ctx, startable, r.toolStartTimeout)
+			started, err := startable.TryStartWithTimeout(ctx, r.toolStartTimeout)
+			starts[i] <- startOutcome{started: started, err: err}
 		}()
 	}
 
@@ -1789,21 +1854,43 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 
 		// Handle the start outcome, including recovery: a previously-started
 		// toolset whose inner connection died (e.g. background invalid_token)
-		// had its recovery Start() called above so ShouldReportRecoveryFailure
-		// can fire the targeted re-auth notice. Start() is a no-op when the
-		// toolset is already healthy, so calling it unconditionally is safe.
+		// had its recovery start attempted above so ShouldReportRecoveryFailure
+		// can fire the targeted re-auth notice. The attempt is a no-op when the
+		// toolset is already healthy, so starting it unconditionally is safe.
 		if startable, ok := toolset.(*tools.StartableToolSet); ok {
-			if err := <-starts[i]; err != nil {
+			outcome := <-starts[i]
+			if err := outcome.err; err != nil {
 				desc := tools.DescribeToolSet(startable.ToolSet)
-				// A start that outlived its deadline (e.g. an MCP container
-				// stuck behind a wedged Docker daemon) is reported directly:
-				// the abandoned Start goroutine has not returned, so the
-				// once-per-streak guard below has recorded nothing and would
-				// silently swallow the warning.
-				if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-					slog.WarnContext(ctx, "Toolset start timed out; skipping",
-						"agent", a.Name(), "toolset", desc, "timeout", r.toolStartTimeout)
-					a.AddToolWarning(fmt.Sprintf("%s is taking too long to start (>%s) — it keeps starting in the background and its tools appear once it is ready", desc, r.toolStartTimeout))
+				// A cancellation-family error means the bounded attempt may
+				// have abandoned a wedged Start that keeps running in the
+				// background holding the toolset's single-flight lock. The
+				// failure reporters below share that lock, so consulting them
+				// here would block on the very attempt just abandoned — never
+				// touch them for these errors.
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+					// Outer context done — possibly canceled after the
+					// top-of-loop check: the startup pass is being torn down,
+					// so return without a warning.
+					if ctx.Err() != nil {
+						return
+					}
+					if errors.Is(err, context.DeadlineExceeded) {
+						// A start that outlived its per-toolset deadline (e.g.
+						// an MCP container stuck behind a wedged Docker daemon)
+						// is reported directly: the abandoned Start goroutine
+						// has not returned, so the once-per-streak guard below
+						// has recorded nothing and would silently swallow the
+						// warning.
+						slog.WarnContext(ctx, "Toolset start timed out; skipping",
+							"agent", a.Name(), "toolset", desc, "timeout", r.toolStartTimeout)
+						a.AddToolWarning(fmt.Sprintf("%s is taking too long to start (>%s) — it keeps starting in the background and its tools appear once it is ready", desc, r.toolStartTimeout))
+						continue
+					}
+					// A Canceled error while the outer context is still live can
+					// only come from within the toolset's own Start; skip it for
+					// this pass like the agent's turn path does.
+					slog.DebugContext(ctx, "Toolset start canceled; skipping",
+						"agent", a.Name(), "toolset", desc, "cause", err)
 					continue
 				}
 				// IsAuthorizationRequired must be checked BEFORE
@@ -1812,7 +1899,8 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 				// failure-reported flag here would suppress the *real*
 				// failure (e.g. server 4xx on the eventual interactive
 				// retry) that the user actually needs to see.
-				if tools.IsAuthorizationRequired(err) {
+				switch {
+				case tools.IsAuthorizationRequired(err):
 					// Two cases:
 					// 1. Initial startup deferral (toolset never ran): the
 					//    OAuth dialog will appear naturally on the first user
@@ -1828,8 +1916,6 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 					} else {
 						slog.DebugContext(ctx, "Toolset deferred until first message", "agent", a.Name(), "toolset", desc, "reason", err)
 					}
-					continue
-				}
 				// Route real failures through the agent's warning
 				// channel so the TUI surfaces a persistent,
 				// user-visible notice that includes the actual
@@ -1838,12 +1924,30 @@ func (r *LocalRuntime) emitToolsProgressively(ctx context.Context, a *agent.Agen
 				// once-per-streak guard as ensureToolSetsAreStarted
 				// so a failing toolset doesn't flood the UI with a
 				// new warning every time the agent is restarted.
-				if !startable.ShouldReportFailure() {
+				case startable.ShouldReportFailure():
+					slog.WarnContext(ctx, "Toolset start failed; skipping", "agent", a.Name(), "toolset", desc, "error", err)
+					a.AddToolWarning(fmt.Sprintf("%s start failed: %v", desc, err))
+				default:
 					slog.DebugContext(ctx, "Toolset still unavailable; skipping", "agent", a.Name(), "toolset", desc, "error", err)
+				}
+				// A partial start leaves the composite latched and usable:
+				// fall through so its healthy subset (and the composite's
+				// own wrapper tool) is still listed and counted. Fully
+				// failed toolsets have nothing to list — skip them.
+				if !tools.IsPartialStart(err) {
 					continue
 				}
-				slog.WarnContext(ctx, "Toolset start failed; skipping", "agent", a.Name(), "toolset", desc, "error", err)
-				a.AddToolWarning(fmt.Sprintf("%s start failed: %v", desc, err))
+			} else if !outcome.started {
+				// Another lifecycle operation holds the toolset's single-flight
+				// lock (e.g. a start abandoned by an earlier bounded attempt):
+				// skip the toolset for this startup pass — silently, because
+				// the failure reporters share that lock and consulting them
+				// would block on the very attempt being skipped. It is picked
+				// up once the attempt settles. Checked only on the error-free
+				// path: a partial start reports started=false with its error
+				// while the wrapper is latched, and must fall through above.
+				slog.DebugContext(ctx, "Toolset start already in flight; skipping",
+					"agent", a.Name(), "toolset", tools.DescribeToolSet(startable.ToolSet))
 				continue
 			}
 		}
@@ -1907,40 +2011,6 @@ func listToolsWithTimeout(ctx context.Context, toolset tools.ToolSet, timeout ti
 		return nil, toolCtx.Err()
 	case res := <-done:
 		return res.tools, res.err
-	}
-}
-
-// startToolsetWithTimeout starts a toolset under a bounded deadline, mirroring
-// listToolsWithTimeout. The deadline must be enforced by racing the call
-// against the timeout (not only via the context): the MCP connector detaches
-// the context it is handed with context.WithoutCancel, so a wedged initialize
-// handshake (e.g. Docker failing to start the server container) would ignore a
-// ctx deadline and block startup forever. On timeout it returns the context
-// error; the orphaned goroutine sends into a buffered channel and exits if the
-// call ever returns.
-//
-// The abandoned goroutine keeps holding the StartableToolSet's single-flight
-// lock, so later Start/Stop calls on the same toolset wait for the original
-// attempt rather than racing it — if it eventually completes, the toolset
-// becomes usable on the next turn; if it never does, the TUI shutdown safety
-// net still bounds the exit path.
-func startToolsetWithTimeout(ctx context.Context, toolset *tools.StartableToolSet, timeout time.Duration) error {
-	if timeout <= 0 {
-		timeout = defaultToolStartTimeout
-	}
-	startCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	done := make(chan error, 1) // buffered so a late send never blocks
-	go func() {
-		done <- toolset.Start(startCtx)
-	}()
-
-	select {
-	case <-startCtx.Done():
-		return startCtx.Err()
-	case err := <-done:
-		return err
 	}
 }
 

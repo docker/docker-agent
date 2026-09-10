@@ -39,6 +39,8 @@ type Server struct {
 	Icon        string   `json:"icon,omitempty"`
 	Readme      string   `json:"readme,omitempty"`
 	Auth        Auth     `json:"auth"`
+
+	allowPrivateIPs bool
 }
 
 // Auth describes how to authenticate against a remote MCP server.

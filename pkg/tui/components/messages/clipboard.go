@@ -161,19 +161,18 @@ func (m *model) extractSelectedText() string {
 	}
 
 	m.ensureAllItemsRendered()
-	lines := m.renderedLines
 	startLine, startCol, endLine, endCol := m.selection.normalized()
 
-	if startLine < 0 || startLine >= len(lines) {
+	if startLine < 0 || startLine >= m.totalHeight {
 		return ""
 	}
-	if endLine >= len(lines) {
-		endLine = len(lines) - 1
+	if endLine >= m.totalHeight {
+		endLine = m.totalHeight - 1
 	}
 
 	var selected []string
-	for i := startLine; i <= endLine && i < len(lines); i++ {
-		originalLine := lines[i]
+	for i := startLine; i <= endLine && i < m.totalHeight; i++ {
+		originalLine := m.renderedLine(i)
 		// Strip ANSI codes first to get the displayed text with borders
 		plainLine := ansi.Strip(originalLine)
 		// Strip border characters to get the actual text content

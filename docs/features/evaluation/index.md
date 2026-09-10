@@ -123,21 +123,75 @@ Each eval file is a JSON session that captures a complete conversation. The key 
 The `evals` object inside each session controls what gets scored:
 
 | Field         | Type     | Description                                                                               |
-| ------------- | -------- | ----------------------------------------------------------------------------------------- |
+| ------------- | -------- | ------------------------------------------------------------------------------------------- |
 | `relevance`   | string[] | Statements that must be true about the agent's response. Scored by an LLM judge.          |
+| `assertions`  | object[] | Code-based checks evaluated against the agent's output. See [Assertions](#assertions).    |
 | `size`        | string   | Expected response size: `S`, `M`, `L`, or `XL`. Compared against actual output length.    |
 | `working_dir` | string   | Subdirectory under `evals/working_dirs/` to mount as the container's working directory.   |
 | `setup`       | string   | Shell script to run in the container before the agent executes (e.g., create test files). |
 
+### Assertions
+
+Each entry in `assertions` is a code-based check evaluated deterministically against the agent's output, without an LLM judge:
+
+```json
+"assertions": [
+  { "name": "mentions file count", "type": "contains", "value": "2 files" },
+  { "name": "no error message", "type": "not_contains", "value": "error" },
+  { "name": "used list_directory", "type": "tool_called", "value": "list_directory" },
+  { "name": "under budget", "type": "cost_threshold", "value": "0.05" }
+]
+```
+
+Each assertion has a `name` (shown in results), a `type`, and a `value` checked against the agent's response, cost, or tool calls:
+
+| Type             | Checks that...                                                     |
+| ---------------- | -------------------------------------------------------------------- |
+| `contains`       | the response contains `value`                                       |
+| `not_contains`   | the response does not contain `value`                                |
+| `equals`         | the (trimmed) response equals `value`                                |
+| `starts_with`    | the response starts with `value`                                     |
+| `ends_with`      | the (trimmed) response ends with `value`                             |
+| `regex`          | the response matches the regular expression `value`                  |
+| `cost_threshold` | the eval's cost is less than or equal to `value` (a dollar amount)   |
+| `tool_called`    | the agent called a tool named `value`                                |
+
 ## Scoring Metrics
 
-Docker Agent evaluates agents across three dimensions:
+Docker Agent evaluates agents across four dimensions:
 
 | Metric              | How It's Measured                                                                                                         |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | **Tool Calls (F1)** | F1 score between the expected tool call sequence (from the recorded session) and the actual tool calls made by the agent. |
 | **Relevance**       | An LLM judge (configurable via `--judge-model`) evaluates whether each relevance statement is satisfied by the response.  |
 | **Size**            | Whether the response length matches the expected size category (S/M/L/XL).                                                |
+| **Assertions**      | Code-based [assertions](#assertions) evaluated deterministically against the response, cost, and tool calls — no LLM judge involved. |
+
+### Repeat Metrics (pass@k / pass^k)
+
+Running with `--repeat <k>` (k > 1) repeats each eval `k` times and, once the
+run completes, prints two additional consistency metrics alongside the
+regular summary:
+
+- **pass@k** — the fraction of unique evals that passed on *at least one* of
+  the `k` repetitions. Measures whether the agent can produce a correct
+  answer at all.
+- **pass^k** — the fraction of unique evals that passed on *every* one of the
+  `k` repetitions. Measures determinism / reliability.
+
+```console
+  Repeat metrics (k=5, 3 unique evals):
+   pass@5: 100.0% (passed at least once)
+   pass^5: 66.7% (passed every time)
+```
+
+These metrics are also included in the JSON results (`repeat_metrics`) and,
+when comparing against a `--baseline`, are reported as informational deltas
+(see [Regression gate](#regression-gate)).
+
+## Serve-safety verification and rollback
+
+When changing an agent served over MCP HTTP, chat, or A2A, add an evaluation that attempts an approval-requiring tool call and verifies the resolved safety policy and authentication behavior. Run the evaluation with the same explicit `--safety` setting used in deployment. If a rollout must be reversed, stop the affected listener, restore the prior agent configuration and explicit safety flag, then restart only after confirming non-loopback listeners still require authentication. Do not restore an unauthenticated network listener as a rollback shortcut.
 
 ## Creating Eval Sessions
 
@@ -164,10 +218,51 @@ $ docker agent eval <agent-file>|<registry-ref> [<eval-dir>|./evals]
 | `--output`          | `<eval-dir>/results`  | Directory for results, logs, and session databases                |
 | `--only`            | (all)                       | Only run evals with file names matching these patterns            |
 | `--base-image`      | (default)                   | Custom base image for eval containers (see [Custom Base Images](#custom-base-images)) |
+| `--agent-image`     | (this CLI's version)        | docker-agent image injected into eval containers; `none` skips injection (see [Custom Base Images](#custom-base-images)) |
 | `--container-runtime` | `docker`                  | Container runtime executable for building and running evaluations (e.g. `podman`) |
 | `--keep-containers` | `false`                     | Keep containers after evaluation (don't remove with `--rm`)       |
 | `-e, --env`         | (none)                      | Environment variables to pass to container (`KEY` or `KEY=VALUE`) |
 | `--repeat`          | `1`                         | Number of times to repeat each evaluation (useful for computing baselines) |
+| `--baseline`        | (none)                      | Compare against a previously saved run JSON and exit non-zero on regression (see [Regression gate](#regression-gate)) |
+| `--regression-tolerance` | `0`                    | How far an aggregate quality rate may fall before `--baseline` reports a regression (0–1) |
+
+### Regression gate
+
+`--baseline` compares the run against a previous one and exits non-zero when
+quality regressed, so an eval suite can gate CI:
+
+```console
+$ docker agent eval ./agent.yaml --baseline results/2026-08-01-run.json
+```
+
+The baseline is the run JSON written by a previous invocation —
+`<output>/<run-name>.json` — so there is no separate artifact to produce.
+
+The comparison covers every aggregate quality rate that both runs have data
+for: size pass rate, tool F1 mean, relevance rate, and — since
+docker/docker-agent#4103 — assertion rate. When both runs used `--repeat`,
+`pass@k` and `pass^k` are also reported as deltas, but purely
+**informationally**: they never gate, since they derive from the same
+per-eval pass/fail that the other metrics already gate on.
+
+Four rules decide the verdict, and they are worth knowing before wiring this
+into CI:
+
+- **The tolerance governs aggregate rates only.** An LLM judge does not return
+  the same score twice, so without a tolerance the gate flaps. `--regression-tolerance 0.05`
+  lets an aggregate rate fall five points before it counts.
+- **An evaluation that passed and now fails always gates**, regardless of the
+  tolerance. That transition is the signal the gate exists to catch, so it is
+  never absorbed.
+- **Cost is reported but never gates.** A provider price change is not a quality
+  regression.
+- **An added *failing* evaluation gates** via the aggregate rate, even though no
+  existing evaluation regressed. A suite that got worse should say so — but it
+  means committing a known-failing eval needs a tolerance bump or a fix.
+
+A baseline that carries no evaluations, or a run that produced none (an
+`--only` pattern that matched nothing), is rejected rather than reported as
+passing: a gate that cannot fail is worse than no gate.
 
 ### Provider Credentials
 
@@ -205,7 +300,7 @@ evaluated agent run fails to authenticate.
 
 When `--base-image` is set, the eval harness builds a derived image on top of your base image at evaluation time. Two things happen automatically:
 
-1. **The docker-agent binary is injected** — it is copied from `docker/docker-agent:edge` into the derived image at build time, so you don't need to include it in your base image.
+1. **The docker-agent binary is injected** — by default it is copied from `docker/docker-agent:<version>`, pinned to this CLI's own release version, so eval results are reproducible against a known build rather than a moving target. A dev build (compiled from `main`, without a release version) falls back to `docker/docker-agent:edge`. This injection applies to every eval run, not just those using `--base-image`. Use `--agent-image <ref>` to inject a specific image instead — for example to pin CI to an older release, or to test against `docker/docker-agent:edge` deliberately. Pass `--agent-image none` to skip injection entirely and trust whatever `/docker-agent` binary is already present in your base image.
 2. **The entrypoint is overridden** — Docker Agent replaces your base image's entrypoint with its own `/run.sh` wrapper.
 
 Your base image therefore only needs to provide the runtime environment: language runtimes, installed dependencies, test fixtures, the appropriate working directory, and so on. Any `ENTRYPOINT` or `CMD` defined in your base image is ignored.

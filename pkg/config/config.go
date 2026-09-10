@@ -13,10 +13,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/goccy/go-yaml"
 
-	hclconv "github.com/docker/docker-agent/pkg/config/hcl"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 )
@@ -48,17 +48,6 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 		return nil, err
 	}
 
-	// Configurations may be authored in HCL as an alternative to YAML.
-	// Detect the format from the source name extension or, when no hint is
-	// available (OCI artifacts, etc.), from the content itself, then
-	// transparently convert to YAML for the rest of the pipeline.
-	if isHCLSource(source.Name(), data) {
-		data, err = hclconv.ToYAML(data, source.Name())
-		if err != nil {
-			return nil, fmt.Errorf("parsing HCL config file: %w", err)
-		}
-	}
-
 	// Flavor patches rewrite the raw document, so they run before anything
 	// (including the version sniff below) reads it.
 	if data, err = applyFlavors(ctx, data, options.flavors); err != nil {
@@ -77,6 +66,8 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 	if err != nil {
 		msg := yaml.FormatError(err, true, true)
 		if hint := newerVersionHint(data, raw.Version, err); hint != "" {
+			msg += "\n" + hint
+		} else if hint := removedFieldHint(raw.Version, err); hint != "" {
 			msg += "\n" + hint
 		}
 		return nil, fmt.Errorf("parsing config file\n%s", msg)
@@ -204,15 +195,19 @@ func parseCurrentVersion(data []byte, version string) (any, error) {
 	return parser(data)
 }
 
-// newerVersionHint returns a user-facing hint when a strict-parse failure is
-// caused by a key that a newer schema version accepts. It tries the parsers
-// for every version above the declared one, in order, and points the user at
-// the smallest version that parses the config successfully. Best-effort: a
-// newer version may accept the config for unrelated reasons (laxer schema),
-// so the original unknown-field error is always shown before the hint.
+// newerVersionHint returns a hint when a parse error is caused by a key or a
+// value shape that a newer config version accepts (an unknown field, or a type
+// mismatch such as a list where an older schema only takes a string), so the
+// user is pointed at the `version` bump instead of a generic YAML error. It
+// tries the parsers for every version above the declared one, in order, and
+// points the user at the smallest version that parses the config successfully.
+// Best-effort: a newer version may accept the config for unrelated reasons
+// (laxer schema), so the original unknown-field error is always shown before
+// the hint.
 func newerVersionHint(data []byte, version string, parseErr error) string {
 	var unknownField *yaml.UnknownFieldError
-	if !errors.As(parseErr, &unknownField) {
+	var typeErr *yaml.TypeError
+	if !errors.As(parseErr, &unknownField) && !errors.As(parseErr, &typeErr) {
 		return ""
 	}
 
@@ -233,7 +228,7 @@ func newerVersionHint(data []byte, version string, parseErr error) string {
 	for _, n := range newer {
 		v := strconv.Itoa(n)
 		if _, err := parsers[v](data); err == nil {
-			return fmt.Sprintf("hint: this key is supported by config version %s; update the top-level 'version' field (currently %s)", v, version)
+			return fmt.Sprintf("hint: this syntax is supported by config version %s; update the top-level 'version' field (currently %s)", v, version)
 		}
 	}
 
@@ -394,16 +389,6 @@ func validateForceHandoffs(cfg *latest.Config, allNames map[string]bool) error {
 	return nil
 }
 
-// isHCLSource reports whether the configuration data should be parsed as HCL
-// rather than YAML. The decision is based first on the source name extension,
-// and then on a content-based heuristic when no extension hint is available.
-func isHCLSource(name string, data []byte) bool {
-	if strings.EqualFold(filepath.Ext(name), ".hcl") {
-		return true
-	}
-	return hclconv.LooksLikeHCL(data)
-}
-
 // providerAPITypes are the allowed values for api_type in provider configs
 var providerAPITypes = map[string]bool{
 	"":                       true, // empty is allowed (defaults to openai_chatcompletions)
@@ -547,6 +532,12 @@ func validateSkills(label string, sc *latest.SkillsConfig) error {
 		inline := &sc.Inline[i]
 		if strings.TrimSpace(inline.Name) == "" {
 			return fmt.Errorf("%s has an inline skill with no name", label)
+		}
+		// The name doubles as the `/<name>` slash command, whose parser splits
+		// the input on the first space, so whitespace here would silently
+		// produce a skill that command can never reach.
+		if strings.ContainsFunc(inline.Name, unicode.IsSpace) {
+			return fmt.Errorf("%s inline skill '%s' must not have whitespace in its name: it doubles as the /%s command", label, inline.Name, inline.Name)
 		}
 		if strings.TrimSpace(inline.Description) == "" {
 			return fmt.Errorf("%s inline skill '%s' is missing a description", label, inline.Name)

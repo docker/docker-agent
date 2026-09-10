@@ -187,3 +187,64 @@ func TestStopAfterFailedStart(t *testing.T) {
 		t.Fatal("Stop() deadlocked after a failed Start()")
 	}
 }
+
+// watcherCapturingStrategy hands the context its file watcher receives to the
+// test so it can assert on the watcher's lifetime. Initialize is immediate
+// (inherited from mockStrategy) and StartFileWatcher returns as soon as the
+// watcher is "installed", mirroring the real strategies.
+type watcherCapturingStrategy struct {
+	mockStrategy
+
+	watchCtx chan context.Context
+}
+
+func (m *watcherCapturingStrategy) StartFileWatcher(ctx context.Context, _ []string, _ strategy.ChunkingConfig) error {
+	m.watchCtx <- ctx
+	return nil
+}
+
+type watcherCtxKey struct{}
+
+// TestStartDetachesWatcherFromCallerContext covers #4001: Start may run under
+// a short-lived context (e.g. the runtime's bounded startup probe), and the
+// long-lived file watcher must not die with it. The watcher context keeps the
+// caller's values, but only Stop() owns its cancellation.
+func TestStartDetachesWatcherFromCallerContext(t *testing.T) {
+	t.Parallel()
+
+	strategyMock := &watcherCapturingStrategy{watchCtx: make(chan context.Context, 1)}
+	cfg := rag.Config{
+		StrategyConfigs: []strategy.Config{
+			{Name: "capturing", Strategy: strategyMock},
+		},
+	}
+
+	mgr, err := rag.New(t.Context(), "watched-rag", cfg, nil)
+	require.NoError(t, err)
+
+	tool := &ToolSet{
+		manager:  mgr,
+		toolName: "watched-rag",
+	}
+
+	startCtx, cancelStart := context.WithCancel(context.WithValue(t.Context(), watcherCtxKey{}, "kept"))
+	defer cancelStart()
+	require.NoError(t, tool.Start(startCtx))
+
+	var watchCtx context.Context
+	select {
+	case watchCtx = <-strategyMock.watchCtx:
+	case <-time.After(5 * time.Second):
+		t.Fatal("file watcher was never started")
+	}
+	assert.Equal(t, "kept", watchCtx.Value(watcherCtxKey{}), "watcher context must keep the caller's values")
+
+	// Cancelling the Start context (probe timeout) must not kill the watcher.
+	// Cancellation propagates synchronously, so this check is deterministic.
+	cancelStart()
+	require.NoError(t, watchCtx.Err(), "watcher must outlive the context passed to Start")
+
+	// Stop owns the watcher's cancellation.
+	require.NoError(t, tool.Stop(t.Context()))
+	assert.ErrorIs(t, watchCtx.Err(), context.Canceled, "Stop must cancel the watcher")
+}

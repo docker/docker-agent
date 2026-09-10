@@ -2888,7 +2888,8 @@ func TestResolveClientCredentials_NoDCR_PromptsUser(t *testing.T) {
 
 	clientID, clientSecret, scopes, err := transport.resolveClientCredentials(
 		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb",
-		[]string{"challenge-scope"}, []string{"prm-scope"})
+		[]string{"challenge-scope"}, []string{"prm-scope"},
+	)
 	require.NoError(t, err)
 	assert.Equal(t, "user-client-id", clientID)
 	assert.Equal(t, "user-secret", clientSecret)
@@ -3017,7 +3018,8 @@ func TestResolveClientCredentials_PromptDeclined(t *testing.T) {
 			}
 
 			clientID, clientSecret, _, err := transport.resolveClientCredentials(
-				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil)
+				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil,
+			)
 			require.Error(t, err)
 			assert.Empty(t, clientID)
 			assert.Empty(t, clientSecret)
@@ -3052,7 +3054,8 @@ func TestResolveClientCredentials_PromptMissingClientID(t *testing.T) {
 			}
 
 			clientID, clientSecret, _, err := transport.resolveClientCredentials(
-				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil)
+				t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil,
+			)
 			require.Error(t, err)
 			assert.Empty(t, clientID)
 			assert.Empty(t, clientSecret)
@@ -3071,7 +3074,8 @@ func TestResolveClientCredentials_NoElicitationBridgeDefersAuth(t *testing.T) {
 	transport := &oauthTransport{baseURL: "https://mcp.example.test/mcp"}
 
 	clientID, clientSecret, _, err := transport.resolveClientCredentials(
-		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil)
+		t.Context(), &AuthorizationServerMetadata{}, "https://example.test/cb", nil, nil,
+	)
 	require.Error(t, err)
 	assert.Empty(t, clientID)
 	assert.Empty(t, clientSecret)

@@ -463,3 +463,30 @@ func tagFactoryCapturingOpts(into *options.ModelOptions) providerFactory {
 		return &fakeProvider{id: modelsdev.NewID("test", "captured")}, nil
 	}
 }
+
+func TestRegistry_OpenAIProtocolVariantsFallBackToOpenAI(t *testing.T) {
+	t.Parallel()
+
+	called := 0
+	r := NewRegistry(map[string]Factory{
+		"openai": func(context.Context, *latest.ModelConfig, environment.Provider, ...options.Opt) (Provider, error) {
+			called++
+			return nil, nil
+		},
+	})
+
+	assert.True(t, r.Has("openai"))
+	assert.True(t, r.Has("openai_chatcompletions"))
+	assert.True(t, r.Has("openai_responses"))
+	assert.False(t, r.Has("anthropic"))
+	assert.Equal(t, []string{"openai"}, r.Types())
+
+	// A custom OpenAI-compatible provider pinning an api_type resolves to a
+	// protocol variant and must still be served by the "openai" factory.
+	cfg := &latest.ModelConfig{Provider: "corp", Model: "m"}
+	providers := map[string]latest.ProviderConfig{"corp": {BaseURL: "https://llm.corp.example", APIType: "openai_responses"}}
+	assert.Equal(t, "openai_responses", ResolveType(cfg, providers))
+	_, err := r.New(t.Context(), cfg, environment.NewEnvListProvider(nil), options.WithProviders(providers))
+	require.NoError(t, err)
+	assert.Equal(t, 1, called)
+}

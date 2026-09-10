@@ -1,13 +1,11 @@
 package config
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -15,14 +13,15 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/content"
+	"github.com/goccy/go-yaml"
+
+	"github.com/docker/docker-agent/pkg/configsize"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
-	"github.com/docker/docker-agent/pkg/memoize"
 	"github.com/docker/docker-agent/pkg/paths"
-	"github.com/docker/docker-agent/pkg/remote"
 )
 
 type Source interface {
@@ -31,7 +30,23 @@ type Source interface {
 	Read(ctx context.Context) ([]byte, error)
 }
 
+// EncryptedConfigSource is implemented by sources that may discover an
+// encrypted representation of the agent config while reading it (for example a
+// trusted Docker URL that returns the X-Cagent-Encrypted-Config response
+// header). Callers can type-assert a Source to this interface after Read to
+// pick up the value, which is then forwarded to a trusted Docker models gateway
+// on subsequent model requests.
+type EncryptedConfigSource interface {
+	// EncryptedConfig returns the encrypted config captured during the most
+	// recent successful Read, or "" if none was seen. Safe to call concurrently.
+	EncryptedConfig() string
+}
+
 type Sources map[string]Source
+
+// ErrSourceFetchFailed reports that a remote URL source could not be fetched.
+// It intentionally excludes URL validation and config parsing errors.
+var ErrSourceFetchFailed = errors.New("remote source fetch failed")
 
 // fileSource is used to load an agent configuration from a YAML file.
 type fileSource struct {
@@ -94,174 +109,6 @@ func (a bytesSource) Read(context.Context) ([]byte, error) {
 	return a.data, nil
 }
 
-// ociSource is used to load an agent configuration from an OCI artifact.
-type ociSource struct {
-	reference string
-}
-
-func NewOCISource(reference string) Source {
-	return ociSource{
-		reference: reference,
-	}
-}
-
-func (a ociSource) Name() string {
-	return a.reference
-}
-
-func (a ociSource) ParentDir() string {
-	return ""
-}
-
-// ociReadMemoizer caches successful OCI reads for a short window, keyed by
-// fully-qualified reference (registry host included, so references that
-// differ only by registry can never share an entry). A single command
-// invocation reads the same source several times (the sandbox-default probe
-// in runRunCommand, then the team load), and without memoization each read
-// pays a blocking registry digest round-trip even when the artifact is
-// cached and unchanged. Failed reads are never cached (memoize retries
-// them), and neither are degraded reads that fell back to the local store
-// because the registry was unreachable — so recovery is retried on the very
-// next read. The TTL bounds staleness for long-lived embedders so a tag
-// update is picked up within a minute.
-var ociReadMemoizer = memoize.New[[]byte](1 * time.Minute)
-
-// pullOCIArtifact pulls (or digest-checks) an OCI artifact from the registry.
-// It is a var so tests can stub the network out.
-var pullOCIArtifact = func(ctx context.Context, ref string, force bool) (string, error) {
-	return remote.Pull(ctx, ref, force)
-}
-
-// degradedReadError smuggles a successful-but-degraded read (registry
-// unreachable, stale local copy served) out of the memoized closure as an
-// error, so memoize does not cache it. Read unwraps it back into a success.
-type degradedReadError struct {
-	data []byte
-}
-
-func (e *degradedReadError) Error() string {
-	return "degraded OCI read served from local store"
-}
-
-// Read loads an agent configuration from an OCI artifact.
-//
-// The OCI registry remains the source of truth.
-// The local content store is used as a cache and fallback only.
-// A forced re-pull is triggered exclusively when store corruption is detected.
-//
-// Reads validated against the registry are memoized per process (see
-// ociReadMemoizer) so repeated loads of the same reference within one command
-// don't repeat the registry round-trip. Concurrent readers of the same
-// reference share a single in-flight read — including its context: if the
-// first caller is cancelled mid-read, waiters get that error too, but since
-// errors are never cached the next read simply retries.
-func (a ociSource) Read(ctx context.Context) ([]byte, error) {
-	// The memoization key must include the registry host: two references that
-	// differ only by registry are distinct trust boundaries and must never
-	// share cached bytes.
-	cacheKey, err := remote.FullyQualifiedReference(a.reference)
-	if err != nil {
-		return nil, fmt.Errorf("normalizing OCI reference %s: %w", a.reference, err)
-	}
-
-	data, err := ociReadMemoizer.Memoize(cacheKey, func() ([]byte, error) {
-		data, degraded, err := a.read(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if degraded {
-			return nil, &degradedReadError{data: data}
-		}
-		return data, nil
-	})
-	if degraded, ok := errors.AsType[*degradedReadError](err); ok {
-		return degraded.data, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	// Clone so no caller can mutate the cached bytes shared with later reads.
-	return bytes.Clone(data), nil
-}
-
-// read performs the actual (unmemoized) load of the OCI artifact. degraded
-// reports that the returned data came from the local store because the
-// registry could not be reached — a success for the caller, but one that
-// must not be cached so the next read retries the registry.
-func (a ociSource) read(ctx context.Context) (data []byte, degraded bool, err error) {
-	store, err := content.NewStore()
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to create content store: %w", err)
-	}
-
-	// Normalize the reference so that equivalent forms (e.g.
-	// "myorg/review-pr" and "index.docker.io/myorg/review-pr:latest")
-	// resolve to the same store key that remote.Pull uses.
-	storeKey, err := remote.NormalizeReference(a.reference)
-	if err != nil {
-		return nil, false, fmt.Errorf("normalizing OCI reference %s: %w", a.reference, err)
-	}
-
-	// For digest references, the content is immutable. If we already have
-	// the artifact locally, serve it directly without any network call.
-	if remote.IsDigestReference(a.reference) {
-		if data, loadErr := loadArtifact(store, storeKey); loadErr == nil {
-			slog.DebugContext(ctx, "Serving digest-pinned OCI artifact from cache", "ref", a.reference)
-			return data, false, nil
-		}
-	}
-
-	// Check whether we have a local copy to fall back on.
-	hasLocal := hasLocalArtifact(store, storeKey)
-
-	// Pull from registry (checks remote digest, skips download if unchanged).
-	if _, pullErr := pullOCIArtifact(ctx, a.reference, false); pullErr != nil {
-		if !hasLocal {
-			return nil, false, fmt.Errorf("failed to pull OCI image %s: %w", a.reference, pullErr)
-		}
-		slog.DebugContext(ctx, "Failed to check for OCI reference updates, using cached version",
-			"ref", a.reference, "error", pullErr)
-		degraded = true
-	}
-
-	// Try loading from store.
-	data, err = loadArtifact(store, storeKey)
-	if err == nil {
-		return data, degraded, nil
-	}
-
-	// If corrupted, force re-pull and try once more.
-	if !errors.Is(err, content.ErrStoreCorrupted) {
-		return nil, false, fmt.Errorf("failed to load agent from OCI source %s: %w", a.reference, err)
-	}
-
-	slog.WarnContext(ctx, "Local OCI store corrupted, forcing re-pull", "ref", a.reference)
-	if _, pullErr := pullOCIArtifact(ctx, a.reference, true); pullErr != nil {
-		return nil, false, fmt.Errorf("failed to force re-pull OCI image %s: %w", a.reference, pullErr)
-	}
-
-	data, err = loadArtifact(store, storeKey)
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to load agent from OCI source %s: %w", a.reference, err)
-	}
-	return data, false, nil
-}
-
-// loadArtifact reads the agent YAML from the content store.
-func loadArtifact(store *content.Store, storeKey string) ([]byte, error) {
-	af, err := store.GetArtifact(storeKey)
-	if err != nil {
-		return nil, err
-	}
-	return []byte(af), nil
-}
-
-// hasLocalArtifact reports whether the content store has metadata for the given key.
-func hasLocalArtifact(store *content.Store, storeKey string) bool {
-	_, err := store.GetArtifactMetadata(storeKey)
-	return err == nil
-}
-
 // urlSource is used to load an agent configuration from an HTTP/HTTPS URL.
 type urlSource struct {
 	url         string
@@ -271,15 +118,172 @@ type urlSource struct {
 	// sources_test.go), which exists because tests use httptest.NewServer
 	// (plain HTTP, 127.0.0.1).
 	unsafe bool
+	// encryptedConfig captures the X-Cagent-Encrypted-Config response header
+	// seen on a successful fetch from a trusted Docker URL. It is a pointer so
+	// the value-receiver Read can persist the captured value back onto the
+	// pointer the caller holds, and so concurrent readers see a consistent
+	// value.
+	encryptedConfig *atomic.Pointer[string]
 }
 
 // NewURLSource creates a new URL source. If envProvider is non-nil, it will be used
 // to look up GITHUB_TOKEN for authentication when fetching from GitHub URLs.
 func NewURLSource(rawURL string, envProvider environment.Provider) Source {
 	return &urlSource{
-		url:         rawURL,
-		envProvider: envProvider,
+		url:             rawURL,
+		envProvider:     envProvider,
+		encryptedConfig: &atomic.Pointer[string]{},
 	}
+}
+
+// EncryptedConfig returns the encrypted agent config captured from the
+// X-Cagent-Encrypted-Config response header during the most recent successful
+// Read from a trusted Docker URL, or "" if none was seen. It implements
+// [EncryptedConfigSource].
+func (a urlSource) EncryptedConfig() string {
+	if a.encryptedConfig == nil {
+		return ""
+	}
+	if v := a.encryptedConfig.Load(); v != nil {
+		return *v
+	}
+	return ""
+}
+
+// storeEncryptedConfig records enc both in memory (for this process) and on
+// disk (encPath, next to the cached YAML) so a later run that revalidates the
+// URL and gets a 304 — which no longer carries the full config, only its digest
+// — can recover the value from disk instead of the response.
+func (a urlSource) storeEncryptedConfig(ctx context.Context, enc, encPath string) {
+	if a.encryptedConfig != nil {
+		a.encryptedConfig.Store(&enc)
+	}
+	// Ensure the cache directory exists: captureEncryptedConfigFromEnvelope may run before
+	// the YAML-caching block that creates it (e.g. this fetch returns early).
+	if err := os.MkdirAll(filepath.Dir(encPath), 0o700); err != nil {
+		slog.DebugContext(ctx, "Failed to create cache dir for encrypted agent config", "url", a.url, "error", err)
+		return
+	}
+	if err := os.WriteFile(encPath, []byte(enc), 0o600); err != nil {
+		slog.DebugContext(ctx, "Failed to cache encrypted agent config", "url", a.url, "error", err)
+	}
+}
+
+// clearEncryptedConfig drops any in-memory encrypted config so that, until the
+// next successful capture, no (potentially stale) value is forwarded to the
+// gateway. The on-disk sidecar is left untouched. Safe to call concurrently.
+func (a urlSource) clearEncryptedConfig() {
+	if a.encryptedConfig != nil {
+		a.encryptedConfig.Store(nil)
+	}
+}
+
+// adoptCachedEncryptedConfig loads the encrypted config cached on disk and, if
+// present, records it in memory so it is forwarded to the Docker models gateway
+// on subsequent model requests. When wantDigest is non-empty (the server sent
+// X-Cagent-Encrypted-Config-Digest on a 304), the cached value is only adopted
+// if its digest matches, so a stale cache is never replayed. It reports whether
+// a usable, matching value was adopted.
+func (a urlSource) adoptCachedEncryptedConfig(ctx context.Context, encPath, wantDigest string) bool {
+	if a.encryptedConfig == nil {
+		return false
+	}
+	if !isTrustedDockerURL(a.url) {
+		return false
+	}
+	data, err := os.ReadFile(encPath)
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	enc := string(data)
+	if wantDigest != "" && encryptedConfigDigest(enc) != wantDigest {
+		slog.DebugContext(ctx, "Cached encrypted agent config does not match server digest; discarding", "url", a.url)
+		return false
+	}
+	a.encryptedConfig.Store(&enc)
+	slog.DebugContext(ctx, "Recovered encrypted agent config from cache", "url", a.url)
+	return true
+}
+
+// captureEncryptedConfigFromBody, when body is agent YAML from a trusted
+// Docker URL that carries a top-level `encrypted_agent_config` field, records
+// the encrypted config (in memory and on encPath) and returns the body with
+// that field stripped, so the config the rest of the pipeline parses never sees
+// it. For any other body (no such field, non-YAML, or an untrusted host) it
+// returns body unchanged and captures nothing. The trust check mirrors the
+// Docker JWT injection so the value is never captured from an untrusted host.
+func (a urlSource) captureEncryptedConfigFromBody(ctx context.Context, body, encPath string) string {
+	if !isTrustedDockerURL(a.url) {
+		return body
+	}
+
+	var doc yaml.MapSlice
+	if err := yaml.Unmarshal([]byte(body), &doc); err != nil {
+		// Not a YAML mapping (or malformed); leave it for the strict parser to
+		// report a precise error later.
+		return body
+	}
+
+	enc := ""
+	stripped := make(yaml.MapSlice, 0, len(doc))
+	for _, item := range doc {
+		if key, ok := item.Key.(string); ok && key == httpclient.EncryptedConfigBodyField {
+			if s, ok := item.Value.(string); ok {
+				enc = s
+			}
+			continue
+		}
+		stripped = append(stripped, item)
+	}
+	if enc == "" {
+		return body
+	}
+
+	if a.encryptedConfig != nil {
+		a.storeEncryptedConfig(ctx, enc, encPath)
+	}
+	slog.DebugContext(ctx, "Captured encrypted agent config from Docker source YAML field", "url", a.url)
+
+	out, err := yaml.Marshal(stripped)
+	if err != nil {
+		// Should not happen; fall back to the original body so the agent still
+		// loads (the field will surface as an unknown-field parse error, which
+		// is a safe, visible failure rather than silent corruption).
+		slog.DebugContext(ctx, "Failed to re-encode agent YAML after stripping encrypted config", "url", a.url, "error", err)
+		return body
+	}
+	return string(out)
+}
+
+// sendEncryptedQueryParam is the query parameter docker-agent adds to a trusted
+// Docker config-fetch URL to opt in to receiving the encrypted agent config
+// embedded in the response body. It must stay in sync with the Docker gateway
+// (gordon proxy pkg/agents/handler.go), which only injects the config when it
+// is set to "true".
+const sendEncryptedQueryParam = "sendEncrypted"
+
+// urlWithSendEncrypted returns rawURL with sendEncrypted=true added to its
+// query string, preserving any existing parameters. An existing sendEncrypted
+// value is overwritten.
+func urlWithSendEncrypted(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set(sendEncryptedQueryParam, "true")
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// encryptedConfigDigest returns the "sha256:<hex>" fingerprint of enc, matching
+// the format a trusted Docker source sends in X-Cagent-Encrypted-Config-Digest.
+func encryptedConfigDigest(enc string) string {
+	if enc == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(enc))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (a urlSource) Name() string {
@@ -306,21 +310,57 @@ func (a urlSource) Read(ctx context.Context) ([]byte, error) {
 	urlHash := hashURL(a.url)
 	cachePath := filepath.Join(cacheDir, urlHash)
 	etagPath := cachePath + ".etag"
+	// encPath sidecars the cached YAML with the encrypted agent config captured
+	// from the X-Cagent-Encrypted-Config header on a 200, so a later 304 (which
+	// carries only the digest) can recover it.
+	encPath := cachePath + ".enc"
 
-	// Read cached ETag if available
+	return a.read(ctx, cacheDir, cachePath, etagPath, encPath, false)
+}
+
+// read performs the conditional fetch and caching. When forceReload is true it
+// skips the If-None-Match revalidation so the server answers with a fresh 200
+// (never a 304); this is the self-healing path taken when a 304 arrives but the
+// encrypted config could not be recovered from cache (missing or digest
+// mismatch).
+func (a urlSource) read(ctx context.Context, cacheDir, cachePath, etagPath, encPath string, forceReload bool) ([]byte, error) {
+	// Read cached ETag if available (skipped when forcing a reload).
 	cachedETag := ""
-	if etagData, err := os.ReadFile(etagPath); err == nil {
-		cachedETag = string(etagData)
+	if !forceReload {
+		if etagData, err := os.ReadFile(etagPath); err == nil {
+			cachedETag = string(etagData)
+		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.url, http.NoBody)
+	reqURL := a.url
+	if isTrustedDockerURL(a.url) {
+		// Opt in to receiving the encrypted agent config embedded in the
+		// response body. Only trusted Docker gateways honor this, and only a
+		// client that sets it (like us) knows to strip the injected field
+		// before parsing — so the flag both requests the value and signals we
+		// can handle it. Best-effort: a malformed URL falls back to the
+		// original and simply won't receive the config.
+		if withFlag, err := urlWithSendEncrypted(a.url); err == nil {
+			reqURL = withFlag
+		}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	// Include If-None-Match header if we have a cached ETag
+	// Include If-None-Match header if we have a cached ETag and are not forcing
+	// a full reload.
 	if cachedETag != "" {
 		req.Header.Set("If-None-Match", cachedETag)
+	}
+	// On a forced reload, ask any intermediary (and the origin) not to answer
+	// from cache, so we are guaranteed a fresh 200 carrying the full encrypted
+	// config rather than another 304.
+	if forceReload {
+		req.Header.Set("Cache-Control", "no-cache")
+		req.Header.Set("Pragma", "no-cache")
 	}
 
 	a.addGitHubAuth(ctx, req)
@@ -336,7 +376,7 @@ func (a urlSource) Read(ctx context.Context) ([]byte, error) {
 		} else {
 			client = &http.Client{
 				Timeout:       60 * time.Second,
-				Transport:     httpclient.NewSSRFSafeTransport(),
+				Transport:     httpclient.NewDesktopAwareSSRFSafeTransport(),
 				CheckRedirect: httpclient.HTTPSOnlyRedirects(10),
 			}
 		}
@@ -345,36 +385,86 @@ func (a urlSource) Read(ctx context.Context) ([]byte, error) {
 	resp, err := client.Do(req)
 	if err != nil {
 		// Network error - try to use cached version
-		if cachedData, cacheErr := os.ReadFile(cachePath); cacheErr == nil {
+		if cachedData, cacheErr := readCachedConfig(cachePath); cacheErr == nil {
 			slog.DebugContext(ctx, "Network error fetching URL, using cached version", "url", a.url, "error", err)
+			a.adoptCachedEncryptedConfig(ctx, encPath, "")
 			return cachedData, nil
+		} else if errors.Is(cacheErr, configsize.ErrTooLarge) {
+			return nil, fmt.Errorf("reading cached configuration for %s: %w", a.url, cacheErr)
 		}
-		return nil, fmt.Errorf("fetching %s: %w", a.url, err)
+		return nil, fmt.Errorf("%w: fetching %s: %w", ErrSourceFetchFailed, a.url, err)
 	}
 	defer resp.Body.Close()
 
+	// The full encrypted agent config now rides in the 200 response body
+	// envelope (handled after the body is read below); a 304 carries only the
+	// digest, handled next.
+
 	// 304 Not Modified - return cached content
 	if resp.StatusCode == http.StatusNotModified {
-		if cachedData, cacheErr := os.ReadFile(cachePath); cacheErr == nil {
+		if cachedData, cacheErr := readCachedConfig(cachePath); cacheErr == nil {
+			// Recover the encrypted config from disk, verifying it against the
+			// digest the server sent (when present). If it is missing or stale,
+			// self-heal by forcing a full reload so we get the config again.
+			wantDigest := resp.Header.Get(httpclient.EncryptedConfigDigestHeader)
+			if wantDigest != "" && !a.adoptCachedEncryptedConfig(ctx, encPath, wantDigest) {
+				if !forceReload {
+					slog.DebugContext(ctx, "304 received but cached encrypted config is missing or stale; forcing a reload", "url", a.url)
+					return a.read(ctx, cacheDir, cachePath, etagPath, encPath, true)
+				}
+				// We already forced a reload (Cache-Control: no-cache), yet the
+				// server answered 304 again with a digest we still cannot match
+				// from cache. A forced reload is supposed to bypass caching and
+				// return a fresh 200 carrying the full config, so a second 304 is
+				// a server/protocol violation we cannot recover from here.
+				//
+				// The YAML config itself is valid and cached, so we do NOT fail
+				// the whole config load over it — that would keep the agent from
+				// starting for what is only an encrypted-config-forwarding issue.
+				// Instead we leave the encrypted config unset (nothing stale or
+				// mismatched is forwarded to the gateway; the proxy-side check
+				// fails open for a missing header) and warn loudly.
+				a.clearEncryptedConfig()
+				slog.WarnContext(ctx, "Server returned 304 to a forced reload but the cached encrypted agent config does not match the advertised digest; forwarding no encrypted config for this URL", "url", a.url, "want_digest", wantDigest)
+			}
+			if wantDigest == "" {
+				// No digest advertised: best-effort adopt whatever is cached.
+				a.adoptCachedEncryptedConfig(ctx, encPath, "")
+			}
 			slog.DebugContext(ctx, "URL not modified, using cached version", "url", a.url)
 			return cachedData, nil
+		} else if errors.Is(cacheErr, configsize.ErrTooLarge) {
+			return nil, fmt.Errorf("reading cached configuration for %s: %w", a.url, cacheErr)
 		}
 		// Cache file missing despite 304, fall through to fetch again
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		// HTTP error - try to use cached version
-		if cachedData, cacheErr := os.ReadFile(cachePath); cacheErr == nil {
+		if cachedData, cacheErr := readCachedConfig(cachePath); cacheErr == nil {
 			slog.DebugContext(ctx, "HTTP error fetching URL, using cached version", "url", a.url, "status", resp.Status)
+			a.adoptCachedEncryptedConfig(ctx, encPath, "")
 			return cachedData, nil
+		} else if errors.Is(cacheErr, configsize.ErrTooLarge) {
+			return nil, fmt.Errorf("reading cached configuration for %s: %w", a.url, cacheErr)
 		}
-		return nil, fmt.Errorf("fetching %s: %s", a.url, resp.Status)
+		return nil, fmt.Errorf("%w: fetching %s: %s", ErrSourceFetchFailed, a.url, resp.Status)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := configsize.Read(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
+		if errors.Is(err, configsize.ErrTooLarge) {
+			return nil, fmt.Errorf("fetching %s: %w", a.url, err)
+		}
+		return nil, fmt.Errorf("%w: reading response body: %w", ErrSourceFetchFailed, err)
 	}
+
+	// Cache the response and any associated encrypted config only after the
+	// complete body passes the size limit. When a trusted Docker source embeds
+	// the encrypted config as a top-level YAML field, capture it and strip the
+	// field so the cached content is the plain agent YAML (raw-YAML sources and
+	// untrusted hosts are returned unchanged).
+	data = []byte(a.captureEncryptedConfigFromBody(ctx, string(data), encPath))
 
 	// Cache the response
 	if err := os.MkdirAll(cacheDir, 0o700); err == nil {
@@ -394,6 +484,15 @@ func (a urlSource) Read(ctx context.Context) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+func readCachedConfig(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := configsize.Read(file)
+	return data, errors.Join(readErr, file.Close())
 }
 
 // githubHosts lists the hostnames that support GitHub token authentication.
@@ -477,15 +576,25 @@ func isLocalhostHTTP(rawURL string) bool {
 	if err != nil {
 		return false
 	}
-	return u.Scheme == "http" && u.Hostname() == "localhost"
+	return u.Scheme == "http" && isLocalhostHTTPHost(u.Hostname())
+}
+
+func isLocalhostHTTPHost(host string) bool {
+	// Deliberately exact: this predicate decides whether an agent source may
+	// be fetched over plaintext HTTP with no dial-time SSRF guard (see
+	// urlSource.Read). *.localhost is an RFC 6761 convention, not guaranteed
+	// by musl, Docker's embedded DNS (127.0.0.11), or corporate resolvers.
+	// Use httpclient.isLoopbackHost for transport-level checks.
+	return strings.EqualFold(strings.TrimSuffix(host, "."), "localhost")
 }
 
 // validateAgentURL enforces that an agent URL uses HTTPS, with an exception
 // for http://localhost which is allowed for local development. SSRF protection
-// (rejecting connections to loopback / private / link-local addresses) is
-// done at dial time by [httpclient.NewSSRFSafeTransport] so that DNS
-// rebinding cannot be used to bypass it. The SSRF transport is intentionally
-// skipped for http://localhost since loopback is the whole point.
+// is applied by [httpclient.NewDesktopAwareSSRFSafeTransport]: on the direct
+// path (non-Docker host or Desktop unavailable) it refuses non-public IPs at
+// dial time after DNS resolution; Docker-owned hosts may go through Desktop's
+// PAC proxy where dial-time enforcement does not apply. The SSRF transport is
+// intentionally skipped for http://localhost since loopback is the whole point.
 func validateAgentURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {

@@ -141,7 +141,7 @@ Each model provider requires its own API key as an environment variable:
 | MiniMax       | `MINIMAX_API_KEY`                                   |
 | Requesty      | `REQUESTY_API_KEY`                                  |
 | OpenRouter    | `OPENROUTER_API_KEY`                                |
-| GitHub Copilot | `GITHUB_TOKEN` (PAT with `copilot` scope)          |
+| GitHub Copilot | `GITHUB_TOKEN` or `GH_TOKEN` (PAT with `copilot` scope)          |
 | Azure OpenAI  | `AZURE_API_KEY` (override with `token_key`)         |
 | AWS Bedrock   | `AWS_BEARER_TOKEN_BEDROCK` or AWS credentials chain |
 
@@ -159,7 +159,7 @@ Model names must match the provider's naming exactly. Common mistakes:
 
 ### Network connectivity
 
-If the agent hangs or times out, check that you can reach the provider's API endpoint. Firewalls, VPNs, or proxy settings may block requests.
+If the agent hangs or times out, check that you can reach the provider's API endpoint. Firewalls, VPNs, or proxy settings may block requests. Docker Agent does not evaluate PAC files or URLs directly. When Docker Desktop is running, eligible requests use its PAC adapter before environment proxy settings; `NO_PROXY` does not bypass that selection. Set `DOCKER_AGENT_DISABLE_DESKTOP_PROXY=1` (or `true`, `yes`, or `on`) to restore `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` routing per request; see [Docker Desktop proxy](../../tools/fetch/index.md#docker-desktop-proxy) for scope and SSRF behavior.
 
 ## Tool Execution Failures
 
@@ -199,6 +199,8 @@ MCP tools using stdio transport must complete the initialization handshake befor
 
 If a toolset keeps crashing in a tight loop, tune the [`lifecycle`](../../configuration/tools/index.md#toolset-lifecycle) block on the toolset (e.g. raise `backoff.initial`, lower `max_restarts`, or switch to the `best-effort` profile) so a flaky dependency does not amplify into a restart storm.
 
+If a **RAG knowledge base** is failing to index because the embedding provider is rate-limiting requests (HTTP 429), Docker Agent automatically backs off and retries — see [Indexing failures, retries and backoff](../../tools/rag/index.md#indexing-failures-retries-and-backoff) for the retry schedule and the `max_indexing_concurrency` / `max_embedding_concurrency` knobs that control how much concurrent load is generated.
+
 ## Configuration Errors
 
 ### YAML syntax issues
@@ -227,6 +229,13 @@ Docker Agent validates config at startup and reports errors with line numbers. C
 > Use the [JSON schema](https://github.com/docker/docker-agent/blob/main/agent-schema.json) in your editor for real-time config validation and autocompletion.
 
 ## Session &amp; Connectivity Issues
+
+### Downgrade fails with a newer-database error
+
+If an older Docker Agent binary cannot open the session database after an upgrade,
+the database may contain a schema migration that the older binary does not know.
+Restore a database created by the older version, or use a binary that includes the
+migration.
 
 ### Port conflicts
 

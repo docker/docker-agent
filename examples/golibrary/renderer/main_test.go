@@ -16,7 +16,7 @@ func TestEmbeddedMCPExposesPrefixedTool(t *testing.T) {
 	srv := startMCPServer()
 	defer srv.Close()
 
-	ts := tools.NewStartable(mcptools.NewRemoteToolset("github", srv.URL, "streamable", nil, nil))
+	ts := tools.NewStartable(mcptools.NewRemoteToolsetWithAllowPrivateIPs("github", srv.URL, "streamable", nil, nil, true))
 	require.NoError(t, ts.Start(ctx))
 	defer func() { _ = ts.Stop(ctx) }()
 
