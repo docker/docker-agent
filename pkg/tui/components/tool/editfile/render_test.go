@@ -149,3 +149,84 @@ func TestRenderEditFile_MissingFileReturnsEmptyDiff(t *testing.T) {
 		_ = renderEditFile(toolCall, 100, false, types.ToolStatusCompleted)
 	})
 }
+
+// An edit whose oldText matches more than once is refused by the tool, but
+// strings.Replace(..., 1) always produces a first-occurrence diff — so without
+// the preview check the user approves a change that never happens, having been
+// shown a diff that was never on offer.
+func TestRenderEditFile_ConfirmationPreviewsRefusal(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "conf.py")
+
+	const original = "def dev():\n    debug = True\n\ndef prod():\n    debug = True\n"
+	require.NoError(t, os.WriteFile(path, []byte(original), 0o644))
+
+	render := func(t *testing.T, id string, edits []map[string]string, status types.ToolStatus) string {
+		t.Helper()
+		encoded, err := json.Marshal(map[string]any{"path": path, "edits": edits})
+		require.NoError(t, err)
+		toolCall := tools.ToolCall{
+			ID:       id,
+			Function: tools.FunctionCall{Name: "edit_file", Arguments: string(encoded)},
+		}
+		InvalidateCaches()
+		t.Cleanup(InvalidateCaches)
+		return ansi.Strip(renderEditFile(toolCall, 120, false, status))
+	}
+
+	t.Run("ambiguous edit shows the refusal instead of a diff", func(t *testing.T) {
+		out := render(t, "test-refusal-ambiguous",
+			[]map[string]string{{"oldText": "    debug = True", "newText": "    debug = False"}},
+			types.ToolStatusConfirmation)
+
+		assert.Contains(t, out, "will be refused")
+		assert.Contains(t, out, "appears 2 times")
+		assert.NotContains(t, out, "debug = False",
+			"a diff the tool will not apply must not be shown")
+	})
+
+	t.Run("empty oldText shows the refusal", func(t *testing.T) {
+		out := render(t, "test-refusal-empty",
+			[]map[string]string{{"oldText": "", "newText": "INJECTED"}},
+			types.ToolStatusConfirmation)
+
+		assert.Contains(t, out, "oldText must not be empty")
+		assert.NotContains(t, out, "INJECTED")
+	})
+
+	// Control: the preview must not refuse what the tool would accept. The
+	// first edit removes the duplicate that made the second one ambiguous, so
+	// the reason has to be evaluated against the running content.
+	t.Run("an earlier edit resolving a later ambiguity still previews", func(t *testing.T) {
+		out := render(t, "test-refusal-chained",
+			[]map[string]string{
+				{"oldText": "def dev():\n    debug = True", "newText": "def dev():\n    debug = None"},
+				{"oldText": "    debug = True", "newText": "    debug = False"},
+			},
+			types.ToolStatusConfirmation)
+
+		assert.NotContains(t, out, "will be refused")
+		assert.NotEmpty(t, out)
+	})
+
+	// Control: an unambiguous edit is unaffected.
+	t.Run("a unique edit previews normally", func(t *testing.T) {
+		out := render(t, "test-refusal-unique",
+			[]map[string]string{{"oldText": "def prod():\n    debug = True", "newText": "def prod():\n    debug = False"}},
+			types.ToolStatusConfirmation)
+
+		assert.NotContains(t, out, "will be refused")
+		assert.Contains(t, out, "debug = False")
+	})
+
+	// Control: after execution the file on disk is the outcome; there is
+	// nothing left to predict and the diff must render as before.
+	t.Run("a completed call is never previewed as refused", func(t *testing.T) {
+		out := render(t, "test-refusal-completed",
+			[]map[string]string{{"oldText": "    debug = True", "newText": "    debug = False"}},
+			types.ToolStatusCompleted)
+
+		assert.NotContains(t, out, "will be refused")
+	})
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/lrucache"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
@@ -127,6 +128,10 @@ func renderEditFileUncached(toolCall tools.ToolCall, width int, splitView bool, 
 		return ""
 	}
 
+	if notice := refusalNotice(args, toolStatus); notice != "" {
+		return notice
+	}
+
 	var output strings.Builder
 	for i, edit := range args.Edits {
 		if i > 0 {
@@ -146,6 +151,43 @@ func renderEditFileUncached(toolCall tools.ToolCall, width int, splitView bool, 
 	}
 
 	return output.String()
+}
+
+// refusalNotice returns the message to show in place of a diff when the edit
+// the user is being asked to approve will be refused, or an empty string when
+// the call is applicable.
+//
+// Without this, an ambiguous or empty oldText is previewed as a
+// first-occurrence diff — strings.Replace(..., 1) always produces one — so the
+// user approves a change the tool then declines, and the diff they saw was
+// never the change that would have been made.
+//
+// Only meaningful before execution: once the tool has run, the file on disk is
+// the outcome and there is nothing left to predict.
+func refusalNotice(args filesystem.EditFileArgs, toolStatus types.ToolStatus) string {
+	if toolStatus != types.ToolStatusConfirmation {
+		return ""
+	}
+
+	content, err := os.ReadFile(args.Path)
+	if err != nil {
+		// The tool reports unreadable paths itself; a preview must not
+		// second-guess it.
+		return ""
+	}
+
+	// Evaluated against the running content exactly as handleEditFile does, so
+	// a preview never refuses a call the tool would accept: an earlier edit may
+	// legitimately remove a duplicate that made a later one ambiguous.
+	running := string(content)
+	for i, edit := range args.Edits {
+		if reason := filesystem.EditFailureReason(running, edit); reason != "" {
+			return styles.ErrorStyle.Render(
+				fmt.Sprintf("This call will be refused — Edit %d: %s", i+1, reason))
+		}
+		running = strings.Replace(running, edit.OldText, edit.NewText, 1)
+	}
+	return ""
 }
 
 // countDiffLines returns the number of added and removed lines for the edit.

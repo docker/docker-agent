@@ -44,7 +44,7 @@ This helps agents distinguish between an empty directory and a tool failure, avo
 | `read_file`            | Read the contents of a file (whole file, or a line range of a text file)  |
 | `read_multiple_files`  | Read several files in one call (more efficient than multiple `read_file`) |
 | `write_file`           | Create or overwrite a file with new content                               |
-| `edit_file`            | Make line-based edits (find-and-replace) in an existing file. Each edit must specify a non-empty `oldText` to match and replace; empty `oldText` values are rejected with an error. |
+| `edit_file`            | Make line-based edits (find-and-replace) in an existing file. Each edit must specify a non-empty `oldText` that matches exactly once in the file; empty `oldText` values and ambiguous matches are rejected with an error naming the occurrence count. Add surrounding context to disambiguate, or send one edit per occurrence to change several. |
 | `list_directory`       | List files and directories at a given path (explicitly reports empty directories) |
 | `directory_tree`       | Recursive tree view of a directory                                        |
 | `create_directory`     | Create a new directory (creates parent directories as needed)             |

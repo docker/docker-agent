@@ -584,6 +584,103 @@ func TestFilesystemTool_EditFileRejectsEmptyOldText(t *testing.T) {
 	})
 }
 
+// An oldText that matches more than once is ambiguous: strings.Replace(..., 1)
+// would rewrite the first occurrence and report a plain success, so the model
+// cannot tell whether it edited the site it meant. The caller has to
+// disambiguate with more surrounding context instead.
+func TestFilesystemTool_EditFileRejectsAmbiguousMatch(t *testing.T) {
+	t.Parallel()
+
+	// The same assignment in two different blocks — a realistic shape.
+	const original = "def dev():\n    debug = True\n\ndef prod():\n    debug = True\n"
+
+	t.Run("two occurrences are refused", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		tool := New(tmpDir)
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conf.py"), []byte(original), 0o644))
+
+		result, err := tool.handleEditFile(t.Context(), EditFileArgs{
+			Path:  "conf.py",
+			Edits: []Edit{{OldText: "    debug = True", NewText: "    debug = False"}},
+		})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Output, "appears 2 times")
+
+		after, err := os.ReadFile(filepath.Join(tmpDir, "conf.py"))
+		require.NoError(t, err)
+		assert.Equal(t, original, string(after), "an ambiguous edit must not modify the file")
+	})
+
+	t.Run("a uniquely matching edit still applies", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		tool := New(tmpDir)
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conf.py"), []byte(original), 0o644))
+
+		// Enough surrounding context to match exactly once.
+		result, err := tool.handleEditFile(t.Context(), EditFileArgs{
+			Path:  "conf.py",
+			Edits: []Edit{{OldText: "def prod():\n    debug = True", NewText: "def prod():\n    debug = False"}},
+		})
+		require.NoError(t, err)
+		assert.False(t, result.IsError)
+
+		after, err := os.ReadFile(filepath.Join(tmpDir, "conf.py"))
+		require.NoError(t, err)
+		assert.Equal(t, "def dev():\n    debug = True\n\ndef prod():\n    debug = False\n", string(after))
+	})
+
+	// Occurrences must be counted against the running content, not the original:
+	// an earlier edit can legitimately remove a duplicate and leave the later
+	// edit unambiguous.
+	t.Run("an earlier edit may resolve a later edit's ambiguity", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		tool := New(tmpDir)
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conf.py"), []byte(original), 0o644))
+
+		result, err := tool.handleEditFile(t.Context(), EditFileArgs{
+			Path: "conf.py",
+			Edits: []Edit{
+				// Removes the first duplicate, using surrounding context.
+				{OldText: "def dev():\n    debug = True", NewText: "def dev():\n    debug = None"},
+				// Now matches exactly once.
+				{OldText: "    debug = True", NewText: "    debug = False"},
+			},
+		})
+		require.NoError(t, err)
+		assert.False(t, result.IsError, "got: %s", result.Output)
+
+		after, err := os.ReadFile(filepath.Join(tmpDir, "conf.py"))
+		require.NoError(t, err)
+		assert.Equal(t, "def dev():\n    debug = None\n\ndef prod():\n    debug = False\n", string(after))
+	})
+
+	t.Run("an ambiguous later edit discards the earlier one", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		tool := New(tmpDir)
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conf.py"), []byte(original), 0o644))
+
+		result, err := tool.handleEditFile(t.Context(), EditFileArgs{
+			Path: "conf.py",
+			Edits: []Edit{
+				{OldText: "def dev():", NewText: "def development():"},
+				{OldText: "    debug = True", NewText: "    debug = False"},
+			},
+		})
+		require.NoError(t, err)
+		assert.True(t, result.IsError)
+		assert.Contains(t, result.Output, "Edit 2")
+
+		after, err := os.ReadFile(filepath.Join(tmpDir, "conf.py"))
+		require.NoError(t, err)
+		assert.Equal(t, original, string(after), "no edit may be persisted when a later one is rejected")
+	})
+}
+
 func TestParseEditFileArgs(t *testing.T) {
 	t.Parallel()
 
@@ -1646,4 +1743,87 @@ func TestFilesystemTool_EditFileHandlerRefusesWellFormedEmptyOldText(t *testing.
 	after, err := os.ReadFile(filepath.Join(tmpDir, "f.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, original, string(after))
+}
+
+// EditFailureReason is the single rule both the built-in handler and the ACP
+// override apply, so it is tested directly rather than only through them.
+func TestEditFailureReason(t *testing.T) {
+	t.Parallel()
+
+	const content = "a = 1\nb = 2\na = 1\n"
+
+	t.Run("applicable edit has no reason", func(t *testing.T) {
+		t.Parallel()
+		assert.Empty(t, EditFailureReason(content, Edit{OldText: "b = 2", NewText: "b = 9"}))
+	})
+
+	t.Run("missing text", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "old text not found",
+			EditFailureReason(content, Edit{OldText: "nope", NewText: "x"}))
+	})
+
+	// strings.Count(s, "") returns the rune count plus one, so an empty oldText
+	// would otherwise fall into the n > 1 arm and report a meaningless
+	// "appears 19 times" with advice that cannot be satisfied.
+	t.Run("empty oldText gets its own message, not an occurrence count", func(t *testing.T) {
+		t.Parallel()
+		reason := EditFailureReason(content, Edit{OldText: "", NewText: "x"})
+		assert.Equal(t, "oldText must not be empty", reason)
+		assert.NotContains(t, reason, "appears")
+	})
+
+	t.Run("ambiguous match names the count and both remedies", func(t *testing.T) {
+		t.Parallel()
+		reason := EditFailureReason(content, Edit{OldText: "a = 1", NewText: "a = 9"})
+		assert.Contains(t, reason, "appears 2 times")
+		assert.Contains(t, reason, "more surrounding context")
+		// A model whose intent was *every* occurrence needs to be told how this
+		// schema expresses that, or it retries the same payload.
+		assert.Contains(t, reason, "one edit per occurrence")
+	})
+}
+
+// Repeating an identical edit used to be the way to express "change every
+// occurrence", and refusing it is a deliberate behaviour change. The intent must
+// still be expressible, which is what the error message now points at.
+func TestFilesystemTool_EditFileMultiOccurrenceIntentRemainsExpressible(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	tool := New(tmpDir)
+	const original = "a = 1\nb = 2\na = 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "conf.py"), []byte(original), 0o644))
+
+	// The old spelling — the same edit twice — is now refused.
+	result, err := tool.handleEditFile(t.Context(), EditFileArgs{
+		Path: "conf.py",
+		Edits: []Edit{
+			{OldText: "a = 1", NewText: "a = 9"},
+			{OldText: "a = 1", NewText: "a = 9"},
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, result.IsError)
+	assert.Contains(t, result.Output, "one edit per occurrence")
+
+	after, err := os.ReadFile(filepath.Join(tmpDir, "conf.py"))
+	require.NoError(t, err)
+	require.Equal(t, original, string(after), "the refused batch must not have written")
+
+	// One edit per occurrence, each carrying enough context to be unique, does
+	// what the model meant.
+	result, err = tool.handleEditFile(t.Context(), EditFileArgs{
+		Path: "conf.py",
+		Edits: []Edit{
+			{OldText: "a = 1\nb = 2", NewText: "a = 9\nb = 2"},
+			{OldText: "b = 2\na = 1", NewText: "b = 2\na = 9"},
+		},
+	})
+	require.NoError(t, err)
+	require.False(t, result.IsError, result.Output)
+
+	after, err = os.ReadFile(filepath.Join(tmpDir, "conf.py"))
+	require.NoError(t, err)
+	assert.Equal(t, "a = 9\nb = 2\na = 9\n", string(after))
 }
