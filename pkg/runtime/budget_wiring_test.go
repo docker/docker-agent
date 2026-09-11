@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,16 @@ func (s *collectSink) budgetUsages() []*BudgetUsageEvent {
 	for _, e := range s.events {
 		if b, ok := e.(*BudgetUsageEvent); ok {
 			out = append(out, b)
+		}
+	}
+	return out
+}
+
+func (s *collectSink) warnings() []*WarningEvent {
+	var out []*WarningEvent
+	for _, e := range s.events {
+		if w, ok := e.(*WarningEvent); ok {
+			out = append(out, w)
 		}
 	}
 	return out
@@ -197,4 +208,54 @@ func TestEnforceBudgetEmitsCanonicalStopMessage(t *testing.T) {
 	assert.Equal(t, exceeded.StopMessage.Message.CreatedAt, recorded.Message.CreatedAt)
 	require.NotNil(t, added.Message)
 	assert.Equal(t, recorded, *added.Message)
+}
+
+func TestEnforceBudgetWarnsOnceThenStillHardStops(t *testing.T) {
+	now := budgetEpoch
+	r := &LocalRuntime{now: func() time.Time { return now }}
+	WithBudget(&latest.BudgetConfig{MaxCost: 0.50})(r)
+	r.ensureBudget()
+
+	sess := session.New()
+	a := agent.New("root", "test")
+	sink := &collectSink{}
+
+	r.recordBudget(sess, a, &chat.Usage{InputTokens: 100, OutputTokens: 100}, new(0.40), time.Second, sink)
+	require.Equal(t, iterationContinue, r.enforceBudget(t.Context(), sess, a, sink),
+		"80% of max_cost must not stop the run")
+
+	warns := sink.warnings()
+	require.Len(t, warns, 1, "enforceBudget must emit exactly one Warning at 80%")
+	assert.Contains(t, warns[0].Message, "used $0.40 of $0.50 budget.max_cost")
+	assert.Contains(t, warns[0].Message, "Prefer cheaper tools")
+
+	prompt := sess.GetMessages(a)
+	var sawSystem bool
+	for _, msg := range prompt {
+		if msg.Role == chat.MessageRoleSystem && strings.Contains(msg.Content, "approaching the configured budget") {
+			sawSystem = true
+			assert.Equal(t, warns[0].Message, msg.Content, "the model-visible message must match the Warning event")
+		}
+	}
+	assert.True(t, sawSystem, "the approaching warning must be in the next-turn prompt")
+
+	eventCount := len(sink.events)
+	require.Equal(t, iterationContinue, r.enforceBudget(t.Context(), sess, a, sink))
+	assert.Len(t, sink.warnings(), 1, "a second enforceBudget must not re-warn")
+	assert.Equal(t, eventCount, len(sink.events), "no extra events on the second approaching check")
+
+	r.recordBudget(sess, a, &chat.Usage{InputTokens: 10, OutputTokens: 10}, new(0.15), time.Second, sink)
+	require.Equal(t, iterationStop, r.enforceBudget(t.Context(), sess, a, sink),
+		"crossing the ceiling after a warning must still hard-stop")
+
+	var exceeded *BudgetExceededEvent
+	for _, e := range sink.events {
+		if ev, ok := e.(*BudgetExceededEvent); ok {
+			exceeded = ev
+		}
+	}
+	require.NotNil(t, exceeded, "hard-stop contract is unchanged")
+	assert.Equal(t, "max_cost", exceeded.Limit)
+	assert.Equal(t, "budget.max_cost", exceeded.ConfigPath)
+	assert.Contains(t, exceeded.Message, "Execution stopped")
 }
