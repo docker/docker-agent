@@ -764,17 +764,22 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 	})
 }
 
-func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
 	var params handoff.Args
 	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
-	ca := r.currentAgentName()
-	currentAgent, err := r.team.Agent(ca)
-	if err != nil {
-		return nil, fmt.Errorf("current agent not found: %w", err)
+	// Resolve the caller from the dispatcher's batch snapshot, never from the
+	// shared current agent: a transfer_task running beside this call in the
+	// same batch may already have swapped it, which would validate the handoff
+	// against the transfer target's handoffs list instead of the real
+	// caller's (#4156).
+	currentAgent := r.callerAgent(rt, sess)
+	if currentAgent == nil {
+		return nil, errors.New("no agent resolved for the calling session")
 	}
+	ca := currentAgent.Name()
 
 	if errResult := validateAgentInList(ca, params.Agent, "hand off to", "handoffs list", currentAgent.Handoffs()); errResult != nil {
 		return errResult, nil

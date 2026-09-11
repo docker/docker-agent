@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
+	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
 	"github.com/docker/docker-agent/pkg/tools/builtin/think"
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
@@ -1972,4 +1973,44 @@ func TestTransferTask_PinningByBatchShape(t *testing.T) {
 			assert.Equal(t, tt.wantHandoffCalls, probe.handoffCallCount())
 		})
 	}
+}
+
+func handoffToolCall(target string) tools.ToolCall {
+	return tools.ToolCall{
+		ID:   "call_handoff",
+		Type: "function",
+		Function: tools.FunctionCall{
+			Name:      handoff.ToolNameHandoff,
+			Arguments: fmt.Sprintf(`{"agent":%q}`, target),
+		},
+	}
+}
+
+// TestHandoff_UsesBatchCallerSnapshotNotSharedCurrentAgent extends #4156 to the
+// sibling delegating tool: handoff resolved its caller from the shared current
+// agent, which a transfer_task running beside it in the same batch may already
+// have swapped. The handoff was then validated against the transfer target's
+// handoffs list rather than the real caller's, rejecting a legitimate call.
+func TestHandoff_UsesBatchCallerSnapshotNotSharedCurrentAgent(t *testing.T) {
+	t.Parallel()
+
+	idle := func() *mockProvider { return &mockProvider{id: "test/mock-model", stream: &mockStream{}} }
+
+	specialist := agent.New("specialist", "Specialist agent", agent.WithModel(idle()))
+	// Stands in for a sibling transfer_task's target. It declares no handoffs,
+	// so resolving it as the caller rejects the call outright.
+	drafter := agent.New("drafter", "Drafter agent", agent.WithModel(idle()))
+	root := agent.New("root", "Root agent", agent.WithModel(idle()), agent.WithHandoffs(specialist))
+
+	rt := newDelegationRuntime(t, root, specialist, drafter)
+	rt.setCurrentAgent("drafter")
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	result, err := rt.handleHandoff(t.Context(), sess, handoffToolCall("specialist"),
+		NewChannelSink(make(chan Event, 128)), callerRuntime{caller: root})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError,
+		"the caller must come from the batch snapshot (root), not the swapped current agent: %s", result.Output)
+	assert.Equal(t, "specialist", rt.CurrentAgentName(t.Context()))
 }
