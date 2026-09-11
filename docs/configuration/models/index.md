@@ -32,7 +32,7 @@ models:
     token_key: string # Optional: env var for API token
     thinking_budget: string|int # Optional: reasoning effort
     task_budget: int|object # Optional: total task token budget (Anthropic)
-    parallel_tool_calls: boolean # Optional: allow parallel tool calls
+    parallel_tool_calls: boolean # Optional: allow parallel tool calls. Omit to use the provider/API default.
     track_usage: boolean # Optional: track token usage
     routing: [list] # Optional: rule-based model routing
     capabilities: # Optional: override attachment (input) capabilities
@@ -72,7 +72,7 @@ models:
 | `token_key`           | string     | ✗        | Environment variable name containing the API token (overrides provider default)       |
 | `thinking_budget`     | string/int | ✗        | Reasoning effort control                                                              |
 | `task_budget`         | int/object | ✗        | Total token budget for an agentic task (forwarded to Anthropic; see [Task Budget](#task-budget)). |
-| `parallel_tool_calls` | boolean    | ✗        | Allow model to call multiple tools at once                                            |
+| `parallel_tool_calls` | boolean    | ✗        | Allow model to call multiple tools at once. When omitted, Docker Agent leaves the setting unset so the selected provider or API can apply its own default. |
 | `track_usage`         | boolean    | ✗        | Track and report token usage for this model                                           |
 | `routing`             | array      | ✗        | Rule-based routing to different models. See [Model Routing](../routing/index.md). |
 | `capabilities`        | object     | ✗        | Override attachment (input) capabilities for this model. See [Attachment Capability Overrides](#attachment-capability-overrides). |

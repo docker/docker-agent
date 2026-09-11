@@ -104,7 +104,7 @@ agents:
 | `top_p`               | float      | Default nucleus sampling threshold (0.0–1.0).                                         | —                        |
 | `frequency_penalty`   | float      | Default frequency penalty (-2.0–2.0).                                                 | —                        |
 | `presence_penalty`    | float      | Default presence penalty (-2.0–2.0).                                                  | —                        |
-| `parallel_tool_calls` | boolean    | Whether to enable parallel tool calls by default.                                     | —                        |
+| `parallel_tool_calls` | boolean    | Whether to enable parallel tool calls by default. When omitted, the provider/API default is used.         | —                        |
 | `track_usage`         | boolean    | Whether to track token usage by default.                                              | —                        |
 | `thinking_budget`     | string/int | Default reasoning effort/budget.                                                      | —                        |
 | `task_budget`         | int/object | Default total token budget for an agentic task (forwarded to Anthropic; honored by Claude Opus 4.7+ today). Integer shorthand or `{type: tokens, total: N}`. | —                        |

@@ -402,6 +402,8 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		}
 		promptFiles = unique
 
+		// Build options in source order: author configuration first, followed by
+		// loader/runtime additions below, so explicit execution overrides win.
 		opts := []agent.Opt{
 			agent.WithName(agentConfig.Name),
 			agent.WithDescription(expander.Expand(ctx, agentConfig.Description, nil)),

@@ -1200,6 +1200,76 @@ func TestLoadRejectsUncompilableToolModeSchema(t *testing.T) {
 	require.ErrorContains(t, err, "agent root: structured_output")
 }
 
+func TestLoadPreservesModelPolicyDefaults(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	tests := []struct {
+		name string
+		yaml string
+		want *bool
+	}{
+		{
+			name: "omitted",
+			yaml: `models:
+  configured:
+    provider: openai
+    model: gpt-4o
+agents:
+  root:
+    model: configured
+    instruction: test
+`,
+			want: nil,
+		},
+		{
+			name: "explicit true",
+			yaml: `models:
+  configured:
+    provider: openai
+    model: gpt-4o
+    parallel_tool_calls: true
+agents:
+  root:
+    model: configured
+    instruction: test
+`,
+			want: new(true),
+		},
+		{
+			name: "explicit false",
+			yaml: `models:
+  configured:
+    provider: openai
+    model: gpt-4o
+    parallel_tool_calls: false
+agents:
+  root:
+    model: configured
+    instruction: test
+`,
+			want: new(false),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loaded, err := Load(t.Context(), config.NewBytesSource("model.yaml", []byte(tt.yaml)),
+				&config.RuntimeConfig{}, withTestProviderRegistry()...)
+			require.NoError(t, err)
+			root, err := loaded.Agent("root")
+			require.NoError(t, err)
+			models := root.ConfiguredModels()
+			require.Len(t, models, 1)
+			got := models[0].BaseConfig().ModelConfig.ParallelToolCalls
+			if tt.want == nil {
+				assert.Nil(t, got)
+			} else if assert.NotNil(t, got) {
+				assert.Equal(t, *tt.want, *got)
+			}
+		})
+	}
+}
+
 // TestLoadPropagatesSafetyDefaults verifies the author-declared safety
 // defaults travel from the YAML config to the built team: runtime.safety
 // lands on the team (team.RuntimeSafety) and agents.<name>.safety on the

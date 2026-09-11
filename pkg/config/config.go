@@ -262,14 +262,6 @@ func validateConfig(cfg *latest.Config) error {
 		cfg.Models = map[string]latest.ModelConfig{}
 	}
 
-	for name := range cfg.Models {
-		if cfg.Models[name].ParallelToolCalls == nil {
-			m := cfg.Models[name]
-			m.ParallelToolCalls = new(true)
-			cfg.Models[name] = m
-		}
-	}
-
 	if err := ensureModelsExist(cfg); err != nil {
 		return err
 	}
