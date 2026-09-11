@@ -122,6 +122,11 @@ Before marking work as complete:
   blocking job; to make a new job blocking, add it to `gate.needs` in
   `.github/workflows/ci.yml` — the ruleset does not change. Docs-only PRs
   (only `docs/**` changed) skip the Go jobs; `gate` treats skipped as passed
+- `report-main-failures` runs after the test jobs on failed pushes to the
+  canonical repository's `main` branch. It files deduplicated Bug issues using
+  the required `flaky-test` label, assigns them to `dgageot`, and throttles
+  repeat run-link comments to once per 24 hours. The job is diagnostic and
+  intentionally excluded from `gate.needs`
 - Every job sets `timeout-minutes`; every checkout sets
   `persist-credentials: false`. zizmor (`.github/zizmor.yml`) and Dependabot
   (`.github/dependabot.yml`, GitHub Actions only) keep both honest

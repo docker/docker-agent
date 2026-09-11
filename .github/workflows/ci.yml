@@ -90,6 +90,7 @@ jobs:
       - name: Shell scripts
         run: |
           shellcheck scripts/*.sh
+          ./scripts/ci-report-failures-test.sh
           ./scripts/models-delta-test.sh
 
       - name: GitHub Actions
@@ -220,6 +221,41 @@ jobs:
 
       - name: Test with the race detector
         run: task test-race
+
+  # Non-blocking triage for test failures on the canonical repository's main
+  # branch. cross-compile orders this after all test jobs but is not reported.
+  report-main-failures:
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'docker/docker-agent' &&
+      (needs.test-linux.result == 'failure' ||
+       needs.test-windows.result == 'failure' ||
+       needs.test-race.result == 'failure')
+    needs: [ test-linux, test-windows, test-race, cross-compile ]
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    concurrency:
+      group: ci-report-main-failures
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Report failed tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci-report-failures.sh
 
   # Builds the image and the sandbox template, on Build Cloud whenever the run
   # can authenticate to Docker Hub: both platforms natively on one runner.
