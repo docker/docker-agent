@@ -287,6 +287,12 @@ A few things that catch people out:
 > [!WARNING]
 > Raising `--max-request-size` increases how much memory an unauthenticated or malicious client can force the server to buffer per request. Pick a value with your deployment's exposure in mind, and pair any non-loopback listener with `--auth-token` (API server) or `--api-key`/`--api-key-env` (chat server). A `--listen` control plane has neither flag — keep it on loopback, a unix socket, or behind an authenticating reverse proxy if it must be reachable from elsewhere.
 
+### Delegated task appears stalled before its first response
+
+A direct `transfer_task` delegation automatically retries once when the child model stream is silent before sending any response payload. It emits the existing warning event, and the retry is immediate and applies once to the complete child run, including later turns and fallback models. Each nested native `transfer_task` starts a new child run with its own fresh retry allowance. The retry does not apply after partial output, to `background_agents`, or when cancellation or a run budget blocks it.
+
+Run with `--debug` and look for `Delegated model stream idle before response; retrying immediately`. If the child still fails, check provider connectivity, fallback configuration, cancellation, and run-budget events; Docker Agent does not retry when the context is canceled or the run budget is exhausted.
+
 ## Performance Issues
 
 ### High memory usage
