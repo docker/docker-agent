@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -190,7 +191,7 @@ func TestReasoningBlockExpandedShowsFullToolRenderer(t *testing.T) {
 
 	stripped := ansi.Strip(block.View())
 	assert.Contains(t, stripped, "Edit")
-	assert.Contains(t, stripped, path)
+	assert.Contains(t, stripped, pathx.ShortenHome(path))
 	assert.Contains(t, stripped, "old line")
 	assert.Contains(t, stripped, "new line")
 }

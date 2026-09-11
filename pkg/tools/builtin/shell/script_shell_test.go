@@ -290,7 +290,7 @@ func TestCreateScriptToolSet_EnvPrecedence(t *testing.T) {
 		},
 		Shell: map[string]latest.ScriptShellToolConfig{
 			"show_env": {
-				Cmd: "env",
+				Cmd: envDumpCmd(),
 				Env: map[string]string{
 					"SCRIPT_PREC_TOOL": "from-tool",
 				},
@@ -316,12 +316,12 @@ func TestCreateScriptToolSet_EnvPrecedence(t *testing.T) {
 	}, tools.NopRuntime{})
 	require.NoError(t, err)
 	require.False(t, result.IsError, "unexpected error: %s", result.Output)
-	// `env` prints the spawned process's effective environment, i.e. what
-	// exec.Cmd kept after last-wins dedup.
-	assert.Contains(t, result.Output, "SCRIPT_PREC_OS=from-os\n")
-	assert.Contains(t, result.Output, "SCRIPT_PREC_TOOLSET=from-toolset\n")
-	assert.Contains(t, result.Output, "SCRIPT_PREC_TOOL=from-tool\n")
-	assert.Contains(t, result.Output, "SCRIPT_PREC_ARG=from-arg\n")
+	// Normalize CRLF (Windows) to LF for portable assertions.
+	output := strings.ReplaceAll(result.Output, "\r\n", "\n")
+	assert.Contains(t, output, "SCRIPT_PREC_OS=from-os\n")
+	assert.Contains(t, output, "SCRIPT_PREC_TOOLSET=from-toolset\n")
+	assert.Contains(t, output, "SCRIPT_PREC_TOOL=from-tool\n")
+	assert.Contains(t, output, "SCRIPT_PREC_ARG=from-arg\n")
 }
 
 func TestScriptShellTool_PerToolEnvOverridesToolsetEnv(t *testing.T) {

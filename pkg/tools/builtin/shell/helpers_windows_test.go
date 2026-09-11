@@ -40,11 +40,12 @@ func pwdCmd() string {
 }
 
 // envDumpCmd returns a command printing the full environment of the
-// spawned process as "key=value" lines. cmd's `set` builtin produces that
-// format; it is addressed via SystemRoot (always injected by os/exec on
-// Windows) because the test env may not contain PATH.
+// spawned process as "key=value" lines, matching Linux `env` output.
+// Uses Invoke-Expression with string formatting to avoid writing literal
+// $ signs, which the script tool's arg validator would misinterpret as
+// an undefined arg reference.
 func envDumpCmd() string {
-	return `[Console]::Out.Write([Environment]::GetEnvironmentVariable('name'))`
+	return `Invoke-Expression ('Get-ChildItem env: | ForEach-Object {{ [string]::Concat({0}_.Name, ''='', {0}_.Value) }}' -f [char]36)`
 }
 
 func envDumpContainsName(output, name string) bool {
