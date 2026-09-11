@@ -206,6 +206,9 @@ type delegationRequest struct {
 	// concurrent foreground loop and must not be mutated from a
 	// background task (#3886).
 	SwitchCurrentAgent bool
+	// directNativeTransfer enables the idle-stream recovery reserved for the
+	// native transfer_task handler. Other runForwarding callers leave it false.
+	directNativeTransfer bool
 }
 
 // newSubSession builds a *session.Session from a SubSessionConfig and a parent
@@ -375,18 +378,24 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	// subagent_stop fires after the child's stream has fully drained,
 	// using the *parent* agent's executor so handlers configured on the
 	// orchestrator see every child completion in one place — success or
-	// failure. The deferred call ensures we don't lose the event when an
-	// ErrorEvent triggers an early return below; handlers can detect a
-	// failed run by an empty stop_response (or by correlating with the
-	// session-level error event the parent already received).
+	// failure. On failure, stop_response carries any assistant content the
+	// child produced before stopping; an empty value means no content existed.
 	defer func() {
 		r.executeSubagentStopHooks(ctx, parent, s, callerAgent, req.AgentName, s.GetLastAssistantMessageContent())
 	}()
 
-	childEvents := r.RunStream(ctx, s)
+	idleRetryPolicy := defaultIdleStreamRetryPolicy()
+	if req.directNativeTransfer {
+		idleRetryPolicy = idleStreamRetryPolicy{enabled: true, parentSessionID: parent.ID}
+	}
+	childEvents := r.runStream(ctx, s, idleRetryPolicy)
 	var subSessionErr error
 	for event := range childEvents {
 		evts.Emit(event)
+		if budgetEvent, ok := event.(*BudgetExceededEvent); ok &&
+			req.directNativeTransfer && budgetEvent.SessionID == s.ID && subSessionErr == nil {
+			subSessionErr = errors.New(budgetEvent.Message)
+		}
 		if errEvent, ok := event.(*ErrorEvent); ok && subSessionErr == nil {
 			// Capture the first ErrorEvent but keep draining the channel so
 			// the sub-session's full transcript still streams through. The
@@ -405,6 +414,9 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	parent.AddLiveSubSession(s)
 	evts.Emit(SubSessionCompleted(parent.ID, s, callerAgent.Name()))
 
+	if subSessionErr == nil && ctx.Err() != nil {
+		subSessionErr = ctx.Err()
+	}
 	if subSessionErr != nil {
 		span.RecordError(subSessionErr)
 		span.SetStatus(codes.Error, "sub-session error")
@@ -739,7 +751,8 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 			NonInteractive:    sess.NonInteractive,
 			DelegationLineage: childLineage,
 		},
-		SwitchCurrentAgent: true,
+		SwitchCurrentAgent:   true,
+		directNativeTransfer: true,
 	})
 }
 

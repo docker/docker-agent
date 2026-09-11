@@ -74,7 +74,12 @@ func newFallbackExecutor() *fallbackExecutor {
 	return &fallbackExecutor{}
 }
 
-// buildModelChain returns the ordered list of models to try: primary first, then fallbacks.
+type idleRetryAdmission func() error
+
+type budgetAdmissionError struct{}
+
+func (budgetAdmissionError) Error() string { return "delegated idle retry stopped by budget" }
+
 func buildModelChain(primary provider.Provider, fallbacks []provider.Provider) []modelWithFallback {
 	chain := make([]modelWithFallback, 0, 1+len(fallbacks))
 	chain = append(chain, modelWithFallback{
@@ -182,6 +187,41 @@ func (e *fallbackExecutor) recordSuccess(a *agent.Agent, modelEntry modelWithFal
 	}
 }
 
+type idleStreamRetryAllowance struct {
+	remaining       bool
+	parentSessionID string
+}
+
+// idleStreamRetryPolicy is default-disabled. Callers opt in only for direct
+// transfer_task children.
+type idleStreamRetryPolicy struct {
+	enabled         bool
+	parentSessionID string
+}
+
+func defaultIdleStreamRetryPolicy() idleStreamRetryPolicy {
+	return idleStreamRetryPolicy{}
+}
+
+func (p idleStreamRetryPolicy) allowance() *idleStreamRetryAllowance {
+	return &idleStreamRetryAllowance{
+		remaining:       p.enabled,
+		parentSessionID: p.parentSessionID,
+	}
+}
+
+func isRetryableIdleStream(err error, result streamResult) bool {
+	return errors.Is(err, errStreamIdle) && !result.ResponseStarted
+}
+
+func (a *idleStreamRetryAllowance) eligible(err error, result streamResult) bool {
+	return a != nil && a.remaining && isRetryableIdleStream(err, result)
+}
+
+func (a *idleStreamRetryAllowance) consume() {
+	a.remaining = false
+}
+
 // classifyAttemptError handles an error from a stream attempt: checks for
 // context cancellation, classifies the error, and returns either a
 // per-iteration decision (retry the same model or skip to the next) or a
@@ -214,7 +254,9 @@ func (e *fallbackExecutor) classifyAttemptError(
 }
 
 // execute attempts to create a stream and get a response using the primary model,
-// falling back to configured fallback models if the primary fails.
+// falling back to configured fallback models if the primary fails. When
+// idleRetry has allowance, the first idle timeout before any response payload is
+// retried immediately once across the whole delegated child run.
 //
 // Retry behavior:
 // - Retryable errors (5xx, timeouts): retry the same model with exponential backoff
@@ -236,6 +278,8 @@ func (e *fallbackExecutor) execute(
 	sess *session.Session,
 	m *modelsdev.Model,
 	events EventSink,
+	idleRetry *idleStreamRetryAllowance,
+	admitIdleRetry idleRetryAdmission,
 ) (streamResult, provider.Provider, error) {
 	fallbackModels := a.FallbackModels()
 	fallbackRetries := getEffectiveRetries(a)
@@ -273,7 +317,6 @@ func (e *fallbackExecutor) execute(
 				fbSpan.SetOutcome(genai.FallbackOutcomeContextCanceled)
 				return streamResult{}, nil, ctx.Err()
 			}
-			fbSpan.IncrementAttempt()
 
 			// Apply backoff before retry (not on first attempt of each model)
 			if attempt > 0 {
@@ -315,6 +358,8 @@ func (e *fallbackExecutor) execute(
 			// the goroutine reading the response body.
 			streamCtx, streamCancel := context.WithCancelCause(ctx)
 
+			// Count only requests that reach the provider dispatch boundary.
+			fbSpan.IncrementAttempt()
 			stream, err := modelEntry.provider.CreateChatCompletionStream(streamCtx, attemptMessages, agentTools)
 			if err != nil {
 				streamCancel(nil)
@@ -346,6 +391,51 @@ func (e *fallbackExecutor) execute(
 			streamCancel(nil) // always release the child context
 			if err != nil {
 				lastErr = err
+				if idleRetry.eligible(err, res) && admitIdleRetry != nil {
+					if ctx.Err() != nil {
+						fbSpan.SetOutcome(genai.FallbackOutcomeContextCanceled)
+						return streamResult{}, nil, ctx.Err()
+					}
+					if err := admitIdleRetry(); err != nil {
+						fbSpan.SetOutcome(genai.FallbackOutcomeFailed)
+						return streamResult{}, nil, err
+					}
+					if ctx.Err() != nil {
+						fbSpan.SetOutcome(genai.FallbackOutcomeContextCanceled)
+						return streamResult{}, nil, ctx.Err()
+					}
+					idleRetry.consume()
+					modelID := modelEntry.provider.ID().String()
+					const retryLimit = 1
+					slog.WarnContext(ctx, "Delegated model stream idle before response; retrying immediately",
+						"agent", a.Name(),
+						"model", modelID,
+						"session_id", sess.ID,
+						"parent_session_id", idleRetry.parentSessionID,
+						"reason", "stream_idle_before_response",
+						"retry", retryLimit,
+						"limit", retryLimit,
+					)
+					events.Emit(Warning(
+						"Delegated model stream was idle before responding; retrying once.",
+						a.Name(),
+					))
+
+					streamCtx, streamCancel = context.WithCancelCause(ctx)
+					fbSpan.IncrementAttempt()
+					stream, err = modelEntry.provider.CreateChatCompletionStream(streamCtx, attemptMessages, agentTools)
+					if err == nil {
+						res, err = handleStream(streamCtx, streamCancel, stream, a, agentTools, sess, m, e.telemetry, events, defaultStreamIdleTimeout)
+					}
+					streamCancel(nil)
+					if err == nil {
+						e.recordSuccess(a, modelEntry, primaryFailedWithNonRetryable)
+						fbSpan.SetFinalModel(modelEntry.provider.ID().Model)
+						fbSpan.SetOutcome(genai.FallbackOutcomeSuccess)
+						return res, modelEntry.provider, nil
+					}
+					lastErr = err
+				}
 				decision, retErr := e.classifyAttemptError(ctx, err, a, modelEntry, attempt, hasFallbacks, &primaryFailedWithNonRetryable)
 				if retErr != nil {
 					fbSpan.SetOutcome(genai.FallbackOutcomeContextCanceled)

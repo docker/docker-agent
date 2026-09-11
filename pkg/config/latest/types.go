@@ -65,6 +65,8 @@ type Config struct {
 	// only carries the section so it round-trips — see config.applyFlavors
 	// for the merge semantics.
 	Flavors map[string]map[string]any `json:"flavors,omitempty"`
+
+	modelOverrideState any
 }
 
 // BudgetConfig caps what a single run may consume before the agent is

@@ -75,6 +75,9 @@ type liveSessionEntry struct {
 	// foreground parent finishes and unregisters. Immutable once the entry
 	// is published.
 	treeRootID string
+	// idleRetry owns the single pre-response idle retry allowance for the
+	// complete delegated transfer_task child run.
+	idleRetry *idleStreamRetryAllowance
 	// compactCh holds at most one pending explicit compaction request.
 	// Sends happen only under liveSessionsMu while the entry is still
 	// registered; the final drain runs after unregistration, so an
@@ -86,9 +89,14 @@ type liveSessionEntry struct {
 // RunStream before the run goroutine starts so the session is targetable for
 // the whole lifetime of its stream.
 func (r *LocalRuntime) registerLiveSession(sess *session.Session) *liveSessionEntry {
+	return r.registerLiveSessionWithIdleRetry(sess, defaultIdleStreamRetryPolicy())
+}
+
+func (r *LocalRuntime) registerLiveSessionWithIdleRetry(sess *session.Session, policy idleStreamRetryPolicy) *liveSessionEntry {
 	entry := &liveSessionEntry{
 		sess:      sess,
 		agentName: r.sessionAgentName(sess),
+		idleRetry: policy.allowance(),
 		compactCh: make(chan liveCompactionRequest, 1),
 	}
 	r.liveSessionsMu.Lock()

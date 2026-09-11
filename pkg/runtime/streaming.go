@@ -47,6 +47,7 @@ type streamResult struct {
 	ReasoningContent  string
 	ThinkingSignature string
 	ThoughtSignature  []byte
+	ResponseStarted   bool
 	// Media accumulates every [chat.MediaDelta] streamed during the turn
 	// (e.g. generated images). Populated regardless of provider — see
 	// chat.MessageDelta.Media.
@@ -117,6 +118,11 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	var media []chat.MediaDelta
 	var messageUsage *chat.Usage
 	var providerFinishReason chat.FinishReason
+	var responseStarted bool
+
+	failedResult := func() streamResult {
+		return streamResult{Stopped: true, ResponseStarted: responseStarted}
+	}
 
 	toolCallIndex := make(map[string]int)   // toolCallID -> index in toolCalls slice
 	emittedPartial := make(map[string]bool) // toolCallID -> whether we've emitted a partial event
@@ -225,7 +231,7 @@ mainLoop:
 				break mainLoop
 			}
 			if res.err != nil {
-				return streamResult{Stopped: true}, fmt.Errorf("error receiving from stream: %w", res.err)
+				return failedResult(), fmt.Errorf("error receiving from stream: %w", res.err)
 			}
 
 			response := res.response
@@ -243,11 +249,13 @@ mainLoop:
 			choice := response.Choices[0]
 
 			if len(choice.Delta.ThoughtSignature) > 0 {
+				responseStarted = true
 				thoughtSignature = choice.Delta.ThoughtSignature
 			}
 
 			// A terminal chunk can also carry media; collect it before returning.
 			if len(choice.Delta.Media) > 0 {
+				responseStarted = true
 				media = append(media, choice.Delta.Media...)
 			}
 
@@ -258,6 +266,7 @@ mainLoop:
 			// reason first would drop the call and the turn would end with an
 			// empty assistant message ("No response from agent").
 			if len(choice.Delta.ToolCalls) > 0 {
+				responseStarted = true
 				// Process each tool call delta
 				for _, delta := range choice.Delta.ToolCalls {
 					idx, exists := toolCallIndex[delta.ID]
@@ -347,6 +356,7 @@ mainLoop:
 					Stopped:           len(toolCalls) == 0, // stop only when there are no tool calls to execute
 					FinishReason:      finishReason,
 					Usage:             messageUsage,
+					ResponseStarted:   responseStarted,
 				}, nil
 			}
 
@@ -358,23 +368,26 @@ mainLoop:
 			}
 
 			if choice.Delta.ReasoningContent != "" {
+				responseStarted = true
 				events.Emit(AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent))
 				fullReasoningContent.WriteString(choice.Delta.ReasoningContent)
 			}
 
 			// Capture thinking signature for Anthropic extended thinking
 			if choice.Delta.ThinkingSignature != "" {
+				responseStarted = true
 				thinkingSignature = choice.Delta.ThinkingSignature
 			}
 
 			if choice.Delta.Content != "" {
+				responseStarted = true
 				appendContent(markerFilter.Push(choice.Delta.Content))
 			}
 
 		case <-ctx.Done():
 			// Context cancelled (SIGTERM, Ctrl+C, or idle-timeout cancel from
 			// this function). Return promptly so graceful shutdown can proceed.
-			return streamResult{Stopped: true}, ctx.Err()
+			return failedResult(), ctx.Err()
 
 		case <-idleTimer.C:
 			slog.WarnContext(ctx, "Model stream stalled: no data received within idle timeout",
@@ -387,7 +400,7 @@ mainLoop:
 			if cancelStream != nil {
 				cancelStream(errStreamIdle)
 			}
-			return streamResult{Stopped: true}, fmt.Errorf("model stream stalled after %s with no data: %w",
+			return failedResult(), fmt.Errorf("model stream stalled after %s with no data: %w",
 				idleTimeout, errStreamIdle)
 		}
 	}
@@ -441,5 +454,6 @@ mainLoop:
 		Stopped:           stoppedNoToolCalls,
 		FinishReason:      finishReason,
 		Usage:             messageUsage,
+		ResponseStarted:   responseStarted,
 	}, nil
 }

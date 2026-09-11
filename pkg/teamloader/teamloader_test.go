@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1092,6 +1094,95 @@ func TestLoadWithConfig_WithWorkingDirDoesNotLeak(t *testing.T) {
 	assert.Equal(t, callerDir, runConfig.WorkingDir)
 }
 
+func TestLoadWithConfigModelOverridePolicyMatrix(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	data := []byte(`models:
+  serial:
+    provider: openai
+    model: original-serial
+    parallel_tool_calls: false
+  parallel:
+    provider: openai
+    model: original-parallel
+    parallel_tool_calls: true
+  unset:
+    provider: openai
+    model: original-unset
+  named_nil:
+    provider: openai
+    model: named
+agents:
+  serial:
+    model: serial
+    instruction: test
+  parallel:
+    model: parallel
+    instruction: test
+  unset:
+    model: unset
+    instruction: test
+  named:
+    model: serial
+    instruction: test
+`)
+
+	result, err := LoadWithConfig(
+		t.Context(),
+		config.NewBytesSource("overrides.yaml", data),
+		&config.RuntimeConfig{},
+		withTestProviderRegistry(WithModelOverrides([]string{
+			"serial=openai/replacement",
+			"parallel=openai/replacement",
+			"unset=openai/replacement",
+			"named=named_nil",
+		}))...,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]string{
+		"serial": "openai/replacement", "parallel": "openai/replacement",
+		"unset": "openai/replacement", "named": "named_nil",
+	}, result.AgentDefaultModels)
+	assert.ElementsMatch(t, []string{"serial", "parallel", "unset", "named_nil", "openai/replacement"}, slices.Collect(maps.Keys(result.Models)))
+	for name := range result.Models {
+		assert.NotContains(t, name, "__cli_model_")
+	}
+
+	wantPolicy := map[string]*bool{
+		"serial": new(false), "parallel": new(true), "unset": nil, "named": nil,
+	}
+	wantRef := map[string]string{
+		"serial": "openai/replacement", "parallel": "openai/replacement",
+		"unset": "openai/replacement", "named": "named_nil",
+	}
+	for agentName, modelRef := range wantRef {
+		teamCfg, ok := result.Team.AgentConfig(agentName)
+		require.True(t, ok)
+		assert.Equal(t, modelRef, teamCfg.Model)
+
+		a, err := result.Team.Agent(agentName)
+		require.NoError(t, err)
+		providers := a.ConfiguredModels()
+		require.Len(t, providers, 1)
+		assert.Equal(t, modelRef, providers[0].BaseConfig().ModelConfig.Name)
+		assert.Equal(t, map[string]string{
+			"serial": "openai/replacement", "parallel": "openai/replacement",
+			"unset": "openai/replacement", "named": "openai/named",
+		}[agentName], providers[0].ID().String())
+
+		got := providers[0].BaseConfig().ModelConfig.ParallelToolCalls
+		want := wantPolicy[agentName]
+		if want == nil {
+			assert.Nil(t, got)
+		} else if assert.NotNil(t, got) {
+			assert.Equal(t, *want, *got)
+		}
+	}
+	assert.Nil(t, result.Models["openai/replacement"].ParallelToolCalls)
+	assert.Nil(t, result.Models["named_nil"].ParallelToolCalls)
+}
+
 // TestLoadRetainsAgentConfig verifies the loader retains the raw resolved
 // per-agent config on the team (team.WithAgentConfigs) so the agent inspector
 // can surface declared toolset allow-lists, limits and flags. It uses a
@@ -1198,6 +1289,76 @@ func TestLoadRejectsUncompilableToolModeSchema(t *testing.T) {
 
 	_, err := Load(t.Context(), config.NewBytesSource("bad-schema.yaml", data), &config.RuntimeConfig{}, withTestProviderRegistry()...)
 	require.ErrorContains(t, err, "agent root: structured_output")
+}
+
+func TestLoadPreservesModelPolicyDefaults(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	tests := []struct {
+		name string
+		yaml string
+		want *bool
+	}{
+		{
+			name: "omitted",
+			yaml: `models:
+  configured:
+    provider: openai
+    model: gpt-4o
+agents:
+  root:
+    model: configured
+    instruction: test
+`,
+			want: nil,
+		},
+		{
+			name: "explicit true",
+			yaml: `models:
+  configured:
+    provider: openai
+    model: gpt-4o
+    parallel_tool_calls: true
+agents:
+  root:
+    model: configured
+    instruction: test
+`,
+			want: new(true),
+		},
+		{
+			name: "explicit false",
+			yaml: `models:
+  configured:
+    provider: openai
+    model: gpt-4o
+    parallel_tool_calls: false
+agents:
+  root:
+    model: configured
+    instruction: test
+`,
+			want: new(false),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loaded, err := Load(t.Context(), config.NewBytesSource("model.yaml", []byte(tt.yaml)),
+				&config.RuntimeConfig{}, withTestProviderRegistry()...)
+			require.NoError(t, err)
+			root, err := loaded.Agent("root")
+			require.NoError(t, err)
+			models := root.ConfiguredModels()
+			require.Len(t, models, 1)
+			got := models[0].BaseConfig().ModelConfig.ParallelToolCalls
+			if tt.want == nil {
+				assert.Nil(t, got)
+			} else if assert.NotNil(t, got) {
+				assert.Equal(t, *tt.want, *got)
+			}
+		})
+	}
 }
 
 // TestLoadPropagatesSafetyDefaults verifies the author-declared safety

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path"
@@ -247,6 +248,10 @@ func (r *LocalRuntime) streamStoppedTimeout() time.Duration {
 // the response, executes any tool calls, and loops until the model signals stop
 // or the iteration limit is reached.
 func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-chan Event {
+	return r.runStream(ctx, sess, defaultIdleStreamRetryPolicy())
+}
+
+func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idleRetryPolicy idleStreamRetryPolicy) <-chan Event {
 	slog.DebugContext(ctx, "Starting runtime stream", "agent", r.currentAgentName(), "session_id", sess.ID)
 	events := make(chan Event, defaultEventChannelCapacity)
 	rootStream := !sess.IsSubSession()
@@ -261,7 +266,7 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 	// Register before the run goroutine starts so the session is listed in
 	// the /context team view (and targetable for explicit compaction) for
 	// the whole lifetime of its stream.
-	entry := r.registerLiveSession(sess)
+	entry := r.registerLiveSessionWithIdleRetry(sess, idleRetryPolicy)
 
 	go func() {
 		if rootStream {
@@ -374,6 +379,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	sessionStart := r.executeSessionStartHooks(ctx, sess, a, sink)
 	ls := &loopState{
 		maxIterations:          sess.MaxIterations,
+		idleRetry:              liveEntry.idleRetry,
 		sessionStartMsgs:       sessionStart.messages,
 		sessionStartLegacyMsgs: sessionStart.legacyMessages(),
 		sessionStartSources:    sessionStart.sources,
@@ -661,6 +667,8 @@ type loopState struct {
 	// empty-response warning would otherwise imply. Reset on agent switch
 	// so it never carries across agents.
 	prevTurnMadeToolCalls bool
+	// idleRetry is shared by every turn and fallback attempt in this child run.
+	idleRetry *idleStreamRetryAllowance
 }
 
 // emptyTurnWarning classifies an empty assistant turn (no content, no tool
@@ -813,9 +821,23 @@ func (r *LocalRuntime) runTurn(
 	// Runtime message transforms run inside fallback.execute so each attempt
 	// uses the capabilities of the provider that will receive it.
 
-	// Try primary model with fallback chain if configured
+	// Try primary model with fallback chain if configured. The idle retry
+	// admission callback belongs to this loop invocation so a denial can stop
+	// this exact session before generic model-error handling runs.
 	agentTools = r.toolDeferrals.MarkAt(sess.ID, lastToolCallID(messages), agentTools)
-	res, usedModel, err := r.fallback.execute(streamCtx, a, model, messages, agentTools, sess, m, events)
+	admitIdleRetry := func() error {
+		if r.enforceBudget(ctx, sess, a, events) == iterationStop {
+			return budgetAdmissionError{}
+		}
+		return nil
+	}
+	res, usedModel, err := r.fallback.execute(streamCtx, a, model, messages, agentTools, sess, m, events, ls.idleRetry, admitIdleRetry)
+	var budgetStop budgetAdmissionError
+	if errors.As(err, &budgetStop) {
+		endStreamSpan()
+		endReason = turnEndReasonBudgetExceeded
+		return turnExit
+	}
 	if err != nil {
 		outcome := r.handleStreamError(ctx, sess, a, err, contextLimit, &ls.overflowCompactions, streamSpan, events)
 		endStreamSpan()

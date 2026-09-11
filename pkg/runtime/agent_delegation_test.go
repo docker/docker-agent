@@ -1,21 +1,27 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/safety"
@@ -637,6 +643,406 @@ func TestRunAgent_EndToEndPermissions(t *testing.T) {
 	require.False(t, executed, "expected dangerous_tool to NOT be executed because it is denied by inherited permissions")
 }
 
+type providerSequence struct {
+	id      string
+	mu      sync.Mutex
+	streams []chat.MessageStream
+	calls   int
+}
+
+func (p *providerSequence) ID() modelsdev.ID { return modelsdev.ParseIDOrZero(p.id) }
+
+func (p *providerSequence) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if len(p.streams) == 0 {
+		return &mockStream{}, nil
+	}
+	stream := p.streams[0]
+	p.streams = p.streams[1:]
+	return stream, nil
+}
+
+func (p *providerSequence) BaseConfig() base.Config { return base.Config{} }
+func (p *providerSequence) MaxTokens() int          { return 0 }
+
+func (p *providerSequence) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func TestIdleStreamRetryAllowance_WholeRunLifecycle(t *testing.T) {
+	t.Parallel()
+
+	allowance := idleStreamRetryPolicy{enabled: true, parentSessionID: "parent"}.allowance()
+	assert.True(t, allowance.eligible(errStreamIdle, streamResult{}))
+	allowance.consume()
+	assert.False(t, allowance.eligible(errStreamIdle, streamResult{}), "a later turn or fallback cannot receive a second retry")
+
+	started := idleStreamRetryPolicy{enabled: true, parentSessionID: "parent"}.allowance()
+	assert.False(t, started.eligible(errStreamIdle, streamResult{ResponseStarted: true}))
+	assert.True(t, started.remaining, "post-response stalls must not consume the allowance")
+}
+
+func TestTransferTask_RetriesIdleStreamOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		stalled := newStalledStream()
+		primary := &providerSequence{id: "test/delegate", streams: []chat.MessageStream{
+			stalled,
+			newStreamBuilder().AddContent("recovered").AddStopWithUsage(1, 1).Build(),
+		}}
+		delegate := agent.New("delegate", "Delegate",
+			agent.WithModel(primary),
+			agent.WithHooks(&hooks.Config{
+				SubagentStop: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "test_record_transfer_stop"}},
+			}),
+		)
+		root := agent.New("root", "Root",
+			agent.WithModel(primary),
+			agent.WithHooks(&hooks.Config{
+				SubagentStop: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "test_record_transfer_stop"}},
+			}),
+		)
+		agent.WithSubAgents(delegate)(root)
+
+		store := session.NewInMemorySessionStore()
+		rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, delegate)),
+			WithSessionCompaction(false), WithModelStore(mockModelStore{}), WithSessionStore(store))
+		require.NoError(t, err)
+
+		recorder := &recordingBuiltin{}
+		require.NoError(t, rt.hooksRegistry.RegisterBuiltin("test_record_transfer_stop", recorder.hook))
+		rt.buildHooksExecutors()
+		rt.ensureBudget()
+
+		var logBuf bytes.Buffer
+		previousLogger := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		defer slog.SetDefault(previousLogger)
+
+		sess := session.New(session.WithUserMessage("Test"))
+		require.NoError(t, store.UpdateSession(t.Context(), sess))
+		eventCh := make(chan Event, 128)
+		resultCh := make(chan struct {
+			result *tools.ToolCallResult
+			err    error
+		}, 1)
+		go func() {
+			result, err := rt.handleTaskTransfer(
+				t.Context(), sess, transferToolCall("delegate"), NewChannelSink(eventCh), tools.NopRuntime{},
+			)
+			resultCh <- struct {
+				result *tools.ToolCallResult
+				err    error
+			}{result: result, err: err}
+		}()
+
+		<-stalled.recvStarted
+		time.Sleep(defaultStreamIdleTimeout - time.Nanosecond) //nolint:forbidigo // Advances synthetic time to the boundary.
+		assert.Equal(t, 1, primary.callCount(), "retry must not start before the five-minute boundary")
+		time.Sleep(time.Nanosecond) //nolint:forbidigo // Crosses the synthetic timeout boundary.
+		synctest.Wait()
+		outcome := <-resultCh
+		result, err := outcome.result, outcome.err
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "recovered", result.Output)
+		assert.Equal(t, 2, primary.callCount())
+		assert.Equal(t, "root", rt.CurrentAgent().Name(), "transfer must restore the caller")
+
+		warningCount := 0
+		completionCount := 0
+		var completedChild *session.Session
+		for len(eventCh) > 0 {
+			event := <-eventCh
+			switch typed := event.(type) {
+			case *WarningEvent:
+				warningCount++
+			case *SubSessionCompletedEvent:
+				completionCount++
+				completedChild, _ = typed.SubSession.(*session.Session)
+			}
+		}
+		assert.Equal(t, 1, warningCount)
+		assert.Equal(t, 1, completionCount)
+		assert.Contains(t, logBuf.String(), "parent_session_id="+sess.ID)
+		assert.Contains(t, logBuf.String(), "reason=stream_idle_before_response")
+		assert.Contains(t, logBuf.String(), "limit=1")
+
+		stops := recorder.snapshot()
+		require.Len(t, stops, 1)
+		assert.Equal(t, "delegate", stops[0].AgentName)
+		assert.Equal(t, "recovered", stops[0].StopResponse)
+
+		require.NotNil(t, completedChild)
+		assert.Equal(t, "recovered", completedChild.GetLastAssistantMessageContent())
+	})
+}
+
+func TestRunTurn_BudgetAdmissionErrorStopsLoop(t *testing.T) {
+	primary := &providerSequence{id: "test/root", streams: []chat.MessageStream{
+		newImmediateIdleStream(),
+		newStreamBuilder().AddContent("must not dispatch").AddStopWithUsage(1, 1).Build(),
+	}}
+	root := agent.New("root", "Root", agent.WithModel(primary))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+		WithSessionCompaction(false), WithModelStore(mockModelStore{}),
+		WithBudget(&latest.BudgetConfig{MaxTokens: 1}))
+	require.NoError(t, err)
+	rt.ensureBudget()
+
+	sess := session.New(session.WithUserMessage("Test"))
+	rt.recordBudget(sess, root, &chat.Usage{InputTokens: 1}, nil, 0, &collectSink{})
+	ls := &loopState{idleRetry: &idleStreamRetryAllowance{remaining: true, parentSessionID: "parent"}}
+	sink := &collectSink{}
+
+	_, span := noop.NewTracerProvider().Tracer("test").Start(t.Context(), "test")
+	control := rt.runTurn(
+		t.Context(), sess, root, nil, primary, primary.ID(), 0, span,
+		nil, ls, sink,
+	)
+
+	assert.Equal(t, turnExit, control)
+	assert.Equal(t, turnEndReasonBudgetExceeded, ls.exitReason)
+	assert.Equal(t, 1, primary.callCount())
+	assert.True(t, ls.idleRetry.remaining)
+	assert.NotEmpty(t, sink.events)
+	_, ok := sink.events[0].(*BudgetExceededEvent)
+	assert.True(t, ok)
+}
+
+func TestRunForwarding_DirectTransferOwnBudgetStopFailsAfterLifecycle(t *testing.T) {
+	primary := &providerSequence{id: "test/delegate", streams: []chat.MessageStream{
+		newStreamBuilder().
+			AddToolCallName("call_unknown", "unknown_tool").
+			AddToolCallArguments("call_unknown", `{}`).
+			AddToolCallStopWithUsage(1, 1).
+			Build(),
+		newStreamBuilder().AddContent("should not dispatch").AddStopWithUsage(1, 1).Build(),
+	}}
+	delegate := agent.New("delegate", "Delegate", agent.WithModel(primary))
+	root := agent.New("root", "Root",
+		agent.WithModel(primary),
+		agent.WithHooks(&hooks.Config{
+			SubagentStop: []hooks.Hook{{Type: hooks.HookTypeBuiltin, Command: "test_record_budget_stop"}},
+		}),
+	)
+	agent.WithSubAgents(delegate)(root)
+
+	store := session.NewInMemorySessionStore()
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, delegate)),
+		WithSessionCompaction(false), WithModelStore(mockModelStore{}), WithSessionStore(store),
+		WithBudget(&latest.BudgetConfig{MaxTokens: 1}))
+	require.NoError(t, err)
+
+	recorder := &recordingBuiltin{}
+	require.NoError(t, rt.hooksRegistry.RegisterBuiltin("test_record_budget_stop", recorder.hook))
+	rt.buildHooksExecutors()
+	rt.ensureBudget()
+
+	parent := session.New(session.WithUserMessage("Test"))
+	require.NoError(t, store.UpdateSession(t.Context(), parent))
+	var events []Event
+	result, err := rt.runForwarding(t.Context(), parent, EventSinkFunc(func(event Event) {
+		events = append(events, event)
+	}), delegationRequest{
+		SubSessionConfig:     SubSessionConfig{AgentName: "delegate"},
+		SwitchCurrentAgent:   true,
+		directNativeTransfer: true,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "max_tokens")
+	assert.Equal(t, 1, primary.callCount())
+
+	budgetCount := 0
+	completionCount := 0
+	var completedChild *session.Session
+	for _, event := range events {
+		switch typed := event.(type) {
+		case *BudgetExceededEvent:
+			budgetCount++
+		case *SubSessionCompletedEvent:
+			completionCount++
+			completedChild, _ = typed.SubSession.(*session.Session)
+		}
+	}
+	assert.Equal(t, 1, budgetCount)
+	assert.Equal(t, 1, completionCount)
+
+	stops := recorder.snapshot()
+	require.Len(t, stops, 1)
+	assert.NotEmpty(t, stops[0].StopResponse)
+
+	require.NotNil(t, completedChild)
+	assert.NotEmpty(t, completedChild.GetLastAssistantMessageContent())
+}
+
+func TestRunForwarding_IgnoresMismatchedBudgetStop(t *testing.T) {
+	observer := &mismatchedBudgetObserver{}
+	primary := &providerSequence{id: "test/delegate", streams: []chat.MessageStream{
+		newStreamBuilder().
+			AddToolCallName("call_unknown", "unknown_tool").
+			AddToolCallArguments("call_unknown", `{}`).
+			AddToolCallStopWithUsage(1, 1).
+			Build(),
+		newStreamBuilder().AddContent("must not dispatch").AddStopWithUsage(1, 1).Build(),
+	}}
+	delegate := agent.New("delegate", "Delegate", agent.WithModel(primary))
+	root := agent.New("root", "Root", agent.WithModel(primary))
+	agent.WithSubAgents(delegate)(root)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, delegate)),
+		WithSessionCompaction(false), WithModelStore(mockModelStore{}),
+		WithBudget(&latest.BudgetConfig{MaxTokens: 1}), WithEventObserver(observer))
+	require.NoError(t, err)
+	rt.ensureBudget()
+	parent := session.New(session.WithUserMessage("Test"))
+	observer.mismatchedSessionID = parent.ID
+
+	var forwardedBudget *BudgetExceededEvent
+	result, err := rt.runForwarding(t.Context(), parent, EventSinkFunc(func(event Event) {
+		if budgetEvent, ok := event.(*BudgetExceededEvent); ok {
+			forwardedBudget = budgetEvent
+		}
+	}), delegationRequest{
+		SubSessionConfig:     SubSessionConfig{AgentName: "delegate"},
+		directNativeTransfer: true,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, primary.callCount())
+	require.NotEmpty(t, observer.childSessionID)
+	require.NotNil(t, forwardedBudget)
+	assert.Equal(t, parent.ID, forwardedBudget.SessionID)
+	assert.NotEqual(t, observer.childSessionID, forwardedBudget.SessionID)
+}
+
+type mismatchedBudgetObserver struct {
+	mismatchedSessionID string
+	childSessionID      string
+}
+
+func (o *mismatchedBudgetObserver) OnRunStart(_ context.Context, sess *session.Session) {
+	o.childSessionID = sess.ID
+}
+
+func (o *mismatchedBudgetObserver) OnEvent(_ context.Context, _ *session.Session, event Event) {
+	if budgetEvent, ok := event.(*BudgetExceededEvent); ok {
+		budgetEvent.SessionID = o.mismatchedSessionID
+	}
+}
+
+func TestRunForwarding_CancellationCannotReturnStaleSuccess(t *testing.T) {
+	primary := &providerSequence{id: "test/delegate", streams: []chat.MessageStream{
+		newStreamBuilder().AddContent("stale").AddStopWithUsage(1, 1).Build(),
+	}}
+	delegate := agent.New("delegate", "Delegate", agent.WithModel(primary))
+	root := agent.New("root", "Root", agent.WithModel(primary))
+	agent.WithSubAgents(delegate)(root)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, delegate)),
+		WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	parent := session.New(session.WithUserMessage("Test"))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	result, err := rt.runForwarding(ctx, parent, EventSinkFunc(func(Event) {}), delegationRequest{
+		SubSessionConfig: SubSessionConfig{AgentName: "delegate"},
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, result)
+}
+
+func TestTransferTask_SpendsIdleRetryBeforeFallback(t *testing.T) {
+	tests := []struct {
+		name              string
+		primaryStreams    []chat.MessageStream
+		fallbackStreams   []chat.MessageStream
+		fallbackRetries   int
+		wantOutput        string
+		wantPrimaryCalls  int
+		wantFallbackCalls int
+		wantWarnings      int
+	}{
+		{
+			name: "recovers on primary",
+			primaryStreams: []chat.MessageStream{
+				newImmediateIdleStream(), newStreamBuilder().AddContent("recovered").AddStopWithUsage(1, 1).Build(),
+			},
+			wantOutput: "recovered", wantPrimaryCalls: 2, wantWarnings: 1,
+		},
+		{
+			name: "spends retry budget before fallback",
+			primaryStreams: []chat.MessageStream{
+				newImmediateIdleStream(), newImmediateIdleStream(),
+			},
+			fallbackStreams: []chat.MessageStream{
+				newStreamBuilder().AddContent("fallback").AddStopWithUsage(1, 1).Build(),
+			},
+			wantOutput: "fallback", wantPrimaryCalls: 2, wantFallbackCalls: 1, wantWarnings: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+			primary := &providerSequence{id: "test/delegate", streams: tt.primaryStreams}
+			fallback := &providerSequence{id: "test/fallback", streams: tt.fallbackStreams}
+			delegateOpts := []agent.Opt{agent.WithModel(primary)}
+			if len(tt.fallbackStreams) > 0 {
+				delegateOpts = append(delegateOpts, agent.WithFallbackModel(fallback), agent.WithFallbackRetries(tt.fallbackRetries))
+			}
+			delegate := agent.New("delegate", "Delegate", delegateOpts...)
+			root := agent.New("root", "Root", agent.WithModel(primary))
+			agent.WithSubAgents(delegate)(root)
+
+			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, delegate)),
+				WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+			require.NoError(t, err)
+
+			rt.ensureBudget()
+
+			sess := session.New(session.WithUserMessage("Test"))
+			eventCh := make(chan Event, 128)
+			result, err := rt.handleTaskTransfer(
+				t.Context(), sess, transferToolCall("delegate"), NewChannelSink(eventCh), tools.NopRuntime{},
+			)
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, tt.wantOutput, result.Output)
+			assert.Equal(t, tt.wantPrimaryCalls, primary.callCount())
+			assert.Equal(t, tt.wantFallbackCalls, fallback.callCount())
+
+			warningCount := 0
+			for len(eventCh) > 0 {
+				if _, ok := (<-eventCh).(*WarningEvent); ok {
+					warningCount++
+				}
+			}
+			assert.Equal(t, tt.wantWarnings, warningCount)
+		})
+	}
+}
+
+type immediateIdleStream struct{}
+
+func newImmediateIdleStream() chat.MessageStream { return &immediateIdleStream{} }
+func (*immediateIdleStream) Recv() (chat.MessageStreamResponse, error) {
+	return chat.MessageStreamResponse{}, errStreamIdle
+}
+func (*immediateIdleStream) Close() {}
+
 func TestTransferTask_PropagatesPermissions(t *testing.T) {
 	t.Parallel()
 
@@ -863,6 +1269,49 @@ func TestTransferTask_RejectsDirectCycle(t *testing.T) {
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Output, "delegation cycle detected: root -> root")
 	assert.Nil(t, firstSubSession(sess), "rejected delegation must not attach a child session")
+}
+
+func TestTransferTask_NestedTransferGetsFreshIdleRetryAllowance(t *testing.T) {
+	t.Parallel()
+
+	workerProvider := &providerSequence{id: "test/worker", streams: []chat.MessageStream{
+		newImmediateIdleStream(),
+		newStreamBuilder().AddContent("worker done").AddStopWithUsage(1, 1).Build(),
+	}}
+	helperProvider := &providerSequence{id: "test/helper", streams: []chat.MessageStream{
+		newImmediateIdleStream(),
+		newStreamBuilder().AddContent("helper done").AddStopWithUsage(1, 1).Build(),
+	}}
+	root := agent.New("root", "Root", agent.WithModel(workerProvider))
+	worker := agent.New("worker", "Worker", agent.WithModel(workerProvider))
+	helper := agent.New("helper", "Helper", agent.WithModel(helperProvider))
+	agent.WithSubAgents(worker)(root)
+	agent.WithSubAgents(helper)(worker)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, worker, helper)),
+		WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	rt.ensureBudget()
+
+	parent := session.New(session.WithUserMessage("Test"))
+	result, err := rt.handleTaskTransfer(
+		t.Context(), parent, transferToolCall("worker"), EventSinkFunc(func(Event) {}), tools.NopRuntime{},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "worker done", result.Output)
+	assert.Equal(t, 2, workerProvider.callCount())
+
+	child := firstSubSession(parent)
+	require.NotNil(t, child)
+	child.AgentName = "worker"
+	result, err = rt.handleTaskTransfer(
+		t.Context(), child, transferToolCall("helper"), EventSinkFunc(func(Event) {}), tools.NopRuntime{},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "helper done", result.Output)
+	assert.Equal(t, 2, helperProvider.callCount())
 }
 
 // TestTransferTask_NestedFromPinnedBackgroundSession covers the #3886 nested

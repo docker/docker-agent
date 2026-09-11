@@ -402,6 +402,8 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		}
 		promptFiles = unique
 
+		// Build options in source order: author configuration first, followed by
+		// loader/runtime additions below, so explicit execution overrides win.
 		opts := []agent.Opt{
 			agent.WithName(agentConfig.Name),
 			agent.WithDescription(expander.Expand(ctx, agentConfig.Description, nil)),
@@ -660,6 +662,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 			isAutoModel = true
 		}
 		modelCfg.Name = name
+		config.ApplyModelOverridePolicy(cfg, a.Name, name, &modelCfg)
 
 		// Use max_tokens from config if specified, otherwise look up from models.dev
 		maxTokens := &defaultMaxTokens
