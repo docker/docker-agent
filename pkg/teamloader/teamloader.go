@@ -662,6 +662,7 @@ func getModelsForAgent(ctx context.Context, cfg *latest.Config, a *latest.AgentC
 			isAutoModel = true
 		}
 		modelCfg.Name = name
+		config.ApplyModelOverridePolicy(cfg, a.Name, name, &modelCfg)
 
 		// Use max_tokens from config if specified, otherwise look up from models.dev
 		maxTokens := &defaultMaxTokens
