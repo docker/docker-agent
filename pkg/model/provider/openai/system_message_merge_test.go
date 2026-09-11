@@ -35,6 +35,16 @@ func TestChatCompletions_MergesConsecutiveSystemMessages(t *testing.T) {
 	})
 }
 
+func TestDaoxe_MergesConsecutiveSystemMessages(t *testing.T) {
+	t.Parallel()
+
+	assertMergesConsecutiveMessages(t, &latest.ModelConfig{
+		Provider: "daoxe",
+		Model:    "gpt-4o",
+		TokenKey: "MY_TOKEN",
+	})
+}
+
 func TestBaseten_MergesConsecutiveSystemMessages(t *testing.T) {
 	t.Parallel()
 

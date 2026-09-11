@@ -265,6 +265,7 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 // system messages and are deliberately absent so their behavior is unchanged.
 var openModelHostProviders = map[string]bool{
 	"baseten":     true,
+	"daoxe":       true,
 	"ovhcloud":    true,
 	"openrouter":  true,
 	"nebius":      true,

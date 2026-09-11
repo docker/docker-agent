@@ -83,6 +83,7 @@ for details.
 | NVIDIA NIM          | `nvidia`         | Nemotron, Llama, Qwen, DeepSeek (open models) | `NVIDIA_API_KEY`               |
 | MiniMax             | `minimax`        | MiniMax models                       | `MINIMAX_API_KEY`                   |
 | Baseten             | `baseten`        | DeepSeek, Kimi, GLM, Llama models    | `BASETEN_API_KEY`                   |
+| DaoXE               | `daoxe`          | Multi-model gateway (OpenAI-compatible) | `DAOXE_API_KEY`                |
 | OVHcloud            | `ovhcloud`       | Qwen, Llama, Mistral, DeepSeek (EU-hosted) | `OVH_AI_ENDPOINTS_ACCESS_TOKEN` |
 | Groq                | `groq`           | Llama, Qwen, GPT-OSS (fast inference) | `GROQ_API_KEY`                     |
 | Fireworks AI        | `fireworks`      | Kimi, Llama, Qwen, DeepSeek, GLM (open models) | `FIREWORKS_API_KEY`         |
