@@ -50,6 +50,14 @@ type openAIAliasProvider struct {
 
 var openAIAliasProviders = []openAIAliasProvider{
 	{
+		provider:             "atlascloud",
+		envVar:               "ATLASCLOUD_API_KEY",
+		testKey:              "test-atlascloud-key",
+		model:                "qwen/qwen3.8-max",
+		greeting:             "Hello from Atlas Cloud",
+		mergesSystemMessages: true,
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",
