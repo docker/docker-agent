@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -441,29 +442,128 @@ func (s *stalledStream) Close() {
 // wrapping errStreamIdle when no SSE chunk arrives within the idle window.
 // It also checks that the provided cancelStream function is called so the
 // HTTP transport can close the underlying TCP connection.
+func TestHandleStream_ProductionIdleTimeoutBoundary(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		stream := newStalledStream()
+		a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+		sess := session.New(session.WithUserMessage("go"))
+		resultCh := make(chan error, 1)
+
+		go func() {
+			_, err := handleStream(
+				t.Context(), func(error) { stream.Close() }, stream, a, nil, sess, nil,
+				defaultTelemetry{}, NewChannelSink(make(chan Event, 64)), defaultStreamIdleTimeout,
+			)
+			resultCh <- err
+		}()
+
+		<-stream.recvStarted
+		time.Sleep(defaultStreamIdleTimeout - time.Nanosecond) //nolint:forbidigo // Advances synthetic time to the boundary.
+		select {
+		case err := <-resultCh:
+			t.Fatalf("production idle timeout fired before five minutes: %v", err)
+		default:
+		}
+		time.Sleep(time.Nanosecond) //nolint:forbidigo // Crosses the synthetic timeout boundary.
+		synctest.Wait()
+		select {
+		case err := <-resultCh:
+			require.ErrorIs(t, err, errStreamIdle)
+		default:
+			t.Fatal("production idle timeout did not fire at five minutes")
+		}
+	})
+}
+
 func TestHandleStream_IdleTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		stream := newStalledStream()
+		a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+		sess := session.New(session.WithUserMessage("go"))
+
+		cancelCalled := false
+		cancelStream := func(cause error) {
+			cancelCalled = true
+			stream.Close() // unblock the stalled Recv so the reader goroutine can exit
+		}
+
+		evCh := make(chan Event, 64)
+		res, err := handleStream(
+			t.Context(), cancelStream, stream, a, nil, sess, nil,
+			defaultTelemetry{}, NewChannelSink(evCh), 30*time.Second,
+		)
+
+		require.Error(t, err)
+		require.ErrorIs(t, err, errStreamIdle, "error must wrap errStreamIdle")
+		assert.True(t, res.Stopped)
+		assert.False(t, res.ResponseStarted)
+		assert.True(t, cancelCalled, "cancelStream must be called on idle timeout")
+	})
+}
+
+func TestHandleStream_IdleTimeoutAfterResponseStarted(t *testing.T) {
 	t.Parallel()
 
-	stream := newStalledStream()
-	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
-	sess := session.New(session.WithUserMessage("go"))
-
-	cancelCalled := false
-	cancelStream := func(cause error) {
-		cancelCalled = true
-		stream.Close() // unblock the stalled Recv so the reader goroutine can exit
+	tests := []struct {
+		name     string
+		response chat.MessageStreamResponse
+	}{
+		{name: "content", response: chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: "partial"}}}}},
+		{name: "reasoning", response: chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ReasoningContent: "thinking"}}}}},
+		{name: "thinking signature", response: chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ThinkingSignature: "signature"}}}}},
+		{name: "thought signature", response: chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ThoughtSignature: []byte("signature")}}}}},
+		{name: "tool call", response: streamResponseWithToolCall()},
+		{name: "media", response: chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Media: []chat.MediaDelta{{}}}}}}},
 	}
 
-	evCh := make(chan Event, 64)
-	res, err := handleStream(
-		t.Context(), cancelStream, stream, a, nil, sess, nil,
-		defaultTelemetry{}, NewChannelSink(evCh), 50*time.Millisecond,
-	)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.Error(t, err)
-	require.ErrorIs(t, err, errStreamIdle, "error must wrap errStreamIdle")
-	assert.True(t, res.Stopped)
-	assert.True(t, cancelCalled, "cancelStream must be called on idle timeout")
+			stream := newResponseThenStalledStream(tt.response)
+			a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+			sess := session.New(session.WithUserMessage("go"))
+			cancelStream := func(error) { stream.Close() }
+
+			res, err := handleStream(
+				t.Context(), cancelStream, stream, a, nil, sess, nil,
+				defaultTelemetry{}, NewChannelSink(make(chan Event, 64)), 50*time.Millisecond,
+			)
+
+			require.ErrorIs(t, err, errStreamIdle)
+			assert.True(t, res.ResponseStarted)
+		})
+	}
+}
+
+func streamResponseWithToolCall() chat.MessageStreamResponse {
+	return chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{
+		Delta: chat.MessageDelta{ToolCalls: []tools.ToolCall{{
+			ID: "call", Function: tools.FunctionCall{Name: "tool"},
+		}}},
+	}}}
+}
+
+type responseThenStalledStream struct {
+	response chat.MessageStreamResponse
+	stalled  *stalledStream
+	sent     bool
+}
+
+func newResponseThenStalledStream(response chat.MessageStreamResponse) *responseThenStalledStream {
+	return &responseThenStalledStream{response: response, stalled: newStalledStream()}
+}
+
+func (s *responseThenStalledStream) Recv() (chat.MessageStreamResponse, error) {
+	if !s.sent {
+		s.sent = true
+		return s.response, nil
+	}
+	return s.stalled.Recv()
+}
+
+func (s *responseThenStalledStream) Close() {
+	s.stalled.Close()
 }
 
 // TestHandleStream_ContextCancellation verifies that handleStream returns
