@@ -167,9 +167,11 @@ func TestShellTool_HandlerError(t *testing.T) {
 	t.Parallel()
 	tool := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
 
+	// Hosted Windows command startup can exceed the production 30s default, so leave headroom.
 	result, err := tool.handler.RunShell(t.Context(), RunShellArgs{
-		Cmd: "command_that_does_not_exist",
-		Cwd: "",
+		Cmd:     "command_that_does_not_exist",
+		Cwd:     "",
+		Timeout: 120,
 	}, tools.NopRuntime{})
 	require.NoError(t, err, "Handler should not return an error")
 	assert.Contains(t, result.Output, "Error executing command")
