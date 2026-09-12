@@ -42,6 +42,19 @@ type Config struct {
 	Models         map[string]latest.ModelConfig
 	Providers      map[string]latest.ProviderConfig
 
+	// EnvOverrides layers explicit values in front of the computed
+	// environment provider chain (see EnvProvider): every Get checks here
+	// first before falling back to env files, the OS environment, Docker
+	// Desktop, etc. Unlike EnvProviderForTests, which replaces the whole
+	// chain for tests, EnvOverrides adds a small number of synthetic values
+	// while leaving the rest of the chain intact. Production code sets it
+	// for --record/--fake: their local proxy always binds to localhost,
+	// which environment.IsTrustedDockerURL treats as a trusted Docker
+	// gateway address, so provider clients would otherwise refuse to build
+	// without a real Docker Desktop sign-in even when the configured
+	// provider has nothing to do with the Docker AI Gateway.
+	EnvOverrides map[string]string
+
 	// EncryptedConfig is an opaque, encrypted representation of the full agent
 	// YAML (as produced by `docker agent share push --key --encrypt`). When set
 	// and the configured models gateway is a trusted Docker gateway, it is
@@ -107,6 +120,7 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 	clone.Flavors = slices.Clone(runConfig.Flavors)
 	clone.Models = maps.Clone(runConfig.Models)
 	clone.Providers = maps.Clone(runConfig.Providers)
+	clone.EnvOverrides = maps.Clone(runConfig.EnvOverrides)
 	clone.DefaultModel = runConfig.DefaultModel.Clone()
 	clone.HookPreToolUse = slices.Clone(runConfig.HookPreToolUse)
 	clone.HookPostToolUse = slices.Clone(runConfig.HookPostToolUse)
@@ -152,7 +166,14 @@ func (runConfig *RuntimeConfig) EnvProvider() environment.Provider {
 	runConfig.envProviderOnce.Do(func() {
 		runConfig.envProviderCached = runConfig.computedEnvProvider()
 	})
-	return runConfig.envProviderCached
+	if len(runConfig.EnvOverrides) == 0 {
+		return runConfig.envProviderCached
+	}
+	// Checked fresh on every call (rather than baked in at cache time) so
+	// code that sets EnvOverrides after the chain was first resolved (e.g.
+	// --record/--fake, which run after flag parsing has already materialized
+	// the provider chain) still takes effect.
+	return environment.NewMultiProvider(environment.NewMapEnvProvider(runConfig.EnvOverrides), runConfig.envProviderCached)
 }
 
 // EnvFilesError reports a failure to resolve, read, or parse the configured
