@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/environment"
 )
 
 func TestClone_ChangeWorkingDir(t *testing.T) {
@@ -26,6 +28,72 @@ func TestClone_ChangeWorkingDir(t *testing.T) {
 
 	assert.Equal(t, "/newapp", original.WorkingDir)
 	assert.Equal(t, "/cloneapp", clone.WorkingDir)
+}
+
+func TestEnvProvider_EnvOverrides(t *testing.T) {
+	t.Parallel()
+
+	t.Run("overrides take precedence over the computed chain", func(t *testing.T) {
+		t.Parallel()
+		rc := &RuntimeConfig{
+			EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{"FOO": "real"}),
+			Config:              Config{EnvOverrides: map[string]string{"FOO": "override"}},
+		}
+
+		// EnvProviderForTests wins outright: EnvOverrides only layers onto the
+		// computed production chain, not a test double.
+		v, ok := rc.EnvProvider().Get(t.Context(), "FOO")
+		require.True(t, ok)
+		assert.Equal(t, "real", v)
+	})
+
+	t.Run("overrides layer onto the computed chain without replacing it", func(t *testing.T) {
+		t.Parallel()
+		ok := filepath.Join(t.TempDir(), "ok.env")
+		require.NoError(t, os.WriteFile(ok, []byte("SOME_TEST_ONLY_VAR=from-env-file\n"), 0o600))
+		rc := &RuntimeConfig{Config: Config{
+			EnvFiles:     []string{ok},
+			EnvOverrides: map[string]string{"SOME_OTHER_VAR": "overridden"},
+		}}
+
+		v, found := rc.EnvProvider().Get(t.Context(), "SOME_OTHER_VAR")
+		require.True(t, found)
+		assert.Equal(t, "overridden", v)
+
+		// Values not present in EnvOverrides still fall through to the rest
+		// of the chain (env files here).
+		v, found = rc.EnvProvider().Get(t.Context(), "SOME_TEST_ONLY_VAR")
+		require.True(t, found)
+		assert.Equal(t, "from-env-file", v)
+	})
+
+	t.Run("set after the chain was first resolved still applies", func(t *testing.T) {
+		t.Parallel()
+		rc := &RuntimeConfig{}
+
+		// Simulate flag parsing materializing the chain before recording mode
+		// (which sets EnvOverrides later) runs. Use a var name that can't
+		// already be set in the ambient environment.
+		const varName = "CAGENT_TEST_ENV_PROVIDER_OVERRIDE_LATE_SET"
+		_, found := rc.EnvProvider().Get(t.Context(), varName)
+		assert.False(t, found)
+
+		rc.EnvOverrides = map[string]string{varName: "placeholder"}
+
+		v, found := rc.EnvProvider().Get(t.Context(), varName)
+		require.True(t, found)
+		assert.Equal(t, "placeholder", v)
+	})
+
+	t.Run("clone gets an independent copy", func(t *testing.T) {
+		t.Parallel()
+		rc := &RuntimeConfig{Config: Config{EnvOverrides: map[string]string{"FOO": "bar"}}}
+
+		clone := rc.Clone()
+		clone.EnvOverrides["FOO"] = "mutated"
+
+		assert.Equal(t, "bar", rc.EnvOverrides["FOO"], "mutating the clone's map must not affect the original")
+	})
 }
 
 func TestEnvFilesError(t *testing.T) {
