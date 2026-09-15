@@ -221,7 +221,15 @@ func AvailableProviders(ctx context.Context, modelsGateway string, env environme
 
 	for _, p := range cloudProviders {
 		for _, envVar := range p.envVars {
-			if key, _ := env.Get(ctx, envVar); key != "" {
+			key, _ := env.Get(ctx, envVar)
+			if envVar == "GOOGLE_GENAI_USE_VERTEXAI" {
+				if isVertexAIEnabled(key) {
+					providers = append(providers, p.name)
+					break
+				}
+				continue
+			}
+			if key != "" {
 				providers = append(providers, p.name)
 				break // found one, no need to check other env vars for this provider
 			}

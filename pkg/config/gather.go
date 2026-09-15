@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -280,7 +281,7 @@ func addEnvVarsForCoreProvider(ctx context.Context, providerType string, model *
 		requiredEnv["ANTHROPIC_API_KEY"] = true
 	case "google":
 		if model.ProviderOpts["project"] == nil && model.ProviderOpts["location"] == nil {
-			if value, _ := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI"); value != "" {
+			if value, _ := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI"); isVertexAIEnabled(value) {
 				requiredEnv["GOOGLE_CLOUD_PROJECT"] = true
 				requiredEnv["GOOGLE_CLOUD_LOCATION"] = true
 			} else if value, _ := env.Get(ctx, "GEMINI_API_KEY"); value == "" {
@@ -329,6 +330,15 @@ func GatherEnvVarsForTools(ctx context.Context, cfg *latest.Config) ([]string, e
 		return sortedKeys(requiredEnv), fmt.Errorf("tool env preflight: %w", errors.Join(errs...))
 	}
 	return sortedKeys(requiredEnv), nil
+}
+
+// isVertexAIEnabled interprets GOOGLE_GENAI_USE_VERTEXAI as a boolean,
+// mirroring the provider routing in pkg/model/provider/gemini. Only an
+// explicit truthy value (per strconv.ParseBool) enables the Vertex AI path,
+// so "false", "0" or "" require the direct Gemini API credentials instead.
+func isVertexAIEnabled(value string) bool {
+	enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+	return err == nil && enabled
 }
 
 func sortedKeys(requiredEnv map[string]bool) []string {
