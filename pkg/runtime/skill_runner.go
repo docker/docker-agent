@@ -38,11 +38,13 @@ func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, 
 // tool call's runtime handle. Standalone invocations pass nil and skip embedded
 // commands because no tool call exists to own an approval prompt.
 func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, args skills.RunSkillArgs, evts EventSink, rt tools.Runtime) (*tools.ToolCallResult, error) {
-	// The caller resolves from the session, not the shared current agent:
-	// a fork skill invoked from a pinned background session must use the
-	// pinned agent's skills, identity, and model override, no matter where
-	// the concurrent foreground loop points (#3886).
-	caller := r.resolveSessionAgent(sess)
+	// The caller never resolves from the shared current agent: a fork skill
+	// invoked from a pinned background session must use the pinned agent's
+	// skills, identity, and model override (#3886), and a sibling transfer_task
+	// in the same parallel batch may already have swapped it — which would run
+	// the skill as the wrong agent (#4156). rt is nil for standalone
+	// invocations; callerAgent falls back to session resolution there.
+	caller := r.callerAgent(rt, sess)
 	if caller == nil {
 		return nil, errors.New("no agent resolved for the calling session")
 	}
@@ -126,10 +128,13 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 	// Skills are sub-sessions of the caller, not delegations, so the
 	// runtime's currentAgent stays put and the delegation lineage is
 	// inherited unchanged (no DelegationLineage: not a delegation edge).
-	// When the caller session is itself pinned (a background agent's
-	// session), pin the child to the same agent so RunStream resolves it
-	// as the pinned caller instead of the shared current agent.
+	// The child is always pinned to the caller: the caller is already
+	// resolved here, so RunStream never has to consult the shared current
+	// agent — which a pinned parent must not expose (#3886) and which a
+	// sibling transfer_task in the same batch may have swapped to its own
+	// target (#4156).
 	return r.runForwarding(ctx, sess, evts, delegationRequest{
+		CallerAgent: caller,
 		SubSessionConfig: SubSessionConfig{
 			Task:                prepared.Task,
 			SystemMessage:       skills.BuildSkillSystemMessage(prepared, sess.AttachedFilesSnapshot()),
@@ -140,7 +145,7 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 			SafetyPolicy:        sess.GetSafetyPolicy(),
 			Permissions:         sess.ClonePermissions(),
 			NonInteractive:      sess.NonInteractive,
-			PinAgent:            sess.AgentName != "",
+			PinAgent:            true,
 			ExcludedTools:       []string{skills.ToolNameRunSkill},
 			AllowedTools:        prepared.AllowedTools,
 			ExtraToolSets:       prepared.ToolSets,

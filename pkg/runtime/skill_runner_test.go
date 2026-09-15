@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/team"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
+	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
 
 func TestRunSkillFork_SkipsEmbeddedCommandsWithoutParentToolCall(t *testing.T) {
@@ -150,4 +151,63 @@ func TestRunSkillFork_PinnedSessionRunsAsPinnedAgent(t *testing.T) {
 	require.NotNil(t, completed)
 	assert.Equal(t, "worker", completed.GetAgentName(),
 		"SubSessionCompleted must be attributed to the pinned caller")
+}
+
+// TestRunSkillFork_MixedBatchWithTransferRunsAsTheCaller closes #4156's last
+// unguarded shape: a batch of [transfer_task, run_skill]. The delegation saw no
+// sibling of its own name, counted itself solo and swapped the shared current
+// agent to its target; the skill child, left unpinned, then resolved from that
+// same field and ran as the transfer's target instead of as its caller.
+//
+// A fork skill always knows its caller — runSkillFork resolves it before
+// dispatch — so the child is pinned to it and never consults the shared field,
+// whatever the siblings do.
+func TestRunSkillFork_MixedBatchWithTransferRunsAsTheCaller(t *testing.T) {
+	t.Parallel()
+
+	skillTS := skillstool.New([]skills.Skill{{
+		Name:          "greet",
+		Description:   "Greets the user",
+		Context:       "fork",
+		InlineContent: "# Greet\nSay the greeting.",
+	}}, "")
+
+	// Both agents answer with their own name, so the skill result names the
+	// agent the child actually executed as.
+	workerProv := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+		newStreamBuilder().AddContent("worker done").AddStopWithUsage(10, 5).Build(),
+		newStreamBuilder().AddContent("skill ran as worker").AddStopWithUsage(10, 5).Build(),
+	}}
+	worker := agent.New("worker", "Worker agent", agent.WithModel(workerProv))
+
+	// One assistant response carrying both calls: the delegation and the fork.
+	batch := newStreamBuilder().
+		AddToolCallName("call_transfer", transfertask.ToolNameTransferTask).
+		AddToolCallArguments("call_transfer", `{"agent":"worker","task":"chunk","expected_output":"result"}`).
+		AddToolCallName("call_skill", skillstool.ToolNameRunSkill).
+		AddToolCallArguments("call_skill", `{"name":"greet","task":"greet the user"}`)
+	rootProv := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+		batch.AddToolCallStopWithUsage(10, 5).Build(),
+		newStreamBuilder().AddContent("skill ran as root").AddStopWithUsage(10, 5).Build(),
+		newStreamBuilder().AddContent("root done").AddStopWithUsage(10, 5).Build(),
+	}}
+	root := agent.New("root", "Root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(worker),
+		agent.WithToolSets(transfertask.New(), skillTS),
+	)
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, worker)),
+		WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	sess := session.New(session.WithUserMessage("split and skill"), session.WithToolsApproved(true))
+	_, err = rt.Run(t.Context(), sess)
+	require.NoError(t, err)
+
+	assert.Equal(t, "skill ran as root", toolResultContent(t, sess, "call_skill"),
+		"the fork skill must run as its caller, not as the sibling delegation's target")
+	assert.Equal(t, "worker done", toolResultContent(t, sess, "call_transfer"),
+		"the delegation must still run as its own target")
 }

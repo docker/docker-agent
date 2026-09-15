@@ -1069,11 +1069,13 @@ func (r *LocalRuntime) runTurn(
 		// --- FORCED HANDOFF: deterministic routing on natural stop ---
 		// When the agent's config names a force_handoff target, the
 		// runtime intercepts the finish state and routes the conversation
-		// to that agent without involving the LLM. Skipped for pinned
-		// sessions (background agents): resolveSessionAgent would keep
-		// returning the pinned agent, turning the forced switch into an
-		// infinite stop/handoff loop.
-		if next := a.ForceHandoff(); next != nil && sess.AgentName == "" {
+		// to that agent without involving the LLM. Honoured for pinned
+		// sessions too (background agents, children pinned by a parallel
+		// delegation batch): applyForceHandoff moves the session's own pin,
+		// so the next iteration resolves the target rather than looping on
+		// the agent that just stopped. Config validation rejects
+		// force_handoff cycles, so the chain always terminates.
+		if next := a.ForceHandoff(); next != nil {
 			r.applyForceHandoff(ctx, sess, a, next)
 			endReason = turnEndReasonForceHandoff
 			return turnContinue
