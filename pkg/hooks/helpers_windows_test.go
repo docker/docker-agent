@@ -3,13 +3,25 @@
 package hooks
 
 import (
+	"context"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func warmShell() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	shell, argsPrefix := shellpath.DetectShell()
+	_ = exec.CommandContext(ctx, shell, append(argsPrefix, "exit 0")...).Run()
+}
 
 // Command hooks run under PowerShell on Windows (shellpath.DetectShell).
 // These helpers generate PowerShell equivalents of the POSIX commands in
