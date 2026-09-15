@@ -61,13 +61,26 @@ func (m *streamingMotionModel) View() tea.View {
 	return v
 }
 
+// waitForProgramQuiescence blocks until the program's view/composition/write
+// counters have been unchanged for a full settle window. The settle window
+// must comfortably exceed the renderer's tick period (tea's default FPS is
+// 60, i.e. ~16.7ms): under -race with the full suite's package-level
+// parallelism, the render ticker's goroutine can be scheduled several tick
+// periods late, so a composition that already happened may not yet have been
+// flushed to the writer when a short window would call it stable. A caller
+// that samples counters right after that premature "stable" reading (as a
+// baseline to diff against later) then attributes the delayed flush to
+// whatever happens next, inflating its write count. 300ms is ~18 tick
+// periods, giving the ticker goroutine ample room to catch up before we
+// trust a reading.
 func waitForProgramQuiescence(t *testing.T, model *streamingMotionModel, writer *wallClockCountingWriter) {
 	t.Helper()
+	const settleWindow = 300 * time.Millisecond
 	lastViews, lastCompositions, lastWrites := model.views.Load(), model.compositions.Load(), writer.writes.Load()
 	stableSince := time.Now()
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
-	timeout := time.NewTimer(5 * time.Second)
+	timeout := time.NewTimer(20 * time.Second)
 	defer timeout.Stop()
 	for {
 		select {
@@ -77,7 +90,7 @@ func waitForProgramQuiescence(t *testing.T, model *streamingMotionModel, writer 
 				lastViews, lastCompositions, lastWrites = views, compositions, writes
 				stableSince = time.Now()
 			}
-			if time.Since(stableSince) >= 50*time.Millisecond {
+			if time.Since(stableSince) >= settleWindow {
 				return
 			}
 		case <-timeout.C:
