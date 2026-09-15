@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"google.golang.org/genai"
@@ -67,7 +68,8 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		// an HTTP transport wrapper forces a fallback to BackendGeminiAPI.
 		// The Vertex AI backend relies on ADC-managed HTTP clients that bypass
 		// http.RoundTripper, so the wrapper cannot be applied there.
-		_, useVertexAIEnv := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI")
+		vertexFlag, _ := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI")
+		useVertexAIEnv := vertexAIEnabled(vertexFlag)
 		wantVertexAI := cfg.ProviderOpts["project"] != nil || cfg.ProviderOpts["location"] != nil || useVertexAIEnv
 		useVertexAI := wantVertexAI && globalOptions.TransportWrapper() == nil
 
@@ -969,6 +971,15 @@ func parseRerankScoresStrict(raw string, expected int) ([]float64, error) {
 	}
 
 	return rr.Scores, nil
+}
+
+// vertexAIEnabled interprets GOOGLE_GENAI_USE_VERTEXAI as a boolean. Only an
+// explicit truthy value (per strconv.ParseBool: "1", "t", "true", etc.)
+// enables the Vertex AI path, so "false", "0", "" or an unset variable all
+// leave the direct Gemini API path in use.
+func vertexAIEnabled(value string) bool {
+	enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+	return err == nil && enabled
 }
 
 func providerOption(cfg *latest.ModelConfig, name string) string {
