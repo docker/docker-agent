@@ -32,11 +32,12 @@ colors:
 	require.NoError(t, os.WriteFile(themePath, []byte(initialContent), 0o644))
 
 	// Track callback invocations
-	var callbackCount atomic.Int32
-	var lastThemeRef atomic.Value
+	themeRefs := make(chan string, 1)
 	callback := func(themeRef string) {
-		callbackCount.Add(1)
-		lastThemeRef.Store(themeRef)
+		select {
+		case themeRefs <- themeRef:
+		default:
+		}
 	}
 
 	// Create watcher with custom themes directory
@@ -56,12 +57,12 @@ colors:
 	require.NoError(t, os.WriteFile(themePath, []byte(updatedContent), 0o644))
 
 	// Wait for the watcher to detect the change and fire the callback
-	require.Eventually(t, func() bool {
-		return callbackCount.Load() >= 1
-	}, 5*time.Second, 50*time.Millisecond, "callback should have been called at least once")
-	ref, ok := lastThemeRef.Load().(string)
-	assert.True(t, ok)
-	assert.Equal(t, "test-theme", ref, "callback should receive the correct theme ref")
+	select {
+	case ref := <-themeRefs:
+		assert.Equal(t, "test-theme", ref, "callback should receive the correct theme ref")
+	case <-time.After(5 * time.Second):
+		require.Fail(t, "callback should have been called at least once")
+	}
 }
 
 func TestThemeWatcher_DoesNotWatchDefaultTheme(t *testing.T) {
