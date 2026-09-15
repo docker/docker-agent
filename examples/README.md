@@ -197,6 +197,7 @@ remote MCP endpoints.
 | [`model_env_substitution.yaml`](model_env_substitution.yaml) | `${env.VAR}` substitution in a model's `model` / `base_url`. |
 | [`nebius.yaml`](nebius.yaml) | Nebius cloud provider. |
 | [`baseten.yaml`](baseten.yaml) | Baseten cloud provider. |
+| [`daoxe.yaml`](daoxe.yaml) | DaoXE multi-model gateway provider. |
 | [`ovhcloud.yaml`](ovhcloud.yaml) | OVHcloud AI Endpoints provider. |
 | [`groq.yaml`](groq.yaml) | Groq fast-inference provider. |
 | [`fireworks.yaml`](fireworks.yaml) | Fireworks AI open-model inference provider. |
