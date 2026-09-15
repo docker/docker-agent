@@ -35,6 +35,8 @@ func TestNilBudgetTrackerIsInert(t *testing.T) {
 	assert.NotPanics(t, func() {
 		b.record("root", &chat.Usage{InputTokens: 10}, new(1.0), time.Second)
 		assert.Nil(t, b.exceeded())
+		assert.Nil(t, b.approaching())
+		assert.Nil(t, b.consumeApproaching())
 		assert.Equal(t, budgetSnapshot{}, b.snapshot())
 		assert.False(t, b.unpricedSpend())
 	})
@@ -187,6 +189,8 @@ func TestBudgetTrackerIsConcurrencySafe(t *testing.T) {
 			for range 50 {
 				b.record("root", &chat.Usage{InputTokens: 1, OutputTokens: 1}, new(0.01), time.Second)
 				b.exceeded()
+				b.approaching()
+				b.consumeApproaching()
 				b.snapshot()
 			}
 		}()
@@ -358,6 +362,106 @@ func TestBudgetSetSnapshotPerBudget(t *testing.T) {
 	assert.InDelta(t, 1.00, snaps[0].Snapshot.MaxCost, 1e-9)
 	assert.Equal(t, int64(10), snaps[1].Snapshot.Tokens)
 	assert.InDelta(t, 0.10, snaps[2].Snapshot.MaxCost, 1e-9)
+}
+
+func TestBudgetApproachingCostAtEightyPercent(t *testing.T) {
+	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 0.50})
+	require.NotNil(t, b)
+
+	b.record("root", &chat.Usage{InputTokens: 100}, new(0.39), time.Second)
+	assert.Nil(t, b.approaching(), "$0.39 of $0.50 is under 80%")
+	assert.Nil(t, b.exceeded())
+	assert.Nil(t, b.consumeApproaching())
+
+	b.record("root", &chat.Usage{InputTokens: 100}, new(0.01), time.Second)
+	warn := b.approaching()
+	require.NotNil(t, warn, "$0.40 of $0.50 must warn")
+	assert.Equal(t, budgetLimitCost, warn.Limit)
+	assert.Equal(t, "$0.40", warn.Used)
+	assert.Equal(t, "$0.50", warn.Max)
+	assert.Nil(t, b.exceeded(), "80% must not hard-stop")
+	assert.Contains(t, warn.WarnMessage(), "used $0.40 of $0.50 budget.max_cost")
+}
+
+func TestBudgetApproachingDoesNotFireAtCeiling(t *testing.T) {
+	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 0.50})
+	b.record("root", &chat.Usage{}, new(0.50), time.Second)
+	require.NotNil(t, b.exceeded())
+	assert.Nil(t, b.approaching(), "at the ceiling exceeded wins; approaching is a pre-stop signal")
+	assert.Nil(t, b.consumeApproaching(), "a hard-stopped tracker must not emit a warning")
+}
+
+func TestBudgetApproachingWarnsOncePerLimit(t *testing.T) {
+	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 0.50})
+	b.record("root", &chat.Usage{}, new(0.40), time.Second)
+
+	first := b.consumeApproaching()
+	require.NotNil(t, first)
+	assert.Equal(t, budgetLimitCost, first.Limit)
+
+	b.record("root", &chat.Usage{}, new(0.05), time.Second)
+	assert.Nil(t, b.consumeApproaching(), "second consume after more spend must not re-warn the same limit")
+	assert.Nil(t, b.exceeded())
+}
+
+func TestBudgetApproachingTokensWhenCostUnset(t *testing.T) {
+	b := newBudgetTracker(&latest.BudgetConfig{MaxTokens: 1000})
+	b.record("root", &chat.Usage{InputTokens: 700, OutputTokens: 100}, nil, time.Second)
+	warn := b.approaching()
+	require.NotNil(t, warn, "800 of 1000 tokens is 80%")
+	assert.Equal(t, budgetLimitTokens, warn.Limit)
+	assert.Equal(t, "800 tokens", warn.Used)
+	assert.Equal(t, "1000 tokens", warn.Max)
+	assert.Nil(t, b.exceeded())
+}
+
+func TestBudgetApproachingTime(t *testing.T) {
+	b := newBudgetTracker(&latest.BudgetConfig{MaxTime: latest.Duration{Duration: 10 * time.Minute}})
+	b.record("root", &chat.Usage{}, nil, 8*time.Minute)
+	warn := b.approaching()
+	require.NotNil(t, warn, "8m of 10m is 80%")
+	assert.Equal(t, budgetLimitTime, warn.Limit)
+	assert.Equal(t, "8m0s", warn.Used)
+	assert.Equal(t, "10m0s", warn.Max)
+}
+
+func TestBudgetApproachingCostPreferredOverTokens(t *testing.T) {
+	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 1, MaxTokens: 100})
+	b.record("root", &chat.Usage{InputTokens: 80}, new(0.80), time.Second)
+	warn := b.approaching()
+	require.NotNil(t, warn)
+	assert.Equal(t, budgetLimitCost, warn.Limit, "cost has the same priority as exceeded()")
+}
+
+func TestBudgetApproachingSkipsUnpricedCost(t *testing.T) {
+	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 0.50})
+	b.record("root", &chat.Usage{InputTokens: 5000, OutputTokens: 5000}, nil, time.Second)
+	assert.True(t, b.unpricedSpend())
+	assert.Nil(t, b.approaching(), "unpriced spend must not invent an approaching-cost warning")
+	assert.Nil(t, b.consumeApproaching())
+}
+
+func TestBudgetApproachingTokensDespiteUnpricedCost(t *testing.T) {
+	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 0.50, MaxTokens: 1000})
+	b.record("root", &chat.Usage{InputTokens: 800}, nil, time.Second)
+	warn := b.approaching()
+	require.NotNil(t, warn, "token ceiling is honest even when cost is unpriced")
+	assert.Equal(t, budgetLimitTokens, warn.Limit)
+}
+
+func TestBudgetConsumeApproachingThenNextLimit(t *testing.T) {
+	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 1, MaxTokens: 100})
+	b.record("root", &chat.Usage{InputTokens: 80}, new(0.80), time.Second)
+
+	costWarn := b.consumeApproaching()
+	require.NotNil(t, costWarn)
+	assert.Equal(t, budgetLimitCost, costWarn.Limit)
+
+	tokenWarn := b.consumeApproaching()
+	require.NotNil(t, tokenWarn, "after cost is warned, tokens at 80% must still warn once")
+	assert.Equal(t, budgetLimitTokens, tokenWarn.Limit)
+
+	assert.Nil(t, b.consumeApproaching())
 }
 
 func TestBudgetConfigIsZero(t *testing.T) {
