@@ -39,6 +39,7 @@ var modelsDevAbsentProviders = map[string]bool{
 	"ovhcloud":              true, // models.dev lower-cases OVHcloud model ids (e.g. "qwen3.5-397b-a17b"); the provider API is case-sensitive and takes "Qwen3.5-397B-A17B"
 	"cloudflare-workers-ai": true, // example uses an @cf/... model id not present in the models.dev snapshot (only variant ids like -fp8 are listed)
 	"cloudflare-ai-gateway": true, // multi-provider router; example model ids use the gateway's provider/model form, not guaranteed to match a models.dev id
+	"atlascloud":            true, // Atlas Cloud is not listed in the models.dev catalog; its model ids come from its own /api/v1/models endpoint
 }
 
 func collectExamples(t *testing.T) []string {
