@@ -30,9 +30,20 @@ Keep comments short and to the point:
 
 - Use tools to gather information rather than relying on assumptions
 - Examine existing code before making changes
+- Grep for existing plumbing before adding a mechanism, and before calling
+  something unavailable
 - Validate all changes before considering tasks complete
 - Ask clarifying questions only when truly necessary
 - When possible, call independent tools concurrently — it's faster
+
+### Client and Session Lifetimes
+
+- Provider clients are built per team load: once per session in `serve api`,
+  once at startup in `serve a2a` and `serve mcp`
+- Anything that must vary per conversation belongs in a request middleware,
+  not in client construction
+- The session ID is on the request context via
+  `httpclient.SessionIDFromContext`; `chatgptAuthMiddleware` shows the shape
 
 ## Validation Requirements
 
@@ -47,6 +58,10 @@ Before marking work as complete:
 - [ ] Edge cases are considered
 
 # Development Commands
+
+Canonical setup, commands and style guide:
+[the contributing guide](docs/community/contributing/index.md). The list below
+is a quick reference.
 
 ## Build and Development
 
