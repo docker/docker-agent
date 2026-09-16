@@ -25,6 +25,7 @@ type ModelOptions struct {
 	transportWrapper func(http.RoundTripper) http.RoundTripper
 	tokenSource      TokenSource
 	openAIVendor     bool
+	customBaseURL    bool
 }
 
 func (c *ModelOptions) Gateway() string {
@@ -76,6 +77,15 @@ func (c *ModelOptions) ModelsDevStore() *modelsdev.Store {
 // that must not leak onto an OpenAI-compatible alias for a different vendor.
 func (c *ModelOptions) OpenAIVendor() bool {
 	return c.openAIVendor
+}
+
+// CustomBaseURL reports whether the model dials an endpoint the user chose
+// (a model-level base_url, a providers: entry, or an override of a built-in
+// alias URL) rather than a provider's default. Like [ModelOptions.OpenAIVendor]
+// it is set only by the factory through [WithCustomBaseURL], never from
+// YAML, and gates request fields that only OpenAI-compatible servers accept.
+func (c *ModelOptions) CustomBaseURL() bool {
+	return c.customBaseURL
 }
 
 func (c *ModelOptions) TokenSource() TokenSource {
@@ -192,6 +202,14 @@ func WithModelsDevStore(store *modelsdev.Store) Opt {
 func WithOpenAIVendor(v bool) Opt {
 	return func(cfg *ModelOptions) {
 		cfg.openAIVendor = v
+	}
+}
+
+// WithCustomBaseURL records the factory-resolved user-chosen-endpoint bit
+// (see [ModelOptions.CustomBaseURL]).
+func WithCustomBaseURL(v bool) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.customBaseURL = v
 	}
 }
 

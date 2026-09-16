@@ -141,6 +141,16 @@ func UsesReasoningEffort(modelID string) bool {
 	return isOSeries(m) || strings.HasPrefix(m, "gpt-5")
 }
 
+// IsOpenAIModelName reports whether modelID names one of OpenAI's own model
+// families (o-series, gpt-*, chatgpt-*), reasoning or not. It lets callers
+// on a user-supplied OpenAI-compatible endpoint tell an OpenAI model behind
+// a proxy apart from a self-hosted open-weight model, since OpenAI rejects
+// request fields it does not know.
+func IsOpenAIModelName(modelID string) bool {
+	m := normalizeOpenAI(modelID)
+	return isOSeries(m) || strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "chatgpt-")
+}
+
 // AlwaysReasons reports whether an OpenAI model always reasons internally
 // and therefore needs a default thinking_budget when none is configured.
 //

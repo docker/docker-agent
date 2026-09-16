@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestApplySamplingProviderOpts(t *testing.T) {
+func TestApplyProviderOptsExtraFields(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
@@ -48,6 +48,20 @@ func TestApplySamplingProviderOpts(t *testing.T) {
 			opts:     map[string]any{"seed": 42},
 			wantKeys: []string{"seed"},
 		},
+		{
+			name:     "extra_body forwarded verbatim",
+			opts:     map[string]any{"extra_body": map[string]any{"reasoning_effort": "none", "chat_template_kwargs": map[string]any{"enable_thinking": false}}},
+			wantKeys: []string{"reasoning_effort", "chat_template_kwargs"},
+		},
+		{
+			name:     "extra_body alongside sampling opts",
+			opts:     map[string]any{"top_k": 40, "extra_body": map[string]any{"reasoning_effort": "none"}},
+			wantKeys: []string{"top_k", "reasoning_effort"},
+		},
+		{
+			name: "extra_body of the wrong type ignored",
+			opts: map[string]any{"extra_body": "reasoning_effort=none"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -55,7 +69,7 @@ func TestApplySamplingProviderOpts(t *testing.T) {
 			params := oai.ChatCompletionNewParams{
 				Model: "test-model",
 			}
-			applySamplingProviderOpts(&params, tt.opts)
+			applyProviderOptsExtraFields(&params, tt.opts, nil)
 
 			// Marshal to JSON and check for expected keys
 			data, err := json.Marshal(params)

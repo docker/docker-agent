@@ -128,6 +128,28 @@ func GetProviderOptStringSlice(opts map[string]any, key string) ([]string, bool)
 	}
 }
 
+// ExtraBody returns the provider_opts.extra_body object: arbitrary JSON
+// fields the user wants merged verbatim into every chat completion request
+// body, for vendor-specific parameters docker-agent has no field for (e.g.
+// {"reasoning_effort": "none"} or {"thinking": {"type": "disabled"}}). Returns
+// nil when unset or not an object.
+func ExtraBody(opts map[string]any) map[string]any {
+	v, ok := opts["extra_body"]
+	if !ok {
+		return nil
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		slog.Debug("provider_opts type mismatch, ignoring",
+			"key", "extra_body",
+			"expected_type", "object",
+			"actual_type", fmt.Sprintf("%T", v),
+			"value", v)
+		return nil
+	}
+	return m
+}
+
 // samplingProviderOptsKeys lists the provider_opts keys that are
 // treated as sampling parameters and forwarded to provider APIs.
 // Provider-specific infrastructure keys (api_type, transport, region, etc.)

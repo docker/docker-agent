@@ -277,6 +277,39 @@ func TestCloneWithOptions_PreservesOpenAIVendorBit_NamedCustomProvider(t *testin
 	assert.Equal(t, "none", req.ReasoningEffort, "cloned NoThinking() path must still send gpt-5.6's real none effort")
 }
 
+// TestCloneWithOptions_PreservesCustomBaseURL_LocalModel verifies that a
+// NoThinking() clone (title generation, sampling) of a model on a
+// user-supplied OpenAI-compatible endpoint still resolves the custom
+// base_url bit when it re-enters the factory with the already-resolved
+// config, so the clone also switches thinking off on the wire.
+func TestCloneWithOptions_PreservesCustomBaseURL_LocalModel(t *testing.T) {
+	t.Parallel()
+
+	server, body := captureNamedCustomProviderRequestBody(t, "openai_chatcompletions")
+
+	modelCfg := &latest.ModelConfig{Provider: "openai", Model: "mlx-community/Qwen3.6-35B-A3B-8bit", BaseURL: server.URL}
+	env := environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "secret"})
+
+	baseProvider, err := fullTestRegistry().New(t.Context(), modelCfg, env)
+	require.NoError(t, err)
+	baseOpts := baseProvider.BaseConfig().ModelOptions
+	require.True(t, baseOpts.CustomBaseURL())
+
+	cloned := CloneWithOptions(t.Context(), baseProvider, options.WithNoThinking())
+	clonedOpts := cloned.BaseConfig().ModelOptions
+	require.True(t, clonedOpts.CustomBaseURL(), "clone must keep the custom base_url bit")
+
+	stream, err := cloned.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, nil)
+	require.NoError(t, err)
+	defer stream.Close()
+	drainStream(t, stream)
+
+	var req map[string]any
+	require.NoError(t, json.Unmarshal(body(), &req))
+	assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
+	assert.NotContains(t, req, "reasoning_effort")
+}
+
 // TestCloneWithOptions_KeepsOpenAIVendorFalse_UnrelatedAlias is the negative
 // counterpart: cloning a provider built on a known non-OpenAI alias (xai,
 // mistral) must not somehow gain the OpenAI vendor bit, so the clone's

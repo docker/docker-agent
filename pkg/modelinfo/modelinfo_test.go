@@ -282,6 +282,39 @@ func TestUsesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestIsOpenAIModelName(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{"gpt-4o", true},
+		{"gpt-4.1-mini", true},
+		{"gpt-3.5-turbo", true},
+		{"gpt-5.6-sol", true},
+		{"gpt-oss-120b", true},
+		{"chatgpt-4o-latest", true},
+		{"o3-mini", true},
+		{"O1", true},
+		{"openai/gpt-4o", true},
+
+		{"qwen3.6:35b-a3b-q8_0", false},
+		{"mlx-community/Qwen3.6-35B-A3B-8bit", false},
+		{"deepseek-r1", false},
+		{"claude-sonnet-5", false},
+		{"llama-3.1-8b", false},
+		{"ai/qwen3", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, IsOpenAIModelName(tc.model))
+		})
+	}
+}
+
 func TestAlwaysReasons(t *testing.T) {
 	t.Parallel()
 

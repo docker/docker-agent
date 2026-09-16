@@ -201,6 +201,41 @@ func TestApplyModelDefaults(t *testing.T) {
 			name:   "dmr: no effect",
 			config: &latest.ModelConfig{Provider: "dmr", Model: "ai/llama3.2"},
 		},
+
+		// --- Disabled thinking preserved where a client acts on it ---
+		{
+			name:       "dmr: thinking_budget: none is preserved (reasoning-budget 0 and chat_template_kwargs)",
+			config:     &latest.ModelConfig{Provider: "dmr", Model: "ai/qwen3", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+			wantBudget: &latest.ThinkingBudget{Effort: "none"},
+		},
+		{
+			name:       "dmr: thinking_budget: 0 is preserved",
+			config:     &latest.ModelConfig{Provider: "dmr", Model: "ai/qwen3", ThinkingBudget: &latest.ThinkingBudget{Tokens: 0}},
+			wantBudget: &latest.ThinkingBudget{Tokens: 0},
+		},
+		{
+			name:       "custom base_url with an open-weight model: none is preserved",
+			config:     &latest.ModelConfig{Provider: "openai", Model: "mlx-community/Qwen3.6-35B-A3B-8bit", BaseURL: "http://localhost:8080/v1", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+			wantBudget: &latest.ThinkingBudget{Effort: "none"},
+		},
+		{
+			name:       "custom base_url with an open-weight model: 0 is preserved",
+			config:     &latest.ModelConfig{Provider: "openai", Model: "qwen3", BaseURL: "http://localhost:8080/v1", ThinkingBudget: &latest.ThinkingBudget{Tokens: 0}},
+			wantBudget: &latest.ThinkingBudget{Tokens: 0},
+		},
+		{
+			name:       "alias with overridden base_url and an open-weight model: none is preserved",
+			config:     &latest.ModelConfig{Provider: "xai", Model: "qwen3", BaseURL: "https://proxy.example.com/v1", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+			wantBudget: &latest.ThinkingBudget{Effort: "none"},
+		},
+		{
+			name:   "custom base_url with an OpenAI model behind a proxy: none becomes nil",
+			config: &latest.ModelConfig{Provider: "openai", Model: "gpt-4o", BaseURL: "https://proxy.example.com/v1", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+		},
+		{
+			name:   "alias default base_url: none becomes nil",
+			config: &latest.ModelConfig{Provider: "groq", Model: "qwen/qwen3-32b", BaseURL: "https://api.groq.com/openai/v1", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+		},
 	}
 
 	for _, tt := range tests {

@@ -86,7 +86,10 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	// internal state rather than a ProviderOpts key: provider_opts is public,
 	// user-controllable config, so it must never be able to spoof or suppress
 	// this decision (see options.WithOpenAIVendor).
-	opts = append(opts, options.WithOpenAIVendor(isOpenAIVendor(enhancedCfg)))
+	opts = append(opts,
+		options.WithOpenAIVendor(isOpenAIVendor(enhancedCfg)),
+		options.WithCustomBaseURL(hasCustomBaseURL(enhancedCfg, envExpander(ctx, env))),
+	)
 	// A model may opt out of the models gateway and dial its provider directly.
 	// Clearing the gateway option makes the leaf provider take its direct-auth
 	// path (provider API key / token_key) instead of the gateway path.

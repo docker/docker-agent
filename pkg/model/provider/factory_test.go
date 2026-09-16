@@ -470,6 +470,90 @@ func TestCreateDirectProvider_ResolvesOpenAIVendorOption(t *testing.T) {
 	}
 }
 
+// TestCreateDirectProvider_ResolvesCustomBaseURLOption verifies that
+// createDirectProvider passes options.WithCustomBaseURL(true) to the leaf
+// factory only when the endpoint was chosen by the user: a model-level
+// base_url, a providers: entry, or an override of a built-in alias URL. The
+// alias default itself never counts, including when the already-resolved
+// config re-enters the factory through a clone.
+func TestCreateDirectProvider_ResolvesCustomBaseURLOption(t *testing.T) {
+	t.Parallel()
+
+	xaiDefault, ok := LookupAlias("xai")
+	require.True(t, ok)
+
+	tests := []struct {
+		name            string
+		cfg             *latest.ModelConfig
+		customProviders map[string]latest.ProviderConfig
+		want            bool
+	}{
+		{
+			name: "direct openai provider without base_url",
+			cfg:  &latest.ModelConfig{Provider: "openai", Model: "gpt-4o"},
+			want: false,
+		},
+		{
+			name: "direct openai provider with model-level base_url",
+			cfg:  &latest.ModelConfig{Provider: "openai", Model: "qwen3", BaseURL: "http://localhost:8080/v1"},
+			want: true,
+		},
+		{
+			name: "xai alias default base_url",
+			cfg:  &latest.ModelConfig{Provider: "xai", Model: "grok-4"},
+			want: false,
+		},
+		{
+			name: "xai alias with resolved default base_url (clone re-entry)",
+			cfg:  &latest.ModelConfig{Provider: "xai", Model: "grok-4", BaseURL: xaiDefault.BaseURL},
+			want: false,
+		},
+		{
+			name: "xai alias with overridden base_url",
+			cfg:  &latest.ModelConfig{Provider: "xai", Model: "grok-4", BaseURL: "https://proxy.example.com/v1"},
+			want: true,
+		},
+		{
+			name: "named custom provider with base_url",
+			cfg:  &latest.ModelConfig{Provider: "local_llm", Model: "qwen3"},
+			customProviders: map[string]latest.ProviderConfig{
+				"local_llm": {BaseURL: "http://localhost:8000/v1"},
+			},
+			want: true,
+		},
+		{
+			name: "named custom provider pointed at openai with base_url",
+			cfg:  &latest.ModelConfig{Provider: "my_openai", Model: "gpt-4o"},
+			customProviders: map[string]latest.ProviderConfig{
+				"my_openai": {Provider: "openai", BaseURL: "https://gateway.example.com/v1", TokenKey: "MY_KEY"},
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var probe options.ModelOptions
+			r := NewRegistry(map[string]providerFactory{
+				"openai":                 tagFactoryCapturingOpts(&probe),
+				"openai_chatcompletions": tagFactoryCapturingOpts(&probe),
+				"openai_responses":       tagFactoryCapturingOpts(&probe),
+			})
+
+			var opts []options.Opt
+			if tt.customProviders != nil {
+				opts = append(opts, options.WithProviders(tt.customProviders))
+			}
+
+			_, err := r.createDirectProvider(t.Context(), tt.cfg, environment.NewNoEnvProvider(), opts...)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, probe.CustomBaseURL())
+		})
+	}
+}
+
 // tagFactoryCapturingOpts returns a providerFactory that replays every
 // received Opt onto into, so tests can inspect the resolved ModelOptions.
 func tagFactoryCapturingOpts(into *options.ModelOptions) providerFactory {

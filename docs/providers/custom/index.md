@@ -83,10 +83,10 @@ agents:
 | `presence_penalty`    | float      | Default presence penalty (-2.0–2.0).                                                  | —                        |
 | `parallel_tool_calls` | boolean    | Whether to enable parallel tool calls by default. When omitted, the provider/API default is used.         | —                        |
 | `track_usage`         | boolean    | Whether to track token usage by default.                                              | —                        |
-| `thinking_budget`     | string/int | Default reasoning effort/budget.                                                      | —                        |
+| `thinking_budget`     | string/int | Default reasoning effort/budget. `none` or `0` switches thinking off on servers that support it (see [Disabling thinking](#disabling-thinking-on-local-and-openai-compatible-servers)). | —                        |
 | `task_budget`         | int/object | Default total token budget for an agentic task. See [Task Budget](../../configuration/models/index.md#task-budget) for syntax and [Anthropic](../anthropic/index.md#task-budget) for model support. | —                        |
 | `compaction_model`    | string     | Default model used for session compaction (summary generation) by agents whose model uses this provider. Named model or inline `provider/model` string. Agent-level and model-level `compaction_model` take precedence. | —                        |
-| `provider_opts`       | object     | Provider-specific options passed through to the client.                               | —                        |
+| `provider_opts`       | object     | Provider-specific options passed through to the client. `extra_body` (object) merges arbitrary JSON fields into every chat completion request body. | —                        |
 
 ## Default Inheritance
 
@@ -158,6 +158,33 @@ agents:
 > **Reasoning tokens from OpenAI-compatible providers**
 >
 > Models that stream reasoning under `delta.reasoning` (e.g. Qwen3 served via OVHcloud AI Endpoints, OpenRouter, or a self-hosted vLLM / SGLang deployment) are fully supported. Docker Agent reads both the `delta.reasoning_content` and `delta.reasoning` fields from the stream, so thinking blocks are captured and shown in the TUI regardless of which field the server uses.
+
+### Disabling thinking on local and OpenAI-compatible servers
+
+Open-weight reasoning models (Qwen3, DeepSeek, GLM, ...) think by default, and every reasoning token counts against `max_tokens`: a small cap can be spent entirely on reasoning, leaving an empty reply. When the model runs on an endpoint you chose (a `base_url` on the model or on a `providers:` entry) and its name is not an OpenAI one, `thinking_budget: none` (or `0`) sends `chat_template_kwargs: {"enable_thinking": false}` with each request. llama.cpp, vLLM, SGLang and mlx_lm honor it; servers without the switch ignore the field. A configured `max_tokens` below 256 is raised to 256 so residual reasoning cannot starve the answer.
+
+```yaml
+models:
+  local:
+    provider: openai
+    model: mlx-community/Qwen3.6-35B-A3B-8bit
+    base_url: http://localhost:8080/v1
+    thinking_budget: none
+```
+
+Servers and vendors with a different switch take it through `provider_opts.extra_body`, an object merged verbatim into every chat completion request body after the fields Docker Agent derives, so an explicit key always wins. It works on any provider, including the built-in aliases. `reasoning_effort: none` is accepted by llama.cpp, vLLM, SGLang, Ollama, Groq (Qwen3 models) and Cerebras; check your vendor's documentation for others.
+
+```yaml
+models:
+  ollama_qwen:
+    provider: ollama
+    model: qwen3
+    provider_opts:
+      extra_body:
+        reasoning_effort: none
+```
+
+Fields you send this way are not validated; a vendor that rejects an unknown field returns an API error.
 
 ### API Router (Requesty, LiteLLM)
 

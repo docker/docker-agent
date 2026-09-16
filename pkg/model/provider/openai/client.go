@@ -466,6 +466,10 @@ func (c *Client) CreateChatCompletionStream(
 		}
 	}
 
+	// Extra JSON body fields; merged with provider_opts by
+	// applyProviderOptsExtraFields below.
+	extras := map[string]any{}
+
 	// Apply thinking budget: set reasoning_effort for reasoning models (o-series, gpt-5).
 	// Reasoning models always reason; omitting the param uses the default effort.
 	// When NoThinking is set we still need to send an explicit effort so hidden
@@ -481,7 +485,20 @@ func (c *Client) CreateChatCompletionStream(
 	// the caller has imposed no cap, so there is nothing to floor.
 	switch {
 	case !modelinfo.UsesReasoningEffort(c.ModelConfig.Model):
-		if c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled() {
+		switch {
+		case c.disablesOpenAICompatibleThinking():
+			// Open-weight thinking models (Qwen3, DeepSeek, GLM, ...) on a
+			// user-chosen OpenAI-compatible server: llama.cpp, vLLM, SGLang
+			// and mlx_lm all honor chat_template_kwargs.enable_thinking=false;
+			// servers without the switch ignore the field. Same output floor
+			// as the NoThinking path, since residual reasoning tokens count
+			// against max_tokens.
+			extras["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
+			if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
+				params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
+			}
+			slog.DebugContext(ctx, "OpenAI-compatible request disabling thinking via chat_template_kwargs", "model", c.ModelConfig.Model)
+		case c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled():
 			c.warnThinkingBudgetIgnored(ctx)
 		}
 	case len(requestTools) > 0 && modelinfo.OpenAIRejectsToolsWithReasoningEffort(c.ModelConfig.Model):
@@ -557,10 +574,7 @@ func (c *Client) CreateChatCompletionStream(
 		return nil, err
 	}
 
-	// Forward sampling-related provider_opts as extra body fields.
-	// This allows custom/OpenAI-compatible providers (vLLM, Ollama, etc.)
-	// to receive parameters like top_k, repetition_penalty, etc.
-	applySamplingProviderOpts(&params, c.ModelConfig.ProviderOpts)
+	applyProviderOptsExtraFields(&params, c.ModelConfig.ProviderOpts, extras)
 
 	stream := client.Chat.Completions.NewStreaming(ctx, params)
 
@@ -1354,7 +1368,7 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		},
 	}
 
-	applySamplingProviderOpts(&params, c.ModelConfig.ProviderOpts)
+	applyProviderOptsExtraFields(&params, c.ModelConfig.ProviderOpts, nil)
 
 	resp, err := client.Chat.Completions.New(ctx, params)
 	if err != nil {
@@ -1505,6 +1519,19 @@ func sendsRealNoneEffort(cfg *latest.ModelConfig, openAIVendor bool) bool {
 		return false
 	}
 	return modelinfo.IsOpenAIVendor(cfg.Provider, cfg.Model) || openAIVendor
+}
+
+// disablesOpenAICompatibleThinking reports whether this Chat Completions
+// request should carry chat_template_kwargs.enable_thinking=false: thinking
+// is off (thinking_budget none/0 or the NoThinking option), the endpoint was
+// chosen by the user (see options.WithCustomBaseURL), and the model is not
+// one of OpenAI's own, which reject unknown request fields when reached
+// through a proxy.
+func (c *Client) disablesOpenAICompatibleThinking() bool {
+	if !c.ModelOptions.NoThinking() && !c.ModelConfig.ThinkingBudget.IsDisabled() {
+		return false
+	}
+	return c.ModelOptions.CustomBaseURL() && !modelinfo.IsOpenAIModelName(c.ModelConfig.Model)
 }
 
 // openAIReasoningEffort validates a ThinkingBudget effort string for the
