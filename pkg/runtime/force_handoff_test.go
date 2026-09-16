@@ -22,6 +22,12 @@ import (
 type handoffRecordingProvider struct {
 	mockProvider
 
+	// newStream, when set, builds a fresh stream per invocation. A probe can be
+	// reached more than once at a time — parallel delegation children each
+	// routing to the same force_handoff target — and mockProvider hands out one
+	// single-use mockStream whose cursor is not safe for concurrent Recv.
+	newStream func() chat.MessageStream
+
 	mu       sync.Mutex
 	calls    int
 	lastMsgs []chat.Message
@@ -32,6 +38,9 @@ func (p *handoffRecordingProvider) CreateChatCompletionStream(ctx context.Contex
 	p.calls++
 	p.lastMsgs = append([]chat.Message(nil), msgs...)
 	p.mu.Unlock()
+	if p.newStream != nil {
+		return p.newStream(), nil
+	}
 	return p.mockProvider.CreateChatCompletionStream(ctx, msgs, t)
 }
 
@@ -120,17 +129,19 @@ func TestForceHandoff_RoutesToTargetOnNaturalStop(t *testing.T) {
 	assert.True(t, sawNotice, "target agent must see the handoff notice")
 }
 
-// TestForceHandoff_SkippedForPinnedSession documents the guard for pinned
-// sessions (background agents): resolveSessionAgent always returns the
-// pinned agent, so honouring force_handoff there would loop forever. The
-// runtime must finish the run on the pinned agent without ever invoking
-// the target.
-func TestForceHandoff_SkippedForPinnedSession(t *testing.T) {
+// TestForceHandoff_RoutesToTargetInPinnedSession pins force_handoff's
+// documented contract — "unconditionally", "deterministic pipelines" — inside a
+// pinned session (a background agent's session, or a child pinned by a parallel
+// delegation batch). Routing there moves the session's own pin, so the next loop
+// iteration resolves the target instead of the agent that just stopped; the
+// shared current agent belongs to the concurrent foreground loop and stays put
+// (#3886).
+func TestForceHandoff_RoutesToTargetInPinnedSession(t *testing.T) {
 	t.Parallel()
 
 	rt, sumProv := forceHandoffTeam(t,
 		newStreamBuilder().AddContent("done").AddStopWithUsage(10, 5).Build(),
-		newStreamBuilder().AddContent("should never run").AddStopWithUsage(10, 5).Build(),
+		newStreamBuilder().AddContent("summarized").AddStopWithUsage(10, 5).Build(),
 	)
 
 	sess := session.New(session.WithUserMessage("hi"), session.WithAgentName("root"))
@@ -139,7 +150,47 @@ func TestForceHandoff_SkippedForPinnedSession(t *testing.T) {
 	for range rt.RunStream(t.Context(), sess) {
 	}
 
-	assert.Equal(t, 0, sumProv.handoffCallCount(), "force_handoff target must not run for pinned sessions")
-	assert.Equal(t, "root", rt.CurrentAgentName(t.Context()))
-	assert.Equal(t, "done", sess.GetLastAssistantMessageContent())
+	assert.Equal(t, 1, sumProv.handoffCallCount(), "force_handoff must reach its target in a pinned session")
+	assert.Equal(t, "summarizer", sess.AgentName, "routing moves the session's pin, not the shared current agent")
+	assert.Equal(t, "root", rt.CurrentAgentName(t.Context()),
+		"the shared current agent belongs to the foreground loop and must not be mutated (#3886)")
+	assert.Equal(t, "summarized", sess.GetLastAssistantMessageContent())
+}
+
+// TestForceHandoff_PinnedChainTerminates guards the reason the pinned-session
+// gate existed: honouring force_handoff without moving the pin re-resolved the
+// agent that had just stopped, looping stop/handoff forever. Re-pinning walks
+// the chain to its end exactly once — config validation rejects cycles, so the
+// chain is always finite.
+func TestForceHandoff_PinnedChainTerminates(t *testing.T) {
+	t.Parallel()
+
+	stream := func(content string) *handoffRecordingProvider {
+		return &handoffRecordingProvider{mockProvider: mockProvider{
+			id:     "test/mock-model",
+			stream: newStreamBuilder().AddContent(content).AddStopWithUsage(10, 5).Build(),
+		}}
+	}
+
+	lastProv := stream("last done")
+	last := agent.New("last", "Last agent", agent.WithModel(lastProv))
+	middle := agent.New("middle", "Middle agent", agent.WithModel(stream("middle done")),
+		agent.WithForceHandoff(last))
+	root := agent.New("root", "Root agent", agent.WithModel(stream("root done")),
+		agent.WithForceHandoff(middle))
+
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, middle, last)),
+		WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	sess := session.New(session.WithUserMessage("hi"), session.WithAgentName("root"))
+	sess.Title = "Unit Test"
+
+	for range rt.RunStream(t.Context(), sess) {
+	}
+
+	assert.Equal(t, 1, lastProv.handoffCallCount(), "the chain must reach its tail exactly once")
+	assert.Equal(t, "last", sess.AgentName)
+	assert.Equal(t, "last done", sess.GetLastAssistantMessageContent())
 }

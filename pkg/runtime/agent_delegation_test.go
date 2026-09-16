@@ -29,6 +29,9 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	agenttool "github.com/docker/docker-agent/pkg/tools/builtin/agent"
+	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
+	"github.com/docker/docker-agent/pkg/tools/builtin/think"
+	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
 
 func TestBuildTaskSystemMessage(t *testing.T) {
@@ -1676,6 +1679,115 @@ func TestTransferTask_ConcurrentPinnedNestedTransfersStayIsolated(t *testing.T) 
 	assert.Equal(t, "workerB", completedB.GetAgentName())
 }
 
+// callerRuntime is a [tools.Runtime] reporting a fixed caller agent, standing in
+// for the per-call handle the dispatcher builds from its pre-fan-out snapshot.
+type callerRuntime struct {
+	tools.NopRuntime
+
+	caller *agent.Agent
+}
+
+func (r callerRuntime) CallerAgent() *agent.Agent { return r.caller }
+
+// TestTransferTask_UsesBatchCallerSnapshotNotSharedCurrentAgent pins the exact
+// failure reported in #4156: a sibling transfer_task from the same parallel
+// batch has already swapped the shared current agent to its own target, so
+// re-resolving the caller from it identified the target as its own caller and
+// rejected the transfer with "No agents are configured in this list".
+func TestTransferTask_UsesBatchCallerSnapshotNotSharedCurrentAgent(t *testing.T) {
+	t.Parallel()
+
+	drafter := agent.New("drafter", "Drafter agent", agent.WithModel(&mockProvider{
+		id:     "test/mock-model",
+		stream: newStreamBuilder().AddContent("drafter done").AddStopWithUsage(10, 5).Build(),
+	}))
+	root := agent.New("root", "Root agent",
+		agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}),
+		agent.WithSubAgents(drafter),
+	)
+
+	tm := team.New(team.WithAgents(root, drafter))
+	rt, err := NewLocalRuntime(t.Context(), tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+
+	// Stand in for the sibling that already claimed the shared current agent.
+	rt.setCurrentAgent("drafter")
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	result, err := rt.handleTaskTransfer(t.Context(), sess, transferToolCall("drafter"),
+		NewChannelSink(make(chan Event, 128)), callerRuntime{caller: root})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError,
+		"the caller must come from the batch snapshot (root), not the swapped current agent: %s", result.Output)
+	assert.Equal(t, "drafter done", result.Output)
+}
+
+// TestTransferTask_ConcurrentForegroundTransfersStayIsolated reproduces #4156:
+// the model issues three transfer_task calls in a single response and the
+// dispatcher runs them in parallel. Each goroutine used to re-read the shared
+// current agent that a sibling's swapCurrentAgent had already mutated, so the
+// later calls validated the target against the wrong caller and failed with
+// "target agent not in sub-agents list", while a child that did start could run
+// its turns as another sibling's agent. Every transfer must instead run as its
+// own target and leave the shared current agent back at root.
+func TestTransferTask_ConcurrentForegroundTransfersStayIsolated(t *testing.T) {
+	t.Parallel()
+
+	targets := []string{"drafter", "reviewer", "tester"}
+	subAgents := make([]*agent.Agent, 0, len(targets))
+	for _, name := range targets {
+		prov := &mockProvider{id: "test/mock-model", stream: newStreamBuilder().
+			AddContent(name+" done").AddStopWithUsage(10, 5).Build()}
+		subAgents = append(subAgents, agent.New(name, name+" agent", agent.WithModel(prov)))
+	}
+
+	// One assistant response carrying all three calls — the parallel tool use
+	// that triggers the race.
+	batch := newStreamBuilder()
+	for i, name := range targets {
+		id := transferCallID(i)
+		batch.AddToolCallName(id, transfertask.ToolNameTransferTask).
+			AddToolCallArguments(id, fmt.Sprintf(`{"agent":%q,"task":"chunk %d","expected_output":"result"}`, name, i))
+	}
+	rootProv := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+		batch.AddToolCallStopWithUsage(10, 5).Build(),
+		newStreamBuilder().AddContent("all delegated").AddStopWithUsage(10, 5).Build(),
+	}}
+
+	root := agent.New("root", "Root agent",
+		agent.WithModel(rootProv),
+		agent.WithSubAgents(subAgents...),
+		agent.WithToolSets(transfertask.New()),
+	)
+
+	tm := team.New(team.WithAgents(append([]*agent.Agent{root}, subAgents...)...))
+	rt, err := NewLocalRuntime(t.Context(), tm,
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	sess := session.New(session.WithUserMessage("split the diff"), session.WithToolsApproved(true))
+	_, err = rt.Run(t.Context(), sess)
+	require.NoError(t, err)
+
+	for i, name := range targets {
+		out := toolResultContent(t, sess, transferCallID(i))
+		assert.Equal(t, name+" done", out,
+			"transfer to %s must run as %s, not as a sibling's target", name, name)
+	}
+	assert.Equal(t, "root", rt.CurrentAgent().Name(),
+		"the shared current agent must be back at root once the batch drains")
+}
+
+// transferCallID names the nth transfer_task call of a parallel batch.
+func transferCallID(i int) string { return fmt.Sprintf("call_transfer_%d", i) }
+
 func TestTransferTask_DepthBoundary(t *testing.T) {
 	t.Parallel()
 
@@ -2185,4 +2297,307 @@ func TestRunStream_NestedBackgroundAgents_EndToEnd(t *testing.T) {
 
 	assert.Equal(t, "root", rt.CurrentAgent().Name(),
 		"the shared current agent must still be root after the whole chain")
+}
+
+// transferBatchStream builds one assistant response carrying a transfer_task
+// call per target — the single-response fan-out the dispatcher runs in
+// parallel.
+func transferBatchStream(targets ...string) *mockStream {
+	b := newStreamBuilder()
+	for i, name := range targets {
+		id := transferCallID(i)
+		b.AddToolCallName(id, transfertask.ToolNameTransferTask).
+			AddToolCallArguments(id, fmt.Sprintf(`{"agent":%q,"task":"chunk %d","expected_output":"result"}`, name, i))
+	}
+	return b.AddToolCallStopWithUsage(10, 5).Build()
+}
+
+// delegatingAgent builds an agent that first issues transfer_task calls to
+// targets, then answers normally on its next turn.
+func delegatingAgent(name string, subAgents []*agent.Agent, targets ...string) *agent.Agent {
+	prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+		transferBatchStream(targets...),
+		newStreamBuilder().AddContent(name+" done").AddStopWithUsage(10, 5).Build(),
+	}}
+	return agent.New(name, name+" agent",
+		agent.WithModel(prov),
+		agent.WithSubAgents(subAgents...),
+		agent.WithToolSets(transfertask.New()),
+	)
+}
+
+// handoffProbe returns an agent whose model invocations are counted, standing
+// in for a force_handoff target that must (or must not) be reached.
+func handoffProbe() (*agent.Agent, *handoffRecordingProvider) {
+	prov := &handoffRecordingProvider{
+		mockProvider: mockProvider{id: "test/mock-model"},
+		// Fresh per invocation: a batch of parallel delegations all routing here
+		// reaches the probe concurrently.
+		newStream: func() chat.MessageStream {
+			return newStreamBuilder().AddContent("finisher done").AddStopWithUsage(10, 5).Build()
+		},
+	}
+	return agent.New("finisher", "finisher agent", agent.WithModel(prov)), prov
+}
+
+// newDelegationRuntime wires a team into a runtime with the usual test doubles.
+func newDelegationRuntime(t *testing.T, agents ...*agent.Agent) *LocalRuntime {
+	t.Helper()
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agents...)),
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+	return rt
+}
+
+// TestTransferTask_PinningByBatchShape pins which delegations may own the
+// runtime's shared current agent. Only a delegation with no concurrent sibling
+// swaps it; every member of a multi-call batch is pinned instead, so the choice
+// never depends on which goroutine wins a race.
+//
+// The nested case is the regression guard for #4156's first fix: claiming the
+// switch runtime-globally for the outer delegation's whole lifetime also pinned
+// the sequential child underneath it, changing where that child's switch events
+// and force_handoff routing were observed. Pinning is a routing decision only —
+// every case below still reaches its force_handoff target.
+func TestTransferTask_PinningByBatchShape(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		setup            func(t *testing.T) (*LocalRuntime, *handoffRecordingProvider)
+		wantHandoffCalls int
+	}{
+		{
+			name: "solo delegation switches and honours the child's force_handoff",
+			setup: func(t *testing.T) (*LocalRuntime, *handoffRecordingProvider) {
+				t.Helper()
+				finisher, probe := handoffProbe()
+				worker := agent.New("worker", "worker agent",
+					agent.WithModel(&mockProvider{
+						id:     "test/mock-model",
+						stream: newStreamBuilder().AddContent("worker done").AddStopWithUsage(10, 5).Build(),
+					}),
+					agent.WithForceHandoff(finisher),
+				)
+				root := delegatingAgent("root", []*agent.Agent{worker}, "worker")
+				return newDelegationRuntime(t, root, worker, finisher), probe
+			},
+			wantHandoffCalls: 1,
+		},
+		{
+			name: "sequential nested delegation switches and honours force_handoff",
+			setup: func(t *testing.T) (*LocalRuntime, *handoffRecordingProvider) {
+				t.Helper()
+				finisher, probe := handoffProbe()
+				worker := agent.New("worker", "worker agent",
+					agent.WithModel(&mockProvider{
+						id:     "test/mock-model",
+						stream: newStreamBuilder().AddContent("worker done").AddStopWithUsage(10, 5).Build(),
+					}),
+					agent.WithForceHandoff(finisher),
+				)
+				lead := delegatingAgent("lead", []*agent.Agent{worker}, "worker")
+				root := delegatingAgent("root", []*agent.Agent{lead}, "lead")
+				return newDelegationRuntime(t, root, lead, worker, finisher), probe
+			},
+			wantHandoffCalls: 1,
+		},
+		{
+			name: "batch mixing another tool leaves the delegation solo",
+			setup: func(t *testing.T) (*LocalRuntime, *handoffRecordingProvider) {
+				t.Helper()
+				finisher, probe := handoffProbe()
+				worker := agent.New("worker", "worker agent",
+					agent.WithModel(&mockProvider{
+						id:     "test/mock-model",
+						stream: newStreamBuilder().AddContent("worker done").AddStopWithUsage(10, 5).Build(),
+					}),
+					agent.WithForceHandoff(finisher),
+				)
+
+				// One response carrying a transfer_task beside an unrelated
+				// tool. Only delegations contend for the shared current agent,
+				// so counting the whole batch instead of the calls to this tool
+				// would pin the child for no reason.
+				batch := newStreamBuilder()
+				batch.AddToolCallName(transferCallID(0), transfertask.ToolNameTransferTask).
+					AddToolCallArguments(transferCallID(0), `{"agent":"worker","task":"chunk","expected_output":"result"}`)
+				batch.AddToolCallName("call_think", think.ToolNameThink).
+					AddToolCallArguments("call_think", `{"thought":"planning the split"}`)
+
+				root := agent.New("root", "root agent",
+					agent.WithModel(&queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+						batch.AddToolCallStopWithUsage(10, 5).Build(),
+						newStreamBuilder().AddContent("root done").AddStopWithUsage(10, 5).Build(),
+					}}),
+					agent.WithSubAgents(worker),
+					agent.WithToolSets(transfertask.New(), think.New()),
+				)
+				return newDelegationRuntime(t, root, worker, finisher), probe
+			},
+			wantHandoffCalls: 1,
+		},
+		{
+			name: "parallel sibling batch pins every child, force_handoff still reached",
+			setup: func(t *testing.T) (*LocalRuntime, *handoffRecordingProvider) {
+				t.Helper()
+				finisher, probe := handoffProbe()
+				workers := make([]*agent.Agent, 0, 3)
+				for _, name := range []string{"drafter", "reviewer", "tester"} {
+					workers = append(workers, agent.New(name, name+" agent",
+						agent.WithModel(&mockProvider{
+							id:     "test/mock-model",
+							stream: newStreamBuilder().AddContent(name+" done").AddStopWithUsage(10, 5).Build(),
+						}),
+						agent.WithForceHandoff(finisher),
+					))
+				}
+				root := delegatingAgent("root", workers, "drafter", "reviewer", "tester")
+				return newDelegationRuntime(t, append([]*agent.Agent{root, finisher}, workers...)...), probe
+			},
+			// One per pinned child: pinning protects the shared current agent,
+			// it must not cost the children their deterministic routing.
+			wantHandoffCalls: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rt, probe := tt.setup(t)
+			sess := session.New(session.WithUserMessage("go"), session.WithToolsApproved(true))
+			_, err := rt.Run(t.Context(), sess)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantHandoffCalls, probe.handoffCallCount())
+		})
+	}
+}
+
+func handoffToolCall(target string) tools.ToolCall {
+	return tools.ToolCall{
+		ID:   "call_handoff",
+		Type: "function",
+		Function: tools.FunctionCall{
+			Name:      handoff.ToolNameHandoff,
+			Arguments: fmt.Sprintf(`{"agent":%q}`, target),
+		},
+	}
+}
+
+// TestHandoff_UsesBatchCallerSnapshotNotSharedCurrentAgent extends #4156 to the
+// sibling delegating tool: handoff resolved its caller from the shared current
+// agent, which a transfer_task running beside it in the same batch may already
+// have swapped. The handoff was then validated against the transfer target's
+// handoffs list rather than the real caller's, rejecting a legitimate call.
+func TestHandoff_UsesBatchCallerSnapshotNotSharedCurrentAgent(t *testing.T) {
+	t.Parallel()
+
+	idle := func() *mockProvider { return &mockProvider{id: "test/mock-model", stream: &mockStream{}} }
+
+	specialist := agent.New("specialist", "Specialist agent", agent.WithModel(idle()))
+	// Stands in for a sibling transfer_task's target. It declares no handoffs,
+	// so resolving it as the caller rejects the call outright.
+	drafter := agent.New("drafter", "Drafter agent", agent.WithModel(idle()))
+	root := agent.New("root", "Root agent", agent.WithModel(idle()), agent.WithHandoffs(specialist))
+
+	rt := newDelegationRuntime(t, root, specialist, drafter)
+	rt.setCurrentAgent("drafter")
+
+	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+	result, err := rt.handleHandoff(t.Context(), sess, handoffToolCall("specialist"),
+		NewChannelSink(make(chan Event, 128)), callerRuntime{caller: root})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError,
+		"the caller must come from the batch snapshot (root), not the swapped current agent: %s", result.Output)
+	assert.Equal(t, "specialist", rt.CurrentAgentName(t.Context()))
+}
+
+// TestHandoff_FromPinnedSession_RepinsWithoutTouchingSharedCurrentAgent extends
+// #3886 to handoff. Resolving the caller from the session (what the batch
+// snapshot falls back to) makes a handoff issued from a pinned background
+// session pass validation, so it now reaches the agent switch: that switch must
+// re-pin the session itself, never the shared current agent, which belongs to
+// the concurrent foreground loop.
+func TestHandoff_FromPinnedSession_RepinsWithoutTouchingSharedCurrentAgent(t *testing.T) {
+	t.Parallel()
+
+	idle := func() *mockProvider { return &mockProvider{id: "test/mock-model", stream: &mockStream{}} }
+
+	specialist := agent.New("specialist", "Specialist agent", agent.WithModel(idle()))
+	background := agent.New("background", "Background agent", agent.WithModel(idle()),
+		agent.WithHandoffs(specialist))
+	foreground := agent.New("foreground", "Foreground agent", agent.WithModel(idle()))
+
+	rt := newDelegationRuntime(t, foreground, background, specialist)
+	rt.setCurrentAgent("foreground")
+
+	sess := session.New(session.WithUserMessage("Test"),
+		session.WithToolsApproved(true), session.WithAgentName("background"))
+	result, err := rt.handleHandoff(t.Context(), sess, handoffToolCall("specialist"),
+		NewChannelSink(make(chan Event, 128)), tools.NopRuntime{})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.False(t, result.IsError,
+		"the pinned agent is the caller, and specialist is in its handoffs list: %s", result.Output)
+
+	assert.Equal(t, "specialist", sess.AgentName,
+		"the pinned session must move to the handoff target")
+	assert.Equal(t, "foreground", rt.CurrentAgentName(t.Context()),
+		"the shared current agent belongs to the foreground loop and must not be mutated (#3886)")
+}
+
+// TestTransferTask_MixedBatchWithHandoffDoesNotClobberTheSwitch closes the last
+// gap of #4156: the batch tally is per delegating tool, so a lone transfer_task
+// standing beside a handoff still counted itself solo, claimed the shared
+// current agent, and restored it to the caller on the way out — silently undoing
+// the handoff that ran next to it. Whether the handoff survived depended on
+// which goroutine finished last.
+//
+// transfer_task must weigh every call in the batch that can move the session's
+// agent, not just its own namesake: with a handoff beside it, the delegation is
+// pinned and the handoff's switch stands.
+func TestTransferTask_MixedBatchWithHandoffDoesNotClobberTheSwitch(t *testing.T) {
+	t.Parallel()
+
+	worker := agent.New("worker", "Worker agent", agent.WithModel(&mockProvider{
+		id:     "test/mock-model",
+		stream: newStreamBuilder().AddContent("worker done").AddStopWithUsage(10, 5).Build(),
+	}))
+	specialist := agent.New("specialist", "Specialist agent", agent.WithModel(&mockProvider{
+		id:     "test/mock-model",
+		stream: newStreamBuilder().AddContent("specialist done").AddStopWithUsage(10, 5).Build(),
+	}))
+
+	// One assistant response carrying both delegating calls.
+	batch := newStreamBuilder().
+		AddToolCallName(transferCallID(0), transfertask.ToolNameTransferTask).
+		AddToolCallArguments(transferCallID(0), `{"agent":"worker","task":"chunk","expected_output":"result"}`).
+		AddToolCallName("call_handoff", handoff.ToolNameHandoff).
+		AddToolCallArguments("call_handoff", `{"agent":"specialist"}`)
+
+	root := agent.New("root", "Root agent",
+		agent.WithModel(&queueProvider{id: "test/mock-model", streams: []chat.MessageStream{
+			batch.AddToolCallStopWithUsage(10, 5).Build(),
+		}}),
+		agent.WithSubAgents(worker),
+		agent.WithHandoffs(specialist),
+		agent.WithToolSets(transfertask.New(), handoff.New()),
+	)
+
+	rt := newDelegationRuntime(t, root, worker, specialist)
+
+	sess := session.New(session.WithUserMessage("split and route"), session.WithToolsApproved(true))
+	_, err := rt.Run(t.Context(), sess)
+	require.NoError(t, err)
+
+	assert.Equal(t, "worker done", toolResultContent(t, sess, transferCallID(0)),
+		"the delegation must still run as its own target")
+	assert.Equal(t, "specialist", rt.CurrentAgent().Name(),
+		"the sibling handoff owns the switch; the delegation must not restore the caller over it")
+	assert.Equal(t, "specialist done", sess.GetLastAssistantMessageContent())
 }
