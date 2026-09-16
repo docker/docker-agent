@@ -229,20 +229,22 @@ func TestEnforceBudgetWarnsOnceThenStillHardStops(t *testing.T) {
 	assert.Contains(t, warns[0].Message, "used $0.40 of $0.50 budget.max_cost")
 	assert.Contains(t, warns[0].Message, "Prefer cheaper tools")
 
-	prompt := sess.GetMessages(a)
-	var sawSystem bool
-	for _, msg := range prompt {
-		if msg.Role == chat.MessageRoleSystem && strings.Contains(msg.Content, "approaching the configured budget") {
-			sawSystem = true
-			assert.Equal(t, warns[0].Message, msg.Content, "the model-visible message must match the Warning event")
-		}
-	}
-	assert.True(t, sawSystem, "the approaching warning must be in the next-turn prompt")
+	assert.Empty(t, sess.GetAllMessages(), "the approaching extra must not be persisted")
+	assert.False(t, promptContains(sess.GetMessages(a), budgetApproachingPrompt),
+		"GetMessages without extras must not carry the approaching warning")
+
+	extras := r.budgetPromptMessages(a.Name())
+	require.Len(t, extras, 1)
+	assert.Equal(t, chat.MessageRoleSystem, extras[0].Role)
+	assert.Equal(t, budgetApproachingPrompt, extras[0].Content)
+	assert.True(t, promptContains(sess.GetMessagesWithoutInstructionContext(a, extras...), budgetApproachingPrompt),
+		"the next-turn prompt must carry the stable extra")
 
 	eventCount := len(sink.events)
 	require.Equal(t, iterationContinue, r.enforceBudget(t.Context(), sess, a, sink))
 	assert.Len(t, sink.warnings(), 1, "a second enforceBudget must not re-warn")
-	assert.Equal(t, eventCount, len(sink.events), "no extra events on the second approaching check")
+	assert.Len(t, sink.events, eventCount, "no extra events on the second approaching check")
+	assert.Equal(t, extras, r.budgetPromptMessages(a.Name()), "the extra stays sticky after the one-shot Warning")
 
 	r.recordBudget(sess, a, &chat.Usage{InputTokens: 10, OutputTokens: 10}, new(0.15), time.Second, sink)
 	require.Equal(t, iterationStop, r.enforceBudget(t.Context(), sess, a, sink),
@@ -258,4 +260,40 @@ func TestEnforceBudgetWarnsOnceThenStillHardStops(t *testing.T) {
 	assert.Equal(t, "max_cost", exceeded.Limit)
 	assert.Equal(t, "budget.max_cost", exceeded.ConfigPath)
 	assert.Contains(t, exceeded.Message, "Execution stopped")
+}
+
+func TestBudgetWarningInstructionSourceDoesNotRewritePrefix(t *testing.T) {
+	sess := session.New()
+	a := agent.New("root", "base prompt")
+	sess.AddMessage(session.UserMessage("hello"))
+
+	env := []session.InstructionSource{{
+		Key: "hooks/session-start", Label: "environment context", Content: "cwd: /tmp", Available: true,
+	}}
+	require.True(t, sess.PrepareInstructionContext(env))
+	first := sess.GetMessages(a)
+
+	budgetSrc := instructionSource(budgetWarningSourceKey, "run budget", []chat.Message{
+		{Role: chat.MessageRoleSystem, Content: budgetApproachingPrompt},
+	})
+	sources := append(append([]session.InstructionSource{}, env...), budgetSrc)
+	require.True(t, sess.PrepareInstructionContext(sources), "first appearance must be a chronological update")
+
+	updated := sess.GetMessages(a)
+	assert.Equal(t, first[0].Content, updated[0].Content, "invariant system prompt must stay byte-stable")
+	assert.Equal(t, first[1].Content, updated[1].Content, "frozen instruction prefix must stay byte-stable")
+	require.GreaterOrEqual(t, len(updated), 4)
+	assert.Equal(t, chat.MessageRoleUser, updated[len(updated)-1].Role)
+	assert.Contains(t, updated[len(updated)-1].Content, budgetApproachingPrompt)
+
+	assert.False(t, sess.PrepareInstructionContext(sources), "stable wording must not rotate the cache on later turns")
+}
+
+func promptContains(messages []chat.Message, text string) bool {
+	for _, msg := range messages {
+		if strings.Contains(msg.Content, text) {
+			return true
+		}
+	}
+	return false
 }

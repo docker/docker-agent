@@ -26,6 +26,14 @@ const (
 	// a YAML knob: a run that still crosses the ceiling must stop the
 	// same way it does today.
 	budgetWarnFraction = 0.8
+
+	// budgetApproachingPrompt is the model-visible extra injected after
+	// any 80% warning. Wording is free of used/max amounts so prompt-cache
+	// checkpoints stay reusable on later turns. The TUI/JSON Warning still
+	// uses WarnMessage, which includes the numbers.
+	budgetApproachingPrompt = "You are approaching the configured run budget. Prefer cheaper tools, avoid redundant calls, summarize, and finish soon. The run will stop if a limit is reached."
+
+	budgetWarningSourceKey = "runtime/budget-warning"
 )
 
 type budgetTracker struct {
@@ -38,9 +46,12 @@ type budgetTracker struct {
 	active    time.Duration
 	unpriced  bool
 	perAgent  map[string]*agentSpend
-	// warned records which limits have already emitted the 80% warning
-	// so each tracker warns at most once per limit.
+	// warned records which limits have already emitted the 80% TUI/JSON
+	// warning so each tracker warns at most once per limit.
 	warned map[budgetLimit]bool
+	// softPrompt stays set after the first approaching warning so the
+	// stable extra is re-injected every remaining turn until hard stop.
+	softPrompt bool
 }
 
 type agentSpend struct {
@@ -259,6 +270,7 @@ func (b *budgetTracker) consumeApproaching() *budgetBreach {
 			b.warned = make(map[budgetLimit]bool)
 		}
 		b.warned[limit] = true
+		b.softPrompt = true
 		return br
 	}
 	return nil
@@ -307,6 +319,15 @@ func (b *budgetTracker) breachIfApproachingLocked(limit budgetLimit) *budgetBrea
 		}
 	}
 	return nil
+}
+
+func (b *budgetTracker) hasSoftPrompt() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.softPrompt
 }
 
 func (b *budgetTracker) unpricedSpend() bool {
@@ -503,11 +524,25 @@ func (r *LocalRuntime) warnBudgetIfApproaching(
 		"max", warn.Max,
 	)
 	events.Emit(Warning(msg, a.Name()))
-	addAgentMessage(sess, a, &chat.Message{
-		Role:      chat.MessageRoleSystem,
-		Content:   msg,
-		CreatedAt: r.now().Format(time.RFC3339),
-	}, events)
+}
+
+// budgetPromptMessages returns the sticky, cache-stable extra for this
+// agent's next model call, or nil. Never persisted: callers thread it
+// through extraSystemMessages / instruction sources at assembly time.
+func (r *LocalRuntime) budgetPromptMessages(agentName string) []chat.Message {
+	return r.currentBudget().promptMessagesFor(agentName)
+}
+
+func (s *budgetSet) promptMessagesFor(agentName string) []chat.Message {
+	if s == nil {
+		return nil
+	}
+	for _, nt := range s.budgetsFor(agentName) {
+		if nt.Tracker.hasSoftPrompt() {
+			return []chat.Message{{Role: chat.MessageRoleSystem, Content: budgetApproachingPrompt}}
+		}
+	}
+	return nil
 }
 
 func (s *budgetSet) exceededFor(agentName string) *budgetBreach {

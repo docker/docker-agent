@@ -37,6 +37,7 @@ func TestNilBudgetTrackerIsInert(t *testing.T) {
 		assert.Nil(t, b.exceeded())
 		assert.Nil(t, b.approaching())
 		assert.Nil(t, b.consumeApproaching())
+		assert.False(t, b.hasSoftPrompt())
 		assert.Equal(t, budgetSnapshot{}, b.snapshot())
 		assert.False(t, b.unpricedSpend())
 	})
@@ -395,12 +396,16 @@ func TestBudgetApproachingWarnsOncePerLimit(t *testing.T) {
 	b := newBudgetTracker(&latest.BudgetConfig{MaxCost: 0.50})
 	b.record("root", &chat.Usage{}, new(0.40), time.Second)
 
+	require.NotNil(t, b.approaching())
+	assert.False(t, b.hasSoftPrompt(), "approaching() must not arm the prompt extra")
 	first := b.consumeApproaching()
 	require.NotNil(t, first)
 	assert.Equal(t, budgetLimitCost, first.Limit)
+	assert.True(t, b.hasSoftPrompt(), "consumeApproaching must arm the sticky prompt extra")
 
 	b.record("root", &chat.Usage{}, new(0.05), time.Second)
 	assert.Nil(t, b.consumeApproaching(), "second consume after more spend must not re-warn the same limit")
+	assert.True(t, b.hasSoftPrompt(), "the prompt extra stays armed until hard stop")
 	assert.Nil(t, b.exceeded())
 }
 

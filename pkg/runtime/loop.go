@@ -767,12 +767,15 @@ func (r *LocalRuntime) runTurn(
 	// against what the model already knows. Changes extend the conversation;
 	// they never rewrite the frozen instruction prefix.
 	turnStartMsgs := r.executeTurnStartHooks(ctx, sess, a, events)
-	// Pending tool-mode structured-output reminder rides with the transient
-	// system extras: threaded per call, never persisted as a user message.
+	// Pending tool-mode structured-output reminder and the sticky 80%
+	// budget extra ride with the transient system extras: threaded per
+	// call, never persisted as a user message.
 	reminderMsgs := ls.structuredOutputReminderMessages()
-	legacyExtras := slices.Concat(ls.sessionStartLegacyMsgs, ls.userPromptMsgs, turnStartMsgs.legacyMessages(), reminderMsgs)
+	budgetMsgs := r.budgetPromptMessages(a.Name())
+	legacyExtras := slices.Concat(ls.sessionStartLegacyMsgs, ls.userPromptMsgs, turnStartMsgs.legacyMessages(), reminderMsgs, budgetMsgs)
 	sources := instructionSources(ls.sessionStartMsgs, ls.userPromptMsgs, turnStartMsgs, ls.sessionStartSources...)
 	sources = append(sources, instructionSource("runtime/structured-output", "structured-output reminder", reminderMsgs))
+	sources = append(sources, instructionSource(budgetWarningSourceKey, "run budget", budgetMsgs))
 	messages := r.messagesWithDynamicContext(ctx, sess, a, sources, legacyExtras)
 	slog.DebugContext(ctx, "Retrieved messages for processing", "agent", a.Name(), "message_count", len(messages))
 
