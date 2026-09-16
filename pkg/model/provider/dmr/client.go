@@ -276,10 +276,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 	// wholesale, so merge all contributors before a single Set call.
 	extraFields := map[string]any{}
 
-	// Thinking off (NoThinking option or thinking_budget none/0): disable
-	// reasoning at the chat-template level. llama.cpp, vLLM, SGLang and MLX
-	// honor chat_template_kwargs.enable_thinking=false for Qwen3 / Hermes /
-	// DeepSeek-R1 style templates; other engines ignore unknown keys.
+	// Thinking off: llama.cpp, vLLM, SGLang and MLX honor chat_template_kwargs.enable_thinking=false; others ignore it.
 	//
 	// When the caller has also set a small MaxTokens (e.g. session title
 	// generation sets max_tokens=20), raise it to noThinkingMinOutputTokens

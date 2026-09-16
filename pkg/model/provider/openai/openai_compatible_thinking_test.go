@@ -14,8 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// driveChatCompletions points cfg at a mock server, runs one Chat Completions
-// request and returns the decoded request body.
+// driveChatCompletions runs one Chat Completions request for cfg against a mock server and returns the request body.
 func driveChatCompletions(t *testing.T, cfg *latest.ModelConfig, toolList []tools.Tool, opts ...options.Opt) map[string]any {
 	t.Helper()
 

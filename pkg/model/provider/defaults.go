@@ -376,8 +376,7 @@ func isOpenAIVendor(cfg *latest.ModelConfig) bool {
 	return isUnrecognizedOpenAIProtocolProvider(cfg)
 }
 
-// hasCustomBaseURL reports whether the resolved cfg dials a user-chosen endpoint, i.e. a base_url other
-// than the provider alias default (expanded with expand when given), so it also holds on clone rebuilds.
+// hasCustomBaseURL reports whether cfg.BaseURL differs from the alias default (expanded when expand is given).
 func hasCustomBaseURL(cfg *latest.ModelConfig, expand func(string) string) bool {
 	if cfg.BaseURL == "" {
 		return false
@@ -393,14 +392,12 @@ func hasCustomBaseURL(cfg *latest.ModelConfig, expand func(string) string) bool 
 	return strings.TrimRight(cfg.BaseURL, "/") != strings.TrimRight(defaultURL, "/")
 }
 
-// sendsChatTemplateThinkingOff reports whether a user-chosen OpenAI-compatible endpoint that does not
-// reach OpenAI itself gets chat_template_kwargs.enable_thinking=false when thinking is disabled.
+// sendsChatTemplateThinkingOff reports whether disabled thinking becomes chat_template_kwargs on this endpoint.
 func sendsChatTemplateThinkingOff(cfg *latest.ModelConfig, expand func(string) string) bool {
 	return hasCustomBaseURL(cfg, expand) && !modelinfo.IsOpenAIHosted(cfg.Provider, cfg.Model)
 }
 
-// keepsDisabledThinking reports whether a disabled ThinkingBudget must survive applyModelDefaults
-// because the DMR client or the OpenAI Chat Completions client turns it into a wire-level switch.
+// keepsDisabledThinking reports whether a client turns a disabled ThinkingBudget into a wire-level switch.
 func keepsDisabledThinking(cfg *latest.ModelConfig, providerType string) bool {
 	switch providerType {
 	case "dmr":

@@ -1246,8 +1246,7 @@ func TestNoThinkingSetsChatTemplateKwargsAndBumpsMaxTokens(t *testing.T) {
 	assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
 }
 
-// captureChatCompletion drives one chat completion for cfg against a mock
-// model runner and returns the decoded request body.
+// captureChatCompletion runs one chat completion for cfg against a mock model runner and returns the request body.
 func captureChatCompletion(t *testing.T, cfg *latest.ModelConfig, opts ...options.Opt) map[string]any {
 	t.Helper()
 

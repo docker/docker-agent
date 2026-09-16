@@ -277,11 +277,7 @@ func TestCloneWithOptions_PreservesOpenAIVendorBit_NamedCustomProvider(t *testin
 	assert.Equal(t, "none", req.ReasoningEffort, "cloned NoThinking() path must still send gpt-5.6's real none effort")
 }
 
-// TestCloneWithOptions_ThinkingSwitch_LocalModel verifies the title-generation
-// and compaction shape on a user-supplied OpenAI-compatible endpoint: a
-// NoThinking() clone re-enters the factory with the already-resolved config
-// (base_url filled, a none budget injected by mergeCloneOptions) and must
-// send chat_template_kwargs only when the user's own YAML disabled thinking.
+// A NoThinking clone re-enters the factory with the resolved config and an injected none budget.
 func TestCloneWithOptions_ThinkingSwitch_LocalModel(t *testing.T) {
 	t.Parallel()
 

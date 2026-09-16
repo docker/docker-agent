@@ -79,9 +79,7 @@ func (c *ModelOptions) OpenAIVendor() bool {
 	return c.openAIVendor
 }
 
-// ChatTemplateThinkingOff reports whether Chat Completions requests carry
-// chat_template_kwargs.enable_thinking=false; resolved by the factory like
-// [ModelOptions.OpenAIVendor], never from YAML.
+// ChatTemplateThinkingOff reports whether requests carry chat_template_kwargs.enable_thinking=false; factory-resolved, never from YAML.
 func (c *ModelOptions) ChatTemplateThinkingOff() bool {
 	return c.chatTemplateThinkingOff
 }
@@ -203,8 +201,6 @@ func WithOpenAIVendor(v bool) Opt {
 	}
 }
 
-// WithChatTemplateThinkingOff records the factory-resolved bit behind
-// [ModelOptions.ChatTemplateThinkingOff].
 func WithChatTemplateThinkingOff(v bool) Opt {
 	return func(cfg *ModelOptions) {
 		cfg.chatTemplateThinkingOff = v

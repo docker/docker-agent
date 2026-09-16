@@ -470,10 +470,6 @@ func TestCreateDirectProvider_ResolvesOpenAIVendorOption(t *testing.T) {
 	}
 }
 
-// TestCreateDirectProvider_ResolvesChatTemplateThinkingOff verifies the single
-// bit behind chat_template_kwargs.enable_thinking=false: the user's own
-// thinking_budget none/0 (never the NoThinking option a clone sets) on a
-// user-chosen endpoint that does not reach OpenAI itself.
 func TestCreateDirectProvider_ResolvesChatTemplateThinkingOff(t *testing.T) {
 	t.Parallel()
 

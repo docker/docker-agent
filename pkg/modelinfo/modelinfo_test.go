@@ -290,7 +290,6 @@ func TestIsOpenAIHosted(t *testing.T) {
 		model    string
 		want     bool
 	}{
-		// OpenAI's own model names reach OpenAI even behind a proxy.
 		{"openai", "gpt-4o", true},
 		{"openai", "gpt-4.1-mini", true},
 		{"openai", "gpt-3.5-turbo", true},
@@ -303,12 +302,10 @@ func TestIsOpenAIHosted(t *testing.T) {
 		{"openai", "openai/gpt-4o", true},
 		{"my_proxy", "gpt-4o", true},
 
-		// azure and chatgpt always dial OpenAI, whatever the deployment is called.
 		{"azure", "my-gpt4o-deployment", true},
 		{"Azure", "qwen3", true},
 		{"chatgpt", "anything", true},
 
-		// Open-weight models on the bare openai provider or a custom one.
 		{"openai", "qwen3.6:35b-a3b-q8_0", false},
 		{"openai", "mlx-community/Qwen3.6-35B-A3B-8bit", false},
 		{"openai", "deepseek-r1", false},

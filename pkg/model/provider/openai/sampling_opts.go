@@ -10,8 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 )
 
-// applyProviderOptsExtraFields merges the caller's extras, the sampling provider_opts allowlist and
-// provider_opts.extra_body (last, so an explicit user field wins) into one SetExtraFields call.
+// applyProviderOptsExtraFields merges extras, the sampling allowlist and extra_body (last, so it wins) into one SetExtraFields call.
 func applyProviderOptsExtraFields(params *oai.ChatCompletionNewParams, opts, extras map[string]any) {
 	set := func(key string, value any) {
 		if extras == nil {

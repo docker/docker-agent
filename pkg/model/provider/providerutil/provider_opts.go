@@ -128,8 +128,7 @@ func GetProviderOptStringSlice(opts map[string]any, key string) ([]string, bool)
 	}
 }
 
-// ExtraBody returns the provider_opts.extra_body object (fields merged verbatim into chat completion
-// requests), or nil when unset or not an object.
+// ExtraBody returns the provider_opts.extra_body object, or nil when unset or not an object.
 func ExtraBody(opts map[string]any) map[string]any {
 	v, ok := opts["extra_body"]
 	if !ok {
