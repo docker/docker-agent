@@ -20,33 +20,34 @@ import (
 // benchmark iteration — roughly the order of magnitude of a long assistant turn.
 const streamingBenchChunks = 500
 
-// countingStore wraps an in-memory store and records AddMessage / UpdateMessage
-// calls so tests can pin the per-chunk persistence contract.
-type countingStore struct {
-	*session.InMemorySessionStore
+// countingPersistenceStore wraps a session store and records AddMessage /
+// UpdateMessage calls so tests can pin the per-chunk persistence contract.
+type countingPersistenceStore struct {
+	session.Store
+
 	addCalls    atomic.Int64
 	updateCalls atomic.Int64
 }
 
-func newCountingStore() *countingStore {
-	return &countingStore{
-		InMemorySessionStore: session.NewInMemorySessionStore().(*session.InMemorySessionStore),
+func newCountingPersistenceStore() *countingPersistenceStore {
+	return &countingPersistenceStore{
+		Store: session.NewInMemorySessionStore(),
 	}
 }
 
-func (s *countingStore) AddMessage(ctx context.Context, sessionID string, msg *session.Message) (int64, error) {
+func (s *countingPersistenceStore) AddMessage(ctx context.Context, sessionID string, msg *session.Message) (int64, error) {
 	s.addCalls.Add(1)
-	return s.InMemorySessionStore.AddMessage(ctx, sessionID, msg)
+	return s.Store.AddMessage(ctx, sessionID, msg)
 }
 
-func (s *countingStore) UpdateMessage(ctx context.Context, messageID int64, msg *session.Message) error {
+func (s *countingPersistenceStore) UpdateMessage(ctx context.Context, sessionID string, messageID int64, msg *session.Message) error {
 	s.updateCalls.Add(1)
-	return s.InMemorySessionStore.UpdateMessage(ctx, messageID, msg)
+	return s.Store.UpdateMessage(ctx, sessionID, messageID, msg)
 }
 
-func setupPersistenceObserverBench(tb testing.TB) (*PersistenceObserver, *session.InMemorySessionStore) {
+func setupPersistenceObserverBench(tb testing.TB) (*PersistenceObserver, session.Store) {
 	tb.Helper()
-	store := session.NewInMemorySessionStore().(*session.InMemorySessionStore)
+	store := session.NewInMemorySessionStore()
 	obs := newPersistenceObserver(store)
 	require.NotNil(tb, obs)
 	return obs, store
@@ -77,7 +78,7 @@ func TestPersistenceObserver_UpdateCountPerChunk(t *testing.T) {
 	const chunks = 100
 	ctx := t.Context()
 
-	store := newCountingStore()
+	store := newCountingPersistenceStore()
 	obs := newPersistenceObserver(store)
 	require.NotNil(t, obs)
 
