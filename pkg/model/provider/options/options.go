@@ -13,20 +13,19 @@ import (
 type TokenSource func(context.Context) (string, error)
 
 type ModelOptions struct {
-	gateway          string
-	encryptedConfig  string
-	structuredOutput *latest.StructuredOutput
-	generatingTitle  bool
-	compacting       bool
-	noThinking       bool
-	maxTokens        int64
-	providers        map[string]latest.ProviderConfig
-	modelsDevStore   *modelsdev.Store
-	transportWrapper func(http.RoundTripper) http.RoundTripper
-	tokenSource      TokenSource
-	openAIVendor     bool
-	customBaseURL    bool
-	thinkingDisabled bool
+	gateway                 string
+	encryptedConfig         string
+	structuredOutput        *latest.StructuredOutput
+	generatingTitle         bool
+	compacting              bool
+	noThinking              bool
+	maxTokens               int64
+	providers               map[string]latest.ProviderConfig
+	modelsDevStore          *modelsdev.Store
+	transportWrapper        func(http.RoundTripper) http.RoundTripper
+	tokenSource             TokenSource
+	openAIVendor            bool
+	chatTemplateThinkingOff bool
 }
 
 func (c *ModelOptions) Gateway() string {
@@ -80,22 +79,11 @@ func (c *ModelOptions) OpenAIVendor() bool {
 	return c.openAIVendor
 }
 
-// CustomBaseURL reports whether the model dials an endpoint the user chose
-// (a model-level base_url, a providers: entry, or an override of a built-in
-// alias URL) rather than a provider's default. Like [ModelOptions.OpenAIVendor]
-// it is set only by the factory through [WithCustomBaseURL], never from
-// YAML, and gates request fields that only OpenAI-compatible servers accept.
-func (c *ModelOptions) CustomBaseURL() bool {
-	return c.customBaseURL
-}
-
-// ThinkingDisabled reports whether the user's own configuration switched
-// thinking off (thinking_budget none or 0), as opposed to [NoThinking], the
-// request-scoped option that title generation and compaction clones set on
-// their own. Set only by the factory through [WithThinkingDisabled]; it gates
-// wire-level off switches that must never fire without the user asking.
-func (c *ModelOptions) ThinkingDisabled() bool {
-	return c.thinkingDisabled
+// ChatTemplateThinkingOff reports whether Chat Completions requests carry
+// chat_template_kwargs.enable_thinking=false; resolved by the factory like
+// [ModelOptions.OpenAIVendor], never from YAML.
+func (c *ModelOptions) ChatTemplateThinkingOff() bool {
+	return c.chatTemplateThinkingOff
 }
 
 func (c *ModelOptions) TokenSource() TokenSource {
@@ -215,19 +203,11 @@ func WithOpenAIVendor(v bool) Opt {
 	}
 }
 
-// WithCustomBaseURL records the factory-resolved user-chosen-endpoint bit
-// (see [ModelOptions.CustomBaseURL]).
-func WithCustomBaseURL(v bool) Opt {
+// WithChatTemplateThinkingOff records the factory-resolved bit behind
+// [ModelOptions.ChatTemplateThinkingOff].
+func WithChatTemplateThinkingOff(v bool) Opt {
 	return func(cfg *ModelOptions) {
-		cfg.customBaseURL = v
-	}
-}
-
-// WithThinkingDisabled records the factory-resolved "the user's config
-// disabled thinking" bit (see [ModelOptions.ThinkingDisabled]).
-func WithThinkingDisabled(v bool) Opt {
-	return func(cfg *ModelOptions) {
-		cfg.thinkingDisabled = v
+		cfg.chatTemplateThinkingOff = v
 	}
 }
 
@@ -313,8 +293,8 @@ func FromModelOptions(m ModelOptions) []Opt {
 	if m.openAIVendor {
 		out = append(out, WithOpenAIVendor(true))
 	}
-	if m.thinkingDisabled {
-		out = append(out, WithThinkingDisabled(true))
+	if m.chatTemplateThinkingOff {
+		out = append(out, WithChatTemplateThinkingOff(true))
 	}
 	return out
 }

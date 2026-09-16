@@ -304,13 +304,11 @@ func TestCloneWithOptions_ThinkingSwitch_LocalModel(t *testing.T) {
 			baseProvider, err := fullTestRegistry().New(t.Context(), modelCfg, env)
 			require.NoError(t, err)
 			baseOpts := baseProvider.BaseConfig().ModelOptions
-			require.True(t, baseOpts.CustomBaseURL())
-			require.Equal(t, tt.wantSent, baseOpts.ThinkingDisabled())
+			require.Equal(t, tt.wantSent, baseOpts.ChatTemplateThinkingOff())
 
 			cloned := CloneWithOptions(t.Context(), baseProvider, options.WithNoThinking())
 			clonedOpts := cloned.BaseConfig().ModelOptions
-			require.True(t, clonedOpts.CustomBaseURL(), "clone must keep the custom base_url bit")
-			require.Equal(t, tt.wantSent, clonedOpts.ThinkingDisabled(), "clone must keep the user's thinking bit, not derive it from NoThinking")
+			require.Equal(t, tt.wantSent, clonedOpts.ChatTemplateThinkingOff(), "clone must keep the user's bit, not derive it from NoThinking")
 
 			stream, err := cloned.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, nil)
 			require.NoError(t, err)

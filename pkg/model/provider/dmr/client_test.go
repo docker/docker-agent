@@ -1239,56 +1239,11 @@ func TestConfigureRequestTopLevelFieldsEndToEnd(t *testing.T) {
 func TestNoThinkingSetsChatTemplateKwargsAndBumpsMaxTokens(t *testing.T) {
 	t.Parallel()
 
-	var captured []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			body, _ := io.ReadAll(r.Body)
-			captured = body
-			// Return a minimal streaming response so the SDK is happy.
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
-			_, _ = w.Write([]byte("data: [DONE]\n\n"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"data":[]}`))
-	}))
-	defer server.Close()
-
 	maxTokens := int64(20)
-	cfg := &latest.ModelConfig{
-		Provider:  "dmr",
-		Model:     "ai/qwen3",
-		BaseURL:   server.URL + "/engines/v1/",
-		MaxTokens: &maxTokens,
-	}
-	client, err := NewClient(t.Context(), cfg, options.WithNoThinking())
-	require.NoError(t, err)
+	req := captureChatCompletion(t, &latest.ModelConfig{Model: "ai/qwen3", MaxTokens: &maxTokens}, options.WithNoThinking())
 
-	stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{
-		{Role: chat.MessageRoleUser, Content: "hi"},
-	}, nil)
-	require.NoError(t, err)
-	for {
-		if _, err := stream.Recv(); err != nil {
-			break
-		}
-	}
-	stream.Close()
-
-	require.NotEmpty(t, captured, "chat/completions should have been called")
-
-	var req map[string]any
-	require.NoError(t, json.Unmarshal(captured, &req))
-
-	// max_tokens floor (20 -> 256).
 	assert.EqualValues(t, noThinkingMinOutputTokens, req["max_tokens"])
-
-	// chat_template_kwargs.enable_thinking=false on every engine.
-	ct, ok := req["chat_template_kwargs"].(map[string]any)
-	require.True(t, ok, "chat_template_kwargs must be present")
-	assert.Equal(t, false, ct["enable_thinking"])
+	assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
 }
 
 // captureChatCompletion drives one chat completion for cfg against a mock

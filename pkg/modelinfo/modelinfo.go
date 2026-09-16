@@ -141,13 +141,8 @@ func UsesReasoningEffort(modelID string) bool {
 	return isOSeries(m) || strings.HasPrefix(m, "gpt-5")
 }
 
-// IsOpenAIHosted reports whether a request for (provider, modelID) reaches
-// OpenAI's own service even on a user-supplied base_url: the azure and
-// chatgpt providers always do (Azure deployments carry arbitrary names), and
-// so does one of OpenAI's own model families (o-series, gpt-*, chatgpt-*,
-// codex-*) behind a proxy. Callers use it to keep request fields OpenAI
-// rejects as unknown off such requests while still sending them to
-// self-hosted open-weight models.
+// IsOpenAIHosted reports whether a request reaches OpenAI itself even on a user-supplied base_url:
+// azure and chatgpt always do, and so does an OpenAI model name (o-series, gpt-*, chatgpt-*, codex-*).
 func IsOpenAIHosted(provider, modelID string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "azure", "chatgpt":

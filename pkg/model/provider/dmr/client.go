@@ -279,9 +279,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 	// Thinking off (NoThinking option or thinking_budget none/0): disable
 	// reasoning at the chat-template level. llama.cpp, vLLM, SGLang and MLX
 	// honor chat_template_kwargs.enable_thinking=false for Qwen3 / Hermes /
-	// DeepSeek-R1 style templates; other engines ignore unknown keys. This
-	// complements the llamacpp.reasoning-budget sent on _configure, which
-	// only reaches the llama.cpp engine.
+	// DeepSeek-R1 style templates; other engines ignore unknown keys.
 	//
 	// When the caller has also set a small MaxTokens (e.g. session title
 	// generation sets max_tokens=20), raise it to noThinkingMinOutputTokens
