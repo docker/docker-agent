@@ -398,7 +398,7 @@ func hasCustomBaseURL(cfg *latest.ModelConfig, expand func(string) string) bool 
 	if expand != nil {
 		defaultURL = expand(defaultURL)
 	}
-	return cfg.BaseURL != defaultURL
+	return strings.TrimRight(cfg.BaseURL, "/") != strings.TrimRight(defaultURL, "/")
 }
 
 // envExpander adapts environment.Expand to hasCustomBaseURL, falling back to
@@ -416,15 +416,17 @@ func envExpander(ctx context.Context, env environment.Provider) func(string) str
 // keepsDisabledThinking reports whether an explicitly disabled ThinkingBudget
 // (none or 0) must survive applyModelDefaults because a client turns it into
 // a wire-level off switch: the DMR client (llamacpp.reasoning-budget 0 and
-// chat_template_kwargs.enable_thinking=false) and the OpenAI client on a
-// user-chosen endpoint serving a non-OpenAI model (chat_template_kwargs, see
-// pkg/model/provider/openai). preservesNoneEffort covers OpenAI's own "none".
+// chat_template_kwargs.enable_thinking=false) and the OpenAI client's Chat
+// Completions path on a user-chosen endpoint that does not reach OpenAI
+// itself (chat_template_kwargs, see pkg/model/provider/openai). The Responses
+// API path has no such switch, so openai_responses is left out.
+// preservesNoneEffort covers OpenAI's own "none".
 func keepsDisabledThinking(cfg *latest.ModelConfig, providerType string) bool {
 	switch providerType {
 	case "dmr":
 		return true
-	case "openai", "openai_chatcompletions", "openai_responses":
-		return hasCustomBaseURL(cfg, nil) && !modelinfo.IsOpenAIModelName(cfg.Model)
+	case "openai", "openai_chatcompletions":
+		return hasCustomBaseURL(cfg, nil) && !modelinfo.IsOpenAIHosted(cfg.Provider, cfg.Model)
 	default:
 		return false
 	}

@@ -236,6 +236,22 @@ func TestApplyModelDefaults(t *testing.T) {
 			name:   "alias default base_url: none becomes nil",
 			config: &latest.ModelConfig{Provider: "groq", Model: "qwen/qwen3-32b", BaseURL: "https://api.groq.com/openai/v1", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
 		},
+		{
+			name:   "alias default base_url with trailing slash: none becomes nil",
+			config: &latest.ModelConfig{Provider: "groq", Model: "qwen/qwen3-32b", BaseURL: "https://api.groq.com/openai/v1/", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+		},
+		{
+			name:   "azure deployment (base_url always set, arbitrary deployment name): none becomes nil",
+			config: &latest.ModelConfig{Provider: "azure", Model: "my-gpt4o-deployment", BaseURL: "https://acme.openai.azure.com", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+		},
+		{
+			name:   "custom base_url on the Responses API: none becomes nil (switch is Chat Completions only)",
+			config: &latest.ModelConfig{Provider: "vllm", Model: "qwen3", BaseURL: "http://localhost:8000/v1", ProviderOpts: map[string]any{"api_type": "openai_responses"}, ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+		},
+		{
+			name:   "custom provider pointed at azure: none becomes nil",
+			config: &latest.ModelConfig{Provider: "azure", Model: "qwen-deployment", BaseURL: "https://acme.openai.azure.com", ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"}, ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+		},
 	}
 
 	for _, tt := range tests {

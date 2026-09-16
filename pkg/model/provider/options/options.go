@@ -26,6 +26,7 @@ type ModelOptions struct {
 	tokenSource      TokenSource
 	openAIVendor     bool
 	customBaseURL    bool
+	thinkingDisabled bool
 }
 
 func (c *ModelOptions) Gateway() string {
@@ -86,6 +87,15 @@ func (c *ModelOptions) OpenAIVendor() bool {
 // YAML, and gates request fields that only OpenAI-compatible servers accept.
 func (c *ModelOptions) CustomBaseURL() bool {
 	return c.customBaseURL
+}
+
+// ThinkingDisabled reports whether the user's own configuration switched
+// thinking off (thinking_budget none or 0), as opposed to [NoThinking], the
+// request-scoped option that title generation and compaction clones set on
+// their own. Set only by the factory through [WithThinkingDisabled]; it gates
+// wire-level off switches that must never fire without the user asking.
+func (c *ModelOptions) ThinkingDisabled() bool {
+	return c.thinkingDisabled
 }
 
 func (c *ModelOptions) TokenSource() TokenSource {
@@ -213,6 +223,14 @@ func WithCustomBaseURL(v bool) Opt {
 	}
 }
 
+// WithThinkingDisabled records the factory-resolved "the user's config
+// disabled thinking" bit (see [ModelOptions.ThinkingDisabled]).
+func WithThinkingDisabled(v bool) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.thinkingDisabled = v
+	}
+}
+
 // WithTokenSource configures request-time bearer-token resolution. OpenAI
 // direct clients use it before token_key; gateway and ChatGPT auth stay separate.
 func WithTokenSource(source TokenSource) Opt {
@@ -294,6 +312,9 @@ func FromModelOptions(m ModelOptions) []Opt {
 	}
 	if m.openAIVendor {
 		out = append(out, WithOpenAIVendor(true))
+	}
+	if m.thinkingDisabled {
+		out = append(out, WithThinkingDisabled(true))
 	}
 	return out
 }

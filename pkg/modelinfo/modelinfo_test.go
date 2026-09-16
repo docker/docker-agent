@@ -282,35 +282,45 @@ func TestUsesReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestIsOpenAIModelName(t *testing.T) {
+func TestIsOpenAIHosted(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		model string
-		want  bool
+		provider string
+		model    string
+		want     bool
 	}{
-		{"gpt-4o", true},
-		{"gpt-4.1-mini", true},
-		{"gpt-3.5-turbo", true},
-		{"gpt-5.6-sol", true},
-		{"gpt-oss-120b", true},
-		{"chatgpt-4o-latest", true},
-		{"o3-mini", true},
-		{"O1", true},
-		{"openai/gpt-4o", true},
+		// OpenAI's own model names reach OpenAI even behind a proxy.
+		{"openai", "gpt-4o", true},
+		{"openai", "gpt-4.1-mini", true},
+		{"openai", "gpt-3.5-turbo", true},
+		{"openai", "gpt-5.6-sol", true},
+		{"openai", "gpt-oss-120b", true},
+		{"openai", "chatgpt-4o-latest", true},
+		{"openai", "codex-mini-latest", true},
+		{"openai", "o3-mini", true},
+		{"openai", "O1", true},
+		{"openai", "openai/gpt-4o", true},
+		{"my_proxy", "gpt-4o", true},
 
-		{"qwen3.6:35b-a3b-q8_0", false},
-		{"mlx-community/Qwen3.6-35B-A3B-8bit", false},
-		{"deepseek-r1", false},
-		{"claude-sonnet-5", false},
-		{"llama-3.1-8b", false},
-		{"ai/qwen3", false},
-		{"", false},
+		// azure and chatgpt always dial OpenAI, whatever the deployment is called.
+		{"azure", "my-gpt4o-deployment", true},
+		{"Azure", "qwen3", true},
+		{"chatgpt", "anything", true},
+
+		// Open-weight models on the bare openai provider or a custom one.
+		{"openai", "qwen3.6:35b-a3b-q8_0", false},
+		{"openai", "mlx-community/Qwen3.6-35B-A3B-8bit", false},
+		{"openai", "deepseek-r1", false},
+		{"local_llm", "claude-sonnet-5", false},
+		{"openai", "llama-3.1-8b", false},
+		{"dmr", "ai/qwen3", false},
+		{"openai", "", false},
 	}
 	for _, tc := range cases {
-		t.Run(tc.model, func(t *testing.T) {
+		t.Run(tc.provider+"/"+tc.model, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, IsOpenAIModelName(tc.model))
+			assert.Equal(t, tc.want, IsOpenAIHosted(tc.provider, tc.model))
 		})
 	}
 }

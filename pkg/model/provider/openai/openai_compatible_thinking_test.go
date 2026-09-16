@@ -38,7 +38,11 @@ func compatChatRequest(t *testing.T, cfg *latest.ModelConfig, opts ...options.Op
 	return req
 }
 
-func TestChatCompletions_ThinkingBudgetNone_CustomBaseURL(t *testing.T) {
+// optedIn mirrors what the factory threads to the client for a model on a
+// user-chosen endpoint whose YAML disabled thinking.
+var optedIn = []options.Opt{options.WithCustomBaseURL(true), options.WithThinkingDisabled(true)}
+
+func TestChatCompletions_ThinkingDisabled_CustomBaseURL(t *testing.T) {
 	t.Parallel()
 
 	for _, budget := range []*latest.ThinkingBudget{{Effort: "none"}, {Tokens: 0}} {
@@ -46,7 +50,7 @@ func TestChatCompletions_ThinkingBudgetNone_CustomBaseURL(t *testing.T) {
 			Provider:       "openai",
 			Model:          "mlx-community/Qwen3.6-35B-A3B-8bit",
 			ThinkingBudget: budget,
-		}, options.WithCustomBaseURL(true))
+		}, optedIn...)
 
 		assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
 		assert.NotContains(t, req, "reasoning_effort")
@@ -54,7 +58,7 @@ func TestChatCompletions_ThinkingBudgetNone_CustomBaseURL(t *testing.T) {
 	}
 }
 
-func TestChatCompletions_ThinkingBudgetNone_CustomBaseURL_FloorsMaxTokens(t *testing.T) {
+func TestChatCompletions_ThinkingDisabled_CustomBaseURL_FloorsMaxTokens(t *testing.T) {
 	t.Parallel()
 
 	maxTokens := int64(20)
@@ -63,25 +67,29 @@ func TestChatCompletions_ThinkingBudgetNone_CustomBaseURL_FloorsMaxTokens(t *tes
 		Model:          "qwen3",
 		MaxTokens:      &maxTokens,
 		ThinkingBudget: &latest.ThinkingBudget{Effort: "none"},
-	}, options.WithCustomBaseURL(true))
+	}, optedIn...)
 
 	assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
 	assert.EqualValues(t, noThinkingMinOutputTokens, req["max_tokens"])
 }
 
-func TestChatCompletions_NoThinking_CustomBaseURL(t *testing.T) {
+// TestChatCompletions_ThinkingDisabled_NoThinkingClone is the title-generation
+// and compaction shape: the clone carries NoThinking plus the injected none
+// budget, and still sends the switch because the user opted in.
+func TestChatCompletions_ThinkingDisabled_NoThinkingClone(t *testing.T) {
 	t.Parallel()
 
 	req := compatChatRequest(t, &latest.ModelConfig{
-		Provider: "openai",
-		Model:    "qwen3",
-	}, options.WithCustomBaseURL(true), options.WithNoThinking())
+		Provider:       "openai",
+		Model:          "qwen3",
+		ThinkingBudget: &latest.ThinkingBudget{Effort: "none"},
+	}, append(optedIn, options.WithNoThinking())...)
 
 	assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
 	assert.NotContains(t, req, "reasoning_effort")
 }
 
-func TestChatCompletions_ThinkingBudgetNone_NotSentWithoutOptIn(t *testing.T) {
+func TestChatCompletions_ThinkingSwitch_NotSentWithoutOptIn(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -92,11 +100,22 @@ func TestChatCompletions_ThinkingBudgetNone_NotSentWithoutOptIn(t *testing.T) {
 		{
 			name: "base_url is the alias default",
 			cfg:  &latest.ModelConfig{Provider: "xai", Model: "grok-4", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+			opts: []options.Opt{options.WithThinkingDisabled(true)},
 		},
 		{
 			name: "OpenAI model name behind a proxy",
 			cfg:  &latest.ModelConfig{Provider: "openai", Model: "gpt-4o", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
-			opts: []options.Opt{options.WithCustomBaseURL(true)},
+			opts: optedIn,
+		},
+		{
+			name: "azure deployment with an arbitrary name",
+			cfg:  &latest.ModelConfig{Provider: "azure", Model: "my-qwen-deployment", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}, ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"}},
+			opts: optedIn,
+		},
+		{
+			name: "internal NoThinking clone of a model whose YAML never disabled thinking",
+			cfg:  &latest.ModelConfig{Provider: "openai", Model: "qwen3", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+			opts: []options.Opt{options.WithCustomBaseURL(true), options.WithNoThinking()},
 		},
 		{
 			name: "thinking_budget unset",
@@ -151,7 +170,7 @@ func TestChatCompletions_ExtraBody_OverridesDerivedFields(t *testing.T) {
 				"chat_template_kwargs": map[string]any{"enable_thinking": true},
 			},
 		},
-	}, options.WithCustomBaseURL(true))
+	}, optedIn...)
 
 	assert.Equal(t, map[string]any{"enable_thinking": true}, req["chat_template_kwargs"], "explicit extra_body wins over the thinking_budget sugar")
 }

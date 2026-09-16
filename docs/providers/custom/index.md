@@ -161,7 +161,7 @@ agents:
 
 ### Disabling thinking on local and OpenAI-compatible servers
 
-Open-weight reasoning models (Qwen3, DeepSeek, GLM, ...) think by default, and every reasoning token counts against `max_tokens`: a small cap can be spent entirely on reasoning, leaving an empty reply. When the model runs on an endpoint you chose (a `base_url` on the model or on a `providers:` entry) and its name is not an OpenAI one, `thinking_budget: none` (or `0`) sends `chat_template_kwargs: {"enable_thinking": false}` with each request. llama.cpp, vLLM, SGLang and mlx_lm honor it; servers without the switch ignore the field. A configured `max_tokens` below 256 is raised to 256 so residual reasoning cannot starve the answer.
+Open-weight reasoning models (Qwen3, DeepSeek, GLM, ...) think by default, and every reasoning token counts against `max_tokens`: a small cap can be spent entirely on reasoning, leaving an empty reply. When the model runs on an endpoint you chose (a `base_url` on the model or on a `providers:` entry, not Azure or ChatGPT) and its name is not an OpenAI one, `thinking_budget: none` (or `0`) sends `chat_template_kwargs: {"enable_thinking": false}` with each Chat Completions request, including the internal session-title and compaction calls made for that model. llama.cpp, vLLM, SGLang and mlx_lm honor it; servers without the switch ignore the field. A configured `max_tokens` below 256 is raised to 256 so residual reasoning cannot starve the answer. Set on a `providers:` entry, the setting applies to every model of that provider, so a router that also fronts OpenAI models should carry it per model instead. The Responses API (`api_type: openai_responses`) has no equivalent switch.
 
 ```yaml
 models:
@@ -184,7 +184,7 @@ models:
         reasoning_effort: none
 ```
 
-Fields you send this way are not validated; a vendor that rejects an unknown field returns an API error.
+Fields you send this way are not validated, and they replace anything Docker Agent set under the same key, including `model`, `stream` and `max_tokens`; a vendor that rejects an unknown field returns an API error. `extra_body` can also sit on a `providers:` entry; a model-level `extra_body` then replaces it as a whole rather than merging key by key.
 
 ### API Router (Requesty, LiteLLM)
 

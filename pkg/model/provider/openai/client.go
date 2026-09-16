@@ -1522,16 +1522,16 @@ func sendsRealNoneEffort(cfg *latest.ModelConfig, openAIVendor bool) bool {
 }
 
 // disablesOpenAICompatibleThinking reports whether this Chat Completions
-// request should carry chat_template_kwargs.enable_thinking=false: thinking
-// is off (thinking_budget none/0 or the NoThinking option), the endpoint was
-// chosen by the user (see options.WithCustomBaseURL), and the model is not
-// one of OpenAI's own, which reject unknown request fields when reached
-// through a proxy.
+// request should carry chat_template_kwargs.enable_thinking=false: the
+// user's config disabled thinking (thinking_budget none/0, see
+// options.WithThinkingDisabled; the internal NoThinking option alone never
+// qualifies), the endpoint was chosen by the user (options.WithCustomBaseURL),
+// and the request does not reach OpenAI itself (azure, chatgpt, or an OpenAI
+// model name behind a proxy), which rejects unknown request fields.
 func (c *Client) disablesOpenAICompatibleThinking() bool {
-	if !c.ModelOptions.NoThinking() && !c.ModelConfig.ThinkingBudget.IsDisabled() {
-		return false
-	}
-	return c.ModelOptions.CustomBaseURL() && !modelinfo.IsOpenAIModelName(c.ModelConfig.Model)
+	return c.ModelOptions.ThinkingDisabled() &&
+		c.ModelOptions.CustomBaseURL() &&
+		!modelinfo.IsOpenAIHosted(c.ModelConfig.Provider, c.ModelConfig.Model)
 }
 
 // openAIReasoningEffort validates a ThinkingBudget effort string for the

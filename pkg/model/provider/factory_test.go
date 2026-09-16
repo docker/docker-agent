@@ -514,6 +514,16 @@ func TestCreateDirectProvider_ResolvesCustomBaseURLOption(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "xai alias default base_url with trailing slash",
+			cfg:  &latest.ModelConfig{Provider: "xai", Model: "grok-4", BaseURL: xaiDefault.BaseURL + "/"},
+			want: false,
+		},
+		{
+			name: "azure always sets base_url (excluded downstream by IsOpenAIHosted, not here)",
+			cfg:  &latest.ModelConfig{Provider: "azure", Model: "my-deployment", BaseURL: "https://acme.openai.azure.com"},
+			want: true,
+		},
+		{
 			name: "named custom provider with base_url",
 			cfg:  &latest.ModelConfig{Provider: "local_llm", Model: "qwen3"},
 			customProviders: map[string]latest.ProviderConfig{
@@ -550,6 +560,65 @@ func TestCreateDirectProvider_ResolvesCustomBaseURLOption(t *testing.T) {
 			_, err := r.createDirectProvider(t.Context(), tt.cfg, environment.NewNoEnvProvider(), opts...)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, probe.CustomBaseURL())
+		})
+	}
+}
+
+// TestCreateDirectProvider_ResolvesThinkingDisabledOption verifies that the
+// user-disabled-thinking bit comes from the YAML thinking_budget (none or 0)
+// and never from the request-scoped NoThinking option that internal clones
+// set, so title generation and compaction cannot switch on wire behavior the
+// user did not ask for.
+func TestCreateDirectProvider_ResolvesThinkingDisabledOption(t *testing.T) {
+	t.Parallel()
+
+	local := func(budget *latest.ThinkingBudget) *latest.ModelConfig {
+		return &latest.ModelConfig{Provider: "openai", Model: "qwen3", BaseURL: "http://localhost:8080/v1", ThinkingBudget: budget}
+	}
+	tests := []struct {
+		name string
+		cfg  *latest.ModelConfig
+		opts []options.Opt
+		want bool
+	}{
+		{name: "thinking_budget: none", cfg: local(&latest.ThinkingBudget{Effort: "none"}), want: true},
+		{name: "thinking_budget: 0", cfg: local(&latest.ThinkingBudget{Tokens: 0}), want: true},
+		{name: "thinking_budget unset", cfg: local(nil), want: false},
+		{name: "thinking_budget: high", cfg: local(&latest.ThinkingBudget{Effort: "high"}), want: false},
+		{
+			name: "NoThinking build with an injected none does not count as user intent",
+			cfg:  local(&latest.ThinkingBudget{Effort: "none"}),
+			opts: []options.Opt{options.WithNoThinking()},
+			want: false,
+		},
+		{
+			name: "NoThinking rebuild keeps a bit the original build resolved",
+			cfg:  local(&latest.ThinkingBudget{Effort: "none"}),
+			opts: []options.Opt{options.WithThinkingDisabled(true), options.WithNoThinking()},
+			want: true,
+		},
+		{
+			name: "provider-level none is inherited",
+			cfg:  &latest.ModelConfig{Provider: "local_llm", Model: "qwen3"},
+			opts: []options.Opt{options.WithProviders(map[string]latest.ProviderConfig{
+				"local_llm": {BaseURL: "http://localhost:8000/v1", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}},
+			})},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var probe options.ModelOptions
+			r := NewRegistry(map[string]providerFactory{
+				"openai":                 tagFactoryCapturingOpts(&probe),
+				"openai_chatcompletions": tagFactoryCapturingOpts(&probe),
+			})
+			_, err := r.createDirectProvider(t.Context(), tt.cfg, environment.NewNoEnvProvider(), tt.opts...)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, probe.ThinkingDisabled())
 		})
 	}
 }

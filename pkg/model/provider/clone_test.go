@@ -277,37 +277,56 @@ func TestCloneWithOptions_PreservesOpenAIVendorBit_NamedCustomProvider(t *testin
 	assert.Equal(t, "none", req.ReasoningEffort, "cloned NoThinking() path must still send gpt-5.6's real none effort")
 }
 
-// TestCloneWithOptions_PreservesCustomBaseURL_LocalModel verifies that a
-// NoThinking() clone (title generation, sampling) of a model on a
-// user-supplied OpenAI-compatible endpoint still resolves the custom
-// base_url bit when it re-enters the factory with the already-resolved
-// config, so the clone also switches thinking off on the wire.
-func TestCloneWithOptions_PreservesCustomBaseURL_LocalModel(t *testing.T) {
+// TestCloneWithOptions_ThinkingSwitch_LocalModel verifies the title-generation
+// and compaction shape on a user-supplied OpenAI-compatible endpoint: a
+// NoThinking() clone re-enters the factory with the already-resolved config
+// (base_url filled, a none budget injected by mergeCloneOptions) and must
+// send chat_template_kwargs only when the user's own YAML disabled thinking.
+func TestCloneWithOptions_ThinkingSwitch_LocalModel(t *testing.T) {
 	t.Parallel()
 
-	server, body := captureNamedCustomProviderRequestBody(t, "openai_chatcompletions")
+	tests := []struct {
+		name     string
+		budget   *latest.ThinkingBudget
+		wantSent bool
+	}{
+		{name: "thinking_budget: none in YAML", budget: &latest.ThinkingBudget{Effort: "none"}, wantSent: true},
+		{name: "thinking_budget unset in YAML", budget: nil, wantSent: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	modelCfg := &latest.ModelConfig{Provider: "openai", Model: "mlx-community/Qwen3.6-35B-A3B-8bit", BaseURL: server.URL}
-	env := environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "secret"})
+			server, body := captureNamedCustomProviderRequestBody(t, "openai_chatcompletions")
+			modelCfg := &latest.ModelConfig{Provider: "openai", Model: "mlx-community/Qwen3.6-35B-A3B-8bit", BaseURL: server.URL, ThinkingBudget: tt.budget}
+			env := environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "secret"})
 
-	baseProvider, err := fullTestRegistry().New(t.Context(), modelCfg, env)
-	require.NoError(t, err)
-	baseOpts := baseProvider.BaseConfig().ModelOptions
-	require.True(t, baseOpts.CustomBaseURL())
+			baseProvider, err := fullTestRegistry().New(t.Context(), modelCfg, env)
+			require.NoError(t, err)
+			baseOpts := baseProvider.BaseConfig().ModelOptions
+			require.True(t, baseOpts.CustomBaseURL())
+			require.Equal(t, tt.wantSent, baseOpts.ThinkingDisabled())
 
-	cloned := CloneWithOptions(t.Context(), baseProvider, options.WithNoThinking())
-	clonedOpts := cloned.BaseConfig().ModelOptions
-	require.True(t, clonedOpts.CustomBaseURL(), "clone must keep the custom base_url bit")
+			cloned := CloneWithOptions(t.Context(), baseProvider, options.WithNoThinking())
+			clonedOpts := cloned.BaseConfig().ModelOptions
+			require.True(t, clonedOpts.CustomBaseURL(), "clone must keep the custom base_url bit")
+			require.Equal(t, tt.wantSent, clonedOpts.ThinkingDisabled(), "clone must keep the user's thinking bit, not derive it from NoThinking")
 
-	stream, err := cloned.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, nil)
-	require.NoError(t, err)
-	defer stream.Close()
-	drainStream(t, stream)
+			stream, err := cloned.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, nil)
+			require.NoError(t, err)
+			defer stream.Close()
+			drainStream(t, stream)
 
-	var req map[string]any
-	require.NoError(t, json.Unmarshal(body(), &req))
-	assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
-	assert.NotContains(t, req, "reasoning_effort")
+			var req map[string]any
+			require.NoError(t, json.Unmarshal(body(), &req))
+			if tt.wantSent {
+				assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
+			} else {
+				assert.NotContains(t, req, "chat_template_kwargs")
+			}
+			assert.NotContains(t, req, "reasoning_effort")
+		})
+	}
 }
 
 // TestCloneWithOptions_KeepsOpenAIVendorFalse_UnrelatedAlias is the negative

@@ -141,14 +141,20 @@ func UsesReasoningEffort(modelID string) bool {
 	return isOSeries(m) || strings.HasPrefix(m, "gpt-5")
 }
 
-// IsOpenAIModelName reports whether modelID names one of OpenAI's own model
-// families (o-series, gpt-*, chatgpt-*), reasoning or not. It lets callers
-// on a user-supplied OpenAI-compatible endpoint tell an OpenAI model behind
-// a proxy apart from a self-hosted open-weight model, since OpenAI rejects
-// request fields it does not know.
-func IsOpenAIModelName(modelID string) bool {
+// IsOpenAIHosted reports whether a request for (provider, modelID) reaches
+// OpenAI's own service even on a user-supplied base_url: the azure and
+// chatgpt providers always do (Azure deployments carry arbitrary names), and
+// so does one of OpenAI's own model families (o-series, gpt-*, chatgpt-*,
+// codex-*) behind a proxy. Callers use it to keep request fields OpenAI
+// rejects as unknown off such requests while still sending them to
+// self-hosted open-weight models.
+func IsOpenAIHosted(provider, modelID string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "azure", "chatgpt":
+		return true
+	}
 	m := normalizeOpenAI(modelID)
-	return isOSeries(m) || strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "chatgpt-")
+	return isOSeries(m) || strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "chatgpt-") || strings.HasPrefix(m, "codex-")
 }
 
 // AlwaysReasons reports whether an OpenAI model always reasons internally

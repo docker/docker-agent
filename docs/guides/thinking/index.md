@@ -292,7 +292,7 @@ Grok and Mistral reasoning models (e.g. `grok-3-mini`, `magistral`) manage reaso
 
 ## Custom OpenAI-compatible endpoints (llama.cpp, vLLM, SGLang, mlx_lm)
 
-Open-weight reasoning models such as Qwen3 think by default when served locally. On an endpoint you chose (a `base_url` on the model or on a `providers:` entry), `thinking_budget: none` or `0` sends `chat_template_kwargs: {"enable_thinking": false}` with each request, which those servers honor and others ignore. Other `thinking_budget` values are not translated for these servers. The switch is not sent when the model name is an OpenAI one (`gpt-*`, `o*`), so a proxy in front of OpenAI never receives a field OpenAI would reject. See the [custom provider page](../../providers/custom/index.md#disabling-thinking-on-local-and-openai-compatible-servers) for details and the `extra_body` alternative.
+Open-weight reasoning models such as Qwen3 think by default when served locally. On an endpoint you chose (a `base_url` on the model or on a `providers:` entry), `thinking_budget: none` or `0` sends `chat_template_kwargs: {"enable_thinking": false}` with each Chat Completions request, which those servers honor and others ignore. Other `thinking_budget` values are not translated for these servers, and the Responses API has no equivalent switch. The switch is not sent for Azure or ChatGPT, nor when the model name is an OpenAI one (`gpt-*`, `o*`), so a proxy in front of OpenAI never receives a field OpenAI would reject. See the [custom provider page](../../providers/custom/index.md#disabling-thinking-on-local-and-openai-compatible-servers) for details and the `extra_body` alternative.
 
 ## Disabling Thinking
 
