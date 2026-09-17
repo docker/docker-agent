@@ -116,7 +116,7 @@ func (a *betaStreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 
 // Close closes the Beta stream
 func (a *betaStreamAdapter) Close() {
-	a.stream.Close()
+	a.close()
 }
 
 // betaUsageFromDelta maps the Beta Messages API streaming usage onto chat.Usage.
