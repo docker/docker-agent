@@ -88,6 +88,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "ovhcloud",
 		},
 		{
+			name: "daoxe api key present",
+			envVars: map[string]string{
+				"DAOXE_API_KEY": "test-key",
+			},
+			expectedProvider: "daoxe",
+		},
+		{
 			name: "groq api key present",
 			envVars: map[string]string{
 				"GROQ_API_KEY": "test-key",
@@ -321,6 +328,15 @@ func TestAutoModelConfig(t *testing.T) {
 			},
 			expectedProvider:  "ovhcloud",
 			expectedModel:     "Qwen3.5-397B-A17B",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "daoxe provider",
+			envVars: map[string]string{
+				"DAOXE_API_KEY": "test-key",
+			},
+			expectedProvider:  "daoxe",
+			expectedModel:     "claude-sonnet-4-6",
 			expectedMaxTokens: 32000,
 		},
 		{

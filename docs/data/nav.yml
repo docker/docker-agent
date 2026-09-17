@@ -177,6 +177,8 @@
       url: /providers/cloudflare-workers-ai/
     - title: ChatGPT
       url: /providers/chatgpt/
+    - title: DaoXE
+      url: /providers/daoxe/
     - title: DeepSeek
       url: /providers/deepseek/
     - title: Docker Model Runner
