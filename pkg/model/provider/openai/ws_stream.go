@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -52,10 +54,12 @@ func (m wsCreateMessage) MarshalJSON() ([]byte, error) {
 // After the terminal event (response.completed, response.failed, etc.) is
 // delivered via Current(), the next call to Next() returns false.
 type wsStream struct {
-	conn    *websocket.Conn
-	current responses.ResponseStreamEventUnion
-	err     error
-	done    bool
+	conn      *websocket.Conn
+	current   responses.ResponseStreamEventUnion
+	err       error
+	done      atomic.Bool
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Compile-time check: wsStream satisfies responseEventStream.
@@ -121,7 +125,7 @@ func dialWebSocket(
 // Next reads the next event from the WebSocket. Returns false when the
 // response is complete or an error occurred.
 func (s *wsStream) Next() bool {
-	if s.done {
+	if s.done.Load() {
 		return false
 	}
 
@@ -133,11 +137,11 @@ func (s *wsStream) Next() bool {
 				websocket.CloseGoingAway,
 				websocket.CloseNoStatusReceived,
 			) {
-				s.done = true
+				s.done.Store(true)
 				return false
 			}
 			s.err = fmt.Errorf("websocket read: %w", err)
-			s.done = true
+			s.done.Store(true)
 			return false
 		}
 
@@ -149,7 +153,7 @@ func (s *wsStream) Next() bool {
 		var event responses.ResponseStreamEventUnion
 		if err := json.Unmarshal(data, &event); err != nil {
 			s.err = fmt.Errorf("websocket unmarshal event: %w", err)
-			s.done = true
+			s.done.Store(true)
 			return false
 		}
 
@@ -163,14 +167,14 @@ func (s *wsStream) Next() bool {
 	// Check for server-side error events.
 	if event.Type == "error" {
 		s.err = fmt.Errorf("openai websocket error: %s (param: %s)", event.Message, event.Param)
-		s.done = true
+		s.done.Store(true)
 		// Still return true so the caller can inspect the event.
 		return true
 	}
 
 	// Terminal events: deliver this event then stop on next call.
 	if isTerminalEvent(event.Type) {
-		s.done = true
+		s.done.Store(true)
 		// Return true so the adapter receives usage/finish data.
 		return true
 	}
@@ -190,13 +194,14 @@ func (s *wsStream) Err() error {
 
 // Close sends a close frame and releases the connection.
 func (s *wsStream) Close() error {
-	s.done = true
-	// Best-effort close handshake.
-	_ = s.conn.WriteMessage(
-		websocket.CloseMessage,
-		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-	)
-	return s.conn.Close()
+	s.closeOnce.Do(func() {
+		s.done.Store(true)
+		// WriteControl is concurrency-safe; bound the handshake so Close unblocks reads.
+		_ = s.conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+		s.closeErr = s.conn.Close()
+	})
+	return s.closeErr
 }
 
 // isTerminalEvent returns true for event types that signal the end of a
