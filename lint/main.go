@@ -52,6 +52,7 @@ var cops = []cop.Cop{
 // programCops lists whole-program, inter-procedural cops. These run once over
 // the entire loaded program rather than once per file.
 var programCops = []prog.Cop{
+	StreamCloseSafety,
 	ExclusiveStreamLease,
 	rubocops.NewLintContextConnectivity(),
 }
