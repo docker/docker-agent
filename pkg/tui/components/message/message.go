@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tui/animation"
@@ -359,7 +358,7 @@ func (mv *messageModel) IsToggleLine(lineIdx int) bool {
 
 func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 	msg := mv.message
-	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.Content == "" || mv.selected || len(mv.markdownImages) != 0 {
+	if msg == nil || msg.Type != types.MessageTypeAssistant || msg.Content == "" || mv.selected || len(mv.markdownImages) != 0 || len(msg.AssistantMedia) != 0 {
 		return AssistantSegments{}, false
 	}
 	messageStyle := styles.AssistantMessageStyle
@@ -421,13 +420,6 @@ func (mv *messageModel) RenderedSegments(width int) (AssistantSegments, bool) {
 		mv.codeBlocks = append(mv.codeBlocks[:0], mv.segmentCodeBlocks...)
 	}
 	return AssistantSegments{Header: cache.headerLines, Stable: cache.stableLines, Tail: tailLines}, true
-}
-
-func styledAssistantLines(style lipgloss.Style, width int, content string) []string {
-	if content == "" {
-		return nil
-	}
-	return strings.Split(strings.TrimSuffix(style.Width(width).Render(content), "\n"), "\n")
 }
 
 // View renders the message view
@@ -492,7 +484,7 @@ func (mv *messageModel) isSpinnerDriven() bool {
 	case types.MessageTypeSpinner, types.MessageTypeLoading:
 		return true
 	case types.MessageTypeAssistant:
-		return mv.message.Content == ""
+		return mv.message.Content == "" && len(mv.message.AssistantMedia) == 0
 	}
 	return false
 }
@@ -552,7 +544,7 @@ func (mv *messageModel) render(width int) string {
 		noTopPaddingStyle := messageStyle.PaddingTop(0)
 		return noTopPaddingStyle.Width(width).Render(topRow + "\n" + content)
 	case types.MessageTypeAssistant:
-		if msg.Content == "" {
+		if msg.Content == "" && len(msg.AssistantMedia) == 0 {
 			return mv.spinner.View()
 		}
 
@@ -569,6 +561,7 @@ func (mv *messageModel) render(width int) string {
 			codeBlocks = nil
 		}
 		rendered, codeBlocks = replaceMarkdownImagePlaceholders(rendered, codeBlocks, imagePlaceholders)
+		rendered = appendAssistantMediaLines(rendered, msg.AssistantMedia, innerRenderWidth)
 
 		var prefix string
 		if !mv.sameAgentAsPrevious(msg) {
@@ -733,6 +726,47 @@ func replaceMarkdownImagePlaceholders(rendered string, codeBlocks []markdown.Cod
 		}
 	}
 	return strings.Join(result, "\n"), codeBlocks
+}
+
+// appendAssistantMediaLines appends generated-media blocks after the
+// rendered markdown, preserving the text-then-media order of the assistant
+// turn. Appending never shifts earlier lines, so code-block coordinates
+// computed for the markdown remain valid.
+func appendAssistantMediaLines(rendered string, media []types.AssistantMedia, width int) string {
+	blocks := make([]string, 0, len(media))
+	for _, m := range media {
+		if lines := assistantMediaLines(m, width); len(lines) > 0 {
+			blocks = append(blocks, strings.Join(lines, "\n"))
+		}
+	}
+	if len(blocks) == 0 {
+		return rendered
+	}
+	joined := strings.Join(blocks, "\n\n")
+	if rendered = strings.TrimRight(rendered, "\n\r\t "); rendered == "" {
+		return joined
+	}
+	return rendered + "\n\n" + joined
+}
+
+// assistantMediaLines renders one generated-media item: a muted name label
+// plus kitty marker rows when the image is renderable (mirroring the
+// markdown-image layout above), or the item's safe textual fallback when
+// graphics are unavailable or the image never decoded.
+func assistantMediaLines(media types.AssistantMedia, width int) []string {
+	if media.Image != nil {
+		if markers := tuiimage.RenderMarkers(*media.Image, width); len(markers) > 0 {
+			lines := make([]string, 0, len(markers)+1)
+			if media.Image.Name != "" {
+				lines = append(lines, "  "+styles.MutedStyle.Render(media.Image.Name))
+			}
+			return append(lines, markers...)
+		}
+	}
+	if media.Fallback == "" {
+		return nil
+	}
+	return []string{styles.MutedStyle.Width(width).Render(media.Fallback)}
 }
 
 // renderAssistantMarkdown renders streamed assistant content using a per-message

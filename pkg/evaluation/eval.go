@@ -3,6 +3,7 @@ package evaluation
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -46,15 +48,10 @@ type Runner struct {
 }
 
 // newRunner creates a new evaluation runner.
-func newRunner(agentSource config.Source, runConfig *config.RuntimeConfig, judgeModel provider.Provider, cfg Config) *Runner {
-	var judge *Judge
-	if judgeModel != nil {
-		judge = NewJudge(judgeModel, cfg.Concurrency)
-	}
+func newRunner(agentSource config.Source, runConfig *config.RuntimeConfig, cfg Config) *Runner {
 	return &Runner{
 		Config:      cfg,
 		agentSource: agentSource,
-		judge:       judge,
 		runConfig:   runConfig,
 		imageCache:  make(map[imageKey]string),
 	}
@@ -64,18 +61,15 @@ func newRunner(agentSource config.Source, runConfig *config.RuntimeConfig, judge
 // ttyOut is used for progress bar rendering (should be the console/TTY).
 // out is used for results and status messages (can be tee'd to a log file).
 func Evaluate(ctx context.Context, ttyOut, out io.Writer, isTTY bool, runName string, runConfig *config.RuntimeConfig, cfg Config) (*EvalRun, error) {
-	agentSource, err := config.Resolve(cfg.AgentFilename, nil)
+	agentSource, err := sources.Resolve(cfg.AgentFilename, nil)
 	if err != nil {
 		return nil, fmt.Errorf("resolving agent: %w", err)
 	}
-
-	// Create judge model provider for relevance checking
-	judgeModel, err := createJudgeModel(ctx, cfg.JudgeModel, runConfig)
-	if err != nil {
-		return nil, err
+	if _, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...)); err != nil {
+		return nil, fmt.Errorf("loading agent: %w", err)
 	}
 
-	runner := newRunner(agentSource, runConfig, judgeModel, cfg)
+	runner := newRunner(agentSource, runConfig, cfg)
 
 	fmt.Fprintf(out, "Evaluation run: %s\n", runName)
 
@@ -84,6 +78,7 @@ func Evaluate(ctx context.Context, ttyOut, out io.Writer, isTTY bool, runName st
 	duration := time.Since(startTime)
 
 	summary := computeSummary(results)
+	summary.RepeatMetrics = computeRepeatMetrics(results, cfg.Repeat)
 	printSummary(out, summary, duration)
 
 	run := &EvalRun{
@@ -124,7 +119,14 @@ func (r *Runner) Run(ctx context.Context, ttyOut, out io.Writer, isTTY bool) ([]
 	// instead of silently producing zero-relevance results.
 	if needsJudge(evals) {
 		if r.judge == nil {
-			return nil, errors.New("some evaluations have relevance criteria but no judge model is configured (use --judge-model)")
+			judgeModel, err := createJudgeModel(ctx, r.JudgeModel, r.runConfig)
+			if err != nil {
+				return nil, err
+			}
+			if judgeModel == nil {
+				return nil, errors.New("some evaluations have relevance criteria but no judge model is configured (use --judge-model)")
+			}
+			r.judge = NewJudge(judgeModel, r.Concurrency)
 		}
 		fmt.Fprintln(out, "Validating judge model...")
 		if err := r.judge.Validate(ctx); err != nil {
@@ -329,6 +331,7 @@ func (r *Runner) runSingleEval(ctx context.Context, evalSess *InputSession) (Res
 		Question:          strings.Join(userMessages, "\n"),
 		SizeExpected:      evals.Size,
 		RelevanceExpected: float64(len(evals.Relevance)),
+		AssertionsTotal:   len(evals.Assertions),
 	}
 
 	expectedToolCalls := extractToolCalls(evalSess.Messages)
@@ -381,6 +384,17 @@ func (r *Runner) runSingleEval(ctx context.Context, evalSess *InputSession) (Res
 		}
 		result.RelevancePassed = passed
 		result.RelevanceResults = results
+	}
+
+	// Run code-based assertions against the agent output.
+	if len(evals.Assertions) > 0 {
+		assertionResults := runAssertions(evals.Assertions, response, cost, actualToolCalls)
+		result.AssertionResults = assertionResults
+		for _, ar := range assertionResults {
+			if ar.Passed {
+				result.AssertionsPassed++
+			}
+		}
 	}
 
 	slog.DebugContext(ctx, "Evaluation complete", "title", title, "duration", time.Since(startTime))
@@ -481,19 +495,16 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 	if err != nil {
 		return nil, fmt.Errorf("creating stdout pipe: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("creating stderr pipe: %w", err)
-	}
+	// Let exec.Cmd own the stderr copy: Wait blocks until its own copying
+	// goroutine finishes (bounded by WaitDelay), so stderrBuf is safe to read
+	// after Wait returns. A hand-rolled StderrPipe+goroutine has no such
+	// guarantee and races with the reads below.
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting %s run: %w", containerRuntime, err)
 	}
-
-	var stderrData []byte
-	go func() {
-		stderrData, _ = io.ReadAll(stderr)
-	}()
 
 	var events []map[string]any
 	scanner := bufio.NewScanner(stdout)
@@ -519,11 +530,11 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 
 	waitErr := cmd.Wait()
 	if waitErr != nil {
-		slog.DebugContext(ctx, "Container exited with error", "stderr", string(stderrData), "error", waitErr)
+		slog.DebugContext(ctx, "Container exited with error", "stderr", stderrBuf.String(), "error", waitErr)
 	}
 
 	if len(events) == 0 {
-		stderrStr := strings.TrimSpace(string(stderrData))
+		stderrStr := strings.TrimSpace(stderrBuf.String())
 		if waitErr != nil {
 			return nil, fmt.Errorf("container failed: %w (stderr: %s)", waitErr, stderrStr)
 		}

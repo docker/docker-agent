@@ -90,7 +90,7 @@ Docker Model Runner
   Status: not installed (https://docs.docker.com/ai/model-runner/get-started/)
 
 Model auto-selection
-  auto -> anthropic/claude-sonnet-4-6
+  auto -> anthropic/claude-sonnet-5
 
 No issues found.
 ```

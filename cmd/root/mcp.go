@@ -106,6 +106,7 @@ func (f *mcpFlags) runMCPCommand(cmd *cobra.Command, args []string) (commandErr 
 	return mcp.StartHTTPServer(ctx, agentFilename, f.agentName, &f.runConfig, ln, mcp.HTTPOptions{
 		CLISafety: session.SafetyPolicy(f.safety),
 		AuthToken: f.authToken,
+		Out:       cmd.OutOrStdout(),
 		OnSafetyPolicy: func(resolved servesafety.Resolved) {
 			fmt.Fprintf(cmd.OutOrStdout(), "Tool safety policy: %s (source: %s)\n", resolved.Policy, resolved.Source)
 		},

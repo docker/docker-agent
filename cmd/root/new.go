@@ -78,10 +78,17 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 	}
 
 	var appOpts []app.Opt
+	// The creator runs in the user's checkout and writes the generated agent
+	// YAML there; capture that workspace as the session's provenance.
+	workingDir, err := session.CaptureLocalWorkingDir(f.runConfig.WorkingDir)
+	if err != nil {
+		return err
+	}
 	sessOpts := []session.Opt{
 		session.WithTitle("New agent"),
 		session.WithMaxIterations(f.maxIterationsParam),
 		session.WithToolsApproved(true),
+		session.WithWorkingDir(workingDir),
 	}
 	if len(args) > 0 {
 		arg := strings.Join(args, " ")

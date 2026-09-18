@@ -92,19 +92,17 @@ func (d *semanticVectorDB) createSchema(ctx context.Context) error {
 	return nil
 }
 
-// AddDocumentWithEmbedding implements vectorStoreDB.
-// For semantic-embeddings, the embeddingInput contains the LLM-generated summary.
-func (d *semanticVectorDB) AddDocumentWithEmbedding(ctx context.Context, doc database.Document, embedding []float64, embeddingInput string) error {
-	if len(embedding) == 0 {
-		return errors.New("embedding is required for vector database")
+// ReplaceFileDocuments implements vectorStoreDB.
+// It atomically replaces a file's indexed state in a single transaction:
+// delete the existing row (cascades to its chunks) -> insert the files row
+// with the final hash -> insert every chunk. If any step fails the whole
+// transaction rolls back, leaving the previous version (if any) intact.
+func (d *semanticVectorDB) ReplaceFileDocuments(ctx context.Context, meta database.FileMetadata, docs []database.Document, embeddings [][]float64, embeddingInputs []string) error {
+	if len(docs) == 0 {
+		return errors.New("replace file documents: at least one document is required; use DeleteDocumentsByPath for an empty file")
 	}
-	if len(embedding) != d.vectorDimensions {
-		return fmt.Errorf("embedding dimension mismatch: got %d, expected %d", len(embedding), d.vectorDimensions)
-	}
-
-	embJSON, err := json.Marshal(embedding)
-	if err != nil {
-		return fmt.Errorf("failed to marshal embedding: %w", err)
+	if len(docs) != len(embeddings) || len(docs) != len(embeddingInputs) {
+		return fmt.Errorf("replace file documents: got %d docs, %d embeddings, %d embedding inputs", len(docs), len(embeddings), len(embeddingInputs))
 	}
 
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -113,24 +111,41 @@ func (d *semanticVectorDB) AddDocumentWithEmbedding(ctx context.Context, doc dat
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_, err = tx.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO %s (source_path, file_hash, indexed_at)
-		 VALUES (?, ?, CURRENT_TIMESTAMP)
-		 ON CONFLICT(source_path) 
-		 DO UPDATE SET file_hash = excluded.file_hash, indexed_at = CURRENT_TIMESTAMP`, d.filesTable),
-		doc.SourcePath, doc.FileHash)
-	if err != nil {
-		return fmt.Errorf("failed to upsert file metadata: %w", err)
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE source_path = ?", d.filesTable), meta.SourcePath); err != nil {
+		return fmt.Errorf("failed to delete old file row: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO %s (source_path, chunk_index, content, embedding, embedding_input)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(source_path, chunk_index) 
-		 DO UPDATE SET content = excluded.content, embedding = excluded.embedding, embedding_input = excluded.embedding_input`, d.chunksTable),
-		doc.SourcePath, doc.ChunkIndex, doc.Content, embJSON, embeddingInput)
+		fmt.Sprintf(`INSERT INTO %s (source_path, file_hash, indexed_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, d.filesTable),
+		meta.SourcePath, meta.FileHash)
 	if err != nil {
-		return fmt.Errorf("failed to upsert chunk: %w", err)
+		return fmt.Errorf("failed to insert file metadata: %w", err)
+	}
+
+	chunkStmt, err := tx.PrepareContext(ctx,
+		fmt.Sprintf(`INSERT INTO %s (source_path, chunk_index, content, embedding, embedding_input) VALUES (?, ?, ?, ?, ?)`, d.chunksTable))
+	if err != nil {
+		return fmt.Errorf("failed to prepare chunk insert: %w", err)
+	}
+	defer chunkStmt.Close()
+
+	for i, doc := range docs {
+		embedding := embeddings[i]
+		if len(embedding) == 0 {
+			return errors.New("embedding is required for vector database")
+		}
+		if len(embedding) != d.vectorDimensions {
+			return fmt.Errorf("embedding dimension mismatch: got %d, expected %d", len(embedding), d.vectorDimensions)
+		}
+
+		embJSON, err := json.Marshal(embedding)
+		if err != nil {
+			return fmt.Errorf("failed to marshal embedding: %w", err)
+		}
+
+		if _, err := chunkStmt.ExecContext(ctx, doc.SourcePath, doc.ChunkIndex, doc.Content, embJSON, embeddingInputs[i]); err != nil {
+			return fmt.Errorf("failed to insert chunk %d: %w", doc.ChunkIndex, err)
+		}
 	}
 
 	return tx.Commit()
@@ -218,16 +233,6 @@ func (d *semanticVectorDB) GetFileMetadata(ctx context.Context, sourcePath strin
 	}
 
 	return &metadata, nil
-}
-
-func (d *semanticVectorDB) SetFileMetadata(ctx context.Context, metadata database.FileMetadata) error {
-	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO %s (source_path, file_hash, indexed_at)
-		 VALUES (?, ?, CURRENT_TIMESTAMP)
-		 ON CONFLICT(source_path) 
-		 DO UPDATE SET file_hash = excluded.file_hash, indexed_at = CURRENT_TIMESTAMP`, d.filesTable),
-		metadata.SourcePath, metadata.FileHash)
-	return err
 }
 
 func (d *semanticVectorDB) GetAllFileMetadata(ctx context.Context) ([]database.FileMetadata, error) {

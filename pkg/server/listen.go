@@ -47,17 +47,11 @@ func listenFD(raw string) (net.Listener, error) {
 }
 
 func listenUnix(ctx context.Context, path string) (net.Listener, error) {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // socket access is gated by socket file permissions, not directory
 		return nil, err
 	}
-
-	var lnConfig net.ListenConfig
-	return lnConfig.Listen(ctx, "unix", path)
+	return listenUnixSocket(ctx, path)
 }
 
 func listenTCP(ctx context.Context, addr string) (net.Listener, error) {

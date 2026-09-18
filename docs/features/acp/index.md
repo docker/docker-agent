@@ -58,7 +58,7 @@ Host Application
 
 - **Stdio transport** — No network ports needed; ideal for subprocess integration
 - **Session persistence** — SQLite-backed sessions survive process restarts
-- **Full agent support** — All Docker Agent features work: tools, multi-agent, model fallbacks
+- **Agent runtime support** — Supports configured tools, multi-agent delegation, and model fallbacks. Client-supplied MCP servers and audio prompts are not supported; use `session/resume`, not `session/load`, for persisted sessions.
 - **Multi-agent configs** — Team configurations with sub-agents work transparently
 - **Filesystem operations** — Agents can read/write files relative to the host's working directory
 
@@ -68,41 +68,28 @@ Host Application
 docker agent serve acp <agent-file>|<registry-ref> [flags]
 ```
 
-| Flag                              | Default                | Description                                                                                                          |
-| --------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| `-s, --session-db <path>`         | `<data-dir>/session.db` | Path to the SQLite session database.                                                                                 |
-| `--working-dir <path>`            | current dir            | Working directory the agent runs in.                                                                                 |
-| `--env-from-file <file>`          | (none)                 | Load additional environment variables from a `.env` file (repeatable).                                               |
-| `--models-gateway <url>`          | (none)                 | Route all provider traffic through a models gateway URL.                                                             |
-| `--code-mode-tools`               | `false`                | Expose tools as a single "code" toolset that accepts a JavaScript snippet to run.                                    |
-| `--hook-pre-tool-use <cmd>`       | (none)                 | Add a pre-tool-use hook (repeatable). See [Hooks](../../configuration/hooks/index.md).                     |
-| `--hook-post-tool-use <cmd>`      | (none)                 | Add a post-tool-use hook (repeatable).                                                                               |
-| `--hook-session-start <cmd>`      | (none)                 | Add a session-start hook (repeatable).                                                                               |
-| `--hook-session-end <cmd>`        | (none)                 | Add a session-end hook (repeatable).                                                                                 |
-| `--hook-on-user-input <cmd>`      | (none)                 | Add an on-user-input hook (repeatable).                                                                              |
-| `--hook-stop <cmd>`               | (none)                 | Add a stop hook, fired when the model finishes responding (repeatable).                                              |
+See the [CLI reference](../cli/index.md#docker-agent-serve-acp) for all flags, defaults, and shared runtime options.
 
 ## Integration Example
 
 A host application would spawn Docker Agent as a subprocess and communicate via the ACP protocol:
 
 ```javascript
-// Pseudocode for an IDE extension
-const child = spawn("docker", ["agent", "serve", "acp", "./agent.yaml"]);
+// Pseudocode: request() sends newline-delimited JSON-RPC with unique IDs,
+// correlates responses, and handles incoming client requests/notifications.
+const client = spawnACP(["docker", "agent", "serve", "acp", "./agent.yaml"]);
 
-// Send a message to the agent
-child.stdin.write(
-  JSON.stringify({
-    jsonrpc: "2.0",
-    method: "agent/run",
-    params: { message: "Explain this code" },
-  }),
-);
-
-// Read responses
-child.stdout.on("data", (data) => {
-  const response = JSON.parse(data);
-  // Handle agent response, tool calls, etc.
+await client.request("initialize", {
+  protocolVersion: 1,
+  clientCapabilities: {},
+});
+const session = await client.request("session/new", {
+  cwd: process.cwd(),
+  mcpServers: [],
+});
+await client.request("session/prompt", {
+  sessionId: session.sessionId,
+  prompt: [{ type: "text", text: "Explain this code" }],
 });
 ```
 

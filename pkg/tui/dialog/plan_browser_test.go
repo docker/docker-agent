@@ -20,18 +20,11 @@ func letterKey(r rune) tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: r, Text: string(r)}
 }
 
-// testPlanListing builds a listing with the current session's plan first
-// (the service's ordering) and two shared plans.
+// testPlanListing builds a listing with two shared plans.
 func testPlanListing() plans.ListResult {
 	now := time.Now().UTC()
 	return plans.ListResult{
 		Plans: []plans.Plan{
-			{
-				Scope:     plans.ScopeSession,
-				Name:      "11112222-3333-4444-5555-666677778888",
-				SessionID: "11112222-3333-4444-5555-666677778888",
-				UpdatedAt: now.Add(-5 * time.Minute),
-			},
 			{
 				Scope:     plans.ScopeShared,
 				Name:      "release",
@@ -93,20 +86,12 @@ func TestPlanBrowserRendersScopeIdentityStatusVersionTimeTitle(t *testing.T) {
 	d := newTestPlanBrowser(t, testPlanListing())
 
 	view := d.View()
-	assert.Contains(t, view, "session", "scope column must name the session scope")
 	assert.Contains(t, view, "shared", "scope column must name the shared scope")
-	assert.Contains(t, view, "current session", "the session plan row is labelled as the current session's")
-	assert.Contains(t, view, "11112222-3333-4444-5555-666677778888",
-		"the footer keeps the full session ID of the selected session plan")
 	assert.Contains(t, view, "release")
 	assert.Contains(t, view, "in-progress")
-	assert.Contains(t, view, "v3", "shared plan version must be shown")
+	assert.Contains(t, view, "v3", "plan version must be shown")
 	assert.Contains(t, view, "2h ago", "updated time must be shown")
 	assert.Contains(t, view, "Release plan", "title must be shown")
-
-	// The session plan row renders "-" for its nonexistent version.
-	sessionRow := d.renderPlan(d.filtered[0], false, 90)
-	assert.Contains(t, sessionRow, "-")
 }
 
 func TestPlanBrowserRowsTruncateSafely(t *testing.T) {
@@ -138,11 +123,9 @@ func TestPlanBrowserNavigation(t *testing.T) {
 	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	assert.Equal(t, 1, d.selected)
 	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	assert.Equal(t, 2, d.selected)
-	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
-	assert.Equal(t, 2, d.selected, "selection stays at the end of the list")
+	assert.Equal(t, 1, d.selected, "selection stays at the end of the list")
 	d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	assert.Equal(t, 1, d.selected)
+	assert.Equal(t, 0, d.selected)
 }
 
 func TestPlanBrowserFilter(t *testing.T) {
@@ -181,42 +164,20 @@ func TestPlanBrowserFilterNoMatches(t *testing.T) {
 	assert.Contains(t, d.View(), "No plans match the filter")
 }
 
-// TestPlanBrowserSessionRowSearchable proves the session row matches its
-// "current session" label as well as its session ID.
-func TestPlanBrowserSessionRowSearchable(t *testing.T) {
-	t.Parallel()
-	d := newTestPlanBrowser(t, testPlanListing())
-
-	d.Update(letterKey('/'))
-	for _, r := range "current" {
-		d.Update(letterKey(r))
-	}
-	require.Len(t, d.filtered, 1, "filtering by the label must keep only the session row")
-	assert.Equal(t, plans.ScopeSession, d.filtered[0].Scope)
-
-	// The session ID itself stays searchable too.
-	d.filterInput.SetValue("11112222")
-	d.applyFilter()
-	require.Len(t, d.filtered, 1)
-	assert.Equal(t, plans.ScopeSession, d.filtered[0].Scope)
-}
-
 func TestPlanBrowserEnterOpensDetail(t *testing.T) {
 	t.Parallel()
 	d := newTestPlanBrowser(t, testPlanListing())
 
-	// Session plan (first row): detail is addressed by session ref.
 	_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	msg, ok := firstMsgOfType[messages.OpenPlanDetailMsg](collectMsgs(cmd))
 	require.True(t, ok, "enter must open the detail dialog, not invoke agent tools")
-	assert.Equal(t, plans.SessionRef("11112222-3333-4444-5555-666677778888"), msg.Ref)
+	assert.Equal(t, plans.SharedRef("release"), msg.Ref)
 
-	// Shared plan.
 	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
 	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	msg, ok = firstMsgOfType[messages.OpenPlanDetailMsg](collectMsgs(cmd))
 	require.True(t, ok)
-	assert.Equal(t, plans.SharedRef("release"), msg.Ref)
+	assert.Equal(t, plans.SharedRef("db-migration"), msg.Ref)
 }
 
 func TestPlanBrowserRefreshAndExportKeys(t *testing.T) {
@@ -230,13 +191,12 @@ func TestPlanBrowserRefreshAndExportKeys(t *testing.T) {
 	_, cmd = d.Update(letterKey('x'))
 	exportMsg, ok := firstMsgOfType[messages.ExportPlanMsg](collectMsgs(cmd))
 	require.True(t, ok, "x must request an export")
-	assert.Equal(t, plans.SessionRef("11112222-3333-4444-5555-666677778888"), exportMsg.Ref)
+	assert.Equal(t, plans.SharedRef("release"), exportMsg.Ref)
 }
 
 func TestPlanBrowserStatusFlow(t *testing.T) {
 	t.Parallel()
-	d := newTestPlanBrowser(t, testPlanListing())
-	d.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // select release, v3
+	d := newTestPlanBrowser(t, testPlanListing()) // release, v3, selected
 
 	_, cmd := d.Update(letterKey('s'))
 	openMsg, ok := firstMsgOfType[OpenDialogMsg](collectMsgs(cmd))
@@ -274,19 +234,23 @@ func TestPlanBrowserStatusEmptyRejected(t *testing.T) {
 	assert.Equal(t, notification.TypeError, note.Type)
 }
 
-func TestPlanBrowserSessionMutationsUnsupported(t *testing.T) {
+// TestPlanBrowserVersionlessMutationRefused proves a plan without a known
+// version (which the service always provides) is refused rather than
+// mutated unguarded.
+func TestPlanBrowserVersionlessMutationRefused(t *testing.T) {
 	t.Parallel()
-	d := newTestPlanBrowser(t, testPlanListing()) // session plan selected
+	d := newTestPlanBrowser(t, plans.ListResult{Plans: []plans.Plan{
+		{Scope: plans.ScopeShared, Name: "release"},
+	}})
 
-	for _, r := range []rune{'s', 'd'} {
+	for _, r := range []rune{'s', 'd', 'e'} {
 		_, cmd := d.Update(letterKey(r))
 		msgs := collectMsgs(cmd)
 		note, ok := firstMsgOfType[notification.ShowMsg](msgs)
-		require.True(t, ok, "%c on a session plan must show an explanatory notification", r)
-		assert.Contains(t, note.Text, "Session plans")
-		assert.Contains(t, note.Text, "edit", "the notification must point at the supported edit action")
+		require.True(t, ok, "%c on a versionless plan must show an explanatory notification", r)
+		assert.Contains(t, note.Text, "no version is known")
 		_, opened := firstMsgOfType[OpenDialogMsg](msgs)
-		assert.False(t, opened, "%c must not open an action dialog for session plans", r)
+		assert.False(t, opened, "%c must not open an action dialog for a versionless plan", r)
 		_, statusEmitted := firstMsgOfType[messages.SetPlanStatusMsg](msgs)
 		assert.False(t, statusEmitted)
 		_, deleteEmitted := firstMsgOfType[messages.DeletePlanMsg](msgs)
@@ -296,26 +260,9 @@ func TestPlanBrowserSessionMutationsUnsupported(t *testing.T) {
 	}
 }
 
-// TestPlanBrowserSessionEditEmitsIntent proves e on the session row edits the
-// current session plan with the no-version sentinel 0 instead of refusing.
-func TestPlanBrowserSessionEditEmitsIntent(t *testing.T) {
-	t.Parallel()
-	d := newTestPlanBrowser(t, testPlanListing()) // session plan selected
-
-	_, cmd := d.Update(letterKey('e'))
-	msgs := collectMsgs(cmd)
-	editMsg, ok := firstMsgOfType[messages.EditPlanMsg](msgs)
-	require.True(t, ok, "e must edit the current session plan")
-	assert.Equal(t, plans.SessionRef("11112222-3333-4444-5555-666677778888"), editMsg.Ref)
-	assert.Equal(t, 0, editMsg.ExpectedVersion, "session plans have no versions; 0 is the sentinel")
-	_, notified := firstMsgOfType[notification.ShowMsg](msgs)
-	assert.False(t, notified, "a supported edit must not produce an unsupported notification")
-}
-
 func TestPlanBrowserDeleteFlow(t *testing.T) {
 	t.Parallel()
-	d := newTestPlanBrowser(t, testPlanListing())
-	d.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // select release, v3
+	d := newTestPlanBrowser(t, testPlanListing()) // release, v3, selected
 
 	_, cmd := d.Update(letterKey('d'))
 	openMsg, ok := firstMsgOfType[OpenDialogMsg](collectMsgs(cmd))
@@ -366,8 +313,7 @@ func TestPlanBrowserNewFlow(t *testing.T) {
 
 func TestPlanBrowserEditKey(t *testing.T) {
 	t.Parallel()
-	d := newTestPlanBrowser(t, testPlanListing())
-	d.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // select release, v3
+	d := newTestPlanBrowser(t, testPlanListing()) // release, v3, selected
 
 	_, cmd := d.Update(letterKey('e'))
 	editMsg, ok := firstMsgOfType[messages.EditPlanMsg](collectMsgs(cmd))
@@ -378,11 +324,10 @@ func TestPlanBrowserEditKey(t *testing.T) {
 
 func TestPlanBrowserDataMsgReplacesRowsAndKeepsSelection(t *testing.T) {
 	t.Parallel()
-	d := newTestPlanBrowser(t, testPlanListing())
-	d.Update(tea.KeyPressMsg{Code: tea.KeyDown}) // select release
+	d := newTestPlanBrowser(t, testPlanListing()) // release selected
 
 	updated := plans.ListResult{Plans: []plans.Plan{
-		{Scope: plans.ScopeShared, Name: "db-migration", Version: new(1)},
+		{Scope: plans.ScopeShared, Name: "another", Version: new(1)},
 		{Scope: plans.ScopeShared, Name: "release", Status: "done", Version: new(4)},
 	}}
 	d.Update(PlanBrowserDataMsg{Result: updated})
@@ -392,7 +337,7 @@ func TestPlanBrowserDataMsgReplacesRowsAndKeepsSelection(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "release", p.Name, "selection follows the plan identity across refreshes")
 	assert.Equal(t, 4, *p.Version)
-	assert.NotContains(t, d.View(), "11112222", "removed rows must disappear")
+	assert.NotContains(t, d.View(), "db-migration", "removed rows must disappear")
 }
 
 // manyPlansListing builds n shared plans named plan-00, plan-01, … so tests

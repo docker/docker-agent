@@ -1,6 +1,7 @@
 package compaction
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -38,6 +39,49 @@ func TestEstimateMessageTokens(t *testing.T) {
 			},
 			// 21 total chars → 21/3.5 = 6 + 5 overhead = 11
 			expected: 11,
+		},
+		{
+			// Regression test for the runtime-generated assistant shape
+			// (pkg/runtime.recordAssistantMessage /
+			// stripGeneratedMediaTransform) that mirrors Content into a
+			// MultiContent text part verbatim, so oaistream-style converters
+			// treating MultiContent as authoritative don't lose the text.
+			// The mirrored part must be counted once, not twice.
+			name: "content mirrored into a multi-content text part is not double-counted",
+			msg: chat.Message{
+				Role:    chat.MessageRoleAssistant,
+				Content: "here you go", // 11 chars
+				MultiContent: []chat.MessagePart{
+					{Type: chat.MessagePartTypeText, Text: "here you go"}, // mirror of Content, must be skipped
+					{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+						Name: "cat.png", MimeType: "image/png",
+						Source: chat.DocumentSource{ArtifactPath: "cat.png"},
+					}},
+				},
+			},
+			// 11 chars (Content, counted once) → 11/3.5 = 3 + 5 overhead = 8.
+			// ArtifactPath-referenced generated media carries no InlineData, so
+			// it draws no binary-attachment charge here; what this case checks
+			// is that the mirrored text part does NOT add another 3 on top
+			// (which would make it 11).
+			expected: 8,
+		},
+		{
+			// A MultiContent text part that happens to repeat Content's exact
+			// text but is NOT the mirror (it comes after another part with
+			// the same text already skipped) must still be counted: only the
+			// first match is treated as the mirror, so genuinely repeated
+			// user-authored text is never silently dropped from the estimate.
+			name: "only the first multi-content match of Content is treated as the mirror",
+			msg: chat.Message{
+				Content: "same", // 4 chars
+				MultiContent: []chat.MessagePart{
+					{Type: chat.MessagePartTypeText, Text: "same"}, // skipped as the mirror
+					{Type: chat.MessagePartTypeText, Text: "same"}, // counted: 4 chars
+				},
+			},
+			// 4 (Content) + 4 (second "same") = 8 chars → 8/3.5 = 2 + 5 overhead = 7
+			expected: 7,
 		},
 		{
 			name: "message with tool calls",
@@ -640,4 +684,17 @@ func TestFirstIndexInBudget(t *testing.T) {
 			assert.Equal(t, tt.wantFirst, got)
 		})
 	}
+}
+
+func TestReportedMessageTokensIncludesPersistedReasoning(t *testing.T) {
+	t.Parallel()
+	msg := &chat.Message{
+		Usage:          &chat.Usage{OutputTokens: 200, ReasoningTokens: 150},
+		OpenAIResponse: &chat.OpenAIResponse{ID: "resp_1", Output: []json.RawMessage{json.RawMessage(`{"type":"reasoning","encrypted_content":"opaque"}`)}},
+	}
+	assert.Equal(t, int64(200), reportedMessageTokens(msg))
+	msg.OpenAIResponse.Output = nil
+	assert.Equal(t, int64(50), reportedMessageTokens(msg), "diagnostic IDs do not carry reasoning")
+	msg.OpenAIResponse = nil
+	assert.Equal(t, int64(50), reportedMessageTokens(msg))
 }

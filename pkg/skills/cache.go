@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/httpclient"
 )
 
@@ -161,7 +163,7 @@ func (c *diskCache) FetchAndStore(ctx context.Context, baseURL, skillName, fileP
 		ExpiresAt: directive.expiresAt(),
 	}
 	metaJSON, _ := json.Marshal(meta)
-	if err := os.WriteFile(metaPath, metaJSON, 0o600); err != nil {
+	if err := atomicfile.Write(metaPath, bytes.NewReader(metaJSON), 0o600); err != nil {
 		// Non-fatal: the content is cached, just the metadata isn't
 		slog.DebugContext(ctx, "Failed to write cache metadata", "path", metaPath, "error", err)
 	}

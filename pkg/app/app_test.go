@@ -1240,3 +1240,215 @@ func TestElicitationDeliveryAcrossEntryPoints(t *testing.T) {
 		})
 	}
 }
+
+// scriptedStreamMockRuntime replays a fixed sequence of events on RunStream
+// and then closes the channel, without appending a StreamStoppedEvent
+// unless the script itself contains one. This drives the #4136 regression
+// tests below through every shape the drain loop must fall back for: no
+// stop at all, a real root stop, a sub-session-only stop, a mid-stream
+// cancellation, and a root error — uniformly across every entry point in
+// elicitationEntryPoints.
+type scriptedStreamMockRuntime struct {
+	mockRuntime
+
+	script []runtime.Event
+	// cancelAfterScript, when set, is called after every scripted event has
+	// been pushed onto the channel and before it closes, simulating ctx
+	// being cancelled mid-stream (e.g. Esc) with the channel closing right
+	// after — without it ever carrying a StreamStoppedEvent of its own.
+	cancelAfterScript context.CancelFunc
+}
+
+func (m *scriptedStreamMockRuntime) RunStream(_ context.Context, _ *session.Session) <-chan runtime.Event {
+	ch := make(chan runtime.Event, len(m.script)+1)
+	go func() {
+		defer close(ch)
+		for _, ev := range m.script {
+			ch <- ev
+		}
+		if m.cancelAfterScript != nil {
+			m.cancelAfterScript()
+		}
+	}()
+	return ch
+}
+
+// collectUntilQuietWindow is how long collectUntilQuiet waits for a lull
+// before deciding the producer is done.
+const collectUntilQuietWindow = 500 * time.Millisecond
+
+// collectUntilQuiet drains events until no further message arrives within
+// collectUntilQuietWindow, returning everything collected in order. The
+// #4136 regression tests below have no single sentinel event to stop on (a
+// synthesized StreamStoppedEvent looks just like a real one, and a
+// sub-session stop can arrive before it), so a fixed quiet window is the
+// simplest way to know forwardRunStreamEvents' goroutine has finished.
+func collectUntilQuiet(t *testing.T, events <-chan tea.Msg) []tea.Msg {
+	t.Helper()
+
+	var collected []tea.Msg
+	for {
+		select {
+		case msg := <-events:
+			collected = append(collected, msg)
+		case <-time.After(collectUntilQuietWindow):
+			return collected
+		}
+	}
+}
+
+// streamStoppedEvents returns every *runtime.StreamStoppedEvent in msgs, in
+// order.
+func streamStoppedEvents(msgs []tea.Msg) []*runtime.StreamStoppedEvent {
+	var stops []*runtime.StreamStoppedEvent
+	for _, msg := range msgs {
+		if stop, ok := msg.(*runtime.StreamStoppedEvent); ok {
+			stops = append(stops, stop)
+		}
+	}
+	return stops
+}
+
+// TestForwardRunStreamEvents_SynthesizesRootStreamStopped is the regression
+// coverage for #4136 (TUI stuck on "Working…" after the stream ends): the
+// runtime documents the channel close, not receipt of StreamStoppedEvent,
+// as the terminal signal, and drops the event under back-pressure
+// (LocalRuntime.finalizeEventChannel's non-blocking emit) — a fast local
+// model streaming faster than the persistence observer can keep up
+// reliably triggers this. Run/Retry/RunWithMessage all funnel through
+// forwardRunStreamEvents, so every case is driven across all three via
+// elicitationEntryPoints, mirroring TestElicitationDeliveryAcrossEntryPoints.
+func TestForwardRunStreamEvents_SynthesizesRootStreamStopped(t *testing.T) {
+	t.Parallel()
+
+	for _, ep := range elicitationEntryPoints {
+		t.Run(ep.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("no stop event: synthesizes exactly one, reason normal, as the last event", func(t *testing.T) {
+				t.Parallel()
+
+				sess := session.New()
+				rt := &scriptedStreamMockRuntime{script: []runtime.Event{
+					runtime.StreamStarted(sess.ID, "mock"),
+					runtime.AgentChoice("mock", sess.ID, "partial content"),
+				}}
+				events := make(chan tea.Msg, 16)
+				app := &App{runtime: rt, session: sess, events: events}
+
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				ep.invoke(app, ctx, cancel)
+
+				collected := collectUntilQuiet(t, events)
+				require.NotEmpty(t, collected, "the script's own events must still be forwarded")
+				stops := streamStoppedEvents(collected)
+				require.Len(t, stops, 1, "exactly one StreamStoppedEvent must be synthesized")
+				assert.Equal(t, sess.ID, stops[0].SessionID)
+				assert.Equal(t, "normal", stops[0].Reason)
+				assert.Equal(t, "mock", stops[0].AgentName, "must fall back to the last observed root-session agent name")
+				assert.Same(t, tea.Msg(stops[0]), collected[len(collected)-1],
+					"the synthesized stop must be the last event forwarded")
+			})
+
+			t.Run("real root stop: no duplicate is synthesized", func(t *testing.T) {
+				t.Parallel()
+
+				sess := session.New()
+				rt := &scriptedStreamMockRuntime{script: []runtime.Event{
+					runtime.StreamStarted(sess.ID, "mock"),
+					runtime.AgentChoice("mock", sess.ID, "partial content"),
+					runtime.StreamStopped(sess.ID, "mock", "normal"),
+				}}
+				events := make(chan tea.Msg, 16)
+				app := &App{runtime: rt, session: sess, events: events}
+
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				ep.invoke(app, ctx, cancel)
+
+				collected := collectUntilQuiet(t, events)
+				stops := streamStoppedEvents(collected)
+				require.Len(t, stops, 1, "the real StreamStoppedEvent must not be duplicated")
+				assert.Equal(t, sess.ID, stops[0].SessionID)
+				assert.Equal(t, "normal", stops[0].Reason)
+			})
+
+			t.Run("sub-session stop only: root stop is still synthesized", func(t *testing.T) {
+				t.Parallel()
+
+				sess := session.New()
+				const subSessionID = "sub-session"
+				rt := &scriptedStreamMockRuntime{script: []runtime.Event{
+					runtime.StreamStarted(sess.ID, "mock"),
+					runtime.StreamStopped(subSessionID, "worker", "normal"),
+				}}
+				events := make(chan tea.Msg, 16)
+				app := &App{runtime: rt, session: sess, events: events}
+
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				ep.invoke(app, ctx, cancel)
+
+				collected := collectUntilQuiet(t, events)
+				stops := streamStoppedEvents(collected)
+				require.Len(t, stops, 2, "the sub-session stop must not satisfy the root fallback")
+				assert.Equal(t, subSessionID, stops[0].SessionID, "the sub-session's own stop is forwarded first")
+				assert.Equal(t, sess.ID, stops[1].SessionID, "a root stop must still be synthesized")
+				assert.Equal(t, "normal", stops[1].Reason)
+				assert.Equal(t, "mock", stops[1].AgentName,
+					"must use the root StreamStarted's agent name, not the sub-session's")
+				assert.Same(t, tea.Msg(stops[1]), collected[len(collected)-1],
+					"the synthesized root stop must be the last event forwarded")
+			})
+
+			t.Run("ctx cancelled mid-stream: synthesized with reason canceled", func(t *testing.T) {
+				t.Parallel()
+
+				sess := session.New()
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				rt := &scriptedStreamMockRuntime{
+					script: []runtime.Event{
+						runtime.StreamStarted(sess.ID, "mock"),
+						runtime.AgentChoice("mock", sess.ID, "partial content"),
+					},
+					cancelAfterScript: cancel,
+				}
+				events := make(chan tea.Msg, 16)
+				app := &App{runtime: rt, session: sess, events: events}
+
+				ep.invoke(app, ctx, cancel)
+
+				collected := collectUntilQuiet(t, events)
+				stops := streamStoppedEvents(collected)
+				require.Len(t, stops, 1, "exactly one StreamStoppedEvent must be synthesized")
+				assert.Equal(t, sess.ID, stops[0].SessionID)
+				assert.Equal(t, "canceled", stops[0].Reason)
+			})
+
+			t.Run("root error event: synthesized with reason error", func(t *testing.T) {
+				t.Parallel()
+
+				sess := session.New()
+				rt := &scriptedStreamMockRuntime{script: []runtime.Event{
+					runtime.StreamStarted(sess.ID, "mock"),
+					runtime.ErrorForSession(sess.ID, "boom"),
+				}}
+				events := make(chan tea.Msg, 16)
+				app := &App{runtime: rt, session: sess, events: events}
+
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				ep.invoke(app, ctx, cancel)
+
+				collected := collectUntilQuiet(t, events)
+				stops := streamStoppedEvents(collected)
+				require.Len(t, stops, 1, "exactly one StreamStoppedEvent must be synthesized")
+				assert.Equal(t, sess.ID, stops[0].SessionID)
+				assert.Equal(t, "error", stops[0].Reason)
+				assert.Equal(t, "mock", stops[0].AgentName)
+			})
+		})
+	}
+}

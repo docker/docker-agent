@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"errors"
+	"math"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,15 +14,27 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 // dmrRuntime builds a LocalRuntime whose DMR discovery is stubbed with the
 // given lister, no models gateway, and no configured models unless provided.
 func dmrRuntime(lister func(context.Context) ([]string, error), store ModelStore, models map[string]latest.ModelConfig) *LocalRuntime {
+	var details func(context.Context) ([]dmrmodels.Model, error)
+	if lister != nil {
+		details = func(ctx context.Context) ([]dmrmodels.Model, error) {
+			ids, err := lister(ctx)
+			models := make([]dmrmodels.Model, len(ids))
+			for i, id := range ids {
+				models[i].ID = id
+			}
+			return models, err
+		}
+	}
 	return &LocalRuntime{
 		modelsStore:    store,
-		dmrModelLister: lister,
+		dmrModelLister: details,
 		now:            time.Now,
 		modelSwitcherCfg: &ModelSwitcherConfig{
 			EnvProvider: environment.NewNoEnvProvider(),
@@ -160,7 +174,7 @@ func TestListDMRModelsCachesResult(t *testing.T) {
 	for range 3 {
 		ids, err := r.listDMRModels(t.Context())
 		require.NoError(t, err)
-		assert.Equal(t, []string{"ai/qwen3:latest"}, ids)
+		assert.Equal(t, []dmrmodels.Model{{ID: "ai/qwen3:latest"}}, ids)
 	}
 
 	assert.Equal(t, int32(1), calls.Load(), "lister should be called once within the TTL window")
@@ -202,7 +216,7 @@ func TestListDMRModels_DoesNotCacheCallerCancellation(t *testing.T) {
 
 	ids, err := r.listDMRModels(t.Context())
 	require.NoError(t, err)
-	assert.Equal(t, []string{"ai/qwen3:latest"}, ids)
+	assert.Equal(t, []dmrmodels.Model{{ID: "ai/qwen3:latest"}}, ids)
 	assert.Equal(t, int32(2), calls.Load(), "caller cancellation must not poison the DMR discovery cache")
 }
 
@@ -239,4 +253,73 @@ func TestAvailableModelsIncludesDMR(t *testing.T) {
 
 	got := refsOf(r.AvailableModels(t.Context()))
 	assert.Contains(t, got, "dmr/ai/qwen3:latest")
+}
+
+func TestDMRMetadataInPicker(t *testing.T) {
+	t.Parallel()
+	r := dmrRuntime(nil, stubModelStore{}, map[string]latest.ModelConfig{
+		"local":  {Provider: "dmr", Model: "ai/qwen3", ProviderOpts: map[string]any{"context_size": 8192}},
+		"remote": {Provider: "dmr", Model: "ai/gemma3", BaseURL: "http://remote/engines/v1", ProviderOpts: map[string]any{"context_size": 4096}},
+	})
+	calls := 0
+	r.dmrModelLister = func(context.Context) ([]dmrmodels.Model, error) {
+		calls++
+		return []dmrmodels.Model{
+			{ID: "ai/qwen3:latest", Metadata: &dmrmodels.Metadata{Architecture: "qwen3", ContextWindow: 32768, Parameters: "8B", Quantization: "Q4_K_M", Size: "4.9 GiB"}},
+			{ID: "ai/gemma3", Metadata: &dmrmodels.Metadata{ContextWindow: 131072}},
+		}, nil
+	}
+	choices := r.AvailableModels(t.Context())
+	byRef := map[string]ModelChoice{}
+	for _, choice := range choices {
+		byRef[choice.Ref] = choice
+	}
+	assert.Equal(t, 8192, byRef["local"].ContextLimit)
+	assert.Equal(t, "qwen3", byRef["local"].Architecture)
+	assert.Equal(t, "8B", byRef["local"].Parameters)
+	assert.Equal(t, "Q4_K_M", byRef["local"].Quantization)
+	assert.Equal(t, "4.9 GiB", byRef["local"].Size)
+	assert.Equal(t, 4096, byRef["remote"].ContextLimit, "must use explicit context, not local metadata for a remote model")
+	assert.Equal(t, 32768, byRef["dmr/ai/qwen3:latest"].ContextLimit)
+	assert.Equal(t, 1, calls, "configured and discovered choices share one request")
+}
+
+func TestConfiguredContextWithoutDiscovery(t *testing.T) {
+	t.Parallel()
+	r := dmrRuntime(func(context.Context) ([]string, error) { return nil, errors.New("unavailable") }, stubModelStore{}, map[string]latest.ModelConfig{
+		"local": {Provider: "dmr", Model: "ai/qwen3", ProviderOpts: map[string]any{"context_size": 4096}},
+	})
+	choices := r.AvailableModels(t.Context())
+	require.Len(t, choices, 1)
+	assert.Equal(t, 4096, choices[0].ContextLimit)
+}
+
+func TestConfiguredContextIntegerBounds(t *testing.T) {
+	t.Parallel()
+
+	for _, n := range []int64{32768, math.MaxInt32, math.MaxInt32 + 1, math.MaxInt64} {
+		value := strconv.FormatInt(n, 10)
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+
+			for _, discovered := range []bool{false, true} {
+				t.Run(strconv.FormatBool(discovered), func(t *testing.T) {
+					t.Parallel()
+
+					r := dmrRuntime(nil, stubModelStore{}, map[string]latest.ModelConfig{
+						"local": {Provider: "dmr", Model: "ai/qwen3", ProviderOpts: map[string]any{"context_size": value}},
+					})
+					if discovered {
+						r.dmrModelLister = func(context.Context) ([]dmrmodels.Model, error) {
+							return []dmrmodels.Model{{ID: "ai/qwen3", Metadata: &dmrmodels.Metadata{ContextWindow: 4096}}}, nil
+						}
+					}
+					choices := r.AvailableModels(t.Context())
+					require.Len(t, choices, 1)
+					assert.Equal(t, min(n, int64(math.MaxInt)), int64(choices[0].ContextLimit))
+					assert.Positive(t, choices[0].ContextLimit)
+				})
+			}
+		})
+	}
 }

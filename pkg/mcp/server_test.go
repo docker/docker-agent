@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/httpsec"
+	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -285,17 +286,17 @@ func TestStreamableHTTPHandler_StatelessNegotiates20260728(t *testing.T) {
 
 	rec := &recordingRoundTripper{}
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0.0.1"}, nil)
-	session, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{
+	clientSession, err := client.Connect(t.Context(), &mcp.StreamableClientTransport{
 		Endpoint:   httpSrv.URL,
 		HTTPClient: &http.Client{Transport: rec},
 	}, nil)
 	require.NoError(t, err)
-	defer session.Close()
+	defer clientSession.Close()
 
-	assert.Equal(t, "2026-07-28", session.InitializeResult().ProtocolVersion,
+	assert.Equal(t, "2026-07-28", clientSession.InitializeResult().ProtocolVersion,
 		"stateless handler must negotiate the 2026-07-28 revision with a v1.7 client")
 
-	toolsRes, err := session.ListTools(t.Context(), nil)
+	toolsRes, err := clientSession.ListTools(t.Context(), nil)
 	require.NoError(t, err)
 	require.Len(t, toolsRes.Tools, 1)
 	assert.Equal(t, "root", toolsRes.Tools[0].Name)
@@ -468,12 +469,12 @@ func TestStreamableHTTPHandler_ConcurrentStatelessClients(t *testing.T) {
 	for range 8 {
 		g.Go(func() error {
 			client := mcp.NewClient(&mcp.Implementation{Name: "concurrent-client", Version: "0.0.1"}, nil)
-			session, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: httpSrv.URL}, nil)
+			clientSession, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: httpSrv.URL}, nil)
 			if err != nil {
 				return err
 			}
-			defer session.Close()
-			res, err := session.ListTools(ctx, nil)
+			defer clientSession.Close()
+			res, err := clientSession.ListTools(ctx, nil)
 			if err != nil {
 				return err
 			}
@@ -504,4 +505,19 @@ func TestAgentToolAnnotationsJSONKeepsFalseHints(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"readOnlyHint":false`)
 	assert.Contains(t, string(data), `"idempotentHint":false`)
+}
+
+func TestNewToolCallSession(t *testing.T) {
+	t.Parallel()
+
+	ag := agent.New("root", "test agent", agent.WithMaxIterations(7))
+	sess := newToolCallSession(ag, "hello", session.SafetyPolicyAutonomous, "/srv/workspace")
+
+	assert.Equal(t, "MCP tool call", sess.Title)
+	assert.Equal(t, 7, sess.MaxIterations)
+	assert.True(t, sess.ToolsApproved)
+	assert.True(t, sess.NonInteractive)
+	assert.Equal(t, session.SafetyPolicyAutonomous, sess.SafetyPolicy)
+	assert.Equal(t, "hello", sess.GetLastUserMessageContent())
+	assert.Equal(t, "/srv/workspace", sess.WorkingDir)
 }

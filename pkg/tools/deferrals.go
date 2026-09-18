@@ -25,6 +25,9 @@ func (t *DeferralTracker) MarkAt(sessionID, toolCallID string, requestTools []To
 	if !ok {
 		initial = make(map[string]struct{}, len(requestTools))
 		for _, tool := range requestTools {
+			if tool.SearchOnly {
+				continue
+			}
 			initial[tool.Name] = struct{}{}
 		}
 		t.initial[sessionID] = initial
@@ -36,6 +39,9 @@ func (t *DeferralTracker) MarkAt(sessionID, toolCallID string, requestTools []To
 	copy(marked, requestTools)
 	loadPoints := t.loadPointBy[sessionID]
 	for i := range marked {
+		if marked[i].SearchOnly {
+			continue
+		}
 		if _, presentInitially := initial[marked[i].Name]; presentInitially {
 			continue
 		}

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -92,18 +93,47 @@ func TestDesktopAwareTransportProxySafe(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "resolver stalled beyond lookup budget falls open",
+			host: "stalled-resolver.example",
+			resolver: func(ctx context.Context, _ string) ([]net.IP, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			transport := newDesktopAwareTransport(true).(*desktopAwareTransport)
+			transport.proxySafeLookupTimeout = 20 * time.Millisecond
 			if tt.resolver != nil {
 				transport.resolver = tt.resolver
 			}
 			assert.Equal(t, tt.want, transport.proxySafe(t.Context(), tt.host))
 		})
 	}
+}
+
+// TestDesktopAwareTransportProxySafeParentCancellationStaysClosed asserts
+// that if the caller's context expires while our lookup is in flight, we
+// treat that as the request being torn down — not as a signal to fall open.
+func TestDesktopAwareTransportProxySafeParentCancellationStaysClosed(t *testing.T) {
+	t.Parallel()
+
+	transport := newDesktopAwareTransport(true).(*desktopAwareTransport)
+	transport.proxySafeLookupTimeout = time.Second
+	transport.resolver = func(ctx context.Context, _ string) ([]net.IP, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	assert.False(t, transport.proxySafe(ctx, "cancelled.example"))
 }
 
 func TestDesktopAwareTransportLoopbackIsNeverProxied(t *testing.T) {

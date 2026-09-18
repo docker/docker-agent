@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -27,15 +27,8 @@ type a2aResponse struct {
 	ID      string `json:"id"`
 	Error   any    `json:"error,omitempty"`
 
-	// Result holds the task with its artifacts.
-	Result *struct {
-		Artifacts []struct {
-			Parts []struct {
-				Kind string `json:"kind"`
-				Text string `json:"text"`
-			} `json:"parts"`
-		} `json:"artifacts"`
-	} `json:"result,omitempty"`
+	// Result holds the produced event, e.g. the task with its artifacts.
+	Result *a2a.StreamResponse `json:"result,omitempty"`
 }
 
 // textParts returns all text parts across every artifact in the response.
@@ -43,11 +36,15 @@ func (r *a2aResponse) textParts() []string {
 	if r.Result == nil {
 		return nil
 	}
+	task, ok := r.Result.Event.(*a2a.Task)
+	if !ok {
+		return nil
+	}
 	var texts []string
-	for _, a := range r.Result.Artifacts {
+	for _, a := range task.Artifacts {
 		for _, p := range a.Parts {
-			if p.Kind == "text" {
-				texts = append(texts, p.Text)
+			if _, ok := p.Content.(a2a.Text); ok {
+				texts = append(texts, p.Text())
 			}
 		}
 	}
@@ -62,8 +59,9 @@ func TestA2AServer_AgentCard(t *testing.T) {
 
 	assert.Equal(t, "basic", agentCard.Name)
 	assert.NotEmpty(t, agentCard.Description)
-	assert.Equal(t, a2a.TransportProtocolJSONRPC, agentCard.PreferredTransport)
-	assert.Contains(t, agentCard.URL, "/invoke")
+	require.Len(t, agentCard.SupportedInterfaces, 1)
+	assert.Equal(t, a2a.TransportProtocolJSONRPC, agentCard.SupportedInterfaces[0].ProtocolBinding)
+	assert.Contains(t, agentCard.SupportedInterfaces[0].URL, "/invoke")
 	assert.True(t, agentCard.Capabilities.Streaming)
 	assert.NotEmpty(t, agentCard.Version)
 }
@@ -74,7 +72,7 @@ func TestA2AServer_Invoke(t *testing.T) {
 	_, runConfig := startRecordingAIProxy(t)
 	agentCard := startA2AServer(t, "testdata/basic.yaml", runConfig)
 
-	resp := sendA2AMessage(t, agentCard.URL, "test-request-1", "msg-1", "What is 2+2? Answer with just the number.")
+	resp := sendA2AMessage(t, invokeURL(t, agentCard), "test-request-1", "msg-1", "What is 2+2? Answer with just the number.")
 
 	assert.Equal(t, "2.0", resp.Jsonrpc)
 	assert.Equal(t, "test-request-1", resp.ID)
@@ -104,7 +102,7 @@ func TestA2AServer_MultipleRequests(t *testing.T) {
 			requestID := fmt.Sprintf("test-request-%d", i)
 			msgID := fmt.Sprintf("msg-%d", i)
 
-			resp := sendA2AMessage(t, agentCard.URL, requestID, msgID, message)
+			resp := sendA2AMessage(t, invokeURL(t, agentCard), requestID, msgID, message)
 
 			assert.Equal(t, requestID, resp.ID)
 			assert.Nil(t, resp.Error)
@@ -119,7 +117,7 @@ func TestA2AServer_MultiAgent(t *testing.T) {
 	_, runConfig := startRecordingAIProxy(t)
 	agentCard := startA2AServer(t, "testdata/multi.yaml", runConfig)
 
-	resp := sendA2AMessage(t, agentCard.URL, "test-multi-1", "msg-multi-1", "Say hello.")
+	resp := sendA2AMessage(t, invokeURL(t, agentCard), "test-multi-1", "msg-multi-1", "Say hello.")
 
 	assert.Equal(t, "test-multi-1", resp.ID)
 	assert.Nil(t, resp.Error)
@@ -130,21 +128,25 @@ func TestA2AServer_MultiAgent(t *testing.T) {
 	assert.Contains(t, texts[len(texts)-1], "Hello")
 }
 
-// sendA2AMessage sends a message/send JSON-RPC request and returns the parsed response.
+// invokeURL returns the JSON-RPC endpoint advertised by the agent card.
+func invokeURL(t *testing.T, card a2a.AgentCard) string {
+	t.Helper()
+
+	require.NotEmpty(t, card.SupportedInterfaces)
+	return card.SupportedInterfaces[0].URL
+}
+
+// sendA2AMessage sends a SendMessage JSON-RPC request and returns the parsed response.
 func sendA2AMessage(t *testing.T, url, requestID, messageID, text string) a2aResponse {
 	t.Helper()
 
+	message := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(text))
+	message.ID = messageID
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      requestID,
-		"method":  "message/send",
-		"params": map[string]any{
-			"message": map[string]any{
-				"messageId": messageID,
-				"role":      "user",
-				"parts":     []map[string]any{{"kind": "text", "text": text}},
-			},
-		},
+		"method":  "SendMessage",
+		"params":  &a2a.SendMessageRequest{Message: message},
 	})
 	require.NoError(t, err)
 

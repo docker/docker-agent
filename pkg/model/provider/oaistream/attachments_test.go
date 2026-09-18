@@ -1,6 +1,7 @@
 package oaistream
 
 import (
+	"bytes"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ func TestConvertDocument_StrategyB64_Image(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	visionCaps := modelinfo.CapsWith(true, true)
+	visionCaps := modelinfo.CapsWith(true, true, false, false)
 	parts, err := convertDocumentWithCaps(t.Context(), doc, visionCaps)
 	require.NoError(t, err)
 	require.Len(t, parts, 1, "expected exactly one image part")
@@ -36,8 +37,7 @@ func TestConvertDocument_StrategyB64_Image(t *testing.T) {
 
 	// Data URI must embed the base64-encoded payload.
 	wantB64 := base64.StdEncoding.EncodeToString(minJPEG)
-	assert.Contains(t, parts[0].OfImageURL.ImageURL.URL, "data:image/jpeg;base64,")
-	assert.Contains(t, parts[0].OfImageURL.ImageURL.URL, wantB64)
+	assert.Equal(t, "data:image/jpeg;base64,"+wantB64, parts[0].OfImageURL.ImageURL.URL)
 }
 
 // TestConvertDocument_StrategyB64_PDF verifies that a PDF document with
@@ -52,7 +52,7 @@ func TestConvertDocument_StrategyB64_PDF(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: pdf},
 	}
 
-	pdfCaps := modelinfo.CapsWith(false, true)
+	pdfCaps := modelinfo.CapsWith(false, true, false, false)
 	parts, err := convertDocumentWithCaps(t.Context(), doc, pdfCaps)
 	require.NoError(t, err)
 	require.Len(t, parts, 1, "expected exactly one file part")
@@ -61,8 +61,7 @@ func TestConvertDocument_StrategyB64_PDF(t *testing.T) {
 
 	wantB64 := base64.StdEncoding.EncodeToString(pdf)
 	assert.Equal(t, "spec.pdf", parts[0].OfFile.File.Filename.Value)
-	assert.Contains(t, parts[0].OfFile.File.FileData.Value, "data:application/pdf;base64,")
-	assert.Contains(t, parts[0].OfFile.File.FileData.Value, wantB64)
+	assert.Equal(t, "data:application/pdf;base64,"+wantB64, parts[0].OfFile.File.FileData.Value)
 }
 
 // TestConvertDocument_StrategyB64_PDFDropped verifies that a PDF is dropped when
@@ -75,7 +74,7 @@ func TestConvertDocument_StrategyB64_PDFDropped(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: []byte("%PDF-1.4")},
 	}
 
-	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.CapsWith(true, false))
+	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.CapsWith(true, false, false, false))
 	require.NoError(t, err)
 	assert.Nil(t, parts, "pdf should be dropped when the model does not support PDF")
 }
@@ -97,7 +96,7 @@ func TestConvertMessagesWithCaps(t *testing.T) {
 		}},
 	}}
 
-	withVision := ConvertMessagesWithCaps(t.Context(), messages, modelinfo.CapsWith(true, false))
+	withVision := ConvertMessagesWithCaps(t.Context(), messages, modelinfo.CapsWith(true, false, false, false))
 	require.Len(t, withVision, 1)
 	require.NotNil(t, withVision[0].OfUser)
 	require.Len(t, withVision[0].OfUser.Content.OfArrayOfContentParts, 1)
@@ -122,7 +121,7 @@ func TestConvertMessagesWithCaps(t *testing.T) {
 		}},
 	}}
 
-	withPDF := ConvertMessagesWithCaps(t.Context(), pdfMessages, modelinfo.CapsWith(false, true))
+	withPDF := ConvertMessagesWithCaps(t.Context(), pdfMessages, modelinfo.CapsWith(false, true, false, false))
 	require.Len(t, withPDF, 1)
 	require.NotNil(t, withPDF[0].OfUser)
 	require.Len(t, withPDF[0].OfUser.Content.OfArrayOfContentParts, 1)
@@ -144,7 +143,7 @@ func TestConvertDocument_StrategyB64_ImageDropped(t *testing.T) {
 		Source:   chat.DocumentSource{InlineData: minJPEG},
 	}
 
-	textOnlyCaps := modelinfo.CapsWith(false, false)
+	textOnlyCaps := modelinfo.CapsWith(false, false, false, false)
 	parts, err := convertDocumentWithCaps(t.Context(), doc, textOnlyCaps)
 	require.NoError(t, err)
 	assert.Nil(t, parts, "image should be dropped for text-only model")
@@ -235,4 +234,47 @@ func TestConvertDocument_Drop_NoContent(t *testing.T) {
 	parts, err := convertDocumentWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	assert.Nil(t, parts, "should be dropped when no inline content")
+}
+
+func TestDataURI(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		mimeType string
+		data     []byte
+		want     string
+	}{
+		{"nil", "", nil, "data:;base64,"},
+		{"empty", "image/png", []byte{}, "data:image/png;base64,"},
+		{"one byte", "image/png", []byte{0xff}, "data:image/png;base64,/w=="},
+		{"two bytes", "image/png", []byte{0xff, 0x00}, "data:image/png;base64,/wA="},
+		{"three bytes", "image/png", []byte{0xff, 0x00, 0x01}, "data:image/png;base64,/wAB"},
+		{"mixed case", "image/PNG", []byte{0xff}, "data:image/PNG;base64,/w=="},
+		{"literal MIME", "image/%s", []byte{0xff}, "data:image/%s;base64,/w=="},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, dataURI(tc.mimeType, tc.data))
+		})
+	}
+}
+
+func BenchmarkDataURI(b *testing.B) {
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
+		{"1KiB", 1 << 10},
+		{"1MiB", 1 << 20},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			data := bytes.Repeat([]byte{0xff}, tc.size)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(data)))
+			for b.Loop() {
+				_ = dataURI("image/png", data)
+			}
+		})
+	}
 }

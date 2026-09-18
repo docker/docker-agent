@@ -19,19 +19,38 @@ import (
 
 // fakeProvider is a Provider stub used to verify factory dispatch.
 type fakeProvider struct {
-	id modelsdev.ID
+	id     modelsdev.ID
+	config base.Config
 }
 
 func (f *fakeProvider) ID() modelsdev.ID { return f.id }
 func (f *fakeProvider) CreateChatCompletionStream(_ context.Context, _ []chat.Message, _ []tools.Tool) (chat.MessageStream, error) {
 	return nil, errors.New("not implemented")
 }
-func (f *fakeProvider) BaseConfig() base.Config { return base.Config{} }
+func (f *fakeProvider) BaseConfig() base.Config { return f.config }
 
 func tagFactory(id string) providerFactory {
 	return func(_ context.Context, _ *latest.ModelConfig, _ environment.Provider, _ ...options.Opt) (Provider, error) {
 		return &fakeProvider{id: modelsdev.NewID("test", id)}, nil
 	}
+}
+
+func TestEmptyRegistryCannotConstructProviders(t *testing.T) {
+	t.Parallel()
+
+	r := EmptyRegistry()
+	assert.Empty(t, r.Types())
+
+	_, err := r.New(t.Context(), &latest.ModelConfig{Provider: "openai", Model: "gpt-5"}, environment.NewDefaultProvider())
+	require.EqualError(t, err, `unknown provider type "openai" (register it with provider.NewRegistry or use providers.NewDefaultRegistry)`)
+}
+
+func TestNilRegistryReturnsConfigurationError(t *testing.T) {
+	t.Parallel()
+
+	var r *Registry
+	_, err := r.New(t.Context(), &latest.ModelConfig{Provider: "openai", Model: "gpt-5"}, environment.NewDefaultProvider())
+	require.EqualError(t, err, "provider registry is required")
 }
 
 // TestCreateDirectProvider_DispatchByType verifies that resolveProviderType's
@@ -462,4 +481,31 @@ func tagFactoryCapturingOpts(into *options.ModelOptions) providerFactory {
 		}
 		return &fakeProvider{id: modelsdev.NewID("test", "captured")}, nil
 	}
+}
+
+func TestRegistry_OpenAIProtocolVariantsFallBackToOpenAI(t *testing.T) {
+	t.Parallel()
+
+	called := 0
+	r := NewRegistry(map[string]Factory{
+		"openai": func(context.Context, *latest.ModelConfig, environment.Provider, ...options.Opt) (Provider, error) {
+			called++
+			return nil, nil
+		},
+	})
+
+	assert.True(t, r.Has("openai"))
+	assert.True(t, r.Has("openai_chatcompletions"))
+	assert.True(t, r.Has("openai_responses"))
+	assert.False(t, r.Has("anthropic"))
+	assert.Equal(t, []string{"openai"}, r.Types())
+
+	// A custom OpenAI-compatible provider pinning an api_type resolves to a
+	// protocol variant and must still be served by the "openai" factory.
+	cfg := &latest.ModelConfig{Provider: "corp", Model: "m"}
+	providers := map[string]latest.ProviderConfig{"corp": {BaseURL: "https://llm.corp.example", APIType: "openai_responses"}}
+	assert.Equal(t, "openai_responses", ResolveType(cfg, providers))
+	_, err := r.New(t.Context(), cfg, environment.NewEnvListProvider(nil), options.WithProviders(providers))
+	require.NoError(t, err)
+	assert.Equal(t, 1, called)
 }

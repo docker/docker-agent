@@ -227,3 +227,46 @@ func TestSchemaToMap_StripsNullFromRequiredArrayTypes(t *testing.T) {
 		"required": []any{"paths"},
 	}, m)
 }
+
+// T14: ensurePropertyTypes must not inject a "type" key into a $ref node.
+// Doing so pollutes the node with a sibling keyword, which providers like
+// OpenAI reject on $ref nodes under strict mode (see docker/docker-agent#4106).
+func TestSchemaToMap_RefPropertyLeftAsLeaf(t *testing.T) {
+	t.Parallel()
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"p": map[string]any{"$ref": "#/$defs/thing"},
+		},
+		"$defs": map[string]any{
+			"thing": map[string]any{"type": "string"},
+		},
+	})
+	require.NoError(t, err)
+
+	p := m["properties"].(map[string]any)["p"].(map[string]any)
+	assert.Equal(t, map[string]any{"$ref": "#/$defs/thing"}, p, "$ref node must be left as a leaf, no injected type")
+}
+
+func TestSchemaToMap_RefPropertyInNestedObjectLeftAsLeaf(t *testing.T) {
+	t.Parallel()
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"config": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"p": map[string]any{"$ref": "#/$defs/thing"},
+				},
+			},
+		},
+		"$defs": map[string]any{
+			"thing": map[string]any{"type": "string"},
+		},
+	})
+	require.NoError(t, err)
+
+	config := m["properties"].(map[string]any)["config"].(map[string]any)
+	p := config["properties"].(map[string]any)["p"].(map[string]any)
+	assert.Equal(t, map[string]any{"$ref": "#/$defs/thing"}, p, "$ref node must be left as a leaf, no injected type")
+}

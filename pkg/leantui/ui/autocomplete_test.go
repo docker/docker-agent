@@ -8,6 +8,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/modelpicker"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/tui/components/completion"
 )
 
 func testCommands() []Command {
@@ -90,6 +91,38 @@ func TestAutocompleteRenderWidth(t *testing.T) {
 	for _, r := range rows {
 		assert.LessOrEqual(t, DisplayWidth(r), 60)
 	}
+}
+
+func TestAutocompleteFiles(t *testing.T) {
+	t.Parallel()
+	a := NewAutocomplete()
+	a.SetCommands(testCommands())
+	a.SetFiles([]completion.Item{
+		{Label: "pkg/leantui/update.go", Value: "@pkg/leantui/update.go"},
+		{Label: "README.md", Value: "@README.md"},
+	})
+
+	require.True(t, a.Sync("please inspect @plu"))
+	assert.True(t, a.IsFileCompletion())
+	file, ok := a.Current()
+	require.True(t, ok)
+	assert.Equal(t, "pkg/leantui/update.go", file.Name)
+	assert.Equal(t, "@pkg/leantui/update.go", file.Value)
+
+	assert.False(t, a.Sync("email@example.com"))
+	assert.False(t, a.Sync("done @pkg/leantui/update.go now"))
+}
+
+func TestEditorReplaceCurrentWord(t *testing.T) {
+	t.Parallel()
+	e := NewEditor("")
+	e.SetText("inspect @pkg/old.go please")
+	for range len(" please") {
+		e.MoveLeft()
+	}
+
+	e.ReplaceCurrentWord("@pkg/new.go ")
+	assert.Equal(t, "inspect @pkg/new.go  please", e.Text())
 }
 
 func TestAutocompleteBuiltinsBeforeAgent(t *testing.T) {

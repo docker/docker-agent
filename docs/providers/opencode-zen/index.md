@@ -152,7 +152,7 @@ providers:
 models:
   claude:
     provider: opencode-zen-claude
-    model: claude-sonnet-4-5
+    model: claude-sonnet-4-6
 
 agents:
   root:
@@ -203,6 +203,10 @@ OpenCode Zen is implemented as a built-in alias in Docker Agent:
 The same API key works for both OpenCode Go and OpenCode Zen — they are part of the same platform. Zen uses a pay-per-use billing model, while Go uses a fixed subscription.
 
 For Anthropic-compatible models, Docker Agent uses a custom provider pointing to the Anthropic client at `https://opencode.ai/zen` with the same token. For Google models, a custom provider points to the Google client at `https://opencode.ai/zen` (the Google SDK appends its own `/v1beta/models/...` path segment).
+
+### Session Header
+
+OpenCode's [Go documentation](https://opencode.ai/docs/go/#where-can-i-use-it) asks clients to send an `x-opencode-session` header carrying one stable ID per conversation, which it uses to optimise routing and prompt caching. Docker Agent sends the same header on every direct request to `opencode.ai`, Zen included, whether the model goes through the built-in alias or a custom provider on the OpenAI, Anthropic or Google client, deriving an opaque value from the agent session so each conversation keeps the same ID, including in `serve api` / `serve chat` deployments that multiplex many conversations. Requests routed through a models gateway carry the gateway's own session header instead, and the OpenAI client's opt-in `transport: websocket` setting is ignored for OpenCode models, which stay on SSE so the header is always sent. On the OpenAI client you can pin your own value through `provider_opts.http_headers.x-opencode-session`; the Anthropic and Google clients do not read `http_headers`.
 
 ### Differences from OpenCode Go
 

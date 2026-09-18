@@ -32,6 +32,14 @@ type Metrics struct {
 	RelevanceRate float64 `json:"relevance_rate"`
 	HasRelevance  bool    `json:"has_relevance"`
 
+	AssertionRate float64 `json:"assertion_rate"`
+	HasAssertions bool    `json:"has_assertions"`
+
+	PassK     float64 `json:"pass_at_k,omitempty"`
+	HatK      float64 `json:"pass_hat_k,omitempty"`
+	RepeatK   int     `json:"repeat_k,omitempty"`
+	HasRepeat bool    `json:"has_repeat"`
+
 	TotalCost float64 `json:"total_cost"`
 }
 
@@ -56,6 +64,16 @@ func metricsOfSummary(s Summary) Metrics {
 	if s.RelevanceTotal > 0 {
 		m.HasRelevance = true
 		m.RelevanceRate = s.RelevancePassed / s.RelevanceTotal
+	}
+	if s.AssertionsTotal > 0 {
+		m.HasAssertions = true
+		m.AssertionRate = float64(s.AssertionsPassed) / float64(s.AssertionsTotal)
+	}
+	if s.RepeatMetrics != nil {
+		m.HasRepeat = true
+		m.RepeatK = s.RepeatMetrics.K
+		m.PassK = s.RepeatMetrics.PassK
+		m.HatK = s.RepeatMetrics.HatK
 	}
 	return m
 }
@@ -216,6 +234,7 @@ func Compare(baseline *Baseline, current *EvalRun, tolerance float64) (Compariso
 		{"size pass rate", c.Baseline.SizePassRate, c.Current.SizePassRate, c.Baseline.HasSizes, c.Current.HasSizes},
 		{"tool F1 mean", c.Baseline.ToolsF1Mean, c.Current.ToolsF1Mean, c.Baseline.HasTools, c.Current.HasTools},
 		{"relevance rate", c.Baseline.RelevanceRate, c.Current.RelevanceRate, c.Baseline.HasRelevance, c.Current.HasRelevance},
+		{"assertion rate", c.Baseline.AssertionRate, c.Current.AssertionRate, c.Baseline.HasAssertions, c.Current.HasAssertions},
 	} {
 		if !q.hasBase || !q.hasCur {
 			continue
@@ -253,6 +272,25 @@ func Compare(baseline *Baseline, current *EvalRun, tolerance float64) (Compariso
 		Delta:         c.Current.TotalCost - c.Baseline.TotalCost,
 		Informational: true,
 	})
+
+	// pass@k and pass^k are informational: they measure consistency across
+	// repetitions but derive from the same per-eval pass/fail that the
+	// individual changes already gate on.
+	if c.Baseline.HasRepeat && c.Current.HasRepeat {
+		c.Deltas = append(c.Deltas, MetricDelta{
+			Name:          fmt.Sprintf("pass@%d", c.Current.RepeatK),
+			Baseline:      c.Baseline.PassK,
+			Current:       c.Current.PassK,
+			Delta:         c.Current.PassK - c.Baseline.PassK,
+			Informational: true,
+		}, MetricDelta{
+			Name:          fmt.Sprintf("pass^%d", c.Current.RepeatK),
+			Baseline:      c.Baseline.HatK,
+			Current:       c.Current.HatK,
+			Delta:         c.Current.HatK - c.Baseline.HatK,
+			Informational: true,
+		})
+	}
 
 	for _, d := range c.Deltas {
 		if d.Regressed && !d.Informational {

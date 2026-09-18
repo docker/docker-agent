@@ -161,7 +161,7 @@ func TestShouldMergeConsecutiveMessages_Gating(t *testing.T) {
 		{"baseten", &latest.ModelConfig{Provider: "baseten", Model: "zai-org/GLM-5.2"}, true},
 		{"ovhcloud", &latest.ModelConfig{Provider: "ovhcloud", Model: "Qwen3.5-397B-A17B"}, true},
 		{"open-model host alias cerebras", &latest.ModelConfig{Provider: "cerebras", Model: "qwen-3-coder-480b"}, true},
-		{"open-model host fireworks", &latest.ModelConfig{Provider: "fireworks", Model: "accounts/fireworks/models/kimi-k2-instruct"}, true},
+		{"open-model host fireworks", &latest.ModelConfig{Provider: "fireworks", Model: "accounts/fireworks/models/kimi-k3"}, true},
 		{"open-model host together", &latest.ModelConfig{Provider: "together", Model: "Qwen/Qwen3-235B-A22B-Instruct-2507-tput"}, true},
 		{"open-model host huggingface", &latest.ModelConfig{Provider: "huggingface", Model: "meta-llama/Llama-3.3-70B-Instruct"}, true},
 		{"open-model host gateway vercel", &latest.ModelConfig{Provider: "vercel", Model: "openai/gpt-5"}, true},

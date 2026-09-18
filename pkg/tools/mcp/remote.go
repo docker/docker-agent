@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/js"
+	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/upstream"
 )
 
@@ -211,8 +212,32 @@ func enrichConnectError(err error, t *oauthTransport) error {
 	if t.authorizationRequired() {
 		return &AuthorizationRequiredError{URL: t.baseURL}
 	}
-	if status, msg := t.lastServerError(); status != 0 && msg != "" {
-		return fmt.Errorf("failed to connect to MCP server: %w (server responded %d: %s)", err, status, msg)
+	// Wrap on status alone: many rate-limit / load-balancer 429s and 503s
+	// carry an empty body, so gating on msg != "" (as an earlier version of
+	// this code did) silently dropped the *modelerrors.StatusError wrap —
+	// and with it, the StartableToolSet backoff gate never armed.
+	//
+	// status, msg and retryAfter are read together as a single snapshot
+	// (rather than via two separately-locked accessor calls) so they can
+	// never be pieced together from two different concurrent responses on
+	// this transport (e.g. a standalone SSE probe racing the initialize call).
+	if status, msg, retryAfter := t.lastServerErrorSnapshot(); status != 0 {
+		var enriched error
+		if msg != "" {
+			enriched = fmt.Errorf("failed to connect to MCP server: %w (server responded %d: %s)", err, status, msg)
+		} else {
+			// No status text extracted from the body: modelerrors.StatusError.Error()
+			// already prefixes "HTTP %d: ", so repeating the code here would read as
+			// "HTTP 503: ... (server responded 503)".
+			enriched = fmt.Errorf("failed to connect to MCP server: %w", err)
+		}
+		// Forward the server's Retry-After hint (if any) so the backoff gate
+		// honors it instead of falling back to the generic computed delay.
+		resp := &http.Response{Header: http.Header{}}
+		if retryAfter != "" {
+			resp.Header.Set("Retry-After", retryAfter)
+		}
+		return modelerrors.WrapHTTPError(status, resp, enriched)
 	}
 	return fmt.Errorf("failed to connect to MCP server: %w", err)
 }
@@ -249,8 +274,9 @@ func (c *remoteMCPClient) SetUnmanagedOAuthRedirectURI(uri string) {
 // values never go stale on a long-lived connection.
 //
 // The oauthTransport is returned alongside the client so callers can inspect
-// the most recent server-side failure (via lastServerError) when Connect()
-// returns a bare HTTP-status error and we need to surface the actual cause.
+// the most recent server-side failure (via lastServerErrorSnapshot) when
+// Connect() returns a bare HTTP-status error and we need to surface the
+// actual cause.
 //
 // The transport chain wraps `httpclient.WrapWithOTel` outermost so every
 // outbound MCP request injects W3C `traceparent` (and creates an HTTP
@@ -304,7 +330,7 @@ func (c *remoteMCPClient) expandHeaders(ctx context.Context, headers map[string]
 }
 
 func (c *remoteMCPClient) headerTransport() http.RoundTripper {
-	base := http.DefaultTransport
+	base := httpclient.TransportForAllowPrivateIPs(c.allowPrivateIPs)
 	origin := c.url
 	if path, ok := unixSocketPath(c.url); ok {
 		t := http.DefaultTransport.(*http.Transport).Clone()

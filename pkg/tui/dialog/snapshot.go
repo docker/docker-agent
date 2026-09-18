@@ -3,6 +3,7 @@ package dialog
 import (
 	"fmt"
 
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -54,23 +55,33 @@ func (d *snapshotsDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
+var snapshotKeys = struct {
+	Close, Up, Down, Home, End key.Binding
+}{
+	key.NewBinding(key.WithKeys("esc", "q")),
+	key.NewBinding(key.WithKeys("up", "k")),
+	key.NewBinding(key.WithKeys("down", "j")),
+	key.NewBinding(key.WithKeys("home", "g")),
+	key.NewBinding(key.WithKeys("end", "G")),
+}
+
 func (d *snapshotsDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
-	switch msg.String() {
-	case "esc", "q":
+	switch {
+	case key.Matches(msg, snapshotKeys.Close):
 		return core.CmdHandler(CloseDialogMsg{})
-	case "up", "k":
+	case key.Matches(msg, snapshotKeys.Up):
 		if d.selected > 0 {
 			d.selected--
 		}
-	case "down", "j":
+	case key.Matches(msg, snapshotKeys.Down):
 		if d.selected < len(d.fileCounts) {
 			d.selected++
 		}
-	case "home", "g":
+	case key.Matches(msg, snapshotKeys.Home):
 		d.selected = 0
-	case "end", "G":
+	case key.Matches(msg, snapshotKeys.End):
 		d.selected = len(d.fileCounts)
-	case "r":
+	case msg.String() == "r":
 		if len(d.fileCounts) == 0 {
 			return nil
 		}

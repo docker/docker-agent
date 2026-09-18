@@ -44,7 +44,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `theme` | string | `default` | Theme name, loaded from a built-in theme or `~/.cagent/themes/<name>.yaml`. The special value `auto` follows the terminal's light/dark background. See [Theming](../../features/tui/index.md#theming). |
 | `theme_dark` | string | `default` | Theme applied when `theme: auto` and the terminal background is dark. |
 | `theme_light` | string | `default-light` | Theme applied when `theme: auto` and the terminal background is light. |
-| `YOLO` | boolean | `false` | Auto-approve all tool calls globally, across every agent you run. Mirrors the `--yolo` flag and the `/yolo` command. Legacy alias for `safety: autonomous`; when both are set, `safety` wins. |
+| `YOLO` | boolean | `false` | Select the `autonomous` safety fallback globally. Unmatched calls are auto-approved, but deny rules, session-scoped ask rules, `tool_guard`, and `preempt_yolo` hooks can still block or prompt. Mirrors the `--yolo` flag and the `/yolo` command. Legacy alias for `safety: autonomous`; when both are set, `safety` wins. |
 | `safety` | string | _unset_ | Default [safety mode](../permissions/index.md#safety-modes) for new sessions: `strict`, `balanced`, `restricted`, or `autonomous` (any other value fails config loading). Wins over the legacy `YOLO` flag. Applied when no explicit `--safety`/`--yolo` flag and no alias safety option was given; wins over the agent YAML's `agents.<name>.safety` / `runtime.safety` defaults. Never changes the mode of a resumed session. |
 | `lean` | boolean | `false` | Make the [lean TUI](../../features/tui/index.md#lean-tui) (simplified, minimal-chrome interface) the default for interactive runs instead of the full TUI. |
 | `tab_title_max_length` | int | `20` | Maximum display length for tab titles; longer titles are truncated with an ellipsis. |
@@ -63,7 +63,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 
 ## Layout Settings
 
-`layout` customizes the TUI's sidebar. The zero value (an omitted `layout:` block, or any field left out) is the default: sidebar on the right, every section visible, normal spacing.
+`layout` customizes the TUI's sidebar. The zero value (an omitted `layout:` block, or any field left out) is the default: sidebar on the right, all sections except **Plans** visible, normal spacing.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -74,6 +74,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `hide_agents` | boolean | `false` | Hide the Agents section. |
 | `active_agents_only` | boolean | `false` | Show only agents active in the current session in the Agents section (and the top/bottom band), instead of the whole configured team. Ignored while the Agents section is hidden. |
 | `hide_tools` | boolean | `false` | Hide the Tools section. |
+| `show_plans` | boolean | `false` | Show the [Plans sidebar section](../../features/tui/index.md#plans-sidebar) for shared plans. Full left/right sidebars list the five most recently updated plans; compact layouts show a count and browser shortcut. |
 | `hide_todos` | boolean | `false` | Hide the Todos section. |
 
 ```yaml
@@ -82,7 +83,10 @@ settings:
     sidebar_position: left
     section_spacing: compact
     hide_usage: true
+    show_plans: true
 ```
+
+Enable **Plans** under `/settings` → **Appearance** → **Sidebar sections**, or set `settings.layout.show_plans: true` as above. This is a global user preference, not an agent configuration field or a per-session plan. It displays the same shared plan store as `/plans` and `docker agent plans`, without classifying free-form statuses as active or completed. The section remains hidden in lean mode and with `--sidebar=false`.
 
 ## Complete Example
 

@@ -86,6 +86,10 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
 COPY --chmod=0755 --from=docker/mcp-gateway:v2 /docker-mcp /usr/local/lib/docker/cli-plugins/docker-mcp
+COPY --chmod=0755 --from=registry.k8s.io/kubectl:v1.37.0 /bin/kubectl /usr/local/bin/kubectl
+COPY --chmod=0755 --from=amazon/aws-cli:2.36.42 /usr/local/aws-cli/ /usr/local/aws-cli/
+RUN ln -s /usr/local/aws-cli/v2/current/bin/aws /usr/local/bin/aws && \
+    ln -s /usr/local/aws-cli/v2/current/bin/aws_completer /usr/local/bin/aws_completer
 USER agent
 ENV DOCKER_AGENT_NO_TOUR=1 \
     DOCKER_AGENT_HIDE_TELEMETRY_BANNER=1 \

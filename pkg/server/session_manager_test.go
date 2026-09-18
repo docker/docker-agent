@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -25,6 +26,8 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
@@ -82,6 +85,38 @@ func (f *fakeRuntime) OnElicitationRequest(func(runtime.Event)) {}
 
 func (f *fakeRuntime) CurrentAgentName(context.Context) string { return "root" }
 
+// delayedTitleProvider lets a RunSession title request finish after the
+// runtime stream has already closed.
+type delayedTitleProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *delayedTitleProvider) ID() modelsdev.ID { return modelsdev.NewID("test", "title") }
+
+func (p *delayedTitleProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	close(p.started)
+	return &delayedTitleStream{release: p.release}, nil
+}
+
+func (p *delayedTitleProvider) BaseConfig() base.Config { return base.Config{} }
+
+type delayedTitleStream struct {
+	release  chan struct{}
+	received bool
+}
+
+func (s *delayedTitleStream) Recv() (chat.MessageStreamResponse, error) {
+	if s.received {
+		return chat.MessageStreamResponse{}, io.EOF
+	}
+	<-s.release
+	s.received = true
+	return chat.MessageStreamResponse{Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: "Delayed title"}}}}, nil
+}
+
+func (s *delayedTitleStream) Close() {}
+
 // SupportsModelSwitching reports false by default. Tests that exercise
 // the /models endpoints embed fakeRuntime and override this.
 func (f *fakeRuntime) SupportsModelSwitching() bool { return false }
@@ -134,6 +169,81 @@ func TestAttachRuntime_RegistersRuntimeForExternalDriver(t *testing.T) {
 
 	// Steer routes through the attached runtime, not a freshly built one.
 	require.NoError(t, sm.SteerSession(ctx, sess.ID, []api.Message{{Content: "hi"}}))
+}
+
+func TestRunSession_TitleCanFinishAfterRuntimeStream(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	sess := session.New()
+	sm := newTestSessionManager(t, sess, &fakeRuntime{})
+	provider := &delayedTitleProvider{started: make(chan struct{}), release: make(chan struct{})}
+	runtimeSession, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok)
+	runtimeSession.titleGen = sessiontitle.New(provider)
+
+	events, err := sm.RunSession(ctx, sess.ID, "agent", "root", []api.Message{{Content: "hello"}}, "")
+	require.NoError(t, err)
+
+	select {
+	case <-provider.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("title generation did not start")
+	}
+	for range events {
+	}
+
+	close(provider.release)
+	require.Eventually(t, func() bool {
+		return sess.TitleSnapshot() == "Delayed title"
+	}, 2*time.Second, 10*time.Millisecond)
+}
+
+func TestRunSession_CancellationUnblocksExistingTitle(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	sess := session.New(session.WithTitle("Existing title"))
+	sm := newTestSessionManager(t, sess, &fakeRuntime{})
+
+	events, err := sm.RunSession(ctx, sess.ID, "agent", "root", []api.Message{{Content: "hello"}}, "")
+	require.NoError(t, err)
+	assertSessionStreamingEventuallyUnlocked(t, sm, sess.ID)
+	for range events {
+	}
+}
+
+func TestSendStreamEvent_CancellationUnblocks(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	result := make(chan bool)
+	go func() {
+		result <- sendStreamEvent(ctx, make(chan runtime.Event), runtime.SessionTitle("session", "title"))
+	}()
+	cancel()
+
+	select {
+	case sent := <-result:
+		require.False(t, sent)
+	case <-time.After(2 * time.Second):
+		t.Fatal("event send did not stop after cancellation")
+	}
+}
+
+func assertSessionStreamingEventuallyUnlocked(t *testing.T, sm *SessionManager, sessionID string) {
+	t.Helper()
+
+	runtimeSession, ok := sm.runtimeSessions.Load(sessionID)
+	require.True(t, ok)
+	require.Eventually(t, func() bool {
+		if !runtimeSession.streaming.TryLock() {
+			return false
+		}
+		runtimeSession.streaming.Unlock()
+		return true
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 // TestRunSession_ConcurrentRequestReturnsErrSessionBusy verifies that a
@@ -235,6 +345,37 @@ func TestAddMessage_RejectsWhileSessionStreaming(t *testing.T) {
 	require.NoError(t, sm.AddMessage(ctx, sess.ID, session.UserMessage("accepted")))
 }
 
+func TestUpdateMessageRejectsWrongSessionAndMalformedID(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	owner := session.New()
+	other := session.New()
+	require.NoError(t, store.AddSession(ctx, owner))
+	require.NoError(t, store.AddSession(ctx, other))
+	messageID, err := store.AddMessage(ctx, owner.ID, session.UserMessage("original"))
+	require.NoError(t, err)
+
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	guard := sm.AttachRuntime(ctx, owner.ID, &fakeRuntime{}, owner)
+	guard.Lock()
+	defer guard.Unlock()
+
+	err = sm.UpdateMessage(ctx, other.ID, strconv.FormatInt(messageID, 10), session.UserMessage("wrong session"))
+	require.ErrorIs(t, err, session.ErrNotFound)
+	err = sm.UpdateMessage(ctx, owner.ID, strconv.FormatInt(messageID, 10), session.UserMessage("busy bypass"))
+	require.ErrorIs(t, err, ErrSessionBusy)
+	err = sm.UpdateMessage(ctx, other.ID, strconv.FormatInt(messageID, 10)+"junk", session.UserMessage("malformed"))
+	require.ErrorContains(t, err, "invalid message ID")
+
+	stored, err := store.GetSession(ctx, owner.ID)
+	require.NoError(t, err)
+	messages := stored.GetAllMessages()
+	require.Len(t, messages, 1)
+	assert.Equal(t, "original", messages[0].Message.Content)
+}
+
 // TestUpdateMessage_RejectsWhileSessionStreaming mirrors
 // TestAddMessage_RejectsWhileSessionStreaming for UpdateMessage.
 func TestUpdateMessage_RejectsWhileSessionStreaming(t *testing.T) {
@@ -334,10 +475,10 @@ func (s *blockingStore) AddMessage(ctx context.Context, sessionID string, msg *s
 	return s.Store.AddMessage(ctx, sessionID, msg)
 }
 
-func (s *blockingStore) UpdateMessage(ctx context.Context, messageID int64, msg *session.Message) error {
+func (s *blockingStore) UpdateMessage(ctx context.Context, sessionID string, messageID int64, msg *session.Message) error {
 	close(s.entered)
 	<-s.release
-	return s.Store.UpdateMessage(ctx, messageID, msg)
+	return s.Store.UpdateMessage(ctx, sessionID, messageID, msg)
 }
 
 // assertAttachedGuardBlockedDuringMutation drives the reviewer's
@@ -943,6 +1084,120 @@ func TestUserMessageOrdinalToItemIndex(t *testing.T) {
 
 	_, err = userMessageOrdinalToItemIndex(sess, 99)
 	require.ErrorIs(t, err, ErrForkOutOfRange)
+}
+
+func TestUpdateSessionPermissionsUsesActiveSession(t *testing.T) {
+	t.Parallel()
+
+	stores := []struct {
+		name string
+		new  func(*testing.T) session.Store
+	}{
+		{
+			name: "in-memory",
+			new: func(*testing.T) session.Store {
+				return session.NewInMemorySessionStore()
+			},
+		},
+		{
+			name: "sqlite",
+			new: func(t *testing.T) session.Store {
+				t.Helper()
+				store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "sessions.db"))
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = store.Close() })
+				return store
+			},
+		},
+	}
+
+	for _, tc := range stores {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := tc.new(t)
+			stored := session.New(session.WithTitle("stored"), session.WithPermissions(&session.PermissionsConfig{Allow: []string{"old"}}))
+			require.NoError(t, store.AddSession(t.Context(), stored))
+			require.NoError(t, store.UpdateSession(t.Context(), stored))
+
+			live := stored
+			live.SetTitle("live")
+			sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{})
+			sm.runtimeSessions.Store(live.ID, &activeRuntimes{runtime: &fakeRuntime{}, session: live})
+
+			perms := &session.PermissionsConfig{Allow: []string{"new"}, Deny: []string{"dangerous"}}
+			require.NoError(t, sm.UpdateSessionPermissions(t.Context(), live.ID, perms))
+			perms.Allow[0] = "mutated-by-caller"
+
+			assert.Equal(t, []string{"new"}, live.ClonePermissions().Allow)
+			got, err := sm.GetSession(t.Context(), live.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "live", got.TitleSnapshot(), "active state must win over the stale store clone")
+			assert.Equal(t, []string{"new"}, got.ClonePermissions().Allow)
+
+			// A later runtime save must retain the policy update.
+			live.SetTitle("saved later")
+			require.NoError(t, store.UpdateSession(t.Context(), live))
+			reloaded, err := store.GetSession(t.Context(), live.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "saved later", reloaded.TitleSnapshot())
+			assert.Equal(t, []string{"new"}, reloaded.ClonePermissions().Allow)
+			assert.Equal(t, []string{"dangerous"}, reloaded.ClonePermissions().Deny)
+		})
+	}
+}
+
+func TestUpdateSessionPermissionsConcurrentReads(t *testing.T) {
+	t.Parallel()
+
+	store := session.NewInMemorySessionStore()
+	live := session.New()
+	require.NoError(t, store.AddSession(t.Context(), live))
+	require.NoError(t, store.UpdateSession(t.Context(), live))
+
+	sm := NewSessionManager(t.Context(), config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.runtimeSessions.Store(live.ID, &activeRuntimes{runtime: &fakeRuntime{}, session: live})
+
+	const iterations = 100
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := range iterations {
+			if err := sm.UpdateSessionPermissions(t.Context(), live.ID, &session.PermissionsConfig{
+				Allow: []string{strconv.Itoa(i)},
+			}); err != nil {
+				errs <- err
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for range iterations {
+			got, err := sm.GetSession(t.Context(), live.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			_ = got.ClonePermissions()
+
+			snapshot, err := sm.GetSessionSnapshot(t.Context(), live.ID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if snapshot.Permissions != nil {
+				_ = snapshot.Permissions.Allow
+			}
+		}
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
 }
 
 // TestAddMessage_SQLitePersistedToolResultCappedOnReload pins the read-time

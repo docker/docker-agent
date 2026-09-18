@@ -30,9 +30,20 @@ Keep comments short and to the point:
 
 - Use tools to gather information rather than relying on assumptions
 - Examine existing code before making changes
+- Grep for existing plumbing before adding a mechanism, and before calling
+  something unavailable
 - Validate all changes before considering tasks complete
 - Ask clarifying questions only when truly necessary
 - When possible, call independent tools concurrently — it's faster
+
+### Client and Session Lifetimes
+
+- Provider clients are built per team load: once per session in `serve api`,
+  once at startup in `serve a2a` and `serve mcp`
+- Anything that must vary per conversation belongs in a request middleware,
+  not in client construction
+- The session ID is on the request context via
+  `httpclient.SessionIDFromContext`; `chatgptAuthMiddleware` shows the shape
 
 ## Validation Requirements
 
@@ -48,13 +59,17 @@ Before marking work as complete:
 
 # Development Commands
 
+Canonical setup, commands and style guide:
+[the contributing guide](docs/community/contributing/index.md). The list below
+is a quick reference.
+
 ## Build and Development
 
 - `task build` — Build the application binary (outputs to `./bin/docker-agent`)
 - `task test` — Run Go tests (clears API keys to ensure deterministic tests)
 - `task lint` — Run golangci-lint (uses `.golangci.yml` configuration)
 - `task format` — Format code using golangci-lint fmt
-- `task dev` — Run lint, test, and build in sequence
+- `task dev` — Run lint, test, and build in parallel
 
 ## Docker and Cross-Platform Builds
 
@@ -115,3 +130,31 @@ Before marking work as complete:
 - Keep branches focused on single features or fixes
 - Ensure your branch is up-to-date before submitting
 - Sign commits with a GPG or SSH key (`git commit -S`)
+
+# GitHub Actions
+
+- `ci / gate` is the single required status check on `main`. It needs every
+  blocking job; to make a new job blocking, add it to `gate.needs` in
+  `.github/workflows/ci.yml` — the ruleset does not change. Docs-only PRs
+  (only `docs/**` changed) skip the Go jobs, and so does a `main` push whose
+  SHA already passed a merge-queue run; `gate` treats skipped as passed
+- `report-main-failures` runs after the test jobs on failed pushes to the
+  canonical repository's `main` branch. It files deduplicated Bug issues using
+  the required `flaky-test` label, assigns them to `dgageot`, and throttles
+  repeat run-link comments to once per 24 hours. The job is diagnostic and
+  intentionally excluded from `gate.needs`
+- Every job sets `timeout-minutes`; every checkout sets
+  `persist-credentials: false`. zizmor (`.github/zizmor.yml`) and Dependabot
+  (`.github/dependabot.yml`, GitHub Actions only) keep both honest
+- Pin every third-party action by 40-character SHA with a `# vX.Y.Z` comment,
+  and only to versions listed in the org allow list
+  (`docker/infra-github-allow-list`, `terraform/docker/main.tf`); `actions/*`,
+  `github/*` and `docker/*` are allowed at any version
+- Every PR-triggered workflow declares a `concurrency` group. Runs on `main`
+  and on tags are never queued or cancelled: their group includes
+  `github.run_id`
+- Shared setup lives in `.github/actions/`, referenced as `$/.github/actions/<name>`
+  (no checkout needed): `setup-go` (Go, Task, per-job
+  cache), `setup-hugo`, `setup-buildx` (Hub OIDC login and builder). Pin tool
+  versions there, not in workflows
+- `scripts/workflow-lint.sh` enforces the above and runs in the `lint` job

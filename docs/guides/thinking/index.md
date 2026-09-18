@@ -122,7 +122,7 @@ models:
 >
 > Every string effort value on Anthropic is sent as adaptive thinking (`output_config.effort`), which only newer Claude models (Opus 4.6+, Sonnet 4.6) accept. For older models like Sonnet 4.5, use an integer token budget instead. Conversely, models that _only_ support adaptive thinking (Opus 4.6, 4.7, 4.8, Sonnet 4.6) automatically have token budgets coerced to `adaptive` (a warning is logged).
 
-### Disabling thinking
+### Disabling thinking (Claude)
 
 ```yaml
 thinking_budget: none   # or 0
@@ -162,13 +162,7 @@ models:
       thinking_display: omitted   # summarized | omitted (display: pre-4.6 models only)
 ```
 
-| Value        | Behavior                                                                              |
-| ------------ | ------------------------------------------------------------------------------------- |
-| `summarized` | Thinking blocks returned with a text summary (Docker Agent default for adaptive thinking). |
-| `display`    | Full thinking blocks returned for display. Pre-4.6 token-thinking models only — rejected by Opus/Sonnet 4.6+, Sonnet 5, and Fable 5 (Docker Agent fails fast with a configuration error). |
-| `omitted`    | Thinking blocks hidden — only the signature is returned.                               |
-
-Full thinking tokens are billed regardless of `thinking_display`.
+See [Anthropic: Thinking Display](../../providers/anthropic/index.md#thinking-display) for the value reference and model restrictions. Full thinking tokens are billed regardless of `thinking_display`.
 
 ### Task budget (Anthropic)
 
@@ -296,6 +290,8 @@ xAI and Mistral run through Docker Agent's OpenAI-compatible client, but the `re
 Grok and Mistral reasoning models (e.g. `grok-3-mini`, `magistral`) manage reasoning on their own; for non-reasoning models, consider the [think tool](../../tools/think/index.md) instead.
 
 ## Disabling Thinking
+
+<a id="disabling-thinking-1"></a>
 
 Use `none` or `0` to disable thinking on any provider:
 

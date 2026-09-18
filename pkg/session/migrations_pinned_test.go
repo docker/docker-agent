@@ -39,7 +39,7 @@ func TestMigrationCatalogIsContentPinned(t *testing.T) {
 
 	got := digestMigrationCatalog(getAllMigrations())
 
-	const wantDigest = "73643834fd1cc3b0dfd2a2ba52593c0b79ba773d364045a8e3b99ba890b55476"
+	const wantDigest = "e2d764e159e9c952596cdac552c860df2df3c90d5cf00fdac0ff4d9eda5b15ba"
 	if got != wantDigest {
 		t.Fatalf(`migration catalogue content has changed.
 

@@ -43,6 +43,7 @@ func TestParseRunes(t *testing.T) {
 func TestParseEscapeSequences(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, KeyUp, singleKey(t, "\x1b[A").Typ)
+	assert.Equal(t, KeyAltUp, singleKey(t, "\x1b[1;3A").Typ)
 	assert.Equal(t, KeyDown, singleKey(t, "\x1b[B").Typ)
 	assert.Equal(t, KeyRight, singleKey(t, "\x1b[C").Typ)
 	assert.Equal(t, KeyLeft, singleKey(t, "\x1b[D").Typ)
@@ -56,6 +57,36 @@ func TestParseEscapeSequences(t *testing.T) {
 	assert.Equal(t, KeyWordLeft, singleKey(t, "\x1bb").Typ)
 	assert.Equal(t, KeyWordRight, singleKey(t, "\x1bf").Typ)
 	assert.Equal(t, KeyAltEnter, singleKey(t, "\x1b\r").Typ)
+}
+
+func TestParseKittyKeyboardSequences(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		sequence string
+		want     KeyType
+	}{
+		{sequence: "\x1b[9;2u", want: KeyShiftTab},
+		{sequence: "\x1b[13;2u", want: KeyShiftEnter},
+		{sequence: "\x1b[13;3u", want: KeyAltEnter},
+		{sequence: "\x1b[1;3A", want: KeyAltUp},
+		{sequence: "\x1b[27u", want: KeyEsc},
+		{sequence: "\x1b[27;1u", want: KeyEsc},
+		{sequence: "\x1b[127;3u", want: KeyCtrlW},
+		{sequence: "\x1b[8;3u", want: KeyCtrlW},
+		{sequence: "\x1b[97;5u", want: KeyHome},
+		{sequence: "\x1b[65;5u", want: KeyHome},
+		{sequence: "\x1b[99;5u", want: KeyCtrlC},
+		{sequence: "\x1b[100;5u", want: KeyCtrlD},
+		{sequence: "\x1b[101;5u", want: KeyEnd},
+		{sequence: "\x1b[69;5u", want: KeyEnd},
+		{sequence: "\x1b[117;5u", want: KeyCtrlU},
+		{sequence: "\x1b[107;5u", want: KeyCtrlK},
+		{sequence: "\x1b[119;5u", want: KeyCtrlW},
+		{sequence: "\x1b[108;5u", want: KeyCtrlL},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, singleKey(t, tt.sequence).Typ)
+	}
 }
 
 func TestParseLoneEscape(t *testing.T) {

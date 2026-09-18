@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -29,11 +28,9 @@ const (
 	systemPrompt     = "You are a helpful AI assistant that generates concise, descriptive titles for conversations. You will be given up to 2 recent user messages and asked to create a single-line title that captures the main topic. Never use newlines or line breaks in your response."
 	userPromptFormat = "Based on the following recent user messages from a conversation with an AI assistant, generate a short, descriptive title (maximum 50 characters) that captures the main topic or purpose of the conversation. Return ONLY the title text on a single line, nothing else. Do not include any newlines, explanations, or formatting.\n\nRecent user messages:\n%s\n\n"
 
-	// titleMaxTokens is the max output token budget for title generation.
-	// This is sized for visible output only (~50 chars ≈ 12-15 tokens).
-	// Providers that need extra headroom for hidden reasoning tokens
-	// (e.g. OpenAI reasoning models) handle the adjustment internally.
-	titleMaxTokens = 20
+	// Gemini 3 may still consume a small hidden reasoning budget even when
+	// thinking is disabled. The visible title is capped separately at 50 chars.
+	titleMaxTokens = 128
 
 	// titleGenerationTimeout is the maximum time to wait for title generation.
 	// Title generation should be quick since we disable thinking and use low max_tokens.
@@ -46,15 +43,20 @@ type Generator struct {
 	models []provider.Provider
 }
 
-// New creates a new title Generator. The first model is the primary; any
-// additional ones are fallbacks tried in order if earlier attempts fail.
-// Nil providers are silently ignored.
-func New(model provider.Provider, fallbackModels ...provider.Provider) *Generator {
-	models := slices.DeleteFunc(
-		append([]provider.Provider{model}, fallbackModels...),
-		func(p provider.Provider) bool { return p == nil },
-	)
-	return &Generator{models: models}
+// New creates a title Generator from the ordered candidate models. Nil
+// providers are skipped. Image-output-capable providers remain eligible
+// because title-generation calls are explicitly text-only.
+func New(models ...provider.Provider) *Generator {
+	usable := make([]provider.Provider, 0, len(models))
+	for _, model := range models {
+		if model != nil {
+			usable = append(usable, model)
+		}
+	}
+	if len(usable) == 0 {
+		return nil
+	}
+	return &Generator{models: usable}
 }
 
 // Generate produces a title for a session based on the provided user messages.

@@ -856,11 +856,12 @@ func TestToolsExposesEnabledServerTools(t *testing.T) {
 	// Inject a synthetic catalog entry that points at the test server.
 	const id = "test-server"
 	server := Server{
-		ID:        id,
-		Title:     "Test",
-		URL:       srv.URL,
-		Transport: "streamable-http",
-		Auth:      Auth{Type: "none"},
+		ID:              id,
+		Title:           "Test",
+		URL:             srv.URL,
+		Transport:       "streamable-http",
+		Auth:            Auth{Type: "none"},
+		allowPrivateIPs: true,
 	}
 	ts.catalog.Servers = append(ts.catalog.Servers, server)
 	ts.byID[id] = server
@@ -929,11 +930,12 @@ func TestHandleEnable_OAuthDCR_ChallengePRMScopeFallback(t *testing.T) {
 
 	const id = "test-oauth-dcr-server"
 	server := Server{
-		ID:        id,
-		Title:     "OAuth DCR Test Server",
-		URL:       srv.URL,
-		Transport: "streamable-http",
-		Auth:      Auth{Type: "oauth"},
+		ID:              id,
+		Title:           "OAuth DCR Test Server",
+		URL:             srv.URL,
+		Transport:       "streamable-http",
+		Auth:            Auth{Type: "oauth"},
+		allowPrivateIPs: true,
 	}
 	ts.catalog.Servers = append(ts.catalog.Servers, server)
 	ts.byID[id] = server

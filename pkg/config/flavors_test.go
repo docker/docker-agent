@@ -173,6 +173,15 @@ flavors:
       root:
         model+:
           - extra
+  mapping-append:
+    agents+:
+      - extra
+  more-instruction:
+    agents:
+      root:
+        instruction+:
+          - |
+            Also: be brief.
 `
 
 func TestFlavorsAppendToArray(t *testing.T) {
@@ -203,11 +212,31 @@ func TestFlavorsAppendRequiresSequencePatch(t *testing.T) {
 	require.ErrorContains(t, err, `append key "toolsets+": value must be a sequence`)
 }
 
-func TestFlavorsAppendRequiresSequenceBase(t *testing.T) {
+func TestFlavorsAppendPromotesScalarBase(t *testing.T) {
 	t.Parallel()
 
+	// The patch itself succeeds ("openai/gpt-5" becomes ["openai/gpt-5",
+	// "extra"]); the resulting document then fails validation like any
+	// hand-written config with a list where a string belongs.
 	_, err := loadFlavored(t, appendConfig, "scalar-append")
-	require.ErrorContains(t, err, `existing value for "model" is not a sequence`)
+	require.ErrorContains(t, err, "model")
+	require.NotContains(t, err.Error(), `applying flavor`)
+}
+
+func TestFlavorsAppendRejectsMappingBase(t *testing.T) {
+	t.Parallel()
+
+	_, err := loadFlavored(t, appendConfig, "mapping-append")
+	require.ErrorContains(t, err, `applying flavor "mapping-append"`)
+	require.ErrorContains(t, err, `existing value for "agents" is a mapping, not a sequence`)
+}
+
+func TestFlavorsAppendToInstruction(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := loadFlavored(t, appendConfig, "more-instruction")
+	require.NoError(t, err)
+	assert.Equal(t, "hello\n\nAlso: be brief.\n", cfg.Agents.First().Instruction)
 }
 
 const removeConfig = `agents:

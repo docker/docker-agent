@@ -47,13 +47,10 @@ func programAck(t *testing.T, program *tea.Program) {
 }
 
 func TestActualProgramPendingSpinnerHoverIsFrameIsolated(t *testing.T) {
-	root, _, _ := wallClockRoot(t, 120, 40)
+	root, _, _ := frozenClockRoot(t, 120, 40)
 	_, _ = root.Update(messages.RoutedMsg{SessionID: "profile", Inner: agentruntime.StreamStarted("profile", "root")})
 	model := &streamingMotionModel{root: root, ready: make(chan struct{})}
-	program := tea.NewProgram(model, tea.WithInput(nil), tea.WithOutput(&wallClockCountingWriter{}), tea.WithWindowSize(120, 40))
-	done := make(chan error, 1)
-	go func() { _, err := program.Run(); done <- err }()
-	<-model.ready
+	program := startStreamingMotionProgram(t, model, tea.WithOutput(&wallClockCountingWriter{}))
 
 	baseline := programFrame(t, program)
 	require.NotEmpty(t, strings.TrimSpace(ansi.Strip(baseline)), "pending spinner frame")
@@ -67,9 +64,6 @@ func TestActualProgramPendingSpinnerHoverIsFrameIsolated(t *testing.T) {
 		programAck(t, program)
 		require.Equal(t, baseline, programFrame(t, program), "leave restores the exact same-elapsed frame")
 	}
-	program.Quit()
-	require.NoError(t, <-done)
-	root.ar.Stop()
 }
 
 func TestActualProgramVirtualSuffixKeyWheelPageMatrixNeverBlanks(t *testing.T) {
@@ -81,10 +75,7 @@ func TestActualProgramVirtualSuffixKeyWheelPageMatrixNeverBlanks(t *testing.T) {
 		_ = root.View()
 	}
 	model := &streamingMotionModel{root: root, ready: make(chan struct{})}
-	program := tea.NewProgram(model, tea.WithInput(nil), tea.WithOutput(&wallClockCountingWriter{}), tea.WithWindowSize(120, 40))
-	done := make(chan error, 1)
-	go func() { _, err := program.Run(); done <- err }()
-	<-model.ready
+	program := startStreamingMotionProgram(t, model, tea.WithOutput(&wallClockCountingWriter{}))
 
 	for _, msg := range []tea.Msg{
 		messages.WheelCoalescedMsg{Delta: -1_000_000, X: 40, Y: 20},
@@ -105,9 +96,6 @@ func TestActualProgramVirtualSuffixKeyWheelPageMatrixNeverBlanks(t *testing.T) {
 	}
 	frame := programFrame(t, program)
 	require.Contains(t, ansi.Strip(frame), "stream marker", "exact bottom dropped virtual active suffix")
-	program.Quit()
-	require.NoError(t, <-done)
-	root.ar.Stop()
 }
 
 func TestActualProgramHoverThenBottomReentryStaysBounded(t *testing.T) {
@@ -118,14 +106,11 @@ func TestActualProgramHoverThenBottomReentryStaysBounded(t *testing.T) {
 		_, _ = root.Update(messages.RoutedMsg{SessionID: "profile", Inner: agentruntime.AgentChoice("root", "profile", chunk)})
 		_ = root.View()
 	}
-	root.chatPage.ScrollToBottom()
+	root.activeTab.chatPage.ScrollToBottom()
 	before := root.View().Content
 	model := &streamingMotionModel{root: root, ready: make(chan struct{})}
 	writer := &wallClockCountingWriter{}
-	program := tea.NewProgram(model, tea.WithInput(nil), tea.WithOutput(writer), tea.WithWindowSize(120, 40))
-	done := make(chan error, 1)
-	go func() { _, err := program.Run(); done <- err }()
-	<-model.ready
+	program := startStreamingMotionProgram(t, model, tea.WithOutput(writer))
 	program.Send(tea.MouseMotionMsg{X: 40, Y: 25})
 	programAck(t, program)
 	hovered := programFrame(t, program)
@@ -148,7 +133,4 @@ func TestActualProgramHoverThenBottomReentryStaysBounded(t *testing.T) {
 	}
 	programAck(t, program)
 	require.LessOrEqual(t, writer.writes.Load()-beforeWrites, uint64(30), "follow-tail renderer work remains bounded by events")
-	program.Quit()
-	require.NoError(t, <-done)
-	root.ar.Stop()
 }

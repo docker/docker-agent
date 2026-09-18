@@ -72,3 +72,71 @@ func TestApplyConfigCost(t *testing.T) {
 		assert.Zero(t, *cost)
 	})
 }
+
+func TestComputeMessageCostContextTiers(t *testing.T) {
+	t.Parallel()
+
+	model := &modelsdev.Model{Cost: &modelsdev.Cost{
+		Input: 1, Output: 2, CacheRead: 0.1, CacheWrite: 1.25,
+		Tiers: []modelsdev.CostTier{{
+			Rates: modelsdev.Rates{Input: 3, Output: 4, CacheRead: 0.3, CacheWrite: 3.75},
+			Tier:  modelsdev.TierSpec{Type: "context", Size: 200_000},
+		}},
+	}}
+	for _, tc := range []struct {
+		name  string
+		usage chat.Usage
+		want  float64
+	}{
+		{
+			name:  "output and reasoning do not select the tier",
+			usage: chat.Usage{InputTokens: 200_000, OutputTokens: 100_000, ReasoningTokens: 50_000},
+			want:  0.4,
+		},
+		{
+			name:  "fresh input selects the tier",
+			usage: chat.Usage{InputTokens: 200_001},
+			want:  200_001 * 3 / 1e6,
+		},
+		{
+			name:  "cache writes cross the threshold and use tier rates",
+			usage: chat.Usage{InputTokens: 100_000, CachedInputTokens: 50_000, CacheWriteTokens: 50_001, OutputTokens: 1_000},
+			want:  (100_000*3 + 50_000*0.3 + 50_001*3.75 + 1_000*4) / 1e6,
+		},
+		{
+			name:  "empty usage is free",
+			usage: chat.Usage{},
+			want:  0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := computeMessageCost(&tc.usage, model)
+			require.NotNil(t, got)
+			assert.InDelta(t, tc.want, *got, 1e-9)
+		})
+	}
+}
+
+func TestConfigCostReplacesContextTiers(t *testing.T) {
+	t.Parallel()
+
+	catalogued := &modelsdev.Model{Cost: &modelsdev.Cost{
+		Input: 2,
+		Tiers: []modelsdev.CostTier{{
+			Rates: modelsdev.Rates{Input: 4},
+			Tier:  modelsdev.TierSpec{Type: "context", Size: 200_000},
+		}},
+	}}
+	usage := &chat.Usage{InputTokens: 1_000_000}
+	for _, price := range []float64{0, 1.25} {
+		m := applyConfigCost(catalogued, modelsdev.NewID("openai", "test"), &latest.CostConfig{Input: price})
+		assert.Empty(t, m.Cost.Tiers)
+		got := computeMessageCost(usage, m)
+		require.NotNil(t, got)
+		assert.InDelta(t, price, *got, 1e-9)
+	}
+	got := computeMessageCost(usage, catalogued)
+	require.NotNil(t, got)
+	assert.InDelta(t, 4.0, *got, 1e-9, "overrides must not mutate shared catalog tiers")
+}

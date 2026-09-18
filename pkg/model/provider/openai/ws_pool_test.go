@@ -232,3 +232,21 @@ func assertPreviousResponseID(t *testing.T, msg map[string]json.RawMessage, expe
 	require.NoError(t, json.Unmarshal(raw, &got))
 	assert.Equal(t, expected, got)
 }
+
+func TestWSPool_ExplicitNullPreventsHistoryChaining(t *testing.T) {
+	t.Parallel()
+	srv, captured := testWSServerCapture(t, []map[string]any{completedEvent("resp_previous")})
+	defer srv.Close()
+	pool := newWSPool(httpToWSURL(srv.URL), func(context.Context) (http.Header, error) { return http.Header{}, nil })
+	defer pool.Close()
+	stream, err := pool.Stream(t.Context(), defaultTestParams())
+	require.NoError(t, err)
+	drainStream(t, stream)
+	params := defaultTestParams()
+	params.PreviousResponseID = param.Null[string]()
+	stream, err = pool.Stream(t.Context(), params)
+	require.NoError(t, err)
+	drainStream(t, stream)
+	require.Len(t, *captured, 2)
+	assert.JSONEq(t, `null`, string((*captured)[1]["previous_response_id"]))
+}

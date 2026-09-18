@@ -2,12 +2,58 @@ package completion
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestCompletionLabelColumnWidthIsStableWhileFiltering(t *testing.T) {
+	t.Parallel()
+	m := New().(*manager)
+	m.width = 80
+	m.Update(OpenMsg{Items: []Item{
+		{Label: "Short", Description: "Short description"},
+		{Label: "Much Longer Command", Description: "Long description"},
+	}})
+
+	fullLine := completionLine(t, m.View(), "Short")
+	fullDescriptionColumn := strings.Index(fullLine, "Short description")
+	require.Positive(t, fullDescriptionColumn)
+
+	m.Update(QueryMsg{Query: "short"})
+	filteredLine := completionLine(t, m.View(), "Short")
+
+	assert.Equal(t, fullDescriptionColumn, strings.Index(filteredLine, "Short description"))
+}
+
+func completionLine(t *testing.T, view, label string) string {
+	t.Helper()
+	for line := range strings.SplitSeq(ansi.Strip(view), "\n") {
+		if strings.Contains(line, label) {
+			return line
+		}
+	}
+	require.FailNow(t, "completion line not found", label)
+	return ""
+}
+
+func TestFilterItemsPreservesPinnedItems(t *testing.T) {
+	t.Parallel()
+	items := []Item{
+		{Label: "Browse files", Pinned: true},
+		{Label: "main.go"},
+		{Label: "README.md"},
+	}
+
+	filtered := FilterItems(items, "mg", MatchFuzzy)
+	require.Len(t, filtered, 2)
+	assert.Equal(t, "Browse files", filtered[0].Label)
+	assert.Equal(t, "main.go", filtered[1].Label)
+}
 
 func TestCompletionManagerStaysOpenWithNoResults(t *testing.T) {
 	t.Parallel()

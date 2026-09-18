@@ -116,6 +116,37 @@ func TestCompactionThresholdValidation(t *testing.T) {
 	}
 }
 
+// TestValidateAddPromptFilesDepth keeps the Go validation in step with the
+// JSON schema's "minimum": 0 — YAML loading only goes through the former.
+func TestValidateAddPromptFilesDepth(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		depth   int
+		wantErr bool
+	}{
+		{name: "disabled", depth: 0},
+		{name: "positive", depth: 3},
+		{name: "negative rejected", depth: -1, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := latest.Config{Agents: []latest.AgentConfig{
+				{Name: "root", Model: "openai/gpt-4o", AddPromptFilesDepth: tt.depth},
+			}}
+			err := cfg.Validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "agents.root: add_prompt_files_depth must be >= 0, got -1")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_UnsupportedVersion(t *testing.T) {
 	t.Parallel()
 

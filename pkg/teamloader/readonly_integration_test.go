@@ -40,7 +40,8 @@ func TestGetToolsForAgent_ToolsetReadOnly(t *testing.T) {
 	}
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
-	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, testToolsetRegistry(), "test-config", expander)
+	got, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "test-config", &loadOptions{toolsetRegistry: testToolsetRegistry()}, expander)
+	require.NoError(t, err)
 	require.Empty(t, warnings)
 	require.Len(t, got, 1)
 
@@ -67,7 +68,8 @@ func TestGetToolsForAgent_AgentReadOnly(t *testing.T) {
 	}
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
-	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, testToolsetRegistry(), "test-config", expander)
+	got, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "test-config", &loadOptions{toolsetRegistry: testToolsetRegistry()}, expander)
+	require.NoError(t, err)
 	require.Empty(t, warnings)
 	require.Len(t, got, 1)
 
@@ -92,7 +94,8 @@ func TestGetToolsForAgent_NoReadOnlyKeepsAllTools(t *testing.T) {
 	}
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 
-	got, warnings := getToolsForAgent(t.Context(), a, ".", &runConfig, testToolsetRegistry(), "test-config", expander)
+	got, warnings, err := getToolsForAgent(t.Context(), a, ".", &runConfig, "test-config", &loadOptions{toolsetRegistry: testToolsetRegistry()}, expander)
+	require.NoError(t, err)
 	require.Empty(t, warnings)
 	require.Len(t, got, 2)
 

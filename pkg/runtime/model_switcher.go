@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -41,6 +42,12 @@ type ModelChoice struct {
 	IsCustom bool `json:"is_custom,omitempty"`
 	// IsCatalog indicates this is a model from the models.dev catalog
 	IsCatalog bool `json:"is_catalog,omitempty"`
+
+	// Local model metadata reported by Docker Model Runner.
+	Architecture string `json:"architecture,omitempty"`
+	Parameters   string `json:"parameters,omitempty"`
+	Quantization string `json:"quantization,omitempty"`
+	Size         string `json:"size,omitempty"`
 
 	// The fields below are populated (best-effort) from the models.dev
 	// catalog. They are optional and may all be zero/empty when no
@@ -161,6 +168,10 @@ type ModelSwitcherConfig struct {
 	Providers map[string]latest.ProviderConfig
 	// ModelsGateway is the gateway URL if configured
 	ModelsGateway string
+	// EncryptedConfig is the opaque encrypted agent YAML forwarded to a trusted
+	// Docker models gateway on every request (X-Cagent-Encrypted-Config header).
+	// Empty disables forwarding.
+	EncryptedConfig string
 	// EnvProvider provides access to environment variables
 	EnvProvider environment.Provider
 	// ProviderRegistry instantiates providers for runtime model switching.
@@ -617,6 +628,13 @@ func (r *LocalRuntime) AvailableModels(ctx context.Context) []ModelChoice {
 			choice.CacheReadCost = cfg.Cost.CacheRead
 			choice.CacheWriteCost = cfg.Cost.CacheWrite
 		}
+		if n := latest.ContextSizeFromProviderOpts(cfg.ProviderOpts); n > 0 {
+			if n > math.MaxInt {
+				choice.ContextLimit = math.MaxInt
+			} else {
+				choice.ContextLimit = int(n)
+			}
+		}
 		choices = append(choices, choice)
 	}
 	configuredDuration := time.Since(configuredStart)
@@ -654,6 +672,7 @@ func (r *LocalRuntime) AvailableModels(ctx context.Context) []ModelChoice {
 	// would show nothing selectable in the picker.
 	dmrStart := time.Now()
 	dmrChoices := r.buildDMRChoices(ctx)
+	r.populateDMRChoices(ctx, choices)
 	dmrDuration := time.Since(dmrStart)
 	choices = append(choices, dmrChoices...)
 
@@ -874,6 +893,7 @@ func modelHasAnthropicAuth(m latest.ModelConfig, providers map[string]latest.Pro
 func (r *LocalRuntime) createProviderFromConfig(ctx context.Context, cfg *latest.ModelConfig) (provider.Provider, error) {
 	opts := []options.Opt{
 		options.WithGateway(r.modelSwitcherCfg.ModelsGateway),
+		options.WithEncryptedConfig(r.modelSwitcherCfg.EncryptedConfig),
 		options.WithProviders(r.modelSwitcherCfg.Providers),
 	}
 
@@ -896,7 +916,7 @@ func (r *LocalRuntime) createProviderFromConfig(ctx context.Context, cfg *latest
 		registry = r.providerRegistry
 	}
 	if registry == nil {
-		registry = provider.DefaultRegistry()
+		registry = provider.EmptyRegistry()
 	}
 	return registry.NewWithModels(ctx,
 		cfg,

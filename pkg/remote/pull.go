@@ -18,28 +18,9 @@ import (
 	desktoptransport "github.com/docker/docker-agent/pkg/desktop/transport"
 )
 
-// NormalizeReference parses an OCI reference and returns the normalized
-// store key that Pull uses to store artifacts. This ensures that equivalent
-// references (e.g. "myorg/review-pr" and
-// "index.docker.io/myorg/review-pr:latest") map to the same key.
-//
-// The registry host is deliberately stripped, so references that differ only
-// by registry map to the same key. Callers that need a registry-scoped
-// identity (e.g. cache keys spanning trust boundaries) must use
-// FullyQualifiedReference instead.
-func NormalizeReference(registryRef string) (string, error) {
-	ref, err := name.ParseReference(registryRef)
-	if err != nil {
-		return "", fmt.Errorf("parsing registry reference %s: %w", registryRef, err)
-	}
-	return ref.Context().RepositoryStr() + separator(ref) + ref.Identifier(), nil
-}
-
-// FullyQualifiedReference returns the fully-qualified form of an OCI
-// reference, including the registry host (e.g.
-// "index.docker.io/myorg/review-pr:latest"). Equivalent shorthand
-// forms map to the same value, while references that differ only by registry
-// map to different values — unlike NormalizeReference, which strips the host.
+// FullyQualifiedReference parses an OCI reference and returns its fully qualified
+// form, including the registry host. Equivalent shorthand forms map to the
+// same value, while references on different registries remain distinct.
 func FullyQualifiedReference(registryRef string) (string, error) {
 	ref, err := name.ParseReference(registryRef)
 	if err != nil {
@@ -74,6 +55,11 @@ func Pull(ctx context.Context, registryRef string, force bool, opts ...crane.Opt
 		return "", fmt.Errorf("parsing registry reference %s: %w", registryRef, err)
 	}
 
+	storeKey, err := FullyQualifiedReference(registryRef)
+	if err != nil {
+		return "", fmt.Errorf("normalizing registry reference %s: %w", registryRef, err)
+	}
+
 	s, err := newSession(o)
 	if err != nil {
 		return "", fmt.Errorf("creating registry session: %w", err)
@@ -89,7 +75,7 @@ func Pull(ctx context.Context, registryRef string, force bool, opts ...crane.Opt
 		return "", fmt.Errorf("creating content store: %w", err)
 	}
 
-	localRef := ref.Context().RepositoryStr() + separator(ref) + ref.Identifier()
+	localRef := storeKey
 	if !force {
 		if meta, metaErr := store.GetArtifactMetadata(localRef); metaErr == nil {
 			if meta.Digest == remoteDigest {
@@ -294,13 +280,4 @@ func hasCagentAnnotation(annotations map[string]string) bool {
 		_, exists = annotations["io.docker.cagent.version"]
 	}
 	return exists
-}
-
-// separator returns the separator used between repository and identifier.
-// For digests it returns "@", for tags it returns ":".
-func separator(ref name.Reference) string {
-	if _, ok := ref.(name.Digest); ok {
-		return "@"
-	}
-	return ":"
 }

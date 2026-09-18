@@ -1,0 +1,55 @@
+# Validates every example's model reference against the LIVE models.dev API,
+# as opposed to ci.yml's `task test` (which runs TestParseExamples against
+# only the committed pkg/modelsdev/snapshot.json and is fully hermetic).
+#
+# This check is deliberately NOT part of ci.yml and NOT a required PR check:
+# a failure here means the external models.dev catalog has drifted since the
+# snapshot was last refreshed, which is unrelated to any PR's diff and can
+# strike any PR (or none) at any time. See issue #4134.
+name: models-live-check
+
+permissions:
+  contents: read
+
+concurrency:
+  group: models-live-check
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily, 07:00 UTC (an hour after models-update's Monday 06:00 refresh).
+    - cron: "0 7 * * *"
+
+jobs:
+  check:
+    timeout-minutes: 15
+    if: github.repository == 'docker/docker-agent'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Restore-only: reuses the cache ci's test-linux job saves on main.
+      - uses: $/.github/actions/setup-go
+        with:
+          cache-name: test-linux
+
+      - name: Check examples against the live models.dev catalog
+        run: task check-models-live
+
+      - name: Explain failure
+        if: failure()
+        run: |
+          {
+            echo "### models.dev live-catalog drift detected"
+            echo
+            echo "This is **not** caused by any pull request's diff. This scheduled check"
+            echo "validates example model references against the live models.dev API, which"
+            echo "has moved on since \`pkg/modelsdev/snapshot.json\` was last refreshed."
+            echo
+            echo "The committed snapshot and \`TestParseExamples\` (the PR-blocking check) are"
+            echo "unaffected. Fix by refreshing the snapshot (\`task update-models\`) and/or"
+            echo "updating the affected example(s); see the failed step's log above for which."
+          } >> "$GITHUB_STEP_SUMMARY"

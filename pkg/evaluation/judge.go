@@ -17,19 +17,37 @@ import (
 )
 
 // relevancePrompt is the prompt template for the judge model to evaluate responses.
-const relevancePrompt = `You are an evaluation judge. Check if the response matches the given relevance criteria.
+// It uses a rubric-driven, chain-of-thought approach with anti-bias rules to
+// produce consistent and fair relevance judgments.
+const relevancePrompt = `You are a strict evaluation judge grading an AI agent's output against a specific criterion.
+
+Your task:
+1. Read the response carefully.
+2. Read the criterion.
+3. Think step-by-step (chain of thought) about whether the response satisfies the criterion.
+4. Produce your verdict.
+
+Rubric:
+- "pass": The response clearly and fully satisfies the criterion.
+- "fail": The response does not satisfy the criterion, or only partially satisfies it.
+
+Anti-bias rules:
+- Evaluate ONLY the criterion given. Do not reward or penalize unrelated qualities.
+- Ignore response length, politeness, or formatting unless the criterion explicitly requires them.
+- Do not give credit for effort or partial answers — the criterion is binary.
+- Evaluate the substance, not the style.
 
 Response to evaluate:
 <response>
 %s
 </response>
 
-Criteria to check:
+Criterion to check:
 <criteria>
 %s
 </criteria>
 
-Evaluate whether the response satisfies the criteria and respond with your judgment.`
+Think step-by-step, then respond with your judgment.`
 
 // judgeResponseSchema defines the JSON schema for structured output from the judge model.
 var judgeResponseSchema = &latest.StructuredOutput{

@@ -85,6 +85,37 @@ func TestNewFromCodeBuiltTeam(t *testing.T) {
 	require.NotNil(t, s.Conversation())
 }
 
+func TestConversationsCarryWorkspaceProvenance(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	s, err := New(t.Context(), Config{
+		Team:          newCodeBuiltTeam(),
+		RuntimeConfig: &dagentcfg.RuntimeConfig{Config: dagentcfg.Config{WorkingDir: root}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	require.Equal(t, root, s.Conversation().WorkingDir)
+
+	require.NoError(t, s.Restart())
+	require.Equal(t, root, s.Conversation().WorkingDir, "restarted conversations must keep the workspace root")
+}
+
+func TestSessionOptionsOverrideCapturedWorkingDir(t *testing.T) {
+	t.Parallel()
+	configured := t.TempDir()
+	override := t.TempDir()
+
+	s, err := New(t.Context(), Config{
+		Team:           newCodeBuiltTeam(),
+		RuntimeConfig:  &dagentcfg.RuntimeConfig{Config: dagentcfg.Config{WorkingDir: configured}},
+		SessionOptions: []session.Opt{session.WithWorkingDir(override)},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	require.Equal(t, override, s.Conversation().WorkingDir)
+}
+
 func TestInitialSessionResumesConversation(t *testing.T) {
 	t.Parallel()
 	restored := session.New()

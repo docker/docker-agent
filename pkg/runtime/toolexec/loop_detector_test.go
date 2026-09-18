@@ -129,6 +129,18 @@ func TestLoopDetector(t *testing.T) {
 			wantCount: 0,
 		},
 		{
+			name:        "repeated background agent joins do not count as a loop",
+			threshold:   2,
+			exemptTools: []string{bgagent.ToolNameWaitBackgroundAgents},
+			batches: [][]tools.ToolCall{
+				makeCalls(bgagent.ToolNameWaitBackgroundAgents, `{"task_ids":["task1","task2"]}`),
+				makeCalls(bgagent.ToolNameWaitBackgroundAgents, `{"task_ids":["task1","task2"]}`),
+				makeCalls(bgagent.ToolNameWaitBackgroundAgents, `{"task_ids":["task1","task2"]}`),
+			},
+			wantTrip:  false,
+			wantCount: 0,
+		},
+		{
 			name:        "mixed batch with exempt and non exempt tools still counts",
 			threshold:   2,
 			exemptTools: []string{bgagent.ToolNameViewBackgroundAgent, backgroundjobs.ToolNameViewBackgroundJob},

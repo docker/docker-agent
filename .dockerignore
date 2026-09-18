@@ -8,7 +8,7 @@
 !./**/*.go
 !./**/*.txt
 !/pkg/chatserver/openapi.json
-!/pkg/config/builtin-agents/*.yaml
+!/pkg/config/sources/builtin-agents/*.yaml
 !/pkg/safety/safety_patterns.json
 !/pkg/modelsdev/snapshot.json
 !/pkg/tools/builtin/mcpcatalog/servers.json

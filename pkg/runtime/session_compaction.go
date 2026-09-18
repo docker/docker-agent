@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -17,6 +18,8 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 )
+
+var errCompactionBudgetExceeded = errors.New("compaction budget exhausted")
 
 // Compaction reasons reported to BeforeCompaction / AfterCompaction hooks.
 const (
@@ -106,8 +109,14 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 			Agent:            a,
 			AdditionalPrompt: additionalPrompt,
 			ContextLimit:     contextLimit,
-			RunAgent:         r.runCompactionAgent,
+			RunAgent: func(ctx context.Context, summaryAgent *agent.Agent, summarySession *session.Session) error {
+				return r.runCompactionAgent(ctx, summaryAgent, summarySession, sess, events)
+			},
 		})
+		if errors.Is(err, errCompactionBudgetExceeded) {
+			outcome = CompactionOutcomeSkipped
+			return
+		}
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to generate session summary", "error", err)
 			events.Emit(ErrorForSession(sess.ID, err.Error()))
@@ -295,10 +304,14 @@ func compactionCaps(primaryLimit, compactionLimit int64) bool {
 //     same number the engine will enforce. This also makes compaction
 //     work for local models that aren't catalogued in models.dev (e.g.
 //     a HuggingFace GGUF).
-//  2. Otherwise, the models.dev catalogue limit looked up by id.
-//  3. Otherwise, 0 (caller treats this as "can't compact").
+//  2. Otherwise, the provider's discovered runtime context window.
+//  3. Otherwise, the models.dev catalogue limit looked up by id.
+//  4. Otherwise, 0 (caller treats this as "can't compact").
 func (r *LocalRuntime) resolveContextLimit(ctx context.Context, p provider.Provider, id modelsdev.ID) int64 {
 	if n := providerContextLimit(p); n > 0 {
+		return n
+	}
+	if n := r.discoveredContextLimit(ctx, p); n > 0 {
 		return n
 	}
 	m, err := r.modelsStore.GetModel(ctx, id)
@@ -328,16 +341,36 @@ func providerContextLimit(p provider.Provider) int64 {
 // It is the runtime-side glue [pkg/runtime/compactor] invokes via callback,
 // which avoids creating an import cycle on [pkg/runtime].
 //
-// The sub-runtime inherits the parent's model store so the summary call is
-// priced from the same catalogue as every other call — otherwise the
-// compaction cost recorded on the summary item would silently be 0 whenever
-// the default lazy store cannot price the model the configured store can.
-func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess *session.Session) error {
+// The summary uses the parent's pricing and budgets, even when invoked manually.
+func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess, parent *session.Session, events EventSink) error {
+	r.ensureBudget()
+	budget := r.currentBudget()
 	t := team.New(team.WithAgents(a))
-	rt, err := New(ctx, t, WithSessionCompaction(false), WithModelStore(r.modelsStore))
+	rt, err := New(ctx, t, WithSessionCompaction(false), WithModelStore(r.modelsStore),
+		WithClock(r.now), withSharedBudget(budget))
 	if err != nil {
 		return err
 	}
-	_, err = rt.Run(ctx, sess)
-	return err
+
+	warnUnpriced := !budget.unpricedSpend()
+	var runErr error
+	for event := range rt.RunStream(ctx, sess) {
+		switch e := event.(type) {
+		case *BudgetExceededEvent:
+			// Never let the child's synthetic stop message replace the conversation.
+			runErr = errCompactionBudgetExceeded
+			events.Emit(Warning(fmt.Sprintf("Compaction skipped: %s limit reached (used %s of %s).", e.ConfigPath, e.Used, e.Max), a.Name()))
+		case *ErrorEvent:
+			if runErr == nil {
+				runErr = errors.New(e.Error)
+			}
+		}
+	}
+	if budget != nil {
+		if warnUnpriced && budget.unpricedSpend() {
+			events.Emit(Warning(unpricedSpendWarning, a.Name()))
+		}
+		events.Emit(BudgetUsage(parent.ID, a.Name(), budget.snapshot()))
+	}
+	return runErr
 }

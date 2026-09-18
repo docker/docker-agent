@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -63,23 +64,34 @@ func (d *effortPickerDialog) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	return d, nil
 }
 
+var effortPickerKeys = struct {
+	Close, Up, Down, Home, End, Enter key.Binding
+}{
+	key.NewBinding(key.WithKeys("esc", "q")),
+	key.NewBinding(key.WithKeys("up", "k", "ctrl+k")),
+	key.NewBinding(key.WithKeys("down", "j", "ctrl+j")),
+	key.NewBinding(key.WithKeys("home", "g")),
+	key.NewBinding(key.WithKeys("end", "G")),
+	key.NewBinding(key.WithKeys("enter")),
+}
+
 func (d *effortPickerDialog) handleKey(msg tea.KeyPressMsg) tea.Cmd {
-	switch msg.String() {
-	case "esc", "q":
+	switch {
+	case key.Matches(msg, effortPickerKeys.Close):
 		return closeDialogCmd()
-	case "up", "k", "ctrl+k":
+	case key.Matches(msg, effortPickerKeys.Up):
 		if d.selected > 0 {
 			d.selected--
 		}
-	case "down", "j", "ctrl+j":
+	case key.Matches(msg, effortPickerKeys.Down):
 		if d.selected < len(d.levels)-1 {
 			d.selected++
 		}
-	case "home", "g":
+	case key.Matches(msg, effortPickerKeys.Home):
 		d.selected = 0
-	case "end", "G":
+	case key.Matches(msg, effortPickerKeys.End):
 		d.selected = max(0, len(d.levels)-1)
-	case "enter":
+	case key.Matches(msg, effortPickerKeys.Enter):
 		return d.handleSelection()
 	}
 	return nil

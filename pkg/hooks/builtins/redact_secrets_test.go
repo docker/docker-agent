@@ -19,37 +19,42 @@ func fakeGitHubPAT() string {
 
 // TestRedactSecretsScrubsTopLevelStringValue: a recognised secret in
 // a top-level string argument is replaced and ONLY the rewritten key
-// is emitted in UpdatedInput. The latter is critical because
-// pre_tool_use hooks aggregate via shallow maps.Copy in config order
-// — returning unchanged keys would clobber concurrent hooks'
-// modifications.
+// is emitted in UpdatedInput. Both the auto-injected
+// tool_input_transform leg and an explicit legacy pre_tool_use entry
+// scrub arguments, echoing the dispatching event name back.
 func TestRedactSecretsScrubsTopLevelStringValue(t *testing.T) {
 	t.Parallel()
 
-	secret := fakeGitHubPAT()
+	for _, event := range []hooks.EventType{hooks.EventToolInputTransform, hooks.EventPreToolUse} {
+		t.Run(string(event), func(t *testing.T) {
+			t.Parallel()
 
-	in := &hooks.Input{
-		HookEventName: hooks.EventPreToolUse,
-		ToolName:      "shell",
-		ToolInput: map[string]any{
-			"command": "curl -H 'Authorization: token " + secret + "' https://api.github.com",
-			"timeout": 30,
-		},
+			secret := fakeGitHubPAT()
+
+			in := &hooks.Input{
+				HookEventName: event,
+				ToolName:      "shell",
+				ToolInput: map[string]any{
+					"command": "curl -H 'Authorization: token " + secret + "' https://api.github.com",
+					"timeout": 30,
+				},
+			}
+
+			out, err := redactSecrets(t.Context(), in, nil)
+			require.NoError(t, err)
+			require.NotNil(t, out, "must return Output when redaction happened")
+			require.NotNil(t, out.HookSpecificOutput)
+
+			updated := out.HookSpecificOutput.UpdatedInput
+			cmd, ok := updated["command"].(string)
+			require.True(t, ok, "changed key must appear in UpdatedInput")
+			assert.NotContains(t, cmd, secret, "raw secret must be gone")
+			assert.Contains(t, cmd, portcullis.Marker)
+			assert.NotContains(t, updated, "timeout",
+				"unchanged keys need no patch")
+			assert.Equal(t, event, out.HookSpecificOutput.HookEventName)
+		})
 	}
-
-	out, err := redactSecrets(t.Context(), in, nil)
-	require.NoError(t, err)
-	require.NotNil(t, out, "must return Output when redaction happened")
-	require.NotNil(t, out.HookSpecificOutput)
-
-	updated := out.HookSpecificOutput.UpdatedInput
-	cmd, ok := updated["command"].(string)
-	require.True(t, ok, "changed key must appear in UpdatedInput")
-	assert.NotContains(t, cmd, secret, "raw secret must be gone")
-	assert.Contains(t, cmd, portcullis.Marker)
-	assert.NotContains(t, updated, "timeout",
-		"unchanged keys must NOT appear in UpdatedInput (would clobber concurrent hooks)")
-	assert.Equal(t, hooks.EventPreToolUse, out.HookSpecificOutput.HookEventName)
 }
 
 // TestRedactSecretsReturnsNilWhenNothingChanged: clean tool calls
@@ -152,21 +157,23 @@ func TestRedactSecretsIsRegistered(t *testing.T) {
 
 // TestApplyAgentDefaultsInjectsRedactSecrets: setting the agent flag
 // must materialise hook entries for ALL THREE legs of the
-// redact_secrets feature — pre_tool_use (tool args), before_llm_call
-// (outgoing chat), and tool_response_transform (tool output) — each
-// pointing at the same redact_secrets builtin.
+// redact_secrets feature — tool_input_transform (tool args, before
+// approval), before_llm_call (outgoing chat), and
+// tool_response_transform (tool output) — each pointing at the same
+// redact_secrets builtin. Nothing is injected on pre_tool_use.
 func TestApplyAgentDefaultsInjectsRedactSecrets(t *testing.T) {
 	t.Parallel()
 
 	cfg := ApplyAgentDefaults(nil, AgentDefaults{RedactSecrets: true})
 	require.NotNil(t, cfg)
 
-	// Leg 1: pre_tool_use, wildcard matcher.
-	require.Len(t, cfg.PreToolUse, 1)
-	assert.Equal(t, "*", cfg.PreToolUse[0].Matcher)
-	require.Len(t, cfg.PreToolUse[0].Hooks, 1)
-	assert.Equal(t, hooks.HookTypeBuiltin, cfg.PreToolUse[0].Hooks[0].Type)
-	assert.Equal(t, RedactSecrets, cfg.PreToolUse[0].Hooks[0].Command)
+	// Leg 1: tool_input_transform, wildcard matcher.
+	require.Len(t, cfg.ToolInputTransform, 1)
+	assert.Equal(t, "*", cfg.ToolInputTransform[0].Matcher)
+	require.Len(t, cfg.ToolInputTransform[0].Hooks, 1)
+	assert.Equal(t, hooks.HookTypeBuiltin, cfg.ToolInputTransform[0].Hooks[0].Type)
+	assert.Equal(t, RedactSecrets, cfg.ToolInputTransform[0].Hooks[0].Command)
+	assert.Empty(t, cfg.PreToolUse, "argument scrubbing moved off pre_tool_use")
 
 	// Leg 2: before_llm_call, flat (event is not tool-scoped).
 	require.Len(t, cfg.BeforeLLMCall, 1)
@@ -355,4 +362,32 @@ func TestRedactSecretsLenientOnUnsupportedEvent(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 	assert.Nil(t, out)
+}
+
+// TestRedactSecretsToolInputTransformEndToEnd wires the auto-injected
+// config through a real executor: dispatching tool_input_transform
+// yields the scrubbed arguments in Result.ModifiedInput, and nothing
+// runs on pre_tool_use anymore.
+func TestRedactSecretsToolInputTransformEndToEnd(t *testing.T) {
+	t.Parallel()
+
+	reg := hooks.NewRegistry()
+	require.NoError(t, Register(reg))
+	cfg := ApplyAgentDefaults(nil, AgentDefaults{RedactSecrets: true})
+	exec := hooks.NewExecutorWithRegistry(cfg, t.TempDir(), nil, reg)
+	assert.False(t, exec.Has(hooks.EventPreToolUse))
+	require.True(t, exec.Has(hooks.EventToolInputTransform))
+
+	secret := fakeGitHubPAT()
+	result, err := exec.Dispatch(t.Context(), hooks.EventToolInputTransform, &hooks.Input{
+		ToolName:  "shell",
+		ToolInput: map[string]any{"cmd": "echo " + secret, "cwd": "/tmp"},
+	})
+	require.NoError(t, err)
+	assert.True(t, result.Allowed)
+	require.NotNil(t, result.ModifiedInput)
+	cmd, _ := result.ModifiedInput["cmd"].(string)
+	assert.NotContains(t, cmd, secret)
+	assert.Contains(t, cmd, portcullis.Marker)
+	assert.Equal(t, "/tmp", result.ModifiedInput["cwd"], "untouched keys are preserved")
 }

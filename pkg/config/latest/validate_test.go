@@ -74,6 +74,8 @@ func TestModelConfigValidateFirstAvailable(t *testing.T) {
 		{name: "with compaction_model", model: ModelConfig{FirstAvailable: candidates, CompactionModel: "small"}, wantErr: "first_available cannot be combined with compaction_model"},
 		{name: "with compaction_threshold", model: ModelConfig{FirstAvailable: candidates, CompactionThreshold: new(0.5)}, wantErr: "first_available cannot be combined with compaction_threshold"},
 		{name: "with cost", model: ModelConfig{FirstAvailable: candidates, Cost: &CostConfig{Input: 1}}, wantErr: "first_available cannot be combined with cost"},
+		{name: "with output_capabilities", model: ModelConfig{FirstAvailable: candidates, OutputCapabilities: &OutputCapabilitiesConfig{Image: new(true)}}, wantErr: "first_available cannot be combined with output_capabilities"},
+		{name: "with output_capabilities false", model: ModelConfig{FirstAvailable: candidates, OutputCapabilities: &OutputCapabilitiesConfig{Image: new(false)}}, wantErr: "first_available cannot be combined with output_capabilities"},
 	}
 
 	for _, tt := range tests {
@@ -191,12 +193,13 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 		{name: "blocked_servers on non-mcp_catalog", toolset: Toolset{Type: "shell", BlockedServers: []string{"github"}}, wantErr: "blocked_servers can only be used with type 'mcp_catalog'"},
 		{name: "blank allowed_servers entry", toolset: Toolset{Type: "mcp_catalog", AllowedServers: []string{""}}, wantErr: "allowed_servers[0] must not be empty"},
 		{name: "blank blocked_servers entry", toolset: Toolset{Type: "mcp_catalog", BlockedServers: []string{"github", " "}}, wantErr: "blocked_servers[1] must not be empty"},
+		{name: "escape_html on non-fetch", toolset: Toolset{Type: "shell", EscapeHTML: new(true)}, wantErr: "escape_html can only be used with type 'fetch'"},
+		{name: "escape_html disabled on non-fetch", toolset: Toolset{Type: "shell", EscapeHTML: new(false)}, wantErr: "escape_html can only be used with type 'fetch'"},
 		{name: "allowed_domains on non-fetch", toolset: Toolset{Type: "shell", AllowedDomains: []string{"example.com"}}, wantErr: "allowed_domains can only be used with type 'fetch'"},
 		{name: "blocked_domains on non-fetch", toolset: Toolset{Type: "shell", BlockedDomains: []string{"example.com"}}, wantErr: "blocked_domains can only be used with type 'fetch'"},
 		{name: "allow_private_ips on wrong type", toolset: Toolset{Type: "shell", AllowPrivateIPs: new(true)}, wantErr: "allow_private_ips can only be used with type 'fetch', 'api', 'openapi', 'a2a' or remote MCP toolsets"},
 		{name: "sudo_askpass on non-shell", toolset: Toolset{Type: "fetch", SudoAskpass: new(true)}, wantErr: "sudo_askpass can only be used with type 'shell'"},
 		{name: "recall on non-background_jobs", toolset: Toolset{Type: "shell", Recall: new(true)}, wantErr: "recall can only be used with type 'background_jobs'"},
-		{name: "safer on non-shell", toolset: Toolset{Type: "fetch", Safer: new(true)}, wantErr: "safer can only be used with type 'shell'"},
 		{name: "allowed and blocked domains", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"a.example.com"}, BlockedDomains: []string{"b.example.com"}}, wantErr: "allowed_domains and blocked_domains are mutually exclusive"},
 		{name: "invalid allowed_domains pattern", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"foo.*"}}, wantErr: `allowed_domains[0] "foo.*" is invalid`},
 		{name: "invalid blocked_domains pattern", toolset: Toolset{Type: "fetch", BlockedDomains: []string{"10.0.0.0/33"}}, wantErr: `blocked_domains[0] "10.0.0.0/33" is invalid: not a valid CIDR`},
@@ -248,6 +251,7 @@ func TestToolsetValidateTypeRequirements(t *testing.T) {
 		{name: "open_url without url", toolset: Toolset{Type: "open_url"}, wantErr: "open_url toolset requires a url to be set"},
 		{name: "model_picker without models", toolset: Toolset{Type: "model_picker"}, wantErr: "model_picker toolset requires at least one model in the 'models' list"},
 		{name: "rag without ref or config", toolset: Toolset{Type: "rag"}, wantErr: "rag toolset requires either ref or rag_config"},
+		{name: "rag inline config with negative indexing_timeout", toolset: Toolset{Type: "rag", RAGConfig: &RAGConfig{IndexingTimeout: &Duration{Duration: -time.Second}}}, wantErr: "indexing_timeout must not be negative"},
 	}
 
 	for _, tt := range tests {
@@ -306,7 +310,7 @@ func TestToolsetValidateValidToolsets(t *testing.T) {
 		name    string
 		toolset Toolset
 	}{
-		{name: "shell", toolset: Toolset{Type: "shell", Env: map[string]string{"A": "b"}, SudoAskpass: new(true), Safer: new(true)}},
+		{name: "shell", toolset: Toolset{Type: "shell", Env: map[string]string{"A": "b"}, SudoAskpass: new(true)}},
 		{name: "background_jobs", toolset: Toolset{Type: "background_jobs", Env: map[string]string{"A": "b"}, Recall: new(true)}},
 		{name: "memory with path", toolset: Toolset{Type: "memory", Path: "/tmp/memory.db"}},
 		{name: "memory without path", toolset: Toolset{Type: "memory"}},
@@ -316,6 +320,8 @@ func TestToolsetValidateValidToolsets(t *testing.T) {
 		{name: "filesystem", toolset: Toolset{Type: "filesystem", PostEdit: []PostEditConfig{{}}, IgnoreVCS: new(false), AllowList: []string{".", "~/src"}, DenyList: []string{"/etc"}}},
 		{name: "file", toolset: Toolset{Type: "file", PostEdit: []PostEditConfig{{}}, AllowList: []string{".", "~/src"}, DenyList: []string{"/etc"}}},
 		{name: "fetch with allowed domains", toolset: Toolset{Type: "fetch", AllowedDomains: []string{"example.com", "*.example.org", ".sub.example.net", "10.0.0.0/8"}, Headers: map[string]string{"Accept": "text/html"}, AllowPrivateIPs: new(true)}},
+		{name: "fetch with escape_html", toolset: Toolset{Type: "fetch", EscapeHTML: new(true)}},
+		{name: "fetch without escape_html", toolset: Toolset{Type: "fetch", EscapeHTML: new(false)}},
 		{name: "fetch with blocked domains", toolset: Toolset{Type: "fetch", BlockedDomains: []string{"internal.example.com"}}},
 		{name: "api with allow_private_ips", toolset: Toolset{Type: "api", AllowPrivateIPs: new(true)}},
 		{name: "mcp_catalog", toolset: Toolset{Type: "mcp_catalog", AllowedServers: []string{"github"}, BlockedServers: []string{"slack"}}},

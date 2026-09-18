@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Workflows and the composite actions under .github/actions. Pins are SHAs;
+  # Dependabot bumps the SHA and its version comment. A version outside the org
+  # allow list fails CI visibly. Go modules are deliberately not here: the
+  # bump-go-dependencies skill handles them.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+      day: monday
+    # Let a release settle before adopting it.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+

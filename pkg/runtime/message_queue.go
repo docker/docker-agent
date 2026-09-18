@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"sync"
 
 	"github.com/docker/docker-agent/pkg/chat"
 )
@@ -10,8 +11,16 @@ import (
 // either mid-turn (via the steer queue) or at end-of-turn (via the follow-up
 // queue).
 type QueuedMessage struct {
+	ID           string
 	Content      string
 	MultiContent []chat.MessagePart
+}
+
+// PendingMessageCanceler is implemented by runtimes that can withdraw queued
+// messages before the agent loop consumes them.
+type PendingMessageCanceler interface {
+	CancelSteer(ctx context.Context, id string) bool
+	CancelFollowUp(ctx context.Context, id string) bool
 }
 
 // RecallHandler delivers a tool-produced message through an embedder-owned
@@ -40,9 +49,16 @@ type MessageQueue interface {
 	Drain(ctx context.Context) []QueuedMessage
 }
 
-// inMemoryMessageQueue is the default MessageQueue backed by a buffered channel.
+type cancelableMessageQueue interface {
+	MessageQueue
+	Cancel(id string) bool
+}
+
+// inMemoryMessageQueue is the default MessageQueue.
 type inMemoryMessageQueue struct {
-	ch chan QueuedMessage
+	mu       sync.Mutex
+	messages []QueuedMessage
+	capacity int
 }
 
 const (
@@ -53,40 +69,65 @@ const (
 	defaultFollowUpQueueCapacity = 20
 )
 
-// NewInMemoryMessageQueue creates a MessageQueue backed by a buffered channel
-// with the given capacity.
+// NewInMemoryMessageQueue creates an in-memory FIFO queue with the given capacity.
 func NewInMemoryMessageQueue(capacity int) MessageQueue {
-	return &inMemoryMessageQueue{ch: make(chan QueuedMessage, capacity)}
+	return &inMemoryMessageQueue{capacity: capacity}
 }
 
-func (q *inMemoryMessageQueue) Enqueue(_ context.Context, msg QueuedMessage) bool {
-	select {
-	case q.ch <- msg:
-		return true
-	default:
+func (q *inMemoryMessageQueue) Enqueue(ctx context.Context, msg QueuedMessage) bool {
+	if ctx.Err() != nil {
 		return false
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.messages) >= q.capacity {
+		return false
+	}
+	q.messages = append(q.messages, msg)
+	return true
 }
 
 func (q *inMemoryMessageQueue) Dequeue(_ context.Context) (QueuedMessage, bool) {
-	select {
-	case m := <-q.ch:
-		return m, true
-	default:
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.messages) == 0 {
 		return QueuedMessage{}, false
 	}
+	msg := q.messages[0]
+	q.messages[0] = QueuedMessage{}
+	q.messages = q.messages[1:]
+	return msg, true
 }
 
 func (q *inMemoryMessageQueue) Drain(_ context.Context) []QueuedMessage {
-	var msgs []QueuedMessage
-	for {
-		select {
-		case m := <-q.ch:
-			msgs = append(msgs, m)
-		default:
-			return msgs
-		}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	msgs := q.messages
+	q.messages = nil
+	return msgs
+}
+
+func (q *inMemoryMessageQueue) Cancel(id string) bool {
+	if id == "" {
+		return false
 	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, msg := range q.messages {
+		if msg.ID != id {
+			continue
+		}
+		q.messages[i] = QueuedMessage{}
+		q.messages = append(q.messages[:i], q.messages[i+1:]...)
+		return true
+	}
+	return false
+}
+
+func (q *inMemoryMessageQueue) status() (depth, capacity int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.messages), q.capacity
 }
 
 // QueueStatus represents the current depth and capacity of message queues

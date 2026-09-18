@@ -2,6 +2,7 @@ package httpclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/net/http/httpproxy"
 
@@ -18,6 +20,12 @@ import (
 
 const disableDesktopProxyEnv = "DOCKER_AGENT_DISABLE_DESKTOP_PROXY"
 
+// defaultProxySafeLookupTimeout caps the SSRF pre-check DNS lookup on the
+// Desktop-routing path. A stalled client-side resolver on a network where
+// the target is only reachable through the operator-configured Desktop
+// egress would otherwise block the request indefinitely; see proxySafe.
+const defaultProxySafeLookupTimeout = 2 * time.Second
+
 var invalidDesktopProxySetting struct {
 	sync.Mutex
 
@@ -25,10 +33,11 @@ var invalidDesktopProxySetting struct {
 }
 
 type desktopAwareTransport struct {
-	direct              *http.Transport
-	guarded             bool
-	resolver            func(context.Context, string) ([]net.IP, error)
-	newDesktopTransport func(context.Context, http.RoundTripper) http.RoundTripper
+	direct                 *http.Transport
+	guarded                bool
+	resolver               func(context.Context, string) ([]net.IP, error)
+	newDesktopTransport    func(context.Context, http.RoundTripper) http.RoundTripper
+	proxySafeLookupTimeout time.Duration
 
 	mu                 sync.Mutex
 	desktopTransport   http.RoundTripper
@@ -52,6 +61,7 @@ func newDesktopAwareTransport(guarded bool) http.RoundTripper {
 		newDesktopTransport: func(_ context.Context, direct http.RoundTripper) http.RoundTripper {
 			return desktoptransport.NewDesktopTransport(direct)
 		},
+		proxySafeLookupTimeout: defaultProxySafeLookupTimeout,
 	}
 }
 
@@ -128,10 +138,25 @@ func (t *desktopAwareTransport) proxySafe(ctx context.Context, host string) bool
 	if ip := net.ParseIP(host); ip != nil {
 		return IsPublicIP(ip)
 	}
-	ips, err := t.resolver(ctx, host)
+	// Cap the lookup: on networks where Docker-owned hostnames are
+	// reachable only through the operator-configured Desktop egress,
+	// the client-side resolver may hang or take tens of seconds to
+	// answer. Without a bound here, a request that would have
+	// succeeded through Desktop is trapped in the SSRF pre-check.
+	lookupCtx, cancel := context.WithTimeout(ctx, t.proxySafeLookupTimeout)
+	defer cancel()
+	ips, err := t.resolver(lookupCtx, host)
 	if err != nil {
-		// Fail closed: Docker-owned hostnames resolve publicly; NXDOMAIN
-		// suggests a broken resolver rather than a PAC-only network.
+		// Fall open only when *our* lookup budget expired and the
+		// parent context is still live: the operator has already
+		// opted this host in for Desktop routing (isDockerHost gate
+		// in RoundTrip), and Desktop applies its own egress policy
+		// and resolution against the upstream. NXDOMAIN and other
+		// resolver errors still fail closed — a broken resolver
+		// isn't a routing hint.
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return true
+		}
 		return false
 	}
 	if len(ips) == 0 {

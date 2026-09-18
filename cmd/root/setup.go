@@ -166,9 +166,11 @@ func newTerminalSetupWizard(in io.Reader, out io.Writer) *setupWizard {
 			}
 			return string(value), nil
 		},
-		stores:       environment.SecretStores(),
-		dmrLister:    dmr.ListModels,
-		pullModel:    dmr.Pull,
+		stores:    environment.SecretStores(),
+		dmrLister: dmr.ListModels,
+		pullModel: func(ctx context.Context, model string) error {
+			return dmr.PullTo(ctx, model, out, out)
+		},
 		chatgptLogin: chatgpt.Login,
 		saveProvider: func(name string, provider latest.ProviderConfig) error {
 			return userconfig.Update(func(cfg *userconfig.Config) error {

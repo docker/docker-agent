@@ -33,8 +33,9 @@ func (t *ToolSet) Name() string {
 func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
-			Name:     ToolNameTransferTask,
-			Category: "transfer",
+			Name:           ToolNameTransferTask,
+			RuntimeHandler: ToolNameTransferTask,
+			Category:       "transfer",
 			Description: `Use this function to transfer a task to the selected team member.
             You must provide a clear and concise description of the task the member should achieve AND the expected output.`,
 			Parameters: tools.MustSchemaFor[Args](),

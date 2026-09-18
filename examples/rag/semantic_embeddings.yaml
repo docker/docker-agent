@@ -25,6 +25,11 @@ rag:
   codebase:
     tool:
       description: Search the codebase for relevant code snippets by semantic meaning
+    # Large knowledge bases can take a while to index. indexing_timeout bounds
+    # that single indexing run, detached from the much shorter (30s) toolset-
+    # start wait budget: the agent proceeds without this tool on early turns
+    # and it appears once indexing finishes. "0s" means no bound; default 30m.
+    indexing_timeout: 2h
     docs:
       - ../../pkg/**/*.go
       - ../../cmd/**/*.go

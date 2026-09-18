@@ -571,6 +571,37 @@ func TestRunLLM_ReportsModelAndUsage(t *testing.T) {
 	assert.Equal(t, int64(45), result.Usage.OutputTokens)
 }
 
+// TestRunLLM_CompactionSessionInheritsWorkspace verifies the ephemeral
+// summarization session runs with the compacted session's workspace root.
+func TestRunLLM_CompactionSessionInheritsWorkspace(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New(
+		session.WithUserMessage("please do the task"),
+		session.WithWorkingDir("/work/project"),
+	)
+	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{
+		Role:    chat.MessageRoleAssistant,
+		Content: "done",
+	}))
+	a := agent.New("root", "instr", agent.WithModel(fakeProvider{id: modelsdev.NewID("fake", "model")}))
+
+	_, err := RunLLM(t.Context(), LLMArgs{
+		Session:      sess,
+		Agent:        a,
+		ContextLimit: 8_192,
+		RunAgent: func(_ context.Context, _ *agent.Agent, cs *session.Session) error {
+			assert.Equal(t, "/work/project", cs.WorkingDir)
+			cs.AddMessage(session.NewAgentMessage("root", &chat.Message{
+				Role:    chat.MessageRoleAssistant,
+				Content: "the summary",
+			}))
+			return nil
+		},
+	})
+	require.NoError(t, err)
+}
+
 // TestRunLLM_NoConversationFits_NoOps pins the safety net behind the
 // scaled budgets: when not a single conversation message fits the
 // summarization budget (e.g. one giant tool result), RunLLM must no-op

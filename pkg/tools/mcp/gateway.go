@@ -22,92 +22,120 @@ import (
 )
 
 const (
-	// Temp file names embed the creating PID (<prefix><pid>-<random>) so
-	// the sweep can spare files of the current process. Older releases
-	// used <prefix><random>; those legacy names are still swept by age.
 	secretsFilePrefix = "mcp-secrets-"
 	configFilePrefix  = "mcp-config-"
-
-	// staleTempFileAge is the sweep's grace period for files of other
-	// processes. It is a margin, not a guarantee: PID reuse or another
-	// process outliving it can still be misjudged.
-	staleTempFileAge = 24 * time.Hour
+	staleTempFileAge  = 24 * time.Hour
 )
 
 type GatewayToolset struct {
 	*Toolset
 
-	cleanUp func() error
+	mu            sync.Mutex
+	mcpServerName string
+	secrets       []gateway.Secret
+	config        []byte
+	envProvider   environment.Provider
+	secretsFile   string
+	configFile    string
 }
 
 var _ tools.ToolSet = (*GatewayToolset)(nil)
 
-// NewGatewayToolset creates a new MCP toolset backed by the MCP gateway CLI
-// for a cataloged server (a `ref:`-based toolset).
-//
-// The optional policy lets callers tune restart/backoff/timeout behaviour;
-// see NewToolsetCommand for the semantics. When omitted, the zero value
-// is used, which is behaviorally equivalent to lifecycle.PolicyFromConfig
-// with a nil config (the resilient-profile default).
-func NewGatewayToolset(ctx context.Context, name, mcpServerName string, secrets []gateway.Secret, config any, envProvider environment.Provider, cwd string, policy ...lifecycle.Policy) (*GatewayToolset, error) {
-	slog.DebugContext(ctx, "Creating MCP Gateway toolset", "name", mcpServerName)
-
-	// A crash or SIGKILL skips Stop and leaves plaintext secrets behind;
-	// sweep those leftovers before writing new files.
-	runStartupSweep(ctx)
-
-	// Make sure all the required secrets are available in the environment.
-	// TODO(dga): Ideally, the MCP gateway would use the same provider that we have.
-	fileSecrets, err := writeSecretsToFile(ctx, mcpServerName, secrets, envProvider)
+// NewGatewayToolset creates an inert MCP gateway toolset. Secret and config
+// files are materialized only when Start or Restart acquires the subprocess.
+func NewGatewayToolset(_ context.Context, name, mcpServerName string, secrets []gateway.Secret, config any, envProvider environment.Provider, cwd string, policy ...lifecycle.Policy) (*GatewayToolset, error) {
+	configData, err := yaml.Marshal(map[string]any{mcpServerName: config})
 	if err != nil {
-		return nil, fmt.Errorf("writing secrets to file: %w", err)
+		return nil, fmt.Errorf("marshaling config: %w", err)
 	}
 
-	fileConfig, err := writeConfigToFile(ctx, mcpServerName, config)
-	if err != nil {
-		if rmErr := removeIfExists(fileSecrets); rmErr != nil {
-			slog.WarnContext(ctx, "Failed to remove secrets file after config error", "error", rmErr, "path", fileSecrets)
-		}
-		return nil, fmt.Errorf("writing config to file: %w", err)
-	}
-
-	// Isolate ourselves from the MCP Toolkit config by always using the Docker MCP catalog and custom config and secrets.
-	// This improves shareability of agents.
-	// The gateway CLI only accepts file paths for --secrets/--config (stdin
-	// already carries the MCP transport), so temp files are necessary.
-	args := []string{
-		"mcp", "gateway", "run",
-		"--servers", mcpServerName,
-		"--catalog", gateway.DockerCatalogURL,
-		"--secrets", fileSecrets,
-		"--config", fileConfig,
-	}
-
-	inner := NewToolsetCommand(name, "docker", args, nil, cwd, policy...)
+	inner := NewToolsetCommand(name, "docker", nil, nil, cwd, policy...)
 	inner.description = "mcp(ref=" + mcpServerName + ")"
-
 	return &GatewayToolset{
-		Toolset: inner,
-		cleanUp: func() error {
-			return errors.Join(removeIfExists(fileSecrets), removeIfExists(fileConfig))
-		},
+		Toolset:       inner,
+		mcpServerName: mcpServerName,
+		secrets:       secrets,
+		config:        configData,
+		envProvider:   envProvider,
 	}, nil
 }
 
-func (t *GatewayToolset) Stop(ctx context.Context) error {
-	stopErr := t.Toolset.Stop(ctx)
-
-	cleanUpErr := t.cleanUp()
-	if cleanUpErr != nil {
-		slog.WarnContext(ctx, "Failed to clean up MCP Gateway temp files", "error", cleanUpErr)
+func (t *GatewayToolset) Start(ctx context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := t.prepare(ctx); err != nil {
+		return err
 	}
-
-	return errors.Join(stopErr, cleanUpErr)
+	if err := t.Toolset.Start(ctx); err != nil {
+		return errors.Join(err, t.cleanUp(ctx))
+	}
+	return nil
 }
 
-// removeIfExists treats a missing file as success so cleanUp, and
-// therefore Stop, stays idempotent.
+func (t *GatewayToolset) Restart(ctx context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err := t.prepare(ctx); err != nil {
+		return err
+	}
+	if err := t.Toolset.Restart(ctx); err != nil {
+		return errors.Join(err, t.cleanUp(ctx))
+	}
+	return nil
+}
+
+func (t *GatewayToolset) Stop(ctx context.Context) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return errors.Join(t.Toolset.Stop(ctx), t.cleanUp(ctx))
+}
+
+func (t *GatewayToolset) prepare(ctx context.Context) error {
+	if t.secretsFile != "" && t.configFile != "" {
+		return nil
+	}
+	runStartupSweep(ctx)
+
+	secretsFile, err := writeSecretsToFile(ctx, t.mcpServerName, t.secrets, t.envProvider)
+	if err != nil {
+		return fmt.Errorf("writing secrets to file: %w", err)
+	}
+	configFile, err := writeTempFile(tempFilePattern(configFilePrefix), t.config)
+	if err != nil {
+		_ = removeIfExists(secretsFile)
+		return fmt.Errorf("writing config to file: %w", err)
+	}
+
+	t.secretsFile = secretsFile
+	t.configFile = configFile
+	client, ok := t.mcpClient.(*stdioMCPClient)
+	if !ok {
+		return errors.Join(errors.New("gateway toolset requires stdio MCP client"), t.cleanUp(ctx))
+	}
+	client.setArgs([]string{
+		"mcp", "gateway", "run",
+		"--servers", t.mcpServerName,
+		"--catalog", gateway.DockerCatalogURL,
+		"--secrets", secretsFile,
+		"--config", configFile,
+	})
+	return nil
+}
+
+func (t *GatewayToolset) cleanUp(ctx context.Context) error {
+	err := errors.Join(removeIfExists(t.secretsFile), removeIfExists(t.configFile))
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to clean up MCP Gateway temp files", "error", err)
+	}
+	t.secretsFile = ""
+	t.configFile = ""
+	return err
+}
+
 func removeIfExists(path string) error {
+	if path == "" {
+		return nil
+	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -121,39 +149,18 @@ func writeSecretsToFile(ctx context.Context, mcpServerName string, secrets []gat
 		if !found || v == "" {
 			return "", errors.New("missing environment variable " + secret.Env + " required by MCP server " + mcpServerName)
 		}
-
 		if strings.ContainsAny(v, "\n\r") {
 			return "", fmt.Errorf("secret %s contains newline characters", secret.Env)
 		}
-
 		secretValues = append(secretValues, fmt.Sprintf("%s=%s", secret.Name, v))
 	}
-
-	// We have all the secrets, let's create a file with all of them for the MCP Gateway
 	return writeTempFile(tempFilePattern(secretsFilePrefix), []byte(strings.Join(secretValues, "\n")))
 }
 
-func writeConfigToFile(_ context.Context, mcpServerName string, config any) (string, error) {
-	buf, err := yaml.Marshal(map[string]any{
-		mcpServerName: config,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	return writeTempFile(tempFilePattern(configFilePrefix), buf)
-}
-
-// tempFilePattern embeds the current PID so the sweep can tell our files
-// from those of other processes.
 func tempFilePattern(prefix string) string {
 	return prefix + strconv.Itoa(os.Getpid()) + "-*"
 }
 
-// parseGatewayTempName matches gateway temp file names strictly:
-// <prefix><pid>-<random> (current scheme) yields the pid digits,
-// <prefix><random> (legacy) yields "". ok is false for any other name so
-// lookalikes are never removed.
 func parseGatewayTempName(name string) (pidPart string, ok bool) {
 	rest, found := strings.CutPrefix(name, secretsFilePrefix)
 	if !found {
@@ -162,7 +169,6 @@ func parseGatewayTempName(name string) (pidPart string, ok bool) {
 	if !found {
 		return "", false
 	}
-
 	pidPart, random, hasPID := strings.Cut(rest, "-")
 	if !hasPID {
 		return "", isDigits(rest)
@@ -185,11 +191,6 @@ func isDigits(s string) bool {
 	return true
 }
 
-// sweepStaleGatewayTempFiles removes regular files in dir whose names match
-// a gateway temp scheme and whose mtime is older than maxAge, except files
-// owned by currentPID, which are kept regardless of age. Symlinks and
-// directories are skipped so nothing outside dir can be affected.
-// Best-effort: per-entry errors don't stop the loop; the first is returned.
 func sweepStaleGatewayTempFiles(dir string, currentPID int, now time.Time, maxAge time.Duration) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -220,10 +221,8 @@ func sweepStaleGatewayTempFiles(dir string, currentPID int, now time.Time, maxAg
 		if !info.ModTime().Before(cutoff) {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			if firstErr == nil {
-				firstErr = err
-			}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+			firstErr = err
 		}
 	}
 	return firstErr
@@ -231,8 +230,6 @@ func sweepStaleGatewayTempFiles(dir string, currentPID int, now time.Time, maxAg
 
 var startupSweepOnce sync.Once
 
-// runStartupSweep swallows the sweep error so an unreadable temp dir does
-// not block the toolset from being created.
 func runStartupSweep(ctx context.Context) {
 	startupSweepOnce.Do(func() {
 		tempDir := os.TempDir()
@@ -247,17 +244,14 @@ func writeTempFile(nameTemplate string, content []byte) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("creating temp file: %w", err)
 	}
-
 	if _, err := f.Write(content); err != nil {
 		f.Close()
 		os.Remove(f.Name())
 		return "", err
 	}
-
 	if err := f.Close(); err != nil {
 		os.Remove(f.Name())
 		return "", err
 	}
-
 	return f.Name(), nil
 }

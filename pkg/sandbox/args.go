@@ -3,7 +3,7 @@ package sandbox
 import (
 	"path/filepath"
 
-	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 )
 
 // ExtraWorkspace returns the directory to mount as a read-only extra
@@ -11,7 +11,7 @@ import (
 //
 // The agent reference may be a path, an OCI/URL reference, a built-in
 // name, or an alias defined in the user's config — ExtraWorkspace
-// delegates resolution to [config.Resolve] so all of those forms are
+// delegates resolution to [sources.Resolve] so all of those forms are
 // handled the same way runtime code handles them. Only [Source]s that
 // expose a containing directory (i.e. local file sources) produce a
 // mount; OCI / URL / built-in / bytes sources return "" because there
@@ -25,7 +25,7 @@ func ExtraWorkspace(wd, agentRef string) string {
 		return ""
 	}
 
-	source, err := config.Resolve(agentRef, nil)
+	source, err := sources.Resolve(agentRef, nil)
 	if err != nil {
 		return ""
 	}

@@ -194,6 +194,8 @@ var blockRules = map[string]blockRule{
 	"session_end":             {mode: modeList, outKey: "session_end"},
 	"permission_request":      {mode: modeList, outKey: "permission_request"},
 	"tool_response_transform": {mode: modeList, outKey: "tool_response_transform"},
+	"tool_input_transform":    {mode: modeList, outKey: "tool_input_transform"},
+	"tool_guard":              {mode: modeList, outKey: "tool_guard"},
 }
 
 // lookupRule returns the conversion rule for a block, falling back to a

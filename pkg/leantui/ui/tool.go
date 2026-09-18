@@ -84,7 +84,7 @@ func RenderToolWithState(t *ToolView, width, frame int, sessionState service.Ses
 		defer animation.StopView(view)
 	}
 
-	lines := splitRenderedTool(renderToolBox(view.View(), width), width)
+	lines := splitRenderedLines(renderToolBox(view.View(), width), width)
 	for _, img := range t.images {
 		lines = append(lines, RenderInlineImage(img, width)...)
 	}
@@ -132,7 +132,7 @@ func totalContentWidth(lines []string) int {
 	return total
 }
 
-func splitRenderedTool(rendered string, width int) []string {
+func splitRenderedLines(rendered string, width int) []string {
 	if width < 1 {
 		width = 1
 	}

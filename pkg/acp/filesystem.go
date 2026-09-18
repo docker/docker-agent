@@ -2,7 +2,6 @@ package acp
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -184,7 +183,7 @@ func evalSymlinksAllowMissing(path string) (string, error) {
 
 func (t *FilesystemToolset) handleReadFile(ctx context.Context, toolCall tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var args filesystem.ReadFileArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &args); err != nil {
 		return nil, fmt.Errorf("failed to parse arguments: %w", err)
 	}
 	if err := filesystem.ValidateReadFileRange(args.Line, args.Limit); err != nil {
@@ -219,7 +218,7 @@ func (t *FilesystemToolset) handleReadFile(ctx context.Context, toolCall tools.T
 
 func (t *FilesystemToolset) handleWriteFile(ctx context.Context, toolCall tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var args filesystem.WriteFileArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &args); err != nil {
 		return nil, fmt.Errorf("failed to parse arguments: %w", err)
 	}
 

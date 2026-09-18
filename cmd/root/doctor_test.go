@@ -71,7 +71,7 @@ func TestDoctorCommand_ReportsCredentialSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Regexp(t, `anthropic\s+found\s+ANTHROPIC_API_KEY\s+environment`, output)
 	assert.Regexp(t, `openai\s+not set\s+OPENAI_API_KEY\s+-`, output)
-	assert.Contains(t, output, "auto -> anthropic/claude-sonnet-4-6")
+	assert.Contains(t, output, "auto -> anthropic/claude-sonnet-5")
 	assert.Contains(t, output, "No issues found.")
 	assert.NotContains(t, output, "sk-secret-value", "secret values must never be printed")
 }

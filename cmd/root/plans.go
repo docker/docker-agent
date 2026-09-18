@@ -29,13 +29,12 @@ const plansConflictExitCode = 3
 
 // Stable machine-readable error codes of the --json stderr contract.
 const (
-	plansErrCodeConflict    = "conflict"
-	plansErrCodeNotFound    = "not_found"
-	plansErrCodeInvalid     = "invalid_argument"
-	plansErrCodeUnsupported = "unsupported"
-	plansErrCodeCorrupt     = "corrupt"
-	plansErrCodeStorage     = "storage"
-	plansErrCodeUnknown     = "error"
+	plansErrCodeConflict = "conflict"
+	plansErrCodeNotFound = "not_found"
+	plansErrCodeInvalid  = "invalid_argument"
+	plansErrCodeCorrupt  = "corrupt"
+	plansErrCodeStorage  = "storage"
+	plansErrCodeUnknown  = "error"
 )
 
 // plansCmdOption customizes newPlansCmd; used by tests to inject the service.
@@ -70,16 +69,9 @@ func newPlansCmd(opts ...plansCmdOption) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "plans",
-		Short: "Manage shared and session plans",
-		Long: `Manage the plans agents collaborate on, from the host.
-
-Two kinds of plans exist:
-
-  - shared plans: the named, versioned documents of the plan toolset,
-    collaborated on across sessions. Fully manageable here.
-  - session plans: the single per-session plan of the "draft, review,
-    execute" workflow. Read-only here (list, get, export); they belong to
-    their session and are changed from within it.
+		Short: "Manage shared plans",
+		Long: `Manage the plans agents collaborate on, from the host: the named,
+versioned documents of the plan toolset, collaborated on across sessions.
 
 Mutations guard against concurrent edits: pass --expected-version <n> (the
 version from a previous get or list) to fail with exit code 3 when the plan
@@ -94,8 +86,7 @@ failures are then reported as a single JSON object on stderr.`,
   docker-agent plans update release --file ./plan.md --expected-version 1
   docker-agent plans status release done --expected-version 2
   docker-agent plans export release --output ./plan.md
-  docker-agent plans delete release --expected-version 3
-  docker-agent plans get --session <session-id>`,
+  docker-agent plans delete release --expected-version 3`,
 		GroupID:      "advanced",
 		SilenceUsage: true,
 	}
@@ -127,8 +118,8 @@ failures are then reported as a single JSON object on stderr.`,
 func (o *plansOptions) runPlans(sub string, jsonOut *bool, handler func(cmd *cobra.Command, svc plans.Service, args []string) error) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
-		// Telemetry carries the subcommand only: positional args are plan and
-		// session names, and raw errors embed names and filesystem paths, so
+		// Telemetry carries the subcommand only: positional args are plan
+		// names, and raw errors embed names and filesystem paths, so
 		// failures are reduced to their stable code by plansTelemetryError.
 		trackArgs := []string{sub}
 		telemetry.TrackCommand(ctx, "plans", trackArgs)
@@ -239,13 +230,12 @@ type plansErrorDocument struct {
 // error text.
 func plansErrorBodyFor(err error) plansErrorBody {
 	var (
-		conflict    *plans.ConflictError
-		notFound    *plans.NotFoundError
-		unsupported *plans.UnsupportedError
-		corrupt     *plans.CorruptError
-		storageErr  *plans.StorageError
-		validation  *plans.ValidationError
-		usage       *plansUsageError
+		conflict   *plans.ConflictError
+		notFound   *plans.NotFoundError
+		corrupt    *plans.CorruptError
+		storageErr *plans.StorageError
+		validation *plans.ValidationError
+		usage      *plansUsageError
 	)
 	switch {
 	case errors.As(err, &conflict):
@@ -261,8 +251,6 @@ func plansErrorBodyFor(err error) plansErrorBody {
 		}
 	case errors.As(err, &notFound):
 		return plansErrorBody{Code: plansErrCodeNotFound, Message: err.Error(), Scope: notFound.Scope, Name: notFound.Name}
-	case errors.As(err, &unsupported):
-		return plansErrorBody{Code: plansErrCodeUnsupported, Message: err.Error(), Scope: unsupported.Scope, Op: unsupported.Op}
 	case errors.As(err, &corrupt):
 		return plansErrorBody{Code: plansErrCodeCorrupt, Message: err.Error(), Scope: corrupt.Scope, Name: corrupt.Name}
 	case errors.As(err, &storageErr):
@@ -276,8 +264,8 @@ func plansErrorBodyFor(err error) plansErrorBody {
 
 // plansTelemetryError sanitizes a failure for telemetry by reducing it to
 // its stable machine-readable code (plansErrorBodyFor): raw error text
-// carries plan names, session IDs, and filesystem paths that must never be
-// sent. Nil stays nil so a success is never tracked as an error.
+// carries plan names and filesystem paths that must never be sent. Nil stays
+// nil so a success is never tracked as an error.
 func plansTelemetryError(err error) error {
 	if err == nil {
 		return nil
@@ -294,61 +282,12 @@ func printPlansError(w io.Writer, err error, jsonOut bool) {
 	fmt.Fprintln(w, "Error:", err.Error())
 }
 
-// planRefFlags selects the plan a subcommand addresses: the shared plan named
-// by the positional argument (the default), or a session's plan via
-// --session. --scope disambiguates explicitly; --session alone implies
-// session scope.
-type planRefFlags struct {
-	scope   string
-	session string
-}
-
-func (f *planRefFlags) register(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&f.scope, "scope", "", `Plan scope: "shared" or "session" (default "shared"; "session" is implied by --session)`)
-	cmd.Flags().StringVar(&f.session, "session", "", "Session ID whose plan to address (session scope)")
-}
-
-func (f *planRefFlags) sessionSelected() bool {
-	return f.session != "" || f.scope == string(plans.ScopeSession)
-}
-
-func (f *planRefFlags) resolve(name string) (plans.Ref, error) {
-	scope := plans.Scope(f.scope)
-	if f.scope == "" {
-		scope = plans.ScopeShared
-		if f.session != "" {
-			scope = plans.ScopeSession
-		}
+// resolvePlanRef addresses the plan named by the positional argument.
+func resolvePlanRef(name string) (plans.Ref, error) {
+	if name == "" {
+		return plans.Ref{}, plansUsagef("a plan name is required")
 	}
-	switch scope {
-	case plans.ScopeShared:
-		if f.session != "" {
-			return plans.Ref{}, plansUsagef("--session selects a session plan: drop --scope shared or use --scope session")
-		}
-		if name == "" {
-			return plans.Ref{}, plansUsagef("a plan name is required for shared plans")
-		}
-		return plans.SharedRef(name), nil
-	case plans.ScopeSession:
-		if f.session == "" {
-			return plans.Ref{}, plansUsagef("--scope session requires --session <id>")
-		}
-		if name != "" {
-			return plans.Ref{}, plansUsagef("session plans are addressed by --session <id>, not by name; drop %q", name)
-		}
-		return plans.SessionRef(f.session), nil
-	default:
-		return plans.Ref{}, plansUsagef("invalid --scope %q: use %q or %q", f.scope, plans.ScopeShared, plans.ScopeSession)
-	}
-}
-
-// planRefName is the plan's identity within its scope, for messages and the
-// delete document.
-func planRefName(ref plans.Ref) string {
-	if ref.Scope == plans.ScopeSession {
-		return ref.SessionID
-	}
-	return ref.Name
+	return plans.SharedRef(name), nil
 }
 
 // planGuardFlags implements the mutation write-guard: --expected-version
@@ -514,7 +453,7 @@ func printPlanMutation(cmd *cobra.Command, jsonOut bool, p plans.Plan, verb stri
 // sends it to stderr so stdout stays pure content while the metadata remains
 // visible.
 func printPlanMetadata(w io.Writer, p plans.Plan) {
-	details := make([]string, 0, 5)
+	details := make([]string, 0, 4)
 	if p.Title != "" {
 		details = append(details, "title: "+p.Title)
 	}
@@ -524,9 +463,6 @@ func printPlanMetadata(w io.Writer, p plans.Plan) {
 	details = append(details, "version: "+formatPlanVersion(p.Version))
 	if !p.UpdatedAt.IsZero() {
 		details = append(details, "updated: "+formatPlanTime(p.UpdatedAt))
-	}
-	if p.Path != "" {
-		details = append(details, "path: "+p.Path)
 	}
 	fmt.Fprintf(w, "%s plan %q (%s)\n", p.Scope, p.Name, strings.Join(details, ", "))
 }
@@ -547,8 +483,7 @@ func printPlansTable(w io.Writer, list []plans.Plan) {
 
 func newPlansListCmd(o *plansOptions) *cobra.Command {
 	var flags struct {
-		json    bool
-		session string
+		json bool
 	}
 
 	cmd := &cobra.Command{
@@ -557,14 +492,12 @@ func newPlansListCmd(o *plansOptions) *cobra.Command {
 		Short:   "List plans",
 		Long: `List every shared plan with its metadata (content is not included).
 
-With --session <id>, that session's plan is listed first when it exists; a
-session without a plan is simply not listed. Plans that exist but cannot be
-read are reported as warnings on stderr (in the "warnings" field with --json)
-so they are never mistaken for missing.`,
+Plans that exist but cannot be read are reported as warnings on stderr (in
+the "warnings" field with --json) so they are never mistaken for missing.`,
 		Args: cobra.NoArgs,
 	}
 	cmd.RunE = o.runPlans("list", &flags.json, func(cmd *cobra.Command, svc plans.Service, _ []string) error {
-		result, err := svc.List(cmd.Context(), plans.ListOptions{SessionID: flags.session})
+		result, err := svc.List(cmd.Context())
 		if err != nil {
 			return err
 		}
@@ -588,7 +521,6 @@ so they are never mistaken for missing.`,
 	})
 
 	cmd.Flags().BoolVar(&flags.json, "json", false, "Output as JSON")
-	cmd.Flags().StringVar(&flags.session, "session", "", "Also include this session's plan when it exists")
 
 	return cmd
 }
@@ -596,26 +528,20 @@ so they are never mistaken for missing.`,
 func newPlansGetCmd(o *plansOptions) *cobra.Command {
 	var flags struct {
 		json bool
-		ref  planRefFlags
 	}
 
 	cmd := &cobra.Command{
-		Use:   "get [<name>]",
+		Use:   "get <name>",
 		Short: "Print a plan's content and metadata",
 		Long: `Print a plan: its content goes to stdout and a concise metadata line goes
 to stderr, so redirecting stdout captures the content alone (use export for a
-byte-exact file copy).
-
-By default <name> addresses a shared plan. Use --session <id> to print that
-session's plan instead; the name is then omitted.`,
+byte-exact file copy).`,
 		Example: `  docker-agent plans get release
-  docker-agent plans get release --json
-  docker-agent plans get --session <session-id>
-  docker-agent plans get --scope session --session <session-id>`,
+  docker-agent plans get release --json`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = o.runPlans("get", &flags.json, func(cmd *cobra.Command, svc plans.Service, args []string) error {
-		ref, err := flags.ref.resolve(firstArg(args))
+		ref, err := resolvePlanRef(firstArg(args))
 		if err != nil {
 			return err
 		}
@@ -635,7 +561,6 @@ session's plan instead; the name is then omitted.`,
 		return nil
 	})
 
-	flags.ref.register(cmd)
 	cmd.Flags().BoolVar(&flags.json, "json", false, "Output as JSON")
 
 	return cmd
@@ -697,7 +622,6 @@ func newPlansUpdateCmd(o *plansOptions) *cobra.Command {
 		title  string
 		author string
 		status string
-		ref    planRefFlags
 		guard  planGuardFlags
 	}
 
@@ -712,13 +636,13 @@ Metadata flags that are omitted keep their previous value; passing them
 
 Exactly one of --expected-version or --force must be given: the former fails
 with exit code 3 when the plan changed since it was read, the latter
-deliberately replaces it unconditionally. Session plans cannot be updated.`,
+deliberately replaces it unconditionally.`,
 		Example: `  docker-agent plans update release --file ./plan.md --expected-version 1
   docker-agent plans update release --file ./plan.md --force --status in-progress`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = o.runPlans("update", &flags.json, func(cmd *cobra.Command, svc plans.Service, args []string) error {
-		ref, err := flags.ref.resolve(firstArg(args))
+		ref, err := resolvePlanRef(firstArg(args))
 		if err != nil {
 			return err
 		}
@@ -748,7 +672,6 @@ deliberately replaces it unconditionally. Session plans cannot be updated.`,
 		return printPlanMutation(cmd, flags.json, p, "Updated")
 	})
 
-	flags.ref.register(cmd)
 	flags.guard.register(cmd)
 	cmd.Flags().StringVar(&flags.file, "file", "", `File with the new plan content ("-" reads stdin); required`)
 	cmd.Flags().StringVar(&flags.title, "title", "", "New plan title (omit to preserve the current one)")
@@ -763,7 +686,6 @@ deliberately replaces it unconditionally. Session plans cannot be updated.`,
 func newPlansStatusCmd(o *plansOptions) *cobra.Command {
 	var flags struct {
 		json  bool
-		ref   planRefFlags
 		guard planGuardFlags
 	}
 
@@ -774,28 +696,17 @@ func newPlansStatusCmd(o *plansOptions) *cobra.Command {
 "done") without touching its body. Setting the status is a write and bumps
 the version.
 
-Exactly one of --expected-version or --force must be given. Session plans
-have no status.`,
+Exactly one of --expected-version or --force must be given.`,
 		Example: `  docker-agent plans status release done --expected-version 2
   docker-agent plans status release blocked --force`,
 		Args: cobra.RangeArgs(1, 2),
 	}
 	cmd.RunE = o.runPlans("status", &flags.json, func(cmd *cobra.Command, svc plans.Service, args []string) error {
-		var name, status string
-		if flags.ref.sessionSelected() {
-			// Session plans have no name, so the only positional is the
-			// status; the service then rejects the mutation as unsupported.
-			if len(args) != 1 {
-				return plansUsagef("session plans take only a status: plans status --session <id> <status>")
-			}
-			status = args[0]
-		} else {
-			if len(args) != 2 {
-				return plansUsagef("shared plans take a name and a status: plans status <name> <status>")
-			}
-			name, status = args[0], args[1]
+		if len(args) != 2 {
+			return plansUsagef("status takes a name and a status: plans status <name> <status>")
 		}
-		ref, err := flags.ref.resolve(name)
+		name, status := args[0], args[1]
+		ref, err := resolvePlanRef(name)
 		if err != nil {
 			return err
 		}
@@ -815,7 +726,6 @@ have no status.`,
 		return nil
 	})
 
-	flags.ref.register(cmd)
 	flags.guard.register(cmd)
 	cmd.Flags().BoolVar(&flags.json, "json", false, "Output as JSON")
 
@@ -827,25 +737,21 @@ func newPlansExportCmd(o *plansOptions) *cobra.Command {
 		json   bool
 		output string
 		force  bool
-		ref    planRefFlags
 	}
 
 	cmd := &cobra.Command{
-		Use:   "export [<name>]",
+		Use:   "export <name>",
 		Short: "Write a plan's content to a file",
 		Long: `Write a plan's content, byte-exact, to --output (required). Parent
 directories are created and the write is atomic, so a reader never observes
 a partial export. An existing destination is refused and left untouched
-unless --force is given, which replaces an existing regular file atomically.
-Works for both scopes: shared plans by name, a session's plan via
---session <id>.`,
+unless --force is given, which replaces an existing regular file atomically.`,
 		Example: `  docker-agent plans export release --output ./plan.md
-  docker-agent plans export release --output ./plan.md --force
-  docker-agent plans export --session <session-id> --output ./plan.md`,
+  docker-agent plans export release --output ./plan.md --force`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = o.runPlans("export", &flags.json, func(cmd *cobra.Command, svc plans.Service, args []string) error {
-		ref, err := flags.ref.resolve(firstArg(args))
+		ref, err := resolvePlanRef(firstArg(args))
 		if err != nil {
 			return err
 		}
@@ -861,7 +767,6 @@ Works for both scopes: shared plans by name, a session's plan via
 		return nil
 	})
 
-	flags.ref.register(cmd)
 	cmd.Flags().StringVar(&flags.output, "output", "", "Destination file for the plan content; required")
 	cmd.Flags().BoolVar(&flags.force, "force", false, "Replace the destination file when it already exists")
 	cmd.Flags().BoolVar(&flags.json, "json", false, "Output as JSON")
@@ -873,7 +778,6 @@ Works for both scopes: shared plans by name, a session's plan via
 func newPlansDeleteCmd(o *plansOptions) *cobra.Command {
 	var flags struct {
 		json  bool
-		ref   planRefFlags
 		guard planGuardFlags
 	}
 
@@ -885,13 +789,13 @@ func newPlansDeleteCmd(o *plansOptions) *cobra.Command {
 --expected-version or --force must be given: the former fails with exit
 code 3 when the plan changed since it was read (leaving it in place), the
 latter deletes unconditionally — which is also how a corrupt plan is
-recovered. Session plans cannot be deleted from the host.`,
+recovered.`,
 		Example: `  docker-agent plans delete release --expected-version 3
   docker-agent plans delete release --force`,
 		Args: cobra.MaximumNArgs(1),
 	}
 	cmd.RunE = o.runPlans("delete", &flags.json, func(cmd *cobra.Command, svc plans.Service, args []string) error {
-		ref, err := flags.ref.resolve(firstArg(args))
+		ref, err := resolvePlanRef(firstArg(args))
 		if err != nil {
 			return err
 		}
@@ -905,14 +809,13 @@ recovered. Session plans cannot be deleted from the host.`,
 		if flags.json {
 			return writePlansJSON(cmd.OutOrStdout(), plansDeletedDocument{
 				SchemaVersion: plansSchemaVersion,
-				Deleted:       plansRefBody{Scope: ref.Scope, Name: planRefName(ref)},
+				Deleted:       plansRefBody{Scope: ref.Scope, Name: ref.Name},
 			})
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "Deleted %s plan %q\n", ref.Scope, planRefName(ref))
+		fmt.Fprintf(cmd.OutOrStdout(), "Deleted %s plan %q\n", ref.Scope, ref.Name)
 		return nil
 	})
 
-	flags.ref.register(cmd)
 	flags.guard.register(cmd)
 	cmd.Flags().BoolVar(&flags.json, "json", false, "Output as JSON")
 

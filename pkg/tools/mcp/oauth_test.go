@@ -2372,7 +2372,7 @@ func TestRoundTrip_ServerInvalidTokenEvictsAndRefreshes(t *testing.T) {
 
 	var oauthSuccessFired atomic.Bool
 	transport := newTransportWithStaleToken(t, srv.URL)
-	transport.onOAuthSuccess = func() { oauthSuccessFired.Store(true) }
+	transport.onOAuthSuccess = func(context.Context) { oauthSuccessFired.Store(true) }
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL, strings.NewReader("{}"))
 	require.NoError(t, err)
@@ -2559,7 +2559,7 @@ func TestRoundTrip_ConcurrentInvalidToken_RefreshesOnce(t *testing.T) {
 	srv, tokenCalls := newInvalidTokenTestServer(t)
 
 	transport := newTransportWithStaleToken(t, srv.URL)
-	transport.onOAuthSuccess = func() {}
+	transport.onOAuthSuccess = func(context.Context) {}
 
 	const n = 6
 	results := make(chan error, n)

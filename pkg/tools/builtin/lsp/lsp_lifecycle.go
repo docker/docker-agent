@@ -196,8 +196,8 @@ func (h *lspHandler) clearSessionLocked() {
 	h.openFiles = make(map[string]int)
 }
 
-// fireToolsChanged invokes the registered tools-changed handler if any,
-// outside h.mu so the runtime is free to call back into the toolset.
+// fireToolsChanged invokes the registered tools-changed handlers, outside
+// h.mu so the runtime is free to call back into the toolset.
 func (h *lspHandler) fireToolsChanged() {
 	h.mu.Lock()
 	handler := h.toolsChangedHandler
@@ -205,6 +205,7 @@ func (h *lspHandler) fireToolsChanged() {
 	if handler != nil {
 		handler()
 	}
+	h.toolsChangedSubs.Notify()
 }
 
 // lspSession is a single live LSP server session. cmd.Wait must be called

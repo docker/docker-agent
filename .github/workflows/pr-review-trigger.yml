@@ -1,4 +1,4 @@
-name: PR Review - Trigger
+name: pr-review-trigger
 on:
   pull_request:
     types: [ready_for_review, opened, review_requested]
@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   save-context:
+    timeout-minutes: 5
     # Only run on fork PRs; skip GitHub App bot accounts (Dependabot, Renovate, etc.) early.
     if: github.event.pull_request.head.repo.fork && github.event.sender.type != 'Bot'
     runs-on: ubuntu-latest

@@ -21,21 +21,23 @@ var matcherWildcard = []MatcherConfig{{Matcher: "*", Hooks: trueHook}}
 // event is a one-line update here — the same one-line update
 // compileEvents needs.
 var onlyHooks = map[EventType]*Config{
-	EventPreToolUse:       {PreToolUse: matcherWildcard},
-	EventPostToolUse:      {PostToolUse: matcherWildcard},
-	EventSessionStart:     {SessionStart: trueHook},
-	EventTurnStart:        {TurnStart: trueHook},
-	EventTurnEnd:          {TurnEnd: trueHook},
-	EventBeforeLLMCall:    {BeforeLLMCall: trueHook},
-	EventAfterLLMCall:     {AfterLLMCall: trueHook},
-	EventSessionEnd:       {SessionEnd: trueHook},
-	EventOnUserInput:      {OnUserInput: trueHook},
-	EventStop:             {Stop: trueHook},
-	EventNotification:     {Notification: trueHook},
-	EventOnError:          {OnError: trueHook},
-	EventOnMaxIterations:  {OnMaxIterations: trueHook},
-	EventBeforeCompaction: {BeforeCompaction: trueHook},
-	EventAfterCompaction:  {AfterCompaction: trueHook},
+	EventPreToolUse:         {PreToolUse: matcherWildcard},
+	EventPostToolUse:        {PostToolUse: matcherWildcard},
+	EventSessionStart:       {SessionStart: trueHook},
+	EventTurnStart:          {TurnStart: trueHook},
+	EventTurnEnd:            {TurnEnd: trueHook},
+	EventBeforeLLMCall:      {BeforeLLMCall: trueHook},
+	EventAfterLLMCall:       {AfterLLMCall: trueHook},
+	EventSessionEnd:         {SessionEnd: trueHook},
+	EventOnUserInput:        {OnUserInput: trueHook},
+	EventStop:               {Stop: trueHook},
+	EventNotification:       {Notification: trueHook},
+	EventOnError:            {OnError: trueHook},
+	EventOnMaxIterations:    {OnMaxIterations: trueHook},
+	EventBeforeCompaction:   {BeforeCompaction: trueHook},
+	EventAfterCompaction:    {AfterCompaction: trueHook},
+	EventToolInputTransform: {ToolInputTransform: matcherWildcard},
+	EventToolGuard:          {ToolGuard: matcherWildcard},
 }
 
 // TestExecutorHasIsGeneric exercises the generic Has API across every

@@ -16,7 +16,8 @@ const (
 )
 
 type fileCompletion struct {
-	ctx func() context.Context
+	ctx  func() context.Context
+	root string
 
 	mu     sync.Mutex
 	items  []completion.Item
@@ -24,7 +25,11 @@ type fileCompletion struct {
 }
 
 func NewFileCompletion(ctx context.Context) Completion {
-	return &fileCompletion{ctx: func() context.Context { return context.WithoutCancel(ctx) }}
+	return NewFileCompletionAt(ctx, ".")
+}
+
+func NewFileCompletionAt(ctx context.Context, root string) Completion {
+	return &fileCompletion{ctx: func() context.Context { return context.WithoutCancel(ctx) }, root: root}
 }
 
 func (c *fileCompletion) AutoSubmit() bool {
@@ -49,7 +54,7 @@ func (c *fileCompletion) Items() []completion.Item {
 	}
 
 	// Try to create VCS matcher for current directory
-	vcsMatcher, _ := fsx.NewVCSMatcher(".")
+	vcsMatcher, _ := fsx.NewVCSMatcher(c.root)
 
 	// Prepare shouldIgnore function
 	var shouldIgnore func(string) bool
@@ -58,7 +63,7 @@ func (c *fileCompletion) Items() []completion.Item {
 	}
 
 	// Use bounded walker to avoid scanning huge directories
-	files, err := fsx.WalkFiles(c.ctx(), ".", fsx.WalkFilesOptions{
+	files, err := fsx.WalkFiles(c.ctx(), c.root, fsx.WalkFilesOptions{
 		ShouldIgnore: shouldIgnore,
 	})
 	if err != nil {
@@ -105,7 +110,7 @@ func (c *fileCompletion) LoadInitialItemsAsync(ctx context.Context) <-chan []com
 		c.mu.Unlock()
 
 		// Try to create VCS matcher for current directory
-		vcsMatcher, _ := fsx.NewVCSMatcher(".")
+		vcsMatcher, _ := fsx.NewVCSMatcher(c.root)
 
 		var shouldIgnore func(string) bool
 		if vcsMatcher != nil {
@@ -113,7 +118,7 @@ func (c *fileCompletion) LoadInitialItemsAsync(ctx context.Context) <-chan []com
 		}
 
 		// Shallow scan: 2 levels deep, max 100 files
-		files, err := fsx.WalkFiles(ctx, ".", fsx.WalkFilesOptions{
+		files, err := fsx.WalkFiles(ctx, c.root, fsx.WalkFilesOptions{
 			MaxFiles:     initialMaxFiles,
 			MaxDepth:     initialMaxDepth,
 			ShouldIgnore: shouldIgnore,
@@ -169,7 +174,7 @@ func (c *fileCompletion) LoadItemsAsync(ctx context.Context) <-chan []completion
 		c.mu.Unlock()
 
 		// Try to create VCS matcher for current directory
-		vcsMatcher, _ := fsx.NewVCSMatcher(".")
+		vcsMatcher, _ := fsx.NewVCSMatcher(c.root)
 
 		// Prepare shouldIgnore function
 		var shouldIgnore func(string) bool
@@ -178,7 +183,7 @@ func (c *fileCompletion) LoadItemsAsync(ctx context.Context) <-chan []completion
 		}
 
 		// Full scan with default limits
-		files, err := fsx.WalkFiles(ctx, ".", fsx.WalkFilesOptions{
+		files, err := fsx.WalkFiles(ctx, c.root, fsx.WalkFilesOptions{
 			ShouldIgnore: shouldIgnore,
 		})
 		if err != nil || ctx.Err() != nil {

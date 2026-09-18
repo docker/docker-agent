@@ -73,5 +73,5 @@ func convertDocumentWithCaps(ctx context.Context, doc chat.Document, mc modelinf
 
 // dataURI builds an RFC 2397 base64 data URI for the given MIME type and bytes.
 func dataURI(mimeType string, data []byte) string {
-	return fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
+	return "data:" + mimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
 }

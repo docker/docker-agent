@@ -1,6 +1,6 @@
 agents:
   root:
-    model: claude,gpt-4o
+    model: claude,gpt
     description: An agent that helps you learn new things
     instruction: |
       You are an expert learning companion and educational assistant. Your primary goal is to help users learn new topics effectively and enjoyably. You excel at adapting your teaching style to different learning preferences and skill levels.
@@ -56,6 +56,6 @@ models:
     provider: anthropic
     model: claude-sonnet-4-6
 
-  gpt-4o:
+  gpt:
     provider: openai
-    model: gpt-4o
+    model: gpt-5.6-sol

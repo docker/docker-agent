@@ -409,3 +409,31 @@ func TestEnvFromFileErrorsAbortPreRun(t *testing.T) {
 		assert.Contains(t, err.Error(), "bad.env")
 	})
 }
+
+// TestSetupWorkingDirectory_StoresAbsolutePath pins that a relative
+// --working-dir value is absolutized back into the runtime config: after the
+// chdir, downstream consumers (session workspace provenance, servers) must
+// see the absolute root, not a path relative to itself.
+func TestSetupWorkingDirectory_StoresAbsolutePath(t *testing.T) {
+	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(base)
+	require.NoError(t, err)
+	require.NoError(t, os.Mkdir(filepath.Join(base, "sub"), 0o755))
+	t.Chdir(base)
+
+	runConfig := &config.RuntimeConfig{Config: config.Config{WorkingDir: "sub"}}
+	require.NoError(t, setupWorkingDirectory(runConfig))
+
+	assert.Equal(t, filepath.Join(base, "sub"), runConfig.WorkingDir)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	cwd, err = filepath.EvalSymlinks(cwd)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(base, "sub"), cwd)
+}
+
+func TestSetupWorkingDirectory_EmptyIsNoop(t *testing.T) {
+	runConfig := &config.RuntimeConfig{}
+	require.NoError(t, setupWorkingDirectory(runConfig))
+	assert.Empty(t, runConfig.WorkingDir)
+}

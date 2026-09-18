@@ -185,9 +185,6 @@ func TestListen_Unix(t *testing.T) {
 	assert.Equal(t, "pong", string(body))
 }
 
-// TestListen_Unix_ReplacesStaleSocket verifies that a leftover socket file
-// from a previous run is removed so the bind succeeds (rather than failing
-// with "address already in use").
 func TestListen_Unix_ReplacesStaleSocket(t *testing.T) {
 	t.Parallel()
 
@@ -202,4 +199,93 @@ func TestListen_Unix_ReplacesStaleSocket(t *testing.T) {
 	require.NoError(t, err)
 	defer ln2.Close()
 	assert.Equal(t, "unix", ln2.Addr().Network())
+}
+
+func TestListen_Unix_PreservesRegularFile(t *testing.T) {
+	t.Parallel()
+
+	sockPath := filepath.Join(shortTempDir(t), "a.sock")
+	original := []byte("keep me")
+	require.NoError(t, os.WriteFile(sockPath, original, 0o640))
+
+	_, err := Listen(t.Context(), "unix://"+sockPath)
+	require.ErrorContains(t, err, "refusing to replace non-socket path")
+
+	got, err := os.ReadFile(sockPath)
+	require.NoError(t, err)
+	assert.Equal(t, original, got)
+}
+
+func TestListen_Unix_RejectsSymlink(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	target := filepath.Join(dir, "target")
+	sockPath := filepath.Join(dir, "a.sock")
+	require.NoError(t, os.WriteFile(target, []byte("keep me"), 0o600))
+	require.NoError(t, os.Symlink(target, sockPath))
+
+	_, err := Listen(t.Context(), "unix://"+sockPath)
+	require.ErrorContains(t, err, "refusing to replace non-socket path")
+
+	info, err := os.Lstat(sockPath)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink)
+}
+
+func TestListen_Unix_DoesNotUnlinkLiveSocket(t *testing.T) {
+	t.Parallel()
+
+	sockPath := filepath.Join(shortTempDir(t), "a.sock")
+	ln, err := Listen(t.Context(), "unix://"+sockPath)
+	require.NoError(t, err)
+	defer ln.Close()
+
+	_, err = Listen(t.Context(), "unix://"+sockPath)
+	require.ErrorContains(t, err, "already in use")
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(t.Context(), "unix", sockPath)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}
+
+func TestListen_Unix_SerializesConcurrentStarts(t *testing.T) {
+	t.Parallel()
+
+	sockPath := filepath.Join(shortTempDir(t), "a.sock")
+	const starts = 8
+	listeners := make(chan net.Listener, starts)
+	errs := make(chan error, starts)
+	var wg sync.WaitGroup
+	for range starts {
+		wg.Go(func() {
+			ln, err := Listen(t.Context(), "unix://"+sockPath)
+			if err != nil {
+				errs <- err
+				return
+			}
+			listeners <- ln
+		})
+	}
+	wg.Wait()
+	close(listeners)
+	close(errs)
+
+	var successful []net.Listener
+	for ln := range listeners {
+		successful = append(successful, ln)
+	}
+	t.Cleanup(func() {
+		for _, ln := range successful {
+			_ = ln.Close()
+		}
+	})
+	assert.Len(t, successful, 1)
+	assert.Len(t, errs, starts-1)
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(t.Context(), "unix", sockPath)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
 }

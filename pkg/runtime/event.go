@@ -445,29 +445,6 @@ func SessionTitle(sessionID, title string) Event {
 
 func (e *SessionTitleEvent) GetSessionID() string { return e.SessionID }
 
-// SessionPlanUpdatedEvent fires when the session_plan toolset writes a plan.
-// Content and Path let a UI render the plan inline without re-reading the file.
-type SessionPlanUpdatedEvent struct {
-	AgentContext
-
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	Content   string `json:"content,omitempty"`
-	Path      string `json:"path,omitempty"`
-}
-
-func SessionPlanUpdated(sessionID, content, path, agentName string) Event {
-	return &SessionPlanUpdatedEvent{
-		Type:         "session_plan_updated",
-		SessionID:    sessionID,
-		Content:      content,
-		Path:         path,
-		AgentContext: newAgentContext(agentName),
-	}
-}
-
-func (e *SessionPlanUpdatedEvent) GetSessionID() string { return e.SessionID }
-
 // PlanChangedEvent fires after an agent successfully mutates a shared plan
 // (write, status change, or delete) through the plan toolset. It carries
 // identity and version only — no content — so a UI refreshes through its own
@@ -586,11 +563,13 @@ func (e *SessionCompactionEvent) GetSessionID() string { return e.SessionID }
 // the turnEndReason* classification (normal, error, canceled) so consumers can
 // tell successful completion apart from crashes and user-initiated stops.
 //
-// Delivery is best-effort: it is emitted non-blockingly during teardown and is
-// dropped if the events buffer is full and the consumer has gone away (see
-// finalizeEventChannel). Treat the channel close, not receipt of this event, as
-// the guaranteed terminal signal. Do not assume session-end hooks have finished
-// when this event arrives: it is emitted before they run.
+// Delivery is bounded-blocking: finalizeEventChannel waits (up to a deadline)
+// for the consumer to accept it, so any consumer still draining the channel
+// reliably receives it, and it is dropped only once the consumer has
+// abandoned the channel entirely (#4136). Still, treat the channel close, not
+// receipt of this event, as the guaranteed terminal signal — it remains the
+// only delivery that can never be dropped. Do not assume session-end hooks
+// have finished when this event arrives: it is emitted before they run.
 type StreamStoppedEvent struct {
 	AgentContext
 

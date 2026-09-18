@@ -84,17 +84,18 @@ type Toolset struct {
 	//     toolsets, so the inner mcp.Toolset is treated identically.
 	enabled map[string]*tools.StartableToolSet
 
-	// elicitationHandler / oauthSuccessHandler / managedOAuth /
-	// toolsChangedHandler are captured before any server is enabled
-	// (the runtime calls these via tools.As[...] from
-	// configureToolsetHandlers at the start of every turn). They are
-	// re-applied to each new mcp.Toolset on enable so OAuth elicitation,
-	// OAuth-success refreshes, the managed-vs-unmanaged flag and
-	// tool-list change notifications behave identically to a YAML-
-	// declared `mcp.remote` toolset.
+	// elicitationHandler / oauthSuccessHandler / managedOAuth are captured
+	// before any server is enabled (the runtime discovers these through the
+	// toolset graph from configureToolsetHandlers at the start of every
+	// turn). They are re-applied to each new mcp.Toolset on enable so OAuth
+	// elicitation, OAuth-success refreshes and the managed-vs-unmanaged flag
+	// behave identically to a YAML-declared `mcp.remote` toolset. Tool-list
+	// changes from inner toolsets are routed through notifyToolsChanged so
+	// the legacy handler and every subscriber see them.
 	elicitationHandler        tools.ElicitationHandler
 	oauthSuccessHandler       func()
 	toolsChangedHandler       func()
+	toolsChangedSubs          tools.ChangeSubscribers
 	managedOAuth              bool
 	managedOAuthSet           bool // distinguishes "default" from "explicitly false"
 	unmanagedOAuthRedirectURI string
@@ -114,13 +115,14 @@ type Toolset struct {
 }
 
 var (
-	_ tools.ToolSet        = (*Toolset)(nil)
-	_ tools.Startable      = (*Toolset)(nil)
-	_ tools.Instructable   = (*Toolset)(nil)
-	_ tools.Describer      = (*Toolset)(nil)
-	_ tools.ChangeNotifier = (*Toolset)(nil)
-	_ tools.Elicitable     = (*Toolset)(nil)
-	_ tools.OAuthCapable   = (*Toolset)(nil)
+	_ tools.ToolSet          = (*Toolset)(nil)
+	_ tools.Startable        = (*Toolset)(nil)
+	_ tools.Instructable     = (*Toolset)(nil)
+	_ tools.Describer        = (*Toolset)(nil)
+	_ tools.ChangeNotifier   = (*Toolset)(nil)
+	_ tools.ChangeSubscriber = (*Toolset)(nil)
+	_ tools.Elicitable       = (*Toolset)(nil)
+	_ tools.OAuthCapable     = (*Toolset)(nil)
 )
 
 // Option customizes a Toolset at construction time.
@@ -374,19 +376,31 @@ func (t *Toolset) SetUnmanagedOAuthRedirectURI(uri string) {
 }
 
 // SetToolsChangedHandler is invoked by the runtime to be notified when
-// the set of available tools changes. We forward to the activated MCP
-// toolsets *and* call it ourselves on every Enable / Disable so the
-// runtime sees the meta-tool surface change too.
+// the set of available tools changes: on every Enable / Disable (the
+// meta-tool surface) and whenever an activated MCP toolset reports a
+// change, which every inner toolset routes through notifyToolsChanged.
 func (t *Toolset) SetToolsChangedHandler(handler func()) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.toolsChangedHandler = handler
-	enabled := t.snapshotEnabled()
+}
+
+// SubscribeToolsChanged adds a handler for the same changes as
+// SetToolsChangedHandler without displacing other runtimes' handlers.
+func (t *Toolset) SubscribeToolsChanged(handler func()) func() {
+	return t.toolsChangedSubs.Subscribe(handler)
+}
+
+// notifyToolsChanged fans a tool-surface change out to the legacy handler
+// and every subscriber. Called outside t.mu so handlers may re-enter.
+func (t *Toolset) notifyToolsChanged() {
+	t.mu.Lock()
+	handler := t.toolsChangedHandler
 	t.mu.Unlock()
-	for _, ts := range enabled {
-		if n, ok := tools.As[tools.ChangeNotifier](ts); ok {
-			n.SetToolsChangedHandler(handler)
-		}
+	if handler != nil {
+		handler()
 	}
+	t.toolsChangedSubs.Notify()
 }
 
 // snapshotEnabled returns the currently enabled toolsets as a fresh slice.
@@ -701,7 +715,7 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 		)), nil
 	}
 
-	var notify func()
+	var notify bool
 	if !alreadyEnabled {
 		// Create the MCP toolset. The nil headers and nil
 		// *latest.RemoteOAuthConfig are intentional: every catalog server
@@ -710,7 +724,7 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 		// default callback. If a future entry needs custom scopes / a fixed
 		// client_id / a non-default callback, extend Auth in servers.go and
 		// plumb the resulting *RemoteOAuthConfig through here.
-		mcpToolset := mcp.NewRemoteToolset(id, server.URL, server.Transport, nil, nil)
+		mcpToolset := mcp.NewRemoteToolsetWithAllowPrivateIPs(id, server.URL, server.Transport, nil, nil, server.allowPrivateIPs)
 
 		// Re-attach the captured handlers so OAuth flows behave
 		// identically to a YAML-declared mcp.remote toolset. Apply
@@ -722,9 +736,7 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 		if t.oauthSuccessHandler != nil {
 			mcpToolset.SetOAuthSuccessHandler(t.oauthSuccessHandler)
 		}
-		if t.toolsChangedHandler != nil {
-			mcpToolset.SetToolsChangedHandler(t.toolsChangedHandler)
-		}
+		mcpToolset.SetToolsChangedHandler(t.notifyToolsChanged)
 		if t.managedOAuthSet {
 			mcpToolset.SetManagedOAuth(t.managedOAuth)
 		}
@@ -734,7 +746,7 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 
 		wrapped = tools.NewStartable(mcpToolset)
 		t.enabled[id] = wrapped
-		notify = t.toolsChangedHandler
+		notify = true
 	}
 	t.mu.Unlock()
 
@@ -744,8 +756,8 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 	// pending server while the (potentially slow) OAuth dialog is open.
 	// Only the first-time enable notifies; a retry on an existing entry
 	// has no surface change to report.
-	if notify != nil {
-		notify()
+	if notify {
+		t.notifyToolsChanged()
 	}
 
 	// Drive the inner toolset's connect (and any OAuth handshake)
@@ -873,7 +885,6 @@ func (t *Toolset) disableAfterDecline(ctx context.Context, id string, wrapped *t
 		// session in a partially-initialised state.
 		stillEnabled = false
 	}
-	notify := t.toolsChangedHandler
 	t.mu.Unlock()
 
 	if err := wrapped.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -883,8 +894,8 @@ func (t *Toolset) disableAfterDecline(ctx context.Context, id string, wrapped *t
 
 	// Only notify when WE removed the entry; if a concurrent caller
 	// already mutated t.enabled, they will have notified themselves.
-	if stillEnabled && notify != nil {
-		notify()
+	if stillEnabled {
+		t.notifyToolsChanged()
 	}
 }
 
@@ -898,7 +909,6 @@ func (t *Toolset) handleDisable(ctx context.Context, args DisableArgs) (*tools.T
 		return tools.ResultError(fmt.Sprintf("server %q is not enabled", id)), nil
 	}
 	delete(t.enabled, id)
-	notify := t.toolsChangedHandler
 	t.mu.Unlock()
 
 	if err := wrapped.Stop(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -907,9 +917,7 @@ func (t *Toolset) handleDisable(ctx context.Context, args DisableArgs) (*tools.T
 		slog.WarnContext(ctx, "Failed to stop remote MCP toolset on disable", "id", id, "error", err)
 	}
 
-	if notify != nil {
-		notify()
-	}
+	t.notifyToolsChanged()
 
 	return tools.ResultSuccess(fmt.Sprintf("disabled %q", id)), nil
 }
@@ -975,7 +983,6 @@ func (t *Toolset) handleResetAuth(ctx context.Context, args ResetAuthArgs) (*too
 	if wasEnabled {
 		delete(t.enabled, id)
 	}
-	notify := t.toolsChangedHandler
 	t.mu.Unlock()
 
 	if wasEnabled {
@@ -988,8 +995,8 @@ func (t *Toolset) handleResetAuth(ctx context.Context, args ResetAuthArgs) (*too
 	// active set), so the tools surface has changed regardless of whether
 	// the keyring removal below succeeds. Notify *before* the keyring call
 	// so a transient keyring failure can't desync the runtime's tool list.
-	if wasEnabled && notify != nil {
-		notify()
+	if wasEnabled {
+		t.notifyToolsChanged()
 	}
 
 	if err := t.removeOAuthToken(server.URL); err != nil {

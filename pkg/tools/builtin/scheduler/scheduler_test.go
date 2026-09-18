@@ -14,10 +14,13 @@ import (
 )
 
 type fakeRuntime struct {
+	tools.NopRuntime
+
 	mu        sync.Mutex
 	recalls   []string
 	recall    bool
 	recallErr error
+	recallFn  func() error
 }
 
 func (f *fakeRuntime) EmitOutput(context.Context, string) {}
@@ -26,6 +29,9 @@ func (f *fakeRuntime) Recall(_ context.Context, msg string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.recalls = append(f.recalls, msg)
+	if f.recallFn != nil {
+		return f.recallFn()
+	}
 	return f.recallErr
 }
 
@@ -120,6 +126,77 @@ func TestFireDueCallsRecall(t *testing.T) {
 	require.Contains(t, msgs[0], "run backup")
 	require.Contains(t, msgs[0], "bkp")
 	require.Len(t, ts.store.list(), 1)
+}
+
+func TestFireDueRetriesOneShotAfterRecallError(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestToolSet()
+	attempts := 0
+	rt := &fakeRuntime{
+		recall: true,
+		recallFn: func() error {
+			attempts++
+			if attempts == 1 {
+				return errors.New("host went away")
+			}
+			return nil
+		},
+	}
+
+	_, err := ts.createSchedule(t.Context(),
+		CreateScheduleArgs{Prompt: "do once", When: "in:10m"}, rt)
+	require.NoError(t, err)
+
+	dueAt := testNow.Add(10 * time.Minute)
+	ts.fireDue(t.Context(), dueAt)
+	require.Len(t, rt.messages(), 1)
+	require.Len(t, ts.store.list(), 1)
+
+	ts.fireDue(t.Context(), dueAt)
+	require.Len(t, rt.messages(), 1)
+
+	ts.fireDue(t.Context(), dueAt.Add(recallRetryDelay))
+	require.Len(t, rt.messages(), 2)
+	require.Empty(t, ts.store.list())
+}
+
+func TestCancelScheduleDuringRecallDoesNotRetry(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestToolSet()
+	started := make(chan struct{})
+	proceed := make(chan struct{})
+	rt := &fakeRuntime{
+		recall: true,
+		recallFn: func() error {
+			close(started)
+			<-proceed
+			return errors.New("host went away")
+		},
+	}
+
+	_, err := ts.createSchedule(t.Context(),
+		CreateScheduleArgs{Prompt: "do once", When: "in:10m"}, rt)
+	require.NoError(t, err)
+	id := ts.store.list()[0].ID
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ts.fireDue(t.Context(), testNow.Add(10*time.Minute))
+	}()
+	<-started
+
+	res, err := ts.cancelSchedule(t.Context(), CancelScheduleArgs{ID: id})
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	close(proceed)
+	<-done
+
+	require.Empty(t, ts.store.list())
+	ts.fireDue(t.Context(), testNow.Add(10*time.Minute+recallRetryDelay))
+	require.Len(t, rt.messages(), 1)
 }
 
 func TestFireDueContinuesAfterRecallError(t *testing.T) {

@@ -3,10 +3,15 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	"strconv"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/modelinfo"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -71,22 +76,73 @@ func WithMessageTransform(name string, fn MessageTransform) Opt {
 // transforms read it via [hooks.Input.ModelID]. Calling
 // agent.Model() from a transform would re-randomize the alloy pick
 // and miss the per-tool override.
+//
+// caps is the model's already-resolved attachment capability set
+// (explicit `capabilities:` config override applied — see
+// [modelinfo.ResolveCapsFromModel]); transforms read it via
+// [hooks.Input.ModelCapabilities]. nil means the caller has no
+// capability information (e.g. the coding-harness path) and
+// capability-gated transforms must not act.
+func (r *LocalRuntime) prepareMessagesForModel(
+	ctx context.Context,
+	sess *session.Session,
+	a *agent.Agent,
+	model provider.Provider,
+	msgs []chat.Message,
+) []chat.Message {
+	modelID := model.ID()
+	catalogModel, err := r.modelsStore.GetModel(ctx, modelID)
+	if err != nil {
+		slog.DebugContext(ctx, "Failed to resolve model capabilities for message transforms", "model", modelID.String(), "error", err)
+	}
+	cfg := model.BaseConfig()
+	caps := modelinfo.ResolveCapsFromModel(catalogModel, cfg.CapsOverride())
+	if catalogModel == nil && cfg.CapsOverride() == nil {
+		caps = providerFallbackCaps(ctx, cfg.ModelConfig, modelID)
+	}
+	return r.applyBeforeLLMCallTransforms(ctx, sess, a, modelID.String(), &caps, msgs)
+}
+
+func providerFallbackCaps(ctx context.Context, cfg latest.ModelConfig, id modelsdev.ID) modelinfo.ModelCapabilities {
+	if cfg.Provider == "dmr" {
+		return modelinfo.CapsWith(providerOptBool(cfg.ProviderOpts, "supports_images"), providerOptBool(cfg.ProviderOpts, "supports_pdf"), false, false)
+	}
+	if cfg.Provider == "anthropic" || modelinfo.IsClaude(ctx, nil, id) {
+		return modelinfo.CapsWith(true, true, false, false)
+	}
+	return modelinfo.ModelCapabilities{}
+}
+
+func providerOptBool(opts map[string]any, key string) bool {
+	switch value := opts[key].(type) {
+	case bool:
+		return value
+	case string:
+		parsed, err := strconv.ParseBool(value)
+		return err == nil && parsed
+	default:
+		return false
+	}
+}
+
 func (r *LocalRuntime) applyBeforeLLMCallTransforms(
 	ctx context.Context,
 	sess *session.Session,
 	a *agent.Agent,
 	modelID string,
+	caps *modelinfo.ModelCapabilities,
 	msgs []chat.Message,
 ) []chat.Message {
 	if len(r.transforms) == 0 {
 		return msgs
 	}
 	in := &hooks.Input{
-		SessionID:     sess.ID,
-		AgentName:     a.Name(),
-		ModelID:       modelID,
-		HookEventName: hooks.EventBeforeLLMCall,
-		Cwd:           r.workingDir,
+		SessionID:         sess.ID,
+		AgentName:         a.Name(),
+		ModelID:           modelID,
+		ModelCapabilities: caps,
+		HookEventName:     hooks.EventBeforeLLMCall,
+		Cwd:               r.workingDir,
 	}
 	for _, t := range r.transforms {
 		out, err := t.fn(ctx, in, msgs)

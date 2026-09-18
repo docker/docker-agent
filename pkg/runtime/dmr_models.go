@@ -3,11 +3,14 @@ package runtime
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
@@ -24,16 +27,16 @@ const dmrModelsTTL = 1 * time.Minute
 type dmrModelsCache struct {
 	mu        sync.Mutex
 	sf        singleflight.Group
-	ids       []string
+	models    []dmrmodels.Model
 	err       error
 	fetchedAt time.Time
 }
 
-// listDMRModels returns the model IDs available to Docker Model Runner, using
+// listDMRModels returns the models available to Docker Model Runner, using
 // the runtime's cache when fresh. It returns (nil, nil) when no lister is
 // configured (e.g. runtimes built directly in tests), so DMR discovery is
 // opt-in via NewLocalRuntime.
-func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]string, error) {
+func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]dmrmodels.Model, error) {
 	if r.dmrModelLister == nil {
 		slog.DebugContext(ctx, "DMR model discovery skipped; no lister configured")
 		return nil, nil
@@ -46,11 +49,11 @@ func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]string, error) {
 
 	c := &r.dmrModels
 
-	readFresh := func() (ids []string, ok bool, err error) {
+	readFresh := func() (ids []dmrmodels.Model, ok bool, err error) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if !c.fetchedAt.IsZero() && now().Sub(c.fetchedAt) < dmrModelsTTL {
-			return c.ids, true, c.err
+			return c.models, true, c.err
 		}
 		return nil, false, nil
 	}
@@ -75,14 +78,14 @@ func (r *LocalRuntime) listDMRModels(ctx context.Context) ([]string, error) {
 		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		c.ids, c.err, c.fetchedAt = ids, err, now()
+		c.models, c.err, c.fetchedAt = ids, err, now()
 		return ids, err
 	})
 	if err != nil {
 		slog.DebugContext(ctx, "DMR model discovery fetch completed", "duration", time.Since(start), "error", err)
 		return nil, err
 	}
-	ids := v.([]string)
+	ids := v.([]dmrmodels.Model)
 	slog.DebugContext(ctx, "DMR model discovery fetch completed", "duration", time.Since(start), "models", len(ids))
 	return ids, nil
 }
@@ -111,7 +114,8 @@ func (r *LocalRuntime) buildDMRChoices(ctx context.Context) []ModelChoice {
 	}
 
 	choices := make([]ModelChoice, 0, len(ids))
-	for _, id := range ids {
+	for _, model := range ids {
+		id := model.ID
 		// DMR model IDs (e.g. "ai/qwen3:latest") contain slashes; the ref is
 		// "dmr/<id>" and ParseModelRef cuts on the first slash, so it
 		// round-trips back to provider="dmr", model="<id>".
@@ -155,9 +159,57 @@ func (r *LocalRuntime) buildDMRChoices(ctx context.Context) []ModelChoice {
 			}
 			applyCatalogMetadata(&choice, meta)
 		}
+		applyDMRMetadata(&choice, model.Metadata)
 		choices = append(choices, choice)
 	}
 
 	slog.DebugContext(ctx, "Built DMR model choices", "count", len(choices))
 	return choices
+}
+
+func applyDMRMetadata(choice *ModelChoice, metadata *dmrmodels.Metadata) {
+	if metadata == nil {
+		return
+	}
+	if metadata.ContextWindow > 0 {
+		choice.ContextLimit = int(metadata.ContextWindow)
+	}
+	choice.Architecture = metadata.Architecture
+	choice.Parameters = metadata.Parameters
+	choice.Quantization = metadata.Quantization
+	choice.Size = metadata.Size
+}
+
+// Configured models at explicit endpoints must not inherit another runner's metadata.
+func (r *LocalRuntime) populateDMRChoices(ctx context.Context, choices []ModelChoice) {
+	if r.modelSwitcherCfg.ModelsGateway != "" {
+		return
+	}
+	models, err := r.listDMRModels(ctx)
+	if err != nil {
+		return
+	}
+	metadata := make(map[string]*dmrmodels.Metadata, len(models))
+	for _, model := range models {
+		metadata[model.ID] = model.Metadata
+	}
+	for i := range choices {
+		choice := &choices[i]
+		cfg := r.modelSwitcherCfg.Models[choice.Ref]
+		if cfg.Provider != "dmr" || cfg.BaseURL != "" {
+			continue
+		}
+		meta := metadata[cfg.Model]
+		if meta == nil {
+			meta = metadata[cfg.Model+":latest"]
+		}
+		applyDMRMetadata(choice, meta)
+		if n := latest.ContextSizeFromProviderOpts(cfg.ProviderOpts); n > 0 {
+			if n > math.MaxInt {
+				choice.ContextLimit = math.MaxInt
+			} else {
+				choice.ContextLimit = int(n)
+			}
+		}
+	}
 }

@@ -4,7 +4,6 @@ package a2a
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -186,17 +185,22 @@ func (t *Toolset) Start(ctx context.Context) error {
 	// `allow_private_ips: true` opt-in disables this for legitimate
 	// internal-service use.
 	client := httpclient.ClientForAllowPrivateIPs(t.timeout, t.allowPrivateIPs)
-	resolver := agentcard.NewResolver(client)
-	card, err := resolver.Resolve(ctx, t.url)
-	if err != nil {
-		return fmt.Errorf("failed to fetch A2A agent card: %w", err)
-	}
-
-	httpClient := client
-	base := httpClient.Transport
+	base := client.Transport
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	// Recorder sits only in front of the card-resolution GET(s); it never
+	// reaches the JSON-RPC transport chain built from base below.
+	rec := &retryAfterRecorder{base: base}
+	client.Transport = rec
+
+	resolver := agentcard.NewResolver(client)
+	card, err := resolver.Resolve(ctx, t.url)
+	if err != nil {
+		return enrichCardError(err, rec)
+	}
+
+	httpClient := client
 
 	endpointOrigin := t.url
 	if card.URL != "" {
@@ -237,7 +241,7 @@ func (t *Toolset) createHandler() tools.ToolHandler {
 		var args struct {
 			Message string `json:"message"`
 		}
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+		if err := tools.UnmarshalToolArguments(ctx, toolCall, &args); err != nil {
 			return nil, fmt.Errorf("failed to parse arguments: %w", err)
 		}
 

@@ -13,9 +13,8 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 )
 
-// Note: httptest servers listen on 127.0.0.1, which IsTrustedDockerURL
-// treats as trusted, so every test against them exercises the Docker
-// token auth path.
+// httptest servers use loopback URLs, so they exercise the no-Docker-token
+// path unless a test supplies a Docker hostname with a rewriting transport.
 
 func tokenEnv() environment.Provider {
 	return environment.NewMapEnvProvider(map[string]string{
@@ -107,15 +106,20 @@ func TestListModels_InvalidJSON(t *testing.T) {
 func TestListModels_MissingDockerToken(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var gotAuth string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4o"}]}`))
 	}))
 	defer server.Close()
 
-	_, err := ListModels(t.Context(), server.URL, environment.NewMapEnvProvider(nil))
+	client := server.Client()
+	client.Transport = hostRewriteTransport{host: server.Listener.Addr().String(), base: client.Transport}
+	_, err := listModelsWith(t.Context(), "https://models.docker.com", environment.NewMapEnvProvider(nil), client)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Docker Desktop")
+	assert.Empty(t, gotAuth)
 }
 
 func TestListModels_UnreachableGateway(t *testing.T) {
@@ -137,14 +141,22 @@ func TestListModels_InvalidURL(t *testing.T) {
 // hostRewriteTransport redirects every request to a local test server,
 // letting tests exercise non-trusted hostnames without touching the network.
 type hostRewriteTransport struct {
-	host string
+	host   string
+	base   http.RoundTripper
+	scheme string
 }
 
 func (t hostRewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r2 := req.Clone(req.Context())
-	r2.URL.Scheme = "http"
+	if t.scheme != "" {
+		r2.URL.Scheme = t.scheme
+	}
 	r2.URL.Host = t.host
-	return http.DefaultTransport.RoundTrip(r2)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(r2)
 }
 
 func TestListModels_GenericGatewayNeedsNoDockerToken(t *testing.T) {
@@ -159,7 +171,7 @@ func TestListModels_GenericGatewayNeedsNoDockerToken(t *testing.T) {
 
 	// models.example.com is not a trusted Docker URL, so discovery must
 	// neither require the Docker token nor send any Authorization header.
-	client := &http.Client{Transport: hostRewriteTransport{host: server.Listener.Addr().String()}}
+	client := &http.Client{Transport: hostRewriteTransport{host: server.Listener.Addr().String(), scheme: "http"}}
 	ids, err := listModelsWith(t.Context(), "https://models.example.com", environment.NewMapEnvProvider(nil), client)
 
 	require.NoError(t, err)

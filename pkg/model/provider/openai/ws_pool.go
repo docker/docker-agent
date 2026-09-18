@@ -75,7 +75,7 @@ func (p *wsPool) Stream(
 	// Inject previous_response_id for server-side context caching when the
 	// caller hasn't already set one and we have a response from an earlier
 	// exchange on this pool.
-	if p.lastResponseID != "" && !params.PreviousResponseID.Valid() {
+	if p.lastResponseID != "" && param.IsOmitted(params.PreviousResponseID) {
 		params.PreviousResponseID = param.NewOpt(p.lastResponseID)
 	}
 

@@ -19,7 +19,11 @@ var errIndexingAborted = errors.New("indexing aborted due to non-retryable model
 // call made during indexing. Permanent failures are wrapped with
 // errIndexingAborted so callers can abort the run; transient failures (5xx,
 // timeouts) and context cancellation are returned unchanged so callers can
-// skip the current file and continue.
+// skip the current file and continue. Per-file skipping is still correct for
+// an isolated transient failure, but if every file in a run fails the same
+// way, the caller uses isGateArmingTransientError to detect that and
+// propagate instead of silently returning success (see vector_store.go's
+// Initialize).
 func classifyModelCallError(err error) error {
 	if err == nil {
 		return nil
@@ -39,4 +43,17 @@ func classifyModelCallError(err error) error {
 // isIndexingAborted reports whether err carries the errIndexingAborted marker.
 func isIndexingAborted(err error) bool {
 	return errors.Is(err, errIndexingAborted)
+}
+
+// isGateArmingTransientError reports whether a transient (non-aborted) model
+// error carries an HTTP status that StartableToolSet's backoff gate paces on
+// (429, 408, or a fixed 5xx set — see startBackoffRetryable). Mirrors that
+// function's own *modelerrors.StatusError pre-filter so plain-text errors
+// (port numbers, chunk counters) can never arm the gate here either.
+func isGateArmingTransientError(err error) bool {
+	var se *modelerrors.StatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	return modelerrors.RetryableHTTPStatus(se)
 }

@@ -7,7 +7,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
+
+// ShellBaseName returns the lowercase shell name without extension. Splits on
+// both separators so results are stable when the path came from another host OS.
+func ShellBaseName(shellPath string) string {
+	base := shellPath
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	return strings.ToLower(strings.TrimSuffix(base, filepath.Ext(base)))
+}
 
 // WindowsCmdExe returns the absolute path to cmd.exe on Windows using the
 // SystemRoot environment variable (e.g. C:\Windows\System32\cmd.exe).

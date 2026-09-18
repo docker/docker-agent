@@ -22,6 +22,21 @@ func StReasoning() lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(styles.TextMutedGray).Italic(true)
 }
 
+func StUserBox(width int) lipgloss.Style {
+	if width < 1 {
+		width = 1
+	}
+	horizontalPadding := 1
+	if width < 3 {
+		horizontalPadding = 0
+	}
+	return lipgloss.NewStyle().
+		Foreground(styles.AgentBadgeFg).
+		Background(styles.MobyBlue).
+		Padding(1, horizontalPadding).
+		Width(width)
+}
+
 func StToolBox(width int) lipgloss.Style {
 	if width < 1 {
 		width = 1

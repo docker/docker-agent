@@ -474,7 +474,7 @@ type oauthTransport struct {
 	// onOAuthSuccess notifies the runtime that a token was obtained or
 	// silently refreshed; production wiring points it at
 	// sessionClient.oauthSuccess. May be nil (tests); then it's a no-op.
-	onOAuthSuccess            func()
+	onOAuthSuccess            func(context.Context)
 	tokenStore                OAuthTokenStore
 	baseURL                   string
 	managed                   bool
@@ -500,6 +500,12 @@ type oauthTransport struct {
 	// swallows in favor of a bare http.StatusText.
 	lastErrStatus int
 	lastErrBody   []byte
+	// lastErrRetryAfter captures the raw Retry-After header value (if any) of
+	// the most recent non-2xx response, so enrichConnectError can forward it
+	// to modelerrors.WrapHTTPError and have the StartableToolSet backoff gate
+	// honor a server-supplied retry hint instead of falling back to the
+	// generic computed delay.
+	lastErrRetryAfter string
 	// lastAuthRequired records when the transport short-circuited an
 	// interactive OAuth flow because the request context disallowed
 	// prompts (see WithoutInteractivePrompts). The MCP SDK wraps transport
@@ -534,9 +540,9 @@ func (t *oauthTransport) elicit(ctx context.Context, params *mcpsdk.ElicitParams
 }
 
 // notifyOAuthSuccess invokes the injected OAuth-success callback, if any.
-func (t *oauthTransport) notifyOAuthSuccess() {
+func (t *oauthTransport) notifyOAuthSuccess(ctx context.Context) {
 	if t.onOAuthSuccess != nil {
-		t.onOAuthSuccess()
+		t.onOAuthSuccess(ctx)
 	}
 }
 
@@ -595,7 +601,7 @@ func (t *oauthTransport) handleServerRejectedToken(ctx context.Context, prev *OA
 		_, err := t.refreshStoredToken(ctx, prev)
 		if err == nil {
 			slog.DebugContext(ctx, "Silently refreshed server-rejected token", "url", sanitizeURLForLog(t.baseURL))
-			t.notifyOAuthSuccess()
+			t.notifyOAuthSuccess(ctx)
 			return nil
 		}
 		slog.DebugContext(ctx, "Refresh failed after server-side token rejection; falling back to interactive auth",
@@ -874,6 +880,7 @@ func (t *oauthTransport) logErrorResponse(req *http.Request, resp *http.Response
 	t.mu.Lock()
 	t.lastErrStatus = resp.StatusCode
 	t.lastErrBody = body
+	t.lastErrRetryAfter = resp.Header.Get("Retry-After")
 	t.mu.Unlock()
 
 	slog.Warn("Authenticated MCP request was rejected by the server",
@@ -885,23 +892,33 @@ func (t *oauthTransport) logErrorResponse(req *http.Request, resp *http.Response
 	)
 }
 
-// lastServerError returns the status code and a short, human-readable
-// explanation drawn from the most recent non-2xx response seen by this
-// transport. The string is empty when no such response has been captured
-// or when the body yielded no useful text.
+// lastServerErrorSnapshot returns the status code, a short human-readable
+// explanation, and the raw Retry-After header value, all captured together
+// under a single lock from the most recent non-2xx response seen by this
+// transport. status is 0 when no such response has been captured; msg and
+// retryAfter are "" when the body yielded no useful text / no header was
+// present, respectively.
+//
+// The three fields are read under one lock (rather than via separate
+// accessors) so a caller building a combined error never pairs a status
+// captured from one response with a Retry-After header captured from a
+// different, concurrent one: this transport's RoundTrip can be invoked
+// concurrently for a single logical connect attempt (e.g. a standalone SSE
+// probe alongside the initialize call).
 //
 // This is how the transport surfaces provider-specific errors (e.g. Slack's
 // "App is not enabled for Slack MCP server access") that would otherwise
 // be hidden behind the MCP SDK's generic http.StatusText-derived messages.
-func (t *oauthTransport) lastServerError() (int, string) {
+func (t *oauthTransport) lastServerErrorSnapshot() (status int, msg, retryAfter string) {
 	t.mu.Lock()
-	status := t.lastErrStatus
+	status = t.lastErrStatus
 	body := t.lastErrBody
+	retryAfter = t.lastErrRetryAfter
 	t.mu.Unlock()
 	if status == 0 {
-		return 0, ""
+		return 0, "", ""
 	}
-	return status, extractServerMessage(body)
+	return status, extractServerMessage(body), retryAfter
 }
 
 // authorizationRequired reports whether the transport short-circuited an
@@ -1355,7 +1372,7 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 	}
 
 	// Notify the runtime that the OAuth flow was successful
-	t.notifyOAuthSuccess()
+	t.notifyOAuthSuccess(ctx)
 
 	slog.DebugContext(ctx, "OAuth flow completed successfully")
 	return nil
@@ -1742,7 +1759,7 @@ func (t *oauthTransport) handleUnmanagedOAuthFlow(ctx context.Context, authServe
 	}
 
 	// Notify the runtime that the OAuth flow was successful
-	t.notifyOAuthSuccess()
+	t.notifyOAuthSuccess(ctx)
 
 	slog.DebugContext(ctx, "Unmanaged OAuth flow completed successfully")
 	return nil

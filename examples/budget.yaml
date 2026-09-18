@@ -39,7 +39,7 @@ providers:
 models:
   budget-model:
     provider: openrouter
-    model: openai/gpt-4o-mini
+    model: openai/gpt-4.1-mini
     # A custom base_url endpoint is not in the models.dev catalogue, so the
     # runtime cannot price it automatically — and an unpriced model does not
     # count against a max_cost limit. Declaring cost here (USD per 1M

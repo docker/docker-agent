@@ -22,12 +22,13 @@ import (
 // recursively, scalars and sequences replace the previous value, and an
 // explicit null deletes the key. As extensions, a mapping key ending in `+`
 // appends its sequence to the existing one instead of replacing it (e.g.
-// `toolsets+:` adds entries to an agent's toolsets), and a key ending in `-`
-// removes entries: from a mapping by key name, from a sequence by scalar
-// equality or mapping subset-match. The `+`/`-` suffixes are reserved inside
-// flavor patches; keys ending in them cannot be set literally. The `flavors`
-// section itself is left in place; the latest schema carries it so parsing
-// still succeeds.
+// `toolsets+:` adds entries to an agent's toolsets; a scalar base such as a
+// string `instruction` is promoted to a one-element sequence first), and a key
+// ending in `-` removes entries: from a mapping by key name, from a sequence
+// by scalar equality or mapping subset-match. The `+`/`-` suffixes are
+// reserved inside flavor patches; keys ending in them cannot be set literally.
+// The `flavors` section itself is left in place; the latest schema carries it
+// so parsing still succeeds.
 func applyFlavors(ctx context.Context, data []byte, enabled []string) ([]byte, error) {
 	if len(enabled) == 0 {
 		return data, nil
@@ -140,7 +141,9 @@ func mergePatch(base, patch any) (any, error) {
 
 // appendPatch handles a `key+` patch entry: it appends the patch sequence to
 // the base sequence under key, creating the sequence when key is absent or
-// null. Both sides must be sequences.
+// null. A scalar base is promoted to a one-element sequence first, so
+// `instruction+:` can extend a plain-string instruction (the agent decoder
+// joins a list of strings back into one). The patch value must be a sequence.
 func appendPatch(out yaml.MapSlice, key string, value any) (yaml.MapSlice, error) {
 	items, ok := value.([]any)
 	if !ok {
@@ -152,9 +155,15 @@ func appendPatch(out yaml.MapSlice, key string, value any) (yaml.MapSlice, error
 	if idx < 0 {
 		return append(out, yaml.MapItem{Key: key, Value: items}), nil
 	}
-	existing, ok := out[idx].Value.([]any)
-	if !ok && out[idx].Value != nil {
-		return nil, fmt.Errorf("append key %q: existing value for %q is not a sequence", key+"+", key)
+	var existing []any
+	switch base := out[idx].Value.(type) {
+	case nil:
+	case []any:
+		existing = base
+	case yaml.MapSlice:
+		return nil, fmt.Errorf("append key %q: existing value for %q is a mapping, not a sequence", key+"+", key)
+	default:
+		existing = []any{base}
 	}
 	out[idx].Value = append(slices.Clone(existing), items...)
 	return out, nil

@@ -3,6 +3,7 @@ package leantui
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -11,7 +12,10 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/gitbranch"
+	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
+	"github.com/docker/docker-agent/pkg/tui/components/completion"
+	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
@@ -20,6 +24,7 @@ type Config struct {
 	App        *app.App
 	WorkingDir string
 	Cleanup    func()
+	History    *history.History
 
 	FirstMessage           *string
 	FirstMessageAttachment string
@@ -50,8 +55,21 @@ func Run(ctx context.Context, cfg Config) error {
 	loopCtx, loopCancel := context.WithCancel(ctx)
 	defer loopCancel()
 
+	if cfg.History == nil {
+		cfg.History, err = history.New("")
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to initialize command history", "error", err)
+		}
+	}
+
 	m := newModel(term, cfg)
+	branchWatcher, err := gitbranch.Watch(loopCtx, cfg.WorkingDir)
+	if err != nil {
+		return err
+	}
+	m.status.Branch = branchWatcher.Current()
 	m.commitWelcome()
+	m.loadInitialSessionTranscript()
 	m.refreshCommands(loopCtx)
 
 	keys := make(chan ui.Key, 64)
@@ -59,6 +77,17 @@ func Run(ctx context.Context, cfg Config) error {
 	resizes := make(chan [2]int, 4)
 	done := make(chan struct{})
 	defer close(done)
+
+	fileCompletion := completions.NewFileCompletionAt(loopCtx, cfg.WorkingDir)
+	if loader, ok := fileCompletion.(completions.AsyncLoader); ok {
+		go func() {
+			items := <-loader.LoadItemsAsync(loopCtx)
+			select {
+			case events <- fileCompletionsLoaded(items):
+			case <-done:
+			}
+		}()
+	}
 
 	go readKeys(term.Reader(), keys, done)
 	go func() {
@@ -91,11 +120,16 @@ func Run(ctx context.Context, cfg Config) error {
 		m.sendFirstMessage(loopCtx, first, cfg.FirstMessageAttachment)
 	}
 	for _, msg := range cfg.QueuedMessages {
+		if command, ok := strings.CutPrefix(strings.TrimSpace(msg), "!"); ok {
+			m.runBangCommand(loopCtx, command)
+			continue
+		}
 		m.enqueueFollowUp(msg, msg)
 	}
 
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	animationTicker := time.NewTicker(100 * time.Millisecond)
+	defer animationTicker.Stop()
+	branchChanges := branchWatcher.Changes()
 
 	m.render()
 	for !m.quitting {
@@ -112,11 +146,18 @@ func Run(ctx context.Context, cfg Config) error {
 			m.width, m.height = sz[0], sz[1]
 			m.r.SetSize(sz[0], sz[1])
 			m.render()
-		case <-ticker.C:
+		case <-animationTicker.C:
 			if m.busy {
 				m.spinnerFrame++
 				m.render()
 			}
+		case branch, ok := <-branchChanges:
+			if !ok {
+				branchChanges = nil
+				continue
+			}
+			m.status.Branch = branch
+			m.render()
 		}
 	}
 
@@ -126,6 +167,8 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	return nil
 }
+
+type fileCompletionsLoaded []completion.Item
 
 func readKeys(r io.Reader, keys chan<- ui.Key, done <-chan struct{}) {
 	p := &ui.InputParser{}
@@ -159,12 +202,13 @@ type model struct {
 	sessionState *service.SessionState
 	usage        *ui.UsageTracker
 
-	busy         bool
-	spinnerFrame int
-	runCancel    context.CancelFunc
-	queue        []ui.PendingUserMessage
-	pendingUsers []ui.PendingUserMessage
-	ignoredUsers []string
+	busy                bool
+	spinnerFrame        int
+	runCancel           context.CancelFunc
+	cancelMarkerPending bool
+	queue               []ui.PendingUserMessage
+	pendingUsers        []ui.PendingUserMessage
+	ignoredUsers        []string
 
 	quitting         bool
 	appName          string
@@ -193,14 +237,16 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 
 	renderImages := cfg.RenderImages == nil || *cfg.RenderImages
 
+	branch := gitbranch.Current(cfg.WorkingDir)
+
 	return &model{
 		app:              cfg.App,
 		term:             term,
 		r:                ui.NewRenderer(term.Writer(), w, h),
 		width:            w,
 		height:           h,
-		screen:           ui.NewScreen(cfg.WorkingDir, gitbranch.Current(cfg.WorkingDir), "Type a message, / for commands"),
-		status:           ui.StatusModel{WorkingDir: cfg.WorkingDir, Branch: gitbranch.Current(cfg.WorkingDir)},
+		screen:           ui.NewScreen(cfg.WorkingDir, branch, "Type a message, / for commands", cfg.History),
+		status:           ui.StatusModel{WorkingDir: cfg.WorkingDir, Branch: branch},
 		sessionState:     sessionState,
 		usage:            ui.NewUsageTracker(),
 		appName:          appName,

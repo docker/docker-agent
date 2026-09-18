@@ -781,3 +781,18 @@ func scalarString(v any) string {
 		return fmt.Sprint(v)
 	}
 }
+
+// RetryableHTTPStatus reports whether err contains an HTTP status that warrants
+// backoff (429 rate-limit, 408 request-timeout, or a 5xx server error). It
+// checks for a *StatusError in the chain first; if none is found it falls back
+// to matching \b([45]\d{2})\b in the error message, which can produce false
+// positives for port numbers or similar numeric patterns. Callers that need
+// strict StatusError-only classification should pre-filter with errors.As.
+// No context-error handling is performed.
+func RetryableHTTPStatus(err error) bool {
+	code := extractHTTPStatusCode(err)
+	if code == 0 {
+		return false
+	}
+	return code == http.StatusTooManyRequests || isRetryableStatusCode(code)
+}

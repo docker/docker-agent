@@ -1,5 +1,10 @@
 package runtime
 
+import (
+	"log/slog"
+	"time"
+)
+
 // EventSink is the write side of the runtime's event stream. Methods
 // that produce events accept an EventSink instead of a raw chan Event,
 // decoupling event producers from the channel implementation.
@@ -64,6 +69,41 @@ func (s nonBlockingChannelSink) Emit(e Event) {
 	select {
 	case s.ch <- e:
 	default:
+	}
+}
+
+// boundedChannelSink wraps an event channel with a bounded-blocking send:
+// it waits up to wait for the consumer to accept the event, then drops it.
+// Use this for turn-boundary events that a live, still-draining consumer
+// must reliably receive, but that must not hang teardown indefinitely when
+// the consumer has genuinely gone away (#3070, #4136). Regular runtime code
+// should use the unbounded blocking [channelSink] instead, so ordinary
+// back-pressure is preserved.
+type boundedChannelSink struct {
+	ch   chan Event
+	wait time.Duration
+}
+
+// bounded returns a bounded-blocking sink for sink with the given deadline.
+// If sink wraps a channel directly, the result writes to that channel with a
+// timeout; otherwise, sink is returned unchanged because non-channel sinks
+// (notably [EventSinkFunc] used in tests) do not have an underlying buffer
+// that can fill up.
+func bounded(sink EventSink, wait time.Duration) EventSink {
+	if cs, ok := sink.(*channelSink); ok {
+		return boundedChannelSink{ch: cs.ch, wait: wait}
+	}
+	return sink
+}
+
+func (s boundedChannelSink) Emit(e Event) {
+	defer func() { recover() }() //nolint:errcheck // swallow send-on-closed-channel panic
+	t := time.NewTimer(s.wait)
+	defer t.Stop()
+	select {
+	case s.ch <- e:
+	case <-t.C:
+		slog.Warn("dropping event: consumer did not drain within the delivery deadline", "wait", s.wait)
 	}
 }
 

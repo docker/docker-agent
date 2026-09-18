@@ -18,18 +18,16 @@ import (
 
 	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
-	"github.com/docker/docker-agent/pkg/tools/builtin/sessionplan"
 )
 
-// newPlansTestService builds a hermetic plans.Service over temp directories,
-// returning both so tests can plant files directly. No test ever touches the
+// newPlansTestService builds a hermetic plans.Service over a temp directory,
+// returning it so tests can plant files directly. No test ever touches the
 // real user data directory.
-func newPlansTestService(t *testing.T) (svc plans.Service, sharedDir, sessionDir string) {
+func newPlansTestService(t *testing.T) (svc plans.Service, sharedDir string) {
 	t.Helper()
 	sharedDir = t.TempDir()
-	sessionDir = t.TempDir()
-	svc = plans.NewService(plan.NewFilesystemStorage(sharedDir), plans.WithSessionDir(sessionDir))
-	return svc, sharedDir, sessionDir
+	svc = plans.NewService(plan.NewFilesystemStorage(sharedDir))
+	return svc, sharedDir
 }
 
 func executePlansIn(t *testing.T, svc plans.Service, stdin io.Reader, args ...string) (stdout, stderr string, err error) {
@@ -68,13 +66,6 @@ func writePlanContentFile(t *testing.T, content string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "content.md")
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
-	return path
-}
-
-func writeSessionPlanFile(t *testing.T, dir, sessionID, content string) string {
-	t.Helper()
-	path, err := sessionplan.WriteContent(dir, sessionID, content)
-	require.NoError(t, err)
 	return path
 }
 
@@ -145,7 +136,7 @@ func TestPlansCommand_RegisteredOnRoot(t *testing.T) {
 
 func TestPlansList_EmptyJSON(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	stdout, stderr, err := executePlans(t, svc, "list", "--json")
 	require.NoError(t, err)
@@ -162,21 +153,18 @@ func TestPlansList_EmptyJSON(t *testing.T) {
 
 func TestPlansList_HumanShowsMetadataAndSendsWarningsToStderr(t *testing.T) {
 	t.Parallel()
-	svc, sharedDir, sessionDir := newPlansTestService(t)
+	svc, sharedDir := newPlansTestService(t)
 	_, err := svc.Create(t.Context(), plans.CreateRequest{
 		Ref: plans.SharedRef("alpha"), Content: "body", Title: "Alpha plan", Status: "draft",
 	})
 	require.NoError(t, err)
-	writeSessionPlanFile(t, sessionDir, "sess-1", "# session plan")
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDir, "bad.json"), []byte("{nope"), 0o600))
 
-	stdout, stderr, err := executePlans(t, svc, "list", "--session", "sess-1")
+	stdout, stderr, err := executePlans(t, svc, "list")
 	require.NoError(t, err)
 
 	assert.Regexp(t, `SCOPE\s+NAME\s+STATUS\s+VERSION\s+UPDATED\s+TITLE`, stdout)
 	assert.Regexp(t, `shared\s+alpha\s+draft\s+1\s+\S+\s+Alpha plan`, stdout)
-	// Session plans have no version or status: shown as "-".
-	assert.Regexp(t, `session\s+sess-1\s+-\s+-\s+\S+\s+-`, stdout)
 	assert.NotContains(t, stdout, "\x1b[", "human output must be ANSI-free")
 
 	// Human-mode warnings go to stderr, not stdout.
@@ -187,30 +175,22 @@ func TestPlansList_HumanShowsMetadataAndSendsWarningsToStderr(t *testing.T) {
 
 func TestPlansList_JSONMetadataAndWarnings(t *testing.T) {
 	t.Parallel()
-	svc, sharedDir, sessionDir := newPlansTestService(t)
+	svc, sharedDir := newPlansTestService(t)
 	_, err := svc.Create(t.Context(), plans.CreateRequest{
 		Ref: plans.SharedRef("alpha"), Content: "body", Title: "Alpha plan", Author: "alice", Status: "draft",
 	})
 	require.NoError(t, err)
-	writeSessionPlanFile(t, sessionDir, "sess-1", "# session plan")
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDir, "bad.json"), []byte("{nope"), 0o600))
 
-	stdout, stderr, err := executePlans(t, svc, "list", "--session", "sess-1", "--json")
+	stdout, stderr, err := executePlans(t, svc, "list", "--json")
 	require.NoError(t, err)
 	assert.Empty(t, stderr, "JSON mode must not write warnings to stderr")
 
 	var doc plansTestListDocument
 	require.NoError(t, json.Unmarshal([]byte(stdout), &doc))
-	require.Len(t, doc.Plans, 2)
+	require.Len(t, doc.Plans, 1)
 
-	sess := doc.Plans[0]
-	assert.Equal(t, plans.ScopeSession, sess.Scope)
-	assert.Equal(t, "sess-1", sess.Name)
-	assert.Equal(t, "sess-1", sess.SessionID)
-	assert.Nil(t, sess.Version)
-	assert.Empty(t, sess.Content, "list is metadata only")
-
-	shared := doc.Plans[1]
+	shared := doc.Plans[0]
 	assert.Equal(t, plans.ScopeShared, shared.Scope)
 	assert.Equal(t, "alpha", shared.Name)
 	assert.Equal(t, "Alpha plan", shared.Title)
@@ -218,27 +198,17 @@ func TestPlansList_JSONMetadataAndWarnings(t *testing.T) {
 	assert.Equal(t, "draft", shared.Status)
 	require.NotNil(t, shared.Version)
 	assert.Equal(t, 1, *shared.Version)
+	assert.Empty(t, shared.Content, "list is metadata only")
 
 	require.Len(t, doc.Warnings, 1)
 	assert.Contains(t, doc.Warnings[0], "bad")
-}
-
-func TestPlansList_InvalidSessionID(t *testing.T) {
-	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
-
-	stdout, stderr, err := executePlans(t, svc, "list", "--session", "../escape", "--json")
-	requirePlansStatusCode(t, err, 1)
-	assert.Empty(t, stdout)
-	body := decodePlansError(t, stderr)
-	assert.Equal(t, "invalid_argument", body.Code)
 }
 
 // --- Get -----------------------------------------------------------------------
 
 func TestPlansGet_SharedHuman(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	_, err := svc.Create(t.Context(), plans.CreateRequest{
 		Ref: plans.SharedRef("release"), Content: "# release\n\nstep 1\n", Title: "Release", Status: "draft",
 	})
@@ -256,7 +226,7 @@ func TestPlansGet_SharedHuman(t *testing.T) {
 
 func TestPlansGet_SharedJSON(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	_, err := svc.Create(t.Context(), plans.CreateRequest{
 		Ref: plans.SharedRef("release"), Content: "the body", Title: "Release", Author: "alice", Status: "draft",
 	})
@@ -285,63 +255,21 @@ func TestPlansGet_SharedJSON(t *testing.T) {
 	assert.NotContains(t, stdout, `"updatedAt"`)
 }
 
-func TestPlansGet_Session(t *testing.T) {
+func TestPlansGet_RequiresName(t *testing.T) {
 	t.Parallel()
-	svc, _, sessionDir := newPlansTestService(t)
-	path := writeSessionPlanFile(t, sessionDir, "sess-1", "# session plan\n")
+	svc, _ := newPlansTestService(t)
 
-	// --session alone implies session scope; --scope session spells it out.
-	for _, args := range [][]string{
-		{"get", "--session", "sess-1"},
-		{"get", "--scope", "session", "--session", "sess-1"},
-	} {
-		stdout, stderr, err := executePlans(t, svc, args...)
-		require.NoError(t, err, "args %v", args)
-		assert.Equal(t, "# session plan\n", stdout)
-		assert.Contains(t, stderr, `session plan "sess-1"`)
-		assert.Contains(t, stderr, "version: -", "session plans have no version")
-	}
-
-	stdout, _, err := executePlans(t, svc, "get", "--session", "sess-1", "--json")
-	require.NoError(t, err)
-	var doc plansTestPlanDocument
-	require.NoError(t, json.Unmarshal([]byte(stdout), &doc))
-	assert.Equal(t, plans.ScopeSession, doc.Plan.Scope)
-	assert.Equal(t, "sess-1", doc.Plan.SessionID)
-	assert.Equal(t, "# session plan\n", doc.Plan.Content)
-	assert.Equal(t, path, doc.Plan.Path)
-	assert.Nil(t, doc.Plan.Version)
-	assert.Contains(t, stdout, `"session_id"`)
-	assert.NotContains(t, stdout, `"sessionId"`)
-}
-
-func TestPlansGet_RefValidation(t *testing.T) {
-	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
-
-	tests := []struct {
-		args    []string
-		wantMsg string
-	}{
-		{[]string{"get"}, "a plan name is required"},
-		{[]string{"get", "p", "--session", "sess-1"}, "addressed by --session"},
-		{[]string{"get", "--scope", "session"}, "requires --session"},
-		{[]string{"get", "--scope", "shared", "--session", "sess-1"}, "--session selects a session plan"},
-		{[]string{"get", "p", "--scope", "bogus"}, "invalid --scope"},
-	}
-	for _, tt := range tests {
-		stdout, stderr, err := executePlans(t, svc, append(tt.args, "--json")...)
-		requirePlansStatusCode(t, err, 1)
-		assert.Empty(t, stdout, "args %v", tt.args)
-		body := decodePlansError(t, stderr)
-		assert.Equal(t, "invalid_argument", body.Code, "args %v", tt.args)
-		assert.Contains(t, body.Message, tt.wantMsg, "args %v", tt.args)
-	}
+	stdout, stderr, err := executePlans(t, svc, "get", "--json")
+	requirePlansStatusCode(t, err, 1)
+	assert.Empty(t, stdout)
+	body := decodePlansError(t, stderr)
+	assert.Equal(t, "invalid_argument", body.Code)
+	assert.Contains(t, body.Message, "a plan name is required")
 }
 
 func TestPlansGet_NotFoundJSON(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	stdout, stderr, err := executePlans(t, svc, "get", "missing", "--json")
 	requirePlansStatusCode(t, err, 1)
@@ -354,7 +282,7 @@ func TestPlansGet_NotFoundJSON(t *testing.T) {
 
 func TestPlansGet_NotFoundHuman(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	stdout, stderr, err := executePlans(t, svc, "get", "missing")
 	requirePlansStatusCode(t, err, 1)
@@ -366,7 +294,7 @@ func TestPlansGet_NotFoundHuman(t *testing.T) {
 
 func TestPlansGet_InvalidName(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	_, stderr, err := executePlans(t, svc, "get", "UPPER", "--json")
 	requirePlansStatusCode(t, err, 1)
@@ -377,7 +305,7 @@ func TestPlansGet_InvalidName(t *testing.T) {
 
 func TestPlansGet_Corrupt(t *testing.T) {
 	t.Parallel()
-	svc, sharedDir, _ := newPlansTestService(t)
+	svc, sharedDir := newPlansTestService(t)
 	require.NoError(t, os.WriteFile(filepath.Join(sharedDir, "broken.json"), []byte("{not json"), 0o600))
 
 	_, stderr, err := executePlans(t, svc, "get", "broken", "--json")
@@ -392,7 +320,7 @@ func TestPlansGet_Corrupt(t *testing.T) {
 
 func TestPlansCreate_FromFile(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	file := writePlanContentFile(t, "plan body")
 
 	stdout, stderr, err := executePlans(t, svc,
@@ -410,7 +338,7 @@ func TestPlansCreate_FromFile(t *testing.T) {
 
 func TestPlansCreate_FromStdin(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	// Headless: content is piped through a non-TTY stdin via --file -.
 	stdout, _, err := executePlansIn(t, svc, strings.NewReader("piped body"), "create", "p", "--file", "-", "--json")
@@ -426,7 +354,7 @@ func TestPlansCreate_FromStdin(t *testing.T) {
 
 func TestPlansCreate_StdinAtSizeLimit(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	// Exactly the cap is not "over" it: the bounded reader must pass the
 	// content through (no off-by-one) and the real filesystem storage must
@@ -447,7 +375,7 @@ func TestPlansCreate_StdinAtSizeLimit(t *testing.T) {
 
 func TestPlansCreate_FileAtSizeLimit(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	file := writePlanContentFile(t, strings.Repeat("b", plan.MaxPlanContentSize))
 
 	_, stderr, err := executePlans(t, svc, "create", "p", "--file", file)
@@ -457,7 +385,7 @@ func TestPlansCreate_FileAtSizeLimit(t *testing.T) {
 
 func TestPlansCreate_StdinOverSizeLimit(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	// One byte over the cap must be detected and refused.
 	content := strings.Repeat("a", plan.MaxPlanContentSize+1)
@@ -475,7 +403,7 @@ func TestPlansCreate_StdinOverSizeLimit(t *testing.T) {
 
 func TestPlansCreate_EmptyStdin(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	// Empty piped content reaches the service and is rejected there, like an
 	// empty --file.
@@ -488,7 +416,7 @@ func TestPlansCreate_EmptyStdin(t *testing.T) {
 
 func TestPlansCreate_OversizedFile(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	big := filepath.Join(t.TempDir(), "big.md")
 	require.NoError(t, os.WriteFile(big, make([]byte, plan.MaxPlanContentSize+1), 0o600))
 
@@ -501,7 +429,7 @@ func TestPlansCreate_OversizedFile(t *testing.T) {
 
 func TestPlansCreate_DirectoryAsFile(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	_, stderr, err := executePlans(t, svc, "create", "p", "--file", t.TempDir(), "--json")
 	requirePlansStatusCode(t, err, 1)
@@ -521,7 +449,7 @@ func (r stdinMustNotBeRead) Read([]byte) (int, error) {
 
 func TestPlansCreate_RequiresFileWithoutPrompting(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	// Without --file the command must fail immediately instead of waiting on
 	// an interactive terminal for content.
@@ -532,7 +460,7 @@ func TestPlansCreate_RequiresFileWithoutPrompting(t *testing.T) {
 
 func TestPlansCreate_ExistingNameConflicts(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "original")
 	file := writePlanContentFile(t, "clobber")
 
@@ -556,7 +484,7 @@ func TestPlansCreate_ExistingNameConflicts(t *testing.T) {
 
 func TestPlansCreate_ExistingNameConflictHuman(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "original")
 	file := writePlanContentFile(t, "clobber")
 
@@ -574,7 +502,7 @@ func TestPlansCreate_ExistingNameConflictHuman(t *testing.T) {
 // code 3 and stays byte-identical, and a fresh name keeps working.
 func TestPlansCreate_ExistingRevisionZeroFileConflicts(t *testing.T) {
 	t.Parallel()
-	svc, sharedDir, _ := newPlansTestService(t)
+	svc, sharedDir := newPlansTestService(t)
 
 	original := `{"name":"planted","content":"precious content"}`
 	plantedPath := filepath.Join(sharedDir, "planted.json")
@@ -605,7 +533,7 @@ func TestPlansCreate_ExistingRevisionZeroFileConflicts(t *testing.T) {
 
 func TestPlansCreate_Validation(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	// Empty content is rejected by the service.
 	empty := writePlanContentFile(t, "")
@@ -635,7 +563,7 @@ func TestPlansCreate_Validation(t *testing.T) {
 
 func TestPlansUpdate_Success(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	_, err := svc.Create(t.Context(), plans.CreateRequest{
 		Ref: plans.SharedRef("p"), Content: "v1", Title: "Original", Status: "draft",
 	})
@@ -661,7 +589,7 @@ func TestPlansUpdate_Success(t *testing.T) {
 
 func TestPlansUpdate_StaleConflict(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "v1")
 	_, err := svc.Update(t.Context(), plans.UpdateRequest{Ref: plans.SharedRef("p"), Content: "v2", ExpectedVersion: new(1)})
 	require.NoError(t, err)
@@ -691,7 +619,7 @@ func TestPlansUpdate_StaleConflict(t *testing.T) {
 
 func TestPlansUpdate_Force(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "v1")
 	_, err := svc.Update(t.Context(), plans.UpdateRequest{Ref: plans.SharedRef("p"), Content: "v2", ExpectedVersion: new(1)})
 	require.NoError(t, err)
@@ -705,7 +633,7 @@ func TestPlansUpdate_Force(t *testing.T) {
 
 func TestPlansUpdate_RequiresGuard(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "v1")
 	file := writePlanContentFile(t, "v2")
 
@@ -719,7 +647,7 @@ func TestPlansUpdate_RequiresGuard(t *testing.T) {
 
 func TestPlansUpdate_NotFound(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	file := writePlanContentFile(t, "x")
 
 	_, stderr, err := executePlans(t, svc, "update", "ghost", "--file", file, "--force", "--json")
@@ -731,7 +659,7 @@ func TestPlansUpdate_NotFound(t *testing.T) {
 
 func TestPlansMutations_ExpectedVersionMustBePositive(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "v1")
 	file := writePlanContentFile(t, "v2")
 
@@ -752,7 +680,7 @@ func TestPlansMutations_ExpectedVersionMustBePositive(t *testing.T) {
 
 func TestPlansStatus_Success(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "body")
 
 	stdout, _, err := executePlans(t, svc, "status", "p", "in-progress", "--expected-version", "1")
@@ -766,7 +694,7 @@ func TestPlansStatus_Success(t *testing.T) {
 
 func TestPlansStatus_StaleConflict(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	_, err := svc.Create(t.Context(), plans.CreateRequest{Ref: plans.SharedRef("p"), Content: "body", Status: "draft"})
 	require.NoError(t, err)
 	_, err = svc.Update(t.Context(), plans.UpdateRequest{Ref: plans.SharedRef("p"), Content: "v2", ExpectedVersion: new(1)})
@@ -784,7 +712,7 @@ func TestPlansStatus_StaleConflict(t *testing.T) {
 
 func TestPlansStatus_Validation(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "body")
 
 	// An empty status string is rejected by the service.
@@ -808,7 +736,7 @@ func TestPlansStatus_Validation(t *testing.T) {
 // misclassified as invalid_argument (issue #3844: labels are user-defined).
 func TestPlansMetadata_LargeLabelsAccepted(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	bigTitle := strings.Repeat("t", 5<<10)
 	bigAuthor := strings.Repeat("a", 5<<10)
@@ -835,43 +763,11 @@ func TestPlansMetadata_LargeLabelsAccepted(t *testing.T) {
 	assert.Equal(t, "new body", p.Content)
 }
 
-// --- Session mutations are unsupported -------------------------------------------
-
-func TestPlansMutations_SessionUnsupported(t *testing.T) {
-	t.Parallel()
-	svc, _, sessionDir := newPlansTestService(t)
-	writeSessionPlanFile(t, sessionDir, "sess-1", "# plan")
-	file := writePlanContentFile(t, "new content")
-
-	tests := []struct {
-		args   []string
-		wantOp string
-	}{
-		{[]string{"update", "--session", "sess-1", "--file", file, "--force"}, "update"},
-		{[]string{"status", "--session", "sess-1", "done", "--force"}, "set_status"},
-		{[]string{"delete", "--session", "sess-1", "--force"}, "delete"},
-	}
-	for _, tt := range tests {
-		stdout, stderr, err := executePlans(t, svc, append(tt.args, "--json")...)
-		requirePlansStatusCode(t, err, 1)
-		assert.Empty(t, stdout, "args %v", tt.args)
-		body := decodePlansError(t, stderr)
-		assert.Equal(t, "unsupported", body.Code, "args %v", tt.args)
-		assert.Equal(t, "session", body.Scope, "args %v", tt.args)
-		assert.Equal(t, tt.wantOp, body.Op, "args %v", tt.args)
-		assert.Contains(t, body.Message, "within its session", "the error must tell the caller what to do instead")
-	}
-
-	// The refused mutations left the session plan untouched.
-	p := mustGetPlan(t, svc, plans.SessionRef("sess-1"))
-	assert.Equal(t, "# plan", p.Content)
-}
-
 // --- Export --------------------------------------------------------------------
 
 func TestPlansExport_Shared(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "release", "the body")
 	dest := filepath.Join(t.TempDir(), "nested", "plan.md")
 
@@ -885,13 +781,13 @@ func TestPlansExport_Shared(t *testing.T) {
 	assert.Equal(t, "the body", string(data))
 }
 
-func TestPlansExport_SessionJSON(t *testing.T) {
+func TestPlansExport_JSON(t *testing.T) {
 	t.Parallel()
-	svc, _, sessionDir := newPlansTestService(t)
-	writeSessionPlanFile(t, sessionDir, "sess-2", "# session plan")
+	svc, _ := newPlansTestService(t)
+	mustCreatePlan(t, svc, "release", "the body")
 	dest := filepath.Join(t.TempDir(), "plan.md")
 
-	stdout, _, err := executePlans(t, svc, "export", "--session", "sess-2", "--output", dest, "--json")
+	stdout, _, err := executePlans(t, svc, "export", "release", "--output", dest, "--json")
 	require.NoError(t, err)
 
 	var doc struct {
@@ -900,22 +796,23 @@ func TestPlansExport_SessionJSON(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(stdout), &doc))
 	assert.Equal(t, "1", doc.SchemaVersion)
-	assert.Equal(t, plans.ScopeSession, doc.Export.Scope)
-	assert.Equal(t, "sess-2", doc.Export.Name)
+	assert.Equal(t, plans.ScopeShared, doc.Export.Scope)
+	assert.Equal(t, "release", doc.Export.Name)
 	assert.Equal(t, dest, doc.Export.Path)
-	assert.Nil(t, doc.Export.Version, "session plans have no version to export")
-	assert.Equal(t, len("# session plan"), doc.Export.BytesWritten)
+	require.NotNil(t, doc.Export.Version)
+	assert.Equal(t, 1, *doc.Export.Version)
+	assert.Equal(t, len("the body"), doc.Export.BytesWritten)
 	assert.Contains(t, stdout, `"bytes_written"`)
 	assert.NotContains(t, stdout, `"bytesWritten"`)
 
 	data, err := os.ReadFile(dest)
 	require.NoError(t, err)
-	assert.Equal(t, "# session plan", string(data))
+	assert.Equal(t, "the body", string(data))
 }
 
 func TestPlansExport_NotFound(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	dest := filepath.Join(t.TempDir(), "plan.md")
 
 	_, stderr, err := executePlans(t, svc, "export", "ghost", "--output", dest, "--json")
@@ -927,7 +824,7 @@ func TestPlansExport_NotFound(t *testing.T) {
 
 func TestPlansExport_RequiresOutput(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "body")
 
 	_, _, err := executePlans(t, svc, "export", "p")
@@ -937,7 +834,7 @@ func TestPlansExport_RequiresOutput(t *testing.T) {
 
 func TestPlansExport_RefusesExistingDestination(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "release", "new body")
 	dest := filepath.Join(t.TempDir(), "plan.md")
 	require.NoError(t, os.WriteFile(dest, []byte("precious"), 0o600))
@@ -956,7 +853,7 @@ func TestPlansExport_RefusesExistingDestination(t *testing.T) {
 
 func TestPlansExport_ForceReplacesExistingFile(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "release", "new body")
 	dest := filepath.Join(t.TempDir(), "plan.md")
 	require.NoError(t, os.WriteFile(dest, []byte("old"), 0o600))
@@ -975,7 +872,7 @@ func TestPlansExport_ForceReplacesExistingFile(t *testing.T) {
 
 func TestPlansDelete_WithExpectedVersion(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "body")
 
 	stdout, _, err := executePlans(t, svc, "delete", "p", "--expected-version", "1")
@@ -990,7 +887,7 @@ func TestPlansDelete_WithExpectedVersion(t *testing.T) {
 
 func TestPlansDelete_JSON(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "body")
 
 	stdout, _, err := executePlans(t, svc, "delete", "p", "--force", "--json")
@@ -1011,7 +908,7 @@ func TestPlansDelete_JSON(t *testing.T) {
 
 func TestPlansDelete_StaleConflictPreservesPlan(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "v1")
 	_, err := svc.Update(t.Context(), plans.UpdateRequest{Ref: plans.SharedRef("p"), Content: "v2", ExpectedVersion: new(1)})
 	require.NoError(t, err)
@@ -1028,7 +925,7 @@ func TestPlansDelete_StaleConflictPreservesPlan(t *testing.T) {
 
 func TestPlansDelete_SafetyRequiresGuardOrForce(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	mustCreatePlan(t, svc, "p", "body")
 
 	// The CLI never prompts, so a bare delete is refused.
@@ -1047,7 +944,7 @@ func TestPlansDelete_SafetyRequiresGuardOrForce(t *testing.T) {
 
 func TestPlansDelete_NotFound(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	_, stderr, err := executePlans(t, svc, "delete", "ghost", "--force", "--json")
 	requirePlansStatusCode(t, err, 1)
@@ -1064,7 +961,7 @@ func TestPlansDelete_NotFound(t *testing.T) {
 // schema-versioned JSON object on stderr, nothing on stdout, exit code 1.
 func TestPlansValidation_JSONContract(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 	file := writePlanContentFile(t, "body")
 
 	tests := []struct {
@@ -1103,7 +1000,7 @@ func TestPlansValidation_JSONContract(t *testing.T) {
 // --json is only honoured when it was parsed before the failure.
 func TestPlansValidation_UnknownFlagBeforeJSONIsPlainText(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	stdout, stderr, err := executePlans(t, svc, "list", "--frobnicate", "--json")
 	require.Error(t, err)
@@ -1117,7 +1014,7 @@ func TestPlansValidation_UnknownFlagBeforeJSONIsPlainText(t *testing.T) {
 // the caller and rendered once, never as JSON.
 func TestPlansValidation_HumanModeKeepsCobraRendering(t *testing.T) {
 	t.Parallel()
-	svc, _, _ := newPlansTestService(t)
+	svc, _ := newPlansTestService(t)
 
 	_, stderr, err := executePlans(t, svc, "get", "a", "b")
 	require.Error(t, err)
@@ -1265,8 +1162,8 @@ func TestHardenPlansValidation_PreRunEErrorHumanModePassesThrough(t *testing.T) 
 
 // TestPlansTelemetryError_ReducesToStableCode pins the telemetry
 // sanitization: the tracked error is exactly the stable machine-readable
-// code of the JSON error contract, so plan names, session IDs, and
-// filesystem paths embedded in error text never leave the machine.
+// code of the JSON error contract, so plan names and filesystem paths
+// embedded in error text never leave the machine.
 func TestPlansTelemetryError_ReducesToStableCode(t *testing.T) {
 	t.Parallel()
 
@@ -1320,7 +1217,7 @@ func (f failingPlanStorage) Delete(context.Context, string, *int) (bool, error) 
 
 func TestPlansList_StorageErrorJSON(t *testing.T) {
 	t.Parallel()
-	svc := plans.NewService(failingPlanStorage{err: errors.New("backend boom")}, plans.WithSessionDir(t.TempDir()))
+	svc := plans.NewService(failingPlanStorage{err: errors.New("backend boom")})
 
 	stdout, stderr, err := executePlans(t, svc, "list", "--json")
 	requirePlansStatusCode(t, err, 1)
@@ -1334,7 +1231,7 @@ func TestPlansList_StorageErrorJSON(t *testing.T) {
 
 func TestPlansList_StorageErrorHuman(t *testing.T) {
 	t.Parallel()
-	svc := plans.NewService(failingPlanStorage{err: errors.New("backend boom")}, plans.WithSessionDir(t.TempDir()))
+	svc := plans.NewService(failingPlanStorage{err: errors.New("backend boom")})
 
 	stdout, stderr, err := executePlans(t, svc, "list")
 	requirePlansStatusCode(t, err, 1)

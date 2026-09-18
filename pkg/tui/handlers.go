@@ -30,6 +30,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/messages"
+	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -74,7 +75,7 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 	}
 
 	// Preserve sidebar settings across branch
-	sidebarSettings := m.chatPage.GetSidebarSettings()
+	sidebarSettings := m.activeTab.chatPage.GetSidebarSettings()
 
 	activeID := m.supervisor.ActiveID()
 
@@ -88,23 +89,28 @@ func (m *appModel) handleBranchFromEdit(msg messages.BranchFromEditMsg) (tea.Mod
 	m.persistActiveTab(newSess.ID)
 
 	// Replace the session in the app and rebuild all per-session components.
+	m.preparePageReplacement(activeID)
+	m.bindTabSession(activeID, newSess.ID)
 	m.application.ReplaceSession(ctx, newSess)
 	m.initSessionComponents(activeID, m.application, newSess)
 	m.dialogMgr = dialog.New()
 
 	// Restore sidebar settings
-	m.chatPage.SetSidebarSettings(sidebarSettings)
+	m.activeTab.chatPage.SetSidebarSettings(sidebarSettings)
 
 	m.reapplyKeyboardEnhancements()
 
-	return m, tea.Sequence(
-		m.chatPage.Init(),
-		m.resizeAll(),
-		m.editor.Focus(),
-		core.CmdHandler(messages.SendMsg{
-			Content:     msg.Content,
-			Attachments: msg.Attachments,
-		}),
+	return m, tea.Batch(
+		tea.Sequence(
+			m.activeTab.chatPage.Init(),
+			m.resizeAll(),
+			m.activeTab.editor.Focus(),
+			core.CmdHandler(messages.SendMsg{
+				Content:     msg.Content,
+				Attachments: msg.Attachments,
+			}),
+		),
+		chat.WatchGitBranch(m.activeTab.chatPage),
 	)
 }
 
@@ -161,7 +167,7 @@ func (m *appModel) handleToggleSessionStar(sessionID string) (tea.Model, tea.Cmd
 	currentSess := m.application.Session()
 	if currentSess != nil && currentSess.ID == sessionID {
 		currentSess.Starred = !currentSess.Starred
-		m.chatPage.SetSessionStarred(currentSess.Starred)
+		m.activeTab.chatPage.SetSessionStarred(currentSess.Starred)
 		if err := store.UpdateSession(m.ctx(), currentSess); err != nil {
 			return m, notification.ErrorCmd(fmt.Sprintf("Failed to save session: %v", err))
 		}
@@ -201,7 +207,7 @@ func (m *appModel) handleRegenerateTitle() (tea.Model, tea.Cmd) {
 		}
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to regenerate title: %v", err))
 	}
-	spinnerCmd := m.chatPage.SetTitleRegenerating(true)
+	spinnerCmd := m.activeTab.chatPage.SetTitleRegenerating(true)
 	return m, tea.Batch(spinnerCmd, notification.SuccessCmd("Regenerating title..."))
 }
 
@@ -234,7 +240,7 @@ func (m *appModel) handleExportSession(filename string) (tea.Model, tea.Cmd) {
 
 func (m *appModel) handleCompactSession(msg messages.CompactSessionMsg) (tea.Model, tea.Cmd) {
 	if compactTargetsCurrentSession(msg, m.application.Session()) {
-		return m, m.chatPage.CompactSession(msg.AdditionalPrompt)
+		return m, m.activeTab.chatPage.CompactSession(msg.AdditionalPrompt)
 	}
 	// Targeted compaction of a live sub-agent session: queued onto the
 	// target session's own run loop, so neither the root stream nor the
@@ -291,7 +297,7 @@ func (m *appModel) handleCopyLastResponseToClipboard() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleUndoSnapshot() (tea.Model, tea.Cmd) {
-	if m.chatPage.IsWorking() {
+	if m.activeTab.chatPage.IsWorking() {
 		return m, notification.WarningCmd("Wait for the current response to finish before undoing")
 	}
 	result, err := m.application.UndoLastSnapshot(m.ctx())
@@ -314,7 +320,7 @@ func (m *appModel) handleShowSnapshotsDialog() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleResetSnapshot(keep int) (tea.Model, tea.Cmd) {
-	if m.chatPage.IsWorking() {
+	if m.activeTab.chatPage.IsWorking() {
 		return m, notification.WarningCmd("Wait for the current response to finish before resetting")
 	}
 	result, err := m.application.ResetSnapshot(m.ctx(), keep)
@@ -357,14 +363,14 @@ func copyToClipboard(text, successMsg string) tea.Cmd {
 // --- Agent management ---
 
 func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
-	if agentName == m.sessionState.CurrentAgentName() {
+	if agentName == m.activeTab.sessionState.CurrentAgentName() {
 		return m, nil
 	}
 
 	if err := m.application.SwitchAgent(agentName); err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to switch to agent '%s': %v", agentName, err))
 	}
-	m.sessionState.SetCurrentAgentName(agentName)
+	m.activeTab.sessionState.SetCurrentAgentName(agentName)
 	cmd := m.updateChatCmd(messages.SessionToggleChangedMsg{})
 	return m, cmd
 }
@@ -374,17 +380,17 @@ func (m *appModel) handleSwitchAgent(agentName string) (tea.Model, tea.Cmd) {
 // token-usage snapshot (if it has run) rides along so the dialog can show its
 // context usage, as does its cumulative attributed cost (if any).
 func (m *appModel) handleShowAgentDetails(agentName string) (tea.Model, tea.Cmd) {
-	for _, agent := range m.sessionState.AvailableAgents() {
+	for _, agent := range m.activeTab.sessionState.AvailableAgents() {
 		if agent.Name != agentName {
 			continue
 		}
 		cfg := m.application.AgentConfigInfo(m.ctx(), agentName)
 		var usage *runtime.Usage
-		if u, ok := m.sessionState.AgentUsage(agentName); ok {
+		if u, ok := m.activeTab.sessionState.AgentUsage(agentName); ok {
 			usage = &u
 		}
 		var cost *float64
-		if c, ok := m.sessionState.AgentCost(agentName); ok {
+		if c, ok := m.activeTab.sessionState.AgentCost(agentName); ok {
 			cost = &c
 		}
 		return m, core.CmdHandler(dialog.OpenDialogMsg{
@@ -395,13 +401,13 @@ func (m *appModel) handleShowAgentDetails(agentName string) (tea.Model, tea.Cmd)
 }
 
 func (m *appModel) handleCycleAgent() (tea.Model, tea.Cmd) {
-	availableAgents := m.sessionState.AvailableAgents()
+	availableAgents := m.activeTab.sessionState.AvailableAgents()
 	if len(availableAgents) <= 1 {
 		return m, notification.InfoCmd("No other agents available")
 	}
 	currentIndex := -1
 	for i, agent := range availableAgents {
-		if agent.Name == m.sessionState.CurrentAgentName() {
+		if agent.Name == m.activeTab.sessionState.CurrentAgentName() {
 			currentIndex = i
 			break
 		}
@@ -411,10 +417,10 @@ func (m *appModel) handleCycleAgent() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleSwitchToAgentByIndex(index int) (tea.Model, tea.Cmd) {
-	availableAgents := m.sessionState.AvailableAgents()
+	availableAgents := m.activeTab.sessionState.AvailableAgents()
 	if index >= 0 && index < len(availableAgents) {
 		agentName := availableAgents[index].Name
-		if agentName != m.sessionState.CurrentAgentName() {
+		if agentName != m.activeTab.sessionState.CurrentAgentName() {
 			return m, core.CmdHandler(messages.SwitchAgentMsg{AgentName: agentName})
 		}
 	}
@@ -429,7 +435,7 @@ func (m *appModel) handleSwitchToAgentByIndex(index int) (tea.Model, tea.Cmd) {
 func (m *appModel) handleToggleYolo() (tea.Model, tea.Cmd) {
 	sess := m.application.Session()
 	sess.ToggleYolo()
-	m.sessionState.SetYoloMode(sess.IsToolsApproved())
+	m.activeTab.sessionState.SetYoloMode(sess.IsToolsApproved())
 	return m.forwardChat(messages.SessionToggleChangedMsg{})
 }
 
@@ -447,14 +453,14 @@ func (m *appModel) handleTogglePause() (tea.Model, tea.Cmd) {
 	case !supported:
 		return m, notification.InfoCmd("Pause is not supported with remote runtimes")
 	case paused:
-		if m.chatPage.IsWorking() {
-			m.sessionState.SetPauseState(service.PausePausing)
+		if m.activeTab.chatPage.IsWorking() {
+			m.activeTab.sessionState.SetPauseState(service.PausePausing)
 			return m, notification.InfoCmd("Pausing after the current request — /pause again to resume")
 		}
-		m.sessionState.SetPauseState(service.PausePaused)
+		m.activeTab.sessionState.SetPauseState(service.PausePaused)
 		return m, notification.InfoCmd("Runtime paused — /pause again to resume")
 	default:
-		m.sessionState.SetPauseState(service.PauseNone)
+		m.activeTab.sessionState.SetPauseState(service.PauseNone)
 		return m, notification.SuccessCmd("Runtime resumed")
 	}
 }
@@ -464,8 +470,8 @@ func (m *appModel) handleToggleHideToolResults() (tea.Model, tea.Cmd) {
 }
 
 func (m *appModel) handleToggleSplitDiff() (tea.Model, tea.Cmd) {
-	m.sessionState.ToggleSplitDiffView()
-	enabled := m.sessionState.SplitDiffView()
+	m.activeTab.sessionState.ToggleSplitDiffView()
+	enabled := m.activeTab.sessionState.SplitDiffView()
 
 	// Persist to global userconfig
 	go persistSplitDiffView(enabled)
@@ -637,48 +643,63 @@ func (m *appModel) handleOpenModelPicker() (tea.Model, tea.Cmd) {
 	})
 }
 
+type modelPickerRefreshResult struct {
+	tabID       string
+	origin      chat.Page
+	application *app.App
+	result      messages.ModelPickerRefreshedMsg
+}
+
+type modelPickerRefreshEffect struct {
+	tabID       string
+	origin      chat.Page
+	application *app.App
+	inner       tea.Msg
+}
+
 func (m *appModel) handleRefreshModelPicker(query string) (tea.Model, tea.Cmd) {
 	if !m.application.SupportsModelSwitching() {
 		return m, notification.InfoCmd("Model switching is not supported with remote runtimes")
 	}
 
-	ctx := m.ctx()
+	ctx, application, origin := m.ctx(), m.application, m.activeTab.chatPage
+	tabID := m.supervisor.ActiveID()
 	return m, tea.Batch(
 		notification.InfoCmd("Refreshing models…"),
 		func() tea.Msg {
-			err := m.application.RefreshModelsCatalog(ctx)
-			catalogRefreshed := err == nil
+			err := application.RefreshModelsCatalog(ctx)
+			result := messages.ModelPickerRefreshedMsg{Query: query, CatalogRefreshed: err == nil}
 			if errors.Is(err, runtime.ErrUnsupported) {
 				err = nil
 			}
-			if err != nil {
-				return messages.ModelPickerRefreshedMsg{Query: query, Err: err}
+			result.Err = err
+			if err == nil {
+				result.Models = application.AvailableModels(ctx)
 			}
-			return messages.ModelPickerRefreshedMsg{
-				Models:           m.application.AvailableModels(ctx),
-				Query:            query,
-				CatalogRefreshed: catalogRefreshed,
-			}
+			return modelPickerRefreshResult{tabID: tabID, origin: origin, application: application, result: result}
 		},
 	)
 }
 
-func (m *appModel) handleModelPickerRefreshed(msg messages.ModelPickerRefreshedMsg) (tea.Model, tea.Cmd) {
-	if msg.Err != nil {
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to refresh models catalog: %v", msg.Err))
+func (m *appModel) handleModelPickerRefreshed(msg modelPickerRefreshResult) (tea.Model, tea.Cmd) {
+	scoped := func(inner tea.Msg) tea.Cmd {
+		return core.CmdHandler(modelPickerRefreshEffect{tabID: msg.tabID, origin: msg.origin, application: msg.application, inner: inner})
 	}
-	if len(msg.Models) == 0 {
-		return m, notification.InfoCmd("No models available for selection")
+	result := msg.result
+	if result.Err != nil {
+		return m, scoped(notification.ShowMsg{Text: fmt.Sprintf("Failed to refresh models catalog: %v", result.Err), Type: notification.TypeError})
 	}
-
-	modelDialog := dialog.NewModelPickerDialogWithQuery(msg.Models, msg.Query)
+	if len(result.Models) == 0 {
+		return m, scoped(notification.ShowMsg{Text: "No models available for selection", Type: notification.TypeInfo})
+	}
+	modelDialog := dialog.NewModelPickerDialogWithQuery(result.Models, result.Query)
 	toast := "Model list reloaded"
-	if msg.CatalogRefreshed {
+	if result.CatalogRefreshed {
 		toast = "Models refreshed"
 	}
 	return m, tea.Batch(
-		notification.SuccessCmd(toast),
-		core.CmdHandler(dialog.OpenDialogMsg{Model: modelDialog}),
+		scoped(notification.ShowMsg{Text: toast, Type: notification.TypeSuccess}),
+		scoped(dialog.OpenDialogMsg{Model: modelDialog}),
 	)
 }
 
@@ -728,7 +749,7 @@ func (m *appModel) handleSetThinkingLevel(level string) (tea.Model, tea.Cmd) {
 // The sidebar's thinking label doubles as the support signal: it is empty
 // exactly when the runtime reports no selectable thinking configuration.
 func (m *appModel) openEffortPicker() (tea.Model, tea.Cmd) {
-	agent := m.sessionState.GetCurrentAgent()
+	agent := m.activeTab.sessionState.GetCurrentAgent()
 	if agent.Thinking == "" {
 		return m, notification.InfoCmd("Current model does not support thinking levels")
 	}
@@ -925,17 +946,21 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 	m.sendMode = messages.ParseSendMode(string(preferences.SendMode))
 	m.interruptMode = messages.ParseInterruptMode(string(preferences.InterruptConfirmation))
 	m.showBanner = preferences.ShowBanner
-	for _, page := range m.chatPages {
+	for _, tab := range m.tabs {
+		page := tab.chatPage
+		if page == nil {
+			continue
+		}
 		page.SetSendMode(m.sendMode)
 		page.SetInterruptMode(m.interruptMode)
 		page.SetShowBanner(m.showBanner)
 	}
-	if m.sessionState.SplitDiffView() != preferences.SplitDiffView {
-		m.sessionState.SetSplitDiffView(preferences.SplitDiffView)
+	if m.activeTab.sessionState.SplitDiffView() != preferences.SplitDiffView {
+		m.activeTab.sessionState.SetSplitDiffView(preferences.SplitDiffView)
 		cmd = tea.Batch(cmd, m.updateChatCmd(editfile.ToggleDiffViewMsg{}))
 	}
-	m.sessionState.SetExpandThinking(preferences.ExpandThinking)
-	m.sessionState.SetHideToolResults(preferences.HideToolResults)
+	m.activeTab.sessionState.SetExpandThinking(preferences.ExpandThinking)
+	m.activeTab.sessionState.SetHideToolResults(preferences.HideToolResults)
 	if m.imageWriter != nil {
 		m.imageWriter.SetEnabled(preferences.RenderImages)
 		tuiimage.SetRenderingEnabled(m.imageWriter.RenderingEnabled())
@@ -953,18 +978,29 @@ func (m *appModel) handleApplySettings(msg messages.ApplySettingsMsg) (tea.Model
 // applyLayoutSettings applies the given layout to every chat page (all tabs
 // share the same layout) without persisting it.
 func (m *appModel) applyLayoutSettings(settings messages.LayoutSettings) (tea.Model, tea.Cmd) {
+	wasEnabled := m.planSidebarEnabled()
 	settings.SidebarPosition = messages.ParseSidebarPosition(string(settings.SidebarPosition))
 	settings.SectionSpacing = messages.ParseSectionSpacing(string(settings.SectionSpacing))
 	settings.SidebarInfoMode = messages.ParseSidebarInfoMode(string(settings.SidebarInfoMode))
 	m.layoutSettings = settings
+	if !m.planSidebarEnabled() {
+		m.cancelSidebarPlanEdit()
+	}
 
 	var cmds []tea.Cmd
-	for _, page := range m.chatPages {
+	for _, tab := range m.tabs {
+		page := tab.chatPage
+		if page == nil {
+			continue
+		}
 		if cmd := page.SetLayoutSettings(settings); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	}
 	cmds = append(cmds, m.resizeAll())
+	if !wasEnabled && m.planSidebarEnabled() {
+		cmds = append(cmds, m.refreshPlanSidebarCmd())
+	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -980,6 +1016,7 @@ func layoutSettingsFromConfig(l userconfig.LayoutSettings) messages.LayoutSettin
 		HideUsage:        l.HideUsage,
 		HideAgents:       l.HideAgents,
 		HideTools:        l.HideTools,
+		ShowPlans:        l.ShowPlans,
 		HideTodos:        l.HideTodos,
 	}
 }
@@ -1044,6 +1081,7 @@ func savePreferences(p messages.Preferences) error {
 		s.Layout = &userconfig.LayoutSettings{
 			SidebarPosition: position, SectionSpacing: spacing, SidebarInfoMode: infoMode,
 			ActiveAgentsOnly: layout.ActiveAgentsOnly,
+			ShowPlans:        layout.ShowPlans,
 			HideSessionPath:  layout.HideSessionPath, HideUsage: layout.HideUsage,
 			HideAgents: layout.HideAgents, HideTools: layout.HideTools, HideTodos: layout.HideTodos,
 		}
@@ -1126,11 +1164,11 @@ func (m *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
 
 	var cmds []tea.Cmd
 	switchSucceeded := true
-	if ok && cmd.Agent != "" && cmd.Agent != m.sessionState.CurrentAgentName() {
+	if ok && cmd.Agent != "" && cmd.Agent != m.activeTab.sessionState.CurrentAgentName() {
 		// Attempt to switch agents. If the switch fails, handleSwitchAgent
 		// returns an error notification command. We check if the agent actually
 		// changed to determine success, rather than relying on the command type.
-		prevAgent := m.sessionState.CurrentAgentName()
+		prevAgent := m.activeTab.sessionState.CurrentAgentName()
 		switched, switchCmd := m.handleSwitchAgent(cmd.Agent)
 		var ok bool
 		if m, ok = switched.(*appModel); !ok {
@@ -1140,7 +1178,7 @@ func (m *appModel) handleAgentCommand(command string) (tea.Model, tea.Cmd) {
 		} else {
 			// Check if the agent actually changed to determine if the switch succeeded.
 			// If it failed, we must not send the message to the wrong agent.
-			switchSucceeded = m.sessionState.CurrentAgentName() != prevAgent
+			switchSucceeded = m.activeTab.sessionState.CurrentAgentName() != prevAgent
 		}
 		if switchCmd != nil {
 			cmds = append(cmds, switchCmd)
@@ -1179,7 +1217,7 @@ func expandSessionPlaceholder(url, sessionID string) string {
 
 func (m *appModel) handleAttachFile(filePath string) (tea.Model, tea.Cmd) {
 	if filePath != "" {
-		if err := m.editor.AttachFile(filePath); err != nil {
+		if err := m.activeTab.editor.AttachFile(filePath); err != nil {
 			slog.Warn("failed to attach file", "path", filePath, "error", err)
 			// Attachment failed — open the file picker with an error notification
 			return m, tea.Batch(
@@ -1223,7 +1261,7 @@ func (m *appModel) handleStartSpeak() (tea.Model, tea.Cmd) {
 
 	return m, tea.Batch(
 		notification.InfoCmd("🎤 Listening... (ENTER to send or ESC to cancel)"),
-		m.editor.SetRecording(true),
+		m.activeTab.editor.SetRecording(true),
 		m.waitForTranscript(),
 	)
 }
@@ -1236,7 +1274,7 @@ func (m *appModel) handleStopSpeak() (tea.Model, tea.Cmd) {
 	m.transcriber.Stop()
 	m.closeTranscriptCh()
 
-	return m, tea.Batch(m.editor.SetRecording(false), notification.SuccessCmd("Stopped listening"))
+	return m, tea.Batch(m.activeTab.editor.SetRecording(false), notification.SuccessCmd("Stopped listening"))
 }
 
 // waitForTranscript returns a command that blocks until the next transcript

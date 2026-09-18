@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/fake"
 	"github.com/docker/docker-agent/pkg/paths"
@@ -52,7 +53,7 @@ func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, p
 	runConfig := startReplayProxy(t, proxyOpts)
 
 	ctx := t.Context()
-	agentSource, err := config.Resolve(agentFile, runConfig.EnvProvider())
+	agentSource, err := sources.Resolve(agentFile, runConfig.EnvProvider())
 	require.NoError(t, err)
 
 	loadResult, err := teamloader.LoadWithConfig(ctx, agentSource, runConfig, loaderdefaults.Opts()...)

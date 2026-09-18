@@ -42,9 +42,7 @@ func convertDocumentToResponseInputWithCaps(ctx context.Context, doc chat.Docume
 	case attachment.StrategyB64:
 		mime := strings.ToLower(doc.MimeType)
 		if strings.HasPrefix(mime, "image/") {
-			dataURI := fmt.Sprintf("data:%s;base64,%s",
-				doc.MimeType,
-				base64.StdEncoding.EncodeToString(doc.Source.InlineData))
+			dataURI := "data:" + doc.MimeType + ";base64," + base64.StdEncoding.EncodeToString(doc.Source.InlineData)
 			return []responses.ResponseInputContentUnionParam{
 				{
 					OfInputImage: &responses.ResponseInputImageParam{
@@ -56,9 +54,7 @@ func convertDocumentToResponseInputWithCaps(ctx context.Context, doc chat.Docume
 		}
 
 		if mime == "application/pdf" {
-			dataURI := fmt.Sprintf("data:%s;base64,%s",
-				doc.MimeType,
-				base64.StdEncoding.EncodeToString(doc.Source.InlineData))
+			dataURI := "data:" + doc.MimeType + ";base64," + base64.StdEncoding.EncodeToString(doc.Source.InlineData)
 			return []responses.ResponseInputContentUnionParam{
 				{
 					OfInputFile: &responses.ResponseInputFileParam{

@@ -1,15 +1,15 @@
-//go:build !js
-
 package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/rulebased"
 )
@@ -48,9 +48,7 @@ func (r *Registry) NewWithModels(ctx context.Context, cfg *latest.ModelConfig, m
 		if err != nil {
 			return nil, err
 		}
-		if setter, ok := p.(interface{ SetProviderRegistry(registry any) }); ok {
-			setter.SetProviderRegistry(r)
-		}
+		r.attachRebuilder(p, models, env)
 		return p, nil
 	}
 	return r.createDirectProvider(ctx, cfg, env, opts...)
@@ -76,7 +74,7 @@ func (r *Registry) resolveRoutedModel(ctx context.Context, modelSpec string, mod
 
 func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
 	if r == nil {
-		r = DefaultRegistry()
+		return nil, errors.New("provider registry is required")
 	}
 	globalOptions := options.Apply(opts...)
 	enhancedCfg := applyProviderDefaults(cfg, globalOptions.Providers())
@@ -102,7 +100,7 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 		opts = append(opts, options.WithGateway(""))
 	}
 	providerType := resolveProviderType(enhancedCfg)
-	factory, ok := r.factories[providerType]
+	factory, ok := r.factory(providerType)
 	if !ok {
 		slog.ErrorContext(ctx, "Unknown provider type", "type", providerType)
 		return nil, unknownProviderError(providerType)
@@ -111,9 +109,7 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	if err != nil {
 		return nil, err
 	}
-	if setter, ok := p.(interface{ SetProviderRegistry(registry any) }); ok {
-		setter.SetProviderRegistry(r)
-	}
+	r.attachRebuilder(p, nil, env)
 	// Wrap leaf providers with the GenAI semconv tracer so every chat
 	// completion emits a `chat {model}` CLIENT span and the standard
 	// gen_ai.client.* metrics. The rule-based router constructed by
@@ -122,10 +118,31 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	return instrumentProvider(p), nil
 }
 
-var defaultFactories map[string]Factory
+func (r *Registry) attachRebuilder(p Provider, models map[string]latest.ModelConfig, env environment.Provider) {
+	setter, ok := p.(interface {
+		SetProviderRebuilder(rebuild contracts.RebuildProviderFunc)
+	})
+	if !ok {
+		return
+	}
+	setter.SetProviderRebuilder(func(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt) (contracts.Provider, error) {
+		return r.NewWithModels(ctx, cfg, models, env, opts...)
+	})
+}
 
+// EmptyRegistry returns a registry with no provider factories. It is useful
+// for components that support running without models; it cannot construct a
+// concrete provider until factories are explicitly supplied to NewRegistry.
+func EmptyRegistry() *Registry {
+	return NewRegistry(nil)
+}
+
+// DefaultRegistry returns an empty registry because this package deliberately
+// does not import concrete provider implementations.
+//
+// Deprecated: use EmptyRegistry or construct a Registry explicitly.
 func DefaultRegistry() *Registry {
-	return NewRegistry(defaultFactories)
+	return EmptyRegistry()
 }
 
 func unknownProviderError(providerType string) error {

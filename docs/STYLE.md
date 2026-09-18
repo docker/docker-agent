@@ -87,7 +87,7 @@ canonical: https://docs.docker.com/ai/docker-agent/<section>/<page>/
 
 The github.io layout renders it as the page's `rel=canonical` link;
 docs.docker.com ignores the value and self-canonicalizes. CI
-(`docs-lint` / `scripts/docs-check-canonical.sh`) fails when the
+(`docs / canonical`, `scripts/docs-check-canonical.sh`) fails when the
 value is missing or doesn't match the page path — mind it when
 scaffolding a new page from an existing one. The homepage, `404.md`
 and section `_index.md` files are not mirrored pages and don't set
@@ -102,7 +102,7 @@ Every nav entry must resolve to a real page with a non-empty
 `description:` in its front matter (whitespace-only counts as empty)
 — the build fails with an `errorf` naming the offending title/url
 otherwise, since the spec's `- [title](url): note` shape requires a
-note. CI (`docs-lint` / `scripts/docs-check-llms-txt.sh`) additionally
+note. CI (`docs / llms-txt`, `scripts/docs-check-llms-txt.sh`) additionally
 rebuilds the site and asserts the generated `llms.txt` matches
 `nav.yml`'s sections, titles, order, count **and per-entry URL**
 (each rendered link must match the nav url at the same position, not

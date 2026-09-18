@@ -6,11 +6,8 @@ import (
 	"testing"
 
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
-	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
-	"github.com/docker/docker-agent/pkg/tui/page/chat"
-	"github.com/docker/docker-agent/pkg/tui/service"
 )
 
 // fakeTranscriber is a controllable implementation of the Transcriber
@@ -51,18 +48,14 @@ func newSpeakTestModel(tb testing.TB, ft *fakeTranscriber) *appModel {
 	tb.Helper()
 	page := &mockChatPage{}
 	ed := &mockEditor{}
+	tab := &tabModel{chatPage: page, editor: ed}
 
 	return &appModel{
-		ctx:                     tb.Context,
-		chatPages:               map[string]chat.Page{"test": page},
-		sessionStates:           map[string]*service.SessionState{},
-		editors:                 map[string]editor.Editor{"test": ed},
-		pendingRestores:         map[string]string{},
-		pendingSidebarCollapsed: map[string]bool{},
-		chatPage:                page,
-		editor:                  ed,
-		transcriber:             ft,
-		dialogMgr:               dialog.New(),
+		ctx:         tb.Context,
+		tabs:        map[string]*tabModel{"test": tab},
+		activeTab:   tab,
+		transcriber: ft,
+		dialogMgr:   dialog.New(),
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,4 +97,36 @@ func TestToolsetStatusFor_UnwrapsStartable(t *testing.T) {
 	require.ErrorIs(t, got.LastError, want)
 	assert.Equal(t, 5, got.RestartCount)
 	assert.Equal(t, "mcp(remote host=example.com)", got.Description)
+}
+
+// TestToolsetStatusFor_UnsupervisedReportsStartingWithoutBlocking pins the
+// #4073 motivation for the non-blocking status probe: a toolset with no
+// Statable supervisor whose Start is still running (e.g. RAG indexing a
+// large knowledge base) must report lifecycle.StateStarting rather than
+// blocking toolsetStatusFor until Start settles.
+func TestToolsetStatusFor_UnsupervisedReportsStartingWithoutBlocking(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	inner := &inFlightStartToolSet{entered: make(chan struct{}), release: release}
+	wrapped := tools.NewStartable(inner)
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- wrapped.Start(t.Context()) }()
+	<-inner.entered
+
+	resultCh := make(chan tools.ToolsetStatus, 1)
+	go func() { resultCh <- toolsetStatusFor(wrapped) }()
+
+	select {
+	case status := <-resultCh:
+		assert.Equal(t, lifecycle.StateStarting, status.State, "a mid-start toolset must report Starting, not block or misreport")
+	case <-time.After(5 * time.Second):
+		t.Fatal("toolsetStatusFor blocked behind an in-flight Start instead of reporting Starting")
+	}
+
+	close(release)
+	require.NoError(t, <-startDone)
+
+	assert.Equal(t, lifecycle.StateReady, toolsetStatusFor(wrapped).State, "settled start reports Ready")
 }

@@ -20,7 +20,7 @@ docker run -d --rm \
   hugo server --bind 0.0.0.0 --baseURL http://docs-linkcheck:1313/
 
 echo 'Waiting for Hugo to start...'
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   docker run --rm --network docs-linkcheck-net curlimages/curl -sf http://docs-linkcheck:1313/ > /dev/null 2>&1 && break
   sleep 2
 done

@@ -4,8 +4,7 @@
 //
 // The toolset is a metadata stub — the runtime owns the handlers
 // (pkg/runtime/sessioncontext_handlers.go) so they can reach the live session
-// store and exclude the session that is currently running. This mirrors the
-// session_plan toolset, which is wired the same way.
+// store and exclude the session that is currently running.
 package sessioncontext
 
 import (
@@ -72,25 +71,26 @@ type ReadSessionArgs struct {
 	SessionID string `json:"session_id" jsonschema:"The session to read. Use an id from list_sessions, or a relative reference like '-1' (most recent), '-2' (second most recent)."`
 }
 
-// Tools advertises the metadata only; Handler is intentionally nil so the
-// runtime's toolMap takes over (same pattern as session_plan and handoff).
+// Tools advertises metadata for handlers implemented by the runtime.
 func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
-			Name:        ToolNameListSessions,
-			Category:    "session_context",
-			Description: "List previous sessions (most recent first) with their id, title, creation time and message count. The current session is never included.",
-			Parameters:  tools.MustSchemaFor[ListSessionsArgs](),
+			Name:           ToolNameListSessions,
+			RuntimeHandler: ToolNameListSessions,
+			Category:       "session_context",
+			Description:    "List previous sessions (most recent first) with their id, title, creation time and message count. The current session is never included.",
+			Parameters:     tools.MustSchemaFor[ListSessionsArgs](),
 			Annotations: tools.ToolAnnotations{
 				Title:        "List Sessions",
 				ReadOnlyHint: true,
 			},
 		},
 		{
-			Name:        ToolNameReadSession,
-			Category:    "session_context",
-			Description: "Read the conversation transcript of a previous session to use it as context. Accepts a concrete session id or a relative reference like '-1'. Long transcripts are truncated, keeping the most recent messages.",
-			Parameters:  tools.MustSchemaFor[ReadSessionArgs](),
+			Name:           ToolNameReadSession,
+			RuntimeHandler: ToolNameReadSession,
+			Category:       "session_context",
+			Description:    "Read the conversation transcript of a previous session to use it as context. Accepts a concrete session id or a relative reference like '-1'. Long transcripts are truncated, keeping the most recent messages.",
+			Parameters:     tools.MustSchemaFor[ReadSessionArgs](),
 			Annotations: tools.ToolAnnotations{
 				Title:        "Read Session",
 				ReadOnlyHint: true,

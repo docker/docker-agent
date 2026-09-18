@@ -64,9 +64,10 @@ func (p agentPolicy) pick(model string) string {
 //
 // Returns nil when the history contains no usable user message, in which
 // case the caller should reject the request.
-func buildSession(messages []ChatCompletionMessage) *session.Session {
+func buildSession(messages []ChatCompletionMessage, workingDir string) *session.Session {
 	sess := session.New(
 		session.WithNonInteractive(true),
+		session.WithWorkingDir(workingDir),
 	)
 
 	hasUser := false

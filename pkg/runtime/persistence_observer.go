@@ -101,7 +101,7 @@ func (p *PersistenceObserver) OnEvent(ctx context.Context, sess *session.Session
 		// MessageAddedEvent payload, then reset for the next stream.
 		var err error
 		if p.streaming.messageID != 0 {
-			err = p.store.UpdateMessage(ctx, p.streaming.messageID, e.Message)
+			err = p.store.UpdateMessage(ctx, e.SessionID, p.streaming.messageID, e.Message)
 		} else {
 			_, err = p.store.AddMessage(ctx, e.SessionID, e.Message)
 		}
@@ -193,7 +193,7 @@ func (p *PersistenceObserver) persistStreamingContent(ctx context.Context, sessi
 		return
 	}
 
-	if err := p.store.UpdateMessage(ctx, p.streaming.messageID, msg); err != nil {
+	if err := p.store.UpdateMessage(ctx, sessionID, p.streaming.messageID, msg); err != nil {
 		slog.WarnContext(ctx, "Failed to update streaming message",
 			"session_id", sessionID, "message_id", p.streaming.messageID, "error", err)
 	}

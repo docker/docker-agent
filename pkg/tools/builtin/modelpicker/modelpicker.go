@@ -62,8 +62,9 @@ func (t *ToolSet) AllowedModels() []string {
 func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
-			Name:     ToolNameChangeModel,
-			Category: "model",
+			Name:           ToolNameChangeModel,
+			RuntimeHandler: ToolNameChangeModel,
+			Category:       "model",
 			Description: fmt.Sprintf(
 				"Change the current model to one of the available models: %s. "+
 					"Use this when you need a different model for the current task.",
@@ -76,8 +77,9 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 			},
 		},
 		{
-			Name:     ToolNameRevertModel,
-			Category: "model",
+			Name:           ToolNameRevertModel,
+			RuntimeHandler: ToolNameRevertModel,
+			Category:       "model",
 			Description: "Revert to the agent's original/default model. " +
 				"Use this after completing a task that required a different model.",
 			Annotations: tools.ToolAnnotations{

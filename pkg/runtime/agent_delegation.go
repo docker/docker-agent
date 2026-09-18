@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -206,6 +205,9 @@ type delegationRequest struct {
 	// concurrent foreground loop and must not be mutated from a
 	// background task (#3886).
 	SwitchCurrentAgent bool
+	// directNativeTransfer enables the idle-stream recovery reserved for the
+	// native transfer_task handler. Other runForwarding callers leave it false.
+	directNativeTransfer bool
 }
 
 // newSubSession builds a *session.Session from a SubSessionConfig and a parent
@@ -248,6 +250,10 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithSendUserMessage(false),
 		session.WithStructuredOutputDisabled(cfg.DisableStructuredOutput),
 		session.WithParentID(parent.ID),
+		// Delegated children run in the parent's workspace: the persisted
+		// WorkingDir is the workspace-root provenance later used to resolve
+		// files the child produced. Empty stays empty (headless parents).
+		session.WithWorkingDir(parent.WorkingDir),
 		session.WithAttachedFiles(attachedFiles),
 		session.WithAttributes(parent.AttributesSnapshot()),
 	}
@@ -371,18 +377,24 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	// subagent_stop fires after the child's stream has fully drained,
 	// using the *parent* agent's executor so handlers configured on the
 	// orchestrator see every child completion in one place — success or
-	// failure. The deferred call ensures we don't lose the event when an
-	// ErrorEvent triggers an early return below; handlers can detect a
-	// failed run by an empty stop_response (or by correlating with the
-	// session-level error event the parent already received).
+	// failure. On failure, stop_response carries any assistant content the
+	// child produced before stopping; an empty value means no content existed.
 	defer func() {
 		r.executeSubagentStopHooks(ctx, parent, s, callerAgent, req.AgentName, s.GetLastAssistantMessageContent())
 	}()
 
-	childEvents := r.RunStream(ctx, s)
+	idleRetryPolicy := defaultIdleStreamRetryPolicy()
+	if req.directNativeTransfer {
+		idleRetryPolicy = idleStreamRetryPolicy{enabled: true, parentSessionID: parent.ID}
+	}
+	childEvents := r.runStream(ctx, s, idleRetryPolicy)
 	var subSessionErr error
 	for event := range childEvents {
 		evts.Emit(event)
+		if budgetEvent, ok := event.(*BudgetExceededEvent); ok &&
+			req.directNativeTransfer && budgetEvent.SessionID == s.ID && subSessionErr == nil {
+			subSessionErr = errors.New(budgetEvent.Message)
+		}
 		if errEvent, ok := event.(*ErrorEvent); ok && subSessionErr == nil {
 			// Capture the first ErrorEvent but keep draining the channel so
 			// the sub-session's full transcript still streams through. The
@@ -401,6 +413,9 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 	parent.AddLiveSubSession(s)
 	evts.Emit(SubSessionCompleted(parent.ID, s, callerAgent.Name()))
 
+	if subSessionErr == nil && ctx.Err() != nil {
+		subSessionErr = ctx.Err()
+	}
 	if subSessionErr != nil {
 		span.RecordError(subSessionErr)
 		span.SetStatus(codes.Error, "sub-session error")
@@ -665,13 +680,13 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	}, params.OnContent)
 }
 
-func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var params struct {
 		Agent          string `json:"agent"`
 		Task           string `json:"task"`
 		ExpectedOutput string `json:"expected_output"`
 	}
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
@@ -724,24 +739,23 @@ func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Ses
 	defer span.End()
 
 	return r.runForwarding(ctx, sess, evts, delegationRequest{
-		SubSessionConfig: SubSessionConfig{
-			Task:              params.Task,
-			ExpectedOutput:    params.ExpectedOutput,
-			AgentName:         params.Agent,
-			Title:             "Transferred task",
-			ToolsApproved:     sess.IsToolsApproved(),
-			SafetyPolicy:      sess.GetSafetyPolicy(),
-			Permissions:       sess.ClonePermissions(),
-			NonInteractive:    sess.NonInteractive,
-			DelegationLineage: childLineage,
-		},
-		SwitchCurrentAgent: true,
+		Task:                 params.Task,
+		ExpectedOutput:       params.ExpectedOutput,
+		AgentName:            params.Agent,
+		Title:                "Transferred task",
+		ToolsApproved:        sess.IsToolsApproved(),
+		SafetyPolicy:         sess.GetSafetyPolicy(),
+		Permissions:          sess.ClonePermissions(),
+		NonInteractive:       sess.NonInteractive,
+		DelegationLineage:    childLineage,
+		SwitchCurrentAgent:   true,
+		directNativeTransfer: true,
 	})
 }
 
-func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleHandoff(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var params handoff.Args
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 

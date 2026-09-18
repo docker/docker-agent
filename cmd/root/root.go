@@ -16,9 +16,11 @@ import (
 	"github.com/docker/cli/cli/command"
 	"github.com/spf13/cobra"
 
+	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/feedback"
 	"github.com/docker/docker-agent/pkg/logging"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/jscommands"
 	"github.com/docker/docker-agent/pkg/selfupdate"
 	"github.com/docker/docker-agent/pkg/telemetry"
@@ -201,6 +203,8 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 	keyringstore.Register()
 	// Enable ${...} JavaScript expressions in slash-command instructions.
 	jscommands.Register()
+	// Enable `harness:` agents backed by external coding CLIs.
+	runtime.RegisterHarness(codingharness.Factory)
 
 	selfupdate.Cleanup(ctx)
 

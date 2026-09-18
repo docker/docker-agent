@@ -126,3 +126,39 @@ func TestListModels(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+func TestListModelsWithMetadataAt(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/engines/v1/models", r.URL.Path)
+		_, _ = w.Write([]byte(`{"data":[
+   {"id":" ai/qwen3:latest ","dmr":{"context_window":32768,"architecture":"qwen3","parameters":"8B","quantization":"Q4_K_M","size":"4.9 GiB"}},
+   {"id":"ai/qwen3:latest"}, {"id":""}, {"id":"ai/legacy"}, {"id":"ai/null","dmr":null}
+  ]}`))
+	}))
+	defer server.Close()
+	models, err := ListModelsWithMetadataAt(t.Context(), server.Client(), server.URL+"/engines/v1/")
+	require.NoError(t, err)
+	require.Len(t, models, 3)
+	assert.Equal(t, "ai/legacy", models[0].ID)
+	assert.Nil(t, models[0].Metadata)
+	assert.Nil(t, models[1].Metadata)
+	assert.Equal(t, Model{ID: "ai/qwen3:latest", Metadata: &Metadata{
+		ContextWindow: 32768, Architecture: "qwen3", Parameters: "8B", Quantization: "Q4_K_M", Size: "4.9 GiB",
+	}}, models[2])
+}
+
+func TestGetModel(t *testing.T) {
+	t.Parallel()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /engines/v1/models/{name...}", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "hf.co/org/model:Q4_K_M", r.PathValue("name"))
+		_, _ = w.Write([]byte(`{"id":"hf.co/org/model:Q4_K_M","dmr":{"context_window":8192}}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	model, err := GetModel(t.Context(), server.Client(), server.URL+"/engines/v1/", "hf.co/org/model:Q4_K_M")
+	require.NoError(t, err)
+	require.NotNil(t, model.Metadata)
+	assert.Equal(t, int32(8192), model.Metadata.ContextWindow)
+}

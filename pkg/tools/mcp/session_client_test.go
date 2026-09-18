@@ -7,9 +7,34 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// TestApplySamplingHandlerOpts_RegistrationMatrix pins the registration choice
+func TestSessionClientRequestContextUsesSoleInflightCall(t *testing.T) {
+	t.Parallel()
+
+	client := &sessionClient{}
+	ctx := tools.WithHandlerScope(t.Context(), tools.HandlerScope{})
+	id := client.registerCallContext(ctx)
+	defer client.unregisterCallContext(id)
+
+	assert.True(t, tools.HasHandlerScope(client.requestContext(t.Context())))
+}
+
+func TestSessionClientRequestContextRejectsAmbiguousInflightCalls(t *testing.T) {
+	t.Parallel()
+
+	client := &sessionClient{}
+	ctx := tools.WithHandlerScope(t.Context(), tools.HandlerScope{})
+	first := client.registerCallContext(ctx)
+	second := client.registerCallContext(ctx)
+	defer client.unregisterCallContext(first)
+	defer client.unregisterCallContext(second)
+
+	assert.False(t, tools.HasHandlerScope(client.requestContext(ctx)))
+}
+
 // applySamplingHandlerOpts makes for each combination of the two sampling
 // handler fields. The reviewer flagged a reconnect race: if Initialize ran
 // before configureToolsetHandlers had wired up the handlers, the old

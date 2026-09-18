@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os/signal"
@@ -33,9 +32,9 @@ type AddNumbersArgs struct {
 	B int `json:"b"`
 }
 
-func addNumbers(_ context.Context, toolCall tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
+func addNumbers(ctx context.Context, toolCall tools.ToolCall, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	var p AddNumbersArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &p); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &p); err != nil {
 		return nil, err
 	}
 

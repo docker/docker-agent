@@ -87,13 +87,26 @@ type Model interface {
 	AppendToolOutput(msg *runtime.ToolCallOutputEvent) tea.Cmd
 	AddToolResult(msg *runtime.ToolCallResponseEvent, status types.ToolStatus) tea.Cmd
 	AppendToLastMessage(agentName, content string) tea.Cmd
+	// AppendAssistantMedia attaches generated media to the agent's current
+	// assistant message (or starts a media-only one), so it renders in the
+	// same assistant turn as the streamed text.
+	AppendAssistantMedia(agentName string, media []types.AssistantMedia) tea.Cmd
+	// UpdateAssistantMedia replaces previously attached media items —
+	// wherever they sit in the list — with the given resolved items, matched
+	// by types.AssistantMedia.ID. Items with unknown or zero IDs are
+	// ignored, so a stale asynchronous result is harmless.
+	UpdateAssistantMedia(media []types.AssistantMedia) tea.Cmd
 	AppendReasoning(agentName, content string) tea.Cmd
 	AddShellOutputMessage(content string) tea.Cmd
 	// AddAgentReturn appends the UI-only "child returned control to parent"
 	// delegation transition. It is never persisted, so it does not reappear
 	// when the session is reloaded.
 	AddAgentReturn(fromAgent, toAgent string) tea.Cmd
-	LoadFromSession(sess *session.Session) tea.Cmd
+	// LoadFromSession rebuilds the list from a persisted session.
+	// generatedMedia carries the restored generated-media items to attach,
+	// keyed by the owning message's index in sess.Messages; nil when the
+	// caller cannot resolve generated media.
+	LoadFromSession(sess *session.Session, generatedMedia map[int][]types.AssistantMedia) tea.Cmd
 
 	// StopAnimations unregisters every view from the animation coordinator.
 	// Call it when the list is discarded or its host view goes away, so
@@ -108,6 +121,11 @@ type Model interface {
 	AdjustBottomSlack(delta int)
 	// VisualGeneration increments only when Update changes rendered output.
 	VisualGeneration() uint64
+
+	// MessageTypeCount returns how many messages currently in the list have
+	// the given type. Read-only introspection for callers (e.g. tests) that
+	// need to observe real list state rather than trust a call was made.
+	MessageTypeCount(t types.MessageType) int
 
 	// IsScrollbarDragging returns true when the scrollbar thumb is being dragged.
 	IsScrollbarDragging() bool
@@ -626,6 +644,20 @@ func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.C
 	return m, nil
 }
 
+var messageKeys = struct {
+	Escape, Up, Down, Copy, Edit, PageUp, PageDown, Home, End key.Binding
+}{
+	key.NewBinding(key.WithKeys("esc")),
+	key.NewBinding(key.WithKeys("up", "k")),
+	key.NewBinding(key.WithKeys("down", "j")),
+	key.NewBinding(key.WithKeys("c")),
+	key.NewBinding(key.WithKeys("e")),
+	key.NewBinding(key.WithKeys("pgup")),
+	key.NewBinding(key.WithKeys("pgdown")),
+	key.NewBinding(key.WithKeys("home", "g")),
+	key.NewBinding(key.WithKeys("end", "G")),
+}
+
 func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	// Handle inline editing keys first
 	if m.inlineEditMsgIndex >= 0 {
@@ -662,11 +694,11 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 		}
 	}
 
-	switch msg.String() {
-	case "esc":
+	switch {
+	case key.Matches(msg, messageKeys.Escape):
 		m.clearSelection()
 		return m, nil
-	case "up", "k":
+	case key.Matches(msg, messageKeys.Up):
 		if m.focused {
 			cmd := m.selectPreviousMessage()
 			return m, cmd
@@ -674,7 +706,7 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			m.scrollUp()
 		}
 		return m, nil
-	case "down", "j":
+	case key.Matches(msg, messageKeys.Down):
 		if m.focused {
 			cmd := m.selectNextMessage()
 			return m, cmd
@@ -682,13 +714,13 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			cmd := m.scrollDown()
 			return m, cmd
 		}
-	case "c":
+	case key.Matches(msg, messageKeys.Copy):
 		if m.focused && m.selectedMessageIndex >= 0 {
 			cmd := m.copySelectedMessageToClipboard()
 			return m, cmd
 		}
 		return m, nil
-	case "e":
+	case key.Matches(msg, messageKeys.Edit):
 		if m.focused && m.selectedMessageIndex >= 0 {
 			msg := m.messages[m.selectedMessageIndex]
 			if msg.Type == types.MessageTypeUser && msg.SessionPosition != nil {
@@ -702,16 +734,16 @@ func (m *model) handleKeyPress(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case "pgup":
+	case key.Matches(msg, messageKeys.PageUp):
 		m.scrollPageUp()
 		return m, nil
-	case "pgdown":
+	case key.Matches(msg, messageKeys.PageDown):
 		cmd := m.scrollPageDown()
 		return m, cmd
-	case "home", "g":
+	case key.Matches(msg, messageKeys.Home):
 		m.scrollToTop()
 		return m, nil
-	case "end", "G":
+	case key.Matches(msg, messageKeys.End):
 		cmd := m.scrollToBottom()
 		return m, cmd
 	}
@@ -863,6 +895,7 @@ func (m *model) SetSize(width, height int) tea.Cmd {
 	if m.width == width && m.height == height {
 		return nil // Dimensions unchanged — skip expensive cache invalidation
 	}
+	widthChanged := m.width != width
 	m.width = width
 	m.height = height
 
@@ -872,7 +905,11 @@ func (m *model) SetSize(width, height int) tea.Cmd {
 		view.SetSize(contentWidth, 0)
 	}
 
-	m.invalidateAllItems()
+	// Height changes affect the viewport, not the cached message renderings.
+	if widthChanged {
+		m.renderedItems.Clear()
+	}
+	m.invalidateLines()
 	m.visualGeneration++
 	return nil
 }
@@ -1317,7 +1354,7 @@ func (m *model) shouldCacheMessage(index int) bool {
 	case types.MessageTypeToolResult:
 		return true
 	case types.MessageTypeAssistant:
-		return strings.Trim(msg.Content, "\r\n\t ") != ""
+		return strings.Trim(msg.Content, "\r\n\t ") != "" || len(msg.AssistantMedia) > 0
 	case types.MessageTypeAssistantReasoningBlock:
 		// Cacheable once spinners/fades have settled. Content mutations go
 		// through invalidateItem, which drops any stale entry.
@@ -1461,7 +1498,15 @@ func (m *model) ensureAllItemsRendered() {
 		return
 	}
 
-	var allLines []string
+	// Cached heights avoid repeatedly growing the flattened history buffer.
+	lineCapacity := len(m.views)
+	m.renderedItems.Range(func(index int, item renderedItem) bool {
+		if item.segments == nil || index != len(m.views)-1 {
+			lineCapacity += item.height
+		}
+		return true
+	})
+	allLines := make([]string, 0, lineCapacity)
 	m.activeSegments = nil
 	offsets := make([]int, len(m.views))
 	virtualHeight := 0
@@ -1607,6 +1652,10 @@ func (m *model) invalidateItem(index int) {
 
 func (m *model) invalidateAllItems() {
 	m.renderedItems.Clear()
+	m.invalidateLines()
+}
+
+func (m *model) invalidateLines() {
 	m.renderedLines = nil
 	m.lineOffsets = nil
 	m.totalHeight = 0
@@ -1742,7 +1791,7 @@ func (m *model) addMessage(msg *types.Message) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m *model) LoadFromSession(sess *session.Session) tea.Cmd {
+func (m *model) LoadFromSession(sess *session.Session, generatedMedia map[int][]types.AssistantMedia) tea.Cmd {
 	appendSessionMessage := func(msg *types.Message, view layout.Model) {
 		m.messages = append(m.messages, msg)
 		m.views = append(m.views, view)
@@ -1852,9 +1901,14 @@ func (m *model) LoadFromSession(sess *session.Session) tea.Cmd {
 				m.messages[lastIdx].Content += smsg.Message.ReasoningContent
 			}
 
-			// Step 2: Handle assistant content - this breaks the reasoning block chain
-			if hasContent {
+			// Step 2: Handle assistant content — this breaks the reasoning
+			// block chain. Restored generated media joins the same message
+			// (or forms a media-only one), mirroring AppendAssistantMedia's
+			// live behavior.
+			restoredMedia := generatedMedia[pos]
+			if hasContent || len(restoredMedia) > 0 {
 				msg := types.Agent(types.MessageTypeAssistant, smsg.AgentName, smsg.Message.Content)
+				msg.AssistantMedia = restoredMedia
 				appendSessionMessage(msg, m.createMessageView(msg))
 			}
 
@@ -2043,11 +2097,14 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 	// Append to existing assistant message from same agent
 	if lastMsg.Type == types.MessageTypeAssistant && lastMsg.Sender == agentName {
 		if m.userHasScrolled {
-			if len(m.deferredTail) == 0 {
+			var materializeCmd tea.Cmd
+			if len(m.deferredTail) == 0 || m.deferredTailIndex != lastIdx {
+				// Flush the previous owner before buffering a different message.
+				materializeCmd = m.materializeDeferredTail()
 				m.deferredTailIndex = lastIdx
 			}
 			m.deferredTail = append(m.deferredTail, content)
-			return nil
+			return materializeCmd
 		}
 		materializeCmd := m.materializeDeferredTail()
 		cmd := m.views[lastIdx].(message.Model).AppendContent(content)
@@ -2064,6 +2121,70 @@ func (m *model) AppendToLastMessage(agentName, content string) tea.Cmd {
 	}
 
 	return m.addMessage(types.Agent(types.MessageTypeAssistant, agentName, content))
+}
+
+// AppendAssistantMedia mirrors AppendToLastMessage for generated media: it
+// replaces a pending spinner and joins the agent's current assistant
+// message so the media renders inside the same turn as the streamed text,
+// or starts a media-only assistant message when there is none.
+func (m *model) AppendAssistantMedia(agentName string, media []types.AssistantMedia) tea.Cmd {
+	if len(media) == 0 {
+		return nil
+	}
+	m.removeSpinner()
+
+	if len(m.messages) > 0 {
+		lastIdx := len(m.messages) - 1
+		lastMsg := m.messages[lastIdx]
+		if lastMsg.Type == types.MessageTypeAssistant && lastMsg.Sender == agentName {
+			lastMsg.AssistantMedia = append(lastMsg.AssistantMedia, media...)
+			cmd := m.views[lastIdx].(message.Model).SetMessage(lastMsg)
+			m.invalidateItem(lastIdx)
+			return cmd
+		}
+	}
+
+	msg := types.Agent(types.MessageTypeAssistant, agentName, "")
+	msg.AssistantMedia = media
+	return m.addMessage(msg)
+}
+
+// UpdateAssistantMedia replaces attached media items in place by ID. See
+// Model.UpdateAssistantMedia.
+func (m *model) UpdateAssistantMedia(media []types.AssistantMedia) tea.Cmd {
+	byID := make(map[uint64]types.AssistantMedia, len(media))
+	for _, item := range media {
+		if item.ID != 0 {
+			byID[item.ID] = item
+		}
+	}
+	if len(byID) == 0 {
+		return nil
+	}
+
+	var cmds []tea.Cmd
+	for i, msg := range m.messages {
+		changed := false
+		for j, item := range msg.AssistantMedia {
+			if resolved, ok := byID[item.ID]; ok {
+				msg.AssistantMedia[j] = resolved
+				changed = true
+			}
+		}
+		if !changed {
+			continue
+		}
+		if view, ok := m.views[i].(message.Model); ok {
+			if cmd := view.SetMessage(msg); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		m.invalidateItem(i)
+	}
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *model) AppendReasoning(agentName, content string) tea.Cmd {
@@ -2218,6 +2339,18 @@ func (m *model) createMessageView(msg *types.Message) layout.Model {
 
 func (m *model) RemoveSpinner() {
 	m.removeSpinner()
+}
+
+// MessageTypeCount returns how many messages currently in the list have the
+// given type, by scanning the real message slice — never a call counter.
+func (m *model) MessageTypeCount(t types.MessageType) int {
+	count := 0
+	for _, msg := range m.messages {
+		if msg.Type == t {
+			count++
+		}
+	}
+	return count
 }
 
 func (m *model) removeSpinner() {

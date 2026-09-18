@@ -191,7 +191,7 @@ The coordinator can then:
 
 1. **Dispatch** several tasks at once with `run_background_agent` — each returns a task ID immediately
 2. **Monitor** progress with `list_background_agents` or `view_background_agent`
-3. **Collect** results once tasks complete
+3. **Join** tasks and collect results with `wait_background_agents` — check each task's status before continuing
 4. **Cancel** tasks that are no longer needed with `stop_background_agent`
 
 ```bash
@@ -202,7 +202,10 @@ run_background_agent(agent="analyst", task="Analyze our current architecture")
 # Check on all tasks
 list_background_agents()
 
-# Read results when ready
+# Join both tasks using the IDs returned at dispatch
+wait_background_agents(task_ids=["agent_task_abc123", "agent_task_def456"])
+
+# Read an individual result if its join output was truncated
 view_background_agent(task_id="agent_task_abc123")
 ```
 

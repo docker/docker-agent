@@ -92,14 +92,23 @@ func newTestHandlerWithRunner(r Runner) *Handler {
 }
 
 func insertTask(h *Handler, id, agentName string, status taskStatus) *task {
+	h.admissionMu.Lock()
+	defer h.admissionMu.Unlock()
+
 	t := &task{
 		id:        id,
 		agentName: agentName,
 		taskDesc:  "test task",
 		cancel:    func() {},
+		done:      make(chan struct{}),
 		startTime: time.Now(),
 	}
 	t.status.Store(int32(status))
+	if status == taskRunning {
+		h.activeTasks++
+	} else {
+		close(t.done)
+	}
 	h.tasks.Store(id, t)
 	return t
 }
@@ -511,6 +520,108 @@ func TestHandleRun_ConcurrencyCapEnforced(t *testing.T) {
 	assert.Contains(t, result.Output, "maximum concurrent")
 }
 
+type blockingRunner struct {
+	started   atomic.Int32
+	active    atomic.Int32
+	maxActive atomic.Int32
+	release   chan struct{}
+}
+
+func (*blockingRunner) CurrentAgentSubAgentNames() []string { return []string{"sub"} }
+
+func (r *blockingRunner) RunAgent(ctx context.Context, _ RunParams) *RunResult {
+	r.started.Add(1)
+	active := r.active.Add(1)
+	defer r.active.Add(-1)
+	for {
+		maxActive := r.maxActive.Load()
+		if active <= maxActive || r.maxActive.CompareAndSwap(maxActive, active) {
+			break
+		}
+	}
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+	}
+	return &RunResult{}
+}
+
+func TestHandleRun_ConcurrentAdmissionEnforcesCap(t *testing.T) {
+	t.Parallel()
+
+	runner := &blockingRunner{release: make(chan struct{})}
+	h := newTestHandlerWithRunner(runner)
+	t.Cleanup(h.StopAll)
+	tc := makeToolCall(t, RunBackgroundAgentArgs{Agent: "sub", Task: "work"})
+
+	start := make(chan struct{})
+	results := make(chan *tools.ToolCallResult, 2*maxConcurrentTasks)
+	var calls sync.WaitGroup
+	for range 2 * maxConcurrentTasks {
+		calls.Go(func() {
+			<-start
+			result, err := h.HandleRun(t.Context(), session.New(), tc)
+			require.NoError(t, err)
+			results <- result
+		})
+	}
+	close(start)
+	calls.Wait()
+	close(results)
+
+	var admitted int
+	for result := range results {
+		if !result.IsError {
+			admitted++
+		}
+	}
+	assert.Equal(t, maxConcurrentTasks, admitted)
+	require.Eventually(t, func() bool {
+		return runner.started.Load() == maxConcurrentTasks
+	}, time.Second, time.Millisecond)
+	assert.LessOrEqual(t, runner.maxActive.Load(), int32(maxConcurrentTasks))
+	assert.Equal(t, maxConcurrentTasks, h.totalTaskCount())
+
+	close(runner.release)
+	h.wg.Wait()
+}
+
+func TestHandleRun_RejectsAdmissionDuringShutdown(t *testing.T) {
+	t.Parallel()
+
+	runner := &blockingRunner{release: make(chan struct{})}
+	h := newTestHandlerWithRunner(runner)
+	tc := makeToolCall(t, RunBackgroundAgentArgs{Agent: "sub", Task: "work"})
+
+	first, err := h.HandleRun(t.Context(), session.New(), tc)
+	require.NoError(t, err)
+	require.False(t, first.IsError)
+	require.Eventually(t, func() bool { return runner.started.Load() == 1 }, time.Second, time.Millisecond)
+
+	stopped := make(chan struct{})
+	go func() {
+		h.StopAll()
+		close(stopped)
+	}()
+
+	require.Eventually(t, func() bool {
+		h.admissionMu.Lock()
+		defer h.admissionMu.Unlock()
+		return h.stopping
+	}, time.Second, time.Millisecond)
+
+	result, err := h.HandleRun(t.Context(), session.New(), tc)
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Output, "stopping")
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("StopAll did not finish")
+	}
+	assert.Equal(t, int32(1), runner.started.Load())
+}
+
 func TestHandleRun_InvalidJSON(t *testing.T) {
 	t.Parallel()
 	h := newTestHandlerWithRunner(&mockRunner{subAgentNames: []string{"sub"}})
@@ -730,12 +841,12 @@ func TestHandler_ConcurrentAccess(t *testing.T) {
 
 // --- Tools ---
 
-func TestNewToolSet_ReturnsFourTools(t *testing.T) {
+func TestNewToolSet_ReturnsFiveTools(t *testing.T) {
 	t.Parallel()
 	ts := New()
 	toolsList, err := ts.Tools(t.Context())
 	require.NoError(t, err)
-	assert.Len(t, toolsList, 4)
+	assert.Len(t, toolsList, 5)
 
 	names := make([]string, len(toolsList))
 	for i, tl := range toolsList {
@@ -745,6 +856,7 @@ func TestNewToolSet_ReturnsFourTools(t *testing.T) {
 	assert.Contains(t, names, ToolNameListBackgroundAgents)
 	assert.Contains(t, names, ToolNameViewBackgroundAgent)
 	assert.Contains(t, names, ToolNameStopBackgroundAgent)
+	assert.Contains(t, names, ToolNameWaitBackgroundAgents)
 }
 
 func TestNewToolSet_Instructions(t *testing.T) {
@@ -759,4 +871,5 @@ func TestNewToolSet_Instructions(t *testing.T) {
 	assert.Contains(t, instructions, "list_background_agents")
 	assert.Contains(t, instructions, "view_background_agent")
 	assert.Contains(t, instructions, "stop_background_agent")
+	assert.Contains(t, instructions, "wait_background_agents")
 }

@@ -65,6 +65,18 @@ func (t *Config) Validate() error {
 		}
 	}
 
+	// Top-level "rag" definitions skip Toolset.validate() during YAML
+	// unmarshaling (see RAGToolset.UnmarshalYAML), so their RAGConfig is
+	// validated here instead.
+	for name, def := range t.RAG {
+		if def.RAGConfig == nil {
+			continue
+		}
+		if err := def.RAGConfig.validate(); err != nil {
+			return fmt.Errorf("rag.%s: %w", name, err)
+		}
+	}
+
 	for i := range t.Agents {
 		agent := &t.Agents[i]
 
@@ -83,6 +95,9 @@ func (t *Config) Validate() error {
 		}
 		if err := validateCompactionThreshold(agent.CompactionThreshold); err != nil {
 			return fmt.Errorf("agents.%s: %w", agent.Name, err)
+		}
+		if agent.AddPromptFilesDepth < 0 {
+			return fmt.Errorf("agents.%s: add_prompt_files_depth must be >= 0, got %d", agent.Name, agent.AddPromptFilesDepth)
 		}
 		for _, name := range agent.Budgets {
 			if _, ok := t.Budgets[name]; !ok {
@@ -171,6 +186,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	}
 	if m.Cost != nil {
 		return errors.New("first_available cannot be combined with cost (set it on the candidate models instead)")
+	}
+	if m.OutputCapabilities != nil {
+		return errors.New("first_available cannot be combined with output_capabilities (set output_capabilities.image on the candidate models instead)")
 	}
 	for i, ref := range m.FirstAvailable {
 		if strings.TrimSpace(ref) == "" {
@@ -301,6 +319,9 @@ func (t *Toolset) validate() error {
 	if err := validateNonEmptyEntries("blocked_servers", t.BlockedServers); err != nil {
 		return err
 	}
+	if t.EscapeHTML != nil && t.Type != "fetch" {
+		return errors.New("escape_html can only be used with type 'fetch'")
+	}
 	if len(t.AllowedDomains) > 0 && t.Type != "fetch" {
 		return errors.New("allowed_domains can only be used with type 'fetch'")
 	}
@@ -315,9 +336,6 @@ func (t *Toolset) validate() error {
 	}
 	if t.Recall != nil && t.Type != "background_jobs" {
 		return errors.New("recall can only be used with type 'background_jobs'")
-	}
-	if t.Safer != nil && t.Type != "shell" {
-		return errors.New("safer can only be used with type 'shell'")
 	}
 	if len(t.AllowedDomains) > 0 && len(t.BlockedDomains) > 0 {
 		return errors.New("allowed_domains and blocked_domains are mutually exclusive")
@@ -451,10 +469,24 @@ func (t *Toolset) validate() error {
 		if t.Ref == "" && t.RAGConfig == nil {
 			return errors.New("rag toolset requires either ref or rag_config")
 		}
+		if t.RAGConfig != nil {
+			if err := t.RAGConfig.validate(); err != nil {
+				return err
+			}
+		}
 	case "background_agents":
 		// no additional validation needed
 	}
 
+	return nil
+}
+
+// validate rejects an invalid RAGConfig. Currently only IndexingTimeout is
+// checked; a negative value would make context.WithTimeout fire immediately.
+func (c *RAGConfig) validate() error {
+	if c.IndexingTimeout != nil && c.IndexingTimeout.Duration < 0 {
+		return errors.New("indexing_timeout must not be negative")
+	}
 	return nil
 }
 

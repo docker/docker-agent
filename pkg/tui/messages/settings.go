@@ -90,8 +90,8 @@ func ParseSidebarInfoMode(raw string) SidebarInfoMode {
 // LayoutSettings describes the user-customizable TUI layout: where the
 // sidebar sits, which of its optional sections are rendered, how much
 // space separates them, and how the Agents section renders each agent.
-// The zero value is the default layout (sidebar on the right, everything
-// visible, normal spacing, compact agent info, full team roster).
+// The zero value is the default layout (sidebar on the right, all sections
+// except Plans visible, normal spacing, compact agent info, full team roster).
 type LayoutSettings struct {
 	SidebarPosition SidebarPosition
 	SectionSpacing  SectionSpacing
@@ -104,6 +104,7 @@ type LayoutSettings struct {
 	HideUsage        bool
 	HideAgents       bool
 	HideTools        bool
+	ShowPlans        bool
 	HideTodos        bool
 }
 

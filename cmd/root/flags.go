@@ -59,12 +59,17 @@ func sessionDBPath(flagValue string) string {
 	return filepath.Join(paths.GetDataDir(), "session.db")
 }
 
-func setupWorkingDirectory(workingDir string) error {
-	if workingDir == "" {
+// setupWorkingDirectory applies a --working-dir override: it chdirs into the
+// directory and stores the absolute path back into runConfig.WorkingDir so
+// downstream consumers (session workspace provenance, toolsets, servers) see
+// an absolute root — after the chdir a relative flag value would otherwise
+// resolve against itself.
+func setupWorkingDirectory(runConfig *config.RuntimeConfig) error {
+	if runConfig.WorkingDir == "" {
 		return nil
 	}
 
-	absWd, err := filepath.Abs(workingDir)
+	absWd, err := filepath.Abs(runConfig.WorkingDir)
 	if err != nil {
 		return fmt.Errorf("invalid working directory: %w", err)
 	}
@@ -79,6 +84,7 @@ func setupWorkingDirectory(workingDir string) error {
 	}
 
 	_ = os.Setenv("PWD", absWd)
+	runConfig.WorkingDir = absWd
 	slog.Debug("Working directory set", "path", absWd)
 
 	return nil
@@ -164,7 +170,7 @@ func addGatewayFlags(cmd *cobra.Command, runConfig *config.RuntimeConfig, loadUs
 			runConfig.Providers = userCfg.GetProviders()
 		}
 
-		return setupWorkingDirectory(runConfig.WorkingDir)
+		return setupWorkingDirectory(runConfig)
 	}
 }
 

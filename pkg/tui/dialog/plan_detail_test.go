@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/plans"
-	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
@@ -48,31 +47,6 @@ func TestPlanDetailRendersSharedMetadata(t *testing.T) {
 	assert.Contains(t, view, "architect")
 	assert.Contains(t, view, "1h ago")
 	assert.Contains(t, view, "Step one.")
-}
-
-func TestPlanDetailRendersSessionMetadata(t *testing.T) {
-	t.Parallel()
-	p := plans.Plan{
-		Scope:     plans.ScopeSession,
-		Name:      "11112222-3333-4444-5555-666677778888",
-		SessionID: "11112222-3333-4444-5555-666677778888",
-		Content:   "session plan body",
-		UpdatedAt: time.Now(),
-	}
-	d := newTestPlanDetail(t, p)
-
-	view := d.View()
-	assert.Contains(t, view, "body editable here", "session scope must advertise the body edit")
-	assert.NotContains(t, view, "read-only", "session plans are no longer presented as wholly read-only")
-	assert.Contains(t, view, "11112222-3333-4444-5555-666677778888")
-	assert.Contains(t, view, "session plans have no versions")
-	assert.NotContains(t, view, "status", "session detail must not advertise unsupported actions")
-	assert.Contains(t, view, "session plan body")
-
-	keys := strings.Join(d.helpKeys(), " ")
-	assert.Contains(t, keys, "edit", "the help must advertise e edit for session plans")
-	assert.NotContains(t, keys, "status")
-	assert.NotContains(t, keys, "delete")
 }
 
 func TestPlanDetailScrollsLongContent(t *testing.T) {
@@ -131,50 +105,6 @@ func TestPlanDetailKeysEmitIntents(t *testing.T) {
 	_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
 	_, closed := firstMsgOfType[CloseDialogMsg](collectMsgs(cmd))
 	assert.True(t, closed)
-}
-
-func TestPlanDetailSessionActionsUnsupported(t *testing.T) {
-	t.Parallel()
-	p := plans.Plan{
-		Scope:     plans.ScopeSession,
-		Name:      "sess-1",
-		SessionID: "sess-1",
-		Content:   "body",
-	}
-	d := newTestPlanDetail(t, p)
-
-	for _, r := range []rune{'s', 'd'} {
-		_, cmd := d.Update(letterKey(r))
-		msgs := collectMsgs(cmd)
-		note, ok := firstMsgOfType[notification.ShowMsg](msgs)
-		require.True(t, ok, "%c must explain that session plans don't support the action", r)
-		assert.Contains(t, note.Text, "Session plans")
-		assert.Contains(t, note.Text, "edit", "the notification must point at the supported edit action")
-		_, opened := firstMsgOfType[OpenDialogMsg](msgs)
-		assert.False(t, opened)
-	}
-}
-
-// TestPlanDetailSessionEditEmitsIntent proves e edits the session plan body
-// with the no-version sentinel 0 instead of refusing.
-func TestPlanDetailSessionEditEmitsIntent(t *testing.T) {
-	t.Parallel()
-	p := plans.Plan{
-		Scope:     plans.ScopeSession,
-		Name:      "sess-1",
-		SessionID: "sess-1",
-		Content:   "body",
-	}
-	d := newTestPlanDetail(t, p)
-
-	_, cmd := d.Update(letterKey('e'))
-	msgs := collectMsgs(cmd)
-	editMsg, ok := firstMsgOfType[messages.EditPlanMsg](msgs)
-	require.True(t, ok, "e must edit the session plan body")
-	assert.Equal(t, plans.SessionRef("sess-1"), editMsg.Ref)
-	assert.Equal(t, 0, editMsg.ExpectedVersion, "session plans have no versions; 0 is the sentinel")
-	_, notified := firstMsgOfType[notification.ShowMsg](msgs)
-	assert.False(t, notified, "a supported edit must not produce an unsupported notification")
 }
 
 func TestPlanDetailDataMsgAppliesOnlyMatchingPlan(t *testing.T) {

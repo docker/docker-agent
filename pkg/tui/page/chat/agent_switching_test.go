@@ -217,7 +217,6 @@ func TestScheduleTransferTimersWrapsInRoutedMsg(t *testing.T) {
 	assert.Equal(t, msgtypes.RoutedMsg{SessionID: "tab-1", Inner: payload{n: 42}}, msgs[0],
 		"the expiry is addressed to the owning tab")
 
-	p.pendingTimers = nil
 	p.SetRoutingID("")
 	cmd = p.scheduleTransferTimers([]sidebar.TransferTimer{{Duration: time.Millisecond, Msg: payload{n: 7}}})
 	msgs = runTimerCmd(t, cmd)
@@ -243,32 +242,22 @@ func runTimerCmd(t *testing.T, cmd tea.Cmd) []tea.Msg {
 	return []tea.Msg{msg}
 }
 
-// TestAgentSwitchingArmsRoutedTimersForBackgroundDispatch verifies a hop
-// boundary records its routed timer commands so TakeRoutedTimers can hand
-// them to the appModel when the page is hidden (its regular command is
-// discarded there), and that the collection drains exactly once.
-func TestAgentSwitchingArmsRoutedTimersForBackgroundDispatch(t *testing.T) {
+func TestAgentSwitchingReturnsLocalWorkPerUpdate(t *testing.T) {
 	t.Parallel()
 
 	p, _ := newSwitchingTestPage(t)
 	p.SetRoutingID("tab-1")
 
-	model, _ := p.Update(runtime.AgentSwitching(true, "root", "researcher"))
-	page := model.(*chatPage)
+	_, start := p.UpdateEffects(runtime.AgentSwitching(true, "root", "researcher"))
+	require.NotNil(t, start.Local, "a start arms min/max timers")
+	assert.Nil(t, p.effects, "collection ends when UpdateEffects returns")
 
-	timers := page.TakeRoutedTimers()
-	require.NotNil(t, timers, "a start's min/max timers are collectable for background dispatch")
-	assert.Nil(t, page.TakeRoutedTimers(), "the collection drains once")
+	_, stop := p.UpdateEffects(runtime.AgentSwitching(false, "researcher", "root"))
+	require.NotNil(t, stop.Local, "an accepted stop arms the Return timer")
 
-	// The next Update clears leftovers so a later drain cannot re-arm
-	// timers that the active path already dispatched.
-	model, _ = page.Update(runtime.AgentSwitching(false, "researcher", "root"))
-	page = model.(*chatPage)
-	require.NotNil(t, page.TakeRoutedTimers(), "an accepted stop arms the Return timer")
-
-	model, _ = page.Update(msgtypes.StreamCancelledMsg{})
-	page = model.(*chatPage)
-	assert.Nil(t, page.TakeRoutedTimers(), "updates without boundaries arm nothing")
+	_, cancelled := p.UpdateEffects(msgtypes.StreamCancelledMsg{})
+	assert.Nil(t, cancelled.Local, "updates without boundaries must not redispatch prior work")
+	require.NotNil(t, start.Local, "later updates must not mutate earlier results")
 }
 
 // TestRoutedTimerExpiryDrivesSidebarOnOwnerPage chains the real pieces: the

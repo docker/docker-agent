@@ -116,13 +116,28 @@ func TestSetToolsChangedHandler_RegisterAndFire(t *testing.T) {
 	tool.SetToolsChangedHandler(func() { called++ })
 
 	// Simulate the connector firing the handler post-init.
-	tool.handler.mu.Lock()
-	h := tool.handler.toolsChangedHandler
-	tool.handler.mu.Unlock()
-	if h != nil {
-		h()
-	}
+	tool.handler.fireToolsChanged()
 	assert.Equal(t, 1, called)
+}
+
+// TestSubscribeToolsChanged_FanOut ensures per-runtime subscriptions fire
+// alongside the legacy handler and can be released independently.
+func TestSubscribeToolsChanged_FanOut(t *testing.T) {
+	t.Parallel()
+
+	tool := New("nope", nil, nil, t.TempDir())
+	var legacy, first, second int
+	tool.SetToolsChangedHandler(func() { legacy++ })
+	unsubFirst := tool.SubscribeToolsChanged(func() { first++ })
+	tool.SubscribeToolsChanged(func() { second++ })
+
+	tool.handler.fireToolsChanged()
+	unsubFirst()
+	tool.handler.fireToolsChanged()
+
+	assert.Equal(t, 2, legacy)
+	assert.Equal(t, 1, first)
+	assert.Equal(t, 2, second)
 }
 
 func toolNames(in []tools.Tool) []string {

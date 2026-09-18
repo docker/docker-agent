@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
@@ -240,6 +242,7 @@ func TestSettings_LayoutRoundTrip(t *testing.T) {
 				ActiveAgentsOnly: true,
 				HideSessionPath:  true,
 				HideUsage:        true,
+				ShowPlans:        true,
 				HideTodos:        true,
 			},
 		},
@@ -252,6 +255,7 @@ func TestSettings_LayoutRoundTrip(t *testing.T) {
 	assert.Contains(t, string(data), "hide_session_path: true")
 	assert.Contains(t, string(data), "sidebar_info_mode: detailed")
 	assert.Contains(t, string(data), "active_agents_only: true")
+	assert.Contains(t, string(data), "show_plans: true")
 
 	loaded, err := loadFrom(configFile, "")
 	require.NoError(t, err)
@@ -265,6 +269,7 @@ func TestSettings_LayoutRoundTrip(t *testing.T) {
 	assert.True(t, layout.HideUsage)
 	assert.False(t, layout.HideAgents)
 	assert.False(t, layout.HideTools)
+	assert.True(t, layout.ShowPlans)
 	assert.True(t, layout.HideTodos)
 }
 
@@ -274,6 +279,32 @@ func TestSettings_GetLayoutDefaults(t *testing.T) {
 	var nilSettings *Settings
 	assert.Equal(t, LayoutSettings{}, nilSettings.GetLayout())
 	assert.Equal(t, LayoutSettings{}, (&Settings{}).GetLayout())
+}
+
+func TestSettings_ShowPlansDefaults(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "no settings", input: "{}"},
+		{name: "no layout", input: "settings: {}"},
+		{name: "empty layout", input: "settings:\n  layout: {}"},
+		{name: "existing layout", input: "settings:\n  layout:\n    sidebar_position: left"},
+		{name: "explicit false", input: "settings:\n  layout:\n    show_plans: false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg Config
+			require.NoError(t, yaml.Unmarshal([]byte(tt.input), &cfg))
+			assert.False(t, cfg.GetSettings().GetLayout().ShowPlans)
+
+			data, err := yaml.Marshal(&cfg)
+			require.NoError(t, err)
+			assert.NotContains(t, string(data), "show_plans:", "the default-off value is omitted")
+		})
+	}
 }
 
 func TestConfig_MigrateFromLegacy(t *testing.T) {
@@ -1392,6 +1423,91 @@ func TestUpdate_ConcurrentWritersDoNotLoseChanges(t *testing.T) {
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.Len(t, cfg.Aliases, writers, "every concurrent update must be persisted")
+}
+
+func TestUpdate_SlowWriterDoesNotTimeOutOtherWriters(t *testing.T) {
+	// Not parallel: SetConfigDir mutates process-global state.
+	paths.SetConfigDir(t.TempDir())
+	t.Cleanup(func() { paths.SetConfigDir("") })
+
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- Update(func(cfg *Config) error {
+			close(started)
+			time.Sleep(lockTimeout + time.Second) //nolint:forbidigo // Mutex contention cannot use synctest's clock.
+			return cfg.SetAlias("slow", &Alias{Path: "./slow.yaml"})
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("slow update returned before mutation: %v", err)
+	}
+
+	err := Update(func(cfg *Config) error {
+		return cfg.SetAlias("fast", &Alias{Path: "./fast.yaml"})
+	})
+	slowErr := <-done
+	require.NoError(t, slowErr)
+	require.NoError(t, err)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Len(t, cfg.Aliases, 2, "both updates must be persisted")
+}
+
+func TestUpdate_LockErrorLeavesFileUntouched(t *testing.T) {
+	// Not parallel: SetConfigDir mutates process-global state.
+	paths.SetConfigDir(t.TempDir())
+	t.Cleanup(func() { paths.SetConfigDir("") })
+
+	original := []byte("version: v1\nmodels_gateway: https://gw.example.com\n")
+	require.NoError(t, os.WriteFile(Path(), original, 0o600))
+	require.NoError(t, os.Mkdir(Path()+".lock", 0o700))
+
+	called := false
+	err := Update(func(cfg *Config) error {
+		called = true
+		cfg.ModelsGateway = "https://changed.example.com"
+		return nil
+	})
+	require.ErrorContains(t, err, "open config lock")
+	assert.False(t, called, "lock errors must prevent the mutation")
+
+	data, err := os.ReadFile(Path())
+	require.NoError(t, err)
+	assert.Equal(t, original, data)
+}
+
+func TestUpdate_LockTimeoutLeavesFileUntouched(t *testing.T) {
+	if runtime.GOOS == "js" {
+		t.Skip("file locking is a no-op on js/wasm")
+	}
+	// Not parallel: SetConfigDir mutates process-global state.
+	paths.SetConfigDir(t.TempDir())
+	t.Cleanup(func() { paths.SetConfigDir("") })
+
+	original := []byte("version: v1\nmodels_gateway: https://gw.example.com\n")
+	require.NoError(t, os.WriteFile(Path(), original, 0o600))
+	release, err := acquireFileLock(Path() + ".lock")
+	require.NoError(t, err)
+	defer release()
+
+	synctest.Test(t, func(t *testing.T) {
+		called := false
+		err := Update(func(cfg *Config) error {
+			called = true
+			cfg.ModelsGateway = "https://changed.example.com"
+			return nil
+		})
+		require.ErrorContains(t, err, "timed out waiting for config lock")
+		assert.False(t, called, "lock timeouts must prevent the mutation")
+
+		data, err := os.ReadFile(Path())
+		require.NoError(t, err)
+		assert.Equal(t, original, data)
+	})
 }
 
 func TestUpdate_MutateErrorLeavesFileUntouched(t *testing.T) {

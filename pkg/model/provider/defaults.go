@@ -5,10 +5,12 @@ import (
 	"context"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
@@ -38,6 +40,63 @@ func resolveProviderType(cfg *latest.ModelConfig) string {
 		return alias.APIType
 	}
 	return cfg.Provider
+}
+
+// ResolveType returns the registry key a model config is served by once
+// custom providers (providers: section), built-in aliases and an explicit
+// api_type are applied — i.e. the factory [Registry.New] will look up for
+// it. A routing model resolves to its fallback provider/model. The config is
+// not mutated.
+func ResolveType(cfg *latest.ModelConfig, customProviders map[string]latest.ProviderConfig) string {
+	return resolveProviderType(applyProviderDefaults(cfg, customProviders))
+}
+
+// Adapt turns a provider package's concrete constructor (e.g.
+// anthropic.NewClient, which returns *anthropic.Client) into a [Factory] so
+// it can be registered without a hand-written closure:
+//
+//	provider.NewRegistry(map[string]provider.Factory{"anthropic": provider.Adapt(anthropic.NewClient)})
+func Adapt[P Provider](newClient func(context.Context, *latest.ModelConfig, environment.Provider, ...options.Opt) (P, error)) Factory {
+	return func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+		p, err := newClient(ctx, cfg, env, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return p, nil
+	}
+}
+
+// Has reports whether a factory is registered for providerType, a key as
+// returned by [ResolveType].
+func (r *Registry) Has(providerType string) bool {
+	if r == nil {
+		return false
+	}
+	_, ok := r.factory(providerType)
+	return ok
+}
+
+// factory looks up the factory for a resolved provider type. The OpenAI
+// protocol variants ("openai_chatcompletions", "openai_responses") fall back
+// to the "openai" factory, which serves both, so hand-picked registries only
+// need to register "openai" to cover custom OpenAI-compatible providers.
+func (r *Registry) factory(providerType string) (Factory, bool) {
+	if f, ok := r.factories[providerType]; ok {
+		return f, true
+	}
+	if strings.HasPrefix(providerType, "openai_") {
+		f, ok := r.factories["openai"]
+		return f, ok
+	}
+	return nil, false
+}
+
+// Types returns the registered provider types, sorted.
+func (r *Registry) Types() []string {
+	if r == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(r.factories))
 }
 
 // resolveEffectiveProvider returns the effective provider type for a ProviderConfig.

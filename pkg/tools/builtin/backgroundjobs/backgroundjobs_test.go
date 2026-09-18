@@ -14,12 +14,20 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func newTestTool(t *testing.T) *ToolSet {
 	t.Helper()
 	return New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
+}
+
+// pkg/safety duplicates the tool name to classify background commands
+// without importing this package; a rename must update both.
+func TestToolNameMatchesSafetyPackage(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, ToolNameRunBackgroundJob, safety.BackgroundJobToolName)
 }
 
 func TestRunBackgroundJobArgs_UnmarshalJSON_AcceptsCmdAndCommand(t *testing.T) {
@@ -37,6 +45,25 @@ func TestRunBackgroundJobArgs_UnmarshalJSON_AcceptsCmdAndCommand(t *testing.T) {
 	var blankCmd RunBackgroundJobArgs
 	require.NoError(t, json.Unmarshal([]byte(`{"cmd":"   ","command":"sleep 1"}`), &blankCmd))
 	assert.Equal(t, "sleep 1", blankCmd.Cmd)
+
+	// Mixed-case keys must not override the exact key the runtime
+	// classified (encoding/json struct decoding would let them).
+	for _, input := range []string{
+		`{"cmd":"git status","CMD":"rm -rf /tmp/x"}`,
+		`{"command":"git status","Command":"rm -rf /tmp/x"}`,
+	} {
+		var plain RunBackgroundJobArgs
+		require.NoError(t, json.Unmarshal([]byte(input), &plain))
+		var recall RunBackgroundJobRecallArgs
+		require.NoError(t, json.Unmarshal([]byte(input), &recall))
+
+		var fields map[string]any
+		require.NoError(t, json.Unmarshal([]byte(input), &fields))
+		classified, _ := safety.CommandArg(fields)
+		assert.Equal(t, "git status", classified)
+		assert.Equal(t, classified, plain.Cmd, input)
+		assert.Equal(t, classified, recall.Cmd, input)
+	}
 }
 
 func TestRunBackgroundJobRecallArgs_UnmarshalJSON_AcceptsRecall(t *testing.T) {
@@ -250,6 +277,83 @@ func TestBackgroundJobsTool_WaitBackgroundJob_Stopped(t *testing.T) {
 	assert.Contains(t, result.Output, "stopped")
 	assert.NotContains(t, result.Output, "Exit Code:",
 		"stopped jobs should not show an exit code")
+}
+
+func TestBackgroundJobsTool_StopEscalatesWhenSIGTERMIgnored(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signals; skipped on Windows")
+	}
+
+	tool := newTestTool(t)
+	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{
+		Cmd: `trap '' TERM; echo ready; while :; do sleep 1; done`,
+	}, tools.NopRuntime{})
+	require.NoError(t, err)
+
+	var job *backgroundJob
+	tool.handler.jobs.Range(func(_ string, candidate *backgroundJob) bool {
+		job = candidate
+		return false
+	})
+	require.NotNil(t, job)
+	require.Eventually(t, func() bool {
+		job.outputMu.RLock()
+		defer job.outputMu.RUnlock()
+		return strings.Contains(job.output.String(), "ready")
+	}, time.Second, 10*time.Millisecond)
+
+	started := time.Now()
+	result, err := tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: job.id})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	assert.Less(t, time.Since(started), 5*time.Second)
+	select {
+	case <-job.done:
+	case <-time.After(time.Second):
+		t.Fatal("process survived stop escalation")
+	}
+	assert.Equal(t, statusStopped, job.status.Load())
+
+	result, err = tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: job.id})
+	require.NoError(t, err)
+	assert.True(t, result.IsError)
+	assert.Contains(t, result.Output, "not running")
+}
+
+func TestBackgroundJobsTool_StopWaitsForRealExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX signals; skipped on Windows")
+	}
+
+	tool := newTestTool(t)
+	t.Cleanup(func() { _ = tool.Stop(t.Context()) })
+	_, err := tool.handler.RunBackgroundJob(t.Context(), RunBackgroundJobArgs{
+		Cmd: `trap 'sleep 0.1; exit 0' TERM; echo ready; while :; do sleep 1; done`,
+	}, tools.NopRuntime{})
+	require.NoError(t, err)
+
+	var job *backgroundJob
+	tool.handler.jobs.Range(func(_ string, candidate *backgroundJob) bool {
+		job = candidate
+		return false
+	})
+	require.NotNil(t, job)
+	require.Eventually(t, func() bool {
+		job.outputMu.RLock()
+		defer job.outputMu.RUnlock()
+		return strings.Contains(job.output.String(), "ready")
+	}, time.Second, 10*time.Millisecond)
+
+	result, err := tool.handler.StopBackgroundJob(t.Context(), StopBackgroundJobArgs{JobID: job.id})
+	require.NoError(t, err)
+	assert.False(t, result.IsError)
+	select {
+	case <-job.done:
+	default:
+		t.Fatal("stop returned before the command exited")
+	}
+	assert.Equal(t, statusStopped, job.status.Load())
 }
 
 func TestBackgroundJobsTool_RunBackgroundJob(t *testing.T) {

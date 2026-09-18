@@ -1,8 +1,9 @@
 //go:build js && wasm
 
-package provider
+package provider_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -16,15 +17,19 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
-// This file is the js/wasm counterpart of named_custom_openai_provider_test.go
-// and clone_test.go's OpenAIVendor coverage (both excluded from this build by
-// their `!js` tag): it proves factory_js.go's createDirectProvider mirrors
-// factory.go's resolved-OpenAIVendor injection (see the twin comment in both
-// files), driven through the actual js/wasm DefaultRegistry so a browser
-// build gets the same wire behavior as the CLI.
+// Exercise the shared factory under js/wasm using an explicit OpenAI registry.
+func wasmTestRegistry() *provider.Registry {
+	return provider.NewRegistry(map[string]provider.Factory{
+		"openai": func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (provider.Provider, error) {
+			return openai.NewClient(ctx, cfg, env, opts...)
+		},
+	})
+}
 
 // captureNamedCustomProviderRequestBody starts a mock chat-completions server
 // that records the last request body it received and replies with a minimal
@@ -107,7 +112,7 @@ func TestJSFactory_NamedCustomOpenAIProvider_NoThinking_SendsNoneEffort(t *testi
 	modelCfg := &latest.ModelConfig{Provider: "my_openai", Model: "gpt-5.6"}
 	env := environment.NewMapEnvProvider(map[string]string{"MY_OPENAI_TOKEN": "secret"})
 
-	provider, err := DefaultRegistry().New(t.Context(), modelCfg, env,
+	provider, err := wasmTestRegistry().New(t.Context(), modelCfg, env,
 		options.WithProviders(customProviders), options.WithNoThinking())
 	require.NoError(t, err)
 
@@ -148,7 +153,7 @@ func TestJSFactory_UnrecognizedAlias_KeepsLowFallback(t *testing.T) {
 			}
 			env := environment.NewMapEnvProvider(map[string]string{tt.tokenKey: "secret"})
 
-			p, err := DefaultRegistry().New(t.Context(), modelCfg, env, options.WithNoThinking())
+			p, err := wasmTestRegistry().New(t.Context(), modelCfg, env, options.WithNoThinking())
 			require.NoError(t, err)
 
 			stream, err := p.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, nil)
@@ -182,7 +187,7 @@ func TestJSFactory_SpoofedProviderOptsCannotOverrideResolution(t *testing.T) {
 		}
 		env := environment.NewMapEnvProvider(map[string]string{"XAI_API_KEY": "secret"})
 
-		p, err := DefaultRegistry().New(t.Context(), modelCfg, env, options.WithNoThinking())
+		p, err := wasmTestRegistry().New(t.Context(), modelCfg, env, options.WithNoThinking())
 		require.NoError(t, err)
 		stream, err := p.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, nil)
 		require.NoError(t, err)
@@ -210,7 +215,7 @@ func TestJSFactory_SpoofedProviderOptsCannotOverrideResolution(t *testing.T) {
 		}
 		env := environment.NewMapEnvProvider(map[string]string{"MY_OPENAI_TOKEN": "secret"})
 
-		provider, err := DefaultRegistry().New(t.Context(), modelCfg, env,
+		provider, err := wasmTestRegistry().New(t.Context(), modelCfg, env,
 			options.WithProviders(customProviders), options.WithNoThinking())
 		require.NoError(t, err)
 		stream, err := provider.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, nil)
@@ -242,7 +247,7 @@ func TestJSFactory_CallerSuppliedStaleOpenAIVendorIsOverridden(t *testing.T) {
 		}
 		env := environment.NewMapEnvProvider(map[string]string{"XAI_API_KEY": "secret"})
 
-		p, err := DefaultRegistry().New(t.Context(), modelCfg, env,
+		p, err := wasmTestRegistry().New(t.Context(), modelCfg, env,
 			options.WithOpenAIVendor(true), options.WithNoThinking())
 		require.NoError(t, err)
 		stream, err := p.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, nil)
@@ -265,7 +270,7 @@ func TestJSFactory_CallerSuppliedStaleOpenAIVendorIsOverridden(t *testing.T) {
 		modelCfg := &latest.ModelConfig{Provider: "my_openai", Model: "gpt-5.6"}
 		env := environment.NewMapEnvProvider(map[string]string{"MY_OPENAI_TOKEN": "secret"})
 
-		provider, err := DefaultRegistry().New(t.Context(), modelCfg, env,
+		provider, err := wasmTestRegistry().New(t.Context(), modelCfg, env,
 			options.WithProviders(customProviders), options.WithOpenAIVendor(false), options.WithNoThinking())
 		require.NoError(t, err)
 		stream, err := provider.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "Hi"}}, nil)
@@ -297,12 +302,12 @@ func TestJSFactory_CloneWithOptions_PreservesOpenAIVendorBit(t *testing.T) {
 	modelCfg := &latest.ModelConfig{Provider: "my_openai", Model: "gpt-5.6"}
 	env := environment.NewMapEnvProvider(map[string]string{"MY_OPENAI_TOKEN": "secret"})
 
-	baseProvider, err := DefaultRegistry().New(t.Context(), modelCfg, env, options.WithProviders(customProviders))
+	baseProvider, err := wasmTestRegistry().New(t.Context(), modelCfg, env, options.WithProviders(customProviders))
 	require.NoError(t, err)
 	baseOpts := baseProvider.BaseConfig().ModelOptions
 	require.True(t, baseOpts.OpenAIVendor(), "base provider should resolve the OpenAI vendor bit")
 
-	cloned := CloneWithOptions(t.Context(), baseProvider, options.WithNoThinking())
+	cloned := provider.CloneWithOptions(t.Context(), baseProvider, options.WithNoThinking())
 	clonedOpts := cloned.BaseConfig().ModelOptions
 	require.True(t, clonedOpts.OpenAIVendor(), "clone must preserve the OpenAI vendor bit")
 
@@ -331,12 +336,12 @@ func TestJSFactory_CloneWithOptions_KeepsOpenAIVendorFalse(t *testing.T) {
 	}
 	env := environment.NewMapEnvProvider(map[string]string{"XAI_API_KEY": "secret"})
 
-	baseProvider, err := DefaultRegistry().New(t.Context(), modelCfg, env)
+	baseProvider, err := wasmTestRegistry().New(t.Context(), modelCfg, env)
 	require.NoError(t, err)
 	baseOpts := baseProvider.BaseConfig().ModelOptions
 	require.False(t, baseOpts.OpenAIVendor())
 
-	cloned := CloneWithOptions(t.Context(), baseProvider, options.WithNoThinking())
+	cloned := provider.CloneWithOptions(t.Context(), baseProvider, options.WithNoThinking())
 	clonedOpts := cloned.BaseConfig().ModelOptions
 	require.False(t, clonedOpts.OpenAIVendor())
 

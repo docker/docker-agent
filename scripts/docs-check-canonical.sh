@@ -3,7 +3,7 @@
 # docs.docker.com must declare the canonical: front matter value
 # derived from its path, so the github.io page defers to the stable
 # docs (issue #3371, phase 3.2). Missing or stale values (e.g. a page
-# scaffolded by copying another one) fail here and in docs-lint CI.
+# scaffolded by copying another one) fail here and in the docs CI workflow.
 #
 # Scope: docs/<section>/<page>/index.md and deeper. The homepage,
 # 404.md and section _index.md files are not github.io content pages

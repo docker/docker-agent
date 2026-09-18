@@ -1,0 +1,37 @@
+{
+  "acme": {
+    "models": {
+      "model-a": {
+        "name": "Model A",
+        "limit": { "context": 128000, "output": 4096 },
+        "cost": { "input": 5, "output": 2 }
+      },
+      "model-b": {
+        "name": "Model B",
+        "limit": { "context": 8000, "output": 1000 }
+      },
+      "model-c": {
+        "name": "Model C",
+        "limit": { "context": 500, "output": 100 },
+        "tool_call": true
+      }
+    }
+  },
+  "unchanged": {
+    "models": {
+      "model-z": {
+        "name": "Model Z",
+        "limit": { "context": 100000, "output": 4096 }
+      }
+    }
+  },
+  "evil": {
+    "models": {
+      "weird|`model": {
+        "name": "Weird | Name `with backtick` and a very very very very very very very long tail that should be truncated by the safe() length cap",
+        "limit": { "context": 1000000, "output": 4096 },
+        "cost": { "input": 3, "output": 6 }
+      }
+    }
+  }
+}

@@ -519,10 +519,11 @@ func calculateSemanticUsageCost(ctx context.Context, modelsStore modelStore, id 
 		return 0
 	}
 
-	inputCost := float64(usage.InputTokens) * model.Cost.Input
-	outputCost := float64(usage.OutputTokens+usage.ReasoningTokens) * model.Cost.Output
-	cacheReadCost := float64(usage.CachedInputTokens) * model.Cost.CacheRead
-	cacheWriteCost := float64(usage.CacheWriteTokens) * model.Cost.CacheWrite
+	rates := model.Cost.RatesFor(usage.PromptTokens())
+	inputCost := float64(usage.InputTokens) * rates.Input
+	outputCost := float64(usage.OutputTokens+usage.ReasoningTokens) * rates.Output
+	cacheReadCost := float64(usage.CachedInputTokens) * rates.CacheRead
+	cacheWriteCost := float64(usage.CacheWriteTokens) * rates.CacheWrite
 
 	return (inputCost + outputCost + cacheReadCost + cacheWriteCost) / 1e6
 }

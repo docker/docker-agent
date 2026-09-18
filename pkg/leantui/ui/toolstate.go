@@ -141,6 +141,25 @@ func (t *ToolTracker) Finish(id string, result ToolResult) *ToolView {
 	return snapshot
 }
 
+// FinalizeAll marks every in-flight tool with a terminal status, returns
+// immutable snapshots in call order, and clears the tracker.
+func (t *ToolTracker) FinalizeAll(status tuitypes.ToolStatus) []*ToolView {
+	views := make([]*ToolView, 0, len(t.order))
+	t.ForEach(func(tv *ToolView) {
+		if tv.message == nil {
+			return
+		}
+		tv.message.ToolStatus = status
+		if status == tuitypes.ToolStatusError && tv.message.Content == "" {
+			tv.message.Content = "Tool call ended before a result was received."
+		}
+		msg := *tv.message
+		views = append(views, &ToolView{message: &msg, images: tv.images})
+	})
+	t.Reset()
+	return views
+}
+
 // ToolViewID returns a stable id for a tool call view.
 func ToolViewID(toolCall tools.ToolCall) string {
 	if toolCall.ID != "" {

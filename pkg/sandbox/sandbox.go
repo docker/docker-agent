@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 )
 
@@ -315,7 +316,7 @@ func EnvForAgent(ctx context.Context, agentRef string, env environment.Provider,
 // gatherAgentEnvVars resolves the agent config and returns the list of
 // environment variable names required by its models and tools.
 func gatherAgentEnvVars(ctx context.Context, agentRef string, env environment.Provider, flavors []string) ([]string, error) {
-	source, err := config.Resolve(agentRef, env)
+	source, err := sources.Resolve(agentRef, env)
 	if err != nil {
 		return nil, fmt.Errorf("resolving agent: %w", err)
 	}

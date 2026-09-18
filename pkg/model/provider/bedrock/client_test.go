@@ -1382,10 +1382,9 @@ func TestPromptCachingEnabled_TypeMismatch(t *testing.T) {
 func TestDetectCachingSupport_SupportedModel(t *testing.T) {
 	t.Parallel()
 
-	store, err := modelsdev.NewStore()
-	require.NoError(t, err)
+	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
 
-	// Uses real models.dev lookup to verify Claude models support caching
+	// Uses the committed models.dev snapshot to verify Claude models support caching
 	supported := detectCachingSupport(t.Context(), "anthropic.claude-opus-4-7", store)
 	assert.True(t, supported)
 }
@@ -1393,8 +1392,7 @@ func TestDetectCachingSupport_SupportedModel(t *testing.T) {
 func TestDetectCachingSupport_UnsupportedModel(t *testing.T) {
 	t.Parallel()
 
-	store, err := modelsdev.NewStore()
-	require.NoError(t, err)
+	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
 
 	// Llama doesn't have cache pricing in models.dev
 	supported := detectCachingSupport(t.Context(), "meta.llama3-8b-instruct-v1:0", store)
@@ -1404,8 +1402,7 @@ func TestDetectCachingSupport_UnsupportedModel(t *testing.T) {
 func TestDetectCachingSupport_UnknownModel(t *testing.T) {
 	t.Parallel()
 
-	store, err := modelsdev.NewStore()
-	require.NoError(t, err)
+	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
 
 	// Unknown model should gracefully return false, not panic
 	supported := detectCachingSupport(t.Context(), "nonexistent.model.that.does.not.exist:v1", store)

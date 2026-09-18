@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
@@ -67,6 +68,26 @@ func journalMode() string {
 		return "DELETE"
 	}
 	return "WAL"
+}
+
+// closeDrainTimeout bounds how long CloseDB waits for in-use connections.
+const closeDrainTimeout = 5 * time.Second
+
+// CloseDB closes db and waits until every connection has actually been
+// released. sql.DB.Close only closes idle connections: one checked out by an
+// in-flight statement is closed when that statement returns, after Close has
+// already come back. On Windows the database file cannot be deleted while
+// such a connection still holds it, so callers that remove the directory
+// right after closing (tests with t.TempDir, recovery paths) need the handle
+// gone before Close returns. Waiting is bounded so a wedged statement cannot
+// hang shutdown.
+func CloseDB(db *sql.DB) error {
+	err := db.Close()
+	deadline := time.Now().Add(closeDrainTimeout)
+	for db.Stats().OpenConnections > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	return err
 }
 
 // IsCantOpenError checks if the error is a SQLite CANTOPEN error (code 14).

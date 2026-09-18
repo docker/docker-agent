@@ -27,9 +27,9 @@ type RuntimeConfig struct {
 	modelsDevStoreOnce     sync.Once
 
 	// ProviderRegistry instantiates model providers for toolsets that build
-	// providers at load time (e.g. RAG embeddings/reranking). It is populated
-	// by the team loader with the same registry used for agent models. When
-	// nil, ProviderRegistryOrDefault falls back to provider.DefaultRegistry.
+	// providers at load time (e.g. RAG embeddings/reranking). The team loader
+	// sets it on its per-load clone with the registry used for agent models.
+	// When nil, ProviderRegistryOrDefault falls back to provider.EmptyRegistry.
 	ProviderRegistry *provider.Registry
 }
 
@@ -41,6 +41,14 @@ type Config struct {
 	WorkingDir     string
 	Models         map[string]latest.ModelConfig
 	Providers      map[string]latest.ProviderConfig
+
+	// EncryptedConfig is an opaque, encrypted representation of the full agent
+	// YAML (as produced by `docker agent share push --key --encrypt`). When set
+	// and the configured models gateway is a trusted Docker gateway, it is
+	// forwarded to the gateway on every request via the
+	// `X-Cagent-Encrypted-Config` header. It is ignored for non-Docker
+	// gateways and when no gateway is configured.
+	EncryptedConfig string
 
 	// Flavors are the config flavor patches to enable when loading agent
 	// configs, applied in order. Names a config does not define are ignored.
@@ -124,16 +132,15 @@ func (runConfig *RuntimeConfig) ModelsDevStore() (*modelsdev.Store, error) {
 	return runConfig.modelsDevStore, runConfig.modelsDevStoreErr
 }
 
-// ProviderRegistryOrDefault returns the configured provider registry, or the
-// package default registry when none was set (including when the receiver is
-// nil). The default registry only contains providers the core package can
-// expose without optional SDK dependencies, so callers that need the full
-// provider set must ensure the team loader populated ProviderRegistry.
+// ProviderRegistryOrDefault returns the configured provider registry, or an
+// empty registry when none was set. The provider package cannot link concrete
+// implementations; applications that construct models must populate
+// ProviderRegistry explicitly.
 func (runConfig *RuntimeConfig) ProviderRegistryOrDefault() *provider.Registry {
 	if runConfig != nil && runConfig.ProviderRegistry != nil {
 		return runConfig.ProviderRegistry
 	}
-	return provider.DefaultRegistry()
+	return provider.EmptyRegistry()
 }
 
 func (runConfig *RuntimeConfig) EnvProvider() environment.Provider {

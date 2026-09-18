@@ -190,6 +190,15 @@ func WithAddPromptFiles(addPromptFiles []string) Opt {
 	}
 }
 
+// WithAddPromptFilesDepth sets how many directory levels below the working
+// directory are scanned for further prompt files to list by path. 0 disables
+// the scan.
+func WithAddPromptFilesDepth(depth int) Opt {
+	return func(a *Agent) {
+		a.addPromptFilesDepth = depth
+	}
+}
+
 func WithMaxIterations(maxIterations int) Opt {
 	return func(a *Agent) {
 		a.maxIterations = maxIterations

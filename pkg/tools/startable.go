@@ -265,15 +265,18 @@ type StartableToolSet struct {
 	ToolSet
 
 	// mu serializes lifecycle operations (Start/Stop) and guards started
-	// and the failure streaks. TryStart and TryIsStarted use TryLock to
-	// detect an in-flight lifecycle operation without blocking (#4001);
-	// StopIfStarted uses LockContext so shutdown deadlines are honored even
-	// when an in-flight Start ignores cancellation and keeps the lock past
-	// them. Every holder must release through unlock — never mu.Unlock
+	// and the failure streaks. TryStart, TryIsStarted and TryState use
+	// TryLock to detect an in-flight lifecycle operation without blocking
+	// (#4001); StopIfStarted uses LockContext so shutdown deadlines are
+	// honored even when an in-flight Start ignores cancellation and keeps
+	// the lock past them. Every holder must release through unlock — never
+	// mu.Unlock
 	// directly — so a stop request abandoned by a timed-out StopIfStarted
 	// is consumed by whichever holder releases the lock next.
-	mu      lifecycleMutex
-	started bool
+	mu         lifecycleMutex
+	started    bool
+	attempted  bool
+	recovering bool
 
 	// stopRequestMu guards the stop request that StopIfStarted publishes
 	// before waiting for mu. A requester that times out waiting leaves the
@@ -294,11 +297,44 @@ type StartableToolSet struct {
 	// emit a different, more targeted message (e.g. "needs re-auth" vs
 	// "start failed") for the recovery case.
 	recoveryStreak failureStreak
+
+	// startBackoff throttles retryable start failures via a wall-clock gate
+	// enforced in tryStartLocked (#4060). All fields guarded by mu.
+	startBackoffUntil   time.Time                         // zero means no active window
+	startBackoffAttempt int                               // consecutive retryable failures
+	startBackoffErr     error                             // retained cause returned while throttled
+	startJitter         func(time.Duration) time.Duration // nil uses additiveJitter; tests override via WithStartRetryJitter
+	now                 func() time.Time                  // nil uses time.Now; tests override via WithStartRetryClock
+}
+
+// StartableOption is a functional option for NewStartable.
+type StartableOption func(*StartableToolSet)
+
+// WithStartRetryJitter sets the jitter function for backoff delays; for testing.
+func WithStartRetryJitter(fn func(time.Duration) time.Duration) StartableOption {
+	return func(s *StartableToolSet) { s.startJitter = fn }
+}
+
+// WithStartRetryClock sets the clock used by the backoff gate; for testing.
+func WithStartRetryClock(now func() time.Time) StartableOption {
+	return func(s *StartableToolSet) { s.now = now }
 }
 
 // NewStartable wraps a ToolSet for lazy initialization.
-func NewStartable(ts ToolSet) *StartableToolSet {
-	return &StartableToolSet{ToolSet: ts}
+func NewStartable(ts ToolSet, opts ...StartableOption) *StartableToolSet {
+	s := &StartableToolSet{ToolSet: ts}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// nowFn returns s.now if set, otherwise time.Now.
+func (s *StartableToolSet) nowFn() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // IsStarted returns whether the toolset has been successfully started.
@@ -322,17 +358,76 @@ func (s *StartableToolSet) IsStarted() bool {
 // collecting tools for a turn) rather than stall behind a wedged Start
 // (#4001); callers that need the settled state must use IsStarted.
 func (s *StartableToolSet) TryIsStarted() bool {
+	started, _ := s.TryState()
+	return started
+}
+
+// TryState is the non-blocking status probe backing TryIsStarted, returning
+// the extra inFlight bit callers need to distinguish "not started" from
+// "a lifecycle operation is running right now" — most notably a Start that
+// legitimately keeps running for a long time (e.g. RAG indexing a large
+// knowledge base) past the caller's own wait budget. Status/introspection
+// surfaces that must never block behind such a Start use TryState instead
+// of the blocking IsStarted.
+//
+// Outcomes:
+//   - (false, true): another lifecycle operation (Start/Stop/Tools) holds
+//     the single-flight lock; started carries no information.
+//   - (false, false): settled and not started.
+//   - (true, false): settled and started.
+//
+// As with TryIsStarted, the release handshake may consume a pending
+// StopIfStarted request and stop the toolset this probe just observed
+// started: that case reports (false, false) — reaped, not in flight —
+// rather than a started toolset that no longer is.
+func (s *StartableToolSet) TryState() (started, inFlight bool) {
+	if !s.mu.TryLock() {
+		return false, true
+	}
+	started = s.started
+	if s.unlock() {
+		return false, false
+	}
+	return started, false
+}
+
+// TryIsHealthy reports whether the last start succeeded and any live reporter
+// still considers the underlying toolset ready, without waiting for lifecycle
+// I/O.
+func (s *StartableToolSet) TryIsHealthy() bool {
 	if !s.mu.TryLock() {
 		return false
 	}
-	started := s.started
-	// The release handshake may consume a pending StopIfStarted request and
-	// stop the toolset this probe just observed started: report a reaped
-	// start as not-ready rather than as started.
+	healthy := s.started
+	if healthy {
+		if reporter, ok := As[StartReporter](s.ToolSet); ok {
+			healthy = reporter.IsStarted()
+		}
+	}
 	if s.unlock() {
 		return false
 	}
-	return started
+	return healthy
+}
+
+// TryIsAvailable reports whether the toolset may contribute tools without
+// waiting for lifecycle I/O. Never-started toolsets remain available for
+// direct listing; a failed or unhealthy started toolset does not. An in-flight
+// operation is unavailable until its state settles.
+func (s *StartableToolSet) TryIsAvailable() bool {
+	if !s.mu.TryLock() {
+		return false
+	}
+	available := !s.attempted || s.started
+	if available && s.started {
+		if reporter, ok := As[StartReporter](s.ToolSet); ok {
+			available = reporter.IsStarted()
+		}
+	}
+	if s.unlock() {
+		return false
+	}
+	return available
 }
 
 // Start starts the toolset with single-flight semantics.
@@ -367,7 +462,7 @@ func (s *StartableToolSet) TryStart(ctx context.Context) (started bool, err erro
 			started = s.TryIsStarted()
 		}
 	}()
-	if err := s.startLocked(ctx); err != nil {
+	if err := s.tryStartLocked(ctx); err != nil {
 		return false, err
 	}
 	return s.started, nil
@@ -378,6 +473,12 @@ func (s *StartableToolSet) TryStart(ctx context.Context) (started bool, err erro
 // startup probe so both give up on a wedged toolset after the same grace
 // period; it is deliberately generous because a cold start can legitimately
 // include an image pull.
+//
+// This is a *wait* budget, not a bound on the start itself: a toolset whose
+// Start legitimately outlives it (e.g. RAG indexing a large knowledge base,
+// bounded by its own indexing_timeout) is expected to keep running past this
+// deadline by design — see TryStartWithTimeout below for the abandon-and-
+// resume contract that makes that safe.
 const DefaultStartTimeout = 30 * time.Second
 
 // TryStartWithTimeout runs TryStart bounded by timeout (DefaultStartTimeout
@@ -419,17 +520,73 @@ func (s *StartableToolSet) TryStartWithTimeout(ctx context.Context, timeout time
 	}
 }
 
+// resetStartBackoff clears all backoff state. s.mu must be held.
+func (s *StartableToolSet) resetStartBackoff() {
+	s.startBackoffUntil = time.Time{}
+	s.startBackoffAttempt = 0
+	s.startBackoffErr = nil
+}
+
+// setStartBackoff records a retryable start failure and arms the cooldown
+// gate. Non-retryable errors clear the window so the next attempt runs
+// immediately (preserving today’s prompt-fail behaviour for auth/config
+// errors). s.mu must be held.
+func (s *StartableToolSet) setStartBackoff(err error) {
+	if !startBackoffRetryable(err) {
+		s.resetStartBackoff()
+		return
+	}
+	s.startBackoffAttempt++
+	delay := computeStartBackoff(s.startBackoffAttempt, s.startJitter)
+	// Honor the server's Retry-After hint when it exceeds the computed window,
+	// but cap it at startBackoffMax so a misbehaving server cannot stall indefinitely.
+	// Apply the same jitter to spread simultaneous Retry-After clients.
+	if hint := retryAfterHint(err); hint > delay {
+		if s.startJitter != nil {
+			delay = s.startJitter(min(hint, startBackoffMax))
+		} else {
+			delay = additiveJitter(min(hint, startBackoffMax))
+		}
+	}
+	s.startBackoffUntil = s.nowFn().Add(delay)
+	s.startBackoffErr = err
+}
+
+// tryStartLocked enforces the backoff gate. Only called from TryStart —
+// blocking Start() must never be gated. s.mu must be held.
+func (s *StartableToolSet) tryStartLocked(ctx context.Context) error {
+	// Gate: only the non-blocking TryStart paths enforce the schedule.
+	if !s.startBackoffUntil.IsZero() && s.nowFn().Before(s.startBackoffUntil) {
+		return s.startBackoffErr
+	}
+	return s.startLocked(ctx)
+}
+
 // startLocked implements the start sequence shared by Start and TryStart.
 // s.mu must be held.
 func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
-	recovering := false
+	recovering := s.recovering
+	if recovering {
+		if reporter, ok := As[StartReporter](s.ToolSet); ok && reporter.IsStarted() {
+			s.started = true
+			s.recovering = false
+			s.startStreak.reset()
+			s.recoveryStreak.reset()
+			s.resetStartBackoff()
+			return nil
+		}
+	}
 	if s.started {
 		if reporter, ok := As[StartReporter](s.ToolSet); !ok || reporter.IsStarted() {
 			return nil
 		}
 		s.started = false
 		recovering = true
+		s.recovering = true
 	}
+
+	// Gate is in tryStartLocked (TryStart only); blocking Start() always
+	// attempts the underlying to avoid delaying explicit starts.
 
 	// Span the toolset startup — MCP handshake, OAuth probes,
 	// tool discovery, etc. can take seconds to minutes and the
@@ -447,6 +604,7 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 		inner = u.Unwrap()
 	}
 	if restarter, hasRestarter := As[Restartable](s.ToolSet); recovering && hasRestarter {
+		s.attempted = true
 		ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/tools").Start(
 			ctx,
 			"toolset.start",
@@ -461,11 +619,14 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 			span.End()
 		}()
 		if err := restarter.Restart(ctx); err != nil {
+			s.recovering = true
 			s.startStreak.fail()
 			s.recoveryStreak.fail()
+			s.setStartBackoff(err)
 			return err
 		}
 	} else if startable, ok := As[Startable](s.ToolSet); ok {
+		s.attempted = true
 		ctx, span := otel.Tracer("github.com/docker/docker-agent/pkg/tools").Start(
 			ctx,
 			"toolset.start",
@@ -482,12 +643,20 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 		if err := startable.Start(ctx); err != nil {
 			s.startStreak.fail()
 			var partial *PartialStartError
-			if errors.As(err, &partial) {
+			switch {
+			case errors.As(err, &partial):
 				// A partial start still latches started: the composite's
 				// healthy inner toolsets must stay listed and usable, and
 				// its StartReporter keeps returning false while degraded,
 				// so the failed subset is retried on the next Start.
 				s.started = true
+				// setStartBackoff arms the gate when the aggregated cause is
+				// retryable (errors.As walks the errors.Join tree, so any one
+				// retryable inner cause is enough) and otherwise resets it,
+				// so a degraded subset (e.g. a RAG toolset hitting 429s) is
+				// paced like any other retryable failure (#4067) without
+				// slowing down a non-retryable one.
+				s.setStartBackoff(err)
 				// The latch makes every later Start a recovery run, so
 				// recovering alone cannot tell an inner that was started
 				// and lost from one that never came up (e.g. an initial
@@ -497,23 +666,29 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 				if partial.LostAfterStart {
 					s.recoveryStreak.fail()
 				}
-			} else if recovering {
+			case recovering:
+				s.recovering = true
 				// A failed recovery marks the recovery streak here too, not
 				// only in the Restartable branch above: toolsets recovering
 				// through plain Start (a StartReporter without Restartable,
 				// or a composite whose inner toolsets all went down) need
 				// the targeted re-auth notice as well.
 				s.recoveryStreak.fail()
+				s.setStartBackoff(err)
+			default:
+				s.setStartBackoff(err)
 			}
 			return err
 		}
 	}
 
-	// Successful start: clear the streak so any future failure is reported
-	// as fresh. This is the recovery path — it is intentionally silent.
+	// Successful start: clear streaks and backoff so any future failure is
+	// reported as fresh. This is the recovery path — it is intentionally silent.
 	s.started = true
+	s.recovering = false
 	s.startStreak.reset()
 	s.recoveryStreak.reset()
+	s.resetStartBackoff()
 	return nil
 }
 
@@ -535,6 +710,48 @@ func (s *StartableToolSet) Tools(ctx context.Context) ([]Tool, error) {
 
 	s.listStreak.reset()
 	return ta, nil
+}
+
+// CanRestart reports whether the wrapped toolset supports an explicit restart.
+// Callers must use Restart on this wrapper so the lifecycle latch, failure
+// streaks, and retry gate stay synchronized with the underlying toolset.
+func (s *StartableToolSet) CanRestart() bool {
+	_, ok := As[Restartable](s.ToolSet)
+	return ok
+}
+
+// RestartIfSupported restarts the underlying toolset under the canonical
+// lifecycle lock. It bypasses the retry gate because an explicit operator
+// action must run immediately, then synchronizes all wrapper-owned state.
+func (s *StartableToolSet) RestartIfSupported(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.unlock()
+
+	restarter, ok := As[Restartable](s.ToolSet)
+	if !ok {
+		return errors.New("toolset does not support restart")
+	}
+
+	wasStarted := s.started
+	s.attempted = true
+	s.started = false
+	if err := restarter.Restart(ctx); err != nil {
+		s.recovering = wasStarted || s.recovering
+		s.startStreak.fail()
+		if wasStarted {
+			s.recoveryStreak.fail()
+		}
+		s.setStartBackoff(err)
+		return err
+	}
+
+	s.started = true
+	s.recovering = false
+	s.startStreak.reset()
+	s.listStreak.reset()
+	s.recoveryStreak.reset()
+	s.resetStartBackoff()
+	return nil
 }
 
 // Stop stops the toolset if it implements Startable and resets
@@ -589,9 +806,12 @@ func (s *StartableToolSet) StopIfStarted(ctx context.Context) error {
 // the unlock release handshake; s.mu must be held.
 func (s *StartableToolSet) stopLocked(ctx context.Context) error {
 	s.started = false
+	s.attempted = false
+	s.recovering = false
 	s.startStreak.reset()
 	s.listStreak.reset()
 	s.recoveryStreak.reset()
+	s.resetStartBackoff()
 	if startable, ok := As[Startable](s.ToolSet); ok {
 		return startable.Stop(ctx)
 	}
@@ -604,8 +824,8 @@ func (s *StartableToolSet) stopLocked(ctx context.Context) error {
 // and, when the toolset is started, stops it. The requester may have timed
 // out and returned long ago, so the stop runs under context.WithoutCancel
 // of the request ctx and a failure can only be logged. It reports whether
-// any request was settled, so non-blocking probes (TryIsStarted) can avoid
-// reporting a started toolset this very release just reaped.
+// any request was settled, so non-blocking probes (TryIsStarted, TryState)
+// can avoid reporting a started toolset this very release just reaped.
 //
 // Each round settles one request; the lock is released by the round that
 // finds none. Re-checking after a stop keeps stopRequestMu holds brief

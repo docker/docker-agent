@@ -679,7 +679,7 @@ func (f *runExecFlags) applyAliasOptions(ctx context.Context, alias *userconfig.
 }
 
 // aliasOptions resolves the alias options for an agent reference from an
-// already-loaded user config, mirroring config.ResolveAlias: the empty
+// already-loaded user config, mirroring sources.ResolveAlias: the empty
 // reference maps to the "default" alias, and an alias without options is
 // not returned.
 func aliasOptions(cfg *userconfig.Config, agentFileName string) *userconfig.Alias {
@@ -885,6 +885,7 @@ func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig 
 		Models:             loadResult.Models,
 		Providers:          loadResult.Providers,
 		ModelsGateway:      runConfig.ModelsGateway,
+		EncryptedConfig:    loadResult.EncryptedConfig,
 		EnvProvider:        runConfig.EnvProvider(),
 		ProviderRegistry:   loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels,
@@ -1302,6 +1303,14 @@ func (f *runExecFlags) scopedSafetyDefault(safety latestcfg.SafetyMode, legacyYo
 // createSessionSpawner creates a function that can spawn new sessions with different working directories.
 func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore session.Store) tui.SessionSpawner {
 	return func(spawnCtx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
+		// The spawn dialog may hand us a relative or empty path; pin the
+		// spawned session's workspace provenance to an absolute root now,
+		// before anything below captures it.
+		workingDir, err := session.CaptureLocalWorkingDir(workingDir)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
 		// Create a copy of the runtime config with the new working directory
 		runConfigCopy := f.runConfig.Clone()
 		runConfigCopy.WorkingDir = workingDir

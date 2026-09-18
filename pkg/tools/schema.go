@@ -135,6 +135,18 @@ func removeNullFromType(prop map[string]any) {
 // ensurePropertyTypes recursively walks a JSON Schema map and ensures
 // every property has a "type" set, defaulting to "object" if missing.
 // It descends into nested "properties" and array "items".
+// $ref nodes are skipped: a $ref's type is defined by its target, and
+// injecting one adds a sibling keyword that providers like OpenAI reject
+// on $ref nodes under strict mode.
+// Composition nodes (anyOf/oneOf/allOf) are skipped for the same reason:
+// their shape is the union/intersection of their variants, and a sibling
+// "type" ANDs with the composition. Injecting "object" onto e.g.
+// {"anyOf": [{"type":"string"}, {"type":"array"}]} (Atlassian MCP
+// getConfluenceSpaces.expand, Notion MCP filters) makes the schema
+// unsatisfiable; OpenAI's Responses API then returns an instant
+// status=incomplete / reason=max_output_tokens with zero tokens instead of
+// a 400, which surfaces as an "empty response" turn. The variants
+// themselves are still walked so their own properties get typed.
 func ensurePropertyTypes(schema map[string]any) {
 	props, ok := schema["properties"].(map[string]any)
 	if !ok {
@@ -144,6 +156,28 @@ func ensurePropertyTypes(schema map[string]any) {
 	for _, v := range props {
 		prop, ok := v.(map[string]any)
 		if !ok {
+			continue
+		}
+
+		if _, isRef := prop["$ref"]; isRef {
+			continue
+		}
+
+		if isCompositionSchema(prop) {
+			for _, kw := range compositionKeywords {
+				variants, ok := prop[kw].([]any)
+				if !ok {
+					continue
+				}
+				for _, variant := range variants {
+					if vm, ok := variant.(map[string]any); ok {
+						ensurePropertyTypes(vm)
+						if items, ok := vm["items"].(map[string]any); ok {
+							ensurePropertyTypes(items)
+						}
+					}
+				}
+			}
 			continue
 		}
 
@@ -159,6 +193,20 @@ func ensurePropertyTypes(schema map[string]any) {
 			ensurePropertyTypes(items)
 		}
 	}
+}
+
+// compositionKeywords are the JSON Schema keywords whose node shape is
+// defined by their variants rather than by an own "type".
+var compositionKeywords = []string{"anyOf", "oneOf", "allOf"}
+
+// isCompositionSchema reports whether node uses anyOf/oneOf/allOf.
+func isCompositionSchema(node map[string]any) bool {
+	for _, kw := range compositionKeywords {
+		if _, ok := node[kw]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func ConvertSchema(params, v any) error {

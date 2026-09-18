@@ -19,21 +19,14 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// Provider defines the minimal interface needed for model providers.
-type Provider interface {
-	ID() modelsdev.ID
-	CreateChatCompletionStream(
-		ctx context.Context,
-		messages []chat.Message,
-		availableTools []tools.Tool,
-	) (chat.MessageStream, error)
-	BaseConfig() base.Config
-}
+// Provider is the canonical model provider contract.
+type Provider = contracts.Provider
 
 // ProviderFactory creates a provider from a model config.
 // The models parameter provides access to all configured models for resolving references.
@@ -74,7 +67,6 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, models map[string]l
 	client := &Client{
 		Config: base.Config{
 			ModelConfig: *cfg,
-			Models:      models,
 			Env:         env,
 		},
 		matcher:  newMatcher(),

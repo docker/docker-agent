@@ -659,9 +659,20 @@ func formatDetailsLines(model runtime.ModelChoice, s detailsStyles) []string {
 		ref += s.muted.Render(" · " + model.Family + " family")
 	}
 
+	pricing := row("Pricing", formatPricingRow(model, s))
+	var local []string
+	for _, value := range []string{model.Architecture, model.Parameters, model.Quantization, model.Size} {
+		if value != "" {
+			local = append(local, s.value.Render(value))
+		}
+	}
+	if len(local) > 0 && model.InputCost == 0 && model.OutputCost == 0 && model.CacheReadCost == 0 && model.CacheWriteCost == 0 {
+		pricing = row("Model", strings.Join(local, s.muted.Render(" · ")))
+	}
+
 	return []string{
 		row("Reference", ref),
-		row("Pricing", formatPricingRow(model, s)),
+		pricing,
 		row("Limits", formatLimitsRow(model, s)),
 		row("Modalities", formatModalitiesRow(model, s)),
 	}

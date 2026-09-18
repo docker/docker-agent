@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -19,10 +19,11 @@ import (
 	// OTel Logs 0.21 support (google/adk-go#1335) is merged upstream but not yet
 	// tagged. Replace with the first v2 tag that contains that commit.
 	"google.golang.org/adk/v2/runner"
-	"google.golang.org/adk/v2/server/adka2a"
+	adka2a "google.golang.org/adk/v2/server/adka2a/v2"
 	adksession "google.golang.org/adk/v2/session"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/httpsec"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/servesafety"
@@ -57,7 +58,7 @@ type RunOptions struct {
 func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runConfig *config.RuntimeConfig, ln net.Listener, options RunOptions) error {
 	slog.DebugContext(ctx, "Starting A2A server", "source", agentFilename, "agent", agentName, "addr", ln.Addr().String())
 
-	agentSource, err := config.Resolve(agentFilename, nil)
+	agentSource, err := sources.Resolve(agentFilename, nil)
 	if err != nil {
 		return err
 	}
@@ -101,7 +102,12 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	baseURL := &url.URL{Scheme: "http", Host: routableAddr(ln.Addr().String())}
 	slog.DebugContext(ctx, "A2A server listening", "url", baseURL.String())
 
-	e, err := newServer(t, agentFilename, agentName, sessStore, resolvedSafety, ln.Addr().String(), options)
+	workingDir, err := session.CaptureLocalWorkingDir(runConfig.WorkingDir)
+	if err != nil {
+		return err
+	}
+
+	e, err := newServer(t, agentFilename, agentName, sessStore, resolvedSafety, workingDir, ln.Addr().String(), options)
 	if err != nil {
 		return fmt.Errorf("failed to create A2A server: %w", err)
 	}
@@ -121,8 +127,8 @@ func Run(ctx context.Context, agentFilename, agentName, sessionDB string, runCon
 	return nil
 }
 
-func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, listenAddr string, options RunOptions) (*echo.Echo, error) {
-	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety)
+func newServer(t *team.Team, agentFilename, agentName string, sessStore session.Store, safety servesafety.Resolved, workingDir, listenAddr string, options RunOptions) (*echo.Echo, error) {
+	adkAgent, err := newDockerAgentAdapter(t, agentName, sessStore, safety, workingDir)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +137,7 @@ func newServer(t *team.Team, agentFilename, agentName string, sessStore session.
 	name := strings.TrimSuffix(filepath.Base(agentFilename), filepath.Ext(agentFilename))
 
 	agentPath := "/invoke"
+	invokeURL := baseURL.JoinPath(agentPath).String()
 	agentCard := &a2a.AgentCard{
 		Name:        name,
 		Description: adkAgent.Description(),
@@ -140,12 +147,11 @@ func newServer(t *team.Team, agentFilename, agentName string, sessStore session.
 			Description: adkAgent.Description(),
 			Tags:        []string{"llm", "docker agent"},
 		}},
-		PreferredTransport: a2a.TransportProtocolJSONRPC,
-		URL:                baseURL.JoinPath(agentPath).String(),
-		Capabilities:       a2a.AgentCapabilities{Streaming: true},
-		Version:            version.Version,
-		DefaultInputModes:  []string{},
-		DefaultOutputModes: []string{},
+		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(invokeURL, a2a.TransportProtocolJSONRPC)},
+		Capabilities:        a2a.AgentCapabilities{Streaming: true},
+		Version:             version.Version,
+		DefaultInputModes:   []string{},
+		DefaultOutputModes:  []string{},
 	}
 
 	executor := newExecutorWrapper(adka2a.ExecutorConfig{

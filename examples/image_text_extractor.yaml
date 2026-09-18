@@ -1,7 +1,7 @@
 models:
-  gpt4_vision:
+  gpt_vision:
     provider: openai
-    model: gpt-4o
+    model: gpt-5.6-sol
     max_tokens: 4000
 
   claude:
@@ -16,7 +16,7 @@ models:
 
 agents:
   root:
-    model: gpt4_vision
+    model: gpt_vision
     description: "Expert image text extraction and analysis agent that can read text from images and provide clear, comprehensive explanations of the content"
     instruction: |
       You are an expert image text extraction agent with advanced OCR capabilities. Your primary responsibilities are:

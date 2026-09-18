@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
@@ -42,30 +44,35 @@ func TestNameFor_DescriberFallback(t *testing.T) {
 	assert.Equal(t, "mcp(stdio)", nameForTest(ts, tools.DescribeToolSet(ts)))
 }
 
-// TestRestartToolset_HappyPath constructs a fake agent (LocalRuntime
-// with a single statable+restartable toolset) and exercises the by-name
-// dispatch.
-//
-// We don't construct a full runtime here — that's covered by integration
-// tests — but we do exercise the same helper RestartToolset uses
-// internally (toolsetStatusFor + match by name + Restartable.Restart).
-func TestRestartable_DispatchesByName(t *testing.T) {
+// TestRestartToolset_HappyPath verifies that runtime restart dispatch goes
+// through StartableToolSet, keeping wrapper and supervisor state synchronized.
+func TestRestartToolset_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	inner := &restartableToolset{desc: "mcp(stdio cmd=foo)"}
+	root := agent.New("root", "agent", agent.WithModel(&mockProvider{id: "test/model", stream: &mockStream{}}), agent.WithToolSets(inner))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	require.NoError(t, rt.RestartToolset(t.Context(), inner.desc))
+	assert.Equal(t, 1, inner.restartCall)
+
+	wrapped := root.ToolSets()[0].(*tools.StartableToolSet)
+	assert.True(t, wrapped.IsStarted())
+}
+
+func TestRestartToolset_FailureLeavesWrapperUnstarted(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("post-restart error from supervisor")
-	ts := &restartableToolset{
-		desc:       "mcp(stdio cmd=foo)",
-		restartErr: wantErr,
-	}
+	inner := &restartableToolset{desc: "mcp(stdio cmd=foo)", restartErr: wantErr}
+	root := agent.New("root", "agent", agent.WithModel(&mockProvider{id: "test/model", stream: &mockStream{}}), agent.WithToolSets(inner))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 
-	// Match against the description (the same name resolution the
-	// runtime does via nameFor when there's no Name() method).
-	matched := false
-	if nameForTest(ts, tools.DescribeToolSet(ts)) == "mcp(stdio cmd=foo)" {
-		matched = true
-		err := ts.Restart(t.Context())
-		require.ErrorIs(t, err, wantErr)
-	}
-	assert.True(t, matched)
-	assert.Equal(t, 1, ts.restartCall)
+	require.ErrorIs(t, rt.RestartToolset(t.Context(), inner.desc), wantErr)
+	wrapped := root.ToolSets()[0].(*tools.StartableToolSet)
+	assert.False(t, wrapped.IsStarted())
 }

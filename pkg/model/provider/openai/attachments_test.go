@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -35,8 +36,7 @@ func TestConvertDocumentResponseInput_StrategyB64_Image(t *testing.T) {
 
 	wantB64 := base64.StdEncoding.EncodeToString(minJPEG)
 	imageURL := parts[0].OfInputImage.ImageURL.Value
-	assert.Contains(t, imageURL, "data:image/jpeg;base64,")
-	assert.Contains(t, imageURL, wantB64)
+	assert.Equal(t, "data:image/jpeg;base64,"+wantB64, imageURL)
 }
 
 // TestConvertDocumentResponseInput_StrategyB64_ImageDropped verifies that an
@@ -116,4 +116,48 @@ func TestConvertDocumentResponseInput_Drop_NoContent(t *testing.T) {
 	parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, modelinfo.ModelCapabilities{})
 	require.NoError(t, err)
 	assert.Nil(t, parts, "should be nil when no inline content")
+}
+
+func TestConvertDocumentResponseInput_StrategyB64_PreservesMIMEType(t *testing.T) {
+	t.Parallel()
+
+	for _, mimeType := range []string{"image/PNG", "application/PDF"} {
+		t.Run(mimeType, func(t *testing.T) {
+			t.Parallel()
+			doc := chat.Document{
+				MimeType: mimeType,
+				Source:   chat.DocumentSource{InlineData: []byte{0xff}},
+			}
+			parts, err := convertDocumentToResponseInputWithCaps(t.Context(), doc, modelinfo.CapsWith(true, true))
+			require.NoError(t, err)
+			require.Len(t, parts, 1)
+			if mimeType == "image/PNG" {
+				require.NotNil(t, parts[0].OfInputImage)
+				assert.Equal(t, "data:image/PNG;base64,/w==", parts[0].OfInputImage.ImageURL.Value)
+			} else {
+				require.NotNil(t, parts[0].OfInputFile)
+				assert.Equal(t, "data:application/PDF;base64,/w==", parts[0].OfInputFile.FileData.Value)
+			}
+		})
+	}
+}
+
+func BenchmarkConvertDocumentResponseInputB64(b *testing.B) {
+	for _, mimeType := range []string{"image/png", "application/pdf"} {
+		b.Run(mimeType, func(b *testing.B) {
+			doc := chat.Document{
+				MimeType: mimeType,
+				Source:   chat.DocumentSource{InlineData: bytes.Repeat([]byte{0xff}, 1<<20)},
+			}
+			caps := modelinfo.CapsWith(true, true)
+			ctx := b.Context()
+			b.ReportAllocs()
+			b.SetBytes(int64(len(doc.Source.InlineData)))
+			for b.Loop() {
+				if _, err := convertDocumentToResponseInputWithCaps(ctx, doc, caps); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }

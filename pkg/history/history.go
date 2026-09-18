@@ -5,7 +5,6 @@ package history
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,16 +26,12 @@ type History struct {
 }
 
 // New loads the history stored under baseDir/.cagent/history. If baseDir is
-// empty, the user's home directory is used.
+// empty, paths.GetHomeDir() is used.
 func New(baseDir string) (*History, error) {
 	if baseDir == "" {
 		baseDir = paths.GetHomeDir()
-		if baseDir == "" {
-			return nil, errors.New("failed to get user home directory")
-		}
 	}
-
-	h := &History{path: filepath.Join(baseDir, ".cagent", "history")}
+	h := &History{path: filepath.Join(baseDir, ".cagent", "history")} //rubocop:disable Lint/StatePathViaPathsPackage // baseDir is home-dir or caller-supplied root; .cagent sub-path is intentional here
 	if err := h.migrateOldHistory(baseDir); err != nil {
 		return nil, err
 	}
@@ -195,7 +190,7 @@ func (h *History) load() error {
 // migrateOldHistory imports messages from the legacy history.json file (if it
 // exists) into the new line-oriented format and removes the old file.
 func (h *History) migrateOldHistory(baseDir string) error {
-	oldPath := filepath.Join(baseDir, ".cagent", "history.json")
+	oldPath := filepath.Join(baseDir, ".cagent", "history.json") //rubocop:disable Lint/StatePathViaPathsPackage // legacy migration path — intentional
 
 	data, err := os.ReadFile(oldPath)
 	if os.IsNotExist(err) {

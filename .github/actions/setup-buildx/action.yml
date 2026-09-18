@@ -1,0 +1,79 @@
+name: Set up Buildx
+description: >-
+  Logs in to Docker Hub with a short-lived OIDC token and sets up a Buildx
+  builder, Docker Build Cloud by default. Requires `id-token: write`.
+
+inputs:
+  connection-id:
+    description: Docker Hub OIDC connection id.
+    required: true
+  expected-sha:
+    description: Optional 40-character commit SHA the run must be on.
+    required: false
+    default: ''
+  driver:
+    description: Buildx driver; `cloud` or `docker-container`.
+    required: false
+    default: cloud
+  endpoint:
+    description: Build Cloud endpoint (cloud driver only).
+    required: false
+    default: docker/docker-agent
+  builder:
+    description: Create a builder. Set false for registry-only work such as imagetools.
+    required: false
+    default: 'true'
+
+outputs:
+  builder:
+    description: Builder name to pass to build-push-action (empty when builder is false).
+    value: ${{ steps.buildx.outputs.name }}
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        CONNECTION_ID: ${{ inputs.connection-id }}
+        EXPECTED_SHA: ${{ inputs.expected-sha }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$EXPECTED_SHA" ]]; then
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "expected-sha must be a lowercase 40-character SHA" >&2
+            exit 1
+          fi
+          if [[ "$EXPECTED_SHA" != "$GITHUB_SHA" ]]; then
+            echo "expected-sha does not match the workflow run commit $GITHUB_SHA" >&2
+            exit 1
+          fi
+        fi
+        if [[ -z "$CONNECTION_ID" ]]; then
+          echo "DOCKERHUB_OIDC_CONNECTION_ID must be configured" >&2
+          exit 1
+        fi
+        if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" || -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+          echo "GitHub Actions OIDC is unavailable; the job needs id-token: write" >&2
+          exit 1
+        fi
+
+    - id: oidc
+      uses: docker/oidc-action@96ba694c64860c7209bcd1ede7d698c71564ef78 # v1.2.0
+      with:
+        connection-id: ${{ inputs.connection-id }}
+        expires-in: 3600
+
+    - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        username: docker
+        password: ${{ steps.oidc.outputs.token }}
+
+    - id: buildx
+      if: inputs.builder == 'true'
+      uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      with:
+        driver: ${{ inputs.driver }}
+        endpoint: ${{ inputs.driver == 'cloud' && inputs.endpoint || '' }}
+        version: ${{ inputs.driver == 'cloud' && 'lab:edge' || '' }}
+        # Downloading buildx takes seconds; caching it costs ~40 MB per branch.
+        cache-binary: false

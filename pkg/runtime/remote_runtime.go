@@ -855,7 +855,7 @@ func (s *RemoteSessionStore) AddMessage(context.Context, string, *session.Messag
 	return 0, fmt.Errorf("add message: %w", ErrUnsupported)
 }
 
-func (s *RemoteSessionStore) UpdateMessage(context.Context, int64, *session.Message) error {
+func (s *RemoteSessionStore) UpdateMessage(context.Context, string, int64, *session.Message) error {
 	return fmt.Errorf("update message: %w", ErrUnsupported)
 }
 

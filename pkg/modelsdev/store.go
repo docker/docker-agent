@@ -1,6 +1,7 @@
 package modelsdev
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/desktop/transport"
+	"github.com/docker/docker-agent/pkg/paths"
 )
 
 const (
@@ -116,11 +119,7 @@ func NewStore(opts ...Opt) (*Store, error) {
 
 	cacheFile := options.cacheFile
 	if cacheFile == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get user home directory: %w", err)
-		}
-		cacheFile = filepath.Join(homeDir, ".cagent", CacheFileName)
+		cacheFile = filepath.Join(paths.GetCacheDir(), CacheFileName)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(cacheFile), 0o700); err != nil {
@@ -363,6 +362,27 @@ func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool, fetch 
 	return database, true
 }
 
+// Fetch retrieves the models.dev catalog directly from the live API,
+// bypassing any on-disk cache or the embedded build-time snapshot. Unlike a
+// Store lookup, a failure here is always returned to the caller rather than
+// silently degraded to cached or embedded data — callers that need to detect
+// live-catalog drift (as opposed to resolving a model as best-effort) should
+// use this instead of GetDatabase.
+func Fetch(ctx context.Context) (*Database, error) {
+	db, _, err := fetchFromAPI(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	if db == nil {
+		// fetchFromAPI returns (nil, etag, nil) only for a 304 response, which
+		// requires a non-empty If-None-Match — unreachable with the empty etag
+		// passed above. Guard it anyway so a future change to fetchFromAPI
+		// can't silently turn this into a nil-database success.
+		return nil, errors.New("models.dev fetch returned no data")
+	}
+	return db, nil
+}
+
 // fetchFromAPI fetches the models.dev database.
 // If etag is non-empty it is sent as If-None-Match; a 304 response
 // returns (nil, etag, nil) to indicate no change.
@@ -436,7 +456,7 @@ func saveToCache(cacheFile string, database *Database, etag string) error {
 		return fmt.Errorf("failed to marshal cached data: %w", err)
 	}
 
-	if err := os.WriteFile(cacheFile, data, 0o600); err != nil {
+	if err := atomicfile.Write(cacheFile, bytes.NewReader(data), 0o600); err != nil {
 		return fmt.Errorf("failed to write cache file: %w", err)
 	}
 

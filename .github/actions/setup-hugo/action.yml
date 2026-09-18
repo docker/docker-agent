@@ -1,0 +1,22 @@
+name: Set up Hugo
+description: >-
+  Installs the Hugo release every docs workflow builds with, verifying it
+  against the release's published checksums. Kept in sync with the docker/docs
+  HUGO_VERSION pin so docs.docker.com and github.io render the same way.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        HUGO_VERSION: 0.163.0
+        # hugo_<version>_checksums.txt entry for hugo_extended_<version>_linux-amd64.tar.gz.
+        HUGO_SHA256: 6291775b7d012f9b10fb377ba914e5b1589c0b0d2531b695fa9029be14750111
+      run: |
+        set -euo pipefail
+        archive="hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+        curl -fsSLo "${RUNNER_TEMP}/${archive}" \
+          "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/${archive}"
+        echo "${HUGO_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum -c -
+        sudo tar -xzf "${RUNNER_TEMP}/${archive}" -C /usr/local/bin hugo
+        hugo version

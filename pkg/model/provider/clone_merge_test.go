@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -125,9 +127,12 @@ func TestMergeCloneOptions_LaterOverridesWin(t *testing.T) {
 func TestCloneWithOptions_FallbackOnError(t *testing.T) {
 	t.Parallel()
 
-	// fakeProvider returns a zero-valued base.Config, so its Provider type is
-	// empty; that always fails the factory-registry lookup in createDirectProvider.
-	original := &fakeProvider{id: modelsdev.NewID("test", "original")}
+	original := &fakeProvider{
+		id: modelsdev.NewID("test", "original"),
+		config: base.Config{RebuildProvider: func(_ context.Context, _ *latest.ModelConfig, _ ...options.Opt) (Provider, error) {
+			return nil, errors.New("rebuild failed")
+		}},
+	}
 
 	got := CloneWithOptions(t.Context(), original, options.WithMaxTokens(int64(2048)))
 

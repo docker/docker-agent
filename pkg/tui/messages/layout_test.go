@@ -2,6 +2,18 @@ package messages
 
 import "testing"
 
+func TestLayoutSettingsDefaults(t *testing.T) {
+	t.Parallel()
+
+	layout := LayoutSettings{}
+	if layout.ShowPlans {
+		t.Error("the Plans section must be hidden by default")
+	}
+	if layout.HideSessionPath || layout.HideUsage || layout.HideAgents || layout.HideTools || layout.HideTodos {
+		t.Error("existing sidebar sections must remain visible by default")
+	}
+}
+
 func TestParseSectionSpacing(t *testing.T) {
 	t.Parallel()
 

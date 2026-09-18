@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -257,6 +256,10 @@ func agentSourceHTTPError(operation string, err error) error {
 }
 
 func (s *Server) getSessions(c echo.Context) error {
+	if c.QueryParam("active") == "true" {
+		return c.JSON(http.StatusOK, s.sm.GetActiveSessions())
+	}
+
 	sessions, err := s.sm.GetSessions(c.Request().Context())
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to get sessions: %v", err))
@@ -272,7 +275,7 @@ func (s *Server) getSessions(c echo.Context) error {
 			ID:           sess.ID,
 			Title:        title,
 			CreatedAt:    sess.CreatedAt.Format(time.RFC3339),
-			NumMessages:  len(sess.GetAllMessages()),
+			NumMessages:  sess.AllMessageCount(),
 			InputTokens:  inputTokens,
 			OutputTokens: outputTokens,
 			WorkingDir:   sess.WorkingDir,
@@ -328,7 +331,7 @@ func (s *Server) forkSession(c echo.Context) error {
 		InputTokens:   forked.InputTokens,
 		OutputTokens:  forked.OutputTokens,
 		WorkingDir:    forked.WorkingDir,
-		Permissions:   forked.Permissions,
+		Permissions:   forked.ClonePermissions(),
 	})
 }
 
@@ -350,7 +353,7 @@ func (s *Server) getSession(c echo.Context) error {
 		InputTokens:   inputTokens,
 		OutputTokens:  outputTokens,
 		WorkingDir:    sess.WorkingDir,
-		Permissions:   sess.Permissions,
+		Permissions:   sess.ClonePermissions(),
 	})
 }
 
@@ -636,7 +639,7 @@ func (s *Server) steerSession(c echo.Context) error {
 	}
 
 	if err := s.sm.SteerSession(c.Request().Context(), sessionID, req.Messages); err != nil {
-		if strings.Contains(err.Error(), "queue full") {
+		if errors.Is(err, runtime.ErrSteerQueueFull) {
 			c.Response().Header().Set("Retry-After", "1")
 			return echo.NewHTTPError(http.StatusTooManyRequests, "steer queue full")
 		}
@@ -767,7 +770,7 @@ func (s *Server) followUpSession(c echo.Context) error {
 
 	streaming, duplicate, err := s.sm.FollowUpSession(c.Request().Context(), sessionID, req.Messages, idempotencyKey)
 	if err != nil {
-		if strings.Contains(err.Error(), "queue full") {
+		if errors.Is(err, runtime.ErrFollowUpQueueFull) {
 			c.Response().Header().Set("Retry-After", "1")
 			return echo.NewHTTPError(http.StatusTooManyRequests, "follow-up queue full")
 		}

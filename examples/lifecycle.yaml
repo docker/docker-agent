@@ -1,6 +1,6 @@
 agents:
   root:
-    model: openai/gpt-4o-mini
+    model: openai/gpt-5.6-terra
     description: An example agent that demonstrates per-toolset lifecycle policies.
     instruction: |
       Use the configured tools to answer questions.
@@ -37,9 +37,9 @@ agents:
           profile: best-effort
 
 models:
-  openai/gpt-4o-mini:
+  openai/gpt-5.6-terra:
     provider: openai
-    model: gpt-4o-mini
+    model: gpt-5.6-terra
 
 metadata:
   description: Demonstrates per-toolset lifecycle profiles (strict / resilient / best-effort)

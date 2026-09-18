@@ -3,6 +3,8 @@ package codemode
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -682,13 +685,9 @@ func (t *testToolSet) Stop(context.Context) error {
 	return nil
 }
 
-// capableToolSet is a testToolSet that also implements the capability
-// interfaces codeModeTool must forward (Elicitable, Sampleable,
-// SampleableWithTools, OAuthCapable, ChangeNotifier) so tests can assert
-// that codeModeTool actually forwards to inner toolsets instead of
-// silently dropping them (the regression this file guards against: an
-// MCP toolset wrapped by code_mode_tools never got its OAuth elicitation
-// handler wired up, so its authorization dialog never surfaced).
+// capableToolSet is a testToolSet that also implements capabilities discovered
+// through the Code Mode graph. It guards against silently dropping handlers
+// for MCP toolsets nested under code_mode_tools.
 type capableToolSet struct {
 	testToolSet
 
@@ -737,19 +736,12 @@ func (c *capableToolSet) SetToolsChangedHandler(handler func()) {
 	c.toolsChangedHandler = handler
 }
 
-// TestCodeModeTool_ForwardsCapabilityHandlers verifies that codeModeTool
-// forwards elicitation, sampling, OAuth, and tool-list-changed handlers to
-// every inner toolset that supports them. Before this fix, codeModeTool
-// implemented none of these capability interfaces, so
-// tools.ConfigureHandlers (called by the runtime once per turn) could never
-// reach an MCP toolset hidden behind code_mode_tools — its OAuth
-// elicitation handler stayed nil forever and the authorization dialog
-// never surfaced.
-func TestCodeModeTool_ForwardsCapabilityHandlers(t *testing.T) {
+// TestCodeModeTool_ConfiguresCapabilityHandlers verifies that generic graph
+// traversal configures every capable child without composite-specific forwarding.
+func TestCodeModeTool_ConfiguresCapabilityHandlers(t *testing.T) {
 	t.Parallel()
 	capable := &capableToolSet{}
-	// A plain toolset without any capability must be tolerated (As returns
-	// ok=false) rather than panicking.
+	// A plain toolset without any capability must be tolerated.
 	plain := &testToolSet{}
 
 	tool := Wrap(capable, plain)
@@ -782,17 +774,17 @@ func TestCodeModeTool_ForwardsCapabilityHandlers(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:1234/callback", capable.unmanagedOAuthRedirectURI)
 
 	changedCalled := false
-	tool.(tools.ChangeNotifier).SetToolsChangedHandler(func() { changedCalled = true })
+	for _, notifier := range tools.FindAll[tools.ChangeNotifier](tool) {
+		notifier.SetToolsChangedHandler(func() { changedCalled = true })
+	}
 	require.NotNil(t, capable.toolsChangedHandler)
 	capable.toolsChangedHandler()
 	assert.True(t, changedCalled)
 }
 
-// TestCodeModeTool_ForwardsCapabilityHandlersThroughStartableWrapper verifies
-// that the capability forwarding also finds an inner toolset wrapped in a
-// tools.StartableToolSet, matching how real MCP toolsets are wired
-// (tools.NewStartable(mcpToolset)) before being handed to codemode.Wrap.
-func TestCodeModeTool_ForwardsCapabilityHandlersThroughStartableWrapper(t *testing.T) {
+// TestCodeModeTool_ConfiguresCapabilitiesThroughStartableWrapper verifies
+// graph traversal through both composite and decorator edges.
+func TestCodeModeTool_ConfiguresCapabilitiesThroughStartableWrapper(t *testing.T) {
 	t.Parallel()
 	capable := &capableToolSet{}
 	wrapped := tools.NewStartable(capable)
@@ -802,7 +794,7 @@ func TestCodeModeTool_ForwardsCapabilityHandlersThroughStartableWrapper(t *testi
 	handler := func(context.Context, *mcp.ElicitParams) (tools.ElicitationResult, error) {
 		return tools.ElicitationResult{}, nil
 	}
-	tool.(tools.Elicitable).SetElicitationHandler(handler)
+	tools.ConfigureHandlers(tool, handler, nil, nil, nil, false, "")
 
 	assert.NotNil(t, capable.elicitationHandler)
 }
@@ -970,4 +962,63 @@ func TestCodeModeTool_FailureIncludesToolArguments(t *testing.T) {
 	assert.Equal(t, "tool_with_args", scriptResult.ToolCalls[0].Name)
 	assert.Equal(t, map[string]any{"value": "test123"}, scriptResult.ToolCalls[0].Arguments)
 	assert.Equal(t, "result", scriptResult.ToolCalls[0].Result)
+}
+
+// TestCodeModeTool_RateLimitedInnerPacesRetry is the codemode-level
+// regression for #4067: when the composite degrades with a retryable inner
+// cause (e.g. a RAG toolset hitting 429s), the outer StartableToolSet gate
+// must pace the composite's own retry of the failed subset instead of
+// re-invoking every inner toolset's Start on every turn, while the healthy
+// subset's declarations stay listed throughout.
+func TestCodeModeTool_RateLimitedInnerPacesRetry(t *testing.T) {
+	t.Parallel()
+
+	healthy := &testToolSet{tools: []tools.Tool{{Name: "fetch_url"}}}
+	rateLimited := &testToolSet{
+		startErr: &modelerrors.StatusError{StatusCode: http.StatusTooManyRequests, Err: errors.New("rate limited")},
+		tools:    []tools.Tool{{Name: "rag_search"}},
+	}
+
+	composite := Wrap(healthy, rateLimited)
+
+	now := time.Now()
+	identityJitter := func(d time.Duration) time.Duration { return d }
+	s := tools.NewStartable(composite,
+		tools.WithStartRetryClock(func() time.Time { return now }),
+		tools.WithStartRetryJitter(identityJitter),
+	)
+
+	// Turn 1: partial start latches the wrapper (healthy subset stays
+	// listed) and arms the gate on the retryable inner cause.
+	_, err := s.TryStart(t.Context())
+	require.True(t, tools.IsPartialStart(err))
+	assert.True(t, s.IsStarted(), "healthy subset must be listed after a partial start")
+	assert.Equal(t, 1, healthy.start)
+	assert.Equal(t, 1, rateLimited.start)
+
+	allTools, terr := composite.Tools(t.Context())
+	require.NoError(t, terr)
+	require.Len(t, allTools, 1)
+	assert.Contains(t, allTools[0].Description, "FetchUrl")
+	assert.NotContains(t, allTools[0].Description, "RagSearch")
+
+	// Turn 2 (same instant): gated — neither inner is retried.
+	_, err = s.TryStart(t.Context())
+	require.Error(t, err)
+	assert.True(t, s.IsStarted(), "healthy subset must stay listed while gated")
+	assert.Equal(t, 1, healthy.start, "healthy inner must not be re-started while gated")
+	assert.Equal(t, 1, rateLimited.start, "degraded inner's retry must be paced, not re-attempted every turn")
+
+	// Advance comfortably past the (5-minute-capped) window: the next turn
+	// retries the degraded subset, which now recovers.
+	now = now.Add(6 * time.Minute)
+	rateLimited.startErr = nil
+	started, err := s.TryStart(t.Context())
+	require.NoError(t, err)
+	assert.True(t, started)
+	assert.Equal(t, 2, rateLimited.start, "degraded inner must be retried once the window elapses")
+
+	allTools, terr = composite.Tools(t.Context())
+	require.NoError(t, terr)
+	assert.Contains(t, allTools[0].Description, "RagSearch", "recovered inner's declarations must reappear")
 }

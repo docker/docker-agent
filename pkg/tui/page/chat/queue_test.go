@@ -23,6 +23,7 @@ import (
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -583,6 +584,32 @@ func (r *steerRecordingRuntime) FollowUp(_ context.Context, msg runtime.QueuedMe
 	return nil
 }
 
+func (r *steerRecordingRuntime) CancelSteer(_ context.Context, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, msg := range r.steers {
+		if msg.ID != id {
+			continue
+		}
+		r.steers = append(r.steers[:i], r.steers[i+1:]...)
+		return true
+	}
+	return false
+}
+
+func (r *steerRecordingRuntime) CancelFollowUp(_ context.Context, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, msg := range r.followUps {
+		if msg.ID != id {
+			continue
+		}
+		r.followUps = append(r.followUps[:i], r.followUps[i+1:]...)
+		return true
+	}
+	return false
+}
+
 func (r *steerRecordingRuntime) followedUp() []runtime.QueuedMessage {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -636,6 +663,52 @@ func TestSteerFlow_BusyAgent_SteersMessage(t *testing.T) {
 	steered := rt.steered()
 	require.Len(t, steered, 1)
 	assert.Equal(t, "extra context", steered[0].Content)
+}
+
+func TestOptionUpRestoresAllPendingMessageTypes(t *testing.T) {
+	t.Parallel()
+
+	rt := &steerRecordingRuntime{}
+	sess := session.New()
+	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	p.working = true
+
+	_, steerCmd := p.handleSendMsg(messages.SendMsg{Content: "first steer"})
+	steerResult := steerCmd()
+	_, _ = p.Update(steerResult)
+	_, followCmd := p.handleSendMsg(messages.SendMsg{Content: "then follow up", FollowUp: true})
+	followResult := followCmd()
+	_, _ = p.Update(followResult)
+	p.enqueueMessage(messages.SendMsg{Content: "locally queued", Queue: true})
+
+	_, cmd := p.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
+
+	assert.Empty(t, rt.steered())
+	assert.Empty(t, rt.followedUp())
+	assert.Empty(t, p.pendingMessages)
+	assert.Empty(t, p.messageQueue)
+	msgs := runTimerCmd(t, cmd)
+	assert.Contains(t, msgs, messages.RestorePendingMessagesMsg{Content: "first steer\nthen follow up\nlocally queued"})
+	assert.Contains(t, msgs, messages.RequestFocusMsg{Target: messages.PanelEditor})
+}
+
+func TestConsumedSteerIsNotRestored(t *testing.T) {
+	t.Parallel()
+
+	rt := &steerRecordingRuntime{}
+	sess := session.New()
+	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	p.working = true
+
+	_, steerCmd := p.handleSendMsg(messages.SendMsg{Content: "already consumed"})
+	_, _ = p.Update(steerCmd())
+	require.Len(t, p.pendingMessages, 1)
+	p.consumePendingMessage("already consumed")
+
+	_, cmd := p.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
+
+	assert.Empty(t, p.pendingMessages)
+	assert.Contains(t, runTimerCmd(t, cmd), notification.ShowMsg{Text: "No pending messages", Type: notification.TypeInfo})
 }
 
 // TestSteerFlow_ExplicitQueue_SkipsSteering verifies the internal Queue

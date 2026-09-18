@@ -2,12 +2,17 @@ package messages
 
 import tea "charm.land/bubbletea/v2"
 
+// RouteScope identifies a page lifetime without depending on the page package.
+// Nonzero size ensures distinct allocations have distinct identities.
+type RouteScope struct{ _ byte }
+
 // RoutedMsg wraps a message with a session ID for routing.
 // Runtime events are wrapped in this type so the TUI can route
 // them to the correct tab/session.
 type RoutedMsg struct {
-	SessionID string  // The session ID this message is for
-	Inner     tea.Msg // The wrapped message
+	SessionID string      // The session ID this message is for
+	Inner     tea.Msg     // The wrapped message
+	Scope     *RouteScope // Set by runtime subscriptions; nil for page-owned messages.
 }
 
 // SpawnSessionMsg is sent when a new session should be created.

@@ -46,6 +46,7 @@ type fetchHandler struct {
 	blockedDomains  []string
 	headers         map[string]string
 	allowPrivateIPs bool
+	escapeHTML      bool
 	expander        *js.Expander
 }
 
@@ -162,7 +163,7 @@ func (h *fetchHandler) CallTool(ctx context.Context, params ToolArgs) (*tools.To
 	}
 
 	// Multiple URLs - return structured results
-	return tools.ResultJSON(results), nil
+	return tools.ResultJSONWithOptions(results, tools.JSONResultOptions{EscapeHTML: h.escapeHTML}), nil
 }
 
 type Result struct {
@@ -514,6 +515,9 @@ func CreateToolSet(toolset latest.Toolset, runConfig *config.RuntimeConfig) (too
 	if toolset.AllowPrivateIPsEnabled() {
 		opts = append(opts, WithAllowPrivateIPs(true))
 	}
+	if toolset.EscapeHTML != nil {
+		opts = append(opts, WithEscapeHTML(*toolset.EscapeHTML))
+	}
 	opts = append(opts, WithHeaders(toolset.Headers))
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 	opts = append(opts, WithExpander(expander))
@@ -583,6 +587,14 @@ func WithHeaders(headers map[string]string) ToolOption {
 	}
 }
 
+// WithEscapeHTML controls legacy HTML escaping in multi-URL JSON results.
+// Single-URL results and fetched content are unaffected.
+func WithEscapeHTML(escape bool) ToolOption {
+	return func(t *ToolSet) {
+		t.handler.escapeHTML = escape
+	}
+}
+
 func WithExpander(expander *js.Expander) ToolOption {
 	return func(t *ToolSet) {
 		t.handler.expander = expander
@@ -591,7 +603,7 @@ func WithExpander(expander *js.Expander) ToolOption {
 
 func (t *ToolSet) Instructions() string {
 	var b strings.Builder
-	b.WriteString("## Fetch Tool\n\nFetch content from HTTP/HTTPS URLs. Supports multiple URLs per call, output format selection (text, markdown, html), and respects robots.txt.")
+	b.WriteString("## Fetch Tool\n\nFetch HTTP/HTTPS URLs; respects robots.txt.")
 	if d := t.handler.allowedDomains; len(d) > 0 {
 		fmt.Fprintf(&b, "\n\nThis tool is restricted to these domains (and any subdomain): %s. Other hosts are rejected without a network call.", strings.Join(d, ", "))
 	}
@@ -606,7 +618,7 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:        ToolNameFetch,
 			Category:    "fetch",
-			Description: "Fetch content from one or more HTTP/HTTPS URLs. Returns the response body and metadata.",
+			Description: "Fetch HTTP/HTTPS URLs; return response bodies and metadata.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -615,12 +627,12 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 						"items": map[string]any{
 							"type": "string",
 						},
-						"description": "Array of URLs to fetch",
+						"description": "URLs to fetch",
 						"minItems":    1,
 					},
 					"format": map[string]any{
 						"type":        "string",
-						"description": "The format to return the content in (text, markdown, or html)",
+						"description": "Output format",
 						"enum":        []string{"text", "markdown", "html"},
 					},
 					"timeout": map[string]any{

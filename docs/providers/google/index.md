@@ -1,12 +1,12 @@
 ---
 title: "Google Gemini"
-description: "Use Gemini 2.5 Flash, Gemini 3 Pro, and other Google models with Docker Agent."
+description: "Use Gemini 2.5 Flash, Gemini 3.1 Pro, and other Google models with Docker Agent."
 keywords: docker agent, ai agents, model providers, llm, google gemini
 weight: 120
 canonical: https://docs.docker.com/ai/docker-agent/providers/google/
 ---
 
-_Use Gemini 2.5 Flash, Gemini 3 Pro, and other Google models with Docker Agent._
+_Use Gemini 2.5 Flash, Gemini 3.1 Pro, and other Google models with Docker Agent._
 
 ## Setup
 
@@ -19,6 +19,8 @@ Docker Agent reads the first credential it finds from these environment variable
 | `GOOGLE_GENAI_USE_VERTEXAI` | When set (any value), routes through Vertex AI instead of the Gemini Developer API. |
 | `GOOGLE_CLOUD_PROJECT`      | GCP project used when `GOOGLE_GENAI_USE_VERTEXAI` is set or for Vertex AI Model Garden. |
 | `GOOGLE_CLOUD_LOCATION`     | GCP region for Vertex AI (defaults to the SDK default).                             |
+
+On the Gemini Developer API, a model or [custom provider](../custom/index.md) that sets `token_key` reads its key from that variable instead of `GOOGLE_API_KEY` / `GEMINI_API_KEY`. The Vertex AI backends use Application Default Credentials and ignore `token_key`.
 
 ```bash
 # Gemini Developer API
@@ -38,7 +40,7 @@ export GOOGLE_CLOUD_LOCATION="us-central1"
 ```yaml
 agents:
   root:
-    model: google/gemini-3.5-flash
+    model: google/gemini-3.8-flash
 ```
 
 ### Named Model
@@ -47,18 +49,70 @@ agents:
 models:
   gemini:
     provider: google
-    model: gemini-3.5-flash
+    model: gemini-3.8-flash
     temperature: 0.5
 ```
 
 ## Available Models
 
-| Model              | Best For                        |
-| ------------------ | ------------------------------- |
-| `gemini-3-pro`     | Most capable Gemini model       |
-| `gemini-3-flash`   | Fast, efficient, good balance   |
-| `gemini-2.5-flash` | Fast inference, cost-effective  |
-| `gemini-2.5-pro`   | Strong reasoning, large context |
+| Model                     | Best For                        |
+| -------------------------- | ------------------------------- |
+| `gemini-3.1-pro-preview`  | Most capable Gemini model       |
+| `gemini-3.8-flash`        | Fast, efficient, good balance   |
+| `gemini-2.5-flash`        | Fast inference, cost-effective  |
+| `gemini-2.5-pro`          | Strong reasoning, large context |
+
+## Generated Images
+
+Some Gemini models (e.g. `gemini-2.5-flash-image`) are designed to generate
+an image directly as part of their reply, not just describe one. When the
+model's image output capability resolves as enabled — see
+[Output capabilities](../../configuration/models/index.md#output-capabilities)
+for the `output_capabilities.image` / models.dev precedence rules — Docker
+Agent requests that image output on supported Google surfaces: the models
+gateway, direct Gemini API, and Vertex AI. Each eligible ordinary chat request
+asks for text *and* image output. Vertex AI has deterministic guard/predicate
+coverage; live image-generation validation is deferred.
+
+```yaml
+models:
+  gemini-image:
+    provider: google
+    model: gemini-2.5-flash-image
+```
+
+`output_capabilities.image` can be omitted for models that models.dev lists
+with image output; set it explicitly for custom models or to override
+incorrect catalogue data. Capability is never guessed from the model name.
+
+Session-title and compaction requests omit image response modalities and
+bypass the guard even for image-output-capable models. They do not explicitly
+force TEXT-only output. Ordinary image-output requests with custom function tools or
+structured output are rejected locally before any request is sent. Google
+Search, Maps, and code-execution built-ins remain available. When custom
+tools conflict, Docker Agent uses models.dev's `tool_call` capability to clarify
+whether the model cannot call tools at all or supports tools only outside an
+image-output request. Unknown catalogue data keeps the conservative generic
+message.
+
+A few provider-side behaviors to know:
+
+- **The provider decides the image format** (typically PNG). Asking for a
+  `.gif` or `.svg` filename does not transcode anything — the saved file's
+  extension is corrected to match the data actually returned.
+- **An image is not guaranteed.** Even a correctly configured image model
+  can answer with text only and generate no image; that is provider behavior,
+  so reword or repeat the prompt. At a text-only stop, Docker Agent may add a
+  nonfatal phrase-based warning to the turn — see
+  [Generated Media](../../features/tui/index.md#generated-media) for the exact
+  check and its limitations.
+
+Docker Agent attempts to save each returned image into the session workspace,
+keep a portable copy in the session database, and display it in the TUI. See
+[Generated Media Files](../../features/sessions/index.md#generated-media-files)
+for persistence and portability, and
+[Generated Media](../../features/tui/index.md#generated-media) for file
+naming, collision handling, and rendering.
 
 ## Thinking Budget
 
@@ -93,14 +147,14 @@ models:
 
 ```yaml
 models:
-  gemini-3-pro:
+  gemini-pro:
     provider: google
-    model: gemini-3-pro
+    model: gemini-3.1-pro-preview
     thinking_budget: high # default for Pro: low | high
 
-  gemini-3-flash:
+  gemini-flash:
     provider: google
-    model: gemini-3-flash
+    model: gemini-3.8-flash
     thinking_budget: medium # default for Flash: minimal | low | medium | high
 ```
 
@@ -155,7 +209,7 @@ gcloud auth application-default login
 models:
   claude-on-vertex:
     provider: google
-    model: claude-sonnet-4-20250514
+    model: claude-sonnet-5
     provider_opts:
       project: my-gcp-project       # GCP project ID (or set GOOGLE_CLOUD_PROJECT)
       location: us-east5             # GCP region (or set GOOGLE_CLOUD_LOCATION)

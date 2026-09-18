@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tools/mcp"
 )
@@ -171,7 +172,7 @@ func newDebugOAuthLoginCmd() *cobra.Command {
 			mcpName := args[1]
 
 			// Load the agent config to find the MCP server URL.
-			agentSource, err := config.Resolve(agentFile, flags.runConfig.EnvProvider())
+			agentSource, err := sources.Resolve(agentFile, flags.runConfig.EnvProvider())
 			if err != nil {
 				return err
 			}

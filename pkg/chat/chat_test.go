@@ -209,3 +209,11 @@ func TestDetectMimeType_ContentSniffing(t *testing.T) {
 		})
 	}
 }
+
+func TestUsagePromptTokens(t *testing.T) {
+	t.Parallel()
+
+	u := &Usage{InputTokens: 10, CachedInputTokens: 20, CacheWriteTokens: 5, OutputTokens: 99, ReasoningTokens: 7}
+	assert.Equal(t, int64(35), u.PromptTokens(), "prompt is the sum of the three input buckets, excluding output")
+	assert.Zero(t, (&Usage{}).PromptTokens())
+}

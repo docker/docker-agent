@@ -60,6 +60,6 @@ agents:
 models:
   github-model:
     provider: openai
-    model: gpt-5
+    model: gpt-5.6-sol
     base_url: https://models.github.ai/inference
     token_key: GITHUB_TOKEN

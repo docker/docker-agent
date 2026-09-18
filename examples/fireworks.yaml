@@ -3,7 +3,7 @@
 models:
   fireworks_model:
     provider: fireworks
-    model: accounts/fireworks/models/kimi-k2-instruct
+    model: accounts/fireworks/models/kimi-k3
 
 agents:
   root:

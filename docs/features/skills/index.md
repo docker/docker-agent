@@ -23,8 +23,6 @@ agents:
     model: openai/gpt-4o
     instruction: You are a helpful assistant.
     skills: true
-    toolsets:
-      - type: filesystem # required for reading skill files
 ```
 
 > [!TIP]
@@ -95,13 +93,13 @@ agents:
       - type: filesystem
 ```
 
-Inline skills carry their body in the config itself, so they need no `SKILL.md` file and require no filesystem source. They are **always exposed** — the name filter only applies to file- and URL-based skills. Because inline skills travel inside the agent YAML, they also work in `--sandbox` mode without any kit staging, and they can be shared with the agent via `share push`.
+Inline skills carry their body in the config itself, so they need no `SKILL.md` file and require no filesystem source. They are **always exposed** — the name filter only applies to file- and URL-based skills. An inline skill also **takes precedence** over a discovered skill of the same name: the config is explicit, whereas local skills are picked up from whatever happens to sit in the [search paths](#search-paths). The shadowed skill is dropped and a warning is logged at startup. Because inline skills travel inside the agent YAML, they also work in `--sandbox` mode without any kit staging, and they can be shared with the agent via `share push`.
 
 ### Inline Skill Fields
 
 | Field           | Required | Description                                                                |
 | --------------- | -------- | -------------------------------------------------------------------------- |
-| `name`          | Yes      | Skill identifier used by `read_skill` / `run_skill` and the `/<name>` command |
+| `name`          | Yes      | Skill identifier used by `read_skill` / `run_skill` and the `/<name>` command. Must not contain whitespace |
 | `description`   | Yes      | Short description shown to the agent for skill matching                    |
 | `instructions`  | Yes      | The skill body (what a `SKILL.md` would contain below its frontmatter)     |
 | `context`       | No       | Set to `fork` to run the skill as an isolated sub-agent                    |
@@ -112,7 +110,7 @@ Inline skills carry their body in the config itself, so they need no `SKILL.md` 
 > [!NOTE]
 > **Inline vs. file-based skills**
 >
-> Inline skills support the subset of the SKILL.md format that fits in YAML. They cannot bundle supporting files (no `read_skill_file`) or use `` !`command` `` expansion. For skills that need bundled resources or executable helpers, use a `SKILL.md` directory instead.
+> Inline skills support the subset of the SKILL.md format that fits in YAML. They cannot bundle supporting files (no `read_skill_file`), so for skills that need bundled resources use a `SKILL.md` directory instead. They do support [embedded commands](#embedded-commands).
 
 ## SKILL.md Format
 
@@ -150,6 +148,35 @@ When asked to create a Dockerfile:
 | `license`        | No       | License identifier (e.g. `Apache-2.0`)                                      |
 | `compatibility`  | No       | Free-text compatibility notes                                               |
 | `metadata`       | No       | Arbitrary key-value pairs (e.g. `author`, `version`)                        |
+
+### Embedded Commands
+
+A local skill — whether loaded from a `SKILL.md` file or [defined inline](#inline-skills) in the agent config — can inject the output of a command into its body with the `` !`command` `` syntax:
+
+```markdown
+Current branch: !`git branch --show-current`
+```
+
+These commands run on your machine, so commands loaded by the agent through
+`read_skill` or `run_skill` are emitted as `shell` tool calls and go through the
+normal approval policy — classification, permission rules and safety mode —
+before they run. In practice that means a confirmation prompt unless the policy
+already allows the command (an `allow` rule, autonomous mode, or a read-only
+command under the balanced mode). Refusing a command leaves an error note in its
+place; the rest of the skill is still loaded.
+
+Expansion is skipped entirely for remote skills, whose body is fetched over the
+network from a third party. It is also skipped when a skill is invoked directly
+with `/<name>`: input resolution has no parent tool call to own an approval
+prompt, so the commands are reported as skipped instead of running unannounced.
+
+> [!WARNING]
+> An inline skill's commands come from the agent config itself, so an agent YAML
+> you did not write — for example one pulled from a registry with
+> `docker-agent run myorg/agent:tag` — can carry them. That config also chooses
+> the agent's instructions, toolsets and `permissions` rules, so treat a
+> third-party agent config as you would any other untrusted code and read it
+> before running it.
 
 ## Running a Skill as a Sub-Agent
 
@@ -339,6 +366,7 @@ When multiple skills share the same name:
 2. Project skills load next, from git root toward current directory
 3. Skills closer to the current directory override those further away
 4. At the same directory level, `.agents/skills/` overrides `.github/skills/`
+5. An [inline skill](#inline-skills) overrides any discovered skill of the same name
 
 ## Skills in Sandbox Mode
 

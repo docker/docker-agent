@@ -51,7 +51,7 @@ func (c providerModelClient) Ask(
 	}
 	registry := c.registry
 	if registry == nil {
-		registry = provider.DefaultRegistry()
+		registry = provider.EmptyRegistry()
 	}
 	p, err := registry.New(ctx, &cfg, environment.NewDefaultProvider(), opts...)
 	if err != nil {

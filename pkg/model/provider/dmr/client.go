@@ -124,7 +124,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 
 	// Ensure we always have a non-nil HTTP client for both OpenAI adapter and direct HTTP calls (rerank).
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = &http.Client{} //rubocop:disable Lint/HTTPClientTransport // DMR local service; default transport is appropriate
 	}
 
 	if verifyViaAPI {
@@ -174,7 +174,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 		client:         openai.NewClient(clientOptions...),
 		httpClient:     httpClient,
 		engine:         engine,
-		attachmentCaps: modelinfo.CapsWith(parsed.supportsImages, parsed.supportsPDF),
+		attachmentCaps: modelinfo.CapsWith(parsed.supportsImages, parsed.supportsPDF, false, false),
 	}, nil
 }
 
@@ -190,7 +190,7 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	// (issue #2741).
 	caps := c.attachmentCaps
 	if override := c.CapsOverride(); override != nil {
-		caps = modelinfo.CapsWith(override.Image, override.PDF)
+		caps = modelinfo.CapsWith(override.Image, override.PDF, override.Audio, override.Video)
 	}
 	openaiMessages := oaistream.ConvertMessagesWithCaps(ctx, messages, caps)
 	return oaistream.MergeConsecutiveMessages(openaiMessages)

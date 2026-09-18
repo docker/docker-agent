@@ -128,22 +128,7 @@ $ docker agent run config.yaml --otel
 
 ### API keys not set
 
-Each model provider requires its own API key as an environment variable:
-
-| Provider      | Environment Variable                                |
-| ------------- | --------------------------------------------------- |
-| OpenAI        | `OPENAI_API_KEY`                                    |
-| Anthropic     | `ANTHROPIC_API_KEY`                                 |
-| Google Gemini | `GOOGLE_API_KEY` or `GEMINI_API_KEY`                |
-| Mistral       | `MISTRAL_API_KEY`                                   |
-| xAI           | `XAI_API_KEY`                                       |
-| Nebius        | `NEBIUS_API_KEY`                                    |
-| MiniMax       | `MINIMAX_API_KEY`                                   |
-| Requesty      | `REQUESTY_API_KEY`                                  |
-| OpenRouter    | `OPENROUTER_API_KEY`                                |
-| GitHub Copilot | `GITHUB_TOKEN` (PAT with `copilot` scope)          |
-| Azure OpenAI  | `AZURE_API_KEY` (override with `token_key`)         |
-| AWS Bedrock   | `AWS_BEARER_TOKEN_BEDROCK` or AWS credentials chain |
+Check that your provider's credentials are available to the process running Docker Agent. For example, OpenAI uses `OPENAI_API_KEY` and Anthropic uses `ANTHROPIC_API_KEY`. Other providers use different variables, account login, or a credentials chain; local models may need no key. See [Provider Credentials](../../providers/overview/index.md#provider-credentials) for the complete mapping.
 
 ```bash
 # Verify your keys are set
@@ -198,6 +183,8 @@ MCP tools using stdio transport must complete the initialization handshake befor
 > At startup, Docker Agent queries each toolset for its tool list. If a toolset does not respond within 10 seconds (e.g. a wedged MCP stdio server that never answers `tools/list`), that toolset is skipped with a warning and the remaining toolsets load normally. The sidebar resolves showing whichever tools did load — no infinite spinner. Enable `--debug` to see the warning message, and use `/toolset-restart <name>` once the server becomes responsive.
 
 If a toolset keeps crashing in a tight loop, tune the [`lifecycle`](../../configuration/tools/index.md#toolset-lifecycle) block on the toolset (e.g. raise `backoff.initial`, lower `max_restarts`, or switch to the `best-effort` profile) so a flaky dependency does not amplify into a restart storm.
+
+If a **RAG knowledge base** is failing to index because the embedding provider is rate-limiting requests (HTTP 429), Docker Agent automatically backs off and retries — see [Indexing failures, retries and backoff](../../tools/rag/index.md#indexing-failures-retries-and-backoff) for the retry schedule and the `max_indexing_concurrency` / `max_embedding_concurrency` knobs that control how much concurrent load is generated.
 
 ## Configuration Errors
 
@@ -284,6 +271,12 @@ A few things that catch people out:
 
 > [!WARNING]
 > Raising `--max-request-size` increases how much memory an unauthenticated or malicious client can force the server to buffer per request. Pick a value with your deployment's exposure in mind, and pair any non-loopback listener with `--auth-token` (API server) or `--api-key`/`--api-key-env` (chat server). A `--listen` control plane has neither flag — keep it on loopback, a unix socket, or behind an authenticating reverse proxy if it must be reachable from elsewhere.
+
+### Delegated task appears stalled before its first response
+
+A direct `transfer_task` delegation automatically retries once when the child model stream is silent before sending any response payload. It emits the existing warning event, and the retry is immediate and applies once to the complete child run, including later turns and fallback models. Each nested native `transfer_task` starts a new child run with its own fresh retry allowance. The retry does not apply after partial output, to `background_agents`, or when cancellation or a run budget blocks it.
+
+Run with `--debug` and look for `Delegated model stream idle before response; retrying immediately`. If the child still fails, check provider connectivity, fallback configuration, cancellation, and run-budget events; Docker Agent does not retry when the context is canceled or the run budget is exhausted.
 
 ## Performance Issues
 

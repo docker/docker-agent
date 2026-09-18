@@ -25,6 +25,7 @@ const (
 )
 
 type PendingUserMessage struct {
+	ID      string
 	Display string
 	Content string
 	Kind    PendingUserKind
@@ -137,6 +138,13 @@ func (t *Transcript) FinishTool(id string, result ToolResult, sessionState servi
 	t.AddBlock(func(w int) []string { return RenderToolWithState(view, w, 0, sessionState) })
 }
 
+// FinalizeTools commits every in-flight tool with the given terminal status.
+func (t *Transcript) FinalizeTools(status tuitypes.ToolStatus, sessionState service.SessionStateReader) {
+	for _, view := range t.toolz.FinalizeAll(status) {
+		t.AddBlock(func(w int) []string { return RenderToolWithState(view, w, 0, sessionState) })
+	}
+}
+
 // Lines renders everything that scrolls: finalized blocks, the in-progress
 // streamed block, running tool calls, and user messages waiting to be accepted
 // by the runtime. A blank line separates each entry. The spinner is shown only
@@ -159,7 +167,7 @@ func (t *Transcript) Lines(width, spinnerFrame int, busy bool, sessionState serv
 		lines = append(lines, spinnerLine(spinnerFrame), "")
 	}
 	for _, msg := range pendingUsers {
-		lines = append(lines, RenderPendingUserLines(msg.Display, width)...)
+		lines = append(lines, RenderPendingUserLines(msg, width)...)
 		lines = append(lines, "")
 	}
 	return lines

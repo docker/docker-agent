@@ -47,9 +47,15 @@ type streamResult struct {
 	ReasoningContent  string
 	ThinkingSignature string
 	ThoughtSignature  []byte
-	Stopped           bool
-	FinishReason      chat.FinishReason
-	Usage             *chat.Usage
+	OpenAIResponse    *chat.OpenAIResponse
+	ResponseStarted   bool
+	// Media accumulates every [chat.MediaDelta] streamed during the turn
+	// (e.g. generated images). Populated regardless of provider — see
+	// chat.MessageDelta.Media.
+	Media        []chat.MediaDelta
+	Stopped      bool
+	FinishReason chat.FinishReason
+	Usage        *chat.Usage
 }
 
 // handleStream reads a chat.MessageStream to completion, emitting streaming
@@ -109,9 +115,16 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	var fullReasoningContent strings.Builder
 	var thinkingSignature string
 	var thoughtSignature []byte
+	var openAIResponse *chat.OpenAIResponse
 	var toolCalls []tools.ToolCall
+	var media []chat.MediaDelta
 	var messageUsage *chat.Usage
 	var providerFinishReason chat.FinishReason
+	var responseStarted bool
+
+	failedResult := func() streamResult {
+		return streamResult{Stopped: true, ResponseStarted: responseStarted}
+	}
 
 	toolCallIndex := make(map[string]int)   // toolCallID -> index in toolCalls slice
 	emittedPartial := make(map[string]bool) // toolCallID -> whether we've emitted a partial event
@@ -122,6 +135,42 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	xmlToolCallGate := false
 	for _, t := range agentTools {
 		toolDefMap[t.Name] = t
+	}
+
+	// markerFilter strips [media-file: ...] naming markers from the assistant
+	// text BEFORE it is emitted or accumulated, so markers never flash in the
+	// TUI and never reach the persisted message. Provider-neutral: the strict
+	// line grammar is a no-op on streams that never emit markers.
+	var markerFilter mediaFileMarkerFilter
+
+	// appendContent accumulates and emits assistant text that survived the
+	// marker filter, keeping the live event text and fullContent identical
+	// while gating raw <tool_call> XML out of the event stream.
+	appendContent := func(content string) {
+		if content == "" {
+			return
+		}
+		if !xmlToolCallGate {
+			tagIdx := strings.Index(content, "<tool_call>")
+			if tagIdx < 0 {
+				events.Emit(AgentChoice(a.Name(), sess.ID, content))
+			} else {
+				xmlToolCallGate = true
+				if tagIdx > 0 {
+					events.Emit(AgentChoice(a.Name(), sess.ID, content[:tagIdx]))
+				}
+			}
+		}
+		fullContent.WriteString(content)
+	}
+
+	// finishAssistantText flushes the marker filter's withheld tail and pairs
+	// the extracted requested paths onto the accumulated media. Called on
+	// every successful completion path (terminal finish reason or bare EOF),
+	// before any XML tool-call fallback parsing.
+	finishAssistantText := func() {
+		appendContent(markerFilter.Finish())
+		applyMediaFileRequestedPaths(media, markerFilter.paths)
 	}
 
 	// applyXMLFallback extracts <tool_call> blocks from accumulated content when
@@ -184,7 +233,7 @@ mainLoop:
 				break mainLoop
 			}
 			if res.err != nil {
-				return streamResult{Stopped: true}, fmt.Errorf("error receiving from stream: %w", res.err)
+				return failedResult(), fmt.Errorf("error receiving from stream: %w", res.err)
 			}
 
 			response := res.response
@@ -201,8 +250,19 @@ mainLoop:
 			}
 			choice := response.Choices[0]
 
+			if choice.Delta.OpenAIResponse != nil {
+				openAIResponse = choice.Delta.OpenAIResponse
+			}
+
 			if len(choice.Delta.ThoughtSignature) > 0 {
+				responseStarted = true
 				thoughtSignature = choice.Delta.ThoughtSignature
+			}
+
+			// A terminal chunk can also carry media; collect it before returning.
+			if len(choice.Delta.Media) > 0 {
+				responseStarted = true
+				media = append(media, choice.Delta.Media...)
 			}
 
 			// Accumulate tool call deltas from this chunk *before* evaluating the
@@ -212,6 +272,7 @@ mainLoop:
 			// reason first would drop the call and the turn would end with an
 			// empty assistant message ("No response from agent").
 			if len(choice.Delta.ToolCalls) > 0 {
+				responseStarted = true
 				// Process each tool call delta
 				for _, delta := range choice.Delta.ToolCalls {
 					idx, exists := toolCallIndex[delta.ID]
@@ -232,6 +293,9 @@ mainLoop:
 					// Update fields from delta
 					if delta.Type != "" {
 						tc.Type = delta.Type
+					}
+					if delta.ProviderID != "" {
+						tc.ProviderID = delta.ProviderID
 					}
 					if delta.Function.Name != "" {
 						tc.Function.Name = delta.Function.Name
@@ -272,6 +336,7 @@ mainLoop:
 			}
 
 			if choice.FinishReason == chat.FinishReasonStop || choice.FinishReason == chat.FinishReasonLength || choice.FinishReason == chat.FinishReasonRefusal {
+				finishAssistantText()
 				recordUsage()
 				finishReason := choice.FinishReason
 				if finishReason == chat.FinishReasonRefusal {
@@ -283,6 +348,7 @@ mainLoop:
 						slog.WarnContext(ctx, "Dropping tool calls from refused turn",
 							"agent", a.Name(), "tool_calls", len(toolCalls))
 						toolCalls = nil
+						openAIResponse = nil
 					}
 				} else {
 					applyXMLFallback()
@@ -296,9 +362,12 @@ mainLoop:
 					ReasoningContent:  fullReasoningContent.String(),
 					ThinkingSignature: thinkingSignature,
 					ThoughtSignature:  thoughtSignature,
+					OpenAIResponse:    openAIResponse,
+					Media:             media,
 					Stopped:           len(toolCalls) == 0, // stop only when there are no tool calls to execute
 					FinishReason:      finishReason,
 					Usage:             messageUsage,
+					ResponseStarted:   responseStarted,
 				}, nil
 			}
 
@@ -310,34 +379,26 @@ mainLoop:
 			}
 
 			if choice.Delta.ReasoningContent != "" {
+				responseStarted = true
 				events.Emit(AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent))
 				fullReasoningContent.WriteString(choice.Delta.ReasoningContent)
 			}
 
 			// Capture thinking signature for Anthropic extended thinking
 			if choice.Delta.ThinkingSignature != "" {
+				responseStarted = true
 				thinkingSignature = choice.Delta.ThinkingSignature
 			}
 
 			if choice.Delta.Content != "" {
-				if !xmlToolCallGate {
-					tagIdx := strings.Index(choice.Delta.Content, "<tool_call>")
-					if tagIdx < 0 {
-						events.Emit(AgentChoice(a.Name(), sess.ID, choice.Delta.Content))
-					} else {
-						xmlToolCallGate = true
-						if tagIdx > 0 {
-							events.Emit(AgentChoice(a.Name(), sess.ID, choice.Delta.Content[:tagIdx]))
-						}
-					}
-				}
-				fullContent.WriteString(choice.Delta.Content)
+				responseStarted = true
+				appendContent(markerFilter.Push(choice.Delta.Content))
 			}
 
 		case <-ctx.Done():
 			// Context cancelled (SIGTERM, Ctrl+C, or idle-timeout cancel from
 			// this function). Return promptly so graceful shutdown can proceed.
-			return streamResult{Stopped: true}, ctx.Err()
+			return failedResult(), ctx.Err()
 
 		case <-idleTimer.C:
 			slog.WarnContext(ctx, "Model stream stalled: no data received within idle timeout",
@@ -350,10 +411,12 @@ mainLoop:
 			if cancelStream != nil {
 				cancelStream(errStreamIdle)
 			}
-			return streamResult{Stopped: true}, fmt.Errorf("model stream stalled after %s with no data: %w",
+			return failedResult(), fmt.Errorf("model stream stalled after %s with no data: %w",
 				idleTimeout, errStreamIdle)
 		}
 	}
+
+	finishAssistantText()
 
 	recordUsage()
 
@@ -362,6 +425,8 @@ mainLoop:
 	// Invariant: a bare-EOF turn (no per-choice finish_reason) is terminal
 	// whenever there are no tool calls — the outer loop has nothing to continue
 	// on. Turns with tool calls keep Stopped=false so the loop executes them.
+	// Media is irrelevant to this decision: with no tool calls pending, the turn
+	// is over either way (media or not) — stopping is what ends it correctly.
 	// NOTE(krissetto): this can likely be removed once compaction works properly with all providers (aka dmr)
 	stoppedNoToolCalls := len(toolCalls) == 0
 
@@ -376,7 +441,7 @@ mainLoop:
 		switch {
 		case len(toolCalls) > 0:
 			finishReason = chat.FinishReasonToolCalls
-		case fullContent.Len() > 0:
+		case fullContent.Len() > 0 || len(media) > 0:
 			finishReason = chat.FinishReasonStop
 		default:
 			finishReason = chat.FinishReasonNull
@@ -396,8 +461,11 @@ mainLoop:
 		ReasoningContent:  fullReasoningContent.String(),
 		ThinkingSignature: thinkingSignature,
 		ThoughtSignature:  thoughtSignature,
+		OpenAIResponse:    openAIResponse,
+		Media:             media,
 		Stopped:           stoppedNoToolCalls,
 		FinishReason:      finishReason,
 		Usage:             messageUsage,
+		ResponseStarted:   responseStarted,
 	}, nil
 }

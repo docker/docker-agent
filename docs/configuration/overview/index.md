@@ -19,7 +19,7 @@ A Docker Agent config has these main sections:
 
 ```bash
 # 1. Version — configuration schema version (optional but recommended)
-version: 15
+version: 16
 
 # 2. Metadata — optional agent metadata for distribution
 metadata:
@@ -130,22 +130,9 @@ Models can be referenced inline or defined in the `models` section:
 
 ## Environment Variables
 
-API keys and secrets are read from environment variables — never stored in config files. See [Managing Secrets](../../guides/secrets/index.md) for all the ways to provide credentials (env files, Docker Compose secrets, the Docker Agent env file):
+Resolve API keys and secrets at runtime rather than embedding them in agent configs. Fields such as environment variables, headers, and URLs can contain literal secrets; use `${env.VAR}` references or the secret-management options below. See [Managing Secrets](../../guides/secrets/index.md) for all the ways to provide credentials (env files, Docker Compose secrets, the Docker Agent env file):
 
-| Variable                   | Provider                                            |
-| -------------------------- | --------------------------------------------------- |
-| `OPENAI_API_KEY`           | OpenAI                                              |
-| `ANTHROPIC_API_KEY`        | Anthropic                                           |
-| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | Google Gemini                              |
-| `MISTRAL_API_KEY`          | Mistral                                             |
-| `XAI_API_KEY`              | xAI                                                 |
-| `NEBIUS_API_KEY`           | Nebius                                              |
-| `MINIMAX_API_KEY`          | MiniMax                                             |
-| `REQUESTY_API_KEY`         | Requesty                                            |
-| `OPENROUTER_API_KEY`       | OpenRouter                                          |
-| `GITHUB_TOKEN`             | GitHub Copilot (PAT with `copilot` scope)           |
-| `AZURE_API_KEY`            | Azure OpenAI (override with `token_key`)            |
-| `AWS_BEARER_TOKEN_BEDROCK` | AWS Bedrock (or the standard AWS credentials chain) |
+See [Provider Credentials](../../providers/overview/index.md#provider-credentials) for the complete list of built-in provider keys and authentication methods.
 
 **Tool Auto-Installation:**
 
@@ -298,10 +285,10 @@ For YAML editor autocompletion and validation, use the [Docker Agent JSON Schema
 
 ## Config Versioning
 
-Docker Agent configs are versioned. The current version is `15`. Add the version at the top of your config:
+Docker Agent configs are versioned. The current version is `16`. Add the version at the top of your config:
 
 ```yaml
-version: 15
+version: 16
 
 agents:
   root:
@@ -311,13 +298,19 @@ agents:
 
 When you load an older config, Docker Agent automatically migrates it to the latest schema. It's recommended to include the version to ensure consistent behavior.
 
-If you use a config key that requires a newer schema version, Docker Agent will fail with a strict-parse error and include a hint like:
+If you use a config key or value syntax that requires a newer schema version, Docker Agent will fail with a strict-parse error and include a hint like:
 
 ```text
-hint: this key is supported by config version 12; update the top-level 'version' field (currently 11)
+hint: this syntax is supported by config version 12; update the top-level 'version' field (currently 11)
 ```
 
-Bump the `version` field as directed to enable the new key.
+Bump the `version` field as directed to enable the new syntax.
+
+Conversely, if a key was valid in an older schema version but has since been removed (for example, the `safer` shell toolset flag removed in version 15 — see the [Shell tool docs](../../tools/shell/index.md)), the hint instead tells you the field is gone and should be deleted, rather than suggesting you lower `version`:
+
+```text
+hint: 'safer' was part of config version 14 but has since been removed; delete it from your config instead of lowering the top-level 'version' field
+```
 
 ## Metadata Section
 
@@ -479,7 +472,7 @@ agents:
 | `top_p`               | Default top-p sampling parameter.                                                         |
 | `frequency_penalty`   | Default frequency penalty.                                                                |
 | `presence_penalty`    | Default presence penalty.                                                                 |
-| `parallel_tool_calls` | Enable parallel tool calls by default.                                                    |
+| `parallel_tool_calls` | Enable or disable parallel tool calls by default. If omitted, the provider/API default is used.              |
 | `track_usage`         | Track token usage by default.                                                             |
 | `provider_opts`       | Provider-specific options.                                                                |
 

@@ -72,11 +72,11 @@ func (m *mockChatPage) SetInterruptMode(mode messages.InterruptMode) {
 func (m *mockChatPage) SetShowBanner(show bool) {
 	m.showBanner = show
 }
-func (m *mockChatPage) SetRoutingID(string)       {}
-func (m *mockChatPage) TakeRoutedTimers() tea.Cmd { return nil }
-func (m *mockChatPage) VisualGeneration() uint64  { return 0 }
-func (m *mockChatPage) Bindings() []key.Binding   { return nil }
-func (m *mockChatPage) Help() help.KeyMap         { return nil }
+func (m *mockChatPage) SetRoutingID(string)                             {}
+func (m *mockChatPage) UpdateEffects(tea.Msg) (chat.Page, chat.Effects) { return m, chat.Effects{} }
+func (m *mockChatPage) VisualGeneration() uint64                        { return 0 }
+func (m *mockChatPage) Bindings() []key.Binding                         { return nil }
+func (m *mockChatPage) Help() help.KeyMap                               { return nil }
 
 type countingChatPage struct {
 	mockChatPage
@@ -86,11 +86,11 @@ type countingChatPage struct {
 	dirtyTick bool
 }
 
-func (p *countingChatPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+func (p *countingChatPage) UpdateEffects(msg tea.Msg) (chat.Page, chat.Effects) {
 	if tick, ok := msg.(animation.TickMsg); ok && p.dirtyTick {
 		tick.MarkDirty()
 	}
-	return p, nil
+	return p, chat.Effects{}
 }
 
 func (p *countingChatPage) VisualGeneration() uint64 { return 0 }
@@ -102,12 +102,12 @@ func (p *countingChatPage) View() string {
 func TestRootViewCachePreservesExactViewOnCleanTick(t *testing.T) {
 	m, _ := newTestModel(t)
 	page := &countingChatPage{text: "stable"}
-	m.chatPage = page
+	m.activeTab.chatPage = page
 	m.ready = true
 	m.leanMode = true
 	m.ar = animation.NewRuntime()
 	m.appName = "test"
-	m.sessionState = &service.SessionState{}
+	m.activeTab.sessionState = &service.SessionState{}
 
 	first := m.View()
 	require.Equal(t, 1, page.views)
@@ -131,12 +131,12 @@ func TestRootViewCachePreservesExactViewOnCleanTick(t *testing.T) {
 func TestRootViewCacheInvalidatesOnlyForDirtyAcceptedTick(t *testing.T) {
 	m, _ := newTestModel(t)
 	page := &countingChatPage{text: "stable"}
-	m.chatPage = page
+	m.activeTab.chatPage = page
 	m.ready = true
 	m.leanMode = true
 	m.ar = animation.NewRuntime()
 	m.appName = "test"
-	m.sessionState = &service.SessionState{}
+	m.activeTab.sessionState = &service.SessionState{}
 	_ = m.View()
 
 	sub := m.ar.Subscribe()
@@ -247,22 +247,17 @@ func newTestModel(tb testing.TB) (*appModel, *mockEditor) {
 	tb.Helper()
 	page := &mockChatPage{}
 	ed := &mockEditor{}
+	tab := &tabModel{chatPage: page, editor: ed}
 
 	m := &appModel{
-		ctx:                     tb.Context,
-		chatPages:               map[string]chat.Page{"test": page},
-		sessionStates:           map[string]*service.SessionState{},
-		editors:                 map[string]editor.Editor{"test": ed},
-		pendingRestores:         map[string]string{},
-		pendingSidebarCollapsed: map[string]bool{},
-		stashedDialogs:          map[string]stashedDialog{},
-		chatPage:                page,
-		editor:                  ed,
-		transcriber:             &fakeTranscriber{},
-		notification:            notification.New(),
-		dialogMgr:               dialog.New(),
-		completions:             completion.New(),
-		tour:                    tour.New(),
+		ctx:          tb.Context,
+		tabs:         map[string]*tabModel{"test": tab},
+		activeTab:    tab,
+		transcriber:  &fakeTranscriber{},
+		notification: notification.New(),
+		dialogMgr:    dialog.New(),
+		completions:  completion.New(),
+		tour:         tour.New(),
 	}
 	return m, ed
 }

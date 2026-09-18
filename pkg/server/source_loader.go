@@ -11,6 +11,12 @@ import (
 
 var sourceRetrySchedule = []time.Duration{2 * time.Second, 15 * time.Second, 70 * time.Second}
 
+// sourceLoader must keep satisfying config.EncryptedConfigSource: it decorates
+// every agent source in API-server mode, and teamloader discovers the agent
+// config envelope through a type assertion, so dropping the method would
+// silently stop forwarding it to the models gateway rather than fail to build.
+var _ config.EncryptedConfigSource = (*sourceLoader)(nil)
+
 type sourceLoader struct {
 	inner           config.Source
 	refreshInterval time.Duration
@@ -51,6 +57,31 @@ func (sl *sourceLoader) Read(_ context.Context) ([]byte, error) {
 	sl.mu.RLock()
 	defer sl.mu.RUnlock()
 	return sl.data, sl.err
+}
+
+// EncryptedConfig forwards the inner source's captured agent config envelope so
+// this caching decorator stays transparent to callers that type-assert for
+// [config.EncryptedConfigSource] — chiefly teamloader, which adopts the value
+// into RuntimeConfig.EncryptedConfig so it is forwarded to a trusted Docker
+// models gateway on every model request.
+//
+// Without this passthrough the capability is silently lost in API-server mode
+// (`docker agent serve api`, i.e. Docker Desktop): NewSessionManager wraps every
+// source in a sourceLoader, so teamloader's assertion fails, no config envelope
+// is forwarded, and the gateway's prompt verification degrades to a no-op — it
+// fails open on a request that carries no config, so nothing surfaces as an
+// error. The CLI path is unaffected because it hands the source over undecorated.
+// See also the identical passthrough on the HCL decorator (pkg/config/hcl).
+//
+// It reads through to the inner source rather than caching the value: the config
+// envelope is refreshed by the very same Read that refreshLoop performs, so a
+// tag repushed under a new signature is picked up without a restart. Returns ""
+// when the inner source does not support the capability.
+func (sl *sourceLoader) EncryptedConfig() string {
+	if ecs, ok := sl.inner.(config.EncryptedConfigSource); ok {
+		return ecs.EncryptedConfig()
+	}
+	return ""
 }
 
 func (sl *sourceLoader) load(ctx context.Context) {

@@ -6,7 +6,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
-	"github.com/docker/docker-agent/pkg/tui/page/chat"
 )
 
 // The Bubble Tea Update contract returns a tea.Model interface, which forces
@@ -26,15 +25,15 @@ import (
 
 // updateChatCmd forwards a message to the chat page and returns its cmd.
 func (m *appModel) updateChatCmd(msg tea.Msg) tea.Cmd {
-	updated, cmd := m.chatPage.Update(msg)
-	m.chatPage = updated.(chat.Page)
-	return cmd
+	updated, effects := m.activeTab.chatPage.UpdateEffects(msg)
+	m.activeTab.chatPage = updated
+	return effects.Cmd(true)
 }
 
 // updateEditorCmd forwards a message to the editor and returns its cmd.
 func (m *appModel) updateEditorCmd(msg tea.Msg) tea.Cmd {
-	updated, cmd := m.editor.Update(msg)
-	m.editor = updated.(editor.Editor)
+	updated, cmd := m.activeTab.editor.Update(msg)
+	m.activeTab.editor = updated.(editor.Editor)
 	return cmd
 }
 

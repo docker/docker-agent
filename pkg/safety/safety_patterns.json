@@ -1,6 +1,6 @@
 {
-  "version": "0.3",
-  "description": "Destructive-command and safe-read taxonomy consumed by the shell safety classifier (pkg/safety). Each destructive entry pairs a command shape with a blast_radius tier and a category tag; each safe entry names a known read-only command shape that may be auto-approved by permissive safety modes. Patterns use the matcher's `<placeholder>` / `...` syntax; matching is regex-based on a whitespace-normalized form of the command.",
+  "version": "0.4",
+  "description": "Destructive-command and safe-read taxonomy consumed by the shell safety classifier (pkg/safety). Each destructive entry pairs a command shape with a blast_radius tier and a category tag; each safe entry names a known read-only command shape that may be auto-approved by permissive safety modes. Patterns use the matcher's `<placeholder>` / `...` syntax; safe-only `<number>` matches digits, `<sed-print>` matches a numeric print address (optionally quoted, with a single-quoted $ end address), and `<read-path>` matches literal non-flag paths without unquoted expansions; matching is regex-based on a whitespace-normalized form of the command.",
   "blast_radius_legend": {
     "HIGH": "Force confirmation; irreversible data loss",
     "MEDIUM": "Force confirmation; recoverable but real cost",
@@ -35,7 +35,24 @@
       { "pattern": "chmod -R 000 <path>",          "blast_radius": "MEDIUM",      "category": "fs-permissions",   "notes": "recursive lockout" },
       { "pattern": "chown -R <user> <path>",       "blast_radius": "MEDIUM",      "category": "fs-permissions",   "notes": "recursive ownership change" },
       { "pattern": "chmod -R 777 <path>",          "blast_radius": "LOW",         "category": "fs-permissions",   "notes": "security regression, reversible" },
-      { "pattern": "sed -i",                       "blast_radius": "MEDIUM",      "category": "fs-modify",        "notes": "in-place file edit; -i.bak variants also match" }
+      { "pattern": "sed -i",                       "blast_radius": "MEDIUM",      "category": "fs-modify",        "notes": "in-place file edit; -i.bak variants also match" },
+      { "pattern": "gofmt -w", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "gofmt ... -w", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "goimports -w", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "goimports ... -w", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "go fmt", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "golangci-lint fmt", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "perl -i", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "perl -pi", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "perl -pi<flags>", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "perl -i<flags>", "blast_radius": "MEDIUM", "category": "fs-modify" },
+      { "pattern": "tee <file>", "blast_radius": "MEDIUM", "category": "fs-overwrite" }
+    ],
+    "powershell": [
+      { "pattern": "Remove-Item ...-Recurse", "blast_radius": "HIGH",   "category": "fs-delete",    "notes": "wildcard spans quoted paths with spaces (`C:\\Program Files\\…`) that `<path>` (=\\S+) could not" },
+      { "pattern": "Remove-Item ...-Force",   "blast_radius": "MEDIUM", "category": "fs-delete",    "notes": "when -Recurse is also present, the HIGH entry above wins on severity" },
+      { "pattern": "Remove-Item <path>",      "blast_radius": "LOW",    "category": "fs-delete",    "notes": "prompts on tty" },
+      { "pattern": "Clear-Content ...",       "blast_radius": "MEDIUM", "category": "fs-overwrite", "notes": "empties file contents in place, positional or -Path form" }
     ],
     "git": [
       { "pattern": "git reset --hard",             "blast_radius": "HIGH",        "category": "git-discard",      "notes": "discards uncommitted work; unrecoverable" },
@@ -60,7 +77,21 @@
       { "pattern": "git push --force",             "blast_radius": "MEDIUM",      "category": "git-history",      "notes": "long form of -f" },
       { "pattern": "git branch -D <name>",         "blast_radius": "MEDIUM",      "category": "git-history",      "notes": "deletes unmerged branch; reflog-recoverable" },
       { "pattern": "git stash drop",               "blast_radius": "MEDIUM",      "category": "git-discard",      "notes": "drops newest or named stash" },
-      { "pattern": "git stash clear",              "blast_radius": "MEDIUM-HIGH", "category": "git-discard",      "notes": "drops every stash" }
+      { "pattern": "git stash clear",              "blast_radius": "MEDIUM-HIGH", "category": "git-discard",      "notes": "drops every stash" },
+      { "pattern": "git push ... -f", "blast_radius": "MEDIUM", "category": "git-history" },
+      { "pattern": "git push ... --force-with-lease", "blast_radius": "MEDIUM", "category": "git-history" },
+      { "pattern": "git push ... --force", "blast_radius": "MEDIUM", "category": "git-history" },
+      { "pattern": "git push --delete", "blast_radius": "MEDIUM", "category": "git-history" },
+      { "pattern": "git push ... --delete", "blast_radius": "MEDIUM", "category": "git-history" },
+      { "pattern": "git push -d", "blast_radius": "MEDIUM", "category": "git-history" },
+      { "pattern": "git push ... -d", "blast_radius": "MEDIUM", "category": "git-history" },
+      { "pattern": "git checkout -f", "blast_radius": "HIGH", "category": "git-discard" },
+      { "pattern": "git checkout --force", "blast_radius": "HIGH", "category": "git-discard" },
+      { "pattern": "git checkout --ours", "blast_radius": "MEDIUM", "category": "git-discard" },
+      { "pattern": "git checkout --theirs", "blast_radius": "MEDIUM", "category": "git-discard" },
+      { "pattern": "git worktree remove <path>", "blast_radius": "MEDIUM", "category": "git-discard" },
+      { "pattern": "git clean -fdq", "blast_radius": "HIGH", "category": "git-discard" },
+      { "pattern": "git clean -qf", "blast_radius": "HIGH", "category": "git-discard" }
     ],
     "docker": [
       { "pattern": "docker volume rm <name>",                                "blast_radius": "HIGH",        "category": "dk-volume-del",    "notes": "irreversible data loss" },
@@ -93,8 +124,8 @@
       { "pattern": "docker system prune",                                    "blast_radius": "MEDIUM",      "category": "dk-multi-del",     "notes": "containers + images + networks, NO volumes" },
       { "pattern": "docker system prune -a",                                 "blast_radius": "MEDIUM-HIGH", "category": "dk-multi-del",     "notes": "adds all unused images" },
       { "pattern": "docker system prune --all",                              "blast_radius": "MEDIUM-HIGH", "category": "dk-multi-del",     "notes": "long form of -a" },
-      { "pattern": "docker system prune --volumes",                          "blast_radius": "HIGH",        "category": "dk-multi-del",     "notes": "adds named-volume deletion" },
-      { "pattern": "docker system prune -af --volumes",                      "blast_radius": "HIGH",        "category": "dk-multi-del",     "notes": "the YOLO combination" },
+      { "pattern": "docker system prune --volumes",                          "blast_radius": "HIGH",        "category": "dk-multi-del",     "notes": "adds named-volume deletion; --volumes trailed by other flags inherits via the compiled `\\b.*` suffix" },
+      { "pattern": "docker system prune ...--volumes",                       "blast_radius": "HIGH",        "category": "dk-multi-del",     "notes": "covers -f/-fa (or future flags) between `prune` and `--volumes`" },
       { "pattern": "docker buildx prune",                                    "blast_radius": "MEDIUM",      "category": "dk-build-cache",   "notes": "rebuild cost only" },
       { "pattern": "docker buildx prune --all",                              "blast_radius": "MEDIUM-HIGH", "category": "dk-build-cache",   "notes": "every cached layer" },
       { "pattern": "docker buildx prune -a",                                 "blast_radius": "MEDIUM-HIGH", "category": "dk-build-cache",   "notes": "short form of --all" },
@@ -105,6 +136,8 @@
       { "pattern": "docker compose down -v",                                 "blast_radius": "HIGH",        "category": "dk-compose",       "notes": "drops named volumes" },
       { "pattern": "docker compose down --volumes",                          "blast_radius": "HIGH",        "category": "dk-compose",       "notes": "long form of -v" },
       { "pattern": "docker compose down --volumes --remove-orphans",         "blast_radius": "HIGH",        "category": "dk-compose",       "notes": "aggressive cleanup" },
+      { "pattern": "docker compose down ...-v",                              "blast_radius": "HIGH",        "category": "dk-compose",       "notes": "covers --remove-orphans (or future flags) between `down` and `-v`" },
+      { "pattern": "docker compose down ...--volumes",                       "blast_radius": "HIGH",        "category": "dk-compose",       "notes": "long-flag variant" },
       { "pattern": "docker compose rm -v <svc>",                             "blast_radius": "MEDIUM-HIGH", "category": "dk-compose",       "notes": "volume removal per service" },
       { "pattern": "docker compose rm -f",                                   "blast_radius": "MEDIUM",      "category": "dk-compose",       "notes": "bypasses removal prompt" },
       { "pattern": "docker context rm <name>",                               "blast_radius": "LOW",         "category": "dk-context",       "notes": "reversible if endpoint known" },
@@ -115,6 +148,48 @@
       { "pattern": "docker exec <ctr> rm -rf <bind-mount-path>",             "blast_radius": "HIGH",        "category": "dk-exec-host",     "notes": "filesystem op via bind mount hits host" },
       { "pattern": "docker run --rm -v $(pwd):/x <img> rm -rf /x",           "blast_radius": "HIGH",        "category": "dk-bind-mount",    "notes": "host-bind YOLO pattern" },
       { "pattern": "docker run --rm -v /:/host <img> <destructive>",         "blast_radius": "HIGH",        "category": "dk-bind-mount",    "notes": "mounts host root — almost always wrong" }
+    ],
+    "sql": [
+      { "pattern": "mysql ...drop database",     "blast_radius": "HIGH",        "category": "sql-drop",     "notes": "anchored on the client so `grep 'drop database' -r .` stays safe; docker/kubectl exec wrappers still match via the leading `.*\\b` anchor" },
+      { "pattern": "mysql ...drop schema",       "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "mysql ...drop table",        "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "mysql ...truncate table",    "blast_radius": "MEDIUM-HIGH", "category": "sql-truncate" },
+      { "pattern": "mysql ...delete from",       "blast_radius": "MEDIUM",      "category": "sql-delete" },
+      { "pattern": "mariadb ...drop database",   "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "mariadb ...drop schema",     "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "mariadb ...drop table",      "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "mariadb ...truncate table",  "blast_radius": "MEDIUM-HIGH", "category": "sql-truncate" },
+      { "pattern": "mariadb ...delete from",     "blast_radius": "MEDIUM",      "category": "sql-delete" },
+      { "pattern": "psql ...drop database",      "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "psql ...drop schema",        "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "psql ...drop table",         "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "psql ...truncate table",     "blast_radius": "MEDIUM-HIGH", "category": "sql-truncate" },
+      { "pattern": "psql ...delete from",        "blast_radius": "MEDIUM",      "category": "sql-delete" },
+      { "pattern": "sqlite3 ...drop database",   "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "sqlite3 ...drop schema",     "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "sqlite3 ...drop table",      "blast_radius": "HIGH",        "category": "sql-drop" },
+      { "pattern": "sqlite3 ...truncate table",  "blast_radius": "MEDIUM-HIGH", "category": "sql-truncate" },
+      { "pattern": "sqlite3 ...delete from",     "blast_radius": "MEDIUM",      "category": "sql-delete" }
+    ],
+    "app-cli": [
+      { "pattern": "n8n db:reset",                   "blast_radius": "HIGH",        "category": "app-reset",        "notes": "wipes the n8n instance database" },
+      { "pattern": "n8n user-management:reset",      "blast_radius": "MEDIUM",      "category": "app-reset",        "notes": "resets the n8n owner account and API keys" },
+      { "pattern": "bench new-site ...--force",      "blast_radius": "HIGH",        "category": "app-reset",        "notes": "Frappe/ERPNext: --force overwrites an existing site's database; wildcard matches either flag ordering" },
+      { "pattern": "bench drop-site",                "blast_radius": "HIGH",        "category": "app-reset",        "notes": "Frappe/ERPNext: drops the site's database and archive" },
+      { "pattern": "rails db:drop",                  "blast_radius": "HIGH",        "category": "app-reset",        "notes": "Rails: drops the database for the current env" },
+      { "pattern": "rails db:reset",                 "blast_radius": "HIGH",        "category": "app-reset",        "notes": "Rails: drop + create + migrate + seed" },
+      { "pattern": "rails db:schema:load",           "blast_radius": "HIGH",        "category": "app-reset",        "notes": "Rails: replaces the schema, wiping rows" },
+      { "pattern": "manage.py flush",                "blast_radius": "HIGH",        "category": "app-reset",        "notes": "Django: removes all data from the database" },
+      { "pattern": "prisma migrate reset",           "blast_radius": "HIGH",        "category": "app-reset",        "notes": "Prisma: drops schema and reruns migrations" },
+      { "pattern": "sequelize db:drop",              "blast_radius": "HIGH",        "category": "app-reset",        "notes": "Sequelize CLI: drops the database" }
+    ],
+    "key-value-store": [
+      { "pattern": "redis-cli ...flushall",          "blast_radius": "HIGH",        "category": "kv-flush",         "notes": "wildcard spans connection flags (-h/-p/-n); removes every key from every Redis database" },
+      { "pattern": "redis-cli ...flushdb",           "blast_radius": "HIGH",        "category": "kv-flush",         "notes": "as above, current database only" }
+    ],
+    "process": [
+      { "pattern": "pkill <pattern>", "blast_radius": "MEDIUM", "category": "proc-signal" },
+      { "pattern": "killall <name>", "blast_radius": "MEDIUM", "category": "proc-signal" }
     ]
   },
   "safe": {
@@ -138,13 +213,30 @@
       { "pattern": "df -h",         "category": "fs-read", "notes": "human-readable disk free" },
       { "pattern": "du -sh <path>", "category": "fs-read", "notes": "single-path summary; non-recursive write" },
       { "pattern": "tree",          "category": "fs-read", "notes": "directory listing" },
-      { "pattern": "tree <path>",   "category": "fs-read", "notes": "directory listing" }
+      { "pattern": "tree <path>",   "category": "fs-read", "notes": "directory listing" },
+      { "pattern": "ls ...", "category": "fs-read" },
+      { "pattern": "cat ...", "category": "fs-read" },
+      { "pattern": "wc ...", "category": "fs-read" },
+      { "pattern": "head -<number>", "category": "fs-read" },
+      { "pattern": "head -<number> <read-path>", "category": "fs-read" },
+      { "pattern": "head -c <number>", "category": "fs-read" },
+      { "pattern": "head -c <number> <read-path>", "category": "fs-read" },
+      { "pattern": "head -n <number>", "category": "fs-read" },
+      { "pattern": "tail -<number>", "category": "fs-read" },
+      { "pattern": "tail -<number> <read-path>", "category": "fs-read" },
+      { "pattern": "tail -c <number>", "category": "fs-read" },
+      { "pattern": "tail -c <number> <read-path>", "category": "fs-read" },
+      { "pattern": "tail -n <number>", "category": "fs-read" },
+      { "pattern": "tail -n +<number> <read-path>", "category": "fs-read" },
+      { "pattern": "tail -c +<number> <read-path>", "category": "fs-read" }
     ],
     "text-read": [
       { "pattern": "grep ...", "category": "text-read", "notes": "stdout-only search; compound shell is blocked upstream" },
       { "pattern": "rg ...",   "category": "text-read", "notes": "ripgrep; same constraints as grep", "deny_flags": ["--pre", "--pre-glob"] },
       { "pattern": "sort <file>",   "category": "text-read", "notes": "in-memory sort to stdout" },
-      { "pattern": "uniq <file>",   "category": "text-read", "notes": "adjacent dedupe to stdout" }
+      { "pattern": "uniq <file>",   "category": "text-read", "notes": "adjacent dedupe to stdout" },
+      { "pattern": "sed -n <sed-print> <read-path>", "category": "text-read", "notes": "Only numeric print addresses; no arbitrary sed program or option-valued path." },
+      { "pattern": "sed -n <sed-print>", "category": "text-read" }
     ],
     "process-read": [
       { "pattern": "ps",            "category": "proc-read", "notes": "process list" },
@@ -166,18 +258,35 @@
       { "pattern": "git status",    "category": "git-read", "notes": "working-tree state" },
       { "pattern": "git status ...", "category": "git-read", "notes": "status with flags" },
       { "pattern": "git diff",      "category": "git-read", "notes": "unstaged diff" },
-      { "pattern": "git diff ...",  "category": "git-read", "notes": "any diff variant; argv read-only", "deny_flags": ["--output"] },
+      { "pattern": "git diff ...",  "category": "git-read", "notes": "any diff variant; argv read-only", "deny_flags": ["--output", "--ext-diff", "--textconv"] },
       { "pattern": "git log",       "category": "git-read", "notes": "commit history" },
-      { "pattern": "git log ...",   "category": "git-read", "notes": "log variants", "deny_flags": ["--output"] },
+      { "pattern": "git log ...",   "category": "git-read", "notes": "log variants", "deny_flags": ["--output", "--ext-diff", "--textconv"] },
       { "pattern": "git show",      "category": "git-read", "notes": "show HEAD" },
-      { "pattern": "git show ...",  "category": "git-read", "notes": "show arbitrary ref", "deny_flags": ["--output"] },
+      { "pattern": "git show ...",  "category": "git-read", "notes": "show arbitrary ref", "deny_flags": ["--output", "--ext-diff", "--textconv"] },
       { "pattern": "git branch",    "category": "git-read", "notes": "list branches" },
       { "pattern": "git remote",    "category": "git-read", "notes": "list remotes" },
       { "pattern": "git remote -v", "category": "git-read", "notes": "verbose remotes" },
       { "pattern": "git rev-parse ...", "category": "git-read", "notes": "ref resolution" },
       { "pattern": "git config --list", "category": "git-read", "notes": "config dump" },
       { "pattern": "git config --get <key>", "category": "git-read", "notes": "single-key read" },
-      { "pattern": "git blame <file>", "category": "git-read", "notes": "annotate" }
+      { "pattern": "git blame <file>", "category": "git-read", "notes": "annotate" },
+      { "pattern": "git branch --show-current", "category": "git-read" },
+      { "pattern": "git branch -a", "category": "git-read" },
+      { "pattern": "git branch -r", "category": "git-read" },
+      { "pattern": "git branch --all", "category": "git-read" },
+      { "pattern": "git branch --remotes", "category": "git-read" },
+      { "pattern": "git branch --list", "category": "git-read" },
+      { "pattern": "git branch -v", "category": "git-read" },
+      { "pattern": "git branch -vv", "category": "git-read" },
+      { "pattern": "git branch -avv", "category": "git-read" },
+      { "pattern": "git ls-files", "category": "git-read" },
+      { "pattern": "git ls-files ...", "category": "git-read" },
+      { "pattern": "git worktree list", "category": "git-read" },
+      { "pattern": "git worktree list ...", "category": "git-read" },
+      { "pattern": "git stash list", "category": "git-read" },
+      { "pattern": "git stash list ...", "category": "git-read", "deny_flags": ["--output", "--ext-diff", "--textconv"] },
+      { "pattern": "git merge-base ...", "category": "git-read" },
+      { "pattern": "git rev-list ...", "category": "git-read", "deny_flags": ["--output", "--ext-diff", "--textconv"] }
     ],
     "docker-read": [
       { "pattern": "docker ps",     "category": "dk-read", "notes": "running containers" },
@@ -209,6 +318,32 @@
       { "pattern": "printf ...",    "category": "io", "notes": "stdout write only" },
       { "pattern": "basename <path>", "category": "io", "notes": "pure string op" },
       { "pattern": "dirname <path>",  "category": "io", "notes": "pure string op" }
+    ],
+    "github-read": [
+      { "pattern": "gh pr view", "category": "gh-read" },
+      { "pattern": "gh pr view ...", "category": "gh-read", "deny_flags": ["--web", "-w", "--watch"] },
+      { "pattern": "gh pr list", "category": "gh-read" },
+      { "pattern": "gh pr list ...", "category": "gh-read", "deny_flags": ["--web", "-w", "--watch"] },
+      { "pattern": "gh pr diff", "category": "gh-read" },
+      { "pattern": "gh pr diff ...", "category": "gh-read", "deny_flags": ["--web", "-w", "--watch"] },
+      { "pattern": "gh pr checks", "category": "gh-read" },
+      { "pattern": "gh pr checks ...", "category": "gh-read", "deny_flags": ["--web", "-w", "--watch"] },
+      { "pattern": "gh pr status", "category": "gh-read" },
+      { "pattern": "gh pr status ...", "category": "gh-read", "deny_flags": ["--web", "-w", "--watch"] },
+      { "pattern": "gh issue view", "category": "gh-read" },
+      { "pattern": "gh issue view ...", "category": "gh-read", "deny_flags": ["--web", "-w", "--watch"] },
+      { "pattern": "gh issue list", "category": "gh-read" },
+      { "pattern": "gh issue list ...", "category": "gh-read", "deny_flags": ["--web", "-w", "--watch"] },
+      { "pattern": "gh run view", "category": "gh-read" },
+      { "pattern": "gh run view ...", "category": "gh-read", "deny_flags": ["--web", "-w", "--watch"] },
+      { "pattern": "gh run list", "category": "gh-read" },
+      { "pattern": "gh run list ...", "category": "gh-read", "deny_flags": ["--web", "--watch"], "notes": "-w selects a workflow, unlike the browser flag on view commands." }
+    ],
+    "go-read": [
+      { "pattern": "go version", "category": "go-read" },
+      { "pattern": "go version ...", "category": "go-read" },
+      { "pattern": "go env", "category": "go-read" },
+      { "pattern": "go env ...", "category": "go-read", "deny_flags": ["-w", "--w", "-u", "--u"] }
     ]
   }
 }

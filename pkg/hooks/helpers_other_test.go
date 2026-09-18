@@ -11,6 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func warmShell() {}
+
 // Command hooks run under $SHELL (or /bin/sh) on non-Windows platforms.
 // These helpers generate the POSIX commands mirrored for PowerShell in
 // helpers_windows_test.go so the tests validate the same hook contracts

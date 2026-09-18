@@ -15,6 +15,9 @@ import (
 // updating the conversation, tool state, status footer, or busy state.
 func (m *model) handleEvent(ctx context.Context, ev any) {
 	switch e := ev.(type) {
+	case fileCompletionsLoaded:
+		m.screen.Autocomplete.SetFiles(e)
+		m.screen.Autocomplete.Sync(m.screen.Editor.Text())
 	case msgtypes.SendMsg:
 		if e.BypassQueue {
 			m.submit(ctx, e.Content, submitOptions{busyMode: busySubmitSteer})
@@ -146,6 +149,11 @@ func (m *model) handleSessionCompaction(ctx context.Context, e *runtime.SessionC
 // queued message, if any. It reports whether a queued run was started.
 func (m *model) finishBusy(ctx context.Context) bool {
 	m.screen.Transcript.FlushPending()
+	m.screen.Transcript.FinalizeTools(tuitypes.ToolStatusError, m.sessionState)
+	if m.cancelMarkerPending {
+		m.screen.Transcript.AddBlock(func(int) []string { return []string{ui.StWarning().Render("⏹ Cancelled")} })
+		m.cancelMarkerPending = false
+	}
 	m.busy = false
 	m.runCancel = nil
 

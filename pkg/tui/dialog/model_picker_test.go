@@ -670,3 +670,25 @@ func TestModelPickerDetailsPanelMissingInfo(t *testing.T) {
 	view := d.View()
 	assert.Contains(t, view, "unavailable", "details panel should indicate missing catalog info")
 }
+
+func TestModelPickerDMRMetadata(t *testing.T) {
+	t.Parallel()
+	d := NewModelPickerDialog([]runtime.ModelChoice{{
+		Name: "ai/qwen3", Ref: "dmr/ai/qwen3", Provider: "dmr", Model: "ai/qwen3",
+		Architecture: "qwen3", Parameters: "8B", Quantization: "Q4_K_M", Size: "4.9 GiB", ContextLimit: 32768,
+	}}).(*modelPickerDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 140, Height: 50})
+	view := d.View()
+	for _, value := range []string{"qwen3", "8B", "Q4_K_M", "4.9 GiB", "32.8K context window"} {
+		assert.Contains(t, view, value)
+	}
+}
+
+func TestDMRMetadataPreservesConfiguredPricing(t *testing.T) {
+	t.Parallel()
+	d := NewModelPickerDialog([]runtime.ModelChoice{{Name: "local", Ref: "local", Provider: "dmr", Parameters: "8B", InputCost: 1}}).(*modelPickerDialog)
+	d.Init()
+	d.Update(tea.WindowSizeMsg{Width: 140, Height: 50})
+	assert.Contains(t, d.View(), "$1 in")
+}

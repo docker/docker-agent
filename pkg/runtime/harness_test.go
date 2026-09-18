@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/paths"
@@ -37,6 +38,7 @@ func TestMain(m *testing.M) {
 	RegisterCommandEvaluator(func(agentTools []tools.Tool) CommandEvaluator {
 		return js.NewEvaluator(agentTools)
 	})
+	RegisterHarness(codingharness.Factory)
 
 	//nolint:forbidigo // TestMain has no *testing.T, so t.TempDir is unavailable.
 	dir, err := os.MkdirTemp("", "harness-shim")

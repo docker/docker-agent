@@ -24,6 +24,7 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelerrors"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/session"
@@ -294,6 +295,52 @@ func runSession(t *testing.T, sess *session.Session, stream *mockStream) []Event
 		events = append(events, ev)
 	}
 	return events
+}
+
+func TestImageGenerationTextOnlyWarning(t *testing.T) {
+	t.Parallel()
+
+	warningFor := func(t *testing.T, prompt string, stream *mockStream) *WarningEvent {
+		t.Helper()
+		events := runSession(t, session.New(session.WithUserMessage(prompt)), stream)
+		for _, event := range events {
+			if warning, ok := event.(*WarningEvent); ok && warning.Message == missingGeneratedImageWarning {
+				return warning
+			}
+		}
+		return nil
+	}
+
+	t.Run("text-only image request", func(t *testing.T) {
+		t.Parallel()
+		sess := session.New(session.WithUserMessage("draw an image of Docker and friends"))
+		events := runSession(t, sess, newStreamBuilder().AddContent("Here's an image of Docker and its friends.").AddStopWithUsage(10, 8).Build())
+
+		var warning *WarningEvent
+		for _, event := range events {
+			if candidate, ok := event.(*WarningEvent); ok && candidate.Message == missingGeneratedImageWarning {
+				warning = candidate
+			}
+		}
+		require.NotNil(t, warning)
+		assert.Equal(t, "root", warning.AgentName)
+		assert.Equal(t, "Here's an image of Docker and its friends.", sess.GetLastAssistantMessageContent())
+	})
+
+	t.Run("ordinary text", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, warningFor(t, "Explain how image generation works", newStreamBuilder().AddContent("Image generation works by...").AddStopWithUsage(6, 8).Build()))
+	})
+
+	t.Run("text and media", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, warningFor(t, "create an image of a whale", newStreamBuilder().AddContent("Done").AddMedia([]byte("image"), "image/png", "whale.png").AddStopWithUsage(6, 8).Build()))
+	})
+
+	t.Run("media only", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, warningFor(t, "create an image of a whale", newStreamBuilder().AddMedia([]byte("image"), "image/png", "whale.png").AddStopWithUsage(6, 8).Build()))
+	})
 }
 
 func hasEventType(t *testing.T, events []Event, target Event) bool {
@@ -1924,7 +1971,7 @@ func TestConfigureToolsetHandlers_ReachesThroughCodeModeWrapper(t *testing.T) {
 	require.NoError(t, err)
 
 	events := make(chan Event, 8)
-	rt.configureToolsetHandlers(root, NewChannelSink(events))
+	rt.configureToolsetHandlers(root)
 	close(events)
 	for range events {
 	}
@@ -2716,7 +2763,7 @@ func TestTransferTaskRejectsNonSubAgent(t *testing.T) {
 		},
 	}
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.True(t, result.IsError, "transfer to non-sub-agent should return an error result")
@@ -2756,7 +2803,7 @@ func TestTransferTaskAllowsSubAgent(t *testing.T) {
 		},
 	}
 
-	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	result, err := rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.False(t, result.IsError, "transfer to valid sub-agent should succeed")
@@ -2804,7 +2851,7 @@ func TestTransferTaskPersistsSubSessionOnError(t *testing.T) {
 
 	// runForwarding returns an error because the child emitted an ErrorEvent,
 	// but only *after* persisting the sub-session.
-	_, err = rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts))
+	_, err = rt.handleTaskTransfer(t.Context(), sess, toolCall, NewChannelSink(evts), tools.NopRuntime{})
 	require.Error(t, err, "transfer should surface the sub-session error to the caller")
 
 	// The parent session must now hold a sub-session item — without the fix
@@ -2992,11 +3039,12 @@ func TestSessionDenyOverridesYoloMode(t *testing.T) {
 	require.False(t, executed, "expected tool to NOT be executed in --yolo mode because session Deny wins")
 }
 
-func TestStripImageContent(t *testing.T) {
+func TestStripUnsupportedMediaContent(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
+		caps     modelinfo.ModelCapabilities // zero value = text-only
 		messages []chat.Message
 		want     []chat.Message
 	}{
@@ -3180,12 +3228,58 @@ func TestStripImageContent(t *testing.T) {
 				{Role: chat.MessageRoleAssistant, Content: "got it"},
 			},
 		},
+		{
+			name: "strips audio and video documents, preserves supported image",
+			caps: modelinfo.CapsWith(true, false, false, false),
+			messages: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeText, Text: "listen and watch"},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.wav", MimeType: "audio/wav", Source: chat.DocumentSource{InlineData: []byte{0x52}}}},
+						{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp4", MimeType: "video/mp4", Source: chat.DocumentSource{InlineData: []byte{0x00}}}},
+					},
+				},
+			},
+			want: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeText, Text: "listen and watch"},
+						{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,abc"}},
+					},
+				},
+			},
+		},
+		{
+			name: "retains audio and video when supported",
+			caps: modelinfo.CapsWith(false, false, true, true),
+			messages: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp3", MimeType: "audio/mpeg", Source: chat.DocumentSource{InlineData: []byte{0x49}}}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.webm", MimeType: "video/webm", Source: chat.DocumentSource{InlineData: []byte{0x1a}}}},
+					},
+				},
+			},
+			want: []chat.Message{
+				{
+					Role: chat.MessageRoleUser,
+					MultiContent: []chat.MessagePart{
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.mp3", MimeType: "audio/mpeg", Source: chat.DocumentSource{InlineData: []byte{0x49}}}},
+						{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "clip.webm", MimeType: "video/webm", Source: chat.DocumentSource{InlineData: []byte{0x1a}}}},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := stripImageContent(tt.messages)
+			got := stripUnsupportedMediaContent(t.Context(), tt.messages, tt.caps)
 			require.Equal(t, tt.want, got)
 		})
 	}
@@ -3406,7 +3500,7 @@ func TestSkillSubSessionTools_ScopesAndInjects(t *testing.T) {
 		session.WithExtraToolSets([]tools.ToolSet{newStubToolSet(nil, []tools.Tool{extraTool}, nil)}),
 	)
 
-	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited, NewChannelSink(make(chan Event, 8)))
+	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited)
 
 	names := toolNames(result)
 	// read_file kept (allow-listed), shell/write_file filtered out, fetch injected.
@@ -3427,7 +3521,7 @@ func TestSkillSubSessionTools_NoOpForOrdinarySession(t *testing.T) {
 	inherited := []tools.Tool{{Name: "read_file"}, {Name: "shell"}}
 	sess := session.New()
 
-	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited, NewChannelSink(make(chan Event, 8)))
+	result := rt.skillSubSessionTools(t.Context(), sess, root, inherited)
 	assert.Equal(t, inherited, result)
 }
 
@@ -4637,6 +4731,22 @@ func TestRunAgentPersistsSubSessionOnError(t *testing.T) {
 	}
 	assert.Equal(t, 1, subSessionItems,
 		"parent session must record the sub-session even when the background agent errored")
+}
+
+func TestImageGenerationProviderErrorDoesNotEmitWarning(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProviderWithError{id: "test/mock-model"}
+	a := agent.New("root", "test agent", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(a)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	events := runAndCollect(t, rt, session.New(session.WithUserMessage("generate an image")))
+	for _, event := range events {
+		if warning, ok := event.(*WarningEvent); ok {
+			assert.NotEqual(t, missingGeneratedImageWarning, warning.Message)
+		}
+	}
 }
 
 // TestRunAgentImmediateFailureEmitsNoZeroUsageEvent guards runCollecting's

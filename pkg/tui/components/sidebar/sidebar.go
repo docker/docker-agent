@@ -2,6 +2,7 @@ package sidebar
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -19,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/gitbranch"
 	pathx "github.com/docker/docker-agent/pkg/path"
+	"github.com/docker/docker-agent/pkg/plans"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -57,8 +59,9 @@ const (
 )
 
 // SectionVisibility controls which optional sidebar sections are rendered.
-// The zero value shows everything.
+// The zero value shows the original sections; plans are opt-in.
 type SectionVisibility struct {
+	ShowPlans       bool
 	HideSessionPath bool
 	HideUsage       bool
 	HideAgents      bool
@@ -157,6 +160,47 @@ type Model interface {
 	VisualGeneration() uint64
 	// WorkingDirectory returns the working directory path displayed in the sidebar.
 	WorkingDirectory() string
+	EditPlan(name, tabID string) tea.Cmd
+}
+
+type gitBranchChangedMsg string
+
+// Seams for the process state the sidebar reads at construction. Unit tests
+// run inside the repository checkout, so without them the checkout's branch
+// name (60 characters in a merge queue) leaks into every rendered layout.
+var (
+	getwd         = os.Getwd
+	currentBranch = gitbranch.Current
+	watchBranch   = gitbranch.Watch
+)
+
+var errBranchWatcherDisabled = errors.New("sidebar: git branch watcher disabled for testing")
+
+// SetWorkingDirectoryForTesting makes every sidebar created afterwards report
+// dir and branch instead of the process's working directory and its git
+// branch, with no branch watcher, and returns a function restoring the
+// defaults. Call it from TestMain: it is not safe alongside running tests.
+func SetWorkingDirectoryForTesting(dir, branch string) (restore func()) {
+	prevGetwd, prevCurrent, prevWatch := getwd, currentBranch, watchBranch
+	getwd = func() (string, error) { return dir, nil }
+	currentBranch = func(string) string { return branch }
+	watchBranch = func(context.Context, string) (*gitbranch.Watcher, error) {
+		return nil, errBranchWatcherDisabled
+	}
+	return func() { getwd, currentBranch, watchBranch = prevGetwd, prevCurrent, prevWatch }
+}
+
+func waitForGitBranch(watcher *gitbranch.Watcher) tea.Cmd {
+	if watcher == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		branch, ok := <-watcher.Changes()
+		if !ok {
+			return nil
+		}
+		return gitBranchChangedMsg(branch)
+	}
 }
 
 // ragIndexingState tracks per-strategy indexing progress
@@ -319,7 +363,8 @@ type model struct {
 	rootSessionID        string   // Main (top-level) session, shown when no stream is active
 	scrollview           *scrollview.Model
 	workingDirectory     string
-	gitBranchName        string   // current git branch, empty if not in a repo
+	gitBranchName        string // current git branch, empty if not in a repo
+	gitBranchWatcher     *gitbranch.Watcher
 	queuedMessages       []string // Truncated preview of queued messages
 	streamCancelled      bool     // true after ESC cancel until next StreamStartedEvent
 	compacting           bool     // true while a session compaction runs (started → completed)
@@ -372,6 +417,9 @@ type model struct {
 	// rendering so click zones can be registered explicitly rather than inferred
 	// from blank-line heuristics.
 	agentLineOwners []string
+	planData        messages.PlanSidebarDataMsg
+	recentPlans     []plans.Plan
+	planClickZones  map[int]planClickZone
 }
 
 // New creates a new sidebar bound to the given session state.
@@ -381,7 +429,9 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 	ti.CharLimit = 50
 	ti.Prompt = "" // No prompt to maximize usable width in collapsed sidebar
 
-	wd, branch := getCurrentWorkingDirectory()
+	rawDir, _ := getwd()
+	wd, branch := formatWorkingDirectory(rawDir)
+	branchWatcher, _ := watchBranch(ctx, rawDir)
 
 	m := &model{
 		ctx:               func() context.Context { return context.WithoutCancel(ctx) },
@@ -402,6 +452,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 		),
 		workingDirectory: wd,
 		gitBranchName:    branch,
+		gitBranchWatcher: branchWatcher,
 		preferredWidth:   DefaultWidth,
 		sectionGap:       defaultSectionGap,
 		titleInput:       ti,
@@ -413,7 +464,7 @@ func New(ar *animation.Runtime, ctx context.Context, sessionState *service.Sessi
 }
 
 func (m *model) Init() tea.Cmd {
-	return nil
+	return waitForGitBranch(m.gitBranchWatcher)
 }
 
 // needsSpinner returns true if any spinner-driving state is active.
@@ -806,6 +857,9 @@ type ClickResult int
 
 const (
 	ClickNone ClickResult = iota
+	ClickPlan
+	ClickPlanBrowser
+	ClickPlanRefresh
 	ClickStar
 	ClickTitle        // Click on the title area (use double-click to edit)
 	ClickWorkingDir   // Click on the working directory line
@@ -823,7 +877,7 @@ func (m *model) HandleClick(x, y int) bool {
 }
 
 // HandleClickType returns what was clicked (see ClickResult).
-// For ClickAgent, the second return value is the agent name.
+// For ClickAgent or ClickPlan, the second return value is the canonical name.
 func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	// Account for left padding
 	adjustedX := x - m.layoutCfg.PaddingLeft
@@ -861,6 +915,12 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 		// In collapsed mode, working dir line follows the title section.
 		// A hidden session path renders no line and must not keep a hit target.
 		vm := m.computeCollapsedViewModel(m.contentWidth(false))
+		if vm.PlansSummary != "" && adjustedX < vm.ContentWidth {
+			start := vm.LineCount() - 1 - linesNeeded(lipgloss.Width(vm.PlansSummary), vm.ContentWidth)
+			if y >= start && y < vm.LineCount()-1 {
+				return ClickPlanBrowser, ""
+			}
+		}
 		wdStartY := vm.titleSectionLines()
 		wdLines := linesNeeded(lipgloss.Width(vm.WorkingDir), vm.ContentWidth)
 
@@ -933,6 +993,11 @@ func (m *model) HandleClickType(x, y int) (ClickResult, string) {
 	if agentName, ok := m.agentClickZones[contentY]; ok {
 		return ClickAgent, agentName
 	}
+	if m.sectionVisibility.ShowPlans {
+		if zone, ok := m.planClickZones[contentY]; ok {
+			return zone.kind, zone.name
+		}
+	}
 
 	return ClickNone, ""
 }
@@ -1001,7 +1066,12 @@ func (m *model) LoadFromSession(sess *session.Session) {
 
 	// Load working directory from session
 	if sess.WorkingDir != "" {
-		m.workingDirectory, m.gitBranchName = formatWorkingDirectory(sess.WorkingDir)
+		m.workingDirectory = pathx.ShortenHome(sess.WorkingDir)
+		if m.gitBranchWatcher != nil {
+			m.gitBranchName = m.gitBranchWatcher.SetDir(sess.WorkingDir)
+		} else {
+			m.gitBranchName = currentBranch(sess.WorkingDir)
+		}
 	}
 
 	// Session has content if it has messages or token usage
@@ -1132,18 +1202,7 @@ func formatWorkingDirectory(rawDir string) (display, branch string) {
 	if rawDir == "" {
 		return "", ""
 	}
-	return pathx.ShortenHome(rawDir), gitbranch.Current(rawDir)
-}
-
-// getCurrentWorkingDirectory returns the current working directory with home directory
-// replaced by ~/, along with the current git branch name.
-func getCurrentWorkingDirectory() (string, string) {
-	pwd, err := os.Getwd()
-	if err != nil {
-		return "", ""
-	}
-
-	return formatWorkingDirectory(pwd)
+	return pathx.ShortenHome(rawDir), currentBranch(rawDir)
 }
 
 // workingDirWithBranch returns the working directory path with the git branch
@@ -1172,6 +1231,13 @@ func (m *model) workingDirLine() string {
 // Update handles messages and updates the component state.
 func (m *model) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case messages.PlanSidebarDataMsg:
+		m.setPlans(msg)
+		return m, nil
+	case gitBranchChangedMsg:
+		m.gitBranchName = string(msg)
+		m.invalidateCache()
+		return m, waitForGitBranch(m.gitBranchWatcher)
 	case tea.WindowSizeMsg:
 		cmd := m.SetSize(msg.Width, msg.Height)
 		return m, cmd
@@ -1490,6 +1556,7 @@ func (m *model) computeCollapsedViewModel(contentWidth int) CollapsedViewModel {
 		WorkingIndicator: m.workingIndicatorCollapsed(),
 		WorkingDir:       m.workingDirLine(),
 		InfoLine:         m.collapsedInfoLine(contentWidth),
+		PlansSummary:     toolcommon.TruncateText(m.plansSummary(), contentWidth),
 		ContentWidth:     contentWidth,
 	}
 	if !m.sectionVisibility.HideUsage {
@@ -1750,6 +1817,17 @@ func (m *model) renderSections(contentWidth int) []string {
 	if !m.sectionVisibility.HideTodos {
 		m.todoComp.SetSize(contentWidth)
 		appendSection(m.todoComp.Render())
+	}
+	m.planClickZones = nil
+	if m.sectionVisibility.ShowPlans {
+		section, zones := m.plansSection(contentWidth)
+		start := appendSection(section)
+		m.planClickZones = make(map[int]planClickZone)
+		for i, zone := range zones {
+			if zone.kind != ClickNone {
+				m.planClickZones[start+tabHeaderLines+i] = zone
+			}
+		}
 	}
 
 	return lines

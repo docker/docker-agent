@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os/exec"
 	"runtime"
+	"slices"
+	"sync"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -15,6 +17,7 @@ type stdioMCPClient struct {
 	sessionClient
 
 	command string
+	argsMu  sync.RWMutex
 	args    []string
 	env     []string
 	cwd     string
@@ -32,6 +35,18 @@ func newStdioCmdClient(command string, args, env []string, cwd string) *stdioMCP
 		env:           env,
 		cwd:           cwd,
 	}
+}
+
+func (c *stdioMCPClient) setArgs(args []string) {
+	c.argsMu.Lock()
+	defer c.argsMu.Unlock()
+	c.args = slices.Clone(args)
+}
+
+func (c *stdioMCPClient) getArgs() []string {
+	c.argsMu.RLock()
+	defer c.argsMu.RUnlock()
+	return slices.Clone(c.args)
 }
 
 func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequest) (*gomcp.InitializeResult, error) {
@@ -59,7 +74,7 @@ func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequ
 		Version: "1.0.0",
 	}, opts)
 
-	cmd := exec.CommandContext(ctx, c.command, c.args...)
+	cmd := exec.CommandContext(ctx, c.command, c.getArgs()...)
 	cmd.Env = c.env
 	cmd.Dir = c.cwd
 	session, err := client.Connect(ctx, &gomcp.CommandTransport{

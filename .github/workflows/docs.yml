@@ -1,0 +1,182 @@
+# Checks for the documentation source in docs/**. Every job runs in parallel:
+#
+#   markdownlint  style, via docs/.markdownlint-cli2.yaml
+#   canonical     every mounted page canonicalizes to its docs.docker.com URL
+#   links         relative Markdown links resolve to a real file (lychee,
+#                 offline); these are what the docs.docker.com module mount
+#                 resolves, so a broken one breaks the downstream build
+#   llms-txt      the generated /llms.txt matches data/nav.yml
+#   a11y          WCAG 2 AA scan of the built site with pa11y-ci
+#   upstream      docs.docker.com still builds with docs/ mounted at this commit
+#
+# Path-filtered, so it only runs when docs change and cannot be a required
+# check as is; `ci / gate` is the required one.
+name: docs
+
+permissions:
+  contents: read
+
+# Main and tag runs get a group of their own so they are never queued behind
+# or cancelled by another run; PR runs supersede the previous run on the ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')) && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/docs.yml"
+      - ".github/actions/setup-hugo/**"
+      - "docs/**"
+      - "scripts/docs-*.sh"
+  pull_request:
+    paths:
+      - ".github/workflows/docs.yml"
+      - ".github/actions/setup-hugo/**"
+      - "docs/**"
+      - "scripts/docs-*.sh"
+
+jobs:
+  markdownlint:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # From docs/ so the globs in .markdownlint-cli2.yaml resolve as locally.
+      - name: Lint Markdown
+        working-directory: docs
+        run: npx --yes markdownlint-cli2@0.22.1
+
+  canonical:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check canonical front matter
+        run: ./scripts/docs-check-canonical.sh
+
+  links:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check relative links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          # index.md and 404.md are github.io-only landing pages whose links
+          # are HTML anchors resolved on the rendered site (task docs-check-links).
+          args: >-
+            --offline --no-progress
+            --exclude-path docs/index.md --exclude-path docs/404.md
+            "docs/**/*.md"
+          fail: true
+
+  llms-txt:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup-hugo
+
+      # Asserts the built output's content, not just build success: a broken
+      # template traversal can silently drop entries while the build stays green.
+      - name: Check llms.txt
+        run: ./scripts/docs-check-llms-txt.sh
+
+  # Two tiers, each URL scanned in both themes (?theme= is honored by
+  # js/app.js ahead of localStorage / prefers-color-scheme, since the headless
+  # browser's default color scheme is otherwise indeterminate):
+  #   1. always: the layout-archetype pages listed in docs/.pa11yci.json,
+  #      guarding shared CSS/JS/templates/SVG;
+  #   2. pull_request only: the content pages the PR modifies, mapped from the
+  #      changed Markdown by scripts/docs-a11y-urls.sh.
+  # pa11y fails only on HTML_CodeSniffer "error" results. See docs/STYLE.md to
+  # reproduce a scan locally.
+  a11y:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # HEAD^1 of the pull_request merge commit is the base tip, so
+          # `git diff HEAD^1 HEAD` is the PR's changed files, token-free.
+          fetch-depth: 2
+
+      # pa11y-ci@3.1.0 bundles a Puppeteer whose Chromium download fails under
+      # `npx --yes`; a pinned Chrome via PUPPETEER_EXECUTABLE_PATH sidesteps it.
+      - name: Install Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4 # v2.2.0
+        with:
+          chrome-version: stable
+
+      - uses: $/.github/actions/setup-hugo
+
+      - name: Start Hugo server
+        working-directory: docs
+        run: nohup hugo server --bind 127.0.0.1 --port 1313 > hugo-server.log 2>&1 &
+
+      - name: Wait for server
+        run: npx --yes wait-on@7.2.0 http://127.0.0.1:1313/docker-agent/ --timeout 60000
+
+      - name: Compute changed-page URLs
+        id: changed
+        if: github.event_name == 'pull_request'
+        env:
+          A11Y_BASE_URL: http://127.0.0.1:1313
+        run: |
+          git diff --name-only --diff-filter=d HEAD^1 HEAD \
+            | ./scripts/docs-a11y-urls.sh > /tmp/changed-urls.txt
+          count=$(wc -l < /tmp/changed-urls.txt | tr -d ' ')
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "Tier 2: $count changed-page URL(s):"
+          cat /tmp/changed-urls.txt
+
+      - name: Assemble pa11y config
+        if: github.event_name == 'pull_request' && steps.changed.outputs.count != '0'
+        run: |
+          jq -Rn '[inputs]' /tmp/changed-urls.txt > /tmp/changed-urls.json
+          jq --slurpfile extra /tmp/changed-urls.json '.urls += $extra[0]' \
+            docs/.pa11yci.json > /tmp/pa11yci.generated.json
+          echo "Merged pa11y-ci config (static + changed pages):"
+          jq -r '.urls[]' /tmp/pa11yci.generated.json
+
+      - name: Run pa11y-ci
+        working-directory: docs
+        env:
+          PUPPETEER_EXECUTABLE_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          config=.pa11yci.json
+          if [ -f /tmp/pa11yci.generated.json ]; then
+            config=/tmp/pa11yci.generated.json
+          fi
+          echo "Using pa11y-ci config: $config"
+          npx --yes pa11y-ci@3.1.0 --config "$config"
+
+      - name: Show Hugo server log on failure
+        if: failure()
+        working-directory: docs
+        run: cat hugo-server.log || true
+
+  # docker/docs mounts this repo's docs as a Hugo module pinned to a release
+  # tag; the reusable workflow builds docker/docs with the module replaced by
+  # this commit and runs htmltest on the output. A no-op until docker/docs
+  # imports github.com/docker/docker-agent (issue #3371, Phase 2.1).
+  upstream:
+    uses: docker/docs/.github/workflows/validate-upstream.yml@bbf8dfd2f0205fd5c754eedceac8f8b69aa91f81 # main
+    with:
+      module-name: docker/docker-agent

@@ -1,389 +1,528 @@
+# Quality gate for every PR and the release pipeline for main and v* tags.
+#
+# `gate` is the only check the main ruleset needs to require: it fails when any
+# job it needs failed or was cancelled and passes when they succeeded or were
+# skipped (docs-only PRs skip every Go job; a main push whose SHA already
+# passed the merge queue skips them too). Add a job to `gate.needs` to make it
+# blocking; the ruleset never has to change.
 name: ci
 
 permissions:
   contents: read
 
+# Main, tag and merge-queue runs get a group of their own so they are never
+# queued behind or cancelled by another run; PR runs supersede the previous
+# run on the ref.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.event_name != 'pull_request' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 on:
   workflow_dispatch:
+    inputs:
+      image_mode:
+        description: Publish on main with auto; test images without publishing on other branches or with build-only
+        type: choice
+        required: false
+        default: auto
+        options:
+          - auto
+          - build-only
+      expected_sha:
+        description: Optional immutable 40-character commit SHA to verify before authentication
+        type: string
+        required: false
+        default: ''
   push:
     branches: [ main ]
     tags: [ "v*" ]
   pull_request:
-    branches: [ main ]
+  merge_group:
 
 jobs:
-  lint:
+  # Decides what the run has to do:
+  #   code    false on docs-only PRs (every changed file under docs/), which
+  #           skip the Go jobs. Markdown elsewhere is test data, so only docs/
+  #           counts. Anything but a PR runs all.
+  #   tested  true on a main push whose commit already passed a merge-queue
+  #           run of this workflow: the queue tested this exact SHA minutes
+  #           ago, so the push only builds and publishes. A push that bypassed
+  #           the queue (no green merge_group run for the SHA) runs everything.
+  changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.docs_count != steps.filter.outputs.all_count }}
+      tested: ${{ steps.queue.outputs.tested == 'true' }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
+          filters: |
+            docs:
+              - 'docs/**'
+            all:
+              - '**'
 
-      - name: Lint
+      - name: Look for a green merge-queue run of this commit
+        id: queue
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW_PATH: ${{ github.workflow_ref }}
+        run: |
+          # workflow_ref is owner/repo/.github/workflows/ci.yml@refs/heads/main
+          workflow_file="${WORKFLOW_PATH#"$GH_REPO"/}"
+          workflow_file="${workflow_file%@*}"
+          # shellcheck disable=SC2016 # $file is a jq variable
+          runs=$(gh api "repos/$GH_REPO/actions/runs?event=merge_group&head_sha=$GITHUB_SHA&status=success&per_page=20" \
+            | jq --arg file "$workflow_file" '[.workflow_runs[] | select(.path == $file)] | length')
+          if [[ "$runs" -gt 0 ]]; then
+            echo "tested=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${GITHUB_SHA} passed the merge queue; lint and test jobs are skipped on this push"
+          else
+            echo "tested=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  lint:
+    needs: changes
+    if: needs.changes.outputs.tested != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup-go
+        with:
+          cache-name: test-linux
+          save: 'false'
+          task: 'false'
+
+      - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.13.1
+          version: v2.13.2
 
-      - name: Lint GitHub Actions
+      # The rest of `task lint`: project cops and go.mod tidiness.
+      - name: Project cops
+        run: go run ./lint .
+
+      - name: go mod tidy
+        run: go mod tidy --diff >/dev/null || (echo 'go.mod/go.sum are not tidy' && exit 1)
+
+      - name: Shell scripts
+        run: |
+          shellcheck scripts/*.sh
+          ./scripts/ci-report-failures-test.sh
+          ./scripts/models-delta-test.sh
+
+      - name: GitHub Actions
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
         with:
+          version: 1.7.12
           fail-on-error: true
           pyflakes: false
+          # actionlint does not know GitHub's `$/` same-repository action syntax
+          # yet. The action splits flags on whitespace, hence the \s pattern.
+          flags: -ignore action\s.\$/\S+.\sin\sinvalid\sformat
 
-      - name: Lint GitHub Workflows
+      # Static security audit of workflows and composite actions; config in
+      # .github/zizmor.yml. Findings at low severity and above fail the job.
+      - name: zizmor
+        uses: zizmorcore/zizmor-action@70fb788f84895a7701f5643d103d587e460b5c99 # v0.6.3
+        with:
+          advanced-security: false
+          annotations: true
+          min-severity: low
+          version: v1.30.0
+
+      - name: Workflow invariants
         run: ./scripts/workflow-lint.sh
 
-  build-and-test:
+  test-linux:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tested != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
+          persist-credentials: false
 
-      - name: Install Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-        with:
-          version: 3.51.1
-
-      - name: Create bin directory
-        run: mkdir -p "$HOME/bin"
+      - uses: $/.github/actions/setup-go
 
       - name: Build
         run: task build
 
-      - name: Cross-compile plan storage
-        run: task check-plan-cross
+      - name: Test
+        run: task test-ci
 
-      - name: Run tests
-        run: |
-          task test
-          task test-binary
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-test-${{ github.job }}
+          path: ${{ runner.temp }}/go-test.json
+          retention-days: 14
+          if-no-files-found: ignore
 
-  # Native Windows tests. Plan storage relies on OS-specific file locking and
-  # path semantics, so the full Go test suite runs natively on Windows in a
-  # single blocking `task test` step, mirroring the Linux job.
-  windows-tests:
+      - name: Test binary
+        run: task test-binary
+
+  # Plan storage relies on OS-specific file locking and path semantics, so the
+  # full suite also runs natively on Windows.
+  test-windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tested != 'true'
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
+          persist-credentials: false
 
-      - name: Install Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - uses: $/.github/actions/setup-go
+
+      # Real-time scanning of every compiled object and test binary is the
+      # dominant I/O cost on hosted Windows runners.
+      - name: Exclude build paths from Defender
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $paths = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, (go env GOROOT), (go env GOPATH), (go env GOCACHE), (go env GOMODCACHE))
+          Add-MpPreference -ExclusionPath $paths
+          Get-MpPreference | Select-Object -ExpandProperty ExclusionPath
+
+      - name: Test
+        run: task test-ci
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          version: 3.51.1
+          name: go-test-${{ github.job }}
+          path: ${{ runner.temp }}/go-test.json
+          retention-days: 14
+          if-no-files-found: ignore
 
-      - name: Go environment
-        run: go env GOOS GOARCH CGO_ENABLED CC
-
-      - name: Run tests
-        run: task test
-
-  license-check:
+  # Compile-only checks kept out of `test-linux` so they run alongside it.
+  cross-compile:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tested != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
+          persist-credentials: false
 
-      - name: Install go-licences
-        run: go install github.com/google/go-licenses@latest
+      - uses: $/.github/actions/setup-go
+
+      - name: Plan storage build tags
+        run: task check-plan-cross
+
+      - name: WASM provider registration
+        run: task test-wasm-js
+
+  licenses:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tested != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup-go
+        with:
+          cache-name: test-linux
+          save: 'false'
+          task: 'false'
 
       - name: Check licenses
-        run: go-licenses check . --allowed_licenses=Apache-2.0,MIT,BSD-3-Clause,BSD-2-Clause --ignore modernc.org/mathutil --ignore github.com/hashicorp/hcl/v2
+        run: |
+          go install github.com/google/go-licenses@v1.6.0
+          go-licenses check . --allowed_licenses=Apache-2.0,MIT,BSD-3-Clause,BSD-2-Clause --ignore modernc.org/mathutil --ignore github.com/hashicorp/hcl/v2
 
-  build-image:
-    if: github.event_name == 'pull_request'
-    # Build each platform on its own native runner, in parallel. Building both
-    # platforms on a single runner serializes two CPU-bound cgo/zig compiles on
-    # 2 vCPUs (~8 min); splitting across native runners cuts wall-clock to ~4 min.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+  # Race detector on main only: it is several times slower than `task test`
+  # and must not sit on the PR critical path. Not needed by `gate`.
+  test-race:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-
-      - name: Build image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          push: false
-          sbom: false
-          provenance: false
-          build-args: |
-            GIT_TAG=pr
-            GIT_COMMIT=dev
-          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
-          cache-to: type=gha,mode=min,scope=buildx-${{ matrix.platform }}
+          persist-credentials: false
 
-      # The sandbox template shares the builder-linux stage, so it reuses the
-      # binary compiled by the step above.
-      - name: Build template
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: .
-          target: template
-          platforms: ${{ matrix.platform }}
-          push: false
-          sbom: false
-          provenance: false
-          build-args: |
-            GIT_TAG=pr
-            GIT_COMMIT=dev
-          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
+      - uses: $/.github/actions/setup-go
 
-  build-and-push-image:
-    if: github.event_name != 'pull_request' && !github.event.repository.fork
-    needs: [ lint, build-and-test, windows-tests, license-check ]
+      - name: Test with the race detector
+        run: task test-race
+
+  # Non-blocking triage for test failures on the canonical repository's main
+  # branch. cross-compile orders this after all test jobs but is not reported.
+  report-main-failures:
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'docker/docker-agent' &&
+      (needs.test-linux.result == 'failure' ||
+       needs.test-windows.result == 'failure' ||
+       needs.test-race.result == 'failure')
+    needs: [ test-linux, test-windows, test-race, cross-compile ]
     permissions:
       contents: read
-      id-token: write
-    # Build each platform on its own native runner in parallel, push by digest,
-    # then assemble the multi-arch manifest in the merge job below.
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+      actions: read
+      issues: write
+    concurrency:
+      group: ci-report-main-failures
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Prepare platform name
-        run: echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+      - name: Report failed tests
         env:
-          platform: ${{ matrix.platform }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci-report-failures.sh
 
-      - name: Get Docker Hub OIDC token
-        id: docker_oidc
-        uses: docker/oidc-action@b048fb089ace3e15a5fbdd784f4784d284ce5e8d # v1.1.0
-        with:
-          connection-id: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
-          expires-in: 3600
-
-      - name: Hub login
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        with:
-          username: docker
-          password: ${{ steps.docker_oidc.outputs.token }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: |
-            docker/docker-agent
-
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          labels: ${{ steps.meta.outputs.labels }}
-          sbom: true
-          provenance: mode=max
-          outputs: type=image,name=docker/docker-agent,push-by-digest=true,name-canonical=true,push=true
-          build-args: |
-            GIT_TAG=${{ github.ref_name }}
-            GIT_COMMIT=${{ github.sha }}
-          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
-          cache-to: type=gha,mode=max,scope=buildx-${{ matrix.platform }}
-
-      - name: Export digest
-        run: |
-          mkdir -p "${RUNNER_TEMP}/digests"
-          digest="${{ steps.build.outputs.digest }}"
-          touch "${RUNNER_TEMP}/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: digests-${{ env.PLATFORM_PAIR }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-      # The sandbox template is a stage of the same Dockerfile with identical
-      # build args, so it reuses the builder-linux layer from the image build
-      # above and embeds the exact same binary.
-      - name: Build and push template by digest
-        id: build-template
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          context: .
-          target: template
-          platforms: ${{ matrix.platform }}
-          sbom: true
-          provenance: mode=max
-          outputs: type=image,name=docker/docker-agent-sbx-templates,push-by-digest=true,name-canonical=true,push=true
-          build-args: |
-            GIT_TAG=${{ github.ref_name }}
-            GIT_COMMIT=${{ github.sha }}
-          cache-from: type=gha,scope=buildx-${{ matrix.platform }}
-
-      - name: Export template digest
-        env:
-          DIGEST: ${{ steps.build-template.outputs.digest }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/template-digests"
-          touch "${RUNNER_TEMP}/template-digests/${DIGEST#sha256:}"
-
-      - name: Upload template digest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: template-digests-${{ env.PLATFORM_PAIR }}
-          path: ${{ runner.temp }}/template-digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  merge-and-push-image:
-    if: github.event_name != 'pull_request' && !github.event.repository.fork
-    needs: [ build-and-push-image ]
+  # Builds the image and the sandbox template, on Build Cloud whenever the run
+  # can authenticate to Docker Hub: both platforms natively on one runner.
+  # main, v* tags and `image_mode: auto` dispatches on main push by digest,
+  # untagged; every other run builds into the cache only. Runs that cannot
+  # authenticate (PRs from forks, PRs opened by Dependabot and other bots
+  # running with a read-only token, CI in a fork of this repo) fall back to a
+  # plain builder on the runner, linux/amd64 only, nothing pushed, so the
+  # Dockerfile is still exercised. Not gated on the test jobs: nothing
+  # user-visible moves until `publish`.
+  image:
+    needs: changes
+    if: >-
+      needs.changes.outputs.code == 'true' && (
+        github.event_name == 'pull_request' ||
+        github.event_name == 'push' ||
+        github.event_name == 'merge_group' ||
+        (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/'))
+      )
     permissions:
       contents: read
       id-token: write
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      publish: ${{ steps.mode.outputs.publish }}
+      image-digest: ${{ steps.image.outputs.digest }}
+      template-digest: ${{ steps.template.outputs.digest }}
+    env:
+      IMAGE: docker/docker-agent
+      TEMPLATE: docker/docker-agent-sbx-templates
     steps:
-      - name: Download digests
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: ${{ runner.temp }}/digests
-          pattern: digests-*
-          merge-multiple: true
+          persist-credentials: false
 
-      - name: Get Docker Hub OIDC token
-        id: docker_oidc
-        uses: docker/oidc-action@b048fb089ace3e15a5fbdd784f4784d284ce5e8d # v1.1.0
+      - name: Decide build mode
+        id: mode
+        env:
+          PUBLISH: >-
+            ${{ github.repository == 'docker/docker-agent' &&
+                (github.event_name == 'push' ||
+                 (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+                  (inputs.image_mode == '' || inputs.image_mode == 'auto'))) && 'true' || 'false' }}
+          # Empty on fork PRs, Dependabot PRs and in forks of this repo.
+          CONNECTION_ID: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
+        run: |
+          # Build Cloud needs the Hub OIDC connection id and an OIDC token; the
+          # token endpoint is only exposed when id-token: write was granted.
+          if [[ -n "$CONNECTION_ID" && -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]]; then
+            builder=cloud
+          elif [[ "$PUBLISH" == true ]]; then
+            echo "publishing requires Build Cloud: DOCKERHUB_OIDC_CONNECTION_ID or the OIDC token is unavailable" >&2
+            exit 1
+          else
+            builder=local
+            echo "::notice::Build Cloud unavailable for this run; building linux/amd64 on the runner"
+          fi
+          echo "builder=$builder" >> "$GITHUB_OUTPUT"
+
+          if [[ "$PUBLISH" == true ]]; then
+            {
+              echo "publish=true"
+              echo "image-outputs=type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true"
+              echo "template-outputs=type=image,name=${TEMPLATE},push-by-digest=true,name-canonical=true,push=true"
+              echo "provenance=mode=max"
+              echo "git-tag=${GITHUB_REF_NAME}"
+              echo "git-commit=${GITHUB_SHA}"
+              # Build records are useful on PRs; skip the upload for release builds.
+              echo "record-upload=false"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "publish=false"
+              echo "image-outputs=type=cacheonly"
+              echo "template-outputs=type=cacheonly"
+              echo "provenance=false"
+              echo "git-tag=pr"
+              echo "git-commit=dev"
+              # A read-only token (the local case) cannot upload the record artifact.
+              echo "record-upload=$([[ "$builder" == cloud ]] && echo true || echo false)"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$builder" == cloud ]]; then
+            echo "platforms=linux/amd64,linux/arm64" >> "$GITHUB_OUTPUT"
+          else
+            echo "platforms=linux/amd64" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.mode.outputs.builder == 'cloud'
+        uses: $/.github/actions/setup-buildx
+        id: cloud
         with:
           connection-id: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
-          expires-in: 3600
+          expected-sha: ${{ inputs.expected_sha }}
 
-      - name: Hub login
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+      - if: steps.mode.outputs.builder == 'local'
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        id: local
         with:
-          username: docker
-          password: ${{ steps.docker_oidc.outputs.token }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+          cache-binary: false
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: |
-            docker/docker-agent
+          images: ${{ env.IMAGE }}
+
+      - name: Build image
+        id: image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: ${{ steps.mode.outputs.record-upload }}
+          DOCKER_BUILD_SUMMARY: ${{ steps.mode.outputs.record-upload }}
+        with:
+          builder: ${{ steps.cloud.outputs.builder || steps.local.outputs.name }}
+          context: .
+          platforms: ${{ steps.mode.outputs.platforms }}
+          labels: ${{ steps.meta.outputs.labels }}
+          load: false
+          github-token: ''
+          sbom: ${{ steps.mode.outputs.publish }}
+          provenance: ${{ steps.mode.outputs.provenance }}
+          outputs: ${{ steps.mode.outputs.image-outputs }}
+          build-args: |
+            GIT_TAG=${{ steps.mode.outputs.git-tag }}
+            GIT_COMMIT=${{ steps.mode.outputs.git-commit }}
+
+      # A stage of the same Dockerfile with identical build args, so it reuses
+      # the builder-linux layer above and embeds the exact same binary.
+      - name: Build template
+        id: template
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: ${{ steps.mode.outputs.record-upload }}
+          DOCKER_BUILD_SUMMARY: ${{ steps.mode.outputs.record-upload }}
+        with:
+          builder: ${{ steps.cloud.outputs.builder || steps.local.outputs.name }}
+          context: .
+          target: template
+          platforms: ${{ steps.mode.outputs.platforms }}
+          load: false
+          github-token: ''
+          sbom: ${{ steps.mode.outputs.publish }}
+          provenance: ${{ steps.mode.outputs.provenance }}
+          outputs: ${{ steps.mode.outputs.template-outputs }}
+          build-args: |
+            GIT_TAG=${{ steps.mode.outputs.git-tag }}
+            GIT_COMMIT=${{ steps.mode.outputs.git-commit }}
+
+  # Single required status check; see the header comment.
+  gate:
+    if: always()
+    needs: [ changes, lint, test-linux, test-windows, cross-compile, licenses, image ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          {
+            echo "| job | result |"
+            echo "|---|---|"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<< "$RESULTS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -e '[.[] | .result] | all(. == "success" or . == "skipped")' <<< "$RESULTS" >/dev/null
+
+  # Moves tags onto the digests pushed by `image` once the gate is green. On
+  # main only edge moves; on a v* tag the version tag and the floating latest
+  # tag that sandboxes pull by default.
+  publish:
+    if: needs.image.outputs.publish == 'true'
+    needs: [ gate, image ]
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      IMAGE: docker/docker-agent
+      TEMPLATE: docker/docker-agent-sbx-templates
+      IMAGE_DIGEST: ${{ needs.image.outputs.image-digest }}
+      TEMPLATE_DIGEST: ${{ needs.image.outputs.template-digest }}
+    steps:
+      # imagetools talks to the registry directly; no builder needed.
+      - uses: $/.github/actions/setup-buildx
+        with:
+          connection-id: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
+          builder: 'false'
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
           tags: |
             type=semver,pattern={{version}}
             type=edge
-            type=ref,event=pr
 
-      - name: Create manifest list and push
-        working-directory: ${{ runner.temp }}/digests
+      - name: Tag image
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
+          : "${IMAGE_DIGEST:?image produced no digest}"
           mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
           args=()
           for tag in "${tags[@]}"; do args+=(-t "$tag"); done
-          for digest in *; do args+=("docker/docker-agent@sha256:${digest}"); done
-          docker buildx imagetools create "${args[@]}"
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${IMAGE_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
 
-      - name: Inspect image
+      - name: Tag template
         run: |
-          docker buildx imagetools inspect docker/docker-agent:${{ steps.meta.outputs.version }}
-
-  merge-and-push-template:
-    if: github.event_name != 'pull_request' && !github.event.repository.fork
-    needs: [ build-and-push-image ]
-    permissions:
-      contents: read
-      id-token: write
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download template digests
-        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
-        with:
-          path: ${{ runner.temp }}/template-digests
-          pattern: template-digests-*
-          merge-multiple: true
-
-      - name: Get Docker Hub OIDC token
-        id: docker_oidc
-        uses: docker/oidc-action@b048fb089ace3e15a5fbdd784f4784d284ce5e8d # v1.1.0
-        with:
-          connection-id: ${{ vars.DOCKERHUB_OIDC_CONNECTION_ID }}
-          expires-in: 3600
-
-      - name: Hub login
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        with:
-          username: docker
-          password: ${{ steps.docker_oidc.outputs.token }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
-
-      # Assemble the multi-arch manifest list from the per-arch digests pushed
-      # by build-and-push-image. On main only the edge tag moves; on a v* tag
-      # both the version tag and the floating latest tag that sandboxes pulls
-      # by default.
-      - name: Create manifest list and push
-        working-directory: ${{ runner.temp }}/template-digests
-        run: |
+          : "${TEMPLATE_DIGEST:?image produced no template digest}"
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            tags=(-t "docker/docker-agent-sbx-templates:${GITHUB_REF_NAME#v}" -t "docker/docker-agent-sbx-templates:latest")
+            version="${GITHUB_REF_NAME#v}"
+            tags=(-t "${TEMPLATE}:${version}" -t "${TEMPLATE}:latest")
           else
-            tags=(-t "docker/docker-agent-sbx-templates:edge")
+            version=edge
+            tags=(-t "${TEMPLATE}:edge")
           fi
-          args=()
-          for digest in *; do args+=("docker/docker-agent-sbx-templates@sha256:${digest}"); done
-          docker buildx imagetools create "${tags[@]}" "${args[@]}"
-
-      - name: Inspect template
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then tag="${GITHUB_REF_NAME#v}"; else tag="edge"; fi
-          docker buildx imagetools inspect "docker/docker-agent-sbx-templates:${tag}"
+          docker buildx imagetools create "${tags[@]}" "${TEMPLATE}@${TEMPLATE_DIGEST}"
+          docker buildx imagetools inspect "${TEMPLATE}:${version}"

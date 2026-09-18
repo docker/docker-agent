@@ -1,12 +1,12 @@
 package anthropic
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -79,6 +79,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		}
 		httpClient := httpclient.NewHTTPClient(ctx)
 		globalOptions.WrapTransport(ctx, httpClient)
+		base.WrapOpenCodeSession(cfg, httpClient)
 		requestOptions := append([]option.RequestOption{
 			option.WithHTTPClient(httpClient),
 		}, authOpts...)
@@ -102,30 +103,17 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 		// When using a Gateway, tokens are short-lived.
 		anthropicClient.clientFn = func(ctx context.Context) (anthropic.Client, error) {
-			// Query a fresh auth token each time the client is used.
-			authToken, err := base.GatewayAuthToken(ctx, env, gateway)
+			connection, err := base.NewGatewayClient(ctx, env, gateway, "https://api.anthropic.com/", "/", cfg, &globalOptions)
 			if err != nil {
 				return anthropic.Client{}, err
 			}
 
-			url, err := url.Parse(gateway)
-			if err != nil {
-				return anthropic.Client{}, fmt.Errorf("invalid gateway URL: %w", err)
-			}
-			baseURL := fmt.Sprintf("%s://%s%s/", url.Scheme, url.Host, url.Path)
-
-			// Configure a custom HTTP client to inject headers and query params used by the Gateway.
-			httpOptions := base.GatewayHTTPOptions(url, "https://api.anthropic.com/", cfg, &globalOptions)
-			httpOptions = append(httpOptions, base.GatewayAuthRetry(env, gateway)...)
-
-			gatewayHTTPClient := httpclient.NewHTTPClient(ctx, httpOptions...)
-			globalOptions.WrapTransport(ctx, gatewayHTTPClient)
 			clientOptions := []option.RequestOption{
-				option.WithBaseURL(baseURL),
-				option.WithHTTPClient(gatewayHTTPClient),
+				option.WithBaseURL(connection.BaseURL),
+				option.WithHTTPClient(connection.HTTPClient),
 			}
-			if authToken != "" {
-				clientOptions = append(clientOptions, option.WithAuthToken(authToken), option.WithAPIKey(authToken))
+			if connection.AuthToken != "" {
+				clientOptions = append(clientOptions, option.WithAuthToken(connection.AuthToken), option.WithAPIKey(connection.AuthToken))
 			}
 			client := anthropic.NewClient(clientOptions...)
 
@@ -181,7 +169,8 @@ func NewClientFromFactory(ctx context.Context, cfg *latest.ModelConfig, env envi
 
 // buildDirectAuthOptions returns the SDK request options that authenticate
 // a direct (non-gateway) Anthropic client. It picks between Workload
-// Identity Federation and the legacy ANTHROPIC_API_KEY path based on cfg.
+// Identity Federation and an API key read from the model's token_key, or
+// ANTHROPIC_API_KEY when no token_key is set.
 func buildDirectAuthOptions(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider) ([]option.RequestOption, error) {
 	if cfg.Auth != nil {
 		if cfg.Auth.Type != latest.AuthTypeWorkloadIdentityFederation {
@@ -200,11 +189,12 @@ func buildDirectAuthOptions(ctx context.Context, cfg *latest.ModelConfig, env en
 		}
 		return opts, nil
 	}
-	apiKey, _ := env.Get(ctx, "ANTHROPIC_API_KEY")
+	tokenKey := cmp.Or(cfg.TokenKey, "ANTHROPIC_API_KEY")
+	apiKey, _ := env.Get(ctx, tokenKey)
 	if apiKey == "" {
-		return nil, errors.New("ANTHROPIC_API_KEY environment variable is required")
+		return nil, fmt.Errorf("%s environment variable is required", tokenKey)
 	}
-	slog.DebugContext(ctx, "Anthropic API key found")
+	slog.DebugContext(ctx, "Anthropic API key found", "token_key", tokenKey)
 	return []option.RequestOption{option.WithAPIKey(apiKey)}, nil
 }
 

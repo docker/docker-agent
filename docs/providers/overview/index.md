@@ -32,12 +32,17 @@ _Docker Agent supports multiple AI model providers. Choose the right one for you
 | Docker Model Runner | `dmr`            | Yes    | No API costs, data privacy, offline capable           |
 | Local Models (Ollama / vLLM) | `ollama` / custom | Yes | No API costs, full data privacy, any OpenAI-compatible server |
 
-## Additional Built-in Providers
+## Provider Credentials
 
-Docker Agent also includes built-in aliases for these providers:
+Use this table to find a built-in provider's config key and authentication method. For ways to supply credentials without embedding secrets in YAML, see [Managing Secrets](../../guides/secrets/index.md). Individual provider pages cover setup and provider-specific overrides.
 
 | Provider       | Alias            | API Key / Env Variable              |
 | -------------- | ---------------- | ----------------------------------- |
+| [OpenAI](../openai/index.md) | `openai` | `OPENAI_API_KEY` |
+| [Anthropic](../anthropic/index.md) | `anthropic` | `ANTHROPIC_API_KEY` (override with `token_key`) |
+| [Google Gemini](../google/index.md) | `google` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` (override with `token_key`) |
+| [AWS Bedrock](../bedrock/index.md) | `amazon-bedrock` | `AWS_BEARER_TOKEN_BEDROCK` or the standard AWS credentials chain |
+| [Docker Model Runner](../dmr/index.md) | `dmr` | None (local) |
 | ChatGPT (OpenAI account) | [`chatgpt`](../chatgpt/index.md) | None (sign in via `docker agent setup`) |
 | OpenCode Zen   | `opencode-zen`   | `OPENCODE_API_KEY`                  |
 | OpenCode Go    | `opencode-go`    | `OPENCODE_API_KEY`                  |
@@ -60,9 +65,13 @@ Docker Agent also includes built-in aliases for these providers:
 | Cloudflare AI Gateway | `cloudflare-ai-gateway` | `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
 | Requesty       | `requesty`       | `REQUESTY_API_KEY`                  |
 | OpenRouter     | `openrouter`     | `OPENROUTER_API_KEY`                |
-| Azure OpenAI   | `azure`          | `AZURE_API_KEY` + `base_url`        |
+| Azure OpenAI   | `azure`          | `AZURE_API_KEY` + `base_url` (override the key with `token_key`) |
 | [Ollama](../local/index.md) | `ollama` | None (local; optional `base_url`) |
-| GitHub Copilot | `github-copilot` | `GITHUB_TOKEN` (PAT with `copilot` scope) |
+| GitHub Copilot | `github-copilot` | `GITHUB_TOKEN` or `GH_TOKEN` (PAT with `copilot` scope) |
+
+## Additional Built-in Providers
+
+The [credential table](#provider-credentials) includes built-in aliases as well as the core providers. Select one using the inline form below:
 
 ```bash
 # Use built-in providers inline
@@ -84,11 +93,11 @@ Different agents can use different providers in the same configuration:
 models:
   claude:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     max_tokens: 64000
   gpt:
     provider: openai
-    model: gpt-5
+    model: gpt-5.6-sol
   local:
     provider: dmr
     model: ai/qwen3

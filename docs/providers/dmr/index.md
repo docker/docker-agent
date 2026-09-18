@@ -90,7 +90,20 @@ models:
       context_size: 32768       # total context window (sent via _configure)
 ```
 
-If `context_size` is omitted, Model Runner uses its default. `max_tokens` is **not** used as the context window.
+If `context_size` is omitted, Docker Agent queries the runner's completion
+configuration, then falls back to the packaged model's context window. This
+read-only discovery is cached briefly and drives context usage and automatic
+compaction. An explicit `context_size` always takes precedence; `max_tokens` is
+**not** used as the context window.
+
+Discovery is best-effort. Older or unreachable runners, gateways, and runtime
+flags that override context allocation may leave the window unknown. In those
+cases, set `context_size` explicitly. Arbitrary `raw_runtime_flags` also disable
+automatic context discovery.
+
+The model picker displays DMR's reported architecture, parameter count,
+quantization, size, and packaged context window when available. The packaged
+window can differ from a running model's configured context size.
 
 Docker Agent's auto-compaction scales its summary and keep-tail token budgets proportionally to `context_size`. This ensures compaction works correctly even for small context windows — for example, an 8k-token local model will not have its session history wiped during compaction.
 

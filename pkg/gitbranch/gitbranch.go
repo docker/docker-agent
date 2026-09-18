@@ -13,6 +13,13 @@ import (
 // a .git entry is found. It returns "" when dir is empty or not inside a
 // repository.
 func Current(dir string) string {
+	if head := findHead(dir); head != "" {
+		return readHead(head)
+	}
+	return ""
+}
+
+func findHead(dir string) string {
 	if dir == "" {
 		return ""
 	}
@@ -22,11 +29,11 @@ func Current(dir string) string {
 		info, err := os.Stat(gitPath)
 		switch {
 		case err == nil && info.IsDir():
-			return readHead(filepath.Join(gitPath, "HEAD"))
+			return filepath.Join(gitPath, "HEAD")
 		case err == nil:
 			// A .git file points at the real git dir (submodule or worktree).
 			if gd := parseGitdir(gitPath, d); gd != "" {
-				return readHead(filepath.Join(gd, "HEAD"))
+				return filepath.Join(gd, "HEAD")
 			}
 		}
 

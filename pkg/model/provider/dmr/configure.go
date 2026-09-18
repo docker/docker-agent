@@ -87,7 +87,7 @@ func (so *speculativeDecodingOpts) LogValue() slog.Value {
 // configureModel sends model configuration to Model Runner via POST /engines/_configure.
 func configureModel(ctx context.Context, httpClient *http.Client, baseURL, model string, backend configureBackendConfig, mode *string, rawRuntimeFlags string) error {
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = &http.Client{} //rubocop:disable Lint/HTTPClientTransport // DMR local service; default transport is appropriate
 	}
 
 	configureURL := buildConfigureURL(baseURL)

@@ -447,6 +447,13 @@ func newBudgetSet(runBudget *latest.BudgetConfig, named map[string]latest.Budget
 	return s
 }
 
+func withSharedBudget(budget *budgetSet) Opt {
+	return func(r *LocalRuntime) {
+		r.budget = budget
+		r.budgetStarted = true
+	}
+}
+
 func (r *LocalRuntime) ensureBudget() {
 	r.budgetMu.Lock()
 	defer r.budgetMu.Unlock()
@@ -571,6 +578,9 @@ func (s *budgetSet) consumeApproachingFor(agentName string) *budgetBreach {
 	return nil
 }
 
+const unpricedSpendWarning = "This run has a max_cost limit, but the model reported usage the runtime cannot price, " +
+	"so that spend does not count against the limit. Set a model-level `cost:` block to price it."
+
 func (r *LocalRuntime) recordBudget(sess *session.Session, a *agent.Agent, usage *chat.Usage, cost *float64, active time.Duration, events EventSink) {
 	s := r.currentBudget()
 	if s == nil {
@@ -586,11 +596,7 @@ func (r *LocalRuntime) recordBudget(sess *session.Session, a *agent.Agent, usage
 		nt.Tracker.record(a.Name(), usage, cost, active)
 	}
 	if warnUnpriced && s.unpricedSpend() {
-		events.Emit(Warning(
-			"This run has a max_cost limit, but the model reported usage the runtime cannot price, "+
-				"so that spend does not count against the limit. Set a model-level `cost:` block to price it.",
-			a.Name(),
-		))
+		events.Emit(Warning(unpricedSpendWarning, a.Name()))
 	}
 	events.Emit(BudgetUsage(sess.ID, a.Name(), s.snapshot()))
 }

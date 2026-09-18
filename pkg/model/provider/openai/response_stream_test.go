@@ -123,6 +123,82 @@ func drainContent(t *testing.T, adapter *ResponseStreamAdapter) (string, chat.Fi
 	}
 }
 
+func TestResponseStream_FunctionCallName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		topName  string
+		itemName string
+		wantName string
+	}{
+		{name: "item name", itemName: "shell", wantName: "shell"},
+		{name: "top-level name", topName: `"shell"`, wantName: "shell"},
+		{name: "top-level name takes precedence", topName: `"shell"`, itemName: "other", wantName: "shell"},
+		{name: "empty top-level name", topName: `""`, itemName: "shell", wantName: "shell"},
+		{name: "null top-level name", topName: `null`, itemName: "shell", wantName: "shell"},
+		{name: "numeric top-level name", topName: `42`, itemName: "shell", wantName: "shell"},
+		{name: "object top-level name", topName: `{"name":"other"}`, itemName: "shell", wantName: "shell"},
+		{name: "array top-level name", topName: `["other"]`, itemName: "shell", wantName: "shell"},
+		{name: "escaped top-level name", topName: `"sh\u0065ll"`, wantName: "shell"},
+		{name: "missing names"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			item := map[string]any{
+				"type":    "function_call",
+				"id":      "fc_1",
+				"call_id": "call_1",
+			}
+			if tt.itemName != "" {
+				item["name"] = tt.itemName
+			}
+			added := map[string]any{
+				"type": "response.output_item.added",
+				"item": item,
+			}
+			if tt.topName != "" {
+				added["name"] = json.RawMessage(tt.topName)
+			}
+
+			const args = `{"cmd":"ls"}`
+			events := decodeEvents(t, []map[string]any{
+				{
+					"type":    "response.function_call_arguments.delta",
+					"item_id": "fc_1",
+					"delta":   args,
+				},
+				added,
+			})
+			adapter := newResponseStreamAdapter(&fakeEventStream{events: events}, true)
+
+			resp, err := adapter.Recv()
+			require.NoError(t, err)
+			assert.Empty(t, resp.Choices)
+
+			resp, err = adapter.Recv()
+			require.NoError(t, err)
+			if tt.wantName == "" {
+				assert.Empty(t, resp.Choices)
+			} else {
+				require.Len(t, resp.Choices, 1)
+				require.Len(t, resp.Choices[0].Delta.ToolCalls, 1)
+				call := resp.Choices[0].Delta.ToolCalls[0]
+				assert.Equal(t, "call_1", call.ID)
+				assert.Equal(t, "function", string(call.Type))
+				assert.Equal(t, tt.wantName, call.Function.Name)
+				assert.JSONEq(t, args, call.Function.Arguments)
+			}
+
+			_, err = adapter.Recv()
+			assert.ErrorIs(t, err, io.EOF)
+		})
+	}
+}
+
 // TestResponseStream_ArgumentsOnlyInDoneEvent is a regression test for
 // https://github.com/docker/docker-agent/issues/3818.
 //

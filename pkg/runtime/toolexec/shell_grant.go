@@ -1,8 +1,8 @@
 package toolexec
 
 // This file hardens the session-permissions override of preempt-yolo
-// safety verdicts (see [call.sessionPermissionsAllow]) for the shell
-// tool.
+// safety verdicts (see [call.sessionPermissionsAllow]) for the command
+// tools — shell and run_background_job (see [safety.IsCommandTool]).
 //
 // The generic permissions matcher treats a trailing-* pattern as a
 // plain prefix match over the whole command string, so the interactive
@@ -17,93 +17,65 @@ package toolexec
 //
 //   - the command must be a single simple invocation — no shell
 //     metacharacters that chain (;, &, |, newlines), substitute
-//     ($(...), `...`), or redirect (>, <);
-//   - a "shell:cmd=<literal>*" grant must match at a word boundary:
+//     ($(...), `...`, zsh =(...) or fish (...)), or redirect (>, <);
+//   - a "<tool>:cmd=<literal>*" grant must match at a word boundary:
 //     "mkdir*" covers "mkdir" and "mkdir -p x" but not "mkdiranything".
 //
 // Only grant shapes whose word-level intent is unambiguous are honored;
 // any other shape falls back to the confirmation prompt. A rejected
 // override is never destructive — the user is simply asked again.
 
-import "strings"
+import (
+	"strings"
 
-// shellToolName mirrors the shell builtin's canonical tool name. It is
-// duplicated as a string literal (rather than imported from
-// pkg/tools/builtin/shell) for the same reason as the identical
-// constant in pkg/hooks/builtins/safer_shell.go; a rename would be
-// caught by tests in all three packages.
-const shellToolName = "shell"
+	"github.com/docker/docker-agent/pkg/safety"
+)
 
-// shellGrantCoversCommand reports whether one of the session-level
-// allow patterns covers the shell call's command under the strict
-// safety-override reading described in the file comment. args is the
-// parsed tool input (see ParseToolInput).
-func shellGrantCoversCommand(allowPatterns []string, args map[string]any) bool {
-	cmd, ok := shellCommandFromArgs(args)
+// commandGrantCoversCall reports whether one of the session-level
+// allow patterns covers the command tool call's command under the
+// strict safety-override reading described in the file comment.
+// toolName is the command tool being invoked; args is the parsed tool
+// input (see ParseToolInput).
+func commandGrantCoversCall(toolName string, allowPatterns []string, args map[string]any) bool {
+	cmd, ok := safety.CommandArg(args)
 	if !ok || !isSimpleShellCommand(cmd) {
 		return false
 	}
 	for _, pattern := range allowPatterns {
-		if shellGrantMatches(pattern, cmd) {
+		if commandGrantMatches(toolName, pattern, cmd) {
 			return true
 		}
 	}
 	return false
 }
 
-// shellCommandFromArgs extracts the command string from the shell
-// tool's parsed arguments. Mirrors the cmd/command fallback in
-// pkg/hooks/builtins/safer_shell.go.
-func shellCommandFromArgs(args map[string]any) (string, bool) {
-	if v, ok := args["cmd"].(string); ok {
-		return v, true
-	}
-	if v, ok := args["command"].(string); ok {
-		return v, true
-	}
-	return "", false
-}
-
-// isSimpleShellCommand reports whether cmd is a single simple
-// invocation: free of the metacharacters that let one command smuggle
-// another past a word-level grant — separators/chaining (;, &, |,
-// newlines), command substitution ($( and backticks), and redirection
-// (> and <, a file-write primitive). A bare $ stays allowed: variable
-// expansion ($HOME) cannot execute a second command by itself, and the
-// substitution forms that can are caught by "$(" and "`".
-//
-// Deliberately stricter than safer_shell's containsShellSeparator,
-// which only detects whitespace-surrounded separators because its
-// safe-list regexes are ^…$-anchored as the primary defence; a prefix
-// grant has no such anchor, so this check carries the full weight.
+// isSimpleShellCommand uses the same substitution guard as the classifier.
 func isSimpleShellCommand(cmd string) bool {
-	if strings.ContainsAny(cmd, ";&|<>`\n\r") {
-		return false
-	}
-	return !strings.Contains(cmd, "$(")
+	return !safety.ContainsShellMetacharacter(cmd)
 }
 
-// shellGrantMatches reports whether a single session allow pattern
-// covers cmd under safety-override semantics. Recognized shapes:
+// commandGrantMatches reports whether a single session allow pattern
+// covers cmd for toolName under safety-override semantics. Recognized
+// shapes:
 //
-//	"shell"                — whole-tool grant: covers any (simple) command
-//	"shell:cmd=<literal>"  — exact-command grant
-//	"shell:cmd=<literal>*" — word-prefix grant (the shape
-//	                         toolconfirm.BuildPermissionPattern stores
-//	                         for the interactive T decision): the
-//	                         literal must match whole words, so
-//	                         "mkdir*" covers "mkdir -p x" but not
-//	                         "mkdiranything"
+//	"<tool>"                — whole-tool grant: covers any (simple) command
+//	"<tool>:cmd=<literal>"  — exact-command grant
+//	"<tool>:cmd=<literal>*" — word-prefix grant (the shape
+//	                          toolconfirm.BuildPermissionPattern stores
+//	                          for the interactive T decision): the
+//	                          literal must match whole words, so
+//	                          "mkdir*" covers "mkdir -p x" but not
+//	                          "mkdiranything"
 //
 // Any other shape — glob metacharacters inside the literal, extra
 // argument conditions (":cwd=..."), tool-name globs — has ambiguous
 // word-level intent and is not honored for safety override.
 // Matching is case-insensitive, consistent with the generic matcher.
-func shellGrantMatches(pattern, cmd string) bool {
-	if pattern == shellToolName {
+func commandGrantMatches(toolName, pattern, cmd string) bool {
+	if pattern == toolName {
 		return true
 	}
-	cond, ok := strings.CutPrefix(pattern, shellToolName+":cmd=")
+	cond, ok := strings.CutPrefix(pattern, toolName+":cmd=")
 	if !ok {
 		return false
 	}

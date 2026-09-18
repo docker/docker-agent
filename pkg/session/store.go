@@ -109,11 +109,11 @@ type Store interface {
 	// Returns the ID of the created message item.
 	AddMessage(ctx context.Context, sessionID string, msg *Message) (int64, error)
 
-	// UpdateMessage updates an existing message by its ID.
+	// UpdateMessage updates a message belonging to sessionID by its ID.
 	// This is called on each streaming delta to keep the persisted message
 	// in sync with the in-progress content, and once more with the final
 	// payload when the message completes.
-	UpdateMessage(ctx context.Context, messageID int64, msg *Message) error
+	UpdateMessage(ctx context.Context, sessionID string, messageID int64, msg *Message) error
 
 	// AddSubSession creates a sub-session and links it to the parent.
 	// The sub-session is stored as a separate session row with parent_id set.
@@ -148,13 +148,17 @@ type Store interface {
 }
 
 type InMemorySessionStore struct {
-	sessions  *concurrent.Map[string, *Session]
-	messageID atomic.Int64 // counter for message IDs, incremented via Add(1)
+	sessions       *concurrent.Map[string, *Session]
+	generatedFiles *concurrent.Map[string, GeneratedFile] // keyed by generatedFileKey
+	generatedBlobs *concurrent.Map[string, []byte]        // keyed by generatedFileKey
+	messageID      atomic.Int64                           // counter for message IDs, incremented via Add(1)
 }
 
 func NewInMemorySessionStore() Store {
 	return &InMemorySessionStore{
-		sessions: concurrent.NewMap[string, *Session](),
+		sessions:       concurrent.NewMap[string, *Session](),
+		generatedFiles: concurrent.NewMap[string, GeneratedFile](),
+		generatedBlobs: concurrent.NewMap[string, []byte](),
 	}
 }
 
@@ -233,6 +237,8 @@ func (s *InMemorySessionStore) DeleteSession(_ context.Context, id string) error
 		return ErrNotFound
 	}
 	s.sessions.Delete(id)
+	s.deleteGeneratedFiles(id)
+	s.deleteGeneratedBlobs(id)
 	return nil
 }
 
@@ -325,32 +331,31 @@ func (s *InMemorySessionStore) AddMessage(_ context.Context, sessionID string, m
 	return id, nil
 }
 
-// UpdateMessage updates an existing message by its ID.
-func (s *InMemorySessionStore) UpdateMessage(_ context.Context, messageID int64, msg *Message) error {
+// UpdateMessage updates a message belonging to sessionID by its ID.
+func (s *InMemorySessionStore) UpdateMessage(_ context.Context, sessionID string, messageID int64, msg *Message) error {
+	if sessionID == "" {
+		return ErrEmptyID
+	}
+	session, exists := s.sessions.Load(sessionID)
+	if !exists {
+		return ErrNotFound
+	}
+
 	// Create a deep copy of the message to avoid mutating the caller's pointer,
 	// which may be shared with another Session object.
 	updated := cloneMessage(msg)
 	updated.ID = messageID
 
-	// For in-memory store, we need to find the message across all sessions
-	var found bool
-	s.sessions.Range(func(_ string, session *Session) bool {
-		session.mu.Lock()
-		defer session.mu.Unlock()
-		for i := range session.Messages {
-			if session.Messages[i].Message == nil || session.Messages[i].Message.ID != messageID {
-				continue
-			}
-			session.Messages[i].Message = updated
-			found = true
-			return false
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	for i := range session.Messages {
+		if session.Messages[i].Message == nil || session.Messages[i].Message.ID != messageID {
+			continue
 		}
-		return true
-	})
-	if !found {
-		return ErrNotFound
+		session.Messages[i].Message = updated
+		return nil
 	}
-	return nil
+	return ErrNotFound
 }
 
 // AddSubSession creates a sub-session and links it to the parent.
@@ -626,11 +631,6 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 		return ErrEmptyID
 	}
 
-	fields, err := sessionPersistedFieldsOf(session)
-	if err != nil {
-		return err
-	}
-
 	// Use a transaction to insert session and its items
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -638,17 +638,7 @@ func (s *SQLiteSessionStore) AddSession(ctx context.Context, session *Session) e
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	_, err = tx.ExecContext(ctx,
-		`INSERT INTO sessions (
-			id, origin, tools_approved, safety_policy, input_tokens, output_tokens, title, cost, send_user_message,
-			max_iterations, working_dir, created_at, permissions, agent_model_overrides,
-			custom_models_used, thinking, parent_id, instruction_context, attributes
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		session.ID, session.Origin, session.ToolsApproved, string(session.SafetyPolicy), session.InputTokens, session.OutputTokens, session.Title,
-		session.Cost, session.SendUserMessage, session.MaxIterations, session.WorkingDir,
-		session.CreatedAt.Format(time.RFC3339), fields.PermissionsJSON, fields.AgentModelOverridesJSON,
-		fields.CustomModelsUsedJSON, false, fields.ParentID, fields.InstructionContextJSON, fields.AttributesJSON)
-	if err != nil {
+	if err := s.addSessionTx(ctx, tx, session); err != nil {
 		return err
 	}
 
@@ -999,8 +989,22 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 		return ErrEmptyID
 	}
 
-	result, err := s.db.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
+	// These tables carry no foreign keys because media may be recorded before
+	// the lazily persisted session row exists, so prune them explicitly.
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM generated_media_blobs WHERE session_id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM generated_media_manifest WHERE session_id = ?", id); err != nil {
 		return err
 	}
 
@@ -1013,7 +1017,7 @@ func (s *SQLiteSessionStore) DeleteSession(ctx context.Context, id string) error
 		return ErrNotFound
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 // UpdateSession updates an existing session's metadata, or creates it if it doesn't exist (upsert).
@@ -1137,9 +1141,23 @@ func (s *SQLiteSessionStore) SetSessionStarred(ctx context.Context, id string, s
 	return nil
 }
 
-// Close closes the database connection
+// closeDrainTimeout bounds how long Close waits for in-use connections.
+const closeDrainTimeout = 5 * time.Second
+
+// Close closes the database connection, waiting for in-flight statements to
+// release it so the file can be removed immediately afterwards. sql.DB.Close
+// only closes idle connections; a background persistence write still holding
+// one keeps the file open on Windows until it returns.
+//
+// Mirrors sqliteutil.CloseDB; duplicated so pkg/session stays free of the
+// SQLite driver (see pkg/session/sqlitestore).
 func (s *SQLiteSessionStore) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	deadline := time.Now().Add(closeDrainTimeout)
+	for s.db.Stats().OpenConnections > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	return err
 }
 
 // AddMessage adds a message to a session at the next position.
@@ -1172,16 +1190,19 @@ func (s *SQLiteSessionStore) AddMessage(ctx context.Context, sessionID string, m
 	return id, nil
 }
 
-// UpdateMessage updates an existing message by its ID.
-func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, messageID int64, msg *Message) error {
+// UpdateMessage updates a message belonging to sessionID by its ID.
+func (s *SQLiteSessionStore) UpdateMessage(ctx context.Context, sessionID string, messageID int64, msg *Message) error {
+	if sessionID == "" {
+		return ErrEmptyID
+	}
 	msgJSON, err := json.Marshal(msg.Message)
 	if err != nil {
 		return fmt.Errorf("marshaling message: %w", err)
 	}
 
 	result, err := s.db.ExecContext(ctx,
-		`UPDATE session_items SET message_json = ?, implicit = ? WHERE id = ?`,
-		string(msgJSON), msg.Implicit, messageID)
+		`UPDATE session_items SET message_json = ?, implicit = ? WHERE session_id = ? AND id = ?`,
+		string(msgJSON), msg.Implicit, sessionID, messageID)
 	if err != nil {
 		return fmt.Errorf("updating message: %w", err)
 	}

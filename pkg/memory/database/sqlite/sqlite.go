@@ -81,7 +81,7 @@ func (m *MemoryDatabase) ensureDB(ctx context.Context) (*sql.DB, error) {
 
 	// Add category column if it doesn't exist (transparent migration)
 	if _, err := db.ExecContext(ctx, "ALTER TABLE memories ADD COLUMN category TEXT DEFAULT ''"); err != nil {
-		if !strings.Contains(err.Error(), "duplicate column name") {
+		if !strings.Contains(err.Error(), "duplicate column name") { //rubocop:disable Lint/ErrorStringMatching // sqlite exposes this migration result only as error text
 			db.Close()
 			return nil, fmt.Errorf("memory database migration failed: %w", err)
 		}

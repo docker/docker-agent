@@ -3,7 +3,6 @@ package shell
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -215,7 +214,7 @@ func (t *ScriptToolSet) Tools(context.Context) ([]tools.Tool, error) {
 func (t *ScriptToolSet) execute(ctx context.Context, rt tools.Runtime, toolConfig *latest.ScriptShellToolConfig, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
 	var params map[string]any
 	if toolCall.Function.Arguments != "" {
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+		if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
 	}

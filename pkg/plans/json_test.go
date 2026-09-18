@@ -40,23 +40,6 @@ func TestPlanJSON_SharedShape(t *testing.T) {
 		mustMarshal(t, p))
 }
 
-func TestPlanJSON_SessionShape(t *testing.T) {
-	t.Parallel()
-	p := Plan{
-		Scope:     ScopeSession,
-		Name:      "sess-1",
-		Content:   "# plan",
-		UpdatedAt: time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC),
-		SessionID: "sess-1",
-		Path:      "/data/session_plans/sess-1.md",
-	}
-
-	// No version, title, author, or status: session plans never carry them.
-	assert.JSONEq(t,
-		`{"scope":"session","name":"sess-1","content":"# plan","updated_at":"2024-05-06T07:08:09Z","session_id":"sess-1","path":"/data/session_plans/sess-1.md"}`,
-		mustMarshal(t, p))
-}
-
 func TestPlanJSON_ZeroValuesOmitted(t *testing.T) {
 	t.Parallel()
 
@@ -70,11 +53,14 @@ func TestPlanJSON_ZeroValuesOmitted(t *testing.T) {
 func TestPlanJSON_RoundTrip(t *testing.T) {
 	t.Parallel()
 	p := Plan{
-		Scope:     ScopeSession,
-		Name:      "sess-1",
+		Scope:     ScopeShared,
+		Name:      "release",
+		Title:     "Release plan",
+		Author:    "alice",
+		Status:    "draft",
+		Content:   "body",
+		Version:   new(3),
 		UpdatedAt: time.Date(2024, 5, 6, 7, 8, 9, 0, time.UTC),
-		SessionID: "sess-1",
-		Path:      "/x/plan.md",
 	}
 
 	var got Plan
@@ -89,8 +75,8 @@ func TestExportResultJSON_Shapes(t *testing.T) {
 		`{"scope":"shared","name":"p","path":"/out/plan.md","version":2,"bytes_written":5}`,
 		mustMarshal(t, ExportResult{Scope: ScopeShared, Name: "p", Path: "/out/plan.md", Version: new(2), BytesWritten: 5}))
 
-	// Session exports have no version to report.
+	// A nil version is omitted from the wire shape.
 	assert.JSONEq(t,
-		`{"scope":"session","name":"sess-1","path":"/out/plan.md","bytes_written":0}`,
-		mustMarshal(t, ExportResult{Scope: ScopeSession, Name: "sess-1", Path: "/out/plan.md"}))
+		`{"scope":"shared","name":"p","path":"/out/plan.md","bytes_written":0}`,
+		mustMarshal(t, ExportResult{Scope: ScopeShared, Name: "p", Path: "/out/plan.md"}))
 }

@@ -49,3 +49,15 @@ func TestDeferralTrackerRecordsEmptyFirstCall(t *testing.T) {
 	marked := tracker.MarkAt("session", "call-1", []Tool{{Name: "read"}})
 	assert.True(t, marked[0].Deferred)
 }
+
+func TestDeferralTrackerIgnoresUnactivatedCatalog(t *testing.T) {
+	t.Parallel()
+	var tracker DeferralTracker
+	tracker.Mark("session", []Tool{{Name: "search_tool"}, {Name: "read", InCatalog: true, SearchOnly: true}})
+	stillHidden := tracker.MarkAt("session", "search-call", []Tool{{Name: "read", InCatalog: true, SearchOnly: true}})
+	assert.False(t, stillHidden[0].Deferred)
+	activated := tracker.MarkAt("session", "add-call", []Tool{{Name: "read", InCatalog: true}})
+	require.Len(t, activated, 1)
+	assert.True(t, activated[0].Deferred)
+	assert.Equal(t, "add-call", activated[0].DeferredAtToolCallID)
+}

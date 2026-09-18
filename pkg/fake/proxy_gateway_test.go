@@ -11,7 +11,116 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/dnaeon/go-vcr.v4/pkg/cassette"
+
+	"github.com/docker/docker-agent/pkg/httpclient"
 )
+
+func TestStartRecordingProxy_EncryptedConfigSecrecy(t *testing.T) {
+	const (
+		encrypted = "ENCRYPTED-AGENT-CONFIG"
+		digest    = "sha256:DIGEST-SECRET"
+	)
+
+	tests := []struct {
+		name              string
+		upstreamTrustURL  string
+		wantUpstreamField bool
+	}{
+		{name: "untrusted upstream", upstreamTrustURL: "https://gateway.example.com"},
+		{name: "trusted loopback upstream", upstreamTrustURL: "http://localhost:8080", wantUpstreamField: true},
+		{name: "trusted Docker upstream", upstreamTrustURL: "https://models.docker.com", wantUpstreamField: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var upstreamBody []byte
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var err error
+				upstreamBody, err = io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				_, _ = w.Write([]byte(`{"ok":true}`))
+			}))
+			defer upstream.Close()
+
+			cassettePath := t.TempDir() + "/recording"
+			transport := hostRewriteRoundTripper{target: upstream.URL}
+			proxyURL, cleanup, err := startStreamingRecordingProxy(t.Context(), cassettePath, tt.upstreamTrustURL,
+				gatewayAuthHeaderUpdater(tt.upstreamTrustURL), transport)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = cleanup() })
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, proxyURL+"/v1/chat/completions",
+				strings.NewReader(`{"model":"gpt-4o","encrypted_agent_config":"`+encrypted+`"}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Cagent-Forward", "https://api.openai.com/v1")
+			req.Header.Set(httpclient.EncryptedConfigDigestHeader, digest)
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			resp.Body.Close()
+			require.NoError(t, cleanup())
+
+			if tt.wantUpstreamField {
+				assert.Contains(t, string(upstreamBody), encrypted)
+			} else {
+				assert.NotContains(t, string(upstreamBody), encrypted)
+			}
+
+			data, err := os.ReadFile(cassettePath + ".yaml")
+			require.NoError(t, err)
+			assert.NotContains(t, string(data), encrypted)
+			assert.NotContains(t, string(data), digest)
+		})
+	}
+}
+
+type hostRewriteRoundTripper struct {
+	target string
+}
+
+func (t hostRewriteRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	target, err := http.NewRequestWithContext(req.Context(), req.Method, t.target+req.URL.RequestURI(), req.Body)
+	if err != nil {
+		return nil, err
+	}
+	target.Header = req.Header.Clone()
+	return http.DefaultTransport.RoundTrip(target)
+}
+
+func TestStartRecordingProxy_NoUpstreamScrubsEncryptedConfig(t *testing.T) {
+	const encrypted = "NO-UPSTREAM-SECRET"
+
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		upstreamBody, err = io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	cassettePath := t.TempDir() + "/recording"
+	proxyURL, cleanup, err := StartStreamingRecordingProxy(t.Context(), cassettePath, "", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cleanup() })
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, proxyURL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4o","encrypted_agent_config":"`+encrypted+`"}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Cagent-Forward", upstream.URL)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.NoError(t, cleanup())
+
+	assert.NotContains(t, string(upstreamBody), encrypted)
+	data, err := os.ReadFile(cassettePath + ".yaml")
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), encrypted)
+}
 
 func TestGatewayTargetURL(t *testing.T) {
 	t.Parallel()

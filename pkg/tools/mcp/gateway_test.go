@@ -252,14 +252,20 @@ func TestWriteSecretsToFile(t *testing.T) {
 func TestNewGatewayToolset_ErrorLeavesNoFiles(t *testing.T) {
 	dir := redirectTempDir(t)
 
-	_, err := NewGatewayToolset(t.Context(), "toolset", "github",
+	ts, err := NewGatewayToolset(t.Context(), "toolset", "github",
 		[]gateway.Secret{{Name: "github.token", Env: "MISSING_VAR"}},
 		nil, mapEnvProvider{}, "")
-	require.Error(t, err)
+	require.NoError(t, err)
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
-	assert.Empty(t, entries, "no temp files should remain after a constructor error")
+	assert.Empty(t, entries, "constructor must not create temp files")
+
+	err = ts.Start(t.Context())
+	require.Error(t, err)
+	entries, err = os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "failed acquisition must not leave temp files")
 }
 
 func TestNewGatewayToolset_ConfigErrorLeavesNoFiles(t *testing.T) {
@@ -270,14 +276,14 @@ func TestNewGatewayToolset_ConfigErrorLeavesNoFiles(t *testing.T) {
 		make(chan int), // goccy/go-yaml cannot marshal channels
 		mapEnvProvider{"GITHUB_TOKEN": "abc"}, "")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "writing config to file")
+	assert.Contains(t, err.Error(), "marshaling config")
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "secrets file must be removed when the config write fails")
 }
 
-func TestNewGatewayToolset_CleanUpRemovesFiles(t *testing.T) {
+func TestNewGatewayToolset_DoesNotCreateFilesUntilStart(t *testing.T) {
 	dir := redirectTempDir(t)
 
 	ts, err := NewGatewayToolset(t.Context(), "toolset", "github",
@@ -288,14 +294,16 @@ func TestNewGatewayToolset_CleanUpRemovesFiles(t *testing.T) {
 
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
-	require.Len(t, entries, 2, "constructor should create one secrets and one config file")
+	assert.Empty(t, entries, "constructor must remain side-effect free")
 
-	require.NoError(t, ts.cleanUp())
-
+	require.NoError(t, ts.prepare(t.Context()))
 	entries, err = os.ReadDir(dir)
 	require.NoError(t, err)
-	assert.Empty(t, entries, "cleanUp should remove both temp files")
+	require.Len(t, entries, 2)
 
-	// Stop is documented idempotent, so a second cleanUp must not error.
-	require.NoError(t, ts.cleanUp())
+	require.NoError(t, ts.cleanUp(t.Context()))
+	entries, err = os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+	require.NoError(t, ts.cleanUp(t.Context()), "cleanup must be idempotent")
 }

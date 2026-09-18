@@ -281,7 +281,8 @@ func TestDispatcher_RoutesToRuntimeHandler(t *testing.T) {
 	// Toolset handler must NOT be called when a runtime handler is registered
 	// for the same name.
 	tool := tools.Tool{
-		Name: "transfer_task",
+		Name:           "transfer_task",
+		RuntimeHandler: "transfer_task",
 		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
 			t.Fatal("toolset handler must not be called when runtime handler exists")
 			return nil, nil
@@ -296,6 +297,145 @@ func TestDispatcher_RoutesToRuntimeHandler(t *testing.T) {
 	assert.Equal(t, 1, handlerCalls)
 	require.Len(t, em.responses, 1)
 	assert.Equal(t, "transferred", em.responses[0].Output)
+}
+
+func TestDispatcher_ToolNameDoesNotSelectRuntimeHandler(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New()
+	sess.ToolsApproved = true
+
+	var runtimeCalls, toolsetCalls int
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Handlers: map[string]toolexec.ToolHandler{
+			"handoff": func(context.Context, *session.Session, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+				runtimeCalls++
+				return tools.ResultSuccess("runtime"), nil
+			},
+		},
+	}
+	tool := tools.Tool{
+		Name: "handoff",
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			toolsetCalls++
+			return tools.ResultSuccess("external"), nil
+		},
+	}
+	em := &captureEmitter{}
+
+	d.Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "call_external",
+		Function: tools.FunctionCall{Name: "handoff", Arguments: "{}"},
+	}}, []tools.Tool{tool}, em)
+
+	assert.Equal(t, 0, runtimeCalls)
+	assert.Equal(t, 1, toolsetCalls)
+	require.Len(t, em.responses, 1)
+	assert.Equal(t, "external", em.responses[0].Output)
+}
+
+func TestDispatcher_MissingDeclaredRuntimeHandlerReturnsError(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New()
+	sess.ToolsApproved = true
+	em := &captureEmitter{}
+	d := &toolexec.Dispatcher{AgentFor: func(*session.Session) *agent.Agent { return a }}
+
+	d.Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "call_missing",
+		Function: tools.FunctionCall{Name: "handoff", Arguments: "{}"},
+	}}, []tools.Tool{{Name: "handoff", RuntimeHandler: "handoff"}}, em)
+
+	require.Len(t, em.responses, 1)
+	assert.True(t, em.responses[0].IsError)
+	assert.Contains(t, em.responses[0].Output, "Runtime handler \"handoff\" is unavailable")
+}
+
+func TestDispatcher_UnmarkedToolWithoutHandlerReturnsError(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New()
+	sess.ToolsApproved = true
+	em := &captureEmitter{}
+	d := &toolexec.Dispatcher{AgentFor: func(*session.Session) *agent.Agent { return a }}
+
+	d.Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "call_unmarked",
+		Function: tools.FunctionCall{Name: "handoff", Arguments: "{}"},
+	}}, []tools.Tool{{Name: "handoff"}}, em)
+
+	require.Len(t, em.responses, 1)
+	assert.True(t, em.responses[0].IsError)
+	assert.Contains(t, em.responses[0].Output, "Tool \"handoff\" has no handler")
+}
+
+func TestDispatcher_RuntimeHandlerPropagatesNestedStop(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyAutonomous))
+
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Handlers: map[string]toolexec.ToolHandler{
+			"run_skill": func(ctx context.Context, _ *session.Session, _ tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
+				_, err := rt.ConfirmAndRun(ctx, echoCommand, execDone)
+				if err != nil {
+					return nil, err
+				}
+				return tools.ResultSuccess("started"), nil
+			},
+		},
+		Hooks: &stubHookDispatcher{on: map[hooks.EventType]*hooks.Result{
+			hooks.EventPostToolUse: {Allowed: false, Message: "stop requested"},
+		}},
+	}
+	em := &captureEmitter{}
+
+	stop, message := d.Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "call_skill",
+		Function: tools.FunctionCall{Name: "run_skill", Arguments: "{}"},
+	}}, []tools.Tool{{Name: "run_skill", RuntimeHandler: "run_skill"}}, em)
+
+	assert.True(t, stop)
+	assert.Equal(t, "stop requested", message)
+	require.Len(t, em.responses, 2)
+	assert.Contains(t, em.responses[1].Output, "post_tool_use hook stopped")
+}
+
+func TestDispatcher_ToolsetHandlerPropagatesNestedStop(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+	sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyAutonomous))
+
+	d := &toolexec.Dispatcher{
+		AgentFor: func(*session.Session) *agent.Agent { return a },
+		Hooks: &stubHookDispatcher{on: map[hooks.EventType]*hooks.Result{
+			hooks.EventPostToolUse: {Allowed: false, Message: "stop requested"},
+		}},
+	}
+	em := &captureEmitter{}
+	tool := tools.Tool{
+		Name: "read_skill",
+		Handler: func(ctx context.Context, _ tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
+			_, err := rt.ConfirmAndRun(ctx, echoCommand, execDone)
+			if err != nil {
+				return nil, err
+			}
+			return tools.ResultSuccess("loaded"), nil
+		},
+	}
+
+	stop, message := d.Process(t.Context(), sess, []tools.ToolCall{{
+		ID:       "call_skill",
+		Function: tools.FunctionCall{Name: "read_skill", Arguments: "{}"},
+	}}, []tools.Tool{tool}, em)
+
+	assert.True(t, stop)
+	assert.Equal(t, "stop requested", message)
+	require.Len(t, em.responses, 2)
+	assert.Contains(t, em.responses[1].Output, "post_tool_use hook stopped")
 }
 
 func TestDispatcher_UnknownToolEmitsErrorResponse(t *testing.T) {
@@ -692,6 +832,71 @@ func TestDispatcher_BalancedClassifiesShellCommands(t *testing.T) {
 	})
 }
 
+// TestDispatcher_BalancedClassifiesBackgroundJobCommands pins that the
+// command carried by run_background_job is classified exactly like a
+// shell command: a destructive command cannot be laundered through the
+// background-job tool to lose its badge, and a safe one auto-runs.
+func TestDispatcher_BalancedClassifiesBackgroundJobCommands(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+
+	t.Run("safe command auto-approves", func(t *testing.T) {
+		t.Parallel()
+		sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyBalanced))
+
+		var ran bool
+		tool := tools.Tool{
+			Name: "run_background_job",
+			Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+				ran = true
+				return tools.ResultSuccess("ok"), nil
+			},
+		}
+		d := &toolexec.Dispatcher{
+			AgentFor: func(*session.Session) *agent.Agent { return a },
+		}
+		em := &captureEmitter{}
+
+		d.Process(t.Context(), sess, []tools.ToolCall{{
+			ID:       "b",
+			Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"cmd":"git log --oneline"}`},
+		}}, []tools.Tool{tool}, em)
+
+		assert.True(t, ran, "balanced must auto-approve classifier-safe background commands")
+		assert.Empty(t, em.confirmations)
+	})
+
+	t.Run("destructive command prompts with label", func(t *testing.T) {
+		t.Parallel()
+		sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyBalanced))
+
+		tool := tools.Tool{
+			Name: "run_background_job",
+			Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+				panic("must not run")
+			},
+		}
+		resume := make(chan toolexec.ResumeRequest, 1)
+		d := &toolexec.Dispatcher{
+			AgentFor: func(*session.Session) *agent.Agent { return a },
+			Resume:   resume,
+		}
+		em := &captureEmitter{}
+
+		resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeReject}
+
+		d.Process(t.Context(), sess, []tools.ToolCall{{
+			ID:       "b",
+			Function: tools.FunctionCall{Name: "run_background_job", Arguments: `{"cmd":"rm -rf /tmp/x"}`},
+		}}, []tools.Tool{tool}, em)
+
+		require.Len(t, em.confirmations, 1)
+		require.Len(t, em.confirmationMeta, 1)
+		assert.Equal(t, "destructive", em.confirmationMeta[0]["safety_label"])
+		assert.Equal(t, "high", em.confirmationMeta[0]["blast_radius"])
+	})
+}
+
 // Restricted is the fail-closed profile for unattended runs: safe
 // calls auto-run, everything else is rejected outright — no
 // confirmation prompt, no tool execution — with the stable
@@ -814,6 +1019,75 @@ func TestDispatcher_DenyRuleBlocksUnderAutonomous(t *testing.T) {
 	require.Len(t, em.responses, 1)
 	assert.True(t, em.responses[0].IsError)
 	assert.Contains(t, em.responses[0].Output, "denied")
+}
+
+// TestDispatcher_CommandRulesSeeTheExecutedCommand pins that permission
+// rules written against the canonical "cmd" key match whatever command
+// the handler will actually run: the "command" alias cannot dodge a
+// deny rule, and a stored "always allow" grant keeps covering alias
+// calls. Both command tools are exercised.
+func TestDispatcher_CommandRulesSeeTheExecutedCommand(t *testing.T) {
+	t.Parallel()
+	a := newAgent()
+
+	for _, toolName := range []string{"shell", "run_background_job"} {
+		t.Run(toolName+" alias cannot dodge a deny rule", func(t *testing.T) {
+			t.Parallel()
+			sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyAutonomous))
+			tool := tools.Tool{
+				Name: toolName,
+				Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+					panic("must not run")
+				},
+			}
+			d := &toolexec.Dispatcher{
+				AgentFor: func(*session.Session) *agent.Agent { return a },
+				Permissions: staticCheckers(toolexec.NamedChecker{
+					Checker: permissions.NewCheckerFromRules(nil, nil, []string{toolName + ":cmd=sudo *"}),
+					Source:  "permissions configuration",
+					Tier:    toolexec.TierTeam,
+				}),
+			}
+			em := &captureEmitter{}
+
+			d.Process(t.Context(), sess, []tools.ToolCall{{
+				ID:       "s",
+				Function: tools.FunctionCall{Name: toolName, Arguments: `{"command":"sudo rm -rf /"}`},
+			}}, []tools.Tool{tool}, em)
+
+			require.Len(t, em.responses, 1)
+			assert.True(t, em.responses[0].IsError)
+			assert.Contains(t, em.responses[0].Output, "denied")
+		})
+
+		t.Run(toolName+" always-allow grant covers alias calls", func(t *testing.T) {
+			t.Parallel()
+			sess := session.New(session.WithSafetyPolicy(session.SafetyPolicyStrict))
+			sess.Permissions = &session.PermissionsConfig{Allow: []string{toolName + ":cmd=git*"}}
+
+			ran := false
+			tool := tools.Tool{
+				Name: toolName,
+				Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+					ran = true
+					return tools.ResultSuccess("ok"), nil
+				},
+			}
+			d := &toolexec.Dispatcher{
+				AgentFor:    func(*session.Session) *agent.Agent { return a },
+				Permissions: sessionCheckers,
+			}
+			em := &captureEmitter{}
+
+			d.Process(t.Context(), sess, []tools.ToolCall{{
+				ID:       "s",
+				Function: tools.FunctionCall{Name: toolName, Arguments: `{"command":"git fetch"}`},
+			}}, []tools.Tool{tool}, em)
+
+			assert.True(t, ran, "the grant was built from the executed command and must match it again")
+			assert.Empty(t, em.confirmations)
+		})
+	}
 }
 
 // DestructiveHint on a non-approved tool must surface as
@@ -1490,7 +1764,7 @@ func TestDispatcher_PreToolUsePreYoloAskHonorsSessionAllow(t *testing.T) {
 // generic matcher and would also cover "mkdir x && rm -rf ~" — a
 // compound command that smuggles a destructive call behind the
 // approved word. Overriding a preempt-yolo Ask therefore requires the
-// word-boundary, no-metacharacter reading (shellGrantCoversCommand):
+// word-boundary, no-metacharacter reading (commandGrantCoversCall):
 // the compound call must still prompt.
 func TestDispatcher_PreToolUsePreYoloAskSessionAllowRefusesCompound(t *testing.T) {
 	t.Parallel()

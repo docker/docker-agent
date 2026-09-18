@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/a2aproject/a2a-go/a2a"
-	"github.com/a2aproject/a2a-go/a2aclient"
+	"github.com/a2aproject/a2a-go/v2/a2a"
+	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/stretchr/testify/require"
 
 	dagent "github.com/docker/docker-agent/pkg/agent"
@@ -97,13 +97,12 @@ func TestServer_ToolPolicyOverInvoke(t *testing.T) {
 			root := dagent.New("root", "You are a test agent", dagent.WithModel(provider), dagent.WithTools(tool))
 			server := startInvokeServer(t, team.New(team.WithAgents(root)), session.NewInMemorySessionStore(), servesafety.Resolved{Policy: tc.policy})
 
-			client, err := a2aclient.NewFromEndpoints(t.Context(), []a2a.AgentInterface{{
-				Transport: a2a.TransportProtocolJSONRPC,
-				URL:       fmt.Sprintf("http://%s/invoke", server.Addr()),
-			}})
+			client, err := a2aclient.NewFromEndpoints(t.Context(), []*a2a.AgentInterface{
+				a2a.NewAgentInterface(fmt.Sprintf("http://%s/invoke", server.Addr()), a2a.TransportProtocolJSONRPC),
+			})
 			require.NoError(t, err)
-			_, err = client.SendMessage(t.Context(), &a2a.MessageSendParams{
-				Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "run the tool"}),
+			_, err = client.SendMessage(t.Context(), &a2a.SendMessageRequest{
+				Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("run the tool")),
 			})
 			require.NoError(t, err)
 			require.Equal(t, tc.executed, executions.Load())
@@ -134,23 +133,22 @@ func TestServer_RejectsNonA2AContextCollision(t *testing.T) {
 	require.NoError(t, store.AddSession(t.Context(), existing))
 	server := startInvokeServer(t, team.New(team.WithAgents(root)), store, servesafety.Resolved{Policy: session.SafetyPolicyAutonomous})
 
-	client, err := a2aclient.NewFromEndpoints(t.Context(), []a2a.AgentInterface{{
-		Transport: a2a.TransportProtocolJSONRPC,
-		URL:       fmt.Sprintf("http://%s/invoke", server.Addr()),
-	}})
+	client, err := a2aclient.NewFromEndpoints(t.Context(), []*a2a.AgentInterface{
+		a2a.NewAgentInterface(fmt.Sprintf("http://%s/invoke", server.Addr()), a2a.TransportProtocolJSONRPC),
+	})
 	require.NoError(t, err)
-	message := a2a.NewMessage(a2a.MessageRoleUser, a2a.TextPart{Text: "run the tool"})
+	message := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("run the tool"))
 	message.ContextID = "colliding-context"
-	got, err := client.SendMessage(t.Context(), &a2a.MessageSendParams{Message: message})
+	got, err := client.SendMessage(t.Context(), &a2a.SendMessageRequest{Message: message})
 	require.NoError(t, err)
 	task, ok := got.(*a2a.Task)
 	require.True(t, ok)
 	require.Equal(t, a2a.TaskStateFailed, task.Status.State)
 	require.NotNil(t, task.Status.Message)
 	require.Len(t, task.Status.Message.Parts, 1)
-	failure, ok := task.Status.Message.Parts[0].(a2a.TextPart)
-	require.True(t, ok)
-	require.Equal(t, "agent run failed: context ID is not available", failure.Text)
+	failure := task.Status.Message.Parts[0]
+	require.IsType(t, a2a.Text(""), failure.Content)
+	require.Equal(t, "agent run failed: context ID is not available", failure.Text())
 	require.Zero(t, executions.Load())
 
 	stored, err := store.GetSession(t.Context(), existing.ID)
@@ -164,7 +162,7 @@ func startInvokeServer(t *testing.T, tm *team.Team, store session.Store, safety 
 
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	e, err := newServer(tm, "test.yaml", "root", store, safety, ln.Addr().String(), RunOptions{})
+	e, err := newServer(tm, "test.yaml", "root", store, safety, testWorkspaceRoot, ln.Addr().String(), RunOptions{})
 	require.NoError(t, err)
 	go func() { _ = e.Server.Serve(ln) }()
 	t.Cleanup(func() { require.NoError(t, e.Server.Close()) })

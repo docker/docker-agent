@@ -30,7 +30,7 @@ $ docker agent run [config] [message...] [flags]
 | `-a, --agent <name>`                    | Run a specific agent from the config                                                                                                      |
 | `--yolo`                                | Auto-approve tool calls (unless explicitly denied). Legacy alias for `--safety autonomous`.                                              |
 | `--safety <mode>`                       | Safety mode for tool approval: `strict` (ask for everything), `balanced` (auto-approve safe calls), `restricted` (auto-approve safe calls, deny the rest — fail-closed for unattended runs), or `autonomous` (approve everything). Wins over `--yolo` when both are given. Without the flag, the mode falls back to alias/user-config defaults, then the agent YAML's `agents.<name>.safety` / `runtime.safety`; a resumed session keeps its stored mode unless `--safety`/`--yolo` is passed explicitly. See [Safety Modes](../../configuration/permissions/index.md#safety-modes). |
-| `--model <ref>`                         | Override model(s). Use `provider/model` for all agents, or `agent=provider/model` for specific agents. Comma-separate multiple overrides. |
+| `--model <ref>`                         | Override model(s). Use `provider/model` for all agents, or `agent=provider/model` for specific agents. Comma-separate multiple overrides. Inline overrides inherit each agent's explicit `parallel_tool_calls` setting only from a concrete, provider-qualified configured model. Existing named targets are authoritative on every invocation, including an omitted setting; harness, router, alloy/comma-list, `first_available`, providerless, and unresolved source models do not inherit it. |
 | `--session <id>`                        | Resume a previous session. Supports relative refs (`-1` = newest by creation time, `-2` = second-newest, … — creation order, not last-used). An explicit ID that does not exist yet is created with that ID, so a supervisor can own the session ID upfront and reuse it across runs. |
 | `-s, --session-db <path>`               | Path to the SQLite session database (default: `<data-dir>/session.db`, so `~/.cagent/session.db` unless `--data-dir` is set)              |
 | `--session-read-only`                   | Open the TUI in read-only mode: conversation history is displayed but no new messages can be sent to the LLM. Cannot be used with `--exec`. |
@@ -38,7 +38,7 @@ $ docker agent run [config] [message...] [flags]
 | `--attach <path>`                       | Attach an image file to the initial message                                                                                               |
 | `--dry-run`                             | Initialize the agent without executing anything (useful for validating a config)                                                          |
 | `--remote <addr>`                       | Use a remote runtime at the given address instead of running the agent locally. Mutually exclusive with `--sandbox`, `--worktree`, `--worktree-pr`, `--worktree-base`, `--session`, `--session-db`, `--record`, and `--fake` — a remote runtime owns its own session storage and execution environment, so these local-only concerns don't apply. |
-| `--listen <addr>`                       | Expose this run's control plane over HTTP so an external process can drive the running TUI (send follow-ups, stream events, read the title). Accepts `host:port` or `unix://`, `npipe://`, `fd://`. Hidden from `docker agent run --help` — like `debug`, it's a stable but advanced/automation-oriented flag rather than a day-to-day one. See the [API Server](../api-server/index.md#listen) guide for the full walkthrough. |
+| `--listen <addr>`                       | Expose this run's control plane over HTTP so an external process can drive the running TUI (send follow-ups, stream events, read the title). Accepts `host:port` or `unix://`, `npipe://`, `fd://`. Hidden from `docker agent run --help` — it's a stable but advanced/automation-oriented flag rather than a day-to-day one. See the [API Server](../api-server/index.md#listen) guide for the full walkthrough. |
 | `--session-workingdir-root <path>`      | Confine the `working_dir` of sessions created through the `--listen` control plane to this directory and its descendants (default: no restriction — any clean host directory is accepted, though raw values containing `..` are rejected). Recommended when the control plane is reachable by other users. Hidden from `--help`, like `--listen`. |
 | `--lean`                                | Use a simplified, non-alternate-screen TUI. Unlike the default full-screen TUI, this renders inline in the normal terminal buffer — useful in environments where an alternate screen is unwanted (e.g. inside tmux panes, CI with a tty, or log-friendly pipelines). Like the full TUI, displays an ASCII art banner on startup when the chat is empty (configurable via `show_banner` in [user settings](../../configuration/user-settings/index.md)). |
 | `--app-name <name>`                     | Override the application name label shown in the TUI (status bar, window title, "/exit" notifications).                                   |
@@ -60,7 +60,7 @@ $ docker agent run [config] [message...] [flags]
 | `--env-from-file <path>`                | Load environment variables from file (repeatable)                                                                                         |
 | `--flavor <name>`                       | Enable a config flavor, a YAML patch defined under the config's `flavors` section (repeatable, applied in order). See [Flavors](../../configuration/flavors/index.md). |
 | `--code-mode-tools`                     | Provide a single tool to call other tools via JavaScript (forces code-mode tools globally)                                                |
-| `--models-gateway <addr>`               | Route model traffic through a gateway. Also reads `DOCKER_AGENT_MODELS_GATEWAY` (legacy `CAGENT_MODELS_GATEWAY`) env var.                  |
+| `--models-gateway <addr>`               | Route model traffic through a gateway. Docker Desktop sign-in is required only for HTTPS `docker.com` gateways; loopback and third-party gateways need no Docker token. Also reads `DOCKER_AGENT_MODELS_GATEWAY` (legacy `CAGENT_MODELS_GATEWAY`) env var. |
 | `--hook-pre-tool-use <cmd>`             | Add a pre-tool-use hook command (repeatable). See [Hooks](../../configuration/hooks/index.md).                                  |
 | `--hook-post-tool-use <cmd>`            | Add a post-tool-use hook command (repeatable)                                                                                             |
 | `--hook-session-start <cmd>`            | Add a session-start hook command (repeatable)                                                                                             |
@@ -69,7 +69,7 @@ $ docker agent run [config] [message...] [flags]
 | `--hook-stop <cmd>`                     | Add a stop hook command, fired when the model finishes responding (repeatable)                                                            |
 | `--fake <path>`                         | Replay AI responses from a cassette file (for testing). Mutually exclusive with `--record`.                                               |
 | `--fake-stream [ms]`                    | When replaying with `--fake`, simulate streaming with a delay between chunks (defaults to 15ms when given without a value).               |
-| `--record [path]`                       | Record AI API interactions to a cassette file and generate a TUI e2e test from the session (auto-generates filename if no path given). Routes through `--models-gateway` when one is configured. |
+| `--record [path]`                       | Record AI API interactions to a cassette file and generate a TUI e2e test from the session (auto-generates filename if no path given). Routes through `--models-gateway` when one is configured. Encrypted agent config and its digest are never stored in cassettes. |
 | `-d, --debug`                           | Enable debug logging                                                                                                                      |
 | `--log-file <path>`                     | Custom debug log location                                                                                                                 |
 | `-o, --otel`                            | Enable OpenTelemetry observability: traces, metrics, and logs. Requires `OTEL_EXPORTER_OTLP_ENDPOINT` to export to a collector. |
@@ -211,7 +211,7 @@ $ docker agent models --provider openai
 $ docker agent models --format json | jq
 ```
 
-When a models gateway is configured (`--models-gateway`, `DOCKER_AGENT_MODELS_GATEWAY`, or the user config), the command first queries the gateway's `/v1/models` endpoint. A non-empty response is authoritative for the models routed through the gateway: the listing shows the models the gateway serves (`--provider` filters within it), alongside any custom providers you have configured, which serve their models from their own endpoints rather than through the gateway. If the gateway cannot be queried or serves no usable model (endpoint not implemented, empty list, invalid response, timeout, missing authentication), the command falls back to the providers you have configured directly — provider API keys, provider aliases, and custom providers — plus the model catalog; a failure of one source never prevents the others from being listed. The Docker Desktop token is only sent (and required) when the gateway targets a trusted Docker URL.
+When a models gateway is configured (`--models-gateway`, `DOCKER_AGENT_MODELS_GATEWAY`, or the user config), the command first queries the gateway's `/v1/models` endpoint. A non-empty response is authoritative for the models routed through the gateway: the listing shows the models the gateway serves (`--provider` filters within it), alongside any custom providers you have configured, which serve their models from their own endpoints rather than through the gateway. If the gateway cannot be queried or serves no usable model (endpoint not implemented, empty list, invalid response, timeout, missing authentication), the command falls back to the providers you have configured directly — provider API keys, provider aliases, and custom providers — plus the model catalog; a failure of one source never prevents the others from being listed. Docker Desktop authentication is required only for HTTPS `docker.com` gateways. An available Docker Desktop token may also be sent to trusted loopback gateways, but is never sent to third-party gateways.
 
 ### `docker agent toolsets`
 
@@ -288,10 +288,10 @@ $ docker agent serve api <agent-file>|<agents-dir>|<registry-ref> [flags]
 | `-s, --session-db <path>`  | `session.db`       | Path to the SQLite session database (relative paths resolve against the working directory).                |
 | `--pull-interval <minutes>`| `0`                | Periodically re-pull OCI/URL references and refresh the agent definition. `0` disables auto-pull.          |
 | `--fake <path>`             | (none)             | Replay AI responses from a cassette file (for testing). Mutually exclusive with `--record`.               |
-| `--record [path]`           | (none)             | Record AI API interactions to a cassette file. Routes through `--models-gateway` when one is configured. |
+| `--record <path>`           | (none)             | Record AI API interactions to a cassette file. Routes through `--models-gateway` when one is configured; encrypted agent config and its digest are omitted from cassettes. |
 | `--mcp-oauth-redirect-uri <url>` | (none)        | OAuth redirect URI for the unmanaged MCP OAuth flow in server mode. When set, the runtime drives PKCE and code exchange in-process and sends the full authorize URL to the client via elicitation. See [Remote MCP](../remote-mcp/index.md) for details. |
 
-> **Diagnostics:** Set `CAGENT_PPROF_ADDR=127.0.0.1:6060` (or `--pprof-addr`, a hidden flag) to start a live Go pprof server at `/debug/pprof/`. Use a loopback address; a non-loopback binding logs a security warning.
+> **Diagnostics:** Set `DOCKER_AGENT_PPROF_ADDR=127.0.0.1:6060` (legacy `CAGENT_PPROF_ADDR` is also supported), or use `--pprof-addr`, a hidden flag, to start a live Go pprof server at `/debug/pprof/`. Use a loopback address; a non-loopback binding logs a security warning.
 
 All [runtime configuration flags](#runtime-configuration-flags) (`--working-dir`, `--env-from-file`, `--models-gateway`, `--hook-*`, …) are also accepted.
 
@@ -450,11 +450,29 @@ $ docker agent share pull docker.io/username/my-agent:latest
 
 # Force pull, overwriting the local copy
 $ docker agent share pull docker.io/username/my-agent:latest --force
+
+# Sign on push, verify on pull
+$ docker agent share push ./agent.yaml docker.io/username/my-agent:latest --key file://~/.ssh/id_ed25519
+$ docker agent share pull docker.io/username/my-agent:latest --key file://~/.ssh/id_ed25519.pub
 ```
 
-| Flag       | Applies to | Description                                                |
-| ---------- | ---------- | ---------------------------------------------------------- |
-| `--force`  | `pull`     | Force pull even if the configuration already exists locally |
+| Flag        | Applies to | Description                                                                                       |
+| ----------- | ---------- | ------------------------------------------------------------------------------------------------- |
+| `--force`   | `pull`     | Force pull even if the configuration already exists locally                                       |
+| `--key`     | both       | Key (inline, or `file://<path>`) used to sign/encrypt the agent on push, or verify it on pull     |
+| `--encrypt` | `push`     | Also embed an encrypted copy of the agent in the manifest annotations (needs `--key`)             |
+
+Signing records a DSSE envelope over an in-toto Statement v1 in the `io.docker.agent.attestation` annotation, so the attestation interoperates with cosign and in-toto tooling. On pull, the attested reference is checked against the one requested — a signed artifact copied to another repository or tag is rejected — and the verified metadata is printed:
+
+```console
+$ docker agent share pull docker.io/username/my-agent:latest --key file://~/.ssh/id_ed25519.pub
+Verified signature (ed25519)
+  image:   index.docker.io/username/my-agent:latest
+  digest:  sha256:889871ef…
+  created: 2026-09-11T08:30:00Z
+```
+
+See [Signing and encrypting agents](../../concepts/distribution/index.md#signing-and-encrypting-agents) for key formats and the security model.
 
 See [Agent Distribution](../../concepts/distribution/index.md) for full registry workflow details.
 
@@ -515,6 +533,7 @@ $ docker agent eval <agent-file>|<registry-ref> [<eval-dir>|./evals] [flags]
 | `--output <dir>`    | `<eval-dir>/results`                 | Directory for results, logs, and session databases                         |
 | `--only <pattern>`  | (all)                                | Only run evals with file names matching these patterns (repeatable)        |
 | `--base-image`      | (default)                            | Custom base image for eval containers                                      |
+| `--agent-image`     | (this CLI's version)                 | docker-agent image injected into eval containers; `none` skips injection   |
 | `--container-runtime` | `docker`                           | Container runtime executable for building and running evaluations (e.g. `podman`) |
 | `--keep-containers` | `false`                              | Keep containers after evaluation (don't remove with `--rm`)                |
 | `-e, --env`         | (none)                               | Environment variables to pass to container (`KEY` or `KEY=VALUE`, repeatable) |
@@ -661,10 +680,7 @@ Entries are unioned with the gateway, the kit-resolved tool install hosts, and a
 
 ### `docker agent plans`
 
-Manage the plans agents collaborate on, from the host — without starting a session. Two plan systems are covered:
-
-- **Shared plans** — the named, versioned documents of the [plan toolset](../../tools/plan/index.md). Fully manageable: create, update, set status, export, delete.
-- **Session plans** — the single per-session plan of the "draft, review, execute" workflow. Read-only here (`list`, `get`, `export`); they belong to their session and are changed from within it. A mutation aimed at a session plan fails with an `unsupported` error explaining what to do instead.
+Manage the plans agents collaborate on, from the host — without starting a session: the named, versioned documents of the [plan toolset](../../tools/plan/index.md). Fully manageable: create, update, set status, export, delete.
 
 ```bash
 $ docker agent plans <subcommand> [flags]
@@ -672,13 +688,13 @@ $ docker agent plans <subcommand> [flags]
 
 | Subcommand | Description |
 | ---------- | ----------- |
-| `list [--session <id>]` | List shared plans with scope, name, status, version, updated time, and title. With `--session`, that session's plan is listed first when it exists. Plans that exist but cannot be read are reported as warnings on stderr (in the `warnings` field with `--json`), so they are never mistaken for missing. |
-| `get <name>` | Print a plan. Content goes to stdout and a concise metadata line goes to stderr, so `> file` captures the content alone (use `export` for a byte-exact copy). `get --session <id>` prints a session's plan; the name is then omitted (`--scope shared\|session` disambiguates explicitly, and `--session` alone implies session scope). |
-| `create <name> --file <path>` | Create a new shared plan with content from `--file` (required — the CLI never prompts; `--file -` reads stdin). Create-only: an existing name fails with a version conflict instead of overwriting. `--title`, `--author`, and `--status` set metadata. |
-| `update <name> --file <path>` | Replace the content of an existing shared plan (never creates). Omitted `--title`/`--author`/`--status` flags preserve the current values; passing them (even empty) overwrites. |
-| `status <name> <status>` | Set a shared plan's free-form status without touching its body (bumps the version). |
-| `export <name> --output <path>` | Write a plan's content, byte-exact, to a file (parents created, atomic write). An existing destination is refused (`invalid_argument`) and left untouched; add `--force` to replace an existing regular file atomically. Works for both scopes: `export --session <id> --output <path>`. |
-| `delete <name>` | Delete a shared plan. A `--force` delete also recovers a corrupt plan. |
+| `list` | List plans with scope, name, status, version, updated time, and title. Plans that exist but cannot be read are reported as warnings on stderr (in the `warnings` field with `--json`), so they are never mistaken for missing. |
+| `get <name>` | Print a plan. Content goes to stdout and a concise metadata line goes to stderr, so `> file` captures the content alone (use `export` for a byte-exact copy). |
+| `create <name> --file <path>` | Create a new plan with content from `--file` (required — the CLI never prompts; `--file -` reads stdin). Create-only: an existing name fails with a version conflict instead of overwriting. `--title`, `--author`, and `--status` set metadata. |
+| `update <name> --file <path>` | Replace the content of an existing plan (never creates). Omitted `--title`/`--author`/`--status` flags preserve the current values; passing them (even empty) overwrites. |
+| `status <name> <status>` | Set a plan's free-form status without touching its body (bumps the version). |
+| `export <name> --output <path>` | Write a plan's content, byte-exact, to a file (parents created, atomic write). An existing destination is refused (`invalid_argument`) and left untouched; add `--force` to replace an existing regular file atomically. |
+| `delete <name>` | Delete a plan. A `--force` delete also recovers a corrupt plan. |
 
 Plan content passed via `--file` (a regular file, or stdin with `--file -`) is capped at 10 MiB — the same limit the plan storage itself enforces — and a directory or non-regular file (device, named pipe) is rejected up front; violations fail with an `invalid_argument` error.
 
@@ -689,13 +705,13 @@ Plan content passed via `--file` (a regular file, or stdin with `--file -`) is c
 
 `create` takes no guard: it is inherently create-only and conflicts (exit code 3) when the name already exists.
 
-**JSON output:** every subcommand accepts `--json`. Success documents go to stdout with a top-level `"schema_version": "1"` marker and stable service-model keys (`plans`, `plan`, `export`, `deleted`) whose fields are snake_case (`updated_at`, `session_id`, `bytes_written`; a zero/unknown `updated_at` is omitted); empty plan lists encode as `[]`, and no prose or ANSI is mixed in. Failures print a single JSON object to stderr:
+**JSON output:** every subcommand accepts `--json`. Success documents go to stdout with a top-level `"schema_version": "1"` marker and stable service-model keys (`plans`, `plan`, `export`, `deleted`) whose fields are snake_case (`updated_at`, `bytes_written`; a zero/unknown `updated_at` is omitted); empty plan lists encode as `[]`, and no prose or ANSI is mixed in. Failures print a single JSON object to stderr:
 
 ```json
 {"schema_version":"1","error":{"code":"conflict","message":"...","scope":"shared","name":"p","expected_version":1,"current_version":2}}
 ```
 
-with `code` one of `conflict` (including `expected_version` and `current_version`), `not_found`, `invalid_argument`, `unsupported`, `corrupt`, `storage`, or `error`; `scope`, `name`, and `op` are included where the failure carries them. Validation performed before a subcommand runs is covered too: a missing required flag, a violated `--expected-version`/`--force` group rule, and wrong positional arguments are reported as the same JSON object (code `invalid_argument`) whenever `--json` is present. One residual: flags are parsed left-to-right and parsing stops at the first unknown flag or invalid flag value, so such an error is reported as JSON only when `--json` appears before it on the command line; errors raised before a `plans` subcommand is resolved at all (e.g. an unknown subcommand) also remain plain text.
+with `code` one of `conflict` (including `expected_version` and `current_version`), `not_found`, `invalid_argument`, `corrupt`, `storage`, or `error`; `scope`, `name`, and `op` are included where the failure carries them. Validation performed before a subcommand runs is covered too: a missing required flag, a violated `--expected-version`/`--force` group rule, and wrong positional arguments are reported as the same JSON object (code `invalid_argument`) whenever `--json` is present. One residual: flags are parsed left-to-right and parsing stops at the first unknown flag or invalid flag value, so such an error is reported as JSON only when `--json` appears before it on the command line; errors raised before a `plans` subcommand is resolved at all (e.g. an unknown subcommand) also remain plain text.
 
 ```bash
 # Examples
@@ -710,15 +726,13 @@ $ docker agent plans export release --output ./plan.md
 $ docker agent plans export release --output ./plan.md --force   # replace an existing file
 $ docker agent plans delete release --expected-version 3
 $ docker agent plans delete scratch --force
-$ docker agent plans get --session <session-id>       # a session's plan
-$ docker agent plans export --session <session-id> --output ./session-plan.md
 ```
 
-Plans live under the data directory (`~/.cagent/plans/` and `~/.cagent/session_plans/` by default), so `--data-dir` selects which store the commands operate on.
+Plans live under the data directory (`~/.cagent/plans/` by default), so `--data-dir` selects which store the commands operate on.
 
 ### `docker agent debug`
 
-Troubleshooting subcommands for inspecting how an agent config resolves and generating diagnostic output — useful when a config isn't behaving the way you expect. `debug` doesn't appear in `docker agent --help` (it's a diagnostic surface, not a day-to-day command), but every subcommand below is stable and fully supported.
+Troubleshooting subcommands for inspecting how an agent config resolves and generating diagnostic output — useful when a config isn't behaving the way you expect. `debug` appears under **Advanced Commands** in `docker agent --help`; every subcommand below is stable and fully supported.
 
 ```bash
 $ docker agent debug <subcommand> [flags]
@@ -726,9 +740,9 @@ $ docker agent debug <subcommand> [flags]
 
 | Subcommand | Description |
 | ---------- | ----------- |
-| `config <agent-file>` | Print the fully-resolved, canonical form of an agent's configuration (defaults applied, references resolved). |
-| `toolsets <agent-file>` | List every toolset each agent in the config exposes, with each tool's name and description. |
-| `skills <agent-file>` | List the skills discovered for each agent, marking forked skills. |
+| `config <agent-file> [flavor...]` | Print the fully-resolved, canonical form of an agent's configuration (defaults applied, references resolved). When [flavors](../../configuration/flavors/index.md) are given they are applied in order and the `flavors` section is dropped from the output. |
+| `toolsets <agent-file>` | List every toolset each agent in the config exposes, with each tool's name and description. Add `--json` for machine-readable output including each tool's parameters, annotations, and output schema. |
+| `skills <agent-file>` | List the skills discovered for each agent, marking forked skills. Add `--json` for machine-readable output; each skill includes a `path` field when it is backed by a file (omitted for inline skills). |
 | `title <agent-file> <question>` | Generate a session title for `<question>` using the same title-generation path the TUI uses (including any configured `title_model`), without starting a session. See [Session Titles](../sessions/index.md#session-titles). |
 | `auth` | Print parsed Docker authentication info from the token in use (source, subject, issuer, expiry, username/email). Add `--json` for machine-readable output. |
 | `oauth list` | List stored MCP OAuth tokens (resource, scope, expiry, redacted access token). Add `--json` for machine-readable output. |
@@ -738,8 +752,11 @@ $ docker agent debug <subcommand> [flags]
 ```bash
 # Examples
 $ docker agent debug config agent.yaml
+$ docker agent debug config agent.yaml cheap with-shell
 $ docker agent debug toolsets agent.yaml
+$ docker agent debug toolsets agent.yaml --json
 $ docker agent debug skills agent.yaml
+$ docker agent debug skills agent.yaml --json
 $ docker agent debug title agent.yaml "How do I configure a fallback model?"
 $ docker agent debug auth --json
 $ docker agent debug oauth list
@@ -755,22 +772,32 @@ The `Source` field says where the token came from: `docker desktop`, or `minted 
 
 The `config`, `toolsets`, `skills`, and `title` subcommands also accept [runtime configuration flags](#runtime-configuration-flags) (`--working-dir`, `--models-gateway`, …); `title` additionally accepts `--model` to override the model used to resolve the config before generating the title.
 
-### `docker agent completion`
+### `docker-agent completion`
 
-Generate a shell completion script for `bash`, `zsh`, `fish`, or `powershell`.
+Generate a shell completion script for the standalone `docker-agent` binary for `bash`, `zsh`, `fish`, or `powershell`.
 
 ```bash
-$ docker agent completion <bash|zsh|fish|powershell>
+$ docker-agent completion <bash|zsh|fish|powershell>
 
 # Examples
 # Bash: load for the current session
-$ source <(docker agent completion bash)
+$ source <(docker-agent completion bash)
 
 # Zsh: install permanently (adjust the path for your $fpath)
-$ docker agent completion zsh > "${fpath[1]}/_docker-agent"
+$ docker-agent completion zsh > "${fpath[1]}/_docker-agent"
 ```
 
-Run `docker agent completion <shell> --help` for shell-specific installation instructions.
+Run `docker-agent completion <shell> --help` for shell-specific installation instructions.
+
+When using the `docker agent` CLI plugin, use Docker's completion instead. The plugin doesn't provide a `docker agent completion` command:
+
+```bash
+# Bash: load Docker CLI completion for the current session
+$ source <(docker completion bash)
+
+# Shell-specific installation instructions
+$ docker completion <shell> --help
+```
 
 ### Self-update
 

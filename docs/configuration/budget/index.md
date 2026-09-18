@@ -81,6 +81,8 @@ Give agents **distinct budget names** when you want independent pots.
 
 The same applies to the run-wide `budget`: every sub-session inside a run (transferred tasks, sub-agents, skills) spends from that one wallet.
 
+Compaction model calls also count towards the run-wide budget and the compacted agent's named budgets, including when a dedicated compaction model is configured. An exhausted budget skips LLM-based compaction; a hook-supplied summary can still be applied without spending tokens.
+
 ## Scope: a budget spans the session
 
 Spend accumulates for the life of the **session**, across every message you send — it does not reset each time you hit enter. A `max_cost: 0.50` you could re-spend on every message would not be a ceiling at all.

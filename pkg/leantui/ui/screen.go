@@ -1,6 +1,9 @@
 package ui
 
-import "github.com/docker/docker-agent/pkg/tui/service"
+import (
+	"github.com/docker/docker-agent/pkg/history"
+	"github.com/docker/docker-agent/pkg/tui/service"
+)
 
 // Screen aggregates the lean TUI presentation models and lays out a full frame.
 type Screen struct {
@@ -11,10 +14,10 @@ type Screen struct {
 	Confirm      *ConfirmModel
 }
 
-func NewScreen(workingDir, branch, editorPlaceholder string) *Screen {
+func NewScreen(workingDir, branch, editorPlaceholder string, historyStore ...*history.History) *Screen {
 	return &Screen{
 		Transcript:   NewTranscript(),
-		Editor:       NewEditor(editorPlaceholder),
+		Editor:       NewEditor(editorPlaceholder, historyStore...),
 		Autocomplete: NewAutocomplete(),
 		Status:       StatusModel{WorkingDir: workingDir, Branch: branch},
 	}

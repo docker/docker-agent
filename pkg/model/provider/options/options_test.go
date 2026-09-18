@@ -1,6 +1,7 @@
 package options
 
 import (
+	"context"
 	"net/http"
 	"testing"
 
@@ -110,6 +111,24 @@ func TestFromModelOptions_RoundTripsTransportWrapper(t *testing.T) {
 	result := got(http.DefaultTransport)
 	assert.True(t, wrapperInvoked)
 	assert.NotNil(t, result)
+}
+
+func TestFromModelOptions_RoundTripsTokenSource(t *testing.T) {
+	t.Parallel()
+
+	source := TokenSource(func(context.Context) (string, error) { return "token", nil })
+	var src ModelOptions
+	WithTokenSource(source)(&src)
+
+	var dst ModelOptions
+	for _, opt := range FromModelOptions(src) {
+		opt(&dst)
+	}
+
+	require.NotNil(t, dst.TokenSource())
+	token, err := dst.TokenSource()(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, "token", token)
 }
 
 func TestFromModelOptions_RoundTripsCompacting(t *testing.T) {

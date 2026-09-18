@@ -24,11 +24,11 @@ func pullDockerModelIfNeeded(ctx context.Context, model string) error {
 		return nil
 	}
 
-	if err := confirmModelPull(ctx, model); err != nil {
+	if err := confirmModelPull(ctx, model, os.Stdout); err != nil {
 		return err
 	}
 
-	return pullWithRecovery(ctx, model)
+	return pullWithRecovery(ctx, model, os.Stdout, os.Stderr)
 }
 
 // Pull pulls a Docker Model Runner model via `docker model pull`, streaming
@@ -37,18 +37,23 @@ func pullDockerModelIfNeeded(ctx context.Context, model string) error {
 // wizard) can invoke it directly. It skips the pull when the model is already
 // available locally and returns a *PullFailedError on failure.
 func Pull(ctx context.Context, model string) error {
+	return PullTo(ctx, model, os.Stdout, os.Stderr)
+}
+
+// PullTo is Pull with caller-controlled output streams.
+func PullTo(ctx context.Context, model string, stdout, stderr io.Writer) error {
 	if modelExists(ctx, model) {
 		slog.DebugContext(ctx, "Model already exists, skipping pull", "model", model)
 		return nil
 	}
 
-	return pullWithRecovery(ctx, model)
+	return pullWithRecovery(ctx, model, stdout, stderr)
 }
 
 // pullWithRecovery runs the pull and recovers once from a corrupted partial
 // download.
-func pullWithRecovery(ctx context.Context, model string) error {
-	err := runModelPull(ctx, model)
+func pullWithRecovery(ctx context.Context, model string, stdout, stderr io.Writer) error {
+	err := runModelPull(ctx, model, stdout, stderr)
 	if err == nil {
 		return nil
 	}
@@ -64,13 +69,13 @@ func pullWithRecovery(ctx context.Context, model string) error {
 	}
 	if path, size, ok := corruptPartial(pfe.Detail); ok {
 		pfe.CorruptPartial = path
-		if confirmRemoveCorruptPartial(ctx, path, size) {
+		if confirmRemoveCorruptPartial(ctx, stdout, path, size) {
 			if rmErr := os.Remove(path); rmErr != nil {
 				slog.WarnContext(ctx, "Failed to remove corrupted partial download", "path", path, "error", rmErr)
 			} else {
 				slog.InfoContext(ctx, "Removed corrupted partial download, retrying pull", "path", path, "model", model)
-				fmt.Printf("Removed corrupted partial download. Retrying...\n")
-				return runModelPull(ctx, model)
+				fmt.Fprintln(stdout, "Removed corrupted partial download. Retrying...")
+				return runModelPull(ctx, model, stdout, stderr)
 			}
 		}
 	}
@@ -80,36 +85,36 @@ func pullWithRecovery(ctx context.Context, model string) error {
 // runModelPull shells out to `docker model pull`, streaming output live while
 // capturing stderr so a failure carries the real cause. It returns a
 // *PullFailedError on failure so callers can inspect the captured output.
-func runModelPull(ctx context.Context, model string) error {
+func runModelPull(ctx context.Context, model string, stdout, stderr io.Writer) error {
 	slog.InfoContext(ctx, "Pulling DMR model", "model", model)
-	fmt.Printf("Pulling model %s...\n", model)
+	fmt.Fprintf(stdout, "Pulling model %s...\n", model)
 
 	cmd := exec.CommandContext(ctx, "docker", "model", "pull", model)
-	cmd.Stdout = os.Stdout
+	cmd.Stdout = stdout
 	// Tee stderr so the live pull output still reaches the terminal while we
 	// also capture it, otherwise the real cause (e.g. a registry error) is lost
 	// and the returned error degrades to a bare "exit status 1".
-	var stderr bytes.Buffer
-	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	var stderrCapture bytes.Buffer
+	cmd.Stderr = io.MultiWriter(stderr, &stderrCapture)
 	if err := cmd.Run(); err != nil {
-		return &PullFailedError{Model: model, Detail: cleanPullStderr(stderr.String()), Cause: err}
+		return &PullFailedError{Model: model, Detail: cleanPullStderr(stderrCapture.String()), Cause: err}
 	}
 
 	slog.InfoContext(ctx, "Model pulled successfully", "model", model)
-	fmt.Printf("Model %s pulled successfully.\n", model)
+	fmt.Fprintf(stdout, "Model %s pulled successfully.\n", model)
 	return nil
 }
 
 // confirmModelPull asks for user confirmation in interactive mode.
 // In non-interactive mode (e.g. devcontainers, CI), it proceeds automatically.
-func confirmModelPull(ctx context.Context, model string) error {
+func confirmModelPull(ctx context.Context, model string, out io.Writer) error {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		slog.InfoContext(ctx, "Model not found locally, pulling automatically (non-interactive mode)", "model", model)
 		return nil
 	}
 
-	fmt.Printf("\nModel %s not found locally.\n", model)
-	fmt.Printf("Do you want to pull it now? ([y]es/[n]o): ")
+	fmt.Fprintf(out, "\nModel %s not found locally.\n", model)
+	fmt.Fprint(out, "Do you want to pull it now? ([y]es/[n]o): ")
 
 	response, err := input.ReadLine(ctx, os.Stdin)
 	if err != nil {
@@ -281,12 +286,12 @@ func modelStoreDir() string {
 // confirmRemoveCorruptPartial asks, in interactive mode, whether to delete a
 // corrupted partial download. In non-interactive mode it returns false so files
 // are never removed without explicit consent.
-func confirmRemoveCorruptPartial(ctx context.Context, path string, size int64) bool {
+func confirmRemoveCorruptPartial(ctx context.Context, out io.Writer, path string, size int64) bool {
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return false
 	}
-	fmt.Printf("\nThe pull failed because a partially downloaded copy is corrupted:\n  %s (%s)\n", path, humanizeBytes(size))
-	fmt.Printf("Remove it and retry the pull? ([y]es/[n]o): ")
+	fmt.Fprintf(out, "\nThe pull failed because a partially downloaded copy is corrupted:\n  %s (%s)\n", path, humanizeBytes(size))
+	fmt.Fprint(out, "Remove it and retry the pull? ([y]es/[n]o): ")
 	response, err := input.ReadLine(ctx, os.Stdin)
 	if err != nil {
 		return false

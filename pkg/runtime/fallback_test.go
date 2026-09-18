@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -93,6 +95,29 @@ func TestBuildModelChain(t *testing.T) {
 		assert.True(t, chain[2].isFallback)
 		assert.Equal(t, 1, chain[2].index)
 	})
+}
+
+func TestIsRetryableIdleStream(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		err    error
+		result streamResult
+		want   bool
+	}{
+		{name: "sentinel before response", err: fmt.Errorf("wrapped: %w", errStreamIdle), want: true},
+		{name: "sentinel after response", err: errStreamIdle, result: streamResult{ResponseStarted: true}},
+		{name: "matching text without sentinel", err: errors.New("model stream stalled after 30s with no data")},
+		{name: "other error", err: errors.New("connection reset")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, isRetryableIdleStream(tt.err, tt.result))
+		})
+	}
 }
 
 func TestFallbackOrder(t *testing.T) {
@@ -672,4 +697,199 @@ func TestRateLimitGate_EnabledWithFallbacks_SkipsToFallback(t *testing.T) {
 		assert.True(t, gotContent, "should receive content from fallback")
 		assert.Equal(t, 1, primary.callCount, "primary should only be called once — fallbacks take priority over retry")
 	})
+}
+
+type idleErrorStream struct{}
+
+func (*idleErrorStream) Recv() (chat.MessageStreamResponse, error) {
+	return chat.MessageStreamResponse{}, errStreamIdle
+}
+func (*idleErrorStream) Close() {}
+
+func TestFallbackExecutor_IdleWithoutAdmissionUsesOrdinaryClassification(t *testing.T) {
+	t.Parallel()
+
+	modelProvider := &mockProvider{id: "test/model", stream: &idleErrorStream{}}
+	a := agent.New("delegate", "Delegate", agent.WithModel(modelProvider))
+	executor := newFallbackExecutor()
+	executor.cooldowns = newCooldownManager(time.Now)
+	executor.telemetry = defaultTelemetry{}
+
+	_, _, err := executor.execute(
+		t.Context(), a, modelProvider, nil, nil, session.New(), nil,
+		&collectSink{}, &idleStreamRetryAllowance{remaining: true, parentSessionID: "parent"}, nil,
+	)
+
+	require.Error(t, err)
+	require.ErrorIs(t, err, errStreamIdle)
+}
+
+type idleThenResultProvider struct {
+	id      string
+	mu      sync.Mutex
+	streams []chat.MessageStream
+	calls   int
+}
+
+func (p *idleThenResultProvider) ID() modelsdev.ID { return modelsdev.ParseIDOrZero(p.id) }
+func (p *idleThenResultProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	stream := p.streams[0]
+	p.streams = p.streams[1:]
+	return stream, nil
+}
+func (p *idleThenResultProvider) BaseConfig() base.Config { return base.Config{} }
+func (p *idleThenResultProvider) MaxTokens() int          { return 0 }
+func (p *idleThenResultProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func TestFallbackExecutor_IdleRetryIsAdditionalImmediateRequest(t *testing.T) {
+	t.Parallel()
+
+	recovered := newStreamBuilder().AddContent("recovered").AddStopWithUsage(1, 1).Build()
+	modelProvider := &idleThenResultProvider{id: "test/model", streams: []chat.MessageStream{&idleErrorStream{}, recovered}}
+	a := agent.New("delegate", "Delegate", agent.WithModel(modelProvider), agent.WithFallbackRetries(-1))
+	executor := newFallbackExecutor()
+	executor.cooldowns = newCooldownManager(time.Now)
+	executor.telemetry = defaultTelemetry{}
+	sink := &collectSink{}
+	allowance := &idleStreamRetryAllowance{remaining: true, parentSessionID: "parent"}
+	result, used, err := executor.execute(
+		t.Context(), a, modelProvider, nil, nil, session.New(), nil, sink, allowance,
+		func() error { return nil },
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, "recovered", result.Content)
+	assert.Equal(t, modelProvider, used)
+	assert.Equal(t, 2, modelProvider.callCount(), "maxAttempts=1 must still admit one additional request")
+	assert.False(t, allowance.remaining)
+	warnings := 0
+	fallbacks := 0
+	for _, event := range sink.events {
+		switch event.(type) {
+		case *WarningEvent:
+			warnings++
+		case *ModelFallbackEvent:
+			fallbacks++
+		}
+	}
+	assert.Equal(t, 1, warnings)
+	assert.Zero(t, fallbacks)
+}
+
+func TestFallbackExecutor_DeniedIdleRetryPreservesAllowanceAndEmitsNothing(t *testing.T) {
+	t.Parallel()
+
+	modelProvider := &idleThenResultProvider{id: "test/model", streams: []chat.MessageStream{&idleErrorStream{}}}
+	a := agent.New("delegate", "Delegate", agent.WithModel(modelProvider), agent.WithFallbackRetries(-1))
+	executor := newFallbackExecutor()
+	executor.cooldowns = newCooldownManager(time.Now)
+	executor.telemetry = defaultTelemetry{}
+	sink := &collectSink{}
+	allowance := &idleStreamRetryAllowance{remaining: true, parentSessionID: "parent"}
+	admissionErr := errors.New("not admitted")
+
+	_, _, err := executor.execute(
+		t.Context(), a, modelProvider, nil, nil, session.New(), nil, sink, allowance,
+		func() error { return admissionErr },
+	)
+
+	require.ErrorIs(t, err, admissionErr)
+	assert.Equal(t, 1, modelProvider.callCount())
+	assert.True(t, allowance.remaining)
+	assert.Empty(t, sink.events)
+}
+
+type cancelOnRecvIdleStream struct {
+	cancel context.CancelFunc
+}
+
+func (s *cancelOnRecvIdleStream) Recv() (chat.MessageStreamResponse, error) {
+	s.cancel()
+	return chat.MessageStreamResponse{}, errStreamIdle
+}
+
+func (*cancelOnRecvIdleStream) Close() {}
+
+func TestFallbackExecutor_CancellationBeforeIdleRetryAdmission(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	modelProvider := &mockProvider{id: "test/model", stream: &cancelOnRecvIdleStream{cancel: cancel}}
+	a := agent.New("delegate", "Delegate", agent.WithModel(modelProvider))
+	executor := newFallbackExecutor()
+	executor.cooldowns = newCooldownManager(time.Now)
+	executor.telemetry = defaultTelemetry{}
+	admissionChecks := 0
+
+	_, _, err := executor.execute(
+		ctx, a, modelProvider, nil, nil, session.New(), nil,
+		&collectSink{}, &idleStreamRetryAllowance{remaining: true, parentSessionID: "parent"},
+		func() error {
+			admissionChecks++
+			return nil
+		},
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, admissionChecks)
+}
+
+func TestFallbackExecutor_CancellationAfterIdleRetryAdmission(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	modelProvider := &idleThenResultProvider{id: "test/model", streams: []chat.MessageStream{&idleErrorStream{}}}
+	a := agent.New("delegate", "Delegate", agent.WithModel(modelProvider))
+	executor := newFallbackExecutor()
+	executor.cooldowns = newCooldownManager(time.Now)
+	executor.telemetry = defaultTelemetry{}
+	sink := &collectSink{}
+	allowance := &idleStreamRetryAllowance{remaining: true, parentSessionID: "parent"}
+	admissionChecks := 0
+
+	_, _, err := executor.execute(
+		ctx, a, modelProvider, nil, nil, session.New(), nil, sink, allowance,
+		func() error {
+			admissionChecks++
+			cancel()
+			return nil
+		},
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 1, admissionChecks)
+	assert.Equal(t, 1, modelProvider.callCount())
+	assert.True(t, allowance.remaining)
+	assert.Empty(t, sink.events)
+}
+
+func TestFallbackExecutor_IdleRetryStopsForBudget(t *testing.T) {
+	t.Parallel()
+
+	modelProvider := &mockProvider{id: "test/model", stream: &idleErrorStream{}}
+	a := agent.New("delegate", "Delegate", agent.WithModel(modelProvider))
+	executor := newFallbackExecutor()
+	executor.cooldowns = newCooldownManager(time.Now)
+	executor.telemetry = defaultTelemetry{}
+	admissionChecks := 0
+	admissionErr := errors.New("budget exceeded")
+
+	_, _, err := executor.execute(
+		t.Context(), a, modelProvider, nil, nil, session.New(), nil,
+		&collectSink{}, &idleStreamRetryAllowance{remaining: true, parentSessionID: "parent"},
+		func() error {
+			admissionChecks++
+			return admissionErr
+		},
+	)
+
+	require.ErrorIs(t, err, admissionErr)
+	assert.Equal(t, 1, admissionChecks)
 }

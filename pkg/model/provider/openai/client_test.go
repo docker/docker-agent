@@ -36,7 +36,7 @@ func TestConvertMessagesToResponseInput_OrphanedFunctionCall(t *testing.T) {
 			callIDs = append(callIDs, item.OfFunctionCall.CallID)
 		}
 		if item.OfFunctionCallOutput != nil {
-			outputIDs = append(outputIDs, item.OfFunctionCallOutput.CallID)
+			outputIDs = append(outputIDs, item.OfFunctionCallOutput.CallID.Value)
 		}
 	}
 

@@ -57,15 +57,21 @@ func instrumentProvider(p Provider) Provider {
 
 	switch {
 	case isBatchEmbed && isRerank:
-		return &tracedBatchEmbedRerank{tracedChat: tc, batchEmbed: bep, rerank: rp}
+		return &tracedBatchEmbedRerank{
+			tracedBatchEmbed: tracedBatchEmbed{tracedEmbed: tracedEmbed{tracedChat: tc, embed: bep}, batchEmbed: bep},
+			tracedRerankOps:  tracedRerankOps{chat: tc, rerank: rp},
+		}
 	case isBatchEmbed:
-		return &tracedBatchEmbed{tracedChat: tc, batchEmbed: bep}
+		return &tracedBatchEmbed{tracedEmbed: tracedEmbed{tracedChat: tc, embed: bep}, batchEmbed: bep}
 	case isEmbed && isRerank:
-		return &tracedEmbedRerank{tracedChat: tc, embed: ep, rerank: rp}
+		return &tracedEmbedRerank{
+			tracedEmbed:     tracedEmbed{tracedChat: tc, embed: ep},
+			tracedRerankOps: tracedRerankOps{chat: tc, rerank: rp},
+		}
 	case isEmbed:
 		return &tracedEmbed{tracedChat: tc, embed: ep}
 	case isRerank:
-		return &tracedRerank{tracedChat: tc, rerank: rp}
+		return &tracedRerank{tracedChat: tc, tracedRerankOps: tracedRerankOps{chat: tc, rerank: rp}}
 	default:
 		return tc
 	}
@@ -225,12 +231,17 @@ func (t *tracedChat) wrapRerank(ctx context.Context, query string, documents []t
 // at the chat layer.
 type tracedRerank struct {
 	*tracedChat
+	tracedRerankOps
+}
 
+type tracedRerankOps struct {
+	// Named to avoid promoting Provider methods through two embedded paths.
+	chat   *tracedChat
 	rerank RerankingProvider
 }
 
-func (t *tracedRerank) Rerank(ctx context.Context, query string, documents []types.Document, criteria string) ([]float64, error) {
-	return t.wrapRerank(ctx, query, documents, criteria, t.rerank.Rerank)
+func (t *tracedRerankOps) Rerank(ctx context.Context, query string, documents []types.Document, criteria string) ([]float64, error) {
+	return t.chat.wrapRerank(ctx, query, documents, criteria, t.rerank.Rerank)
 }
 
 // tracedEmbed satisfies EmbeddingProvider.
@@ -248,34 +259,16 @@ func (t *tracedEmbed) CreateEmbedding(ctx context.Context, text string) (*base.E
 
 // tracedEmbedRerank satisfies EmbeddingProvider and RerankingProvider.
 type tracedEmbedRerank struct {
-	*tracedChat
-
-	embed  EmbeddingProvider
-	rerank RerankingProvider
-}
-
-func (t *tracedEmbedRerank) CreateEmbedding(ctx context.Context, text string) (*base.EmbeddingResult, error) {
-	return wrapEmbedding(ctx, t.embeddingRequestForConfig(0), func(ctx context.Context) (*base.EmbeddingResult, error) {
-		return t.embed.CreateEmbedding(ctx, text)
-	})
-}
-
-func (t *tracedEmbedRerank) Rerank(ctx context.Context, query string, documents []types.Document, criteria string) ([]float64, error) {
-	return t.wrapRerank(ctx, query, documents, criteria, t.rerank.Rerank)
+	tracedEmbed
+	tracedRerankOps
 }
 
 // tracedBatchEmbed satisfies BatchEmbeddingProvider (which embeds
 // EmbeddingProvider).
 type tracedBatchEmbed struct {
-	*tracedChat
+	tracedEmbed
 
 	batchEmbed BatchEmbeddingProvider
-}
-
-func (t *tracedBatchEmbed) CreateEmbedding(ctx context.Context, text string) (*base.EmbeddingResult, error) {
-	return wrapEmbedding(ctx, t.embeddingRequestForConfig(0), func(ctx context.Context) (*base.EmbeddingResult, error) {
-		return t.batchEmbed.CreateEmbedding(ctx, text)
-	})
 }
 
 func (t *tracedBatchEmbed) CreateBatchEmbedding(ctx context.Context, texts []string) (*base.BatchEmbeddingResult, error) {
@@ -287,24 +280,6 @@ func (t *tracedBatchEmbed) CreateBatchEmbedding(ctx context.Context, texts []str
 // tracedBatchEmbedRerank satisfies BatchEmbeddingProvider and
 // RerankingProvider — the broadest combination, used by openai and dmr.
 type tracedBatchEmbedRerank struct {
-	*tracedChat
-
-	batchEmbed BatchEmbeddingProvider
-	rerank     RerankingProvider
-}
-
-func (t *tracedBatchEmbedRerank) CreateEmbedding(ctx context.Context, text string) (*base.EmbeddingResult, error) {
-	return wrapEmbedding(ctx, t.embeddingRequestForConfig(0), func(ctx context.Context) (*base.EmbeddingResult, error) {
-		return t.batchEmbed.CreateEmbedding(ctx, text)
-	})
-}
-
-func (t *tracedBatchEmbedRerank) CreateBatchEmbedding(ctx context.Context, texts []string) (*base.BatchEmbeddingResult, error) {
-	return wrapBatchEmbedding(ctx, t.embeddingRequestForConfig(len(texts)), func(ctx context.Context) (*base.BatchEmbeddingResult, error) {
-		return t.batchEmbed.CreateBatchEmbedding(ctx, texts)
-	})
-}
-
-func (t *tracedBatchEmbedRerank) Rerank(ctx context.Context, query string, documents []types.Document, criteria string) ([]float64, error) {
-	return t.wrapRerank(ctx, query, documents, criteria, t.rerank.Rerank)
+	tracedBatchEmbed
+	tracedRerankOps
 }

@@ -8,6 +8,32 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 )
 
+func TestIsDockerDomainURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		url  string
+		want bool
+	}{
+		{"https://docker.com", true},
+		{"https://api.docker.com/models", true},
+		{"https://DOCKER.COM", true},
+		{"http://docker.com", false},
+		{"https://docker.com.evil.com", false},
+		{"https://notdocker.com", false},
+		{"http://localhost:8080", false},
+		{"https://127.0.0.1:8080", false},
+		{"not-a-url", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, environment.IsDockerDomainURL(tt.url))
+		})
+	}
+}
+
 func TestIsTrustedDockerURL(t *testing.T) {
 	t.Parallel()
 

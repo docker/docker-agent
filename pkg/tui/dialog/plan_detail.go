@@ -167,9 +167,6 @@ func (d *planDetailDialog) headerLines(contentWidth int) []string {
 	p := d.plan
 
 	title := "Plan: " + p.Name
-	if p.Scope == plans.ScopeSession {
-		title = "Session plan"
-	}
 
 	lines := []string{
 		RenderTitle(toolcommon.TruncateText(title, contentWidth), contentWidth, styles.DialogTitleStyle),
@@ -181,27 +178,20 @@ func (d *planDetailDialog) headerLines(contentWidth int) []string {
 		return l + styles.DialogContentStyle.Render(toolcommon.TruncateText(value, max(1, contentWidth-10)))
 	}
 
-	if p.Scope == plans.ScopeSession {
-		lines = append(lines,
-			field("Scope", "session — owned by its session, body editable here"),
-			field("Session", p.SessionID),
-			field("Version", "- (session plans have no versions)"),
-		)
-	} else {
-		lines = append(lines,
-			field("Scope", "shared — collaborative, versioned"),
-			field("Name", p.Name),
-		)
-		if p.Title != "" {
-			lines = append(lines, field("Title", p.Title))
-		}
-		lines = append(lines,
-			field("Status", planLabel(p.Status)),
-			field("Version", planVersionLabel(p.Version)),
-			field("Author", planLabel(p.Author)),
-		)
+	lines = append(lines,
+		field("Scope", "shared — collaborative, versioned"),
+		field("Name", p.Name),
+	)
+	if p.Title != "" {
+		lines = append(lines, field("Title", p.Title))
 	}
-	lines = append(lines, field("Updated", d.updatedLabel()), RenderSeparator(contentWidth))
+	lines = append(lines,
+		field("Status", planLabel(p.Status)),
+		field("Version", planVersionLabel(p.Version)),
+		field("Author", planLabel(p.Author)),
+		field("Updated", d.updatedLabel()),
+		RenderSeparator(contentWidth),
+	)
 	return lines
 }
 
@@ -245,13 +235,7 @@ func (d *planDetailDialog) renderContent(contentWidth int) []string {
 
 func (d *planDetailDialog) helpKeys() []string {
 	keys := []string{"↑/↓", "scroll", "r", "refresh", "x", "export"}
-	switch {
-	case d.plan.Scope.Mutable():
-		keys = append(keys, "s", "status", "e", "edit", "d", "delete")
-	case d.plan.Scope == plans.ScopeSession:
-		// Session plans support editing the body only.
-		keys = append(keys, "e", "edit")
-	}
+	keys = append(keys, "s", "status", "e", "edit", "d", "delete")
 	return append(keys, "esc", "close")
 }
 

@@ -184,11 +184,6 @@ linters:
         linters:
           - staticcheck
         text: "SA1019:.*FunctionCall.*deprecated"
-      # adka2a/v2 migration requires a full a2a-go v2 upgrade (separate PR)
-      - path: pkg/a2a/
-        linters:
-          - staticcheck
-        text: "SA1019:.*adka2a.*deprecated"
       # MCP sampling (SEP-2577) is deprecated upstream but functional during
       # the deprecation window; migrating off it is a separate effort
       - path: ^(e2e/sampling_test|pkg/runtime/sampling(_test)?|pkg/tools/sampling|pkg/tools/codemode/codemode_test|pkg/tools/mcp/(mcp|session_client)(_test)?)\.go$
@@ -231,4 +226,5 @@ formatters:
         - pattern: 'interface{}'
           replacement: 'any'
     gofumpt:
-      extra-rules: true
+      extra:
+        group-params: true

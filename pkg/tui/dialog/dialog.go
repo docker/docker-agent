@@ -1,6 +1,8 @@
 package dialog
 
 import (
+	"slices"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -14,8 +16,7 @@ import (
 // dialog as a background dialog. Background dialogs do not block tab
 // navigation: tab-switch keys and tab-bar mouse clicks keep working. When
 // the user switches away from the tab that opened the dialog, the dialog is
-// closed and OriginatingEvent is re-stashed in the supervisor so the same
-// prompt is re-displayed when the user returns. Other input (including
+// parked on its owning tab and re-displayed when the user returns. Other input (including
 // mouse-wheel events) is still routed to the dialog while it is on screen.
 type OpenDialogMsg struct {
 	Model            Dialog
@@ -66,6 +67,8 @@ type Manager interface {
 	// visiting bottom to top. Unlike TopDialog it also sees dialogs buried
 	// under other dialogs, e.g. a plan browser under a help dialog.
 	HasDialog(pred func(Dialog) bool) bool
+	// TakeBackgroundDialogs removes matching attention dialogs in bottom-to-top order.
+	TakeBackgroundDialogs(pred func(tea.Msg) bool) []OpenDialogMsg
 }
 
 // dialogEntry pairs a dialog with its drag offset so the two stay in sync.
@@ -416,4 +419,19 @@ func (d *manager) GetLayers() []*lipgloss.Layer {
 	}
 
 	return layers
+}
+
+func (d *manager) TakeBackgroundDialogs(pred func(tea.Msg) bool) []OpenDialogMsg {
+	var removed []OpenDialogMsg
+	d.stack = slices.DeleteFunc(d.stack, func(entry dialogEntry) bool {
+		if entry.originatingEvent == nil || !pred(entry.originatingEvent) {
+			return false
+		}
+		removed = append(removed, OpenDialogMsg{Model: entry.dialog, OriginatingEvent: entry.originatingEvent})
+		return true
+	})
+	if len(removed) > 0 {
+		d.drag.active = false
+	}
+	return removed
 }

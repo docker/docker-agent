@@ -1,15 +1,73 @@
 package vertexai
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
+
+func TestOpenAIClientRefreshesToken(t *testing.T) {
+	t.Parallel()
+
+	var got []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	calls := 0
+	tokens := func() string {
+		calls++
+		return fmt.Sprintf("token-%d", calls)
+	}
+	client, err := newOpenAIClientWithTokenSource(t.Context(), &latest.ModelConfig{
+		Provider:     "google",
+		Model:        "meta/test-model",
+		ProviderOpts: map[string]any{"publisher": "meta"},
+	}, environment.NewNoEnvProvider(), "test-project", "us-central1", func(context.Context) (string, error) {
+		token := tokens()
+		return token, nil
+	}, options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+		return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			req.URL.Scheme = "http"
+			req.URL.Host = strings.TrimPrefix(server.URL, "http://")
+			return http.DefaultTransport.RoundTrip(req)
+		})
+	}))
+	require.NoError(t, err)
+
+	for range 2 {
+		stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, nil)
+		require.NoError(t, err)
+		for {
+			if _, err := stream.Recv(); err != nil {
+				break
+			}
+		}
+		stream.Close()
+	}
+
+	assert.Equal(t, []string{"Bearer token-2", "Bearer token-3"}, got)
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 func TestIsModelGardenConfig(t *testing.T) {
 	t.Parallel()

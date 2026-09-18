@@ -24,6 +24,7 @@
 package kit
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -46,8 +47,10 @@ import (
 	"github.com/docker/portcullis"
 	"github.com/fatih/color"
 
+	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/paths"
@@ -78,7 +81,7 @@ type Options struct {
 	// and skills to ship.
 	AgentRef string
 
-	// EnvProvider is forwarded to [config.Resolve] so URL-sourced
+	// EnvProvider is forwarded to [sources.Resolve] so URL-sourced
 	// agents can pick up GITHUB_TOKEN. May be nil.
 	EnvProvider environment.Provider
 
@@ -416,7 +419,7 @@ func promote(stagingDir, finalDir string) error {
 }
 
 func loadConfig(ctx context.Context, opts Options) (*latestcfg.Config, error) {
-	source, err := config.Resolve(opts.AgentRef, opts.EnvProvider)
+	source, err := sources.Resolve(opts.AgentRef, opts.EnvProvider)
 	if err != nil {
 		return nil, err
 	}
@@ -518,6 +521,10 @@ func localSkillFilter(cfg *latestcfg.Config) (map[string]bool, bool) {
 // surfaces through the live mount and the host-home one is staged
 // into the kit, exactly mirroring the runtime [promptfiles.Paths]
 // behaviour that returns up to two paths.
+//
+// The nested files listed by add_prompt_files_depth are not staged: they
+// live under workspace by construction and are read on demand through the
+// live mount.
 func stagePromptFiles(kitDir string, cfg *latestcfg.Config, hostCwd, hostHome, workspace string) ([]Entry, []Redaction, error) {
 	target := filepath.Join(kitDir, promptfiles.KitSubdir)
 	if err := os.MkdirAll(target, 0o750); err != nil {
@@ -781,7 +788,7 @@ func writeManifest(dir string, m Manifest) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, manifestFile), data, 0o600)
+	return atomicfile.Write(filepath.Join(dir, manifestFile), bytes.NewReader(data), 0o600)
 }
 
 // PrintSummary writes a human-readable description of what was staged

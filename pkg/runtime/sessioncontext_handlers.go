@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,14 +13,14 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
 )
 
-func (r *LocalRuntime) handleListSessions(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleListSessions(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	if r.sessionStore == nil {
 		return tools.ResultError("session history is not available in this runtime"), nil
 	}
 
 	var args sessioncontext.ListSessionsArgs
 	if strings.TrimSpace(toolCall.Function.Arguments) != "" {
-		if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+		if err := tools.UnmarshalToolArguments(ctx, toolCall, &args); err != nil {
 			return nil, fmt.Errorf("invalid arguments: %w", err)
 		}
 	}
@@ -52,13 +51,13 @@ func (r *LocalRuntime) handleListSessions(ctx context.Context, sess *session.Ses
 	return tools.ResultJSON(infos), nil
 }
 
-func (r *LocalRuntime) handleReadSession(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleReadSession(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, _ EventSink, _ tools.Runtime) (*tools.ToolCallResult, error) {
 	if r.sessionStore == nil {
 		return tools.ResultError("session history is not available in this runtime"), nil
 	}
 
 	var args sessioncontext.ReadSessionArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 	ref := strings.TrimSpace(args.SessionID)

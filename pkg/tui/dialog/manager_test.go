@@ -3,6 +3,7 @@ package dialog
 import (
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -139,4 +140,39 @@ func TestManagerClosePlanDetail(t *testing.T) {
 			return ok && viewer.PlanRef() == ref
 		}), "the buried detail stays open")
 	})
+}
+
+func TestTakeBackgroundDialogsPreservesOrderAndOtherLayers(t *testing.T) {
+	t.Parallel()
+	mgr := New().(*manager)
+	first, second := new(int), new(int)
+	modal := NewExitConfirmationDialog()
+	one := NewElicitationDialog("one", nil, nil)
+	two := NewElicitationDialog("two", nil, nil)
+	mgr.handleOpen(OpenDialogMsg{Model: one, OriginatingEvent: first})
+	mgr.handleOpen(OpenDialogMsg{Model: modal})
+	mgr.handleOpen(OpenDialogMsg{Model: two, OriginatingEvent: second})
+	mgr.drag.active = true
+
+	removed := mgr.TakeBackgroundDialogs(func(tea.Msg) bool { return true })
+	require.Len(t, removed, 2)
+	assert.Same(t, one, removed[0].Model)
+	assert.Same(t, first, removed[0].OriginatingEvent)
+	assert.Same(t, two, removed[1].Model)
+	assert.Same(t, second, removed[1].OriginatingEvent)
+	assert.Same(t, modal, mgr.TopDialog())
+	assert.False(t, mgr.drag.active)
+	assert.Empty(t, mgr.TakeBackgroundDialogs(func(tea.Msg) bool { return true }))
+}
+
+func TestTakeBackgroundDialogsRetainsUnmatchedAttention(t *testing.T) {
+	t.Parallel()
+	mgr := New().(*manager)
+	first, second := new(int), new(int)
+	mgr.handleOpen(OpenDialogMsg{Model: NewElicitationDialog("one", nil, nil), OriginatingEvent: first})
+	mgr.handleOpen(OpenDialogMsg{Model: NewElicitationDialog("two", nil, nil), OriginatingEvent: second})
+	removed := mgr.TakeBackgroundDialogs(func(event tea.Msg) bool { return event == first })
+	require.Len(t, removed, 1)
+	assert.Same(t, first, removed[0].OriginatingEvent)
+	assert.Same(t, second, mgr.TopBackgroundEvent())
 }

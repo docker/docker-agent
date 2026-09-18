@@ -9,8 +9,12 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
+// TokenSource returns the bearer token for each provider request.
+type TokenSource func(context.Context) (string, error)
+
 type ModelOptions struct {
 	gateway          string
+	encryptedConfig  string
 	structuredOutput *latest.StructuredOutput
 	generatingTitle  bool
 	compacting       bool
@@ -19,11 +23,18 @@ type ModelOptions struct {
 	providers        map[string]latest.ProviderConfig
 	modelsDevStore   *modelsdev.Store
 	transportWrapper func(http.RoundTripper) http.RoundTripper
+	tokenSource      TokenSource
 	openAIVendor     bool
 }
 
 func (c *ModelOptions) Gateway() string {
 	return c.gateway
+}
+
+// EncryptedConfig returns the opaque encrypted agent YAML to forward to a
+// trusted Docker models gateway, or "" when none was set.
+func (c *ModelOptions) EncryptedConfig() string {
+	return c.encryptedConfig
 }
 
 func (c *ModelOptions) StructuredOutput() *latest.StructuredOutput {
@@ -67,6 +78,10 @@ func (c *ModelOptions) OpenAIVendor() bool {
 	return c.openAIVendor
 }
 
+func (c *ModelOptions) TokenSource() TokenSource {
+	return c.tokenSource
+}
+
 // TransportWrapper returns the HTTP transport wrapper function registered via
 // WithHTTPTransportWrapper, or nil if none was set.
 func (c *ModelOptions) TransportWrapper() func(http.RoundTripper) http.RoundTripper {
@@ -107,6 +122,14 @@ func Apply(opts ...Opt) ModelOptions {
 func WithGateway(gateway string) Opt {
 	return func(cfg *ModelOptions) {
 		cfg.gateway = gateway
+	}
+}
+
+// WithEncryptedConfig records the opaque encrypted agent YAML to forward to a
+// trusted Docker models gateway. An empty value is a no-op.
+func WithEncryptedConfig(encryptedConfig string) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.encryptedConfig = encryptedConfig
 	}
 }
 
@@ -172,6 +195,14 @@ func WithOpenAIVendor(v bool) Opt {
 	}
 }
 
+// WithTokenSource configures request-time bearer-token resolution. OpenAI
+// direct clients use it before token_key; gateway and ChatGPT auth stay separate.
+func WithTokenSource(source TokenSource) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.tokenSource = source
+	}
+}
+
 // WithHTTPTransportWrapper registers a function that wraps the HTTP transport
 // used by provider clients (Anthropic, OpenAI, and Gemini with the Gemini API
 // backend). The function receives the transport that docker-agent built
@@ -213,6 +244,9 @@ func FromModelOptions(m ModelOptions) []Opt {
 	if g := m.Gateway(); g != "" {
 		out = append(out, WithGateway(g))
 	}
+	if m.encryptedConfig != "" {
+		out = append(out, WithEncryptedConfig(m.encryptedConfig))
+	}
 	if m.structuredOutput != nil {
 		out = append(out, WithStructuredOutput(m.structuredOutput))
 	}
@@ -236,6 +270,9 @@ func FromModelOptions(m ModelOptions) []Opt {
 	}
 	if m.transportWrapper != nil {
 		out = append(out, WithHTTPTransportWrapper(m.transportWrapper))
+	}
+	if m.tokenSource != nil {
+		out = append(out, WithTokenSource(m.tokenSource))
 	}
 	if m.openAIVendor {
 		out = append(out, WithOpenAIVendor(true))

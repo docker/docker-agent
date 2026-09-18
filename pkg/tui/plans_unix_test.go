@@ -30,7 +30,7 @@ import (
 // leaves the path in place.
 func TestHandlePlanEditorClosed_NoInlineDraftRead(t *testing.T) {
 	t.Parallel()
-	m, svc, _, _ := newPlansTestModel(t)
+	m, svc := newPlansTestModel(t)
 
 	fifo := filepath.Join(t.TempDir(), "draft.md")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
@@ -70,11 +70,11 @@ func TestShowPlanBrowser_FIFOPlanFileDoesNotHang(t *testing.T) {
 	t.Parallel()
 	m, _ := newTestModel(t)
 	sharedDir := t.TempDir()
-	svc := plans.NewService(plan.NewFilesystemStorage(sharedDir), plans.WithSessionDir(t.TempDir()))
+	svc := plans.NewService(plan.NewFilesystemStorage(sharedDir))
 	WithPlansService(svc)(m)
 	sess := session.New()
 	m.application = app.New(t.Context(), stubRuntime{}, sess)
-	m.sessionState = service.NewSessionState(sess)
+	m.activeTab.sessionState = service.NewSessionState(sess)
 
 	mustCreatePlan(t, svc, "good", "content")
 	if err := syscall.Mkfifo(filepath.Join(sharedDir, "wedged.json"), 0o600); err != nil {

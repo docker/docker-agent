@@ -56,7 +56,7 @@ func createProcessGroup(proc *os.Process) (*processGroup, error) {
 	}, nil
 }
 
-func kill(proc *os.Process, pg *processGroup) error {
+func terminateProcess(proc *os.Process, pg *processGroup, _ bool) error {
 	if pg != nil {
 		if pg.processHandle != 0 {
 			_ = windows.CloseHandle(pg.processHandle)

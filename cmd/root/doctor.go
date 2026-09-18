@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	agentsources "github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/telemetry"
@@ -257,7 +258,7 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 	// Agent's auto model, so global model issues must not block it.
 	var agentCfg *latest.Config
 	if agentRef != "" {
-		agentSource, err := config.Resolve(agentRef, env)
+		agentSource, err := agentsources.Resolve(agentRef, env)
 		if err != nil {
 			return nil, err
 		}
@@ -288,7 +289,7 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		autoStatus.Note = "credentials are supplied by the models gateway"
 		// Mirrors the run-time preflight: the Docker AI Gateway authenticates
 		// with the Docker Desktop JWT, not per-provider API keys.
-		if environment.IsTrustedDockerURL(f.runConfig.ModelsGateway) {
+		if environment.IsDockerDomainURL(f.runConfig.ModelsGateway) {
 			if _, ok := findSource(ctx, sources, environment.DockerDesktopTokenEnv); !ok {
 				autoStatus.Usable = false
 				autoIssues = append(autoIssues,

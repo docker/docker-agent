@@ -53,7 +53,7 @@ func TestToolsetDescribe_GatewayRef(t *testing.T) {
 	// Build a GatewayToolset manually to avoid needing Docker or a live registry.
 	inner := NewToolsetCommand("", "docker", []string{"mcp", "gateway", "run"}, nil, "")
 	inner.description = "mcp(ref=github-official)"
-	gt := &GatewayToolset{Toolset: inner, cleanUp: func() error { return nil }}
+	gt := &GatewayToolset{Toolset: inner}
 	assert.Check(t, is.Equal(gt.Describe(), "mcp(ref=github-official)"))
 }
 

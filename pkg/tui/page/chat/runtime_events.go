@@ -32,6 +32,7 @@ import (
 //   - AgentChoiceEvent         → Append text to message
 //   - AgentChoiceReasoningEvent → Append reasoning block
 //   - UserMessageEvent         → Replace loading with user message
+//   - MessageAddedEvent        → Render generated media (local runs only)
 //
 // Tool Events:
 //   - PartialToolCallEvent      → Show tool call in progress
@@ -84,6 +85,7 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	// ===== Content Events =====
 	case *runtime.UserMessageEvent:
 		p.showStartupBanner = false
+		p.consumePendingMessage(msg.Message)
 		return true, p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)
 
 	case *runtime.AgentChoiceEvent:
@@ -91,6 +93,9 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	case *runtime.AgentChoiceReasoningEvent:
 		return true, p.handleAgentChoiceReasoning(msg)
+
+	case *runtime.MessageAddedEvent:
+		return true, p.handleMessageAdded(msg)
 
 	case *runtime.ShellOutputEvent:
 		return true, p.messages.AddShellOutputMessage(msg.Output)
@@ -400,9 +405,13 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	var exitCmd tea.Cmd
 	if p.app.ShouldExitAfterFirstResponse() && p.hasReceivedAssistantContent {
 		slog.Debug("Exit after first response triggered, scheduling delayed exit")
-		exitCmd = tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
-			return msgtypes.ExitAfterFirstResponseMsg{}
-		})
+		routingID, application := p.routingID, p.app
+		exitCmd = p.global(tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+			if routingID == "" {
+				return msgtypes.ExitAfterFirstResponseMsg{}
+			}
+			return GlobalMsg{TabID: routingID, Origin: p, Application: application, Inner: msgtypes.ExitAfterFirstResponseMsg{}}
+		}))
 	}
 
 	return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, queueCmd, exitCmd)
@@ -427,10 +436,7 @@ func (p *chatPage) handlePartialToolCall(msg *runtime.PartialToolCallEvent) tea.
 func (p *chatPage) handleToolCallConfirmation(msg *runtime.ToolCallConfirmationEvent) tea.Cmd {
 	spinnerCmd := p.setWorking(false)
 	toolCmd := p.messages.AddOrUpdateToolCall(msg.AgentName, msg.ToolCall, msg.ToolDefinition, types.ToolStatusConfirmation)
-	dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-		Model:            dialog.NewToolConfirmationDialog(p.ar, msg, p.sessionState),
-		OriginatingEvent: msg,
-	})
+	dialogCmd := p.attentionDialogCmd(msg)
 	return tea.Batch(toolCmd, p.messages.ScrollToBottom(), spinnerCmd, dialogCmd)
 }
 
@@ -480,52 +486,22 @@ func (p *chatPage) handleBudgetExceeded(msg *runtime.BudgetExceededEvent) tea.Cm
 }
 
 func (p *chatPage) handleMaxIterationsReached(msg *runtime.MaxIterationsReachedEvent) tea.Cmd {
-	spinnerCmd := p.setWorking(false)
-	dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-		Model:            dialog.NewMaxIterationsDialog(msg.MaxIterations, p.app),
-		OriginatingEvent: msg,
-	})
-	return tea.Batch(spinnerCmd, dialogCmd)
+	return tea.Batch(p.setWorking(false), p.attentionDialogCmd(msg))
 }
 
 func (p *chatPage) handleElicitationRequest(msg *runtime.ElicitationRequestEvent) tea.Cmd {
-	spinnerCmd := p.setWorking(false)
+	return tea.Batch(p.setWorking(false), p.attentionDialogCmd(msg))
+}
 
-	// Check if this is an OAuth flow by looking at the meta type
-	// Guard against nil Meta map to prevent panic
-	if msg.Meta != nil {
-		if elicitationType, ok := msg.Meta["docker-agent/type"].(string); ok && elicitationType == "oauth_flow" {
-			// OAuth flow - show the OAuth authorization dialog
-			var serverURL string
-			if url, ok := msg.Meta["docker-agent/server_url"].(string); ok {
-				serverURL = url
-			}
-			dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-				Model:            dialog.NewOAuthAuthorizationDialog(p.ctx(), serverURL, p.app, msg.ElicitationID),
-				OriginatingEvent: msg,
-			})
-			return tea.Batch(spinnerCmd, dialogCmd)
-		}
+func (p *chatPage) attentionDialogCmd(event tea.Msg) tea.Cmd {
+	// Hosted pages leave attention delivery to the tab's FIFO in the root Update.
+	if p.routingID != "" {
+		return nil
 	}
-
-	// Check elicitation mode
-	switch msg.Mode {
-	case "url":
-		// URL-based elicitation - show URL dialog
-		dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewURLElicitationDialog(p.ctx(), msg.Message, msg.URL, msg.ElicitationID),
-			OriginatingEvent: msg,
-		})
-		return tea.Batch(spinnerCmd, dialogCmd)
-
-	default:
-		// Form-based elicitation (default) - show form dialog
-		dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewElicitationDialog(msg.Message, msg.Schema, msg.Meta, msg.ElicitationID),
-			OriginatingEvent: msg,
-		})
-		return tea.Batch(spinnerCmd, dialogCmd)
-	}
+	return core.CmdHandler(dialog.OpenDialogMsg{
+		Model:            dialog.NewAttentionDialog(p.ctx(), p.ar, p.app, p.sessionState, event),
+		OriginatingEvent: event,
+	})
 }
 
 // isSuccessfulStop returns true when the stream reason indicates a

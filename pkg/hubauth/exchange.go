@@ -61,7 +61,7 @@ var errTransient = errors.New("temporary failure")
 // store nor reach the real Hub.
 var (
 	lookupCredentials = dockerConfigCredentials
-	httpClient        = &http.Client{
+	httpClient        = &http.Client{ //rubocop:disable Lint/HTTPClientTransport // no-redirect client for PAT; default transport is correct
 		// A redirect would resend the PAT to another host.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse

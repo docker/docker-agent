@@ -31,10 +31,11 @@ func (t *ToolSet) Name() string {
 func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	return []tools.Tool{
 		{
-			Name:        ToolNameHandoff,
-			Category:    "handoff",
-			Description: "Use this function to hand off the conversation to the selected agent.",
-			Parameters:  tools.MustSchemaFor[Args](),
+			Name:           ToolNameHandoff,
+			RuntimeHandler: ToolNameHandoff,
+			Category:       "handoff",
+			Description:    "Use this function to hand off the conversation to the selected agent.",
+			Parameters:     tools.MustSchemaFor[Args](),
 			Annotations: tools.ToolAnnotations{
 				ReadOnlyHint: true,
 				Title:        "Handoff Conversation",

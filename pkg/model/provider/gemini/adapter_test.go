@@ -1,9 +1,11 @@
 package gemini
 
 import (
+	"fmt"
 	"io"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
 
@@ -182,4 +184,192 @@ func TestStreamAdapter_FunctionCalls(t *testing.T) {
 		// Should NOT include tool calls in final message (to avoid duplication)
 		require.Empty(t, finalResp.Choices[0].Delta.ToolCalls)
 	})
+}
+
+func TestStreamAdapter_GeneratedImage(t *testing.T) {
+	t.Parallel()
+
+	t.Run("inline image-only chunk is forwarded as Delta.Media", func(t *testing.T) {
+		imgBytes := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a}
+		mockResp := &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{
+				{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{
+								InlineData: &genai.Blob{
+									Data:        imgBytes,
+									MIMEType:    "image/png",
+									DisplayName: "cat.png",
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+			fn(mockResp, nil)
+		}
+		adapter := NewStreamAdapter(iter, "test-model", true)
+
+		// A chunk carrying only inline media (no text, no function calls, no
+		// usage) must still be forwarded rather than dropped by the run()
+		// content gate.
+		resp, err := adapter.Recv()
+		require.NoError(t, err)
+		require.Len(t, resp.Choices[0].Delta.Media, 1, "image-only chunk must be forwarded")
+		assert.Equal(t, imgBytes, resp.Choices[0].Delta.Media[0].Data)
+		assert.Equal(t, "image/png", resp.Choices[0].Delta.Media[0].MimeType)
+		assert.Equal(t, "cat.png", resp.Choices[0].Delta.Media[0].Name)
+		assert.Equal(t, int64(len(imgBytes)), resp.Choices[0].Delta.Media[0].Size)
+		assert.Empty(t, resp.Choices[0].Delta.Content, "no text was in this chunk")
+
+		// The synthesized done event must still report a normal stop —
+		// generated media does not change finish-reason handling.
+		done, err := adapter.Recv()
+		require.NoError(t, err)
+		assert.Equal(t, chat.FinishReasonStop, done.Choices[0].FinishReason)
+	})
+
+	t.Run("text and inline image in the same chunk both surface", func(t *testing.T) {
+		imgBytes := []byte{0x01, 0x02, 0x03}
+		mockResp := &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{
+				{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{Text: "here you go"},
+							{InlineData: &genai.Blob{Data: imgBytes, MIMEType: "image/jpeg"}},
+						},
+					},
+				},
+			},
+		}
+
+		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+			fn(mockResp, nil)
+		}
+		adapter := NewStreamAdapter(iter, "test-model", true)
+
+		resp, err := adapter.Recv()
+		require.NoError(t, err)
+		assert.Equal(t, "here you go", resp.Choices[0].Delta.Content, "text handling must remain intact alongside media")
+		require.Len(t, resp.Choices[0].Delta.Media, 1)
+		assert.Equal(t, imgBytes, resp.Choices[0].Delta.Media[0].Data)
+		assert.Equal(t, "image/jpeg", resp.Choices[0].Delta.Media[0].MimeType)
+		// Provider omitted a display name; the adapter must not invent one —
+		// that is the runtime accumulator's job.
+		assert.Empty(t, resp.Choices[0].Delta.Media[0].Name)
+	})
+
+	t.Run("empty inline data is not surfaced as media", func(t *testing.T) {
+		// A Blob with zero bytes must not produce a spurious empty Media
+		// delta (and, since it carries no text either, must not be
+		// forwarded as a chunk at all).
+		mockResp := &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{
+				{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{InlineData: &genai.Blob{Data: nil, MIMEType: "image/png"}},
+						},
+					},
+				},
+			},
+		}
+
+		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+			fn(mockResp, nil)
+		}
+		adapter := NewStreamAdapter(iter, "test-model", true)
+
+		// Nothing at all was produced (no text, no media, no tool calls, no
+		// usage), so the stream ends directly with EOF — same as any other
+		// content-free chunk, no synthesized done event.
+		_, err := adapter.Recv()
+		require.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("multiple inline blobs across parts and candidates in one chunk are all retained", func(t *testing.T) {
+		// Gemini can pack more than one generated blob into a single chunk:
+		// multiple parts within a candidate, and/or multiple candidates.
+		// Every blob must survive, not just the last one seen.
+		mockResp := &genai.GenerateContentResponse{
+			Candidates: []*genai.Candidate{
+				{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{InlineData: &genai.Blob{Data: []byte{0x01}, MIMEType: "image/png", DisplayName: "first.png"}},
+							{InlineData: &genai.Blob{Data: []byte{0x02}, MIMEType: "image/jpeg", DisplayName: "second.jpg"}},
+						},
+					},
+				},
+				{
+					Content: &genai.Content{
+						Parts: []*genai.Part{
+							{InlineData: &genai.Blob{Data: []byte{0x03}, MIMEType: "image/webp", DisplayName: "third.webp"}},
+						},
+					},
+				},
+			},
+		}
+
+		iter := func(fn func(*genai.GenerateContentResponse, error) bool) {
+			fn(mockResp, nil)
+		}
+		adapter := NewStreamAdapter(iter, "test-model", true)
+
+		resp, err := adapter.Recv()
+		require.NoError(t, err)
+		require.Len(t, resp.Choices[0].Delta.Media, 3, "every blob in the chunk must be retained")
+		assert.Equal(t, "first.png", resp.Choices[0].Delta.Media[0].Name)
+		assert.Equal(t, "second.jpg", resp.Choices[0].Delta.Media[1].Name)
+		assert.Equal(t, "third.webp", resp.Choices[0].Delta.Media[2].Name)
+	})
+}
+
+func TestStreamAdapter_SignatureOnlyChunk(t *testing.T) {
+	t.Parallel()
+
+	for _, toolCall := range []bool{false, true} {
+		t.Run(fmt.Sprintf("toolCall=%t", toolCall), func(t *testing.T) {
+			t.Parallel()
+			part := genai.NewPartFromText("hello")
+			if toolCall {
+				part = genai.NewPartFromFunctionCall("test_function", nil)
+			}
+			signature := []byte("signature")
+			adapter := NewStreamAdapter(func(yield func(*genai.GenerateContentResponse, error) bool) {
+				for _, p := range []*genai.Part{part, {ThoughtSignature: signature}} {
+					if !yield(&genai.GenerateContentResponse{
+						Candidates: []*genai.Candidate{{Content: &genai.Content{Parts: []*genai.Part{p}}}},
+					}, nil) {
+						return
+					}
+				}
+			}, "gemini-3.8-flash", true)
+			t.Cleanup(adapter.Close)
+
+			_, err := adapter.Recv()
+			require.NoError(t, err)
+			response, err := adapter.Recv()
+			require.NoError(t, err)
+			assert.Equal(t, signature, response.Choices[0].Delta.ThoughtSignature)
+			assert.Empty(t, response.Choices[0].FinishReason)
+
+			done, err := adapter.Recv()
+			require.NoError(t, err)
+			wantReason := chat.FinishReasonStop
+			if toolCall {
+				wantReason = chat.FinishReasonToolCalls
+			}
+			assert.Equal(t, wantReason, done.Choices[0].FinishReason)
+			assert.Empty(t, done.Choices[0].Delta.ToolCalls)
+			assert.Empty(t, done.Choices[0].Delta.ThoughtSignature)
+			_, err = adapter.Recv()
+			require.ErrorIs(t, err, io.EOF)
+		})
+	}
 }

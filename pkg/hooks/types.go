@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
 // EventType identifies a hook event.
@@ -189,6 +190,32 @@ const (
 	// Tool-scoped: matchers select which tools the hook runs against,
 	// like pre_tool_use / post_tool_use.
 	EventToolResponseTransform EventType = "tool_response_transform"
+	// EventToolInputTransform fires before every tool call, ahead of the
+	// deterministic approval pipeline (--yolo, permission patterns,
+	// safety mode) and of tool_guard. Hooks run sequentially, each
+	// seeing the preceding rewrite, and may patch tool arguments via
+	// [HookSpecificOutput.UpdatedInput] exactly like pre_tool_use. Its
+	// only job is rewriting: verdicts belong on tool_guard. Failures
+	// follow the hook's on_error policy (default warn) — the runtime
+	// honours an explicit block. The redact_secrets builtin's
+	// argument-scrubbing leg is auto-injected here.
+	//
+	// Tool-scoped: matchers select which tools the hook runs against.
+	EventToolInputTransform EventType = "tool_input_transform"
+	// EventToolGuard fires after tool_input_transform and before the
+	// deterministic approval pipeline, so its verdict cannot be bypassed
+	// by --yolo or permission allow-rules. Hooks run concurrently and
+	// their [HookSpecificOutput.PermissionDecision] verdicts aggregate to
+	// the most restrictive (Deny > Ask > Allow) in [Result.Decision].
+	// Deny is terminal; Ask forces the user prompt even when the session
+	// already allowed the tool; Allow is advisory (the pipeline still
+	// runs). [HookSpecificOutput.Metadata] is merged into
+	// [Result.Metadata] for the confirmation prompt. UpdatedInput is
+	// ignored — use tool_input_transform to rewrite arguments. Hook
+	// execution failures fail closed like pre_tool_use.
+	//
+	// Tool-scoped: matchers select which tools the hook runs against.
+	EventToolGuard EventType = "tool_guard"
 	// EventWorktreeCreate fires once, just after the CLI creates a git
 	// worktree for a `--worktree` run and before the session starts. The
 	// new working directory is reported in [Input.Cwd] (hooks run there)
@@ -252,6 +279,18 @@ type Input struct {
 	// model-call-scoped.
 	ModelID string `json:"model_id,omitempty"`
 
+	// ModelCapabilities is the resolved attachment-capability set for
+	// [Input.ModelID], with any explicit `capabilities:` config override
+	// already applied — the same resolution providers use for attachment
+	// routing (see modelinfo.ResolveCapsFromModel). Like ModelID it is
+	// populated by the loop, but only for in-process before_llm_call
+	// message transforms; nil for every other event and for dispatch
+	// paths with no capability information (e.g. coding-harness labels).
+	// Capability-gated transforms must consume it instead of re-querying
+	// models.dev, which would ignore config overrides. Excluded from the
+	// JSON payload: cross-process hooks never see it.
+	ModelCapabilities *modelinfo.ModelCapabilities `json:"-"`
+
 	// Iteration is the 1-based run-loop iteration counter for the
 	// model call this dispatch is gating. Populated for
 	// [EventBeforeLLMCall] (1 for the first call of the RunStream, 2
@@ -267,8 +306,9 @@ type Input struct {
 	LastUserMessage string `json:"last_user_message,omitempty"`
 
 	// Tool-related fields (PreToolUse, PostToolUse, PermissionRequest,
-	// ToolResponseTransform). ToolCategory identifies the dispatching tool's
-	// category for builtins that target whole toolsets.
+	// ToolInputTransform, ToolGuard, ToolResponseTransform). ToolCategory
+	// identifies the dispatching tool's category for builtins that target
+	// whole toolsets.
 	ToolCategory string         `json:"tool_category,omitempty"`
 	ToolName     string         `json:"tool_name,omitempty"`
 	ToolUseID    string         `json:"tool_use_id,omitempty"`
@@ -298,10 +338,10 @@ type Input struct {
 	// applies the rewrite before the actual provider call.
 	Messages []chat.Message `json:"messages,omitempty"`
 
-	// SessionStart specific: "startup", "resume", "clear", "compact".
+	// SessionStart specific: "startup".
 	// PreCompact specific: "manual", "auto", "overflow", "tool_overflow".
 	Source string `json:"source,omitempty"`
-	// SessionEnd specific: "clear", "logout", "prompt_input_exit", "other".
+	// SessionEnd specific: "stream_ended".
 	// TurnEnd specific: "normal", "continue", "steered", "error",
 	// "canceled", "hook_blocked", "loop_detected".
 	Reason string `json:"reason,omitempty"`
@@ -532,11 +572,13 @@ type HookSpecificOutput struct {
 	HookEventName EventType `json:"hook_event_name,omitempty"`
 
 	// PreToolUse fields.
-	PermissionDecision       Decision       `json:"permission_decision,omitempty"`
-	PermissionDecisionReason string         `json:"permission_decision_reason,omitempty"`
-	UpdatedInput             map[string]any `json:"updated_input,omitempty"`
+	PermissionDecision       Decision `json:"permission_decision,omitempty"`
+	PermissionDecisionReason string   `json:"permission_decision_reason,omitempty"`
 
-	// PostToolUse / SessionStart / TurnStart / Stop fields.
+	// UpdatedInput is a top-level patch; omitted keys are preserved.
+	UpdatedInput map[string]any `json:"updated_input,omitempty"`
+
+	// Context-contributing events (see EventContract).
 	AdditionalContext  string               `json:"additional_context,omitempty"`
 	InstructionContext []InstructionContext `json:"instruction_context,omitempty"`
 
@@ -552,9 +594,8 @@ type HookSpecificOutput struct {
 	// scrubbing outbound chat content. Hooks for other events should
 	// leave it nil; aggregate() only honours it for before_llm_call.
 	//
-	// First non-empty wins when multiple before_llm_call hooks return
-	// rewrites concurrently — see aggregate(). Compose multiple
-	// rewriters into a single hook if you need them to chain.
+	// Hooks run in config order; each sees the preceding rewrite.
+	// The last non-empty rewrite is returned to the runtime.
 	UpdatedMessages []chat.Message `json:"updated_messages,omitempty"`
 
 	// UpdatedToolResponse, when non-nil on a
@@ -564,15 +605,14 @@ type HookSpecificOutput struct {
 	// call. Pointer-typed so an explicit empty string ("clear the
 	// output") is distinguishable from "don't touch it" (nil).
 	//
-	// First non-nil wins when multiple tool_response_transform hooks
-	// return rewrites concurrently — see aggregate(). Compose multiple
-	// rewriters into a single hook if you need them to chain.
+	// Hooks run in config order; each sees the preceding rewrite.
+	// The last non-nil rewrite, including an empty string, is returned.
 	UpdatedToolResponse *string `json:"updated_tool_response,omitempty"`
 
 	// Metadata is a set of key/value annotations a
-	// [EventPermissionRequest] hook contributes to the tool-call
-	// confirmation prompt. The runtime merges it onto the tool's own
-	// metadata before emitting the confirmation event, so clients (TUI,
+	// [EventPermissionRequest] or [EventToolGuard] hook contributes to
+	// the tool-call confirmation prompt. The runtime merges it onto the
+	// tool's own metadata before emitting the confirmation event, so clients (TUI,
 	// HTTP) can render extra per-call context. Keys from multiple hooks
 	// are merged; on a key clash the last hook in config order wins (see
 	// aggregate()). Ignored on every other event.
@@ -589,7 +629,8 @@ type Result struct {
 	PermissionAllowed bool
 	// Message is feedback to include in the response.
 	Message string
-	// ModifiedInput contains modifications to tool input (PreToolUse).
+	// ModifiedInput is the complete tool input after applying PreToolUse
+	// or ToolInputTransform patches. Nil means no hook supplied a patch.
 	ModifiedInput map[string]any
 	// AdditionalContext is context added by the hooks.
 	AdditionalContext  string
@@ -619,21 +660,21 @@ type Result struct {
 	UpdatedToolResponse *string
 
 	// Metadata aggregates the key/value annotations contributed by
-	// [EventPermissionRequest] hooks. The runtime merges it onto the
-	// tool's own metadata when emitting the tool-call confirmation
-	// event. nil when no hook supplied any.
+	// [EventPermissionRequest] and [EventToolGuard] hooks. The runtime
+	// merges it onto the tool's own metadata when emitting the tool-call
+	// confirmation event. nil when no hook supplied any.
 	Metadata map[string]string
 
-	// Decision is the most-restrictive PreToolUse verdict reported by
-	// any matching hook in the chain ("" when no hook produced one).
-	// Most-restrictive ordering: Deny > Ask > Allow > "".
+	// Decision is the most-restrictive PreToolUse or ToolGuard verdict
+	// reported by any matching hook in the chain ("" when no hook
+	// produced one). Most-restrictive ordering: Deny > Ask > Allow > "".
 	//
 	// The runtime's tool-approval flow consults this BEFORE asking the
 	// user, so an LLM-judge hook that returns Allow can auto-approve a
 	// call that would otherwise prompt, and Ask can force a prompt for
 	// a call that would otherwise auto-run.
 	//
-	// Always empty for non-PreToolUse events.
+	// Always empty for events other than pre_tool_use and tool_guard.
 	Decision Decision
 	// DecisionReason is the human-readable rationale paired with
 	// Decision (the reason from the most-restrictive hook). Empty when

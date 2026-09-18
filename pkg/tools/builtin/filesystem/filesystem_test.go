@@ -3,7 +3,6 @@ package filesystem
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -179,12 +179,7 @@ func TestFilesystemTool_ReadFile(t *testing.T) {
 		Path: "nonexistent.txt",
 	})
 	require.NoError(t, err)
-	assert.Contains(t, result.Output, "not found")
-	// The hint must name the resolved path and the working directory so the
-	// model can correct a wrong base instead of retrying the same path.
-	// %q-quoted, so Windows separators appear escaped in the output.
-	assert.Contains(t, result.Output, fmt.Sprintf("%q", filepath.Join(tmpDir, "nonexistent.txt")))
-	assert.Contains(t, result.Output, fmt.Sprintf("%q", tmpDir))
+	assert.Equal(t, "not found", result.Output)
 }
 
 // TestFilesystemTool_ReadFile_LineRange is a regression test for issue
@@ -407,7 +402,7 @@ func TestFilesystemTool_ReadImageFile(t *testing.T) {
 	result, err = tool.handleReadFile(t.Context(), ReadFileArgs{Path: "missing.png"})
 	require.NoError(t, err)
 	assert.True(t, result.IsError)
-	assert.Contains(t, result.Output, "not found")
+	assert.Equal(t, "not found", result.Output)
 }
 
 func TestFilesystemTool_ReadMultipleFiles(t *testing.T) {
@@ -462,7 +457,7 @@ func TestFilesystemTool_ListDirectory(t *testing.T) {
 		Path: "nonexistent",
 	})
 	require.NoError(t, err)
-	assert.Contains(t, result.Output, "not found")
+	assert.Contains(t, result.Output, "Error reading directory")
 }
 
 // TestFilesystemTool_ListDirectoryEmpty pins the empty-directory message:
@@ -924,6 +919,64 @@ func TestFilesystemTool_SearchFilesContent_SkipsBinaryFiles(t *testing.T) {
 	assert.NotContains(t, result.Output, "program.bin")
 	assert.NotContains(t, result.Output, "doc.pdf")
 	assert.Equal(t, SearchFilesContentMeta{MatchCount: 1, FileCount: 1}, result.Meta)
+}
+
+// TestFilesystemTool_SearchFilesContent_LineNumbering verifies that line
+// numbers in results are 1-based and correct across a variety of file shapes.
+func TestFilesystemTool_SearchFilesContent_LineNumbering(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tool := New(tmpDir)
+
+	// File with a trailing newline: "a\nb\n" has 3 segments from Split("\n")
+	// but only 2 real lines. The trailing empty segment must not produce a
+	// phantom line-3 match when searching for an empty string.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "trailing.txt"), []byte("alpha\nbeta\n"), 0o644))
+	// File without trailing newline.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "notrailing.txt"), []byte("gamma\ndelta"), 0o644))
+	// Empty file: should produce no matches.
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "empty.txt"), []byte(""), 0o644))
+
+	// Literal match: check 1-based line numbers.
+	res, err := tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:  ".",
+		Query: "beta",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, res.Output, "trailing.txt:2:")
+	assert.NotContains(t, res.Output, "trailing.txt:3:")
+	assert.NotContains(t, res.Output, "empty.txt")
+
+	res, err = tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:  ".",
+		Query: "delta",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, res.Output, "notrailing.txt:2:")
+}
+
+// TestFilesystemTool_SearchFilesContent_RegexEmptyLine verifies that the ^$
+// regex matches blank lines (including those produced by trailing newlines)
+// with correct 1-based numbering.
+func TestFilesystemTool_SearchFilesContent_RegexEmptyLine(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tool := New(tmpDir)
+
+	// "line1\n\nline3\n" → segments: "line1", "", "line3", ""
+	// ^$ matches segments 2 and 4 (lines 2 and 4).
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "gaps.txt"), []byte("line1\n\nline3\n"), 0o644))
+
+	res, err := tool.handleSearchFilesContent(t.Context(), SearchFilesContentArgs{
+		Path:    ".",
+		Query:   `^$`,
+		IsRegex: true,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, res.Output, "gaps.txt:2:")
+	assert.Contains(t, res.Output, "gaps.txt:4:")
+	assert.NotContains(t, res.Output, "gaps.txt:1:")
+	assert.NotContains(t, res.Output, "gaps.txt:3:")
 }
 
 func TestIsBinaryContent(t *testing.T) {
@@ -1646,4 +1699,40 @@ func TestFilesystemTool_EditFileHandlerRefusesWellFormedEmptyOldText(t *testing.
 	after, err := os.ReadFile(filepath.Join(tmpDir, "f.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, original, string(after))
+}
+
+// BenchmarkSearchFilesContent_Batch measures per-file line scanning cost with
+// 40 files × 2000 lines (literal + regex), where strings.SplitSeq avoids
+// allocating the full []string. Run with -bench=. -benchmem to compare.
+func BenchmarkSearchFilesContent_Batch(b *testing.B) {
+	root := b.TempDir()
+	var sb strings.Builder
+	for i := range 2000 {
+		if i%97 == 0 {
+			sb.WriteString("func handleNeedle(ctx context.Context) error { return nil }\n")
+		} else {
+			sb.WriteString("\tresult = append(result, computeValue(index, offset+1)) // filler\n")
+		}
+	}
+	content := []byte(sb.String())
+	for i := range 40 {
+		name := filepath.Join(root, "file"+strconv.Itoa(i)+".go")
+		require.NoError(b, os.WriteFile(name, content, 0o644))
+	}
+	tool := New(root)
+	b.Cleanup(func() { _ = tool.Close() })
+	ctx := b.Context()
+	queries := []SearchFilesContentArgs{
+		{Path: ".", Query: "handleNeedle"},
+		{Path: ".", Query: `func handle\w+\(`, IsRegex: true},
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		for _, q := range queries {
+			res, err := tool.handleSearchFilesContent(ctx, q)
+			if err != nil || res.IsError {
+				b.Fatal(err, res.Output)
+			}
+		}
+	}
 }

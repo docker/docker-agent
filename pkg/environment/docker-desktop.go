@@ -14,6 +14,17 @@ const (
 	DockerDesktopTokenEnv = "DOCKER_TOKEN"
 )
 
+// IsDockerDomainURL reports whether rawURL targets docker.com or one of its
+// subdomains over HTTPS.
+func IsDockerDomainURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "docker.com" || strings.HasSuffix(host, ".docker.com")
+}
+
 // IsTrustedDockerURL checks if the URL targets a domain trusted to receive
 // the Docker Desktop JWT. It matches:
 //   - "docker.com" and any subdomain (e.g. "desktop.docker.com") over HTTPS only
@@ -32,10 +43,7 @@ func IsTrustedDockerURL(rawURL string) bool {
 	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
 		return true
 	}
-	if u.Scheme != "https" {
-		return false
-	}
-	return host == "docker.com" || strings.HasSuffix(host, ".docker.com")
+	return IsDockerDomainURL(rawURL)
 }
 
 type DockerDesktopProvider struct{}

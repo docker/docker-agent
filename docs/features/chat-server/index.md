@@ -194,24 +194,7 @@ $ docker agent serve chat agent.yaml --cors-origin https://my-ui.example.com
 docker agent serve chat <agent-file>|<registry-ref> [flags]
 ```
 
-| Flag                          | Default            | Description                                                                                                       |
-| ----------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `-a, --agent <name>`          | (all agents)       | Name of the agent to expose. If omitted, every agent in the config is exposed as a separate model.                |
-| `-l, --listen <addr>`         | `127.0.0.1:8083`   | Address to listen on.                                                                                             |
-| `--cors-origin <origin>`      | (none)             | Allowed CORS origin (e.g. `https://example.com`). Empty disables CORS.                                            |
-| `--api-key <token>`           | (none)             | Required Bearer token clients must present (`Authorization: Bearer <token>`). Empty disables auth.                |
-| `--api-key-env <name>`        | (none)             | Read the required API key from this non-empty environment variable.                                               |
-| `--insecure-no-auth`          | `false`            | Permit unauthenticated non-loopback binding. Use only behind a trusted authentication boundary.                  |
-| `--safety <policy>`           | `restricted`       | Tool safety policy. CLI value overrides agent/runtime configuration.                                               |
-| `--max-request-size <bytes>`  | `1048576` (1 MiB)  | Maximum request body size in bytes. Requests whose body exceeds this limit are rejected with HTTP 413 (Request Entity Too Large) — see [Troubleshooting: HTTP 413](../../community/troubleshooting/index.md#http-413-request-body-too-large) if you hit this. |
-| `--request-timeout <dur>`     | `5m`               | Per-request timeout (covers model + tool calls + streaming).                                                      |
-| `--conversations-max <n>`     | `0`                | Cache up to N conversations server-side, keyed by `X-Conversation-Id`. `0` disables — clients must resend history. |
-| `--conversation-ttl <dur>`    | `30m`              | Idle TTL after which a cached conversation is evicted.                                                            |
-| `--max-idle-runtimes <n>`     | `4`                | Maximum number of idle runtimes pooled per agent. `0` disables pooling.                                           |
-
-All [runtime configuration flags](../cli/index.md#runtime-configuration-flags)
-(`--working-dir`, `--env-from-file`, `--models-gateway`, `--hook-*`, …) are
-also accepted.
+See the [CLI reference](../cli/index.md#docker-agent-serve-chat) for all flags, defaults, and shared runtime options.
 
 > [!NOTE]
 > **What `--max-request-size` does and doesn't cover**

@@ -513,6 +513,14 @@ func TestEvalCriteriaUnmarshalJSON(t *testing.T) {
 			},
 		},
 		{
+			name:  "valid with assertions",
+			input: `{"relevance":[],"assertions":[{"name":"has greeting","type":"contains","value":"hello"}]}`,
+			want: EvalCriteria{
+				Relevance:  []string{},
+				Assertions: []Assertion{{Name: "has greeting", Type: "contains", Value: "hello"}},
+			},
+		},
+		{
 			name:  "empty object",
 			input: `{}`,
 			want:  EvalCriteria{},

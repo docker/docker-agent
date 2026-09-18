@@ -112,7 +112,7 @@ func newCompactTestModel(t *testing.T, rt runtime.Runtime, sess *session.Session
 	t.Helper()
 	m, _ := newTestModel(t)
 	m.application = app.New(t.Context(), rt, sess)
-	page := m.chatPage.(*mockChatPage)
+	page := m.activeTab.chatPage.(*mockChatPage)
 	return m, page
 }
 

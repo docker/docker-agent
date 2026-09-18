@@ -33,6 +33,10 @@ type skillFakeRuntime struct {
 	calls    []skillstool.RunSkillArgs
 	emitted  []runtime.Event
 	stopCall atomic.Bool
+	// skipStop, when true, omits the unconditional StreamStoppedEvent this
+	// mock otherwise emits — used by the #4136 regression tests below to
+	// exercise RunSkillFork's own channel-close fallback.
+	skipStop bool
 }
 
 func (f *skillFakeRuntime) CurrentAgentSkillsToolset() *skillstool.ToolSet {
@@ -43,13 +47,17 @@ func (f *skillFakeRuntime) RunSkillFork(_ context.Context, sess *session.Session
 	f.mu.Lock()
 	f.calls = append(f.calls, args)
 	emitted := f.emitted
+	skipStop := f.skipStop
 	f.mu.Unlock()
 
 	for _, ev := range emitted {
 		sink.Emit(ev)
 	}
-	// Always emit StreamStoppedEvent so the App's drain loop terminates.
-	sink.Emit(runtime.StreamStopped(sess.ID, "", ""))
+	if !skipStop {
+		// Emit StreamStoppedEvent so the App's drain loop terminates without
+		// relying on its own #4136 fallback (see skipStop for the opposite).
+		sink.Emit(runtime.StreamStopped(sess.ID, "", ""))
+	}
 	f.stopCall.Store(true)
 	return tools.ResultSuccess("done"), nil
 }
@@ -220,7 +228,9 @@ func TestApp_SlashSkill_NonFork_E2E(t *testing.T) {
 	resolved := a.ResolveInput(ctx, input)
 	require.Contains(t, resolved, `<skill name="review">`)
 	require.Contains(t, resolved, "User's request: carefully")
-	require.Contains(t, resolved, "HELLO_FROM_SKILL", "local skill placeholders must be expanded")
+	// A slash command is resolved synchronously inside the UI loop, so an
+	// embedded command cannot be approved and is reported as skipped.
+	require.Contains(t, resolved, "[error executing `echo HELLO_FROM_SKILL`")
 	require.Contains(t, resolved, "Please review the staged changes.")
 
 	runCtx, cancel := context.WithCancel(ctx)
@@ -239,9 +249,75 @@ func TestApp_SlashSkill_NonFork_E2E(t *testing.T) {
 	assert.Equal(t, chat.MessageRoleUser, last.Message.Role)
 	assert.Contains(t, last.Message.Content, `<skill name="review">`)
 	assert.Contains(t, last.Message.Content, "Please review the staged changes.")
-	assert.Contains(t, last.Message.Content, "HELLO_FROM_SKILL")
+	assert.Contains(t, last.Message.Content, "[error executing `echo HELLO_FROM_SKILL`")
 	assert.Contains(t, last.Message.Content, "User's request: carefully")
 
 	assert.Empty(t, rt.recordedCalls(), "Runtime.RunSkillFork must not be called for non-fork skills")
 	assert.False(t, rt.stopCall.Load())
+}
+
+// TestApp_RunSkillFork_SynthesizesStreamStoppedWhenMissing is part of the
+// #4136 regression coverage: RunSkillFork's drain loop mirrors
+// forwardRunStreamEvents and has the identical gap. If the runtime's
+// events channel closes without a StreamStoppedEvent (dropped under
+// back-pressure, see LocalRuntime.finalizeEventChannel's non-blocking
+// emit), the App must still synthesize one so the TUI's "Working…"
+// indicator clears.
+func TestApp_RunSkillFork_SynthesizesStreamStoppedWhenMissing(t *testing.T) {
+	t.Parallel()
+
+	skill := writeSkill(t, "commit", true /* fork */, "# Commit\nPlease commit.\n")
+	st := skillstool.New([]skills.Skill{skill}, filepath.Dir(skill.FilePath))
+
+	rt := &skillFakeRuntime{
+		mockRuntime: &mockRuntime{},
+		skillset:    st,
+		skipStop:    true,
+	}
+
+	sess := session.New()
+	a := New(t.Context(), rt, sess)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	a.RunSkillFork(ctx, cancel, "commit", "please commit", nil)
+
+	require.Eventually(t, func() bool { return rt.stopCall.Load() }, time.Second, 10*time.Millisecond,
+		"RunSkillFork goroutine should finish even without an explicit stop event")
+
+	collected := collectUntilQuiet(t, a.events)
+	stops := streamStoppedEvents(collected)
+	require.Len(t, stops, 1, "exactly one StreamStoppedEvent must be synthesized")
+	assert.Equal(t, "normal", stops[0].Reason)
+	assert.Equal(t, sess.ID, stops[0].SessionID,
+		"with no sub-session id ever observed, the fallback must use the parent session's own id")
+	assert.Equal(t, "mock", stops[0].AgentName, "must fall back to Runtime.CurrentAgentName since no event carried one")
+}
+
+// TestApp_RunSkillFork_DoesNotDuplicateRealStreamStopped pins the flip
+// side: a fork run that does emit its own StreamStoppedEvent (the common
+// case) must not also get a synthesized duplicate.
+func TestApp_RunSkillFork_DoesNotDuplicateRealStreamStopped(t *testing.T) {
+	t.Parallel()
+
+	skill := writeSkill(t, "commit", true /* fork */, "# Commit\nPlease commit.\n")
+	st := skillstool.New([]skills.Skill{skill}, filepath.Dir(skill.FilePath))
+
+	rt := &skillFakeRuntime{
+		mockRuntime: &mockRuntime{},
+		skillset:    st,
+	}
+
+	a := New(t.Context(), rt, session.New())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	a.RunSkillFork(ctx, cancel, "commit", "please commit", nil)
+
+	require.Eventually(t, func() bool { return rt.stopCall.Load() }, time.Second, 10*time.Millisecond,
+		"RunSkillFork goroutine should finish")
+
+	collected := collectUntilQuiet(t, a.events)
+	stops := streamStoppedEvents(collected)
+	require.Len(t, stops, 1, "the real StreamStoppedEvent must not be duplicated")
 }

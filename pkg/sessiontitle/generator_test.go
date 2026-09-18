@@ -10,7 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -73,6 +75,28 @@ func streamWithContent(content string) chat.MessageStream {
 		},
 		errAt: -1,
 	}
+}
+
+func TestGenerateOnceUsesTitleHeadroomAndClearsStructuredOutput(t *testing.T) {
+	t.Parallel()
+
+	structured := &latest.StructuredOutput{Schema: map[string]any{"type": "object"}}
+	baseProvider := &mockProvider{
+		id: modelsdev.NewID("google", "gemini-3-flash"),
+		baseCfgFn: func() base.Config {
+			maxTokens := int64(7)
+			return base.Config{
+				ModelConfig:  latest.ModelConfig{MaxTokens: &maxTokens},
+				ModelOptions: options.Apply(options.WithStructuredOutput(structured)),
+			}
+		},
+		createFn: func() (chat.MessageStream, error) { return streamWithContent("Title"), nil },
+	}
+
+	_, err := generateOnce(t.Context(), baseProvider, buildPrompt([]string{"hello"}))
+	require.NoError(t, err)
+	assert.Equal(t, 1, baseProvider.calls, "a failed clone would call the base provider and lose title-specific options")
+	assert.Equal(t, 128, titleMaxTokens)
 }
 
 func TestGenerator_Generate_FallsBackOnStreamCreateError(t *testing.T) {
@@ -188,4 +212,95 @@ func TestGenerator_Generate_FallsBackOnEmptyOutput(t *testing.T) {
 	assert.Equal(t, "Good Title", title)
 	assert.Equal(t, 1, primary.calls)
 	assert.Equal(t, 1, fallback.calls)
+}
+
+// imageOutputProvider is an image-capable title candidate.
+func imageOutputProvider(id modelsdev.ID) *mockProvider {
+	return &mockProvider{
+		id: id,
+		createFn: func() (chat.MessageStream, error) {
+			return nil, errors.New("image-output title attempt failed")
+		},
+		baseCfgFn: func() base.Config {
+			return base.Config{ModelConfig: latest.ModelConfig{
+				OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(true)},
+			}}
+		},
+	}
+}
+
+func TestNew_ImageOutputCandidateFallsThroughOnFailure(t *testing.T) {
+	t.Parallel()
+
+	img := imageOutputProvider(modelsdev.NewID("google", "image-primary"))
+	safe := &mockProvider{
+		id: modelsdev.NewID("safe", "fallback"),
+		createFn: func() (chat.MessageStream, error) {
+			return streamWithContent("Safe Title"), nil
+		},
+	}
+
+	title, err := New(img, safe).Generate(t.Context(), "sess-1", []string{"hello"})
+	require.NoError(t, err)
+	assert.Equal(t, "Safe Title", title)
+	assert.Equal(t, 1, img.calls)
+	assert.Equal(t, 1, safe.calls)
+}
+
+func TestNew_AllImageOutputCandidatesRemainEligible(t *testing.T) {
+	t.Parallel()
+
+	img1 := imageOutputProvider(modelsdev.NewID("google", "image-one"))
+	img2 := &mockProvider{
+		id: modelsdev.NewID("google", "image-two"),
+		createFn: func() (chat.MessageStream, error) {
+			return streamWithContent("Image Model Title"), nil
+		},
+	}
+
+	gen := New(img1, img2)
+	require.NotNil(t, gen)
+	title, err := gen.Generate(t.Context(), "sess-1", []string{"hello"})
+	require.NoError(t, err)
+	assert.Equal(t, "Image Model Title", title)
+	assert.Equal(t, 1, img1.calls)
+	assert.Equal(t, 1, img2.calls)
+}
+
+func TestNew_NoUsableCandidates_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, New())
+	assert.Nil(t, New(nil, nil))
+}
+
+func TestNew_KeepsUndeclaredAndExplicitFalseCandidates(t *testing.T) {
+	t.Parallel()
+
+	undeclared := &mockProvider{
+		id: modelsdev.NewID("safe", "undeclared"),
+		createFn: func() (chat.MessageStream, error) {
+			return streamWithContent("Ordinary Title"), nil
+		},
+	}
+	declaredFalse := &mockProvider{
+		id: modelsdev.NewID("safe", "declared-false"),
+		createFn: func() (chat.MessageStream, error) {
+			return streamWithContent("Fallback Title"), nil
+		},
+		baseCfgFn: func() base.Config {
+			return base.Config{ModelConfig: latest.ModelConfig{
+				OutputCapabilities: &latest.OutputCapabilitiesConfig{Image: new(false)},
+			}}
+		},
+	}
+
+	gen := New(undeclared, declaredFalse)
+	require.NotNil(t, gen)
+
+	title, err := gen.Generate(t.Context(), "sess-1", []string{"hello"})
+	require.NoError(t, err)
+	assert.Equal(t, "Ordinary Title", title)
+	assert.Equal(t, 1, undeclared.calls)
+	assert.Zero(t, declaredFalse.calls)
 }

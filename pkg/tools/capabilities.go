@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"sync"
 
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
@@ -24,10 +25,14 @@ type StartReporter interface {
 }
 
 // PeerDependent is implemented by toolsets whose Start reads from the
-// agent's other toolsets (e.g. the deferred aggregator lists its source
-// toolsets' tools). Callers that start an agent's toolsets concurrently
-// must start these only after every other toolset has settled, or their
-// Start would race the very toolsets it depends on.
+// agent's other toolsets. Callers that start an agent's toolsets
+// concurrently must start these only after every other toolset has
+// settled, or their Start would race the very toolsets it depends on.
+//
+// Note the guarantee is best-effort: a peer whose start is already in
+// flight elsewhere is skipped, not awaited, so a PeerDependent Start must
+// still tolerate a peer that is not ready yet. Prefer resolving peer state
+// lazily, as the deferred toolset does.
 type PeerDependent interface {
 	StartsAfterPeers()
 }
@@ -103,25 +108,94 @@ func GetInstructions(ts ToolSet) string {
 
 // ChangeNotifier is implemented by toolsets that can notify when their
 // tool list changes (e.g. after an MCP ToolListChanged notification).
+// The single handler slot is replaced on every call; hosts that may share
+// a toolset with other runtimes should prefer ChangeSubscriber.
 type ChangeNotifier interface {
 	SetToolsChangedHandler(handler func())
 }
 
-// ConfigureHandlers sets all applicable handlers on a toolset.
-// It checks for Elicitable, Sampleable, SampleableWithTools, and OAuthCapable
-// interfaces and configures them. This is a convenience function that handles
-// the capability checking internally.
+// ChangeSubscriber is implemented by toolsets whose tool-list changes can
+// be observed by any number of hosts at once (one per runtime sharing the
+// toolset). Every subscriber receives every change; unsubscribing removes
+// only that subscription. Handlers must not block.
+type ChangeSubscriber interface {
+	SubscribeToolsChanged(handler func()) (unsubscribe func())
+}
+
+// Subscribers is a concurrency-safe fan-out registry for host callbacks on
+// toolsets shared by several runtimes or streams. Notify snapshots the set
+// under the lock and invokes callbacks outside it, so a callback may
+// subscribe or unsubscribe re-entrantly. The zero value is ready to use.
+type Subscribers[T any] struct {
+	mu     sync.Mutex
+	subs   map[uint64]func(T)
+	nextID uint64
+}
+
+// Subscribe registers cb and returns an idempotent unsubscribe function.
+// A nil cb registers nothing.
+func (s *Subscribers[T]) Subscribe(cb func(T)) (unsubscribe func()) {
+	if cb == nil {
+		return func() {}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.subs == nil {
+		s.subs = make(map[uint64]func(T))
+	}
+	id := s.nextID
+	s.nextID++
+	s.subs[id] = cb
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.subs, id)
+	}
+}
+
+// Notify invokes every current subscriber with v.
+func (s *Subscribers[T]) Notify(v T) {
+	s.mu.Lock()
+	subs := make([]func(T), 0, len(s.subs))
+	for _, cb := range s.subs {
+		subs = append(subs, cb)
+	}
+	s.mu.Unlock()
+
+	for _, cb := range subs {
+		cb(v)
+	}
+}
+
+// ChangeSubscribers backs ChangeSubscriber implementations: a Subscribers
+// registry for argument-less tools-changed handlers.
+type ChangeSubscribers struct {
+	subs Subscribers[struct{}]
+}
+
+func (c *ChangeSubscribers) Subscribe(handler func()) (unsubscribe func()) {
+	if handler == nil {
+		return func() {}
+	}
+	return c.subs.Subscribe(func(struct{}) { handler() })
+}
+
+func (c *ChangeSubscribers) Notify() {
+	c.subs.Notify(struct{}{})
+}
+
+// ConfigureHandlers sets all applicable handlers throughout a toolset graph.
 func ConfigureHandlers(ts ToolSet, elicitHandler ElicitationHandler, samplingHandler SamplingHandler, samplingWithToolsHandler SamplingWithToolsHandler, oauthHandler func(), managedOAuth bool, unmanagedOAuthRedirectURI string) {
-	if e, ok := As[Elicitable](ts); ok {
+	for _, e := range FindAll[Elicitable](ts) {
 		e.SetElicitationHandler(elicitHandler)
 	}
-	if s, ok := As[Sampleable](ts); ok {
+	for _, s := range FindAll[Sampleable](ts) {
 		s.SetSamplingHandler(samplingHandler)
 	}
-	if s, ok := As[SampleableWithTools](ts); ok {
+	for _, s := range FindAll[SampleableWithTools](ts) {
 		s.SetSamplingWithToolsHandler(samplingWithToolsHandler)
 	}
-	if o, ok := As[OAuthCapable](ts); ok {
+	for _, o := range FindAll[OAuthCapable](ts) {
 		o.SetOAuthSuccessHandler(oauthHandler)
 		o.SetManagedOAuth(managedOAuth)
 		o.SetUnmanagedOAuthRedirectURI(unmanagedOAuthRedirectURI)

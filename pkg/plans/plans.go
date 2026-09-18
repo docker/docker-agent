@@ -1,17 +1,11 @@
 // Package plans is the host-facing contract for managing plans from a
-// frontend such as a CLI or TUI. It unifies the two plan systems behind one
-// model and one Service: the shared, named plans agents collaborate on
-// (pkg/tools/builtin/plan) and the single per-session plan owned by the
-// runtime (pkg/tools/builtin/sessionplan).
+// frontend such as a CLI or TUI. It wraps the shared, named plans agents
+// collaborate on (pkg/tools/builtin/plan) behind one model and one Service.
 //
 // The package wraps the existing storage rather than duplicating it. Shared
 // plans go through a caller-supplied plan.Storage — pass plan.SharedStorage()
 // to operate on the same store, and thus the same mutex, as the plan tools of
-// agents running in this process. The session plan is read and written
-// through the sessionplan helpers. Session plans have no revisions or
-// optimistic locking: the version-guarded mutations reject them with a typed
-// *UnsupportedError, and the one supported write is UpdateSession, which
-// replaces the body of an existing plan last-write-wins.
+// agents running in this process.
 package plans
 
 import (
@@ -19,28 +13,16 @@ import (
 	"time"
 )
 
-// Scope identifies which plan system a plan belongs to.
+// Scope identifies which plan system a plan belongs to. It remains part of
+// the wire contract for forward compatibility even though only one scope
+// exists today.
 type Scope string
 
-const (
-	// ScopeShared is the cross-session store of named plans that agents
-	// collaborate on. Shared plans are versioned and fully mutable.
-	ScopeShared Scope = "shared"
-	// ScopeSession is the per-session plan of the "draft, review, execute"
-	// workflow. At most one exists per session; it has no versions, so the
-	// Service reads, exports, and replaces its body through UpdateSession
-	// but rejects the version-guarded mutations.
-	ScopeSession Scope = "session"
-)
+// ScopeShared is the cross-session store of named plans that agents
+// collaborate on. Shared plans are versioned and fully mutable.
+const ScopeShared Scope = "shared"
 
-// Mutable reports whether plans in this scope support the full set of
-// version-guarded mutations (create, update, set-status, delete), so a
-// frontend can disable those actions up front instead of provoking an
-// *UnsupportedError. Session plans are not Mutable in this sense; their
-// body is still replaceable through UpdateSession.
-func (s Scope) Mutable() bool { return s == ScopeShared }
-
-// Plan is the host-facing view of a plan from either scope.
+// Plan is the host-facing view of a plan.
 //
 // The JSON tags are a stable, snake_case wire contract for host consumers
 // (e.g. the plans CLI --json output). It is deliberately independent of the
@@ -49,55 +31,32 @@ func (s Scope) Mutable() bool { return s == ScopeShared }
 type Plan struct {
 	// Scope tells which plan system the plan lives in.
 	Scope Scope `json:"scope"`
-	// Name is the canonical identity within the scope: the validated plan
-	// name for shared plans, the session ID for session plans.
+	// Name is the validated canonical plan name.
 	Name string `json:"name"`
-	// Title, Author, and Status are shared-plan metadata, empty for session
-	// plans. Status is a free-form lifecycle label with no fixed vocabulary.
+	// Title, Author, and Status are plan metadata. Status is a free-form
+	// lifecycle label with no fixed vocabulary.
 	Title  string `json:"title,omitempty"`
 	Author string `json:"author,omitempty"`
 	Status string `json:"status,omitempty"`
 	// Content is the plan body. List returns metadata only, so Content is
 	// empty there; Get populates it.
 	Content string `json:"content,omitempty"`
-	// Version is the optimistic-lock revision of a shared plan. It is nil for
-	// session plans, which have no revisions: nil means version-guarded
-	// operations are unsupported, not "version zero".
+	// Version is the optimistic-lock revision of the plan.
 	Version *int `json:"version,omitempty"`
-	// UpdatedAt is the time of the last write: the stored timestamp for
-	// shared plans, the plan file's modification time for session plans.
-	// Zero when unknown (and then omitted from JSON via omitzero, which
-	// consults time.Time.IsZero; omitempty would keep the zero struct).
+	// UpdatedAt is the stored time of the last write. Zero when unknown (and
+	// then omitted from JSON via omitzero, which consults time.Time.IsZero;
+	// omitempty would keep the zero struct).
 	UpdatedAt time.Time `json:"updated_at,omitzero"`
-	// SessionID is the owning session of a session plan, empty for shared
-	// plans.
-	SessionID string `json:"session_id,omitempty"`
-	// Path is the backing file of a session plan. It is empty for shared
-	// plans, whose storage backend is pluggable and opaque.
-	Path string `json:"path,omitempty"`
 }
 
-// Ref addresses a plan in either scope: Name addresses a shared plan,
-// SessionID the plan of that session. The field matching Scope must be set.
+// Ref addresses a plan by name within a scope.
 type Ref struct {
-	Scope     Scope
-	Name      string
-	SessionID string
+	Scope Scope
+	Name  string
 }
 
 // SharedRef addresses the named shared plan.
 func SharedRef(name string) Ref { return Ref{Scope: ScopeShared, Name: name} }
-
-// SessionRef addresses the plan of the given session.
-func SessionRef(sessionID string) Ref { return Ref{Scope: ScopeSession, SessionID: sessionID} }
-
-// ListOptions controls List.
-type ListOptions struct {
-	// SessionID, when non-empty, also includes that session's plan in the
-	// listing if one exists. Only the identified session is consulted; plan
-	// files left behind by other sessions are never enumerated.
-	SessionID string
-}
 
 // ListResult is the outcome of List. Warnings carries plans that exist but
 // could not be read, so a caller can tell "no plans" apart from "some plans
@@ -151,8 +110,7 @@ type DeleteRequest struct {
 	ExpectedVersion *int
 }
 
-// ExportRequest writes a plan's content to a file on disk. Export works for
-// both scopes.
+// ExportRequest writes a plan's content to a file on disk.
 //
 // Force replaces an existing regular file at Path. Without it, Export
 // refuses any existing destination with a *ValidationError and leaves it
@@ -163,8 +121,8 @@ type ExportRequest struct {
 	Force bool
 }
 
-// ExportResult reports a completed export. Version is the exported shared
-// plan's version, nil for session plans.
+// ExportResult reports a completed export. Version is the exported plan's
+// version.
 type ExportResult struct {
 	Scope        Scope  `json:"scope"`
 	Name         string `json:"name"`
@@ -173,19 +131,15 @@ type ExportResult struct {
 	BytesWritten int    `json:"bytes_written"`
 }
 
-// Service is the host-facing contract for managing plans across both scopes.
-// The version-guarded mutations address shared plans only; one aimed at a
-// session plan fails with a typed *UnsupportedError, and the session plan's
-// body is replaced through the dedicated UpdateSession instead. Failures are
+// Service is the host-facing contract for managing plans. Failures are
 // reported as the typed errors of this package so frontends never classify
 // by error text.
 type Service interface {
-	// List returns plan metadata (Content is left empty): every shared plan
-	// sorted by name and, when opts.SessionID is set, that session's plan
-	// first. A missing session plan is simply not included, never an error.
-	List(ctx context.Context, opts ListOptions) (ListResult, error)
+	// List returns plan metadata (Content is left empty) for every shared
+	// plan, sorted by name.
+	List(ctx context.Context) (ListResult, error)
 	// Get returns the full plan, including content. A missing plan is a
-	// *NotFoundError in either scope.
+	// *NotFoundError.
 	Get(ctx context.Context, ref Ref) (Plan, error)
 	// Create adds a new shared plan; a name that already exists fails with a
 	// *ConflictError carrying the current version.
@@ -193,11 +147,6 @@ type Service interface {
 	// Update replaces the content (and optionally metadata) of an existing
 	// shared plan, honouring req.ExpectedVersion.
 	Update(ctx context.Context, req UpdateRequest) (Plan, error)
-	// UpdateSession replaces the content of the session's existing plan.
-	// Session plans have no versions, so the write is unguarded and
-	// last-write-wins by design. A missing plan is a *NotFoundError:
-	// UpdateSession edits, it never creates.
-	UpdateSession(ctx context.Context, sessionID, content string) (Plan, error)
 	// SetStatus sets the free-form status of an existing shared plan,
 	// honouring req.ExpectedVersion.
 	SetStatus(ctx context.Context, req SetStatusRequest) (Plan, error)

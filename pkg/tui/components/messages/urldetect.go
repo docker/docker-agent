@@ -246,13 +246,12 @@ func findURLSpans(text string) []urlSpan {
 	n := len(runes)
 
 	for i := 0; i < n; {
-		// Look for http:// or https://
-		remaining := string(runes[i:])
+		// Look for http:// or https:// without re-encoding the suffix at every position.
 		var prefixLen int
 		switch {
-		case strings.HasPrefix(remaining, "https://"):
+		case hasRunePrefix(runes[i:], "https://"):
 			prefixLen = len("https://")
-		case strings.HasPrefix(remaining, "http://"):
+		case hasRunePrefix(runes[i:], "http://"):
 			prefixLen = len("http://")
 		default:
 			i++
@@ -291,6 +290,20 @@ func findURLSpans(text string) []urlSpan {
 		i = j
 	}
 	return spans
+}
+
+// hasRunePrefix reports whether runes begins with the ASCII prefix, comparing
+// runes directly instead of re-encoding the slice to a string at every position.
+func hasRunePrefix(runes []rune, prefix string) bool {
+	if len(runes) < len(prefix) {
+		return false
+	}
+	for k := range len(prefix) {
+		if runes[k] != rune(prefix[k]) {
+			return false
+		}
+	}
+	return true
 }
 
 func runeSliceWidth(runes []rune) int {

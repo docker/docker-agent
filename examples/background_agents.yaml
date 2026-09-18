@@ -3,7 +3,7 @@
 # waiting for each one sequentially.
 #
 # The coordinator fans out research tasks to two specialists at the same time,
-# monitors their progress, and synthesises a final answer once both are done.
+# joins their results, and synthesises a final answer once both are done.
 
 agents:
   root:
@@ -15,8 +15,9 @@ agents:
       1. Break the question into independent research tasks.
       2. Dispatch each task to the appropriate sub-agent using
          `run_background_agent` so they run in parallel.
-      3. Use `list_background_agents` or `view_background_agent` to check
-         progress and collect results.
+      3. Call `wait_background_agents` with both task IDs to join their results.
+         If `all_done` is false after a timeout, wait again. Inspect each task's
+         status and handle failures before synthesising the findings.
       4. Synthesise the findings into a clear, well-structured answer.
 
       Always run independent tasks concurrently — do not wait for one to
