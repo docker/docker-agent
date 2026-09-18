@@ -68,10 +68,12 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		// Determine whether Vertex AI would normally be used, then check whether
 		// an HTTP transport wrapper forces a fallback to BackendGeminiAPI.
 		// The Vertex AI backend relies on ADC-managed HTTP clients that bypass
-		// http.RoundTripper, so the wrapper cannot be applied there.
+		// http.RoundTripper, so the wrapper cannot be applied there. With an
+		// explicit token source we own the HTTP client and the wrapper applies.
 		_, useVertexAIEnv := env.Get(ctx, "GOOGLE_GENAI_USE_VERTEXAI")
 		wantVertexAI := cfg.ProviderOpts["project"] != nil || cfg.ProviderOpts["location"] != nil || useVertexAIEnv
-		useVertexAI := wantVertexAI && globalOptions.TransportWrapper() == nil
+		tokenSource := globalOptions.TokenSource()
+		useVertexAI := wantVertexAI && (globalOptions.TransportWrapper() == nil || tokenSource != nil)
 
 		if wantVertexAI && !useVertexAI {
 			slog.DebugContext(ctx, "Vertex AI requested but HTTP transport wrapper is set, falling back to GeminiAPI backend")
@@ -98,12 +100,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			}
 
 			backend = genai.BackendVertexAI
-			httpClient = nil // Use ADC-managed client
 		case useVertexAI:
 			project, _ = env.Get(ctx, "GOOGLE_CLOUD_PROJECT")
 			location, _ = env.Get(ctx, "GOOGLE_CLOUD_LOCATION")
 			backend = genai.BackendVertexAI
-			httpClient = nil // Use ADC-managed client
 		default:
 			var err error
 			apiKey, err = directAPIKey(ctx, cfg, env)
@@ -117,12 +117,29 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 		if backend == genai.BackendVertexAI {
 			apiSurface = apiSurfaceVertexAI
+			// A nil httpClient means the SDK's ADC-managed client. With an explicit
+			// token source we supply our own, authenticated per request below, so
+			// no ADC lookup runs.
+			switch {
+			case tokenSource != nil:
+				if _, err := tokenSource(ctx); err != nil {
+					return nil, fmt.Errorf("resolving access token: %w", err)
+				}
+				httpClient = httpclient.NewHTTPClient(ctx)
+			case !adcSupported:
+				return nil, errors.New("vertex AI requires an explicit token source on this platform: application default credentials are unavailable")
+			}
 		} else {
 			apiSurface = apiSurfaceGeminiAPI
 		}
 
 		globalOptions.WrapTransport(ctx, httpClient)
 		base.WrapOpenCodeSession(cfg, httpClient)
+		if backend == genai.BackendVertexAI && tokenSource != nil {
+			// Outermost so the wrapper sees the same authenticated request the
+			// other providers' SDK middlewares produce.
+			httpClient.Transport = &bearerTokenTransport{source: tokenSource, base: httpClient.Transport}
+		}
 
 		client, err := genai.NewClient(ctx, &genai.ClientConfig{
 			APIKey:     apiKey,
@@ -186,6 +203,22 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		clientFn:   clientFn,
 		apiSurface: apiSurface,
 	}, nil
+}
+
+// bearerTokenTransport resolves the bearer token on every request.
+type bearerTokenTransport struct {
+	source options.TokenSource
+	base   http.RoundTripper
+}
+
+func (t *bearerTokenTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	token, err := t.source(req.Context())
+	if err != nil {
+		return nil, err
+	}
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Bearer "+token)
+	return t.base.RoundTrip(req)
 }
 
 // directAPIKey resolves the Gemini API key for the direct path: the model's

@@ -12,11 +12,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/junegunn/fzf/src/algo"
-	"github.com/junegunn/fzf/src/util"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/docker/docker-agent/pkg/fuzzy"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -199,24 +198,14 @@ func (d *ToolSet) handleSearchTool(ctx context.Context, args SearchToolArgs) (*t
 			continue
 		}
 
-		chars := util.ToChars([]byte(name + " " + tool.Description))
-		res, _ := algo.FuzzyMatchV2(
-			false, // caseSensitive
-			true,  // normalize
-			true,  // forward
-			&chars,
-			queryRunes,
-			true, // withPos
-			nil,  // slab
-		)
-
-		if res.Start >= 0 {
+		score, matched := fuzzy.Score(name+" "+tool.Description, queryRunes)
+		if matched {
 			matches = append(matches, scoredDeferredTool{
 				result: SearchToolResult{
 					Name:        name,
 					Description: tool.Description,
 				},
-				score: res.Score,
+				score: score,
 			})
 		}
 	}

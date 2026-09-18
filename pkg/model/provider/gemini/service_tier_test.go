@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -78,8 +79,8 @@ func serviceTierInBody(t *testing.T, body []byte) (string, bool) {
 
 // geminiSurface describes one Google API surface pointed at a test server.
 // Each surface uses a distinct SDK request converter, so the wire shape is
-// pinned on all three. The Vertex AI case relies on the SDK skipping ADC when
-// only a custom base URL is configured.
+// pinned on all three. An explicit Vertex AI token source avoids ADC discovery,
+// including on WASM.
 type geminiSurface struct {
 	name       string
 	apiSurface string
@@ -95,6 +96,9 @@ func (s geminiSurface) newClient(t *testing.T, serverURL string, providerOpts ma
 		opts = append(opts, options.WithGateway(serverURL))
 	} else {
 		cfg.BaseURL = serverURL
+	}
+	if s.apiSurface == apiSurfaceVertexAI {
+		opts = append(opts, options.WithTokenSource(func(context.Context) (string, error) { return "test-token", nil }))
 	}
 	client, err := NewClient(t.Context(), cfg, environment.NewMapEnvProvider(s.env), opts...)
 	require.NoError(t, err)

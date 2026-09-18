@@ -3,14 +3,11 @@
 package main
 
 import (
-	"syscall/js"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/config/latest"
-	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
 )
 
@@ -19,19 +16,28 @@ func TestDemoProviderRegistry(t *testing.T) {
 		assert.True(t, demoProviders.Has(name), name)
 		assert.False(t, provider.EmptyRegistry().Has(name), "demo registration must not affect the empty core registry")
 	}
-	assert.False(t, demoProviders.Has("amazon-bedrock"))
 }
 
-func TestDemoBuildRuntimeUsesExplicitRegistry(t *testing.T) {
-	cfg := &latest.Config{
-		Models: map[string]latest.ModelConfig{
-			"primary":  {Provider: "anthropic", Model: "claude-sonnet-4-6"},
-			"fallback": {Provider: "openai", Model: "gpt-4o-mini"},
-		},
-		Agents: latest.Agents{{Name: "root", Model: "primary", Fallback: &latest.FallbackConfig{Models: []string{"fallback"}}}},
-	}
-	rt, err := buildRuntime(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "test", "OPENAI_API_KEY": "test"}), js.Undefined())
+func TestBrowserHostBuildsDemoProvidersWithSessionEnv(t *testing.T) {
+	const yaml = `
+models:
+  primary:
+    provider: anthropic
+    model: claude-sonnet-4-6
+  fallback:
+    provider: openai
+    model: gpt-4o-mini
+agents:
+  root:
+    model: primary
+    fallback:
+      models: [fallback]
+`
+	// Keys come from the session env only; nothing is exported to the process.
+	s, err := browserHost.openSession(t.Context(), sessionOptions{YAML: yaml, Env: map[string]string{"ANTHROPIC_API_KEY": "test", "OPENAI_API_KEY": "test"}})
 	require.NoError(t, err)
-	assert.Contains(t, rt.providers, "root")
-	require.Len(t, rt.fallbacks["root"], 1)
+	require.NoError(t, s.close())
+
+	_, err = browserHost.openSession(t.Context(), sessionOptions{YAML: yaml})
+	require.Error(t, err, "missing keys are reported when the session is created")
 }

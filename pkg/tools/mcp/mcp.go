@@ -56,13 +56,15 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 				return nil, fmt.Errorf("working_dir is not supported for MCP toolset %q: ref %q resolves to a remote server (no local subprocess)",
 					toolset.Name, toolset.Ref)
 			}
-			return NewRemoteToolsetWithAllowPrivateIPs(
+			return newRemoteToolset(
 				toolset.Name,
 				serverSpec.Remote.URL,
 				serverSpec.Remote.TransportType,
 				nil,
 				nil,
 				toolset.AllowPrivateIPsEnabled(),
+				nil,
+				oauthTokenStoreFromContext(ctx),
 				lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
 			), nil
 		}
@@ -125,6 +127,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 			toolset.Remote.OAuth,
 			toolset.AllowPrivateIPsEnabled(),
 			envProvider,
+			oauthTokenStoreFromContext(ctx),
 			lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
 		), nil
 
@@ -250,7 +253,7 @@ func NewToolsetCommand(name, command string, args, env []string, cwd string, pol
 // The optional policy lets callers tune restart/backoff behaviour;
 // see NewToolsetCommand for the semantics.
 func NewRemoteToolset(name, urlString, transport string, headers map[string]string, oauthConfig *latest.RemoteOAuthConfig, policy ...lifecycle.Policy) *Toolset {
-	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, false, nil, policy...)
+	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, false, nil, nil, policy...)
 }
 
 // NewRemoteToolsetWithAllowPrivateIPs creates a new remote MCP toolset and
@@ -262,19 +265,23 @@ func NewRemoteToolsetWithAllowPrivateIPs(
 	allowPrivateIPs bool,
 	policy ...lifecycle.Policy,
 ) *Toolset {
-	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, allowPrivateIPs, nil, policy...)
+	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, allowPrivateIPs, nil, nil, policy...)
 }
 
 // newRemoteToolset is the shared constructor behind the exported remote
 // toolset variants. env is optional: when non-nil, ${env.X} placeholders in
 // header values are resolved against it on every outbound HTTP request; when
 // nil (programmatic callers), header values are used as configured.
+// tokenStore is optional too: nil selects the process-wide store, which is
+// only built when actually needed so a per-session override never triggers
+// the keyring.
 func newRemoteToolset(
 	name, urlString, transport string,
 	headers map[string]string,
 	oauthConfig *latest.RemoteOAuthConfig,
 	allowPrivateIPs bool,
 	env environment.Provider,
+	tokenStore OAuthTokenStore,
 	policy ...lifecycle.Policy,
 ) *Toolset {
 	slog.Debug("Creating Remote MCP toolset",
@@ -284,10 +291,14 @@ func newRemoteToolset(
 		"allow_private_ips", allowPrivateIPs,
 	)
 
+	if tokenStore == nil {
+		tokenStore = NewKeyringTokenStore()
+	}
+
 	desc := buildRemoteDescription(urlString, transport)
 	ts := &Toolset{
 		name:        name,
-		mcpClient:   newRemoteClient(urlString, transport, headers, NewKeyringTokenStore(), oauthConfig, allowPrivateIPs, env),
+		mcpClient:   newRemoteClient(urlString, transport, headers, tokenStore, oauthConfig, allowPrivateIPs, env),
 		logID:       sanitizeRemoteAddress(urlString),
 		description: desc,
 		callTimeout: firstOrZero(policy).CallTimeout,

@@ -27,6 +27,12 @@ type Strategy interface {
 	Close() error
 }
 
+// DocumentIndexer is implemented by strategies that can index documents
+// supplied in memory, keyed by logical path, instead of reading files.
+type DocumentIndexer interface {
+	InitializeDocuments(ctx context.Context, docs map[string][]byte, chunking ChunkingConfig) error
+}
+
 // Config contains a strategy and its runtime configuration.
 type Config struct {
 	Name      string

@@ -19,16 +19,19 @@ const (
 )
 
 // vectorDBFactory constructs a vectorStoreDB backend for the atomicity tests
-// below, so they can run identically against both the semantic-embeddings
-// and chunked-embeddings SQLite implementations.
+// below, so they can run identically against every implementation: the
+// platform constructors (sqlite natively, in-memory under js) and the
+// in-memory backend explicitly, so it is covered on every platform.
 type vectorDBFactory struct {
-	name string
-	new  func(ctx context.Context, dbPath string) (vectorStoreDB, error)
+	name     string
+	semantic bool // backend records embedding inputs
+	new      func(ctx context.Context, dbPath string) (vectorStoreDB, error)
 }
 
 var vectorDBFactories = []vectorDBFactory{
 	{
-		name: "semantic",
+		name:     "semantic",
+		semantic: true,
 		new: func(ctx context.Context, dbPath string) (vectorStoreDB, error) {
 			return newSemanticVectorDB(ctx, dbPath, testVectorDimensions, "semantic")
 		},
@@ -37,6 +40,19 @@ var vectorDBFactories = []vectorDBFactory{
 		name: "chunked",
 		new: func(ctx context.Context, dbPath string) (vectorStoreDB, error) {
 			return newChunkedVectorDB(ctx, dbPath, testVectorDimensions, "chunked")
+		},
+	},
+	{
+		name:     "memory-semantic",
+		semantic: true,
+		new: func(context.Context, string) (vectorStoreDB, error) {
+			return newMemoryVectorDB(testVectorDimensions, true), nil
+		},
+	},
+	{
+		name: "memory-chunked",
+		new: func(context.Context, string) (vectorStoreDB, error) {
+			return newMemoryVectorDB(testVectorDimensions, false), nil
 		},
 	},
 }
@@ -197,19 +213,28 @@ func TestDeleteDocumentsByPath_CascadesChunksToZero(t *testing.T) {
 	}
 }
 
-func TestReplaceFileDocuments_SemanticEmbeddingInputRoundTrips(t *testing.T) {
+func TestReplaceFileDocuments_EmbeddingInputRoundTripsOnlyForSemantic(t *testing.T) {
 	t.Parallel()
-	db := newTestDB(t, vectorDBFactories[0]) // semantic
-	ctx := t.Context()
+	for _, factory := range vectorDBFactories {
+		t.Run(factory.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t, factory)
+			ctx := t.Context()
 
-	docs := docsFor("raw chunk content")
-	require.NoError(t, db.ReplaceFileDocuments(ctx, database.FileMetadata{SourcePath: testDocPath, FileHash: "v1", ChunkCount: 1}, docs, embeddingsFor(1), []string{"LLM-generated summary"}))
+			docs := docsFor("raw chunk content")
+			require.NoError(t, db.ReplaceFileDocuments(ctx, database.FileMetadata{SourcePath: testDocPath, FileHash: "v1", ChunkCount: 1}, docs, embeddingsFor(1), []string{"LLM-generated summary"}))
 
-	results, err := db.SearchSimilarVectors(ctx, embeddingsFor(1)[0], 10)
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	assert.Equal(t, "LLM-generated summary", results[0].EmbeddingInput)
-	assert.Equal(t, "raw chunk content", results[0].Content)
+			results, err := db.SearchSimilarVectors(ctx, embeddingsFor(1)[0], 10)
+			require.NoError(t, err)
+			require.Len(t, results, 1)
+			assert.Equal(t, "raw chunk content", results[0].Content)
+			if factory.semantic {
+				assert.Equal(t, "LLM-generated summary", results[0].EmbeddingInput)
+			} else {
+				assert.Empty(t, results[0].EmbeddingInput)
+			}
+		})
+	}
 }
 
 func TestReplaceFileDocuments_RejectsEmptyDocs(t *testing.T) {
@@ -226,6 +251,67 @@ func TestReplaceFileDocuments_RejectsEmptyDocs(t *testing.T) {
 			all, err := db.GetAllFileMetadata(ctx)
 			require.NoError(t, err)
 			assert.Empty(t, all)
+		})
+	}
+}
+
+func TestGetFileMetadata_ReportsChunkCountOrNil(t *testing.T) {
+	t.Parallel()
+	for _, factory := range vectorDBFactories {
+		t.Run(factory.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t, factory)
+			ctx := t.Context()
+
+			meta, err := db.GetFileMetadata(ctx, testDocPath)
+			require.NoError(t, err)
+			assert.Nil(t, meta, "unknown file yields nil, not an error")
+
+			docs := docsFor("one", "two", "three")
+			require.NoError(t, db.ReplaceFileDocuments(ctx, database.FileMetadata{SourcePath: testDocPath, FileHash: "v1", ChunkCount: 3}, docs, embeddingsFor(3), inputsFor("s", 3)))
+
+			meta, err = db.GetFileMetadata(ctx, testDocPath)
+			require.NoError(t, err)
+			require.NotNil(t, meta)
+			assert.Equal(t, testDocPath, meta.SourcePath)
+			assert.Equal(t, "v1", meta.FileHash)
+			assert.Equal(t, 3, meta.ChunkCount)
+			assert.NotEmpty(t, meta.LastIndexed)
+
+			require.NoError(t, db.DeleteFileMetadata(ctx, testDocPath))
+			meta, err = db.GetFileMetadata(ctx, testDocPath)
+			require.NoError(t, err)
+			assert.Nil(t, meta)
+		})
+	}
+}
+
+func TestSearchSimilarVectors_RanksAcrossFilesAndLimits(t *testing.T) {
+	t.Parallel()
+	for _, factory := range vectorDBFactories {
+		t.Run(factory.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t, factory)
+			ctx := t.Context()
+
+			for path, embedding := range map[string][]float64{
+				"/x.txt": {1, 0, 0},
+				"/y.txt": {0, 1, 0},
+				"/z.txt": {1, 1, 0},
+			} {
+				docs := []database.Document{{ID: path, SourcePath: path, ChunkIndex: 0, Content: path, FileHash: "h"}}
+				require.NoError(t, db.ReplaceFileDocuments(ctx, database.FileMetadata{SourcePath: path, FileHash: "h", ChunkCount: 1}, docs, [][]float64{embedding}, []string{"s"}))
+			}
+
+			results, err := db.SearchSimilarVectors(ctx, []float64{1, 0, 0}, 2)
+			require.NoError(t, err)
+			require.Len(t, results, 2, "limit is applied after ranking")
+			assert.Equal(t, "/x.txt", results[0].SourcePath)
+			assert.Equal(t, "/x.txt_0", results[0].ID)
+			assert.InDelta(t, 1.0, results[0].Similarity, 1e-9)
+			assert.Equal(t, "/z.txt", results[1].SourcePath)
+			assert.Equal(t, "h", results[1].FileHash)
+			assert.NotEmpty(t, results[1].CreatedAt)
 		})
 	}
 }

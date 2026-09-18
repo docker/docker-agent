@@ -1,0 +1,26 @@
+# Amazon Bedrock from the browser build (cmd/wasm, -tags docker_agent_wasm_cloud).
+#
+# The browser has no AWS credential chain: no ~/.aws files, no IMDS, no STS.
+# The only credential is a Bedrock API key (bearer token) passed in the
+# session env as AWS_BEARER_TOKEN_BEDROCK (or under the model's token_key,
+# which then becomes required in the CLI too). provider_opts.profile and
+# role_arn are rejected there.
+#
+# The same file runs in the CLI, where a missing token falls back to the
+# standard AWS credential chain (SigV4).
+#   https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html
+
+models:
+  claude:
+    provider: amazon-bedrock
+    model: anthropic.claude-sonnet-4-6
+    provider_opts:
+      region: us-east-1
+
+agents:
+  root:
+    model: claude
+    description: Concise assistant on Claude via Amazon Bedrock.
+    instruction: |
+      You are a concise, helpful assistant. Answer directly and say so when
+      you are unsure.

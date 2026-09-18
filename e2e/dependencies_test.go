@@ -189,6 +189,32 @@ func TestWasmProviderDependencies(t *testing.T) {
 	}
 }
 
+// The default browser binary links only the Gemini API, OpenAI and Anthropic
+// clients; the cloud SDKs stay behind -tags docker_agent_wasm_cloud, and the
+// portable tool and hook builds keep sqlite and the fzf fork out.
+func TestWasmDefaultBinaryDependencies(t *testing.T) {
+	t.Parallel()
+	cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "./cmd/wasm")
+	cmd.Dir = ".."
+	cmd.Env = append(os.Environ(), "GOOS=js", "GOARCH=wasm")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	forbidden := []string{
+		"github.com/docker/docker-agent/pkg/model/provider/bedrock",
+		"github.com/docker/docker-agent/pkg/model/provider/vertexai",
+		"github.com/docker/docker-agent/pkg/model/provider/anthropic/vertex",
+		"github.com/aws/aws-sdk-go-v2",
+		"golang.org/x/oauth2/google",
+		"modernc.org/sqlite",
+		"github.com/junegunn/fzf",
+	}
+	for dep := range strings.FieldsSeq(string(out)) {
+		for _, prefix := range forbidden {
+			assert.False(t, dep == prefix || strings.HasPrefix(dep, prefix+"/"), "opt-in dependency in the default WASM binary: %s", dep)
+		}
+	}
+}
+
 // listTransitiveDeps returns the full (non-test) dependency closure of the
 // given packages, as reported by `go list -deps`.
 func listTransitiveDeps(t *testing.T, pkgs ...string) map[string]bool {

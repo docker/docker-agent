@@ -229,8 +229,11 @@ jobs:
       - name: Plan storage build tags
         run: task check-plan-cross
 
-      - name: WASM provider registration
+      - name: WASM runtime, tools and providers
         run: task test-wasm-js
+
+      - name: WASM JavaScript bridge
+        run: task test-wasm-bridge
 
   licenses:
     needs: changes

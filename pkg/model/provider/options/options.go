@@ -196,7 +196,8 @@ func WithOpenAIVendor(v bool) Opt {
 }
 
 // WithTokenSource configures request-time bearer-token resolution. OpenAI
-// direct clients use it before token_key; gateway and ChatGPT auth stay separate.
+// direct clients use it before token_key; Gemini Vertex clients use it instead
+// of ADC. Gateway and ChatGPT auth stay separate.
 func WithTokenSource(source TokenSource) Opt {
 	return func(cfg *ModelOptions) {
 		cfg.tokenSource = source
@@ -204,8 +205,7 @@ func WithTokenSource(source TokenSource) Opt {
 }
 
 // WithHTTPTransportWrapper registers a function that wraps the HTTP transport
-// used by provider clients (Anthropic, OpenAI, and Gemini with the Gemini API
-// backend). The function receives the transport that docker-agent built
+// used by provider clients (Anthropic, OpenAI, and Gemini). The function receives the transport that docker-agent built
 // (including OTel instrumentation, SSE decompression fix, and Desktop proxy
 // support) and must return a new RoundTripper that delegates to it. The wrapper
 // is applied in both direct mode and gateway/proxy mode.
@@ -220,8 +220,9 @@ func WithTokenSource(source TokenSource) Opt {
 //   - OpenAI clients configured with transport=websocket bypass the HTTP
 //     transport layer entirely; the wrapper is not applied in that mode.
 //   - Gemini clients using the Vertex AI backend (project/location config or
-//     GOOGLE_GENAI_USE_VERTEXAI) rely on the genai SDK's default HTTP client;
-//     the wrapper is not applied and a warning is logged.
+//     GOOGLE_GENAI_USE_VERTEXAI) use ADC unless WithTokenSource is supplied.
+//     With a token source the wrapper applies; otherwise setting a wrapper
+//     selects the Gemini API backend instead.
 //
 // The wrapper function must return a non-nil RoundTripper; returning nil is a
 // no-op (a warning is logged and the original transport is kept).

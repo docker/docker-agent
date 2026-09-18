@@ -381,7 +381,7 @@ func TestIndexFile_InterruptedCommitLeavesHashUnrecorded(t *testing.T) {
 	fake := &fakeEmbeddingProvider{}
 	store := newVectorStoreWithDB(fake, db)
 
-	err := store.indexFile(ctx, path)
+	err := store.indexFile(ctx, fileSource{}, path)
 	require.Error(t, err)
 	require.ErrorIs(t, err, context.Canceled)
 
@@ -389,7 +389,7 @@ func TestIndexFile_InterruptedCommitLeavesHashUnrecorded(t *testing.T) {
 	require.NoError(t, dbErr)
 	assert.Empty(t, all, "an interrupted commit must leave no file metadata behind")
 
-	needsIndexing, err := store.needsIndexing(t.Context(), path)
+	needsIndexing, err := store.needsIndexing(fileSource{}, path)
 	require.NoError(t, err)
 	assert.True(t, needsIndexing, "file must still be considered not indexed after the interruption")
 
@@ -464,7 +464,7 @@ func TestLoadExistingHashes_SkipsZeroChunkMetadata(t *testing.T) {
 
 	require.NoError(t, store.loadExistingHashes(t.Context()))
 
-	needsIndexing, err := store.needsIndexing(t.Context(), path)
+	needsIndexing, err := store.needsIndexing(fileSource{}, path)
 	require.NoError(t, err)
 	assert.True(t, needsIndexing, "a zero-chunk metadata row must not be treated as indexed")
 }
@@ -483,19 +483,19 @@ func TestIndexFile_FileBecomesEmptyCleansUpPreviousVersion(t *testing.T) {
 	fake := &fakeEmbeddingProvider{}
 	store := newVectorStoreWithDB(fake, db)
 
-	require.NoError(t, store.indexFile(t.Context(), path))
+	require.NoError(t, store.indexFile(t.Context(), fileSource{}, path))
 	all, err := db.GetAllFileMetadata(t.Context())
 	require.NoError(t, err)
 	require.Len(t, all, 1, "file must be indexed with its initial content")
 
 	require.NoError(t, os.WriteFile(path, nil, 0o644))
-	require.NoError(t, store.indexFile(t.Context(), path))
+	require.NoError(t, store.indexFile(t.Context(), fileSource{}, path))
 
 	all, err = db.GetAllFileMetadata(t.Context())
 	require.NoError(t, err)
 	assert.Empty(t, all, "an emptied file must have no leftover metadata/chunks")
 
-	needsIndexing, err := store.needsIndexing(t.Context(), path)
+	needsIndexing, err := store.needsIndexing(fileSource{}, path)
 	require.NoError(t, err)
 	assert.True(t, needsIndexing, "fileHashes entry must be cleared so the file is re-checked")
 }

@@ -1,0 +1,38 @@
+# Google Vertex AI from the browser build (cmd/wasm, -tags docker_agent_wasm_cloud).
+#
+# The browser has no Application Default Credentials. Vertex AI models
+# (project/location set) authenticate with a Google OAuth access token from
+# the session env — GOOGLE_OAUTH_ACCESS_TOKEN, or the model's token_key, which
+# then becomes required in the CLI too — read on every request, so the host
+# can rotate it. A session without the token is rejected when it is created.
+# Gemini through the Gemini API (no project/location) keeps using
+# GOOGLE_API_KEY.
+#
+# The same file runs in the CLI, where the missing token falls back to ADC
+# (`gcloud auth application-default login`).
+
+models:
+  gemini:
+    provider: google
+    model: gemini-2.5-flash
+    provider_opts:
+      project: my-gcp-project
+      location: us-central1
+
+  # Model Garden publishers work the same way; Claude uses the
+  # Anthropic-native endpoint, other publishers the OpenAI-compatible one.
+  # claude:
+  #   provider: google
+  #   model: claude-sonnet-4-6
+  #   provider_opts:
+  #     project: my-gcp-project
+  #     location: us-east5
+  #     publisher: anthropic
+
+agents:
+  root:
+    model: gemini
+    description: Concise assistant on Gemini via Vertex AI.
+    instruction: |
+      You are a concise, helpful assistant. Answer directly and say so when
+      you are unsure.

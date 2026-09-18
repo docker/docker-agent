@@ -1,0 +1,45 @@
+# A keyword-search (BM25) assistant over documents the host hands to the
+# session. In the browser build (cmd/wasm) there is no filesystem: `docs`
+# select among the paths of createSession's `documents` option instead, e.g.
+#
+#   await dockerAgent.createSession({
+#     yaml,
+#     env: { OPENROUTER_API_KEY: key },
+#     documents: {
+#       "handbook/leave.md": "Everyone gets 25 days of vacation ...",
+#       "handbook/expenses.md": "File expense reports within 30 days ...",
+#     },
+#   }, onEvent);
+#
+# The same YAML runs in the CLI, where `docs: [handbook]` is a directory next
+# to this file. BM25 needs no embedding model, so no extra key is required;
+# see cmd/wasm/README.md for the chunked-embeddings and hybrid variants.
+
+providers:
+  openrouter:
+    provider: openai
+    base_url: https://openrouter.ai/api/v1
+    token_key: OPENROUTER_API_KEY
+
+agents:
+  root:
+    model: openrouter/meta-llama/llama-3.3-70b-instruct:free
+    instruction: |
+      Answer questions about the employee handbook. Always search the
+      handbook first and quote the passage you relied on.
+    toolsets:
+      - type: rag
+        ref: handbook
+
+rag:
+  handbook:
+    tool:
+      description: Search the employee handbook.
+    docs: [handbook]
+    strategies:
+      - type: bm25
+        chunking:
+          size: 800
+          overlap: 100
+    results:
+      limit: 3

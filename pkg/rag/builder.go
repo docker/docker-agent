@@ -24,6 +24,10 @@ type ManagersBuildConfig struct {
 	Models        map[string]latest.ModelConfig    // Model configurations from config
 	Providers     map[string]latest.ProviderConfig // Custom provider configurations from config
 	RuntimeConfig *config.RuntimeConfig
+	// Documents, when set, replace the filesystem: the RAG's docs select
+	// among them (by path, directory or glob) and nothing is read from disk
+	// or watched. Documents that stay nil leave the native behavior unchanged.
+	Documents Documents
 }
 
 // NewProvider creates a model provider using the build config's environment,
@@ -52,6 +56,15 @@ func NewManager(
 		return nil, fmt.Errorf("no strategies configured for RAG %q", ragName)
 	}
 
+	if buildCfg.Documents != nil {
+		if err := validateDocumentsConfig(ragCfg); err != nil {
+			return nil, fmt.Errorf("RAG %q: %w", ragName, err)
+		}
+		// Snapshot so the caller mutating its map or bytes afterwards cannot
+		// change what is indexed or returned as full content.
+		buildCfg.Documents = buildCfg.Documents.clone()
+	}
+
 	// Build context for strategy builders
 	strategyBuildCtx := strategy.BuildContext{
 		RAGName:       ragName,
@@ -61,13 +74,20 @@ func NewManager(
 		Providers:     buildCfg.Providers,
 		Env:           buildCfg.Env,
 		ModelsGateway: buildCfg.ModelsGateway,
-		RespectVCS:    ragCfg.GetRespectVCS(),
+		// VCS ignore files apply to filesystem trees, not to supplied documents.
+		RespectVCS:    ragCfg.GetRespectVCS() && buildCfg.Documents == nil,
 		RuntimeConfig: buildCfg.RuntimeConfig,
 	}
 
 	strategyConfigs, strategyEvents, err := buildStrategyConfigs(ctx, *ragCfg, strategyBuildCtx, ragName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build strategy configs for RAG %q: %w", ragName, err)
+	}
+
+	if buildCfg.Documents != nil {
+		if err := bindDocumentStrategies(strategyConfigs, buildCfg.ParentDir, buildCfg.Documents); err != nil {
+			return nil, fmt.Errorf("RAG %q: %w", ragName, err)
+		}
 	}
 
 	managerCfg, err := buildManagerConfig(ctx, *ragCfg, buildCfg, strategyConfigs)
@@ -134,6 +154,7 @@ func buildManagerConfig(
 			Instruction: ragCfg.Tool.Instruction,
 		},
 		Docs:            GetAbsolutePaths(buildCfg.ParentDir, ragCfg.Docs),
+		Documents:       buildCfg.Documents,
 		Results:         results,
 		FusionConfig:    fusionCfg,
 		StrategyConfigs: strategyConfigs,

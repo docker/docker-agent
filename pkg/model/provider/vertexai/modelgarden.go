@@ -10,7 +10,8 @@
 //   - Other publishers: Vertex AI's OpenAI-compatible `/chat/completions`
 //     endpoint.
 //
-// Authentication uses Google Cloud Application Default Credentials.
+// Authentication uses Google Cloud Application Default Credentials, or the
+// token source given to NewClientWithTokenSource.
 //
 // Usage in agent config:
 //
@@ -85,6 +86,24 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		return vertex.NewClient(ctx, rewritten, env, project, location, opts...)
 	}
 	return newOpenAIClient(ctx, rewritten, env, project, location, opts...)
+}
+
+// NewClientWithTokenSource is NewClient authenticated with source instead of
+// Application Default Credentials, which are never looked up. The token is
+// resolved with each request's context.
+func NewClientWithTokenSource(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, source options.TokenSource, opts ...options.Opt) (Client, error) {
+	if source == nil {
+		return nil, errors.New("token source is required")
+	}
+	project, location, err := resolveProjectLocation(ctx, cfg, env)
+	if err != nil {
+		return nil, err
+	}
+	rewritten := withModelsDevProvider(cfg)
+	if strings.EqualFold(publisher(cfg), "anthropic") {
+		return vertex.NewClientWithTokenSource(ctx, rewritten, env, project, location, source, opts...)
+	}
+	return newOpenAIClientWithTokenSource(ctx, rewritten, env, project, location, source, opts...)
 }
 
 // withModelsDevProvider returns a deep copy of cfg with its Provider field
@@ -182,16 +201,12 @@ func resolveProjectLocation(ctx context.Context, cfg *latest.ModelConfig, env en
 // newOpenAIClient creates a client pointing at Vertex AI's OpenAI-compatible
 // endpoint. It uses Google Application Default Credentials for authentication.
 func newOpenAIClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, project, location string, opts ...options.Opt) (*openai.Client, error) {
-	// https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/use-partner-models#openai_sdk
-	baseURL := "https://" + location + "-aiplatform.googleapis.com/v1beta1/projects/" +
-		url.PathEscape(project) + "/locations/" + url.PathEscape(location) + "/endpoints/openapi"
-
 	slog.DebugContext(ctx, "Creating Vertex AI Model Garden client",
 		"publisher", publisher(cfg),
 		"project", project,
 		"location", location,
 		"model", cfg.Model,
-		"base_url", baseURL,
+		"base_url", openAIBaseURL(project, location),
 	)
 
 	tokenSource, err := google.DefaultTokenSource(ctx, cloudPlatformScope)
@@ -207,11 +222,16 @@ func newOpenAIClient(ctx context.Context, cfg *latest.ModelConfig, env environme
 	}, opts...)
 }
 
-func newOpenAIClientWithTokenSource(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, project, location string, tokenSource options.TokenSource, opts ...options.Opt) (*openai.Client, error) {
-	baseURL := "https://" + location + "-aiplatform.googleapis.com/v1beta1/projects/" +
+// openAIBaseURL is Vertex AI's OpenAI-compatible endpoint for a project.
+// https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/use-partner-models#openai_sdk
+func openAIBaseURL(project, location string) string {
+	return "https://" + location + "-aiplatform.googleapis.com/v1beta1/projects/" +
 		url.PathEscape(project) + "/locations/" + url.PathEscape(location) + "/endpoints/openapi"
+}
+
+func newOpenAIClientWithTokenSource(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, project, location string, tokenSource options.TokenSource, opts ...options.Opt) (*openai.Client, error) {
 	oaiCfg := cfg.Clone()
-	oaiCfg.BaseURL = baseURL
+	oaiCfg.BaseURL = openAIBaseURL(project, location)
 	oaiCfg.TokenKey = ""
 
 	// Strip Vertex-specific provider_opts before handing off to the OpenAI

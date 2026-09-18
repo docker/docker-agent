@@ -4,19 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/config"
-	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/memory/database"
-	"github.com/docker/docker-agent/pkg/memory/database/sqlite"
-	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/toolsetpath"
 )
 
 const (
@@ -46,55 +38,6 @@ var (
 	_ tools.Describer    = (*ToolSet)(nil)
 	_ tools.Instructable = (*ToolSet)(nil)
 )
-
-// CreateToolSet is used by the tools registry.
-func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, configName string) (tools.ToolSet, error) {
-	var validatedMemoryPath string
-
-	if toolset.Path != "" {
-		var err error
-		validatedMemoryPath, err = toolsetpath.Resolve(toolset.Path, parentDir, runConfig)
-		if err != nil {
-			return nil, fmt.Errorf("invalid memory database path: %w", err)
-		}
-	} else {
-		if configName == "" {
-			configName = "default"
-		}
-		validatedMemoryPath = filepath.Join(paths.GetDataDir(), "memory", sanitizePathSegment(configName), "memory.db")
-	}
-
-	if err := os.MkdirAll(filepath.Dir(validatedMemoryPath), 0o700); err != nil {
-		return nil, fmt.Errorf("failed to create memory database directory: %w", err)
-	}
-
-	db, err := sqlite.NewMemoryDatabase(validatedMemoryPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create memory database: %w", err)
-	}
-
-	return NewWithPath(db, validatedMemoryPath), nil
-}
-
-// sanitizePathSegment replaces characters that are illegal in a single path
-// component on Windows with '_'. Agent sources loaded from an OCI reference
-// (e.g. "namespace/repo:tag") produce config names that include the image
-// tag's ':'; the colon causes os.MkdirAll to fail with ERROR_INVALID_NAME on
-// NTFS. The replacement is lossy but safe — the hash suffix already in the
-// config name preserves uniqueness, so collisions from sanitisation aren't a
-// concern in practice.
-func sanitizePathSegment(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch r {
-		case '<', '>', ':', '"', '|', '?', '*', '\\', '/':
-			return '_'
-		}
-		if r < 0x20 {
-			return '_'
-		}
-		return r
-	}, s)
-}
 
 func New(manager DB) *ToolSet {
 	return &ToolSet{

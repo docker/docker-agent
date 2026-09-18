@@ -136,6 +136,19 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 // alternative endpoints, such as
 // [github.com/docker/docker-agent/pkg/model/provider/anthropic/vertex].
 func NewClientFromFactory(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, factory func(context.Context) (anthropic.Client, error), opts ...options.Opt) (*Client, error) {
+	var withOptions func(context.Context, options.ModelOptions) (anthropic.Client, error)
+	if factory != nil {
+		withOptions = func(ctx context.Context, _ options.ModelOptions) (anthropic.Client, error) {
+			return factory(ctx)
+		}
+	}
+	return NewClientFromFactoryWithOptions(ctx, cfg, env, withOptions, opts...)
+}
+
+// NewClientFromFactoryWithOptions is NewClientFromFactory for factories that
+// need the applied options (e.g. options.TokenSource). Options are applied
+// exactly once, before the factory runs, and the factory receives the result.
+func NewClientFromFactoryWithOptions(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, factory func(context.Context, options.ModelOptions) (anthropic.Client, error), opts ...options.Opt) (*Client, error) {
 	if cfg == nil {
 		return nil, errors.New("model configuration is required")
 	}
@@ -156,7 +169,7 @@ func NewClientFromFactory(ctx context.Context, cfg *latest.ModelConfig, env envi
 	}
 	globalOptions := options.Apply(opts...)
 
-	client, err := factory(ctx)
+	client, err := factory(ctx, globalOptions)
 	if err != nil {
 		return nil, err
 	}

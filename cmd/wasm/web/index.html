@@ -929,6 +929,9 @@ async function run() {
           scrollToBottomIfPinned();
         } else if (event.type === "tool_call") {
           appendSystemMessage(`🔧 Calling tool: **${event.name}**`);
+        } else if (event.type === "tool_confirmation") {
+          // The returned decision answers the confirmation; declining is the default.
+          return window.confirm(`Allow the agent to run ${event.name}?\n\n${event.args}`);
         } else if (event.type === "tool_result") {
           appendSystemMessage(`✅ ${event.name} → ${event.output.slice(0, 200)}${event.output.length > 200 ? "…" : ""}`);
         } else if (event.type === "tool_blocked") {

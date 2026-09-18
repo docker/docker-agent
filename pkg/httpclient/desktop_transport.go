@@ -52,7 +52,7 @@ func newDesktopAwareTransport(guarded bool) http.RoundTripper {
 	} else {
 		direct = cloneDefaultTransport(environmentProxyFunc())
 	}
-	return &desktopAwareTransport{
+	return wrapBrowserEgress(&desktopAwareTransport{
 		direct:  direct,
 		guarded: guarded,
 		resolver: func(ctx context.Context, host string) ([]net.IP, error) {
@@ -62,7 +62,7 @@ func newDesktopAwareTransport(guarded bool) http.RoundTripper {
 			return desktoptransport.NewDesktopTransport(direct)
 		},
 		proxySafeLookupTimeout: defaultProxySafeLookupTimeout,
-	}
+	}, guarded)
 }
 
 // NewDesktopAwareSSRFSafeTransport returns a guarded transport that routes
@@ -71,7 +71,9 @@ func newDesktopAwareTransport(guarded bool) http.RoundTripper {
 // the direct SSRF-guarded transport (dial-time enforcement, defeats DNS
 // rebinding). Docker Desktop is optional: absent, disabled, or when the target
 // host is outside the allowlist, requests fall back to direct with the same
-// SSRF protection as NewSSRFSafeTransport.
+// SSRF protection as NewSSRFSafeTransport. On browser (js/wasm) builds the
+// guard cannot run at dial time, so the transport instead requires an egress
+// proxy from [WithEgressProxy] and fails closed without one.
 func NewDesktopAwareSSRFSafeTransport() http.RoundTripper {
 	return newDesktopAwareTransport(true)
 }

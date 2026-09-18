@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -334,6 +335,7 @@ func TestApplyAgentDefaultsInjectsExpectedEvents(t *testing.T) {
 }
 
 func TestLimitLargeToolResultsStoresFullOutputAndReturnsTailNotice(t *testing.T) {
+	requireSpillFile(t)
 	t.Setenv("TMPDIR", t.TempDir())
 
 	var b strings.Builder
@@ -389,6 +391,7 @@ func TestLimitLargeToolResultsPreservesUTF8Tail(t *testing.T) {
 }
 
 func TestLimitLargeToolResultsCleansSessionTempDir(t *testing.T) {
+	requireSpillFile(t)
 	t.Setenv("TMPDIR", t.TempDir())
 
 	fn := lookup(t, builtins.LimitLargeToolResults)
@@ -492,6 +495,7 @@ func TestLimitLargeToolResultsNoopsForSmallOutput(t *testing.T) {
 // and the notice must tell the model how to fetch the rest with a ranged
 // read_file call.
 func TestLimitLargeToolResultsReadFileKeepsHeadWithRangedReadNotice(t *testing.T) {
+	requireSpillFile(t)
 	t.Setenv("TMPDIR", t.TempDir())
 
 	var b strings.Builder
@@ -544,6 +548,7 @@ func TestLimitLargeToolResultsReadFileKeepsHeadWithRangedReadNotice(t *testing.T
 // the suggested continuation line is absolute in the file, not relative to
 // the returned range.
 func TestLimitLargeToolResultsReadFileContinuationRespectsRequestedStartLine(t *testing.T) {
+	requireSpillFile(t)
 	t.Setenv("TMPDIR", t.TempDir())
 
 	payload := strings.Repeat(strings.Repeat("y", 600)+"\n", 3000)
@@ -573,6 +578,7 @@ func TestLimitLargeToolResultsReadFileContinuationRespectsRequestedStartLine(t *
 // forever. The notice must state that line-based continuation cannot
 // advance within the first line instead of suggesting such a call.
 func TestLimitLargeToolResultsReadFileSingleLongLineDoesNotSuggestLoopingRead(t *testing.T) {
+	requireSpillFile(t)
 	t.Setenv("TMPDIR", t.TempDir())
 
 	original := "line1-start " + strings.Repeat("z", maxToolCallResultBytesForTest+largeToolCallResultTailBytesForTest)
@@ -705,6 +711,15 @@ func TestLimitLargeToolResultsMCPReadFileKeepsTail(t *testing.T) {
 	assert.NotContains(t, updated, "Showing the first")
 	assert.NotContains(t, updated, "call read_file again")
 	assert.NotContains(t, updated, `"line":`)
+}
+
+// requireSpillFile skips tests that assert on the spilled full result,
+// which the browser limiter does not write.
+func requireSpillFile(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "js" {
+		t.Skip("the browser limiter keeps only the excerpt")
+	}
 }
 
 func extractLargeResultPath(t *testing.T, response string) string {
@@ -844,6 +859,7 @@ func TestApplyAgentDefaultsOrdersTransformsBeforeLimiter(t *testing.T) {
 }
 
 func TestTransformPipelineRedactsBeforeSpillingLargeOutput(t *testing.T) {
+	requireSpillFile(t)
 	t.Setenv("TMPDIR", t.TempDir())
 
 	secret := portcullistest.FakeGitHubPAT("cxLeRrvbJfmYdUtr70xnNE3Q7Gvli4")

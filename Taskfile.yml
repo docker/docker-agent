@@ -128,10 +128,27 @@ tasks:
   # The GOOS=js half of test-wasm-providers; the e2e check above already runs
   # under `task test`, so CI calls this to avoid recompiling the e2e package.
   test-wasm-js:
-    desc: Run the GOOS=js provider registration tests (requires Node)
+    desc: Run portable runtime, tool and provider tests under GOOS=js (requires Node)
     cmds:
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm
       - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" pkg/model/provider/factory_js_openai_vendor_test.go
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run '^TestLimitLargeToolResults|^TestEnvironmentInfo' ./pkg/hooks/builtins
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./pkg/embeddedchat ./pkg/fuzzy/... ./pkg/tools/builtin/deferred ./pkg/tools/builtin/think ./pkg/tools/builtin/todo ./pkg/tools/builtin/memory ./pkg/memory/database/inmemory ./pkg/tools/codemode ./pkg/tools/toon ./pkg/rag ./pkg/rag/strategy
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run 'MemoryStorage|Conformance' ./pkg/tools/builtin/plan
+      - GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" -run 'Egress|TestWithOAuthTokenStore' ./pkg/httpclient ./pkg/tools/mcp
+      - GOOS=js GOARCH=wasm go test -tags docker_agent_wasm_cloud -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./cmd/wasm ./pkg/model/provider/bedrock ./pkg/model/provider/gemini ./pkg/model/provider/anthropic/vertex ./pkg/model/provider/vertexai
+
+  test-wasm-bridge:
+    desc: Build WASM and test its JavaScript API under Node
+    cmds:
+      - GOOS=js GOARCH=wasm go build -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
+      - node cmd/wasm/smoke_test.js
+      - node --test cmd/wasm/node/bridge_test.js
+
+  test-wasm-browser:
+    desc: Test real browser fetch, tools and RAG (requires Chrome and openssl)
+    cmds:
+      - node cmd/wasm/browser/smoke_test.js --build {{.CLI_ARGS}}
 
   test-binary:
     desc: Run tests on build binary

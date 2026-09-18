@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,6 +50,7 @@ func TestURLContext(t *testing.T) {
 					opts = append(opts, options.WithGateway(server.URL))
 				case apiSurfaceVertexAI:
 					envMap["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
+					opts = append(opts, options.WithTokenSource(func(context.Context) (string, error) { return "test-token", nil }))
 				}
 				client, err := NewClient(t.Context(), cfg, environment.NewMapEnvProvider(envMap), opts...)
 				require.NoError(t, err)

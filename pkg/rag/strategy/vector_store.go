@@ -67,7 +67,8 @@ type VectorStore struct {
 
 	similarityMetric string
 
-	indexingTokens int64 // Track tokens used during indexing
+	usageMu        sync.Mutex // Protects the indexing counters; files are indexed concurrently
+	indexingTokens int64      // Track tokens used during indexing
 	indexingCost   float64
 
 	modelID     modelsdev.ID // Provider/model identity, used for pricing lookup.
@@ -202,14 +203,17 @@ func (s *VectorStore) recordUsage(tokens int64, cost float64) {
 		return
 	}
 
+	s.usageMu.Lock()
 	s.indexingTokens += tokens
 	s.indexingCost += cost
+	totalTokens, totalCost := s.indexingTokens, s.indexingCost
+	s.usageMu.Unlock()
 
 	// Emit usage event with CUMULATIVE totals for TUI
 	s.emitEvent(types.Event{
 		Type:        types.EventTypeUsage,
-		TotalTokens: s.indexingTokens,
-		Cost:        s.indexingCost,
+		TotalTokens: totalTokens,
+		Cost:        totalCost,
 	})
 }
 
@@ -223,6 +227,15 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 		"respect_word_boundaries", chunking.RespectWordBoundaries,
 		"code_aware", chunking.CodeAware)
 
+	return s.initialize(ctx, s.files(docPaths), docPaths)
+}
+
+func (s *VectorStore) files(docPaths []string) fileSource {
+	return fileSource{paths: docPaths, shouldIgnore: s.shouldIgnore}
+}
+
+// docPaths is only used for logging; src decides what gets indexed.
+func (s *VectorStore) initialize(ctx context.Context, src documentSource, docPaths []string) error {
 	// Load existing file hashes from metadata
 	slog.DebugContext(ctx, "Loading existing file hashes", "strategy", s.name)
 	if err := s.loadExistingHashes(ctx); err != nil {
@@ -231,7 +244,7 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 
 	// Collect all files
 	slog.DebugContext(ctx, "Collecting files", "strategy", s.name, "paths", docPaths)
-	files, err := fsx.CollectFiles(ctx, docPaths, s.shouldIgnore)
+	files, err := src.list(ctx)
 	if err != nil {
 		s.emitEvent(types.Event{Type: types.EventTypeError, Error: err})
 		return fmt.Errorf("failed to collect files: %w", err)
@@ -283,7 +296,7 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 
 		seenFiles[filePath] = true
 
-		needsIndexing, err := s.needsIndexing(ctx, filePath)
+		needsIndexing, err := s.needsIndexing(src, filePath)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to check if file needs indexing",
 				"path", filePath, "error", err)
@@ -333,7 +346,7 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 			}
 
 			// Index the file
-			if err := s.indexFile(gctx, status.path); err != nil {
+			if err := s.indexFile(gctx, src, status.path); err != nil {
 				// Permanent model errors (invalid model, auth failure, rate limit)
 				// abort the whole run: every remaining file would trigger the
 				// same failing requests. Returning the error cancels gctx, which
@@ -395,12 +408,13 @@ func (s *VectorStore) Initialize(ctx context.Context, docPaths []string, chunkin
 
 	s.emitEvent(types.Event{Type: types.EventTypeIndexingComplete})
 
+	totalTokens, totalCost := s.GetIndexingUsage()
 	slog.InfoContext(ctx, "Vector store initialization completed",
 		"name", s.name,
 		"total_files", len(files),
 		"indexed", indexed,
-		"total_tokens", s.indexingTokens,
-		"total_cost", s.indexingCost)
+		"total_tokens", totalTokens,
+		"total_cost", totalCost)
 
 	return nil
 }
@@ -436,7 +450,8 @@ func (s *VectorStore) Query(ctx context.Context, query string, numResults int, t
 
 // CheckAndReindexChangedFiles checks for file changes and re-indexes if needed
 func (s *VectorStore) CheckAndReindexChangedFiles(ctx context.Context, docPaths []string, chunking ChunkingConfig) error {
-	files, err := fsx.CollectFiles(ctx, docPaths, s.shouldIgnore)
+	src := s.files(docPaths)
+	files, err := src.list(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to collect files: %w", err)
 	}
@@ -453,7 +468,7 @@ func (s *VectorStore) CheckAndReindexChangedFiles(ctx context.Context, docPaths 
 
 		seenFiles[filePath] = true
 
-		needsIndexing, err := s.needsIndexing(ctx, filePath)
+		needsIndexing, err := s.needsIndexing(src, filePath)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to check if file needs indexing", "path", filePath, "error", err)
 			continue
@@ -461,7 +476,7 @@ func (s *VectorStore) CheckAndReindexChangedFiles(ctx context.Context, docPaths 
 
 		if needsIndexing {
 			slog.InfoContext(ctx, "File changed, re-indexing", "path", filePath)
-			if err := s.indexFile(ctx, filePath); err != nil {
+			if err := s.indexFile(ctx, src, filePath); err != nil {
 				if isIndexingAborted(err) {
 					return fmt.Errorf("failed to re-index file %s: %w", filePath, err)
 				}
@@ -533,6 +548,8 @@ func (s *VectorStore) Close() error {
 
 // GetIndexingUsage returns usage statistics from indexing
 func (s *VectorStore) GetIndexingUsage() (tokens int64, cost float64) {
+	s.usageMu.Lock()
+	defer s.usageMu.Unlock()
 	return s.indexingTokens, s.indexingCost
 }
 
@@ -571,8 +588,8 @@ func (s *VectorStore) loadExistingHashes(ctx context.Context) error {
 	return nil
 }
 
-func (s *VectorStore) needsIndexing(_ context.Context, filePath string) (bool, error) {
-	currentHash, err := chunk.FileHash(filePath)
+func (s *VectorStore) needsIndexing(src documentSource, filePath string) (bool, error) {
+	currentHash, err := src.hash(filePath)
 	if err != nil {
 		return false, fmt.Errorf("failed to hash file: %w", err)
 	}
@@ -594,13 +611,17 @@ func (s *VectorStore) needsIndexing(_ context.Context, filePath string) (bool, e
 	return needsIndexing, nil
 }
 
-func (s *VectorStore) indexFile(ctx context.Context, filePath string) error {
-	fileHash, err := chunk.FileHash(filePath)
+func (s *VectorStore) indexFile(ctx context.Context, src documentSource, filePath string) error {
+	fileHash, err := src.hash(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to hash file: %w", err)
 	}
 
-	chunks, err := chunk.ProcessFile(ctx, s.docProcessor, filePath)
+	content, err := src.read(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to process file: %w", err)
+	}
+	chunks, err := s.docProcessor.Process(ctx, filePath, content)
 	if err != nil {
 		return fmt.Errorf("failed to process file: %w", err)
 	}
@@ -879,6 +900,8 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 		return
 	}
 
+	src := s.files(docPaths)
+
 	var debounceTimer *time.Timer
 	debounceDuration := 2 * time.Second
 	pendingChanges := make(map[string]bool)
@@ -931,7 +954,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 				continue
 			}
 
-			needsIndexing, err := s.needsIndexing(ctx, file)
+			needsIndexing, err := s.needsIndexing(src, file)
 			if err != nil {
 				slog.DebugContext(ctx, "File no longer exists or inaccessible", "path", file, "error", err)
 				continue
@@ -965,7 +988,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 					},
 				})
 
-				if err := s.indexFile(ctx, file); err != nil {
+				if err := s.indexFile(ctx, src, file); err != nil {
 					slog.ErrorContext(ctx, "Failed to re-index file", "path", file, "error", err)
 					s.emitEvent(types.Event{
 						Type:    "error",

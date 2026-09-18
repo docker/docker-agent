@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"io"
-	"syscall/js"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,42 +15,41 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-func TestStreamCompletion_PreservesProviderToolCallID(t *testing.T) {
+func TestToolCallPreservesProviderToolCallID(t *testing.T) {
 	for _, providerID := range []string{"", "gemini-call"} {
 		t.Run("providerID="+providerID, func(t *testing.T) {
 			stream := &wasmTestStream{}
 			for _, call := range []tools.ToolCall{
-				{ID: "local-call", Type: "function", Function: tools.FunctionCall{Name: "lookup"}},
-				{ID: "local-call", ProviderID: providerID, Function: tools.FunctionCall{Arguments: `{"city":`}},
+				{ID: "local-call", Type: "function", Function: tools.FunctionCall{Name: "echo"}},
+				{ID: "local-call", ProviderID: providerID, Function: tools.FunctionCall{Arguments: `{"text":`}},
 				{ID: "local-call", Function: tools.FunctionCall{Arguments: `"Paris"}`}},
 			} {
-				stream.responses = append(stream.responses, chat.MessageStreamResponse{
-					Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{ToolCalls: []tools.ToolCall{call}}}},
-				})
+				stream.responses = append(stream.responses, choice(chat.MessageDelta{ToolCalls: []tools.ToolCall{call}}))
 			}
-			rt := &wasmRuntime{onEvent: js.Undefined()}
-			result, err := rt.streamCompletion(t.Context(), &wasmTestProvider{stream: stream}, nil, nil)
+			stream.responses = append(stream.responses, stop(chat.FinishReasonToolCalls, 10, 5))
+			model := newScriptedModel("mock/root", func(context.Context) (chat.MessageStream, error) {
+				return stream, nil
+			}, textTurn("done"))
+			echo := &echoToolSet{}
+			s := openTestSession(t, testHost(echo, map[string]provider.Provider{"root": model}), sessionOptions{YAML: echoAgentYAML, AutoApprove: true})
+
+			_, err := s.send("echo Paris", func(context.Context, map[string]any) {})
 			require.NoError(t, err)
 			assert.True(t, stream.closed)
-			require.Len(t, result.toolCalls, 1)
-			call := result.toolCalls[0]
+			assert.Equal(t, 1, echo.callCount())
+			require.Equal(t, 2, model.callCount())
+			messages := model.lastCall()
+			require.Len(t, messages, 4)
+			assert.Equal(t, chat.MessageRoleAssistant, messages[2].Role)
+			require.Len(t, messages[2].ToolCalls, 1)
+			call := messages[2].ToolCalls[0]
 			assert.Equal(t, "local-call", call.ID)
 			assert.Equal(t, providerID, call.ProviderID)
 			assert.Equal(t, tools.ToolType("function"), call.Type)
-			assert.Equal(t, "lookup", call.Function.Name)
-			assert.JSONEq(t, `{"city":"Paris"}`, call.Function.Arguments)
+			assert.Equal(t, "echo", call.Function.Name)
+			assert.JSONEq(t, `{"text":"Paris"}`, call.Function.Arguments)
 		})
 	}
-}
-
-type wasmTestProvider struct {
-	provider.Provider
-
-	stream chat.MessageStream
-}
-
-func (p *wasmTestProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
-	return p.stream, nil
 }
 
 type wasmTestStream struct {

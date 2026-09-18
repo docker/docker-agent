@@ -127,9 +127,37 @@ if err := chat.Restart(); err != nil {
 | `Tool.Finished` | Tool call completed; `Tool.IsError` is true if it errored.             |
 | `Err`          | A user-facing runtime error; no further content events follow.           |
 | `Done`         | Clean end of turn; no more events.                                       |
+| `Elicitation`  | A pending MCP elicitation request (`Config.ForwardElicitation` only); answer with `RespondToElicitation`. |
 | `RuntimeEvent` | The original `runtime.Event` for callers that need the full stream.      |
 
-For advanced use (custom elicitation, raw event inspection), call `chat.Runtime()` to access the underlying `runtime.Runtime` directly.
+### Opt-in behaviors
+
+The defaults suit a plain chat UI; a richer host (a JS bridge, a browser build) can opt into more:
+
+```go
+chat, err := embeddedchat.New(ctx, embeddedchat.Config{
+    Team: myTeam,
+    // Do not record the process working directory as workspace provenance
+    // (wasm hosts, servers). Conversations get a WorkingDir only if
+    // SessionOptions set one.
+    NonLocal: true,
+    // Surface MCP elicitation requests instead of declining them.
+    ForwardElicitation: true,
+    // Also deliver events the compact projection drops (reasoning, handoffs,
+    // model fallback, token usage, ...) with only RuntimeEvent set.
+    ForwardAllEvents: true,
+})
+```
+
+With `ForwardElicitation`, the runtime stays blocked until you answer; requests are declined for you once the run errored or was cancelled:
+
+```go
+case ev.Elicitation != nil:
+    err := chat.RespondToElicitation(ctx, tools.ElicitationActionAccept,
+        map[string]any{"token": token}, ev.Elicitation.ElicitationID)
+```
+
+For anything beyond that, call `chat.Runtime()` to access the underlying `runtime.Runtime` directly.
 
 > [!WARNING]
 > **Breaking change: `Runtime.ResumeElicitation` (#3584)**
@@ -170,6 +198,25 @@ registry := teamloader.NewToolsetRegistry(creators)
 ```
 
 Pass the custom registry via `teamloader.WithToolsetRegistry(registry)` when calling `teamloader.Load`. Note that `teamloader.Load()` does not return an error for unknown toolset types unless `teamloader.WithStrict` is set — the failure is recorded as a load-time warning and can be retrieved with `agent.DrainWarnings()`; it is also surfaced via logging and TUI notifications.
+
+### RAG over in-memory documents
+
+Hosts without a filesystem (browsers, servers holding uploads in memory) can hand `pkg/rag` the documents directly. Set `ManagersBuildConfig.Documents`, a `rag.Documents` map keyed by logical path, and the manager indexes those instead of reading files: the RAG's `docs` select among the paths (exact path, directory prefix or glob), each strategy indexes the selection through its normal pipeline (`bm25`, `chunked-embeddings`, `semantic-embeddings`, fusion, reranking), `return_full_content` reads the supplied document, and change checks and the file watcher become no-ops. A `docs` entry selecting no document fails `NewManager`; a nil `Documents` keeps the filesystem behaviour.
+
+```go
+mgr, err := rag.NewManager(ctx, "handbook", ragCfg, rag.ManagersBuildConfig{
+    ParentDir:     "/",
+    Env:           runConfig.EnvProvider(),
+    RuntimeConfig: runConfig,
+    Documents:     rag.Documents{"handbook/leave.md": leave, "handbook/expenses.md": expenses},
+})
+if err != nil {
+    return err
+}
+ts := ragtool.New(mgr, mgr.ToolName(), ragtool.WithIndexingTimeout(ragCfg.GetIndexingTimeout()))
+```
+
+`cmd/wasm/toolsets.go` registers exactly this as the browser's `type: rag` creator, fed by `createSession`'s `documents` option.
 
 ## Loading YAML with Hand-Picked Registries (lean embedding)
 
@@ -647,9 +694,9 @@ The wrapper receives the already-instrumented transport (OpenTelemetry, SSE deco
 **Supported providers:** Anthropic, OpenAI, Gemini (GeminiAPI backend), Bedrock. Works in both direct and gateway/proxy mode.
 
 > [!WARNING]
-> **Vertex AI not supported**
+> **Vertex AI authentication**
 >
-> Vertex AI uses an ADC-managed HTTP client that Docker Agent cannot intercept. When a transport wrapper is set, Docker Agent falls back to the GeminiAPI backend instead of Vertex AI — a debug message is logged.
+> Gemini on Vertex AI supports transport wrappers when `options.WithTokenSource` supplies the access token. Without an explicit token source, a wrapper selects the Gemini API backend instead of the ADC-managed Vertex client. For Model Garden, use `vertexai.NewClientWithTokenSource` (or `anthropic/vertex.NewClientWithTokenSource`) to bypass ADC and resolve credentials with each request's context.
 
 In **gateway mode** the wrapper is called on every LLM request because gateway clients are rebuilt each call for short-lived auth tokens. In **direct mode** it is called once at client construction. Rate-limit responses (HTTP 429) are classified as non-retryable by the runtime and cause the model chain to skip to the next fallback, so wrappers that track per-request outcomes will observe these as failures rather than retried calls.
 
@@ -678,7 +725,7 @@ client, err := openai.NewClient(ctx, &latest.ModelConfig{
 }, env, options.WithTokenSource(tokenSource))
 ```
 
-The OpenAI client checks for a configured `TokenSource` before falling back to `token_key`, and uses it to set the `Authorization` header on both HTTP and WebSocket requests. Static API-key, ChatGPT, and gateway auth paths are unaffected. `FromModelOptions` round-trips the token source, so a cloned provider config keeps it. Vertex AI Model Garden uses this option internally to refresh GCP access tokens through the standard `oauth2.TokenSource` machinery.
+The OpenAI client checks for a configured `TokenSource` before falling back to `token_key`, and uses it to set the `Authorization` header on both HTTP and WebSocket requests. Static API-key, ChatGPT, and gateway auth paths are unaffected. `FromModelOptions` round-trips the token source, so a cloned provider config keeps it. Vertex AI Model Garden's default constructor refreshes GCP access tokens through ADC. Its `NewClientWithTokenSource` constructor instead accepts a host-managed request-time token source; neither host credential files nor instance metadata are consulted on that path.
 
 ## Using Different Providers
 

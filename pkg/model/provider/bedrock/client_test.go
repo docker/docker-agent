@@ -3,8 +3,9 @@ package bedrock
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
@@ -16,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -237,34 +239,43 @@ func TestConvertMessages_ConsecutiveToolResults(t *testing.T) {
 	assert.Equal(t, types.ConversationRoleUser, bedrockMsgs[3].Role)
 }
 
-func TestBearerTokenTransport(t *testing.T) {
+// The bearer token replaces SigV4: the SDK's bearer scheme sets the header
+// and no signature is computed. Requests are intercepted at the transport.
+func TestNewClient_BearerTokenRequest(t *testing.T) {
 	t.Parallel()
 
-	// Create a test server to capture the Authorization header
-	var capturedAuth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	// Create transport with bearer token
-	transport := &bearerTokenTransport{
-		token: "test-api-key-12345",
-		base:  http.DefaultTransport,
+	var got *http.Request
+	cfg := &latest.ModelConfig{
+		Provider:     "amazon-bedrock",
+		Model:        "anthropic.claude-v2",
+		TokenKey:     "BEDROCK_TOKEN",
+		ProviderOpts: map[string]any{"region": "eu-west-1"},
 	}
-
-	// Make a request through the transport
-	client := &http.Client{Transport: transport}
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
+	client, err := NewClient(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"BEDROCK_TOKEN": "test-api-key-12345"}),
+		options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+			return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				got = req
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"message":"denied"}`)),
+					Request:    req,
+				}, nil
+			})
+		}))
 	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
 
-	// Verify the Authorization header was set correctly
-	assert.Equal(t, "Bearer test-api-key-12345", capturedAuth)
+	_, err = client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, nil)
+	require.Error(t, err)
+	require.NotNil(t, got, "request must reach the transport")
+	assert.Equal(t, "bedrock-runtime.eu-west-1.amazonaws.com", got.URL.Host)
+	assert.Equal(t, "Bearer test-api-key-12345", got.Header.Get("Authorization"))
+	assert.Empty(t, got.Header.Get("X-Amz-Date"), "no SigV4 signing")
 }
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // Image URL conversion tests
 
@@ -485,28 +496,6 @@ func TestBuildAWSConfig_ProviderOptsOverridesEnv(t *testing.T) {
 
 	// provider_opts should take precedence
 	assert.Equal(t, "eu-central-1", awsCfg.Region)
-}
-
-// NewClient with valid config tests
-
-func TestNewClient_ValidConfig(t *testing.T) {
-	t.Parallel()
-
-	cfg := &latest.ModelConfig{
-		Provider: "amazon-bedrock",
-		Model:    "anthropic.claude-v2",
-		ProviderOpts: map[string]any{
-			"region": "us-east-1",
-		},
-	}
-
-	client, err := NewClient(t.Context(), cfg, environment.NewNoEnvProvider())
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	// Verify client was configured correctly
-	assert.Equal(t, "anthropic.claude-v2", client.ModelConfig.Model)
-	assert.Equal(t, "amazon-bedrock", client.ModelConfig.Provider)
 }
 
 func TestNewClient_WithBearerToken(t *testing.T) {

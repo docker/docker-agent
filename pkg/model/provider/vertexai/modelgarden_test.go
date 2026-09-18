@@ -3,6 +3,7 @@ package vertexai
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
@@ -67,6 +69,62 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+// An explicit token source replaces ADC for every Model Garden publisher and
+// is resolved with the request context.
+func TestNewClientWithTokenSource(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		publisher, model, wantPath string
+	}{
+		{"meta", "meta/llama-4-maverick-17b-128e-instruct-maas", "/v1beta1/projects/test-project/locations/us-central1/endpoints/openapi/chat/completions"},
+		{"anthropic", "claude-sonnet-4-6", "/v1/projects/test-project/locations/us-central1/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict"},
+	} {
+		t.Run(tt.publisher, func(t *testing.T) {
+			t.Parallel()
+
+			var got *http.Request
+			var sessions []string
+			source := func(ctx context.Context) (string, error) {
+				sessions = append(sessions, httpclient.SessionIDFromContext(ctx))
+				return "explicit-token", nil
+			}
+			client, err := NewClientWithTokenSource(t.Context(), &latest.ModelConfig{
+				Provider:     "google",
+				Model:        tt.model,
+				ProviderOpts: map[string]any{"publisher": tt.publisher, "project": "test-project", "location": "us-central1"},
+			}, environment.NewNoEnvProvider(), source,
+				options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+					return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						got = req
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+							Body:       io.NopCloser(strings.NewReader("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\ndata: [DONE]\n\n")),
+							Request:    req,
+						}, nil
+					})
+				}))
+			require.NoError(t, err)
+
+			stream, err := client.CreateChatCompletionStream(httpclient.ContextWithSessionID(t.Context(), "session-1"), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, nil)
+			require.NoError(t, err)
+			for {
+				if _, err := stream.Recv(); err != nil {
+					break
+				}
+			}
+			stream.Close()
+
+			assert.Equal(t, []string{"", "session-1"}, sessions)
+			require.NotNil(t, got)
+			assert.Equal(t, "us-central1-aiplatform.googleapis.com", got.URL.Host)
+			assert.Equal(t, tt.wantPath, got.URL.Path)
+			assert.Equal(t, "Bearer explicit-token", got.Header.Get("Authorization"))
+		})
+	}
 }
 
 func TestIsModelGardenConfig(t *testing.T) {

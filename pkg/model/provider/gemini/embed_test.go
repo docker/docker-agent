@@ -58,8 +58,7 @@ func newEmbedClientForModel(t *testing.T, model, baseURL string, providerOpts ma
 	return client
 }
 
-// newVertexEmbedClient routes through Vertex AI. With a custom BaseURL and no
-// project, location or API key, the genai SDK skips ADC lookup.
+// An explicit token source avoids ADC discovery, including on WASM.
 func newVertexEmbedClient(t *testing.T, model, baseURL string, providerOpts map[string]any) *Client {
 	t.Helper()
 	cfg := &latest.ModelConfig{
@@ -69,7 +68,8 @@ func newVertexEmbedClient(t *testing.T, model, baseURL string, providerOpts map[
 		ProviderOpts: providerOpts,
 	}
 	env := environment.NewMapEnvProvider(map[string]string{"GOOGLE_GENAI_USE_VERTEXAI": "1"})
-	client, err := NewClient(t.Context(), cfg, env)
+	client, err := NewClient(t.Context(), cfg, env,
+		options.WithTokenSource(func(context.Context) (string, error) { return "test-token", nil }))
 	require.NoError(t, err)
 	require.Equal(t, apiSurfaceVertexAI, client.apiSurface)
 	return client

@@ -68,6 +68,20 @@ type Config struct {
 	// EventBuffer controls the size of the channel returned by Send. When zero,
 	// a small default buffer is used.
 	EventBuffer int
+	// NonLocal skips capturing the process working directory as the
+	// conversations' workspace provenance, for hosts without a meaningful
+	// local filesystem (e.g. wasm). Conversations then have no WorkingDir
+	// unless SessionOptions set one.
+	NonLocal bool
+	// ForwardElicitation surfaces elicitation requests as Event.Elicitation and
+	// leaves the runtime blocked until RespondToElicitation is called. When
+	// false, requests are declined automatically.
+	ForwardElicitation bool
+	// ForwardAllEvents also delivers runtime events the compact projection
+	// would drop (reasoning, handoffs, model fallback, token usage, ...) as
+	// events carrying only RuntimeEvent. Events the wrapper answers itself
+	// (auto-declined elicitations, max-iterations) are still not forwarded.
+	ForwardAllEvents bool
 }
 
 // Event is the UI-friendly form of one runtime stream event.
@@ -80,9 +94,13 @@ type Event struct {
 	Err error
 	// Done marks a clean end of the reply stream.
 	Done bool
-	// RuntimeEvent is the original docker-agent runtime event for projected
-	// events. Not every runtime event is forwarded by this compact API; callers
-	// that need the full raw stream can use Runtime().RunStream directly.
+	// Elicitation is a pending MCP elicitation request (Config.ForwardElicitation
+	// only). The runtime is blocked until RespondToElicitation is called with
+	// its ElicitationID.
+	Elicitation *dagentruntime.ElicitationRequestEvent
+	// RuntimeEvent is the original docker-agent runtime event. Without
+	// Config.ForwardAllEvents only projected events are forwarded; callers that
+	// need the full raw stream can also use Runtime().RunStream directly.
 	RuntimeEvent dagentruntime.Event
 }
 
@@ -184,11 +202,13 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 	}
 
 	s := &Session{cfg: cfg, rt: rt}
-	// Capture the embedder's workspace root once, at initialization: a later
-	// process chdir must not change which workspace owns the conversations.
-	s.workingDir, err = session.CaptureLocalWorkingDir(runConfig.WorkingDir)
-	if err != nil {
-		return nil, fmt.Errorf("embeddedchat: capture working dir: %w", err)
+	if !cfg.NonLocal {
+		// Capture the embedder's workspace root once, at initialization: a later
+		// process chdir must not change which workspace owns the conversations.
+		s.workingDir, err = session.CaptureLocalWorkingDir(runConfig.WorkingDir)
+		if err != nil {
+			return nil, fmt.Errorf("embeddedchat: capture working dir: %w", err)
+		}
 	}
 	if root, err := tm.DefaultAgent(); err == nil {
 		s.welcome = root.WelcomeMessage()
@@ -256,7 +276,11 @@ func (s *Session) Close() error {
 func (s *Session) resetConversationLocked() {
 	// The captured root goes first so an embedder-supplied WithWorkingDir in
 	// SessionOptions still wins.
-	opts := append([]session.Opt{session.WithWorkingDir(s.workingDir)}, s.cfg.SessionOptions...)
+	var opts []session.Opt
+	if s.workingDir != "" {
+		opts = append(opts, session.WithWorkingDir(s.workingDir))
+	}
+	opts = append(opts, s.cfg.SessionOptions...)
 	s.session = session.New(opts...)
 }
 
@@ -316,6 +340,23 @@ func (s *Session) Confirm(ctx context.Context, req dagentruntime.ResumeRequest) 
 	return nil
 }
 
+// RespondToElicitation answers the elicitation request identified by
+// elicitationID (Config.ForwardElicitation). The error is the runtime's, e.g.
+// when no such request is pending anymore.
+func (s *Session) RespondToElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any, elicitationID string) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrClosed
+	}
+	rt := s.rt
+	s.mu.Unlock()
+	if rt == nil {
+		return ErrNotInitialized
+	}
+	return rt.ResumeElicitation(ctx, action, content, elicitationID)
+}
+
 func (s *Session) forwardEvents(ctx context.Context, events <-chan dagentruntime.Event, out chan<- Event, cancel context.CancelFunc, runID int) {
 	defer close(out)
 	defer cancel()
@@ -352,10 +393,12 @@ func (s *Session) forwardEvents(ctx context.Context, events <-chan dagentruntime
 				s.rt.Resume(ctx, dagentruntime.ResumeReject("The run was aborted."))
 			}
 		case *dagentruntime.ElicitationRequestEvent:
-			// This headless wrapper has no built-in elicitation UI. Decline so the
-			// run cannot hang forever; embedders that need elicitation can consume
-			// RuntimeEvent directly by driving the runtime themselves.
-			_ = s.rt.ResumeElicitation(ctx, tools.ElicitationActionDecline, nil, e.ElicitationID)
+			// Without ForwardElicitation this headless wrapper has no elicitation
+			// UI, so decline rather than let the run hang forever. Forwarded
+			// requests are declined too once the run errored or was cancelled.
+			if errSent || !s.cfg.ForwardElicitation || !emit(Event{RuntimeEvent: event, Elicitation: e}) {
+				_ = s.rt.ResumeElicitation(ctx, tools.ElicitationActionDecline, nil, e.ElicitationID)
+			}
 		case *dagentruntime.MaxIterationsReachedEvent:
 			s.rt.Resume(ctx, dagentruntime.ResumeReject(""))
 		case *dagentruntime.ErrorEvent:
@@ -370,10 +413,12 @@ func (s *Session) forwardEvents(ctx context.Context, events <-chan dagentruntime
 			if errSent {
 				continue
 			}
-			if translated, ok := TranslateRuntimeEvent(event); ok {
-				if !emit(translated) {
-					return
-				}
+			translated, ok := TranslateRuntimeEvent(event)
+			if !ok && s.cfg.ForwardAllEvents {
+				translated, ok = Event{RuntimeEvent: event}, true
+			}
+			if ok && !emit(translated) {
+				return
 			}
 		}
 	}

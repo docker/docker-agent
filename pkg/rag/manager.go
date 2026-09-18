@@ -38,6 +38,7 @@ type ToolConfig struct {
 type Config struct {
 	Tool            ToolConfig
 	Docs            []string
+	Documents       Documents // When set, full documents are read from here instead of disk
 	Results         ResultsConfig
 	FusionConfig    *FusionConfig
 	StrategyConfigs []strategy.Config
@@ -643,8 +644,15 @@ func (m *Manager) reconstructFullDocuments(_ context.Context, results []database
 	return results
 }
 
-// readFile reads the content of a file
+// readFile reads the content of a file, or of the supplied document at that path
 func (m *Manager) readFile(path string) (string, error) {
+	if m.config.Documents != nil {
+		content, ok := m.config.Documents[path]
+		if !ok {
+			return "", fmt.Errorf("document %q was not supplied", path)
+		}
+		return string(content), nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file %s: %w", path, err)

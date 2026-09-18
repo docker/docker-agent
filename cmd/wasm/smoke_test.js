@@ -1,25 +1,17 @@
 // Node-side smoke test for cmd/wasm/web/docker-agent.wasm.
 //
-// We mirror the polyfill setup from Go's stock wasm_exec_node.js but stop
-// short of its auto-exit logic — instead we call dockerAgent.parseConfig
-// after the runtime is up and assert two YAML shapes parse correctly:
+// Boots the wasm binary through node/boot.js, then asserts that
+// parseConfig and listAgents handle two YAML shapes:
 //   1. A two-agent config (validates the full version-upgrade pipeline).
 //   2. An OpenRouter-style custom provider with a slash-laden model name
 //      (validates the path our browser demo exercises).
 //
 // Run with:  node cmd/wasm/smoke_test.js
+// The JS bridge tests live next door:  node --test cmd/wasm/node/bridge_test.js
 
 "use strict";
 
-globalThis.require = require;
-globalThis.fs = require("node:fs");
-globalThis.path = require("node:path");
-globalThis.TextEncoder = require("node:util").TextEncoder;
-globalThis.TextDecoder = require("node:util").TextDecoder;
-globalThis.performance ??= require("node:perf_hooks").performance;
-globalThis.crypto ??= require("node:crypto").webcrypto;
-
-require("/opt/homebrew/Cellar/go/1.26.2/libexec/lib/wasm/wasm_exec.js");
+const { bootDockerAgent } = require("./node/boot.js");
 
 function assert(cond, msg) {
   if (!cond) {
@@ -29,23 +21,10 @@ function assert(cond, msg) {
 }
 
 (async () => {
-  const wasm = fs.readFileSync(__dirname + "/web/docker-agent.wasm");
-  const go = new Go();
-  go.argv = ["docker-agent.wasm"];
-  const { instance } = await WebAssembly.instantiate(wasm, go.importObject);
-  // Don't await go.run — main() blocks on `select{}`. Fire and forget.
-  go.run(instance);
-
-  for (let i = 0; i < 100 && !globalThis.dockerAgent; i++) {
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  if (!globalThis.dockerAgent) {
-    console.error("dockerAgent global was never registered");
-    process.exit(1);
-  }
+  const dockerAgent = await bootDockerAgent();
 
   // --- Case 1: two-agent config exercising the version migration path. ---
-  const twoAgents = globalThis.dockerAgent.parseConfig(`
+  const twoAgents = dockerAgent.parseConfig(`
 version: "2"
 agents:
   root:
@@ -74,7 +53,7 @@ models:
   //     ships in its default textarea, with a slash-laden model name. ---
   let orStyle;
   try {
-    orStyle = globalThis.dockerAgent.parseConfig(`
+    orStyle = dockerAgent.parseConfig(`
 providers:
   openrouter:
     provider: openai
@@ -97,7 +76,7 @@ agents:
   );
 
   // --- Case 3: listAgents API ---
-  const agents = globalThis.dockerAgent.listAgents(`
+  const agents = dockerAgent.listAgents(`
 providers:
   openrouter:
     provider: openai
@@ -120,12 +99,23 @@ agents:
   assert(agents[1].name === "helper",
     "listAgents[1] should be helper");
 
-  // --- Case 4: abort() should be callable without error ---
-  assert(typeof globalThis.dockerAgent.abort === "function",
-    "abort should be a function");
-  globalThis.dockerAgent.abort(); // should not throw
+  // --- Case 4: invalid YAML throws a real Error ---
+  let threw = false;
+  try {
+    dockerAgent.parseConfig("agents: [");
+  } catch (e) {
+    threw = e instanceof Error;
+  }
+  assert(threw, "parseConfig should throw an Error on invalid YAML");
 
-  console.log("OK — all smoke tests pass (parseConfig, listAgents, abort).");
+  // --- Case 5: abort() should be callable without error ---
+  assert(typeof dockerAgent.abort === "function",
+    "abort should be a function");
+  dockerAgent.abort(); // should not throw
+  assert(typeof dockerAgent.createSession === "function",
+    "createSession should be a function");
+
+  console.log("OK — all smoke tests pass (parseConfig, listAgents, abort, createSession).");
   process.exit(0);
 })().catch((e) => {
   console.error("smoke test failed:", e);

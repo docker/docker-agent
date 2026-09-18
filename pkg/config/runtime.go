@@ -16,6 +16,9 @@ import (
 type RuntimeConfig struct {
 	Config
 
+	// EnvProviderOverride bypasses host environment and credential discovery.
+	EnvProviderOverride environment.Provider
+	// EnvProviderForTests is retained for compatibility; prefer EnvProviderOverride.
 	EnvProviderForTests environment.Provider
 	envProviderCached   environment.Provider
 	envProviderOnce     sync.Once
@@ -93,6 +96,7 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 	env := runConfig.EnvProvider()
 	clone := &RuntimeConfig{
 		Config:                 runConfig.Config,
+		EnvProviderOverride:    runConfig.EnvProviderOverride,
 		EnvProviderForTests:    runConfig.EnvProviderForTests,
 		envProviderCached:      env,
 		envFilesErr:            runConfig.envFilesErr,
@@ -144,6 +148,9 @@ func (runConfig *RuntimeConfig) ProviderRegistryOrDefault() *provider.Registry {
 }
 
 func (runConfig *RuntimeConfig) EnvProvider() environment.Provider {
+	if runConfig.EnvProviderOverride != nil {
+		return runConfig.EnvProviderOverride
+	}
 	if runConfig.EnvProviderForTests != nil {
 		return runConfig.EnvProviderForTests
 	}

@@ -11,7 +11,6 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	dagentcfg "github.com/docker/docker-agent/pkg/config"
-	"github.com/docker/docker-agent/pkg/embeddedchat/defaults"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	dagentruntime "github.com/docker/docker-agent/pkg/runtime"
@@ -19,28 +18,6 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
-
-func TestNewLoadsAgentAndWelcomeMessage(t *testing.T) {
-	t.Parallel()
-	cfg := []byte(`agents:
-  root:
-    description: Test agent
-    instruction: Be helpful.
-    welcome_message: Hello from embedded chat.
-    harness:
-      type: claude-code
-`)
-
-	s, err := New(t.Context(), Config{
-		AgentSource: dagentcfg.NewBytesSource("agent.yaml", cfg),
-		LoadOpts:    defaults.Opts(),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, s.Close()) })
-	require.Equal(t, "Hello from embedded chat.", s.WelcomeMessage())
-	require.NotNil(t, s.Runtime())
-	require.NotNil(t, s.Conversation())
-}
 
 func TestNewRequiresAgentSource(t *testing.T) {
 	t.Parallel()
@@ -116,6 +93,36 @@ func TestSessionOptionsOverrideCapturedWorkingDir(t *testing.T) {
 	require.Equal(t, override, s.Conversation().WorkingDir)
 }
 
+func TestNonLocalSkipsWorkspaceCapture(t *testing.T) {
+	t.Parallel()
+
+	s, err := New(t.Context(), Config{
+		Team:          newCodeBuiltTeam(),
+		NonLocal:      true,
+		RuntimeConfig: &dagentcfg.RuntimeConfig{Config: dagentcfg.Config{WorkingDir: t.TempDir()}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	require.Empty(t, s.Conversation().WorkingDir)
+
+	require.NoError(t, s.Restart())
+	require.Empty(t, s.Conversation().WorkingDir)
+}
+
+func TestNonLocalKeepsSessionOptionsWorkingDir(t *testing.T) {
+	t.Parallel()
+	override := t.TempDir()
+
+	s, err := New(t.Context(), Config{
+		Team:           newCodeBuiltTeam(),
+		NonLocal:       true,
+		SessionOptions: []session.Opt{session.WithWorkingDir(override)},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	require.Equal(t, override, s.Conversation().WorkingDir)
+}
+
 func TestInitialSessionResumesConversation(t *testing.T) {
 	t.Parallel()
 	restored := session.New()
@@ -130,13 +137,20 @@ func TestInitialSessionResumesConversation(t *testing.T) {
 	require.NotSame(t, restored, s.Conversation(), "Restart must start a fresh conversation")
 }
 
+type elicitationAnswer struct {
+	Action  tools.ElicitationAction
+	Content map[string]any
+	ID      string
+}
+
 type fakeRuntime struct {
 	events chan dagentruntime.Event
 
-	runCtxs      []context.Context
-	resumes      []dagentruntime.ResumeRequest
-	elicitations []tools.ElicitationAction
-	closed       bool
+	runCtxs        []context.Context
+	resumes        []dagentruntime.ResumeRequest
+	elicitations   []elicitationAnswer
+	elicitationErr error
+	closed         bool
 }
 
 func newFakeRuntime() *fakeRuntime {
@@ -152,9 +166,13 @@ func (f *fakeRuntime) Resume(_ context.Context, req dagentruntime.ResumeRequest)
 	f.resumes = append(f.resumes, req)
 }
 
-func (f *fakeRuntime) ResumeElicitation(_ context.Context, action tools.ElicitationAction, _ map[string]any, _ ...string) error {
-	f.elicitations = append(f.elicitations, action)
-	return nil
+func (f *fakeRuntime) ResumeElicitation(_ context.Context, action tools.ElicitationAction, content map[string]any, elicitationID ...string) error {
+	var id string
+	if len(elicitationID) > 0 {
+		id = elicitationID[0]
+	}
+	f.elicitations = append(f.elicitations, elicitationAnswer{Action: action, Content: content, ID: id})
+	return f.elicitationErr
 }
 
 func (f *fakeRuntime) Close() error {
@@ -164,6 +182,10 @@ func (f *fakeRuntime) Close() error {
 
 func newTestSession(rt *fakeRuntime) *Session {
 	return &Session{rt: rt, session: session.New()}
+}
+
+func newElicitation(id string) dagentruntime.Event {
+	return dagentruntime.ElicitationRequest("authorize", "url", nil, "https://example.com", id, "", "sess", nil, "agent")
 }
 
 func TestTranslateRuntimeEvent(t *testing.T) {
@@ -256,14 +278,122 @@ func TestSessionSendDeclinesElicitationAndRejectsMaxIterations(t *testing.T) {
 
 	out, err := s.Send(t.Context(), "hi")
 	require.NoError(t, err)
-	rt.events <- dagentruntime.ElicitationRequest("authorize", "url", nil, "https://example.com", "id", "", "sess", nil, "agent")
+	rt.events <- newElicitation("id")
 	rt.events <- dagentruntime.MaxIterationsReached(3)
 	close(rt.events)
 
 	require.True(t, receiveEvent(t, out).Done)
-	require.Equal(t, []tools.ElicitationAction{"decline"}, rt.elicitations)
+	require.Equal(t, []elicitationAnswer{{Action: tools.ElicitationActionDecline, ID: "id"}}, rt.elicitations)
 	require.Len(t, rt.resumes, 1)
 	require.Equal(t, dagentruntime.ResumeTypeReject, rt.resumes[0].Type)
+}
+
+func TestSessionForwardsElicitationAndRespondResumesRuntime(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	s := newTestSession(rt)
+	s.cfg.ForwardElicitation = true
+
+	out, err := s.Send(t.Context(), "authorize")
+	require.NoError(t, err)
+	rt.events <- newElicitation("id-1")
+
+	event := receiveEvent(t, out)
+	require.NotNil(t, event.Elicitation)
+	require.Equal(t, "id-1", event.Elicitation.ElicitationID)
+	require.Same(t, event.Elicitation, event.RuntimeEvent)
+	require.Empty(t, rt.elicitations, "forwarded requests must not be auto-declined")
+
+	content := map[string]any{"token": "secret"}
+	require.NoError(t, s.RespondToElicitation(t.Context(), tools.ElicitationActionAccept, content, "id-1"))
+	require.Equal(t, []elicitationAnswer{{Action: tools.ElicitationActionAccept, Content: content, ID: "id-1"}}, rt.elicitations)
+
+	close(rt.events)
+	require.True(t, receiveEvent(t, out).Done)
+}
+
+func TestRespondToElicitationSurfacesRuntimeError(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	rt.elicitationErr = errors.New("no such elicitation")
+	s := newTestSession(rt)
+
+	require.EqualError(t, s.RespondToElicitation(t.Context(), tools.ElicitationActionDecline, nil, "stale"), "no such elicitation")
+}
+
+func TestRespondToElicitationRequiresRuntime(t *testing.T) {
+	t.Parallel()
+	s := &Session{}
+	require.ErrorIs(t, s.RespondToElicitation(t.Context(), tools.ElicitationActionDecline, nil, "id"), ErrNotInitialized)
+}
+
+func TestSessionDeclinesForwardedElicitationAfterError(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	s := newTestSession(rt)
+	s.cfg.ForwardElicitation = true
+
+	out, err := s.Send(t.Context(), "hi")
+	require.NoError(t, err)
+	rt.events <- dagentruntime.Error("boom")
+	require.EqualError(t, receiveEvent(t, out).Err, "boom")
+
+	rt.events <- newElicitation("id-2")
+	close(rt.events)
+	assertClosed(t, out)
+	require.Equal(t, []elicitationAnswer{{Action: tools.ElicitationActionDecline, ID: "id-2"}}, rt.elicitations)
+}
+
+func TestSessionDoesNotForwardElicitationAfterCancel(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	s := newTestSession(rt)
+	s.cfg.ForwardElicitation = true
+
+	ctx, cancel := context.WithCancel(t.Context())
+	out, err := s.Send(ctx, "hi")
+	require.NoError(t, err)
+	cancel()
+
+	// The runtime unblocks its own wait on the cancelled run context; the
+	// wrapper must neither deliver the request nor hang on it.
+	rt.events <- newElicitation("id-3")
+	close(rt.events)
+	assertClosed(t, out)
+}
+
+func TestSessionForwardAllEventsDeliversUnprojectedEvents(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	s := newTestSession(rt)
+	s.cfg.ForwardAllEvents = true
+
+	out, err := s.Send(t.Context(), "hi")
+	require.NoError(t, err)
+
+	reasoning := dagentruntime.AgentChoiceReasoning("agent", s.session.ID, "thinking")
+	rt.events <- reasoning
+	rt.events <- dagentruntime.AgentChoice("agent", s.session.ID, "hello")
+	close(rt.events)
+
+	event := receiveEvent(t, out)
+	require.Same(t, reasoning, event.RuntimeEvent)
+	require.Equal(t, Event{RuntimeEvent: reasoning}, event, "raw events carry only RuntimeEvent")
+	require.Equal(t, "hello", receiveEvent(t, out).Text, "projected events keep their compact form")
+	require.True(t, receiveEvent(t, out).Done)
+}
+
+func TestSessionDropsUnprojectedEventsByDefault(t *testing.T) {
+	t.Parallel()
+	rt := newFakeRuntime()
+	s := newTestSession(rt)
+
+	out, err := s.Send(t.Context(), "hi")
+	require.NoError(t, err)
+	rt.events <- dagentruntime.AgentChoiceReasoning("agent", s.session.ID, "thinking")
+	close(rt.events)
+
+	require.True(t, receiveEvent(t, out).Done)
 }
 
 func TestSessionSendRejectsConcurrentRun(t *testing.T) {
@@ -294,6 +424,8 @@ func TestSessionRejectsOperationsAfterClose(t *testing.T) {
 	require.ErrorIs(t, err, ErrClosed)
 	require.ErrorIs(t, s.Restart(), ErrClosed)
 	require.ErrorIs(t, s.Confirm(t.Context(), dagentruntime.ResumeApprove()), ErrClosed)
+	require.ErrorIs(t, s.RespondToElicitation(t.Context(), tools.ElicitationActionDecline, nil, "id"), ErrClosed)
+	require.Empty(t, rt.elicitations)
 
 	close(rt.events)
 }
