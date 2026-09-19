@@ -1,6 +1,7 @@
 package oaistream
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/openai/openai-go/v3"
@@ -118,6 +119,13 @@ func TestConvertMessages(t *testing.T) {
 			want: 1,
 		},
 		{
+			name: "assistant with reasoning not skipped",
+			messages: []chat.Message{
+				{Role: chat.MessageRoleAssistant, ReasoningContent: "I concluded X because Y"},
+			},
+			want: 1,
+		},
+		{
 			name: "tool message",
 			messages: []chat.Message{
 				{Role: chat.MessageRoleTool, Content: "Result", ToolCallID: "call_123"},
@@ -142,6 +150,35 @@ func TestConvertMessages(t *testing.T) {
 			assert.Len(t, result, tt.want)
 		})
 	}
+}
+
+func TestConvertMessagesPreservesAssistantReasoning(t *testing.T) {
+	t.Parallel()
+
+	messages := []chat.Message{
+		{
+			Role:             chat.MessageRoleAssistant,
+			ReasoningContent: "I concluded X because Y",
+			ToolCalls: []tools.ToolCall{
+				{ID: "call_123", Function: tools.FunctionCall{Name: "lookup", Arguments: `{}`}},
+			},
+		},
+	}
+
+	converted := ConvertMessages(t.Context(), messages, modelsdev.ID{}, modelsdev.NewDatabaseStore(&modelsdev.Database{}), nil)
+	require.Len(t, converted, 1)
+
+	data, err := json.Marshal(converted[0])
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"role": "assistant",
+		"reasoning_content": "I concluded X because Y",
+		"tool_calls": [{
+			"id": "call_123",
+			"type": "function",
+			"function": {"name": "lookup", "arguments": "{}"}
+		}]
+	}`, string(data))
 }
 
 func TestMergeConsecutiveMessages(t *testing.T) {

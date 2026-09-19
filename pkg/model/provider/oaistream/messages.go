@@ -85,7 +85,7 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 		msg := &messages[i]
 
 		// Skip invalid assistant messages upfront. This can happen if the model is out of tokens (max_tokens reached)
-		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" {
+		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" && strings.TrimSpace(msg.ReasoningContent) == "" {
 			continue
 		}
 
@@ -117,6 +117,11 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 
 		case chat.MessageRoleAssistant:
 			assistantParam := openai.ChatCompletionAssistantMessageParam{}
+			if msg.ReasoningContent != "" {
+				assistantParam.SetExtraFields(map[string]any{
+					"reasoning_content": msg.ReasoningContent,
+				})
+			}
 
 			if len(msg.MultiContent) == 0 {
 				if msg.Content != "" {
