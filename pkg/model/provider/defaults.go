@@ -292,10 +292,10 @@ func applyModelDefaults(cfg *latest.ModelConfig) {
 	providerType := resolveProviderType(cfg)
 
 	// Explicitly disabled → normalise to nil so providers never see it,
-	// unless the model has a real "none" effort worth preserving.
+	// unless a client turns it into a real API value or wire-level switch.
 	if cfg.ThinkingBudget.IsDisabled() {
-		if preservesNoneEffort(cfg, providerType) {
-			slog.Debug("Preserving explicit none reasoning effort",
+		if preservesNoneEffort(cfg, providerType) || keepsDisabledThinking(cfg, providerType) {
+			slog.Debug("Preserving explicit disabled thinking budget",
 				"provider", cfg.Provider, "model", cfg.Model)
 			return
 		}
@@ -374,6 +374,39 @@ func isOpenAIVendor(cfg *latest.ModelConfig) bool {
 		return true
 	}
 	return isUnrecognizedOpenAIProtocolProvider(cfg)
+}
+
+// hasCustomBaseURL reports whether cfg.BaseURL differs from the alias default (expanded when expand is given).
+func hasCustomBaseURL(cfg *latest.ModelConfig, expand func(string) string) bool {
+	if cfg.BaseURL == "" {
+		return false
+	}
+	alias, isBuiltinAlias := LookupAlias(cfg.Provider)
+	if !isBuiltinAlias {
+		return true
+	}
+	defaultURL := alias.BaseURL
+	if expand != nil {
+		defaultURL = expand(defaultURL)
+	}
+	return strings.TrimRight(cfg.BaseURL, "/") != strings.TrimRight(defaultURL, "/")
+}
+
+// sendsChatTemplateThinkingOff reports whether disabled thinking becomes chat_template_kwargs on this endpoint.
+func sendsChatTemplateThinkingOff(cfg *latest.ModelConfig, expand func(string) string) bool {
+	return hasCustomBaseURL(cfg, expand) && !modelinfo.IsOpenAIHosted(cfg.Provider, cfg.Model)
+}
+
+// keepsDisabledThinking reports whether a client turns a disabled ThinkingBudget into a wire-level switch.
+func keepsDisabledThinking(cfg *latest.ModelConfig, providerType string) bool {
+	switch providerType {
+	case "dmr":
+		return true
+	case "openai", "openai_chatcompletions":
+		return sendsChatTemplateThinkingOff(cfg, nil)
+	default:
+		return false
+	}
 }
 
 // isUnrecognizedOpenAIProtocolProvider reports whether cfg.Provider is NOT a

@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -153,11 +154,11 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 		"llamacpp", parsed.llamaCpp,
 		"vllm", parsed.vllm,
 	)
-	// Skip model configuration for title-generation and compaction clones to
-	// avoid reconfiguring the model with different settings (e.g., smaller
-	// max_tokens) that would affect the main agent. It is local-only, so
-	// gateway mode skips it too.
-	if gateway == "" && !globalOptions.GeneratingTitle() && !globalOptions.Compacting() {
+	// Skip model configuration for title-generation, compaction and no-thinking
+	// (MCP sampling) clones: Model Runner stores the accepted configuration per
+	// model, so a clone's settings (smaller max_tokens, a zero reasoning budget)
+	// would stick to the main agent. It is local-only, so gateway mode skips it too.
+	if gateway == "" && !globalOptions.GeneratingTitle() && !globalOptions.Compacting() && !globalOptions.NoThinking() {
 		if err := configureModel(ctx, httpClient, baseURL, cfg.Model, backendCfg, parsed.mode, parsed.rawRuntimeFlags); err != nil {
 			slog.DebugContext(ctx, "model configure via API skipped or failed", "error", err)
 		}
@@ -275,9 +276,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 	// wholesale, so merge all contributors before a single Set call.
 	extraFields := map[string]any{}
 
-	// NoThinking: disable reasoning at the chat-template level. llama.cpp and
-	// vLLM both honor chat_template_kwargs.enable_thinking=false for Qwen3 /
-	// Hermes / DeepSeek-R1 style templates; other engines ignore unknown keys.
+	// Thinking off: llama.cpp, vLLM, SGLang and MLX honor chat_template_kwargs.enable_thinking=false; others ignore it.
 	//
 	// When the caller has also set a small MaxTokens (e.g. session title
 	// generation sets max_tokens=20), raise it to noThinkingMinOutputTokens
@@ -287,7 +286,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 	// and we leave max_tokens off the request (letting the engine use its
 	// own output budget). Mirrors the OpenAI provider (see
 	// pkg/model/provider/openai/client.go).
-	if c.ModelOptions.NoThinking() {
+	if c.ModelOptions.NoThinking() || c.ModelConfig.ThinkingBudget.IsDisabled() {
 		extraFields["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
 		if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
 			params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
@@ -302,6 +301,9 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 			maps.Copy(extraFields, fields)
 		}
 	}
+
+	// provider_opts.extra_body last, so an explicit user field wins.
+	maps.Copy(extraFields, providerutil.ExtraBody(c.ModelConfig.ProviderOpts))
 
 	if len(extraFields) > 0 {
 		params.SetExtraFields(extraFields)

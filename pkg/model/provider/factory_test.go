@@ -470,6 +470,72 @@ func TestCreateDirectProvider_ResolvesOpenAIVendorOption(t *testing.T) {
 	}
 }
 
+func TestCreateDirectProvider_ResolvesChatTemplateThinkingOff(t *testing.T) {
+	t.Parallel()
+
+	xaiDefault, ok := LookupAlias("xai")
+	require.True(t, ok)
+	none := &latest.ThinkingBudget{Effort: "none"}
+	local := func(model string, budget *latest.ThinkingBudget) *latest.ModelConfig {
+		return &latest.ModelConfig{Provider: "openai", Model: model, BaseURL: "http://localhost:8080/v1", ThinkingBudget: budget}
+	}
+
+	tests := []struct {
+		name string
+		cfg  *latest.ModelConfig
+		opts []options.Opt
+		want bool
+	}{
+		{name: "model-level base_url, none", cfg: local("qwen3", none), want: true},
+		{name: "model-level base_url, 0", cfg: local("qwen3", &latest.ThinkingBudget{Tokens: 0}), want: true},
+		{name: "model-level base_url, unset", cfg: local("qwen3", nil), want: false},
+		{name: "model-level base_url, high", cfg: local("qwen3", &latest.ThinkingBudget{Effort: "high"}), want: false},
+		{name: "no base_url", cfg: &latest.ModelConfig{Provider: "openai", Model: "qwen3", ThinkingBudget: none}, want: false},
+		{name: "OpenAI model name behind a proxy", cfg: local("gpt-4o", none), want: false},
+		{name: "azure deployment", cfg: &latest.ModelConfig{Provider: "azure", Model: "my-deployment", BaseURL: "https://acme.openai.azure.com", ThinkingBudget: none}, want: false},
+		{name: "alias default base_url (clone re-entry)", cfg: &latest.ModelConfig{Provider: "xai", Model: "grok-4", BaseURL: xaiDefault.BaseURL, ThinkingBudget: none}, want: false},
+		{name: "alias default base_url with trailing slash", cfg: &latest.ModelConfig{Provider: "xai", Model: "grok-4", BaseURL: xaiDefault.BaseURL + "/", ThinkingBudget: none}, want: false},
+		{name: "alias with overridden base_url", cfg: &latest.ModelConfig{Provider: "xai", Model: "qwen3", BaseURL: "https://proxy.example.com/v1", ThinkingBudget: none}, want: true},
+		{name: "Responses API has no switch", cfg: &latest.ModelConfig{Provider: "openai", Model: "qwen3", BaseURL: "http://localhost:8000/v1", ProviderOpts: map[string]any{"api_type": "openai_responses"}, ThinkingBudget: none}, want: false},
+		{
+			name: "NoThinking build with an injected none is not user intent",
+			cfg:  local("qwen3", none),
+			opts: []options.Opt{options.WithNoThinking()},
+			want: false,
+		},
+		{
+			name: "NoThinking rebuild keeps the bit the first build resolved",
+			cfg:  local("qwen3", none),
+			opts: []options.Opt{options.WithChatTemplateThinkingOff(true), options.WithNoThinking()},
+			want: true,
+		},
+		{
+			name: "providers: entry with none",
+			cfg:  &latest.ModelConfig{Provider: "local_llm", Model: "qwen3"},
+			opts: []options.Opt{options.WithProviders(map[string]latest.ProviderConfig{
+				"local_llm": {BaseURL: "http://localhost:8000/v1", ThinkingBudget: none},
+			})},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var probe options.ModelOptions
+			r := NewRegistry(map[string]providerFactory{
+				"openai":                 tagFactoryCapturingOpts(&probe),
+				"openai_chatcompletions": tagFactoryCapturingOpts(&probe),
+				"openai_responses":       tagFactoryCapturingOpts(&probe),
+			})
+			_, err := r.createDirectProvider(t.Context(), tt.cfg, environment.NewNoEnvProvider(), tt.opts...)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, probe.ChatTemplateThinkingOff())
+		})
+	}
+}
+
 // tagFactoryCapturingOpts returns a providerFactory that replays every
 // received Opt onto into, so tests can inspect the resolved ModelOptions.
 func tagFactoryCapturingOpts(into *options.ModelOptions) providerFactory {

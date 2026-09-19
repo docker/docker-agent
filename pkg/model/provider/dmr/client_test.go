@@ -415,6 +415,62 @@ func TestConfigureModelViaAPI(t *testing.T) {
 	})
 }
 
+// Model Runner stores the accepted configuration per model, so only the main agent's client may configure it.
+func TestNewClientClonesSkipConfigure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		opts          []options.Opt
+		wantConfigure bool
+	}{
+		{name: "main agent", wantConfigure: true},
+		{name: "title clone", opts: []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()}},
+		{name: "compaction clone", opts: []options.Opt{options.WithCompacting()}},
+		{name: "sampling clone", opts: []options.Opt{options.WithStructuredOutput(nil), options.WithNoThinking()}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var configures []configureRequest
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/engines/_configure" {
+					var req configureRequest
+					if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&req)) {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+					configures = append(configures, req)
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"data":[]}`))
+			}))
+			t.Cleanup(server.Close)
+
+			cfg := &latest.ModelConfig{
+				Provider:       "dmr",
+				Model:          "ai/qwen3",
+				BaseURL:        server.URL + "/engines/v1/",
+				ThinkingBudget: &latest.ThinkingBudget{Tokens: 4096},
+			}
+			_, err := NewClient(t.Context(), cfg, tt.opts...)
+			require.NoError(t, err)
+
+			if !tt.wantConfigure {
+				assert.Empty(t, configures)
+				return
+			}
+			require.Len(t, configures, 1)
+			require.NotNil(t, configures[0].LlamaCpp)
+			require.NotNil(t, configures[0].LlamaCpp.ReasoningBudget)
+			assert.Equal(t, int32(4096), *configures[0].LlamaCpp.ReasoningBudget)
+		})
+	}
+}
+
 func TestParseDMRProviderOptsWithSpeculativeDecoding(t *testing.T) {
 	t.Parallel()
 
@@ -1239,12 +1295,21 @@ func TestConfigureRequestTopLevelFieldsEndToEnd(t *testing.T) {
 func TestNoThinkingSetsChatTemplateKwargsAndBumpsMaxTokens(t *testing.T) {
 	t.Parallel()
 
+	maxTokens := int64(20)
+	req := captureChatCompletion(t, &latest.ModelConfig{Model: "ai/qwen3", MaxTokens: &maxTokens}, options.WithNoThinking())
+
+	assert.EqualValues(t, noThinkingMinOutputTokens, req["max_tokens"])
+	assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
+}
+
+// captureChatCompletion runs one chat completion for cfg against a mock model runner and returns the request body.
+func captureChatCompletion(t *testing.T, cfg *latest.ModelConfig, opts ...options.Opt) map[string]any {
+	t.Helper()
+
 	var captured []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			body, _ := io.ReadAll(r.Body)
-			captured = body
-			// Return a minimal streaming response so the SDK is happy.
+			captured, _ = io.ReadAll(r.Body)
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
@@ -1254,21 +1319,14 @@ func TestNoThinkingSetsChatTemplateKwargsAndBumpsMaxTokens(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"data":[]}`))
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 
-	maxTokens := int64(20)
-	cfg := &latest.ModelConfig{
-		Provider:  "dmr",
-		Model:     "ai/qwen3",
-		BaseURL:   server.URL + "/engines/v1/",
-		MaxTokens: &maxTokens,
-	}
-	client, err := NewClient(t.Context(), cfg, options.WithNoThinking())
+	cfg.Provider = "dmr"
+	cfg.BaseURL = server.URL + "/engines/v1/"
+	client, err := NewClient(t.Context(), cfg, opts...)
 	require.NoError(t, err)
 
-	stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{
-		{Role: chat.MessageRoleUser, Content: "hi"},
-	}, nil)
+	stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, nil)
 	require.NoError(t, err)
 	for {
 		if _, err := stream.Recv(); err != nil {
@@ -1276,17 +1334,39 @@ func TestNoThinkingSetsChatTemplateKwargsAndBumpsMaxTokens(t *testing.T) {
 		}
 	}
 	stream.Close()
-
 	require.NotEmpty(t, captured, "chat/completions should have been called")
 
 	var req map[string]any
 	require.NoError(t, json.Unmarshal(captured, &req))
+	return req
+}
 
-	// max_tokens floor (20 -> 256).
-	assert.EqualValues(t, noThinkingMinOutputTokens, req["max_tokens"])
+func TestThinkingBudgetNoneSetsChatTemplateKwargs(t *testing.T) {
+	t.Parallel()
 
-	// chat_template_kwargs.enable_thinking=false on every engine.
-	ct, ok := req["chat_template_kwargs"].(map[string]any)
-	require.True(t, ok, "chat_template_kwargs must be present")
-	assert.Equal(t, false, ct["enable_thinking"])
+	for _, budget := range []*latest.ThinkingBudget{{Effort: "none"}, {Tokens: 0}} {
+		req := captureChatCompletion(t, &latest.ModelConfig{Model: "ai/qwen3", ThinkingBudget: budget})
+		assert.Equal(t, map[string]any{"enable_thinking": false}, req["chat_template_kwargs"])
+	}
+
+	req := captureChatCompletion(t, &latest.ModelConfig{Model: "ai/qwen3", ThinkingBudget: &latest.ThinkingBudget{Effort: "high"}})
+	assert.NotContains(t, req, "chat_template_kwargs")
+}
+
+func TestExtraBodyMergedIntoRequest(t *testing.T) {
+	t.Parallel()
+
+	req := captureChatCompletion(t, &latest.ModelConfig{
+		Model:          "ai/qwen3",
+		ThinkingBudget: &latest.ThinkingBudget{Effort: "none"},
+		ProviderOpts: map[string]any{
+			"extra_body": map[string]any{
+				"reasoning_effort":     "none",
+				"chat_template_kwargs": map[string]any{"enable_thinking": true},
+			},
+		},
+	})
+
+	assert.Equal(t, "none", req["reasoning_effort"])
+	assert.Equal(t, map[string]any{"enable_thinking": true}, req["chat_template_kwargs"], "explicit extra_body wins over the thinking_budget field")
 }

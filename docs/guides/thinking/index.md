@@ -29,10 +29,11 @@ Docker Agent exposes this through a single `thinking_budget` field on any named 
 | Gemini 3            | string     | `minimal`, `low`, `medium`, `high`                                                      | API default (model-dependent) |
 | AWS Bedrock         | int or str | 1024–32768 tokens (`minimal`–`max` mapped to tokens); `adaptive`, `adaptive/<effort>` for Opus 4.6+ (rejected by older Claude models) | off                |
 | Docker Model Runner | int or str | token count, `minimal`–`max` (mapped to tokens), `adaptive` (unlimited), `none`         | engine default     |
+| Custom OpenAI-compatible endpoint (`base_url`) | `none` / `0` | switches thinking off via `chat_template_kwargs` (llama.cpp, vLLM, SGLang, mlx_lm); other values ignored | server default |
 
 String values are case-insensitive. The full set of accepted strings is `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `adaptive`, and `adaptive/<effort>` — but each provider only honors the subset listed above. Unsupported values either fail at request time (OpenAI) or are mapped/ignored as described per provider below.
 
-> `thinking_budget` is only applied by the providers listed above. Other OpenAI-compatible providers (xAI, Mistral, Ollama, …) currently ignore it — see [xAI and Mistral](#xai-grok-and-mistral).
+> `thinking_budget` is only applied by the providers listed above. Built-in OpenAI-compatible aliases (xAI, Mistral, Ollama, Groq, …) currently ignore it — see [xAI and Mistral](#xai-grok-and-mistral) and [Disabling Thinking](#disabling-thinking) for the `extra_body` escape hatch.
 
 ## OpenAI
 
@@ -287,7 +288,11 @@ See the [Docker Model Runner provider page](../../providers/dmr/index.md) for de
 
 xAI and Mistral run through Docker Agent's OpenAI-compatible client, but the `reasoning_effort` parameter is only sent for OpenAI reasoning model names (o-series, gpt-5). **Setting `thinking_budget` on Grok or Mistral models currently has no effect** — the value is accepted by config validation but never sent to the API.
 
-Grok and Mistral reasoning models (e.g. `grok-3-mini`, `magistral`) manage reasoning on their own; for non-reasoning models, consider the [think tool](../../tools/think/index.md) instead.
+Grok and Mistral reasoning models (e.g. `grok-3-mini`, `magistral`) manage reasoning on their own; for non-reasoning models, consider the [think tool](../../tools/think/index.md) instead. Vendors that document their own reasoning parameter can still receive it through `provider_opts.extra_body` (see below).
+
+## Custom OpenAI-compatible endpoints (llama.cpp, vLLM, SGLang, mlx_lm)
+
+Open-weight reasoning models such as Qwen3 think by default when served locally. On an endpoint you chose (a `base_url` on the model or on a `providers:` entry), `thinking_budget: none` or `0` sends `chat_template_kwargs: {"enable_thinking": false}` with each Chat Completions request, which those servers honor and others ignore. Other `thinking_budget` values are not translated for these servers, and the Responses API has no equivalent switch. The switch is not sent for Azure or ChatGPT, nor when the model name is an OpenAI one (`gpt-*`, `o*`), so a proxy in front of OpenAI never receives a field OpenAI would reject. See the [custom provider page](../../providers/custom/index.md#disabling-thinking-on-local-and-openai-compatible-servers) for details and the `extra_body` alternative.
 
 ## Disabling Thinking
 
@@ -308,7 +313,21 @@ models:
     thinking_budget: 0
 ```
 
-`none` and `0` clear Docker Agent's thinking configuration — no thinking parameter is sent. Models that always reason (OpenAI o-series, gpt-5 through gpt-5.5, Gemini 3) then fall back to the API's default behavior and still reason internally; gpt-5.6+ (Sol/Terra/Luna) sends `none` as a real API value that genuinely disables reasoning. Models with optional thinking (Gemini 2.5, Claude, local models) are also fully disabled.
+`none` and `0` clear Docker Agent's thinking configuration — no thinking parameter is sent. Models that always reason (OpenAI o-series, gpt-5 through gpt-5.5, Gemini 3) then fall back to the API's default behavior and still reason internally; gpt-5.6+ (Sol/Terra/Luna) sends `none` as a real API value that genuinely disables reasoning. Models with optional thinking (Gemini 2.5, Claude, Docker Model Runner and custom OpenAI-compatible endpoints) are also fully disabled.
+
+Reasoning tokens count against `max_tokens` on every provider. A model that keeps thinking under a small cap can exhaust it before producing any visible text; Docker Agent then emits a warning event and an empty reply rather than an error.
+
+For built-in OpenAI-compatible aliases and vendors with their own switch, `provider_opts.extra_body` merges arbitrary fields into every chat completion request body. `reasoning_effort: none` is accepted by llama.cpp, vLLM, SGLang, Ollama, Groq (Qwen3 models) and Cerebras:
+
+```yaml
+models:
+  ollama_qwen:
+    provider: ollama
+    model: qwen3
+    provider_opts:
+      extra_body:
+        reasoning_effort: none
+```
 
 ## Choosing an Effort Level
 

@@ -466,6 +466,8 @@ func (c *Client) CreateChatCompletionStream(
 		}
 	}
 
+	var extras map[string]any // extra JSON body fields, merged with provider_opts below
+
 	// Apply thinking budget: set reasoning_effort for reasoning models (o-series, gpt-5).
 	// Reasoning models always reason; omitting the param uses the default effort.
 	// When NoThinking is set we still need to send an explicit effort so hidden
@@ -481,7 +483,14 @@ func (c *Client) CreateChatCompletionStream(
 	// the caller has imposed no cap, so there is nothing to floor.
 	switch {
 	case !modelinfo.UsesReasoningEffort(c.ModelConfig.Model):
-		if c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled() {
+		if c.ModelOptions.ChatTemplateThinkingOff() {
+			// llama.cpp, vLLM, SGLang and mlx_lm honor this for Qwen3-style templates; others ignore it.
+			extras = map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}}
+			if c.ModelConfig.MaxTokens != nil && *c.ModelConfig.MaxTokens < noThinkingMinOutputTokens {
+				params.MaxTokens = openai.Int(noThinkingMinOutputTokens)
+			}
+			slog.DebugContext(ctx, "OpenAI-compatible request disabling thinking via chat_template_kwargs", "model", c.ModelConfig.Model)
+		} else if c.ModelConfig.ThinkingBudget != nil && !c.ModelConfig.ThinkingBudget.IsDisabled() {
 			c.warnThinkingBudgetIgnored(ctx)
 		}
 	case len(requestTools) > 0 && modelinfo.OpenAIRejectsToolsWithReasoningEffort(c.ModelConfig.Model):
@@ -557,10 +566,7 @@ func (c *Client) CreateChatCompletionStream(
 		return nil, err
 	}
 
-	// Forward sampling-related provider_opts as extra body fields.
-	// This allows custom/OpenAI-compatible providers (vLLM, Ollama, etc.)
-	// to receive parameters like top_k, repetition_penalty, etc.
-	applySamplingProviderOpts(&params, c.ModelConfig.ProviderOpts)
+	applyProviderOptsExtraFields(&params, c.ModelConfig.ProviderOpts, extras)
 
 	stream := client.Chat.Completions.NewStreaming(ctx, params)
 
@@ -1354,7 +1360,7 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		},
 	}
 
-	applySamplingProviderOpts(&params, c.ModelConfig.ProviderOpts)
+	applyProviderOptsExtraFields(&params, c.ModelConfig.ProviderOpts, nil)
 
 	resp, err := client.Chat.Completions.New(ctx, params)
 	if err != nil {

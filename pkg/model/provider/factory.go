@@ -86,7 +86,19 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	// internal state rather than a ProviderOpts key: provider_opts is public,
 	// user-controllable config, so it must never be able to spoof or suppress
 	// this decision (see options.WithOpenAIVendor).
-	opts = append(opts, options.WithOpenAIVendor(isOpenAIVendor(enhancedCfg)))
+	// Only the user's own thinking_budget none/0 opts in: a NoThinking clone injects a none budget of its own.
+	thinkingOff := globalOptions.ChatTemplateThinkingOff() ||
+		(!globalOptions.NoThinking() && enhancedCfg.ThinkingBudget.IsDisabled())
+	thinkingOff = thinkingOff && sendsChatTemplateThinkingOff(enhancedCfg, func(s string) string {
+		if expanded, err := environment.Expand(ctx, s, env); err == nil {
+			return expanded
+		}
+		return s
+	})
+	opts = append(opts,
+		options.WithOpenAIVendor(isOpenAIVendor(enhancedCfg)),
+		options.WithChatTemplateThinkingOff(thinkingOff),
+	)
 	// A model may opt out of the models gateway and dial its provider directly.
 	// Clearing the gateway option makes the leaf provider take its direct-auth
 	// path (provider API key / token_key) instead of the gateway path.

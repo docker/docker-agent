@@ -73,29 +73,13 @@ func chatCompletionsReasoningEffortField(t *testing.T, model string, toolList []
 func chatCompletionsRequest(t *testing.T, model string, toolList []tools.Tool, opts ...options.Opt) map[string]any {
 	t.Helper()
 
-	server, body := captureRequestBody(t)
-	cfg := &latest.ModelConfig{
+	return driveChatCompletions(t, &latest.ModelConfig{
 		Provider: "openai",
 		Model:    model,
-		BaseURL:  server.URL,
-		TokenKey: "MY_TOKEN",
 		// Force Chat Completions even for a model that would otherwise
 		// auto-select the Responses API.
 		ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"},
-	}
-	env := environment.NewMapEnvProvider(map[string]string{"MY_TOKEN": "secret"})
-
-	client, err := NewClient(t.Context(), cfg, env, opts...)
-	require.NoError(t, err)
-
-	stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, toolList)
-	require.NoError(t, err)
-	defer stream.Close()
-	drainReasoningTestStream(t, stream)
-
-	var req map[string]any
-	require.NoError(t, json.Unmarshal(body(), &req))
-	return req
+	}, toolList, opts...)
 }
 
 // TestChatCompletions_DropsReasoningEffortWithTools is the regression test

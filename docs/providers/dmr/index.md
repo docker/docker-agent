@@ -109,7 +109,7 @@ Docker Agent's auto-compaction scales its summary and keep-tail token budgets pr
 
 ## Thinking / reasoning budget
 
-When using the **llama.cpp** backend, `thinking_budget` is sent as structured `llamacpp.reasoning-budget` on `_configure` (maps to `--reasoning-budget`). String efforts use the same token mapping as other providers; `adaptive` maps to unlimited (`-1`).
+When using the **llama.cpp** backend, `thinking_budget` is sent as structured `llamacpp.reasoning-budget` on `_configure` (maps to `--reasoning-budget`). String efforts use the same token mapping as other providers; `adaptive` maps to unlimited (`-1`). Model Runner keeps that configuration per model, so only the agent's own client sends it; the internal session-title, compaction and MCP sampling calls never reconfigure the model.
 
 When using the **vLLM** backend, `thinking_budget` is sent as `thinking_token_budget` in each chat completion request. Effort levels map to token counts using the same scale as other providers; `adaptive` maps to unlimited (`-1`).
 
@@ -122,6 +122,20 @@ models:
 ```
 
 On **MLX** and **SGLang** backends, `thinking_budget` is silently ignored — those engines do not currently expose a per-request reasoning token budget knob.
+
+`thinking_budget: none` (or `0`) additionally sends `chat_template_kwargs: {"enable_thinking": false}` with every chat completion request, on every backend, so Qwen3-style models stop thinking even where the engine has no budget knob. A configured `max_tokens` below 256 is raised to 256, because reasoning tokens count against `max_tokens` and a small cap can otherwise be spent entirely on reasoning.
+
+Other fields the engine accepts in the request body can be merged in verbatim through `provider_opts.extra_body`; an explicit key there wins over anything Docker Agent derives:
+
+```yaml
+models:
+  local:
+    provider: dmr
+    model: ai/qwen3
+    provider_opts:
+      extra_body:
+        reasoning_effort: none   # llama.cpp also disables thinking on this field
+```
 
 ## vLLM-specific configuration
 

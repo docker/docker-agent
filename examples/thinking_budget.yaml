@@ -87,3 +87,19 @@ models:
     provider: amazon-bedrock
     model: global.anthropic.claude-opus-4-8
     thinking_budget: adaptive/high # <- Opus 4.6+ reject token budgets on Bedrock too; token values are auto-converted to adaptive
+
+  local-qwen3-no-thinking:
+    provider: local_llm
+    model: mlx-community/Qwen3.6-35B-A3B-8bit # <- any Qwen3-style model on llama.cpp, vLLM, SGLang or mlx_lm
+    thinking_budget: none # <- on a custom base_url, sends chat_template_kwargs: {enable_thinking: false} with each request
+
+  groq-qwen3-no-thinking:
+    provider: groq
+    model: qwen/qwen3.6-27b
+    provider_opts:
+      extra_body:
+        reasoning_effort: none # <- extra_body merges any field into the request body; Groq (Qwen3), Ollama, llama.cpp, vLLM, SGLang and Cerebras read this one
+
+providers:
+  local_llm:
+    base_url: http://localhost:8080/v1 # <- an OpenAI-compatible server you run yourself

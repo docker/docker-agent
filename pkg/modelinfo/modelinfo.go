@@ -141,6 +141,16 @@ func UsesReasoningEffort(modelID string) bool {
 	return isOSeries(m) || strings.HasPrefix(m, "gpt-5")
 }
 
+// IsOpenAIHosted reports whether the request reaches OpenAI itself: azure, chatgpt, or an OpenAI model name.
+func IsOpenAIHosted(provider, modelID string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "azure", "chatgpt":
+		return true
+	}
+	m := normalizeOpenAI(modelID)
+	return isOSeries(m) || strings.HasPrefix(m, "gpt-") || strings.HasPrefix(m, "chatgpt-") || strings.HasPrefix(m, "codex-")
+}
+
 // AlwaysReasons reports whether an OpenAI model always reasons internally
 // and therefore needs a default thinking_budget when none is configured.
 //

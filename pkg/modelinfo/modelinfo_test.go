@@ -282,6 +282,46 @@ func TestUsesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestIsOpenAIHosted(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		provider string
+		model    string
+		want     bool
+	}{
+		{"openai", "gpt-4o", true},
+		{"openai", "gpt-4.1-mini", true},
+		{"openai", "gpt-3.5-turbo", true},
+		{"openai", "gpt-5.6-sol", true},
+		{"openai", "gpt-oss-120b", true},
+		{"openai", "chatgpt-4o-latest", true},
+		{"openai", "codex-mini-latest", true},
+		{"openai", "o3-mini", true},
+		{"openai", "O1", true},
+		{"openai", "openai/gpt-4o", true},
+		{"my_proxy", "gpt-4o", true},
+
+		{"azure", "my-gpt4o-deployment", true},
+		{"Azure", "qwen3", true},
+		{"chatgpt", "anything", true},
+
+		{"openai", "qwen3.6:35b-a3b-q8_0", false},
+		{"openai", "mlx-community/Qwen3.6-35B-A3B-8bit", false},
+		{"openai", "deepseek-r1", false},
+		{"local_llm", "claude-sonnet-5", false},
+		{"openai", "llama-3.1-8b", false},
+		{"dmr", "ai/qwen3", false},
+		{"openai", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider+"/"+tc.model, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, IsOpenAIHosted(tc.provider, tc.model))
+		})
+	}
+}
+
 func TestAlwaysReasons(t *testing.T) {
 	t.Parallel()
 

@@ -90,6 +90,31 @@ func TestGetProviderOptStringSlice(t *testing.T) {
 	}
 }
 
+func TestExtraBody(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		opts map[string]any
+		want map[string]any
+	}{
+		{"nil opts", nil, nil},
+		{"missing key", map[string]any{"top_k": 40}, nil},
+		{
+			"object",
+			map[string]any{"extra_body": map[string]any{"reasoning_effort": "none", "chat_template_kwargs": map[string]any{"enable_thinking": false}}},
+			map[string]any{"reasoning_effort": "none", "chat_template_kwargs": map[string]any{"enable_thinking": false}},
+		},
+		{"empty object", map[string]any{"extra_body": map[string]any{}}, map[string]any{}},
+		{"string value", map[string]any{"extra_body": "reasoning_effort=none"}, nil},
+		{"list value", map[string]any{"extra_body": []any{"a"}}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ExtraBody(tt.opts))
+		})
+	}
+}
+
 func TestGetProviderOptInt64(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

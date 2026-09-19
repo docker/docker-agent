@@ -13,18 +13,19 @@ import (
 type TokenSource func(context.Context) (string, error)
 
 type ModelOptions struct {
-	gateway          string
-	encryptedConfig  string
-	structuredOutput *latest.StructuredOutput
-	generatingTitle  bool
-	compacting       bool
-	noThinking       bool
-	maxTokens        int64
-	providers        map[string]latest.ProviderConfig
-	modelsDevStore   *modelsdev.Store
-	transportWrapper func(http.RoundTripper) http.RoundTripper
-	tokenSource      TokenSource
-	openAIVendor     bool
+	gateway                 string
+	encryptedConfig         string
+	structuredOutput        *latest.StructuredOutput
+	generatingTitle         bool
+	compacting              bool
+	noThinking              bool
+	maxTokens               int64
+	providers               map[string]latest.ProviderConfig
+	modelsDevStore          *modelsdev.Store
+	transportWrapper        func(http.RoundTripper) http.RoundTripper
+	tokenSource             TokenSource
+	openAIVendor            bool
+	chatTemplateThinkingOff bool
 }
 
 func (c *ModelOptions) Gateway() string {
@@ -76,6 +77,11 @@ func (c *ModelOptions) ModelsDevStore() *modelsdev.Store {
 // that must not leak onto an OpenAI-compatible alias for a different vendor.
 func (c *ModelOptions) OpenAIVendor() bool {
 	return c.openAIVendor
+}
+
+// ChatTemplateThinkingOff reports whether requests carry chat_template_kwargs.enable_thinking=false; factory-resolved, never from YAML.
+func (c *ModelOptions) ChatTemplateThinkingOff() bool {
+	return c.chatTemplateThinkingOff
 }
 
 func (c *ModelOptions) TokenSource() TokenSource {
@@ -195,6 +201,12 @@ func WithOpenAIVendor(v bool) Opt {
 	}
 }
 
+func WithChatTemplateThinkingOff(v bool) Opt {
+	return func(cfg *ModelOptions) {
+		cfg.chatTemplateThinkingOff = v
+	}
+}
+
 // WithTokenSource configures request-time bearer-token resolution. OpenAI
 // direct clients use it before token_key; gateway and ChatGPT auth stay separate.
 func WithTokenSource(source TokenSource) Opt {
@@ -276,6 +288,9 @@ func FromModelOptions(m ModelOptions) []Opt {
 	}
 	if m.openAIVendor {
 		out = append(out, WithOpenAIVendor(true))
+	}
+	if m.chatTemplateThinkingOff {
+		out = append(out, WithChatTemplateThinkingOff(true))
 	}
 	return out
 }
