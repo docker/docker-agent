@@ -154,11 +154,11 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 		"llamacpp", parsed.llamaCpp,
 		"vllm", parsed.vllm,
 	)
-	// Skip model configuration for title-generation and compaction clones to
-	// avoid reconfiguring the model with different settings (e.g., smaller
-	// max_tokens) that would affect the main agent. It is local-only, so
-	// gateway mode skips it too.
-	if gateway == "" && !globalOptions.GeneratingTitle() && !globalOptions.Compacting() {
+	// Skip model configuration for title-generation, compaction and no-thinking
+	// (MCP sampling) clones: Model Runner stores the accepted configuration per
+	// model, so a clone's settings (smaller max_tokens, a zero reasoning budget)
+	// would stick to the main agent. It is local-only, so gateway mode skips it too.
+	if gateway == "" && !globalOptions.GeneratingTitle() && !globalOptions.Compacting() && !globalOptions.NoThinking() {
 		if err := configureModel(ctx, httpClient, baseURL, cfg.Model, backendCfg, parsed.mode, parsed.rawRuntimeFlags); err != nil {
 			slog.DebugContext(ctx, "model configure via API skipped or failed", "error", err)
 		}

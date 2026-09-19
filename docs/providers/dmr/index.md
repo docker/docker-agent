@@ -109,7 +109,7 @@ Docker Agent's auto-compaction scales its summary and keep-tail token budgets pr
 
 ## Thinking / reasoning budget
 
-When using the **llama.cpp** backend, `thinking_budget` is sent as structured `llamacpp.reasoning-budget` on `_configure` (maps to `--reasoning-budget`). String efforts use the same token mapping as other providers; `adaptive` maps to unlimited (`-1`).
+When using the **llama.cpp** backend, `thinking_budget` is sent as structured `llamacpp.reasoning-budget` on `_configure` (maps to `--reasoning-budget`). String efforts use the same token mapping as other providers; `adaptive` maps to unlimited (`-1`). Model Runner keeps that configuration per model, so only the agent's own client sends it; the internal session-title, compaction and MCP sampling calls never reconfigure the model.
 
 When using the **vLLM** backend, `thinking_budget` is sent as `thinking_token_budget` in each chat completion request. Effort levels map to token counts using the same scale as other providers; `adaptive` maps to unlimited (`-1`).
 
