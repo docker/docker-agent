@@ -1,6 +1,7 @@
 package environment
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,6 +18,19 @@ func TestNewCredentialHelperProvider(t *testing.T) {
 func TestCredentialHelperProvider_Get(t *testing.T) {
 	t.Parallel()
 
+	echoCmd := "echo"
+	echoArgs := func(v string) []string { return []string{v} }
+	falseCmd := "false"
+
+	if runtime.GOOS == "windows" {
+		echoCmd = "powershell"
+		echoArgs = func(v string) []string {
+			return []string{"-NoProfile", "-Command", "Write-Output '" + v + "'"}
+		}
+		falseCmd = "powershell"
+		// simulate 'false' by exiting with 1
+	}
+
 	tests := []struct {
 		name      string
 		command   string
@@ -25,11 +39,11 @@ func TestCredentialHelperProvider_Get(t *testing.T) {
 		wantValue string
 		wantFound bool
 	}{
-		{"ignores non-DOCKER_TOKEN vars", "echo", []string{"test-token"}, "OTHER_VAR", "", false},
-		{"success", "echo", []string{"my-secret-token"}, DockerDesktopTokenEnv, "my-secret-token", true},
-		{"trims whitespace", "echo", []string{"  token-with-spaces  "}, DockerDesktopTokenEnv, "token-with-spaces", true},
-		{"empty output", "echo", []string{""}, DockerDesktopTokenEnv, "", false},
-		{"command fails", "false", nil, DockerDesktopTokenEnv, "", false},
+		{"ignores non-DOCKER_TOKEN vars", echoCmd, echoArgs("test-token"), "OTHER_VAR", "", false},
+		{"success", echoCmd, echoArgs("my-secret-token"), DockerDesktopTokenEnv, "my-secret-token", true},
+		{"trims whitespace", echoCmd, echoArgs("  token-with-spaces  "), DockerDesktopTokenEnv, "token-with-spaces", true},
+		{"empty output", echoCmd, echoArgs(""), DockerDesktopTokenEnv, "", false},
+		{"command fails", falseCmd, []string{"-NoProfile", "-Command", "exit 1"}, DockerDesktopTokenEnv, "", false},
 		{"command not found", "nonexistent-command-12345", nil, DockerDesktopTokenEnv, "", false},
 	}
 
