@@ -145,6 +145,7 @@ func TestIsContextOverflowError(t *testing.T) {
 		{name: "generic error", err: errors.New("something went wrong"), expected: false},
 		{name: "anthropic prompt too long", err: errors.New("prompt is too long: 226360 tokens > 200000 maximum"), expected: true},
 		{name: "openai context length exceeded", err: errors.New("maximum context length is 128000 tokens"), expected: true},
+		{name: "llama.cpp available context exceeded", err: errors.New("request (277696 tokens) exceeds the available context size (120832 tokens), try increasing it"), expected: true},
 		{name: "context_length_exceeded code", err: errors.New("error code: context_length_exceeded"), expected: true},
 		{name: "thinking budget error", err: errors.New("max_tokens must be greater than thinking.budget_tokens"), expected: true},
 		{name: "request too large", err: errors.New("request too large for model"), expected: true},

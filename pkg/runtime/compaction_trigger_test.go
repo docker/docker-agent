@@ -109,6 +109,71 @@ func TestCompactIfNeeded_TriggersOnOwnMessages(t *testing.T) {
 	assert.True(t, sawCompaction, "large own tool results must still trigger compaction")
 }
 
+func TestCompactIfNeeded_TriggersOnReplayedReasoningHistory(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/model", stream: &mockStream{}}
+	root := agent.New("root", "agent", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+		WithSessionCompaction(true),
+		WithModelStore(mockModelStoreWithLimit{limit: 100_000}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("continue"))
+	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{
+		Role:             chat.MessageRoleAssistant,
+		Content:          "working",
+		ReasoningContent: strings.Repeat("r", 350_000),
+	}))
+	// This is the last provider-reported prompt size from before reasoning
+	// replay was enabled. The stored history estimate must override it.
+	sess.SetUsage(50_000, 1_000)
+
+	events := make(chan Event, 16)
+	rt.compactIfNeeded(t.Context(), sess, root, 100_000, len(sess.OwnMessages()), NewChannelSink(events))
+	close(events)
+
+	var compacted bool
+	for ev := range events {
+		if _, ok := ev.(*SessionCompactionEvent); ok {
+			compacted = true
+		}
+	}
+	assert.True(t, compacted, "stored replayable reasoning must contribute to the compaction trigger")
+}
+
+func TestCompactIfNeeded_IgnoresReasoningRemovedByCompaction(t *testing.T) {
+	t.Parallel()
+
+	prov := &mockProvider{id: "test/model", stream: &mockStream{}}
+	root := agent.New("root", "agent", agent.WithModel(prov))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+		WithSessionCompaction(true),
+		WithModelStore(mockModelStoreWithLimit{limit: 100_000}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("old request"))
+	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{
+		Role:             chat.MessageRoleAssistant,
+		Content:          "old answer",
+		ReasoningContent: strings.Repeat("r", 350_000),
+	}))
+	sess.ApplyCompaction(20_000, 5_000, session.Item{
+		Summary:        "The old work was summarized.",
+		FirstKeptEntry: len(sess.OwnMessages()),
+	})
+	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleUser, Content: "continue"}))
+
+	events := make(chan Event, 16)
+	rt.compactIfNeeded(t.Context(), sess, root, 100_000, len(sess.OwnMessages()), NewChannelSink(events))
+	close(events)
+
+	for ev := range events {
+		_, compacted := ev.(*SessionCompactionEvent)
+		assert.False(t, compacted, "reasoning replaced by a compaction summary must not trigger another compaction")
+	}
+}
+
 // TestCompactIfNeeded_CustomThreshold verifies that the agent's configured
 // compaction_threshold replaces the 0.9 default in the proactive trigger:
 // the same session content that stays under the default threshold triggers

@@ -140,19 +140,20 @@ func (e *ContextOverflowError) Unwrap() error {
 // is heuristics derived from observed errors. Adding a provider only requires
 // appending a phrase.
 var tokenOverflowPatterns = []string{
-	"prompt is too long",                // Anthropic, Vertex (with Anthropic body)
-	"prompt too long",                   // Ollama ("prompt too long; exceeded ...")
-	"maximum context length",            // OpenAI, OpenRouter, DeepSeek, vLLM
-	"context length exceeded",           // OpenAI legacy
-	"context_length_exceeded",           // OpenAI structured code
-	"input is too long",                 // Bedrock
-	"input token count",                 // Gemini ("...exceeds the maximum")
-	"exceeds the context window",        // OpenAI Responses API
-	"reduce the length of the messages", // Groq
-	"exceeded model token limit",        // Kimi, Moonshot
-	"context window exceeds limit",      // MiniMax
-	"model_context_window_exceeded",     // z.ai
-	"max_tokens must be greater than",   // Anthropic edge case: thinking-budget cascade
+	"prompt is too long",                 // Anthropic, Vertex (with Anthropic body)
+	"prompt too long",                    // Ollama ("prompt too long; exceeded ...")
+	"maximum context length",             // OpenAI, OpenRouter, DeepSeek, vLLM
+	"context length exceeded",            // OpenAI legacy
+	"context_length_exceeded",            // OpenAI structured code
+	"input is too long",                  // Bedrock
+	"input token count",                  // Gemini ("...exceeds the maximum")
+	"exceeds the context window",         // OpenAI Responses API
+	"exceeds the available context size", // llama.cpp
+	"reduce the length of the messages",  // Groq
+	"exceeded model token limit",         // Kimi, Moonshot
+	"context window exceeds limit",       // MiniMax
+	"model_context_window_exceeded",      // z.ai
+	"max_tokens must be greater than",    // Anthropic edge case: thinking-budget cascade
 	"maximum number of tokens",
 	"content length exceeds",
 	"exceeds the model's max token",

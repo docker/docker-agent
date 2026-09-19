@@ -595,7 +595,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// window unless a smaller compaction model is configured.
 		contextLimit := r.effectiveContextLimit(ctx, a, r.resolveContextLimit(ctx, model, modelID))
 		inputTokens, outputTokens := sess.Usage()
-		if contextLimit > 0 && r.sessionCompactionEnabled(a) && compaction.ShouldCompact(inputTokens, outputTokens, 0, contextLimit, a.CompactionThreshold()) {
+		estimatedTokens := estimateMessageTokens(sess.GetMessages(a))
+		contextTokens := max(inputTokens+outputTokens, estimatedTokens)
+		if contextLimit > 0 && r.sessionCompactionEnabled(a) && compaction.ShouldCompact(contextTokens, 0, 0, contextLimit, a.CompactionThreshold()) {
 			r.compactWithReason(ctx, sess, "", compactionReasonThreshold, sink)
 		}
 
@@ -1627,21 +1629,25 @@ func (r *LocalRuntime) compactIfNeeded(
 	// heuristic guess for the fresh tool results tracks the provider's
 	// actual tokenizer instead of a fixed chars-per-token ratio.
 	ownMessages := sess.OwnMessages()
+	historyEnd := min(messageCountBefore, len(ownMessages))
+	promptMessages := sess.GetMessages(a)
 	estimator := compaction.NewEstimator(func(yield func(*chat.Message) bool) {
-		for i := range ownMessages {
-			if !yield(&ownMessages[i].Message) {
+		for i := range promptMessages {
+			if !yield(&promptMessages[i]) {
 				return
 			}
 		}
 	})
-	newMessages := ownMessages[messageCountBefore:]
+	newMessages := ownMessages[historyEnd:]
 	var addedTokens int64
 	for i := range newMessages {
 		addedTokens += estimator.EstimateMessageTokens(&newMessages[i].Message)
 	}
 
 	inputTokens, outputTokens := sess.Usage()
-	if !compaction.ShouldCompact(inputTokens, outputTokens, addedTokens, contextLimit, a.CompactionThreshold()) {
+	estimatedPromptTokens := estimateMessageTokens(promptMessages)
+	contextTokens := max(inputTokens+outputTokens+addedTokens, estimatedPromptTokens)
+	if !compaction.ShouldCompact(contextTokens, 0, 0, contextLimit, a.CompactionThreshold()) {
 		return
 	}
 
@@ -1651,10 +1657,20 @@ func (r *LocalRuntime) compactIfNeeded(
 		"output_tokens", outputTokens,
 		"added_estimated_tokens", addedTokens,
 		"estimator_scale", estimator.Scale(),
-		"estimated_total", inputTokens+outputTokens+addedTokens,
+		"estimated_prompt_tokens", estimatedPromptTokens,
+		"estimated_total", contextTokens,
 		"context_limit", contextLimit,
 	)
 	r.compactWithReason(ctx, sess, "", compactionReasonThreshold, events)
+}
+
+func estimateMessageTokens(messages []chat.Message) int64 {
+	estimator := compaction.NewSliceEstimator(messages)
+	var total int64
+	for i := range messages {
+		total += estimator.EstimateMessageTokens(&messages[i])
+	}
+	return total
 }
 
 // getTools executes tool retrieval with automatic OAuth handling and applies
