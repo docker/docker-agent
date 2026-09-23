@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/docker/aijson"
 	"github.com/stretchr/testify/assert"
@@ -22,14 +25,31 @@ func TestResultJSON(t *testing.T) {
 		want  string
 	}{
 		{name: "nil", want: `null`},
+		{name: "nil slice", value: []string(nil), want: `null`},
+		{name: "nil map", value: map[string]int(nil), want: `null`},
 		{name: "empty array", value: []string{}, want: `[]`},
+		{name: "empty object", value: map[string]int{}, want: `{}`},
 		{name: "object", value: map[string]int{"count": 2}, want: `{"count":2}`},
+		{name: "sorted keys", value: map[string]int{"z": 1, "a": 2}, want: `{"a":2,"z":1}`},
+		{name: "byte array", value: [2]byte{1, 2}, want: `[1,2]`},
+		{name: "duration", value: time.Second, want: `1000000000`},
+		{
+			name: "omitempty",
+			value: struct {
+				Count int  `json:"count,omitempty"`
+				Ready bool `json:"ready,omitempty"`
+			}{},
+			want: `{}`,
+		},
 		{name: "HTML", value: `<p>A & B</p>`, want: `"<p>A & B</p>"`},
 		{name: "URL", value: "https://example.com/?a=1&b=2", want: `"https://example.com/?a=1&b=2"`},
 		{name: "control characters", value: "\"quoted\"\tline\n\x00", want: `"\"quoted\"\tline\n\u0000"`},
 		{name: "literal escape", value: `\u003c`, want: `"\\u003c"`},
 		{name: "Unicode", value: "café 日本語 🌍\u2028\u2029", want: `"café 日本語 🌍\u2028\u2029"`},
 		{name: "raw JSON", value: json.RawMessage(`{"body":"<p>A & B</p>"}`), want: `{"body":"<p>A & B</p>"}`},
+		{name: "raw escapes", value: json.RawMessage(`"\u0061\/"`), want: `"\u0061\/"`},
+		{name: "duplicate names", value: json.RawMessage(`{"a":1,"a":2}`), want: `{"a":1,"a":2}`},
+		{name: "invalid UTF-8", value: "\xff", want: "\"\ufffd\""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -53,7 +73,12 @@ func TestResultJSON(t *testing.T) {
 func TestResultJSON_Error(t *testing.T) {
 	t.Parallel()
 
-	for _, value := range []any{make(chan int), math.NaN(), json.RawMessage(`invalid`)} {
+	for _, value := range []any{
+		make(chan int),
+		math.NaN(),
+		json.RawMessage(`invalid`),
+		[]any{strings.Repeat("x", 64<<10), math.NaN()},
+	} {
 		_, err := json.Marshal(value)
 		require.Error(t, err)
 
@@ -61,6 +86,61 @@ func TestResultJSON_Error(t *testing.T) {
 		assert.True(t, result.IsError)
 		assert.Equal(t, err.Error(), result.Output)
 		assert.Equal(t, result, ResultJSONWithOptions(value, JSONResultOptions{EscapeHTML: true}))
+	}
+}
+
+type resultJSONMarshaler func() ([]byte, error)
+
+func (f resultJSONMarshaler) MarshalJSON() ([]byte, error) {
+	return f()
+}
+
+func TestResultJSON_CustomMarshaler(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "success"},
+		{name: "error", err: errors.New("marshal failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, escapeHTML := range []bool{false, true} {
+				var calls []string
+				value := map[string]resultJSONMarshaler{
+					"a": func() ([]byte, error) {
+						calls = append(calls, "a")
+						return []byte(`"<a>&\u2028"`), nil
+					},
+					"b": func() ([]byte, error) {
+						calls = append(calls, "b")
+						return []byte(`"<b>"`), tc.err
+					},
+					"c": func() ([]byte, error) {
+						calls = append(calls, "c")
+						return []byte(`"<c>"`), nil
+					},
+				}
+
+				var b strings.Builder
+				encoder := json.NewEncoder(&b)
+				encoder.SetEscapeHTML(escapeHTML)
+				err := encoder.Encode(value)
+				want := ResultSuccess(strings.TrimSuffix(b.String(), "\n"))
+				if err != nil {
+					want = ResultError(err.Error())
+				}
+				wantCalls := calls
+				calls = nil
+
+				result := ResultJSONWithOptions(value, JSONResultOptions{EscapeHTML: escapeHTML})
+				assert.Equal(t, want, result)
+				assert.Equal(t, wantCalls, calls)
+			}
+		})
 	}
 }
 

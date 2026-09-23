@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"log/slog"
 	"strings"
 
@@ -155,12 +157,10 @@ func ResultJSON(v any) *ToolCallResult {
 // ResultJSONWithOptions is ResultJSON with explicit encoding options.
 func ResultJSONWithOptions(v any, opts JSONResultOptions) *ToolCallResult {
 	var b strings.Builder
-	encoder := json.NewEncoder(&b)
-	encoder.SetEscapeHTML(opts.EscapeHTML)
-	if err := encoder.Encode(v); err != nil {
+	if err := jsonv2.MarshalWrite(&b, v, json.DefaultOptionsV1(), jsontext.EscapeForHTML(opts.EscapeHTML)); err != nil {
 		return ResultError(err.Error())
 	}
-	return ResultSuccess(strings.TrimSuffix(b.String(), "\n"))
+	return ResultSuccess(b.String())
 }
 
 type ToolType string
