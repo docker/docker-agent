@@ -68,11 +68,7 @@ func WithEgressProxy(ctx context.Context, proxyURL string) (context.Context, err
 // [WithEgressProxy], or nil when none is configured.
 func EgressProxyFromContext(ctx context.Context) *url.URL {
 	u, _ := ctx.Value(egressProxyKey{}).(*url.URL)
-	if u == nil {
-		return nil
-	}
-	clone := *u
-	return &clone
+	return u.Clone()
 }
 
 func parseEgressProxyURL(raw string) (*url.URL, error) {
