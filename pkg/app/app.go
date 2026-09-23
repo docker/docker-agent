@@ -14,9 +14,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"uuid"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/google/uuid"
 
 	"github.com/docker/docker-agent/pkg/app/export"
 	"github.com/docker/docker-agent/pkg/app/transcript"
@@ -1176,7 +1176,7 @@ func (a *App) QueueSteerMessage(ctx context.Context, content string, attachments
 
 // QueueSteerMessageForSession uses the caller's session snapshot during asynchronous attachment resolution.
 func (a *App) QueueSteerMessageForSession(ctx context.Context, sess *session.Session, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
-	msg := runtime.QueuedMessage{ID: uuid.NewString(), Content: content}
+	msg := runtime.QueuedMessage{ID: uuid.NewV4().String(), Content: content}
 	if err := ctx.Err(); err != nil {
 		return msg, err
 	}
@@ -1203,7 +1203,7 @@ func (a *App) QueueFollowUpMessage(ctx context.Context, content string, attachme
 
 // QueueFollowUpMessageForSession uses the caller's session snapshot during asynchronous attachment resolution.
 func (a *App) QueueFollowUpMessageForSession(ctx context.Context, sess *session.Session, content string, attachments []messages.Attachment) (runtime.QueuedMessage, error) {
-	msg := runtime.QueuedMessage{ID: uuid.NewString(), Content: content}
+	msg := runtime.QueuedMessage{ID: uuid.NewV4().String(), Content: content}
 	if err := ctx.Err(); err != nil {
 		return msg, err
 	}

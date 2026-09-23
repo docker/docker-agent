@@ -10,8 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
@@ -240,7 +240,7 @@ func newOTelResource() (*resource.Resource, error) {
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(AppName),
 		semconv.ServiceVersion(version.Version),
-		semconv.ServiceInstanceID(uuid.NewString()),
+		semconv.ServiceInstanceID(uuid.NewV4().String()),
 		semconv.ProcessPID(os.Getpid()),
 		semconv.ProcessRuntimeName("go"),
 		semconv.OSTypeKey.String(runtime.GOOS),

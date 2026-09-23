@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"uuid"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,6 +21,17 @@ func todoToolSet(t *testing.T) tools.ToolSet {
 	toolSet, err := todo.CreateToolSet(latest.Toolset{})
 	require.NoError(t, err)
 	return toolSet
+}
+
+func TestNew_GeneratesV4UUID(t *testing.T) {
+	t.Parallel()
+
+	s := New()
+	id, err := uuid.Parse(s.ID)
+	require.NoError(t, err)
+	assert.Equal(t, id.String(), s.ID)
+	assert.Equal(t, byte(4), id[6]>>4)
+	assert.Equal(t, byte(0x80), id[8]&0xc0)
 }
 
 func TestTrimMessagesWithToolCalls(t *testing.T) {

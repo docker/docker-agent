@@ -29,8 +29,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/openai/openai-go/v3"
@@ -630,7 +630,7 @@ func (s *sseStream) sendError(err error) {
 }
 
 // newChatID returns a fresh OpenAI-style chat completion id.
-func newChatID() string { return "chatcmpl-" + uuid.NewString() }
+func newChatID() string { return "chatcmpl-" + uuid.NewV4().String() }
 
 // writeError writes an OpenAI-style error envelope.
 func writeError(c echo.Context, status int, message string) error {

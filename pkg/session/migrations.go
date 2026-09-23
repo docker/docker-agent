@@ -8,8 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -582,7 +581,7 @@ func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int
 		// Create sub-session and link to parent
 		subSessionID := item.SubSession.ID
 		if subSessionID == "" {
-			subSessionID = uuid.New().String()
+			subSessionID = uuid.NewV4().String()
 		}
 
 		// Check if sub-session already exists

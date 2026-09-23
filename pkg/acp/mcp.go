@@ -12,9 +12,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/google/uuid"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
@@ -189,8 +189,8 @@ func prepareClientMCP(ctx context.Context, servers []acp.McpServerStdio, working
 	ctx, cancel := context.WithTimeout(ctx, clientMCPSetupTimeout)
 	defer cancel()
 	lifetime, stop := context.WithCancel(context.WithoutCancel(ctx))
-	g := &clientMCPGeneration{ctx: lifetime, cancel: stop, namespace: uuid.NewString()}
-	prefix := "acp_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:16]
+	g := &clientMCPGeneration{ctx: lifetime, cancel: stop, namespace: uuid.NewV4().String()}
+	prefix := "acp_" + strings.ReplaceAll(uuid.NewV4().String(), "-", "")[:16]
 	var instructions []string
 	for i, spec := range servers {
 		env := os.Environ()

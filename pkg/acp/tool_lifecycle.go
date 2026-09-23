@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"time"
+	"uuid"
 
 	"github.com/coder/acp-go-sdk"
-	"github.com/google/uuid"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -38,7 +38,7 @@ func (t *toolCallTracker) report(ctx context.Context, a *Agent, s *Session, agen
 		return state, nil
 	}
 	if !exists {
-		state = &toolCallState{id: acp.ToolCallId(uuid.NewString())}
+		state = &toolCallState{id: acp.ToolCallId(uuid.NewV4().String())}
 		if t.active == nil {
 			t.active = make(map[toolCallKey]*toolCallState)
 		}
@@ -70,7 +70,7 @@ func (t *toolCallTracker) complete(ctx context.Context, a *Agent, s *Session, ev
 	key := toolCallKey{agent: event.AgentName, id: event.ToolCallID}
 	state, exists := t.active[key]
 	if !exists {
-		state = &toolCallState{id: acp.ToolCallId(uuid.NewString())}
+		state = &toolCallState{id: acp.ToolCallId(uuid.NewV4().String())}
 	}
 	mappedEvent := *event
 	mappedEvent.ToolCallID = string(state.id)

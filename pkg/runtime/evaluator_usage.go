@@ -7,8 +7,7 @@ import (
 	"math"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
@@ -106,7 +105,7 @@ func (ac *evaluatorAccounting) record(ctx context.Context, name string, record e
 	}
 
 	evaluation := &session.Evaluation{
-		ID: uuid.NewString(), Evaluator: name, AgentName: ac.a.Name(),
+		ID: uuid.NewV4().String(), Evaluator: name, AgentName: ac.a.Name(),
 		Model: record.Model, Cost: record.Cost, CreatedAt: ac.r.now().Format(time.RFC3339Nano),
 	}
 	if record.Usage != nil {

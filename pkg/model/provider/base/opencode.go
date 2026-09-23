@@ -5,8 +5,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"uuid"
 
-	"github.com/google/uuid"
+	googleuuid "github.com/google/uuid"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
@@ -43,13 +44,14 @@ func WrapOpenCodeSession(cfg *latest.ModelConfig, client *http.Client) {
 	}
 	client.Transport = &opencodeSessionTransport{
 		base:     cmp.Or(client.Transport, http.DefaultTransport),
-		fallback: uuid.NewString(),
+		fallback: uuid.NewV4().String(),
 	}
 }
 
 // opencodeSessionID derives one ID per conversation, stable across processes.
 func opencodeSessionID(sessionID string) string {
-	return uuid.NewSHA1(opencodeSessionNamespace, []byte(sessionID)).String()
+	// The standard library does not support UUIDv5.
+	return googleuuid.NewSHA1(googleuuid.UUID(opencodeSessionNamespace), []byte(sessionID)).String()
 }
 
 // opencodeSessionTransport sets the header per request unless already set,

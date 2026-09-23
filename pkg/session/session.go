@@ -14,8 +14,7 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
@@ -23,7 +22,7 @@ import (
 )
 
 // defaultNewID returns a fresh random session ID.
-func defaultNewID() string { return uuid.New().String() }
+func defaultNewID() string { return uuid.NewV4().String() }
 
 const (
 	// toolContentPlaceholder is the text used to replace truncated tool content
@@ -267,7 +266,7 @@ type Session struct {
 	mu sync.RWMutex `json:"-"`
 
 	// now and newID are per-session sources of time and identity. They are
-	// indirected (rather than calling time.Now/uuid.New directly) so that
+	// indirected (rather than calling time.Now/uuid.NewV4 directly) so that
 	// tests can inject a deterministic clock and ID generator via WithClock
 	// and WithIDGen without mutating any process-global state — which keeps
 	// such tests safe to run with t.Parallel(). Sessions created outside New

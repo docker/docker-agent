@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,8 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/docker/docker-agent/pkg/config"
@@ -404,7 +405,8 @@ func (r *Runner) runSingleEval(ctx context.Context, evalSess *InputSession) (Res
 func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, questions []string, setup string) ([]map[string]any, error) {
 	agentDir := r.agentSource.ParentDir()
 	agentFile := filepath.Base(r.agentSource.Name())
-	containerName := fmt.Sprintf("docker-agent-eval-%d", uuid.New().ID())
+	containerID := uuid.NewV4()
+	containerName := fmt.Sprintf("docker-agent-eval-%d", binary.BigEndian.Uint32(containerID[:4]))
 
 	args := []string{
 		"run",
@@ -457,7 +459,8 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 	// The default entrypoint is: /run.sh /docker-agent run --exec --yolo --json
 	// /run.sh starts dockerd then exec's "$@".
 	if setup != "" {
-		setupFile := filepath.Join(os.TempDir(), fmt.Sprintf("docker-agent-eval-setup-%d.sh", uuid.New().ID()))
+		setupID := uuid.NewV4()
+		setupFile := filepath.Join(os.TempDir(), fmt.Sprintf("docker-agent-eval-setup-%d.sh", binary.BigEndian.Uint32(setupID[:4])))
 		if err := os.WriteFile(setupFile, []byte(setup), 0o600); err != nil {
 			return nil, fmt.Errorf("writing setup script: %w", err)
 		}

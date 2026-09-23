@@ -1255,7 +1255,7 @@ func TestRunDockerAgentInContainerUsesConfiguredRuntime(t *testing.T) {
 		Config{ContainerRuntime: fakeRuntime},
 	)
 
-	events, err := runner.runDockerAgentInContainer(t.Context(), "image-id", []string{"question"}, "")
+	events, err := runner.runDockerAgentInContainer(t.Context(), "image-id", []string{"question"}, "echo setup")
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	assert.Equal(t, "agent_choice", events[0]["type"])
@@ -1264,6 +1264,8 @@ func TestRunDockerAgentInContainerUsesConfiguredRuntime(t *testing.T) {
 	require.NoError(t, err)
 	got := string(args)
 	assert.True(t, strings.HasPrefix(got, "run "), "fake runtime must receive the run subcommand, got: %s", got)
+	assert.Regexp(t, `--name docker-agent-eval-[0-9]+ `, got)
+	assert.Regexp(t, `docker-agent-eval-setup-[0-9]+\.sh:/setup.sh:ro`, got)
 	assert.Contains(t, got, "image-id")
 }
 

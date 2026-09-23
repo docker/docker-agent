@@ -9,8 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -254,7 +254,7 @@ func NewHandler(runner Runner) *Handler {
 }
 
 func newTaskID() string {
-	return "agent_task_" + uuid.New().String()
+	return "agent_task_" + uuid.NewV4().String()
 }
 
 func (h *Handler) runningTaskCount() int {

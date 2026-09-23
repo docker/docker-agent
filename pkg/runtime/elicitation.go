@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
@@ -541,7 +541,7 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 	// orphaning it (#3584 review item 2a). The wire ID is preserved
 	// separately on the event (ServerElicitationID) for callers that want
 	// to correlate with server-side logs; it is never used for routing.
-	correlationID := uuid.NewString()
+	correlationID := uuid.NewV4().String()
 
 	// Register the waiter BEFORE emitting the request event. This is the
 	// #3584 TOCTOU fix: previously a response that arrived before the

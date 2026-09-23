@@ -13,8 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/docker/docker-agent/pkg/paths"
 )
@@ -63,7 +62,7 @@ func (r *Resolver) Get() string {
 			// If the file was manually edited or corrupted, regenerate
 			// rather than propagating invalid data to telemetry and
 			// the gateway.
-			if _, err := uuid.Parse(existing); err == nil {
+			if validStoredUUID(existing) {
 				r.cached = existing
 				return r.cached
 			}
@@ -73,13 +72,25 @@ func (r *Resolver) Get() string {
 		// regenerate so we always return a valid UUID.
 	}
 
-	id := uuid.New().String()
+	id := uuid.NewV4().String()
 	// Best-effort persistence: even if we cannot save the value to
 	// disk we still cache it in memory so the same identifier is used
 	// for the rest of this process.
 	_ = save(file, id)
 	r.cached = id
 	return r.cached
+}
+
+func validStoredUUID(s string) bool {
+	// Preserve the formats accepted by the former Google UUID parser.
+	switch {
+	case len(s) == 38:
+		s = s[1:37]
+	case len(s) == 45 && strings.EqualFold(s[:9], "urn:uuid:"):
+		s = s[9:]
+	}
+	_, err := uuid.Parse(s)
+	return err == nil
 }
 
 // defaultResolver backs the package-level [Get]. It resolves its

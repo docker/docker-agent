@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/safety"
@@ -153,7 +152,7 @@ func syntheticCall(run tools.ConfirmedRun) (tools.ToolCall, tools.Tool, error) {
 		return tools.ToolCall{}, tools.Tool{}, fmt.Errorf("marshal confirmed-run arguments: %w", err)
 	}
 	tc := tools.ToolCall{
-		ID:       "confirm_" + uuid.NewString(),
+		ID:       "confirm_" + uuid.NewV4().String(),
 		Type:     "function",
 		Function: tools.FunctionCall{Name: run.ToolName, Arguments: string(args)},
 	}

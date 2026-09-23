@@ -13,8 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/config"
@@ -326,7 +325,7 @@ func (t *ToolSet) createTask(ctx context.Context, params CreateTaskArgs) (*tools
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
 	}
-	id := uuid.New().String()
+	id := uuid.NewV4().String()
 
 	deps := params.Dependencies
 	if deps == nil {

@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"uuid"
 
-	"github.com/google/uuid"
 	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -293,7 +293,7 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			toolCalls := make([]tools.ToolCall, 0, len(funcs))
 			for _, fc := range funcs {
 				argsJSON, _ := json.Marshal(fc.Args)
-				id := "call_" + uuid.New().String()
+				id := "call_" + uuid.NewV4().String()
 				slog.Debug("Gemini: Function call", "name", fc.Name, "args", string(argsJSON), "id", id)
 				toolCalls = append(toolCalls, tools.ToolCall{
 					ID:         id,

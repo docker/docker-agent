@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"uuid"
 
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
-	"github.com/google/uuid"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/effort"
@@ -599,7 +599,7 @@ func (m *model) dispatchUserMessage(ctx context.Context, display, content string
 	if m.busy {
 		switch mode {
 		case busySubmitSteer:
-			msg := runtime.QueuedMessage{ID: uuid.NewString(), Content: content}
+			msg := runtime.QueuedMessage{ID: uuid.NewV4().String(), Content: content}
 			if err := m.app.Steer(ctx, msg); err != nil {
 				m.addNotice("⚠ ", "Could not steer current response: "+err.Error(), ui.StWarning())
 				return
@@ -607,7 +607,7 @@ func (m *model) dispatchUserMessage(ctx context.Context, display, content string
 			m.addPendingUser(msg.ID, display, content, ui.PendingUserSteer)
 			return
 		case busySubmitFollowUp:
-			msg := runtime.QueuedMessage{ID: uuid.NewString(), Content: content}
+			msg := runtime.QueuedMessage{ID: uuid.NewV4().String(), Content: content}
 			if err := m.app.FollowUp(ctx, msg); err != nil {
 				m.addNotice("⚠ ", "Could not enqueue follow-up: "+err.Error(), ui.StWarning())
 				return

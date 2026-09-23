@@ -4,8 +4,8 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -159,6 +159,9 @@ func TestOpenCodeSessionTransportSetsHeaderPerSession(t *testing.T) {
 	assert.NotEmpty(t, rec.seen[3], "header must still be sent when no session is on the context")
 	assert.Equal(t, rec.seen[3], rec.seen[4], "fallback ID must be stable for the client's lifetime")
 	assert.NotEqual(t, rec.seen[0], rec.seen[3], "fallback must not collide with a derived ID")
+	fallback, err := uuid.Parse(rec.seen[3])
+	require.NoError(t, err)
+	assert.Equal(t, byte(4), fallback[6]>>4, "fallback must remain a v4 UUID")
 	assert.Empty(t, original.Header.Get(OpenCodeSessionHeader), "the caller's request must not be modified")
 }
 
