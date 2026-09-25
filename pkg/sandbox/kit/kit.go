@@ -81,6 +81,9 @@ type Options struct {
 	// and skills to ship.
 	AgentRef string
 
+	// Source freezes an already resolved agent selection when provided.
+	Source config.Source
+
 	// EnvProvider is forwarded to [sources.Resolve] so URL-sourced
 	// agents can pick up GITHUB_TOKEN. May be nil.
 	EnvProvider environment.Provider
@@ -419,6 +422,9 @@ func promote(stagingDir, finalDir string) error {
 }
 
 func loadConfig(ctx context.Context, opts Options) (*latestcfg.Config, error) {
+	if opts.Source != nil {
+		return config.Load(ctx, opts.Source, config.WithFlavors(opts.Flavors...))
+	}
 	source, err := sources.Resolve(opts.AgentRef, opts.EnvProvider)
 	if err != nil {
 		return nil, err

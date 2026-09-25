@@ -1,9 +1,17 @@
 package sandbox
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
 	"path/filepath"
+	"slices"
 
+	"github.com/docker/docker-agent/pkg/atomicfile"
+	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
+	"github.com/docker/docker-agent/pkg/paths"
 )
 
 // ExtraWorkspace returns the directory to mount as a read-only extra
@@ -30,16 +38,21 @@ func ExtraWorkspace(wd, agentRef string) string {
 		return ""
 	}
 
+	return ExtraWorkspaceForSource(wd, source)
+}
+
+// ExtraWorkspaceForSource uses the frozen selection rather than reloading aliases.
+func ExtraWorkspaceForSource(wd string, source config.Source) string {
 	parent := source.ParentDir()
 	if parent == "" {
 		return ""
 	}
 
-	absParent, err := filepath.Abs(parent)
+	absParent, err := CanonicalPath(parent)
 	if err != nil {
 		return ""
 	}
-	absWd, err := filepath.Abs(wd)
+	absWd, err := CanonicalPath(wd)
 	if err != nil {
 		return ""
 	}
@@ -58,4 +71,33 @@ func ExtraWorkspace(wd, agentRef string) string {
 func startsWithParent(rel string) bool {
 	const dotdot = ".." + string(filepath.Separator)
 	return len(rel) >= len(dotdot) && rel[:len(dotdot)] == dotdot
+}
+
+// GuestAgentRef pins built-ins to a file so the guest cannot resolve their names
+// through a different alias in the mounted user configuration.
+func GuestAgentRef(ctx context.Context, source config.Source) (ref, extra string, err error) {
+	if source.ParentDir() != "" {
+		ref, err = CanonicalFilePath(source.Name())
+		return ref, "", err
+	}
+	if !slices.Contains(sources.BuiltinAgentNames(), source.Name()) {
+		return source.Name(), "", nil
+	}
+	data, err := source.Read(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	dir := filepath.Join(paths.GetCacheDir(), "sandbox-agents", source.Name())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", fmt.Errorf("staging builtin agent: %w", err)
+	}
+	dir, err = CanonicalPath(dir)
+	if err != nil {
+		return "", "", err
+	}
+	ref = filepath.Join(dir, "agent.yaml")
+	if err := atomicfile.Write(ref, bytes.NewReader(data), 0o600); err != nil {
+		return "", "", fmt.Errorf("staging builtin agent: %w", err)
+	}
+	return ref, dir, nil
 }

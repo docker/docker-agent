@@ -30,6 +30,7 @@ import (
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/profiling"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/sandbox"
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -92,6 +93,7 @@ type runExecFlags struct {
 	tour              bool
 	sandbox           bool
 	sandboxTemplate   string
+	sandboxOptions    sandbox.Options
 	sbx               bool
 	noKit             bool
 	agentPickerSpec   string
@@ -209,10 +211,16 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().BoolVar(&flags.sidebar, "sidebar", true, "Show the sidebar in the TUI (set --sidebar=false to hide it)")
 	cmd.PersistentFlags().StringVar(&flags.theme, "theme", "", "Preselect a TUI theme by name, or \"auto\" to match the terminal's light/dark background (overrides the theme from user config; ignored outside the interactive TUI)")
 	_ = cmd.RegisterFlagCompletionFunc("theme", completeTheme)
-	cmd.PersistentFlags().BoolVar(&flags.sandbox, "sandbox", false, "Run the agent inside a Docker sandbox (requires Docker Desktop with sandbox support)")
-	cmd.PersistentFlags().StringVar(&flags.sandboxTemplate, "template", "docker/docker-agent-sbx-templates:latest", "Template image for the sandbox (passed to docker sandbox create -t)")
+	cmd.PersistentFlags().BoolVar(&flags.sandbox, "sandbox", false, "Run the agent inside a Docker sandbox")
+	cmd.PersistentFlags().StringVar(&flags.sandboxTemplate, "template", "docker/docker-agent-sbx-templates:latest", "Local sandbox OCI image, or cloud template name with --cloud")
 	cmd.PersistentFlags().BoolVar(&flags.sbx, "sbx", true, "Prefer the sbx CLI backend when available (set --sbx=false to force docker sandbox)")
 	cmd.PersistentFlags().BoolVar(&flags.noKit, "no-kit", false, "Do not stage a docker-agent kit (skills, prompt files) when running in a sandbox")
+	cmd.PersistentFlags().BoolVar(&flags.sandboxOptions.Cloud, "cloud", false, "Use a cloud sandbox (implies --sandbox; no host files or credentials are uploaded)")
+	cmd.PersistentFlags().StringVar(&flags.sandboxOptions.Workload, "sandbox-kit", "", "Sandbox workload kit reference (directory, ZIP, git, or OCI; must provide docker-agent)")
+	cmd.PersistentFlags().StringArrayVar(&flags.sandboxOptions.Kits, "kit", nil, "Additional sandbox mixin kit reference (repeatable)")
+	cmd.PersistentFlags().StringArrayVar(&flags.sandboxOptions.KitArgs, "kit-arg", nil, "Sandbox kit argument KEY=VALUE (repeatable)")
+	cmd.PersistentFlags().DurationVar(&flags.sandboxOptions.TTL, "sandbox-ttl", time.Hour, "Cloud sandbox time-to-live; stopped on expiry")
+	cmd.MarkFlagsMutuallyExclusive("template", "sandbox-kit")
 	cmd.PersistentFlags().StringVar(&flags.agentPickerSpec, "agent-picker", "", "Show a full-screen picker to choose an agent before launching. Optional comma-separated list of agent refs; \"defaults\" (or no value) offers the built-in agents plus any configs in ~/.agents")
 	cmd.PersistentFlags().Lookup("agent-picker").NoOptDefVal = agentPickerDefaultsSpec
 	cmd.PersistentFlags().StringVarP(&flags.worktreeName, "worktree", "w", "", "Run the agent in a fresh git worktree of the working directory (isolates changes from your checkout). Optionally name it: --worktree=my-name")
@@ -239,6 +247,9 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.MarkFlagsMutuallyExclusive("worktree-base", "worktree-pr")
 	cmd.MarkFlagsMutuallyExclusive("remote", "worktree-base")
 	cmd.MarkFlagsMutuallyExclusive("sandbox", "worktree-base")
+	for _, flag := range []string{"remote", "worktree", "worktree-pr", "worktree-base"} {
+		cmd.MarkFlagsMutuallyExclusive("cloud", flag)
+	}
 
 	// --exec only
 	cmd.PersistentFlags().BoolVar(&flags.exec, "exec", false, "Execute without a TUI")
@@ -329,18 +340,19 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	}
 
 	var discoveredProjectConfig bool
-	args, discoveredProjectConfig = f.discoverRunAgentArgs(args)
+	if !f.sandboxOptions.Cloud {
+		args, discoveredProjectConfig = f.discoverRunAgentArgs(args)
+	}
 
 	// Resolve alias / runtime-declared sandbox opt-in before dispatch.
 	// An explicit --sandbox=<bool> on the CLI always wins, so we only
 	// consult the lower-priority sources when the flag wasn't set.
-	var agentCfg *latestcfg.Config
-	if !cmd.Flags().Changed("sandbox") {
+	if !cmd.Flags().Changed("sandbox") && !f.sandboxOptions.Cloud {
 		var agentRef string
 		if len(args) > 0 {
 			agentRef = args[0]
 		}
-		f.sandbox, agentCfg = resolveSandboxDefault(ctx, agentRef, f.sandbox, f.runConfig.Flavors)
+		f.sandbox, _ = resolveSandboxDefault(ctx, agentRef, f.sandbox, f.runConfig.Flavors)
 	}
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
@@ -348,11 +360,23 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		out.Println("Using project config: " + args[0])
 	}
 
+	if f.sandboxOptions.Cloud {
+		if cmd.Flags().Changed("sandbox") && !f.sandbox {
+			return errors.New("--cloud cannot be combined with --sandbox=false")
+		}
+		f.sandbox = true
+	}
+	if err := validateSandboxOptions(cmd, f.sandbox, f.sandboxOptions); err != nil {
+		return err
+	}
 	if f.sandbox {
 		if cmd.Flags().Changed("worktree") || cmd.Flags().Changed("worktree-pr") {
 			return errors.New("--worktree/--worktree-pr cannot be combined with a sandboxed run")
 		}
-		return runInSandbox(ctx, cmd, args, &f.runConfig, f.sandboxTemplate, f.sbx, f.noKit, agentCfg)
+		if cmd.Flags().Changed("template") || (!f.sandboxOptions.Cloud && f.sandboxOptions.Workload == "") {
+			f.sandboxOptions.Template = f.sandboxTemplate
+		}
+		return runInSandbox(ctx, cmd, args, &f.runConfig, f.sbx, f.noKit, f.sandboxOptions)
 	}
 
 	// --worktree was provided (with or without a value). The string flag lets

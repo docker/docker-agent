@@ -650,3 +650,17 @@ func TestResolveSources_URLReference(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, testURL, source.Name())
 }
+
+func TestResolveWithConfigUsesProvidedSnapshot(t *testing.T) {
+	t.Parallel()
+	alias := &userconfig.Alias{Path: "docker/reviewed:latest", Safety: "strict"}
+	cfg := &userconfig.Config{Aliases: map[string]*userconfig.Alias{"coder": alias}}
+	source, gotAlias, err := ResolveWithConfig("coder", cfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, alias.Path, source.Name())
+	assert.Same(t, alias, gotAlias)
+	source, gotAlias, err = ResolveWithConfig("default", cfg, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "default", source.Name())
+	assert.Nil(t, gotAlias)
+}

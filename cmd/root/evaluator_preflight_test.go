@@ -17,6 +17,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/sandbox"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
@@ -106,7 +107,7 @@ func TestRunInSandboxForwardsInheritedEvaluatorCredentials(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(fakeDir, "docker"), []byte(`#!/bin/sh
 set -eu
 case "$1 $2" in
-  "sandbox version"|"sandbox policy") ;;
+  "sandbox version"|"sandbox policy"|"sandbox create") ;;
   "sandbox ls") printf '%s\n' "$EVALUATOR_TEST_SANDBOX_LIST" ;;
   "sandbox exec")
     printf '%s\000' "$@" > "$EVALUATOR_TEST_EXEC_ARGS"
@@ -120,7 +121,7 @@ esac
 			require.Nil(t, rc.GlobalHooks, "sandbox dispatch happens before runOrExec loads hooks")
 			cmd := &cobra.Command{}
 			cmd.SetOut(io.Discard)
-			require.NoError(t, runInSandbox(t.Context(), cmd, []string{agentPath}, rc, "", false, true, nil))
+			require.NoError(t, runInSandbox(t.Context(), cmd, []string{agentPath}, rc, false, true, sandbox.Options{}))
 			assert.Nil(t, rc.GlobalHooks, "preflight must not mutate the caller's runtime config")
 
 			argsData, err := os.ReadFile(argsFile)
@@ -131,7 +132,9 @@ esac
 			assert.Equal(t, "-e", argv[keyIndex-1])
 			assert.Equal(t, 1, strings.Count(string(argsData), key))
 			assert.NotContains(t, string(argsData), secret)
-			assert.Contains(t, argv, agentPath, "agent paths must remain a single argument")
+			canonicalAgent, err := sandbox.CanonicalPath(agentPath)
+			require.NoError(t, err)
+			assert.Contains(t, argv, canonicalAgent, "agent paths must remain a single argument")
 			envData, err := os.ReadFile(envFile)
 			require.NoError(t, err)
 			assert.Equal(t, secret, string(envData))

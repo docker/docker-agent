@@ -2,17 +2,21 @@ package sandbox_test
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/sandbox"
+	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
 func TestCheckAvailable(t *testing.T) {
@@ -24,12 +28,12 @@ func TestCheckAvailable(t *testing.T) {
 	}{
 		{
 			name:    "no docker installed",
-			wantErr: "--sandbox requires Docker Desktop",
+			wantErr: "--sandbox requires Docker Sandboxes",
 		},
 		{
 			name:    "docker without sandbox support",
 			script:  "#!/bin/sh\nexit 1\n",
-			wantErr: "--sandbox requires Docker Desktop with sandbox support",
+			wantErr: "--sandbox requires a working Docker Sandboxes CLI",
 		},
 		{
 			name:      "docker with sandbox support",
@@ -46,7 +50,7 @@ func TestCheckAvailable(t *testing.T) {
 			}
 			t.Setenv("PATH", fakeDir)
 
-			backend := sandbox.NewBackend(false)
+			backend := sandbox.NewBackend(false, false)
 			err := backend.CheckAvailable(t.Context())
 			if tt.wantNoErr {
 				require.NoError(t, err)
@@ -105,7 +109,7 @@ func TestForWorkspace(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			require.NoError(t, os.WriteFile(dataFile, []byte(tt.json), 0o600))
 
-			backend := sandbox.NewBackend(false)
+			backend := sandbox.NewBackend(false, false)
 			got := backend.ForWorkspace(t.Context(), tt.wd)
 			if tt.wantName == "" {
 				assert.Nil(t, got)
@@ -136,7 +140,7 @@ func TestNewBackend_PrefersSbx(t *testing.T) {
 	t.Setenv("PATH", fakeDir)
 
 	// When sbx is available and preferred, CheckAvailable uses sbx.
-	backend := sandbox.NewBackend(true)
+	backend := sandbox.NewBackend(true, false)
 	err := backend.CheckAvailable(t.Context())
 	require.NoError(t, err)
 }
@@ -147,7 +151,7 @@ func TestNewBackend_FallsBackToDocker(t *testing.T) {
 	writeMockScript(t, fakeDir, "docker", "exit 0")
 	t.Setenv("PATH", fakeDir)
 
-	backend := sandbox.NewBackend(true)
+	backend := sandbox.NewBackend(true, false)
 	err := backend.CheckAvailable(t.Context())
 	require.NoError(t, err)
 }
@@ -161,7 +165,7 @@ func TestForWorkspace_SbxBackend(t *testing.T) {
 	writeMockScript(t, fakeDir, "sbx", script)
 	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	backend := sandbox.NewBackend(true)
+	backend := sandbox.NewBackend(true, false)
 	got := backend.ForWorkspace(t.Context(), "/my/project")
 	require.NotNil(t, got)
 	assert.Equal(t, "my-sbx", got.Name)
@@ -187,7 +191,9 @@ func TestExtraWorkspace(t *testing.T) {
 		require.NoError(t, os.WriteFile(agent, []byte("x"), 0o600))
 
 		got := sandbox.ExtraWorkspace(t.TempDir(), agent)
-		assert.Equal(t, agentDir, got)
+		canonicalDir, err := sandbox.CanonicalPath(agentDir)
+		require.NoError(t, err)
+		assert.Equal(t, canonicalDir, got)
 	})
 
 	t.Run("yaml inside workspace", func(t *testing.T) {
@@ -212,7 +218,9 @@ func TestExtraWorkspace(t *testing.T) {
 		writeAlias(t, "gopher", agent)
 
 		got := sandbox.ExtraWorkspace(t.TempDir(), "gopher")
-		assert.Equal(t, agentDir, got)
+		canonicalDir, err := sandbox.CanonicalPath(agentDir)
+		require.NoError(t, err)
+		assert.Equal(t, canonicalDir, got)
 	})
 
 	t.Run("alias points to OCI reference", func(t *testing.T) {
@@ -246,7 +254,7 @@ func TestAllowHosts_RejectsCommaOrWhitespaceEntries(t *testing.T) {
 	// loudly: the backend joins the list with commas before
 	// forwarding it to the policy engine, and the inner CLI
 	// otherwise has no way to distinguish a typo from an attack.
-	backend := sandbox.NewBackend(false) // docker backend; sbx behaves the same
+	backend := sandbox.NewBackend(false, false) // docker backend; sbx behaves the same
 	cases := []string{
 		"good.example.com,evil.example.com",
 		"good.example.com evil.example.com",
@@ -283,12 +291,12 @@ func TestAllowHosts_ArgvSpelling(t *testing.T) {
 	}{
 		{
 			name:     "docker",
-			backend:  sandbox.NewBackend(false),
+			backend:  sandbox.NewBackend(false, false),
 			wantArgs: "sandbox policy allow network --sandbox my-sbx a.example.com,b.example.com",
 		},
 		{
 			name:     "sbx",
-			backend:  sandbox.NewBackend(true),
+			backend:  sandbox.NewBackend(true, false),
 			wantArgs: "policy allow network --sandbox my-sbx a.example.com,b.example.com",
 		},
 	}
@@ -314,7 +322,7 @@ func TestAllowHosts_SkipsEmptyEntries(t *testing.T) {
 		0o755))
 	t.Setenv("PATH", fakeDir)
 
-	backend := sandbox.NewBackend(false)
+	backend := sandbox.NewBackend(false, false)
 	require.NoError(t, backend.AllowHosts(t.Context(), "sandbox-x", []string{"", "   ", "\t"}))
 }
 
@@ -335,22 +343,22 @@ func TestBuildExecCmd(t *testing.T) {
 	}{
 		{
 			name:       "docker",
-			backend:    sandbox.NewBackend(false),
+			backend:    sandbox.NewBackend(false, false),
 			wantPrefix: []string{"docker", "sandbox", "exec"},
 		},
 		{
 			name:       "sbx",
-			backend:    sandbox.NewBackend(true),
+			backend:    sandbox.NewBackend(true, false),
 			wantPrefix: []string{"sbx", "exec"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := tt.backend.BuildExecCmd(t.Context(), "my-sbx", "/my/project",
+			cmd := tt.backend.BuildExecCmd(t.Context(), "my-sbx", "/my/project", false,
 				[]string{"agent.yaml", "--yolo"}, []string{"-e", "FOO"}, []string{"FOO=bar"})
 
 			want := append(tt.wantPrefix,
-				"-it", "-w", "/my/project",
+				"-i", "-w", "/my/project",
 				"-e", "FOO",
 				"-e", "TERM=xterm-256color",
 				"-e", "COLORTERM=truecolor",
@@ -390,4 +398,119 @@ func writeMockScript(t *testing.T, dir, name, script string) {
 		script = "#!/bin/sh\n" + script
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755))
+}
+
+func TestEnsureNeverRemovesOtherSandboxes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX argv capture")
+	}
+	fakeDir := t.TempDir()
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	configDir, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	listing := filepath.Join(fakeDir, "listing.json")
+	log := filepath.Join(fakeDir, "calls")
+	require.NoError(t, os.WriteFile(listing, fmt.Appendf(nil, `{"sandboxes":[{"name":"my-claude","workspaces":[%q]}]}`, workspace), 0o600))
+	writeMockScript(t, fakeDir, "sbx", fmt.Sprintf(`
+echo "$@" >> %q
+case "$1" in
+  ls) cat %q ;;
+  create) printf 'provisioning\n' >&2 ;;
+  *) exit 99 ;;
+esac`, log, listing))
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	backend := sandbox.NewBackend(true, false)
+	opts := sandbox.Options{Template: "image:v1"}
+	name, err := backend.Ensure(t.Context(), workspace, nil, configDir, "", opts)
+	require.NoError(t, err)
+	assert.NotEqual(t, "my-claude", name)
+	calls, err := os.ReadFile(log)
+	require.NoError(t, err)
+	assert.Contains(t, string(calls), "create --name "+name+" -t image:v1 docker-agent "+workspace)
+	assert.NotContains(t, string(calls), "rm")
+
+	require.NoError(t, os.WriteFile(listing, fmt.Appendf(nil, `{"sandboxes":[{"name":%q,"workspaces":[%q,%q]}]}`, name, workspace, configDir+":ro"), 0o600))
+	reused, err := backend.Ensure(t.Context(), workspace, nil, configDir, "", opts)
+	require.NoError(t, err)
+	assert.Equal(t, name, reused)
+	calls, err = os.ReadFile(log)
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(calls), "create"))
+
+	require.NoError(t, os.WriteFile(listing, []byte("bad json"), 0o600))
+	_, err = backend.Ensure(t.Context(), workspace, nil, configDir, "", opts)
+	require.ErrorContains(t, err, "decoding sandbox list")
+}
+
+func TestCreateCloud(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX argv capture")
+	}
+	fakeDir := t.TempDir()
+	log := filepath.Join(fakeDir, "calls")
+	writeMockScript(t, fakeDir, "sbx", fmt.Sprintf(`
+printf '%%s\n' "$@" > %q
+printf 'sbx_test123\n'
+`, log))
+	t.Setenv("PATH", fakeDir)
+	backend := sandbox.NewBackend(true, true)
+	id, err := backend.CreateCloud(t.Context(), sandbox.Options{
+		Cloud: true, Workload: "./workload", Kits: []string{"docker/mixin:v3", "./second"},
+		KitArgs: []string{"greeting=hello world", "list=a,b"}, TTL: time.Hour,
+	}, io.Discard)
+	require.NoError(t, err)
+	assert.Equal(t, "sbx_test123", id)
+	calls, err := os.ReadFile(log)
+	require.NoError(t, err)
+	argv := strings.Split(strings.TrimSpace(string(calls)), "\n")
+	require.Greater(t, len(argv), 6)
+	assert.Regexp(t, `^docker-agent-[a-f0-9]{32}$`, argv[5])
+	assert.Equal(t, []string{
+		"--cloud", "run", "--detached", "--new", "--name", argv[5], "--ttl", "1h0m0s", "--on-timeout", "stop",
+		"--kit", "docker/mixin:v3", "--kit", "./second", "--kit-arg", "greeting=hello world", "--kit-arg", "list=a,b", "./workload",
+	}, strings.Split(strings.TrimSpace(string(calls)), "\n"))
+	assert.Contains(t, backend.BuildExecCmd(t.Context(), id, "", true, nil, nil, nil).Args, "-t")
+	assert.NotContains(t, backend.BuildExecCmd(t.Context(), id, "", false, nil, nil, nil).Args, "-w")
+}
+
+func TestExtraWorkspaceCanonicalContainment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink privileges required")
+	}
+	root := t.TempDir()
+	workspace := filepath.Join(root, "real")
+	require.NoError(t, os.MkdirAll(filepath.Join(workspace, "agents"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "agents", "agent.yaml"), []byte("agents: {}"), 0o600))
+	linked := filepath.Join(root, "link")
+	require.NoError(t, os.Symlink(workspace, linked))
+	canonical, err := sandbox.CanonicalPath(workspace)
+	require.NoError(t, err)
+	assert.Empty(t, sandbox.ExtraWorkspace(canonical, filepath.Join(linked, "agents", "agent.yaml")), "must not shadow the agent subtree with a read-only mount")
+}
+
+func TestGuestBuiltinDoesNotResolveAnotherAlias(t *testing.T) {
+	paths.SetCacheDir(t.TempDir())
+	paths.SetConfigDir(t.TempDir())
+	t.Cleanup(func() { paths.SetCacheDir(""); paths.SetConfigDir("") })
+	other := filepath.Join(t.TempDir(), "other.yaml")
+	require.NoError(t, os.WriteFile(other, []byte("agents: {}"), 0o600))
+	cfgText := fmt.Sprintf("aliases:\n  selected:\n    path: default\n    safety: strict\n  default:\n    path: %s\n", other)
+	require.NoError(t, os.WriteFile(filepath.Join(paths.GetConfigDir(), "config.yaml"), []byte(cfgText), 0o600))
+	cfg, err := userconfig.Load()
+	require.NoError(t, err)
+	host, _, err := sources.ResolveWithConfig("selected", cfg, nil)
+	require.NoError(t, err)
+	require.Equal(t, "default", host.Name())
+	ref, extra, err := sandbox.GuestAgentRef(t.Context(), host)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Dir(ref), extra)
+	guest, err := sources.Resolve(ref, nil)
+	require.NoError(t, err)
+	want, err := host.Read(t.Context())
+	require.NoError(t, err)
+	got, err := guest.Read(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+	assert.NotEqual(t, other, guest.Name())
 }

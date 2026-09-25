@@ -5,12 +5,10 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -19,26 +17,26 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 )
 
-// CheckAvailable returns a user-friendly error when Docker is not
-// installed or the sandbox feature is not supported.
+// CheckAvailable checks the selected CLI without requiring a local daemon.
 func (b *Backend) CheckAvailable(ctx context.Context) error {
 	if _, err := exec.LookPath(b.program); err != nil {
-		return fmt.Errorf("--sandbox requires Docker Desktop: %w\n\nInstall Docker Desktop from https://docs.docker.com/get-docker/", err)
+		return fmt.Errorf("--sandbox requires Docker Sandboxes (%s): %w\nInstall from https://docs.docker.com/ai/sandboxes/", b.program, err)
 	}
-
 	cmd := exec.CommandContext(ctx, b.program, b.args("version")...)
 	b.applyEnv(cmd)
-	if err := cmd.Run(); err != nil {
-		return errors.New("--sandbox requires Docker Desktop with sandbox support\n\n" +
-			"Make sure Docker Desktop is running and up to date.\n" +
-			"For more information, see https://docs.docker.com/ai/sandboxes/")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		mode := ""
+		if b.cloud {
+			mode = " with cloud support"
+		}
+		return fmt.Errorf("--sandbox requires a working Docker Sandboxes CLI%s: %w\n%s", mode, err, strings.TrimSpace(string(out)))
 	}
-
 	return nil
 }
 
 // Existing holds the name and workspaces of an existing Docker sandbox.
 type Existing struct {
+	ID         string   `json:"id"`
 	Name       string   `json:"name"`
 	Workspaces []string `json:"workspaces"`
 }
@@ -90,117 +88,89 @@ func (b *Backend) allForWorkspace(ctx context.Context, wd string) []Existing {
 	return matches
 }
 
-// Ensure makes sure a sandbox exists for the given workspace,
-// creating or recreating it as needed. extras is a list of additional
-// host directories to mount read-only (kit dir, agent yaml dir, ...).
-// Each entry is made absolute and cleaned; duplicates and entries that
-// resolve to wd are filtered out. When template is non-empty it is
-// passed to `docker sandbox create -t`. loginKit, when non-empty, is a
-// directory containing an sbx mixin kit (see [LoginKit]) passed to
-// `create --kit` and also mounted read-only so that sandboxes created
-// without it (or for a different gateway host) are not reused.
-// Returns the sandbox name.
-func (b *Backend) Ensure(ctx context.Context, wd string, extras []string, template, configDir, loginKit string) (string, error) {
-	wd, err := absClean(wd)
+// Ensure reuses only the sandbox named for this launch configuration. Other
+// sandboxes, including older docker-agent sandboxes, are never removed.
+func (b *Backend) Ensure(ctx context.Context, wd string, extras []string, configDir, loginKit string, opts Options) (string, error) {
+	wd, err := CanonicalPath(wd)
 	if err != nil {
 		return "", fmt.Errorf("resolving workspace path: %w", err)
 	}
-	absConfigDir, err := absClean(configDir)
+	configDir, err = CanonicalPath(configDir)
 	if err != nil {
 		return "", fmt.Errorf("resolving config dir: %w", err)
 	}
-	configDir = absConfigDir
-
 	if loginKit != "" {
 		extras = append(extras, loginKit)
 	}
+	extras = append(extras, configDir)
 	extras, err = cleanExtras(extras, wd)
 	if err != nil {
 		return "", err
 	}
-
-	// Find every sandbox already attached to this workspace. After
-	// previous failed runs there may be more than one (the original
-	// foo, plus foo-1, foo-2 left behind by name-conflict suffixing
-	// when an earlier rm couldn't finish). We pick the first one that
-	// already has the mounts we need — and no login kit we no longer
-	// want, which would keep authenticating gateway requests with the
-	// user's Docker login; the rest are stale and get removed before
-	// we create a fresh sandbox.
-	matches := b.allForWorkspace(ctx, wd)
-
-	for _, candidate := range matches {
-		if hasAllWorkspaces(&candidate, extras) && candidate.HasWorkspace(configDir) && !staleLoginKit(&candidate, loginKit) {
-			slog.DebugContext(ctx, "Reusing existing sandbox", "name", candidate.Name)
-			return candidate.Name, nil
-		}
-	}
-
-	// Nothing reusable. Remove every stale sandbox bound to this
-	// workspace before creating a fresh one — if we leave any of them
-	// behind, "docker sandbox create" / "sbx create" will detect the
-	// name as taken and silently suffix the new sandbox with -1, -2,
-	// ... which then accumulate forever and confuse subsequent reuse
-	// lookups.
-	for _, stale := range matches {
-		slog.DebugContext(ctx, "Removing stale sandbox before recreate", "name", stale.Name)
-		if rmOut, rmErr := b.rm(ctx, stale.Name); rmErr != nil {
-			slog.WarnContext(ctx, "Failed to remove stale sandbox; the new one may end up with a name suffix",
-				"name", stale.Name, "error", rmErr, "output", strings.TrimSpace(string(rmOut)))
-		}
-	}
-
-	createExtra := []string{}
-	if template != "" {
-		createExtra = append(createExtra, "-t", template)
-	}
-	if loginKit != "" {
-		createExtra = append(createExtra, "--kit="+loginKit)
-	}
-	createExtra = append(createExtra, "docker-agent", wd)
-	for _, e := range extras {
-		createExtra = append(createExtra, e+":ro")
-	}
-	// Mount config directory read-only so the sandbox can
-	// access user config.
-	createExtra = append(createExtra, configDir+":ro")
-
-	createArgs := b.args("create", createExtra...)
-	slog.DebugContext(ctx, "Creating sandbox", "args", createArgs)
-
-	createCmd := exec.CommandContext(ctx, b.program, createArgs...)
-	b.applyEnv(createCmd)
-	createCmd.Stdin = os.Stdin
-	createCmd.Stdout = os.Stdout
-	createCmd.Stderr = os.Stderr
-
-	if err := createCmd.Run(); err != nil {
-		return "", fmt.Errorf("sandbox create failed: %w", err)
-	}
-
-	// Read back the sandbox name that was just created.
-	created := b.ForWorkspace(ctx, wd)
-	if created == nil {
-		return "", errors.New("sandbox was created but could not be found")
-	}
-
-	return created.Name, nil
-}
-
-// absClean normalises a path so that two textually different but
-// equivalent paths (e.g. "./foo" and "foo", "a//b" and "a/b") collapse
-// before reaching the workspace dedup / reuse comparisons. Returns an
-// error if filepath.Abs fails.
-func absClean(p string) (string, error) {
-	abs, err := filepath.Abs(p)
+	name, err := launchName(wd, extras, loginKit, opts)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Clean(abs), nil
+	all, err := b.list(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range all {
+		if candidate.Name != name {
+			continue
+		}
+		wanted := []string{wd}
+		for _, extra := range extras {
+			wanted = append(wanted, extra+":ro")
+		}
+		if !sameWorkspaces(candidate.Workspaces, wanted) {
+			return "", fmt.Errorf("sandbox %s already exists with different mounts; refusing to replace it", name)
+		}
+		return name, nil
+	}
+
+	createExtra := []string{"--name", name}
+	createExtra = append(createExtra, opts.kitFlags()...)
+	if opts.Template != "" {
+		createExtra = append(createExtra, "-t", opts.Template)
+	}
+	if loginKit != "" {
+		createExtra = append(createExtra, "--kit="+csvValue(loginKit))
+	}
+	createExtra = append(createExtra, opts.agent(), wd)
+	for _, e := range extras {
+		createExtra = append(createExtra, e+":ro")
+	}
+	createCmd := exec.CommandContext(ctx, b.program, b.args("create", createExtra...)...)
+	b.applyEnv(createCmd)
+	createCmd.Stdin = os.Stdin
+	// Keep machine-readable agent output separate from provisioning messages.
+	createCmd.Stdout = os.Stderr
+	createCmd.Stderr = os.Stderr
+	if err := createCmd.Run(); err != nil {
+		return "", fmt.Errorf("sandbox create failed: %w", err)
+	}
+	return name, nil
+}
+
+func (b *Backend) list(ctx context.Context) ([]Existing, error) {
+	cmd := exec.CommandContext(ctx, b.program, b.args("ls", "--json")...)
+	b.applyEnv(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("listing sandboxes: %w", err)
+	}
+	var raw struct {
+		Sandboxes []Existing `json:"sandboxes"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("decoding sandbox list: %w", err)
+	}
+	return raw.Sandboxes, nil
 }
 
 // cleanExtras drops empty entries, normalises every other entry with
-// [absClean], removes duplicates, and filters out anything that
+// [CanonicalPath], removes duplicates, and filters out anything that
 // resolves to wd — wd is already mounted read-write, so a second
 // mount of the same path would shadow it.
 //
@@ -213,7 +183,7 @@ func cleanExtras(extras []string, wd string) ([]string, error) {
 		if e == "" {
 			continue
 		}
-		abs, err := absClean(e)
+		abs, err := CanonicalPath(e)
 		if err != nil {
 			return nil, fmt.Errorf("resolving extra workspace %q: %w", e, err)
 		}
@@ -226,20 +196,26 @@ func cleanExtras(extras []string, wd string) ([]string, error) {
 	return cleaned, nil
 }
 
-// hasAllWorkspaces reports whether every entry of extras is mounted
-// in s. Empty extras returns true.
-func hasAllWorkspaces(s *Existing, extras []string) bool {
-	for _, e := range extras {
-		if !s.HasWorkspace(e) {
-			return false
-		}
+func sameWorkspaces(actual, wanted []string) bool {
+	if len(actual) != len(wanted) || len(actual) == 0 || actual[0] != wanted[0] {
+		return false
 	}
-	return true
+	actual = slices.Clone(actual[1:])
+	wanted = slices.Clone(wanted[1:])
+	slices.Sort(actual)
+	slices.Sort(wanted)
+	return slices.Equal(actual, wanted)
 }
 
 // BuildExecCmd assembles the sandbox exec command.
-func (b *Backend) BuildExecCmd(ctx context.Context, name, wd string, cagentArgs, envFlags, envVars []string) *exec.Cmd {
-	execExtra := []string{"-it", "-w", wd}
+func (b *Backend) BuildExecCmd(ctx context.Context, name, wd string, tty bool, cagentArgs, envFlags, envVars []string) *exec.Cmd {
+	execExtra := []string{"-i"}
+	if tty {
+		execExtra = append(execExtra, "-t")
+	}
+	if wd != "" {
+		execExtra = append(execExtra, "-w", wd)
+	}
 	execExtra = append(execExtra, envFlags...)
 
 	// Improve the rendering of the TUI. C.UTF-8 is the only UTF-8 locale
@@ -256,6 +232,9 @@ func (b *Backend) BuildExecCmd(ctx context.Context, name, wd string, cagentArgs,
 	args := b.args("exec", execExtra...)
 
 	cmd := exec.CommandContext(ctx, b.program, args...)
+	if b.cloud {
+		gracefulCancel(cmd)
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -292,7 +271,17 @@ func EnvForAgent(ctx context.Context, agentRef string, env environment.Provider,
 		return nil, nil
 	}
 
-	names, err := gatherAgentEnvVars(ctx, agentRef, env, flavors, defaults...)
+	source, err := sources.Resolve(agentRef, env)
+	if err != nil {
+		slog.DebugContext(ctx, "Failed to resolve agent for sandbox", "error", err)
+		return nil, nil
+	}
+	return EnvForSource(ctx, source, env, flavors, defaults...)
+}
+
+// EnvForSource collects credentials from the already resolved agent selection.
+func EnvForSource(ctx context.Context, source config.Source, env environment.Provider, flavors []string, defaults ...*config.RuntimeConfig) (flags, envVars []string) {
+	names, err := gatherSourceEnvVars(ctx, source, env, flavors, defaults...)
 	if err != nil {
 		slog.DebugContext(ctx, "Failed to gather agent env vars for sandbox", "error", err)
 		return nil, nil
@@ -313,14 +302,7 @@ func EnvForAgent(ctx context.Context, agentRef string, env environment.Provider,
 	return flags, envVars
 }
 
-// gatherAgentEnvVars resolves the agent config and returns the list of
-// environment variable names required by its models and tools.
-func gatherAgentEnvVars(ctx context.Context, agentRef string, env environment.Provider, flavors []string, defaults ...*config.RuntimeConfig) ([]string, error) {
-	source, err := sources.Resolve(agentRef, env)
-	if err != nil {
-		return nil, fmt.Errorf("resolving agent: %w", err)
-	}
-
+func gatherSourceEnvVars(ctx context.Context, source config.Source, env environment.Provider, flavors []string, defaults ...*config.RuntimeConfig) ([]string, error) {
 	cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...))
 	if err != nil {
 		return nil, fmt.Errorf("loading agent config: %w", err)

@@ -3,6 +3,7 @@ package root
 import (
 	"cmp"
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/docker/cli/cli"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -97,32 +99,15 @@ func loadAgentConfig(ctx context.Context, agentRef string, flavors []string) *la
 	return cfg
 }
 
-// userSandboxAllowlist returns the persistent host list the user has
-// taught docker-agent to open via `docker agent sandbox allow`.
-// Best-effort: a missing or unreadable user config returns nil so
-// the sandbox falls back to the inferred set only.
-func userSandboxAllowlist(ctx context.Context) []string {
-	cfg, err := userconfig.Load()
-	if err != nil {
-		slog.DebugContext(ctx, "Failed to load user config; skipping persistent sandbox allowlist", "error", err)
-		return nil
-	}
-	return cfg.SandboxAllowlist
-}
-
 // runInSandbox delegates the current command to a Docker sandbox.
 // It ensures a sandbox exists (creating or recreating as needed), then
 // executes docker agent inside it via the sandbox exec command.
-//
-// agentCfg, when non-nil, is the parsed agent config already loaded by
-// resolveSandboxDefault and is used to read runtime.network_allowlist
-// without re-resolving the ref.
-func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runConfig *config.RuntimeConfig, template string, preferSbx, noKit bool, agentCfg *latestcfg.Config) error {
+func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runConfig *config.RuntimeConfig, preferSbx, noKit bool, opts sandbox.Options) error {
 	if environment.InSandbox() {
 		return fmt.Errorf("already running inside a Docker sandbox (VM %s)", os.Getenv("SANDBOX_VM_ID"))
 	}
 
-	backend := sandbox.NewBackend(preferSbx)
+	backend := sandbox.NewBackend(preferSbx, opts.Cloud)
 
 	if err := backend.CheckAvailable(ctx); err != nil {
 		return err
@@ -133,33 +118,63 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		agentRef = args[0]
 	}
 
-	configDir := paths.GetConfigDir()
-	dockerAgentArgs := dockerAgentArgs(cmd, args, configDir)
+	if opts.Cloud {
+		return runInCloudSandbox(ctx, cmd, args, backend, opts)
+	}
+
+	userCfg, err := userconfig.Load()
+	if err != nil {
+		return fmt.Errorf("loading user config: %w", err)
+	}
+	configDir, err := sandbox.CanonicalPath(paths.GetConfigDir())
+	if err != nil {
+		return fmt.Errorf("resolving config directory: %w", err)
+	}
 
 	// When the gateway is a Docker one, authenticate its requests via the
 	// sandbox proxy's sbx-login injection instead of forwarding a token.
 	// Without the kit those requests cannot authenticate at all, so a
 	// write failure is fatal.
-	loginKit, err := sandbox.LoginKit(runConfig.ModelsGateway)
+	loginKit, err := sandbox.LoginKit(runConfig.ModelsGateway, opts.Workload != "")
 	if err != nil {
 		return fmt.Errorf("configuring gateway authentication for the sandbox: %w", err)
 	}
 
 	// Resolve wd to an absolute path so that it matches the absolute
 	// workspace paths returned by `docker sandbox ls --json`.
-	wd, err := filepath.Abs(cmp.Or(runConfig.WorkingDir, "."))
+	wd, err := sandbox.CanonicalPath(cmp.Or(runConfig.WorkingDir, "."))
 	if err != nil {
 		return fmt.Errorf("resolving workspace path: %w", err)
 	}
 
+	forwardArgs := append([]string(nil), args...)
 	envProvider := environment.NewDefaultProvider()
+	source, alias, err := sources.ResolveWithConfig(agentRef, userCfg, envProvider)
+	if err != nil {
+		return fmt.Errorf("resolving agent: %w", err)
+	}
+	resolved, builtinDir, err := sandbox.GuestAgentRef(ctx, source)
+	if err != nil {
+		return fmt.Errorf("preparing sandbox agent: %w", err)
+	}
+	if len(forwardArgs) > 0 {
+		forwardArgs[0] = resolved
+	} else {
+		forwardArgs = []string{resolved}
+	}
+	stateDirs, err := sandboxStateDirs(cmd, wd)
+	if err != nil {
+		return err
+	}
+	dockerAgentArgs := dockerAgentArgs(cmd, forwardArgs, configDir, alias, stateDirs...)
 
-	extras := []string{sandbox.ExtraWorkspace(wd, agentRef)}
+	extras := []string{sandbox.ExtraWorkspaceForSource(wd, source), builtinDir}
 
 	var kitResult *kit.Result
-	if !noKit && agentRef != "" {
+	if !noKit && opts.Workload == "" && agentRef != "" {
 		kitResult, err = kit.Build(ctx, kit.Options{
-			AgentRef:    agentRef,
+			AgentRef:    source.Name(),
+			Source:      source,
 			EnvProvider: envProvider,
 			HostCwd:     wd,
 			Workspace:   wd,
@@ -168,7 +183,11 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		if err != nil {
 			slog.WarnContext(ctx, "docker-agent kit build failed; continuing without kit", "error", err)
 		} else {
-			kitResult.PrintSummary(cmd.OutOrStdout())
+			kitResult.HostDir, err = sandbox.CanonicalPath(kitResult.HostDir)
+			if err != nil {
+				return err
+			}
+			kitResult.PrintSummary(cmd.ErrOrStderr())
 			extras = append(extras, kitResult.HostDir)
 			// We deliberately keep the kit on disk between runs:
 			// the docker sandbox we reuse across runs holds a hard
@@ -181,17 +200,25 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		}
 	}
 
+	agentCfg, err := config.Load(ctx, source, config.WithFlavors(runConfig.Flavors...))
+	if err != nil {
+		return fmt.Errorf("loading sandbox agent: %w", err)
+	}
 	agentHosts := agentNetworkAllowlist(ctx, agentCfg)
-	userHosts := userSandboxAllowlist(ctx)
+	userHosts := userCfg.SandboxAllowlist
 
-	printModelsGateway(cmd.OutOrStdout(), runConfig.ModelsGateway)
-	printGatewayLoginInjection(cmd.OutOrStdout(), loginKit)
-	printModelsDevAllowance(cmd.OutOrStdout())
-	printToolInstallAllowance(cmd.OutOrStdout(), kitResult)
-	printAgentNetworkAllowlist(cmd.OutOrStdout(), agentHosts)
-	printUserSandboxAllowlist(cmd.OutOrStdout(), userHosts)
+	printModelsGateway(cmd.ErrOrStderr(), runConfig.ModelsGateway)
+	printGatewayLoginInjection(cmd.ErrOrStderr(), loginKit)
+	if opts.Workload == "" {
+		printModelsDevAllowance(cmd.ErrOrStderr())
+		printToolInstallAllowance(cmd.ErrOrStderr(), kitResult)
+		printAgentNetworkAllowlist(cmd.ErrOrStderr(), agentHosts)
+		printUserSandboxAllowlist(cmd.ErrOrStderr(), userHosts)
+	} else {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Sandbox kit: sbx manages skills, context, credentials, and network policy; host auto-kit disabled")
+	}
 
-	name, err := backend.Ensure(ctx, wd, extras, template, configDir, loginKit)
+	name, err := backend.Ensure(ctx, wd, extras, configDir, loginKit, opts)
 	if err != nil {
 		return err
 	}
@@ -209,22 +236,20 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	if kitResult != nil {
 		toolHosts = kitResult.ToolInstallHosts
 	}
-	allowSandboxHosts(ctx, backend, name, runConfig.ModelsGateway, toolHosts, agentHosts, userHosts)
+	if opts.Workload == "" {
+		allowSandboxHosts(ctx, backend, name, runConfig.ModelsGateway, toolHosts, agentHosts, userHosts)
+	}
 
 	// Resolve env vars the agent needs and forward them into the sandbox.
 	// Docker Desktop proxies well-known API keys automatically; this handles
 	// any additional vars (e.g. MCP tool secrets).
-	userCfg, err := userconfig.Load()
-	if err != nil {
-		return fmt.Errorf("loading user config: %w", err)
-	}
 	// Sandbox dispatch precedes runOrExec, which normally loads inherited hooks.
 	envConfig := &config.RuntimeConfig{Config: runConfig.Config}
 	envConfig.GlobalHooks = config.MergeHooks(
 		config.MergeHooks(userCfg.GetSettings().GlobalHooks(), config.LoadHookDropIns()),
 		runConfig.GlobalHooks,
 	)
-	envFlags, envVars := sandbox.EnvForAgent(ctx, agentRef, envProvider, runConfig.Flavors, envConfig)
+	envFlags, envVars := sandbox.EnvForSource(ctx, source, envProvider, runConfig.Flavors, envConfig)
 
 	// Forward the gateway by name so a URL with credentials never
 	// shows up in the slog'd `docker sandbox exec` argv.
@@ -267,29 +292,36 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	defer sbxSpan.End()
 	envFlags = append(envFlags, genai.InjectSandboxEnv(ctx)...)
 
-	dockerCmd := backend.BuildExecCmd(ctx, name, wd, dockerAgentArgs, envFlags, envVars)
+	dockerCmd := backend.BuildExecCmd(ctx, name, wd, sandboxTTY(cmd), dockerAgentArgs, envFlags, envVars)
 	slog.DebugContext(ctx, "Executing in sandbox", "name", name, "args", dockerCmd.Args)
 
 	if err := dockerCmd.Run(); err != nil {
-		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
-			sbxSpan.SetExitCode(exitErr.ExitCode())
-			sbxSpan.RecordError(err, "")
-			return cli.StatusError{StatusCode: exitErr.ExitCode()}
-		}
+		err = sandboxCommandError(ctx, err)
+		sbxSpan.SetExitCode(sandboxExitCode(err))
 		sbxSpan.RecordError(err, "")
-		return fmt.Errorf("docker sandbox exec failed: %w", err)
+		return err
 	}
 	sbxSpan.SetExitCode(0)
 
 	return nil
 }
 
-func dockerAgentArgs(cmd *cobra.Command, args []string, configDir string) []string {
+func dockerAgentArgs(cmd *cobra.Command, args []string, configDir string, alias *userconfig.Alias, extraFlags ...string) []string {
 	skip := map[string]bool{
-		"sandbox":    true,
-		"sbx":        true,
-		"config-dir": true,
-		"no-kit":     true,
+		"sandbox":        true,
+		"sbx":            true,
+		"config-dir":     true,
+		"no-kit":         true,
+		"template":       true,
+		"cloud":          true,
+		"sandbox-kit":    true,
+		"kit":            true,
+		"kit-arg":        true,
+		"sandbox-ttl":    true,
+		"models-gateway": true,
+		"cache-dir":      true,
+		"data-dir":       true,
+		"working-dir":    true,
 	}
 
 	var dockerAgentArgs []string
@@ -307,18 +339,51 @@ func dockerAgentArgs(cmd *cobra.Command, args []string, configDir string) []stri
 			hasSafety = true
 		}
 
-		if f.Value.Type() == "bool" {
+		if value, ok := f.Value.(pflag.SliceValue); ok {
+			for _, item := range value.GetSlice() {
+				if f.Value.Type() == "stringSlice" {
+					var encoded strings.Builder
+					writer := csv.NewWriter(&encoded)
+					_ = writer.Write([]string{item})
+					writer.Flush()
+					item = strings.TrimSuffix(encoded.String(), "\n")
+				}
+				dockerAgentArgs = append(dockerAgentArgs, "--"+f.Name, item)
+			}
+		} else if f.Value.Type() == "bool" {
 			dockerAgentArgs = append(dockerAgentArgs, "--"+f.Name+"="+f.Value.String())
 		} else {
 			dockerAgentArgs = append(dockerAgentArgs, "--"+f.Name, f.Value.String())
 		}
 	})
-	if !hasYolo && !hasSafety {
+	if alias != nil {
+		yolo, _ := cmd.Flags().GetBool("yolo")
+		safety := alias.Safety
+		if safety == "" && alias.Yolo && !hasYolo {
+			safety = latestcfg.SafetyModeAutonomous
+		}
+		if safety != "" && !hasSafety && (!hasYolo || !yolo) && !cmd.Flags().Changed("session") {
+			dockerAgentArgs = append(dockerAgentArgs, "--safety", string(safety))
+			hasSafety = true
+		}
+		if alias.Model != "" && !cmd.Flags().Changed("model") {
+			dockerAgentArgs = append(dockerAgentArgs, "--model", alias.Model)
+		}
+		if alias.HideToolResults && !cmd.Flags().Changed("hide-tool-results") {
+			dockerAgentArgs = append(dockerAgentArgs, "--hide-tool-results")
+		}
+	}
+	if !hasYolo && !hasSafety && !cmd.Flags().Changed("session") {
 		dockerAgentArgs = append(dockerAgentArgs, "--yolo")
 	}
 
+	if configDir != "" {
+		dockerAgentArgs = append(dockerAgentArgs, "--config-dir", configDir)
+	}
+	dockerAgentArgs = append(dockerAgentArgs, extraFlags...)
+	// runtime.sandbox may be set in the agent config; never recurse.
+	dockerAgentArgs = append(dockerAgentArgs, "--sandbox=false", "--")
 	dockerAgentArgs = append(dockerAgentArgs, args...)
-	dockerAgentArgs = append(dockerAgentArgs, "--config-dir", configDir)
 
 	return dockerAgentArgs
 }
@@ -610,4 +675,61 @@ func printUserSandboxAllowlist(w io.Writer, hosts []string) {
 	for _, h := range hosts {
 		fmt.Fprintf(w, "  - %s\n", h)
 	}
+}
+
+func sandboxTTY(cmd *cobra.Command) bool {
+	headless, _ := cmd.Flags().GetBool("exec")
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+	return !headless && !jsonOutput && isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
+}
+
+// State outside the writable workspace must not silently select a different DB.
+func sandboxStateDirs(cmd *cobra.Command, wd string) ([]string, error) {
+	var args []string
+	for _, name := range []string{"data-dir", "cache-dir"} {
+		flag := cmd.Flags().Lookup(name)
+		if flag == nil || !flag.Changed {
+			continue
+		}
+		if strings.TrimSpace(flag.Value.String()) == "" {
+			return nil, fmt.Errorf("--%s must not be empty in sandbox mode", name)
+		}
+		dir, err := sandbox.CanonicalPath(flag.Value.String())
+		if err != nil {
+			return nil, fmt.Errorf("resolving --%s: %w", name, err)
+		}
+		rel, err := filepath.Rel(wd, dir)
+		if err != nil || (rel != "." && !filepath.IsLocal(rel)) {
+			return nil, fmt.Errorf("--%s must be inside the sandbox's writable workspace %s", name, wd)
+		}
+		args = append(args, "--"+name, dir)
+	}
+	return args, nil
+}
+
+func sandboxCommandError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return cli.StatusError{StatusCode: 130, Status: err.Error()}
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return cli.StatusError{StatusCode: 124, Status: err.Error()}
+	}
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
+		code := exitErr.ExitCode()
+		if code < 0 {
+			code = 1
+		}
+		return cli.StatusError{StatusCode: code}
+	}
+	return fmt.Errorf("sandbox command failed: %w", err)
+}
+
+func sandboxExitCode(err error) int {
+	if status, ok := errors.AsType[cli.StatusError](err); ok {
+		return status.StatusCode
+	}
+	return 1
 }

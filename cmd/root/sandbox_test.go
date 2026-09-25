@@ -30,7 +30,7 @@ func TestDockerAgentArgs_NoDuplicateArgs(t *testing.T) {
 	args := []string{"./pokemon.yaml"}
 	require.NoError(t, cmd.ParseFlags([]string{"--sandbox"}))
 
-	got := dockerAgentArgs(cmd, args, "/some/config/dir")
+	got := dockerAgentArgs(cmd, args, "/some/config/dir", nil)
 
 	// The agent file must appear exactly once.
 	count := 0
@@ -50,11 +50,11 @@ func TestDockerAgentArgs_NoDuplicateArgs(t *testing.T) {
 	}
 	assert.Equal(t, 1, configDirCount, "--config-dir should appear once in args, got: %v", got)
 
-	// The agent file should come before --config-dir so the cobra run command
-	// sees it as the first positional argument (the agent) and not as a message.
+	// Host-only flags precede the separator; messages cannot become flags.
 	agentIdx := slices.Index(got, "./pokemon.yaml")
 	cfgIdx := slices.Index(got, "--config-dir")
-	assert.Less(t, agentIdx, cfgIdx, "agent file should precede --config-dir, got: %v", got)
+	assert.Less(t, cfgIdx, agentIdx)
+	assert.Less(t, slices.Index(got, "--"), agentIdx)
 
 	// --sandbox and --sbx flags must be stripped so we don't recurse into
 	// another sandbox.
@@ -79,7 +79,7 @@ func TestDockerAgentArgs_PreservesUserYolo(t *testing.T) {
 
 	require.NoError(t, cmd.ParseFlags([]string{"--sandbox", "--yolo"}))
 
-	got := dockerAgentArgs(cmd, []string{"./agent.yaml"}, "/cfg")
+	got := dockerAgentArgs(cmd, []string{"./agent.yaml"}, "/cfg", nil)
 
 	yoloCount := 0
 	for _, a := range got {
@@ -104,7 +104,7 @@ func TestDockerAgentArgs_PreservesUserSafetyWithoutInjectingYolo(t *testing.T) {
 
 	require.NoError(t, cmd.ParseFlags([]string{"--sandbox", "--safety", "strict"}))
 
-	got := dockerAgentArgs(cmd, []string{"./agent.yaml"}, "/cfg")
+	got := dockerAgentArgs(cmd, []string{"./agent.yaml"}, "/cfg", nil)
 
 	assert.Contains(t, got, "--safety")
 	assert.Contains(t, got, "strict")
@@ -124,7 +124,7 @@ func TestDockerAgentArgs_PreservesExplicitFalseBool(t *testing.T) {
 
 	require.NoError(t, cmd.ParseFlags([]string{"--sandbox", "--lean=false"}))
 
-	got := dockerAgentArgs(cmd, []string{"./agent.yaml"}, "/cfg")
+	got := dockerAgentArgs(cmd, []string{"./agent.yaml"}, "/cfg", nil)
 
 	assert.Contains(t, got, "--lean=false")
 	assert.NotContains(t, got, "--lean")

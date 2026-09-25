@@ -27,13 +27,16 @@ import (
 //
 // Returns "" when gateway is empty or is not an HTTPS docker.com URL —
 // any other gateway authenticates by its own means.
-func LoginKit(gateway string) (string, error) {
+func LoginKit(gateway string, v3 bool) (string, error) {
 	host := dockerGatewayHostname(gateway)
 	if host == "" {
 		return "", nil
 	}
 
 	dir := filepath.Join(loginKitParent(), host)
+	if v3 {
+		dir += "-v3"
+	}
 	// Only the host-side sandbox CLI reads the kit (at create time, as
 	// the same user); nothing inside the sandbox needs it, so keep it
 	// owner-only.
@@ -57,9 +60,35 @@ credentials:
           format: "Bearer %%s"
 `, host)
 
+	filename := "spec.yaml"
+	if v3 {
+		filename = "gateway.yaml"
+		spec = fmt.Sprintf(`# syntax=docker/sandbox-kit:3
+schemaVersion: "3"
+kind: mixin
+displayName: Docker Agent gateway authentication
+capabilities:
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow: [%s]
+  - type: com.docker.sandbox/credential@1
+    config:
+      service: sbx-login
+      phase: runtime
+      apiKey:
+        name: DOCKER_TOKEN
+        proxyManaged: true
+        inject:
+          - domain: %s
+            header: Authorization
+            format: "Bearer %%s"
+`, host, host)
+	}
+
 	// Atomic write: concurrent runs for the same gateway share this
 	// path and `create` must never read a partial spec.
-	if err := atomicfile.Write(filepath.Join(dir, "spec.yaml"), bytes.NewReader([]byte(spec)), 0o600); err != nil {
+	if err := atomicfile.Write(filepath.Join(dir, filename), bytes.NewReader([]byte(spec)), 0o600); err != nil {
 		return "", fmt.Errorf("writing login kit spec: %w", err)
 	}
 	return dir, nil
@@ -69,23 +98,6 @@ credentials:
 // one sub-directory per gateway host.
 func loginKitParent() string {
 	return filepath.Join(paths.GetCacheDir(), "sandbox-login-kit")
-}
-
-// staleLoginKit reports whether s mounts a login kit other than the
-// one wanted for this run (loginKit may be empty: no kit wanted).
-// Such a sandbox must not be reused — its proxy would keep
-// authenticating gateway requests with the user's Docker login even
-// though the current run no longer asks for it (gateway removed or
-// switched to a non-Docker one).
-func staleLoginKit(s *Existing, loginKit string) bool {
-	prefix := loginKitParent() + string(filepath.Separator)
-	for _, ws := range s.Workspaces {
-		ws = strings.TrimSuffix(ws, ":ro")
-		if strings.HasPrefix(ws, prefix) && ws != loginKit {
-			return true
-		}
-	}
-	return false
 }
 
 // hostnamePattern matches a conventional DNS hostname: dot-separated
