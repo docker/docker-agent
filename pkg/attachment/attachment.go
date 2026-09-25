@@ -111,9 +111,10 @@ var envelopeTagRe = regexp.MustCompile(`(?i)<[\s/]*(document-[a-z0-9-]+)\b[^>]*>
 // a placeholder in someone else's markup, while the cost of missing it is a
 // break-out — so the check errs toward defusing.
 //
-// Replacement repeats until the output is stable, because one pass can leave a
-// delimiter-shaped residue behind: `</TAG</TAG>>` collapses to `[…removed]>` only
-// after the second pass.
+// The loop repeats until the output is stable. One pass is in fact always enough
+// — [envelopeTagRe] runs to the first `>`, so `</TAG</TAG>>` is a single match that
+// collapses to `[…removed]>` immediately, and any match nested inside another is
+// consumed with it — but the loop checks for stability rather than assuming it.
 func defuseDelimiters(body, tag string) string {
 	if body == "" {
 		return body
@@ -136,10 +137,23 @@ func defuseDelimiters(body, tag string) string {
 	return body
 }
 
-// maxDefusePasses bounds the replace-until-stable loop. Each pass strictly
-// shortens the body (a match is always longer than nothing and is replaced by a
-// constant), so this converges quickly; the bound only exists so a pathological
-// input cannot spin.
+// maxDefusePasses bounds the replace-until-stable loop. Termination does not rest
+// on the body getting shorter — it rests on one property of the replacement text:
+// [delimiterPlaceholder] contains no '<', so a replacement can never introduce a
+// delimiter start, while every match consumes at least one '<'. Each pass that
+// changes the body therefore strictly reduces the body's '<' count, which is a
+// non-negative integer, so the loop cannot run forever.
+//
+// Length alone proves nothing: the 42-byte placeholder is longer than a short
+// delimiter such as `</document-x>` (13 bytes), so the common single-delimiter
+// case grows the body rather than shrinking it. In practice the first pass
+// suffices — every adversarial body tested reached a stable output immediately —
+// and the bound is only a backstop against a pathological input.
+//
+// The placeholder's character set is load-bearing rather than cosmetic: the loop
+// returns whatever it has once the bound is exhausted, silently and with no
+// error, so a placeholder that gained an angle bracket (say `<removed>`) could
+// let a live delimiter through inside the envelope.
 const maxDefusePasses = 8
 
 // slugify converts s to a lowercase, alphanumeric-and-hyphens-only string.

@@ -92,8 +92,8 @@ func TestTXTEnvelope_NoDelimiterSurvivesInTheBody(t *testing.T) {
 	}
 }
 
-// One replacement pass can leave a delimiter-shaped residue behind, so the
-// sanitizer must run until the output is stable.
+// A nested delimiter must not leave a delimiter-shaped residue behind, whether
+// the sanitizer neutralises it in the pass that matches it or in a later one.
 func TestTXTEnvelope_NestedDelimitersLeaveNoResidue(t *testing.T) {
 	t.Parallel()
 
