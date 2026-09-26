@@ -135,7 +135,7 @@ func (f *debugFlags) runDebugConfigCommand(cmd *cobra.Command, args []string) (c
 		return err
 	}
 
-	flavors := append(slices.Clone(f.runConfig.Flavors), args[1:]...)
+	flavors := slices.Concat(f.runConfig.Flavors, args[1:])
 	cfg, err := config.Load(cmd.Context(), agentSource, config.WithFlavors(flavors...))
 	if err != nil {
 		return err

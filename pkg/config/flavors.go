@@ -165,7 +165,8 @@ func appendPatch(out yaml.MapSlice, key string, value any) (yaml.MapSlice, error
 	default:
 		existing = []any{base}
 	}
-	out[idx].Value = append(slices.Clone(existing), items...)
+	// Preserve non-nil empty YAML sequences.
+	out[idx].Value = append(slices.Clone(existing), items...) //rubocop:disable Lint/SlicesConcat
 	return out, nil
 }
 

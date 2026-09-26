@@ -1636,10 +1636,7 @@ func (m *model) refreshRenderedItem(index int) bool {
 	if index == len(m.views)-1 && end == len(m.renderedLines) {
 		m.renderedLines = append(m.renderedLines[:start], itemLines...)
 	} else {
-		replacement := make([]string, 0, len(m.renderedLines)-(end-start)+item.height)
-		replacement = append(replacement, m.renderedLines[:start]...)
-		replacement = append(replacement, itemLines...)
-		replacement = append(replacement, m.renderedLines[end:]...)
+		replacement := slices.Concat(m.renderedLines[:start], itemLines, m.renderedLines[end:])
 		m.renderedLines = replacement
 	}
 	delta := item.height - (end - start)
@@ -2533,11 +2530,7 @@ func (m *model) renderedItemLines(item renderedItem) []string {
 	if item.segments == nil {
 		return item.lines
 	}
-	lines := make([]string, 0, item.height)
-	lines = append(lines, item.segments.Header...)
-	lines = append(lines, item.segments.Stable...)
-	lines = append(lines, item.segments.Tail...)
-	return lines
+	return slices.Concat(item.segments.Header, item.segments.Stable, item.segments.Tail)
 }
 
 // codeBlockAt returns the raw code of the fenced code block whose copy label

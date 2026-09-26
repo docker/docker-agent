@@ -679,6 +679,23 @@ func TestApplyTextEdit_InsertNewLine(t *testing.T) {
 	assert.Equal(t, []string{"hello", "new line", "", "world"}, result)
 }
 
+func TestApplyTextEdit_ThroughEnd(t *testing.T) {
+	t.Parallel()
+	for _, endLine := range []int{1, 5} {
+		lines := []string{"hello", "world"}
+		edit := lspTextEdit{
+			Range: lspRange{
+				Start: lspPosition{Line: 0},
+				End:   lspPosition{Line: endLine, Character: 5},
+			},
+		}
+		result := applyTextEdit(lines, edit)
+		assert.Equal(t, []string{""}, result)
+		result[0] = "changed"
+		assert.Equal(t, []string{"hello", "world"}, lines)
+	}
+}
+
 func TestFormatCodeActions_Empty(t *testing.T) {
 	t.Parallel()
 

@@ -106,7 +106,7 @@ func New(target Target, path string, tokens TokenSource, validator Validator, op
 	if r.credentials == nil {
 		return nil, errors.New("gateway relay credentials function is required")
 	}
-	for _, name := range append(slices.Clone(r.requestHeaders), r.responseHeaders...) {
+	for _, name := range slices.Concat(r.requestHeaders, r.responseHeaders) {
 		if !allowedHeader(name) {
 			return nil, fmt.Errorf("gateway relay header %q is not allowed", name)
 		}

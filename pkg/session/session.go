@@ -2448,9 +2448,7 @@ func (s *Session) getMessages(a *agent.Agent, state *InstructionContextState, ex
 	// Build session summary messages (vary per session)
 	summaryMessages, startIndex, summary := s.buildSessionSummaryMessages(items)
 
-	var messages []chat.Message
-	messages = append(messages, invariantMessages...)
-	messages = append(messages, instructionInitial...)
+	messages := slices.Concat(invariantMessages, instructionInitial)
 	markLastMessageAsCacheControl(messages)
 	// extraSystemMessages are caller-supplied transient system messages
 	// (e.g. turn_start hook output) inserted after the invariant cache

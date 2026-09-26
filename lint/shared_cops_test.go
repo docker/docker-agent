@@ -22,7 +22,7 @@ import (
 func TestSharedCopRegistrations(t *testing.T) {
 	t.Parallel()
 	require.Len(t, cops, 29)
-	require.Len(t, programCops, 18)
+	require.Len(t, programCops, 19)
 	counts := make(map[string]int)
 	for _, c := range cops {
 		counts[c.Name()]++
@@ -30,7 +30,7 @@ func TestSharedCopRegistrations(t *testing.T) {
 	for _, c := range programCops {
 		counts[c.Name()]++
 	}
-	assert.Len(t, counts, 47)
+	assert.Len(t, counts, 48)
 	for name, count := range counts {
 		assert.Equal(t, 1, count, name)
 	}
@@ -42,7 +42,7 @@ func TestSharedCopRegistrations(t *testing.T) {
 	}
 	for _, name := range []string{
 		"PointerHelper", "ReflectFields", "StdlibUUID", "URLClone", "JSONMarshalWrite",
-		"BenchmarkLoop", "SplitTrimJoin", "FieldsSeq", "StreamCloseSafety", "SlicesClone",
+		"BenchmarkLoop", "SplitTrimJoin", "FieldsSeq", "StreamCloseSafety", "SlicesClone", "SlicesConcat",
 	} {
 		registeredSharedCop(t, programCops, "Lint/"+name)
 	}

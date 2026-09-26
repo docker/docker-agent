@@ -1498,14 +1498,7 @@ func applyTextEdit(lines []string, edit lspTextEdit) []string {
 	newText := prefix + edit.NewText + suffix
 	newLines := strings.Split(newText, "\n")
 
-	result := make([]string, 0, len(lines)-(endLine-startLine)+len(newLines)-1)
-	result = append(result, lines[:startLine]...)
-	result = append(result, newLines...)
-	if endLine+1 < len(lines) {
-		result = append(result, lines[endLine+1:]...)
-	}
-
-	return result
+	return slices.Concat(lines[:startLine], newLines, lines[endLine+1:])
 }
 
 func formatCodeActions(file string, line int, data json.RawMessage) string {

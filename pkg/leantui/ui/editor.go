@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/history"
@@ -66,10 +67,7 @@ func (e *Editor) Insert(runes []rune) {
 		}
 		cleaned = append(cleaned, r)
 	}
-	next := make([]rune, 0, len(e.value)+len(cleaned))
-	next = append(next, e.value[:e.cursor]...)
-	next = append(next, cleaned...)
-	next = append(next, e.value[e.cursor:]...)
+	next := slices.Concat(e.value[:e.cursor], cleaned, e.value[e.cursor:])
 	e.value = next
 	e.cursor += len(cleaned)
 }
@@ -87,10 +85,7 @@ func (e *Editor) ReplaceCurrentWord(s string) {
 	}
 
 	replacement := []rune(s)
-	next := make([]rune, 0, len(e.value)-(end-start)+len(replacement))
-	next = append(next, e.value[:start]...)
-	next = append(next, replacement...)
-	next = append(next, e.value[end:]...)
+	next := slices.Concat(e.value[:start], replacement, e.value[end:])
 	e.value = next
 	e.cursor = start + len(replacement)
 }

@@ -143,9 +143,7 @@ func tryRepairEditFileJSON(data []byte) ([]byte, bool) {
 			return nil, false
 		}
 
-		repaired := make([]byte, 0, len(current)-removeCount)
-		repaired = append(repaired, current[:offset]...)
-		repaired = append(repaired, current[offset+removeCount:]...)
+		repaired := slices.Concat(current[:offset], current[offset+removeCount:])
 		current = repaired
 	}
 

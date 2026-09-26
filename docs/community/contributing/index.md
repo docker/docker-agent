@@ -154,6 +154,16 @@ than `new(T{...})`) and any file that shadows the builtin `new`.
 separator are matched, and predicates that mutate or retain a pointer into the
 slice are excluded.
 
+`Lint/SlicesConcat` flags nested append chains and adjacent local append sequences
+that combine slices into fresh storage (nil, empty literals, `make`, or
+`slices.Clone`). It skips in-place appends, single-slice copies, mixed named
+slice types, scalar appends, and inputs with calls or other side effects.
+Review nil versus non-nil empty results, capacity assumptions, and allocation
+panics before replacing a match; `Concat` returns nil for an empty result.
+Keep a reasoned `//rubocop:disable Lint/SlicesConcat` where those semantics matter.
+The cop uses resolved types, inspects production packages, excludes generated
+and frozen config files, and never rewrites code automatically.
+
 `Lint/PointerHelper` recommends native `new` expressions for AWS scalar pointer
 helpers. Preserve explicit numeric conversions; slice/map and dereference helpers
 are not replacements for `new`.

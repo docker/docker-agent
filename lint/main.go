@@ -64,6 +64,7 @@ var programCops = []prog.Cop{
 	CutPrefix,
 	CutSuffix,
 	FieldsSeqLookup,
+	SlicesConcat,
 	SessionStateAccessors,
 	rubocops.NewLintStreamCloseSafety(),
 	ExclusiveStreamLease,

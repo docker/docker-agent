@@ -30,7 +30,7 @@ func drawMermaidGraphHorizontal(edges []mermaidparser.Edge, standalone []string,
 	adjacency, roots, order := mermaidGraph(edges, standalone)
 	expanded := make(map[string]bool)
 	var layouts []mermaidGraphLayout
-	candidates := append(append(make([]string, 0, len(roots)+len(order)), roots...), order...)
+	candidates := slices.Concat(roots, order)
 	for _, root := range candidates {
 		if !expanded[root] {
 			layouts = append(layouts, buildMermaidHorizontalLayout(root, adjacency, nodes, expanded, groupGap))
@@ -273,9 +273,7 @@ func drawMermaidGraph(edges []mermaidparser.Edge, standalone []string, nodes map
 	adjacency, roots, order := mermaidGraph(edges, standalone)
 	expanded := make(map[string]bool)
 	var layouts []mermaidGraphLayout
-	candidates := make([]string, 0, len(roots)+len(order))
-	candidates = append(candidates, roots...)
-	candidates = append(candidates, order...)
+	candidates := slices.Concat(roots, order)
 	for _, root := range candidates {
 		if expanded[root] {
 			continue

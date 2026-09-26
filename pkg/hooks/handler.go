@@ -233,7 +233,8 @@ func (h *commandHandler) Run(ctx context.Context, input []byte) (HandlerResult, 
 		base = os.Environ()
 	}
 	traceEnv := genai.InjectTraceContextEnv(ctx)
-	envCopy := make([]string, 0, len(base)+len(traceEnv))
+	// A nil Cmd.Env would inherit the process environment.
+	envCopy := make([]string, 0, len(base)+len(traceEnv)) //rubocop:disable Lint/SlicesConcat
 	envCopy = append(envCopy, base...)
 	envCopy = append(envCopy, traceEnv...)
 	cmd.Env = envCopy

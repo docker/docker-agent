@@ -29,6 +29,34 @@ func TestEditorInsertStripsCarriageReturns(t *testing.T) {
 	assert.Equal(t, "a\nb", e.Text())
 }
 
+func TestEditorInsertCopiesInputs(t *testing.T) {
+	t.Parallel()
+	e := NewEditor("")
+	e.value = make([]rune, 4, 16)
+	copy(e.value, []rune("abcd"))
+	e.cursor = 2
+	original := e.value
+	e.Insert(original[:2])
+	assert.Equal(t, "ababcd", e.Text())
+	assert.Equal(t, 4, e.cursor)
+	e.value[0] = 'X'
+	assert.Equal(t, "abcd", string(original))
+}
+
+func TestEditorEmptyConcatenation(t *testing.T) {
+	t.Parallel()
+	e := NewEditor("")
+	e.Insert([]rune("\r"))
+	assert.True(t, e.IsEmpty())
+	assert.Zero(t, e.cursor)
+	e.SetText("word")
+	e.ReplaceCurrentWord("")
+	assert.True(t, e.IsEmpty())
+	assert.Zero(t, e.cursor)
+	e.Insert([]rune("next"))
+	assert.Equal(t, "next", e.Text())
+}
+
 func TestEditorBackspaceAndDelete(t *testing.T) {
 	t.Parallel()
 	e := NewEditor("")
