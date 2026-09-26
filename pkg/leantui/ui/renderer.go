@@ -88,10 +88,10 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int) {
 	}
 
 	newViewportTop := max(0, len(newLines)-r.height)
-	// A change above the visible region, or content shrinking enough to pull
-	// scrolled-off lines back into view, can't be patched incrementally.
+	// Changes to a live block may start above the viewport. Repaint only the
+	// visible rows rather than clearing terminal scrollback on every update.
 	if first < r.viewportTop || newViewportTop < r.viewportTop {
-		r.fullRedraw(newLines, cursorLine, cursorCol, true)
+		r.repaintVisible(newLines, cursorLine, cursorCol)
 		return
 	}
 
@@ -137,6 +137,39 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int) {
 	b.WriteString(seqSyncEnd)
 	r.write(b.String())
 
+	r.cursorRow = cur
+	r.prev = newLines
+}
+
+// repaintVisible reconciles changes that start above the viewport without
+// erasing the terminal's scrollback. Growth scrolls the screen before painting
+// the new visible tail; shrinkage simply replaces the visible rows.
+func (r *Renderer) repaintVisible(newLines []string, cursorLine, cursorCol int) {
+	top := max(0, len(newLines)-r.height)
+	var b strings.Builder
+	b.WriteString(seqSyncStart)
+	b.WriteString(seqHideCursor)
+	if delta := top - r.viewportTop; delta > 0 {
+		r.moveRow(&b, r.cursorRow, r.viewportTop+r.height-1)
+		for range delta {
+			b.WriteString("\r\n")
+		}
+	}
+	b.WriteString("\x1b[H")
+	for i := range r.height {
+		if i > 0 {
+			b.WriteString("\r\n")
+		}
+		b.WriteString(seqEraseLine)
+		if top+i < len(newLines) {
+			b.WriteString(newLines[top+i])
+		}
+	}
+	r.viewportTop = top
+	cur := r.moveCursor(&b, top+r.height-1, cursorLine, cursorCol)
+	b.WriteString(seqShowCursor)
+	b.WriteString(seqSyncEnd)
+	r.write(b.String())
 	r.cursorRow = cur
 	r.prev = newLines
 }
