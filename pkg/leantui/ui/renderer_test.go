@@ -92,6 +92,26 @@ func TestRendererMoveCursorClampsCurrentRow(t *testing.T) {
 	assert.NotContains(t, b.String(), ansi.CursorUp(95))
 }
 
+func TestRendererChangingOffscreenToolPreservesScrollback(t *testing.T) {
+	t.Parallel()
+	r, buf := newTestRenderer(4)
+	r.Frame([]string{"history", "tool start", "tool body", "input", "footer"}, 3, 0)
+	buf.Reset()
+
+	// A partial tool call grows above the visible area.
+	r.Frame([]string{"history", "tool start", "tool body updated", "more arguments", "input", "footer"}, 4, 0)
+	assert.NotContains(t, buf.String(), seqClearScreen)
+	assert.Contains(t, buf.String(), "more arguments")
+	assert.Equal(t, 2, r.ViewportTop())
+	buf.Reset()
+
+	// A shorter rendering must clear stale rows without wiping scrollback.
+	r.Frame([]string{"history", "short tool", "input", "footer"}, 2, 0)
+	assert.NotContains(t, buf.String(), seqClearScreen)
+	assert.Contains(t, buf.String(), "short tool")
+	assert.Equal(t, 0, r.ViewportTop())
+}
+
 func TestRendererResizeForcesFullRedraw(t *testing.T) {
 	t.Parallel()
 	r, buf := newTestRenderer(24)
