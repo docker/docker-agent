@@ -285,7 +285,7 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 // render assembles the full frame and reconciles it with the terminal.
 func (m *model) render() {
 	lines, cursorLine, cursorCol := m.buildLines()
-	m.r.Frame(lines, cursorLine, cursorCol)
+	m.r.Frame(lines, cursorLine, cursorCol, m.screen.Transcript.LiveToolRows())
 }
 
 // renderFinal repaints the current state, then erases the input box and footer

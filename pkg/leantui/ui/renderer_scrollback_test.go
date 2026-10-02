@@ -107,3 +107,49 @@ func TestRendererPreservesAnswerPushedOffscreenDuringCorrection(t *testing.T) {
 	require.Equal(t, 1, strings.Count(strings.Join(append(slices.Clone(screen.history), screen.rows...), "\n"), "ANSWER"))
 	require.Equal(t, []string{"input", "input-line2", "footer"}, screen.rows)
 }
+
+func TestRendererOffscreenLiveToolUpdatesDoNotPolluteScrollback(t *testing.T) {
+	t.Parallel()
+	r, buf := newTestRenderer(3)
+	screen := scrollbackScreen{rows: make([]string, 3)}
+	lines := []string{"history", "tool-timer-0", "command", "body", "input", "footer"}
+	liveRows := [2]int{1, 4}
+	r.Frame(lines, 4, 0, liveRows)
+	screen.write(buf.String())
+	buf.Reset()
+	history := slices.Clone(screen.history)
+	for i := range 30 {
+		updated := slices.Clone(lines)
+		updated[1] = fmt.Sprintf("tool-timer-%d", i+1)
+		r.Frame(updated, 4, 0, liveRows)
+		screen.write(buf.String())
+		buf.Reset()
+		lines = updated
+	}
+	require.Equal(t, history, screen.history)
+	require.Equal(t, []string{"body", "input", "footer"}, screen.rows)
+
+	completed := slices.Clone(lines)
+	completed[1] = "tool-completed"
+	r.Frame(completed, 4, 0, [2]int{})
+	screen.write(buf.String())
+	buf.Reset()
+	require.Contains(t, screen.history, "tool-completed", "final results must still be archived")
+	history = slices.Clone(screen.history)
+	r.Frame(completed, 4, 0, [2]int{})
+	screen.write(buf.String())
+	require.Equal(t, history, screen.history)
+}
+
+func TestRendererLiveToolGrowthPreservesNewlyOffscreenRows(t *testing.T) {
+	t.Parallel()
+	r, buf := newTestRenderer(3)
+	screen := scrollbackScreen{rows: make([]string, 3)}
+	r.Frame([]string{"history", "timer-old", "command", "input", "footer"}, 3, 0, [2]int{1, 3})
+	screen.write(buf.String())
+	buf.Reset()
+	r.Frame([]string{"history", "timer-new", "command", "body", "input", "footer"}, 4, 0, [2]int{1, 4})
+	screen.write(buf.String())
+	require.Equal(t, []string{"history", "timer-old", "command"}, screen.history)
+	require.Equal(t, []string{"body", "input", "footer"}, screen.rows)
+}

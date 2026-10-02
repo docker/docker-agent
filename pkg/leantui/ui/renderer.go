@@ -35,11 +35,12 @@ type Renderer struct {
 	width  int
 	height int
 
-	prev        []string
-	viewportTop int // index in prev of the topmost visible row
-	cursorRow   int // buffer row the hardware cursor currently sits on
-	initialized bool
-	needsRedraw bool
+	prev         []string
+	viewportTop  int // index in prev of the topmost visible row
+	cursorRow    int // buffer row the hardware cursor currently sits on
+	initialized  bool
+	needsRedraw  bool
+	liveToolRows [2]int
 }
 
 func NewRenderer(w *bufio.Writer, width, height int) *Renderer {
@@ -61,7 +62,12 @@ func (r *Renderer) Repaint() {
 
 // Frame reconciles the screen with newLines and places the hardware cursor at
 // (cursorLine, cursorCol), where cursorLine is an index into newLines.
-func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int) {
+func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int, liveToolRows ...[2]int) {
+	var liveRows [2]int
+	if len(liveToolRows) > 0 {
+		liveRows = liveToolRows[0]
+	}
+	defer func() { r.liveToolRows = liveRows }()
 	if len(newLines) == 0 {
 		newLines = []string{""}
 	}
@@ -93,7 +99,7 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int) {
 	if first < r.viewportTop || newViewportTop < r.viewportTop {
 		if first < newViewportTop {
 			// Scrollback cannot be edited; replay the changed suffix without erasing history.
-			r.redrawSuffix(newLines, first, cursorLine, cursorCol)
+			r.redrawSuffix(newLines, first, cursorLine, cursorCol, liveRows)
 			return
 		}
 		r.repaintVisible(newLines, cursorLine, cursorCol)
@@ -181,7 +187,7 @@ func (r *Renderer) repaintVisible(newLines []string, cursorLine, cursorCol int) 
 
 // redrawSuffix archives only changed offscreen rows, then restores the visible tail.
 // Scrollback is immutable; replaying the whole suffix would duplicate old answers.
-func (r *Renderer) redrawSuffix(newLines []string, first, cursorLine, cursorCol int) {
+func (r *Renderer) redrawSuffix(newLines []string, first, cursorLine, cursorCol int, liveRows [2]int) {
 	top := max(0, len(newLines)-r.height)
 	oldEnd, newEnd := len(r.prev), len(newLines)
 	for oldEnd > first && newEnd > first && r.prev[oldEnd-1] == newLines[newEnd-1] {
@@ -190,6 +196,10 @@ func (r *Renderer) redrawSuffix(newLines []string, first, cursorLine, cursorCol 
 	}
 	var changed []string
 	for i := first; i < min(newEnd, top); i++ {
+		if i < r.viewportTop && i >= liveRows[0] && i < liveRows[1] && i >= r.liveToolRows[0] && i < r.liveToolRows[1] {
+			// Offscreen tool animations must not become new scrollback entries.
+			continue
+		}
 		if i < r.viewportTop && i < len(r.prev) && r.prev[i] == newLines[i] {
 			continue
 		}

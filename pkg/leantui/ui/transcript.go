@@ -69,6 +69,8 @@ type Transcript struct {
 	blocks  []*block
 	pending *pendingBlock
 	toolz   *ToolTracker
+
+	liveToolRows [2]int
 }
 
 // NewTranscript creates an empty transcript.
@@ -234,10 +236,12 @@ func (t *Transcript) Lines(width, spinnerFrame int, busy bool, sessionState serv
 		lines = append(lines, t.pendingLines(width)...)
 		lines = append(lines, "")
 	}
+	t.liveToolRows[0] = len(lines)
 	t.toolz.ForEach(func(tv *ToolView) {
 		lines = append(lines, RenderToolWithState(tv, width, spinnerFrame, sessionState)...)
 		lines = append(lines, "")
 	})
+	t.liveToolRows[1] = len(lines)
 	if busy && t.pending == nil && t.toolz.Empty() {
 		lines = append(lines, spinnerLine(spinnerFrame), "")
 	}
@@ -247,6 +251,9 @@ func (t *Transcript) Lines(width, spinnerFrame int, busy bool, sessionState serv
 	}
 	return lines
 }
+
+// LiveToolRows returns the half-open live tool range in the last rendered frame.
+func (t *Transcript) LiveToolRows() [2]int { return t.liveToolRows }
 
 // BlockCount reports the number of committed transcript blocks.
 func (t *Transcript) BlockCount() int { return len(t.blocks) }
