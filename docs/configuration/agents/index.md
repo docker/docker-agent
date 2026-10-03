@@ -52,6 +52,9 @@ agents:
     welcome_message: string # Optional: message shown at session start
     handoffs: [list] # Optional: agent names this agent can hand off to
     force_handoff: string # Optional: agent that always receives the conversation when this agent stops
+    routing: # Optional: agents this agent's before_agent_run/after_agent_complete hooks may route to
+      allowed_agents: [list]
+      default_agent: string
     hooks: # Optional: lifecycle hooks
       tool_input_transform: [list]
       tool_guard: [list]
@@ -120,6 +123,7 @@ agents:
 | `welcome_message`           | string  | ✗        | Message displayed to the user when a session starts. Rendered as Markdown in the TUI. **Not sent to the model** — it exists purely for the user's benefit. Useful for telling users what the agent can do and what commands are available. |
 | `handoffs`                  | array   | ✗        | List of agent names this agent can hand off the conversation to. Enables the `handoff` tool. See [Handoffs Routing](../../concepts/multi-agent/index.md#handoffs-routing).                  |
 | `force_handoff`             | string  | ✗        | Name of an agent that unconditionally receives the conversation whenever this agent produces a final response. The runtime performs the switch itself, bypassing the LLM's tool-calling, guaranteeing deterministic pipelines. Must not reference the agent itself, and chains must not form a cycle. See [Forced Handoffs](../../concepts/multi-agent/index.md#forced-handoffs). |
+| `routing`                   | object  | ✗        | Local agents that this agent's `before_agent_run` and `after_agent_complete` hooks may select: `allowed_agents` (required list of agent names) and `default_agent` (fallback for uncertain or failed evaluator assessments). Requires at least one of those hooks; the agent cannot route to itself or to harness agents. See [Agent Routing Hooks](../hooks/index.md#agent-routing-hooks). |
 | `hooks`                     | object  | ✗        | Lifecycle hooks for running commands at various points. See [Hooks](../hooks/index.md).                                                                                   |
 | `structured_output`         | object  | ✗        | Constrain agent output to match a JSON schema. See [Structured Output](../structured-output/index.md).                                                                    |
 | `cache`                     | object  | ✗        | Response cache. When the same user question is asked again, the previous answer is replayed verbatim and the model is not called. See [Response Cache](#response-cache) below.                  |
