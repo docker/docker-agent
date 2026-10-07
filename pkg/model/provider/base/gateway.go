@@ -44,20 +44,33 @@ func GatewayAuthToken(ctx context.Context, env environment.Provider, gateway str
 	return token, nil
 }
 
+// GatewayAuthRefresh returns a function that replaces a Docker token the gateway
+// rejected: the token is forgotten and a fresh one obtained. It returns nil for
+// gateways that don't authenticate with a Docker login. For a static token (an
+// explicitly set DOCKER_TOKEN) it yields the rejected token again, which callers
+// must treat as "nothing to replay".
+func GatewayAuthRefresh(env environment.Provider, gateway string) func(ctx context.Context, rejected string) (string, error) {
+	if !environment.IsTrustedDockerURL(gateway) {
+		return nil
+	}
+	return func(ctx context.Context, rejected string) (string, error) {
+		slog.WarnContext(ctx, "The Docker AI gateway rejected our token, re-authenticating")
+		desktop.InvalidateToken(rejected)
+		return GatewayAuthToken(ctx, env, gateway)
+	}
+}
+
 // GatewayAuthRetry lets a client recover from a gateway that rejects the Docker
 // token it presented: the token is forgotten and the request replayed once with
 // a fresh one. Empty for gateways that don't authenticate with a Docker login,
 // and a no-op when the token comes from a static source (an explicitly set
 // DOCKER_TOKEN can't be refreshed, and must not be second-guessed).
 func GatewayAuthRetry(env environment.Provider, gateway string) []httpclient.Opt {
-	if !environment.IsTrustedDockerURL(gateway) {
+	refresh := GatewayAuthRefresh(env, gateway)
+	if refresh == nil {
 		return nil
 	}
-	return []httpclient.Opt{httpclient.WithUnauthorizedRetry(func(ctx context.Context, rejected string) (string, error) {
-		slog.WarnContext(ctx, "The Docker AI gateway rejected our token, re-authenticating")
-		desktop.InvalidateToken(rejected)
-		return GatewayAuthToken(ctx, env, gateway)
-	})}
+	return []httpclient.Opt{httpclient.WithUnauthorizedRetry(refresh)}
 }
 
 // GatewayClient holds the per-request HTTP client and SDK connection settings.

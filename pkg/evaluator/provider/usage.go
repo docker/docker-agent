@@ -33,15 +33,17 @@ func reportedUsage(raw json.RawMessage) (*evaluator.Usage, error) {
 }
 
 func (p *typesafe) estimateCost(model string, usage *evaluator.Usage) *float64 {
-	if usage == nil {
-		return nil
-	}
 	price := p.cost
 	if price == nil && p.officialPricing && model == "jev-1.13.0" {
 		// https://docs.typesafe.ai/models: input $0.042/Mtok, output free.
 		price = &latest.CostConfig{Input: 0.042}
 	}
-	if price == nil {
+	return estimateCost(price, usage)
+}
+
+// estimateCost returns nil, meaning unknown, without usage or a price.
+func estimateCost(price *latest.CostConfig, usage *evaluator.Usage) *float64 {
+	if usage == nil || price == nil {
 		return nil
 	}
 	cost := float64(usage.InputTokens)/1e6*price.Input + float64(usage.OutputTokens)/1e6*price.Output

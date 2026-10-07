@@ -706,7 +706,7 @@ func TestDoctorEvaluatorResolutionErrors(t *testing.T) {
 	}{
 		{name: "missing provider", want: `unsupported evaluator provider "corporate"`},
 		{name: "unsupported backend", provider: &latest.ProviderConfig{Provider: "anthropic"}, want: `unsupported evaluator provider "anthropic"`},
-		{name: "chat api type", provider: &latest.ProviderConfig{Provider: "typesafe", BaseURL: "https://example.com", APIType: "openai_responses"}, want: "evaluator providers do not support auth or api_type"},
+		{name: "chat api type", provider: &latest.ProviderConfig{Provider: "typesafe", BaseURL: "https://example.com", APIType: "openai_responses"}, want: `evaluator providers do not support api_type "openai_responses"`},
 		{name: "invalid inherited url", provider: &latest.ProviderConfig{Provider: "typesafe", BaseURL: "https://user:private-secret@example.com"}, want: "base_url must be an HTTP(S) URL without credentials, query, or fragment"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

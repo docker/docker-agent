@@ -11,7 +11,8 @@ not generate chat messages or execute tools. Consumers decide what an assessment
 means: an evaluator reports a probability; a tool guard decides whether to ask
 for approval.
 
-The first provider is [TypeSafe's Jev](https://docs.typesafe.ai/). Named evaluators
+Two providers are supported: [OpenAI Decisions](https://developers.openai.com/api/docs/guides/decisions)
+(`openai`, currently in public beta) and [TypeSafe's Jev](https://docs.typesafe.ai/) (`typesafe`). Named evaluators
 are shared across agents in a loaded team. Imported agents keep their source
 configuration’s evaluator bindings, even when the parent uses the same names. Configurations using this feature
 require version `16` or an omitted version (latest).
@@ -30,15 +31,16 @@ evaluators:
 
 | Field | Meaning |
 | --- | --- |
-| `provider` | Required backend type (`typesafe`) or named entry in `providers`. |
-| `model` | Required provider model ID, such as `jev-latest`. Pin a versioned ID for reproducible evaluations. |
+| `provider` | Backend type (`openai`, `typesafe`) or a named entry in `providers`. Optional: without it, `model` is a reference (see [OpenAI Decisions](#openai-decisions)). |
+| `model` | Required. With `provider`, the literal provider model ID, such as `gpt-6-luna` or `jev-latest`; pin a versioned ID for reproducible evaluations. Without `provider`, a name from `models` or an inline `provider/model`. |
 | `type` | Required: `boolean`, `choice`, or `score`. |
 | `instructions` | Required assessment question or rubric instructions. |
 | `choices` | For `choice`: map of 2–255 outcome keys to descriptions. |
 | `levels` | For `score`: 2–10 descriptions ordered from lowest to highest. |
-| `base_url` | Optional API base URL. TypeSafe defaults to `https://api.typesafe.ai`; `/v1/systemone` is appended. |
+| `base_url` | Optional API base URL. OpenAI defaults to `https://api.openai.com/v1` and `/decisions` is appended; TypeSafe defaults to `https://api.typesafe.ai` and `/v1/systemone` is appended. |
 | `endpoint` | Optional exact HTTP(S) request URL. Overrides `base_url`, including a named provider's default; no path is appended. Credentials, query strings, and fragments are not allowed. |
-| `token_key` | Environment variable containing the API key; defaults to `TYPESAFE_API_KEY`. |
+| `token_key` | Environment variable containing the API key; defaults to `OPENAI_API_KEY` or `TYPESAFE_API_KEY`. Not used through the models gateway. |
+| `bypass_models_gateway` | Connect directly to the provider even when a models gateway is configured. |
 | `timeout` | Request timeout as a duration such as `3s`; defaults to `10s`. |
 | `cost` | Optional USD prices per million tokens: `input` and `output`. Overrides automatic pricing; `cost: {}` explicitly declares free evaluations. |
 
@@ -63,11 +65,72 @@ evaluators:
 ```
 
 Evaluator-level `base_url` and `token_key` override provider defaults. Chat-only
-provider settings do not apply; `api_type` and `auth` are rejected for evaluator
-providers. Credentials come from the normal environment provider, including
-configured secret sources. The models gateway does not supply evaluator credentials.
+provider settings such as sampling do not apply, and `auth` is rejected. `api_type` is
+rejected for TypeSafe; for OpenAI only `openai_responses` and `openai_chatcompletions`
+are accepted, so a provider can be shared with chat agents — neither changes the
+Decisions endpoint. Credentials come from the normal environment provider, including
+configured secret sources. `model`, `base_url` and `endpoint` accept `${VAR}` references.
+
+## Connection modes
+
+| Configuration | Mode | Credential |
+| --- | --- | --- |
+| Models gateway configured, nothing else | Gateway | Docker authentication, as for chat models. No local provider key is read. |
+| Custom `base_url` or `endpoint` | Direct | The evaluator's provider key, sent to that endpoint. |
+| `bypass_models_gateway: true` | Direct | The evaluator's provider key. |
+| No gateway | Direct | The evaluator's provider key. |
+
+`token_key` alone does not select direct mode, and a gateway failure never falls back
+to a direct connection. Through the gateway, OpenAI evaluators call `<gateway>/v1/decisions`
+and TypeSafe evaluators `<gateway>/v1/systemone`; gateway paths containing `.` or `..`
+segments (also percent-encoded) are rejected.
+
+> **Migration:** TypeSafe evaluators used to ignore the models gateway. With a gateway
+> configured they now go through it. If your gateway does not serve TypeSafe, set
+> `bypass_models_gateway: true` and keep using a TypeSafe key. Custom endpoints such as
+> Laya on Baseten still connect directly.
 
 In HCL, use `evaluator "name" { ... }` for a top-level named evaluator.
+
+## OpenAI Decisions
+
+The `openai` backend calls `POST /v1/decisions` with one question named `evaluation`.
+Only `gpt-6-luna` is currently available. The three spellings below are equivalent:
+
+```yaml
+providers:
+  company_openai:
+    provider: openai
+    token_key: COMPANY_OPENAI_KEY
+models:
+  decision_model:
+    provider: company_openai
+    model: gpt-6-luna
+
+evaluators:
+  explicit: {provider: openai, model: gpt-6-luna, type: boolean, instructions: Is this risky?}
+  inline:   {model: openai/gpt-6-luna, type: boolean, instructions: Is this risky?}
+  named:    {model: decision_model, type: boolean, instructions: Is this risky?}
+```
+
+Without `provider`, `model` is looked up in `models` first, then split on the first `/`.
+A named model shares only its identity and connection (`provider`, `model`, `base_url`,
+`token_key`, `bypass_models_gateway`); other behavioral settings such as sampling,
+reasoning, routing or `provider_opts` are rejected rather than ignored. Precedence:
+evaluator, then referenced model, then named provider, then backend default.
+
+Putting `model: openai/gpt-6-luna` under an agent does not turn it into an evaluator:
+only entries under `evaluators` call Decisions.
+
+`boolean` maps to a `predicate` question, `choice` to `choice`, and `score` to `score`
+with zero-based level labels. A string state is sent as the input text; an object or
+array is sent as its JSON text. Images are not supported. A `refusal` answer is an
+evaluation failure, not a `false` result, and the refusal text is not exposed.
+
+OpenAI usage is reported when present; a gateway may hide it, in which case usage and
+cost stay unknown. There is no automatic OpenAI pricing: Decisions is listed at
+[$0.10 per million input tokens](https://developers.openai.com/api/docs/guides/decisions)
+with regional and long-context multipliers, so set `cost: {input: 0.1}` for an estimate.
 
 ## Evaluation judges
 
@@ -152,7 +215,7 @@ failed requests automatically.
 
 ## Pricing and accounting
 
-For the official TypeSafe endpoint, the returned model ID `jev-1.13.0` has
+OpenAI evaluators are unpriced unless `cost` is set (see above). For the official TypeSafe endpoint, the returned model ID `jev-1.13.0` has
 [documented pricing](https://docs.typesafe.ai/models) of **$0.042 per million input
 tokens**, with output tokens free. Automatic pricing uses that exact returned ID,
 not the requested alias: `jev-latest` is priced only if it resolves to a known

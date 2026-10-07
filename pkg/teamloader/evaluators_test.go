@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -352,4 +353,85 @@ func TestLoadLayaEvaluatorExample(t *testing.T) {
 	assert.Equal(t, "laya-rl-agent", result.Model)
 	assert.Nil(t, result.Cost)
 	assert.EqualValues(t, 1, requests.Load())
+}
+
+const openAIEvaluatorYAML = `
+models:
+  decision_model:
+    provider: openai
+    model: gpt-6-luna
+    base_url: %[1]s/direct/v1
+    token_key: DECISION_KEY
+evaluators:
+  inline:
+    model: openai/gpt-6-luna
+    type: boolean
+    instructions: Is this safe?
+  named:
+    model: decision_model
+    type: boolean
+    instructions: Is this safe?
+  bypassed:
+    provider: openai
+    model: gpt-6-luna
+    bypass_models_gateway: true
+    base_url: %[1]s/bypass/v1
+    type: boolean
+    instructions: Is this safe?
+agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+`
+
+func TestLoadOpenAIEvaluators(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	paths := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths[r.URL.Path] = r.Header.Get("Authorization")
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"model":"gpt-6-luna","answers":[{"type":"predicate","name":"evaluation","probability":0.25}]}`)
+	}))
+	t.Cleanup(server.Close)
+
+	runConfig := &config.RuntimeConfig{
+		Config: config.Config{ModelsGateway: server.URL + "/gw"},
+		EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{
+			"DECISION_KEY": "decision-secret", "OPENAI_API_KEY": "upstream-secret", "DOCKER_TOKEN": "docker-token",
+		}),
+	}
+	loaded, err := LoadWithConfig(t.Context(), config.NewBytesSource("openai.yaml", fmt.Appendf(nil, openAIEvaluatorYAML, server.URL)), runConfig,
+		withTestProviderRegistry()...)
+	require.NoError(t, err)
+
+	for _, name := range []string{"inline", "named", "bypassed"} {
+		client, ok := loaded.Team.Evaluator(name)
+		require.True(t, ok, name)
+		result, err := client.Evaluate(t.Context(), "state")
+		require.NoError(t, err, name)
+		require.NotNil(t, result.Probability)
+		assert.InDelta(t, 0.25, *result.Probability, 1e-9)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "Bearer docker-token", paths["/gw/v1/decisions"], "inline goes through the gateway without the upstream key")
+	assert.Equal(t, "Bearer decision-secret", paths["/direct/v1/decisions"], "a custom base URL stays direct")
+	assert.Equal(t, "Bearer upstream-secret", paths["/bypass/v1/decisions"], "bypass stays direct")
+	assert.Len(t, paths, 3)
+}
+
+func TestLoadEvaluatorsRejectsBadModelReferences(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"missing", "openai/", "anthropic/claude"} {
+		data := "evaluators:\n  e:\n    model: " + model + "\n    type: boolean\n    instructions: x\nagents:\n  root:\n    model: openai/gpt-4o\n"
+		_, err := LoadWithConfig(t.Context(), config.NewBytesSource("bad.yaml", []byte(data)), &config.RuntimeConfig{
+			EnvProviderForTests: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "k"}),
+		}, withTestProviderRegistry()...)
+		require.ErrorContains(t, err, `evaluator "e"`, model)
+	}
 }

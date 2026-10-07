@@ -35,7 +35,8 @@ func TestCreateJudgeSelectsBackend(t *testing.T) {
 		{"unknown type", "typo", "typesafe/jev-latest", "invalid judge type", false, false},
 		{"bad LLM ref", "llm", "invalid", "invalid judge model format", false, false},
 		{"bad evaluator ref", "evaluator", "missing", "expected 'provider/model' or a named evaluator", false, false},
-		{"unsupported evaluator", "evaluator", "openai/gpt-5", "unsupported evaluator provider", false, false},
+		{"openai evaluator", "evaluator", "openai/gpt-6-luna", "", true, false},
+		{"unsupported evaluator", "evaluator", "anthropic/claude-sonnet-4-5", "unsupported evaluator provider", false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

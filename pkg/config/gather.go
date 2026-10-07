@@ -39,8 +39,7 @@ func gatherMissingEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway
 		modelEnv[e] = true
 	}
 
-	// Evaluators dial their own providers, never the models gateway.
-	for _, name := range GatherEnvVarsForEvaluators(cfg) {
+	for _, name := range GatherEnvVarsForEvaluatorsWithGateway(cfg, modelsGateway) {
 		requiredEnv[name] = true
 	}
 
@@ -344,8 +343,17 @@ func sortedKeys(requiredEnv map[string]bool) []string {
 	return slices.Sorted(maps.Keys(requiredEnv))
 }
 
-// GatherEnvVarsForEvaluators returns credentials needed by referenced evaluator hooks.
+// GatherEnvVarsForEvaluators returns the variables needed by referenced evaluator
+// hooks when no models gateway is configured.
 func GatherEnvVarsForEvaluators(cfg *latest.Config) []string {
+	return GatherEnvVarsForEvaluatorsWithGateway(cfg, "")
+}
+
+// GatherEnvVarsForEvaluatorsWithGateway returns the variables needed by referenced
+// evaluator hooks: environment references in their connection fields, plus the
+// provider credential unless the evaluator goes through modelsGateway, which
+// supplies its own authentication.
+func GatherEnvVarsForEvaluatorsWithGateway(cfg *latest.Config, modelsGateway string) []string {
 	required := map[string]bool{}
 	for _, a := range cfg.Agents {
 		for _, matchers := range a.Hooks.Events() {
@@ -358,8 +366,16 @@ func GatherEnvVarsForEvaluators(cfg *latest.Config) []string {
 					if !ok {
 						continue
 					}
-					resolved, err := def.Resolve(cfg.Providers)
-					if err == nil {
+					resolved, err := def.ResolveWithModels(cfg.Providers, cfg.Models)
+					if err != nil {
+						continue
+					}
+					for _, field := range []string{resolved.Model, resolved.BaseURL, resolved.Endpoint} {
+						for _, name := range environment.Refs(field) {
+							required[name] = true
+						}
+					}
+					if !resolved.UsesModelsGateway(modelsGateway) {
 						required[resolved.TokenKey] = true
 					}
 				}

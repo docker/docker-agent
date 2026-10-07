@@ -5,32 +5,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"maps"
-	"net/http"
-	"net/url"
-	"slices"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/evaluator"
-	"github.com/docker/docker-agent/pkg/httpclient"
 )
 
-const (
-	defaultBaseURL = "https://api.typesafe.ai"
-	defaultTimeout = 10 * time.Second
-)
+const defaultTimeout = 10 * time.Second
 
 // New builds a reusable client from a resolved evaluator configuration.
 // Credentials are obtained from env on each evaluation, not during construction.
-func New(ctx context.Context, cfg latest.EvaluatorConfig, env environment.Provider) (evaluator.Evaluator, error) {
+// Without [WithModelsGateway] the client always connects directly.
+func New(ctx context.Context, cfg latest.EvaluatorConfig, env environment.Provider, opts ...Option) (evaluator.Evaluator, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, errors.New("invalid evaluator configuration")
 	}
-	if cfg.Provider != "typesafe" {
+	if cfg.Provider != latest.EvaluatorProviderTypeSafe && cfg.Provider != latest.EvaluatorProviderOpenAI {
 		return nil, errors.New("unsupported evaluator provider")
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
@@ -39,67 +31,34 @@ func New(ctx context.Context, cfg latest.EvaluatorConfig, env environment.Provid
 	if env == nil {
 		return nil, errors.New("evaluator environment provider is required")
 	}
+	if cfg.Provider == latest.EvaluatorProviderOpenAI {
+		return newOpenAI(ctx, cfg, env, opts)
+	}
+	return newTypeSafe(ctx, cfg, env, opts)
+}
 
-	baseURL := cfg.BaseURL
-	if baseURL == "" {
-		baseURL = defaultBaseURL
+func timeoutOrDefault(cfg latest.EvaluatorConfig) time.Duration {
+	if cfg.Timeout.Duration == 0 {
+		return defaultTimeout
 	}
-	u, err := url.Parse(baseURL)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil, errors.New("evaluator base URL must be an HTTP(S) URL without credentials, query, or fragment")
-	}
+	return cfg.Timeout.Duration
+}
 
-	endpoint := cfg.Endpoint
-	if endpoint == "" {
-		endpoint = strings.TrimRight(baseURL, "/") + "/v1/systemone"
+func copyCost(cost *latest.CostConfig) *latest.CostConfig {
+	if cost == nil {
+		return nil
 	}
+	return new(*cost)
+}
 
-	timeout := cfg.Timeout.Duration
-	if timeout == 0 {
-		timeout = defaultTimeout
-	}
-	if cfg.TokenKey == "" {
-		cfg.TokenKey = "TYPESAFE_API_KEY"
-	}
-
-	question := typesafeQuestion{Type: cfg.Type, Instructions: cfg.Instructions}
-	var probabilityKeys []string
-	switch cfg.Type {
-	case "boolean":
-		question.Type = "noul"
-	case "choice":
-		question.Criteria = cfg.Choices
-		probabilityKeys = slices.Sorted(maps.Keys(cfg.Choices))
-	case "score":
-		question.Criteria = cfg.Levels
-		for i := range cfg.Levels {
-			probabilityKeys = append(probabilityKeys, strconv.Itoa(i))
-		}
-	}
-	questionJSON, err := json.Marshal(question)
+// encodeState validates and marshals an evaluation state before any credential lookup.
+func encodeState(state any) (json.RawMessage, error) {
+	raw, err := json.Marshal(state)
 	if err != nil {
-		return nil, errors.New("invalid evaluator question")
+		return nil, errors.New("evaluator state must be JSON-serializable")
 	}
-
-	var cost *latest.CostConfig
-	if cfg.Cost != nil {
-		price := *cfg.Cost
-		cost = &price
+	if len(raw) == 0 || (raw[0] != '"' && raw[0] != '{' && raw[0] != '[') {
+		return nil, errors.New("evaluator state must be a string, object, or array")
 	}
-	client := httpclient.NewHTTPClient(ctx)
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &typesafe{
-		client:          client,
-		env:             env,
-		endpoint:        endpoint,
-		tokenKey:        cfg.TokenKey,
-		model:           cfg.Model,
-		resultType:      cfg.Type,
-		questionType:    question.Type,
-		question:        questionJSON,
-		probabilityKeys: probabilityKeys,
-		timeout:         timeout,
-		cost:            cost,
-		officialPricing: endpoint == defaultBaseURL+"/v1/systemone",
-	}, nil
+	return raw, nil
 }

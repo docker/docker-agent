@@ -1,14 +1,13 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
+	"maps"
 	"math"
-	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,16 +17,15 @@ import (
 )
 
 const (
+	defaultBaseURL   = "https://api.typesafe.ai"
 	maxResponseBytes = 1 << 20
 	// The API may round each probability and the weighted score independently.
 	roundingTolerance = 1e-3
 )
 
 type typesafe struct {
-	client          *http.Client
-	env             environment.Provider
-	endpoint        string
-	tokenKey        string
+	*connection
+
 	model           string
 	resultType      string
 	questionType    string
@@ -65,6 +63,44 @@ type typesafeAnswer struct {
 	Confidence    *float64            `json:"confidence"`
 }
 
+func newTypeSafe(ctx context.Context, cfg latest.EvaluatorConfig, env environment.Provider, opts []Option) (evaluator.Evaluator, error) {
+	conn, err := newConnection(ctx, cfg, env, typesafeBackend, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	question := typesafeQuestion{Type: cfg.Type, Instructions: cfg.Instructions}
+	var probabilityKeys []string
+	switch cfg.Type {
+	case "boolean":
+		question.Type = "noul"
+	case "choice":
+		question.Criteria = cfg.Choices
+		probabilityKeys = slices.Sorted(maps.Keys(cfg.Choices))
+	case "score":
+		question.Criteria = cfg.Levels
+		for i := range cfg.Levels {
+			probabilityKeys = append(probabilityKeys, strconv.Itoa(i))
+		}
+	}
+	questionJSON, err := json.Marshal(question)
+	if err != nil {
+		return nil, errors.New("invalid evaluator question")
+	}
+
+	return &typesafe{
+		connection:      conn,
+		model:           cfg.Model,
+		resultType:      cfg.Type,
+		questionType:    question.Type,
+		question:        questionJSON,
+		probabilityKeys: probabilityKeys,
+		timeout:         timeoutOrDefault(cfg),
+		cost:            copyCost(cfg.Cost),
+		officialPricing: conn.gateway == "" && conn.endpoint == typesafeBackend.defaultBaseURL+typesafeBackend.path,
+	}, nil
+}
+
 func (p *typesafe) Evaluate(ctx context.Context, state any) (*evaluator.Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
@@ -72,12 +108,9 @@ func (p *typesafe) Evaluate(ctx context.Context, state any) (*evaluator.Result, 
 		return nil, err
 	}
 
-	rawState, err := json.Marshal(state)
+	rawState, err := encodeState(state)
 	if err != nil {
-		return nil, errors.New("evaluator state must be JSON-serializable")
-	}
-	if len(rawState) == 0 || (rawState[0] != '"' && rawState[0] != '{' && rawState[0] != '[') {
-		return nil, errors.New("evaluator state must be a string, object, or array")
+		return nil, err
 	}
 	payload, err := json.Marshal(typesafeRequest{
 		Model:     p.model,
@@ -88,52 +121,32 @@ func (p *typesafe) Evaluate(ctx context.Context, state any) (*evaluator.Result, 
 		return nil, errors.New("failed to encode evaluator request")
 	}
 
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	token, ok := p.env.Get(ctx, p.tokenKey)
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if !ok || strings.TrimSpace(token) == "" {
-		return nil, errors.New("evaluator API key is missing")
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return nil, errors.New("failed to construct evaluator request")
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	x, err := p.send(ctx, payload, p.model)
 	record := evaluator.UsageRecord{Model: p.model}
-	defer func() { evaluator.ObserveUsage(ctx, record) }()
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return nil, requestError(ctx, "evaluator request failed")
+	if x.attempted {
+		defer func() { evaluator.ObserveUsage(ctx, record) }()
 	}
-	defer resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if err != nil {
-		return nil, requestError(ctx, "failed to read evaluator response")
-	}
-	if len(body) > maxResponseBytes {
-		return nil, errors.New("evaluator response exceeds size limit")
-	}
 	var response typesafeResponse
-	decodeErr := json.Unmarshal(body, &response)
+	var decodeErr, modelErr error
 	var model string
-	modelErr := json.Unmarshal(response.Model, &model)
+	if x.usable() {
+		decodeErr = json.Unmarshal(x.body, &response)
+		modelErr = json.Unmarshal(response.Model, &model)
+	}
 	if strings.TrimSpace(model) != "" {
 		record.Model = model
 	}
 	var usageErr error
-	if decodeErr == nil {
+	if x.usable() && decodeErr == nil {
 		record.Usage, usageErr = reportedUsage(response.Usage)
 		record.Cost = p.estimateCost(model, record.Usage)
 	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("evaluator returned HTTP status %d", resp.StatusCode)
+	if failure := p.failure(ctx, x); failure != nil {
+		return nil, failure
 	}
 	if decodeErr != nil || (len(response.Model) != 0 && modelErr != nil) {
 		return nil, errors.New("invalid evaluator response JSON")
@@ -146,14 +159,6 @@ func (p *typesafe) Evaluate(ctx context.Context, state any) (*evaluator.Result, 
 		return nil, &evaluator.TerminalError{Err: usageErr}
 	}
 	return p.result(response.Answers, record)
-}
-
-// Preserve cancellation identity without exposing transport errors or URLs.
-func requestError(ctx context.Context, message string) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("%s: %w", message, err)
-	}
-	return errors.New(message)
 }
 
 func (p *typesafe) result(rawAnswers json.RawMessage, record evaluator.UsageRecord) (*evaluator.Result, error) {

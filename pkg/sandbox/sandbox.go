@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -308,10 +309,12 @@ func gatherSourceEnvVars(ctx context.Context, source config.Source, env environm
 		return nil, fmt.Errorf("loading agent config: %w", err)
 	}
 
+	var gateway string
 	for _, rc := range defaults {
 		if rc == nil {
 			continue
 		}
+		gateway = cmp.Or(gateway, rc.ModelsGateway)
 		config.MergeGlobalProviders(cfg, rc.Providers)
 		config.MergeAgentHooks(cfg, config.MergeHooks(rc.GlobalHooks, rc.CLIHooks()))
 	}
@@ -319,14 +322,14 @@ func gatherSourceEnvVars(ctx context.Context, source config.Source, env environm
 		return nil, err
 	}
 	for name, def := range cfg.Evaluators {
-		if _, err := def.Resolve(cfg.Providers); err != nil {
+		if _, err := def.ResolveWithModels(cfg.Providers, cfg.Models); err != nil {
 			return nil, fmt.Errorf("evaluator %q: %w", name, err)
 		}
 	}
 
 	var names []string
 	names = append(names, config.GatherEnvVarsForModels(ctx, cfg, env)...)
-	names = append(names, config.GatherEnvVarsForEvaluators(cfg)...)
+	names = append(names, config.GatherEnvVarsForEvaluatorsWithGateway(cfg, gateway)...)
 
 	toolNames, err := config.GatherEnvVarsForTools(ctx, cfg)
 	if err != nil {

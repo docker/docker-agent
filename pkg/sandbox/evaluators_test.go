@@ -40,3 +40,45 @@ agents:
 	assert.Equal(t, []string{"-e", "CORPORATE_KEY"}, flags)
 	assert.Equal(t, []string{"CORPORATE_KEY=evaluator-key"}, values)
 }
+
+func TestEnvForAgentOpenAIEvaluatorFollowsGateway(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+evaluators:
+  route:
+    model: openai/gpt-6-luna
+    token_key: DECISION_KEY
+    type: boolean
+    instructions: Assess.
+  direct:
+    model: openai/gpt-6-luna
+    token_key: DIRECT_KEY
+    bypass_models_gateway: true
+    type: boolean
+    instructions: Assess.
+agents:
+  root:
+    model: dmr/ai/qwen3
+`), 0o600))
+	hook := func(name string) latest.HookDefinition {
+		return latest.HookDefinition{Type: "evaluator", Evaluator: name, EvaluatorPolicy: &latest.EvaluatorPolicy{
+			Decisions: map[string]string{"true": "ask"}, MinProbability: 0.9, Fallback: "ask",
+		}}
+	}
+	env := environment.NewMapEnvProvider(map[string]string{"DECISION_KEY": "a", "DIRECT_KEY": "b"})
+	for gateway, want := range map[string][]string{
+		"":                            {"DECISION_KEY", "DIRECT_KEY"},
+		"https://gateway.example.com": {"DIRECT_KEY"},
+	} {
+		rc := &config.RuntimeConfig{}
+		rc.ModelsGateway = gateway
+		rc.GlobalHooks = &latest.HooksConfig{ToolGuard: latest.HookMatcherConfigs{{Hooks: latest.HookDefinitions{hook("route"), hook("direct")}}}}
+		flags, _ := EnvForAgent(t.Context(), path, env, nil, rc)
+		var names []string
+		for i := 1; i < len(flags); i += 2 {
+			names = append(names, flags[i])
+		}
+		assert.Equal(t, want, names, "gateway %q", gateway)
+	}
+}

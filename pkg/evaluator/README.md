@@ -24,6 +24,21 @@ and non-JSON-serializable states are rejected before credentials are requested.
 State is sent to the configured evaluator service; callers must select the data
 appropriate for that service.
 
+## OpenAI Decisions
+
+`openai` posts one `predicate`, `choice` or `score` question named `evaluation` to
+`<base>/decisions` (default `https://api.openai.com/v1`), using `net/http` so the
+OpenAI SDK stays out of the loader's dependencies. Answers are matched by name, and
+probabilities, choice and score are validated strictly; refusals are ordinary errors.
+Usage is read when present and otherwise unknown. There is no built-in pricing.
+
+## Connections
+
+Both backends go through the models gateway when one is configured, unless the
+evaluator sets `bypass_models_gateway` or a custom `base_url`/`endpoint`
+(`EvaluatorConfig.UsesModelsGateway`). A trusted gateway's rejected Docker token is
+replayed once; every attempt is reported to the usage observer exactly once.
+
 ## TypeSafe
 
 The initial backend posts one question named `evaluation` to `/v1/systemone`.

@@ -297,6 +297,15 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	if err := cfg.ValidateEvaluators(); err != nil {
 		return nil, err
 	}
+	// Resolve before model alias resolution, which rewrites models for chat use.
+	resolvedEvaluators := make(map[string]latest.EvaluatorConfig, len(cfg.Evaluators))
+	for name, def := range cfg.Evaluators {
+		resolved, err := def.ResolveWithModels(cfg.Providers, cfg.Models)
+		if err != nil {
+			return nil, fmt.Errorf("evaluator %q: %w", name, err)
+		}
+		resolvedEvaluators[name] = resolved
+	}
 	for _, a := range cfg.Agents {
 		if err := a.Hooks.Validate(); err != nil {
 			return nil, fmt.Errorf("agents.%s: %w", a.Name, err)
@@ -380,13 +389,20 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		}
 	}
 
-	evaluators := make(map[string]evaluator.Evaluator, len(cfg.Evaluators))
-	for name, def := range cfg.Evaluators {
-		resolved, err := def.Resolve(cfg.Providers)
+	evaluatorOpts := []evaluatorprovider.Option{evaluatorprovider.WithModelsGateway(runConfig.ModelsGateway)}
+	modelOptions := options.Apply(loadOpts.modelOpts...)
+	if wrap := modelOptions.TransportWrapper(); wrap != nil {
+		evaluatorOpts = append(evaluatorOpts, evaluatorprovider.WithHTTPTransportWrapper(wrap))
+	}
+	evaluators := make(map[string]evaluator.Evaluator, len(resolvedEvaluators))
+	for name, resolved := range resolvedEvaluators {
+		resolved, err := resolved.ExpandedEnv(func(s string) (string, error) {
+			return environment.Expand(ctx, s, env)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("evaluator %q: %w", name, err)
 		}
-		client, err := evaluatorprovider.New(ctx, resolved, env)
+		client, err := evaluatorprovider.New(ctx, resolved, env, evaluatorOpts...)
 		if err != nil {
 			return nil, fmt.Errorf("evaluator %q: %w", name, err)
 		}

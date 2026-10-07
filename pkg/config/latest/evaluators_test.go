@@ -26,8 +26,10 @@ func TestEvaluatorConfigValidation(t *testing.T) {
 			e.Choices = map[string]string{"simple": "Routine", "complex": "Reasoning"}
 		}, ""},
 		{"score", func(e *EvaluatorConfig) { e.Type = "score"; e.Levels = []string{"Low", "High"} }, ""},
-		{"provider", func(e *EvaluatorConfig) { e.Provider = " " }, "provider and model"},
-		{"model", func(e *EvaluatorConfig) { e.Model = "" }, "provider and model"},
+		{"provider", func(e *EvaluatorConfig) { e.Provider = " " }, "provider must not be blank"},
+		{"model", func(e *EvaluatorConfig) { e.Model = "" }, "model is required"},
+		{"provider omitted", func(e *EvaluatorConfig) { e.Provider = "" }, ""},
+		{"unexpanded url", func(e *EvaluatorConfig) { e.BaseURL = "${EVAL_BASE}/v1" }, ""},
 		{"instructions", func(e *EvaluatorConfig) { e.Instructions = " " }, "instructions"},
 		{"type", func(e *EvaluatorConfig) { e.Type = "noul" }, "unsupported evaluator type"},
 		{"timeout", func(e *EvaluatorConfig) { e.Timeout.Duration = -time.Second }, "timeout"},
@@ -265,4 +267,172 @@ func TestEvaluatorResolveEndpoint(t *testing.T) {
 	assert.Equal(t, "typesafe", resolved.Provider)
 	assert.Equal(t, "laya", cfg.Provider)
 	assert.Empty(t, cfg.BaseURL)
+}
+
+func TestEvaluatorResolveModelReferences(t *testing.T) {
+	t.Parallel()
+	base := EvaluatorConfig{Type: "boolean", Instructions: "Assess risk."}
+	providers := map[string]ProviderConfig{
+		"company_openai": {Provider: "openai", BaseURL: "https://provider.example.com/v1", TokenKey: "PROVIDER_KEY", APIType: "openai_responses", Temperature: new(0.2)},
+	}
+	models := map[string]ModelConfig{
+		"decision_model": {Provider: "company_openai", Model: "gpt-6-luna", Description: "shared", TokenKey: "MODEL_KEY"},
+		"bypassed":       {Provider: "openai", Model: "gpt-6-luna", BypassModelsGateway: true},
+		"sampled":        {Provider: "openai", Model: "gpt-6-luna", Temperature: new(0.5)},
+		"routed":         {Provider: "openai", Model: "gpt-6-luna", Routing: []RoutingRule{{Model: "x"}}},
+		"no_provider":    {Model: "gpt-6-luna"},
+	}
+
+	t.Run("explicit provider keeps raw model id", func(t *testing.T) {
+		t.Parallel()
+		e := base
+		e.Provider, e.Model = "openai", "vendor/gpt-6-luna"
+		resolved, err := e.Resolve(nil)
+		require.NoError(t, err)
+		assert.Equal(t, "openai", resolved.Provider)
+		assert.Equal(t, "vendor/gpt-6-luna", resolved.Model)
+		assert.Equal(t, "OPENAI_API_KEY", resolved.TokenKey)
+	})
+	t.Run("inline splits on first slash", func(t *testing.T) {
+		t.Parallel()
+		e := base
+		e.Model = "openai/vendor/gpt-6-luna"
+		resolved, err := e.Resolve(nil)
+		require.NoError(t, err)
+		assert.Equal(t, "openai", resolved.Provider)
+		assert.Equal(t, "vendor/gpt-6-luna", resolved.Model)
+		assert.Equal(t, "openai/vendor/gpt-6-luna", e.Model, "source is not mutated")
+	})
+	t.Run("explicit and inline are equivalent", func(t *testing.T) {
+		t.Parallel()
+		explicit, inline := base, base
+		explicit.Provider, explicit.Model = "openai", "gpt-6-luna"
+		inline.Model = "openai/gpt-6-luna"
+		a, err := explicit.Resolve(nil)
+		require.NoError(t, err)
+		b, err := inline.Resolve(nil)
+		require.NoError(t, err)
+		assert.Equal(t, a, b)
+	})
+	t.Run("named model and provider precedence", func(t *testing.T) {
+		t.Parallel()
+		e := base
+		e.Model = "decision_model"
+		resolved, err := e.ResolveWithModels(providers, models)
+		require.NoError(t, err)
+		assert.Equal(t, "openai", resolved.Provider)
+		assert.Equal(t, "gpt-6-luna", resolved.Model)
+		assert.Equal(t, "MODEL_KEY", resolved.TokenKey, "model beats provider")
+		assert.Equal(t, "https://provider.example.com/v1", resolved.BaseURL)
+		e.TokenKey = "EVALUATOR_KEY"
+		resolved, err = e.ResolveWithModels(providers, models)
+		require.NoError(t, err)
+		assert.Equal(t, "EVALUATOR_KEY", resolved.TokenKey, "evaluator beats model")
+	})
+	t.Run("bypass is inherited and not undone", func(t *testing.T) {
+		t.Parallel()
+		e := base
+		e.Model = "bypassed"
+		resolved, err := e.ResolveWithModels(nil, models)
+		require.NoError(t, err)
+		assert.True(t, resolved.BypassModelsGateway)
+	})
+	t.Run("incompatible model settings are rejected", func(t *testing.T) {
+		t.Parallel()
+		for name, want := range map[string]string{"sampled": "temperature", "routed": "routing"} {
+			e := base
+			e.Model = name
+			_, err := e.ResolveWithModels(nil, models)
+			require.ErrorContains(t, err, want)
+			require.ErrorContains(t, err, "connection-only")
+		}
+	})
+	t.Run("named model needs a provider", func(t *testing.T) {
+		t.Parallel()
+		e := base
+		e.Model = "no_provider"
+		_, err := e.ResolveWithModels(nil, models)
+		require.ErrorContains(t, err, "provider and model")
+	})
+	t.Run("invalid references", func(t *testing.T) {
+		t.Parallel()
+		for _, ref := range []string{"gpt-6-luna", "openai/", "/gpt-6-luna", " / ", "missing"} {
+			e := base
+			e.Model = ref
+			_, err := e.ResolveWithModels(providers, models)
+			require.ErrorContains(t, err, "unknown model reference", ref)
+		}
+		e := base
+		e.Model = "decision_model"
+		_, err := e.Resolve(providers)
+		require.ErrorContains(t, err, "unknown model reference", "old entry point has no models")
+	})
+	t.Run("api_type", func(t *testing.T) {
+		t.Parallel()
+		e := base
+		e.Provider, e.Model = "p", "gpt-6-luna"
+		for apiType, ok := range map[string]bool{"openai_responses": true, "openai_chatcompletions": true, "openai_decisions": false, "bogus": false} {
+			_, err := e.Resolve(map[string]ProviderConfig{"p": {Provider: "openai", APIType: apiType}})
+			if ok {
+				require.NoError(t, err, apiType)
+			} else {
+				require.ErrorContains(t, err, "api_type", apiType)
+			}
+		}
+		_, err := e.Resolve(map[string]ProviderConfig{"p": {Provider: "typesafe", APIType: "openai_responses"}})
+		require.ErrorContains(t, err, "api_type")
+		_, err = e.Resolve(map[string]ProviderConfig{"p": {Auth: &AuthConfig{}}})
+		require.ErrorContains(t, err, "auth")
+	})
+	t.Run("named provider defaults to openai", func(t *testing.T) {
+		t.Parallel()
+		e := base
+		e.Provider, e.Model = "p", "gpt-6-luna"
+		resolved, err := e.Resolve(map[string]ProviderConfig{"p": {TokenKey: "P_KEY"}})
+		require.NoError(t, err)
+		assert.Equal(t, "openai", resolved.Provider)
+		assert.Equal(t, "P_KEY", resolved.TokenKey)
+	})
+	t.Run("unsupported backend", func(t *testing.T) {
+		t.Parallel()
+		e := base
+		e.Model = "anthropic/claude"
+		_, err := e.Resolve(nil)
+		require.ErrorContains(t, err, "unsupported evaluator provider")
+	})
+}
+
+func TestEvaluatorUsesModelsGateway(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		gateway string
+		cfg     EvaluatorConfig
+		want    bool
+	}{
+		{"no gateway", "", EvaluatorConfig{}, false},
+		{"gateway", "https://gw.example.com", EvaluatorConfig{}, true},
+		{"token key alone", "https://gw.example.com", EvaluatorConfig{TokenKey: "K"}, true},
+		{"base url", "https://gw.example.com", EvaluatorConfig{BaseURL: "https://x.example.com"}, false},
+		{"endpoint", "https://gw.example.com", EvaluatorConfig{Endpoint: "https://x.example.com/p"}, false},
+		{"bypass", "https://gw.example.com", EvaluatorConfig{BypassModelsGateway: true}, false},
+	} {
+		assert.Equal(t, tc.want, tc.cfg.UsesModelsGateway(tc.gateway), tc.name)
+	}
+}
+
+func TestEvaluatorExpandEnv(t *testing.T) {
+	t.Parallel()
+	e := EvaluatorConfig{Model: "gpt-${SUFFIX}", BaseURL: "${BASE}/v1", Endpoint: "${BASE}/e", Instructions: "keep ${SUFFIX}", TokenKey: "KEEP"}
+	expanded, err := e.ExpandedEnv(func(s string) (string, error) {
+		return strings.NewReplacer("${SUFFIX}", "6", "${BASE}", "https://example.com").Replace(s), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-6", expanded.Model)
+	assert.Equal(t, "https://example.com/v1", expanded.BaseURL)
+	assert.Equal(t, "https://example.com/e", expanded.Endpoint)
+	assert.Equal(t, "keep ${SUFFIX}", expanded.Instructions)
+	assert.Equal(t, "gpt-${SUFFIX}", e.Model, "source is not mutated")
+	_, err = e.ExpandedEnv(func(string) (string, error) { return "", assert.AnError })
+	require.Error(t, err)
 }

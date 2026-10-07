@@ -57,11 +57,15 @@ func createJudge(ctx context.Context, cfg Config, runConfig *config.RuntimeConfi
 			config.MergeGlobalProviders(merged, providers)
 			providers = merged.Providers
 		}
-		resolved, err := def.Resolve(providers)
+		var models map[string]latest.ModelConfig
+		if agentConfig != nil {
+			models = agentConfig.Models
+		}
+		resolved, err := def.ResolveWithModels(providers, models)
 		if err != nil {
 			return nil, fmt.Errorf("resolving evaluator judge: %w", err)
 		}
-		client, err := evaluatorprovider.New(ctx, resolved, runConfig.EnvProvider())
+		client, err := evaluatorprovider.New(ctx, resolved, runConfig.EnvProvider(), evaluatorprovider.WithModelsGateway(runConfig.ModelsGateway))
 		if err != nil {
 			return nil, fmt.Errorf("creating evaluator judge: %w", err)
 		}

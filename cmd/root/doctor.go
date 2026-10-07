@@ -284,7 +284,7 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		}
 		for _, name := range slices.Sorted(maps.Keys(agentCfg.Evaluators)) {
 			def := agentCfg.Evaluators[name]
-			if _, err := def.Resolve(agentCfg.Providers); err != nil {
+			if _, err := def.ResolveWithModels(agentCfg.Providers, agentCfg.Models); err != nil {
 				report.Issues = append(report.Issues, fmt.Sprintf("evaluators.%s: %v", name, err))
 			}
 		}
@@ -388,7 +388,7 @@ func (f *doctorFlags) checkAgentFile(ctx context.Context, ref string, cfg *lates
 	for _, name := range config.RequiredModelEnvVars(ctx, cfg, f.runConfig.ModelsGateway, env) {
 		requiredBy[name] = append(requiredBy[name], "models")
 	}
-	for _, name := range config.GatherEnvVarsForEvaluators(cfg) {
+	for _, name := range config.GatherEnvVarsForEvaluatorsWithGateway(cfg, f.runConfig.ModelsGateway) {
 		requiredBy[name] = append(requiredBy[name], "evaluators")
 	}
 	toolVars, toolErr := config.GatherEnvVarsForTools(ctx, cfg)

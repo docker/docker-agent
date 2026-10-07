@@ -3360,11 +3360,13 @@
       "properties": {
         "provider": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "Evaluator backend: openai, typesafe, or a named entry of providers. Optional: when omitted, model is a name from models or an inline provider/model reference (e.g. openai/gpt-6-luna)."
         },
         "model": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "With provider: the literal provider model ID (e.g. gpt-6-luna). Without provider: a name from models or a provider/model reference."
         },
         "instructions": {
           "type": "string",
@@ -3380,15 +3382,19 @@
         },
         "base_url": {
           "type": "string",
-          "description": "API base URL (TypeSafe default: https://api.typesafe.ai); /v1/systemone is appended unless endpoint is set."
+          "description": "API base URL. Defaults: OpenAI https://api.openai.com/v1 (/decisions is appended); TypeSafe https://api.typesafe.ai (/v1/systemone is appended). Ignored when endpoint is set. A custom URL bypasses the models gateway."
         },
         "endpoint": {
           "type": "string",
-          "description": "Exact HTTP(S) evaluator URL, overriding base_url and its default path. No credentials, query, or fragment."
+          "description": "Exact HTTP(S) evaluator URL, overriding base_url and its default path. No credentials, query, or fragment. Bypasses the models gateway."
         },
         "token_key": {
           "type": "string",
-          "description": "API key environment variable (TypeSafe default: TYPESAFE_API_KEY)."
+          "description": "API key environment variable (defaults: OPENAI_API_KEY for OpenAI, TYPESAFE_API_KEY for TypeSafe). Not used when the evaluator goes through the models gateway."
+        },
+        "bypass_models_gateway": {
+          "type": "boolean",
+          "description": "Connect directly to the provider even when a models gateway is configured, using the provider API key. A custom base_url or endpoint implies this."
         },
         "choices": {
           "type": "object",
@@ -3424,11 +3430,10 @@
         },
         "cost": {
           "$ref": "#/definitions/CostConfig",
-          "description": "Explicit USD pricing per one million evaluator input/output tokens. Overrides built-in TypeSafe pricing, including on custom endpoints. An empty object declares free evaluations; cache rates are unused."
+          "description": "Explicit USD pricing per one million evaluator input/output tokens. Overrides built-in TypeSafe pricing, including on custom endpoints. OpenAI evaluators have no built-in pricing; set this to track estimated cost. An empty object declares free evaluations; cache rates are unused."
         }
       },
       "required": [
-        "provider",
         "model",
         "type",
         "instructions"
