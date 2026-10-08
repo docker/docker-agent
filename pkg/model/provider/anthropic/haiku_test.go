@@ -145,14 +145,57 @@ func TestHaiku55PrefillAndFallbackValidation(t *testing.T) {
 	require.Error(t, validateThinkingOptions(&latest.ModelConfig{Model: "claude-haiku-5-5", ProviderOpts: map[string]any{"thinking_display": "display"}}))
 }
 
-func TestHaiku55RerankOmitsSampling(t *testing.T) {
+func TestHaiku55RerankPolicy(t *testing.T) {
 	t.Parallel()
-	srv := newScriptedServer(t, textReply("ok", `{"scores":[0.7]}`))
-	client := newScriptedClient(srv, latest.ModelConfig{Provider: "anthropic", Model: "claude-haiku-5-5", Temperature: new(0.2), TopP: new(0.9), ProviderOpts: samplingOpts(nil)})
-	_, err := client.Rerank(t.Context(), "query", []ragtypes.Document{{Content: "doc"}}, "")
-	require.NoError(t, err)
-	for _, key := range []string{"temperature", "top_p", "top_k"} {
-		assert.NotContains(t, srv.request(t, 0).body, key)
+	for _, tc := range []struct {
+		name   string
+		budget *latest.ThinkingBudget
+		opts   []options.Opt
+		off    bool
+		effort string
+	}{
+		{name: "default"},
+		{name: "zero", budget: &latest.ThinkingBudget{}, off: true},
+		{name: "none", budget: &latest.ThinkingBudget{Effort: "none"}, off: true},
+		{name: "NoThinking", budget: &latest.ThinkingBudget{Effort: "max"}, opts: []options.Opt{options.WithNoThinking(), options.WithMaxTokens(20)}, off: true},
+		{name: "medium", budget: &latest.ThinkingBudget{Effort: "medium"}, effort: "medium"},
+		{name: "max", budget: &latest.ThinkingBudget{Effort: "max"}, effort: "max"},
+		{name: "numeric", budget: &latest.ThinkingBudget{Tokens: 16000}, effort: "medium"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newScriptedServer(t, textReply("ok", `{"scores":[0.7]}`))
+			cfg := latest.ModelConfig{Provider: "anthropic", Model: "claude-haiku-5-5", ThinkingBudget: tc.budget, Temperature: new(0.2), TopP: new(0.9), ProviderOpts: samplingOpts(nil)}
+			before := haikuJSON(t, cfg)
+			c := newScriptedClient(srv, cfg, tc.opts...)
+			_, err := c.Rerank(t.Context(), "query", []ragtypes.Document{{Content: "doc"}}, "")
+			require.NoError(t, err)
+			req := srv.request(t, 0)
+			for _, key := range []string{"temperature", "top_p", "top_k"} {
+				assert.NotContains(t, req.body, key)
+			}
+			assert.Equal(t, "json_schema", req.outputConfig()["format"].(map[string]any)["type"])
+			assert.Contains(t, req.betas, "structured-outputs-2025-11-13")
+			assert.NotContains(t, req.betas, anthropic.AnthropicBetaThinkingBindingControls2026_08_01)
+			switch {
+			case tc.budget == nil && len(tc.opts) == 0:
+				assert.NotContains(t, req.body, "thinking")
+			case tc.off:
+				assert.Equal(t, map[string]any{"type": "disabled"}, req.thinking())
+				assert.NotContains(t, req.outputConfig(), "effort")
+			default:
+				assert.Equal(t, "adaptive", req.thinking()["type"])
+				if tc.effort == "" {
+					assert.NotContains(t, req.outputConfig(), "effort")
+				} else {
+					assert.Equal(t, tc.effort, req.outputConfig()["effort"])
+				}
+			}
+			if tc.name == "NoThinking" {
+				assert.InDelta(t, noThinkingMinOutputTokens, req.body["max_tokens"], 0)
+			}
+			assert.Equal(t, before, haikuJSON(t, cfg))
+		})
 	}
 }
 
@@ -221,4 +264,24 @@ func TestHaiku55Refusal(t *testing.T) {
 		}
 	}
 	assert.Equal(t, chat.FinishReasonRefusal, reason)
+}
+
+func TestHaikuRerankOlderModelsKeepPolicy(t *testing.T) {
+	t.Parallel()
+	for _, model := range []string{"claude-haiku-4-5", "claude-sonnet-5"} {
+		srv := newScriptedServer(t, textReply("ok", `{"scores":[0.7]}`))
+		c := newScriptedClient(srv, latest.ModelConfig{Provider: "anthropic", Model: model, ThinkingBudget: &latest.ThinkingBudget{Effort: "max"}}, options.WithNoThinking())
+		scores, err := c.Rerank(t.Context(), "query", []ragtypes.Document{{Content: "doc"}}, "")
+		require.NoError(t, err)
+		assert.Equal(t, []float64{0.7}, scores)
+		req := srv.request(t, 0)
+		assert.NotContains(t, req.body, "thinking")
+		assert.NotContains(t, req.outputConfig(), "effort")
+		assert.Equal(t, []string{"structured-outputs-2025-11-13"}, req.betas)
+		if model == "claude-haiku-4-5" {
+			assert.InDelta(t, 0, req.body["temperature"], 0)
+		} else {
+			assert.NotContains(t, req.body, "temperature")
+		}
+	}
 }
