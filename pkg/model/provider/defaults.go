@@ -284,7 +284,8 @@ func cloneModelConfig(cfg *latest.ModelConfig) *latest.ModelConfig {
 //   - thinking_budget: none  →  normally normalised the same way (nil), EXCEPT
 //     on an OpenAI-family model that has a real API-level "none" effort
 //     (see [modelinfo.OpenAISupportsNoneEffort]): there the explicit
-//     value is preserved so it actually reaches the API instead of silently
+//     Haiku 5.5 on Claude transports also preserves none/0 as thinking:disabled.
+//     The value is preserved so it actually reaches the API instead of silently
 //     falling back to the model's default ("medium").
 //   - thinking_budget explicitly set to a real value  →  kept as-is; interleaved_thinking
 //     is auto-enabled for Anthropic/Bedrock-Claude.
@@ -297,8 +298,12 @@ func applyModelDefaults(cfg *latest.ModelConfig) {
 	providerType := resolveProviderType(cfg)
 
 	// Explicitly disabled → normalise to nil so providers never see it,
-	// unless the model has a real "none" effort worth preserving.
+	// unless the model has a real off setting worth preserving.
 	if cfg.ThinkingBudget.IsDisabled() {
+		if preservesHaikuDisabledThinking(cfg, providerType) {
+			cfg.ThinkingBudget = &latest.ThinkingBudget{Effort: "none"}
+			return
+		}
 		if preservesNoneEffort(cfg, providerType) {
 			slog.Debug("Preserving explicit none reasoning effort",
 				"provider", cfg.Provider, "model", cfg.Model)
@@ -324,6 +329,21 @@ func applyModelDefaults(cfg *latest.ModelConfig) {
 			slog.Debug("Applied default thinking for thinking-only OpenAI model",
 				"provider", cfg.Provider, "model", cfg.Model)
 		}
+	}
+}
+
+func preservesHaikuDisabledThinking(cfg *latest.ModelConfig, providerType string) bool {
+	if !modelinfo.IsClaudeHaiku55(cfg.Model) {
+		return false
+	}
+	switch providerType {
+	case "anthropic", "amazon-bedrock":
+		return true
+	case "google":
+		publisher, _ := cfg.ProviderOpts["publisher"].(string)
+		return strings.EqualFold(publisher, "anthropic")
+	default:
+		return false
 	}
 }
 

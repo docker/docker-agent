@@ -209,14 +209,14 @@ func TestReplayContent_ExactRoundTrip(t *testing.T) {
 
 	msg := drainStandard(t, interleavedThinkingEvents(true))
 
-	blocks, ok, err := replayContent(&msg)
+	blocks, ok, err := replayContent(&msg, false)
 	require.NoError(t, err)
 	require.True(t, ok)
 	got, err := json.Marshal(blocks)
 	require.NoError(t, err)
 	assert.JSONEq(t, interleavedThinkingWire, string(got))
 
-	betaBlocks, ok, err := betaReplayContent(&msg)
+	betaBlocks, ok, err := betaReplayContent(&msg, false)
 	require.NoError(t, err)
 	require.True(t, ok)
 	got, err = json.Marshal(betaBlocks)
@@ -233,7 +233,7 @@ func TestReplayContent_SurvivesJSONRoundTrip(t *testing.T) {
 	var restored chat.Message
 	require.NoError(t, json.Unmarshal(data, &restored))
 
-	blocks, ok, err := replayContent(&restored)
+	blocks, ok, err := replayContent(&restored, false)
 	require.NoError(t, err)
 	require.True(t, ok)
 	got, err := json.Marshal(blocks)
@@ -274,12 +274,12 @@ func TestReplayContent_FallsBackWhenNotReplayable(t *testing.T) {
 			msg := drainStandard(t, interleavedThinkingEvents(true))
 			mutate(&msg)
 
-			blocks, ok, err := replayContent(&msg)
+			blocks, ok, err := replayContent(&msg, false)
 			require.NoError(t, err)
 			assert.False(t, ok)
 			assert.Nil(t, blocks)
 
-			betaBlocks, ok, err := betaReplayContent(&msg)
+			betaBlocks, ok, err := betaReplayContent(&msg, false)
 			require.NoError(t, err)
 			assert.False(t, ok)
 			assert.Nil(t, betaBlocks)
@@ -307,10 +307,10 @@ func TestReplayContent_FallsBackWhenRawDriftedBeforeSealing(t *testing.T) {
 			msg.AttachProviderState(msg.ProviderState)
 			require.NotNil(t, msg.ReplayableProviderState(providerStateName), "the hash matches the mutated message")
 
-			_, ok, err := replayContent(&msg)
+			_, ok, err := replayContent(&msg, false)
 			require.NoError(t, err)
 			assert.False(t, ok)
-			_, ok, err = betaReplayContent(&msg)
+			_, ok, err = betaReplayContent(&msg, false)
 			require.NoError(t, err)
 			assert.False(t, ok)
 		})
@@ -324,7 +324,7 @@ func TestReplayContent_ArgumentsCompareAsJSON(t *testing.T) {
 	msg := drainStandard(t, interleavedThinkingEvents(true))
 	msg.ToolCalls[0].Function.Arguments = `{ "path" : "a.go" }`
 	msg.AttachProviderState(msg.ProviderState)
-	_, ok, err := replayContent(&msg)
+	_, ok, err := replayContent(&msg, false)
 	require.NoError(t, err)
 	assert.True(t, ok)
 
@@ -332,7 +332,7 @@ func TestReplayContent_ArgumentsCompareAsJSON(t *testing.T) {
 	// both convert to an empty object.
 	msg = chat.Message{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{{ID: "toolu_C", Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":`}}}}
 	msg.AttachProviderState(&chat.ProviderState{Provider: providerStateName, Content: json.RawMessage(`[{"type":"tool_use","id":"toolu_C","name":"read_file","input":{}}]`)})
-	blocks, ok, err := replayContent(&msg)
+	blocks, ok, err := replayContent(&msg, false)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, blocks, 1)
@@ -355,10 +355,10 @@ func TestReplayContent_RejectsMalformedState(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			msg := sealed(raw)
-			_, ok, err := replayContent(&msg)
+			_, ok, err := replayContent(&msg, false)
 			require.Error(t, err)
 			assert.False(t, ok)
-			_, ok, err = betaReplayContent(&msg)
+			_, ok, err = betaReplayContent(&msg, false)
 			require.Error(t, err)
 			assert.False(t, ok)
 		})
@@ -375,7 +375,7 @@ func TestReplayContent_SkipsBlocksTheAPIRejects(t *testing.T) {
 		{"type":"text","text":"done"}
 	]`)})
 
-	blocks, ok, err := replayContent(&msg)
+	blocks, ok, err := replayContent(&msg, false)
 	require.NoError(t, err)
 	require.True(t, ok)
 	got, err := json.Marshal(blocks)
@@ -385,7 +385,7 @@ func TestReplayContent_SkipsBlocksTheAPIRejects(t *testing.T) {
 	// Nothing left to send is "not replayable", not an error.
 	msg.ProviderState = nil
 	msg.AttachProviderState(&chat.ProviderState{Provider: providerStateName, Content: json.RawMessage(`[{"type":"text","text":""}]`)})
-	blocks, ok, err = replayContent(&msg)
+	blocks, ok, err = replayContent(&msg, false)
 	require.NoError(t, err)
 	assert.False(t, ok)
 	assert.Nil(t, blocks)
@@ -402,7 +402,7 @@ func TestReplayContent_OmittedThinkingStaysThinking(t *testing.T) {
 		{"type":"text","text":"ok"}
 	]`)})
 
-	blocks, ok, err := replayContent(&msg)
+	blocks, ok, err := replayContent(&msg, false)
 	require.NoError(t, err)
 	require.True(t, ok)
 	require.Len(t, blocks, 2)

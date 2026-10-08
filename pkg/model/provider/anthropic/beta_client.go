@@ -63,6 +63,10 @@ func (c *Client) createBetaStream(
 		return nil, errors.New("no messages to send after conversion: all messages were filtered out")
 	}
 
+	if err := c.validateLastRole(string(converted[len(converted)-1].Role)); err != nil {
+		return nil, err
+	}
+
 	sys, transient := c.betaSystemContext(messages)
 
 	betas := []anthropic.AnthropicBeta{

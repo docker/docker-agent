@@ -53,7 +53,7 @@ func convertMessages(ctx context.Context, messages []chat.Message, id modelsdev.
 			}
 
 		case chat.MessageRoleAssistant:
-			contentBlocks := convertAssistantContent(msg)
+			contentBlocks := convertAssistantContentForModel(msg, id.Model)
 			if len(contentBlocks) > 0 {
 				bedrockMessages = append(bedrockMessages, types.Message{
 					Role:    types.ConversationRoleAssistant,
@@ -247,10 +247,14 @@ func convertImageURL(imageURL *chat.MessageImageURL) types.ContentBlock {
 }
 
 func convertAssistantContent(msg *chat.Message) []types.ContentBlock {
+	return convertAssistantContentForModel(msg, "")
+}
+
+func convertAssistantContentForModel(msg *chat.Message, model string) []types.ContentBlock {
 	var blocks []types.ContentBlock
 
 	// Add thinking blocks first (order: thinking, text, tool_use)
-	if msg.ReasoningContent != "" && msg.ThinkingSignature != "" {
+	if !modelinfo.IsClaudeHaiku55(model) && msg.ReasoningContent != "" && msg.ThinkingSignature != "" {
 		blocks = append(blocks, &types.ContentBlockMemberReasoningContent{
 			Value: &types.ReasoningContentBlockMemberReasoningText{
 				Value: types.ReasoningTextBlock{
@@ -259,7 +263,7 @@ func convertAssistantContent(msg *chat.Message) []types.ContentBlock {
 				},
 			},
 		})
-	} else if msg.ThinkingSignature != "" {
+	} else if !modelinfo.IsClaudeHaiku55(model) && msg.ThinkingSignature != "" {
 		// Redacted thinking block (signature only)
 		blocks = append(blocks, &types.ContentBlockMemberReasoningContent{
 			Value: &types.ReasoningContentBlockMemberRedactedContent{

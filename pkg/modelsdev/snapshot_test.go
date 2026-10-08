@@ -197,3 +197,25 @@ func TestSnapshotFallbackIsNotMemoized(t *testing.T) {
 	assert.True(t, secondFetched, "a fetch failure must not be memoized; the next lookup must retry")
 	assert.Equal(t, 12345, m.Limit.Context, "the recovered fetch must serve fresh data, not the snapshot")
 }
+
+func TestEmbeddedHaiku55LimitsAndPricing(t *testing.T) {
+	t.Parallel()
+	db := embeddedSnapshot()
+	for _, id := range []ID{NewID("anthropic", "claude-haiku-5-5"), NewID("amazon-bedrock", "global.anthropic.claude-haiku-5-5")} {
+		m, ok := db.Providers[id.Provider].Models[id.Model]
+		require.True(t, ok, id.String())
+		assert.Equal(t, 1000000, m.Limit.Context)
+		assert.Equal(t, int64(128000), m.Limit.Output)
+		require.NotNil(t, m.Cost)
+		for _, tokens := range []int64{99999, 100000, 100001} {
+			rates := m.Cost.RatesFor(tokens)
+			if tokens <= 100000 {
+				assert.InDelta(t, 0.1, rates.Input, 0)
+				assert.InDelta(t, 0.5, rates.Output, 0)
+			} else {
+				assert.InDelta(t, 0.5, rates.Input, 0)
+				assert.InDelta(t, 2.5, rates.Output, 0)
+			}
+		}
+	}
+}

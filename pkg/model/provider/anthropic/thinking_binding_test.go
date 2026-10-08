@@ -150,3 +150,37 @@ func TestBetaStream_WarnsOnDroppedThinking(t *testing.T) {
 	assert.Equal(t, "drop_block", req.thinking()["block_binding"].(map[string]any)["prefix_mismatch_behavior"])
 	assert.Contains(t, req.raw, `"signature":"stale"`, "the stale block is still sent; the server decides to drop it")
 }
+
+func TestHaiku55_WarnsOnDroppedThinkingAfterReenable(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	srv := newScriptedServer(t, sseBody(
+		messageStart("msg_1", map[string]any{"input_transformations": []any{
+			map[string]any{"type": "thinking_dropped", "path": "messages.1.content.0", "reason": "prefix_mismatch"},
+		}}),
+		blockStart(0, map[string]any{"type": "text", "text": ""}),
+		blockDelta(0, map[string]any{"type": "text_delta", "text": "still answering"}),
+		blockStop(0),
+		messageDelta("end_turn", nil),
+		messageStop,
+	))
+	client := newScriptedClient(srv, latest.ModelConfig{Provider: "anthropic", Model: "claude-haiku-5-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}})
+	prior := chat.Message{Role: chat.MessageRoleAssistant, Content: "a1", ReasoningContent: "old plan"}
+	prior.AttachProviderState(&chat.ProviderState{Provider: providerStateName, Content: []byte(`[{"type":"thinking","thinking":"old plan","signature":"stale"},{"type":"text","text":"a1"}]`)})
+
+	chatTurn(t, client, []chat.Message{user("u1"), prior, user("u2")}, nil)
+	assert.NotContains(t, srv.request(t, 0).raw, `"signature":"stale"`)
+	client.ModelConfig.ThinkingBudget = nil
+	reply := chatTurn(t, client, []chat.Message{user("u1"), prior, user("u2")}, nil)
+
+	assert.Equal(t, "still answering", reply.Content, "the stream is not interrupted")
+	require.NotNil(t, reply.ProviderState)
+	assert.Contains(t, logs.String(), "Anthropic dropped invalidated thinking")
+	assert.Contains(t, logs.String(), "messages.1.content.0: prefix_mismatch")
+	req := srv.request(t, 1)
+	assert.Equal(t, "drop_block", req.thinking()["block_binding"].(map[string]any)["prefix_mismatch_behavior"])
+	assert.Contains(t, req.raw, `"signature":"stale"`, "the stale block is still sent; the server decides to drop it")
+}

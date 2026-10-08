@@ -1079,3 +1079,19 @@ func TestHostedToolSearchSnapshots(t *testing.T) {
 		assert.Equal(t, want, SupportsHostedToolSearch("openai", model), model)
 	}
 }
+
+func TestClaudeHaiku55Capabilities(t *testing.T) {
+	t.Parallel()
+	for _, id := range []string{"claude-haiku-5-5", "claude-haiku-5.5", "anthropic/claude-haiku-5-5", "gateway/claude-haiku-5-5", "anthropic.claude-haiku-5-5", "us.anthropic.claude-haiku-5-5", "eu.anthropic.claude-haiku-5-5", "au.anthropic.claude-haiku-5-5", "jp.anthropic.claude-haiku-5-5", "global.anthropic.claude-haiku-5-5", "claude-haiku-5-5@default", "claude-haiku-5-5-20261007"} {
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			assert.True(t, IsClaudeHaiku55(id))
+			assert.True(t, SupportsAdaptiveThinking(id))
+			assert.True(t, RejectsTokenThinking(id))
+			assert.False(t, SupportsFullThinkingDisplay(id))
+		})
+	}
+	for _, id := range []string{"claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-3-5-haiku-20241022", "claude-haiku-5", "claude-haiku-5-6", "claude-haiku-55", "claude-sonnet-5-5", "claude-haiku-5-50", "claude-haiku-5-5-preview", "claude-haiku-5-5-[REDACTED]", "gpt-5"} {
+		assert.False(t, IsClaudeHaiku55(id), id)
+	}
+}

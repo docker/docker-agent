@@ -569,3 +569,11 @@ func TestAnthropicTopEfforts(t *testing.T) {
 		})
 	}
 }
+
+func TestHaiku55ThinkingLevels(t *testing.T) {
+	t.Parallel()
+	want := []effort.Level{effort.None, effort.Low, effort.Medium, effort.High, effort.XHigh, effort.Max}
+	assert.Equal(t, want, SupportedThinkingLevels("anthropic", "claude-haiku-5-5"))
+	assert.Equal(t, want, SupportedThinkingLevels("amazon-bedrock", "global.anthropic.claude-haiku-5-5"))
+	assert.Equal(t, []effort.Level{effort.None, effort.Low, effort.Medium, effort.High}, SupportedThinkingLevels("anthropic", "claude-haiku-4-5"))
+}

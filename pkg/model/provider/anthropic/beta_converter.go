@@ -27,6 +27,7 @@ func (c *Client) convertBetaMessages(ctx context.Context, messages []chat.Messag
 }
 
 func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages []chat.Message, requestTools []tools.Tool) ([]anthropic.BetaMessageParam, error) {
+	dropReasoning := c.dropPriorThinking()
 	var betaMessages []anthropic.BetaMessageParam
 	deferredByCallID := deferredToolNamesByCallID(requestTools)
 
@@ -69,7 +70,7 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 			continue
 		}
 		if msg.Role == chat.MessageRoleAssistant {
-			if blocks, ok, err := betaReplayContent(msg); err != nil {
+			if blocks, ok, err := betaReplayContent(msg, dropReasoning); err != nil {
 				return nil, err
 			} else if ok {
 				betaMessages = append(betaMessages, anthropic.BetaMessageParam{Role: anthropic.BetaMessageParamRoleAssistant, Content: blocks})
@@ -79,7 +80,7 @@ func (c *Client) convertBetaMessagesWithDeferred(ctx context.Context, messages [
 
 			// With interleaved thinking, we can include thinking blocks anywhere
 			// If we have thinking content, include it first (conventional order)
-			if msg.ProviderState == nil && msg.ThinkingSignature != "" {
+			if !dropReasoning && msg.ProviderState == nil && msg.ThinkingSignature != "" {
 				contentBlocks = append(contentBlocks,
 					anthropic.NewBetaThinkingBlock(msg.ThinkingSignature, msg.ReasoningContent))
 			}

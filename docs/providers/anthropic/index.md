@@ -137,6 +137,28 @@ models:
 
 On models that reject token-based thinking (Opus 4.6+, Sonnet 5, Fable and Mythos), an integer budget is automatically coerced to `adaptive` with a logged warning. See the [Thinking / Reasoning guide](../../guides/thinking/index.md) for the full cross-provider reference.
 
+### Haiku 5.5
+
+Use `claude-haiku-5-5` on the Claude API or Vertex AI (the official Vertex ID
+is unsuffixed). Haiku 5.5 uses adaptive thinking, unlike Haiku 4.5's manual
+token budgets. It accepts `low`, `medium`, `high`, `xhigh`, and `max`.
+An unset `thinking_budget` keeps the server's **medium** effort default;
+explicit `adaptive` still means high. Positive numeric budgets migrate to
+adaptive medium with a warning: exact manual token ceilings cannot be retained.
+`none` or `0` sends `thinking: disabled`, including title-generation clones.
+
+Docker Agent omits `temperature`, `top_p`, and `top_k` even with thinking off,
+and requests `summarized` thinking by default. Set
+`provider_opts.thinking_display: omitted` for signature-only blocks; `display`
+is rejected. Requests must end in a user turn or tool result, not an assistant
+prefill. Server-side `provider_opts.fallbacks` is rejected for Haiku 5.5;
+Docker Agent's client-side routing and `first_available` are separate features.
+
+The new tokenizer uses approximately 30% more tokens for the same text than
+Haiku 4.5; this is not a universal accounting multiplier. Pricing comes from
+the catalog and cloud pricing remains an estimate, not a billing guarantee.
+See [the example](https://github.com/docker/docker-agent/blob/main/examples/anthropic-haiku-5-5.yaml).
+
 ## Interleaved Thinking
 
 Auto-enabled whenever a thinking budget is configured on a Claude model. Allows tool calls during model reasoning for more integrated problem-solving:
@@ -346,13 +368,20 @@ Docker Agent preserves the original ordered assistant content blocks, including
 multiple thinking blocks, omitted thinking, redacted thinking and their signatures.
 A hook or user edit invalidates raw replay so stale content cannot override it.
 
-On Fable 5.1/Mythos 5.1, Docker Agent defaults to
+On Fable 5.1/Mythos 5.1 and Haiku 5.5, Docker Agent defaults to
 `thinking.block_binding.prefix_mismatch_behavior: drop_block`: when earlier
 history changes, the API drops invalidated thinking instead of rejecting the
 request. Dropped blocks are reported in logs. To enforce append-only history
 strictly, set `provider_opts.thinking_prefix_mismatch: error`. You can explicitly
 select `drop_block` on other supported Claude models too. Both modes attach
 `thinking-binding-controls-2026-08-01`; neither repairs corrupted signatures.
+
+For Haiku 5.5, binding controls apply only to adaptive thinking. With thinking
+disabled, outgoing requests omit prior thinking and redacted-thinking blocks,
+without editing saved history or text/tool/result order. Re-enabling thinking
+restores normal replay with `drop_block` protection. Keep a session on the
+account that produced its reasoning: thinking replay is account-bound.
+Vertex requests combine every beta name into one comma-separated header value.
 
 ## Strict Tool Arguments
 

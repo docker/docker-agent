@@ -2,15 +2,26 @@ package anthropic
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
 func validateThinkingOptions(cfg *latest.ModelConfig) error {
+	fallbacks, _ := providerutil.GetProviderOptStringSlice(cfg.ProviderOpts, "fallbacks")
+	if len(fallbacks) > 0 {
+		for _, model := range append([]string{cfg.Model}, fallbacks...) {
+			if modelinfo.IsClaudeHaiku55(model) {
+				return fmt.Errorf("anthropic: model %q does not support server-side fallbacks; use docker-agent client-side routing or first_available instead", model)
+			}
+		}
+	}
+
 	if err := validateThinkingDisplay(cfg); err != nil {
 		return err
 	}
@@ -37,6 +48,9 @@ func (c *Client) thinkingBindingBehavior() string {
 }
 
 func (c *Client) applyThinkingBinding(params *anthropic.BetaMessageNewParams) {
+	if modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) && params.Thinking.OfAdaptive == nil {
+		return
+	}
 	behavior := c.thinkingBindingBehavior()
 	if behavior == "" {
 		return
@@ -45,7 +59,7 @@ func (c *Client) applyThinkingBinding(params *anthropic.BetaMessageNewParams) {
 	switch {
 	case params.Thinking.OfAdaptive != nil:
 		params.Thinking.OfAdaptive.BlockBinding = binding
-	case params.Thinking.OfEnabled != nil:
+	case params.Thinking.OfEnabled != nil && !modelinfo.IsClaudeHaiku55(c.ModelConfig.Model):
 		params.Thinking.OfEnabled.BlockBinding = binding
 	default:
 		// Older models may have thinking omitted while a fallback checks prefixes.
@@ -62,4 +76,11 @@ func thinkingTransformations(entries []anthropic.BetaInputTransformationUnion) [
 		}
 	}
 	return result
+}
+
+func (c *Client) validateLastRole(role string) error {
+	if modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) && role == "assistant" {
+		return errors.New("anthropic: Claude Haiku 5.5 rejects assistant prefill; end the request with a user turn or a tool_result")
+	}
+	return nil
 }

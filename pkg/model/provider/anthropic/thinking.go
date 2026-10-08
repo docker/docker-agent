@@ -149,6 +149,9 @@ func validThinkingTokens(tokens, maxTokens int64) (int64, bool) {
 // downstream code keeps treating them as "thinking off".
 func (c *Client) resolveThinkingBudget() *latest.ThinkingBudget {
 	budget := c.ModelConfig.ThinkingBudget
+	if modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) && c.ModelOptions.NoThinking() {
+		return &latest.ThinkingBudget{Effort: "none"}
+	}
 	if budget == nil {
 		if checksThinkingPrefix(c.ModelConfig.Model) || c.progressUpdatesEnabled() {
 			return &latest.ThinkingBudget{Effort: "adaptive"}
@@ -182,10 +185,19 @@ func (c *Client) resolveThinkingBudget() *latest.ThinkingBudget {
 	if budget.Tokens <= 0 || (!modelinfo.RejectsTokenThinking(c.ModelConfig.Model) && !usesDefaultThinking(c.ModelConfig.Model)) {
 		return budget
 	}
-	slog.Warn("Anthropic: model rejects token-based thinking budgets; switching to adaptive thinking",
-		"model", c.ModelConfig.Model,
-		"thinking_budget_tokens", budget.Tokens)
+	if modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) {
+		slog.Warn("Anthropic: exact thinking token ceilings cannot be retained; using adaptive medium", "model", c.ModelConfig.Model)
+		return &latest.ThinkingBudget{Effort: "adaptive/medium"}
+	}
+	slog.Warn("Anthropic: model rejects token-based thinking budgets; switching to adaptive thinking", "model", c.ModelConfig.Model, "thinking_budget_tokens", budget.Tokens)
 	return &latest.ThinkingBudget{Effort: "adaptive"}
+}
+
+func (c *Client) dropPriorThinking() bool {
+	if !modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) {
+		return false
+	}
+	return c.ModelOptions.NoThinking() || c.ModelConfig.ThinkingBudget.IsDisabled()
 }
 
 // effortBudgetTokens maps an effort-based or adaptive ThinkingBudget onto a
