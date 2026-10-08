@@ -27,7 +27,7 @@ func (f haikuTransport) RoundTrip(r *http.Request) (*http.Response, error) { ret
 func TestHaiku55FactoryAndCloneDisabledWire(t *testing.T) {
 	t.Parallel()
 	for _, host := range []string{"anthropic", "custom", "google", "amazon-bedrock"} {
-		for _, mode := range []string{"zero", "none", "inherited", "NoThinking", "clone"} {
+		for _, mode := range []string{"zero", "none", "inherited", "NoThinking", "clone", "env-zero", "env-none", "env-inherited-zero", "env-inherited"} {
 			t.Run(host+"/"+mode, func(t *testing.T) {
 				t.Parallel()
 				cfg := &latest.ModelConfig{Provider: host, Model: "claude-haiku-5-5", Temperature: new(0.2), TopP: new(0.8), ProviderOpts: map[string]any{"top_k": 5}}
@@ -42,11 +42,20 @@ func TestHaiku55FactoryAndCloneDisabledWire(t *testing.T) {
 					cfg.Model = "global.anthropic.claude-haiku-5-5"
 					cfg.ProviderOpts["region"] = "us-east-1"
 				}
-				switch mode {
+				modelID := cfg.Model
+				if strings.HasPrefix(mode, "env-") {
+					cfg.Model = "${env.HAIKU_MODEL}"
+				}
+				switch strings.TrimPrefix(mode, "env-") {
 				case "zero":
 					cfg.ThinkingBudget = &latest.ThinkingBudget{}
 				case "none":
 					cfg.ThinkingBudget = &latest.ThinkingBudget{Effort: "none"}
+				case "inherited-zero":
+					custom["custom"] = latest.ProviderConfig{Provider: "anthropic", ThinkingBudget: &latest.ThinkingBudget{}}
+					if host != "custom" {
+						cfg.ThinkingBudget = &latest.ThinkingBudget{}
+					}
 				case "inherited":
 					custom["custom"] = latest.ProviderConfig{Provider: "anthropic", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}}
 					if host != "custom" {
@@ -86,7 +95,7 @@ func TestHaiku55FactoryAndCloneDisabledWire(t *testing.T) {
 				registry.factories["google"] = func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
 					return vertexai.NewClientWithTokenSource(ctx, cfg, env, func(context.Context) (string, error) { return "test-token", nil }, opts...)
 				}
-				p, err := registry.New(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "test", "AWS_BEARER_TOKEN_BEDROCK": "test"}), opts...)
+				p, err := registry.New(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "test", "AWS_BEARER_TOKEN_BEDROCK": "test", "HAIKU_MODEL": modelID}), opts...)
 				require.NoError(t, err)
 				if mode == "clone" {
 					original := p
@@ -103,7 +112,8 @@ func TestHaiku55FactoryAndCloneDisabledWire(t *testing.T) {
 				require.Len(t, requests, 1)
 				body := requests[0]
 				if host == "amazon-bedrock" {
-					fields := body["additionalModelRequestFields"].(map[string]any)
+					fields, ok := body["additionalModelRequestFields"].(map[string]any)
+					require.True(t, ok, "additional fields missing")
 					assert.Equal(t, map[string]any{"type": "disabled"}, fields["thinking"])
 					assert.NotContains(t, fields, "top_k")
 					assert.NotContains(t, fields, "output_config")
@@ -122,6 +132,53 @@ func TestHaiku55FactoryAndCloneDisabledWire(t *testing.T) {
 				customAfter, err := json.Marshal(custom)
 				require.NoError(t, err)
 				assert.Equal(t, customBefore, customAfter)
+			})
+		}
+	}
+}
+
+func TestHaiku55InheritedBudgetPrecedence(t *testing.T) {
+	t.Parallel()
+	for _, model := range []string{"claude-haiku-5-5", "${env.HAIKU_MODEL}"} {
+		for _, tc := range []struct {
+			modelEffort, providerEffort string
+			clone                       bool
+			off                         bool
+		}{
+			{"medium", "none", false, false},
+			{"none", "medium", false, true},
+			{"medium", "medium", true, true},
+		} {
+			t.Run(model+"/"+tc.modelEffort+"/"+tc.providerEffort+map[bool]string{true: "/clone"}[tc.clone], func(t *testing.T) {
+				t.Parallel()
+				cfg := &latest.ModelConfig{Provider: "custom", Model: model, ThinkingBudget: &latest.ThinkingBudget{Effort: tc.modelEffort}}
+				providers := map[string]latest.ProviderConfig{"custom": {Provider: "anthropic", ThinkingBudget: &latest.ThinkingBudget{Effort: tc.providerEffort}}}
+				var got map[string]any
+				capture := options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+					return haikuTransport(func(req *http.Request) (*http.Response, error) {
+						require.NoError(t, json.NewDecoder(req.Body).Decode(&got))
+						return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"invalid_request_error","message":"capture"}}`)), Request: req}, nil
+					})
+				})
+				p, err := fullTestRegistry().New(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "test", "HAIKU_MODEL": "claude-haiku-5-5"}), options.WithProviders(providers), capture)
+				require.NoError(t, err)
+				if tc.clone {
+					p = CloneWithOptions(t.Context(), p, options.WithNoThinking())
+				}
+				stream, err := p.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "test"}}, nil)
+				require.NoError(t, err)
+				_, err = stream.Recv()
+				stream.Close()
+				require.Error(t, err)
+				if tc.off {
+					assert.Equal(t, map[string]any{"type": "disabled"}, got["thinking"])
+					assert.NotContains(t, got, "output_config")
+				} else {
+					assert.Equal(t, "adaptive", got["thinking"].(map[string]any)["type"])
+					assert.Equal(t, "medium", got["output_config"].(map[string]any)["effort"])
+				}
+				assert.Equal(t, tc.modelEffort, cfg.ThinkingBudget.Effort)
+				assert.Equal(t, tc.providerEffort, providers["custom"].ThinkingBudget.Effort)
 			})
 		}
 	}

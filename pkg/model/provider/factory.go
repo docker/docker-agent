@@ -77,10 +77,21 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 		return nil, errors.New("provider registry is required")
 	}
 	globalOptions := options.Apply(opts...)
+	disabled := cfg.ThinkingBudget
+	if disabled == nil {
+		disabled = globalOptions.Providers()[cfg.Provider].ThinkingBudget
+	}
+	if disabled.IsDisabled() {
+		captured := *disabled
+		disabled = &captured
+	} else {
+		disabled = nil
+	}
 	enhancedCfg := applyProviderDefaults(cfg, globalOptions.Providers())
 	if err := expandModelConfigEnv(ctx, enhancedCfg, env); err != nil {
 		return nil, err
 	}
+	finalizeDisabledThinking(enhancedCfg, disabled)
 	// Resolve genuine-OpenAI-vendor identity now that custom providers and
 	// aliases are fully applied, and thread it to the leaf factory as trusted
 	// internal state rather than a ProviderOpts key: provider_opts is public,

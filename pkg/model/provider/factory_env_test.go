@@ -101,3 +101,34 @@ func TestCreateDirectProvider_PlainModelUnchanged(t *testing.T) {
 	assert.Equal(t, "gpt-4o", got.Model)
 	assert.Equal(t, "https://api.openai.com/v1", got.BaseURL)
 }
+
+func TestCreateDirectProvider_ExpandedDisabledThinking(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		provider, model string
+		preserve        bool
+	}{
+		{"anthropic", "claude-haiku-5-5", true},
+		{"anthropic", "claude-haiku-4-5", false},
+		{"openai", "gpt-5.6-sol", true},
+		{"openai", "claude-haiku-5-5", false},
+		{"vercel", "anthropic/claude-haiku-5-5", false},
+	} {
+		t.Run(tc.provider+"/"+tc.model, func(t *testing.T) {
+			t.Parallel()
+			var got *latest.ModelConfig
+			r := NewRegistry(map[string]providerFactory{tc.provider: captureFactory(&got), "openai": captureFactory(&got)})
+			cfg := &latest.ModelConfig{Provider: tc.provider, Model: "${env.MODEL}", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}}
+			_, err := r.New(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"MODEL": tc.model}))
+			require.NoError(t, err)
+			if tc.preserve {
+				require.NotNil(t, got.ThinkingBudget)
+				assert.Equal(t, "none", got.ThinkingBudget.Effort)
+			} else {
+				assert.Nil(t, got.ThinkingBudget)
+			}
+			assert.Equal(t, "${env.MODEL}", cfg.Model)
+			assert.Equal(t, "none", cfg.ThinkingBudget.Effort)
+		})
+	}
+}
