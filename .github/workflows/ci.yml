@@ -516,6 +516,24 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
           jq -e '[.[] | .result] | all(. == "success" or . == "skipped")' <<< "$RESULTS" >/dev/null
 
+  # PR-only timing experiment; the required gate stays on ubuntu-latest.
+  gate-slim:
+    if: always() && github.event_name == 'pull_request'
+    needs: [ changes, lint, test-linux, test-windows, cross-compile, licenses, image ]
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - name: Check results
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          {
+            echo "| job | result |"
+            echo "|---|---|"
+            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<< "$RESULTS"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -e '[.[] | .result] | all(. == "success" or . == "skipped")' <<< "$RESULTS" >/dev/null
+
   # Moves tags onto the digests pushed by `image` once the gate is green. On
   # main only edge moves; on a v* tag the version tag and the floating latest
   # tag that sandboxes pull by default.
