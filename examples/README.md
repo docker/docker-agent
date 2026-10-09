@@ -206,6 +206,7 @@ remote MCP endpoints.
 | [`env_placeholders.yaml`](env_placeholders.yaml) | `${env.VAR}` substitution inside the YAML. |
 | [`model_env_substitution.yaml`](model_env_substitution.yaml) | `${env.VAR}` substitution in a model's `model` / `base_url`. |
 | [`nebius.yaml`](nebius.yaml) | Nebius cloud provider. |
+| [`atlascloud.yaml`](atlascloud.yaml) | Atlas Cloud open-model host (`atlascloud`). |
 | [`baseten.yaml`](baseten.yaml) | Baseten cloud provider. |
 | [`daoxe.yaml`](daoxe.yaml) | DaoXE multi-model gateway provider. |
 | [`ovhcloud.yaml`](ovhcloud.yaml) | OVHcloud AI Endpoints provider. |

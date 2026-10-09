@@ -75,6 +75,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "openrouter",
 		},
 		{
+			name: "atlascloud api key present",
+			envVars: map[string]string{
+				"ATLASCLOUD_API_KEY": "test-key",
+			},
+			expectedProvider: "atlascloud",
+		},
+		{
 			name: "baseten api key present",
 			envVars: map[string]string{
 				"BASETEN_API_KEY": "test-key",
@@ -494,7 +501,7 @@ func TestDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Test that DefaultModels map has all expected providers
-	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "openrouter", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "amazon-bedrock", "opencode", "opencode-go", "github-copilot"}
+	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "openrouter", "atlascloud", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "amazon-bedrock", "opencode", "opencode-go", "github-copilot"}
 
 	for _, provider := range expectedProviders {
 		t.Run(provider, func(t *testing.T) {
@@ -512,6 +519,7 @@ func TestDefaultModels(t *testing.T) {
 	assert.Equal(t, "ai/qwen3:latest", DefaultModels["dmr"])
 	assert.Equal(t, "mistral-small-latest", DefaultModels["mistral"])
 	assert.Equal(t, "meta-llama/llama-4-maverick", DefaultModels["openrouter"])
+	assert.Equal(t, "qwen/qwen3.8-max", DefaultModels["atlascloud"])
 	assert.Equal(t, "deepseek-ai/DeepSeek-V4-Pro", DefaultModels["baseten"])
 	assert.Equal(t, "Qwen3.5-397B-A17B", DefaultModels["ovhcloud"])
 	assert.Equal(t, "llama-3.3-70b-versatile", DefaultModels["groq"])
@@ -531,7 +539,7 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Verify that AutoModelConfig always returns a model from DefaultModels
-	providers := []string{"openai", "anthropic", "google", "mistral", "openrouter", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "opencode", "github-copilot"}
+	providers := []string{"openai", "anthropic", "google", "mistral", "openrouter", "atlascloud", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "opencode", "github-copilot"}
 
 	for _, provider := range providers {
 		t.Run(provider, func(t *testing.T) {
@@ -553,6 +561,8 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 				envVars["MISTRAL_API_KEY"] = "test-key"
 			case "openrouter":
 				envVars["OPENROUTER_API_KEY"] = "test-key"
+			case "atlascloud":
+				envVars["ATLASCLOUD_API_KEY"] = "test-key"
 			case "baseten":
 				envVars["BASETEN_API_KEY"] = "test-key"
 			case "ovhcloud":
@@ -1147,6 +1157,7 @@ func TestProviderAPIKeyEnvVars(t *testing.T) {
 		"GOOGLE_API_KEY",
 		"MISTRAL_API_KEY",
 		"OPENROUTER_API_KEY",
+		"ATLASCLOUD_API_KEY",
 		"XAI_API_KEY",
 		"NEBIUS_API_KEY",
 	} {
@@ -1199,7 +1210,7 @@ func TestCloudProviderEnvVars(t *testing.T) {
 	assert.Equal(t, []string{"GITHUB_TOKEN", "GH_TOKEN"}, providers[copilotIdx].EnvVars)
 }
 
-// Defaults must resolve through the production lookup against the committed snapshot.
+// Catalogued defaults must resolve through the production lookup against the committed snapshot.
 func TestDefaultModelsExistInModelsDev(t *testing.T) {
 	t.Parallel()
 	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
@@ -1208,8 +1219,8 @@ func TestDefaultModelsExistInModelsDev(t *testing.T) {
 			t.Parallel()
 			require.True(t, provider.IsKnownProvider(providerID))
 			require.Equal(t, providerID, modelsdev.CanonicalProviderID(providerID))
-			if providerID == "dmr" {
-				return // Local models are not catalogued.
+			if modelsDevAbsentProviders[providerID] {
+				return // Providers with their own catalogs cannot be validated against models.dev.
 			}
 			if providerID == "chatgpt" {
 				// ChatGPT is distinct; only its model names are validated against OpenAI.

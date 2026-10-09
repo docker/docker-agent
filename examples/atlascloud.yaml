@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  atlascloud_model:
+    provider: atlascloud
+    model: qwen/qwen3.8-max
+
+agents:
+  root:
+    model: atlascloud_model
+    description: Assistant using Atlas Cloud
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think
