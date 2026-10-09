@@ -402,3 +402,37 @@ func TestApplyProviderDefaults_InheritsAuthFromProviderConfig(t *testing.T) {
 		assert.Equal(t, "fdrl_model", res.Auth.Federation.FederationRuleID)
 	})
 }
+
+func TestHaiku55DisabledDefaults(t *testing.T) {
+	t.Parallel()
+	for _, budget := range []*latest.ThinkingBudget{{Tokens: 0}, {Effort: "none"}} {
+		for _, tc := range []struct {
+			provider, model string
+			opts            map[string]any
+			custom          map[string]latest.ProviderConfig
+			preserve        bool
+		}{
+			{provider: "anthropic", model: "claude-haiku-5-5", preserve: true},
+			{provider: "amazon-bedrock", model: "global.anthropic.claude-haiku-5-5", preserve: true},
+			{provider: "google", model: "claude-haiku-5-5", opts: map[string]any{"publisher": "anthropic"}, preserve: true},
+			{provider: "custom", model: "claude-haiku-5-5", custom: map[string]latest.ProviderConfig{"custom": {Provider: "anthropic", ThinkingBudget: budget}}, preserve: true},
+			{provider: "vercel", model: "anthropic/claude-haiku-5-5"},
+			{provider: "openai", model: "claude-haiku-5-5"},
+			{provider: "anthropic", model: "claude-haiku-4-5"},
+			{provider: "anthropic", model: "claude-sonnet-5"},
+		} {
+			cfg := &latest.ModelConfig{Provider: tc.provider, Model: tc.model, ProviderOpts: tc.opts, ThinkingBudget: budget}
+			before := *cfg
+			beforeBudget := *budget
+			got := applyProviderDefaults(cfg, tc.custom)
+			if tc.preserve {
+				require.NotNil(t, got.ThinkingBudget)
+				assert.Equal(t, "none", got.ThinkingBudget.Effort)
+			} else {
+				assert.Nil(t, got.ThinkingBudget)
+			}
+			assert.Equal(t, before, *cfg)
+			assert.Equal(t, beforeBudget, *budget)
+		}
+	}
+}

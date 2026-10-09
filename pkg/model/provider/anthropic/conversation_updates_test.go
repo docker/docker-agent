@@ -1026,7 +1026,7 @@ func TestWithRequestContext(t *testing.T) {
 	assert.Equal(t, ctx, fromNil.RequestContext)
 	msg := chat.Message{Role: chat.MessageRoleAssistant, Content: "x"}
 	msg.AttachProviderState(fromNil)
-	params, ok, err := betaReplayContent(&msg)
+	params, ok, err := betaReplayContent(&msg, false)
 	require.NoError(t, err)
 	assert.False(t, ok, "a content-less state falls back to the flattened fields")
 	assert.Nil(t, params)

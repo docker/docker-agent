@@ -1475,3 +1475,80 @@ func TestConvertMessages_ToolResultWithCaching(t *testing.T) {
 	_, isCachePoint = secondLastContent.(*types.ContentBlockMemberCachePoint)
 	assert.True(t, isCachePoint, "assistant tool call message should have cache point")
 }
+
+func TestHaiku55ConversePolicy(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		budget *latest.ThinkingBudget
+		effort string
+		off    bool
+	}{
+		{name: "default"},
+		{name: "tokens", budget: &latest.ThinkingBudget{Tokens: 16000}, effort: "medium"},
+		{name: "zero", budget: &latest.ThinkingBudget{}, off: true},
+		{name: "none", budget: &latest.ThinkingBudget{Effort: "none"}, off: true},
+		{name: "low", budget: &latest.ThinkingBudget{Effort: "low"}, effort: "low"},
+		{name: "medium", budget: &latest.ThinkingBudget{Effort: "medium"}, effort: "medium"},
+		{name: "high", budget: &latest.ThinkingBudget{Effort: "high"}, effort: "high"},
+		{name: "xhigh", budget: &latest.ThinkingBudget{Effort: "xhigh"}, effort: "xhigh"},
+		{name: "max", budget: &latest.ThinkingBudget{Effort: "max"}, effort: "max"},
+		{name: "adaptive", budget: &latest.ThinkingBudget{Effort: "adaptive"}, effort: "high"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := bedrockThinkingClient("global.anthropic.claude-haiku-5-5", tc.budget)
+			c.ModelConfig.Temperature = new(0.2)
+			c.ModelConfig.TopP = new(0.8)
+			c.ModelConfig.ProviderOpts = map[string]any{"top_k": 5}
+			before, _ := json.Marshal(c.ModelConfig)
+			inf := c.buildInferenceConfig(c.isThinkingEnabled())
+			assert.Nil(t, inf.Temperature)
+			assert.Nil(t, inf.TopP)
+			doc := c.buildAdditionalModelRequestFields()
+			if tc.budget == nil {
+				assert.Nil(t, doc)
+			} else {
+				fields := decodeRequestFields(t, doc)
+				assert.NotContains(t, fields, "top_k")
+				assert.NotContains(t, fields, "anthropic_beta")
+				if tc.off {
+					assert.Equal(t, map[string]any{"type": "disabled"}, fields["thinking"])
+					assert.NotContains(t, fields, "output_config")
+				} else {
+					assert.Equal(t, map[string]any{"type": "adaptive"}, fields["thinking"])
+					assert.Equal(t, map[string]any{"effort": tc.effort}, fields["output_config"])
+				}
+			}
+			after, _ := json.Marshal(c.ModelConfig)
+			assert.Equal(t, before, after)
+		})
+	}
+	c := bedrockThinkingClient("global.anthropic.claude-haiku-5-5", &latest.ThinkingBudget{Effort: "max"})
+	c.ModelOptions = options.Apply(options.WithNoThinking())
+	assert.Equal(t, map[string]any{"thinking": map[string]any{"type": "disabled"}}, decodeRequestFields(t, c.buildAdditionalModelRequestFields()))
+	assert.False(t, c.isThinkingEnabled())
+}
+
+func TestHaiku55ConverseOmitsPriorReasoning(t *testing.T) {
+	t.Parallel()
+	for _, reasoning := range []string{"", "prior hidden reasoning"} {
+		messages := []chat.Message{
+			{Role: chat.MessageRoleUser, Content: "start"},
+			{Role: chat.MessageRoleAssistant, Content: "text", ReasoningContent: reasoning, ThinkingSignature: "signature-or-redacted", ToolCalls: []tools.ToolCall{{ID: "call", Function: tools.FunctionCall{Name: "read_file", Arguments: `{"path":"a"}`}}}},
+			{Role: chat.MessageRoleTool, ToolCallID: "call", Content: "result"},
+		}
+		before, _ := json.Marshal(messages)
+		got, _ := convertMessages(t.Context(), messages, modelsdev.NewID("amazon-bedrock", "global.anthropic.claude-haiku-5-5"), nil, nil, false)
+		legacy, _ := convertMessages(t.Context(), messages, modelsdev.NewID("amazon-bedrock", "anthropic.claude-haiku-4-5-20251001-v1:0"), nil, nil, false)
+		require.Len(t, got, 3)
+		require.Len(t, got[1].Content, 2)
+		require.Len(t, legacy[1].Content, 3)
+		assert.Equal(t, legacy[1].Content[1:], got[1].Content)
+		assert.Equal(t, legacy[2], got[2])
+		assert.Equal(t, "call", *got[1].Content[1].(*types.ContentBlockMemberToolUse).Value.ToolUseId)
+		assert.Equal(t, "call", *got[2].Content[0].(*types.ContentBlockMemberToolResult).Value.ToolUseId)
+		after, _ := json.Marshal(messages)
+		assert.Equal(t, before, after)
+	}
+}

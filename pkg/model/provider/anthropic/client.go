@@ -284,6 +284,10 @@ func (c *Client) CreateChatCompletionStream(
 	if len(converted) == 0 {
 		return nil, errors.New("no messages to send after conversion: all messages were filtered out")
 	}
+	if err := c.validateLastRole(string(converted[len(converted)-1].Role)); err != nil {
+		return nil, err
+	}
+
 	sys := extractSystemBlocks(messages)
 
 	params := anthropic.MessageNewParams{
@@ -381,6 +385,7 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) (
 }
 
 func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []chat.Message, requestTools []tools.Tool) ([]anthropic.MessageParam, error) {
+	dropReasoning := c.dropPriorThinking()
 	deferredByCallID := deferredToolNamesByCallID(requestTools)
 	var anthropicMessages []anthropic.MessageParam
 	// Track whether the last appended assistant message included tool_use blocks
@@ -409,7 +414,7 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 			continue
 		}
 		if msg.Role == chat.MessageRoleAssistant {
-			if blocks, ok, err := replayContent(msg); err != nil {
+			if blocks, ok, err := replayContent(msg, dropReasoning); err != nil {
 				return nil, err
 			} else if ok {
 				anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(blocks...))
@@ -419,7 +424,7 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 			contentBlocks := make([]anthropic.ContentBlockParamUnion, 0)
 
 			// Include thinking blocks when present to preserve extended thinking context
-			if msg.ProviderState == nil && msg.ThinkingSignature != "" {
+			if !dropReasoning && msg.ProviderState == nil && msg.ThinkingSignature != "" {
 				contentBlocks = append(contentBlocks, anthropic.NewThinkingBlock(msg.ThinkingSignature, msg.ReasoningContent))
 			}
 

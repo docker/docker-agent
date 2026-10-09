@@ -1,0 +1,11 @@
+models:
+  haiku:
+    provider: anthropic
+    model: claude-haiku-5-5
+    thinking_budget: medium
+
+agents:
+  root:
+    model: haiku
+    description: A general-purpose assistant using Haiku 5.5
+    instruction: Help the user with concise, accurate answers.

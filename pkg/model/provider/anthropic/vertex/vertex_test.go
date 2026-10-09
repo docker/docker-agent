@@ -189,3 +189,23 @@ func TestRejectClaudeAPIOnlyFeatures(t *testing.T) {
 		})
 	}
 }
+
+func TestHaiku55BetaHeaderBoundary(t *testing.T) {
+	t.Parallel()
+	var got []*http.Request
+	source := func(context.Context) (string, error) { return "test-token", nil }
+	cfg := &latest.ModelConfig{Provider: "anthropic", Model: "claude-haiku-5-5"}
+	client, err := NewClientWithTokenSource(t.Context(), cfg, environment.NewMapEnvProvider(nil), "project", "global", source, recordingWrapper(&got))
+	require.NoError(t, err)
+	stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, nil)
+	drain(t, stream, err)
+	require.Len(t, got, 1)
+	values := got[0].Header.Values("anthropic-beta")
+	require.Len(t, values, 1)
+	for _, name := range []string{"interleaved-thinking-2025-05-14", "fine-grained-tool-streaming-2025-05-14", "thinking-binding-controls-2026-08-01"} {
+		assert.Contains(t, strings.Split(values[0], ","), name)
+	}
+	assert.Equal(t, "/v1/projects/project/locations/global/publishers/anthropic/models/claude-haiku-5-5:streamRawPredict", got[0].URL.Path)
+	assert.Equal(t, "Bearer test-token", got[0].Header.Get("Authorization"))
+	assert.Empty(t, got[0].Header.Get("X-Api-Key"))
+}

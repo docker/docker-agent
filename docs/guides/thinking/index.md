@@ -122,6 +122,22 @@ models:
 >
 > Every string effort value on Anthropic is sent as adaptive thinking (`output_config.effort`), which only newer Claude models (Opus 4.6+, Sonnet 4.6) accept. For older models like Sonnet 4.5, use an integer token budget instead. Conversely, models that _only_ support adaptive thinking (Opus 4.6, 4.7, 4.8, Sonnet 4.6) automatically have token budgets coerced to `adaptive` (a warning is logged).
 
+### Haiku 5.5
+
+Haiku 5.5 on Anthropic, Vertex-hosted Anthropic, and Bedrock uses adaptive
+thinking with low/medium/high/xhigh/max effort. Unset configuration preserves
+the server's medium default; `adaptive` explicitly selects high. Numeric
+budgets migrate to adaptive medium (exact token ceilings cannot be preserved).
+Unlike Haiku 4.5, `none` and `0` are preserved as a real disabled wire setting
+across custom providers and clones. Sampling parameters are always omitted.
+
+Direct/Vertex requests use adaptive `drop_block` binding protection and omit
+prior reasoning only while thinking is disabled, leaving saved history intact.
+Bedrock Converse omits prior reasoning on **all** Haiku 5.5 requests, trading
+hidden-reasoning continuity for conservative replay compatibility. See the
+[Anthropic](../../providers/anthropic/index.md#haiku-55) and
+[Bedrock](../../providers/bedrock/index.md#haiku-55-on-converse) provider notes.
+
 ### Disabling thinking (Claude)
 
 ```yaml

@@ -1,6 +1,10 @@
 package anthropic
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/docker/docker-agent/pkg/modelinfo"
+)
 
 // claudeModel is the family and version parsed from a Claude model id.
 type claudeModel struct {
@@ -50,6 +54,9 @@ func leadingDigits(s string) (n, width int) {
 }
 
 func usesDefaultThinking(model string) bool {
+	if modelinfo.IsClaudeHaiku55(model) {
+		return true
+	}
 	m, ok := parseClaudeModel(model)
 	return ok && (m.atLeast("opus", 5, 0) || m.atLeast("sonnet", 5, 0) || m.family == "fable" || m.family == "mythos")
 }
@@ -60,11 +67,17 @@ func requiresThinking(model string) bool {
 }
 
 func checksThinkingPrefix(model string) bool {
+	if modelinfo.IsClaudeHaiku55(model) {
+		return true
+	}
 	m, ok := parseClaudeModel(model)
 	return ok && (m.atLeast("fable", 5, 1) || m.atLeast("mythos", 5, 1))
 }
 
 func rejectsSampling(model string) bool {
+	if modelinfo.IsClaudeHaiku55(model) {
+		return true
+	}
 	m, ok := parseClaudeModel(model)
 	return ok && (m.atLeast("opus", 4, 7) || m.atLeast("sonnet", 5, 0) || m.family == "fable" || m.family == "mythos")
 }

@@ -145,6 +145,24 @@ Docker Agent recognizes these models (including Bedrock-style IDs) and transpare
 >
 > Bedrock Claude suppresses `temperature` and `top_p` while extended thinking is active — Anthropic requires `temperature=1.0` internally.
 
+### Haiku 5.5 on Converse
+
+Use an entitled inference profile such as `global.anthropic.claude-haiku-5-5`.
+Docker Agent keeps the Converse/ConverseStream transport. Haiku 5.5 supports
+adaptive thinking with `low`, `medium`, `high`, `xhigh`, or `max`; an unset budget
+leaves the server's medium default unchanged. Positive numeric budgets migrate
+to adaptive medium with a warning, while explicit `adaptive` still means high.
+`none` or `0` sends `thinking: disabled`. Sampling parameters (`temperature`,
+`top_p`, `top_k`) are omitted regardless of thinking mode.
+
+**Continuity trade-off:** Haiku 5.5 outgoing Converse histories conservatively
+omit all prior reasoning (including signed-empty and redacted blocks), while
+preserving text, tools, and results without changing stored history. This
+reduces cross-turn hidden reasoning continuity. Converse binding-control beta
+support has not been verified; Docker Agent does not send it. CountTokens and
+structured output are not added for this model. Cloud costs are catalog-based
+estimates; confirm account, region, and profile availability with AWS.
+
 ## Interleaved Thinking (Claude on Bedrock)
 
 Interleaved thinking lets the model reason between tool calls, not just at the start. This is useful for complex agentic tasks. Enable it alongside a thinking budget:

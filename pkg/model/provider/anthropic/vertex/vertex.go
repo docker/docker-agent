@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	anthropicsdk "github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -100,6 +101,7 @@ func newClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		// must clear the stray X-Api-Key header that would otherwise leak a
 		// direct-API credential into Google's infrastructure.
 		sdkOptions := []option.RequestOption{
+			option.WithMiddleware(coalesceBetaHeaders),
 			sdkvertex.WithCredentials(ctx, location, project, creds),
 			option.WithAPIKey(""),
 		}
@@ -167,4 +169,23 @@ func bearerTokenMiddleware(source options.TokenSource) option.Middleware {
 		req.Header.Set("Authorization", "Bearer "+token)
 		return next(req)
 	}
+}
+
+// Vertex requires all beta names in a single header value.
+func coalesceBetaHeaders(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+	var names []string
+	seen := map[string]bool{}
+	for _, value := range req.Header.Values("anthropic-beta") {
+		for name := range strings.SplitSeq(value, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" && !seen[name] {
+				names = append(names, name)
+				seen[name] = true
+			}
+		}
+	}
+	if len(names) > 0 {
+		req.Header.Set("anthropic-beta", strings.Join(names, ","))
+	}
+	return next(req)
 }

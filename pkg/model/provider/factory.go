@@ -48,7 +48,7 @@ func (r *Registry) NewWithModels(ctx context.Context, cfg *latest.ModelConfig, m
 		if err != nil {
 			return nil, err
 		}
-		r.attachRebuilder(p, models, env)
+		r.attachRebuilder(p, models, env, "")
 		return p, nil
 	}
 	return r.createDirectProvider(ctx, cfg, env, opts...)
@@ -77,10 +77,21 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 		return nil, errors.New("provider registry is required")
 	}
 	globalOptions := options.Apply(opts...)
+	disabled := cfg.ThinkingBudget
+	if disabled == nil {
+		disabled = globalOptions.Providers()[cfg.Provider].ThinkingBudget
+	}
+	if disabled.IsDisabled() {
+		captured := *disabled
+		disabled = &captured
+	} else {
+		disabled = nil
+	}
 	enhancedCfg := applyProviderDefaults(cfg, globalOptions.Providers())
 	if err := expandModelConfigEnv(ctx, enhancedCfg, env); err != nil {
 		return nil, err
 	}
+	finalizeDisabledThinking(enhancedCfg, disabled)
 	// Resolve genuine-OpenAI-vendor identity now that custom providers and
 	// aliases are fully applied, and thread it to the leaf factory as trusted
 	// internal state rather than a ProviderOpts key: provider_opts is public,
@@ -109,7 +120,7 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	if err != nil {
 		return nil, err
 	}
-	r.attachRebuilder(p, nil, env)
+	r.attachRebuilder(p, nil, env, enhancedCfg.Provider)
 	// Wrap leaf providers with the GenAI semconv tracer so every chat
 	// completion emits a `chat {model}` CLIENT span and the standard
 	// gen_ai.client.* metrics. The rule-based router constructed by
@@ -118,7 +129,7 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	return instrumentProvider(p), nil
 }
 
-func (r *Registry) attachRebuilder(p Provider, models map[string]latest.ModelConfig, env environment.Provider) {
+func (r *Registry) attachRebuilder(p Provider, models map[string]latest.ModelConfig, env environment.Provider, dispatchProvider string) {
 	setter, ok := p.(interface {
 		SetProviderRebuilder(rebuild contracts.RebuildProviderFunc)
 	})
@@ -126,6 +137,12 @@ func (r *Registry) attachRebuilder(p Provider, models map[string]latest.ModelCon
 		return
 	}
 	setter.SetProviderRebuilder(func(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt) (contracts.Provider, error) {
+		// Model Garden rewrites Provider for catalog lookups, not dispatch.
+		if dispatchProvider != "" && cfg.Provider != dispatchProvider {
+			restored := cfg.Clone()
+			restored.Provider = dispatchProvider
+			cfg = restored
+		}
 		return r.NewWithModels(ctx, cfg, models, env, opts...)
 	})
 }

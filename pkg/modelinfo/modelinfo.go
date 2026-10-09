@@ -177,11 +177,33 @@ func isAdaptiveOnlyOpus(modelID string) bool {
 	return false
 }
 
+// IsClaudeHaiku55 recognizes Haiku 5.5 across Claude transports without
+// inferring capabilities for other Haiku versions.
+func IsClaudeHaiku55(modelID string) bool {
+	m := normalize(modelID)
+	m, _, _ = strings.Cut(m, "@")
+	if bare, ok := bedrockClaudeModelName(m); ok {
+		m = bare
+	}
+	for _, name := range []string{"claude-haiku-5-5", "claude-haiku-5.5"} {
+		if m == name {
+			return true
+		}
+		if suffix, ok := strings.CutPrefix(m, name+"-"); ok && len(suffix) == 8 {
+			_, width := leadingInt(suffix)
+			if width == 8 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // RejectsTokenThinking reports whether an Anthropic Claude model rejects
 // `thinking.type=enabled` (token-based extended thinking) and instead requires
 // `thinking.type=adaptive`.
 //
-// Applies to Claude Opus 4.6, 4.7, 4.8, 5, and their dated variants (e.g.
+// Applies to Haiku 5.5, Claude Opus 4.6, 4.7, 4.8, 5, and their dated variants (e.g.
 // claude-opus-4-7-20251101, claude-opus-5-20260724). Bedrock-style identifiers
 // such as "global.anthropic.claude-opus-5" are recognised too.
 // For these models the agent transparently switches a token-based budget to
@@ -189,7 +211,7 @@ func isAdaptiveOnlyOpus(modelID string) bool {
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func RejectsTokenThinking(modelID string) bool {
-	return isAdaptiveOnlyOpus(modelID)
+	return IsClaudeHaiku55(modelID) || isAdaptiveOnlyOpus(modelID)
 }
 
 // SupportsAdaptiveThinking reports whether an Anthropic Claude model accepts
@@ -201,7 +223,7 @@ func RejectsTokenThinking(modelID string) bool {
 // Claude 3.x) reject `thinking.type=adaptive`/`output_config.effort` with a 400
 // and must use token-based extended thinking (`thinking.type=enabled`) instead.
 //
-// Supported: Opus 4.6/4.7/4.8/5 (which additionally reject token budgets, see
+// Supported: Haiku 5.5, Opus 4.6/4.7/4.8/5 (which additionally reject token budgets, see
 // [RejectsTokenThinking]), Sonnet 4.6, the Claude 5 families (e.g. Sonnet 5,
 // Opus 5), and the codenamed frontier models (Fable, Mythos). Bedrock-style
 // identifiers such as "global.anthropic.claude-sonnet-4-6" are recognised too.
@@ -211,6 +233,9 @@ func RejectsTokenThinking(modelID string) bool {
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func SupportsAdaptiveThinking(modelID string) bool {
+	if IsClaudeHaiku55(modelID) {
+		return true
+	}
 	m := normalize(modelID)
 	if bare, ok := bedrockClaudeModelName(m); ok {
 		m = bare
@@ -219,7 +244,7 @@ func SupportsAdaptiveThinking(modelID string) bool {
 	if strings.Contains(m, "fable") || strings.Contains(m, "mythos") {
 		return true
 	}
-	// Only Opus and Sonnet gained adaptive thinking; Haiku, Claude 3.x, and
+	// Other Haiku models, Claude 3.x, and
 	// non-Claude models do not parse and fall through to false.
 	major, minor, ok := claudeOpusSonnetVersion(m)
 	if !ok {

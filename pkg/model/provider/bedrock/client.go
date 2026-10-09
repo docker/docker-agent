@@ -45,6 +45,9 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	}
 
 	globalOptions := options.Apply(opts...)
+	if modelinfo.IsClaudeHaiku55(cfg.Model) {
+		slog.WarnContext(ctx, "Bedrock Haiku 5.5 omits prior reasoning on outgoing requests; cross-turn hidden reasoning continuity is reduced")
+	}
 
 	// Check for bearer token
 	// Bearer token is optional: if not provided, falls back to standard AWS credential chain (SigV4).
@@ -230,7 +233,7 @@ func (c *Client) buildInferenceConfig(thinkingEnabled bool) *types.InferenceConf
 
 	// Temperature and TopP cannot be set when extended thinking is enabled
 	// (Claude requires temperature=1.0 which is the default when thinking is on)
-	if !thinkingEnabled {
+	if !thinkingEnabled && !modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) {
 		if c.ModelConfig.Temperature != nil {
 			cfg.Temperature = new(float32(*c.ModelConfig.Temperature))
 		}
@@ -266,14 +269,14 @@ func (c *Client) interleavedThinkingEnabled() bool {
 // It mirrors the validation in buildAdditionalModelRequestFields but without
 // side effects (no logging), so it can safely be used to gate inference config.
 func (c *Client) isThinkingEnabled() bool {
-	if c.ModelConfig.ThinkingBudget == nil {
+	if c.thinkingBudget() == nil {
 		return false
 	}
 	if _, ok := c.adaptiveThinkingEffort(); ok {
 		return true
 	}
-	tokens := c.ModelConfig.ThinkingBudget.Tokens
-	if t, ok := c.ModelConfig.ThinkingBudget.EffortTokens(); ok {
+	tokens := c.thinkingBudget().Tokens
+	if t, ok := c.thinkingBudget().EffortTokens(); ok {
 		tokens = t
 	}
 	if tokens < 1024 {
@@ -295,7 +298,7 @@ func (c *Client) isThinkingEnabled() bool {
 // It has no side effects so it can be shared by isThinkingEnabled and
 // buildAdditionalModelRequestFields.
 func (c *Client) adaptiveThinkingEffort() (string, bool) {
-	budget := c.ModelConfig.ThinkingBudget
+	budget := c.thinkingBudget()
 	if budget == nil || budget.IsDisabled() {
 		return "", false
 	}
@@ -310,6 +313,9 @@ func (c *Client) adaptiveThinkingEffort() (string, bool) {
 	}
 	if budget.Tokens > 0 {
 		// Coerced token budget: adaptive's default effort.
+		if modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) {
+			return "medium", true
+		}
 		return "high", true
 	}
 	return "", false
@@ -328,17 +334,19 @@ func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 	fields := map[string]any{}
 
 	// Forward top_k from provider_opts (Anthropic on Bedrock supports it)
-	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok {
+	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok && !modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) {
 		fields["top_k"] = topK
 		slog.Debug("Bedrock provider_opts: set top_k", "value", topK)
 	}
 
 	// Configure thinking budget if present and valid
-	if budget := c.ModelConfig.ThinkingBudget; budget != nil {
-		if effortStr, ok := c.adaptiveThinkingEffort(); ok {
+	if budget := c.thinkingBudget(); budget != nil {
+		if budget.IsDisabled() && modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) {
+			fields["thinking"] = map[string]any{"type": "disabled"}
+		} else if effortStr, ok := c.adaptiveThinkingEffort(); ok {
 			switch {
 			case budget.Tokens > 0:
-				slog.Warn("Bedrock: model rejects token-based thinking budgets; switching to adaptive thinking",
+				slog.Warn("Bedrock: exact thinking token ceilings cannot be retained; switching to adaptive thinking",
 					"model", c.ModelConfig.Model,
 					"thinking_budget_tokens", budget.Tokens,
 					"effort", effortStr)
@@ -415,4 +423,11 @@ func getProviderOpt[T any](opts map[string]any, key string) T {
 		return zero
 	}
 	return typed
+}
+
+func (c *Client) thinkingBudget() *latest.ThinkingBudget {
+	if modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) && c.ModelOptions.NoThinking() {
+		return &latest.ThinkingBudget{Effort: "none"}
+	}
+	return c.ModelConfig.ThinkingBudget
 }

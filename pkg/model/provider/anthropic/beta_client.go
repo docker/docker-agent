@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/rag/prompts"
 	"github.com/docker/docker-agent/pkg/rag/types"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -61,6 +62,10 @@ func (c *Client) createBetaStream(
 	}
 	if len(converted) == 0 {
 		return nil, errors.New("no messages to send after conversion: all messages were filtered out")
+	}
+
+	if err := c.validateLastRole(string(converted[len(converted)-1].Role)); err != nil {
+		return nil, err
 	}
 
 	sys, transient := c.betaSystemContext(messages)
@@ -276,6 +281,12 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		OutputConfig: anthropic.BetaOutputConfigParam{
 			Format: anthropic.BetaJSONSchemaOutputFormat(schema),
 		},
+	}
+
+	// Rerank has no prior assistant prefix; unset thinking keeps the server default.
+	if modelinfo.IsClaudeHaiku55(c.ModelConfig.Model) && (c.ModelConfig.ThinkingBudget != nil || c.ModelOptions.NoThinking()) {
+		params.MaxTokens = c.floorMaxTokensForNoThinking(maxTokens)
+		c.applyBetaThinkingConfig(&params, params.MaxTokens)
 	}
 
 	// Apply user-configured sampling settings if specified.

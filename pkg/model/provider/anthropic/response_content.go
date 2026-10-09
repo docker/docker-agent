@@ -46,7 +46,7 @@ func newProviderState[T interface{ RawJSON() string }](messageID string, blocks 
 // blocks that no longer describe the flattened message (see describes).
 // Callers then fall back to the flattened fields. A non-nil error means the
 // state is ours but malformed.
-func replayContent(msg *chat.Message) ([]anthropic.ContentBlockParamUnion, bool, error) {
+func replayContent(msg *chat.Message, dropReasoning bool) ([]anthropic.ContentBlockParamUnion, bool, error) {
 	state := msg.ReplayableProviderState(providerStateName)
 	if state == nil {
 		return nil, false, nil
@@ -64,7 +64,7 @@ func replayContent(msg *chat.Message) ([]anthropic.ContentBlockParamUnion, bool,
 	}
 	params := make([]anthropic.ContentBlockParamUnion, 0, len(blocks))
 	for i, b := range blocks {
-		if views[i].skip() {
+		if views[i].skip(dropReasoning) {
 			continue
 		}
 		if b.AsAny() == nil {
@@ -79,7 +79,7 @@ func replayContent(msg *chat.Message) ([]anthropic.ContentBlockParamUnion, bool,
 }
 
 // betaReplayContent is replayContent for the Beta Messages API.
-func betaReplayContent(msg *chat.Message) ([]anthropic.BetaContentBlockParamUnion, bool, error) {
+func betaReplayContent(msg *chat.Message, dropReasoning bool) ([]anthropic.BetaContentBlockParamUnion, bool, error) {
 	state := msg.ReplayableProviderState(providerStateName)
 	if state == nil {
 		return nil, false, nil
@@ -97,7 +97,7 @@ func betaReplayContent(msg *chat.Message) ([]anthropic.BetaContentBlockParamUnio
 	}
 	params := make([]anthropic.BetaContentBlockParamUnion, 0, len(blocks))
 	for i, b := range blocks {
-		if views[i].skip() {
+		if views[i].skip(dropReasoning) {
 			continue
 		}
 		if b.AsAny() == nil {
@@ -119,7 +119,10 @@ type rawBlock struct {
 
 // skip reports blocks the API rejects on replay: empty text blocks and
 // thinking blocks that never received a signature (truncated turn).
-func (b rawBlock) skip() bool {
+func (b rawBlock) skip(dropReasoning bool) bool {
+	if dropReasoning && (b.Type == "thinking" || b.Type == "redacted_thinking") {
+		return true
+	}
 	switch b.Type {
 	case "text":
 		return b.Text == ""
