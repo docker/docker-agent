@@ -30,8 +30,6 @@ var cops = []cop.Cop{
 	HookConfigSync,
 	HookBuiltinsRegistered,
 	HookBuiltinsDocumented,
-	rubocops.NewLintContextFirstParameter(cop.WithScope(outsideFrozenConfig)),
-	rubocops.NewLintNoContextField(cop.WithScope(outsideFrozenConfig)),
 	rubocops.NewLintHTTPRequestWithContext(cop.WithScope(outsideFrozenConfig)),
 	rubocops.NewLintNoFatalOutsideMain(),
 	rubocops.NewLintSlogContextual(),

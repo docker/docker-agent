@@ -199,13 +199,12 @@ type clientMCPGeneration struct {
 	servers      []*mcptools.Toolset
 	instructions string
 	cancel       context.CancelFunc
-	//rubocop:disable Lint/NoContextField // owns the generation independently of setup requests
-	ctx       context.Context //nolint:containedctx // owns the generation independently of setup requests
-	mu        sync.Mutex
-	retired   bool
-	calls     sync.WaitGroup
-	closeOnce sync.Once
-	closeErr  error
+	ctx          context.Context //nolint:containedctx // owns the generation independently of setup requests
+	mu           sync.Mutex
+	retired      bool
+	calls        sync.WaitGroup
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 func (g *clientMCPGeneration) acquire(ctx context.Context) (context.Context, func(), error) {

@@ -423,8 +423,6 @@ type model struct {
 }
 
 // New creates a new sidebar bound to the given session state.
-//
-//rubocop:disable Lint/ContextFirstParameter // Preserve the public constructor signature.
 func New(ar *animation.Runtime, ctx context.Context, sessionState *service.SessionState) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Session title"

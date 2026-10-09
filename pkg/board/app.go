@@ -32,7 +32,6 @@ type Project struct {
 type App struct {
 	// ctx is the board-lifetime context used by engine operations that
 	// outlive a single UI interaction (git commands, tmux attach).
-	//rubocop:disable Lint/NoContextField // board-lifetime context
 	ctx        context.Context //nolint:containedctx // board-lifetime context
 	store      *Store
 	sessions   sessionManager

@@ -62,7 +62,6 @@ type Span struct {
 	// metricCtx carries the active span context so the duration
 	// histogram measurement produces span-context exemplars (drill
 	// Mimir bucket → Tempo trace).
-	//rubocop:disable Lint/NoContextField // intentional: needed for OTel exemplar attribution at End time
 	metricCtx context.Context //nolint:containedctx // intentional: needed for OTel exemplar attribution at End time
 	startedAt time.Time
 	method    string

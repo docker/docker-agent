@@ -53,7 +53,6 @@ type controller struct {
 	// ctx is the board-lifetime context watchers derive from; they are
 	// started lazily (Start) after construction, so it is held here rather
 	// than passed.
-	//rubocop:disable Lint/NoContextField // base context for background watchers
 	ctx       context.Context //nolint:containedctx // base context for background watchers
 	store     *Store
 	sessions  sessionManager

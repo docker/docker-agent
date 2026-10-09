@@ -108,16 +108,16 @@ Key conventions:
 Reusable checks come from [rubocop-go](https://github.com/dgageot/rubocop-go/blob/202b67b66167808e75285d0666f880a2bd4b1144/docs/shared-cops.md)
 (pinned in `go.mod`); project-specific checks and frozen-config exclusions stay
 in `lint/`. Cop IDs and `//rubocop:disable` annotations are unchanged. Add shared checks by their
-constructors, not by enabling the entire upstream catalog. All 36 shared opt-in cops
-are currently selected.
+constructors, not by enabling the entire upstream catalog. 34 of the 36 shared
+opt-in cops are currently selected. `Lint/ContextFirstParameter` and
+`Lint/NoContextField` remain disabled: existing public constructor signatures and
+intentionally owned lifecycle or telemetry contexts would require suppressions or
+unrelated refactoring.
 
-`Lint/ContextFirstParameter`, `Lint/NoContextField`, and
-`Lint/HTTPRequestWithContext` enforce context-first operations, explicit context
-passing, and contextual HTTP request construction outside frozen config versions.
-They inspect production files only; matching is syntactic, so aliases and shadowing
-require care. Keep targeted, reasoned suppressions for public constructor signatures
-and intentionally owned lifecycle or telemetry contexts. `Lint/NoFatalOutsideMain`
-reserves `log.Fatal*` for package main; tests are exempt.
+`Lint/HTTPRequestWithContext` enforces contextual HTTP request construction outside
+frozen config versions. It inspects production files only; matching is syntactic,
+so aliases and shadowing require care. `Lint/NoFatalOutsideMain` reserves
+`log.Fatal*` for package main; tests are exempt.
 
 The following modernization cops inspect resolved production, internal/external
 tests, and test-only packages, excluding generated files and frozen configs:

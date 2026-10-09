@@ -36,7 +36,6 @@ type EmbeddingSpan struct {
 	provider  string
 	model     string
 	startedAt time.Time
-	//rubocop:disable Lint/NoContextField // intentional: needed for OTel exemplar attribution at End time
 	metricCtx context.Context //nolint:containedctx // intentional: needed for OTel exemplar attribution at End time
 
 	mu          sync.Mutex

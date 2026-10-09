@@ -318,7 +318,6 @@ type CacheSpan struct {
 	// produce span-context exemplars (drill Mimir bucket → Tempo
 	// trace). Without this the counter measurement gets only the
 	// resource attributes.
-	//rubocop:disable Lint/NoContextField // intentional: needed for OTel exemplar attribution at End time
 	metricCtx context.Context //nolint:containedctx // intentional: needed for OTel exemplar attribution at End time
 	backing   string
 	op        string

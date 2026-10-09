@@ -654,8 +654,6 @@ func effortCandidates(ctx context.Context, source effortLevelsSource) []commands
 // builtInSessionCommands) so that function stays free of any
 // effort-levels-source dependency. ctx is the long-lived TUI context, closed
 // over by the completer so it can re-resolve the model on every call.
-//
-//rubocop:disable Lint/ContextFirstParameter // Keep items-first ordering consistent with adjacent completion helpers.
 func attachEffortCompletion(items []commands.Item, ctx context.Context, source effortLevelsSource) {
 	for i := range items {
 		if items[i].ID != "session.effort" {

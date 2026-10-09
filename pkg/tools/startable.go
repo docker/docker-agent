@@ -286,9 +286,8 @@ type StartableToolSet struct {
 	// start a later caller deliberately performs. Lock order: mu may be
 	// held when taking stopRequestMu; stopRequestMu is never held while
 	// acquiring mu.
-	stopRequestMu sync.Mutex
-	stopRequested bool
-	//rubocop:disable Lint/NoContextField // carries the requester's values into a late stop; set iff stopRequested
+	stopRequestMu  sync.Mutex
+	stopRequested  bool
 	stopRequestCtx context.Context //nolint:containedctx // carries the requester's values into a late stop; set iff stopRequested
 
 	startStreak failureStreak // Start() failures

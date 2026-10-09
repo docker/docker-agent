@@ -88,7 +88,6 @@ type ChatSpan struct {
 	// trace-to-metric exemplar link. Using context.Background() here
 	// would silently strip the active span context and break
 	// drill-from-metric-bucket-to-trace navigation in Tempo/Mimir.
-	//rubocop:disable Lint/NoContextField // intentional: needed for OTel exemplar attribution at End time
 	metricCtx context.Context //nolint:containedctx // intentional: needed for OTel exemplar attribution at End time
 
 	mu            sync.Mutex

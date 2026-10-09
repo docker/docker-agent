@@ -22,7 +22,7 @@ import (
 
 func TestSharedCopRegistrations(t *testing.T) {
 	t.Parallel()
-	require.Len(t, cops, 33)
+	require.Len(t, cops, 31)
 	require.Len(t, programCops, 28)
 	counts := make(map[string]int)
 	for _, c := range cops {
@@ -31,12 +31,15 @@ func TestSharedCopRegistrations(t *testing.T) {
 	for _, c := range programCops {
 		counts[c.Name()]++
 	}
-	assert.Len(t, counts, 61)
+	assert.Len(t, counts, 59)
+	for _, name := range []string{"Lint/ContextFirstParameter", "Lint/NoContextField"} {
+		assert.NotContains(t, counts, name)
+	}
 	for name, count := range counts {
 		assert.Equal(t, 1, count, name)
 	}
 	for _, name := range []string{
-		"ContextFirstParameter", "NoContextField", "HTTPRequestWithContext", "NoFatalOutsideMain",
+		"HTTPRequestWithContext", "NoFatalOutsideMain",
 		"SlogContextual", "ConstructorPurity", "ConstructorNetworkIO", "WrapErrors",
 		"ErrorStringMatching", "DeferMutexUnlock", "NewExpr", "NoStdoutInLibraries", "ConstructorCommandExec",
 	} {

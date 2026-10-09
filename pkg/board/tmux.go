@@ -16,7 +16,6 @@ import (
 // tmuxSessions manages the tmux sessions the board runs its agents in.
 type tmuxSessions struct {
 	// ctx is the board-lifetime context tmux commands run under.
-	//rubocop:disable Lint/NoContextField // sessionManager methods are context-free
 	ctx context.Context //nolint:containedctx // sessionManager methods are context-free
 }
 

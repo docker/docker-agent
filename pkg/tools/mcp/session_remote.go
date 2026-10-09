@@ -162,7 +162,6 @@ func sessionRemoteError(err error) error {
 }
 
 type sessionRemoteHTTP struct {
-	//rubocop:disable Lint/NoContextField // owned by one connection, canceled and drained on close
 	ctx      context.Context //nolint:containedctx // owned by one connection, canceled and drained on close
 	endpoint string
 	headers  map[string]string
