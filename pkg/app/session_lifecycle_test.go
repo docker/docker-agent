@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"io"
 	"testing"
 	"testing/synctest"
 
@@ -10,12 +9,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/chat"
-	"github.com/docker/docker-agent/pkg/model/provider/base"
-	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
-	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/tools"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 )
@@ -215,42 +210,20 @@ func TestAppRunDropsCanceledWorkWaitingForStreamGuard(t *testing.T) {
 	}
 }
 
-type blockingTitleProvider struct {
+type blockingTitleGenerator struct {
 	started chan struct{}
 	release chan struct{}
 }
 
-func (p *blockingTitleProvider) ID() modelsdev.ID {
-	return modelsdev.NewID("test", "title")
+func (g *blockingTitleGenerator) Generate(context.Context, string, []string) (string, error) {
+	close(g.started)
+	<-g.release
+	return "Original title", nil
 }
-
-func (p *blockingTitleProvider) BaseConfig() base.Config { return base.Config{} }
-
-func (p *blockingTitleProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
-	close(p.started)
-	<-p.release
-	return &singleTitleStream{}, nil
-}
-
-type singleTitleStream struct {
-	done bool
-}
-
-func (s *singleTitleStream) Recv() (chat.MessageStreamResponse, error) {
-	if s.done {
-		return chat.MessageStreamResponse{}, io.EOF
-	}
-	s.done = true
-	return chat.MessageStreamResponse{
-		Choices: []chat.MessageStreamChoice{{Delta: chat.MessageDelta{Content: "Original title"}}},
-	}, nil
-}
-
-func (*singleTitleStream) Close() {}
 
 func TestGenerateTitleKeepsOriginalSession(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		provider := &blockingTitleProvider{
+		generator := &blockingTitleGenerator{
 			started: make(chan struct{}),
 			release: make(chan struct{}),
 		}
@@ -259,7 +232,7 @@ func TestGenerateTitleKeepsOriginalSession(t *testing.T) {
 			runtime:  &mockRuntime{},
 			session:  oldSession,
 			events:   make(chan tea.Msg, 1),
-			titleGen: sessiontitle.New(provider),
+			titleGen: generator,
 		}
 
 		done := make(chan struct{})
@@ -267,10 +240,10 @@ func TestGenerateTitleKeepsOriginalSession(t *testing.T) {
 			defer close(done)
 			app.generateTitle(t.Context(), oldSession, []string{"hello"})
 		}()
-		<-provider.started
+		<-generator.started
 		newSession := session.New()
 		app.ReplaceSession(t.Context(), newSession)
-		close(provider.release)
+		close(generator.release)
 		<-done
 
 		assert.Equal(t, "Original title", oldSession.TitleSnapshot())

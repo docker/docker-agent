@@ -109,38 +109,8 @@ func (m *mockStrategy) Close() error {
 }
 
 func TestRAGTool_HandleQuery_Telemetry(t *testing.T) {
-	// This test asserts handleQueryRAG runs and doesn't panic.
-	// Since telemetry is global, we can't easily assert on the emitted event here without
-	// exposing internal test utilities, but we can verify it doesn't crash on non-zero usage.
-
-	events := make(chan ragtypes.Event)
-	defer close(events)
-
-	stratA := &mockStrategy{
-		usage: ragtypes.Usage{
-			TotalTokens: 10,
-			Cost:        0.1,
-			ModelID:     "test-model",
-		},
-	}
-
-	cfg := rag.Config{
-		StrategyConfigs: []strategy.Config{
-			{Name: "stratA", Strategy: stratA},
-		},
-		Results: rag.ResultsConfig{
-			Limit: 10,
-		},
-	}
-
-	mgr, err := rag.New(t.Context(), "test-rag", cfg, events)
-	require.NoError(t, err)
-
-	tool := &ToolSet{
-		manager:  mgr,
-		toolName: "test-rag",
-	}
-
+	t.Parallel()
+	tool := New(&stubBackend{usage: ragtypes.Usage{TotalTokens: 10, Cost: 0.1, ModelID: "test-model"}}, "test-rag")
 	res, err := tool.handleQueryRAG(t.Context(), queryRAGArgs{Query: "test"})
 	require.NoError(t, err)
 	assert.NotNil(t, res)

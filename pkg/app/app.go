@@ -36,6 +36,10 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
+type titleGenerator interface {
+	Generate(ctx context.Context, sessionID string, userMessages []string) (string, error)
+}
+
 type App struct {
 	operation atomic.Uint64
 	ctx       func() context.Context
@@ -54,7 +58,7 @@ type App struct {
 	exitAfterFirstResponse bool                        // Exit TUI after first assistant response completes
 	readOnly               bool                        // When true, no new messages can be sent to the LLM
 	titleGenerating        atomic.Bool                 // True when title generation is in progress
-	titleGen               *sessiontitle.Generator     // Title generator for local runtime (nil for remote)
+	titleGen               titleGenerator              // Title generator for local runtime (nil for remote)
 	snapshotController     builtins.SnapshotController // Drives /undo, /snapshots, /reset; nil for runtimes that don't capture snapshots
 	streamGuard            sync.Locker                 // Held for the duration of every direct RunStream call; nil when not attached to a SessionManager (see WithStreamGuard)
 
@@ -100,7 +104,10 @@ func WithQueuedMessages(msgs []string) Opt {
 
 // WithTitleGenerator sets the title generator for local title generation.
 // If not set, title generation will be handled by the runtime (for remote) or skipped.
-func WithTitleGenerator(gen *sessiontitle.Generator) Opt {
+func WithTitleGenerator(gen titleGenerator) Opt {
+	if concrete, ok := gen.(*sessiontitle.Generator); ok && concrete == nil {
+		gen = nil
+	}
 	return func(a *App) {
 		a.titleGen = gen
 	}

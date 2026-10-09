@@ -6,12 +6,15 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
+
+type elicitationResponder interface {
+	ResumeElicitation(ctx context.Context, action tools.ElicitationAction, content map[string]any, elicitationID ...string) error
+}
 
 type oauthAuthorizationDialog struct {
 	BaseDialog
@@ -20,7 +23,7 @@ type oauthAuthorizationDialog struct {
 
 	serverURL     string
 	elicitationID string
-	app           *app.App
+	app           elicitationResponder
 	keyMap        ConfirmKeyMap
 }
 
@@ -28,7 +31,7 @@ type oauthAuthorizationDialog struct {
 // elicitationID is variadic for the same backward-compatibility reason as
 // NewElicitationDialog (see firstElicitationID); at most the first value is
 // meaningful.
-func NewOAuthAuthorizationDialog(ctx context.Context, serverURL string, appInstance *app.App, elicitationID ...string) Dialog {
+func NewOAuthAuthorizationDialog(ctx context.Context, serverURL string, appInstance elicitationResponder, elicitationID ...string) Dialog {
 	return &oauthAuthorizationDialog{
 		ctx:           func() context.Context { return context.WithoutCancel(ctx) },
 		serverURL:     serverURL,

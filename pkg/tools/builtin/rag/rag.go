@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/rag"
+	"github.com/docker/docker-agent/pkg/rag/database"
 	ragtypes "github.com/docker/docker-agent/pkg/rag/types"
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -46,9 +47,19 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, parentDir string
 // EventCallback is called to forward RAG manager events during initialization.
 type EventCallback = ragtypes.EventCallback
 
+type backend interface {
+	Initialize(ctx context.Context) error
+	StartFileWatcher(ctx context.Context) error
+	Events() <-chan ragtypes.Event
+	Query(ctx context.Context, query string) ([]database.SearchResult, ragtypes.Usage, error)
+	Description() string
+	ToolInstruction() string
+	Close() error
+}
+
 // ToolSet provides document querying capabilities for a single RAG source.
 type ToolSet struct {
-	manager       *rag.Manager
+	manager       backend
 	toolName      string
 	subscribers   tools.Subscribers[ragtypes.Event]
 	cancelWatcher context.CancelFunc
@@ -86,7 +97,10 @@ func WithIndexingTimeout(d time.Duration) Option {
 }
 
 // New creates a new RAG toolset for a single RAG manager.
-func New(manager *rag.Manager, toolName string, opts ...Option) *ToolSet {
+func New(manager backend, toolName string, opts ...Option) *ToolSet {
+	if concrete, ok := manager.(*rag.Manager); ok && concrete == nil {
+		manager = nil
+	}
 	t := &ToolSet{
 		manager:  manager,
 		toolName: toolName,

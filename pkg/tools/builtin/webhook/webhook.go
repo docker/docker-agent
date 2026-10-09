@@ -26,6 +26,11 @@ import (
 	"github.com/docker/docker-agent/pkg/useragent"
 )
 
+type templateExpander interface {
+	Expand(ctx context.Context, text string, values map[string]string) string
+	ExpandMap(ctx context.Context, values map[string]string) map[string]string
+}
+
 const (
 	ToolNameSendWebhook = "send_webhook"
 	category            = "webhook"
@@ -106,7 +111,7 @@ const (
 
 type ToolSet struct {
 	cfg      latest.WebhookToolConfig
-	expander *js.Expander
+	expander templateExpander
 	client   httpDoer
 
 	maxAttempts  int
@@ -132,7 +137,10 @@ var (
 	_ tools.Instructable = (*ToolSet)(nil)
 )
 
-func New(cfg latest.WebhookToolConfig, expander *js.Expander, timeout time.Duration) *ToolSet {
+func New(cfg latest.WebhookToolConfig, expander templateExpander, timeout time.Duration) *ToolSet {
+	if expander == nil {
+		expander = (*js.Expander)(nil)
+	}
 	return &ToolSet{
 		cfg:          cfg,
 		expander:     expander,

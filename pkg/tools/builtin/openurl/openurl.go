@@ -21,12 +21,16 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
+type urlExpander interface {
+	Expand(ctx context.Context, text string, values map[string]string) string
+}
+
 const ToolNameOpenURL = "open_url"
 
 type ToolSet struct {
 	url      string
 	name     string
-	expander *js.Expander
+	expander urlExpander
 	open     func(context.Context, string) error
 }
 
@@ -65,7 +69,10 @@ func WithName(name string) Option {
 }
 
 // WithExpander enables ${env.X} interpolation of the configured URL.
-func WithExpander(expander *js.Expander) Option {
+func WithExpander(expander urlExpander) Option {
+	if concrete, ok := expander.(*js.Expander); ok && concrete == nil {
+		expander = nil
+	}
 	return func(t *ToolSet) { t.expander = expander }
 }
 

@@ -7,7 +7,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -25,15 +24,13 @@ type maxIterationsDialog struct {
 	BaseDialog
 
 	maxIterations int
-	app           *app.App
 	keyMap        ConfirmKeyMap
 }
 
 // NewMaxIterationsDialog creates a new max iterations confirmation dialog
-func NewMaxIterationsDialog(maxIterations int, appInstance *app.App) Dialog {
+func NewMaxIterationsDialog(maxIterations int) Dialog {
 	return &maxIterationsDialog{
 		maxIterations: maxIterations,
-		app:           appInstance,
 		keyMap:        DefaultConfirmKeyMap(),
 	}
 }

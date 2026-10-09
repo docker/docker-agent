@@ -69,13 +69,26 @@ func globalCommandFactory() CommandEvaluatorFactory {
 // This includes ${args}, ${args[N]}, ${args.join(...)}, ${args.length}, etc.
 var argsPlaceholderRegex = regexp.MustCompile(`\$\{args[^}]*\}`)
 
+type commandLookup interface {
+	CurrentAgentInfo(ctx context.Context) CurrentAgentInfo
+}
+
+type commandTools interface {
+	CurrentAgentTools(ctx context.Context) ([]tools.Tool, error)
+}
+
+type commandSource interface {
+	commandLookup
+	commandTools
+}
+
 // LookupCommand parses userInput as a /command invocation and returns the
 // matching command along with its trailing arguments. The boolean is false
 // when userInput doesn't start with '/' or doesn't match a configured
 // command. Callers that need both the resolved instruction and the original
 // command metadata (e.g. its target agent) typically call LookupCommand to
 // inspect the command before calling ResolveCommand.
-func LookupCommand(ctx context.Context, rt Runtime, userInput string) (cmd types.Command, rest string, ok bool) {
+func LookupCommand(ctx context.Context, rt commandLookup, userInput string) (cmd types.Command, rest string, ok bool) {
 	if !strings.HasPrefix(userInput, "/") {
 		return types.Command{}, "", false
 	}
@@ -104,7 +117,7 @@ func LookupCommand(ctx context.Context, rt Runtime, userInput string) (cmd types
 // caller can forward them to the target sub-agent after switching. When the
 // command has no instruction and no arguments, the result is the empty
 // string, signalling "no message to send".
-func ResolveCommand(ctx context.Context, rt Runtime, userInput string) string {
+func ResolveCommand(ctx context.Context, rt commandSource, userInput string) string {
 	command, rest, ok := LookupCommand(ctx, rt, userInput)
 	if !ok {
 		return userInput
@@ -270,7 +283,7 @@ func isWordChar(b byte) bool {
 }
 
 // executeToolCommands executes !tool_name(arg=value) patterns and replaces them with output.
-func executeToolCommands(ctx context.Context, rt Runtime, instruction string) string {
+func executeToolCommands(ctx context.Context, rt commandTools, instruction string) string {
 	commands := parseToolCommands(instruction)
 	if len(commands) == 0 {
 		return instruction

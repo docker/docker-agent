@@ -28,6 +28,10 @@ import (
 	"github.com/docker/docker-agent/pkg/useragent"
 )
 
+type headerExpander interface {
+	ExpandMap(ctx context.Context, values map[string]string) map[string]string
+}
+
 const (
 	ToolNameFetch = types.ToolNameFetch
 )
@@ -49,7 +53,7 @@ type fetchHandler struct {
 	headers         map[string]string
 	allowPrivateIPs bool
 	escapeHTML      bool
-	expander        *js.Expander
+	expander        headerExpander
 }
 
 type ToolArgs struct {
@@ -530,7 +534,8 @@ func CreateToolSet(toolset latest.Toolset, runConfig *config.RuntimeConfig) (too
 func New(options ...ToolOption) *ToolSet {
 	tool := &ToolSet{
 		handler: &fetchHandler{
-			timeout: httpclient.DefaultToolHTTPTimeout,
+			timeout:  httpclient.DefaultToolHTTPTimeout,
+			expander: (*js.Expander)(nil),
 		},
 	}
 
@@ -597,7 +602,10 @@ func WithEscapeHTML(escape bool) ToolOption {
 	}
 }
 
-func WithExpander(expander *js.Expander) ToolOption {
+func WithExpander(expander headerExpander) ToolOption {
+	if expander == nil {
+		expander = (*js.Expander)(nil)
+	}
 	return func(t *ToolSet) {
 		t.handler.expander = expander
 	}

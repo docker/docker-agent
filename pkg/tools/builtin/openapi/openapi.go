@@ -27,6 +27,10 @@ import (
 	"github.com/docker/docker-agent/pkg/useragent"
 )
 
+type headerExpander interface {
+	ExpandMap(ctx context.Context, values map[string]string) map[string]string
+}
+
 // CreateToolSet is used by the tools registry.
 func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
 	expander := js.NewJsExpander(runConfig.EnvProvider())
@@ -55,7 +59,7 @@ type ToolSet struct {
 	timeout         time.Duration
 	maxOutputBytes  int
 	allowPrivateIPs bool
-	expander        *js.Expander
+	expander        headerExpander
 }
 
 // Verify interface compliance.
@@ -88,7 +92,10 @@ func WithAllowPrivateIPs(allow bool) Option {
 	return func(t *ToolSet) { t.allowPrivateIPs = allow }
 }
 
-func WithExpander(expander *js.Expander) Option {
+func WithExpander(expander headerExpander) Option {
+	if expander == nil {
+		expander = (*js.Expander)(nil)
+	}
 	return func(t *ToolSet) { t.expander = expander }
 }
 
@@ -99,6 +106,7 @@ func New(specURL string, headers map[string]string, opts ...Option) *ToolSet {
 		headers:        headers,
 		timeout:        httpclient.DefaultToolHTTPTimeout,
 		maxOutputBytes: maxOutputSize,
+		expander:       (*js.Expander)(nil),
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -463,7 +471,7 @@ type openAPIHandler struct {
 	timeout         time.Duration
 	maxOutputBytes  int
 	allowPrivateIPs bool
-	expander        *js.Expander
+	expander        headerExpander
 }
 
 type openAPICallArgs map[string]any
@@ -495,7 +503,11 @@ func (h *openAPIHandler) callTool(ctx context.Context, params openAPICallArgs) (
 	}
 	req.Header.Set("Accept", "application/json")
 
-	headers := h.expander.ExpandMap(ctx, h.headers)
+	expander := h.expander
+	if expander == nil {
+		expander = (*js.Expander)(nil)
+	}
+	headers := expander.ExpandMap(ctx, h.headers)
 	setHeaders(req, headers)
 
 	client := httpclient.ClientForAllowPrivateIPs(h.timeout, h.allowPrivateIPs)
