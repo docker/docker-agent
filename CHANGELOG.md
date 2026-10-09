@@ -3,6 +3,54 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.150.0] - 2026-10-09
+
+This release adds new built-in toolsets, provider support, and agent execution capability reporting, along with several bug fixes for runtime configuration propagation and TUI startup behavior.
+
+## What's New
+
+- Adds DaoXE as a built-in OpenAI-compatible provider alias, authenticated via `DAOXE_API_KEY` with the `api.daoxe.com/v1` base URL
+- Reports program status via OSC 7501 in both TUI and lean mode, allowing terminals and multiplexers to surface agent idle/working/waiting states
+- Exposes agent execution capabilities to callers
+- Adds a `datetime` built-in toolset for retrieving and formatting the current time
+- Adds a `calculator` built-in toolset for exact arithmetic
+- Adds a `random` built-in toolset for agent-chosen integer draws
+- Adds an OpenAI Decisions hook routing example (`examples/hook_routing_openai.yaml`) using `gpt-6-luna` as the evaluator
+
+## Bug Fixes
+
+- Fixes manifest-level budgets not being enforced on native runtimes created through the API server
+- Fixes agent limits (memory, SQLite, provider truncation) being silently dropped when resuming an A2A session
+- Moves image support probing to before the TUI claims the terminal, preventing dropped input, screen blink, or startup stalls; also short-circuits the 300 ms timeout on a negative reply
+- Fixes failed or canceled first harness turns to remain resumable
+- Adopts upstream harness streaming fixes for the codex exec `--json` runner
+
+## Technical Changes
+
+- Refreshes the models.dev catalog snapshot (91 models added, 27 removed, ~130 updated)
+- Decouples YAML node decoding in the OpenAPI package via a `nodeDecoder` interface to support the libopenapi v0.41.5 upgrade
+- Updates linting configuration to use shared rubocop-go cops, removing locally duplicated detection logic
+- Bumps Go toolchain to 1.27.2 and updates golangci-lint to v2.14.0
+### Pull Requests
+
+- [#4246](https://github.com/docker/docker-agent/pull/4246) - feat: add DaoXE as an OpenAI-compatible provider alias
+- [#4541](https://github.com/docker/docker-agent/pull/4541) - fix: propagate budgets and execution capabilities across runtimes
+- [#4542](https://github.com/docker/docker-agent/pull/4542) - docs: add OpenAI Decisions hook routing example
+- [#4543](https://github.com/docker/docker-agent/pull/4543) - chore(lint): update rubocop-go and use shared cops
+- [#4544](https://github.com/docker/docker-agent/pull/4544) - feat: report program status via OSC 7501 in TUI and lean mode
+- [#4545](https://github.com/docker/docker-agent/pull/4545) - docs: update CHANGELOG.md for v1.149.0
+- [#4546](https://github.com/docker/docker-agent/pull/4546) - fix: probe image support before the TUI takes the terminal
+- [#4547](https://github.com/docker/docker-agent/pull/4547) - feat: add datetime, calculator, and random built-in toolsets
+- [#4548](https://github.com/docker/docker-agent/pull/4548) - fix: adopt upstream harness streaming fixes and preserve failed threads
+- [#4549](https://github.com/docker/docker-agent/pull/4549) - chore: refresh models.dev snapshot (+91 -27 ~130)
+- [#4551](https://github.com/docker/docker-agent/pull/4551) - test: avoid file-backed SQLite in TestBranchSessionClonesSubSession
+- [#4552](https://github.com/docker/docker-agent/pull/4552) - chore(deps): bump OpenTelemetry to v1.47.0
+- [#4554](https://github.com/docker/docker-agent/pull/4554) - chore(deps): bump libopenapi to v0.41.5
+- [#4556](https://github.com/docker/docker-agent/pull/4556) - test(eval): avoid ETXTBSY in parallel fake-runtime tests
+- [#4558](https://github.com/docker/docker-agent/pull/4558) - chore(deps): bump Anthropic SDK to v1.79.1
+- [#4562](https://github.com/docker/docker-agent/pull/4562) - chore: bump Go to 1.27.2
+
+
 ## [v1.149.0] - 2026-10-07
 
 This release adds GitHub repository skill loading, evaluator routing through the models gateway, and several model pricing and capability fixes, along with TUI stability improvements and expanded debug tool hook support.
@@ -6865,3 +6913,5 @@ This release improves the terminal user interface with better error handling and
 [v1.148.0]: https://github.com/docker/docker-agent/releases/tag/v1.148.0
 
 [v1.149.0]: https://github.com/docker/docker-agent/releases/tag/v1.149.0
+
+[v1.150.0]: https://github.com/docker/docker-agent/releases/tag/v1.150.0
