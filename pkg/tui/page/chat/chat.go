@@ -398,6 +398,8 @@ func defaultKeyMap() KeyMap {
 }
 
 // New creates a new chat page
+//
+//rubocop:disable Lint/ContextFirstParameter // Preserve the public constructor signature.
 func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *service.SessionState, opts ...PageOption) Page {
 	pageCtx, cancel := context.WithCancel(ctx)
 	registry := tooldefaults.NewRegistry()

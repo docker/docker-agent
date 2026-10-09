@@ -27,6 +27,7 @@ type chatSession struct {
 
 	// ctx outlives individual sends: toolsets started lazily during a turn
 	// (remote MCP) keep using it until close.
+	//rubocop:disable Lint/NoContextField // session-lifetime context
 	ctx    context.Context //nolint:containedctx // session-lifetime context
 	cancel context.CancelFunc
 
@@ -44,6 +45,7 @@ type chatSession struct {
 // turn is one in-flight send, from start to the end of its event stream.
 type turn struct {
 	prompt string
+	//rubocop:disable Lint/NoContextField // turn-scoped cancellation
 	ctx    context.Context //nolint:containedctx // turn-scoped cancellation
 	cancel context.CancelFunc
 	done   chan struct{}

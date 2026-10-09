@@ -43,7 +43,8 @@ type sessionClient struct {
 }
 
 type inflightCall struct {
-	scope  tools.HandlerScope
+	scope tools.HandlerScope
+	//rubocop:disable Lint/NoContextField // bounded by CallTool; canceled when unregistered
 	ctx    context.Context //nolint:containedctx // bounded by CallTool; canceled when unregistered
 	cancel context.CancelFunc
 }

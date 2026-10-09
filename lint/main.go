@@ -30,6 +30,10 @@ var cops = []cop.Cop{
 	HookConfigSync,
 	HookBuiltinsRegistered,
 	HookBuiltinsDocumented,
+	rubocops.NewLintContextFirstParameter(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintNoContextField(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintHTTPRequestWithContext(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintNoFatalOutsideMain(),
 	rubocops.NewLintSlogContextual(),
 	ToolArgumentsViaAIJSON,
 	rubocops.NewLintConstructorPurity(),
@@ -51,6 +55,15 @@ var cops = []cop.Cop{
 // programCops lists whole-program, inter-procedural cops. These run once over
 // the entire loaded program rather than once per file.
 var programCops = []prog.Cop{
+	rubocops.NewLintErrorsAsType(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintMapsCopy(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintMapsClone(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintSlicesContains(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintSlicesEqual(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintSplitSeq(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintSortedMapKeys(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintWaitGroupGo(cop.WithScope(outsideFrozenConfig)),
+	rubocops.NewLintHTTPTestRequestWithContext(cop.WithScope(outsideFrozenConfig)),
 	withTypedFiles(rubocops.NewLintSlicesClone, cop.WithScope(outsideFrozenConfig)),
 	rubocops.NewLintSortStableFunc(cop.WithScope(outsideFrozenConfig)),
 	rubocops.NewLintPointerHelper(cop.WithScope(outsideFrozenConfig)),

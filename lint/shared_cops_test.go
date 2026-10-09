@@ -22,8 +22,8 @@ import (
 
 func TestSharedCopRegistrations(t *testing.T) {
 	t.Parallel()
-	require.Len(t, cops, 29)
-	require.Len(t, programCops, 19)
+	require.Len(t, cops, 33)
+	require.Len(t, programCops, 28)
 	counts := make(map[string]int)
 	for _, c := range cops {
 		counts[c.Name()]++
@@ -31,11 +31,12 @@ func TestSharedCopRegistrations(t *testing.T) {
 	for _, c := range programCops {
 		counts[c.Name()]++
 	}
-	assert.Len(t, counts, 48)
+	assert.Len(t, counts, 61)
 	for name, count := range counts {
 		assert.Equal(t, 1, count, name)
 	}
 	for _, name := range []string{
+		"ContextFirstParameter", "NoContextField", "HTTPRequestWithContext", "NoFatalOutsideMain",
 		"SlogContextual", "ConstructorPurity", "ConstructorNetworkIO", "WrapErrors",
 		"ErrorStringMatching", "DeferMutexUnlock", "NewExpr", "NoStdoutInLibraries", "ConstructorCommandExec",
 	} {
@@ -45,6 +46,8 @@ func TestSharedCopRegistrations(t *testing.T) {
 		"PointerHelper", "ReflectFields", "StdlibUUID", "URLClone", "JSONMarshalWrite",
 		"BenchmarkLoop", "SplitTrimJoin", "FieldsSeq", "StreamCloseSafety", "SlicesClone",
 		"CutPrefix", "CutSuffix", "FieldsSeqLookup", "SortStableFunc",
+		"ErrorsAsType", "MapsCopy", "MapsClone", "SlicesContains", "SlicesEqual",
+		"SplitSeq", "SortedMapKeys", "WaitGroupGo", "HTTPTestRequestWithContext",
 	} {
 		registeredSharedCop(t, programCops, "Lint/"+name)
 	}

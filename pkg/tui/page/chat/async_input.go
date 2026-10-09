@@ -13,6 +13,7 @@ import (
 
 // inputScope identifies one page lifetime, including a reload of the same conversation.
 type inputScope struct {
+	//rubocop:disable Lint/NoContextField // Owns the lifetime of in-flight page submissions.
 	ctx      context.Context //nolint:containedctx // Owns the lifetime of in-flight page submissions.
 	cancel   context.CancelFunc
 	app      *app.App
