@@ -85,7 +85,7 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 		msg := &messages[i]
 
 		// Skip invalid assistant messages upfront. This can happen if the model is out of tokens (max_tokens reached)
-		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" {
+		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" && strings.TrimSpace(msg.ReasoningContent) == "" {
 			continue
 		}
 
@@ -137,6 +137,17 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 				if len(contentParts) > 0 {
 					assistantParam.Content.OfArrayOfContentParts = contentParts
 				}
+			}
+
+			// Replay stored reasoning back to OpenAI-compatible providers (e.g. Qwen via
+			// llama.cpp, vLLM, custom endpoints) that expect it on the assistant turn as
+			// reasoning_content. openai-go's typed ChatCompletionAssistantMessageParam has
+			// no such field (non-standard extension - see openai/openai-go#558), so it
+			// must go through SetExtraFields. See issue #4363.
+			if msg.ReasoningContent != "" {
+				assistantParam.SetExtraFields(map[string]any{
+					"reasoning_content": msg.ReasoningContent,
+				})
 			}
 
 			if msg.FunctionCall != nil {
