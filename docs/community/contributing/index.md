@@ -105,10 +105,47 @@ Key conventions:
 ## Lint rules
 
 `task lint` runs the shared and project-specific cops selected in `lint/main.go`.
-Reusable checks come from [rubocop-go](https://github.com/dgageot/rubocop-go/blob/92be797454c8ebde41b9f1eb084be3535cfef668/docs/shared-cops.md)
+Reusable checks come from [rubocop-go](https://github.com/dgageot/rubocop-go/blob/202b67b66167808e75285d0666f880a2bd4b1144/docs/shared-cops.md)
 (pinned in `go.mod`); project-specific checks and frozen-config exclusions stay
 in `lint/`. Cop IDs and `//rubocop:disable` annotations are unchanged. Add shared checks by their
-constructors, not by enabling the entire upstream catalog.
+constructors, not by enabling the entire upstream catalog. 34 of the 36 shared
+opt-in cops are currently selected. `Lint/ContextFirstParameter` and
+`Lint/NoContextField` remain disabled: existing public constructor signatures and
+intentionally owned lifecycle or telemetry contexts would require suppressions or
+unrelated refactoring.
+
+`Lint/HTTPRequestWithContext` enforces contextual HTTP request construction outside
+frozen config versions. It inspects production files only; matching is syntactic,
+so aliases and shadowing require care. `Lint/NoFatalOutsideMain` reserves
+`log.Fatal*` for package main; tests are exempt.
+
+The following modernization cops inspect resolved production, internal/external
+tests, and test-only packages, excluding generated files and frozen configs:
+
+- `Lint/MapsCopy` and `Lint/MapsClone` suggest plain entry-copy loops and nil-safe
+  shallow-copy helpers. Preserve merge order, destination initialization, named
+  types, and nil results; the two cops can report overlapping suggestions.
+- `Lint/SlicesContains` and `Lint/SlicesEqual` suggest simple comparable-element
+  membership and equality helpers. Preserve nil-sensitive guards and comparison
+  behavior, including NaNs and interface-comparison panics.
+- `Lint/SplitSeq` suggests lazy `strings.SplitSeq` or `SplitAfterSeq` for direct
+  value-only ranges. Preserve input/separator evaluation and empty/trailing fields.
+- `Lint/SortedMapKeys` suggests `slices.Sorted(maps.Keys(m))` for adjacent ascending
+  integer/string key collection. Review nil/empty results and downstream capacity
+  contracts; this is not an allocation-performance guarantee.
+- `Lint/WaitGroupGo` suggests reviewing adjacent `Add(1)`/`go`/`defer Done()`.
+  The callback must not let a panic escape; preserve captures and completion timing.
+- `Lint/ErrorsAsType` suggests fresh targets consumed only on successful matches.
+  Custom `As` methods can retain target pointers; do not mechanically replace them.
+- `Lint/HTTPTestRequestWithContext` suggests immediate test-request context
+  attachment with constant method/target and nil body. Keep non-nil contexts and
+  preserve context evaluation versus request validation order.
+
+These checks follow active build constraints, skip ill-typed candidate packages,
+and gate suggestions on the target module/file's Go and stdlib versions, not the
+linter toolchain. Suggestions require behavior review, not automatic rewriting.
+Rubocop exclusions and suppressions do not configure golangci-lint's overlapping
+`modernize` checks.
 
 `Lint/FieldsSeq` flags
 `strings.Fields` slices used only for one value-only range, including loops
@@ -151,6 +188,9 @@ Generated files and frozen config versions are excluded.
 Only constant or local identifier inputs are matched; compound conditions,
 intervening work, and effectful expressions are excluded. Preserve original
 values, assignment scope, and evaluation order when introducing the cut result.
+Both cut cops also cover immediate `bytes.HasPrefix`/`HasSuffix` plus matching
+trimming or slicing on local unnamed byte slices. Preserve nilness, capacity, and
+backing-array aliasing.
 
 `Lint/NewExpr` flags a fresh local declared only to return its address, recommending
 `new(expr)` instead. It requires the declaration and `return &x` to be adjacent, the
