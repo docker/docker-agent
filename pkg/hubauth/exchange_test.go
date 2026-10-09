@@ -188,3 +188,25 @@ func TestLoginEndpointOverride(t *testing.T) {
 		})
 	}
 }
+
+func TestIsStagingEndpoint(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		want     bool
+	}{
+		{endpoint: defaultLoginEndpoint, want: false},
+		{endpoint: "https://hub-stage.docker.com/v2/users/login", want: true},
+		{endpoint: "https://login-stage.docker.com/v2/users/login", want: true},
+		{endpoint: "https://hub.docker.com/hub-stage/v2/users/login", want: false},
+		{endpoint: "https://hub-stage.example.com/v2/users/login", want: false},
+		{endpoint: "https://hub-stage.docker.com.example.com/login", want: false},
+		{endpoint: "http://127.0.0.1:1234/v2/users/login", want: false},
+		{endpoint: "://not a url", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.endpoint, func(t *testing.T) {
+			assert.Equal(t, tt.want, isStagingEndpoint(tt.endpoint))
+		})
+	}
+}

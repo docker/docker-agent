@@ -38,6 +38,8 @@ require (
 	github.com/docker/cli v29.8.1+incompatible
 	github.com/docker/go-units v0.5.0
 	github.com/docker/portcullis v1.1.0
+	github.com/docker/secrets-engine/client v0.1.2
+	github.com/docker/secrets-engine/x v0.8.2
 	github.com/dop251/goja v0.0.0-20260917113740-793a2a65c13b
 	github.com/expr-lang/expr v1.17.8
 	github.com/fatih/color v1.19.0
@@ -105,6 +107,7 @@ require (
 	cloud.google.com/go/auth v0.23.2 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
+	connectrpc.com/connect v1.19.1 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/99designs/go-keychain v0.0.0-20191008050251-8e49817e8af4 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
