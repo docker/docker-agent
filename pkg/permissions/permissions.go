@@ -88,10 +88,11 @@ func (c *Checker) Check(toolName string) Decision {
 // "mcp:github:create_issue".
 //
 // Patterns support:
-// - Simple tool names: "shell", "read_*"
-// - Argument matching: "shell:cmd=ls*" matches shell tool with cmd argument starting with "ls"
-// - Multiple arguments: "shell:cmd=ls*:cwd=/home/*" matches both conditions
-// - Glob patterns in both tool names and argument values
+//   - Simple tool names: "shell", "read_*"
+//   - Argument matching: "shell:cmd=ls*" matches shell tool with cmd argument starting with "ls"
+//     For command-tool allow rules, literal trailing-* prefixes require a simple command and word boundary.
+//   - Multiple arguments: "shell:cmd=ls*:cwd=/home/*" matches both conditions
+//   - Glob patterns in both tool names and argument values
 //
 // Returns ForceAsk when an explicit ask pattern matches. ForceAsk means the
 // tool must always be confirmed, even when it would normally be auto-approved
@@ -103,7 +104,7 @@ func (c *Checker) CheckWithArgs(toolName string, args map[string]any) Decision {
 	}
 
 	// Allow patterns are checked second
-	if matchAny(c.allowPatterns, toolName, args) {
+	if matchAnyAllow(c.allowPatterns, toolName, args) {
 		return Allow
 	}
 
@@ -405,4 +406,17 @@ func classEnd(pattern string, start int) int {
 		}
 	}
 	return -1
+}
+
+func matchAnyAllow(patterns []string, toolName string, args map[string]any) bool {
+	for _, pattern := range patterns {
+		if !matchToolPattern(pattern, toolName, args) {
+			continue
+		}
+		if !commandAllowMatches(toolName, pattern, args) {
+			continue
+		}
+		return true
+	}
+	return false
 }
