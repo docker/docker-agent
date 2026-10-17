@@ -359,21 +359,38 @@ func TestEveryRefusedTokenStaysRefused(t *testing.T) {
 }
 
 func TestGetUserInfo(t *testing.T) {
-	t.Run("prefers what Docker Desktop reports", func(t *testing.T) {
-		backend := &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")}
-		backend.info = &DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}
-		installFakeBackend(t, backend)
+	desktopAccount := DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}
 
-		assert.Equal(t, DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}, GetUserInfo(t.Context()))
-	})
-
-	t.Run("falls back to the token claims", func(t *testing.T) {
-		// Docker Desktop is not around (or not signed in): the token itself
-		// says who we are.
+	t.Run("names the account of the token in use", func(t *testing.T) {
 		backend := &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")}
+		backend.info = &desktopAccount
 		installFakeBackend(t, backend)
 
 		assert.Equal(t, DockerHubInfo{Username: "claims-user", Email: "claims@example.com"}, GetUserInfo(t.Context()))
+	})
+
+	t.Run("falls back to Docker Desktop for a token without an account", func(t *testing.T) {
+		backend := &fakeBackend{token: makeToken(t, time.Now().Add(time.Hour))}
+		backend.info = &desktopAccount
+		installFakeBackend(t, backend)
+
+		assert.Equal(t, desktopAccount, GetUserInfo(t.Context()))
+	})
+
+	t.Run("falls back to Docker Desktop for a personal access token", func(t *testing.T) {
+		backend := &fakeBackend{token: "dckr_pat_0123456789abcdef", loggedIn: true}
+		backend.info = &desktopAccount
+		installFakeBackend(t, backend)
+
+		assert.Equal(t, desktopAccount, GetUserInfo(t.Context()))
+	})
+
+	t.Run("falls back to Docker Desktop without a token", func(t *testing.T) {
+		backend := &fakeBackend{}
+		backend.info = &desktopAccount
+		installFakeBackend(t, backend)
+
+		assert.Equal(t, desktopAccount, GetUserInfo(t.Context()))
 	})
 
 	t.Run("reports nothing without a token", func(t *testing.T) {
@@ -499,6 +516,8 @@ func installFakeBackend(t *testing.T, backend *fakeBackend) {
 		return "", errors.New("no Docker access token in the credential store")
 	}
 	t.Cleanup(func() { mintToken = oldMint })
+
+	installNoSecretsEngine(t)
 
 	clearCache := func() {
 		cache.Lock()

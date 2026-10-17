@@ -177,7 +177,16 @@ On machines where Docker Desktop is installed, Docker Agent queries Docker Deskt
 
 ## Docker Authentication
 
-Routing model traffic through the [Docker models gateway](../../configuration/models/index.md) needs a Docker token. Docker Desktop hands out one that is valid for 15 minutes and cannot be renewed by Docker Agent, so when Desktop has nothing usable to offer — it is signed out, not running, or its own refresh is stuck — Docker Agent exchanges the long-lived access token that `docker login` left in your credential store for a fresh Docker token, the same exchange `docker login` itself performs. Signing in with `docker login` is therefore enough; Docker Desktop is not required.
+Routing model traffic through the [Docker models gateway](../../configuration/models/index.md) needs a Docker token. A `DOCKER_TOKEN` you provide yourself — an environment variable, a Compose secret, an env file or a credential helper, as is common in CI — always takes precedence, and none of the sources below are consulted.
+
+Otherwise, Docker Agent tries these sources in order and uses the first token that is not expired or about to expire:
+
+1. **The Docker secrets engine**, which Docker Desktop serves on a local socket and which holds the session of the account signed in to Desktop. It is skipped when it is unavailable (Docker Desktop is not installed or not running, or predates the engine) or holds no session. A request waits for the engine for at most five seconds, and never more than half of its own time limit, so the other sources still get a turn. An engine that fails or does not answer is skipped for the next 30 seconds. Production sessions are read unless `DOCKER_AGENT_HUB_LOGIN_URL` points at a Docker Hub staging host, such as `hub-stage.docker.com`; staging sessions are read instead. Docker Agent cannot tell which environment Docker Desktop is signed in to, so set that variable when Desktop is signed in to staging.
+2. **Docker Desktop's backend.**
+3. **The access token `docker login` stored.** Docker Agent exchanges the long-lived access token in your credential store for a fresh Docker token, the same exchange `docker login` itself performs. Signing in with `docker login` is therefore enough; Docker Desktop is not required.
+4. **A refresh of Docker Desktop's session**, as a last resort.
+
+The tokens Docker Desktop hands out are valid for 15 minutes, and only Desktop can renew them. That is why the exchange exists: it keeps Docker Agent working when Desktop has nothing usable to offer because it is signed out, not running, or its own refresh is stuck. Tokens are looked up again as they near expiry, so a long-running session keeps working.
 
 Only Docker access tokens are exchanged — the `dckr_…` secrets `docker login` stores — never an account password, and the exchange goes to Docker Hub over HTTPS. The resulting bearer token is cached in a private file under Docker Agent's cache directory so sibling processes reuse it instead of minting their own, and it stops being used within seconds of a `docker logout` or an account switch. Run `docker agent debug auth` to see which token is in use and where it came from.
 

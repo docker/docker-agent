@@ -20,9 +20,10 @@ type DockerHubInfo struct {
 type Source string
 
 const (
-	SourceNone    Source = "none"
-	SourceDesktop Source = "docker desktop"
-	SourceMinted  Source = "minted from the stored access token"
+	SourceNone          Source = "none"
+	SourceSecretsEngine Source = "docker desktop secrets engine"
+	SourceDesktop       Source = "docker desktop"
+	SourceMinted        Source = "minted from the stored access token"
 )
 
 // mintToken exchanges the stored access token for a fresh one. A var so tests
@@ -58,16 +59,14 @@ func GetToken(ctx context.Context) string {
 	return token
 }
 
-// GetTokenWithSource returns the user's Docker access token and where it came
-// from. Docker Desktop's newer auth stack (auth v2) serves whatever its
-// in-memory token source holds and never refreshes on GET, so a stuck
-// background refresher makes it return the same expired JWT forever — or
-// nothing at all when its read-time refresh failed. When that happens we mint
-// a token ourselves from the access token `docker login` stored, and only then
-// fall back to nudging Desktop.
+// GetTokenWithSource returns the user's Docker access token and where it came from.
 func GetTokenWithSource(ctx context.Context) (string, Source) {
 	if token, source, ok := cached(); ok {
 		return token, source
+	}
+
+	if token, ok := secretsEngineToken(ctx); ok {
+		return token, SourceSecretsEngine
 	}
 
 	token, err := fetchToken(ctx)
@@ -217,20 +216,15 @@ func expiresIn(token string) string {
 	return time.Until(exp).Round(time.Second).String()
 }
 
-// GetUserInfo returns the signed-in account. Docker Desktop knows it best, but
-// it is not always around: the token itself carries the same information.
+// GetUserInfo returns the account of the token [GetToken] serves, else Docker Desktop's.
 func GetUserInfo(ctx context.Context) DockerHubInfo {
-	var info DockerHubInfo
-	_ = ClientBackend.Get(ctx, "/registry/info", &info)
-	if info.Username != "" {
-		return info
+	if identity, ok := hubauth.IdentityFromToken(GetToken(ctx)); ok {
+		return DockerHubInfo{Username: identity.Username, Email: identity.Email}
 	}
 
-	identity, ok := hubauth.IdentityFromToken(GetToken(ctx))
-	if !ok {
-		return info
-	}
-	return DockerHubInfo{Username: identity.Username, Email: identity.Email}
+	var info DockerHubInfo
+	_ = ClientBackend.Get(ctx, "/registry/info", &info)
+	return info
 }
 
 func fetchToken(ctx context.Context) (string, error) {
