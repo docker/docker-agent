@@ -33,6 +33,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/components/editor"
 	"github.com/docker/docker-agent/pkg/tui/components/editor/completions"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
+	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/statusbar"
 	"github.com/docker/docker-agent/pkg/tui/components/tabbar"
@@ -285,6 +286,8 @@ type appModel struct {
 	// showBanner displays the ASCII-art startup banner on an empty
 	// conversation. Shared by every tab and managed via /settings.
 	showBanner bool
+	// sidebarSections are extra sidebar sections fed by shell commands.
+	sidebarSections []sidebar.CommandSection
 
 	// buildCommandCategories is a function that returns the list of command categories.
 	buildCommandCategories func(context.Context, tea.Model) []commands.Category
@@ -387,6 +390,14 @@ func WithTourOffer(showTelemetryNotice bool) Option {
 	return func(m *appModel) {
 		m.tourMode = tourModeOffer
 		m.tourShowTelemetryNotice = showTelemetryNotice
+	}
+}
+
+// WithSidebarSections adds sidebar sections that show a shell command's
+// output, refreshed every few seconds.
+func WithSidebarSections(sections []sidebar.CommandSection) Option {
+	return func(m *appModel) {
+		m.sidebarSections = sections
 	}
 }
 
@@ -667,6 +678,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithSendMode(m.sendMode),
 		chat.WithInterruptMode(m.interruptMode),
 		chat.WithShowBanner(m.showBanner),
+		chat.WithSidebarSections(m.sidebarSections),
 	}
 
 	if m.leanMode {

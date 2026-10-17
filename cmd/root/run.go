@@ -41,6 +41,7 @@ import (
 	"github.com/docker/docker-agent/pkg/telemetry"
 	"github.com/docker/docker-agent/pkg/tour"
 	"github.com/docker/docker-agent/pkg/tui"
+	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	"github.com/docker/docker-agent/pkg/tui/recorder"
 	"github.com/docker/docker-agent/pkg/tui/styles"
@@ -117,6 +118,7 @@ type runExecFlags struct {
 	lean            bool
 	leanChanged     bool
 	appName         string
+	sidebarSections []string
 	sidebar         bool
 	listenAddr      string
 	// sessionWorkingDirRoot confines the working_dir of sessions created
@@ -211,6 +213,7 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	_ = cmd.PersistentFlags().MarkHidden("tour")
 	cmd.PersistentFlags().BoolVar(&flags.lean, "lean", false, "Use a simplified TUI with minimal chrome")
 	cmd.PersistentFlags().StringVar(&flags.appName, "app-name", "", "Application name shown in the TUI in place of \"docker agent\"")
+	cmd.PersistentFlags().StringArrayVar(&flags.sidebarSections, "sidebar-section", nil, "Add a sidebar section that shows a shell command's output, refreshed every few seconds: \"Title=command\" (repeatable)")
 	cmd.PersistentFlags().StringSliceVar(&flags.disabledCommands, "disable-commands", nil, "Comma-separated list of slash commands to hide and disable in the TUI (e.g. /cost,/eval,/model)")
 	cmd.PersistentFlags().BoolVar(&flags.sidebar, "sidebar", true, "Show the sidebar in the TUI (set --sidebar=false to hide it)")
 	cmd.PersistentFlags().StringVar(&flags.theme, "theme", "", "Preselect a TUI theme by name, or \"auto\" to match the terminal's light/dark background (overrides the theme from user config; ignored outside the interactive TUI)")
@@ -591,6 +594,17 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 
 	var rec *recorder.Recorder
 	tuiOptions := f.tuiOpts(args)
+	if len(f.sidebarSections) > 0 {
+		sections := make([]sidebar.CommandSection, 0, len(f.sidebarSections))
+		for _, spec := range f.sidebarSections {
+			section, err := sidebar.ParseCommandSection(spec)
+			if err != nil {
+				return fmt.Errorf("--sidebar-section %q: %w", spec, err)
+			}
+			sections = append(sections, section)
+		}
+		tuiOptions = append(tuiOptions, tui.WithSidebarSections(sections))
+	}
 	if dir := f.explicitDefaultWorkingDir(sess); dir != "" {
 		tuiOptions = append(tuiOptions, tui.WithDefaultWorkingDir(dir))
 	}
