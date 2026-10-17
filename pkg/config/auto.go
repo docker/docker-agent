@@ -67,6 +67,7 @@ var cloudProviders = []providerConfig{
 	{"baseten", []string{"BASETEN_API_KEY"}, "BASETEN_API_KEY", "BASETEN_API_KEY"},
 	{"ovhcloud", []string{"OVH_AI_ENDPOINTS_ACCESS_TOKEN"}, "OVH_AI_ENDPOINTS_ACCESS_TOKEN", "OVH_AI_ENDPOINTS_ACCESS_TOKEN"},
 	{"daoxe", []string{"DAOXE_API_KEY"}, "DAOXE_API_KEY", "DAOXE_API_KEY"},
+	{"standardcompute", []string{"STANDARDCOMPUTE_API_KEY"}, "STANDARDCOMPUTE_API_KEY", "STANDARDCOMPUTE_API_KEY"},
 	{"groq", []string{"GROQ_API_KEY"}, "GROQ_API_KEY", "GROQ_API_KEY"},
 	{"fireworks-ai", []string{"FIREWORKS_API_KEY"}, "FIREWORKS_API_KEY", "FIREWORKS_API_KEY"},
 	{"deepseek", []string{"DEEPSEEK_API_KEY"}, "DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"},
@@ -177,6 +178,8 @@ var DefaultModels = map[string]string{
 	"amazon-bedrock": "global.anthropic.claude-sonnet-5",
 	"opencode-go":    "deepseek-v4-flash",
 	"opencode":       "deepseek-v4-flash-free",
+
+	"standardcompute": "standardcompute",
 }
 
 // nonForwardableTokenEnvVars lists provider token env vars that are NOT safe to

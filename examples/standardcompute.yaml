@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  standardcompute_model:
+    provider: standardcompute
+    model: standardcompute
+
+agents:
+  root:
+    model: standardcompute_model
+    description: Assistant using Standard Compute
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think

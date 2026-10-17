@@ -104,6 +104,11 @@ var Aliases = map[string]Alias{
 		BaseURL:     "https://api.daoxe.com/v1",
 		TokenEnvVar: "DAOXE_API_KEY",
 	},
+	"standardcompute": {
+		APIType:     "openai",
+		BaseURL:     "https://api.stdcmpt.com/v1",
+		TokenEnvVar: "STANDARDCOMPUTE_API_KEY",
+	},
 	"groq": {
 		APIType:     "openai",
 		BaseURL:     "https://api.groq.com/openai/v1",

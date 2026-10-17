@@ -231,6 +231,8 @@
       url: /providers/openrouter/
     - title: OVHcloud
       url: /providers/ovhcloud/
+    - title: Standard Compute
+      url: /providers/standardcompute/
     - title: Together AI
       url: /providers/together/
     - title: Vercel AI Gateway

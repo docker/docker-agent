@@ -53,6 +53,8 @@ func TestCatalogAliases(t *testing.T) {
 		"moonshotai":   {APIType: "openai", BaseURL: "https://api.moonshot.ai/v1", TokenEnvVar: "MOONSHOT_API_KEY"},
 		"nvidia":       {APIType: "openai", BaseURL: "https://integrate.api.nvidia.com/v1", TokenEnvVar: "NVIDIA_API_KEY"},
 		"vercel":       {APIType: "openai", BaseURL: "https://ai-gateway.vercel.sh/v1", TokenEnvVar: "AI_GATEWAY_API_KEY"},
+
+		"standardcompute": {APIType: "openai", BaseURL: "https://api.stdcmpt.com/v1", TokenEnvVar: "STANDARDCOMPUTE_API_KEY"},
 	}
 
 	for name, want := range expected {

@@ -45,6 +45,16 @@ func TestDaoxe_MergesConsecutiveSystemMessages(t *testing.T) {
 	})
 }
 
+func TestStandardCompute_MergesConsecutiveSystemMessages(t *testing.T) {
+	t.Parallel()
+
+	assertMergesConsecutiveMessages(t, &latest.ModelConfig{
+		Provider: "standardcompute",
+		Model:    "standardcompute",
+		TokenKey: "MY_TOKEN",
+	})
+}
+
 func TestBaseten_MergesConsecutiveSystemMessages(t *testing.T) {
 	t.Parallel()
 
@@ -172,6 +182,7 @@ func TestShouldMergeConsecutiveMessages_Gating(t *testing.T) {
 		{"api-route, no base_url", &latest.ModelConfig{Provider: "api-route", Model: "gpt-6.1-sol"}, true},
 		{"baseten", &latest.ModelConfig{Provider: "baseten", Model: "zai-org/GLM-5.2"}, true},
 		{"daoxe, no base_url", &latest.ModelConfig{Provider: "daoxe", Model: "claude-sonnet-4-6"}, true},
+		{"standardcompute, no base_url", &latest.ModelConfig{Provider: "standardcompute", Model: "standardcompute"}, true},
 		{"ovhcloud", &latest.ModelConfig{Provider: "ovhcloud", Model: "Qwen3.5-397B-A17B"}, true},
 		{"open-model host alias cerebras", &latest.ModelConfig{Provider: "cerebras", Model: "qwen-3-coder-480b"}, true},
 		{"open-model host fireworks", &latest.ModelConfig{Provider: "fireworks", Model: "accounts/fireworks/models/kimi-k3"}, true},

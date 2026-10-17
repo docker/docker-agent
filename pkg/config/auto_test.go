@@ -110,6 +110,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "daoxe",
 		},
 		{
+			name: "standardcompute api key present",
+			envVars: map[string]string{
+				"STANDARDCOMPUTE_API_KEY": "test-key",
+			},
+			expectedProvider: "standardcompute",
+		},
+		{
 			name: "groq api key present",
 			envVars: map[string]string{
 				"GROQ_API_KEY": "test-key",
@@ -361,6 +368,15 @@ func TestAutoModelConfig(t *testing.T) {
 			},
 			expectedProvider:  "daoxe",
 			expectedModel:     "claude-sonnet-4-6",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "standardcompute provider",
+			envVars: map[string]string{
+				"STANDARDCOMPUTE_API_KEY": "test-key",
+			},
+			expectedProvider:  "standardcompute",
+			expectedModel:     "standardcompute",
 			expectedMaxTokens: 32000,
 		},
 		{

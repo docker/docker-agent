@@ -280,6 +280,8 @@ var openModelHostProviders = map[string]bool{
 	// reach models with strict single-system-message chat templates.
 	"cloudflare-workers-ai": true,
 	"cloudflare-ai-gateway": true,
+
+	"standardcompute": true,
 }
 
 // shouldMergeConsecutiveMessages reports whether the chat-completions request
