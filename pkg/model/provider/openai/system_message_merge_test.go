@@ -35,6 +35,16 @@ func TestChatCompletions_MergesConsecutiveSystemMessages(t *testing.T) {
 	})
 }
 
+func TestOrcaRouter_MergesConsecutiveSystemMessages(t *testing.T) {
+	t.Parallel()
+
+	assertMergesConsecutiveMessages(t, &latest.ModelConfig{
+		Provider: "orcarouter",
+		Model:    "orcarouter/auto",
+		TokenKey: "MY_TOKEN",
+	})
+}
+
 func TestDaoxe_MergesConsecutiveSystemMessages(t *testing.T) {
 	t.Parallel()
 

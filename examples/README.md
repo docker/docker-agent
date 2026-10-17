@@ -210,6 +210,7 @@ remote MCP endpoints.
 | [`atlascloud.yaml`](atlascloud.yaml) | Atlas Cloud open-model host (`atlascloud`). |
 | [`baseten.yaml`](baseten.yaml) | Baseten cloud provider. |
 | [`daoxe.yaml`](daoxe.yaml) | DaoXE multi-model gateway provider. |
+| [`orcarouter.yaml`](orcarouter.yaml) | OrcaRouter multi-model gateway provider. |
 | [`ovhcloud.yaml`](ovhcloud.yaml) | OVHcloud AI Endpoints provider. |
 | [`groq.yaml`](groq.yaml) | Groq fast-inference provider. |
 | [`fireworks.yaml`](fireworks.yaml) | Fireworks AI open-model inference (`fireworks-ai`). |

@@ -229,6 +229,8 @@
       url: /providers/opencode-zen/
     - title: OpenRouter
       url: /providers/openrouter/
+    - title: OrcaRouter
+      url: /providers/orcarouter/
     - title: OVHcloud
       url: /providers/ovhcloud/
     - title: Together AI

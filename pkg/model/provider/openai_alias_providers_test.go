@@ -65,6 +65,15 @@ var openAIAliasProviders = []openAIAliasProvider{
 		liveOptInEnvVar:      "DOCKER_AGENT_RUN_API_ROUTE_LIVE_TEST",
 	},
 	{
+		provider:             "orcarouter",
+		envVar:               "ORCAROUTER_API_KEY",
+		testKey:              "test-orcarouter-key",
+		model:                "orcarouter/auto",
+		greeting:             "Hello from OrcaRouter",
+		mergesSystemMessages: true,
+		liveOptInEnvVar:      "DOCKER_AGENT_RUN_ORCAROUTER_LIVE_TEST",
+	},
+	{
 		provider:             "atlascloud",
 		envVar:               "ATLASCLOUD_API_KEY",
 		testKey:              "test-atlascloud-key",
@@ -311,7 +320,8 @@ func TestOpenAIAliasProvider_EndToEndRequest(t *testing.T) {
 //
 //	DEEPSEEK_API_KEY=sk-... go test -run TestOpenAIAliasProvider_LiveAPI ./pkg/model/provider/
 //
-// API Route additionally requires DOCKER_AGENT_RUN_API_ROUTE_LIVE_TEST=1.
+// API Route additionally requires DOCKER_AGENT_RUN_API_ROUTE_LIVE_TEST=1;
+// OrcaRouter requires DOCKER_AGENT_RUN_ORCAROUTER_LIVE_TEST=1.
 func TestOpenAIAliasProvider_LiveAPI(t *testing.T) {
 	for _, p := range openAIAliasProviders {
 		t.Run(p.provider, func(t *testing.T) {
@@ -321,17 +331,31 @@ func TestOpenAIAliasProvider_LiveAPI(t *testing.T) {
 }
 
 func TestAPIRouteLiveAPIRequiresExplicitOptIn(t *testing.T) {
+	assertLiveAPIRequiresExplicitOptIn(t, "api-route")
+}
+
+func TestOrcaRouterLiveAPIRequiresExplicitOptIn(t *testing.T) {
+	assertLiveAPIRequiresExplicitOptIn(t, "orcarouter")
+}
+
+func assertLiveAPIRequiresExplicitOptIn(t *testing.T, providerName string) {
+	t.Helper()
 	var p openAIAliasProvider
 	for _, candidate := range openAIAliasProviders {
-		if candidate.provider == "api-route" {
+		if candidate.provider == providerName {
 			p = candidate
 			break
 		}
 	}
 	require.NotEmpty(t, p.liveOptInEnvVar)
 	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var mu sync.Mutex
+	var hosts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		mu.Lock()
+		hosts = append(hosts, r.Host)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
 		writeSSEChunk(w, map[string]any{
 			"id": "chatcmpl-test", "object": "chat.completion.chunk", "model": p.model,
@@ -356,6 +380,9 @@ func TestAPIRouteLiveAPIRequiresExplicitOptIn(t *testing.T) {
 		runOpenAIAliasProviderLiveAPI(t, p, server.URL)
 	})
 	require.Equal(t, int32(1), requests.Load())
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{strings.TrimPrefix(server.URL, "http://")}, hosts)
 }
 
 func runOpenAIAliasProviderLiveAPI(t *testing.T, p openAIAliasProvider, baseURL string) {
