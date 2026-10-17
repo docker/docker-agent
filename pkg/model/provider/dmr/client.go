@@ -195,6 +195,11 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	if override := c.CapsOverride(); override != nil {
 		caps = modelinfo.CapsWith(override.Image, override.PDF, override.Audio, override.Video)
 	}
+	// Chat Completions reasoning replay defaults on;
+	// provider_opts.replay_reasoning: false opts out.
+	if !oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts) {
+		messages = oaistream.WithoutReplayedReasoning(messages)
+	}
 	openaiMessages := oaistream.ConvertMessagesWithCaps(ctx, messages, caps)
 	return oaistream.MergeConsecutiveMessages(openaiMessages)
 }

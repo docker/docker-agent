@@ -56,10 +56,17 @@ type Message struct {
 	Content      string        `json:"content"`
 	MultiContent []MessagePart `json:"multi_content,omitempty"`
 
-	// This property is used for the "reasoning" feature supported by deepseek-reasoner
-	// which is not in the official documentation.
-	// the doc from deepseek:
-	// - https://api-docs.deepseek.com/api/create-chat-completion#responses
+	// ReasoningContent carries the reasoning text of a reasoning model. It is a
+	// generic internal field, not one wire field: it is filled from
+	// delta.reasoning_content / delta.reasoning on OpenAI-compatible streams
+	// (DeepSeek, Qwen, vLLM, llama.cpp, ...), from Anthropic and Bedrock thinking
+	// blocks, from Gemini reasoning parts, and from the OpenAI Responses API.
+	// Providers that keep reasoning signed or encrypted of their own store that
+	// alongside in ThinkingSignature or ThoughtSignature.
+	//
+	// Replaying it on later turns stops a reasoning model from re-deriving work it
+	// already produced. Chat Completions replay defaults on and can be disabled
+	// with provider_opts.replay_reasoning for incompatible endpoints.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 
 	// ThinkingSignature is used for Anthropic's extended thinking feature

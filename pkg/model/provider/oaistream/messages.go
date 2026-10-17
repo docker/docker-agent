@@ -85,7 +85,7 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 		msg := &messages[i]
 
 		// Skip invalid assistant messages upfront. This can happen if the model is out of tokens (max_tokens reached)
-		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" {
+		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" && strings.TrimSpace(msg.ReasoningContent) == "" {
 			continue
 		}
 
@@ -117,10 +117,12 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 
 		case chat.MessageRoleAssistant:
 			assistantParam := openai.ChatCompletionAssistantMessageParam{}
+			hasContent := false
 
 			if len(msg.MultiContent) == 0 {
 				if msg.Content != "" {
 					assistantParam.Content.OfString = param.NewOpt(msg.Content)
+					hasContent = true
 				}
 			} else {
 				// Convert multi-content for assistant messages
@@ -136,7 +138,31 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 				}
 				if len(contentParts) > 0 {
 					assistantParam.Content.OfArrayOfContentParts = contentParts
+					hasContent = true
 				}
+			}
+
+			// Replay stored reasoning so a reasoning model can see its own previous
+			// reasoning instead of re-deriving it (#4363). openai-go has no
+			// reasoning_content field on the assistant param -- it is a non-standard
+			// extension (openai/openai-go#558) -- so it can only go through
+			// SetExtraFields.
+			//
+			// Scope: this replays reasoning carried by a turn that is retained in
+			// session history, i.e. one that also has content or tool calls. A turn
+			// whose only payload is reasoning is dropped earlier, by the history
+			// filters (session.isUsageOnlyMessage and session.normalizeMessageContent
+			// both key on content and tool calls), so it never reaches this
+			// converter. Retaining such turns is a separate change with context-size
+			// consequences.
+			//
+			// Whether reasoning reaches this converter at all is the caller's policy;
+			// provider clients clear it when replay_reasoning is disabled. See
+			// [ReplayReasoning].
+			if strings.TrimSpace(msg.ReasoningContent) != "" {
+				assistantParam.SetExtraFields(map[string]any{
+					"reasoning_content": msg.ReasoningContent,
+				})
 			}
 
 			if msg.FunctionCall != nil {
@@ -158,6 +184,13 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 					}
 				}
 				assistantParam.ToolCalls = toolCalls
+			}
+
+			// content is only optional when tool_calls are present, and llama.cpp rejects
+			// an assistant message carrying neither, so a reasoning-only turn must still
+			// send content: "". See issue #4363.
+			if !hasContent && len(assistantParam.ToolCalls) == 0 {
+				assistantParam.Content.OfString = param.NewOpt("")
 			}
 
 			openaiMessage.OfAssistant = &assistantParam

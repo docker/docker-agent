@@ -1,6 +1,7 @@
 package oaistream
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/openai/openai-go/v3"
@@ -117,6 +118,16 @@ func TestConvertMessages(t *testing.T) {
 				{Role: chat.MessageRoleAssistant, Content: "", ToolCalls: []tools.ToolCall{{ID: "1"}}},
 			},
 			want: 1,
+		},
+		{
+			name:     "reasoning-only assistant message not skipped",
+			messages: []chat.Message{{Role: chat.MessageRoleAssistant, ReasoningContent: "thinking"}},
+			want:     1,
+		},
+		{
+			name:     "whitespace-only reasoning assistant message skipped",
+			messages: []chat.Message{{Role: chat.MessageRoleAssistant, ReasoningContent: "   "}},
+			want:     0,
 		},
 		{
 			name: "tool message",
@@ -263,5 +274,158 @@ func TestConvertToolImagesAsText(t *testing.T) {
 			require.NotNil(t, result[2].OfTool)
 			assert.Equal(t, "B", result[2].OfTool.ToolCallID)
 		})
+	}
+}
+
+// TestConvertMessages_ReasoningContentWireFormat covers issue #4363. Assertions are on
+// the serialized request body, not on the SDK struct: a field that openai-go omits is
+// invisible to struct-level assertions, and llama.cpp rejects an assistant message that
+// carries neither content nor tool_calls.
+func TestConvertMessages_ReasoningContentWireFormat(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{})
+
+	tests := []struct {
+		name string
+		msg  chat.Message
+		want map[string]any
+	}{
+		{
+			// A reasoning model that exhausts its output budget mid-reasoning leaves an
+			// assistant turn with no content and no tool calls. Dropping it loses the
+			// reasoning; keeping it with no content is rejected by the backend.
+			name: "reasoning-only turn replays reasoning with empty content",
+			msg: chat.Message{
+				Role:             chat.MessageRoleAssistant,
+				ReasoningContent: "the answer requires two steps",
+			},
+			want: map[string]any{
+				"role":              "assistant",
+				"content":           "",
+				"reasoning_content": "the answer requires two steps",
+			},
+		},
+		{
+			name: "reasoning alongside text",
+			msg: chat.Message{
+				Role:             chat.MessageRoleAssistant,
+				Content:          "Paris.",
+				ReasoningContent: "France's capital, from memory",
+			},
+			want: map[string]any{
+				"role":              "assistant",
+				"content":           "Paris.",
+				"reasoning_content": "France's capital, from memory",
+			},
+		},
+		{
+			// content stays absent here: tool_calls satisfies the backend's requirement.
+			name: "reasoning alongside tool calls",
+			msg: chat.Message{
+				Role:             chat.MessageRoleAssistant,
+				ReasoningContent: "I should call the weather tool",
+				ToolCalls: []tools.ToolCall{{
+					ID: "call_1",
+					Function: tools.FunctionCall{
+						Name:      "weather",
+						Arguments: `{"city":"Paris"}`,
+					},
+				}},
+			},
+			want: map[string]any{
+				"role":              "assistant",
+				"reasoning_content": "I should call the weather tool",
+				"tool_calls": []any{map[string]any{
+					"id":   "call_1",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "weather",
+						"arguments": `{"city":"Paris"}`,
+					},
+				}},
+			},
+		},
+		{
+			name: "no stored reasoning adds no extension",
+			msg:  chat.Message{Role: chat.MessageRoleAssistant, Content: "Hi there!"},
+			want: map[string]any{
+				"role":    "assistant",
+				"content": "Hi there!",
+			},
+		},
+		{
+			name: "whitespace-only reasoning is not replayed",
+			msg: chat.Message{
+				Role:             chat.MessageRoleAssistant,
+				Content:          "Hi there!",
+				ReasoningContent: "   ",
+			},
+			want: map[string]any{
+				"role":    "assistant",
+				"content": "Hi there!",
+			},
+		},
+		{
+			name: "reasoning is replayed on a multi-content turn",
+			msg: chat.Message{
+				Role:             chat.MessageRoleAssistant,
+				MultiContent:     []chat.MessagePart{{Type: chat.MessagePartTypeText, Text: "answer"}},
+				ReasoningContent: "reasoning",
+			},
+			want: map[string]any{
+				"role":              "assistant",
+				"content":           []any{map[string]any{"type": "text", "text": "answer"}},
+				"reasoning_content": "reasoning",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := ConvertMessages(t.Context(), []chat.Message{tt.msg}, modelsdev.ID{}, store, nil)
+			require.Len(t, result, 1)
+			require.NotNil(t, result[0].OfAssistant)
+
+			data, err := json.Marshal(result[0])
+			require.NoError(t, err)
+
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(data, &got))
+			assert.Equal(t, tt.want, got, "serialized assistant message: %s", data)
+		})
+	}
+}
+
+// TestConvertMessages_AssistantAlwaysMarshalable asserts every assistant turn that
+// survives conversion serializes to a shape llama.cpp accepts: either content or
+// tool_calls must be present.
+func TestConvertMessages_AssistantAlwaysMarshalable(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{})
+
+	messages := []chat.Message{
+		{Role: chat.MessageRoleAssistant, ReasoningContent: "thinking"},
+		{Role: chat.MessageRoleAssistant, Content: "text"},
+		{Role: chat.MessageRoleAssistant, MultiContent: []chat.MessagePart{{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "http://example.com/i.png"}}}},
+		{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{{ID: "call_1", Function: tools.FunctionCall{Name: "f", Arguments: "{}"}}}},
+	}
+
+	result := ConvertMessages(t.Context(), messages, modelsdev.ID{}, store, nil)
+	require.Len(t, result, len(messages))
+
+	for i, converted := range result {
+		data, err := json.Marshal(converted)
+		require.NoError(t, err)
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(data, &got))
+		_, hasContent := got["content"]
+		_, hasToolCalls := got["tool_calls"]
+		assert.True(t, hasContent || hasToolCalls,
+			"message %d rejected by llama.cpp: assistant message must contain either 'content' or 'tool_calls', got %s", i, data)
 	}
 }

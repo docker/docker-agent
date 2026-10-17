@@ -219,9 +219,22 @@ func (c *Client) Close() {
 	}
 }
 
+// replaysReasoning reports whether stored assistant reasoning is replayed as
+// reasoning_content on Chat Completions requests. Replay defaults on; an
+// explicit provider_opts.replay_reasoning value can opt out.
+func (c *Client) replaysReasoning() bool {
+	return oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts)
+}
+
 // convertMessages converts chat.Message to openai.ChatCompletionMessageParamUnion
 // using the shared oaistream implementation.
 func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
+	// Gated here rather than inside the converter so that every path below --
+	// including the prompt-cache breakpoint path, which must keep computing the
+	// same body it will send -- sees the same messages.
+	if !c.replaysReasoning() {
+		messages = oaistream.WithoutReplayedReasoning(messages)
+	}
 	// Explicit prompt-cache breakpoints take priority over the consecutive-
 	// message merge below. [sendsExplicitCacheBreakpoints] only admits genuine
 	// OpenAI vendor endpoints — including a trusted named custom OpenAI
