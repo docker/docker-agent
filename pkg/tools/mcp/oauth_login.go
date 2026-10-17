@@ -120,7 +120,7 @@ func performOAuthLogin(ctx context.Context, remote latest.Remote, startCallback 
 
 	redirectURI := callbackServer.ResolveRedirectURI(callbackRedirectURLFrom(remote.OAuth))
 
-	clientID, clientSecret, scopes, err := resolveStandaloneClientCredentials(
+	clientID, clientSecret, scopes, authMethod, err := resolveStandaloneClientCredentials(
 		ctx, client, remote.OAuth, authServerMetadata, redirectURI,
 		challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported,
 	)
@@ -161,13 +161,14 @@ func performOAuthLogin(ctx context.Context, remote latest.Remote, startCallback 
 	}
 
 	// Exchange the code for a token.
-	token, err := oauthflow.ExchangeCodeForTokenWithClient(ctx, client, authServerMetadata.TokenEndpoint, code, verifier, clientID, clientSecret, redirectURI, resourceIndicator)
+	token, err := oauthflow.ExchangeCodeForTokenWithClient(ctx, client, authServerMetadata.TokenEndpoint, code, verifier, clientID, clientSecret, redirectURI, resourceIndicator, authMethod)
 	if err != nil {
 		return fmt.Errorf("failed to exchange code for token: %w", err)
 	}
 
 	token.ClientID = clientID
 	token.ClientSecret = clientSecret
+	token.TokenEndpointAuthMethod = authMethod
 	token.AuthServer = resourceMetadata.AuthorizationServers[0]
 	token.RequestedScopes = scopes
 
@@ -255,23 +256,23 @@ func resolveStandaloneClientCredentials(
 	authServerMetadata *AuthorizationServerMetadata,
 	redirectURI string,
 	challengeScopes, prmScopesSupported []string,
-) (clientID, clientSecret string, scopes []string, err error) {
+) (clientID, clientSecret string, scopes []string, authMethod string, err error) {
 	if oauthConfig != nil && oauthConfig.ClientID != "" {
 		slog.DebugContext(ctx, "Using explicit OAuth credentials from config")
-		return oauthConfig.ClientID, oauthConfig.ClientSecret, oauthConfig.Scopes, nil
+		return oauthConfig.ClientID, oauthConfig.ClientSecret, oauthConfig.Scopes, "", nil
 	}
 
 	if authServerMetadata.RegistrationEndpoint == "" {
-		return "", "", nil, errors.New("authorization server does not support dynamic client registration; configure clientId (and clientSecret, if required) to use a pre-registered client")
+		return "", "", nil, "", errors.New("authorization server does not support dynamic client registration; configure clientId (and clientSecret, if required) to use a pre-registered client")
 	}
 
 	// Select before registering so the exact same scopes go into the DCR
 	// request and are returned for reuse at /authorize and on the stored
 	// token.
 	requestedScopes := selectDCRScopes(configuredScopes(oauthConfig), challengeScopes, prmScopesSupported)
-	clientID, clientSecret, err = oauthflow.RegisterClientWithClient(ctx, client, authServerMetadata, redirectURI, requestedScopes)
+	clientID, clientSecret, authMethod, err = oauthflow.RegisterClientWithClient(ctx, client, authServerMetadata, redirectURI, requestedScopes)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("dynamic client registration failed: %w", err)
+		return "", "", nil, "", fmt.Errorf("dynamic client registration failed: %w", err)
 	}
-	return clientID, clientSecret, requestedScopes, nil
+	return clientID, clientSecret, requestedScopes, authMethod, nil
 }

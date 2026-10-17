@@ -2,8 +2,10 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -192,7 +194,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 		}
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: srv.URL}
 
-		clientID, clientSecret, scopes, err := resolveStandaloneClientCredentials(
+		clientID, clientSecret, scopes, _, err := resolveStandaloneClientCredentials(
 			t.Context(), srv.Client(), oauthConfig, authMeta, "http://127.0.0.1/callback",
 			[]string{"challenge-scope"}, []string{"prm-scope"},
 		)
@@ -209,7 +211,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 		oauthConfig := &latest.RemoteOAuthConfig{ClientID: "explicit-client"}
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: "http://unused.invalid"}
 
-		clientID, clientSecret, scopes, err := resolveStandaloneClientCredentials(
+		clientID, clientSecret, scopes, _, err := resolveStandaloneClientCredentials(
 			t.Context(), http.DefaultClient, oauthConfig, authMeta, "http://127.0.0.1/callback",
 			[]string{"challenge-scope"}, []string{"prm-scope"},
 		)
@@ -224,7 +226,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 
 		authMeta := &AuthorizationServerMetadata{}
 
-		_, _, _, err := resolveStandaloneClientCredentials(
+		_, _, _, _, err := resolveStandaloneClientCredentials(
 			t.Context(), http.DefaultClient, nil, authMeta, "http://127.0.0.1/callback", nil, nil,
 		)
 		require.Error(t, err)
@@ -241,7 +243,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: srv.URL}
 
-		_, _, _, err := resolveStandaloneClientCredentials(
+		_, _, _, _, err := resolveStandaloneClientCredentials(
 			t.Context(), srv.Client(), nil, authMeta, "http://127.0.0.1/callback", nil, nil,
 		)
 		require.Error(t, err)
@@ -266,7 +268,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: srv.URL}
 		oauthConfig := &latest.RemoteOAuthConfig{Scopes: []string{"configured-scope"}}
 
-		clientID, clientSecret, scopes, err := resolveStandaloneClientCredentials(
+		clientID, clientSecret, scopes, _, err := resolveStandaloneClientCredentials(
 			t.Context(), srv.Client(), oauthConfig, authMeta, "http://127.0.0.1/callback",
 			[]string{"challenge-scope"}, []string{"prm-scope"},
 		)
@@ -287,7 +289,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 		defer srv.Close()
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: srv.URL}
 
-		_, _, scopes, err := resolveStandaloneClientCredentials(
+		_, _, scopes, _, err := resolveStandaloneClientCredentials(
 			t.Context(), srv.Client(), nil, authMeta, "http://127.0.0.1/callback",
 			nil, []string{"prm-scope"},
 		)
@@ -1278,6 +1280,9 @@ func TestPerformOAuthLogin_DCRSuccess_EndToEndScopeEquality(t *testing.T) {
 	const mcpPath = "/mcp"
 	var registerScope string
 	var haveRegisterScope bool
+	var registerMethod string
+	var tokenAuth string
+	var tokenForm url.Values
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -1308,14 +1313,19 @@ func TestPerformOAuthLogin_DCRSuccess_EndToEndScopeEquality(t *testing.T) {
 	})
 	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Scope string `json:"scope"`
+			Scope                   string `json:"scope"`
+			TokenEndpointAuthMethod string `json:"token_endpoint_auth_method"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		registerScope, haveRegisterScope = body.Scope, true
+		registerMethod = body.TokenEndpointAuthMethod
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"client_id":"registered-client-id","client_secret":"registered-secret"}`))
 	})
-	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		tokenAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		tokenForm, _ = url.ParseQuery(string(body))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"access_token":"exchanged-at","token_type":"Bearer","expires_in":3600}`))
 	})
@@ -1347,6 +1357,12 @@ func TestPerformOAuthLogin_DCRSuccess_EndToEndScopeEquality(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"configured-scope"}, tok.RequestedScopes,
 		"the stored token's RequestedScopes must match the scope sent to DCR and /authorize")
+	assert.Equal(t, "client_secret_basic", registerMethod)
+	assert.Equal(t, "client_secret_basic", tok.TokenEndpointAuthMethod)
+	wantBasic := "Basic " + base64.StdEncoding.EncodeToString([]byte("registered-client-id:registered-secret"))
+	assert.Equal(t, wantBasic, tokenAuth)
+	assert.Empty(t, tokenForm.Get("client_secret"))
+	assert.Empty(t, tokenForm.Get("client_id"))
 }
 
 // TestPerformOAuthLogin_ChallengeScopePrecedenceOverDistinctPRMScopes_EndToEnd

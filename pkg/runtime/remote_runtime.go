@@ -768,10 +768,10 @@ func (r *RemoteRuntime) handleOAuthElicitation(ctx context.Context, sessionID st
 	redirectURI := callbackServer.GetRedirectURI()
 	slog.DebugContext(ctx, "Callback server started", "redirect_uri", redirectURI)
 
-	var clientID, clientSecret string
+	var clientID, clientSecret, authMethod string
 	if authMetadata.RegistrationEndpoint != "" {
 		slog.DebugContext(ctx, "Attempting dynamic client registration")
-		clientID, clientSecret, err = oauthflow.RegisterClient(oauthCtx, &authMetadata, redirectURI, nil)
+		clientID, clientSecret, authMethod, err = oauthflow.RegisterClient(oauthCtx, &authMetadata, redirectURI, nil)
 		if err != nil {
 			slog.ErrorContext(ctx, "Dynamic client registration failed", "error", err)
 			_ = r.client.ResumeElicitation(ctx, sessionID, "decline", nil, req.ElicitationID)
@@ -824,8 +824,9 @@ func (r *RemoteRuntime) handleOAuthElicitation(ctx context.Context, sessionID st
 
 	slog.DebugContext(ctx, "Authorization code received, exchanging for token")
 
-	token, err := oauthflow.ExchangeCodeForTokenWithResource(
+	token, err := oauthflow.ExchangeCodeForTokenWithClient(
 		oauthCtx,
+		oauthflow.DefaultHTTPClient(),
 		authMetadata.TokenEndpoint,
 		code,
 		verifier,
@@ -833,6 +834,7 @@ func (r *RemoteRuntime) handleOAuthElicitation(ctx context.Context, sessionID st
 		clientSecret,
 		redirectURI,
 		resourceIndicator,
+		authMethod,
 	)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to exchange code for token", "error", err)

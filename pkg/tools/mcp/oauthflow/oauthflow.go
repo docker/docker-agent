@@ -138,19 +138,19 @@ func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChall
 
 // ExchangeCodeForToken exchanges an authorization code for an access token.
 func ExchangeCodeForToken(ctx context.Context, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI string) (*OAuthToken, error) {
-	return ExchangeCodeForTokenWithClient(ctx, DefaultHTTPClient(), tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, "")
+	return ExchangeCodeForTokenWithClient(ctx, DefaultHTTPClient(), tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, "", "")
 }
 
 // ExchangeCodeForTokenWithResource exchanges an authorization code and sends
 // the RFC 8707 resource indicator to token endpoints that require it.
 func ExchangeCodeForTokenWithResource(ctx context.Context, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL string) (*OAuthToken, error) {
-	return ExchangeCodeForTokenWithClient(ctx, DefaultHTTPClient(), tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL)
+	return ExchangeCodeForTokenWithClient(ctx, DefaultHTTPClient(), tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL, "")
 }
 
 // ExchangeCodeForTokenWithClient is ExchangeCodeForTokenWithResource with an
 // explicit *http.Client, for callers that layer per-server headers or
 // private-IP policies on top of the default client.
-func ExchangeCodeForTokenWithClient(ctx context.Context, client *http.Client, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL string) (*OAuthToken, error) {
+func ExchangeCodeForTokenWithClient(ctx context.Context, client *http.Client, tokenEndpoint, code, codeVerifier, clientID, clientSecret, redirectURI, resourceURL, authMethod string) (*OAuthToken, error) {
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
@@ -160,8 +160,9 @@ func ExchangeCodeForTokenWithClient(ctx context.Context, client *http.Client, to
 	if resourceURL != "" {
 		data.Set("resource", resourceURL)
 	}
-	if clientSecret != "" {
-		data.Set("client_secret", clientSecret)
+	basicID, basicSecret, err := arrangeClientAuth(data, clientID, clientSecret, authMethod)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
@@ -170,6 +171,9 @@ func ExchangeCodeForTokenWithClient(ctx context.Context, client *http.Client, to
 	}
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if authMethod == "client_secret_basic" {
+		setClientBasicAuth(req, basicID, basicSecret)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -188,6 +192,7 @@ func ExchangeCodeForTokenWithClient(ctx context.Context, client *http.Client, to
 	}
 	token.ClientID = clientID
 	token.ClientSecret = clientSecret
+	token.TokenEndpointAuthMethod = authMethod
 
 	return token, nil
 }
@@ -312,21 +317,31 @@ func constantTimeStateEqual(got, want string) bool {
 }
 
 // RegisterClient performs dynamic client registration
-func RegisterClient(ctx context.Context, authMetadata *AuthorizationServerMetadata, redirectURI string, scopes []string) (clientID, clientSecret string, err error) {
+func RegisterClient(ctx context.Context, authMetadata *AuthorizationServerMetadata, redirectURI string, scopes []string) (clientID, clientSecret, authMethod string, err error) {
 	return RegisterClientWithClient(ctx, DefaultHTTPClient(), authMetadata, redirectURI, scopes)
 }
 
 // RegisterClientWithClient is RegisterClient with an explicit *http.Client.
-func RegisterClientWithClient(ctx context.Context, client *http.Client, authMetadata *AuthorizationServerMetadata, redirectURI string, scopes []string) (clientID, clientSecret string, err error) {
+// authMethod is the token endpoint auth method to use afterwards. A response
+// that omits token_endpoint_auth_method is client_secret_basic (RFC 7591),
+// not confirmation of the method we asked for.
+func RegisterClientWithClient(ctx context.Context, client *http.Client, authMetadata *AuthorizationServerMetadata, redirectURI string, scopes []string) (clientID, clientSecret, authMethod string, err error) {
 	if authMetadata.RegistrationEndpoint == "" {
-		return "", "", errors.New("authorization server does not support dynamic client registration")
+		return "", "", "", errors.New("authorization server does not support dynamic client registration")
 	}
 
+	authMethod, err = selectTokenEndpointAuthMethod(authMetadata.TokenEndpointAuthMethodsSupported)
+	if err != nil {
+		return "", "", "", err
+	}
 	reqBody := map[string]any{
 		"redirect_uris":  []string{redirectURI},
 		"client_name":    "docker-agent",
 		"grant_types":    []string{"authorization_code", "refresh_token"},
 		"response_types": []string{"code"},
+	}
+	if authMethod != "" {
+		reqBody["token_endpoint_auth_method"] = authMethod
 	}
 	if len(scopes) > 0 {
 		reqBody["scope"] = strings.Join(scopes, " ")
@@ -334,38 +349,107 @@ func RegisterClientWithClient(ctx context.Context, client *http.Client, authMeta
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to marshal registration request: %w", err)
+		return "", "", "", fmt.Errorf("failed to marshal registration request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authMetadata.RegistrationEndpoint, strings.NewReader(string(bodyBytes)))
 	if err != nil {
-		return "", "", fmt.Errorf("failed to create registration request: %w", err)
+		return "", "", "", fmt.Errorf("failed to create registration request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to register client: %w", err)
+		return "", "", "", fmt.Errorf("failed to register client: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
-		return "", "", fmt.Errorf("client registration failed with status %d: %s", resp.StatusCode, string(body))
+		return "", "", "", fmt.Errorf("client registration failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var respBody struct {
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret,omitempty"`
+		ClientID                string `json:"client_id"`
+		ClientSecret            string `json:"client_secret,omitempty"`
+		TokenEndpointAuthMethod string `json:"token_endpoint_auth_method,omitempty"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
-		return "", "", fmt.Errorf("failed to decode registration response: %w", err)
+		return "", "", "", fmt.Errorf("failed to decode registration response: %w", err)
 	}
 
 	if respBody.ClientID == "" {
-		return "", "", errors.New("registration response missing client_id")
+		return "", "", "", errors.New("registration response missing client_id")
 	}
-	return respBody.ClientID, respBody.ClientSecret, nil
+	if respBody.TokenEndpointAuthMethod != "" {
+		authMethod = respBody.TokenEndpointAuthMethod
+	} else {
+		// RFC 7591: an omitted method on the registration response is
+		// client_secret_basic, even when the request asked for post or none.
+		authMethod = "client_secret_basic"
+	}
+	if !supportedClientAuthMethod(authMethod) {
+		return "", "", "", fmt.Errorf("unsupported token endpoint auth method %q", authMethod)
+	}
+	return respBody.ClientID, respBody.ClientSecret, authMethod, nil
+}
+
+// selectTokenEndpointAuthMethod picks a method both sides can use.
+// An omitted list means only client_secret_basic (RFC 8414). A list that
+// does not include post, basic, or none is an error: do not pretend it is post.
+func selectTokenEndpointAuthMethod(supported []string) (string, error) {
+	if len(supported) == 0 {
+		return "client_secret_basic", nil
+	}
+	has := make(map[string]bool, len(supported))
+	for _, s := range supported {
+		has[s] = true
+	}
+	for _, want := range []string{"client_secret_post", "client_secret_basic", "none"} {
+		if has[want] {
+			return want, nil
+		}
+	}
+	return "", fmt.Errorf("authorization server advertises no usable token endpoint auth method (%s)", strings.Join(supported, ", "))
+}
+
+// supportedClientAuthMethod reports methods this client can actually send.
+// Empty is the legacy client_secret_post stored on tokens from before the field existed.
+func supportedClientAuthMethod(method string) bool {
+	switch method {
+	case "", "client_secret_post", "client_secret_basic", "none":
+		return true
+	default:
+		return false
+	}
+}
+
+// arrangeClientAuth puts the client secret where method says it goes.
+// An empty method is client_secret_post. For basic it returns the id and
+// secret for an Authorization header and strips them from the form.
+func arrangeClientAuth(data url.Values, clientID, clientSecret, method string) (basicID, basicSecret string, err error) {
+	switch method {
+	case "client_secret_basic":
+		data.Del("client_id")
+		data.Del("client_secret")
+		return clientID, clientSecret, nil
+	case "none":
+		data.Del("client_secret")
+	case "", "client_secret_post":
+		if clientSecret != "" {
+			data.Set("client_secret", clientSecret)
+		}
+	default:
+		return "", "", fmt.Errorf("unsupported token endpoint auth method %q", method)
+	}
+	return "", "", nil
+}
+
+// setClientBasicAuth sets an RFC 6749 client-secret-basic header.
+// Each credential is application/x-www-form-urlencoded on its own;
+// SetBasicAuth only base64-encodes the raw user:pass.
+func setClientBasicAuth(req *http.Request, id, secret string) {
+	req.SetBasicAuth(url.QueryEscape(id), url.QueryEscape(secret))
 }
 
 // GeneratePKCEVerifier generates a PKCE code verifier using oauth2 library
@@ -376,17 +460,18 @@ func GeneratePKCEVerifier() string {
 // RefreshAccessToken uses a refresh token to obtain a new access token
 // without user interaction.
 func RefreshAccessToken(ctx context.Context, tokenEndpoint, refreshToken, clientID, clientSecret string) (*OAuthToken, error) {
-	return RefreshAccessTokenWithClient(ctx, DefaultHTTPClient(), tokenEndpoint, refreshToken, clientID, clientSecret)
+	return RefreshAccessTokenWithClient(ctx, DefaultHTTPClient(), tokenEndpoint, refreshToken, clientID, clientSecret, "")
 }
 
 // RefreshAccessTokenWithClient is RefreshAccessToken with an explicit *http.Client.
-func RefreshAccessTokenWithClient(ctx context.Context, client *http.Client, tokenEndpoint, refreshToken, clientID, clientSecret string) (*OAuthToken, error) {
+func RefreshAccessTokenWithClient(ctx context.Context, client *http.Client, tokenEndpoint, refreshToken, clientID, clientSecret, authMethod string) (*OAuthToken, error) {
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", refreshToken)
 	data.Set("client_id", clientID)
-	if clientSecret != "" {
-		data.Set("client_secret", clientSecret)
+	basicID, basicSecret, err := arrangeClientAuth(data, clientID, clientSecret, authMethod)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
@@ -394,6 +479,9 @@ func RefreshAccessTokenWithClient(ctx context.Context, client *http.Client, toke
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if authMethod == "client_secret_basic" {
+		setClientBasicAuth(req, basicID, basicSecret)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -418,6 +506,7 @@ func RefreshAccessTokenWithClient(ctx context.Context, client *http.Client, toke
 	// Preserve client credentials so subsequent refreshes work
 	token.ClientID = clientID
 	token.ClientSecret = clientSecret
+	token.TokenEndpointAuthMethod = authMethod
 
 	return token, nil
 }

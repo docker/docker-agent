@@ -79,7 +79,7 @@ func ExchangeCodeForTokenWithResource(ctx context.Context, tokenEndpoint, code, 
 }
 
 // RegisterClient performs dynamic client registration
-func RegisterClient(ctx context.Context, authMetadata *AuthorizationServerMetadata, redirectURI string, scopes []string) (clientID, clientSecret string, err error) {
+func RegisterClient(ctx context.Context, authMetadata *AuthorizationServerMetadata, redirectURI string, scopes []string) (clientID, clientSecret, authMethod string, err error) {
 	return oauthflow.RegisterClient(ctx, authMetadata, redirectURI, scopes)
 }
 
