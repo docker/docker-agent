@@ -233,6 +233,8 @@
       url: /providers/openrouter/
     - title: OVHcloud
       url: /providers/ovhcloud/
+    - title: Rapid-MLX
+      url: /providers/rapid-mlx/
     - title: Together AI
       url: /providers/together/
     - title: Vercel AI Gateway

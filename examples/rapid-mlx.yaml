@@ -1,0 +1,24 @@
+# Start the local server first: rapid-mlx serve qwen3.5-4b-4bit --port 8000
+providers:
+  rapid-mlx:
+    api_type: openai_chatcompletions
+    base_url: http://127.0.0.1:8000/v1
+    # If the server was started with --api-key, set RAPID_MLX_API_KEY and uncomment:
+    # token_key: RAPID_MLX_API_KEY
+    provider_opts:
+      extra_body:
+        chat_template_kwargs:
+          enable_thinking: false
+
+models:
+  local:
+    provider: rapid-mlx
+    model: qwen3.5-4b-4bit
+    temperature: 0
+    max_tokens: 512
+
+agents:
+  root:
+    model: local
+    description: Local chat assistant using Rapid-MLX on Apple Silicon
+    instruction: You are a concise helpful assistant. Answer directly.
