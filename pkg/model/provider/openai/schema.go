@@ -2,6 +2,7 @@ package openai
 
 import (
 	"iter"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,7 +27,25 @@ func ConvertParametersToSchema(params any) (shared.FunctionParameters, bool, err
 	}
 
 	strict := isStrictCompatible(p)
-	return fixSchemaArrayItems(removeFormatFields(ensureTypeFields(makeAllRequired(p)))), strict, nil
+	normalized := fixSchemaArrayItems(removeFormatFields(ensureTypeFields(makeAllRequired(p))))
+	return normalized, strict && !hasUnresolvedLocalRef(normalized), nil
+}
+
+// hasUnresolvedLocalRef is the output-side counterpart of the $ref check in
+// isStrictCompatible: normalization relocates schemas, and a strict schema
+// must never be sent with a local $ref that no longer resolves.
+func hasUnresolvedLocalRef(root map[string]any) bool {
+	unresolved := false
+	walkSchema(root, func(node map[string]any) {
+		ref, ok := node["$ref"].(string)
+		if !ok || (ref != "#" && !strings.HasPrefix(ref, "#/")) {
+			return
+		}
+		if !jsonPointerResolves(root, ref) {
+			unresolved = true
+		}
+	})
+	return unresolved
 }
 
 // childSchemas yields every direct sub-schema of node. Both the strict
@@ -133,25 +152,25 @@ func isStrictCompatibleRef(root, node map[string]any, ref any) bool {
 	if refStr != "#" && !strings.HasPrefix(refStr, "#/") {
 		return false
 	}
-	if _, ok := resolveJSONPointer(root, refStr); !ok {
+	if !jsonPointerResolves(root, refStr) {
 		return false
 	}
 	// No sibling keywords: the node must contain nothing but "$ref".
 	return len(node) == 1
 }
 
-// resolveJSONPointer resolves a local JSON pointer (e.g. "#/$defs/thing" or
-// "#") against root, per RFC 6901. It only descends through map[string]any
+// jsonPointerResolves reports whether a local JSON pointer (e.g. "#/$defs/thing" or
+// "#") resolves to a schema object within root, per RFC 6901. It only descends through map[string]any
 // and []any nodes; anything else, or a missing key/out-of-range index, fails
 // resolution rather than panicking.
-func resolveJSONPointer(root map[string]any, pointer string) (map[string]any, bool) {
+func jsonPointerResolves(root map[string]any, pointer string) bool {
 	pointer = strings.TrimPrefix(pointer, "#")
 	if pointer == "" {
-		return root, true
+		return true
 	}
 	rest, found := strings.CutPrefix(pointer, "/")
 	if !found {
-		return nil, false
+		return false
 	}
 
 	var current any = root
@@ -163,22 +182,22 @@ func resolveJSONPointer(root map[string]any, pointer string) (map[string]any, bo
 		case map[string]any:
 			v, ok := node[tok]
 			if !ok {
-				return nil, false
+				return false
 			}
 			current = v
 		case []any:
 			idx, err := strconv.Atoi(tok)
 			if err != nil || idx < 0 || idx >= len(node) {
-				return nil, false
+				return false
 			}
 			current = node[idx]
 		default:
-			return nil, false
+			return false
 		}
 	}
 
-	m, ok := current.(map[string]any)
-	return m, ok
+	_, ok := current.(map[string]any)
+	return ok
 }
 
 // walkSchema calls fn on the given schema node, then recursively walks into
@@ -211,6 +230,8 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 	if schema == nil {
 		schema = map[string]any{"type": "object", "properties": map[string]any{}}
 	}
+
+	wrappers := nullableWrappers{}
 
 	walkSchema(schema, func(node map[string]any) {
 		if _, ok := node["$ref"]; ok {
@@ -267,7 +288,7 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 
 			if containerType, isNullableContainer := nullableContainerType(propMap); isNullableContainer {
 				propMap["type"] = containerType
-				properties[propName] = nullableAnyOf(propMap)
+				properties[propName] = wrappers.wrap(propMap, false)
 				continue
 			}
 
@@ -279,7 +300,7 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 			t, isScalarType := propMap["type"].(string)
 			switch {
 			case isRef || t == "array" || t == "object":
-				properties[propName] = nullableAnyOf(propMap)
+				properties[propName] = wrappers.wrap(propMap, true)
 			case isScalarType:
 				propMap["type"] = []string{t, "null"}
 			}
@@ -287,6 +308,8 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 
 		node["required"] = newRequired
 	})
+
+	wrappers.retargetLocalRefs(schema)
 
 	return schema
 }
@@ -323,12 +346,86 @@ func nullableContainerType(schema map[string]any) (string, bool) {
 	return "", false
 }
 
-// nullableAnyOf wraps schema as {"anyOf": [schema, {"type": "null"}]}, the
-// nullable form OpenAI strict mode accepts for non-scalar schemas.
-func nullableAnyOf(schema map[string]any) map[string]any {
-	return map[string]any{
+// nullableWrappers tracks the {"anyOf": [schema, {"type": "null"}]} wrappers
+// created while making properties nullable. Wrapping relocates the original
+// schema to <path>/anyOf/0, so local $refs pointing at or into it have to be
+// rewritten. The value says whether a $ref targeting the wrapped node itself
+// should keep seeing the non-null variant: true for properties that were not
+// nullable before, false for ones already declared as a nullable type pair.
+type nullableWrappers map[uintptr]bool
+
+func (w nullableWrappers) wrap(schema map[string]any, referrersSeeNonNull bool) map[string]any {
+	wrapper := map[string]any{
 		"anyOf": []any{schema, map[string]any{"type": "null"}},
 	}
+	w[reflect.ValueOf(wrapper).Pointer()] = referrersSeeNonNull
+	return wrapper
+}
+
+func (w nullableWrappers) variantOf(node any) (wrapped map[string]any, referrersSeeNonNull, isWrapper bool) {
+	wrapper, ok := node.(map[string]any)
+	if !ok {
+		return nil, false, false
+	}
+	referrersSeeNonNull, isWrapper = w[reflect.ValueOf(wrapper).Pointer()]
+	if !isWrapper {
+		return nil, false, false
+	}
+	wrapped = wrapper["anyOf"].([]any)[0].(map[string]any)
+	return wrapped, referrersSeeNonNull, true
+}
+
+func (w nullableWrappers) retargetLocalRefs(root map[string]any) {
+	if len(w) == 0 {
+		return
+	}
+	walkSchema(root, func(node map[string]any) {
+		if ref, ok := node["$ref"].(string); ok {
+			node["$ref"] = w.retarget(root, ref)
+		}
+	})
+}
+
+// retarget returns ref rewritten so it addresses the same schema it addressed
+// before wrapping. Refs that cannot be resolved are returned unchanged.
+func (w nullableWrappers) retarget(root map[string]any, ref string) string {
+	rest, isLocalPointer := strings.CutPrefix(ref, "#/")
+	if !isLocalPointer {
+		return ref
+	}
+
+	var current any = root
+	rewritten := []string{}
+	for token := range strings.SplitSeq(rest, "/") {
+		if wrapped, _, isWrapper := w.variantOf(current); isWrapper {
+			rewritten = append(rewritten, "anyOf", "0")
+			current = wrapped
+		}
+
+		key := strings.ReplaceAll(strings.ReplaceAll(token, "~1", "/"), "~0", "~")
+		switch node := current.(type) {
+		case map[string]any:
+			child, ok := node[key]
+			if !ok {
+				return ref
+			}
+			current = child
+		case []any:
+			index, err := strconv.Atoi(key)
+			if err != nil || index < 0 || index >= len(node) {
+				return ref
+			}
+			current = node[index]
+		default:
+			return ref
+		}
+		rewritten = append(rewritten, token)
+	}
+
+	if _, referrersSeeNonNull, isWrapper := w.variantOf(current); isWrapper && referrersSeeNonNull {
+		rewritten = append(rewritten, "anyOf", "0")
+	}
+	return "#/" + strings.Join(rewritten, "/")
 }
 
 // isCompositionNode reports whether node describes its shape via $ref or a

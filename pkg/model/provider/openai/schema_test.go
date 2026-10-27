@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/openai/openai-go/v3/shared"
@@ -1226,6 +1227,10 @@ func TestConvertParametersToSchema_NullableContainers(t *testing.T) {
 			},
 		}
 	}
+	withDefs := func(schema map[string]any, name string) map[string]any {
+		schema["$defs"] = map[string]any{name: map[string]any{"type": "string"}}
+		return schema
+	}
 	propertyOf := func(object map[string]any) map[string]any {
 		return object["properties"].(map[string]any)["p"].(map[string]any)
 	}
@@ -1299,10 +1304,10 @@ func TestConvertParametersToSchema_NullableContainers(t *testing.T) {
 		},
 		{
 			name:       "optional $ref keeps the anyOf wrapper",
-			schema:     rootWith(map[string]any{"$ref": "#/$defs/thing"}),
+			schema:     withDefs(rootWith(map[string]any{"$ref": "#/$defs/thing"}), "thing"),
 			property:   propertyOf,
 			want:       map[string]any{"anyOf": []any{map[string]any{"$ref": "#/$defs/thing"}, nullVariant}},
-			wantStrict: false,
+			wantStrict: true,
 		},
 	}
 
@@ -1319,6 +1324,7 @@ func TestConvertParametersToSchema_NullableContainers(t *testing.T) {
 				assert.True(t, isStrictCompatible(out))
 			}
 			assertNoNullableContainerTypePairs(t, out)
+			assertEveryLocalRefResolves(t, out)
 		})
 	}
 }
@@ -1330,4 +1336,93 @@ func assertNoNullableContainerTypePairs(t *testing.T, schema map[string]any) {
 		container, isNullablePair := nullableContainerType(node)
 		assert.False(t, isNullablePair, "found nullable %s type pair: %v", container, node)
 	})
+}
+
+func assertEveryLocalRefResolves(t *testing.T, schema map[string]any) {
+	t.Helper()
+
+	walkSchema(schema, func(node map[string]any) {
+		ref, ok := node["$ref"].(string)
+		if !ok || !strings.HasPrefix(ref, "#") {
+			return
+		}
+		assert.True(t, jsonPointerResolves(schema, ref), "unresolved local $ref %q", ref)
+	})
+}
+
+func TestConvertParametersToSchema_LocalRefsFollowWrappedContainers(t *testing.T) {
+	t.Parallel()
+
+	optionalConfig := func() map[string]any {
+		return map[string]any{
+			"type":     "object",
+			"required": []any{"values"},
+			"properties": map[string]any{
+				"values": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			},
+		}
+	}
+	rootWithConfigAndRef := func(ref string) map[string]any {
+		return map[string]any{
+			"type":     "object",
+			"required": []any{"copy"},
+			"properties": map[string]any{
+				"cfg":  optionalConfig(),
+				"copy": map[string]any{"$ref": ref},
+			},
+			"$defs": map[string]any{"thing": map[string]any{"type": "string"}},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		ref     string
+		wantRef string
+	}{
+		{
+			name:    "ref into a descendant of a wrapped property",
+			ref:     "#/properties/cfg/properties/values",
+			wantRef: "#/properties/cfg/anyOf/0/properties/values",
+		},
+		{
+			name:    "ref to the wrapped property itself",
+			ref:     "#/properties/cfg",
+			wantRef: "#/properties/cfg/anyOf/0",
+		},
+		{
+			name:    "ref into $defs is untouched",
+			ref:     "#/$defs/thing",
+			wantRef: "#/$defs/thing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			out, strict, err := ConvertParametersToSchema(rootWithConfigAndRef(tt.ref))
+			require.NoError(t, err)
+
+			copyProp := out["properties"].(map[string]any)["copy"].(map[string]any)
+			assert.Equal(t, tt.wantRef, copyProp["$ref"])
+			assertEveryLocalRefResolves(t, out)
+			assert.True(t, strict)
+		})
+	}
+}
+
+func TestConvertParametersToSchema_UnresolvableLocalRefIsNotStrict(t *testing.T) {
+	t.Parallel()
+
+	schema := map[string]any{
+		"type":     "object",
+		"required": []any{"copy"},
+		"properties": map[string]any{
+			"copy": map[string]any{"$ref": "#/properties/missing"},
+		},
+	}
+
+	_, strict, err := ConvertParametersToSchema(schema)
+	require.NoError(t, err)
+	assert.False(t, strict)
 }
