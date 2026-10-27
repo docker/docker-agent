@@ -43,6 +43,7 @@ func TestCatalogAliases(t *testing.T) {
 		"orcarouter":   {APIType: "openai", BaseURL: "https://api.orcarouter.ai/v1", TokenEnvVar: "ORCAROUTER_API_KEY"},
 		"atlascloud":   {APIType: "openai", BaseURL: "https://api.atlascloud.ai/v1", TokenEnvVar: "ATLASCLOUD_API_KEY"},
 		"runcrate":     {APIType: "openai", BaseURL: "https://api.runcrate.ai/v1", TokenEnvVar: "RUNCRATE_API_KEY"},
+		"cloudgpu":     {APIType: "openai", BaseURL: "https://cloudgpu.app/v1", TokenEnvVar: "CLOUDGPU_API_KEY"},
 		"opper":        {APIType: "openai", BaseURL: "https://api.opper.ai/v3/compat", TokenEnvVar: "OPPER_API_KEY"},
 		"baseten":      {APIType: "openai", BaseURL: "https://inference.baseten.co/v1", TokenEnvVar: "BASETEN_API_KEY"},
 		"daoxe":        {APIType: "openai", BaseURL: "https://api.daoxe.com/v1", TokenEnvVar: "DAOXE_API_KEY"},
@@ -135,6 +136,7 @@ func TestProviderIDsMatchEmbeddedCatalog(t *testing.T) {
 		"atlascloud": "model IDs come from Atlas Cloud's /v1/models endpoint, not models.dev",
 		"chatgpt":    "subscription backend, distinct from OpenAI",
 		"runcrate":   "model IDs come from Runcrate's /v1/models endpoint, not models.dev",
+		"cloudgpu":   "model IDs come from CloudGPU's /v1/models endpoint, not models.dev",
 		"dmr":        "local Docker Model Runner",
 		"ollama":     "local Ollama server",
 	}

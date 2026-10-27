@@ -90,6 +90,14 @@ var openAIAliasProviders = []openAIAliasProvider{
 		mergesSystemMessages: true,
 	},
 	{
+		provider:             "cloudgpu",
+		envVar:               "CLOUDGPU_API_KEY",
+		testKey:              "test-cloudgpu-key",
+		model:                "deepseek-v4.1-flash",
+		greeting:             "Hello from CloudGPU",
+		mergesSystemMessages: true,
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",

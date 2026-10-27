@@ -75,6 +75,16 @@ func TestRuncrate_MergesConsecutiveSystemMessages(t *testing.T) {
 	})
 }
 
+func TestCloudGPU_MergesConsecutiveSystemMessages(t *testing.T) {
+	t.Parallel()
+
+	assertMergesConsecutiveMessages(t, &latest.ModelConfig{
+		Provider: "cloudgpu",
+		Model:    "deepseek-v4.1-flash",
+		TokenKey: "MY_TOKEN",
+	})
+}
+
 func TestBaseten_MergesConsecutiveSystemMessages(t *testing.T) {
 	t.Parallel()
 
@@ -204,6 +214,7 @@ func TestShouldMergeConsecutiveMessages_Gating(t *testing.T) {
 		{"daoxe, no base_url", &latest.ModelConfig{Provider: "daoxe", Model: "claude-sonnet-4-6"}, true},
 		{"opper, no base_url", &latest.ModelConfig{Provider: "opper", Model: "claude-sonnet-4-6"}, true},
 		{"runcrate, no base_url", &latest.ModelConfig{Provider: "runcrate", Model: "deepseek-ai/DeepSeek-V4.1-Flash"}, true},
+		{"cloudgpu, no base_url", &latest.ModelConfig{Provider: "cloudgpu", Model: "deepseek-v4.1-flash"}, true},
 		{"ovhcloud", &latest.ModelConfig{Provider: "ovhcloud", Model: "Qwen3.5-397B-A17B"}, true},
 		{"open-model host alias cerebras", &latest.ModelConfig{Provider: "cerebras", Model: "qwen-3-coder-480b"}, true},
 		{"open-model host fireworks", &latest.ModelConfig{Provider: "fireworks", Model: "accounts/fireworks/models/kimi-k3"}, true},
