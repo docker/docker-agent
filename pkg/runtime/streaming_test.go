@@ -351,6 +351,49 @@ func TestHandleStream_MediaInTerminalChunkIsAccumulated(t *testing.T) {
 	}
 }
 
+// TestHandleStream_ContentInTerminalChunkIsAccumulated covers providers that
+// stream the last content (and reasoning) delta in the same chunk as the
+// terminal finish reason and usage, e.g. DeepSeek V4 through some
+// OpenAI-compatible gateways: "mar", then "igold" with finish_reason "stop".
+func TestHandleStream_ContentInTerminalChunkIsAccumulated(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		finishReason chat.FinishReason
+	}{
+		{"stop", chat.FinishReasonStop},
+		{"length", chat.FinishReasonLength},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := newStreamBuilder().AddContent("mar").Build()
+			stream.responses = append(stream.responses, chat.MessageStreamResponse{
+				Choices: []chat.MessageStreamChoice{{
+					Index:        0,
+					FinishReason: tc.finishReason,
+					Delta:        chat.MessageDelta{Content: "igold", ReasoningContent: "done"},
+				}},
+				Usage: &chat.Usage{InputTokens: 1, OutputTokens: 2},
+			})
+
+			a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+			sess := session.New(session.WithUserMessage("go"))
+
+			evCh := make(chan Event, 64)
+			res, err := handleStream(
+				t.Context(), nil, stream, a, nil, sess,
+				NewChannelSink(evCh), defaultStreamIdleTimeout,
+			)
+			require.NoError(t, err)
+
+			assert.Equal(t, "marigold", res.Content, "content sharing a chunk with the terminal finish reason must not be dropped")
+			assert.Equal(t, "done", res.ReasoningContent)
+			assert.Equal(t, tc.finishReason, res.FinishReason)
+		})
+	}
+}
+
 // TestHandleStream_WhitespaceOnlyContentStops is a regression test for an
 // infinite-loop risk surfaced while reviewing #3145. A turn that streams only
 // whitespace content and ends with a bare EOF (no finish reason) must report
