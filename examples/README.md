@@ -215,6 +215,7 @@ remote MCP endpoints.
 | [`orcarouter.yaml`](orcarouter.yaml) | OrcaRouter multi-model gateway provider. |
 | [`ovhcloud.yaml`](ovhcloud.yaml) | OVHcloud AI Endpoints provider. |
 | [`runcrate.yaml`](runcrate.yaml) | Runcrate open-model host (`runcrate`). |
+| [`obscurify.yaml`](obscurify.yaml) | Obscurify.ai multi-model provider (`obscurify`). |
 | [`groq.yaml`](groq.yaml) | Groq fast-inference provider. |
 | [`fireworks.yaml`](fireworks.yaml) | Fireworks AI open-model inference (`fireworks-ai`). |
 | [`deepseek.yaml`](deepseek.yaml) | DeepSeek chat and reasoning provider. |
