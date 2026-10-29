@@ -77,6 +77,7 @@ func TestProviderIDsMatchEmbeddedCatalog(t *testing.T) {
 		"cloudgpu":   "model IDs come from CloudGPU's /v1/models endpoint, not models.dev",
 		"chatgpt":    "subscription backend, distinct from OpenAI",
 		"lunaroute":  "model IDs come from Lunaroute’s /v1/models endpoint, not models.dev",
+		"obscurify":  "model IDs come from Obscurify.ai's /v1/models endpoint, not models.dev",
 		"runcrate":   "model IDs come from Runcrate's /v1/models endpoint, not models.dev",
 		"dmr":        "local Docker Model Runner",
 		"ollama":     "local Ollama server",
