@@ -185,6 +185,8 @@
       url: /providers/baseten/
     - title: Cerebras
       url: /providers/cerebras/
+    - title: cheapaimodel
+      url: /providers/cheapaimodel/
     - title: Cloudflare AI Gateway
       url: /providers/cloudflare-ai-gateway/
     - title: Cloudflare Workers AI
