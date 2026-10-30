@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -49,6 +50,10 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 	if err != nil {
 		return nil, err
 	}
+	// Editors and PowerShell 5 (Out-File, Set-Content -Encoding utf8) save
+	// UTF-8 with a byte order mark, which the YAML parser would otherwise
+	// read as part of the first key (`unknown field "\ufeffagents"`).
+	data = trimUTF8BOM(data)
 
 	// Flavor patches rewrite the raw document, so they run before anything
 	// (including the version sniff below) reads it.
@@ -564,4 +569,9 @@ func validateSkills(label string, sc *latest.SkillsConfig) error {
 		seenInline[inline.Name] = true
 	}
 	return nil
+}
+
+// trimUTF8BOM drops a leading UTF-8 byte order mark.
+func trimUTF8BOM(data []byte) []byte {
+	return bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 }
