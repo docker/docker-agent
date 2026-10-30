@@ -87,6 +87,8 @@ You don't have to wait for the automatic threshold. Two TUI commands give you di
 
 From `/context`, select any live session with the arrow keys and press <kbd>Enter</kbd> to explicitly compact it — including a sub-agent's session, not just the main one. This is the only way cross-agent compaction happens: there's no idle-triggered automatic compaction of sub-agent sessions, so a long-running background agent stays under your control. The request is queued onto the target session's own run loop and applied at the next safe point between model turns, so it never corrupts an in-flight turn.
 
+Only one compaction runs per session at a time. If a compaction is already in progress — including a background one — a manual `/compact`, an explicit compaction from `/context`, or an overflow-recovery compaction is rejected with a `compaction already in progress` error rather than sending a second summarization request. A proactive threshold compaction that is skipped for the same reason surfaces as a warning. Retry once the running compaction finishes.
+
 ```bash
 $ docker agent run agent.yaml
 # ... work for a while ...
