@@ -22,9 +22,11 @@ type StreamAdapter struct {
 	// heldFinishReason is a stop/length held back until the usage chunk
 	// arrives; emitted at EOF if no usage chunk ever comes.
 	heldFinishReason chat.FinishReason
-	toolCalls        map[int]string
-	trackUsage       bool
-	serviceTier      string
+	// sawRefusal records refusal text, which turns a stop into a refusal.
+	sawRefusal  bool
+	toolCalls   map[int]string
+	trackUsage  bool
+	serviceTier string
 }
 
 func NewStreamAdapter(stream *ssestream.Stream[openai.ChatCompletionChunk], trackUsage bool) *StreamAdapter {
@@ -75,6 +77,12 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if finishReason == "content_filter" {
 			finishReason = chat.FinishReasonRefusal
 		}
+		if choice.Delta.Refusal != "" {
+			a.sawRefusal = true
+		}
+		if finishReason == chat.FinishReasonStop && a.sawRefusal {
+			finishReason = chat.FinishReasonRefusal
+		}
 		if a.trackUsage && !openaiResponse.JSON.Usage.Valid() &&
 			(finishReason == chat.FinishReasonStop || finishReason == chat.FinishReasonLength || finishReason == chat.FinishReasonRefusal) {
 			a.heldFinishReason = finishReason
@@ -117,8 +125,9 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			Index:        int(choice.Index),
 			FinishReason: finishReason,
 			Delta: chat.MessageDelta{
-				Role:             choice.Delta.Role,
-				Content:          choice.Delta.Content,
+				Role: choice.Delta.Role,
+				// Refusal text is the answer the user should see.
+				Content:          choice.Delta.Content + choice.Delta.Refusal,
 				ReasoningContent: reasoningContent,
 			},
 		}
@@ -195,6 +204,9 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			}
 			if finishReason == chat.FinishReasonNull || finishReason == "" {
 				finishReason = chat.FinishReasonStop
+				if a.sawRefusal {
+					finishReason = chat.FinishReasonRefusal
+				}
 			}
 			response.Choices = append(response.Choices, chat.MessageStreamChoice{
 				FinishReason: finishReason,
