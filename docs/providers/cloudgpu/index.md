@@ -46,7 +46,7 @@ For more control over parameters:
 models:
   cloudgpu_kimi:
     provider: cloudgpu
-    model: kimi-k2.6
+    model: kimi-k3
     temperature: 0.7
     max_tokens: 8192
 
@@ -68,7 +68,7 @@ Some chat model IDs CloudGPU serves:
 | --- | --- |
 | `deepseek-v4.1-flash` | DeepSeek V4.1 Flash (default) |
 | `deepseek-v4-pro` | DeepSeek V4 Pro |
-| `kimi-k2.6` | Kimi K2.6 |
+| `kimi-k3` | Kimi K3 |
 | `glm-5.2` | GLM 5.2 |
 | `minimax-m3` | MiniMax M3 |
 
