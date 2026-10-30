@@ -223,6 +223,8 @@
       url: /providers/nebius/
     - title: NVIDIA
       url: /providers/nvidia/
+    - title: Obscurify.ai
+      url: /providers/obscurify/
     - title: OpenAI
       url: /providers/openai/
     - title: OpenCode Go

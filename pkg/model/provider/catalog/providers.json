@@ -135,6 +135,16 @@
     ]
   },
   {
+    "name": "obscurify",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://obscurify.ai/v1",
+    "default_model": "deepseek/deepseek-v4-flash",
+    "token_env_vars": [
+      "OBSCURIFY_API_KEY"
+    ]
+  },
+  {
     "name": "baseten",
     "merge_consecutive_messages": true,
     "api_type": "openai",

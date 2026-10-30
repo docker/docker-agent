@@ -114,6 +114,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "runcrate",
 		},
 		{
+			name: "obscurify api key present",
+			envVars: map[string]string{
+				"OBSCURIFY_API_KEY": "test-key",
+			},
+			expectedProvider: "obscurify",
+		},
+		{
 			name: "baseten api key present",
 			envVars: map[string]string{
 				"BASETEN_API_KEY": "test-key",
@@ -384,6 +391,15 @@ func TestAutoModelConfig(t *testing.T) {
 			envVars:           map[string]string{"LUNAROUTE_API_KEY": "lr_test"},
 			expectedProvider:  "lunaroute",
 			expectedModel:     "glm-5.3",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "obscurify provider",
+			envVars: map[string]string{
+				"OBSCURIFY_API_KEY": "test-key",
+			},
+			expectedProvider:  "obscurify",
+			expectedModel:     "deepseek/deepseek-v4-flash",
 			expectedMaxTokens: 32000,
 		},
 		{
