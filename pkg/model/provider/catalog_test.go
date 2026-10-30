@@ -72,13 +72,14 @@ func TestProviderIDsMatchEmbeddedCatalog(t *testing.T) {
 	t.Parallel()
 	db := modelsdev.EmbeddedSnapshot()
 	absent := map[string]string{
-		"api-route":  "model IDs come from API Route's /v1/models endpoint, not models.dev",
-		"atlascloud": "model IDs come from Atlas Cloud's /v1/models endpoint, not models.dev",
-		"chatgpt":    "subscription backend, distinct from OpenAI",
-		"lunaroute":  "model IDs come from Lunaroute’s /v1/models endpoint, not models.dev",
-		"runcrate":   "model IDs come from Runcrate's /v1/models endpoint, not models.dev",
-		"dmr":        "local Docker Model Runner",
-		"ollama":     "local Ollama server",
+		"api-route":    "model IDs come from API Route's /v1/models endpoint, not models.dev",
+		"atlascloud":   "model IDs come from Atlas Cloud's /v1/models endpoint, not models.dev",
+		"chatgpt":      "subscription backend, distinct from OpenAI",
+		"lunaroute":    "model IDs come from Lunaroute’s /v1/models endpoint, not models.dev",
+		"runcrate":     "model IDs come from Runcrate's /v1/models endpoint, not models.dev",
+		"cheapaimodel": "model IDs come from cheapaimodel's /v1/models endpoint, not models.dev",
+		"dmr":          "local Docker Model Runner",
+		"ollama":       "local Ollama server",
 	}
 	for _, name := range catalog.AllProviders() {
 		t.Run(name, func(t *testing.T) {

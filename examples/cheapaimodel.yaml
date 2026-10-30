@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  cheapaimodel_model:
+    provider: cheapaimodel
+    model: deepseek-v4-1-flash
+
+agents:
+  root:
+    model: cheapaimodel_model
+    description: Assistant using cheapaimodel
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think

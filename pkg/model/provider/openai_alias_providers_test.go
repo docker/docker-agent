@@ -98,6 +98,14 @@ var openAIAliasProviders = []openAIAliasProvider{
 		mergesSystemMessages: true,
 	},
 	{
+		provider:             "cheapaimodel",
+		envVar:               "CHEAPAIMODEL_API_KEY",
+		testKey:              "test-cheapaimodel-key",
+		model:                "deepseek-v4-1-flash",
+		greeting:             "Hello from cheapaimodel",
+		mergesSystemMessages: true,
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",
