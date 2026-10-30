@@ -10,6 +10,11 @@ sourceUrl: https://github.com/docker/docker-agent
 licenses: [Apache-2.0]
 version: "${{ kit.args.version }}"
 args:
+  contentStage:
+    default: kit
+    enum: [kit]
+    buildArg: SANDBOX_TARGET
+    description: Select the sandbox workload in the shared Dockerfile.
   version:
     default: 0.0.0-dev
     buildArg: KIT_VERSION
@@ -154,6 +159,7 @@ capabilities:
   - type: com.docker.sandbox/agent-context@1
     config:
       filename: AGENTS.md
+      directory: /home/agent
   - type: com.docker.sandbox/agent-sessions@1
     config:
       prompt: [--exec, --, "{{.Prompt}}"]

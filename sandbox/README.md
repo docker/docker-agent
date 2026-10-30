@@ -26,12 +26,15 @@ inside the sandbox. Docker Agent's `--sandbox-kit` wrapper supplies its own
 command and safety flags instead.
 
 The kit declares optional, proxy-managed credentials for Anthropic, GitHub
-and Copilot, Google, Mistral, Nebius, OpenAI, OpenRouter, and xAI. Secrets stay
-in the host proxy; no credentials are baked into the image. Runtime egress
+and Copilot, Google, Mistral, Nebius, OpenAI, OpenRouter, and xAI. Docker Agent
+does not forward host `GITHUB_TOKEN` or `GH_TOKEN`; configure GitHub credentials
+through sbx like the other providers. Secrets stay in the host proxy; no
+credentials are baked into the image. Runtime egress
 covers those services, models.dev, and Docker Hub. Add mixins for additional
 providers, package downloads, private registries, or other network access.
-The kit also declares read-only shared skills, `AGENTS.md` context, and
-headless prompts and interactive prompt/resume/continue commands. The built-in
+The kit also declares read-only shared skills, `/home/agent/AGENTS.md` context
+(loaded alongside project instructions), headless prompts, and interactive
+prompt/resume/continue commands. The built-in
 agent consumes both skills and context; custom agents must enable them explicitly.
 
 Cloud support depends on the sbx backend. Configure secrets through
@@ -47,13 +50,14 @@ From the repository root, using a container or cloud Buildx builder:
 
 ```console
 $ task kit
-$ docker buildx build --builder kit-builder --file sandbox.yaml --target kit --output type=oci,dest=/tmp/docker-agent-kit,tar=false --provenance=mode=min .
+$ docker buildx build --builder kit-builder --file sandbox.yaml --output type=oci,dest=/tmp/docker-agent-kit,tar=false --provenance=mode=min .
 $ go install github.com/docker/sandbox-kit-spec/v3/cmd/kit-tck@v3.0.0-m.11
 $ kit-tck validate --layout /tmp/docker-agent-kit latest
 ```
 
 `task kit` builds without pushing. The root [`sandbox.yaml`](../sandbox.yaml)
-is the v3 descriptor; `--target kit` selects its content in the shared Dockerfile.
+is the v3 descriptor; its build argument selects the kit content in the shared
+Dockerfile automatically, including when sbx builds from source.
 Set `GIT_TAG` and `GIT_COMMIT` to stamp a local build; CI sets them from the
 checked-out ref. `KIT_VERSION` defaults to `0.0.0-dev`; CI uses the release
 version or `0.0.0-dev.<commit>` for branch builds.

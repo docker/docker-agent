@@ -11,6 +11,8 @@ import (
 	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/promptfiles"
 )
 
 // The frontend/TCK validate the schema; these tests check the CLI and policy
@@ -22,6 +24,11 @@ func TestPublishedSandboxKit(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(repoDir, "sandbox.yaml"))
 	require.NoError(t, err)
 	var descriptor struct {
+		Args map[string]struct {
+			Default  string
+			Enum     []string
+			BuildArg string `yaml:"buildArg"`
+		}
 		Capabilities []struct {
 			Type     string
 			Optional bool
@@ -32,9 +39,11 @@ func TestPublishedSandboxKit(t *testing.T) {
 					ProxyManaged bool `yaml:"proxyManaged"`
 					Inject       []struct{ Domain string }
 				} `yaml:"apiKey"`
-				Prompt   []string
-				Resume   []string
-				Continue []string
+				Filename  string
+				Directory string
+				Prompt    []string
+				Resume    []string
+				Continue  []string
 			}
 		}
 	}
@@ -42,6 +51,15 @@ func TestPublishedSandboxKit(t *testing.T) {
 
 	recipe, err := os.ReadFile(filepath.Join(repoDir, "Dockerfile"))
 	require.NoError(t, err)
+	t.Run("source builds select kit content", func(t *testing.T) {
+		stage := descriptor.Args["contentStage"]
+		assert.Equal(t, "kit", stage.Default)
+		assert.Equal(t, []string{"kit"}, stage.Enum)
+		assert.Equal(t, "SANDBOX_TARGET", stage.BuildArg)
+		assert.Contains(t, string(recipe), `ARG SANDBOX_TARGET="runtime"`)
+		assert.Contains(t, string(recipe), "FROM alpine:${ALPINE_VERSION} AS runtime\n")
+		assert.True(t, strings.HasSuffix(strings.TrimSpace(string(recipe)), "FROM ${SANDBOX_TARGET}"))
+	})
 	_, stage, ok := strings.Cut(string(recipe), "FROM template AS kit\n")
 	require.True(t, ok)
 	stage, _, _ = strings.Cut(stage, "\nFROM ")
@@ -72,6 +90,19 @@ func TestPublishedSandboxKit(t *testing.T) {
 			for _, inject := range capability.Config.APIKey.Inject {
 				assert.Contains(t, allowed, inject.Domain+":443", "credential destination must be allowed")
 			}
+		case "com.docker.sandbox/agent-context@1":
+			t.Run("workspace and kit guidance", func(t *testing.T) {
+				assert.Equal(t, "AGENTS.md", capability.Config.Filename)
+				assert.Equal(t, "/home/agent", capability.Config.Directory)
+				workspace, home := t.TempDir(), t.TempDir()
+				projectFile := filepath.Join(workspace, capability.Config.Filename)
+				kitFile := filepath.Join(home, capability.Config.Filename)
+				require.NoError(t, os.WriteFile(projectFile, []byte("Project instructions"), 0o600))
+				require.NoError(t, os.WriteFile(kitFile, []byte("Kit instructions"), 0o600))
+				paths, err := promptfiles.PathsWithError(workspace, home, "", capability.Config.Filename)
+				require.NoError(t, err)
+				assert.Equal(t, []string{projectFile, kitFile}, paths)
+			})
 		case "com.docker.sandbox/agent-sessions@1", "com.docker.sandbox/agent-interactive-sessions@1":
 			headless := capability.Type == "com.docker.sandbox/agent-sessions@1"
 			for name, tail := range map[string][]string{

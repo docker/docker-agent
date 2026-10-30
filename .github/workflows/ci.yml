@@ -520,7 +520,6 @@ jobs:
           builder: ${{ steps.cloud.outputs.builder || steps.local.outputs.name }}
           context: .
           file: sandbox.yaml
-          target: kit
           platforms: ${{ steps.mode.outputs.platforms }}
           load: false
           github-token: ''
