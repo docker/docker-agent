@@ -99,6 +99,12 @@ COPY --from=builder-linux --chmod=0755 /binaries/docker-agent-$TARGETOS-$TARGETA
 LABEL com.docker.sandboxes.flavor="docker-agent-docker"
 CMD [ "docker-agent" ]
 
+# v3 workload: the same source-built binary and tools as the legacy template.
+FROM template AS kit
+WORKDIR /home/agent/workspace
+ENTRYPOINT ["docker-agent", "run", "--sandbox=false", "--yolo", "default"]
+CMD []
+
 FROM alpine:${ALPINE_VERSION}
 RUN apk add --no-cache ca-certificates docker-cli && \
     addgroup -S docker-agent && adduser -S -G docker-agent docker-agent && \
