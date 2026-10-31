@@ -95,6 +95,7 @@ Examples that wire up one of the toolsets shipped with docker-agent
 | [`mem.yaml`](mem.yaml) | Persistent memory via the `memory` toolset (SQLite-backed). |
 | [`todo.yaml`](todo.yaml) | Task manager built on the `todo` toolset. |
 | [`shared-todo.yaml`](shared-todo.yaml) | Multiple agents sharing the same todo list. |
+| [`shared-todo-team.yaml`](shared-todo-team.yaml) | Agents of one team sharing a todo list, kept separate from other sessions and tabs. |
 | [`cached_responses.yaml`](cached_responses.yaml) | Caching final answers in JSON so repeated questions don't hit the model. |
 
 ### Web & API access

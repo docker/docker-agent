@@ -1,12 +1,14 @@
 package todo
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -376,4 +378,45 @@ func requireMeta(t *testing.T, result *tools.ToolCallResult, expectedLen int) {
 	metaTodos, ok := result.Meta.([]Todo)
 	require.True(t, ok, "Meta should be []Todo")
 	require.Len(t, metaTodos, expectedLen)
+}
+
+func TestCreator_SharedScopes(t *testing.T) {
+	t.Parallel()
+
+	build := func(ctx context.Context, shared latest.SharedScope) tools.ToolSet {
+		ts, err := Creator(ctx, latest.Toolset{Type: "todo", Shared: shared}, "", nil, "")
+		require.NoError(t, err)
+		return ts
+	}
+
+	t.Run("none is private per agent", func(t *testing.T) {
+		t.Parallel()
+		ctx := tools.WithTeamScope(t.Context())
+		a, b := build(ctx, latest.SharedScopeNone), build(ctx, latest.SharedScopeNone)
+		assert.NotSame(t, a, b)
+	})
+
+	t.Run("process is shared across teams", func(t *testing.T) {
+		t.Parallel()
+		a := build(tools.WithTeamScope(t.Context()), latest.SharedScopeProcess)
+		b := build(tools.WithTeamScope(t.Context()), latest.SharedScopeProcess)
+		assert.Same(t, a, b)
+	})
+
+	t.Run("team is shared within a team only", func(t *testing.T) {
+		t.Parallel()
+		teamA := tools.WithTeamScope(t.Context())
+		teamB := tools.WithTeamScope(t.Context())
+
+		first, second := build(teamA, latest.SharedScopeTeam), build(teamA, latest.SharedScopeTeam)
+		assert.Same(t, first, second)
+		assert.NotSame(t, first, build(teamB, latest.SharedScopeTeam))
+		assert.NotSame(t, first, build(teamA, latest.SharedScopeProcess))
+	})
+
+	t.Run("team without a team scope is private", func(t *testing.T) {
+		t.Parallel()
+		a, b := build(t.Context(), latest.SharedScopeTeam), build(t.Context(), latest.SharedScopeTeam)
+		assert.NotSame(t, a, b)
+	})
 }

@@ -246,6 +246,11 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		span.End()
 	}()
 
+	// External agents join the importing team, so only the root load opens a scope.
+	if externalDepthFromContext(ctx) == 0 {
+		ctx = tools.WithTeamScope(ctx)
+	}
+
 	var loadOpts loadOptions
 	loadOpts.toolsetRegistry = NewDefaultToolsetRegistry()
 	loadOpts.providerRegistry = provider.EmptyRegistry()

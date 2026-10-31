@@ -39,9 +39,9 @@ toolsets:
 
 ### Options
 
-| Property | Type    | Default | Description                                                             |
-| -------- | ------- | ------- | ----------------------------------------------------------------------- |
-| `shared` | boolean | `false` | When `true`, todos are shared across all agents in a multi-agent config |
+| Property | Type             | Default | Description                                                                                  |
+| -------- | ---------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `shared` | boolean / `team` | `false` | Which agents see the same todo list: only the declaring agent, the whole process, or one team |
 
 ### Shared Todos
 
@@ -50,5 +50,15 @@ In multi-agent setups, enable shared todos so all agents can see and update the 
 ```yaml
 toolsets:
   - type: todo
-    shared: true
+    shared: team
 ```
+
+| Value            | Todo list is shared by                                                                                       |
+| ---------------- | ------------------------------------------------------------------------------------------------------------ |
+| `false`          | nothing: each agent has its own list                                                                          |
+| `team`           | the agents of one team: root, its sub-agents and background agents. Each session or tab has its own list     |
+| `true`           | every agent in the process, across sessions. In the TUI, all tabs read and write the same list                |
+
+Todos live in memory only, so they are lost when the process exits.
+
+Use `team` unless you want todos to cross session boundaries.
