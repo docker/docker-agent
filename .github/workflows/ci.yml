@@ -352,7 +352,7 @@ jobs:
           AFTER_SHA: ${{ github.sha }}
         run: ./scripts/ci-report-failures.sh
 
-  # Builds the image and the sandbox template, on Build Cloud whenever the run
+  # Builds the image, sandbox template and v3 kit, on Build Cloud whenever the run
   # can authenticate to Docker Hub: both platforms natively on one runner.
   # main, v* tags and `image_mode: auto` dispatches on main push by digest,
   # untagged; every other run builds into the cache only. Runs that cannot
@@ -379,9 +379,11 @@ jobs:
       publish: ${{ steps.mode.outputs.publish }}
       image-digest: ${{ steps.image.outputs.digest }}
       template-digest: ${{ steps.template.outputs.digest }}
+      kit-digest: ${{ steps.kit.outputs.digest }}
     env:
       IMAGE: docker/docker-agent
       TEMPLATE: docker/docker-agent-sbx-templates
+      KIT: docker/sbx-kit-docker-agent
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -410,12 +412,18 @@ jobs:
             echo "::notice::Build Cloud unavailable for this run; building linux/amd64 on the runner"
           fi
           echo "builder=$builder" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "kit-version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "kit-version=0.0.0-dev.${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          fi
 
           if [[ "$PUBLISH" == true ]]; then
             {
               echo "publish=true"
               echo "image-outputs=type=image,name=${IMAGE},push-by-digest=true,name-canonical=true,push=true"
               echo "template-outputs=type=image,name=${TEMPLATE},push-by-digest=true,name-canonical=true,push=true"
+              echo "kit-outputs=type=image,name=${KIT},push-by-digest=true,name-canonical=true,push=true"
               echo "provenance=mode=max"
               echo "git-tag=${GITHUB_REF_NAME}"
               echo "git-commit=${GITHUB_SHA}"
@@ -427,6 +435,7 @@ jobs:
               echo "publish=false"
               echo "image-outputs=type=cacheonly"
               echo "template-outputs=type=cacheonly"
+              echo "kit-outputs=type=cacheonly"
               echo "provenance=false"
               echo "git-tag=pr"
               echo "git-commit=dev"
@@ -501,6 +510,41 @@ jobs:
             GIT_TAG=${{ steps.mode.outputs.git-tag }}
             GIT_COMMIT=${{ steps.mode.outputs.git-commit }}
 
+      - name: Build v3 kit
+        id: kit
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: ${{ steps.mode.outputs.record-upload }}
+          DOCKER_BUILD_SUMMARY: ${{ steps.mode.outputs.record-upload }}
+        with:
+          builder: ${{ steps.cloud.outputs.builder || steps.local.outputs.name }}
+          context: .
+          file: sandbox.yaml
+          platforms: ${{ steps.mode.outputs.platforms }}
+          load: false
+          github-token: ''
+          sbom: ${{ steps.mode.outputs.publish }}
+          provenance: ${{ steps.mode.outputs.provenance }}
+          outputs: ${{ steps.mode.outputs.kit-outputs }}
+          build-args: |
+            GIT_TAG=${{ steps.mode.outputs.git-tag }}
+            GIT_COMMIT=${{ steps.mode.outputs.git-commit }}
+            version=${{ steps.mode.outputs.kit-version }}
+
+      - if: steps.mode.outputs.publish == 'true'
+        uses: $/.github/actions/setup-go
+        with:
+          cache-name: kit-tck
+          task: 'false'
+
+      - name: Validate published kit before promotion
+        if: steps.mode.outputs.publish == 'true'
+        env:
+          KIT_DIGEST: ${{ steps.kit.outputs.digest }}
+        run: |
+          go install github.com/docker/sandbox-kit-spec/v3/cmd/kit-tck@v3.0.0-m.11
+          kit-tck validate "${KIT}@${KIT_DIGEST}"
+
   # Single required status check; see the header comment.
   gate:
     if: always()
@@ -533,8 +577,10 @@ jobs:
     env:
       IMAGE: docker/docker-agent
       TEMPLATE: docker/docker-agent-sbx-templates
+      KIT: docker/sbx-kit-docker-agent
       IMAGE_DIGEST: ${{ needs.image.outputs.image-digest }}
       TEMPLATE_DIGEST: ${{ needs.image.outputs.template-digest }}
+      KIT_DIGEST: ${{ needs.image.outputs.kit-digest }}
     steps:
       # imagetools talks to the registry directly; no builder needed.
       - uses: $/.github/actions/setup-buildx
@@ -574,3 +620,16 @@ jobs:
           fi
           docker buildx imagetools create "${tags[@]}" "${TEMPLATE}@${TEMPLATE_DIGEST}"
           docker buildx imagetools inspect "${TEMPLATE}:${version}"
+
+      - name: Tag v3 kit
+        run: |
+          : "${KIT_DIGEST:?image produced no kit digest}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            tags=(-t "${KIT}:${version}" -t "${KIT}:latest")
+          else
+            version=edge
+            tags=(-t "${KIT}:edge")
+          fi
+          docker buildx imagetools create "${tags[@]}" "${KIT}@${KIT_DIGEST}"
+          docker buildx imagetools inspect "${KIT}:${version}"
