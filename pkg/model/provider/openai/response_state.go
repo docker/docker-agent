@@ -23,7 +23,7 @@ func (c *Client) firstPartyResponses() bool {
 	if c.ModelConfig.Provider == chatgpt.ProviderName {
 		return c.ModelConfig.BaseURL == "" || strings.TrimRight(c.ModelConfig.BaseURL, "/") == chatgpt.BaseURL
 	}
-	return c.ModelConfig.Provider == "openai" && catalog.IsDefaultEndpoint(c.ModelConfig.Provider, c.ModelConfig.BaseURL)
+	return c.ModelConfig.Provider == "openai" && catalog.IsDefaultEndpoint(c.ModelConfig.Provider, c.endpointConfig().BaseURL)
 }
 
 // Native search needs ordered output replay to retain its loaded tools.

@@ -212,6 +212,14 @@ func (c *Client) replaysReasoning() bool {
 	return oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts)
 }
 
+// endpointConfig returns ModelConfig with BaseURL set to the endpoint requests
+// reach, so endpoint checks also see OPENAI_BASE_URL.
+func (c *Client) endpointConfig() *latest.ModelConfig {
+	cfg := c.ModelConfig
+	cfg.BaseURL = cmp.Or(cfg.BaseURL, c.BaseURL)
+	return &cfg
+}
+
 // convertMessages converts chat.Message to openai.ChatCompletionMessageParamUnion
 // using the shared oaistream implementation.
 func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
@@ -230,7 +238,7 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	// merging rewrites the stable message boundaries the markers pin. The
 	// self-hosted case the merge exists for (openai provider + custom
 	// base_url) is already excluded by the gate and still merges below.
-	if sendsExplicitCacheBreakpoints(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
+	if sendsExplicitCacheBreakpoints(c.endpointConfig(), c.ModelOptions.OpenAIVendor()) {
 		return c.convertMessagesWithCacheBreakpoints(ctx, messages)
 	}
 	// Coalesce consecutive same-role (system/user) messages into one for generic
@@ -247,7 +255,7 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	// prompt-cache breakpoints never reach this path: such backends don't
 	// accept the OpenAI-only field, and the merge rewrites message boundaries
 	// the markers would pin.
-	if shouldMergeConsecutiveMessages(&c.ModelConfig) {
+	if shouldMergeConsecutiveMessages(c.endpointConfig()) {
 		converted := oaistream.ConvertMessages(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
 		return oaistream.MergeConsecutiveMessages(converted)
 	}
@@ -906,7 +914,7 @@ func getTransport(cfg *latest.ModelConfig) string {
 }
 
 func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []chat.Message) []responses.ResponseInputItemUnionParam {
-	markBreakpoints := sendsExplicitCacheBreakpoints(&c.ModelConfig, c.ModelOptions.OpenAIVendor())
+	markBreakpoints := sendsExplicitCacheBreakpoints(c.endpointConfig(), c.ModelOptions.OpenAIVendor())
 	var input []responses.ResponseInputItemUnionParam
 	for _, msg := range messages {
 		if replay := c.replayResponse(msg); len(replay) > 0 {
