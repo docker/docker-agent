@@ -1,9 +1,11 @@
 package oaistream
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/openai/openai-go/v3"
@@ -268,4 +270,94 @@ func TestStreamAdapter_ServiceTier(t *testing.T) {
 			}
 		})
 	}
+}
+
+// collectFinish drains the adapter and returns every non-empty finish reason,
+// whether usage rode on the chunk that carried it, and the terminal error.
+func collectFinish(t *testing.T, adapter *StreamAdapter) (reasons []string, withUsage []bool, err error) {
+	t.Helper()
+	for {
+		resp, recvErr := adapter.Recv()
+		if recvErr != nil {
+			return reasons, withUsage, recvErr
+		}
+		for _, choice := range resp.Choices {
+			if choice.FinishReason != "" {
+				reasons = append(reasons, string(choice.FinishReason))
+				withUsage = append(withUsage, resp.Usage != nil)
+			}
+		}
+	}
+}
+
+const (
+	chunkContent    = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}` + "\n\n"
+	chunkUsageOnly  = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}` + "\n\n"
+	chunkDone       = "data: [DONE]\n\n"
+	chunkFinishTmpl = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"%s"}]}` + "\n\n"
+)
+
+func finishChunk(reason string) string { return fmt.Sprintf(chunkFinishTmpl, reason) }
+
+// With track_usage on, stop and length are held back until the usage chunk.
+// The held reason must survive: length is the only signal of a truncated
+// answer, and a stream that never sends usage must still report its reason.
+func TestStreamAdapter_HeldFinishReason(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sse        string
+		trackUsage bool
+		want       []string
+		wantUsage  []bool
+	}{
+		{"length then usage chunk", chunkContent + finishChunk("length") + chunkUsageOnly + chunkDone, true, []string{"length"}, []bool{true}},
+		{"stop then usage chunk", chunkContent + finishChunk("stop") + chunkUsageOnly + chunkDone, true, []string{"stop"}, []bool{true}},
+		{"tool_calls then usage chunk", chunkContent + finishChunk("tool_calls") + chunkUsageOnly + chunkDone, true, []string{"tool_calls", "tool_calls"}, []bool{false, true}},
+		{"stop, no usage, DONE", chunkContent + finishChunk("stop") + chunkDone, true, []string{"stop"}, []bool{false}},
+		{"length, no usage, DONE", chunkContent + finishChunk("length") + chunkDone, true, []string{"length"}, []bool{false}},
+		{"length, no usage, no DONE", chunkContent + finishChunk("length"), true, []string{"length"}, []bool{false}},
+		{"no finish reason at all", chunkContent + chunkDone, true, nil, nil},
+		{"usage chunk without finish", chunkContent + chunkUsageOnly + chunkDone, true, []string{"stop"}, []bool{true}},
+		{"track_usage off passes length through", chunkContent + finishChunk("length") + chunkUsageOnly + chunkDone, false, []string{"length", "length"}, []bool{false, false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			adapter := NewStreamAdapter(newTestStream(t, tt.sse), tt.trackUsage)
+			defer adapter.Close()
+
+			reasons, withUsage, err := collectFinish(t, adapter)
+			require.ErrorIs(t, err, io.EOF)
+			assert.Equal(t, tt.want, reasons)
+			assert.Equal(t, tt.wantUsage, withUsage)
+		})
+	}
+}
+
+// A transport failure after a held stop must surface as an error, not as a
+// clean stop: the answer may be incomplete.
+func TestStreamAdapter_HeldFinishReasonNotEmittedOnTransportError(t *testing.T) {
+	t.Parallel()
+
+	body := chunkContent + finishChunk("stop")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)+100))
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := srv.Client().Do(req) //nolint:bodyclose // body is closed by the stream
+	require.NoError(t, err)
+	adapter := NewStreamAdapter(ssestream.NewStream[openai.ChatCompletionChunk](ssestream.NewDecoder(resp), nil), true)
+	defer adapter.Close()
+
+	reasons, _, err := collectFinish(t, adapter)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, io.EOF)
+	assert.Empty(t, reasons)
 }
