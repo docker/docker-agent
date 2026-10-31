@@ -151,6 +151,14 @@ Plans are shared documents from the same store used by `/plans`, the [plan tools
 
 Editing changes only the plan document. It does not approve a plan, execute its steps, or authorize tool writes.
 
+### Custom Sidebar Sections
+
+Pass `--sidebar-section "Title=command"` to add a section below Tools that shows a shell command's output. The command runs when the TUI starts and again every 5 seconds, with a 5 second timeout. Its output is shown as plain text: color sequences are stripped, long lines are cut to the sidebar's width, and at most 12 lines are kept. A section with no output is hidden. The flag is repeatable.
+
+```bash
+$ docker agent run agent.yaml --sidebar-section "Services=docker compose ps --format '{{.Name}} {{.State}}'"
+```
+
 ### Agents Panel
 
 The sidebar's **Agents** section lists every agent in the team and has two display modes selectable via **Sidebar info mode** in `/settings`:
