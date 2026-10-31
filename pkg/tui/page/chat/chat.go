@@ -254,6 +254,8 @@ type chatPage struct {
 	// hideBanner mirrors the user's show_banner setting; the zero value
 	// keeps the banner so page literals stay banner-enabled.
 	hideBanner bool
+	banner     tuibanner.Banner
+	bannerSub  animation.Subscription
 
 	// Message queue for enqueuing messages while agent is working
 	messageQueue    []queuedMessage
@@ -414,6 +416,8 @@ func New(ar *animation.Runtime, ctx context.Context, a *app.App, sessionState *s
 		commandParser:     commands.NewParser(),
 		sessionState:      sessionState,
 		showStartupBanner: true,
+		banner:            tuibanner.Default(),
+		bannerSub:         ar.Subscribe(),
 	}
 
 	for _, opt := range opts {
@@ -467,6 +471,14 @@ func WithHideSidebar() PageOption {
 func WithShowBanner(show bool) PageOption {
 	return func(p *chatPage) {
 		p.hideBanner = !show
+	}
+}
+
+// WithBanner replaces the startup banner. A banner with several frames plays
+// while the conversation is empty.
+func WithBanner(b tuibanner.Banner) PageOption {
+	return func(p *chatPage) {
+		p.banner = b
 	}
 }
 
@@ -530,6 +542,9 @@ func (p *chatPage) Init() tea.Cmd {
 	var cmds []tea.Cmd
 
 	cmds = append(cmds, p.messages.Init())
+	if p.bannerPlaying() {
+		cmds = append(cmds, p.bannerSub.Start())
+	}
 
 	// Load state from existing session (for session restore and branching)
 	if sess := p.app.Session(); sess != nil {
@@ -607,6 +622,10 @@ func (p *chatPage) update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		if result.inputOrigin() != p.inputScope || p.inputScope == nil || p.inputScope.ctx.Err() != nil {
 			return p, nil
 		}
+	}
+
+	if tick, ok := msg.(animation.TickMsg); ok {
+		p.tickBanner(tick)
 	}
 
 	switch msg := msg.(type) {
@@ -844,11 +863,21 @@ func (p *chatPage) messagesView(sl sidebarLayout) string {
 	if messagesView != "" || !p.showStartupBanner || p.hideBanner {
 		return messagesView
 	}
-	if sl.chatWidth < tuibanner.Width || sl.chatHeight < tuibanner.Height {
+	art := p.banner
+	if art.Height() == 0 {
+		// Page literals carry no banner; they get the default one.
+		art = tuibanner.Default()
+	}
+	if !art.Fits(sl.chatWidth, sl.chatHeight) {
 		return ""
 	}
 
-	banner := styles.BaseStyle.Foreground(styles.Accent).Render(strings.Join(tuibanner.Lines, "\n"))
+	var elapsed time.Duration
+	if art.Animated() {
+		elapsed = p.ar.Now()
+	}
+	frame := art.Crop(art.FrameAt(elapsed), sl.chatWidth, sl.chatHeight)
+	banner := styles.BaseStyle.Foreground(styles.Accent).Render(frame)
 	return lipgloss.Place(
 		sl.chatWidth,
 		sl.chatHeight,
@@ -856,6 +885,27 @@ func (p *chatPage) messagesView(sl sidebarLayout) string {
 		lipgloss.Center,
 		banner,
 	)
+}
+
+// bannerPlaying reports whether an animated banner still has the screen.
+func (p *chatPage) bannerPlaying() bool {
+	return p.banner.Animated() && p.showStartupBanner && !p.hideBanner
+}
+
+// tickBanner redraws on a frame change and gives up the tick once the
+// conversation has replaced the banner.
+func (p *chatPage) tickBanner(tick animation.TickMsg) {
+	if !p.bannerSub.IsActive() {
+		return
+	}
+	if !p.bannerPlaying() {
+		p.bannerSub.Stop()
+		return
+	}
+	before, after := tick.ElapsedBounds()
+	if p.banner.FrameIndexAt(before) != p.banner.FrameIndexAt(after) {
+		tick.MarkDirty()
+	}
 }
 
 // View renders the chat page (messages + sidebar only, no editor or resize handle)
