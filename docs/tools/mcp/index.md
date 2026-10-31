@@ -68,7 +68,7 @@ toolsets:
 | `command`     | string | Command to execute the MCP server. |
 | `args`        | array  | Command arguments. |
 | `tools`       | array  | Optional whitelist — only expose these tools. |
-| `env`         | object | Environment variables (key-value pairs). |
+| `env`         | object | Environment variables (key-value pairs) for the server process. The process also inherits the host environment; when a key is set in both, the value from `env` wins. |
 | `working_dir` | string | Working directory for the MCP server process. Relative paths are resolved against the agent's working directory. Defaults to the agent's working directory when omitted. Supports `${env.VAR}` (canonical), plus `~` and shell-style `$VAR`/`${VAR}` expansion ([details](../../configuration/overview/index.md#variable-expansion-in-config-fields)). |
 | `instruction` | string | Custom instructions injected into the agent's context. |
 | `version`     | string | Package reference for [auto-installing](../../configuration/tools/index.md#auto-installing-tools) the command binary. |
