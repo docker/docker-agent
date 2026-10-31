@@ -1240,3 +1240,57 @@ func TestStartableToolSet_ZeroValueIsUsable(t *testing.T) {
 	assert.NilError(t, s.StopIfStarted(t.Context()))
 	assert.Check(t, is.Equal(s.IsStarted(), false))
 }
+
+func TestNestedStartableRecoversUnhealthyTool(t *testing.T) {
+	t.Parallel()
+	raw := &reportingToolSet{}
+	inner := tools.NewStartable(raw)
+	outer := tools.NewStartable(tools.WithName(tools.NewStartable(inner), "nested"))
+	assert.NilError(t, outer.Start(t.Context()))
+	raw.started = false
+	assert.Check(t, outer.IsStarted(), "latch remains set until recovery")
+	assert.Check(t, !outer.TryIsHealthy())
+	assert.NilError(t, outer.Start(t.Context()))
+	assert.Check(t, is.Equal(raw.startCalls, 1))
+	assert.Check(t, is.Equal(raw.restartCalls, 1))
+	assert.Check(t, outer.TryIsHealthy())
+	failure := errors.New("restart failed")
+	raw.started, raw.restartErr = false, failure
+	assert.ErrorIs(t, outer.Start(t.Context()), failure)
+	raw.restartErr = nil
+	assert.NilError(t, outer.Start(t.Context()))
+	assert.Check(t, is.Equal(raw.restartCalls, 3))
+	assert.Check(t, outer.TryIsHealthy())
+}
+
+func TestNestedStartableRecoversWithStartFallback(t *testing.T) {
+	t.Parallel()
+	raw := &reportingStartOnlyToolSet{}
+	outer := tools.NewStartable(tools.NewStartable(raw))
+	assert.NilError(t, outer.Start(t.Context()))
+	raw.started = false
+	assert.NilError(t, outer.Start(t.Context()))
+	assert.Check(t, is.Equal(raw.startCalls, 2))
+	assert.Check(t, outer.TryIsHealthy())
+}
+
+func TestNestedStartableRetriesPartialStart(t *testing.T) {
+	t.Parallel()
+	partial := tools.NewPartialStartError(errors.New("unavailable"))
+	raw := &partialFlappyToolSet{errs: []error{partial, partial, nil}}
+	outer := tools.NewStartable(tools.NewStartable(raw))
+	assert.ErrorIs(t, outer.Start(t.Context()), partial)
+	assert.Check(t, outer.IsStarted())
+	assert.Check(t, !outer.TryIsHealthy())
+	listed, err := outer.Tools(t.Context())
+	assert.NilError(t, err)
+	assert.Check(t, is.Len(listed, 1))
+	assert.Check(t, !outer.ShouldReportRecoveryFailure())
+	assert.ErrorIs(t, outer.Start(t.Context()), partial)
+	assert.Check(t, is.Equal(raw.starts, 2))
+	assert.Check(t, !outer.ShouldReportRecoveryFailure())
+	assert.Check(t, outer.IsStarted())
+	assert.NilError(t, outer.Start(t.Context()))
+	assert.Check(t, is.Equal(raw.starts, 3))
+	assert.Check(t, outer.TryIsHealthy())
+}

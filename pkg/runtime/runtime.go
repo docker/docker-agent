@@ -238,8 +238,12 @@ type ModelStore interface {
 
 // LocalRuntime manages the execution of agents
 type LocalRuntime struct {
-	harnessFactory   *harness.Factory
-	commandEvaluator *CommandEvaluatorFactory
+	isolatedWorktree  bool
+	worktreePrompt    worktreePrompt
+	worktreeRoot      string
+	liveSessionParent *LocalRuntime
+	harnessFactory    *harness.Factory
+	commandEvaluator  *CommandEvaluatorFactory
 
 	ctx                       func() context.Context
 	toolMap                   map[string]ToolHandlerFunc
@@ -1288,7 +1292,7 @@ func (r *LocalRuntime) SessionStore() session.Store {
 func (r *LocalRuntime) Close() error {
 	r.bgAgents.StopAll()
 	r.OnToolsChanged(nil)
-	return r.extraToolsetRuns.close()
+	return r.extraToolsetRuns.close(context.WithoutCancel(r.ctx()))
 }
 
 // UpdateSessionTitle persists the session title via the session store.

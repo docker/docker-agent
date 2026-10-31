@@ -20,16 +20,18 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// CreateToolSet is used by the tools registry.
+// CreateToolSet is used by the tools registry. Relative document and database
+// paths use the runtime working directory, falling back to the config's parent.
 func CreateToolSet(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
 	if toolset.RAGConfig == nil {
 		return nil, errors.New("rag toolset requires either a rag_config block or a ref")
 	}
 
 	ragName := cmp.Or(toolset.Name, "rag")
+	baseDir := cmp.Or(runConfig.WorkingDir, parentDir)
 
 	mgr, err := rag.NewManager(ctx, ragName, toolset.RAGConfig, rag.ManagersBuildConfig{
-		ParentDir:     parentDir,
+		ParentDir:     baseDir,
 		ModelsGateway: runConfig.ModelsGateway,
 		Env:           runConfig.EnvProvider(),
 		Models:        runConfig.Models,
@@ -42,7 +44,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, parentDir string
 
 	toolName := cmp.Or(mgr.ToolName(), ragName)
 	own := New(mgr, toolName, WithIndexingTimeout(toolset.RAGConfig.GetIndexingTimeout()))
-	key, _ := sharedKeyFor(ragName, toolset.RAGConfig, parentDir, runConfig)
+	key, _ := sharedKeyFor(ragName, toolset.RAGConfig, baseDir, runConfig)
 	return newSharedToolSet(defaultSharedRegistry, key, own), nil
 }
 

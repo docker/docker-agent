@@ -301,3 +301,48 @@ func TestHookOnErrorBlockCanDenyNonFailClosedEvent(t *testing.T) {
 	assert.False(t, result.Allowed)
 	assert.Contains(t, result.Message, "no builtin hook registered")
 }
+
+func TestRegistryClone(t *testing.T) {
+	t.Parallel()
+	original := NewRegistry()
+	require.NoError(t, original.RegisterBuiltin("where", func(_ context.Context, in *Input, _ []string) (*Output, error) {
+		return &Output{SystemMessage: in.Cwd}, nil
+	}))
+	cloned := original.Clone()
+	require.NoError(t, cloned.RegisterBuiltin("where", func(context.Context, *Input, []string) (*Output, error) {
+		return &Output{SystemMessage: "changed"}, nil
+	}))
+	first, ok := original.LookupBuiltin("where")
+	require.True(t, ok)
+	out, err := first(t.Context(), &Input{Cwd: "original"}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "original", out.SystemMessage)
+	second, ok := cloned.LookupBuiltin("where")
+	require.True(t, ok)
+	out, err = second(t.Context(), &Input{}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "changed", out.SystemMessage)
+	factory, ok := cloned.Lookup(HookTypeBuiltin)
+	require.True(t, ok)
+	handler, err := factory(HandlerEnv{}, Hook{Type: HookTypeBuiltin, Command: "where"})
+	require.NoError(t, err)
+	result, err := handler.Run(t.Context(), []byte(`{}`))
+	require.NoError(t, err)
+	assert.Equal(t, "changed", result.Output.SystemMessage)
+}
+
+func TestRegistryClonePreservesBuiltinFactoryOverride(t *testing.T) {
+	t.Parallel()
+	original := NewRegistry()
+	invoked := false
+	original.Register(HookTypeBuiltin, func(HandlerEnv, Hook) (Handler, error) {
+		invoked = true
+		return nil, errors.New("custom policy rejected hook")
+	})
+	clone := original.Clone()
+	factory, ok := clone.Lookup(HookTypeBuiltin)
+	require.True(t, ok)
+	_, err := factory(HandlerEnv{}, Hook{})
+	require.ErrorContains(t, err, "custom policy")
+	assert.True(t, invoked)
+}

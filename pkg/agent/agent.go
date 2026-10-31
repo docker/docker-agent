@@ -62,6 +62,7 @@ type Agent struct {
 	hooks                   *latest.HooksConfig
 	evaluators              map[string]evaluator.Evaluator
 	cache                   *cache.Cache
+	workingDirFactory       func(context.Context, string) (*Agent, error)
 	structuredOutput        *latest.StructuredOutput
 	// structuredOutputTool lazily compiles the tool-mode output tool once
 	// per agent (sync.OnceValues over structuredoutput.New); nil when the

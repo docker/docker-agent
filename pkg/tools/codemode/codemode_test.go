@@ -1075,3 +1075,74 @@ func TestCodeModeTool_RateLimitedInnerPacesRetry(t *testing.T) {
 	require.NoError(t, terr)
 	assert.Contains(t, allTools[0].Description, "RagSearch", "recovered inner's declarations must reappear")
 }
+
+type disposableRunnableToolSet struct {
+	started chan struct{}
+	done    chan struct{}
+	closed  chan struct{}
+}
+
+func (*disposableRunnableToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return nil, nil
+}
+
+func (r *disposableRunnableToolSet) Run(ctx context.Context) {
+	close(r.started)
+	<-ctx.Done()
+	close(r.done)
+}
+
+func (r *disposableRunnableToolSet) Close() error {
+	close(r.closed)
+	return nil
+}
+
+func TestCodeModeTool_DisposeCancelsCanonicalRunnable(t *testing.T) {
+	t.Parallel()
+	raw := &disposableRunnableToolSet{
+		started: make(chan struct{}), done: make(chan struct{}), closed: make(chan struct{}),
+	}
+	composite := Wrap(raw).(*codeModeTool)
+	owner := tools.NewStartable(composite)
+	children := composite.Children()
+	require.Len(t, children, 1)
+	assert.Same(t, composite.managed[0], children[0])
+	children[0] = nil
+	assert.Same(t, composite.managed[0], composite.Children()[0])
+
+	require.NoError(t, owner.Start(t.Context()))
+	<-raw.started
+	disposed := make(chan error, 1)
+	ctx := t.Context()
+	go func() { disposed <- owner.Dispose(ctx) }()
+	select {
+	case err := <-disposed:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("disposal did not cancel and join the Code Mode runnable")
+	}
+	select {
+	case <-raw.done:
+	default:
+		t.Fatal("disposal returned before the runnable stopped")
+	}
+	select {
+	case <-raw.closed:
+	default:
+		t.Fatal("disposal did not close the runnable")
+	}
+	require.NoError(t, owner.Dispose(ctx))
+	require.ErrorContains(t, owner.Start(ctx), "disposed")
+}
+
+func TestCodeModeTool_DisposeGatesChildListings(t *testing.T) {
+	t.Parallel()
+	composite := Wrap(&testToolSet{tools: []tools.Tool{{Name: "fetch_url"}}}).(*codeModeTool)
+	available := composite.availableToolsets()
+	require.Len(t, available, 1)
+	assert.Same(t, composite.managed[0], available[0])
+	require.NoError(t, tools.Dispose(t.Context(), composite))
+	_, err := available[0].Tools(t.Context())
+	require.ErrorContains(t, err, "disposed")
+	assert.Empty(t, composite.availableToolsets())
+}

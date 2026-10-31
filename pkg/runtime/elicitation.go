@@ -521,6 +521,13 @@ func (r *LocalRuntime) requestElicitation(ctx context.Context, spec elicitationS
 	// to elicitation requests. Decline immediately instead of blocking forever.
 	if r.nonInteractive {
 		slog.DebugContext(ctx, "Declining elicitation in non-interactive mode", "message", spec.message)
+		if r.isolatedWorktree {
+			sessionID := spec.sessionID
+			if sessionID == "" {
+				sessionID = genai.ConversationIDFromContext(ctx)
+			}
+			r.elicitationDeclines.record(sessionID, backgroundElicitationDeclinedNote(spec.message))
+		}
 		return tools.ElicitationResult{
 			Action: tools.ElicitationActionDecline,
 		}, nil

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -18,6 +19,8 @@ type Team struct {
 	agents      []*agent.Agent
 	evaluators  map[string]evaluator.Evaluator
 	permissions *permissions.Checker
+	// linkedAgents owns workspace copies of imported agents outside the member list.
+	linkedAgents []*agent.Agent
 	// runtimeSafety is the config-wide safety-mode default declared under
 	// runtime.safety, retained so session constructors can apply it when
 	// neither the user nor the selected agent chose a mode. Empty when the
@@ -159,7 +162,7 @@ func (t *Team) Size() int {
 
 func (t *Team) StopToolSets(ctx context.Context) error {
 	var errs []error
-	for _, agent := range t.agents {
+	for _, agent := range slices.Concat(t.agents, t.linkedAgents) {
 		// One agent failing to stop (e.g. a wedged toolset) must not leave
 		// later agents' toolsets running: keep stopping and aggregate.
 		if err := agent.StopToolSets(ctx); err != nil {

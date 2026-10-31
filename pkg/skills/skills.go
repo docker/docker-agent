@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -96,6 +97,12 @@ func Load(ctx context.Context, sources []string) []Skill {
 // LoadWithWarnings loads skills and reports GitHub source failures to the caller.
 // The environment provider supplies the optional GITHUB_TOKEN credential.
 func LoadWithWarnings(ctx context.Context, sources []string, env environment.Provider) ([]Skill, []string) {
+	cwd, _ := os.Getwd()
+	return LoadWithWarningsFromDir(ctx, sources, env, cwd)
+}
+
+// LoadWithWarningsFromDir discovers project-local skills in dir rather than the process cwd.
+func LoadWithWarningsFromDir(ctx context.Context, sources []string, env environment.Provider, dir string) ([]Skill, []string) {
 	skillMap := make(map[string]Skill)
 	var warnings []string
 
@@ -103,7 +110,7 @@ func LoadWithWarnings(ctx context.Context, sources []string, env environment.Pro
 	for _, source := range sources {
 		switch {
 		case source == "local":
-			loadLocalSkillsInto(skillMap)
+			loadLocalSkillsFromDirInto(skillMap, dir)
 		case isHTTPSource(source):
 			if remoteCache == nil {
 				remoteCache = newDiskCache(filepath.Join(paths.GetCacheDir(), "skills"))

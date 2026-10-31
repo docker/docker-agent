@@ -8,6 +8,67 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHooksConfigClone(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil", func(t *testing.T) {
+		t.Parallel()
+		var cfg *HooksConfig
+		assert.Nil(t, cfg.Clone())
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		t.Parallel()
+		cfg := &HooksConfig{}
+		cloned := cfg.Clone()
+		assert.Equal(t, cfg, cloned)
+		assert.NotSame(t, cfg, cloned)
+	})
+
+	t.Run("nested data", func(t *testing.T) {
+		t.Parallel()
+		cfg := &HooksConfig{
+			TurnStart: HookDefinitions{{
+				Type: "builtin", Command: "add_context", Args: []string{"original"},
+				Env: map[string]string{"KEY": "original"},
+			}},
+			PreToolUse: HookMatcherConfigs{{
+				Matcher: "shell", PreemptYolo: new(true),
+				Hooks: HookDefinitions{{Type: "builtin", Command: "add_context", Args: []string{"matched"}}},
+			}},
+			ToolGuard: HookMatcherConfigs{{Hooks: HookDefinitions{{
+				Type: "evaluator", Evaluator: "safe",
+				EvaluatorPolicy: &EvaluatorPolicy{Decisions: map[string]string{"true": "allow"}, MinProbability: 0.9, Fallback: "deny"},
+			}}}},
+			BeforeAgentRun: HookDefinitions{{
+				Type: "evaluator", Evaluator: "route",
+				RoutingPolicy: &RoutingPolicy{Routes: map[string]string{"coding": "coder"}, MinProbability: 0.8},
+			}},
+		}
+		cloned := cfg.Clone()
+		require.Equal(t, cfg, cloned)
+		cloned.TurnStart[0].Command = "changed"
+		cloned.TurnStart[0].Args[0] = "changed"
+		cloned.TurnStart[0].Env["KEY"] = "changed"
+		cloned.PreToolUse[0].Matcher = "changed"
+		*cloned.PreToolUse[0].PreemptYolo = false
+		cloned.PreToolUse[0].Hooks[0].Args[0] = "changed"
+		cloned.ToolGuard[0].Hooks[0].EvaluatorPolicy.Decisions["true"] = "deny"
+		cloned.ToolGuard[0].Hooks[0].EvaluatorPolicy.MinProbability = 0.1
+		cloned.BeforeAgentRun[0].RoutingPolicy.Routes["coding"] = "changed"
+		cloned.BeforeAgentRun[0].RoutingPolicy.MinProbability = 0.1
+
+		assert.Equal(t, "add_context", cfg.TurnStart[0].Command)
+		assert.Equal(t, []string{"original"}, cfg.TurnStart[0].Args)
+		assert.Equal(t, map[string]string{"KEY": "original"}, cfg.TurnStart[0].Env)
+		assert.Equal(t, "shell", cfg.PreToolUse[0].Matcher)
+		assert.True(t, *cfg.PreToolUse[0].PreemptYolo)
+		assert.Equal(t, []string{"matched"}, cfg.PreToolUse[0].Hooks[0].Args)
+		assert.Equal(t, &EvaluatorPolicy{Decisions: map[string]string{"true": "allow"}, MinProbability: 0.9, Fallback: "deny"}, cfg.ToolGuard[0].Hooks[0].EvaluatorPolicy)
+		assert.Equal(t, &RoutingPolicy{Routes: map[string]string{"coding": "coder"}, MinProbability: 0.8}, cfg.BeforeAgentRun[0].RoutingPolicy)
+	})
+}
+
 func TestHooksEventsEmpty(t *testing.T) {
 	t.Parallel()
 
