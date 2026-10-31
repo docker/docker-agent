@@ -276,9 +276,16 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 			}
 
 			_, isRef := propMap["$ref"]
+			_, hasEnum := propMap["enum"]
+			_, hasConst := propMap["const"]
 			t, isScalarType := propMap["type"].(string)
 			switch {
 			case isRef || t == "array" || t == "object":
+				properties[propName] = nullableAnyOf(propMap)
+			case hasEnum || hasConst:
+				// A "null" type alongside enum/const still rejects null (both
+				// apply), and the type may be a multi-type array. Wrapping
+				// keeps the values intact and adds null as an alternative.
 				properties[propName] = nullableAnyOf(propMap)
 			case isScalarType:
 				propMap["type"] = []string{t, "null"}
@@ -352,7 +359,8 @@ func isCompositionNode(node map[string]any) bool {
 
 // ensureTypeFields ensures every schema node that is a map has a "type" key.
 // OpenAI Responses API requires all schema nodes to have an explicit type.
-// Nodes with "properties" default to "object"; other nodes default to "object" as well.
+// enum/const nodes get the type of their values (pydantic emits a typeless
+// enum for a mixed Literal); other nodes default to "object".
 // $ref/anyOf/oneOf/allOf nodes are left as leaves — see isCompositionNode.
 func ensureTypeFields(schema shared.FunctionParameters) shared.FunctionParameters {
 	if schema == nil {
@@ -364,7 +372,7 @@ func ensureTypeFields(schema shared.FunctionParameters) shared.FunctionParameter
 			return
 		}
 		if _, hasType := node["type"]; !hasType {
-			node["type"] = "object"
+			node["type"] = tools.DefaultType(node)
 		}
 	})
 

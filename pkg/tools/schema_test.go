@@ -73,6 +73,45 @@ func TestSchemaToMap_PropertyWithoutType(t *testing.T) {
 	}, m)
 }
 
+// TestSchemaToMap_EnumPropertyWithoutType covers pydantic's schema for
+// Literal["auto", 0, 1] and Literal["x"]: the injected type must admit the
+// enum/const values, not reject them all as "object" would.
+func TestSchemaToMap_EnumPropertyWithoutType(t *testing.T) {
+	t.Parallel()
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode": map[string]any{"enum": []any{"auto", 0, 1}},
+			"only": map[string]any{"const": "x"},
+		},
+	})
+	require.NoError(t, err)
+
+	props := m["properties"].(map[string]any)
+	assert.Equal(t, []any{"string", "integer"}, props["mode"].(map[string]any)["type"])
+	assert.Equal(t, "string", props["only"].(map[string]any)["type"])
+}
+
+// TestSchemaToMap_RequiredEnumKeepsNull ensures a required property whose
+// enum lists null keeps "null" in its inferred type: required means present,
+// and null is one of the allowed values.
+func TestSchemaToMap_RequiredEnumKeepsNull(t *testing.T) {
+	t.Parallel()
+	m, err := SchemaToMap(map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode": map[string]any{"enum": []any{"auto", 0, nil}},
+			"none": map[string]any{"const": nil},
+		},
+		"required": []any{"mode", "none"},
+	})
+	require.NoError(t, err)
+
+	props := m["properties"].(map[string]any)
+	assert.Equal(t, []any{"string", "integer", "null"}, props["mode"].(map[string]any)["type"])
+	assert.Equal(t, "null", props["none"].(map[string]any)["type"])
+}
+
 func TestSchemaToMap_NestedPropertyWithoutType(t *testing.T) {
 	t.Parallel()
 	m, err := SchemaToMap(map[string]any{

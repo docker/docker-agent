@@ -305,9 +305,16 @@ func TestSchemaForOpenai(t *testing.T) {
 	"type": "object",
 	"properties": {
 		"direction": {
-			"description": "Order",
-			"enum": ["ASC", "DESC"],
-			"type": ["string", "null"]
+			"anyOf": [
+				{
+					"description": "Order",
+					"enum": ["ASC", "DESC"],
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
 		},
 		"labels": {
 			"anyOf": [

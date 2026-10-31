@@ -3,6 +3,7 @@ package tools
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -130,6 +131,11 @@ func requiredSet(schema map[string]any) map[string]bool {
 }
 
 func removeNullFromType(prop map[string]any) {
+	// Required means the key must be present, not that its value can't be
+	// null: keep "null" when an enum/const lists it as an allowed value.
+	if AllowsNullValue(prop) {
+		return
+	}
 	typeVal, exists := prop["type"]
 	if !exists {
 		return
@@ -158,7 +164,8 @@ func removeNullFromType(prop map[string]any) {
 }
 
 // ensurePropertyTypes recursively walks a JSON Schema map and ensures
-// every property has a "type" set, defaulting to "object" if missing.
+// every property has a "type" set, defaulting to "object" (or the type of
+// its enum/const values, see DefaultType) if missing.
 // It descends into nested "properties" and array "items".
 // $ref nodes are skipped: a $ref's type is defined by its target, and
 // injecting one adds a sibling keyword that providers like OpenAI reject
@@ -207,7 +214,7 @@ func ensurePropertyTypes(schema map[string]any) {
 		}
 
 		if prop["type"] == nil {
-			prop["type"] = "object"
+			prop["type"] = DefaultType(prop)
 		}
 
 		// Recurse into nested object properties.
@@ -249,4 +256,71 @@ func ConvertSchema(params, v any) error {
 	}
 
 	return json.Unmarshal(buf, v)
+}
+
+// DefaultType returns the "type" to give a schema node that has none: the
+// JSON type(s) of its enum/const values, or "object" when it has none.
+// pydantic emits a typeless enum for a mixed Literal such as
+// Literal["auto", 0]; a "type": "object" sibling would reject every value.
+func DefaultType(node map[string]any) any {
+	var values []any
+	if enum, ok := node["enum"].([]any); ok {
+		values = slices.Clone(enum)
+	}
+	if c, ok := node["const"]; ok {
+		values = append(values, c)
+	}
+
+	var types []string
+	for _, v := range values {
+		var t string
+		switch v := v.(type) {
+		case nil:
+			t = "null"
+		case bool:
+			t = "boolean"
+		case string:
+			t = "string"
+		case float64:
+			t = "number"
+			if v == float64(int64(v)) {
+				t = "integer"
+			}
+		case int, int32, int64:
+			t = "integer"
+		case []any:
+			t = "array"
+		default:
+			t = "object"
+		}
+		if !slices.Contains(types, t) {
+			types = append(types, t)
+		}
+	}
+	// "number" already admits integers.
+	if slices.Contains(types, "number") {
+		types = slices.DeleteFunc(types, func(t string) bool { return t == "integer" })
+	}
+
+	switch len(types) {
+	case 0:
+		return "object"
+	case 1:
+		return types[0]
+	default:
+		out := make([]any, len(types))
+		for i, t := range types {
+			out[i] = t
+		}
+		return out
+	}
+}
+
+// AllowsNullValue reports whether node's enum or const explicitly lists null.
+func AllowsNullValue(node map[string]any) bool {
+	if enum, ok := node["enum"].([]any); ok && slices.Contains(enum, nil) {
+		return true
+	}
+	c, ok := node["const"]
+	return ok && c == nil
 }
