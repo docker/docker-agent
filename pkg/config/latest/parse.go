@@ -25,6 +25,8 @@ func upgradeIfNeeded(c any, _ []byte) (any, error) {
 	}
 
 	var config Config
-	types.CloneThroughJSON(old, &config)
+	if err := types.TryCloneThroughJSON(old, &config); err != nil {
+		return nil, err
+	}
 	return config, nil
 }

@@ -465,6 +465,81 @@ model: test-model
 	require.NotContains(t, outputStr, "params:") // Should be flattened
 }
 
+func TestRAGStrategyConfig_Unmarshal_Limit(t *testing.T) {
+	t.Parallel()
+
+	const badLimit = "limit must be a whole number of at least 1, got "
+
+	tests := []struct {
+		name      string
+		input     string
+		json      bool
+		wantLimit int
+		wantErr   string
+	}{
+		{name: "integer limit", input: "type: bm25\nlimit: 10\n", wantLimit: 10},
+		{name: "no limit", input: "type: bm25\nk1: 1.5\n", wantLimit: 0},
+		{name: "json integer limit", input: `{"type":"bm25","limit":10}`, json: true, wantLimit: 10},
+		{name: "int tag", input: "type: bm25\nlimit: !!int 7\n", wantLimit: 7},
+		{name: "null", input: "type: bm25\nlimit:\n", wantLimit: 0},
+		{name: "json null", input: `{"type":"bm25","limit":null}`, json: true, wantLimit: 0},
+		{name: "negative", input: "type: bm25\nlimit: -1\n", wantErr: badLimit + "-1"},
+		{name: "zero", input: "type: bm25\nlimit: 0\n", wantErr: badLimit + "0"},
+		{name: "fraction", input: "type: bm25\nlimit: 2.5\n", wantErr: badLimit + "2.5"},
+		{name: "string", input: "type: bm25\nlimit: x\n", wantErr: badLimit + `"x"`},
+		{name: "quoted number", input: "type: bm25\nlimit: \"10\"\n", wantErr: badLimit + `"10"`},
+		{name: "overflow", input: "type: bm25\nlimit: 18446744073709551615\n", wantErr: badLimit + "18446744073709551615"},
+		{name: "json negative", input: `{"type":"bm25","limit":-3}`, json: true, wantErr: badLimit + "-3"},
+		{name: "json fraction", input: `{"type":"bm25","limit":2.5}`, json: true, wantErr: badLimit + "2.5"},
+		{name: "json quoted number", input: `{"type":"bm25","limit":"10"}`, json: true, wantErr: badLimit + `"10"`},
+		{name: "json overflow", input: `{"type":"bm25","limit":18446744073709551615}`, json: true, wantErr: badLimit + "1.8446744073709552e+19"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var strategy latest.RAGStrategyConfig
+			var err error
+			if tt.json {
+				err = json.Unmarshal([]byte(tt.input), &strategy)
+			} else {
+				err = yaml.Unmarshal([]byte(tt.input), &strategy)
+			}
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantLimit, strategy.Limit)
+			// limit is a known field, so it must not leak into the strategy params
+			require.NotContains(t, strategy.Params, "limit")
+		})
+	}
+}
+
+func TestLoad_RAGStrategyLimit_OlderVersion(t *testing.T) {
+	t.Parallel()
+
+	// Versions up to 15 keep a bad limit in Params; it is rejected when the
+	// config is upgraded, and that must be an error rather than a panic.
+	input := `
+version: "15"
+agents:
+  root:
+    model: openai/gpt-4o
+    toolsets:
+      - type: rag
+        rag_config:
+          docs: [./docs]
+          strategies:
+            - type: bm25
+              limit: 0
+`
+	_, err := Load(t.Context(), NewBytesSource("config.yaml", []byte(input)))
+	require.ErrorContains(t, err, "limit must be a whole number of at least 1, got 0")
+}
+
 func mustGetDBString(t *testing.T, db latest.RAGDatabaseConfig) string {
 	t.Helper()
 	str, err := db.AsString()
