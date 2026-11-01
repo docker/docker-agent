@@ -1,6 +1,7 @@
 package root
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/sandbox/kit"
 )
 
@@ -241,9 +243,147 @@ func TestPrintModelsGateway(t *testing.T) {
 func TestPrintModelsDevAllowance(t *testing.T) {
 	t.Parallel()
 
-	var buf strings.Builder
-	printModelsDevAllowance(&buf)
-	assert.Equal(t, "Models catalog: allowlisting models.dev in the sandbox proxy\n", buf.String())
+	t.Run("online", func(t *testing.T) {
+		t.Parallel()
+		var buf strings.Builder
+		printModelsDevAllowance(&buf, false)
+		assert.Equal(t, "Models catalog: allowlisting models.dev in the sandbox proxy\n", buf.String())
+	})
+
+	t.Run("offline", func(t *testing.T) {
+		t.Parallel()
+		var buf strings.Builder
+		printModelsDevAllowance(&buf, true)
+		assert.Equal(t, "Models catalog: offline mode; not allowlisting models.dev in the sandbox proxy\n", buf.String())
+	})
+}
+
+// TestOfflineSandboxEnv verifies both catalog opt-out switches are forwarded
+// into the guest, where the Store reads its own process environment.
+func TestOfflineSandboxEnv(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		env       map[string]string
+		wantFlags []string
+		wantVars  []string
+	}{
+		{
+			name: "unset forwards nothing",
+		},
+		{
+			name:      "models.dev off",
+			env:       map[string]string{modelsdev.EnvModelsDev: "off"},
+			wantFlags: []string{"-e", modelsdev.EnvModelsDev},
+			wantVars:  []string{modelsdev.EnvModelsDev + "=off"},
+		},
+		{
+			name:      "offline truthy",
+			env:       map[string]string{modelsdev.EnvOffline: "1"},
+			wantFlags: []string{"-e", modelsdev.EnvOffline},
+			wantVars:  []string{modelsdev.EnvOffline + "=1"},
+		},
+		{
+			name: "both switches",
+			env: map[string]string{
+				modelsdev.EnvModelsDev: "off",
+				modelsdev.EnvOffline:   "1",
+			},
+			wantFlags: []string{"-e", modelsdev.EnvModelsDev, "-e", modelsdev.EnvOffline},
+			wantVars:  []string{modelsdev.EnvModelsDev + "=off", modelsdev.EnvOffline + "=1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			flags, vars := offlineSandboxEnv(func(name string) string { return tc.env[name] })
+			assert.Equal(t, tc.wantFlags, flags)
+			assert.Equal(t, tc.wantVars, vars)
+		})
+	}
+}
+
+// TestOfflineSandboxEnvReachesGuestStore applies the forwarded switches to a
+// fresh Store with an empty cache, mirroring the guest process after exec.
+func TestOfflineSandboxEnvReachesGuestStore(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{name: "DOCKER_AGENT_MODELS_DEV=off", key: modelsdev.EnvModelsDev, val: "off"},
+		{name: "DOCKER_AGENT_OFFLINE=1", key: modelsdev.EnvOffline, val: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(modelsdev.EnvModelsDev, "")
+			t.Setenv(modelsdev.EnvOffline, "")
+			t.Setenv(tc.key, tc.val)
+
+			flags, vars := offlineSandboxEnv(os.Getenv)
+			require.Equal(t, []string{"-e", tc.key}, flags)
+			require.Equal(t, []string{tc.key + "=" + tc.val}, vars)
+
+			fetched := false
+			store, err := modelsdev.NewStore(
+				modelsdev.WithCache(filepath.Join(t.TempDir(), modelsdev.CacheFileName)),
+				modelsdev.WithFetcher(func(context.Context, string) (*modelsdev.Database, string, error) {
+					fetched = true
+					return nil, "", errors.New("network unavailable")
+				}),
+			)
+			require.NoError(t, err)
+
+			db, err := store.GetDatabase(t.Context())
+			require.NoError(t, err)
+			require.NotNil(t, db)
+			assert.False(t, fetched, "guest store with an empty cache must not fetch")
+			assert.NotEmpty(t, db.Providers, "guest must fall back to the embedded snapshot")
+		})
+	}
+}
+
+// TestSandboxAllowlistOfflineSkipsModelsDev guards the egress side: in offline
+// mode the sandbox proxy must not open models.dev, while declared hosts and the
+// gateway stay reachable.
+func TestSandboxAllowlistOfflineSkipsModelsDev(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		offline bool
+		gateway string
+		want    []string
+	}{
+		{
+			name: "online allowlists models.dev",
+			want: []string{modelsdev.APIHost},
+		},
+		{
+			name:    "offline omits models.dev",
+			offline: true,
+			want:    []string{"proxy.golang.org", "mcp.example.com", "user.example.com"},
+		},
+		{
+			name:    "offline keeps gateway",
+			offline: true,
+			gateway: "https://gateway.example.com/proxy",
+			want:    []string{"mcp.example.com", "gateway.example.com"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := sandboxAllowlist(tc.gateway, tc.offline,
+				[]string{"proxy.golang.org"}, []string{"mcp.example.com"}, []string{"user.example.com"})
+			for _, host := range tc.want {
+				assert.Contains(t, got, host)
+			}
+			if tc.offline {
+				assert.NotContains(t, got, modelsdev.APIHost, "offline sandbox must not open models.dev")
+			} else {
+				assert.Contains(t, got, modelsdev.APIHost)
+			}
+		})
+	}
 }
 
 func TestPrintToolInstallAllowance(t *testing.T) {
