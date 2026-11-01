@@ -256,6 +256,8 @@ var proxyManagedEnvVars = []string{
 	"OPENROUTER_API_KEY",
 	"XAI_API_KEY",
 	"NEBIUS_API_KEY",
+	"GITHUB_TOKEN",
+	"GH_TOKEN",
 	environment.DockerDesktopTokenEnv,
 }
 

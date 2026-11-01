@@ -192,6 +192,11 @@ tasks:
     cmds:
       - docker buildx build --load --target=template --build-arg GIT_TAG --build-arg GIT_COMMIT -t docker/docker-agent-sbx-templates .
 
+  kit:
+    desc: Build the v3 sandbox kit from the locally-built template (no push)
+    cmds:
+      - docker buildx build --file sandbox.yaml --build-arg GIT_TAG --build-arg GIT_COMMIT --build-arg version="{{.KIT_VERSION | default "0.0.0-dev"}}" --output type=cacheonly .
+
   docs-serve:
     desc: Preview the documentation site locally with Hugo
     dir: docs
