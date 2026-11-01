@@ -69,6 +69,11 @@ func NewExecutorWithRegistry(config *Config, workingDir string, env []string, re
 	}
 }
 
+// ForWorkingDir reuses immutable hook configuration with a different execution directory.
+func (e *Executor) ForWorkingDir(dir string) *Executor {
+	return &Executor{workingDir: dir, env: e.env, registry: e.registry, events: e.events}
+}
+
 // compileEvents compiles the persisted event lists once per executor.
 func compileEvents(c *Config) map[EventType][]matcher {
 	compiled := make(map[EventType][]matcher)

@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/environment"
 )
 
 func TestParseFrontmatter(t *testing.T) {
@@ -1070,4 +1072,23 @@ func TestProjectSearchDirs(t *testing.T) {
 		}, dirs)
 		assert.NotContains(t, dirs, home, "$HOME itself must be excluded")
 	})
+}
+
+func TestLoadWithWarningsFromDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	skillDir := filepath.Join(dir, ".agents", "skills", "isolated-workspace-test")
+	require.NoError(t, os.MkdirAll(skillDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: isolated-workspace-test\ndescription: Test isolated skill discovery\n---\nOnly this workspace.\n"), 0o600))
+	loaded, warnings := LoadWithWarningsFromDir(t.Context(), []string{"local"}, environment.NewMapEnvProvider(nil), dir)
+	require.Empty(t, warnings)
+	var found *Skill
+	for i := range loaded {
+		if loaded[i].Name == "isolated-workspace-test" {
+			found = &loaded[i]
+			break
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, filepath.Join(skillDir, "SKILL.md"), found.FilePath)
 }

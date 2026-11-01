@@ -4,6 +4,7 @@ package memory
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,7 +33,11 @@ func CreateToolSet(toolset latest.Toolset, parentDir string, runConfig *config.R
 		return nil, fmt.Errorf("failed to create memory database: %w", err)
 	}
 
-	return NewWithPath(db, dbPath), nil
+	ts := NewWithPath(db, dbPath)
+	if closer, ok := db.(io.Closer); ok {
+		ts.closeDB = closer.Close
+	}
+	return ts, nil
 }
 
 // databasePath resolves the memory database path from the toolset

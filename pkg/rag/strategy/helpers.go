@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"cmp"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -44,8 +45,19 @@ func MergeDocPaths(sharedDocs, strategyDocs []string, parentDir string) []string
 // ResolveDatabasePath resolves database configuration to a path
 func ResolveDatabasePath(dbCfg latest.RAGDatabaseConfig, parentDir, defaultName string) (string, error) {
 	if dbCfg.IsEmpty() {
-		// Use default path in data directory
-		return filepath.Join(paths.GetDataDir(), defaultName), nil
+		// Indexes from different checkouts must not share rows or prune each other's files.
+		root := paths.GetDataDir()
+		if parentDir != "" {
+			dir, err := filepath.Abs(parentDir)
+			if err != nil {
+				return "", fmt.Errorf("resolving index workspace: %w", err)
+			}
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				dir = resolved
+			}
+			root = filepath.Join(root, "rag", fmt.Sprintf("%x", sha256.Sum256([]byte(dir))))
+		}
+		return filepath.Join(root, defaultName), nil
 	}
 
 	dbStr, err := dbCfg.AsString()

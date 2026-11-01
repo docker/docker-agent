@@ -54,7 +54,10 @@ var (
 func New(dir string) *ToolSet { return &ToolSet{dir: dir} }
 
 func (t *ToolSet) open() (*gogit.Repository, error) {
-	repo, err := gogit.PlainOpenWithOptions(t.dir, &gogit.PlainOpenOptions{DetectDotGit: true})
+	repo, err := gogit.PlainOpenWithOptions(t.dir, &gogit.PlainOpenOptions{
+		DetectDotGit:          true,
+		EnableDotGitCommonDir: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("opening git repository at %s: %w", t.dir, err)
 	}

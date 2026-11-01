@@ -2,6 +2,7 @@ package git
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -238,6 +239,92 @@ func TestGitBlameRequiresPath(t *testing.T) {
 	res, err := New(dir).blame(t.Context(), BlameArgs{})
 	require.NoError(t, err)
 	require.True(t, res.IsError)
+}
+
+func TestGitLinkedWorktree(t *testing.T) {
+	t.Parallel()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+
+	dir, repo := newRepo(t)
+	addCommit(t, repo, dir, map[string]string{"a.txt": "parent content\n"}, "parent commit")
+	parentHead, err := repo.Head()
+	require.NoError(t, err)
+
+	linkedDir := filepath.Join(t.TempDir(), "linked")
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(t.Context(), "git", args...)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
+	runGit("-C", dir, "worktree", "add", "-b", "linked", linkedDir)
+	linkedRepo, err := gogit.PlainOpenWithOptions(linkedDir, &gogit.PlainOpenOptions{EnableDotGitCommonDir: true})
+	require.NoError(t, err)
+	linkedHead := addCommit(t, linkedRepo, linkedDir, map[string]string{"a.txt": "linked content\n"}, "linked commit")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "parent-only.txt"), []byte("parent\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(linkedDir, "linked-only.txt"), []byte("linked\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(linkedDir, "a.txt"), []byte("uncommitted\n"), 0o644))
+	subdir := filepath.Join(linkedDir, "nested")
+	require.NoError(t, os.Mkdir(subdir, 0o755))
+
+	for _, detached := range []bool{false, true} {
+		branch := "linked"
+		if detached {
+			runGit("-C", linkedDir, "checkout", "--detach")
+			branch = "(detached HEAD)"
+		}
+		t.Run(branch, func(t *testing.T) {
+			for _, wd := range []string{linkedDir, subdir} {
+				t.Run(filepath.Base(wd), func(t *testing.T) {
+					ts, err := CreateToolSet(&config.RuntimeConfig{Config: config.Config{WorkingDir: wd}})
+					require.NoError(t, err)
+					tool := ts.(*ToolSet)
+
+					status, err := tool.status(t.Context(), StatusArgs{})
+					require.NoError(t, err)
+					require.False(t, status.IsError, status.Output)
+					require.Contains(t, status.Output, "On branch "+branch)
+					require.Contains(t, status.Output, " M a.txt")
+					require.Contains(t, status.Output, "linked-only.txt")
+					require.NotContains(t, status.Output, "parent-only.txt")
+
+					log, err := tool.log(t.Context(), LogArgs{})
+					require.NoError(t, err)
+					require.False(t, log.IsError, log.Output)
+					require.Contains(t, log.Output, "linked commit")
+					require.Contains(t, log.Output, "parent commit")
+
+					branches, err := tool.branches(t.Context(), BranchesArgs{})
+					require.NoError(t, err)
+					require.False(t, branches.IsError, branches.Output)
+					require.Contains(t, branches.Output, parentHead.Name().Short())
+					require.Contains(t, branches.Output, "linked")
+					if detached {
+						require.NotContains(t, branches.Output, "*")
+					} else {
+						require.Contains(t, branches.Output, "* linked")
+					}
+
+					show, err := tool.show(t.Context(), ShowArgs{})
+					require.NoError(t, err)
+					require.False(t, show.IsError, show.Output)
+					require.Contains(t, show.Output, linkedHead.String())
+					require.Contains(t, show.Output, "linked commit")
+					require.Contains(t, show.Output, "a.txt")
+
+					blame, err := tool.blame(t.Context(), BlameArgs{Path: "a.txt"})
+					require.NoError(t, err)
+					require.False(t, blame.IsError, blame.Output)
+					require.Contains(t, blame.Output, "linked content")
+					require.NotContains(t, blame.Output, "parent content")
+					require.NotContains(t, blame.Output, "uncommitted")
+				})
+			}
+		})
+	}
 }
 
 func TestGitNotARepo(t *testing.T) {

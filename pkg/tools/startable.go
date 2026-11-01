@@ -269,16 +269,24 @@ type StartableToolSet struct {
 	// TryLock to detect an in-flight lifecycle operation without blocking
 	// (#4001); StopIfStarted uses LockContext so shutdown deadlines are
 	// honored even when an in-flight Start ignores cancellation and keeps
-	// the lock past them. Every holder must release through unlock — never
-	// mu.Unlock
-	// directly — so a stop request abandoned by a timed-out StopIfStarted
-	// is consumed by whichever holder releases the lock next.
+	// the lock past them. Holders release through unlock so pending stop
+	// requests are consumed. Final disposal can defer this handshake while
+	// acquiring the complete owner graph.
 	mu         lifecycleMutex
 	started    bool
 	attempted  bool
 	recovering bool
 	run        *toolsetRun
 	stopErr    error // Retained until a successful start; pending-stop handoffs must not lose failures.
+	stopped    bool
+	disposed   bool
+	disposeErr error
+
+	// listingMu gates new work during disposal without waiting for lifecycle I/O.
+	listingMu    sync.Mutex
+	disposing    bool
+	listings     int
+	listingsDone chan struct{}
 
 	// stopRequestMu guards the stop request that StopIfStarted publishes
 	// before waiting for mu. A requester that times out waiting leaves the
@@ -349,7 +357,7 @@ func (s *StartableToolSet) nowFn() time.Time {
 func (s *StartableToolSet) IsStarted() bool {
 	s.mu.Lock()
 	defer s.unlock()
-	return s.isStartedLocked(true)
+	return !s.disposed && s.isStartedLocked(true)
 }
 
 // TryIsStarted is the non-blocking variant of IsStarted: when another
@@ -420,7 +428,7 @@ func (s *StartableToolSet) TryIsAvailable() bool {
 	if !s.mu.TryLock() {
 		return false
 	}
-	available := !s.attempted || s.isStartedLocked(false)
+	available := !s.disposalRequested() && (!s.attempted || s.isStartedLocked(false))
 	if available && s.started {
 		if reporter, ok := As[StartReporter](s.ToolSet); ok {
 			available = nonblockingReporterStarted(reporter)
@@ -568,6 +576,10 @@ func (s *StartableToolSet) tryStartLocked(ctx context.Context) error {
 // startLocked implements the start sequence shared by Start and TryStart.
 // s.mu must be held.
 func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
+	if s.disposalRequested() {
+		return errors.New("toolset is disposed")
+	}
+	s.stopped = false
 	if s.run != nil {
 		if !s.run.finished() {
 			return nil
@@ -577,7 +589,7 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 	}
 	recovering := s.recovering
 	if recovering {
-		if reporter, ok := As[StartReporter](s.ToolSet); ok && reporter.IsStarted() {
+		if reporter, ok := As[StartReporter](s.ToolSet); ok && blockingReporterStarted(reporter) {
 			s.started = true
 			s.stopErr = nil
 			s.recovering = false
@@ -588,7 +600,7 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 		}
 	}
 	if s.started {
-		if reporter, ok := As[StartReporter](s.ToolSet); !ok || reporter.IsStarted() {
+		if reporter, ok := As[StartReporter](s.ToolSet); !ok || blockingReporterStarted(reporter) {
 			return nil
 		}
 		s.started = false
@@ -714,10 +726,31 @@ func (s *StartableToolSet) startLocked(ctx context.Context) (err error) {
 // StopIfStarted request, so a call may invoke — and block on — the
 // underlying Stop.
 func (s *StartableToolSet) Tools(ctx context.Context) ([]Tool, error) {
+	s.listingMu.Lock()
+	if s.disposing {
+		s.listingMu.Unlock()
+		return nil, errors.New("toolset is disposed")
+	}
+	if s.listings == 0 {
+		s.listingsDone = make(chan struct{})
+	}
+	s.listings++
+	s.listingMu.Unlock()
+	defer func() {
+		s.listingMu.Lock()
+		defer s.listingMu.Unlock()
+		s.listings--
+		if s.listings == 0 {
+			close(s.listingsDone)
+		}
+	}()
+
 	ta, err := s.ToolSet.Tools(ctx)
 
 	s.mu.Lock()
 	defer s.unlock()
+	// Listing may create resources even after an earlier Stop.
+	s.stopped = false
 	if err != nil {
 		s.listStreak.fail()
 		return nil, err
@@ -764,6 +797,10 @@ func (s *StartableToolSet) restartFunc() (func(context.Context) error, bool) {
 func (s *StartableToolSet) RestartIfSupported(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.unlock()
+	if s.disposalRequested() {
+		return errors.New("toolset is disposed")
+	}
+	s.stopped = false
 
 	restart, ok := s.restartFunc()
 	if !ok {
@@ -844,6 +881,10 @@ func (s *StartableToolSet) StopIfStarted(ctx context.Context) error {
 // stopLocked implements the stop sequence shared by Stop, StopIfStarted and
 // the unlock release handshake; s.mu must be held.
 func (s *StartableToolSet) stopLocked(ctx context.Context) error {
+	if s.disposed {
+		return s.disposeErr
+	}
+	s.stopped = true
 	s.started = false
 	s.attempted = false
 	s.recovering = false

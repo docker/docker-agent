@@ -55,3 +55,20 @@ func nonblockingReporterStarted(reporter StartReporter) bool {
 	}
 	return reporter.IsStarted()
 }
+
+// Recovery waits for an inner owner and then checks health, not just its latch.
+func blockingReporterStarted(reporter StartReporter) bool {
+	owner, ok := reporter.(*StartableToolSet)
+	if !ok {
+		return reporter.IsStarted()
+	}
+	owner.mu.Lock()
+	defer owner.unlock()
+	if owner.disposed || !owner.isStartedLocked(true) {
+		return false
+	}
+	if inner, ok := As[StartReporter](owner.ToolSet); ok {
+		return blockingReporterStarted(inner)
+	}
+	return true
+}

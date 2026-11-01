@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/worktree"
 )
 
 const (
@@ -46,6 +47,7 @@ func CreateToolSet() (tools.ToolSet, error) {
 
 // RunBackgroundAgentArgs specifies the parameters for dispatching a sub-agent task asynchronously.
 type RunBackgroundAgentArgs struct {
+	Worktree       bool   `json:"worktree,omitempty" jsonschema:"Run in a new isolated git worktree branched from the calling session current HEAD. Uncommitted changes are not copied. The worktree and branch are retained for the caller to inspect and merge."`
 	Agent          string `json:"agent" jsonschema:"The name of the sub-agent to run in the background."`
 	Task           string `json:"task" jsonschema:"A clear and concise description of the task the agent should achieve."`
 	ExpectedOutput string `json:"expected_output,omitempty" jsonschema:"The expected output from the agent (optional)."`
@@ -63,6 +65,8 @@ type StopBackgroundAgentArgs struct {
 
 // RunParams holds the parameters for running a sub-agent.
 type RunParams struct {
+	Worktree       bool
+	OnWorktree     func(*worktree.Worktree)
 	AgentName      string
 	Task           string
 	ExpectedOutput string
@@ -142,6 +146,7 @@ type task struct {
 	errMsg    string
 
 	// outputMu protects output, outputBytes, viewCount, and lastViewedOutputBytes.
+	worktree              *worktree.Worktree // guarded by outputMu
 	outputMu              sync.RWMutex
 	output                strings.Builder
 	outputBytes           int
@@ -157,8 +162,8 @@ func (t *task) storeStatus(s taskStatus) {
 	t.status.Store(int32(s))
 }
 
-func (t *task) casStatus(old, next taskStatus) bool {
-	return t.status.CompareAndSwap(int32(old), int32(next))
+func (t *task) finish(next taskStatus) bool {
+	return t.status.CompareAndSwap(int32(taskRunning), int32(next))
 }
 
 // writeOutput appends content to the task's live output buffer, respecting the
@@ -182,6 +187,7 @@ func (t *task) formatView(status taskStatus, elapsed time.Duration) string {
 	fmt.Fprintf(&out, "Agent:   %s\n", t.agentName)
 	fmt.Fprintf(&out, "Status:  %s\n", status)
 	fmt.Fprintf(&out, "Runtime: %s\n", elapsed)
+	out.WriteString(t.worktreeSummary())
 	out.WriteString("\n--- Output ---\n")
 
 	switch status {
@@ -232,6 +238,30 @@ func (t *task) formatView(status taskStatus, elapsed time.Duration) string {
 	}
 
 	return out.String()
+}
+
+func (t *task) setWorktree(wt *worktree.Worktree) {
+	t.outputMu.Lock()
+	defer t.outputMu.Unlock()
+	if wt != nil {
+		t.worktree = new(*wt)
+	}
+}
+
+func (t *task) worktreeSnapshot() *worktree.Worktree {
+	t.outputMu.RLock()
+	defer t.outputMu.RUnlock()
+	if t.worktree == nil {
+		return nil
+	}
+	return new(*t.worktree)
+}
+
+func (t *task) worktreeSummary() string {
+	if wt := t.worktreeSnapshot(); wt != nil {
+		return fmt.Sprintf("Worktree: %s\nBranch:   %s\nBase:     %s\nRetained for inspection and merging; only committed changes can be merged.\n", wt.Dir, wt.Branch, wt.BaseCommit)
+	}
+	return ""
 }
 
 // Handler owns all background agent tasks and provides tool handlers.
@@ -423,6 +453,8 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 		slog.DebugContext(tracedCtx, "Starting background agent task", "task_id", taskID, "agent", params.Agent)
 
 		result := h.runner.RunAgent(tracedCtx, RunParams{
+			Worktree:       params.Worktree,
+			OnWorktree:     t.setWorktree,
 			AgentName:      params.Agent,
 			Task:           params.Task,
 			ExpectedOutput: params.ExpectedOutput,
@@ -432,7 +464,9 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 
 		if result.ErrMsg != "" {
 			t.errMsg = result.ErrMsg
-			t.storeStatus(taskFailed)
+			if !t.finish(taskFailed) {
+				return
+			}
 			span.SetStatus(codes.Error, result.ErrMsg)
 			span.SetAttributes(
 				attribute.String("error.type", "agent_error"),
@@ -452,7 +486,7 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 		// Write result before CAS so readers who observe taskCompleted
 		// always see the populated result field.
 		t.result = result.Result
-		if t.casStatus(taskRunning, taskCompleted) {
+		if t.finish(taskCompleted) {
 			span.SetAttributes(attribute.String("cagent.background_agent.outcome", "completed"))
 			slog.DebugContext(tracedCtx, "Background agent task completed", "task_id", taskID, "agent", params.Agent)
 		}
@@ -489,6 +523,7 @@ func (h *Handler) HandleList(_ context.Context, _ *session.Session, _ tools.Tool
 		fmt.Fprintf(&out, "  Agent:   %s\n", t.agentName)
 		fmt.Fprintf(&out, "  Status:  %s\n", t.loadStatus())
 		fmt.Fprintf(&out, "  Runtime: %s\n", elapsed)
+		out.WriteString(t.worktreeSummary())
 		out.WriteString("\n")
 		return true
 	})
@@ -530,7 +565,7 @@ func (h *Handler) HandleStop(ctx context.Context, _ *session.Session, toolCall t
 		return tools.ResultError("task not found: " + params.TaskID), nil
 	}
 
-	if !t.casStatus(taskRunning, taskStopped) {
+	if !t.finish(taskStopped) {
 		return tools.ResultError(fmt.Sprintf("task %s is not running (status: %s)", params.TaskID, t.loadStatus())), nil
 	}
 
@@ -546,7 +581,7 @@ func (h *Handler) StopAll() {
 	h.admissionMu.Lock()
 	h.stopping = true
 	h.tasks.Range(func(_ string, t *task) bool {
-		if t.casStatus(taskRunning, taskStopped) {
+		if t.finish(taskStopped) {
 			cancels = append(cancels, t.cancel)
 		}
 		return true
@@ -594,6 +629,8 @@ Use background agent tasks to dispatch work to sub-agents concurrently.
 - **stop_background_agent**: Terminate a task by task_id
 - **wait_background_agents**: Join specified tasks and collect their results. Prefer this over polling; a timeout leaves the tasks running.
 
+**Worktree isolation**: Use worktree: true for concurrent coding tasks in a git repository or an existing git worktree. Each task gets a separate checkout and branch from the caller's current HEAD; uncommitted changes are not copied. Relative paths resolve inside the new checkout. For isolated tasks, describe files relative to the repository rather than passing paths into the original checkout. Have each agent commit its changes (respecting the project's signing policy), then wait for all tasks, inspect the reported branches, and merge them one at a time in the parent checkout. Resolve conflicts and run tests at the top level. No automatic commit or merge is performed. Worktrees are retained even on failure or cancellation; remove them only after integrating or deliberately discarding their work. This is checkout isolation, not a security sandbox. Dispatch all background worktree tasks from the top-level orchestrator; nested background dispatch is not supported inside isolated tasks. External harness agents do not currently support this option.
+
 **Notes**: Output capped at 10MB per task. All tasks auto-terminate when the agent stops.`
 }
 
@@ -607,7 +644,9 @@ func backgroundAgentTools() []tools.Tool {
 Use this to dispatch work to multiple sub-agents concurrently. Native sub-agents inherit the current
 session's safety policy and permissions; calls requiring confirmation are denied because background
 tasks are non-interactive. External harnesses enforce their own permission model. Check progress with
-view_background_agent, or join tasks and collect results with wait_background_agents instead of polling.`,
+view_background_agent, or join tasks and collect results with wait_background_agents instead of polling.
+Set worktree to true to isolate coding changes on a separate git branch and checkout. The caller must
+inspect and merge committed changes explicitly; worktrees are retained. External harnesses are not supported.`,
 			Parameters:  tools.MustSchemaFor[RunBackgroundAgentArgs](),
 			Annotations: tools.ToolAnnotations{Title: "Run Background Agent"},
 		},

@@ -3,6 +3,7 @@ package shell
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -545,4 +546,37 @@ func TestNewScript_ArgWithoutType(t *testing.T) {
 	},
 	"required": ["name"]
 }`, string(schema))
+}
+
+func TestScriptToolSetWorkspace(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "nested")
+	require.NoError(t, os.Mkdir(nested, 0o700))
+	for _, tc := range []struct{ name, override, want string }{
+		{"default", "", dir},
+		{"relative", "nested", nested},
+		{"absolute", t.TempDir(), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := tc.want
+			if want == "" {
+				want = tc.override
+			}
+			ts, err := CreateScriptToolSet(t.Context(), latest.Toolset{Shell: map[string]latest.ScriptShellToolConfig{
+				"where": {Cmd: pwdCmd(), WorkingDir: tc.override},
+			}}, &config.RuntimeConfig{Config: config.Config{WorkingDir: dir}, EnvProviderForTests: environment.NewMapEnvProvider(nil)})
+			require.NoError(t, err)
+			all, err := ts.Tools(t.Context())
+			require.NoError(t, err)
+			result, err := all[0].Handler(t.Context(), tools.ToolCall{}, tools.NopRuntime{})
+			require.NoError(t, err)
+			require.False(t, result.IsError, result.Output)
+			actual, err := filepath.EvalSymlinks(strings.TrimSpace(result.Output))
+			require.NoError(t, err)
+			expected, err := filepath.EvalSymlinks(want)
+			require.NoError(t, err)
+			assert.Equal(t, expected, actual)
+		})
+	}
 }

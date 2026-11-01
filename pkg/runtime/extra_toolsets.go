@@ -56,7 +56,7 @@ func (e *extraToolsetRuns) start(ctx context.Context, sess *session.Session, slo
 	return managed.Start(ctx)
 }
 
-func (e *extraToolsetRuns) close() error {
+func (e *extraToolsetRuns) close(ctx context.Context) error {
 	e.mu.Lock()
 	if e.closed {
 		done := e.done
@@ -72,7 +72,7 @@ func (e *extraToolsetRuns) close() error {
 
 	var errs []error
 	for _, entry := range entries {
-		if err := entry.managed.Stop(context.Background()); err != nil {
+		if err := entry.managed.Stop(ctx); err != nil {
 			errs = append(errs, err)
 		}
 	}
