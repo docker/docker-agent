@@ -213,7 +213,7 @@
       { "pattern": "df -h",         "category": "fs-read", "notes": "human-readable disk free" },
       { "pattern": "du -sh <path>", "category": "fs-read", "notes": "single-path summary; non-recursive write" },
       { "pattern": "tree",          "category": "fs-read", "notes": "directory listing" },
-      { "pattern": "tree <path>",   "category": "fs-read", "notes": "directory listing" },
+      { "pattern": "tree <read-path>", "category": "fs-read", "notes": "directory listing; tree -o <file> writes its output to a file" },
       { "pattern": "ls ...", "category": "fs-read" },
       { "pattern": "cat ...", "category": "fs-read" },
       { "pattern": "wc ...", "category": "fs-read" },
@@ -233,7 +233,7 @@
     "text-read": [
       { "pattern": "grep ...", "category": "text-read", "notes": "stdout-only search; compound shell is blocked upstream" },
       { "pattern": "rg ...",   "category": "text-read", "notes": "ripgrep; same constraints as grep", "deny_flags": ["--pre", "--pre-glob"] },
-      { "pattern": "sort <file>",   "category": "text-read", "notes": "in-memory sort to stdout" },
+      { "pattern": "sort <read-path>", "category": "text-read", "notes": "sort to stdout; sort -o<file> overwrites a file, so the operand cannot be an option" },
       { "pattern": "uniq <file>",   "category": "text-read", "notes": "adjacent dedupe to stdout" },
       { "pattern": "sed -n <sed-print> <read-path>", "category": "text-read", "notes": "Only numeric print addresses; no arbitrary sed program or option-valued path." },
       { "pattern": "sed -n <sed-print>", "category": "text-read" }
