@@ -63,7 +63,7 @@ func browserToolsetCreators(documents map[string][]byte) map[string]teamloader.T
 		"think":      teamloader.Creator(think.CreateToolSet),
 		"random":     teamloader.Creator(random.CreateToolSet),
 		"todo": teamloader.CreatorFromToolset(func(ts latest.Toolset) (tools.ToolSet, error) {
-			if ts.Shared {
+			if ts.Shared != latest.SharedScopeNone {
 				return sharedTodos(), nil
 			}
 			return todo.New(), nil

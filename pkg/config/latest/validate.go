@@ -355,7 +355,7 @@ func (t *Toolset) validate() error {
 	if len(t.Models) > 0 && t.Type != "model_picker" {
 		return errors.New("models can only be used with type 'model_picker'")
 	}
-	if t.Shared && t.Type != "todo" {
+	if t.Shared != SharedScopeNone && t.Type != "todo" {
 		return errors.New("shared can only be used with type 'todo'")
 	}
 	if t.Version != "" && t.Type != "mcp" && t.Type != "lsp" {
