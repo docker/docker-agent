@@ -106,6 +106,14 @@ var openAIAliasProviders = []openAIAliasProvider{
 		mergesSystemMessages: true,
 	},
 	{
+		provider:             "atmorouter",
+		envVar:               "ATMOROUTER_API_KEY",
+		testKey:              "test-atmorouter-key",
+		model:                "cc/claude-sonnet-4-6",
+		greeting:             "Hello from AtmoRouter",
+		mergesSystemMessages: true,
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",

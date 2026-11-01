@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  atmorouter_model:
+    provider: atmorouter
+    model: cc/claude-sonnet-4-6
+
+agents:
+  root:
+    model: atmorouter_model
+    description: Assistant using AtmoRouter
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think
