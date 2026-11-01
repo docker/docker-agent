@@ -28,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	tuibanner "github.com/docker/docker-agent/pkg/tui/banner"
 	"github.com/docker/docker-agent/pkg/tui/commands"
 	commanddefaults "github.com/docker/docker-agent/pkg/tui/commands/defaults"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
@@ -292,6 +293,7 @@ type appModel struct {
 	// showBanner displays the ASCII-art startup banner on an empty
 	// conversation. Shared by every tab and managed via /settings.
 	showBanner bool
+	banner     tuibanner.Banner
 
 	// buildCommandCategories is a function that returns the list of command categories.
 	buildCommandCategories func(context.Context, tea.Model) []commands.Category
@@ -389,6 +391,13 @@ func WithTourOffer(showTelemetryNotice bool) Option {
 	return func(m *appModel) {
 		m.tourMode = tourModeOffer
 		m.tourShowTelemetryNotice = showTelemetryNotice
+	}
+}
+
+// WithBanner replaces the startup banner drawn on an empty conversation.
+func WithBanner(b tuibanner.Banner) Option {
+	return func(m *appModel) {
+		m.banner = b
 	}
 }
 
@@ -554,6 +563,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		showBanner:                    userSettings.GetShowBanner(),
 		keyboardEnhancementsSupported: termfeatures.SupportsModifiedEnter(os.Getenv),
 		dockerDesktop:                 os.Getenv("TERM_PROGRAM") == "docker_desktop",
+		banner:                        tuibanner.Default(),
 		appName:                       "docker agent",
 		appVersion:                    version.Version,
 	}
@@ -726,6 +736,7 @@ func (m *appModel) chatPageOpts() []chat.PageOption {
 		chat.WithSendMode(m.sendMode),
 		chat.WithInterruptMode(m.interruptMode),
 		chat.WithShowBanner(m.showBanner),
+		chat.WithBanner(m.banner),
 	}
 
 	if m.leanMode {
