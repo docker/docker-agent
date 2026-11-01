@@ -106,6 +106,14 @@ var openAIAliasProviders = []openAIAliasProvider{
 		mergesSystemMessages: true,
 	},
 	{
+		provider:             "obscurify",
+		envVar:               "OBSCURIFY_API_KEY",
+		testKey:              "test-obscurify-key",
+		model:                "deepseek/deepseek-v4-flash",
+		greeting:             "Hello from Obscurify.ai",
+		mergesSystemMessages: true,
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",
