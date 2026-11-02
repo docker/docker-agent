@@ -1,3 +1,5 @@
+//go:build darwin || linux || windows || (js && wasm)
+
 package plan
 
 import (
