@@ -416,20 +416,38 @@ mainLoop:
 				finishAssistantText()
 				recordUsage()
 				finishReason := choice.FinishReason
-				if finishReason == chat.FinishReasonRefusal {
+				if finishReason == chat.FinishReasonRefusal || finishReason == chat.FinishReasonLength {
 					// A refusal voids tool calls streamed before the safety
-					// classifier ended the turn: executing them would perform
-					// actions the model refused to complete, and replaying their
+					// classifier ended the turn; a length turn was cut off by
+					// the token limit, so a call streamed into it can carry half
+					// an argument object. Executing either would perform an
+					// action the model did not complete, and replaying their
 					// tool_use blocks without results breaks the next request.
 					// The raw response still holds those blocks, so it goes too.
+					// Dropping them is also what lets the turn end as length:
+					// that is what makes `run --exec` report truncation and ACP
+					// return max_tokens, instead of a partial call hiding it.
 					if len(toolCalls) > 0 {
-						slog.WarnContext(ctx, "Dropping tool calls from refused turn",
-							"agent", a.Name(), "tool_calls", len(toolCalls))
+						slog.WarnContext(ctx, "Dropping tool calls from refused or truncated turn",
+							"agent", a.Name(), "finish_reason", finishReason, "tool_calls", len(toolCalls))
 						events.Emit(ToolCallsRetracted(toolCallIDs(toolCalls), a.Name()))
 						toolCalls = nil
 						openAIResponse = nil
+						// The raw response holds those blocks too, and the signature
+						// kept here belongs to thinking the flattened text no longer
+						// describes. Drop all three together: replaying them would
+						// send tool_use blocks without results, or changed thinking
+						// under a signature the provider did not issue for it.
+						providerState = nil
+						thinkingSignature = ""
+						thoughtSignature = nil
 					}
-					providerState = nil
+					if finishReason == chat.FinishReasonRefusal {
+						// A refusal voids the turn's provider state even when it
+						// carried no tool calls; a length turn keeps it unless the
+						// calls above were retracted.
+						providerState = nil
+					}
 				} else {
 					applyXMLFallback()
 					if finishReason == chat.FinishReasonStop && len(toolCalls) > 0 {
