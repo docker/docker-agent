@@ -212,11 +212,11 @@ func (c *Client) replaysReasoning() bool {
 	return oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts)
 }
 
-// endpointConfig returns ModelConfig with BaseURL set to the endpoint requests
-// reach, so endpoint checks also see OPENAI_BASE_URL.
+// endpointConfig returns ModelConfig with BaseURL set to [base.Config.Endpoint],
+// so endpoint checks also see OPENAI_BASE_URL.
 func (c *Client) endpointConfig() *latest.ModelConfig {
 	cfg := c.ModelConfig
-	cfg.BaseURL = cmp.Or(cfg.BaseURL, c.BaseURL)
+	cfg.BaseURL = c.Endpoint()
 	return &cfg
 }
 

@@ -313,11 +313,14 @@ func TestResponseStateChatGPTDefaultEndpoint(t *testing.T) {
 
 func TestResponseStateOpenAIBaseURLEnv(t *testing.T) {
 	t.Setenv("OPENAI_BASE_URL", "http://localhost:8080/v1")
+	cfg := responseStateClient().ModelConfig
+	cfg.ProviderOpts["native_tool_search"] = true
 	env := environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "secret"})
-	client, err := NewClient(t.Context(), &responseStateClient().ModelConfig, env)
+	client, err := NewClient(t.Context(), &cfg, env)
 	require.NoError(t, err)
 	defer client.Close()
 
+	assert.False(t, client.NativeToolSearchEnabled())
 	assert.Nil(t, client.replayResponse(responseStateMessage()))
 	// Self-hosted: no cache breakpoints, so the system messages merge.
 	assert.Len(t, client.convertMessages(t.Context(), []chat.Message{
