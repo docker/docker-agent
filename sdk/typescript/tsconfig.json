@@ -7,11 +7,12 @@
     "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "rewriteRelativeImportExtensions": true,
     "declaration": true,
-    "rootDir": "src",
-    "outDir": "dist",
+    "noEmit": true,
     "lib": ["es2022"],
-    "types": []
+    "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["src", "test"]
 }

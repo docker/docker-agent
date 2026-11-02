@@ -94,6 +94,7 @@ tasks:
           exit 1
         fi
       - npm --prefix sdk/typescript run typecheck
+      - npm --prefix sdk/typescript test
 
   install-ts:
     internal: true

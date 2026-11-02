@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/constant"
 	"go/token"
 	"go/types"
@@ -14,11 +15,13 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
-// goSource holds what reflection cannot see: declaring files and the values
-// of string constants.
+// goSource holds what reflection cannot see: declaring files, the values of
+// string constants and the syntax of the loaded packages.
 type goSource struct {
 	types  map[string]*goType
 	consts map[string][]string
+	syntax map[string][]*ast.File
+	fset   *token.FileSet
 }
 
 type goType struct {
@@ -41,7 +44,7 @@ func loadPackages(cfg *packages.Config, patterns ...string) (*goSource, error) {
 		return nil, fmt.Errorf("loading packages: %w", err)
 	}
 
-	src := &goSource{types: map[string]*goType{}, consts: map[string][]string{}}
+	src := &goSource{types: map[string]*goType{}, consts: map[string][]string{}, syntax: map[string][]*ast.File{}}
 	var errs []error
 	for _, pkg := range pkgs {
 		for _, e := range pkg.Errors {
@@ -55,6 +58,8 @@ func loadPackages(cfg *packages.Config, patterns ...string) (*goSource, error) {
 }
 
 func (s *goSource) addPackage(pkg *packages.Package) {
+	s.syntax[pkg.PkgPath] = append(s.syntax[pkg.PkgPath], pkg.Syntax...)
+	s.fset = pkg.Fset
 	scope := pkg.Types.Scope()
 	var consts []*types.Const
 	for _, name := range scope.Names() {
@@ -67,8 +72,12 @@ func (s *goSource) addPackage(pkg *packages.Package) {
 		}
 	}
 
-	// Declaration order, which scope.Names does not keep.
-	slices.SortFunc(consts, func(a, b *types.Const) int { return cmp.Compare(a.Pos(), b.Pos()) })
+	// Declaration order, which scope.Names does not keep. token.Pos alone
+	// depends on the order packages were loaded in.
+	slices.SortFunc(consts, func(a, b *types.Const) int {
+		pa, pb := pkg.Fset.Position(a.Pos()), pkg.Fset.Position(b.Pos())
+		return cmp.Or(cmp.Compare(pa.Filename, pb.Filename), cmp.Compare(pa.Offset, pb.Offset))
+	})
 	for _, c := range consts {
 		named, ok := c.Type().(*types.Named)
 		if !ok || c.Val().Kind() != constant.String {
@@ -98,6 +107,13 @@ func (s *goSource) file(pkgPath, name string) string {
 		return t.file
 	}
 	return ""
+}
+
+func (s *goSource) position(pos token.Pos) token.Position {
+	if s.fset == nil {
+		return token.Position{}
+	}
+	return s.fset.Position(pos)
 }
 
 // sourcePath is repository-relative for this module and the import path

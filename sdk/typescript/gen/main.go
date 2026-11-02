@@ -6,6 +6,7 @@ package main
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,44 +25,88 @@ func main() {
 	dir := flag.String("dir", "sdk/typescript", "TypeScript package directory")
 	flag.Parse()
 
-	if err := run(*dir); err != nil {
+	if err := run(context.Background(), *dir); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(dir string) error {
-	defs, err := generate(defaultConfig())
+func run(ctx context.Context, dir string) error {
+	workDir, err := os.MkdirTemp("", "docker-agent-ts-sdk-")
 	if err != nil {
 		return err
 	}
-	types, err := emitTypeScript(defs)
+	defer os.RemoveAll(workDir)
+
+	out, err := generate(ctx, defaultConfig(), workDir)
 	if err != nil {
 		return err
 	}
-	files := map[string]string{}
-	if err := addFiles(files, types); err != nil {
+	if err := writeDir(filepath.Join(dir, "src", "generated"), ".ts", out.sources); err != nil {
 		return err
 	}
-	if err := addFiles(files, map[string]string{"index.ts": emitIndex(files)}); err != nil {
-		return err
-	}
-	schema, err := emitJSONSchema(defs)
-	if err != nil {
-		return err
-	}
-	if err := writeDir(filepath.Join(dir, "src", "generated"), ".ts", files); err != nil {
-		return err
-	}
-	return writeDir(filepath.Join(dir, "schemas"), ".json", map[string]string{"docker-agent.schema.json": schema})
+	return writeDir(filepath.Join(dir, "schemas"), ".json", out.schemas)
 }
 
-func generate(cfg *config) ([]*def, error) {
+// output maps file names to contents.
+type output struct {
+	sources map[string]string
+	schemas map[string]string
+}
+
+// generate builds toolsets in workDir to read their tools.
+func generate(ctx context.Context, cfg *config, workDir string) (*output, error) {
 	src, err := loadGoSource(sortedKeys(cfg.modules))
 	if err != nil {
 		return nil, err
 	}
-	return build(cfg, src)
+	defs, err := build(cfg, src)
+	if err != nil {
+		return nil, err
+	}
+	toolsets, err := collectToolsets(ctx, cfg.toolsets, workDir)
+	if err != nil {
+		return nil, err
+	}
+	args, err := uniqueToolArgs(toolsets)
+	if err != nil {
+		return nil, err
+	}
+
+	types, err := emitTypeScript(defs)
+	if err != nil {
+		return nil, err
+	}
+	taken := map[string]bool{}
+	for _, d := range defs {
+		taken[d.name] = true
+	}
+	zodFiles, err := emitZod(toolsets, args, taken)
+	if err != nil {
+		return nil, err
+	}
+	sources := map[string]string{}
+	for _, files := range []map[string]string{types, zodFiles} {
+		if err := addFiles(sources, files); err != nil {
+			return nil, err
+		}
+	}
+	if err := addFiles(sources, map[string]string{"index.ts": emitIndex(sources)}); err != nil {
+		return nil, err
+	}
+
+	schema, err := emitJSONSchema(defs)
+	if err != nil {
+		return nil, err
+	}
+	toolSchema, err := emitToolArgsJSONSchema(args)
+	if err != nil {
+		return nil, err
+	}
+	return &output{
+		sources: sources,
+		schemas: map[string]string{"docker-agent.schema.json": schema, "tool-args.schema.json": toolSchema},
+	}, nil
 }
 
 // build returns every def reachable from the configured roots and events,
@@ -80,7 +125,7 @@ func build(cfg *config, src *goSource) ([]*def, error) {
 			return nil, err
 		}
 	}
-	defs := slices.Collect(maps.Values(b.defs))
+	defs := slices.Concat(slices.Collect(maps.Values(b.defs)), b.extra)
 	if union != nil {
 		defs = append(defs, union)
 	}

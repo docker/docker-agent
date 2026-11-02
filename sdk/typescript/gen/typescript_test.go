@@ -120,7 +120,7 @@ func TestEmitIndex(t *testing.T) {
 	t.Parallel()
 
 	got := emitIndex(map[string]string{"b.ts": "", "a.ts": ""})
-	assert.Equal(t, header+"export * from './a.js';\nexport * from './b.js';\n", got)
+	assert.Equal(t, header+"export * from './a.ts';\nexport * from './b.ts';\n", got)
 }
 
 func TestAddFilesRejectsCollisions(t *testing.T) {

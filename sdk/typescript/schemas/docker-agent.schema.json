@@ -1,6 +1,67 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
+    "A2AToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "a2a"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "allow_private_ips": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type",
+        "remote"
+      ]
+    },
     "APIMessage": {
       "type": "object",
       "properties": {
@@ -60,6 +121,55 @@
         }
       },
       "$comment": "pkg/config/latest/types.go APIToolConfig"
+    },
+    "APIToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "api"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "allow_private_ips": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type",
+        "api_config"
+      ]
     },
     "AddMessageRequest": {
       "type": "object",
@@ -875,6 +985,105 @@
         "running"
       ]
     },
+    "BackgroundAgentsToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "background_agents"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
+    "BackgroundJobsToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "background_jobs"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "recall": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "BackoffConfig": {
       "type": "object",
       "properties": {
@@ -1181,6 +1390,51 @@
         "reason"
       ]
     },
+    "CalculatorToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "calculator"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "CapabilitiesConfig": {
       "type": "object",
       "properties": {
@@ -1367,13 +1621,13 @@
         "mcps": {
           "type": "object",
           "additionalProperties": {
-            "$ref": "#/$defs/MCPToolset"
+            "$ref": "#/$defs/MCPToolsetDefinition"
           }
         },
         "rag": {
           "type": "object",
           "additionalProperties": {
-            "$ref": "#/$defs/RAGToolset"
+            "$ref": "#/$defs/RAGToolsetDefinition"
           }
         },
         "commands": {
@@ -1538,6 +1792,51 @@
       "required": [
         "path",
         "out"
+      ]
+    },
+    "DatetimeToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "datetime"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
       ]
     },
     "DeferConfig": {
@@ -1767,6 +2066,51 @@
         "timestamp",
         "type",
         "message"
+      ]
+    },
+    "EnvironmentToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "environment"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
       ]
     },
     "ErrorEvent": {
@@ -2174,6 +2518,204 @@
         "identity_token"
       ]
     },
+    "FetchToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "fetch"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "escape_html": {
+          "type": "boolean"
+        },
+        "allowed_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow_private_ips": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
+    "FileToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "file"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "post_edit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PostEditConfig"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "allow_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
+    "FilesystemToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "filesystem"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "post_edit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PostEditConfig"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "ignore_vcs": {
+          "type": "boolean"
+        },
+        "allow_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "FinishReason": {
       "type": "string",
       "$comment": "pkg/chat/chat.go FinishReason",
@@ -2224,6 +2766,51 @@
         }
       },
       "$comment": "pkg/tools/tools.go FunctionCall"
+    },
+    "GitToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "git"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
     },
     "HarnessConfig": {
       "type": "object",
@@ -2932,6 +3519,81 @@
       },
       "$comment": "pkg/session/session.go Item"
     },
+    "LSPToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "lsp"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "version": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "file_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "LifecycleConfig": {
       "type": "object",
       "properties": {
@@ -2958,6 +3620,63 @@
         }
       },
       "$comment": "pkg/config/latest/lifecycle.go LifecycleConfig"
+    },
+    "MCPCatalogToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "mcp_catalog"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "allowed_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
     },
     "MCPInitFinishedEvent": {
       "type": "object",
@@ -3000,6 +3719,86 @@
       ]
     },
     "MCPToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "mcp"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ref": {
+          "type": "string"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "config": true,
+        "version": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "allow_private_ips": {
+          "type": "boolean"
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type",
+        "remote"
+      ]
+    },
+    "MCPToolsetDefinition": {
       "type": "object",
       "properties": {
         "type": {
@@ -3211,6 +4010,54 @@
       "required": [
         "data",
         "mimeType"
+      ]
+    },
+    "MemoryToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "memory"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "path": {
+          "type": "string"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
       ]
     },
     "MessageAddedEvent": {
@@ -3586,6 +4433,57 @@
         "max_attempts"
       ]
     },
+    "ModelPickerToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "model_picker"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "OpenAIResponse": {
       "type": "object",
       "properties": {
@@ -3606,6 +4504,117 @@
       "$comment": "pkg/chat/openai.go OpenAIResponse",
       "required": [
         "source"
+      ]
+    },
+    "OpenAPIToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "openapi"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "url": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "max_output_bytes": {
+          "type": "integer"
+        },
+        "allow_private_ips": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
+    "OpenURLToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "open_url"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
       ]
     },
     "OutputCapabilitiesConfig": {
@@ -3724,6 +4733,51 @@
         "scope",
         "name",
         "action"
+      ]
+    },
+    "PlanToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "plan"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
       ]
     },
     "PostEditConfig": {
@@ -4185,6 +5239,60 @@
       "type": "object",
       "properties": {
         "type": {
+          "const": "rag"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "name": {
+          "type": "string"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "rag_config": {
+          "$ref": "#/$defs/RAGConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
+    "RAGToolsetDefinition": {
+      "type": "object",
+      "properties": {
+        "type": {
           "type": "string"
         },
         "tools": {
@@ -4353,6 +5461,51 @@
         "remote",
         "api_config",
         "webhook_config"
+      ]
+    },
+    "RandomToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "random"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
       ]
     },
     "ReadyResponse": {
@@ -4728,6 +5881,51 @@
         ""
       ]
     },
+    "SchedulerToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "scheduler"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "ScriptShellToolConfig": {
       "type": "object",
       "properties": {
@@ -4765,6 +5963,63 @@
         "cmd",
         "description",
         "required"
+      ]
+    },
+    "ScriptToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "script"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "shell": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ScriptShellToolConfig"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
       ]
     },
     "Session": {
@@ -4922,6 +6177,51 @@
         "type",
         "session_id",
         "status"
+      ]
+    },
+    "SessionContextToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "session_context"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
       ]
     },
     "SessionError": {
@@ -5316,6 +6616,60 @@
         "type"
       ]
     },
+    "ShellToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "shell"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "sudo_askpass": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "SizeCheck": {
       "type": "object",
       "properties": {
@@ -5506,6 +6860,54 @@
         }
       ]
     },
+    "TasksToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "tasks"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "path": {
+          "type": "string"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "TeamInfoEvent": {
       "type": "object",
       "properties": {
@@ -5570,6 +6972,51 @@
         "reason"
       ]
     },
+    "ThinkToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "think"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "ThinkingBudget": {
       "$comment": "pkg/config/latest/types.go ThinkingBudget",
       "anyOf": [
@@ -5581,6 +7028,54 @@
           "type": "integer",
           "description": "Token budget."
         }
+      ]
+    },
+    "TodoToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "todo"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "shared": {
+          "type": "boolean"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
       ]
     },
     "TokenUsage": {
@@ -5943,177 +7438,98 @@
       ]
     },
     "Toolset": {
-      "type": "object",
-      "properties": {
-        "type": {
-          "type": "string"
-        },
-        "tools": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "instruction": {
-          "type": "string"
-        },
-        "toon": {
-          "type": "string"
-        },
-        "readonly": {
-          "type": "boolean"
-        },
-        "model": {
-          "type": "string"
-        },
-        "defer": {
-          "$ref": "#/$defs/DeferConfig"
-        },
-        "command": {
-          "type": "string"
-        },
-        "args": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "ref": {
-          "type": "string"
-        },
-        "remote": {
-          "$ref": "#/$defs/Remote"
-        },
-        "config": true,
-        "version": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "url": {
-          "type": "string"
-        },
-        "headers": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          }
-        },
-        "env": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          }
-        },
-        "shared": {
-          "type": "boolean"
-        },
-        "path": {
-          "type": "string"
-        },
-        "shell": {
-          "type": "object",
-          "additionalProperties": {
-            "$ref": "#/$defs/ScriptShellToolConfig"
-          }
-        },
-        "post_edit": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PostEditConfig"
-          }
-        },
-        "api_config": {
-          "$ref": "#/$defs/APIToolConfig"
-        },
-        "webhook_config": {
-          "$ref": "#/$defs/WebhookToolConfig"
-        },
-        "ignore_vcs": {
-          "type": "boolean"
-        },
-        "allow_list": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "deny_list": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "allowed_servers": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "blocked_servers": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "file_types": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "timeout": {
-          "type": "integer"
-        },
-        "max_output_bytes": {
-          "type": "integer"
-        },
-        "escape_html": {
-          "type": "boolean"
-        },
-        "allowed_domains": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "blocked_domains": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "allow_private_ips": {
-          "type": "boolean"
-        },
-        "sudo_askpass": {
-          "type": "boolean"
-        },
-        "recall": {
-          "type": "boolean"
-        },
-        "rag_config": {
-          "$ref": "#/$defs/RAGConfig"
-        },
-        "models": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "working_dir": {
-          "type": "string"
-        },
-        "lifecycle": {
-          "$ref": "#/$defs/LifecycleConfig"
-        }
-      },
       "$comment": "pkg/config/latest/types.go Toolset",
-      "required": [
-        "remote",
-        "api_config",
-        "webhook_config"
+      "oneOf": [
+        {
+          "$ref": "#/$defs/A2AToolset"
+        },
+        {
+          "$ref": "#/$defs/APIToolset"
+        },
+        {
+          "$ref": "#/$defs/BackgroundAgentsToolset"
+        },
+        {
+          "$ref": "#/$defs/BackgroundJobsToolset"
+        },
+        {
+          "$ref": "#/$defs/CalculatorToolset"
+        },
+        {
+          "$ref": "#/$defs/DatetimeToolset"
+        },
+        {
+          "$ref": "#/$defs/EnvironmentToolset"
+        },
+        {
+          "$ref": "#/$defs/FetchToolset"
+        },
+        {
+          "$ref": "#/$defs/FileToolset"
+        },
+        {
+          "$ref": "#/$defs/FilesystemToolset"
+        },
+        {
+          "$ref": "#/$defs/GitToolset"
+        },
+        {
+          "$ref": "#/$defs/LSPToolset"
+        },
+        {
+          "$ref": "#/$defs/MCPToolset"
+        },
+        {
+          "$ref": "#/$defs/MCPCatalogToolset"
+        },
+        {
+          "$ref": "#/$defs/MemoryToolset"
+        },
+        {
+          "$ref": "#/$defs/ModelPickerToolset"
+        },
+        {
+          "$ref": "#/$defs/OpenURLToolset"
+        },
+        {
+          "$ref": "#/$defs/OpenAPIToolset"
+        },
+        {
+          "$ref": "#/$defs/PlanToolset"
+        },
+        {
+          "$ref": "#/$defs/RAGToolset"
+        },
+        {
+          "$ref": "#/$defs/RandomToolset"
+        },
+        {
+          "$ref": "#/$defs/SchedulerToolset"
+        },
+        {
+          "$ref": "#/$defs/ScriptToolset"
+        },
+        {
+          "$ref": "#/$defs/SessionContextToolset"
+        },
+        {
+          "$ref": "#/$defs/ShellToolset"
+        },
+        {
+          "$ref": "#/$defs/TasksToolset"
+        },
+        {
+          "$ref": "#/$defs/ThinkToolset"
+        },
+        {
+          "$ref": "#/$defs/TodoToolset"
+        },
+        {
+          "$ref": "#/$defs/UserPromptToolset"
+        },
+        {
+          "$ref": "#/$defs/WebhookToolset"
+        }
       ]
     },
     "ToolsetInfoEvent": {
@@ -6312,6 +7728,51 @@
         "session_position"
       ]
     },
+    "UserPromptToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "user_prompt"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type"
+      ]
+    },
     "WarningEvent": {
       "type": "object",
       "properties": {
@@ -6356,6 +7817,52 @@
         }
       },
       "$comment": "pkg/config/latest/types.go WebhookToolConfig"
+    },
+    "WebhookToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "webhook"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "type",
+        "webhook_config"
+      ]
     }
   }
 }

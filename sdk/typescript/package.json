@@ -22,7 +22,8 @@
     "schemas"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
@@ -31,6 +32,7 @@
     "zod": "^4"
   },
   "devDependencies": {
+    "@types/node": "24.19.2",
     "typescript": "7.0.2",
     "zod": "4.6.7"
   }

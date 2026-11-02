@@ -36,17 +36,11 @@ func generated(t *testing.T) []*def {
 func TestGenerateIsDeterministic(t *testing.T) {
 	t.Parallel()
 
-	first, err := emitTypeScript(generated(t))
+	first, err := generate(t.Context(), defaultConfig(), t.TempDir())
 	require.NoError(t, err)
-	second, err := emitTypeScript(generated(t))
+	second, err := generate(t.Context(), defaultConfig(), t.TempDir())
 	require.NoError(t, err)
 	assert.Equal(t, first, second)
-
-	firstSchema, err := emitJSONSchema(generated(t))
-	require.NoError(t, err)
-	secondSchema, err := emitJSONSchema(generated(t))
-	require.NoError(t, err)
-	assert.Equal(t, firstSchema, secondSchema)
 }
 
 func TestEveryAPITypeIsGenerated(t *testing.T) {
@@ -97,7 +91,8 @@ func TestSchemasMatchEncodedValues(t *testing.T) {
 		eventKeys[typ] = key
 	}
 	for _, d := range defs {
-		if d.goType == nil || nilable(d.goType) {
+		// A zero Toolset has no type; samples below cover every variant.
+		if d.goType == nil || nilable(d.goType) || d.goType == reflect.TypeFor[latest.Toolset]() {
 			continue
 		}
 		t.Run(d.name, func(t *testing.T) {
@@ -117,7 +112,17 @@ func TestSchemasMatchEncodedValues(t *testing.T) {
 	sub := session.New(session.WithTitle("sub"))
 	sess := session.New(session.WithUserMessage("hi"), session.WithMessages([]session.Item{{SubSession: sub}}))
 
+	var toolsets []any
+	for _, typ := range cfg.toolsetTypes {
+		toolsets = append(toolsets, latest.Toolset{Type: typ})
+	}
+	toolsets = append(toolsets,
+		latest.Toolset{Type: "shell", SudoAskpass: new(true), Env: map[string]string{"k": "v"}},
+		latest.Toolset{Type: "mcp", Command: "server", Args: []string{"--stdio"}, Lifecycle: &latest.LifecycleConfig{}},
+	)
+
 	samples := map[string][]any{
+		"Toolset":           toolsets,
 		"Duration":          {latest.Duration{}, latest.Duration{Duration: 90 * time.Second}},
 		"InstructionFiles":  {latest.InstructionFiles{"a.md"}, latest.InstructionFiles{"a.md", "b.md"}},
 		"SkillsConfig":      {latest.SkillsConfig{}, latest.SkillsConfig{Sources: []string{latest.SkillSourceLocal}}, latest.SkillsConfig{Sources: []string{"https://example.com"}, Include: []string{"git"}, Inline: []latest.InlineSkill{{Name: "x", Description: "d", Instructions: "i"}}}},

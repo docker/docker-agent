@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"reflect"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -9,10 +10,21 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/memory/database/inmemory"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/skills"
+	"github.com/docker/docker-agent/pkg/teamloader/toolsets"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
+	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
+	"github.com/docker/docker-agent/pkg/tools/builtin/lsp"
+	"github.com/docker/docker-agent/pkg/tools/builtin/mcpcatalog"
+	"github.com/docker/docker-agent/pkg/tools/builtin/memory"
+	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
+	"github.com/docker/docker-agent/pkg/tools/builtin/tasks"
+	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
 
 // config lists what the SDK exposes and how Go types that reflection alone
@@ -35,6 +47,16 @@ type config struct {
 	// reflected are json.Marshaler implementations whose output matches
 	// their fields.
 	reflected map[reflect.Type]bool
+	// toolsetTypes are the config types the Toolset union covers.
+	toolsetTypes []string
+	// toolsetFields restricts Toolset fields that validation accepts on any
+	// type to the types that use them.
+	toolsetFields map[string][]string
+	// toolsets are built to read the names and arguments of their tools.
+	toolsets []toolsetSpec
+	// dynamicToolsets name their tools after their config, so they have no
+	// fixed tools.
+	dynamicToolsets []string
 }
 
 const unionName = "AgentStreamingEvent"
@@ -111,7 +133,9 @@ func defaultConfig() *config {
 		names: map[reflect.Type]string{
 			reflect.TypeFor[api.Message]():              "APIMessage",
 			reflect.TypeFor[chat.Message]():             "ChatMessage",
+			reflect.TypeFor[latest.MCPToolset]():        "MCPToolsetDefinition",
 			reflect.TypeFor[latest.PermissionsConfig](): "ConfigPermissions",
+			reflect.TypeFor[latest.RAGToolset]():        "RAGToolsetDefinition",
 			reflect.TypeFor[runtime.Usage]():            "TokenUsage",
 			reflect.TypeFor[hooks.EventType]():          "HookEventType",
 			reflect.TypeFor[session.Error]():            "SessionError",
@@ -135,11 +159,66 @@ func defaultConfig() *config {
 			reflect.TypeFor[latest.SkillsConfig]():      skillsConfigSchema,
 			reflect.TypeFor[latest.ThinkingBudget]():    thinkingBudgetSchema,
 			reflect.TypeFor[latest.TaskBudget]():        taskBudgetSchema,
+			reflect.TypeFor[latest.Toolset]():           toolsetSchema,
 			reflect.TypeFor[latest.RAGStrategyConfig](): ragStrategyConfigSchema,
 		},
+		toolsetTypes: sortedKeys(toolsets.DefaultToolsetCreators()),
+		toolsetFields: map[string][]string{
+			"api_config":     {"api"},
+			"webhook_config": {"webhook"},
+		},
+		toolsets:        builtinToolsets(),
+		dynamicToolsets: []string{"a2a", "api", "mcp", "openapi", "rag", "script"},
 		reflected: map[reflect.Type]bool{
 			reflect.TypeFor[session.Session](): true,
 			reflect.TypeFor[tools.Tool]():      true,
 		},
+	}
+}
+
+func builtinToolsets() []toolsetSpec {
+	return []toolsetSpec{
+		{typ: "background_agents"},
+		// recall adds an optional argument to run_background_job.
+		{typ: "background_jobs", toolset: latest.Toolset{Recall: new(true)}},
+		{typ: "calculator"},
+		{typ: "datetime"},
+		{name: "deferred", build: func(string) (tools.ToolSet, error) { return deferred.New(), nil }},
+		{typ: "environment"},
+		{typ: "fetch"},
+		{typ: "file"},
+		{typ: "filesystem"},
+		{typ: "git"},
+		{name: "handoff", build: func(string) (tools.ToolSet, error) { return handoff.New(), nil }},
+		{typ: "lsp", build: func(dir string) (tools.ToolSet, error) { return lsp.New("lsp", nil, nil, dir), nil }},
+		{
+			typ: "mcp_catalog",
+			// Offered once a server is enabled.
+			extra: []tools.Tool{
+				{Name: mcpcatalog.ToolNameDisable, Parameters: tools.MustSchemaFor[mcpcatalog.DisableArgs]()},
+				{Name: mcpcatalog.ToolNameResetAuth, Parameters: tools.MustSchemaFor[mcpcatalog.ResetAuthArgs]()},
+			},
+		},
+		{typ: "memory", build: func(string) (tools.ToolSet, error) { return memory.New(inmemory.New()), nil }},
+		{typ: "model_picker", toolset: latest.Toolset{Models: []string{"provider/model"}}},
+		{typ: "open_url", toolset: latest.Toolset{URL: "https://example.com"}},
+		{typ: "plan"},
+		{name: "randomInt", typ: "random"},
+		{typ: "scheduler"},
+		{typ: "session_context"},
+		{typ: "shell"},
+		{
+			name: "skills",
+			// A fork skill with supporting files exposes every skills tool.
+			build: func(dir string) (tools.ToolSet, error) {
+				return skillstool.New([]skills.Skill{{Name: "skill", Files: []string{"SKILL.md", "file"}, Context: "fork"}}, dir), nil
+			},
+		},
+		{typ: "tasks", build: func(dir string) (tools.ToolSet, error) { return tasks.New(filepath.Join(dir, "tasks.json")), nil }},
+		{typ: "think"},
+		{typ: "todo"},
+		{name: "transferTask", build: func(string) (tools.ToolSet, error) { return transfertask.New(), nil }},
+		{typ: "user_prompt"},
+		{typ: "webhook", toolset: latest.Toolset{WebhookConfig: latest.WebhookToolConfig{URL: "https://example.com"}}},
 	}
 }

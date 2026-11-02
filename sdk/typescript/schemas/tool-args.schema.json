@@ -1,0 +1,1590 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "AddDependencyArgs": {
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "type": "string"
+        },
+        "dependsOnId": {
+          "type": "string"
+        }
+      },
+      "$comment": "add_dependency",
+      "required": [
+        "taskId",
+        "dependsOnId"
+      ],
+      "additionalProperties": false
+    },
+    "AddMemoryArgs": {
+      "type": "object",
+      "properties": {
+        "memory": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        }
+      },
+      "$comment": "add_memory",
+      "required": [
+        "memory"
+      ],
+      "additionalProperties": false
+    },
+    "AddToolArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "$comment": "add_tool",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "CalculateArgs": {
+      "type": "object",
+      "properties": {
+        "expression": {
+          "type": "string"
+        }
+      },
+      "$comment": "calculate",
+      "required": [
+        "expression"
+      ],
+      "additionalProperties": false
+    },
+    "CancelScheduleArgs": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "cancel_schedule",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "ChangeModelArgs": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        }
+      },
+      "$comment": "change_model",
+      "required": [
+        "model"
+      ],
+      "additionalProperties": false
+    },
+    "CreateDirectoryArgs": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "create_directory",
+      "required": [
+        "paths"
+      ],
+      "additionalProperties": false
+    },
+    "CreateScheduleArgs": {
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "string"
+        },
+        "when": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "create_schedule",
+      "required": [
+        "prompt",
+        "when"
+      ],
+      "additionalProperties": false
+    },
+    "CreateTaskArgs": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string"
+        },
+        "dependencies": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "create_task",
+      "required": [
+        "title"
+      ],
+      "additionalProperties": false
+    },
+    "CreateTodoArgs": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "create_todo",
+      "required": [
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "CreateTodosArgs": {
+      "type": "object",
+      "properties": {
+        "descriptions": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "create_todos",
+      "required": [
+        "descriptions"
+      ],
+      "additionalProperties": false
+    },
+    "DeleteMemoryArgs": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "$comment": "delete_memory",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "DeletePlanArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "last_known_revision": {
+          "type": [
+            "null",
+            "integer"
+          ]
+        }
+      },
+      "$comment": "delete_plan",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "DeleteTaskArgs": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "$comment": "delete_task",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "DirectoryTreeArgs": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "$comment": "directory_tree",
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "DisableRemoteMCPServerArgs": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "$comment": "disable_remote_mcp_server",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "EditFileArgs": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "edits": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "oldText": {
+                "type": "string"
+              },
+              "newText": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "oldText",
+              "newText"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "edit_file",
+      "required": [
+        "path",
+        "edits"
+      ],
+      "additionalProperties": false
+    },
+    "EnableRemoteMCPServerArgs": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "$comment": "enable_remote_mcp_server",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "ExportPlanToFileArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "$comment": "export_plan_to_file",
+      "required": [
+        "name",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "FetchArgs": {
+      "type": "object",
+      "properties": {
+        "urls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "text",
+            "markdown",
+            "html"
+          ]
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 300
+        }
+      },
+      "$comment": "fetch",
+      "required": [
+        "urls",
+        "format"
+      ],
+      "additionalProperties": false
+    },
+    "GetDatetimeArgs": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "timezone": {
+          "type": "string"
+        }
+      },
+      "$comment": "get_datetime",
+      "required": [
+        "format"
+      ],
+      "additionalProperties": false
+    },
+    "GetEnvironmentInfoArgs": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "get_environment_info",
+      "additionalProperties": false
+    },
+    "GetMemoriesArgs": {
+      "type": "object",
+      "properties": {},
+      "$comment": "get_memories",
+      "additionalProperties": false
+    },
+    "GetPlanStatusArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "$comment": "get_plan_status",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "GetTaskArgs": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "$comment": "get_task",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "GitBlameArgs": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "rev": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "git_blame",
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "GitBranchesArgs": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "git_branches",
+      "additionalProperties": false
+    },
+    "GitLogArgs": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "git_log",
+      "additionalProperties": false
+    },
+    "GitShowArgs": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "git_show",
+      "additionalProperties": false
+    },
+    "GitStatusArgs": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "git_status",
+      "additionalProperties": false
+    },
+    "HandoffArgs": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string"
+        }
+      },
+      "$comment": "handoff",
+      "required": [
+        "agent"
+      ],
+      "additionalProperties": false
+    },
+    "LSPCallHierarchyArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "character": {
+          "type": "integer"
+        },
+        "direction": {
+          "type": "string"
+        }
+      },
+      "$comment": "lsp_call_hierarchy",
+      "required": [
+        "file",
+        "line",
+        "character",
+        "direction"
+      ],
+      "additionalProperties": false
+    },
+    "LSPCodeActionsArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "start_line": {
+          "type": "integer"
+        },
+        "end_line": {
+          "type": "integer"
+        }
+      },
+      "$comment": "lsp_code_actions",
+      "required": [
+        "file",
+        "start_line"
+      ],
+      "additionalProperties": false
+    },
+    "LSPDefinitionArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "character": {
+          "type": "integer"
+        }
+      },
+      "$comment": "lsp_definition",
+      "required": [
+        "file",
+        "line",
+        "character"
+      ],
+      "additionalProperties": false
+    },
+    "LSPDiagnosticsArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        }
+      },
+      "$comment": "lsp_diagnostics",
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "LSPDocumentSymbolsArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        }
+      },
+      "$comment": "lsp_document_symbols",
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "LSPFormatArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        }
+      },
+      "$comment": "lsp_format",
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "LSPHoverArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "character": {
+          "type": "integer"
+        }
+      },
+      "$comment": "lsp_hover",
+      "required": [
+        "file",
+        "line",
+        "character"
+      ],
+      "additionalProperties": false
+    },
+    "LSPImplementationsArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "character": {
+          "type": "integer"
+        }
+      },
+      "$comment": "lsp_implementations",
+      "required": [
+        "file",
+        "line",
+        "character"
+      ],
+      "additionalProperties": false
+    },
+    "LSPInlayHintsArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "start_line": {
+          "type": "integer"
+        },
+        "end_line": {
+          "type": "integer"
+        }
+      },
+      "$comment": "lsp_inlay_hints",
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "LSPReferencesArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "character": {
+          "type": "integer"
+        },
+        "include_declaration": {
+          "type": [
+            "null",
+            "boolean"
+          ]
+        }
+      },
+      "$comment": "lsp_references",
+      "required": [
+        "file",
+        "line",
+        "character"
+      ],
+      "additionalProperties": false
+    },
+    "LSPRenameArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "character": {
+          "type": "integer"
+        },
+        "new_name": {
+          "type": "string"
+        }
+      },
+      "$comment": "lsp_rename",
+      "required": [
+        "file",
+        "line",
+        "character",
+        "new_name"
+      ],
+      "additionalProperties": false
+    },
+    "LSPSignatureHelpArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "character": {
+          "type": "integer"
+        }
+      },
+      "$comment": "lsp_signature_help",
+      "required": [
+        "file",
+        "line",
+        "character"
+      ],
+      "additionalProperties": false
+    },
+    "LSPTypeHierarchyArgs": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "character": {
+          "type": "integer"
+        },
+        "direction": {
+          "type": "string"
+        }
+      },
+      "$comment": "lsp_type_hierarchy",
+      "required": [
+        "file",
+        "line",
+        "character",
+        "direction"
+      ],
+      "additionalProperties": false
+    },
+    "LSPWorkspaceArgs": {
+      "type": "object",
+      "$comment": "lsp_workspace",
+      "additionalProperties": false
+    },
+    "LSPWorkspaceSymbolsArgs": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        }
+      },
+      "$comment": "lsp_workspace_symbols",
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "ListBackgroundAgentsArgs": {
+      "type": "object",
+      "properties": {},
+      "$comment": "list_background_agents",
+      "additionalProperties": false
+    },
+    "ListBackgroundJobsArgs": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "list_background_jobs",
+      "additionalProperties": false
+    },
+    "ListDirectoryArgs": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "list_directory",
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "ListPlansArgs": {
+      "type": "object",
+      "properties": {},
+      "$comment": "list_plans",
+      "additionalProperties": false
+    },
+    "ListRemoteMCPServersArgs": {
+      "type": "object",
+      "$comment": "list_remote_mcp_servers",
+      "additionalProperties": false
+    },
+    "ListSchedulesArgs": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "list_schedules",
+      "additionalProperties": false
+    },
+    "ListSessionsArgs": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "$comment": "list_sessions",
+      "additionalProperties": false
+    },
+    "ListTasksArgs": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string"
+        }
+      },
+      "$comment": "list_tasks",
+      "additionalProperties": false
+    },
+    "ListTodosArgs": {
+      "type": "object",
+      "properties": {},
+      "$comment": "list_todos",
+      "additionalProperties": false
+    },
+    "NextTaskArgs": {
+      "type": "object",
+      "properties": {},
+      "$comment": "next_task",
+      "additionalProperties": false
+    },
+    "OpenURLArgs": {
+      "type": "object",
+      "$comment": "open_url",
+      "additionalProperties": false
+    },
+    "RandomIntArgs": {
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": [
+            "null",
+            "integer"
+          ]
+        },
+        "max": {
+          "type": [
+            "null",
+            "integer"
+          ]
+        }
+      },
+      "$comment": "random_int",
+      "required": [
+        "min",
+        "max"
+      ],
+      "additionalProperties": false
+    },
+    "ReadFileArgs": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "line": {
+          "type": [
+            "null",
+            "integer"
+          ]
+        },
+        "limit": {
+          "type": [
+            "null",
+            "integer"
+          ]
+        }
+      },
+      "$comment": "read_file",
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "ReadMultipleFilesArgs": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "json": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "read_multiple_files",
+      "required": [
+        "paths"
+      ],
+      "additionalProperties": false
+    },
+    "ReadPlanArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "$comment": "read_plan",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "ReadSessionArgs": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "read_session",
+      "required": [
+        "session_id"
+      ],
+      "additionalProperties": false
+    },
+    "ReadSkillArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "$comment": "read_skill",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "ReadSkillFileArgs": {
+      "type": "object",
+      "properties": {
+        "skill_name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "$comment": "read_skill_file",
+      "required": [
+        "skill_name",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "RemoveDependencyArgs": {
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "type": "string"
+        },
+        "dependsOnId": {
+          "type": "string"
+        }
+      },
+      "$comment": "remove_dependency",
+      "required": [
+        "taskId",
+        "dependsOnId"
+      ],
+      "additionalProperties": false
+    },
+    "RemoveDirectoryArgs": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "remove_directory",
+      "required": [
+        "paths"
+      ],
+      "additionalProperties": false
+    },
+    "ResetRemoteMCPServerAuthArgs": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "$comment": "reset_remote_mcp_server_auth",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "RevertModelArgs": {
+      "type": "object",
+      "properties": {},
+      "$comment": "revert_model",
+      "additionalProperties": false
+    },
+    "RunBackgroundAgentArgs": {
+      "type": "object",
+      "properties": {
+        "worktree": {
+          "type": "boolean"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "expected_output": {
+          "type": "string"
+        }
+      },
+      "$comment": "run_background_agent",
+      "required": [
+        "agent",
+        "task"
+      ],
+      "additionalProperties": false
+    },
+    "RunBackgroundJobArgs": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "recall": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "run_background_job",
+      "required": [
+        "cmd"
+      ],
+      "additionalProperties": false
+    },
+    "RunSkillArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "$comment": "run_skill",
+      "required": [
+        "name",
+        "task"
+      ],
+      "additionalProperties": false
+    },
+    "SearchFilesContentArgs": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "is_regex": {
+          "type": "boolean"
+        },
+        "excludePatterns": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "search_files_content",
+      "required": [
+        "path",
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "SearchMemoriesArgs": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        }
+      },
+      "$comment": "search_memories",
+      "additionalProperties": false
+    },
+    "SearchRemoteMCPServersArgs": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        }
+      },
+      "$comment": "search_remote_mcp_servers",
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "SearchToolArgs": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        }
+      },
+      "$comment": "search_tool",
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    },
+    "SendWebhookArgs": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "value2": {
+          "type": "string"
+        },
+        "value3": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "send_webhook",
+      "required": [
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "SetPlanStatusArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "last_known_revision": {
+          "type": [
+            "null",
+            "integer"
+          ]
+        }
+      },
+      "$comment": "set_plan_status",
+      "required": [
+        "name",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "ShellArgs": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "shell",
+      "required": [
+        "cmd"
+      ],
+      "additionalProperties": false
+    },
+    "StopBackgroundAgentArgs": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "stop_background_agent",
+      "required": [
+        "task_id"
+      ],
+      "additionalProperties": false
+    },
+    "StopBackgroundJobArgs": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "stop_background_job",
+      "required": [
+        "job_id"
+      ],
+      "additionalProperties": false
+    },
+    "ThinkArgs": {
+      "type": "object",
+      "properties": {
+        "thought": {
+          "type": "string"
+        }
+      },
+      "$comment": "think",
+      "required": [
+        "thought"
+      ],
+      "additionalProperties": false
+    },
+    "TransferTaskArgs": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "expected_output": {
+          "type": "string"
+        }
+      },
+      "$comment": "transfer_task",
+      "required": [
+        "agent",
+        "task",
+        "expected_output"
+      ],
+      "additionalProperties": false
+    },
+    "UpdateMemoryArgs": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "memory": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        }
+      },
+      "$comment": "update_memory",
+      "required": [
+        "id",
+        "memory"
+      ],
+      "additionalProperties": false
+    },
+    "UpdatePlanFromFileArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "last_known_revision": {
+          "type": [
+            "null",
+            "integer"
+          ]
+        }
+      },
+      "$comment": "update_plan_from_file",
+      "required": [
+        "name",
+        "path"
+      ],
+      "additionalProperties": false
+    },
+    "UpdateTaskArgs": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "dependencies": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "update_task",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    },
+    "UpdateTodosArgs": {
+      "type": "object",
+      "properties": {
+        "updates": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "status"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "$comment": "update_todos",
+      "required": [
+        "updates"
+      ],
+      "additionalProperties": false
+    },
+    "UserPromptArgs": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "$comment": "user_prompt",
+      "required": [
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "ViewBackgroundAgentArgs": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "view_background_agent",
+      "required": [
+        "task_id"
+      ],
+      "additionalProperties": false
+    },
+    "ViewBackgroundJobArgs": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "view_background_job",
+      "required": [
+        "job_id"
+      ],
+      "additionalProperties": false
+    },
+    "WaitBackgroundAgentsArgs": {
+      "type": "object",
+      "properties": {
+        "task_ids": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "integer"
+        }
+      },
+      "$comment": "wait_background_agents",
+      "required": [
+        "task_ids"
+      ],
+      "additionalProperties": false
+    },
+    "WaitBackgroundJobArgs": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "wait_background_job",
+      "required": [
+        "job_id"
+      ],
+      "additionalProperties": false
+    },
+    "WriteFileArgs": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "write_file",
+      "required": [
+        "path",
+        "content"
+      ],
+      "additionalProperties": false
+    },
+    "WritePlanArgs": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "author": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "last_known_revision": {
+          "type": [
+            "null",
+            "integer"
+          ]
+        }
+      },
+      "$comment": "write_plan",
+      "required": [
+        "name",
+        "content"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

@@ -40,7 +40,7 @@ func emitIndex(files map[string]string) string {
 	var index strings.Builder
 	index.WriteString(header)
 	for _, name := range sortedKeys(files) {
-		fmt.Fprintf(&index, "export * from './%s.js';\n", strings.TrimSuffix(name, ".ts"))
+		fmt.Fprintf(&index, "export * from './%s';\n", name)
 	}
 	return index.String()
 }
@@ -65,7 +65,7 @@ func emitModule(module string, defs []*def, moduleOf map[string]string) (string,
 		out.WriteString("\n")
 	}
 	for _, from := range sortedKeys(e.imports) {
-		fmt.Fprintf(&out, "import type { %s } from './%s.js';\n", strings.Join(sortedKeys(e.imports[from]), ", "), from)
+		fmt.Fprintf(&out, "import type { %s } from './%s.ts';\n", strings.Join(sortedKeys(e.imports[from]), ", "), from)
 	}
 	out.WriteString(body.String())
 	return out.String(), nil

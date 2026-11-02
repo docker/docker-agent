@@ -32,6 +32,8 @@ type builder struct {
 	src   *goSource
 	defs  map[reflect.Type]*def
 	names map[string]reflect.Type
+	// extra defs have no Go type of their own.
+	extra []*def
 }
 
 func newBuilder(cfg *config, src *goSource) *builder {
@@ -175,6 +177,18 @@ func (b *builder) def(t reflect.Type) (*def, error) {
 	return d, nil
 }
 
+func (b *builder) addDef(d *def) error {
+	if reservedNames[d.name] {
+		return fmt.Errorf("%s shadows a TypeScript global", d.name)
+	}
+	if other, ok := b.names[d.name]; ok {
+		return fmt.Errorf("%s is already the name of %v", d.name, other)
+	}
+	b.names[d.name] = nil
+	b.extra = append(b.extra, d)
+	return nil
+}
+
 func (b *builder) defName(t reflect.Type) (string, error) {
 	name := cmp.Or(b.cfg.names[t], t.Name())
 	if strings.ContainsAny(name, "[]") {
@@ -197,6 +211,13 @@ var reservedNames = map[string]bool{
 	"JSON": true, "Map": true, "Number": true, "Object": true, "Omit": true, "Partial": true, "Pick": true,
 	"Promise": true, "Readonly": true, "Record": true, "RegExp": true, "Required": true, "Set": true,
 	"String": true, "Symbol": true,
+	"console": true, "fetch": true, "globalThis": true, "process": true,
+}
+
+// allowedShadows may shadow a global anyway.
+var allowedShadows = map[string]bool{
+	// The fetch toolset's tool-name list is named after its config type.
+	"fetch": true,
 }
 
 // enumSchema lists t's constants, then the extra values the config adds for
