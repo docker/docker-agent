@@ -153,7 +153,7 @@ func TestStatefulToolsetsAreSharedWithinASessionOnly(t *testing.T) {
 	session, other := browserToolsets(nil), browserToolsets(nil)
 
 	t.Run("todo", func(t *testing.T) {
-		shared := latest.Toolset{Type: "todo", Shared: true}
+		shared := latest.Toolset{Type: "todo", Shared: latest.SharedScopeProcess}
 		callTool(t, createTool(t, session, shared), "create_todo", `{"description":"ship it"}`)
 		assert.Contains(t, callTool(t, createTool(t, session, shared), "list_todos", ""), "ship it", "shared lists are one per session")
 		assert.NotContains(t, callTool(t, createTool(t, session, latest.Toolset{Type: "todo"}), "list_todos", ""), "ship it", "unshared lists are private")

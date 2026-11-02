@@ -2388,8 +2388,16 @@
           }
         },
         "shared": {
-          "type": "boolean",
-          "description": "Whether the tool is shared (for think tool)"
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "enum": ["team"]
+            }
+          ],
+          "description": "How far the todo list is shared (for todo tool). false (default) keeps a list per agent, true shares one list across the whole process (every session and tab), \"team\" shares one list across the agents of a single team load only"
         },
         "path": {
           "type": "string",

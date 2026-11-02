@@ -29,6 +29,7 @@ import (
 	providerdefaults "github.com/docker/docker-agent/pkg/model/provider/providers"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/deferred"
+	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
 	"github.com/docker/docker-agent/pkg/tools/codemode"
 	"github.com/docker/docker-agent/pkg/tools/toon"
 )
@@ -1929,4 +1930,77 @@ func TestLoadExplicitEncryptedConfigWins(t *testing.T) {
 	result, err := LoadWithConfig(t.Context(), src, rc, withTestProviderRegistry()...)
 	require.NoError(t, err)
 	assert.Equal(t, "FROM-FLAG", result.EncryptedConfig)
+}
+
+// todoSets returns the todo toolset of each named agent in a loaded team.
+func todoSets(t *testing.T, result *LoadResult, names ...string) []*todo.ToolSet {
+	t.Helper()
+
+	var out []*todo.ToolSet
+	for _, name := range names {
+		a, err := result.Team.Agent(name)
+		require.NoError(t, err)
+		var found *todo.ToolSet
+		for _, ts := range a.ToolSets() {
+			if td, ok := tools.As[*todo.ToolSet](ts); ok {
+				found = td
+			}
+		}
+		require.NotNilf(t, found, "agent %q has no todo toolset", name)
+		out = append(out, found)
+	}
+	return out
+}
+
+func TestLoadWithConfig_SharedTodoScopes(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	load := func(t *testing.T, shared string) *LoadResult {
+		t.Helper()
+
+		data := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    sub_agents: [first, second]
+  first:
+    model: openai/gpt-4o
+    instruction: test
+    toolsets:
+      - type: todo
+        shared: ` + shared + `
+  second:
+    model: openai/gpt-4o
+    instruction: test
+    toolsets:
+      - type: todo
+        shared: ` + shared + `
+`)
+		result, err := LoadWithConfig(t.Context(), config.NewBytesSource("t.yaml", data), &config.RuntimeConfig{},
+			withTestProviderRegistry(WithToolsetRegistry(NewToolsetRegistry(map[string]ToolsetCreator{"todo": todo.Creator})))...)
+		require.NoError(t, err)
+		return result
+	}
+
+	t.Run("false keeps a list per agent", func(t *testing.T) {
+		sets := todoSets(t, load(t, "false"), "first", "second")
+		assert.NotSame(t, sets[0], sets[1])
+	})
+
+	t.Run("team shares within a load and not across loads", func(t *testing.T) {
+		tabA := todoSets(t, load(t, "team"), "first", "second")
+		tabB := todoSets(t, load(t, "team"), "first", "second")
+
+		assert.Same(t, tabA[0], tabA[1])
+		assert.Same(t, tabB[0], tabB[1])
+		assert.NotSame(t, tabA[0], tabB[0])
+	})
+
+	t.Run("true shares across loads", func(t *testing.T) {
+		tabA := todoSets(t, load(t, "true"), "first", "second")
+		tabB := todoSets(t, load(t, "true"), "first", "second")
+
+		assert.Same(t, tabA[0], tabA[1])
+		assert.Same(t, tabA[0], tabB[0])
+	})
 }
