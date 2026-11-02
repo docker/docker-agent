@@ -1,0 +1,6361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "APIMessage": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "content": {
+          "type": "string"
+        },
+        "multi_content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessagePart"
+          }
+        }
+      },
+      "$comment": "pkg/api/types.go Message",
+      "required": [
+        "role",
+        "content"
+      ]
+    },
+    "APIToolConfig": {
+      "type": "object",
+      "properties": {
+        "instruction": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "output_schema": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "$comment": "pkg/config/latest/types.go APIToolConfig"
+    },
+    "AddMessageRequest": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionMessage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "$comment": "pkg/api/types.go AddMessageRequest",
+      "required": [
+        "message"
+      ]
+    },
+    "AddSummaryRequest": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "first_kept_entry": {
+          "type": "integer"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        }
+      },
+      "$comment": "pkg/api/types.go AddSummaryRequest",
+      "required": [
+        "summary"
+      ]
+    },
+    "Agent": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "multi": {
+          "type": "boolean"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/api/types.go Agent",
+      "required": [
+        "name",
+        "description",
+        "multi"
+      ]
+    },
+    "AgentBudgetUsage": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "active_seconds": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/runtime/event.go AgentBudgetUsage",
+      "required": [
+        "agent_name",
+        "cost",
+        "tokens",
+        "active_seconds"
+      ]
+    },
+    "AgentChoiceEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "agent_choice"
+        },
+        "content": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go AgentChoiceEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "content"
+      ]
+    },
+    "AgentChoiceReasoningEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "agent_choice_reasoning"
+        },
+        "content": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go AgentChoiceReasoningEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "content"
+      ]
+    },
+    "AgentChoiceReasoningResetEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "agent_choice_reasoning_reset"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go AgentChoiceReasoningResetEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "message_id"
+      ]
+    },
+    "AgentConfig": {
+      "type": "object",
+      "properties": {
+        "Name": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "fallback": {
+          "$ref": "#/$defs/FallbackConfig"
+        },
+        "description": {
+          "type": "string"
+        },
+        "welcome_message": {
+          "type": "string"
+        },
+        "toolsets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Toolset"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "instruction_file": {
+          "$ref": "#/$defs/InstructionFiles"
+        },
+        "harness": {
+          "$ref": "#/$defs/HarnessConfig"
+        },
+        "sub_agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "handoffs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "force_handoff": {
+          "type": "string"
+        },
+        "routing": {
+          "$ref": "#/$defs/AgentRouting"
+        },
+        "add_date": {
+          "type": "boolean"
+        },
+        "add_environment_info": {
+          "type": "boolean"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "safety": {
+          "$ref": "#/$defs/SafetyMode"
+        },
+        "redact_secrets": {
+          "type": "boolean"
+        },
+        "code_mode_tools": {
+          "type": "boolean"
+        },
+        "add_description_parameter": {
+          "type": "boolean"
+        },
+        "max_iterations": {
+          "type": "integer"
+        },
+        "budgets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_consecutive_tool_calls": {
+          "type": "integer"
+        },
+        "max_old_tool_call_tokens": {
+          "type": "integer"
+        },
+        "max_tool_result_tokens": {
+          "type": "integer"
+        },
+        "num_history_items": {
+          "type": "integer"
+        },
+        "session_compaction": {
+          "type": "boolean"
+        },
+        "compaction_threshold": {
+          "type": "number"
+        },
+        "compaction_model": {
+          "type": "string"
+        },
+        "add_prompt_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "add_prompt_files_depth": {
+          "type": "integer"
+        },
+        "commands": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Command"
+          }
+        },
+        "structured_output": {
+          "$ref": "#/$defs/StructuredOutput"
+        },
+        "skills": {
+          "$ref": "#/$defs/SkillsConfig"
+        },
+        "use_commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "use_skills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "use_toolsets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hooks": {
+          "$ref": "#/$defs/HooksConfig"
+        },
+        "cache": {
+          "$ref": "#/$defs/CacheConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go AgentConfig",
+      "required": [
+        "Name"
+      ]
+    },
+    "AgentDetails": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "thinking": {
+          "type": "string"
+        },
+        "commands": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Command"
+          }
+        },
+        "execution_capabilities": {
+          "$ref": "#/$defs/ExecutionCapabilities"
+        }
+      },
+      "$comment": "pkg/runtime/event.go AgentDetails",
+      "required": [
+        "name",
+        "description",
+        "provider",
+        "model"
+      ]
+    },
+    "AgentInfoEvent": {
+      "type": "object",
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "agent_info"
+        },
+        "agent_name": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "welcome_message": {
+          "type": "string"
+        },
+        "context_limit": {
+          "type": "integer"
+        },
+        "compaction_model": {
+          "type": "string"
+        },
+        "primary_context_limit": {
+          "type": "integer"
+        },
+        "execution_capabilities": {
+          "$ref": "#/$defs/ExecutionCapabilities"
+        }
+      },
+      "$comment": "pkg/runtime/event.go AgentInfoEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "agent_name",
+        "model",
+        "description"
+      ]
+    },
+    "AgentRouteEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "agent_route"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "invocation_id": {
+          "type": "string"
+        },
+        "step_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "from_agent": {
+          "type": "string"
+        },
+        "to_agent": {
+          "type": "string"
+        },
+        "evaluator": {
+          "type": "string"
+        },
+        "selected": {
+          "type": "string"
+        },
+        "probability": {
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "fallback_reason": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/routing.go AgentRouteEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "invocation_id",
+        "step_id",
+        "phase",
+        "from_agent",
+        "to_agent"
+      ]
+    },
+    "AgentRouting": {
+      "type": "object",
+      "properties": {
+        "allowed_agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "default_agent": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/routing.go AgentRouting"
+    },
+    "AgentStreamingEvent": {
+      "description": "Any event streamed by a session, discriminated by `type`.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/AgentChoiceEvent"
+        },
+        {
+          "$ref": "#/$defs/AgentChoiceReasoningEvent"
+        },
+        {
+          "$ref": "#/$defs/AgentChoiceReasoningResetEvent"
+        },
+        {
+          "$ref": "#/$defs/AgentInfoEvent"
+        },
+        {
+          "$ref": "#/$defs/AgentRouteEvent"
+        },
+        {
+          "$ref": "#/$defs/AgentSwitchingEvent"
+        },
+        {
+          "$ref": "#/$defs/AuthorizationEvent"
+        },
+        {
+          "$ref": "#/$defs/BackgroundAgentStatusEvent"
+        },
+        {
+          "$ref": "#/$defs/BudgetExceededEvent"
+        },
+        {
+          "$ref": "#/$defs/BudgetUsageEvent"
+        },
+        {
+          "$ref": "#/$defs/ElicitationClosedEvent"
+        },
+        {
+          "$ref": "#/$defs/ElicitationRequestEvent"
+        },
+        {
+          "$ref": "#/$defs/ErrorEvent"
+        },
+        {
+          "$ref": "#/$defs/EvaluationUsageEvent"
+        },
+        {
+          "$ref": "#/$defs/HookBlockedEvent"
+        },
+        {
+          "$ref": "#/$defs/HookFinishedEvent"
+        },
+        {
+          "$ref": "#/$defs/HookStartedEvent"
+        },
+        {
+          "$ref": "#/$defs/MCPInitFinishedEvent"
+        },
+        {
+          "$ref": "#/$defs/MCPInitStartedEvent"
+        },
+        {
+          "$ref": "#/$defs/MaxIterationsReachedEvent"
+        },
+        {
+          "$ref": "#/$defs/MessageAddedEvent"
+        },
+        {
+          "$ref": "#/$defs/ModelFallbackEvent"
+        },
+        {
+          "$ref": "#/$defs/PartialToolCallEvent"
+        },
+        {
+          "$ref": "#/$defs/PausedEvent"
+        },
+        {
+          "$ref": "#/$defs/PlanChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/RAGIndexingCompletedEvent"
+        },
+        {
+          "$ref": "#/$defs/RAGIndexingProgressEvent"
+        },
+        {
+          "$ref": "#/$defs/RAGIndexingStartedEvent"
+        },
+        {
+          "$ref": "#/$defs/RoutingDecisionEvent"
+        },
+        {
+          "$ref": "#/$defs/SessionCompactionEvent"
+        },
+        {
+          "$ref": "#/$defs/SessionRecoveredEvent"
+        },
+        {
+          "$ref": "#/$defs/SessionSummaryEvent"
+        },
+        {
+          "$ref": "#/$defs/SessionTitleEvent"
+        },
+        {
+          "$ref": "#/$defs/ShellOutputEvent"
+        },
+        {
+          "$ref": "#/$defs/StreamStartedEvent"
+        },
+        {
+          "$ref": "#/$defs/StreamStoppedEvent"
+        },
+        {
+          "$ref": "#/$defs/SubSessionCompletedEvent"
+        },
+        {
+          "$ref": "#/$defs/TeamInfoEvent"
+        },
+        {
+          "$ref": "#/$defs/TokenUsageEvent"
+        },
+        {
+          "$ref": "#/$defs/ToolCallConfirmationEvent"
+        },
+        {
+          "$ref": "#/$defs/ToolCallEvent"
+        },
+        {
+          "$ref": "#/$defs/ToolCallOutputEvent"
+        },
+        {
+          "$ref": "#/$defs/ToolCallResponseEvent"
+        },
+        {
+          "$ref": "#/$defs/ToolCallsRetractedEvent"
+        },
+        {
+          "$ref": "#/$defs/ToolsetInfoEvent"
+        },
+        {
+          "$ref": "#/$defs/UserMessageEvent"
+        },
+        {
+          "$ref": "#/$defs/WarningEvent"
+        }
+      ]
+    },
+    "AgentSwitchingEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "agent_switching"
+        },
+        "switching": {
+          "type": "boolean"
+        },
+        "from_agent": {
+          "type": "string"
+        },
+        "to_agent": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go AgentSwitchingEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "switching"
+      ]
+    },
+    "ArtifactRootKind": {
+      "type": "string",
+      "$comment": "pkg/chat/document.go ArtifactRootKind",
+      "enum": [
+        "workspace"
+      ]
+    },
+    "Assertion": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/session/session.go Assertion",
+      "required": [
+        "name",
+        "type",
+        "value"
+      ]
+    },
+    "AssertionResult": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/session/session.go AssertionResult",
+      "required": [
+        "name",
+        "type",
+        "passed"
+      ]
+    },
+    "AssertionsCheck": {
+      "type": "object",
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "passed_count": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        },
+        "results": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AssertionResult"
+          }
+        }
+      },
+      "$comment": "pkg/session/session.go AssertionsCheck",
+      "required": [
+        "passed",
+        "passed_count",
+        "total",
+        "results"
+      ]
+    },
+    "AuthConfig": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "workload_identity_federation": {
+          "$ref": "#/$defs/FederationAuthConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/auth.go AuthConfig",
+      "required": [
+        "type"
+      ]
+    },
+    "AuthorizationEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "authorization_event"
+        },
+        "confirmation": {
+          "$ref": "#/$defs/ElicitationAction"
+        }
+      },
+      "$comment": "pkg/runtime/event.go AuthorizationEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "confirmation"
+      ]
+    },
+    "BackgroundAgentStatusEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "background_agent_status"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "running": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/runtime/event.go BackgroundAgentStatusEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "running"
+      ]
+    },
+    "BackoffConfig": {
+      "type": "object",
+      "properties": {
+        "initial": {
+          "$ref": "#/$defs/Duration"
+        },
+        "max": {
+          "$ref": "#/$defs/Duration"
+        },
+        "multiplier": {
+          "type": "number"
+        },
+        "jitter": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/config/latest/lifecycle.go BackoffConfig"
+    },
+    "BatchDeleteSessionsRequest": {
+      "type": "object",
+      "properties": {
+        "session_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/api/types.go BatchDeleteSessionsRequest",
+      "required": [
+        "session_ids"
+      ]
+    },
+    "BatchDeleteSessionsResponse": {
+      "type": "object",
+      "properties": {
+        "deleted_count": {
+          "type": "integer"
+        },
+        "failed_count": {
+          "type": "integer"
+        },
+        "failed_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/api/types.go BatchDeleteSessionsResponse",
+      "required": [
+        "deleted_count",
+        "failed_count"
+      ]
+    },
+    "BatchExportSessionsRequest": {
+      "type": "object",
+      "properties": {
+        "session_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "format": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go BatchExportSessionsRequest",
+      "required": [
+        "session_ids"
+      ]
+    },
+    "BatchExportSessionsResponse": {
+      "type": "object",
+      "properties": {
+        "export_format": {
+          "type": "string"
+        },
+        "data_url": {
+          "type": "string"
+        },
+        "file_path": {
+          "type": "string"
+        },
+        "session_count": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/api/types.go BatchExportSessionsResponse",
+      "required": [
+        "export_format",
+        "session_count"
+      ]
+    },
+    "BudgetConfig": {
+      "type": "object",
+      "properties": {
+        "max_cost": {
+          "type": "number"
+        },
+        "max_tokens": {
+          "type": "integer"
+        },
+        "max_time": {
+          "$ref": "#/$defs/Duration"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go BudgetConfig"
+    },
+    "BudgetExceededEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "budget_exceeded"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "budget": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "string"
+        },
+        "used": {
+          "type": "string"
+        },
+        "max": {
+          "type": "string"
+        },
+        "config_path": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "stop_message": {
+          "$ref": "#/$defs/BudgetStopMessage"
+        }
+      },
+      "$comment": "pkg/runtime/event.go BudgetExceededEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "budget",
+        "limit",
+        "used",
+        "max",
+        "config_path",
+        "message"
+      ]
+    },
+    "BudgetStatus": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "max_cost": {
+          "type": "number"
+        },
+        "tokens": {
+          "type": "integer"
+        },
+        "max_tokens": {
+          "type": "integer"
+        },
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "max_time_seconds": {
+          "type": "number"
+        },
+        "unpriced": {
+          "type": "boolean"
+        },
+        "per_agent": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentBudgetUsage"
+          }
+        }
+      },
+      "$comment": "pkg/runtime/event.go BudgetStatus",
+      "required": [
+        "name",
+        "cost",
+        "tokens",
+        "elapsed_seconds"
+      ]
+    },
+    "BudgetStopChatMessage": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "content": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go BudgetStopChatMessage",
+      "required": [
+        "role",
+        "content"
+      ]
+    },
+    "BudgetStopMessage": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "message": {
+          "$ref": "#/$defs/BudgetStopChatMessage"
+        }
+      },
+      "$comment": "pkg/runtime/event.go BudgetStopMessage",
+      "required": [
+        "message"
+      ]
+    },
+    "BudgetUsageEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "budget_usage"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "budgets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BudgetStatus"
+          }
+        }
+      },
+      "$comment": "pkg/runtime/event.go BudgetUsageEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id"
+      ]
+    },
+    "CacheConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "case_sensitive": {
+          "type": "boolean"
+        },
+        "trim_spaces": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go CacheConfig"
+    },
+    "CacheDiagnostics": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "missed_input_tokens": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/chat/provider_message.go CacheDiagnostics",
+      "required": [
+        "reason"
+      ]
+    },
+    "CapabilitiesConfig": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "boolean"
+        },
+        "pdf": {
+          "type": "boolean"
+        },
+        "audio": {
+          "type": "boolean"
+        },
+        "video": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go CapabilitiesConfig"
+    },
+    "ChatMessage": {
+      "type": "object",
+      "properties": {
+        "message_id": {
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/MessageRole"
+        },
+        "content": {
+          "type": "string"
+        },
+        "multi_content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessagePart"
+          }
+        },
+        "reasoning_content": {
+          "type": "string"
+        },
+        "thinking_signature": {
+          "type": "string"
+        },
+        "thought_signature": {
+          "type": "string",
+          "contentEncoding": "base64"
+        },
+        "openai_response": {
+          "$ref": "#/$defs/OpenAIResponse"
+        },
+        "provider_state": {
+          "$ref": "#/$defs/ProviderState"
+        },
+        "compaction": {
+          "$ref": "#/$defs/CompactionResult"
+        },
+        "function_call": {
+          "$ref": "#/$defs/FunctionCall"
+        },
+        "tool_calls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolCall"
+          }
+        },
+        "tool_definitions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Tool"
+          }
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "model": {
+          "type": "string"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "finish_reason": {
+          "$ref": "#/$defs/FinishReason"
+        },
+        "cache_control": {
+          "type": "boolean"
+        },
+        "turn_scoped": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/chat/chat.go Message",
+      "required": [
+        "role",
+        "content"
+      ]
+    },
+    "Command": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/types/commands.go Command"
+    },
+    "CompactionResult": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "block": true,
+        "request_context": true,
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "iterations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Usage"
+          }
+        }
+      },
+      "$comment": "pkg/chat/compaction.go CompactionResult",
+      "required": [
+        "summary",
+        "provider",
+        "usage"
+      ]
+    },
+    "Config": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string"
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentConfig"
+          }
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderConfig"
+          }
+        },
+        "models": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelConfig"
+          }
+        },
+        "evaluators": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/EvaluatorConfig"
+          }
+        },
+        "mcps": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/MCPToolset"
+          }
+        },
+        "rag": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RAGToolset"
+          }
+        },
+        "commands": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "$ref": "#/$defs/Command"
+            }
+          }
+        },
+        "skills": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/SkillsConfig"
+          }
+        },
+        "toolsets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Toolset"
+          }
+        },
+        "metadata": {
+          "$ref": "#/$defs/Metadata"
+        },
+        "permissions": {
+          "$ref": "#/$defs/ConfigPermissions"
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeDefaults"
+        },
+        "budget": {
+          "$ref": "#/$defs/BudgetConfig"
+        },
+        "budgets": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/BudgetConfig"
+          }
+        },
+        "flavors": {
+          "type": "object",
+          "additionalProperties": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          }
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Config",
+      "required": [
+        "metadata"
+      ]
+    },
+    "ConfigPermissions": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ask": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/config/latest/types.go PermissionsConfig"
+    },
+    "CostConfig": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "number"
+        },
+        "output": {
+          "type": "number"
+        },
+        "cache_read": {
+          "type": "number"
+        },
+        "cache_write": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go CostConfig"
+    },
+    "CreateAgentConfigRequest": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "instruction": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go CreateAgentConfigRequest",
+      "required": [
+        "filename",
+        "model",
+        "description",
+        "instruction"
+      ]
+    },
+    "CreateAgentConfigResponse": {
+      "type": "object",
+      "properties": {
+        "filepath": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go CreateAgentConfigResponse",
+      "required": [
+        "filepath"
+      ]
+    },
+    "CreateAgentRequest": {
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go CreateAgentRequest",
+      "required": [
+        "prompt"
+      ]
+    },
+    "CreateAgentResponse": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "out": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go CreateAgentResponse",
+      "required": [
+        "path",
+        "out"
+      ]
+    },
+    "DeferConfig": {
+      "type": "object",
+      "properties": {},
+      "$comment": "pkg/config/latest/types.go DeferConfig"
+    },
+    "DeleteAgentRequest": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go DeleteAgentRequest",
+      "required": [
+        "file_path"
+      ]
+    },
+    "DeleteAgentResponse": {
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go DeleteAgentResponse",
+      "required": [
+        "filePath"
+      ]
+    },
+    "DesktopTokenResponse": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go DesktopTokenResponse",
+      "required": [
+        "token"
+      ]
+    },
+    "Document": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/DocumentSource"
+        }
+      },
+      "$comment": "pkg/chat/document.go Document",
+      "required": [
+        "name",
+        "mime_type",
+        "source"
+      ]
+    },
+    "DocumentContent": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/tools/tools.go DocumentContent",
+      "required": [
+        "mimeType"
+      ]
+    },
+    "DocumentSource": {
+      "type": "object",
+      "properties": {
+        "inline_text": {
+          "type": "string"
+        },
+        "inline_data": {
+          "type": "string",
+          "contentEncoding": "base64"
+        },
+        "artifact_path": {
+          "type": "string"
+        },
+        "artifact_root": {
+          "$ref": "#/$defs/ArtifactRootKind"
+        },
+        "artifact_owner_session_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/chat/document.go DocumentSource"
+    },
+    "Duration": {
+      "type": "string",
+      "$comment": "pkg/config/latest/types.go Duration",
+      "description": "Go duration string such as \"1m30s\"; empty when unset."
+    },
+    "EditAgentConfigRequest": {
+      "type": "object",
+      "properties": {
+        "agent_config": {
+          "$ref": "#/$defs/Config"
+        },
+        "filename": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go EditAgentConfigRequest",
+      "required": [
+        "agent_config",
+        "filename"
+      ]
+    },
+    "EditAgentConfigResponse": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "config": true
+      },
+      "$comment": "pkg/api/types.go EditAgentConfigResponse",
+      "required": [
+        "message",
+        "path",
+        "config"
+      ]
+    },
+    "ElicitationAction": {
+      "type": "string",
+      "$comment": "pkg/tools/elicitation.go ElicitationAction",
+      "enum": [
+        "accept",
+        "decline",
+        "cancel"
+      ]
+    },
+    "ElicitationClosedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "elicitation_closed"
+        },
+        "elicitation_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go ElicitationClosedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "elicitation_id"
+      ]
+    },
+    "ElicitationRequestEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "elicitation_request"
+        },
+        "message": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "schema": true,
+        "url": {
+          "type": "string"
+        },
+        "elicitation_id": {
+          "type": "string"
+        },
+        "server_elicitation_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "meta": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "$comment": "pkg/runtime/event.go ElicitationRequestEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "message"
+      ]
+    },
+    "ErrorEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "error"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go ErrorEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "error"
+      ]
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go ErrorResponse",
+      "required": [
+        "message"
+      ]
+    },
+    "EvalCriteria": {
+      "type": "object",
+      "properties": {
+        "relevance": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "assertions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Assertion"
+          }
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "size": {
+          "type": "string"
+        },
+        "setup": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/session/session.go EvalCriteria",
+      "required": [
+        "relevance"
+      ]
+    },
+    "EvalResult": {
+      "type": "object",
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "successes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": "string"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "checks": {
+          "$ref": "#/$defs/EvalResultChecks"
+        },
+        "termination": {
+          "$ref": "#/$defs/Termination"
+        }
+      },
+      "$comment": "pkg/session/session.go EvalResult",
+      "required": [
+        "passed",
+        "cost",
+        "output_tokens",
+        "checks"
+      ]
+    },
+    "EvalResultChecks": {
+      "type": "object",
+      "properties": {
+        "size": {
+          "$ref": "#/$defs/SizeCheck"
+        },
+        "tool_calls": {
+          "$ref": "#/$defs/ToolCallsCheck"
+        },
+        "relevance": {
+          "$ref": "#/$defs/RelevanceCheck"
+        },
+        "assertions": {
+          "$ref": "#/$defs/AssertionsCheck"
+        }
+      },
+      "$comment": "pkg/session/session.go EvalResultChecks"
+    },
+    "Evaluation": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "evaluator": {
+          "type": "string"
+        },
+        "agent_name": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/session/evaluation.go Evaluation",
+      "required": [
+        "id",
+        "evaluator",
+        "agent_name",
+        "model",
+        "created_at"
+      ]
+    },
+    "EvaluationUsageEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "evaluation_usage"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "evaluation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Evaluation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "$comment": "pkg/runtime/evaluator_usage.go EvaluationUsageEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "evaluation"
+      ]
+    },
+    "EvaluatorConfig": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "token_key": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "choices": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "levels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "$ref": "#/$defs/Duration"
+        },
+        "cost": {
+          "$ref": "#/$defs/CostConfig"
+        },
+        "bypass_models_gateway": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/evaluators.go EvaluatorConfig",
+      "required": [
+        "provider",
+        "model",
+        "type",
+        "instructions"
+      ]
+    },
+    "EvaluatorPolicy": {
+      "type": "object",
+      "properties": {
+        "decisions": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "min_probability": {
+          "type": "number"
+        },
+        "fallback": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/evaluators.go EvaluatorPolicy",
+      "required": [
+        "decisions",
+        "min_probability",
+        "fallback"
+      ]
+    },
+    "ExecutionCapabilities": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "tool_execution": {
+          "type": "string"
+        },
+        "tool_approval": {
+          "type": "string"
+        },
+        "budget_supported": {
+          "type": "boolean"
+        },
+        "compaction_supported": {
+          "type": "boolean"
+        },
+        "mid_turn_steering_supported": {
+          "type": "boolean"
+        },
+        "prompt_hook_context_supported": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/runtime/inspection/capabilities.go ExecutionCapabilities",
+      "required": [
+        "mode",
+        "tool_execution",
+        "tool_approval",
+        "budget_supported",
+        "compaction_supported",
+        "mid_turn_steering_supported",
+        "prompt_hook_context_supported"
+      ]
+    },
+    "ExportAgentsResponse": {
+      "type": "object",
+      "properties": {
+        "zipPath": {
+          "type": "string"
+        },
+        "zipFile": {
+          "type": "string"
+        },
+        "zipDirectory": {
+          "type": "string"
+        },
+        "agentsDir": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go ExportAgentsResponse",
+      "required": [
+        "zipPath",
+        "zipFile",
+        "zipDirectory",
+        "agentsDir",
+        "createdAt"
+      ]
+    },
+    "FallbackConfig": {
+      "type": "object",
+      "properties": {
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "retries": {
+          "type": "integer"
+        },
+        "cooldown": {
+          "$ref": "#/$defs/Duration"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go FallbackConfig",
+      "required": [
+        "cooldown"
+      ]
+    },
+    "FederationAuthConfig": {
+      "type": "object",
+      "properties": {
+        "federation_rule_id": {
+          "type": "string"
+        },
+        "organization_id": {
+          "type": "string"
+        },
+        "service_account_id": {
+          "type": "string"
+        },
+        "identity_token": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdentityTokenSourceConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "$comment": "pkg/config/latest/auth.go FederationAuthConfig",
+      "required": [
+        "federation_rule_id",
+        "organization_id",
+        "identity_token"
+      ]
+    },
+    "FinishReason": {
+      "type": "string",
+      "$comment": "pkg/chat/chat.go FinishReason",
+      "enum": [
+        "stop",
+        "length",
+        "tool_calls",
+        "refusal",
+        "null"
+      ]
+    },
+    "FollowUpResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "duplicate": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/api/types.go FollowUpResponse",
+      "required": [
+        "status",
+        "duplicate"
+      ]
+    },
+    "ForkSessionRequest": {
+      "type": "object",
+      "properties": {
+        "user_message_index": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/api/types.go ForkSessionRequest",
+      "required": [
+        "user_message_index"
+      ]
+    },
+    "FunctionCall": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/tools/tools.go FunctionCall"
+    },
+    "HarnessConfig": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "thinking": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go HarnessConfig"
+    },
+    "HealthResponse": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go HealthResponse",
+      "required": [
+        "status",
+        "version"
+      ]
+    },
+    "HookBlockedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "hook_blocked"
+        },
+        "tool_call": {
+          "$ref": "#/$defs/ToolCall"
+        },
+        "tool_definition": {
+          "$ref": "#/$defs/Tool"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go HookBlockedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "tool_call",
+        "tool_definition",
+        "message"
+      ]
+    },
+    "HookDefinition": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "evaluator": {
+          "type": "string"
+        },
+        "evaluator_policy": {
+          "$ref": "#/$defs/EvaluatorPolicy"
+        },
+        "routing_policy": {
+          "$ref": "#/$defs/RoutingPolicy"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "on_error": {
+          "type": "string"
+        },
+        "strict_output": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "system_prompt": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go HookDefinition",
+      "required": [
+        "type"
+      ]
+    },
+    "HookEventType": {
+      "type": "string",
+      "$comment": "pkg/hooks/types.go EventType",
+      "enum": [
+        "skill_content_guard",
+        "prompt_file_guard",
+        "pre_tool_use",
+        "post_tool_use",
+        "permission_request",
+        "session_start",
+        "user_prompt_submit",
+        "user_steering_messages_submit",
+        "user_followup_submit",
+        "turn_start",
+        "turn_end",
+        "before_llm_call",
+        "after_llm_call",
+        "session_end",
+        "pre_compact",
+        "subagent_stop",
+        "on_user_input",
+        "stop",
+        "notification",
+        "on_error",
+        "on_max_iterations",
+        "on_agent_switch",
+        "on_session_resume",
+        "on_tool_approval_decision",
+        "before_compaction",
+        "after_compaction",
+        "tool_response_transform",
+        "tool_input_transform",
+        "tool_guard",
+        "before_agent_run",
+        "after_agent_complete",
+        "worktree_create"
+      ]
+    },
+    "HookFinishedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "hook_finished"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "hook_event": {
+          "$ref": "#/$defs/HookEventType"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "allowed": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go HookFinishedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "hook_event",
+        "duration_ms",
+        "allowed"
+      ]
+    },
+    "HookMatcherConfig": {
+      "type": "object",
+      "properties": {
+        "matcher": {
+          "type": "string"
+        },
+        "hooks": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "preempt_yolo": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go HookMatcherConfig",
+      "required": [
+        "hooks"
+      ]
+    },
+    "HookStartedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "hook_started"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "hook_event": {
+          "$ref": "#/$defs/HookEventType"
+        }
+      },
+      "$comment": "pkg/runtime/event.go HookStartedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "hook_event"
+      ]
+    },
+    "HooksConfig": {
+      "type": "object",
+      "properties": {
+        "prompt_file_guard": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "skill_content_guard": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "pre_tool_use": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookMatcherConfig"
+          }
+        },
+        "post_tool_use": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookMatcherConfig"
+          }
+        },
+        "permission_request": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookMatcherConfig"
+          }
+        },
+        "session_start": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "user_prompt_submit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "user_steering_messages_submit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "user_followup_submit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "turn_start": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "turn_end": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "before_llm_call": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "after_llm_call": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "session_end": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "pre_compact": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "subagent_stop": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "on_user_input": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "stop": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "notification": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "on_error": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "on_max_iterations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "on_agent_switch": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "on_session_resume": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "on_tool_approval_decision": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "before_compaction": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "after_compaction": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "tool_response_transform": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookMatcherConfig"
+          }
+        },
+        "tool_input_transform": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookMatcherConfig"
+          }
+        },
+        "tool_guard": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookMatcherConfig"
+          }
+        },
+        "before_agent_run": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "after_agent_complete": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        },
+        "worktree_create": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HookDefinition"
+          }
+        }
+      },
+      "$comment": "pkg/config/latest/types.go HooksConfig"
+    },
+    "IdentityTokenSourceConfig": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "env": {
+          "type": "string"
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "url": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "response_field": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/auth.go IdentityTokenSourceConfig"
+    },
+    "ImageURLDetail": {
+      "type": "string",
+      "$comment": "pkg/chat/chat.go ImageURLDetail",
+      "enum": [
+        "high",
+        "low",
+        "auto"
+      ]
+    },
+    "ImportAgentRequest": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go ImportAgentRequest",
+      "required": [
+        "file_path"
+      ]
+    },
+    "ImportAgentResponse": {
+      "type": "object",
+      "properties": {
+        "originalPath": {
+          "type": "string"
+        },
+        "targetPath": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go ImportAgentResponse",
+      "required": [
+        "originalPath",
+        "targetPath",
+        "description"
+      ]
+    },
+    "InlineSkill": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "context": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "allowed_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "toolsets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/config/latest/types.go InlineSkill",
+      "required": [
+        "name",
+        "description",
+        "instructions"
+      ]
+    },
+    "InstructionContextState": {
+      "type": "object",
+      "properties": {
+        "epoch_start": {
+          "type": "integer"
+        },
+        "order": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "initial": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/InstructionValue"
+          }
+        },
+        "current": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/InstructionValue"
+          }
+        },
+        "updates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/InstructionUpdate"
+          }
+        }
+      },
+      "$comment": "pkg/session/session.go InstructionContextState",
+      "required": [
+        "epoch_start"
+      ]
+    },
+    "InstructionFiles": {
+      "$comment": "pkg/config/latest/types.go InstructionFiles",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    "InstructionUpdate": {
+      "type": "object",
+      "properties": {
+        "position": {
+          "type": "integer"
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/session/session.go InstructionUpdate",
+      "required": [
+        "position",
+        "content"
+      ]
+    },
+    "InstructionValue": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "removed_content": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/session/session.go InstructionValue",
+      "required": [
+        "hash",
+        "content"
+      ]
+    },
+    "Item": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "$ref": "#/$defs/SessionMessage"
+        },
+        "sub_session": {
+          "$ref": "#/$defs/Session"
+        },
+        "error": {
+          "$ref": "#/$defs/SessionError"
+        },
+        "evaluation": {
+          "$ref": "#/$defs/Evaluation"
+        },
+        "routing_decision": {
+          "$ref": "#/$defs/RoutingDecision"
+        },
+        "termination": {
+          "$ref": "#/$defs/Termination"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "first_kept_entry": {
+          "type": "integer"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "compaction": {
+          "$ref": "#/$defs/CompactionResult"
+        }
+      },
+      "$comment": "pkg/session/session.go Item"
+    },
+    "LifecycleConfig": {
+      "type": "object",
+      "properties": {
+        "profile": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "startup_timeout": {
+          "$ref": "#/$defs/Duration"
+        },
+        "call_timeout": {
+          "$ref": "#/$defs/Duration"
+        },
+        "restart": {
+          "type": "string"
+        },
+        "max_restarts": {
+          "type": "integer"
+        },
+        "backoff": {
+          "$ref": "#/$defs/BackoffConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/lifecycle.go LifecycleConfig"
+    },
+    "MCPInitFinishedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "mcp_init_finished"
+        }
+      },
+      "$comment": "pkg/runtime/event.go MCPInitFinishedEvent",
+      "required": [
+        "timestamp",
+        "type"
+      ]
+    },
+    "MCPInitStartedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "mcp_init_started"
+        }
+      },
+      "$comment": "pkg/runtime/event.go MCPInitStartedEvent",
+      "required": [
+        "timestamp",
+        "type"
+      ]
+    },
+    "MCPToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ref": {
+          "type": "string"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "config": true,
+        "version": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "shared": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "shell": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ScriptShellToolConfig"
+          }
+        },
+        "post_edit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PostEditConfig"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "ignore_vcs": {
+          "type": "boolean"
+        },
+        "allow_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "file_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "max_output_bytes": {
+          "type": "integer"
+        },
+        "escape_html": {
+          "type": "boolean"
+        },
+        "allowed_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow_private_ips": {
+          "type": "boolean"
+        },
+        "sudo_askpass": {
+          "type": "boolean"
+        },
+        "recall": {
+          "type": "boolean"
+        },
+        "rag_config": {
+          "$ref": "#/$defs/RAGConfig"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go MCPToolset",
+      "required": [
+        "remote",
+        "api_config",
+        "webhook_config"
+      ]
+    },
+    "MaxIterationsReachedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "max_iterations_reached"
+        },
+        "max_iterations": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/runtime/event.go MaxIterationsReachedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "max_iterations"
+      ]
+    },
+    "MediaContent": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "mimeType": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/tools/tools.go MediaContent",
+      "required": [
+        "data",
+        "mimeType"
+      ]
+    },
+    "MessageAddedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "message_added"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "assistant_message_empty": {
+          "type": "boolean"
+        },
+        "has_tool_calls": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/runtime/event.go MessageAddedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id"
+      ]
+    },
+    "MessageFile": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "file_id": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/chat/chat.go MessageFile"
+    },
+    "MessageImageURL": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "detail": {
+          "$ref": "#/$defs/ImageURLDetail"
+        }
+      },
+      "$comment": "pkg/chat/chat.go MessageImageURL"
+    },
+    "MessagePart": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/MessagePartType"
+        },
+        "text": {
+          "type": "string"
+        },
+        "image_url": {
+          "$ref": "#/$defs/MessageImageURL"
+        },
+        "file": {
+          "$ref": "#/$defs/MessageFile"
+        },
+        "document": {
+          "$ref": "#/$defs/Document"
+        }
+      },
+      "$comment": "pkg/chat/chat.go MessagePart"
+    },
+    "MessagePartType": {
+      "type": "string",
+      "$comment": "pkg/chat/chat.go MessagePartType",
+      "enum": [
+        "text",
+        "image_url",
+        "file",
+        "document"
+      ]
+    },
+    "MessageRole": {
+      "type": "string",
+      "$comment": "pkg/chat/chat.go MessageRole",
+      "enum": [
+        "system",
+        "user",
+        "assistant",
+        "tool"
+      ]
+    },
+    "MessageUsage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "cached_input_tokens": {
+          "type": "integer"
+        },
+        "cached_write_tokens": {
+          "type": "integer"
+        },
+        "reasoning_tokens": {
+          "type": "integer"
+        },
+        "service_tier": {
+          "type": "string"
+        },
+        "Cost": {
+          "type": "number"
+        },
+        "Model": {
+          "type": "string"
+        },
+        "finish_reason": {
+          "$ref": "#/$defs/FinishReason"
+        }
+      },
+      "$comment": "pkg/runtime/event.go MessageUsage",
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "cached_write_tokens",
+        "Cost",
+        "Model"
+      ]
+    },
+    "Metadata": {
+      "type": "object",
+      "properties": {
+        "author": {
+          "type": "string"
+        },
+        "license": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "readme": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Metadata"
+    },
+    "ModelChoice": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "ref": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "is_current": {
+          "type": "boolean"
+        },
+        "is_custom": {
+          "type": "boolean"
+        },
+        "is_catalog": {
+          "type": "boolean"
+        },
+        "architecture": {
+          "type": "string"
+        },
+        "parameters": {
+          "type": "string"
+        },
+        "quantization": {
+          "type": "string"
+        },
+        "size": {
+          "type": "string"
+        },
+        "family": {
+          "type": "string"
+        },
+        "input_cost": {
+          "type": "number"
+        },
+        "output_cost": {
+          "type": "number"
+        },
+        "cache_read_cost": {
+          "type": "number"
+        },
+        "cache_write_cost": {
+          "type": "number"
+        },
+        "context_limit": {
+          "type": "integer"
+        },
+        "output_limit": {
+          "type": "integer"
+        },
+        "input_modalities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "output_modalities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/runtime/modelcatalog/catalog.go ModelChoice",
+      "required": [
+        "name",
+        "ref"
+      ]
+    },
+    "ModelConfig": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "temperature": {
+          "type": "number"
+        },
+        "max_tokens": {
+          "type": "integer"
+        },
+        "top_p": {
+          "type": "number"
+        },
+        "frequency_penalty": {
+          "type": "number"
+        },
+        "presence_penalty": {
+          "type": "number"
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "parallel_tool_calls": {
+          "type": "boolean"
+        },
+        "token_key": {
+          "type": "string"
+        },
+        "bypass_models_gateway": {
+          "type": "boolean"
+        },
+        "provider_opts": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "track_usage": {
+          "type": "boolean"
+        },
+        "thinking_budget": {
+          "$ref": "#/$defs/ThinkingBudget"
+        },
+        "task_budget": {
+          "$ref": "#/$defs/TaskBudget"
+        },
+        "auth": {
+          "$ref": "#/$defs/AuthConfig"
+        },
+        "routing": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RoutingRule"
+          }
+        },
+        "first_available": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "title_model": {
+          "type": "string"
+        },
+        "compaction_model": {
+          "type": "string"
+        },
+        "compaction_threshold": {
+          "type": "number"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/CapabilitiesConfig"
+        },
+        "output_capabilities": {
+          "$ref": "#/$defs/OutputCapabilitiesConfig"
+        },
+        "cost": {
+          "$ref": "#/$defs/CostConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go ModelConfig"
+    },
+    "ModelFallbackEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "model_fallback"
+        },
+        "failed_model": {
+          "type": "string"
+        },
+        "fallback_model": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "max_attempts": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/runtime/event.go ModelFallbackEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "failed_model",
+        "fallback_model",
+        "reason",
+        "attempt",
+        "max_attempts"
+      ]
+    },
+    "OpenAIResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "output": {
+          "type": "array",
+          "items": true
+        }
+      },
+      "$comment": "pkg/chat/openai.go OpenAIResponse",
+      "required": [
+        "source"
+      ]
+    },
+    "OutputCapabilitiesConfig": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go OutputCapabilitiesConfig"
+    },
+    "PartialToolCallEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "partial_tool_call"
+        },
+        "tool_call": {
+          "$ref": "#/$defs/ToolCall"
+        },
+        "tool_definition": {
+          "$ref": "#/$defs/Tool"
+        }
+      },
+      "$comment": "pkg/runtime/event.go PartialToolCallEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "tool_call"
+      ]
+    },
+    "PausedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "runtime_paused"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go PausedEvent",
+      "required": [
+        "timestamp",
+        "type"
+      ]
+    },
+    "PermissionsConfig": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ask": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/session/session.go PermissionsConfig"
+    },
+    "PlanChangedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "plan_changed"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/runtime/event.go PlanChangedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "scope",
+        "name",
+        "action"
+      ]
+    },
+    "PostEditConfig": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "cmd": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go PostEditConfig",
+      "required": [
+        "path",
+        "cmd"
+      ]
+    },
+    "ProviderConfig": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "api_type": {
+          "type": "string"
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "unload_api": {
+          "type": "string"
+        },
+        "token_key": {
+          "type": "string"
+        },
+        "temperature": {
+          "type": "number"
+        },
+        "max_tokens": {
+          "type": "integer"
+        },
+        "top_p": {
+          "type": "number"
+        },
+        "frequency_penalty": {
+          "type": "number"
+        },
+        "presence_penalty": {
+          "type": "number"
+        },
+        "parallel_tool_calls": {
+          "type": "boolean"
+        },
+        "provider_opts": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "track_usage": {
+          "type": "boolean"
+        },
+        "thinking_budget": {
+          "$ref": "#/$defs/ThinkingBudget"
+        },
+        "task_budget": {
+          "$ref": "#/$defs/TaskBudget"
+        },
+        "auth": {
+          "$ref": "#/$defs/AuthConfig"
+        },
+        "compaction_model": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go ProviderConfig"
+    },
+    "ProviderState": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "version": {
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "cache_diagnostics": {
+          "$ref": "#/$defs/CacheDiagnostics"
+        },
+        "content": true,
+        "content_hash": {
+          "type": "string"
+        },
+        "request_context": true
+      },
+      "$comment": "pkg/chat/provider_message.go ProviderState",
+      "required": [
+        "provider",
+        "content"
+      ]
+    },
+    "PullAgentRequest": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go PullAgentRequest",
+      "required": [
+        "name"
+      ]
+    },
+    "PullAgentResponse": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go PullAgentResponse",
+      "required": [
+        "name",
+        "description"
+      ]
+    },
+    "PushAgentRequest": {
+      "type": "object",
+      "properties": {
+        "filepath": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go PushAgentRequest",
+      "required": [
+        "filepath",
+        "tag"
+      ]
+    },
+    "PushAgentResponse": {
+      "type": "object",
+      "properties": {
+        "filepath": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go PushAgentResponse",
+      "required": [
+        "filepath",
+        "tag",
+        "digest"
+      ]
+    },
+    "QueueDepthResponse": {
+      "type": "object",
+      "properties": {
+        "steer": {
+          "type": "object",
+          "properties": {
+            "depth": {
+              "type": "integer"
+            },
+            "capacity": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "depth",
+            "capacity"
+          ]
+        },
+        "followup": {
+          "type": "object",
+          "properties": {
+            "depth": {
+              "type": "integer"
+            },
+            "capacity": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "depth",
+            "capacity"
+          ]
+        }
+      },
+      "$comment": "pkg/api/types.go QueueDepthResponse",
+      "required": [
+        "steer",
+        "followup"
+      ]
+    },
+    "RAGChunkingConfig": {
+      "type": "object",
+      "properties": {
+        "size": {
+          "type": "integer"
+        },
+        "overlap": {
+          "type": "integer"
+        },
+        "respect_word_boundaries": {
+          "type": "boolean"
+        },
+        "code_aware": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RAGChunkingConfig"
+    },
+    "RAGConfig": {
+      "type": "object",
+      "properties": {
+        "tool": {
+          "$ref": "#/$defs/RAGToolConfig"
+        },
+        "docs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "respect_vcs": {
+          "type": "boolean"
+        },
+        "strategies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RAGStrategyConfig"
+          }
+        },
+        "results": {
+          "$ref": "#/$defs/RAGResultsConfig"
+        },
+        "indexing_timeout": {
+          "$ref": "#/$defs/Duration"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RAGConfig",
+      "required": [
+        "tool",
+        "results"
+      ]
+    },
+    "RAGFusionConfig": {
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "type": "string"
+        },
+        "k": {
+          "type": "integer"
+        },
+        "weights": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number"
+          }
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RAGFusionConfig"
+    },
+    "RAGIndexingCompletedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "rag_indexing_completed"
+        },
+        "rag_name": {
+          "type": "string"
+        },
+        "strategy_name": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go RAGIndexingCompletedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "rag_name",
+        "strategy_name"
+      ]
+    },
+    "RAGIndexingProgressEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "rag_indexing_progress"
+        },
+        "rag_name": {
+          "type": "string"
+        },
+        "strategy_name": {
+          "type": "string"
+        },
+        "current": {
+          "type": "integer"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/runtime/event.go RAGIndexingProgressEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "rag_name",
+        "strategy_name",
+        "current",
+        "total"
+      ]
+    },
+    "RAGIndexingStartedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "rag_indexing_started"
+        },
+        "rag_name": {
+          "type": "string"
+        },
+        "strategy_name": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go RAGIndexingStartedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "rag_name",
+        "strategy_name"
+      ]
+    },
+    "RAGRerankingConfig": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "top_k": {
+          "type": "integer"
+        },
+        "threshold": {
+          "type": "number"
+        },
+        "criteria": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RAGRerankingConfig",
+      "required": [
+        "model"
+      ]
+    },
+    "RAGResultsConfig": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer"
+        },
+        "fusion": {
+          "$ref": "#/$defs/RAGFusionConfig"
+        },
+        "reranking": {
+          "$ref": "#/$defs/RAGRerankingConfig"
+        },
+        "deduplicate": {
+          "type": "boolean"
+        },
+        "include_score": {
+          "type": "boolean"
+        },
+        "return_full_content": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RAGResultsConfig"
+    },
+    "RAGStrategyConfig": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "docs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "database": {
+          "type": "string"
+        },
+        "chunking": {
+          "$ref": "#/$defs/RAGChunkingConfig"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RAGStrategyConfig",
+      "additionalProperties": true
+    },
+    "RAGToolConfig": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "instruction": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RAGToolConfig"
+    },
+    "RAGToolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ref": {
+          "type": "string"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "config": true,
+        "version": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "shared": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "shell": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ScriptShellToolConfig"
+          }
+        },
+        "post_edit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PostEditConfig"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "ignore_vcs": {
+          "type": "boolean"
+        },
+        "allow_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "file_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "max_output_bytes": {
+          "type": "integer"
+        },
+        "escape_html": {
+          "type": "boolean"
+        },
+        "allowed_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow_private_ips": {
+          "type": "boolean"
+        },
+        "sudo_askpass": {
+          "type": "boolean"
+        },
+        "recall": {
+          "type": "boolean"
+        },
+        "rag_config": {
+          "$ref": "#/$defs/RAGConfig"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RAGToolset",
+      "required": [
+        "remote",
+        "api_config",
+        "webhook_config"
+      ]
+    },
+    "ReadyResponse": {
+      "type": "object",
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        },
+        "active_sessions": {
+          "type": "integer"
+        },
+        "store_connected": {
+          "type": "boolean"
+        },
+        "toolset_health": {
+          "type": "string"
+        },
+        "latest_error": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go ReadyResponse",
+      "required": [
+        "ready",
+        "active_sessions",
+        "store_connected"
+      ]
+    },
+    "RelevanceCheck": {
+      "type": "object",
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "passed_count": {
+          "type": "number"
+        },
+        "total": {
+          "type": "number"
+        },
+        "results": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/RelevanceCriterionResult"
+          }
+        }
+      },
+      "$comment": "pkg/session/session.go RelevanceCheck",
+      "required": [
+        "passed",
+        "passed_count",
+        "total",
+        "results"
+      ]
+    },
+    "RelevanceCriterionResult": {
+      "type": "object",
+      "properties": {
+        "criterion": {
+          "type": "string"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "probability": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/session/session.go RelevanceCriterionResult",
+      "required": [
+        "criterion",
+        "passed"
+      ]
+    },
+    "Remote": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "transport_type": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "oauth": {
+          "$ref": "#/$defs/RemoteOAuthConfig"
+        },
+        "standalone_sse": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Remote",
+      "required": [
+        "url"
+      ]
+    },
+    "RemoteOAuthConfig": {
+      "type": "object",
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "clientSecret": {
+          "type": "string"
+        },
+        "callbackPort": {
+          "type": "integer"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "callbackRedirectURL": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RemoteOAuthConfig",
+      "required": [
+        "clientId"
+      ]
+    },
+    "ResumeElicitationRequest": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "content": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "elicitation_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go ResumeElicitationRequest",
+      "required": [
+        "action",
+        "content"
+      ]
+    },
+    "ResumeSessionRequest": {
+      "type": "object",
+      "properties": {
+        "confirmation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "tool_name": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go ResumeSessionRequest",
+      "required": [
+        "confirmation"
+      ]
+    },
+    "RoutingDecision": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "invocation_id": {
+          "type": "string"
+        },
+        "step_id": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "from_agent": {
+          "type": "string"
+        },
+        "to_agent": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "evaluator": {
+          "type": "string"
+        },
+        "selected": {
+          "type": "string"
+        },
+        "probability": {
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "fallback_reason": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "$comment": "pkg/session/routing_decision.go RoutingDecision",
+      "required": [
+        "id",
+        "invocation_id",
+        "step_id",
+        "phase",
+        "from_agent",
+        "action",
+        "created_at"
+      ]
+    },
+    "RoutingDecisionEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "routing_decision"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "decision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoutingDecision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "$comment": "pkg/runtime/routing.go RoutingDecisionEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "decision"
+      ]
+    },
+    "RoutingPolicy": {
+      "type": "object",
+      "properties": {
+        "routes": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "min_probability": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/config/latest/routing.go RoutingPolicy",
+      "required": [
+        "routes",
+        "min_probability"
+      ]
+    },
+    "RoutingRule": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "examples": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RoutingRule",
+      "required": [
+        "model",
+        "examples"
+      ]
+    },
+    "RunAgentRequest": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/APIMessage"
+          }
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go RunAgentRequest",
+      "required": [
+        "messages"
+      ]
+    },
+    "RuntimeDefaults": {
+      "type": "object",
+      "properties": {
+        "sandbox": {
+          "type": "boolean"
+        },
+        "safety": {
+          "$ref": "#/$defs/SafetyMode"
+        },
+        "network_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/config/latest/types.go RuntimeDefaults"
+    },
+    "SafetyMode": {
+      "type": "string",
+      "$comment": "pkg/config/latest/types.go SafetyMode",
+      "enum": [
+        "strict",
+        "balanced",
+        "restricted",
+        "autonomous"
+      ]
+    },
+    "SafetyPolicy": {
+      "type": "string",
+      "$comment": "pkg/session/session.go SafetyPolicy",
+      "enum": [
+        "strict",
+        "balanced",
+        "restricted",
+        "autonomous",
+        "unsafe",
+        "safer",
+        "safe-auto",
+        ""
+      ]
+    },
+    "ScriptShellToolConfig": {
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "required": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "working_dir": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go ScriptShellToolConfig",
+      "required": [
+        "cmd",
+        "description",
+        "required"
+      ]
+    },
+    "Session": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "input_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "evals": {
+          "$ref": "#/$defs/EvalCriteria"
+        },
+        "eval_result": {
+          "$ref": "#/$defs/EvalResult"
+        },
+        "messages": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Item"
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "tools_approved": {
+          "type": "boolean"
+        },
+        "safety_policy": {
+          "$ref": "#/$defs/SafetyPolicy"
+        },
+        "prior_safety_policy": {
+          "$ref": "#/$defs/SafetyPolicy"
+        },
+        "non_interactive": {
+          "type": "boolean"
+        },
+        "hide_tool_results": {
+          "type": "boolean"
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "SendUserMessage": {
+          "type": "boolean"
+        },
+        "max_iterations": {
+          "type": "integer"
+        },
+        "max_consecutive_tool_calls": {
+          "type": "integer"
+        },
+        "max_old_tool_call_tokens": {
+          "type": "integer"
+        },
+        "max_tool_result_tokens": {
+          "type": "integer"
+        },
+        "starred": {
+          "type": "boolean"
+        },
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "permissions": {
+          "$ref": "#/$defs/PermissionsConfig"
+        },
+        "attributes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "agent_model_overrides": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "custom_models_used": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "attached_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction_context": {
+          "$ref": "#/$defs/InstructionContextState"
+        }
+      },
+      "$comment": "pkg/session/session.go Session",
+      "required": [
+        "id",
+        "title",
+        "messages",
+        "created_at",
+        "tools_approved",
+        "hide_tool_results",
+        "SendUserMessage",
+        "max_iterations",
+        "starred",
+        "input_tokens",
+        "output_tokens",
+        "cost"
+      ]
+    },
+    "SessionCompactionEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "session_compaction"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go SessionCompactionEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "status"
+      ]
+    },
+    "SessionError": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        },
+        "agent_name": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/session/session.go Error",
+      "required": [
+        "message"
+      ]
+    },
+    "SessionMessage": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "message": {
+          "$ref": "#/$defs/ChatMessage"
+        },
+        "implicit": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/session/session.go Message",
+      "required": [
+        "agent_name",
+        "message"
+      ]
+    },
+    "SessionModelsResponse": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "current_model_ref": {
+          "type": "string"
+        },
+        "models": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ModelChoice"
+          }
+        }
+      },
+      "$comment": "pkg/runtime/modelcatalog/catalog.go SessionModelsResponse",
+      "required": [
+        "agent",
+        "models"
+      ]
+    },
+    "SessionRecoveredEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "session_recovered"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go SessionRecoveredEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id"
+      ]
+    },
+    "SessionResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "messages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionMessage"
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "tools_approved": {
+          "type": "boolean"
+        },
+        "safety_policy": {
+          "$ref": "#/$defs/SafetyPolicy"
+        },
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "permissions": {
+          "$ref": "#/$defs/PermissionsConfig"
+        }
+      },
+      "$comment": "pkg/api/types.go SessionResponse",
+      "required": [
+        "id",
+        "title",
+        "created_at",
+        "tools_approved",
+        "input_tokens",
+        "output_tokens"
+      ]
+    },
+    "SessionSnapshotResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "messages": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/SessionMessage"
+          }
+        },
+        "tools_approved": {
+          "type": "boolean"
+        },
+        "safety_policy": {
+          "$ref": "#/$defs/SafetyPolicy"
+        },
+        "permissions": {
+          "$ref": "#/$defs/PermissionsConfig"
+        },
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "streaming": {
+          "type": "boolean"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "last_event_seq": {
+          "type": "integer"
+        },
+        "cost": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/api/types.go SessionSnapshotResponse",
+      "required": [
+        "id",
+        "title",
+        "created_at",
+        "messages",
+        "tools_approved",
+        "input_tokens",
+        "output_tokens",
+        "streaming",
+        "last_event_seq",
+        "cost"
+      ]
+    },
+    "SessionStatusResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "streaming": {
+          "type": "boolean"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "num_messages": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/api/types.go SessionStatusResponse",
+      "required": [
+        "id",
+        "title",
+        "streaming",
+        "input_tokens",
+        "output_tokens",
+        "num_messages"
+      ]
+    },
+    "SessionSummaryEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "session_summary"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "first_kept_entry": {
+          "type": "integer"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        }
+      },
+      "$comment": "pkg/runtime/event.go SessionSummaryEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "summary"
+      ]
+    },
+    "SessionTitleEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "session_title"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go SessionTitleEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "title"
+      ]
+    },
+    "SessionsResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "num_messages": {
+          "type": "integer"
+        },
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "streaming": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/api/types.go SessionsResponse",
+      "required": [
+        "id",
+        "title",
+        "created_at",
+        "num_messages",
+        "input_tokens",
+        "output_tokens"
+      ]
+    },
+    "SetSessionStarredRequest": {
+      "type": "object",
+      "properties": {
+        "starred": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/api/types.go SetSessionStarredRequest",
+      "required": [
+        "starred"
+      ]
+    },
+    "ShellOutputEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "shell"
+        },
+        "command_id": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        },
+        "done": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/runtime/event.go ShellOutputEvent",
+      "required": [
+        "timestamp",
+        "type"
+      ]
+    },
+    "SizeCheck": {
+      "type": "object",
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "actual": {
+          "type": "string"
+        },
+        "expected": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/session/session.go SizeCheck",
+      "required": [
+        "passed",
+        "actual",
+        "expected"
+      ]
+    },
+    "SkillsConfig": {
+      "$comment": "pkg/config/latest/types.go SkillsConfig",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/InlineSkill"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "SteerSessionRequest": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/APIMessage"
+          }
+        }
+      },
+      "$comment": "pkg/api/types.go SteerSessionRequest",
+      "required": [
+        "messages"
+      ]
+    },
+    "StreamStartedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "stream_started"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go StreamStartedEvent",
+      "required": [
+        "timestamp",
+        "type"
+      ]
+    },
+    "StreamStoppedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "stream_stopped"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "finish_reason": {
+          "$ref": "#/$defs/FinishReason"
+        }
+      },
+      "$comment": "pkg/runtime/event.go StreamStoppedEvent",
+      "required": [
+        "timestamp",
+        "type"
+      ]
+    },
+    "StructuredOutput": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "schema": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "strict": {
+          "type": "boolean"
+        },
+        "mode": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go StructuredOutput",
+      "required": [
+        "name",
+        "schema"
+      ]
+    },
+    "SubSessionCompletedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "sub_session_completed"
+        },
+        "parent_session_id": {
+          "type": "string"
+        },
+        "sub_session": true
+      },
+      "$comment": "pkg/runtime/event.go SubSessionCompletedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "parent_session_id",
+        "sub_session"
+      ]
+    },
+    "TaskBudget": {
+      "$comment": "pkg/config/latest/types.go TaskBudget",
+      "anyOf": [
+        {
+          "type": "integer",
+          "description": "Token budget."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "total": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "total"
+          ]
+        }
+      ]
+    },
+    "TeamInfoEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "team_info"
+        },
+        "available_agents": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AgentDetails"
+          }
+        },
+        "current_agent": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go TeamInfoEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "available_agents",
+        "current_agent"
+      ]
+    },
+    "Termination": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "budget": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "string"
+        },
+        "used": {
+          "type": "string"
+        },
+        "max": {
+          "type": "string"
+        },
+        "config_path": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/session/session.go Termination",
+      "required": [
+        "reason"
+      ]
+    },
+    "ThinkingBudget": {
+      "$comment": "pkg/config/latest/types.go ThinkingBudget",
+      "anyOf": [
+        {
+          "type": "string",
+          "description": "Effort level."
+        },
+        {
+          "type": "integer",
+          "description": "Token budget."
+        }
+      ]
+    },
+    "TokenUsage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "context_length": {
+          "type": "integer"
+        },
+        "context_limit": {
+          "type": "integer"
+        },
+        "cost": {
+          "type": "number"
+        },
+        "last_message": {
+          "$ref": "#/$defs/MessageUsage"
+        },
+        "snapshot_only": {
+          "type": "boolean"
+        },
+        "compaction_threshold": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/runtime/event.go Usage",
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "context_length",
+        "context_limit",
+        "cost"
+      ]
+    },
+    "TokenUsageEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "token_usage"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "assistant_message_empty": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/runtime/event.go TokenUsageEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "session_id",
+        "usage"
+      ]
+    },
+    "Tool": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "parameters": true,
+        "annotations": {
+          "$ref": "#/$defs/ToolAnnotations"
+        },
+        "outputSchema": true
+      },
+      "$comment": "pkg/tools/tools.go Tool",
+      "required": [
+        "name",
+        "category",
+        "parameters",
+        "annotations",
+        "outputSchema"
+      ]
+    },
+    "ToolAnnotations": {
+      "type": "object",
+      "properties": {
+        "destructiveHint": {
+          "type": "boolean"
+        },
+        "idempotentHint": {
+          "type": "boolean"
+        },
+        "openWorldHint": {
+          "type": "boolean"
+        },
+        "readOnlyHint": {
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/tools/tools.go ToolAnnotations",
+      "required": [
+        "idempotentHint",
+        "readOnlyHint"
+      ]
+    },
+    "ToolCall": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "function": {
+          "$ref": "#/$defs/FunctionCall"
+        },
+        "provider_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/tools/tools.go ToolCall",
+      "required": [
+        "type",
+        "function"
+      ]
+    },
+    "ToolCallConfirmationEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "tool_call_confirmation"
+        },
+        "tool_call": {
+          "$ref": "#/$defs/ToolCall"
+        },
+        "tool_definition": {
+          "$ref": "#/$defs/Tool"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/runtime/event.go ToolCallConfirmationEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "tool_call",
+        "tool_definition"
+      ]
+    },
+    "ToolCallEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "tool_call"
+        },
+        "tool_call": {
+          "$ref": "#/$defs/ToolCall"
+        },
+        "tool_definition": {
+          "$ref": "#/$defs/Tool"
+        }
+      },
+      "$comment": "pkg/runtime/event.go ToolCallEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "tool_call",
+        "tool_definition"
+      ]
+    },
+    "ToolCallOutputEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "tool_call_output"
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "tool_definition": {
+          "$ref": "#/$defs/Tool"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go ToolCallOutputEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "tool_call_id",
+        "tool_definition",
+        "output"
+      ]
+    },
+    "ToolCallResponseEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "tool_call_response"
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "tool_definition": {
+          "$ref": "#/$defs/Tool"
+        },
+        "response": {
+          "type": "string"
+        },
+        "result": {
+          "$ref": "#/$defs/ToolCallResult"
+        }
+      },
+      "$comment": "pkg/runtime/event.go ToolCallResponseEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "tool_call_id",
+        "tool_definition",
+        "response"
+      ]
+    },
+    "ToolCallResult": {
+      "type": "object",
+      "properties": {
+        "output": {
+          "type": "string"
+        },
+        "isError": {
+          "type": "boolean"
+        },
+        "meta": true,
+        "images": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaContent"
+          }
+        },
+        "audios": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MediaContent"
+          }
+        },
+        "documents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DocumentContent"
+          }
+        },
+        "structuredContent": true
+      },
+      "$comment": "pkg/tools/tools.go ToolCallResult",
+      "required": [
+        "output"
+      ]
+    },
+    "ToolCallsCheck": {
+      "type": "object",
+      "properties": {
+        "passed": {
+          "type": "boolean"
+        },
+        "score": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/session/session.go ToolCallsCheck",
+      "required": [
+        "passed",
+        "score"
+      ]
+    },
+    "ToolCallsRetractedEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "tool_calls_retracted"
+        },
+        "tool_call_ids": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "$comment": "pkg/runtime/event.go ToolCallsRetractedEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "tool_call_ids"
+      ]
+    },
+    "Toolset": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "instruction": {
+          "type": "string"
+        },
+        "toon": {
+          "type": "string"
+        },
+        "readonly": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "defer": {
+          "$ref": "#/$defs/DeferConfig"
+        },
+        "command": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ref": {
+          "type": "string"
+        },
+        "remote": {
+          "$ref": "#/$defs/Remote"
+        },
+        "config": true,
+        "version": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "shared": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "shell": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ScriptShellToolConfig"
+          }
+        },
+        "post_edit": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PostEditConfig"
+          }
+        },
+        "api_config": {
+          "$ref": "#/$defs/APIToolConfig"
+        },
+        "webhook_config": {
+          "$ref": "#/$defs/WebhookToolConfig"
+        },
+        "ignore_vcs": {
+          "type": "boolean"
+        },
+        "allow_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny_list": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowed_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_servers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "file_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "timeout": {
+          "type": "integer"
+        },
+        "max_output_bytes": {
+          "type": "integer"
+        },
+        "escape_html": {
+          "type": "boolean"
+        },
+        "allowed_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "blocked_domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow_private_ips": {
+          "type": "boolean"
+        },
+        "sudo_askpass": {
+          "type": "boolean"
+        },
+        "recall": {
+          "type": "boolean"
+        },
+        "rag_config": {
+          "$ref": "#/$defs/RAGConfig"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "working_dir": {
+          "type": "string"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/LifecycleConfig"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go Toolset",
+      "required": [
+        "remote",
+        "api_config",
+        "webhook_config"
+      ]
+    },
+    "ToolsetInfoEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "toolset_info"
+        },
+        "available_tools": {
+          "type": "integer"
+        },
+        "loading": {
+          "type": "boolean"
+        }
+      },
+      "$comment": "pkg/runtime/event.go ToolsetInfoEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "available_tools",
+        "loading"
+      ]
+    },
+    "UpdateMessageRequest": {
+      "type": "object",
+      "properties": {
+        "message": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionMessage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "$comment": "pkg/api/types.go UpdateMessageRequest",
+      "required": [
+        "message"
+      ]
+    },
+    "UpdateSessionPermissionsRequest": {
+      "type": "object",
+      "properties": {
+        "permissions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "$comment": "pkg/api/types.go UpdateSessionPermissionsRequest",
+      "required": [
+        "permissions"
+      ]
+    },
+    "UpdateSessionSafetyPolicyRequest": {
+      "type": "object",
+      "properties": {
+        "safety_policy": {
+          "$ref": "#/$defs/SafetyPolicy"
+        }
+      },
+      "$comment": "pkg/api/types.go UpdateSessionSafetyPolicyRequest",
+      "required": [
+        "safety_policy"
+      ]
+    },
+    "UpdateSessionTitleRequest": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go UpdateSessionTitleRequest",
+      "required": [
+        "title"
+      ]
+    },
+    "UpdateSessionTitleResponse": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/api/types.go UpdateSessionTitleResponse",
+      "required": [
+        "id",
+        "title"
+      ]
+    },
+    "UpdateSessionTokensRequest": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "cost": {
+          "type": "number"
+        }
+      },
+      "$comment": "pkg/api/types.go UpdateSessionTokensRequest",
+      "required": [
+        "input_tokens",
+        "output_tokens"
+      ]
+    },
+    "Usage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer"
+        },
+        "output_tokens": {
+          "type": "integer"
+        },
+        "cached_input_tokens": {
+          "type": "integer"
+        },
+        "cached_write_tokens": {
+          "type": "integer"
+        },
+        "reasoning_tokens": {
+          "type": "integer"
+        },
+        "service_tier": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/chat/chat.go Usage",
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "cached_write_tokens"
+      ]
+    },
+    "UserMessageEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "user_message"
+        },
+        "message": {
+          "type": "string"
+        },
+        "multi_content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MessagePart"
+          }
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "session_position": {
+          "type": "integer"
+        }
+      },
+      "$comment": "pkg/runtime/event.go UserMessageEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "message",
+        "session_id",
+        "session_position"
+      ]
+    },
+    "WarningEvent": {
+      "type": "object",
+      "properties": {
+        "agent_name": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "const": "warning"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/runtime/event.go WarningEvent",
+      "required": [
+        "timestamp",
+        "type",
+        "message"
+      ]
+    },
+    "WebhookToolConfig": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "chat_id": {
+          "type": "string"
+        }
+      },
+      "$comment": "pkg/config/latest/types.go WebhookToolConfig"
+    }
+  }
+}

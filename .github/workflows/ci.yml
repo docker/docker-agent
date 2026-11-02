@@ -238,6 +238,30 @@ jobs:
       - name: WASM JavaScript bridge
         run: task test-wasm-bridge
 
+  # The TypeScript SDK is generated from Go types: fail when it is stale.
+  typescript:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tested != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup-go
+        with:
+          cache-name: test-linux
+          save: 'false'
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: sdk/typescript/.nvmrc
+          package-manager-cache: false
+
+      - name: Check generated TypeScript SDK
+        run: task check-ts
+
   licenses:
     needs: changes
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tested != 'true'
@@ -504,7 +528,7 @@ jobs:
   # Single required status check; see the header comment.
   gate:
     if: always()
-    needs: [ changes, lint, test-linux, test-windows, cross-compile, licenses, image ]
+    needs: [ changes, lint, test-linux, test-windows, cross-compile, typescript, licenses, image ]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

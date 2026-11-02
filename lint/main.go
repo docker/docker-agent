@@ -25,7 +25,6 @@ var cops = []cop.Cop{
 	ConfigVersionsRegistered,
 	TUIViewPurity,
 	TUIKeyBindings,
-	RuntimeEventRegistry,
 	RuntimeSessionScoped,
 	HookConfigSync,
 	HookBuiltinsRegistered,

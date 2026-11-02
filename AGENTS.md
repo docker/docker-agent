@@ -74,6 +74,9 @@ is a quick reference.
 - `task lint` — Run golangci-lint (uses `.golangci.yml` configuration)
 - `task format` — Format code using golangci-lint fmt
 - `task dev` — Run lint, test, and build in parallel
+- `task generate-ts` — Regenerate `sdk/typescript` after changing types the API
+  serves (`pkg/api`, sessions, config, runtime events); `task check-ts` is the
+  CI check
 
 ## Docker and Cross-Platform Builds
 
