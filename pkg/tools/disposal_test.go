@@ -24,6 +24,7 @@ type disposalToolSet struct {
 	started       chan struct{}
 	release       chan struct{}
 	stopErr       error
+	close         func() error
 }
 
 func (s *disposalToolSet) Tools(ctx context.Context) ([]tools.Tool, error) {
@@ -49,6 +50,9 @@ func (s *disposalToolSet) Stop(context.Context) error {
 
 func (s *disposalToolSet) Close() error {
 	s.closes.Add(1)
+	if s.close != nil {
+		return s.close()
+	}
 	return nil
 }
 
@@ -312,5 +316,182 @@ func TestDisposeTraversesBothEdgeTypes(t *testing.T) {
 	for _, raw := range []*disposalToolSet{decorated, child} {
 		assert.EqualValues(t, 1, raw.stops.Load())
 		assert.EqualValues(t, 1, raw.closes.Load())
+	}
+}
+
+type disposalRunnable struct {
+	active            atomic.Bool
+	closedWhileActive atomic.Bool
+	closes            atomic.Int32
+	started           chan struct{}
+	exited            chan struct{}
+	waitFor           <-chan struct{}
+	unblock           <-chan struct{}
+}
+
+func (*disposalRunnable) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+func (r *disposalRunnable) Run(ctx context.Context) {
+	r.active.Store(true)
+	close(r.started)
+	<-ctx.Done()
+	if r.exited != nil {
+		close(r.exited)
+	}
+	if r.waitFor != nil {
+		select {
+		case <-r.waitFor:
+		case <-r.unblock:
+		}
+	}
+	r.active.Store(false)
+}
+
+func (r *disposalRunnable) Close() error {
+	r.closedWhileActive.Store(r.active.Load())
+	r.closes.Add(1)
+	return nil
+}
+
+func TestDisposeJoinsSharedRunnableBeforeClose(t *testing.T) {
+	t.Parallel()
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%t", reverse), func(t *testing.T) {
+			t.Parallel()
+			raw := &disposalRunnable{started: make(chan struct{})}
+			idle, running := tools.NewStartable(raw), tools.NewStartable(raw)
+			require.NoError(t, running.Start(t.Context()))
+			t.Cleanup(func() { assert.NoError(t, running.Stop(context.WithoutCancel(t.Context()))) })
+			<-raw.started
+			owners := []tools.ToolSet{idle, running}
+			if reverse {
+				slices.Reverse(owners)
+			}
+			require.NoError(t, tools.Dispose(t.Context(), owners...))
+			assert.False(t, raw.closedWhileActive.Load(), "all runs must be joined before closing a shared resource")
+			assert.False(t, raw.active.Load())
+			assert.EqualValues(t, 1, raw.closes.Load())
+		})
+	}
+}
+
+func TestDisposeOverlappingCalls(t *testing.T) {
+	t.Parallel()
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%t", reverse), func(t *testing.T) {
+			t.Parallel()
+			entered, resume := make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(resume) })
+			defer release()
+			var closes atomic.Int32
+			raw := &disposalToolSet{close: func() error {
+				if closes.Add(1) == 1 {
+					close(entered)
+					<-resume
+				}
+				return nil
+			}}
+			first, second := tools.NewStartable(raw), tools.NewStartable(raw)
+			ctx := t.Context()
+			done := make(chan error, 1)
+			go func() { done <- first.Dispose(ctx) }()
+			<-entered
+			owners := []tools.ToolSet{first, second}
+			if reverse {
+				slices.Reverse(owners)
+			}
+			overlapped := make(chan error, 1)
+			go func() { overlapped <- tools.Dispose(ctx, owners...) }()
+			require.Eventually(t, func() bool { return !second.TryIsAvailable() }, time.Second, time.Millisecond)
+			release()
+			require.NoError(t, <-done)
+			require.NoError(t, <-overlapped)
+			require.NoError(t, tools.Dispose(ctx, owners...))
+			assert.EqualValues(t, 1, raw.stops.Load())
+			assert.EqualValues(t, 1, raw.closes.Load())
+			require.ErrorContains(t, second.Start(ctx), "disposed")
+		})
+	}
+}
+
+func TestDisposeCancelsAllRunnablesBeforeJoining(t *testing.T) {
+	t.Parallel()
+	peerExited, unblock := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(unblock) })
+	defer release()
+	first := &disposalRunnable{started: make(chan struct{}), waitFor: peerExited, unblock: unblock}
+	peer := &disposalRunnable{started: make(chan struct{}), exited: peerExited}
+	owners := []*tools.StartableToolSet{tools.NewStartable(first), tools.NewStartable(peer)}
+	for i, raw := range []*disposalRunnable{first, peer} {
+		require.NoError(t, owners[i].Start(t.Context()))
+		<-raw.started
+	}
+	ctx := t.Context()
+	done := make(chan error, 1)
+	root := &disposalBothEdges{children: []tools.ToolSet{owners[0], owners[1]}}
+	go func() { done <- tools.Dispose(ctx, root) }()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		release()
+		<-done
+		t.Fatal("disposal joined a worker before cancelling its peer")
+	}
+	assert.EqualValues(t, 1, first.closes.Load())
+	assert.EqualValues(t, 1, peer.closes.Load())
+}
+
+func TestDisposeOverlappingCallsPreserveNestedErrors(t *testing.T) {
+	t.Parallel()
+	failure := errors.New("stop failed")
+	raw := &disposalToolSet{stopErr: failure}
+	inner := tools.NewStartable(raw)
+	shared := &disposalBothEdges{inner: inner}
+	first, second := tools.NewStartable(shared), tools.NewStartable(shared)
+	require.ErrorIs(t, first.Dispose(t.Context()), failure)
+	require.ErrorIs(t, tools.Dispose(t.Context(), first, second), failure)
+	require.ErrorIs(t, second.Dispose(t.Context()), failure)
+	assert.EqualValues(t, 1, raw.stops.Load())
+	assert.EqualValues(t, 1, raw.closes.Load())
+}
+
+func TestDisposeConcurrentCallsShareCanonicalOwner(t *testing.T) {
+	t.Parallel()
+	raw := &disposalToolSet{}
+	shared := tools.NewStartable(raw)
+	first, second := tools.NewStartable(shared), tools.NewStartable(shared)
+	ctx := t.Context()
+	done := make(chan error, 2)
+	go func() { done <- first.Dispose(ctx) }()
+	go func() { done <- second.Dispose(ctx) }()
+	for range 2 {
+		require.NoError(t, <-done)
+	}
+	require.NoError(t, first.Dispose(ctx))
+	require.NoError(t, second.Dispose(ctx))
+	assert.EqualValues(t, 1, raw.stops.Load())
+	assert.EqualValues(t, 1, raw.closes.Load())
+}
+
+func TestDisposeSharedOwnersRetainErrors(t *testing.T) {
+	t.Parallel()
+	for _, reverse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reverse=%t", reverse), func(t *testing.T) {
+			t.Parallel()
+			failure := errors.New("stop failed")
+			raw := &disposalToolSet{stopErr: failure}
+			shared := &disposalBothEdges{inner: tools.NewStartable(raw)}
+			first, second := tools.NewStartable(shared), tools.NewStartable(shared)
+			owners := []tools.ToolSet{first, second}
+			if reverse {
+				slices.Reverse(owners)
+			}
+			require.ErrorIs(t, tools.Dispose(t.Context(), owners...), failure)
+			require.ErrorIs(t, first.Dispose(t.Context()), failure)
+			require.ErrorIs(t, second.Dispose(t.Context()), failure)
+			assert.EqualValues(t, 1, raw.stops.Load())
+			assert.EqualValues(t, 1, raw.closes.Load())
+		})
 	}
 }

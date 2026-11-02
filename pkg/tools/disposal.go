@@ -12,9 +12,10 @@ import (
 
 // Dispose permanently releases a toolset graph, including construction-time
 // resources that never started. Call it only after tool execution has ended.
-// Shared children are disposed once; composites' children, not their Stop
-// methods, own the leaf cleanup. Composites may implement io.Closer for their
-// own additional resources.
+// Pass every owner of shared resources together; independent calls must share
+// a canonical owner, not just a raw toolset. Shared children are disposed once;
+// composites' children, not their Stop methods, own the leaf cleanup. Composites
+// may implement io.Closer for their own additional resources.
 func Dispose(ctx context.Context, toolsets ...ToolSet) error {
 	var errs []error
 	for _, group := range disposalGroups(toolsets) {
@@ -99,7 +100,29 @@ func disposeGroup(ctx context.Context, group disposalGroup) error {
 		}
 	}()
 
-	d := disposal{seen: make(map[ToolSet]struct{}), running: make(map[ToolSet]struct{}), stopped: make(map[ToolSet]struct{})}
+	// Cancel every worker before joining: shutdown may depend on a peer exiting.
+	for _, owner := range owners {
+		if owner.run != nil {
+			owner.run.cancel()
+		}
+	}
+	d := disposal{
+		seen: make(map[ToolSet]struct{}), cleaned: make(map[ToolSet]struct{}),
+		running: make(map[ToolSet]struct{}), stopped: make(map[ToolSet]struct{}),
+		results: make(map[ToolSet]error),
+	}
+	for _, owner := range owners {
+		if owner.run != nil {
+			owner.run.stop()
+			owner.run = nil
+		}
+		if owner.disposed {
+			Walk(owner.ToolSet, func(ts ToolSet) bool {
+				seenToolSet(ts, d.cleaned)
+				return true
+			})
+		}
+	}
 	for _, ts := range group.roots {
 		d.collectStops(ts, false)
 	}
@@ -159,8 +182,10 @@ func lockDisposalOwners(ctx context.Context, owners []*StartableToolSet) error {
 
 type disposal struct {
 	seen    map[ToolSet]struct{}
+	cleaned map[ToolSet]struct{}
 	running map[ToolSet]struct{}
 	stopped map[ToolSet]struct{}
+	results map[ToolSet]error
 }
 
 // Aggregate every owner's requirement before cleanup deduplicates shared leaves.
@@ -191,19 +216,25 @@ func (d *disposal) collectStops(ts ToolSet, stopped bool) {
 	}
 }
 
-func (d *disposal) dispose(ctx context.Context, ts ToolSet, stopped bool) error {
-	if ts == nil || seenToolSet(ts, d.seen) {
+func (d *disposal) dispose(ctx context.Context, ts ToolSet, stopped bool) (err error) {
+	if ts == nil {
 		return nil
+	}
+	isComparable := reflect.ValueOf(ts).Comparable()
+	if seenToolSet(ts, d.seen) {
+		if isComparable {
+			return d.results[ts]
+		}
+		return nil
+	}
+	if isComparable {
+		defer func() { d.results[ts] = err }()
 	}
 	if owner, ok := ts.(*StartableToolSet); ok {
 		if owner.disposed {
 			return owner.disposeErr
 		}
 		owner.disposed = true
-		if owner.run != nil {
-			owner.run.stop()
-			owner.run = nil
-		}
 		owner.disposeErr = errors.Join(owner.stopErr, d.dispose(ctx, owner.ToolSet, owner.stopped))
 		owner.started = false
 		return owner.disposeErr
@@ -218,6 +249,12 @@ func (d *disposal) dispose(ctx context.Context, ts ToolSet, stopped bool) error 
 	if combines {
 		for _, child := range composite.Children() {
 			errs = append(errs, d.dispose(ctx, child, stopped))
+		}
+	}
+	// Still traverse cleaned decorators so nested owners retain their errors.
+	if reflect.ValueOf(ts).Comparable() {
+		if _, cleaned := d.cleaned[ts]; cleaned {
+			return errors.Join(errs...)
 		}
 	}
 	if !wraps && !combines {
