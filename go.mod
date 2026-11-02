@@ -62,7 +62,7 @@ require (
 	github.com/muesli/cancelreader v0.2.2
 	github.com/natefinch/atomic v1.0.1
 	github.com/openai/openai-go/v3 v3.61.0
-	github.com/pb33f/libopenapi v0.41.8
+	github.com/pb33f/libopenapi v0.42.3
 	github.com/rivo/uniseg v0.4.7
 	github.com/rumpl/harness v0.0.0-20261013122321-04282da16ab5
 	github.com/rumpl/keepawake v0.1.0
