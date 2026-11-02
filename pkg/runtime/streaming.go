@@ -433,8 +433,21 @@ mainLoop:
 						events.Emit(ToolCallsRetracted(toolCallIDs(toolCalls), a.Name()))
 						toolCalls = nil
 						openAIResponse = nil
+						// The raw response holds those blocks too, and the signature
+						// kept here belongs to thinking the flattened text no longer
+						// describes. Drop all three together: replaying them would
+						// send tool_use blocks without results, or changed thinking
+						// under a signature the provider did not issue for it.
+						providerState = nil
+						thinkingSignature = ""
+						thoughtSignature = nil
 					}
-					providerState = nil
+					if finishReason == chat.FinishReasonRefusal {
+						// A refusal voids the turn's provider state even when it
+						// carried no tool calls; a length turn keeps it unless the
+						// calls above were retracted.
+						providerState = nil
+					}
 				} else {
 					applyXMLFallback()
 					if finishReason == chat.FinishReasonStop && len(toolCalls) > 0 {
