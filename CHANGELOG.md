@@ -3,6 +3,67 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.155.0] - 2026-11-02
+
+This release adds new MCP transport options, a CloudGPU provider, and improved elicitation forms for Claude Code, alongside a range of bug fixes for MCP environment handling, streaming finish reasons, and tool schema correctness.
+
+## What's New
+
+- Adds `remote.standalone_sse` option to MCP toolsets, enabling the streamable-HTTP standalone SSE stream via YAML configuration
+- Adds CloudGPU as a built-in provider in the embedded catalog, discoverable via `CLOUDGPU_API_KEY` with `deepseek-v4.1-flash` as the default model
+- Adds multi-select and titled choices support in elicitation forms (checkboxes for array fields, option titles and descriptions for `oneOf`/`anyOf` choices)
+- Puts Claude Code's questions (`AskUserQuestion`) and plan approvals (`ExitPlanMode`) to the user as elicitation forms instead of plain text
+
+## Improvements
+
+- Centralizes providers into an embedded catalog, replacing hard-coded provider and alias tables
+
+## Bug Fixes
+
+- Fixes `${env.X}` expansion in MCP toolset env preflight to match runtime expansion behavior
+- Fixes MCP supervisors failing to start after an explicit stop; allows reconnection without public API changes
+- Fixes text content being dropped when a provider sends the last content delta in the same chunk as a terminal finish reason
+- Fixes MCP toolset `env` values being silently overridden by the host environment; toolset env now takes precedence
+- Fixes `model_context_window_exceeded` stop reason on Anthropic and Bedrock being treated as a normal stop instead of truncation
+- Fixes typeless enum/const schemas being incorrectly typed as `object`; type is now derived from the enum/const values
+- Fixes `OPENAI_BASE_URL` not being treated as a custom endpoint, causing incorrect behavior with local servers
+- Fixes held-back `stop`/`length` finish reason being lost or reported as `stop` when usage arrives in a separate final chunk
+- Fixes concurrent session compaction requests; concurrent manual or overflow compactions are now rejected with `compaction already in progress`
+- Fixes tool results in evaluation judge transcripts being silently truncated to 500 bytes; full tool responses are now preserved
+- Fixes MCP stop and resume to be transport-safe
+
+## Technical Changes
+
+- Refreshes the embedded models.dev catalog snapshot
+- Updates CloudGPU documentation example to use `kimi-k3` model
+### Pull Requests
+
+- [#3770](https://github.com/docker/docker-agent/pull/3770) - Make standalone SSE usage in mcp tools configurable
+- [#4712](https://github.com/docker/docker-agent/pull/4712) - fix(config): expand ${env.X} in the MCP toolset env preflight
+- [#4713](https://github.com/docker/docker-agent/pull/4713) - fix(codemode): keep runtime-handled tools out of the script toolset
+- [#4716](https://github.com/docker/docker-agent/pull/4716) - fix: allow MCP supervisors to start after an explicit stop
+- [#4718](https://github.com/docker/docker-agent/pull/4718) - fix(runtime): keep text sent with a terminal finish reason
+- [#4741](https://github.com/docker/docker-agent/pull/4741) - feat(mcp): add remote.standalone_sse to open the streamable-HTTP standalone stream
+- [#4744](https://github.com/docker/docker-agent/pull/4744) - fix(mcp): give the toolset's env precedence over the host environment
+- [#4754](https://github.com/docker/docker-agent/pull/4754) - fix(codemode): keep runtime-handled tools out of the script toolset
+- [#4755](https://github.com/docker/docker-agent/pull/4755) - refactor: centralize providers in an embedded catalog
+- [#4758](https://github.com/docker/docker-agent/pull/4758) - docs: update CHANGELOG.md for v1.154.0
+- [#4759](https://github.com/docker/docker-agent/pull/4759) - fix(anthropic,bedrock): treat model_context_window_exceeded as truncation
+- [#4760](https://github.com/docker/docker-agent/pull/4760) - fix(tools): type typeless enum/const schemas from their values
+- [#4761](https://github.com/docker/docker-agent/pull/4761) - docs: add model provider contribution guide
+- [#4762](https://github.com/docker/docker-agent/pull/4762) - chore: update Go dependencies
+- [#4763](https://github.com/docker/docker-agent/pull/4763) - feat: add CloudGPU provider (centralized catalog)
+- [#4767](https://github.com/docker/docker-agent/pull/4767) - feat(harness): put Claude Code's questions and plan approvals to the user
+- [#4769](https://github.com/docker/docker-agent/pull/4769) - fix: reject concurrent session compaction requests
+- [#4771](https://github.com/docker/docker-agent/pull/4771) - fix(evaluation): preserve full tool results in judge transcripts
+- [#4772](https://github.com/docker/docker-agent/pull/4772) - docs: auto-update for merged PRs (2026-10-30)
+- [#4773](https://github.com/docker/docker-agent/pull/4773) - fix(openai): treat OPENAI_BASE_URL as a custom endpoint
+- [#4774](https://github.com/docker/docker-agent/pull/4774) - fix(oaistream): keep a held-back stop/length finish reason
+- [#4778](https://github.com/docker/docker-agent/pull/4778) - chore: bump Go dependencies
+- [#4781](https://github.com/docker/docker-agent/pull/4781) - docs(cloudgpu): use kimi-k3 in examples
+- [#4789](https://github.com/docker/docker-agent/pull/4789) - chore: refresh models.dev snapshot (+116 -124 ~284)
+
+
 ## [v1.154.0] - 2026-10-28
 
 This release adds support for the Lunaroute AI provider and fixes compatibility with recent sbx sandbox releases.
@@ -7215,3 +7276,5 @@ This release improves the terminal user interface with better error handling and
 [v1.153.0]: https://github.com/docker/docker-agent/releases/tag/v1.153.0
 
 [v1.154.0]: https://github.com/docker/docker-agent/releases/tag/v1.154.0
+
+[v1.155.0]: https://github.com/docker/docker-agent/releases/tag/v1.155.0
