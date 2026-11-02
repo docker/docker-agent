@@ -3,6 +3,19 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.156.1] - 2026-11-02
+
+This release introduces a TypeScript SDK that generates and publishes wire types directly from the Go source, making docker-agent the source of truth for TypeScript API integrations.
+
+## What's New
+- Adds a TypeScript SDK (`@docker/docker-agent-ts-sdk`) that generates TypeScript types for the API wire types, sessions, and events from the Go source code
+- Adds generated Zod schemas for built-in tool arguments as part of the TypeScript SDK
+- Adds CI checks to build the TypeScript SDK package and verify its contents
+### Pull Requests
+
+- [#4795](https://github.com/docker/docker-agent/pull/4795) - Generate and publish a TypeScript SDK for the API wire types
+
+
 ## [v1.155.0] - 2026-11-02
 
 This release adds new MCP transport options, a CloudGPU provider, and improved elicitation forms for Claude Code, alongside a range of bug fixes for MCP environment handling, streaming finish reasons, and tool schema correctness.
@@ -7278,3 +7291,5 @@ This release improves the terminal user interface with better error handling and
 [v1.154.0]: https://github.com/docker/docker-agent/releases/tag/v1.154.0
 
 [v1.155.0]: https://github.com/docker/docker-agent/releases/tag/v1.155.0
+
+[v1.156.1]: https://github.com/docker/docker-agent/releases/tag/v1.156.1
