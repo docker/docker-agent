@@ -62,12 +62,15 @@ func browserToolsetCreators(documents map[string][]byte) map[string]teamloader.T
 		"calculator": teamloader.Creator(calculator.CreateToolSet),
 		"think":      teamloader.Creator(think.CreateToolSet),
 		"random":     teamloader.Creator(random.CreateToolSet),
-		"todo": teamloader.CreatorFromToolset(func(ts latest.Toolset) (tools.ToolSet, error) {
-			if ts.Shared != latest.SharedScopeNone {
+		"todo": func(ctx context.Context, ts latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
+			switch ts.Shared {
+			case latest.SharedScopeProcess:
 				return sharedTodos(), nil
+			case latest.SharedScopeTeam:
+				return tools.TeamScoped(ctx, "todo", func() tools.ToolSet { return todo.New() }), nil
 			}
 			return todo.New(), nil
-		}),
+		},
 		"plan": teamloader.Creator(func() (tools.ToolSet, error) { return plans(), nil }),
 		"memory": func(_ context.Context, ts latest.Toolset, _ string, _ *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
 			if err := checkMemory(ts); err != nil {

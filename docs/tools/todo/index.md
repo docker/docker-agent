@@ -53,12 +53,14 @@ toolsets:
     shared: team
 ```
 
-| Value            | Todo list is shared by                                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------------------------------ |
-| `false`          | nothing: each agent has its own list                                                                          |
-| `team`           | the agents of one team: root, its sub-agents and background agents. Each session or tab has its own list     |
-| `true`           | every agent in the process, across sessions. In the TUI, all tabs read and write the same list                |
+| Value   | Todo list is shared by                                                                                              |
+| ------- | ------------------------------------------------------------------------------------------------------------------- |
+| `false` | nothing: each agent has its own list                                                                                |
+| `team`  | the agents of one loaded team: root, its sub-agents and background agents. Separate team loads, such as TUI tabs, each get their own list |
+| `true`  | every agent in the process, across team loads. In the TUI, all tabs read and write the same list                    |
 
 Todos live in memory only, so they are lost when the process exits.
 
-Use `team` unless you want todos to cross session boundaries.
+`team` is scoped to a team load, not to a session. Sessions that reuse one loaded team, as `serve a2a` and `serve mcp` do, share that team's list.
+
+Use `team` to keep separate TUI tabs from sharing todos. Use `true` only if todos should cross team loads.

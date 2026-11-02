@@ -160,6 +160,29 @@ func TestStatefulToolsetsAreSharedWithinASessionOnly(t *testing.T) {
 		assert.NotContains(t, callTool(t, createTool(t, other, shared), "list_todos", ""), "ship it", "another session")
 	})
 
+	t.Run("todo team scope is separate from shared: true", func(t *testing.T) {
+		team := tools.WithTeamScope(t.Context())
+		otherTeam := tools.WithTeamScope(t.Context())
+		create := func(ctx context.Context, shared latest.SharedScope) tools.ToolSet {
+			created, err := session.CreateTool(ctx, latest.Toolset{Type: "todo", Shared: shared}, "", testRunConfig(), "")
+			require.NoError(t, err)
+			return created
+		}
+
+		callTool(t, create(team, latest.SharedScopeTeam), "create_todo", `{"description":"team item"}`)
+		callTool(t, create(team, latest.SharedScopeProcess), "create_todo", `{"description":"process item"}`)
+
+		teamList := callTool(t, create(team, latest.SharedScopeTeam), "list_todos", "")
+		assert.Contains(t, teamList, "team item", "agents of one team share the list")
+		assert.NotContains(t, teamList, "process item", "team and shared: true are separate lists")
+
+		processList := callTool(t, create(team, latest.SharedScopeProcess), "list_todos", "")
+		assert.Contains(t, processList, "process item")
+		assert.NotContains(t, processList, "team item", "team and shared: true are separate lists")
+
+		assert.NotContains(t, callTool(t, create(otherTeam, latest.SharedScopeTeam), "list_todos", ""), "team item", "another team load")
+	})
+
 	t.Run("plan", func(t *testing.T) {
 		callTool(t, createTool(t, session, latest.Toolset{Type: "plan"}), "write_plan", `{"name":"release","content":"# Release"}`)
 		assert.Contains(t, callTool(t, createTool(t, session, latest.Toolset{Type: "plan"}), "read_plan", `{"name":"release"}`), "# Release")
