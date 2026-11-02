@@ -40,7 +40,7 @@ require (
 	github.com/docker/portcullis v1.1.4
 	github.com/docker/secrets-engine/client v0.2.2
 	github.com/docker/secrets-engine/x v0.8.5
-	github.com/dop251/goja v0.0.0-20261029153331-f81816846776
+	github.com/dop251/goja v0.0.0-20261031103838-cf2ff0ec0b31
 	github.com/expr-lang/expr v1.17.8
 	github.com/fatih/color v1.19.0
 	github.com/fsnotify/fsnotify v1.10.1
