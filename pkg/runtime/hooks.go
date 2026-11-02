@@ -35,10 +35,11 @@ func (r *LocalRuntime) buildHooksExecutors() {
 		if err != nil {
 			continue
 		}
-		cfg := builtins.ApplyAgentDefaults(a.Hooks(), builtins.AgentDefaults{
+		// Workspace agents share source configuration; only mutate a runtime-local copy.
+		cfg := builtins.ApplyAgentDefaults(a.Hooks().Clone(), builtins.AgentDefaults{
 			AddDate:             a.AddDate(),
 			AddEnvironmentInfo:  a.AddEnvironmentInfo(),
-			AddPromptFiles:      a.AddPromptFiles(),
+			AddPromptFiles:      slices.Clone(a.AddPromptFiles()),
 			AddPromptFilesDepth: a.AddPromptFilesDepth(),
 			RedactSecrets:       a.RedactSecrets(),
 		})
@@ -56,7 +57,7 @@ func (r *LocalRuntime) buildHooksExecutors() {
 // applyAutoInjectors runs each AutoInjector against cfg, allocating a
 // fresh Config when needed so a previously-empty agent picks up the
 // injector's hooks. Returns nil iff cfg ends up empty after every
-// injector has run, mirroring [ApplyAgentDefaults].
+// injector has run, mirroring [builtins.ApplyAgentDefaults].
 func applyAutoInjectors(cfg *hooks.Config, injectors []builtins.AutoInjector) *hooks.Config {
 	if len(injectors) == 0 {
 		return cfg
@@ -75,8 +76,8 @@ func applyAutoInjectors(cfg *hooks.Config, injectors []builtins.AutoInjector) *h
 	return cfg
 }
 
-// hooksExec returns the pre-built [hooks.Executor] for a, or nil when
-// the agent has no hooks (see [buildHooksExecutors]).
+// hooksExec returns the pre-built [hooks.Executor] for a, or nil for a
+// nil or unknown agent (see [LocalRuntime.buildHooksExecutors]).
 func (r *LocalRuntime) hooksExec(a *agent.Agent) *hooks.Executor {
 	if a == nil {
 		return nil
@@ -86,10 +87,10 @@ func (r *LocalRuntime) hooksExec(a *agent.Agent) *hooks.Executor {
 
 // dispatchHook is the common dispatch path shared by every hook
 // callsite: resolve the pre-built executor, dispatch, and emit any
-// [Result.SystemMessage] as a Warning event. Errors are logged at warn
-// level and surfaced as nil results so callers can use a single nil
-// check to mean "nothing useful came back" — covering the
-// not-configured, no-agent, and dispatch-failed cases uniformly.
+// [hooks.Result.SystemMessage] as a Warning event. Errors are logged at warn
+// level; for blockable events they become a deny Result (fail-closed),
+// otherwise nil. Not-configured, no-agent and unknown-agent cases also
+// return nil.
 //
 // events may be nil for fire-and-forget callsites (notification,
 // on_error, on_max_iterations, ...) where there's no Warning channel
@@ -159,7 +160,7 @@ func (r *LocalRuntime) executeTurnStartHooks(ctx context.Context, sess *session.
 // Reason values reported in [hooks.Input.Reason] when [hooks.EventTurnEnd]
 // fires. The same values (including the exported trio below, plus
 // hook_blocked/loop_detected/budget_exceeded) are also reported verbatim in
-// [runtime.StreamStoppedEvent.Reason] — loop.go passes its turnEndReason*
+// [StreamStoppedEvent.Reason] — loop.go passes its turnEndReason*
 // classification straight through to StreamStopped. The runtime guarantees
 // that turn_end runs once per turn that fired turn_start, no matter how the
 // turn exited; the reason classifies which exit path the runtime took.
@@ -167,12 +168,15 @@ const (
 	// TurnEndReasonNormal — the model finished the turn cleanly and the
 	// run loop is about to break out (no further iterations).
 	TurnEndReasonNormal = "normal"
-	// TurnEndReasonError — the model call failed and the runtime is
-	// shutting down the run (handleStreamError returned non-retry).
+	// TurnEndReasonError — the turn failed: a model-call error (including
+	// when handleStreamError recovers via overflow compaction and retries),
+	// a rejected routing decision, a structured-output failure, or a
+	// harness error.
 	TurnEndReasonError = "error"
 	// TurnEndReasonCanceled — the turn ended because the stream context
-	// was cancelled (e.g. user Ctrl+C). Includes deferred firing on
-	// any return path while ctx is done.
+	// was cancelled (e.g. user Ctrl+C). The deferred guard also maps a
+	// still-"normal" exit to canceled when ctx is done; a cancelled model
+	// call may report "error" instead.
 	TurnEndReasonCanceled = "canceled"
 )
 
@@ -197,7 +201,7 @@ const (
 	turnEndReasonError = TurnEndReasonError
 	// turnEndReasonCanceled aliases [TurnEndReasonCanceled].
 	turnEndReasonCanceled = TurnEndReasonCanceled
-	// turnEndReasonHookBlocked — a hook (before_llm_call or
+	// turnEndReasonHookBlocked — a blocking hook (e.g. before_llm_call or
 	// post_tool_use) signalled run termination via a deny verdict.
 	turnEndReasonHookBlocked = "hook_blocked"
 	// turnEndReasonLoopDetected — the consecutive-tool-call loop

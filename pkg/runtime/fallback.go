@@ -252,8 +252,9 @@ func (e *fallbackExecutor) classifyAttemptError(
 // retried immediately once across the whole delegated child run.
 //
 // Retry behavior:
-// - Retryable errors (5xx, timeouts): retry the same model with exponential backoff
-// - Non-retryable errors (429, 4xx): skip to the next model in the chain immediately
+//   - Retryable errors (5xx, timeouts): retry the same model with exponential backoff
+//   - Non-retryable errors (4xx; 429 unless WithRetryOnRateLimit is set and no
+//     fallbacks exist): skip to the next model in the chain immediately
 //
 // Cooldown behavior:
 //   - When the primary fails with a non-retryable error and a fallback succeeds, the executor
@@ -310,7 +311,7 @@ func (e *fallbackExecutor) execute(
 
 		// Each model in the chain gets (1 + retries) attempts for retryable errors.
 		// Non-retryable errors (429 with fallbacks, 4xx) skip immediately to the next model.
-		// 429 without fallbacks is retried directly on the same model.
+		// 429 without fallbacks is retried on the same model only with WithRetryOnRateLimit.
 		maxAttempts := 1 + fallbackRetries
 
 		for attempt := range maxAttempts {
@@ -498,11 +499,11 @@ const (
 
 // handleModelError classifies err and decides what to do next:
 //   - retryDecisionReturn   — context cancelled while sleeping; caller returns ctx.Err()
-//   - retryDecisionBreak    — non-retryable error or 429 with fallbacks; skip to next model
-//   - retryDecisionContinue — retryable error or 429 without fallbacks; retry same model
+//   - retryDecisionBreak    — non-retryable error, or 429 unless opt-in retry applies; skip to next model
+//   - retryDecisionContinue — retryable error, or 429 with opt-in retry, no fallbacks; retry same model
 //
 // Side-effect: sets *primaryFailedWithNonRetryable when the primary model fails with a
-// non-retryable (or rate-limited-with-fallbacks) error.
+// non-retryable (or non-retried rate-limit) error.
 func (e *fallbackExecutor) handleModelError(
 	ctx context.Context,
 	err error,

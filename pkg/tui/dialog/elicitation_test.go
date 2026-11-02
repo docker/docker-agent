@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -274,6 +275,94 @@ func TestParseElicitationSchema(t *testing.T) {
 					Required: true,
 					Default:  float64(25),
 				},
+			},
+		},
+		{
+			name: "schema with titled single select",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"color": map[string]any{
+						"type": "string",
+						"oneOf": []any{
+							map[string]any{"const": "r", "title": "Red", "description": "Warm"},
+							map[string]any{"const": "b", "title": "Blue"},
+							map[string]any{"const": "g"},
+						},
+					},
+				},
+			},
+			expectedFields: []ElicitationField{
+				{
+					Name:             "color",
+					Type:             "enum",
+					EnumValues:       []string{"r", "b", "g"},
+					EnumTitles:       []string{"Red", "Blue", "g"},
+					EnumDescriptions: []string{"Warm", "", ""},
+				},
+			},
+		},
+		{
+			name: "schema with multiselect enum",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pets": map[string]any{
+						"type":     "array",
+						"title":    "Pets",
+						"items":    map[string]any{"type": "string", "enum": []any{"cat", "dog", "fish"}},
+						"default":  []any{"dog"},
+						"minItems": float64(1),
+						"maxItems": float64(2),
+					},
+				},
+			},
+			expectedFields: []ElicitationField{
+				{
+					Name:       "pets",
+					Title:      "Pets",
+					Type:       "multiselect",
+					EnumValues: []string{"cat", "dog", "fish"},
+					Default:    []any{"dog"},
+					MinItems:   1,
+					MaxItems:   2,
+				},
+			},
+		},
+		{
+			name: "schema with titled multiselect",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pets": map[string]any{
+						"type": "array",
+						"items": map[string]any{"anyOf": []any{
+							map[string]any{"const": "cat", "title": "Cat", "description": "Purrs"},
+							map[string]any{"const": "dog", "title": "Dog"},
+						}},
+					},
+				},
+			},
+			expectedFields: []ElicitationField{
+				{
+					Name:             "pets",
+					Type:             "multiselect",
+					EnumValues:       []string{"cat", "dog"},
+					EnumTitles:       []string{"Cat", "Dog"},
+					EnumDescriptions: []string{"Purrs", ""},
+				},
+			},
+		},
+		{
+			name: "array without choices stays a text field",
+			schema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tags": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				},
+			},
+			expectedFields: []ElicitationField{
+				{Name: "tags", Type: "array"},
 			},
 		},
 	}
@@ -1052,4 +1141,126 @@ func TestElicitationDialog_ExplicitNewlinesShiftRows(t *testing.T) {
 	// The label's second row must not toggle anything.
 	clickBodyLine(t, dialog, start+1)
 	assert.False(t, dialog.boolValues[0])
+}
+
+func petsSchema(extra map[string]any) map[string]any {
+	pets := map[string]any{
+		"type":  "array",
+		"title": "Which pets do you like?",
+		"items": map[string]any{"anyOf": []any{
+			map[string]any{"const": "cat", "title": "Cat", "description": "Purrs on the keyboard"},
+			map[string]any{"const": "dog", "title": "Dog"},
+			map[string]any{"const": "fish", "title": "Fish"},
+		}},
+	}
+	maps.Copy(pets, extra)
+	return map[string]any{"type": "object", "properties": map[string]any{"pets": pets}}
+}
+
+func TestElicitationDialog_MultiSelectKeyboard(t *testing.T) {
+	t.Parallel()
+
+	dialog := NewElicitationDialog("Pick:", petsSchema(map[string]any{"default": []any{"dog"}}), nil).(*ElicitationDialog)
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+
+	view := ansi.Strip(dialog.View())
+	assert.Contains(t, view, "› [ ] Cat")
+	assert.Contains(t, view, "Purrs on the keyboard", "an option's description is shown under it")
+	assert.Contains(t, view, "  [x] Dog", "defaults start checked")
+	assert.Contains(t, view, "space toggle")
+
+	press := func(msg tea.KeyPressMsg) { _, _ = dialog.Update(msg) }
+	press(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}) // check Cat
+	press(tea.KeyPressMsg{Code: tea.KeyDown})
+	press(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}) // uncheck Dog
+	press(tea.KeyPressMsg{Code: tea.KeyDown})
+	press(tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}) // check Fish
+	press(tea.KeyPressMsg{Code: tea.KeyDown})             // wraps to Cat
+
+	view = ansi.Strip(dialog.View())
+	assert.Contains(t, view, "› [x] Cat")
+	assert.Contains(t, view, "  [ ] Dog")
+	assert.Contains(t, view, "  [x] Fish")
+
+	content, firstErr := dialog.collectAndValidate()
+	assert.Equal(t, -1, firstErr)
+	assert.Equal(t, map[string]any{"pets": []any{"cat", "fish"}}, content, "values come back in option order")
+}
+
+func TestElicitationDialog_MultiSelectEmptyAndCounts(t *testing.T) {
+	t.Parallel()
+
+	empty := NewElicitationDialog("Pick:", petsSchema(nil), nil).(*ElicitationDialog)
+	content, firstErr := empty.collectAndValidate()
+	assert.Equal(t, -1, firstErr)
+	assert.Equal(t, map[string]any{"pets": []any{}}, content)
+
+	for _, tt := range []struct {
+		name    string
+		extra   map[string]any
+		checked []bool
+		want    string
+	}{
+		{name: "too few", extra: map[string]any{"minItems": float64(2)}, checked: []bool{true, false, false}, want: "Select at least 2"},
+		{name: "too many", extra: map[string]any{"maxItems": float64(1)}, checked: []bool{true, true, false}, want: "Select at most 1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dialog := NewElicitationDialog("Pick:", petsSchema(tt.extra), nil).(*ElicitationDialog)
+			dialog.multiChecked[0] = tt.checked
+			_, firstErr := dialog.collectAndValidate()
+			assert.Equal(t, 0, firstErr)
+			assert.Equal(t, tt.want, dialog.fieldErrors[0])
+
+			dialog.toggleOption(0, 2)
+			assert.Empty(t, dialog.fieldErrors[0], "changing the selection clears the error")
+		})
+	}
+}
+
+func TestElicitationDialog_MultiSelectClicks(t *testing.T) {
+	t.Parallel()
+
+	dialog := NewElicitationDialog("Pick:", petsSchema(nil), nil).(*ElicitationDialog)
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	_ = dialog.View()
+
+	geom := dialog.fieldGeoms[0]
+	require.Len(t, geom.optionStarts, 3)
+	assert.Equal(t, 2, geom.optionHeights[0], "Cat spans its label and its description")
+	start := dialog.fieldStarts[0]
+
+	clickBodyLine(t, dialog, start+geom.optionStarts[0]+1)
+	assert.Equal(t, []bool{true, false, false}, dialog.multiChecked[0], "a click on the description toggles its option")
+	clickBodyLine(t, dialog, start+geom.optionStarts[2])
+	assert.Equal(t, []bool{true, false, true}, dialog.multiChecked[0])
+	assert.Equal(t, 2, dialog.multiCursor[0], "the click moves the cursor")
+	clickBodyLine(t, dialog, start+geom.optionStarts[0])
+	assert.Equal(t, []bool{false, false, true}, dialog.multiChecked[0])
+
+	clickBodyLine(t, dialog, start)
+	assert.Equal(t, []bool{false, false, true}, dialog.multiChecked[0], "clicking the label toggles nothing")
+}
+
+func TestElicitationDialog_TitledSingleSelect(t *testing.T) {
+	t.Parallel()
+
+	schema := map[string]any{"type": "object", "properties": map[string]any{
+		"color": map[string]any{"type": "string", "title": "Color", "oneOf": []any{
+			map[string]any{"const": "r", "title": "Red", "description": "Warm"},
+			map[string]any{"const": "b", "title": "Blue"},
+		}},
+	}}
+	dialog := NewElicitationDialog("Pick:", schema, nil).(*ElicitationDialog)
+	_, _ = dialog.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+
+	view := ansi.Strip(dialog.View())
+	assert.Contains(t, view, "› ● Red")
+	assert.Contains(t, view, "Warm")
+	assert.NotContains(t, view, "space toggle")
+
+	_, _ = dialog.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	content, firstErr := dialog.collectAndValidate()
+	assert.Equal(t, -1, firstErr)
+	assert.Equal(t, map[string]any{"color": "b"}, content, "the choice's const is submitted, not its title")
 }

@@ -6,8 +6,19 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/hooks/events"
 )
+
+// Clone returns a deep copy of the hooks configuration.
+func (h *HooksConfig) Clone() *HooksConfig {
+	if h == nil {
+		return nil
+	}
+	var cloned HooksConfig
+	types.CloneThroughJSON(h, &cloned)
+	return &cloned
+}
 
 // Events iterates over populated hook events using their persisted names.
 func (h *HooksConfig) Events() iter.Seq2[string, HookMatcherConfigs] {

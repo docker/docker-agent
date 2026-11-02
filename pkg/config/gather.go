@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -323,10 +322,11 @@ func GatherEnvVarsForTools(ctx context.Context, cfg *latest.Config) ([]string, e
 				if !ok {
 					requiredEnv[secret.Env] = true
 				} else {
-					os.Expand(value, func(name string) string {
+					// Use the same normalization the runtime applies, so `${env.X}`
+					// discovers X rather than the literal name "env.X".
+					for _, name := range environment.Refs(value) {
 						requiredEnv[name] = true
-						return ""
-					})
+					}
 				}
 			}
 		}

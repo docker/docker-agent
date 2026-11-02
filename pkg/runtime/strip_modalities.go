@@ -27,17 +27,18 @@ const BuiltinStripUnsupportedModalities = "strip_unsupported_modalities"
 // stripUnsupportedModalitiesTransform is the [MessageTransform]
 // registered under [BuiltinStripUnsupportedModalities]. It consumes
 // the already-resolved capability set from
-// [hooks.Input.ModelCapabilities] — populated by the loop for the
-// model it actually chose (per-tool override + alloy-mode selection),
+// [hooks.Input.ModelCapabilities] — populated by prepareMessagesForModel
+// for the provider each attempt calls (per-tool override + alloy-mode
+// selection),
 // with any explicit `capabilities:` config override applied — and
 // drops the image/audio/video parts that model does not support.
 //
 // The transform must NOT resolve capabilities itself: a models.dev
 // lookup here would ignore explicit config overrides, so a model the
 // user declared `capabilities.audio: true` for would have its audio
-// stripped anyway. Unknown models resolve (upstream, via
-// [modelinfo.ResolveCapsFromModel]) to the conservative text-only
-// default and lose their media parts — matching the attachment
+// stripped anyway. Unknown models resolve upstream (catalog alias, then
+// provider fallback — see prepareMessagesForModel), defaulting to
+// text-only and losing their media parts — matching the attachment
 // pipeline, which would drop them at provider conversion regardless.
 //
 // A nil capability set means the dispatching path had nothing to
@@ -76,7 +77,7 @@ func (r *LocalRuntime) stripUnsupportedModalitiesTransform(
 // placeholder, which would otherwise strand a media-only assistant turn
 // with no content at all for a capability-less or unknown model.
 //
-// Lives next to [stripUnsupportedModalitiesTransform] (rather than in
+// Lives next to [LocalRuntime.stripUnsupportedModalitiesTransform] (rather than in
 // streaming.go where its image-only ancestor originated) so the
 // builtin's registration, transform, and helper are co-located. Kept
 // as an unexported helper because the only legitimate caller is the

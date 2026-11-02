@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -308,4 +309,19 @@ func TestResponseStateChatGPTDefaultEndpoint(t *testing.T) {
 	require.Len(t, client.replayResponse(message), 5)
 	client.ModelConfig.BaseURL = "https://other.example/codex"
 	assert.Nil(t, client.replayResponse(message))
+}
+
+func TestResponseStateOpenAIBaseURLEnv(t *testing.T) {
+	t.Setenv("OPENAI_BASE_URL", "http://localhost:8080/v1")
+	env := environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "secret"})
+	client, err := NewClient(t.Context(), &responseStateClient().ModelConfig, env)
+	require.NoError(t, err)
+	defer client.Close()
+
+	assert.Nil(t, client.replayResponse(responseStateMessage()))
+	// Self-hosted: no cache breakpoints, so the system messages merge.
+	assert.Len(t, client.convertMessages(t.Context(), []chat.Message{
+		{Role: chat.MessageRoleSystem, Content: "a"},
+		{Role: chat.MessageRoleSystem, Content: "b"},
+	}), 1)
 }

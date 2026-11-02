@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -480,6 +481,106 @@ func TestHarnessCanceledFirstTurnRetainsThread(t *testing.T) {
 	loaded, err := store.GetSession(t.Context(), sess.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "canceled-thread", harnessSessionIDFor(loaded, root))
+}
+
+func TestHarnessQuestionsReachTheUser(t *testing.T) {
+	t.Parallel()
+	provider := &elicitingHarnessProvider{}
+	rt := newElicitingHarnessRuntime(t, provider)
+	var request *ElicitationRequestEvent
+	rt.OnElicitationRequest(func(event Event) {
+		request = event.(*ElicitationRequestEvent)
+		require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, map[string]any{"q1": "Blue"}, request.ElicitationID))
+	})
+
+	sess := session.New(session.WithUserMessage("ask me"))
+	for range rt.RunStream(t.Context(), sess) {
+	}
+
+	require.NotNil(t, request)
+	assert.Equal(t, "Which color?", request.Message)
+	assert.Equal(t, map[string]any{"cagent/title": "Question"}, request.Meta)
+	assert.Equal(t, sess.ID, request.SessionID)
+	assert.Equal(t, "root", request.AgentName)
+	assert.Equal(t, tools.ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"q1": "Blue"}}, provider.result)
+	assert.Equal(t, "Blue", sess.GetLastAssistantMessageContent())
+}
+
+func TestHarnessQuestionsStayInTextWithoutAUser(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		opts []Opt
+		sess []session.Opt
+		ctx  func(context.Context) context.Context
+	}{
+		{name: "non-interactive runtime", opts: []Opt{WithNonInteractive(true)}},
+		{name: "non-interactive session", sess: []session.Opt{session.WithNonInteractive(true)}},
+		{name: "background without a sink", ctx: tools.WithoutInteractivePrompts},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			provider := &elicitingHarnessProvider{}
+			rt := newElicitingHarnessRuntime(t, provider, tt.opts...)
+			ctx := t.Context()
+			if tt.ctx != nil {
+				ctx = tt.ctx(ctx)
+			}
+			sess := session.New(append(tt.sess, session.WithUserMessage("ask me"))...)
+			for range rt.RunStream(ctx, sess) {
+			}
+			assert.False(t, provider.elicited, "the harness must not get an elicitation handler")
+			assert.Equal(t, "no one to ask", sess.GetLastAssistantMessageContent())
+		})
+	}
+}
+
+func newElicitingHarnessRuntime(t *testing.T, provider *elicitingHarnessProvider, opts ...Opt) *LocalRuntime {
+	t.Helper()
+	root := agent.New("root", "", agent.WithHarness(&latest.HarnessConfig{Type: "claude-code"}))
+	opts = append([]Opt{
+		WithSessionCompaction(false),
+		WithModelStore(mockModelStore{}),
+		WithHarnessFactory(func(*latest.HarnessConfig) (harness.Provider, error) { return provider, nil }),
+	}, opts...)
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), opts...)
+	require.NoError(t, err)
+	return rt
+}
+
+// elicitingHarnessProvider asks one question when it gets an elicitation
+// handler and answers with the user's choice.
+type elicitingHarnessProvider struct {
+	elicit   tools.ElicitationHandler
+	elicited bool
+	result   tools.ElicitationResult
+}
+
+func (p *elicitingHarnessProvider) Name() string { return "claude-code" }
+
+func (p *elicitingHarnessProvider) WithElicitation(elicit tools.ElicitationHandler) harness.Provider {
+	p.elicit = elicit
+	p.elicited = true
+	return p
+}
+
+func (p *elicitingHarnessProvider) Run(ctx context.Context, _ string, handle func(harness.Event)) error {
+	if p.elicit == nil {
+		handle(harness.Event{Type: harness.EventResult, Result: "no one to ask"})
+		return nil
+	}
+	result, err := p.elicit(ctx, &mcp.ElicitParams{Message: "Which color?", Meta: mcp.Meta{"cagent/title": "Question"}})
+	if err != nil {
+		return err
+	}
+	p.result = result
+	answer, _ := result.Content["q1"].(string)
+	handle(harness.Event{Type: harness.EventResult, Result: answer})
+	return nil
+}
+
+func (p *elicitingHarnessProvider) Resume(ctx context.Context, _, prompt string, handle func(harness.Event)) error {
+	return p.Run(ctx, prompt, handle)
 }
 
 type canceledHarnessProvider struct{ cancel context.CancelFunc }

@@ -20,7 +20,7 @@ func Factory(cfg *latest.HarnessConfig) (harness.Provider, error) {
 		return nil, err
 	}
 	if cfg.Type == TypeClaudeCode {
-		return claudeCodeProvider{provider{p}}, nil
+		return claudeCodeProvider{provider: provider{p}}, nil
 	}
 	return provider{p}, nil
 }

@@ -100,7 +100,7 @@ func TestSourceLoader_Read_WithRefreshInterval_AfterExpiry(t *testing.T) {
 		synctest.Wait()
 		synctest.Sleep(110 * time.Millisecond)
 
-		// Read should refresh
+		// The background refresh loop has re-read the source
 		data, err := sl.Read(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, []byte("test data"), data)

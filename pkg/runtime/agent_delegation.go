@@ -85,6 +85,8 @@ func validateDelegation(parent *session.Session, caller, target string) ([]strin
 	return childLineage, ""
 }
 
+const delegationPathInstructions = "\n\nIf the task references files, treat any absolute paths in <task> as authoritative and use them as-is. If a referenced file is given by name only (e.g. \"foo.go\"), do not guess: search the workspace or ask the calling agent for the absolute path before reading or modifying the file."
+
 // buildTaskSystemMessage constructs the system message for a delegated task.
 // attachedFiles, when non-empty, lists absolute paths of files the user
 // attached to the parent conversation; they are surfaced to the sub-agent so
@@ -104,7 +106,7 @@ func buildTaskSystemMessage(task, expectedOutput string, attachedFiles []string)
 		}
 		b.WriteString("\n</attached_files>")
 	}
-	b.WriteString("\n\nIf the task references files, treat any absolute paths in <task> as authoritative and use them as-is. If a referenced file is given by name only (e.g. \"foo.go\"), do not guess: search the workspace or ask the calling agent for the absolute path before reading or modifying the file.")
+	b.WriteString(delegationPathInstructions)
 	return b.String()
 }
 
@@ -114,13 +116,17 @@ func buildTaskSystemMessage(task, expectedOutput string, attachedFiles []string)
 // such a session (telemetry, current-agent switching, event forwarding)
 // lives in [LocalRuntime.runForwarding] and [LocalRuntime.runCollecting].
 type SubSessionConfig struct {
+	// workspace owns the isolated checkout and execution resources, when requested.
+	workspace *backgroundWorktree
+	// worktreePrompt describes a borrowed workspace without transferring ownership.
+	worktreePrompt worktreePrompt
 	// Task is the user-facing task description.
 	Task string
 	// ExpectedOutput is an optional description of what the sub-agent should produce.
 	ExpectedOutput string
 	// SystemMessage, when non-empty, replaces the default task-based system
-	// message. This is used by skill sub-agents whose system prompt is the
-	// skill content itself rather than the team delegation boilerplate.
+	// message. This is used by skill sub-agents, whose system prompt is a
+	// skill-specific preamble rather than the team delegation boilerplate.
 	SystemMessage string
 	// AgentName is the name of the agent that will execute the sub-session.
 	AgentName string
@@ -143,13 +149,13 @@ type SubSessionConfig struct {
 	NonInteractive bool
 	// PinAgent, when true, pins the child session to AgentName via
 	// session.WithAgentName. This is required for concurrent background
-	// tasks that must not share the runtime's mutable currentAgent field.
+	// tasks that must not share the runtime's shared current-agent slot.
 	PinAgent bool
 	// AllowHandoffs permits intentional routing inside a pinned skill fork.
 	AllowHandoffs bool
 	// ImplicitUserMessage, when non-empty, overrides the default "Please proceed."
 	// user message sent to the child session. This allows callers like skill
-	// sub-agents to pass the task description as the user message.
+	// sub-agents to pass the skill instructions (and task) as the user message.
 	ImplicitUserMessage string
 	// ExcludedTools lists tool names that should be filtered out of the agent's
 	// tool list for the child session. This prevents recursive tool calls
@@ -190,7 +196,7 @@ type SubSessionConfig struct {
 // The OpenTelemetry span is owned by the caller (each public-facing
 // handler opens its own span before calling runForwarding) so that
 // pre-delegation work — most importantly the model override applied
-// by [LocalRuntime.handleRunSkill] before forwarding — is recorded
+// by [LocalRuntime.runSkillFork] before forwarding — is recorded
 // under the caller's span.
 type delegationRequest struct {
 	SubSessionConfig
@@ -230,6 +236,18 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		sysMsg = buildTaskSystemMessage(cfg.Task, cfg.ExpectedOutput, attachedFiles)
 	}
 
+	workingDir := parent.WorkingDir
+	prompt := cfg.worktreePrompt
+	if cfg.workspace != nil {
+		workingDir = cfg.workspace.tree.Dir
+		prompt = cfg.workspace.prompt()
+	}
+	if prompt.isolationInstructions != "" {
+		sysMsg = strings.TrimSuffix(sysMsg, delegationPathInstructions)
+		sysMsg = prependNote(sysMsg, prompt.setupContext)
+		sysMsg += "\n\n" + prompt.isolationInstructions
+	}
+
 	userMsg := cfg.ImplicitUserMessage
 	if userMsg == "" {
 		userMsg = "Please proceed."
@@ -254,10 +272,8 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 		session.WithSendUserMessage(false),
 		session.WithStructuredOutputDisabled(cfg.DisableStructuredOutput),
 		session.WithParentID(parent.ID),
-		// Delegated children run in the parent's workspace: the persisted
-		// WorkingDir is the workspace-root provenance later used to resolve
-		// files the child produced. Empty stays empty (headless parents).
-		session.WithWorkingDir(parent.WorkingDir),
+		// Preserve workspace provenance, including an isolated checkout override.
+		session.WithWorkingDir(workingDir),
 		session.WithAttachedFiles(attachedFiles),
 		session.WithAttributes(parent.AttributesSnapshot()),
 	}
@@ -284,7 +300,14 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 	if len(cfg.ExtraToolSets) > 0 {
 		opts = append(opts, session.WithExtraToolSets(cfg.ExtraToolSets))
 	}
-	return session.New(opts...)
+	s := session.New(opts...)
+	if cfg.workspace != nil {
+		wt := cfg.workspace.tree
+		s.SetAttribute("worktree.path", wt.Dir)
+		s.SetAttribute("worktree.branch", wt.Branch)
+		s.SetAttribute("worktree.base_commit", wt.BaseCommit)
+	}
+	return s
 }
 
 // mergeExcludedTools combines two excluded-tool lists, deduplicating entries.
@@ -342,15 +365,16 @@ func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, f
 // the user sees the child's events live.
 //
 // On success it returns a tool result whose output is the child's last
-// assistant message. On error it has already forwarded the ErrorEvent to
-// evts and returns a wrapped error.
+// assistant message. On error it returns a non-nil error; when the child
+// stream failed, its ErrorEvent or BudgetExceededEvent has already been
+// forwarded to evts.
 //
 // The caller is expected to have opened a tracing span before calling
 // runForwarding; the function records sub-session status (Ok / Error)
 // on whatever span is attached to ctx — a no-op if none.
 //
 // runForwarding handles every concern the callers used to duplicate:
-// resolving the caller from the parent session, swapping the current agent
+// rejecting a nil caller agent (callers resolve it), swapping the current agent
 // (if requested; downgraded to pinning the child when the parent session is
 // itself pinned), resolving the child agent, building the sub-session,
 // driving RunStream, and recording the sub-session on the parent.
@@ -380,6 +404,7 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 		}
 	}
 
+	req.worktreePrompt = r.worktreePrompt
 	s := newSubSession(parent, req.SubSessionConfig, child)
 
 	// subagent_stop fires after the child's stream has fully drained,
@@ -444,6 +469,15 @@ func (r *LocalRuntime) runForwarding(ctx context.Context, parent *session.Sessio
 // callers like background agents PinAgent the child session so the
 // runtime never mutates the shared currentAgent state.
 func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Session, cfg SubSessionConfig, onContent func(string)) *agenttool.RunResult {
+	var s *session.Session
+	defer func() {
+		if cfg.workspace != nil {
+			closeWorktreeRuntime(ctx, cfg.workspace.runtime)
+		}
+		if s != nil {
+			r.emitBackgroundEvent(context.WithoutCancel(ctx), BackgroundAgentStatus(s.ID, cfg.AgentName, false))
+		}
+	}()
 	// The caller resolves from the parent session, not the shared current
 	// agent: a nested background dispatch from a pinned session must
 	// attribute the child's completion to the pinned agent, no matter
@@ -454,16 +488,17 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	if callerAgent == nil {
 		return &agenttool.RunResult{ErrMsg: "no agent resolved for the parent session"}
 	}
-	child, err := r.team.Agent(cfg.AgentName)
+	executionRuntime := r
+	if cfg.workspace != nil {
+		executionRuntime = cfg.workspace.runtime
+	}
+	child, err := executionRuntime.team.Agent(cfg.AgentName)
 	if err != nil {
 		return &agenttool.RunResult{ErrMsg: fmt.Sprintf("agent %q not found: %s", cfg.AgentName, err)}
 	}
 
-	s := newSubSession(parent, cfg, child)
+	s = newSubSession(parent, cfg, child)
 	r.emitBackgroundEvent(ctx, BackgroundAgentStatus(s.ID, cfg.AgentName, true))
-	defer func() {
-		r.emitBackgroundEvent(context.WithoutCancel(ctx), BackgroundAgentStatus(s.ID, cfg.AgentName, false))
-	}()
 
 	// subagent_stop fires after the background sub-session has fully
 	// drained — success or failure. The caller agent (whoever dispatched
@@ -475,7 +510,7 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	}()
 
 	var errMsg string
-	events := r.RunStream(ctx, s)
+	events := executionRuntime.RunStream(ctx, s)
 	for event := range events {
 		r.forwardBackgroundUsage(ctx, event)
 		if ctx.Err() != nil {
@@ -498,6 +533,18 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 		if errEvt, ok := event.(*ErrorEvent); ok {
 			errMsg = errEvt.Error
 			break
+		}
+		if cfg.workspace != nil {
+			switch e := event.(type) {
+			case *BudgetExceededEvent:
+				if e.SessionID == s.ID {
+					errMsg = e.Message
+				}
+			case *StreamStoppedEvent:
+				if e.SessionID == s.ID && e.Reason != "" && e.Reason != turnEndReasonNormal && e.Reason != turnEndReasonCanceled {
+					errMsg = "background task stopped: " + e.Reason
+				}
+			}
 		}
 	}
 	// Drain remaining events so the RunStream goroutine can complete and
@@ -559,7 +606,7 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	// Mid-call elicitations that were auto-declined because this background
 	// session had no UI to answer them (see elicitationHandler) are recorded
 	// against this sub-session's ID; surface them the same way (#3584).
-	for _, note := range r.elicitationDeclines.drain(s.ID) {
+	for _, note := range executionRuntime.elicitationDeclines.drain(s.ID) {
 		result = prependNote(result, note)
 	}
 	return &agenttool.RunResult{Result: result}
@@ -664,6 +711,9 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	// Caller identity must come from the parent session, not the shared
 	// current agent: nested background delegation runs on pinned sessions
 	// whose agent can differ from whatever the foreground loop points at.
+	if r.isolatedWorktree {
+		return &agenttool.RunResult{ErrMsg: "nested background agents are not supported inside an isolated worktree; dispatch sibling worktree tasks from the top-level agent or use transfer_task"}
+	}
 	caller := r.resolveSessionAgent(params.ParentSession)
 	if caller == nil {
 		return &agenttool.RunResult{ErrMsg: "no agent resolved for the parent session"}
@@ -672,7 +722,7 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 	if guardErr != "" {
 		return &agenttool.RunResult{ErrMsg: guardErr}
 	}
-	return r.runCollecting(ctx, params.ParentSession, SubSessionConfig{
+	cfg := SubSessionConfig{
 		Task:              params.Task,
 		ExpectedOutput:    params.ExpectedOutput,
 		AgentName:         params.AgentName,
@@ -683,7 +733,15 @@ func (r *LocalRuntime) RunAgent(ctx context.Context, params agenttool.RunParams)
 		NonInteractive:    true,
 		PinAgent:          true,
 		DelegationLineage: childLineage,
-	}, params.OnContent)
+	}
+	if params.Worktree {
+		workspace, err := r.prepareBackgroundWorktree(ctx, params)
+		if err != nil {
+			return &agenttool.RunResult{ErrMsg: err.Error()}
+		}
+		cfg.workspace = workspace
+	}
+	return r.runCollecting(ctx, params.ParentSession, cfg, params.OnContent)
 }
 
 func (r *LocalRuntime) handleTaskTransfer(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, a *agent.Agent) (*tools.ToolCallResult, error) {

@@ -17,7 +17,7 @@ import (
 // TestUsageHasTokens covers the helper that suppresses the missing-price
 // warning for empty/no-op turns. The per-message cost arithmetic and its
 // nil/unpriced branches are exercised by TestComputeMessageCost in
-// after_llm_call_test.go, which shares the same computeMessageCost source.
+// after_llm_call_test.go, which shares the same pricing.ComputeMessageCost source.
 func TestUsageHasTokens(t *testing.T) {
 	t.Parallel()
 	assert.False(t, usageHasTokens(nil), "nil usage has no tokens")

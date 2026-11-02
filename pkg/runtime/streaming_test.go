@@ -475,10 +475,6 @@ func (s *stalledStream) Close() {
 	s.closeOnce.Do(func() { close(s.unblock) })
 }
 
-// TestHandleStream_IdleTimeout verifies that handleStream returns an error
-// wrapping errStreamIdle when no SSE chunk arrives within the idle window.
-// It also checks that the provided cancelStream function is called so the
-// HTTP transport can close the underlying TCP connection.
 func TestHandleStream_ProductionIdleTimeoutBoundary(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := newStalledStream()
@@ -511,6 +507,10 @@ func TestHandleStream_ProductionIdleTimeoutBoundary(t *testing.T) {
 	})
 }
 
+// TestHandleStream_IdleTimeout verifies that handleStream returns an error
+// wrapping errStreamIdle when no SSE chunk arrives within the idle window.
+// It also checks that the provided cancelStream function is called so the
+// HTTP transport can close the underlying TCP connection.
 func TestHandleStream_IdleTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := newStalledStream()

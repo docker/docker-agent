@@ -238,8 +238,12 @@ type ModelStore interface {
 
 // LocalRuntime manages the execution of agents
 type LocalRuntime struct {
-	harnessFactory   *harness.Factory
-	commandEvaluator *CommandEvaluatorFactory
+	isolatedWorktree  bool
+	worktreePrompt    worktreePrompt
+	worktreeRoot      string
+	liveSessionParent *LocalRuntime
+	harnessFactory    *harness.Factory
+	commandEvaluator  *CommandEvaluatorFactory
 
 	ctx                       func() context.Context
 	toolMap                   map[string]ToolHandlerFunc
@@ -280,32 +284,39 @@ type LocalRuntime struct {
 	modelContexts    modelContextCache
 
 	// hooksRegistry is the runtime-private hooks.Registry used to build
-	// every Executor. It carries the runtime-owned builtin hooks
-	// (add_date, add_environment_info) registered once during
-	// NewLocalRuntime, so they're available to every agent without
+	// every Executor. It carries the stock builtins from [builtins.Register]
+	// plus the runtime-owned ones (e.g. cache_response), registered once
+	// during NewLocalRuntime, so they're available to every agent without
 	// touching any process-wide state.
 	hooksRegistry *hooks.Registry
 
 	// autoInjectors run on every per-agent hook config during
-	// [buildHooksExecutors] so embedders can plug in builtins (today
+	// [LocalRuntime.buildHooksExecutors] so embedders can plug in builtins (today
 	// snapshot via [builtins.SnapshotController]) without the runtime
 	// hard-coding their wiring. Set via [WithAutoInjector].
 	autoInjectors []builtins.AutoInjector
 
 	// hooksExecByAgent holds the per-agent [hooks.Executor], keyed by
-	// agent name. Built once in [NewLocalRuntime.buildHooksExecutors]
-	// after team and runtime config are finalized; agents with no hooks
-	// have no entry, so [hooksExec] returns nil for them. Read-only after
+	// agent name. Built once in [LocalRuntime.buildHooksExecutors]
+	// after team and runtime config are finalized; every agent has an entry
+	// (the tool-result limiter is always on), so [LocalRuntime.hooksExec]
+	// returns nil only for a nil or unknown agent. Read-only after
 	// construction, so no locking is needed.
 	hooksExecByAgent map[string]*hooks.Executor
 
 	// transforms is the runtime's [MessageTransform] chain, applied to
 	// every LLM call in registration order. Populated by
-	// [NewLocalRuntime] (for the runtime-shipped strip transform) and by
+	// [NewLocalRuntime] (for the runtime-shipped strip_generated_media and
+	// strip_unsupported_modalities transforms) and by
 	// [WithMessageTransform] (for embedder-supplied transforms).
 	// Read-only after construction.
 	transforms []registeredTransform
 
+	// fallback owns the model-fallback chain (primary + configured
+	// fallbacks), per-attempt retry/backoff for transient errors, and
+	// the per-agent "sticky" cooldown after a fallback succeeds. It
+	// holds the cooldownManager and rate-limit retry flag so that state
+	// stays out of LocalRuntime. See [fallbackExecutor].
 	fallback *fallbackExecutor
 
 	// observers receive every event the runtime produces, in
@@ -314,12 +325,6 @@ type LocalRuntime struct {
 	// entry: the auto-registered [PersistenceObserver] for the
 	// configured session store. See [EventObserver] for the contract.
 	observers []func() EventObserver
-
-	// fallback owns the model-fallback chain (primary + configured
-	// fallbacks), per-attempt retry/backoff for transient errors, and
-	// the per-agent "sticky" cooldown after a fallback succeeds. It
-	// holds the cooldownManager and rate-limit retry flag so that state
-	// stays out of LocalRuntime. See [fallbackExecutor].
 
 	// steerQueue stores urgent mid-turn messages. The agent loop drains
 	// ALL pending messages after tool execution, before the stop check.
@@ -397,9 +402,9 @@ type LocalRuntime struct {
 
 	// now is the runtime's clock. Defaults to time.Now and can be replaced
 	// in tests via WithClock to make timestamps and cooldown windows
-	// deterministic. Every time-dependent call inside the runtime (message
-	// CreatedAt, fallback cooldown windows, tool-call latency) goes through
-	// this hook so a single fake clock controls them all.
+	// deterministic. Runtime-recorded timestamps (assistant message
+	// CreatedAt, fallback cooldown windows, budget turn timing) go through
+	// this hook; the toolexec dispatcher and hook timing use time.Now.
 	now func() time.Time
 
 	// telemetry receives the runtime's observability events (session
@@ -556,7 +561,7 @@ func WithEnv(env []string) Opt {
 
 // WithClock replaces the runtime's clock. Defaults to time.Now. Tests that
 // need deterministic timestamps (assistant message CreatedAt, fallback
-// cooldown windows, tool-call latency) can pass a fake clock so assertions
+// cooldown windows, budget turn timing) can pass a fake clock so assertions
 // don't depend on wall-clock advancement.
 func WithClock(now func() time.Time) Opt {
 	return func(r *LocalRuntime) {
@@ -708,8 +713,8 @@ func New(ctx context.Context, agents *team.Team, opts ...Opt) (Runtime, error) {
 	return NewLocalRuntime(ctx, agents, opts...)
 }
 
-// NewLocalRuntime creates a new LocalRuntime without the persistence wrapper.
-// This is useful for testing or when persistence is handled externally.
+// NewLocalRuntime creates a LocalRuntime and auto-registers a
+// PersistenceObserver for the configured (default in-memory) session store.
 func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	defaultAgent, err := agents.DefaultAgent()
 	if err != nil {
@@ -741,10 +746,10 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 	r.bgAgents = agenttool.NewHandler(r)
 	r.fallback.prepareMessages = r.prepareMessagesForModel
 
-	// stripUnsupportedModalitiesTransform captures the runtime closure to
-	// resolve the agent from Input.AgentName, so it lives here rather
-	// than as a stateless builtin in pkg/hooks/builtins. It drops image
-	// content for text-only models on every model call.
+	// stripUnsupportedModalitiesTransform drops image, audio and video
+	// parts the resolved model's capabilities (Input.ModelCapabilities)
+	// don't accept, on every model call. Runtime-generated artifact parts
+	// are always kept; strip_generated_media handles them.
 	//
 	// redact_secrets used to live here as a sibling [MessageTransform];
 	// it now ships entirely as a [hooks.BuiltinFunc] in
@@ -840,7 +845,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 
 	if r.modelsStore == nil {
 		// Precedence: an explicit WithModelStore (already set above) wins; then a
-		// store carried on the ModelSwitcherConfig (the team loader shares the
+		// store carried on the modelcatalog.Config (the team loader shares the
 		// one it warmed so the first /model open skips the cold catalog parse);
 		// otherwise a lazy store constructed on first use.
 		if r.modelSwitcherCfg != nil && r.modelSwitcherCfg.ModelsStore != nil {
@@ -1288,7 +1293,7 @@ func (r *LocalRuntime) SessionStore() session.Store {
 func (r *LocalRuntime) Close() error {
 	r.bgAgents.StopAll()
 	r.OnToolsChanged(nil)
-	return r.extraToolsetRuns.close()
+	return r.extraToolsetRuns.close(context.WithoutCancel(r.ctx()))
 }
 
 // UpdateSessionTitle persists the session title via the session store.
@@ -1393,10 +1398,7 @@ func (r *LocalRuntime) emitBackgroundEvent(ctx context.Context, event Event) {
 	}
 }
 
-// emitAgentAndTeamInfo sends the AgentInfo and TeamInfo events that drive the
-// sidebar's agent/model/thinking display. It returns false when sending was
-// aborted (e.g. the context was cancelled). Shared by EmitStartupInfo and
-// EmitAgentInfo so both render identical model labels.
+// armResume discards an earlier decision before publishing a new prompt.
 func (r *LocalRuntime) armResume() {
 	select {
 	case <-r.resumeChan:
@@ -1516,8 +1518,6 @@ func (r *LocalRuntime) QueueStatus() QueueStatus {
 	}
 	return status
 }
-
-// Run starts the agent's interaction loop
 
 func (r *LocalRuntime) startSpan(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	if r.tracer == nil {

@@ -47,10 +47,12 @@ func streamIdleTimeoutFor(p provider.Provider) time.Duration {
 }
 
 // errStreamIdle is the sentinel error returned when the upstream model stream
-// produces no SSE events for longer than defaultStreamIdleTimeout. It does
-// not wrap any standard context error so that the retry/fallback machinery
-// treats it as a non-retryable, non-context-cancelled failure and surfaces a
-// clear error message to the user.
+// produces no SSE events for longer than the stream's idle timeout
+// (streamIdleTimeoutFor). It does not wrap any standard context error so that
+// the retry/fallback machinery treats it as a non-context-cancelled failure
+// and surfaces a clear error message to the user. It is non-retryable except
+// for the single pre-response retry granted to direct transfer_task children
+// (see isRetryableIdleStream).
 var errStreamIdle = errors.New("model stream stalled: no data received from upstream")
 
 // streamResult holds the aggregated result of processing a single chat
@@ -462,8 +464,8 @@ mainLoop:
 			}
 
 		case <-ctx.Done():
-			// Context cancelled (SIGTERM, Ctrl+C, or idle-timeout cancel from
-			// this function). Return promptly so graceful shutdown can proceed.
+			// Context cancelled (SIGTERM, Ctrl+C, or the caller cancelling the
+			// stream). Return promptly so graceful shutdown can proceed.
 			return failedResult(), ctx.Err()
 
 		case <-idleTimer.C:
@@ -493,7 +495,6 @@ mainLoop:
 	// on. Turns with tool calls keep Stopped=false so the loop executes them.
 	// Media is irrelevant to this decision: with no tool calls pending, the turn
 	// is over either way (media or not) — stopping is what ends it correctly.
-	// NOTE(krissetto): this can likely be removed once compaction works properly with all providers (aka dmr)
 	stoppedNoToolCalls := len(toolCalls) == 0
 
 	// Prefer the provider's explicit finish reason when available (e.g.

@@ -10,7 +10,7 @@ import (
 
 // lazyModelStore is the default ModelStore wired in when the caller did not
 // pass WithModelStore. It defers constructing the modelsdev store (which calls
-// os.UserHomeDir and creates the ~/.cagent cache directory) until the first
+// os.UserCacheDir and creates the cagent cache directory) until the first
 // method invocation. This keeps NewLocalRuntime free of disk I/O — tests
 // that never touch the catalog can build a runtime without paying the cost
 // or hitting failure modes that depend on the host filesystem.

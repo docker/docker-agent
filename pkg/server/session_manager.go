@@ -48,7 +48,8 @@ type activeRuntimes struct {
 	deleting         atomic.Bool // Set before deletion waits for an in-flight model transaction
 }
 
-// SessionManager manages sessions for HTTP and Connect-RPC servers.
+// SessionManager manages sessions for the HTTP API server and the --listen
+// control plane.
 type SessionManager struct {
 	runtimeSessions *concurrent.Map[string, *activeRuntimes]
 	deletedSessions *concurrent.Map[string, *activeRuntimes]
@@ -1035,8 +1036,8 @@ var (
 // RunSession runs a session with the given messages.
 //
 // When modelOverride is non-empty, it is applied to the session's current
-// agent before any user messages are appended (and persisted via
-// SetSessionAgentModel) so the override is in effect for this turn and
+// agent before any user messages are appended (and persisted by the
+// session metadata update that follows) so the override is in effect for this turn and
 // every subsequent one. Validation happens before the messages are
 // recorded so a bad ref does not leave an orphaned user message in the
 // history.
@@ -1114,7 +1115,7 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		sess = runtimeSession.session
 	}
 
-	// Apply the model override (if any) before persisting the user
+	// Apply the model override (if any) before appending the user
 	// messages so that an invalid ref does not leave an orphaned user
 	// message in the history. The streaming and modelSwitch locks keep the
 	// runtime, persisted snapshot, live session, and rollback in one transaction.
@@ -2136,8 +2137,8 @@ var ErrModelSwitchingNotSupported = errors.New("model switching not supported by
 
 // ErrSessionNotRunning is returned by methods that require an active
 // runtime for the session (i.e. RunSession must have been called or
-// AttachRuntime invoked) when none is found. HTTP handlers map this to
-// 404 to distinguish from other runtime errors.
+// AttachRuntime invoked) when none is found. GET /sessions/:id/models maps
+// this to 404; steer and followup surface it as 409.
 var ErrSessionNotRunning = errors.New("session not found or not running")
 
 // AvailableSessionModels returns the list of models available for the

@@ -560,7 +560,8 @@ func TestConcurrentBackgroundElicitations_AllSurfaceAndRouteToCorrectWaiter(t *t
 
 		// deliveries counts sink invocations per ElicitationID. Each ID must be
 		// delivered exactly once: any count > 1 means the exactly-once guarantee
-		// (elicitationHandler is the sole caller of emitElicitationRequest) has
+		// (requestElicitation is the sole production caller of
+		// emitElicitationRequestContext) has
 		// regressed, since nothing else in the App/runtime layer masks
 		// duplicates any more.
 		var mu sync.Mutex

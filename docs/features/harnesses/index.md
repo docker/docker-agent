@@ -134,6 +134,29 @@ ready-to-run `claude-code-agent.yaml`.
 > harness unless the sandbox image is separately provisioned and
 > authenticated.
 
+#### Questions and plan approval
+
+When you can answer, Claude Code's own questions reach you as an elicitation
+form, like an MCP server's: in the TUI, through the API server's
+`elicitation_request` events, or in any client that answers elicitations.
+
+- **`AskUserQuestion`**: one form per call, with each option's description
+  under it. You pick one option of a single-choice question and check any of
+  a multiple-choice one (<kbd>Space</kbd> toggles). A free answer replaces
+  the choices, like Claude Code's "Other". If you decline or dismiss the
+  form, Claude Code learns that you did not answer.
+- **Plan approval** (`ExitPlanMode`): you see the plan and choose to proceed
+  or keep planning. Optional feedback goes back to Claude Code when you keep
+  planning.
+
+Docker Agent serves these prompts to the CLI through
+`--permission-prompt-tool`, from an MCP server on loopback that lives for one
+turn and requires a per-turn token. Other tools still run without asking.
+Non-interactive sessions (`serve mcp`, A2A, background agents) keep the
+previous behavior: Claude Code asks in plain text and ends its turn.
+`docker agent run --exec` answers no forms, so it declines them and Claude
+Code carries on without an answer.
+
 ### Codex
 
 ```yaml

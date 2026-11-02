@@ -13,14 +13,15 @@ import (
 // PersistenceObserver is the stock [EventObserver] that mirrors the
 // runtime's event stream to a [session.Store]:
 //
-//   - persists the initial session row on [OnRunStart] for non-sub-session runs;
+//   - persists the initial session row on [PersistenceObserver.OnRunStart]
+//     for non-sub-session runs;
 //   - tracks streaming assistant content (AgentChoice and
 //     AgentChoiceReasoning) into a single growing message row, finalised
 //     on [MessageAddedEvent];
 //   - persists user messages, sub-session attachments, summaries, token
 //     usage, and session-title updates as they fly past.
 //
-// Sub-session and SessionScoped-mismatch filtering live inside [OnEvent]
+// Sub-session and SessionScoped-mismatch filtering live inside [PersistenceObserver.OnEvent]
 // so callers don't have to think about them.
 //
 // The runtime auto-registers one of these in [NewLocalRuntime] against
@@ -46,8 +47,7 @@ type streamingState struct {
 }
 
 // newPersistenceObserver returns an observer that persists to store, or
-// nil when store is nil so the constructor can call [WithEventObserver]
-// unconditionally without a guard.
+// nil when store is nil.
 func newPersistenceObserver(store session.Store) *PersistenceObserver {
 	if store == nil {
 		return nil

@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // Claude Code CLI probe states, from worst to best.
@@ -195,9 +197,12 @@ func firstLine(out []byte) string {
 }
 
 // claudeCodeProvider is the Claude Code harness driver. It also implements
-// harness.Completer, so harness agents get session titles.
+// harness.Completer, so harness agents get session titles, and
+// harness.Eliciter, so Claude Code's questions reach the user.
 type claudeCodeProvider struct {
 	provider
+
+	elicit tools.ElicitationHandler
 }
 
 // Complete answers prompt with the claude CLI's fast model, without tools, MCP

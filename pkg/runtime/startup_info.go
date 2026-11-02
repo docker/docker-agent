@@ -15,6 +15,10 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
+// emitAgentAndTeamInfo sends the AgentInfo and TeamInfo events that drive the
+// sidebar's agent/model/thinking display. It returns false when sending was
+// aborted (e.g. the context was cancelled). Shared by EmitStartupInfo and
+// EmitAgentInfo so both render identical model labels.
 func (r *LocalRuntime) emitAgentAndTeamInfo(ctx context.Context, a *agent.Agent, send func(Event) bool) bool {
 	modelID := r.getEffectiveModelID(ctx, a)
 	modelLabel := modelID.String()
@@ -298,5 +302,3 @@ func listToolsWithTimeout(ctx context.Context, toolset tools.ToolSet, timeout ti
 		return res.tools, res.err
 	}
 }
-
-// armResume discards an earlier decision before publishing a new prompt.

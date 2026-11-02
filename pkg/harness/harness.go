@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // EventType identifies an Event.
@@ -61,6 +62,15 @@ type Provider interface {
 type Completer interface {
 	Provider
 	Complete(ctx context.Context, systemPrompt, prompt string) (string, error)
+}
+
+// Eliciter is an optional Provider capability: putting the questions a
+// harness asks mid-turn (Claude Code's AskUserQuestion and plan approval) to
+// the user through elicit. Without it, a harness asks in plain text and ends
+// its turn.
+type Eliciter interface {
+	Provider
+	WithElicitation(elicit tools.ElicitationHandler) Provider
 }
 
 // Factory builds the Provider for a harness configuration.

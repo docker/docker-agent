@@ -34,8 +34,10 @@ import (
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
-// registerDefaultTools wires up the built-in tool handlers (delegation,
-// background agents, model switching) into the runtime's tool dispatch map.
+// registerDefaultTools wires up the built-in tool handlers (session context,
+// background agents) into the runtime's tool dispatch map. Caller-bound
+// handlers (transfer_task, handoff, change_model, ...) are bound per call in
+// processToolCalls.
 func (r *LocalRuntime) registerDefaultTools() {
 	r.toolMap[sessioncontext.ToolNameListSessions] = r.handleListSessions
 	r.toolMap[sessioncontext.ToolNameReadSession] = r.handleReadSession
@@ -48,8 +50,8 @@ func (r *LocalRuntime) registerDefaultTools() {
 }
 
 // emitHookDrivenShutdown fans out the standard Error /
-// notification(level=error) / on_error stanzas when a hook
-// (post_tool_use or before_llm_call) signals run termination.
+// notification(level=error) / on_error stanzas when a blocking hook
+// (e.g. post_tool_use or before_llm_call) signals run termination.
 func (r *LocalRuntime) emitHookDrivenShutdown(
 	ctx context.Context,
 	a *agent.Agent,
@@ -58,9 +60,9 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 	events EventSink,
 ) {
 	if message == "" {
-		// aggregate() always populates Result.Message on a deny
-		// verdict; the fallback covers any future hook that returns
-		// block without a reason.
+		// aggregate() may leave Result.Message empty on a deny
+		// verdict (e.g. exit 2 without stderr, or block without a
+		// reason).
 		message = "Agent terminated by a hook."
 	}
 	events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeHookBlocked, message))
@@ -71,7 +73,9 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 // emits the StreamStopped event, fires hooks, records telemetry, restores the
 // previous elicitation channel, and closes the events channel.
 //
-// reason is one of the turnEndReason* constants and classifies how the
+// reason is one of the turnEndReason* constants (or
+// StreamStopReasonMaxIterations), or empty when the stream exits before any
+// turn classifies it (e.g. tool setup failure), and classifies how the
 // stream ended (e.g. "normal", "error", "canceled"). It is surfaced in
 // the StreamStoppedEvent so external consumers (boards, dashboards) can
 // distinguish between successful completion, crashes, and user-initiated
@@ -240,7 +244,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	// streamReason records the exit reason from the final turn so
 	// finalizeEventChannel can surface it in the StreamStoppedEvent.
-	// It is updated by each turn via runTurn (passed by pointer).
+	// It is copied from ls.exitReason after each runTurn.
 	//
 	// Register the cleanup defer immediately after the swap so every exit
 	// path finalizes, including the early returns below (tool setup
@@ -290,9 +294,10 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	// session_start fires once per RunStream. Its AdditionalContext
 	// (typically the AddEnvironmentInfo env block) is held as transient
-	// extras and threaded into every model call below — never persisted,
-	// to keep the visible transcript clean and the user message tail
-	// stable.
+	// extras and threaded into every model call below — never added to
+	// the visible transcript (with cache_stable_prompts it is persisted
+	// only in the instruction-context snapshot), to keep the transcript
+	// clean and the user message tail stable.
 	sessionStart := r.executeSessionStartHooks(ctx, sess, a, sink)
 	ls := &loopState{
 		maxIterations:          sess.MaxIterations,
@@ -525,7 +530,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// the actual inference context), then tries provider discovery and
 		// the models.dev catalogue. The lookup above is reused inside resolveContextLimit
 		// only when context_size isn't supplied; we keep the explicit call
-		// here because m is also passed to [computeMessageCost] for
+		// here because m is also passed to [pricing.ComputeMessageCost] for
 		// per-turn cost computation.
 		// resolveContextLimit yields the primary model's window; effectiveContextLimit
 		// caps it to the dedicated compaction model's (smaller) window when one is
@@ -551,14 +556,14 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			return
 		}
 
-		// Everything from turn_start onwards is wrapped in a closure so a
+		// Everything from turn_start onwards is extracted into runTurn so a
 		// single deferred turn_end hook fires on every exit path: a normal
 		// stop, a follow-up continue, an error, a hook-driven shutdown, the
-		// loop-detector tripping, ctx cancellation, even a panic. The
-		// closure returns the loop control directive and the reason string
-		// reported via [hooks.Input.Reason]; the deferred dispatch then runs
-		// AFTER the closure body has assigned both, so callers see the same
-		// reason the runtime took. ctrl drives the outer for-loop's
+		// loop-detector tripping, ctx cancellation, even a panic. runTurn
+		// returns the loop control directive and records the reason reported
+		// via [hooks.Input.Reason] in ls.exitReason; the deferred dispatch
+		// runs AFTER both are set, so callers see the same reason the
+		// runtime took. ctrl drives the outer for-loop's
 		// continue-or-exit decision.
 		ctrl := r.runTurn(ctx, sess, a, m, model, modelID, contextLimit, sessionSpan, agentTools, ls, sink)
 		streamReason = ls.exitReason
@@ -842,7 +847,7 @@ func (r *LocalRuntime) runTurn(
 	// assistant message — the hook's cost is therefore guaranteed to
 	// equal the cost the session bills for this turn. It is nil when
 	// the turn cannot be priced (no usage, or a model with no pricing
-	// table); see computeMessageCost.
+	// table); see pricing.ComputeMessageCost.
 	msgCost := pricing.ComputeMessageCost(res.Usage, m)
 	if len(res.UsageAttempts) > 0 && usedModel != nil {
 		msgCost = attemptsCost(ctx, res.UsageAttempts, dispatchedConfig(res, usedModel.BaseConfig()), r.modelsStore)
@@ -948,14 +953,14 @@ func (r *LocalRuntime) runTurn(
 
 	// Re-probe toolsets after tool calls: an install/setup tool call may
 	// have made a previously-unavailable LSP or MCP connectable. reprobe()
-	// calls ensureToolSetsAreStarted, emits recovery notices, and updates
-	// the TUI tool-count immediately.
+	// calls ensureToolSetsAreStarted, emits pending failure warnings, and
+	// updates the TUI tool-count immediately.
 	//
 	// The new tools are picked up by the next iteration's getTools() call
 	// at the top of this loop, so the model sees them on its very next
 	// response — within the same user turn, without requiring a new user
-	// message. reprobe's return value is intentionally discarded here;
-	// the top-of-loop getTools() is the authoritative source.
+	// message. reprobe deliberately returns nothing; the top-of-loop
+	// getTools() is the authoritative source.
 	if len(res.Calls) > 0 {
 		r.reprobe(ctx, sess, a, agentTools, sessionSpan, events)
 	}
@@ -1166,7 +1171,7 @@ func shouldWarnOnCacheMiss(sess *session.Session, usage *MessageUsage) bool {
 // recordAssistantMessage adds the model's response to the session and returns
 // per-message usage information for the token-usage event. Empty responses with
 // usage are kept for accounting; session prompt assembly filters them out.
-// cost is the precomputed per-turn cost (see computeMessageCost); nil records
+// cost is the precomputed per-turn cost (see pricing.ComputeMessageCost); nil records
 // as 0, matching the previous "no pricing data" behaviour.
 func (r *LocalRuntime) recordAssistantMessage(
 	ctx context.Context,

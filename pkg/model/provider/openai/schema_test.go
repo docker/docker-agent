@@ -2,8 +2,10 @@ package openai
 
 import (
 	"encoding/json"
+	"maps"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/openai/openai-go/v3/shared"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1008,6 +1010,40 @@ func TestEnsureTypeFields_RefLeaf(t *testing.T) {
 	assert.Equal(t, "#/$defs/thing", p["$ref"])
 }
 
+// TestEnsureTypeFields_EnumConstTakeValueType ensures a typeless enum/const
+// node gets the type of its values rather than "object", which would reject
+// every value. pydantic emits such a node for Literal["auto", 0, 1].
+func TestEnsureTypeFields_EnumConstTakeValueType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		node map[string]any
+		want any
+	}{
+		{"string enum", map[string]any{"enum": []any{"a", "b"}}, "string"},
+		{"integer enum", map[string]any{"enum": []any{float64(1), float64(2)}}, "integer"},
+		{"number enum", map[string]any{"enum": []any{float64(1), 1.5}}, "number"},
+		{"boolean enum", map[string]any{"enum": []any{true}}, "boolean"},
+		{"mixed enum", map[string]any{"enum": []any{"auto", float64(0), nil}}, []any{"string", "integer", "null"}},
+		{"string const", map[string]any{"const": "x"}, "string"},
+		{"no values", map[string]any{"description": "d"}, "object"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			schema := shared.FunctionParameters{
+				"type":       "object",
+				"properties": map[string]any{"p": tt.node},
+			}
+
+			updated := ensureTypeFields(schema)
+
+			p := updated["properties"].(map[string]any)["p"].(map[string]any)
+			assert.Equal(t, tt.want, p["type"])
+		})
+	}
+}
+
 // TestEnsureTypeFields_CompositionNodesLeftAsLeaves ensures ensureTypeFields
 // never injects a "type" onto an anyOf/oneOf/allOf node. A "type" sibling
 // combines with these keywords via AND, so injecting one can make the
@@ -1330,4 +1366,67 @@ func assertNoNullableContainerTypePairs(t *testing.T, schema map[string]any) {
 		container, isNullablePair := nullableContainerType(node)
 		assert.False(t, isNullablePair, "found nullable %s type pair: %v", container, node)
 	})
+}
+
+// TestConvertParametersToSchema_EnumConstNullability checks typeless and
+// nullable enum/const properties through the full conversion by validating
+// instances against the result: optional ones must still accept null once
+// made required, and a required enum that lists null must keep accepting it.
+func TestConvertParametersToSchema_EnumConstNullability(t *testing.T) {
+	t.Parallel()
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode":  map[string]any{"enum": []any{"auto", 0, 1}},
+			"only":  map[string]any{"const": "x"},
+			"level": map[string]any{"type": "string", "enum": []any{"low", "high"}},
+			"pick":  map[string]any{"enum": []any{"auto", 0, nil}},
+		},
+		"required": []any{"pick"},
+	}
+
+	out, strict, err := ConvertParametersToSchema(params)
+	require.NoError(t, err)
+	assert.True(t, strict)
+
+	data, err := json.Marshal(out)
+	require.NoError(t, err)
+	var parsed jsonschema.Schema
+	require.NoError(t, json.Unmarshal(data, &parsed))
+	resolved, err := parsed.Resolve(nil)
+	require.NoError(t, err)
+
+	valid := map[string]any{"mode": "auto", "only": "x", "level": "low", "pick": "auto"}
+	tests := []struct {
+		name  string
+		field string
+		value any
+		ok    bool
+	}{
+		{"mixed enum string", "mode", "auto", true},
+		{"mixed enum integer", "mode", 0, true},
+		{"mixed enum omitted as null", "mode", nil, true},
+		{"mixed enum other", "mode", "bad", false},
+		{"const value", "only", "x", true},
+		{"const omitted as null", "only", nil, true},
+		{"const other", "only", "y", false},
+		{"typed enum omitted as null", "level", nil, true},
+		{"typed enum other", "level", "mid", false},
+		{"required enum allows null", "pick", nil, true},
+		{"required enum integer", "pick", 0, true},
+		{"required enum other", "pick", "bad", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			instance := maps.Clone(valid)
+			instance[tt.field] = tt.value
+			err := resolved.Validate(instance)
+			if tt.ok {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+			}
+		})
+	}
 }

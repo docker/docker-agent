@@ -88,7 +88,7 @@ func TestExtraRunnableBorrowedOwnership(t *testing.T) {
 		sess := session.New()
 		require.NoError(t, runs.start(t.Context(), sess, 0, tools.WithName(owner, "worker")))
 		runCtx := <-started
-		require.NoError(t, runs.close())
+		require.NoError(t, runs.close(t.Context()))
 		require.NoError(t, runCtx.Err(), "runtime must not stop team/embedder-owned workers")
 		require.NoError(t, owner.Stop(t.Context()))
 		require.ErrorIs(t, runCtx.Err(), context.Canceled)
@@ -112,7 +112,7 @@ func TestExtraRunnableCloseRacesStarts(t *testing.T) {
 		var callers sync.WaitGroup
 		for range 20 {
 			callers.Go(func() { _ = runs.start(t.Context(), sess, 0, inner) })
-			callers.Go(func() { assert.NoError(t, runs.close()) })
+			callers.Go(func() { assert.NoError(t, runs.close(t.Context())) })
 		}
 		callers.Wait()
 		assert.Zero(t, active.Load())
@@ -143,6 +143,6 @@ func TestExtraRunnableNoncomparable(t *testing.T) {
 		}
 		synctest.Wait()
 		assert.EqualValues(t, 1, launches.Load())
-		require.NoError(t, runs.close())
+		require.NoError(t, runs.close(t.Context()))
 	})
 }
