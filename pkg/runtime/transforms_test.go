@@ -1,4 +1,3 @@
-// TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap covers the hot
 package runtime
 
 import (
@@ -167,7 +166,7 @@ func TestStripUnsupportedModalitiesTransform(t *testing.T) {
 	cases := []struct {
 		name string
 		caps *modelinfo.ModelCapabilities
-		// wantMime lists the expected surviving MultiContent parts, in
+		// wantParts lists the expected surviving MultiContent parts, in
 		// order, identified by text or MIME/kind.
 		wantParts []string
 	}{
@@ -345,6 +344,7 @@ func TestStripUnsupportedMediaContent_PreservesGeneratedMediaIndependently(t *te
 	assert.False(t, sawImageURL, "an ordinary user-attached image without ArtifactPath must still be stripped")
 }
 
+// TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap covers the hot
 // path: a runtime with no registered transforms returns the input
 // slice as-is without allocating a [hooks.Input].
 func TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap(t *testing.T) {
@@ -356,7 +356,7 @@ func TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap(t *testing.T) {
 	r, err := NewLocalRuntime(t.Context(), tm, WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 
-	// Drop the runtime-shipped strip transform so we can observe the
+	// Drop the runtime-shipped strip transforms so we can observe the
 	// cheap-path behavior.
 	r.transforms = nil
 

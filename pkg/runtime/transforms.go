@@ -25,8 +25,8 @@ import (
 // JSON-roundtripping a full conversation through the cross-process
 // hook protocol would be prohibitive, so command and model hooks
 // cannot rewrite messages. Embedders register transforms via
-// [WithMessageTransform]; the runtime ships
-// [BuiltinStripUnsupportedModalities] out of the box.
+// [WithMessageTransform]; the runtime ships [BuiltinStripGeneratedMedia]
+// and [BuiltinStripUnsupportedModalities] out of the box.
 //
 // Transforms run AFTER the standard before_llm_call gate (see
 // [LocalRuntime.executeBeforeLLMCallHooks]) — a hook that wants to
@@ -50,8 +50,7 @@ type registeredTransform struct {
 // it is applied to every LLM call, in registration order, after the
 // before_llm_call gate. Transforms are runtime-global: per-agent
 // scoping (if needed) lives in the transform body, where
-// [hooks.Input.AgentName] is available — the runtime-shipped strip
-// transform is an example.
+// [hooks.Input.AgentName] is available.
 //
 // Empty name or nil fn are silently ignored, matching the no-error
 // shape of the other [Opt] helpers.
@@ -65,25 +64,9 @@ func WithMessageTransform(name string, fn MessageTransform) Opt {
 	}
 }
 
-// applyBeforeLLMCallTransforms runs every registered
-// [MessageTransform] in chain order, just before the model call and
-// AFTER [LocalRuntime.executeBeforeLLMCallHooks] has approved it.
-// Errors from individual transforms are logged at warn level and the
-// chain continues with the previous slice — a transform failure must
-// never break the run loop.
-//
-// modelID is the canonical model identifier the loop has just
-// resolved (after per-tool overrides and alloy-mode selection);
-// transforms read it via [hooks.Input.ModelID]. Calling
-// agent.Model() from a transform would re-randomize the alloy pick
-// and miss the per-tool override.
-//
-// caps is the model's already-resolved attachment capability set
-// (explicit `capabilities:` config override applied — see
-// [modelinfo.ResolveCapsFromModel]); transforms read it via
-// [hooks.Input.ModelCapabilities]. nil means the caller has no
-// capability information (e.g. the coding-harness path) and
-// capability-gated transforms must not act.
+// prepareMessagesForModel resolves the model's attachment capabilities
+// (catalog, `capabilities:` config override, alias, then provider fallback)
+// and runs the registered transforms for that model.
 func (r *LocalRuntime) prepareMessagesForModel(
 	ctx context.Context,
 	sess *session.Session,
@@ -130,6 +113,26 @@ func providerOptBool(opts map[string]any, key string) bool {
 	}
 }
 
+// applyBeforeLLMCallTransforms runs every registered
+// [MessageTransform] in chain order, just before the model call and
+// AFTER [LocalRuntime.executeBeforeLLMCallHooks] has approved it.
+// Errors from individual transforms are logged at warn level and the
+// chain continues with the previous slice — a transform failure must
+// never break the run loop.
+//
+// modelID identifies the model this call targets: the provider of this
+// attempt (primary, fallback, or native compactor, after per-tool overrides
+// and alloy-mode selection), or the harness label on the coding-harness
+// path; transforms read it via [hooks.Input.ModelID]. Calling
+// agent.Model() from a transform would re-randomize the alloy pick
+// and miss the per-tool override.
+//
+// caps is the model's already-resolved attachment capability set
+// (explicit `capabilities:` config override applied — see
+// [modelinfo.ResolveCapsFromModel]); transforms read it via
+// [hooks.Input.ModelCapabilities]. nil means the caller has no
+// capability information (e.g. the coding-harness path) and
+// capability-gated transforms must not act.
 func (r *LocalRuntime) applyBeforeLLMCallTransforms(
 	ctx context.Context,
 	sess *session.Session,

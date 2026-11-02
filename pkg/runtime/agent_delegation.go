@@ -119,8 +119,8 @@ type SubSessionConfig struct {
 	// ExpectedOutput is an optional description of what the sub-agent should produce.
 	ExpectedOutput string
 	// SystemMessage, when non-empty, replaces the default task-based system
-	// message. This is used by skill sub-agents whose system prompt is the
-	// skill content itself rather than the team delegation boilerplate.
+	// message. This is used by skill sub-agents, whose system prompt is a
+	// skill-specific preamble rather than the team delegation boilerplate.
 	SystemMessage string
 	// AgentName is the name of the agent that will execute the sub-session.
 	AgentName string
@@ -143,13 +143,13 @@ type SubSessionConfig struct {
 	NonInteractive bool
 	// PinAgent, when true, pins the child session to AgentName via
 	// session.WithAgentName. This is required for concurrent background
-	// tasks that must not share the runtime's mutable currentAgent field.
+	// tasks that must not share the runtime's shared current-agent slot.
 	PinAgent bool
 	// AllowHandoffs permits intentional routing inside a pinned skill fork.
 	AllowHandoffs bool
 	// ImplicitUserMessage, when non-empty, overrides the default "Please proceed."
 	// user message sent to the child session. This allows callers like skill
-	// sub-agents to pass the task description as the user message.
+	// sub-agents to pass the skill instructions (and task) as the user message.
 	ImplicitUserMessage string
 	// ExcludedTools lists tool names that should be filtered out of the agent's
 	// tool list for the child session. This prevents recursive tool calls
@@ -190,7 +190,7 @@ type SubSessionConfig struct {
 // The OpenTelemetry span is owned by the caller (each public-facing
 // handler opens its own span before calling runForwarding) so that
 // pre-delegation work — most importantly the model override applied
-// by [LocalRuntime.handleRunSkill] before forwarding — is recorded
+// by [LocalRuntime.runSkillFork] before forwarding — is recorded
 // under the caller's span.
 type delegationRequest struct {
 	SubSessionConfig
@@ -342,15 +342,16 @@ func (r *LocalRuntime) swapCurrentAgent(ctx context.Context, sessionID string, f
 // the user sees the child's events live.
 //
 // On success it returns a tool result whose output is the child's last
-// assistant message. On error it has already forwarded the ErrorEvent to
-// evts and returns a wrapped error.
+// assistant message. On error it returns a non-nil error; when the child
+// stream failed, its ErrorEvent or BudgetExceededEvent has already been
+// forwarded to evts.
 //
 // The caller is expected to have opened a tracing span before calling
 // runForwarding; the function records sub-session status (Ok / Error)
 // on whatever span is attached to ctx — a no-op if none.
 //
 // runForwarding handles every concern the callers used to duplicate:
-// resolving the caller from the parent session, swapping the current agent
+// rejecting a nil caller agent (callers resolve it), swapping the current agent
 // (if requested; downgraded to pinning the child when the parent session is
 // itself pinned), resolving the child agent, building the sub-session,
 // driving RunStream, and recording the sub-session on the parent.

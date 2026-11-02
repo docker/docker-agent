@@ -79,9 +79,9 @@ func hasEventOfType[E Event](evs []Event) bool {
 //
 // We construct the runtime first (so we have access to its private
 // registry), register the verdict builtin on it, and only then exercise
-// the agent — the hooks Executor is built lazily on first use, so by
-// the time the matcher resolves "command" against the registry, our
-// builtin is there.
+// the agent — executors are pre-built, but builtin names resolve
+// against the registry at dispatch time, so registering after
+// construction works.
 func makeJudgedRuntime(
 	t *testing.T,
 	verdict hooks.Decision,
@@ -129,9 +129,9 @@ func makeJudgedRuntime(
 }
 
 // runJudgedToolCall is the assertion-friendly wrapper around
-// processToolCalls used by the per-decision tests. It returns whether
-// the tool ran and the captured events so callers can also check that
-// the user prompt did or did not fire.
+// processToolCalls used by the per-decision tests. It returns the captured
+// events so callers can also check that the user prompt did or did not
+// fire; whether the tool ran is read from makeJudgedRuntime's executed flag.
 func runJudgedToolCall(t *testing.T, rt *LocalRuntime, sess *session.Session, agentTools []tools.Tool) []Event {
 	t.Helper()
 	calls := []tools.ToolCall{{

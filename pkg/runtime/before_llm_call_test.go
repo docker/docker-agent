@@ -115,7 +115,7 @@ func TestMaxIterationsBuiltin_TripsAfterConfiguredLimit(t *testing.T) {
 	// Build a fresh tool-call stream per iteration. We queue more
 	// streams than `limit` so a regression that lets the loop run an
 	// extra time still has a stream to consume — the test then catches
-	// the over-run via prov.callIdx.
+	// the over-run from the residual queue length.
 	newToolCallStream := func(callID string) *mockStream {
 		return newStreamBuilder().
 			AddToolCallName(callID, loopTool.Name).

@@ -158,7 +158,7 @@ func TestExtractMessages_KeepsRecentMessages(t *testing.T) {
 	t.Parallel()
 
 	// Create a session with many messages, some large enough that the last
-	// ~MaxKeepTokens are kept aside.
+	// ~maxKeepTokens are kept aside.
 	var items []session.Item
 	for range 10 {
 		items = append(items, session.NewMessageItem(&session.Message{

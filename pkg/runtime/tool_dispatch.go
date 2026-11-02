@@ -21,18 +21,19 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
 )
 
-// processToolCalls builds a per-stream [toolexec.Dispatcher] and delegates
+// processToolCalls builds a per-batch [toolexec.Dispatcher] and delegates
 // the per-call orchestration to it. The dispatcher owns the approval flow,
 // hook dispatch, tracing, telemetry, and event emission; this file only
 // supplies the runtime-side adapters that bridge them to the runtime's
-// chan Event.
+// EventSink.
 //
 // The dispatcher is constructed per call (cheap: a struct literal plus a
 // small handler-binding map) so its handlers and emitter capture this
-// RunStream's events channel.
+// RunStream's EventSink.
 //
 // Returns (stopRun, message) when a post_tool_use hook signalled a
-// terminating verdict during this batch; the run loop then fans out the
+// terminating verdict during this batch, or when evaluator spend during the
+// batch exceeded the budget; the run loop then fans out the
 // standard Error / notification / on_error stanzas before exiting.
 // (false, "") in every other path — including user cancellation, which
 // halts the *batch* but keeps the loop alive so the synthesised tool
@@ -42,9 +43,10 @@ func (r *LocalRuntime) processToolCalls(ctx context.Context, sess *session.Sessi
 	accounting := &evaluatorAccounting{r: r, sess: sess, a: caller, events: events}
 	ctx = context.WithValue(ctx, evaluatorAccountingKey{}, accounting)
 
-	// Bind runtime-managed handlers (transfer_task, handoff, change_model, ...)
-	// to the current events channel: r.toolMap entries take chan Event,
-	// toolexec.ToolHandler doesn't.
+	// Bind r.toolMap handlers (session context, background agents) to the
+	// current EventSink: they take an EventSink, toolexec.ToolHandler
+	// doesn't. Caller-bound handlers (transfer_task, handoff, ...) are added
+	// below.
 	handlers := make(map[string]toolexec.ToolHandler, len(r.toolMap)+5)
 	for name, h := range r.toolMap {
 		handlers[name] = func(ctx context.Context, sess *session.Session, tc tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
@@ -119,7 +121,7 @@ func (r *LocalRuntime) permissionCheckers(sess *session.Session) []toolexec.Name
 
 // sinkEmitter adapts an [EventSink] into a [toolexec.Emitter]. It's the
 // only place where the dispatcher's typed event surface meets the
-// runtime's event channel; new dispatcher events grow this type in
+// runtime's EventSink; new dispatcher events grow this type in
 // lockstep with the [toolexec.Emitter] interface.
 type sinkEmitter struct {
 	events EventSink
@@ -150,7 +152,7 @@ func (e *sinkEmitter) EmitMessageAdded(sessionID string, msg *session.Message, a
 }
 
 // hookDispatcher adapts the runtime's per-agent [hooks.Executor] machinery
-// into the small [toolexec.HookDispatcher] interface. The events channel
+// into the small [toolexec.HookDispatcher] interface. The EventSink
 // is captured here so [LocalRuntime.dispatchHook] can surface SystemMessage
 // as a Warning event during dispatch.
 type hookDispatcher struct {
@@ -190,8 +192,9 @@ func denySourceFor(checkerSource string) string {
 }
 
 // addAgentMessage records a chat message in the session and emits the
-// resulting MessageAdded event. Used by the loop for assistant messages
-// and max-iteration stop messages. The dispatcher emits its own variant
+// resulting MessageAdded event. Used for messages the runtime records
+// outside the dispatcher (assistant turns, stop messages, cached and harness
+// responses, structured-output results). The dispatcher emits its own variant
 // directly via the [toolexec.Emitter] interface.
 func addAgentMessage(sess *session.Session, a *agent.Agent, msg *chat.Message, events EventSink) {
 	// Synthetic answers have no streaming phase; announce their text on the wire too.

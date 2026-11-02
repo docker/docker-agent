@@ -19,7 +19,7 @@ type Event interface {
 }
 
 // SessionScoped is implemented by events that belong to a specific session.
-// The PersistentRuntime uses this to filter out sub-session events that
+// The PersistenceObserver uses this to filter out sub-session events that
 // should not be persisted into the parent session's history.
 type SessionScoped interface {
 	GetSessionID() string
@@ -522,9 +522,9 @@ func NewTokenUsageEvent(sessionID, agentName string, usage *Usage) Event {
 	}
 }
 
-// GetSessionID makes TokenUsageEvent satisfy [SessionScoped] so the
-// observer fan-out can drop sub-session events without each observer
-// re-implementing the check.
+// GetSessionID makes TokenUsageEvent satisfy [SessionScoped] so observers
+// that filter on it (e.g. PersistenceObserver) can drop sub-session
+// token-usage events.
 func (e *TokenUsageEvent) GetSessionID() string { return e.SessionID }
 
 // SessionUsage builds a Usage from the session's current token counts, the
@@ -689,8 +689,9 @@ func (e *SessionCompactionEvent) GetSessionID() string { return e.SessionID }
 // StreamStopReasonMaxIterations identifies a stream stopped at its iteration limit.
 const StreamStopReasonMaxIterations = "max_iterations"
 
-// StreamStoppedEvent reports that a RunStream loop has stopped. Reason carries
-// the turnEndReason* classification (normal, error, canceled) so consumers can
+// StreamStoppedEvent reports that a RunStream loop has stopped. Reason is a
+// turnEndReason* value (e.g. normal, error, canceled) or
+// StreamStopReasonMaxIterations, so consumers can
 // tell successful completion apart from crashes and user-initiated stops.
 //
 // Delivery is bounded-blocking: finalizeEventChannel waits (up to a deadline)
@@ -774,7 +775,7 @@ type ElicitationRequestEvent struct {
 	URL     string `json:"url,omitempty"`
 	// ElicitationID is the internally-generated correlation ID used to route
 	// a ResumeElicitation response back to this specific request (see
-	// elicitationHandler). It is always set and always unique, regardless of
+	// requestElicitation). It is always set and always unique, regardless of
 	// whether the originating MCP server supplied its own wire ID: two
 	// independent servers can coincidentally reuse the same wire ID, so that
 	// value is never used for routing (#3584).
@@ -1289,7 +1290,7 @@ func HookBlocked(toolCall tools.ToolCall, toolDefinition tools.Tool, message, ag
 }
 
 // MessageAddedEvent is emitted when a message is added to the session.
-// This event is used by the PersistentRuntime wrapper to persist messages.
+// This event is used by the PersistenceObserver to persist messages.
 type MessageAddedEvent struct {
 	AgentContext
 
@@ -1317,7 +1318,7 @@ func MessageAdded(sessionID string, msg *session.Message, agentName string) Even
 }
 
 // SubSessionCompletedEvent is emitted when a sub-session completes and is added to parent.
-// This event is used by the PersistentRuntime wrapper to persist sub-sessions.
+// This event is used by the PersistenceObserver to persist sub-sessions.
 type SubSessionCompletedEvent struct {
 	AgentContext
 

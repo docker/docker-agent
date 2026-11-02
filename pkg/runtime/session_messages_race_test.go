@@ -9,7 +9,7 @@ import (
 )
 
 // TestAppendSteerAndEmitConcurrentWithAddMessage pins the data-race fix for
-// loop.go's appendSteerAndEmit (issue #3590): the emitted
+// continuation.go's appendSteerAndEmit (issue #3590): the emitted
 // UserMessageEvent.SessionPosition must come from AddMessage's own atomic
 // return value, not a separate len(sess.Messages)-1 read taken after the
 // fact. Run with -race: without the fix, reading len(sess.Messages)

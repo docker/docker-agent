@@ -26,9 +26,9 @@ import (
 // execHookDispatcher drives the dispatcher through a real
 // [hooks.Executor] so the tests exercise the executor's aggregation
 // (fail-closed, most-restrictive verdict, pipeline rewrites) instead of
-// canned results. It mirrors the runtime adapter: no hooks configured
-// for the event → nil, Dispatch error → nil. Notifications reuse the
-// stub's recording.
+// canned results. No hooks configured for the event → nil, and, unlike
+// the runtime adapter (which fails closed on Dispatch errors for blocking
+// events), Dispatch error → nil. Notifications reuse the stub's recording.
 type execHookDispatcher struct {
 	stubHookDispatcher
 

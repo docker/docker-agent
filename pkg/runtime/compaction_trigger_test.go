@@ -44,7 +44,7 @@ func TestCompactionController_IgnoresSubSessionTokens(t *testing.T) {
 	sub := session.New(session.WithUserMessage("subtask"))
 	sub.AddMessage(session.NewAgentMessage("worker", &chat.Message{
 		Role:    chat.MessageRoleAssistant,
-		Content: strings.Repeat("z", 600_000), // ~150k estimated tokens
+		Content: strings.Repeat("z", 600_000), // ~171k estimated tokens
 	}))
 	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{
 		Role:      chat.MessageRoleAssistant,
@@ -93,7 +93,7 @@ func TestCompactionController_TriggersOnOwnMessages(t *testing.T) {
 	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{
 		Role:       chat.MessageRoleTool,
 		ToolCallID: "t1",
-		Content:    strings.Repeat("z", 600_000), // ~150k estimated tokens
+		Content:    strings.Repeat("z", 600_000), // ~171k estimated tokens
 	}))
 
 	events := make(chan Event, 16)
@@ -116,8 +116,8 @@ func TestCompactionController_TriggersOnOwnMessages(t *testing.T) {
 func TestCompactionController_CustomThreshold(t *testing.T) {
 	t.Parallel()
 
-	// ~150k chars ≈ ~37.5k estimated tokens: 37.5% of the 100k window —
-	// under the 0.9 default, over a 0.25 threshold.
+	// ~150k chars ≈ ~43k estimated tokens (3.5 chars/token): ~43% of the
+	// 100k window — under the 0.9 default, over a 0.25 threshold.
 	buildSession := func() (*session.Session, int) {
 		sess := session.New(session.WithUserMessage("build the app"))
 		before := len(sess.OwnMessages())
@@ -157,15 +157,15 @@ func TestCompactionController_CustomThreshold(t *testing.T) {
 		return false
 	}
 
-	t.Run("default threshold does not trigger at 37% usage", func(t *testing.T) {
+	t.Run("default threshold does not trigger at 43% usage", func(t *testing.T) {
 		t.Parallel()
-		assert.False(t, run(t), "37%% usage must not trigger compaction at the 0.9 default")
+		assert.False(t, run(t), "43%% usage must not trigger compaction at the 0.9 default")
 	})
 
 	t.Run("lower threshold triggers on the same session", func(t *testing.T) {
 		t.Parallel()
 		assert.True(t, run(t, agent.WithCompactionThreshold(0.25)),
-			"37%% usage must trigger compaction with compaction_threshold: 0.25")
+			"43%% usage must trigger compaction with compaction_threshold: 0.25")
 	})
 
 	t.Run("threshold of 1 suppresses the trigger even at high usage", func(t *testing.T) {
@@ -220,7 +220,7 @@ func TestCompactIfNeeded_AgentSessionCompactionDisabled(t *testing.T) {
 	sess.AddMessage(session.NewAgentMessage("root", &chat.Message{
 		Role:       chat.MessageRoleTool,
 		ToolCallID: "t1",
-		Content:    strings.Repeat("z", 600_000), // ~150k estimated tokens
+		Content:    strings.Repeat("z", 600_000), // ~171k estimated tokens
 	}))
 
 	events := make(chan Event, 16)

@@ -19,9 +19,11 @@ func (r *LocalRuntime) appendSteerAndEmit(sess *session.Session, sm QueuedMessag
 	events.Emit(userMessageEvent(msg.Message, sess.ID, pos))
 }
 
-// drainAndEmitSteered drains all messages from the steer queue and injects
-// them into the session as individual user messages. When multiple messages
-// are drained, a "\n" is appended to the content of every non-last message.
+// drainAndEmitSteered defers to drainSteeredQueue unless the session is
+// routed (routed sessions drain only at boundaries). drainSteeredQueue drains
+// all messages from the steer queue and injects them into the session as
+// individual user messages. When multiple messages are drained, a "\n" is
+// appended to the content of every non-last message.
 // Some chat templates concatenate consecutive user messages without a
 // separator before tokenisation, which would cause trailing/leading word
 // fragments from adjacent messages to be glued together. The "\n" prevents
@@ -29,7 +31,7 @@ func (r *LocalRuntime) appendSteerAndEmit(sess *session.Session, sm QueuedMessag
 //
 // It also snapshots the message count before any messages are added and
 // returns it alongside the drained flag so the caller can pass it to
-// compaction checks without a separate len(sess.GetAllMessages()) call.
+// compaction checks without a separate sess.OwnMessageCount() call.
 //
 // NOTE: the appended \n is persisted in the session message and included in
 // UserMessageEvent. This is a deliberate trade-off: because the runtime passes
