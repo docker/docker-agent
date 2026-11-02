@@ -869,7 +869,7 @@ func (r *LocalRuntime) runTurn(
 	// bills or what after_llm_call reports. Sub-sessions reach the root
 	// run's tracker here, which is how delegated spend lands on the
 	// parent's budget. The turn's duration is attributed to this agent.
-	r.recordBudget(sess, a, res.Usage, msgCost, r.now().Sub(turnStart), events)
+	r.recordBudget(sess, a, budgetUsage(res.Usage, res.UsageAttempts), msgCost, r.now().Sub(turnStart), events)
 
 	// after_llm_call hooks fire on success only; failed calls
 	// fire on_error above. The assistant text content is passed
