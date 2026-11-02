@@ -179,6 +179,8 @@
       url: /providers/api-route/
     - title: Atlas Cloud
       url: /providers/atlascloud/
+    - title: AtmoRouter
+      url: /providers/atmorouter/
     - title: AWS Bedrock
       url: /providers/bedrock/
     - title: Baseten

@@ -145,6 +145,16 @@
     ]
   },
   {
+    "name": "atmorouter",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://atmorouter.dev/v1",
+    "default_model": "cc/claude-sonnet-4-6",
+    "token_env_vars": [
+      "ATMOROUTER_API_KEY"
+    ]
+  },
+  {
     "name": "baseten",
     "merge_consecutive_messages": true,
     "api_type": "openai",

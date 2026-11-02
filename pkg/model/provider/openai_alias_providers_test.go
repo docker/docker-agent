@@ -106,6 +106,15 @@ var openAIAliasProviders = []openAIAliasProvider{
 		mergesSystemMessages: true,
 	},
 	{
+		provider:             "atmorouter",
+		envVar:               "ATMOROUTER_API_KEY",
+		testKey:              "test-atmorouter-key",
+		model:                "cc/claude-sonnet-4-6",
+		greeting:             "Hello from AtmoRouter",
+		mergesSystemMessages: true,
+		liveOptInEnvVar:      "DOCKER_AGENT_RUN_ATMOROUTER_LIVE_TEST",
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",
@@ -345,7 +354,8 @@ func TestOpenAIAliasProvider_EndToEndRequest(t *testing.T) {
 //	DEEPSEEK_API_KEY=sk-... go test -run TestOpenAIAliasProvider_LiveAPI ./pkg/model/provider/
 //
 // API Route additionally requires DOCKER_AGENT_RUN_API_ROUTE_LIVE_TEST=1;
-// OrcaRouter and Lunaroute also require their respective DOCKER_AGENT_RUN_*_LIVE_TEST=1 opt-ins.
+// OrcaRouter, Lunaroute and AtmoRouter also require their respective
+// DOCKER_AGENT_RUN_*_LIVE_TEST=1 opt-ins.
 func TestOpenAIAliasProvider_LiveAPI(t *testing.T) {
 	for _, p := range openAIAliasProviders {
 		t.Run(p.provider, func(t *testing.T) {
