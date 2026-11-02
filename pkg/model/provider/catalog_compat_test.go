@@ -3,8 +3,11 @@
 package provider
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/testutil/geminiintegration"
 )
 
 func TestRegistryUnauthenticatedOpenAIEndpoint(t *testing.T) {
@@ -113,4 +117,60 @@ func TestRegistryExplicitCanonicalEndpointBypassesGateway(t *testing.T) {
 	rebuilt := cloned.BaseConfig()
 	assert.Empty(t, rebuilt.ModelOptions.Gateway())
 	assert.Equal(t, cfg.BaseURL, cloned.BaseConfig().ModelConfig.BaseURL)
+}
+
+func TestRegistryGoogleEndpointEnvironmentPrecedence(t *testing.T) {
+	geminiintegration.Require(t)
+
+	for _, backend := range []string{"gemini", "vertex"} {
+		t.Run(backend, func(t *testing.T) {
+			const envURL = "https://environment.example"
+			if backend == "vertex" {
+				t.Setenv("GOOGLE_VERTEX_BASE_URL", envURL)
+			} else {
+				t.Setenv("GOOGLE_GEMINI_BASE_URL", envURL)
+			}
+			for _, tt := range []struct {
+				name     string
+				baseURL  string
+				endpoint string
+			}{
+				{name: "omitted", endpoint: envURL},
+				{name: "explicit", baseURL: "https://explicit.example", endpoint: "https://explicit.example"},
+				{name: "explicit catalog endpoint", baseURL: catalog.Lookup("google").BaseURL, endpoint: catalog.Lookup("google").BaseURL},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					calls := 0
+					opts := []options.Opt{options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+						return cloneRoundTripper(func(req *http.Request) (*http.Response, error) {
+							calls++
+							assert.Equal(t, tt.endpoint, req.URL.Scheme+"://"+req.URL.Host)
+							return &http.Response{
+								StatusCode: http.StatusOK,
+								Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+								Body:       io.NopCloser(strings.NewReader("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n")),
+								Request:    req,
+							}, nil
+						})
+					})}
+					cfg := &latest.ModelConfig{Provider: "google", Model: "gemini-2.0-flash", BaseURL: tt.baseURL}
+					if backend == "vertex" {
+						cfg.ProviderOpts = map[string]any{"project": "test-project", "location": "us-central1"}
+						opts = append(opts, options.WithTokenSource(func(context.Context) (string, error) { return "test-token", nil }))
+					}
+					p, err := fullTestRegistry().New(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"GOOGLE_API_KEY": "test-key"}), opts...)
+					require.NoError(t, err)
+					for range 2 {
+						stream, err := p.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, nil)
+						require.NoError(t, err)
+						drainStream(t, stream)
+						stream.Close()
+						p, err = Clone(t.Context(), p)
+						require.NoError(t, err)
+					}
+					assert.Equal(t, 2, calls)
+				})
+			}
+		})
+	}
 }
