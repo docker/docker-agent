@@ -262,6 +262,13 @@ jobs:
       - name: Check generated TypeScript SDK
         run: task check-ts
 
+      - name: Pack TypeScript SDK
+        working-directory: sdk/typescript
+        run: |
+          npm run build
+          npm pack --dry-run --json \
+            | jq -e '.[0].files | map(.path) | contains(["dist/index.js", "dist/index.d.ts", "schemas/docker-agent.schema.json", "schemas/tool-args.schema.json"])'
+
   licenses:
     needs: changes
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tested != 'true'
