@@ -35,10 +35,11 @@ func (r *LocalRuntime) buildHooksExecutors() {
 		if err != nil {
 			continue
 		}
-		cfg := builtins.ApplyAgentDefaults(a.Hooks(), builtins.AgentDefaults{
+		// Workspace agents share source configuration; only mutate a runtime-local copy.
+		cfg := builtins.ApplyAgentDefaults(a.Hooks().Clone(), builtins.AgentDefaults{
 			AddDate:             a.AddDate(),
 			AddEnvironmentInfo:  a.AddEnvironmentInfo(),
-			AddPromptFiles:      a.AddPromptFiles(),
+			AddPromptFiles:      slices.Clone(a.AddPromptFiles()),
 			AddPromptFilesDepth: a.AddPromptFilesDepth(),
 			RedactSecrets:       a.RedactSecrets(),
 		})

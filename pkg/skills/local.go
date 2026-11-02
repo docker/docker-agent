@@ -31,7 +31,7 @@ type localSearchPath struct {
 	recursive bool
 }
 
-// localSearchPaths returns every directory to scan for local skills, in
+// localSearchPathsFromDir returns every directory to scan for local skills, in
 // load order. Entries appearing later in the list override skills with the
 // same name from earlier entries.
 //
@@ -47,7 +47,7 @@ type localSearchPath struct {
 //     ancestor of cwd up to $HOME — or the enclosing git root when cwd is
 //     outside $HOME — down to cwd (closest wins; .agents/skills overrides
 //     .github/skills at the same level).
-func localSearchPaths() []localSearchPath {
+func localSearchPathsFromDir(cwd string) []localSearchPath {
 	if kit := os.Getenv(KitDirEnv); kit != "" {
 		return []localSearchPath{{filepath.Join(kit, KitSkillsSubdir), true}}
 	}
@@ -58,8 +58,7 @@ func localSearchPaths() []localSearchPath {
 		searchPaths = append(searchPaths, homeSkillSearchPaths(home)...)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
+	if cwd == "" {
 		return searchPaths
 	}
 
@@ -73,10 +72,10 @@ func localSearchPaths() []localSearchPath {
 	return searchPaths
 }
 
-// loadLocalSkillsInto populates skillMap with every local skill, with later
+// loadLocalSkillsFromDirInto populates skillMap with every local skill, with later
 // search paths overriding earlier ones.
-func loadLocalSkillsInto(skillMap map[string]Skill) {
-	for _, p := range localSearchPaths() {
+func loadLocalSkillsFromDirInto(skillMap map[string]Skill, dir string) {
+	for _, p := range localSearchPathsFromDir(dir) {
 		for _, skill := range loadSkillsFromDir(p.dir, p.recursive) {
 			skillMap[skill.Name] = skill
 		}

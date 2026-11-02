@@ -240,3 +240,16 @@ func TestMemoryTool_ParametersAreObjects(t *testing.T) {
 		assert.Equal(t, "object", m["type"])
 	}
 }
+
+func TestOwnedDatabaseClosesWithToolset(t *testing.T) {
+	t.Parallel()
+	closed := false
+	ts := New(new(MockDB))
+	ts.closeDB = func() error { closed = true; return nil }
+	managed := tools.NewStartable(ts)
+	require.NoError(t, managed.Start(t.Context()))
+	require.NoError(t, managed.StopIfStarted(t.Context()))
+	assert.True(t, closed)
+	// Caller-owned databases have no closer attached.
+	require.NoError(t, New(new(MockDB)).Stop(t.Context()))
+}

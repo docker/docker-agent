@@ -61,7 +61,8 @@ type liveCompactionRequest struct {
 
 // liveSessionEntry tracks one active RunStream in the live-session registry.
 type liveSessionEntry struct {
-	sess *session.Session
+	owner *LocalRuntime
+	sess  *session.Session
 	// agentName is resolved once at registration: exact for pinned
 	// sessions (background agents) and equal to the current agent at
 	// stream start otherwise (transfer_task swaps the current agent
@@ -94,14 +95,24 @@ func (r *LocalRuntime) registerLiveSession(sess *session.Session) *liveSessionEn
 
 func (r *LocalRuntime) registerLiveSessionWithIdleRetry(sess *session.Session, policy idleStreamRetryPolicy) *liveSessionEntry {
 	entry := &liveSessionEntry{
+		owner:     r,
 		sess:      sess,
 		agentName: r.sessionAgentName(sess),
 		idleRetry: policy.allowance(),
 		compactCh: make(chan liveCompactionRequest, 1),
 	}
+	if r.liveSessionParent != nil {
+		parent := r.liveSessionParent
+		parent.liveSessionsMu.Lock()
+		entry.treeRootID = parent.treeRootIDLocked(sess)
+		parent.liveSessions[sess.ID] = entry
+		parent.liveSessionsMu.Unlock()
+	}
 	r.liveSessionsMu.Lock()
 	defer r.liveSessionsMu.Unlock()
-	entry.treeRootID = r.treeRootIDLocked(sess)
+	if r.liveSessionParent == nil {
+		entry.treeRootID = r.treeRootIDLocked(sess)
+	}
 	r.liveSessions[sess.ID] = entry
 	return entry
 }
@@ -138,6 +149,13 @@ func (r *LocalRuntime) finishLiveSession(ctx context.Context, entry *liveSession
 		delete(r.liveSessions, entry.sess.ID)
 	}
 	r.liveSessionsMu.Unlock()
+	if parent := r.liveSessionParent; parent != nil {
+		parent.liveSessionsMu.Lock()
+		if parent.liveSessions[entry.sess.ID] == entry {
+			delete(parent.liveSessions, entry.sess.ID)
+		}
+		parent.liveSessionsMu.Unlock()
+	}
 
 	for {
 		select {
@@ -179,7 +197,11 @@ func (r *LocalRuntime) LiveSessions(ctx context.Context, current *session.Sessio
 
 	children := make([]LiveSession, 0, len(entries))
 	for _, entry := range entries {
-		children = append(children, r.liveSessionRow(ctx, entry.sess, entry.agentName, false))
+		owner := r
+		if entry.owner != nil {
+			owner = entry.owner
+		}
+		children = append(children, owner.liveSessionRow(ctx, entry.sess, entry.agentName, false))
 	}
 	slices.SortStableFunc(children, func(a, b LiveSession) int {
 		if c := cmp.Compare(a.AgentName, b.AgentName); c != 0 {

@@ -23,6 +23,10 @@ import (
 )
 
 func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) string {
+	if r.isolatedWorktree {
+		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeModelError, "external harness agents do not support isolated background worktrees"))
+		return turnEndReasonError
+	}
 	ctx, span := r.startSpan(ctx, "runtime.harness", trace.WithAttributes(traceAttributesForHarness(sess, a)...))
 	defer span.End()
 

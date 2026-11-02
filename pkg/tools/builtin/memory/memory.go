@@ -28,12 +28,14 @@ type DB interface {
 }
 
 type ToolSet struct {
-	db   DB
-	path string
+	db      DB
+	path    string
+	closeDB func() error
 }
 
 // Verify interface compliance
 var (
+	_ tools.Startable    = (*ToolSet)(nil)
 	_ tools.ToolSet      = (*ToolSet)(nil)
 	_ tools.Describer    = (*ToolSet)(nil)
 	_ tools.Instructable = (*ToolSet)(nil)
@@ -52,6 +54,17 @@ func NewWithPath(manager DB, dbPath string) *ToolSet {
 		db:   manager,
 		path: dbPath,
 	}
+}
+
+// Start leaves database initialization lazy until the first memory operation.
+func (t *ToolSet) Start(context.Context) error { return nil }
+
+// Stop closes the database when this toolset owns it.
+func (t *ToolSet) Stop(context.Context) error {
+	if t.closeDB != nil {
+		return t.closeDB()
+	}
+	return nil
 }
 
 // Describe returns a short, user-visible description of this toolset instance.
