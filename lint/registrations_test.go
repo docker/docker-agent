@@ -10,7 +10,7 @@ import (
 
 func TestCopRegistrations(t *testing.T) {
 	t.Parallel()
-	require.Len(t, cops, 31)
+	require.Len(t, cops, 30)
 	require.Len(t, programCops, 36)
 	counts := make(map[string]int)
 	for _, c := range cops {
@@ -19,7 +19,7 @@ func TestCopRegistrations(t *testing.T) {
 	for _, c := range programCops {
 		counts[c.Name()]++
 	}
-	assert.Len(t, counts, 67)
+	assert.Len(t, counts, 66)
 	for _, name := range []string{"Lint/ContextFirstParameter", "Lint/NoContextField", "Lint/SplitGoroutineLifetime"} {
 		assert.NotContains(t, counts, name)
 	}

@@ -74,6 +74,39 @@ tasks:
       - GOOS=wasip1 GOARCH=wasm go build ./pkg/tools/builtin/plan/ ./pkg/plans/
       - GOOS=plan9 GOARCH=amd64 go build ./pkg/tools/builtin/plan/ ./pkg/plans/
 
+  generate-ts:
+    desc: Generate the TypeScript SDK types and JSON Schemas from the Go API types
+    cmds:
+      - go run ./sdk/typescript/gen
+
+  check-ts:
+    desc: Fail if the generated TypeScript SDK is stale or does not type-check (requires Node)
+    deps: [install-ts]
+    vars:
+      GENERATED: sdk/typescript/src/generated sdk/typescript/schemas
+    cmds:
+      - task: generate-ts
+      - |
+        untracked="$(git ls-files --others --exclude-standard -- {{.GENERATED}})"
+        if ! git --no-pager diff --exit-code -- {{.GENERATED}} || [ -n "$untracked" ]; then
+          [ -z "$untracked" ] || printf 'untracked: %s\n' $untracked
+          echo 'The generated TypeScript SDK is stale: run `task generate-ts` and commit the result.'
+          exit 1
+        fi
+      - npm --prefix sdk/typescript run typecheck
+      - npm --prefix sdk/typescript test
+
+  install-ts:
+    internal: true
+    dir: sdk/typescript
+    sources:
+      - package.json
+      - package-lock.json
+    generates:
+      - node_modules/.package-lock.json
+    cmds:
+      - npm ci --ignore-scripts --no-audit --no-fund
+
   deploy-local:
     desc: Deploy the cli-plugin
     aliases: [install]

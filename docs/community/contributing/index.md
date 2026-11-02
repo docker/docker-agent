@@ -49,6 +49,8 @@ export ANTHROPIC_API_KEY=your_key_here
 | `task dev`         | Run lint, test, and build in parallel           |
 | `task build-local` | Build for local platform via Docker             |
 | `task cross`       | Cross-platform builds (all architectures)       |
+| `task generate-ts` | Regenerate the TypeScript SDK from Go types     |
+| `task check-ts`    | Check the generated TypeScript SDK (needs Node) |
 
 ## Adding a model provider
 

@@ -28,7 +28,6 @@ type Client struct {
 	baseURL    *url.URL
 	httpClient *http.Client
 	authToken  string
-	registry   map[string]func() agentruntime.Event
 }
 
 // ClientOption is a function for configuring the Client
@@ -79,55 +78,6 @@ func NewClient(baseURL string, opts ...ClientOption) (*Client, error) {
 		baseURL: parsedURL,
 		httpClient: &http.Client{ //rubocop:disable Lint/HTTPClientTransport // remote runtime base client; callers may add OTel transport via WithOTelTransport
 			Timeout: 30 * time.Second,
-		},
-		registry: map[string]func() agentruntime.Event{
-			"user_message":                 func() agentruntime.Event { return &agentruntime.UserMessageEvent{} },
-			"tool_call":                    func() agentruntime.Event { return &agentruntime.ToolCallEvent{} },
-			"tool_call_output":             func() agentruntime.Event { return &agentruntime.ToolCallOutputEvent{} },
-			"tool_call_response":           func() agentruntime.Event { return &agentruntime.ToolCallResponseEvent{} },
-			"tool_call_confirmation":       func() agentruntime.Event { return &agentruntime.ToolCallConfirmationEvent{} },
-			"token_usage":                  func() agentruntime.Event { return &agentruntime.TokenUsageEvent{} },
-			"evaluation_usage":             func() agentruntime.Event { return &agentruntime.EvaluationUsageEvent{} },
-			"stream_stopped":               func() agentruntime.Event { return &agentruntime.StreamStoppedEvent{} },
-			"session_recovered":            func() agentruntime.Event { return &agentruntime.SessionRecoveredEvent{} },
-			"runtime_paused":               func() agentruntime.Event { return &agentruntime.PausedEvent{} },
-			"stream_started":               func() agentruntime.Event { return &agentruntime.StreamStartedEvent{} },
-			"background_agent_status":      func() agentruntime.Event { return &agentruntime.BackgroundAgentStatusEvent{} },
-			"shell":                        func() agentruntime.Event { return &agentruntime.ShellOutputEvent{} },
-			"session_title":                func() agentruntime.Event { return &agentruntime.SessionTitleEvent{} },
-			"plan_changed":                 func() agentruntime.Event { return &agentruntime.PlanChangedEvent{} },
-			"session_summary":              func() agentruntime.Event { return &agentruntime.SessionSummaryEvent{} },
-			"session_compaction":           func() agentruntime.Event { return &agentruntime.SessionCompactionEvent{} },
-			"partial_tool_call":            func() agentruntime.Event { return &agentruntime.PartialToolCallEvent{} },
-			"tool_calls_retracted":         func() agentruntime.Event { return &agentruntime.ToolCallsRetractedEvent{} },
-			"max_iterations_reached":       func() agentruntime.Event { return &agentruntime.MaxIterationsReachedEvent{} },
-			"budget_usage":                 func() agentruntime.Event { return &agentruntime.BudgetUsageEvent{} },
-			"budget_exceeded":              func() agentruntime.Event { return &agentruntime.BudgetExceededEvent{} },
-			"error":                        func() agentruntime.Event { return &agentruntime.ErrorEvent{} },
-			"elicitation_request":          func() agentruntime.Event { return &agentruntime.ElicitationRequestEvent{} },
-			"elicitation_closed":           func() agentruntime.Event { return &agentruntime.ElicitationClosedEvent{} },
-			"authorization_event":          func() agentruntime.Event { return &agentruntime.AuthorizationEvent{} },
-			"agent_choice":                 func() agentruntime.Event { return &agentruntime.AgentChoiceEvent{} },
-			"agent_choice_reasoning_reset": func() agentruntime.Event { return &agentruntime.AgentChoiceReasoningResetEvent{} },
-			"agent_choice_reasoning":       func() agentruntime.Event { return &agentruntime.AgentChoiceReasoningEvent{} },
-			"mcp_init_started":             func() agentruntime.Event { return &agentruntime.MCPInitStartedEvent{} },
-			"mcp_init_finished":            func() agentruntime.Event { return &agentruntime.MCPInitFinishedEvent{} },
-			"agent_info":                   func() agentruntime.Event { return &agentruntime.AgentInfoEvent{} },
-			"team_info":                    func() agentruntime.Event { return &agentruntime.TeamInfoEvent{} },
-			"toolset_info":                 func() agentruntime.Event { return &agentruntime.ToolsetInfoEvent{} },
-			"agent_switching":              func() agentruntime.Event { return &agentruntime.AgentSwitchingEvent{} },
-			"agent_route":                  func() agentruntime.Event { return &agentruntime.AgentRouteEvent{} },
-			"routing_decision":             func() agentruntime.Event { return &agentruntime.RoutingDecisionEvent{} },
-			"warning":                      func() agentruntime.Event { return &agentruntime.WarningEvent{} },
-			"hook_blocked":                 func() agentruntime.Event { return &agentruntime.HookBlockedEvent{} },
-			"hook_started":                 func() agentruntime.Event { return &agentruntime.HookStartedEvent{} },
-			"hook_finished":                func() agentruntime.Event { return &agentruntime.HookFinishedEvent{} },
-			"rag_indexing_started":         func() agentruntime.Event { return &agentruntime.RAGIndexingStartedEvent{} },
-			"rag_indexing_progress":        func() agentruntime.Event { return &agentruntime.RAGIndexingProgressEvent{} },
-			"rag_indexing_completed":       func() agentruntime.Event { return &agentruntime.RAGIndexingCompletedEvent{} },
-			"message_added":                func() agentruntime.Event { return &agentruntime.MessageAddedEvent{} },
-			"model_fallback":               func() agentruntime.Event { return &agentruntime.ModelFallbackEvent{} },
-			"sub_session_completed":        func() agentruntime.Event { return &agentruntime.SubSessionCompletedEvent{} },
 		},
 	}
 
@@ -441,13 +391,12 @@ func (c *Client) runAgentWithAgentName(ctx context.Context, sessionID, agent, ag
 			}
 
 			// Then unmarshal the full event
-			createEvent, found := c.registry[baseEvent.Type]
+			e, found := agentruntime.NewEvent(baseEvent.Type)
 			if !found {
 				slog.DebugContext(ctx, "event", "invalid_type", baseEvent.Type)
 				continue
 			}
 
-			e := createEvent()
 			if err := json.Unmarshal(after, &e); err != nil {
 				sendClientEvent(ctx, eventChan, agentruntime.Error(fmt.Sprintf("decoding remote agent event: %v", err)))
 				return
@@ -705,8 +654,7 @@ func (c *Client) readSessionEventStream(ctx context.Context, resp *http.Response
 			id = nil
 			continue
 		}
-		if create, ok := c.registry[base.Type]; ok {
-			event := create()
+		if event, ok := agentruntime.NewEvent(base.Type); ok {
 			if err := json.Unmarshal([]byte(data), event); err != nil {
 				sendClientEvent(ctx, events, agentruntime.Error(fmt.Sprintf("decoding session event: %v", err)))
 				return true, nil
