@@ -46,7 +46,7 @@ func (r *LocalRuntime) sessionCompactionEnabled(a *agent.Agent) bool {
 
 // doCompact orchestrates a session compaction. It is intentionally thin:
 // the heavy lifting (extracting the conversation, running the LLM, computing
-// the kept-tail boundary) lives in [pkg/runtime/compactor]; this function
+// the kept-tail boundary) lives in [compactor]; this function
 // owns only what's runtime-private: hook dispatch, session mutation, event
 // emission, and persistence.
 //
@@ -232,7 +232,7 @@ func summaryUsage(result *compactor.Result) *chat.Usage {
 // summaryFromHook lifts a before_compaction hook's Summary verdict into
 // a [compactor.Result] that the runtime can apply with the same code
 // path as the LLM strategy. Returns nil when no hook supplied a
-// summary (the caller then falls through to [compactor.RunLLM]).
+// summary (the caller then tries native compaction, else [compactor.RunLLM]).
 //
 // The hook only contributes the summary text; the runtime fills in the
 // kept-tail boundary (matching the LLM path's policy) and estimates the
@@ -353,7 +353,7 @@ func compactionCaps(primaryLimit, compactionLimit int64) bool {
 // resolveContextLimit resolves the effective context window size for a
 // model. Resolution order:
 //
-//  1. The user-supplied [provider_opts.context_size], when set, is
+//  1. The user-supplied provider_opts.context_size, when set, is
 //     authoritative. Some providers (notably Docker Model Runner) use
 //     it to size the actual inference context, so we plan against the
 //     same number the engine will enforce. This also makes compaction
@@ -376,11 +376,12 @@ func (r *LocalRuntime) resolveContextLimit(ctx context.Context, p provider.Provi
 	return 0
 }
 
-// providerContextLimit reads [provider_opts.context_size] from a
+// providerContextLimit reads provider_opts.context_size from a
 // provider's resolved [latest.ModelConfig], returning 0 when unset or
-// not parseable as an integer. This is the fallback used when the
-// models.dev catalogue does not have an entry for the configured
-// model (typically Docker Model Runner with a HuggingFace GGUF model).
+// not parseable as an integer. resolveContextLimit checks it first; for
+// models absent from the models.dev catalogue (typically Docker Model Runner
+// with a HuggingFace GGUF model) it and the provider's discovered window
+// (see discoveredContextLimit) are the only sources.
 //
 // The parsing is shared with the provider clients (which clamp max_tokens
 // against the same window) via [latest.ContextSizeFromProviderOpts], so the
@@ -393,8 +394,8 @@ func providerContextLimit(p provider.Provider) int64 {
 }
 
 // runCompactionAgent runs an agent against a sub-session for compaction.
-// It is the runtime-side glue [pkg/runtime/compactor] invokes via callback,
-// which avoids creating an import cycle on [pkg/runtime].
+// It is the runtime-side glue [compactor] invokes via callback,
+// which avoids creating an import cycle on pkg/runtime.
 //
 // The summary uses the parent's pricing and budgets, even when invoked manually.
 func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess, parent *session.Session, events EventSink) error {

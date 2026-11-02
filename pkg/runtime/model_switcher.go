@@ -25,7 +25,7 @@ func (r *LocalRuntime) SetAgentModel(ctx context.Context, agentName, modelRef st
 }
 
 // SupportsModelSwitching reports whether the runtime was built with a
-// [ModelSwitcherConfig], i.e. whether [SetAgentModel] / [AvailableModels]
+// [modelcatalog.Config], i.e. whether [LocalRuntime.SetAgentModel] / [LocalRuntime.AvailableModels]
 // will return real data instead of the no-config empty path.
 func (r *LocalRuntime) SupportsModelSwitching() bool {
 	return r.modelSwitcherCfg != nil

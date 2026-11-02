@@ -876,8 +876,8 @@ type sessionItemRow struct {
 }
 
 // loadSessionItems loads all items for a session from session_items.
-// Used both as the public read path (q == s.db) and recursively from inside
-// loadSession when resolving sub-sessions inside a transaction.
+// Used both as the public read path and recursively from loadSession when
+// resolving sub-sessions (q is s.db in both cases today).
 func (s *SQLiteSessionStore) loadSessionItems(ctx context.Context, q querier, sessionID string) ([]Item, error) {
 	rows, err := q.QueryContext(ctx,
 		`SELECT position, item_type, agent_name, message_json, implicit, subsession_id, summary_text, COALESCE(first_kept_entry, 0), cost, COALESCE(model, ''), COALESCE(usage_json, '')

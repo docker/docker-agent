@@ -269,7 +269,7 @@ type Session struct {
 	// read/write access. Shared-session readers must use the locked accessors.
 	mu sync.RWMutex `json:"-"`
 
-	// now and newID are per-session sources of time and identity. They are
+	// clock and idgen are per-session sources of time and identity. They are
 	// indirected (rather than calling time.Now/uuid.NewV4 directly) so that
 	// tests can inject a deterministic clock and ID generator via WithClock
 	// and WithIDGen without mutating any process-global state — which keeps
@@ -2283,7 +2283,7 @@ func (s *Session) summaryMessage(item Item) chat.Message {
 	}
 }
 
-// buildSessionSummaryMessages builds system messages containing the session summary
+// buildSessionSummaryMessages builds the synthetic user message carrying the session summary
 // if one exists. Session summaries are context-specific per session and thus should not have a checkpoint (they will be cached alongside the first user message anyway)
 //
 // startIndex is the index in items from which conversation messages should be

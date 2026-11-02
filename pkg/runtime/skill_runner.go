@@ -63,8 +63,8 @@ func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, 
 	}
 
 	// Open the span before any pre-delegation work so model resolution
-	// (inside WithAgentModel) is recorded under runtime.run_skill rather
-	// than the parent session span.
+	// (inside WithAgentModel) is recorded under the invoke_workflow span
+	// rather than the parent session span.
 	//
 	// Skills are workflow-shaped (a coordinated process the agent
 	// orchestrates), so the GenAI semconv `invoke_workflow` operation

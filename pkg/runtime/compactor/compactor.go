@@ -4,9 +4,11 @@
 // summarization strategy.
 //
 // The runtime calls into this package once it has decided that
-// compaction should run (the trigger logic in pkg/runtime/loop.go) and
-// once it has dispatched the before_compaction hook (which may supply
-// its own summary, in which case this package is bypassed entirely).
+// compaction should run (proactive and background triggers in
+// compaction_controller.go, overflow recovery in loop_steps.go, manual
+// /compact via Summarize) and once it has dispatched the
+// before_compaction hook (which may supply its own summary, in which case
+// only [ComputeFirstKeptEntry] is used and [RunLLM] is skipped).
 // The runtime owns event emission and session mutation; this package
 // produces the summary text and reports the structural facts the
 // runtime needs to apply it.
@@ -41,10 +43,9 @@ import (
 )
 
 // MaxSummaryTokens caps the summary's output length when using the
-// default LLM strategy. Exposed because the runtime subtracts it from
-// the model's context budget when deciding whether the model lookup
-// produced a workable limit. For small context windows the effective
-// cap is scaled down via [summaryTokenBudget] so the summary call
+// default LLM strategy. Exposed because the runtime clones the summary
+// model with this cap when resolving its context window. For small context
+// windows the effective cap is scaled down via [summaryTokenBudget] so the summary call
 // never consumes more than a quarter of the window.
 const MaxSummaryTokens = 16_000
 
@@ -121,16 +122,16 @@ type LLMArgs struct {
 	// Session is the parent session whose conversation is being
 	// compacted. The strategy reads from it but does not mutate it.
 	Session *session.Session
-	// Agent is the parent agent. Its model is cloned (with structured
-	// output disabled and a hard MaxTokens cap) to perform the
-	// summarization.
+	// Agent is the parent agent. Its compaction model (or, absent one,
+	// its own model) is cloned (with structured output disabled and a
+	// hard MaxTokens cap) to perform the summarization.
 	Agent *agent.Agent
 	// AdditionalPrompt is an optional extra instruction appended to
 	// the canonical compaction prompt (e.g. "focus on code changes").
 	// Empty in the proactive/overflow paths; populated by the manual
 	// /compact command.
 	AdditionalPrompt string
-	// ContextLimit is the parent model's context-window size in
+	// ContextLimit is the summary model's context-window size in
 	// tokens, used to truncate the conversation we hand to the
 	// summarizer so the request itself doesn't blow the window.
 	// Required: zero is rejected, since the LLM strategy needs a real
@@ -141,13 +142,14 @@ type LLMArgs struct {
 	RunAgent RunAgent
 }
 
-// RunLLM is the default LLM-based summarization strategy. It clones
-// the parent agent's model with summary-friendly options, builds a
-// fresh compaction agent + child session, hands the work to
+// RunLLM is the default LLM-based summarization strategy. It clones the
+// parent agent's compaction model (or its own model) with summary-friendly
+// options, builds a fresh compaction agent + child session, hands the work to
 // [LLMArgs.RunAgent], and returns the produced summary together with
 // the kept-tail boundary the runtime needs to apply it.
 //
-// Returns (nil, nil) when the model returns an empty summary; callers
+// Returns (nil, nil) when no conversation fits the summarization budget or
+// the model returns an empty summary; callers
 // should treat that as "compaction was a no-op" and skip the apply
 // step.
 func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
@@ -170,9 +172,9 @@ func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		if result != nil {
-			// `Result.InputTokens` actually holds the compaction
-			// sub-session's *output* token count (the summary length)
-			// per the field's doc — name the span attribute by what the
+			// `Result.InputTokens` holds the compaction sub-session's
+			// *output* token count (the summary length), which becomes
+			// the parent's new input tally — name the span attribute by what the
 			// value is, not by what the source struct field is named.
 			span.SetAttributes(
 				attribute.Int("cagent.compaction.summary_output_tokens", int(result.InputTokens)),

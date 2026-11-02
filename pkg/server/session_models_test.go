@@ -303,8 +303,8 @@ func TestAttachedServer_SetSessionModel_PersistsViaRunAgent(t *testing.T) {
 
 func TestAttachedServer_RunAgent_EmptyModelLeavesOverrideUntouched(t *testing.T) {
 	// An empty model field on the runAgent body must be a no-op for the
-	// override (it is not a request to clear it). The TUI relies on this
-	// when it sends a regular user turn after a previous /model PATCH.
+	// override (it is not a request to clear it). Clients rely on this to
+	// send regular turns without resetting a previously applied override.
 	t.Parallel()
 
 	ctx := t.Context()
@@ -1132,9 +1132,8 @@ func TestSessionManager_SetSessionAgentModel_DoesNotHoldMuxDuringRuntimeIO(t *te
 }
 
 // applyStoredOverrides is the helper called by runtimeForSession to
-// re-apply persisted overrides on a freshly-built runtime. We can't
-// drive runtimeForSession with a fake runtime (it constructs a real
-// LocalRuntime), so we cover the helper's contract directly here.
+// re-apply persisted overrides on a freshly-built runtime. These cases
+// cover the helper's contract directly.
 func TestApplyStoredOverrides(t *testing.T) {
 	t.Parallel()
 

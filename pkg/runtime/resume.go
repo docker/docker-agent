@@ -4,7 +4,7 @@ import "github.com/docker/docker-agent/pkg/runtime/toolexec"
 
 // ResumeType identifies the user's response to a confirmation request.
 //
-// The runtime emits a TOOL_PERMISSION_REQUEST event whenever a tool call
+// The runtime emits a ToolCallConfirmationEvent whenever a tool call
 // requires user approval, then blocks until the embedder calls Resume(...)
 // with one of the values below.
 //

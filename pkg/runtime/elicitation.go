@@ -71,7 +71,7 @@ var errNoSuchElicitation = errors.New("no elicitation request in progress")
 // best-effort secondary delivery path for remote/SSE consumers that read
 // events directly off a RunStream channel (see remote_runtime.go). It is
 // never allowed to hold up the reliable sink or response processing: send
-// is bounded by the caller's ctx (see elicitationHandler), and callers
+// is bounded by the caller's ctx (see requestElicitation), and callers
 // invoke it from a detached goroutine so a wedged or abandoned channel
 // cannot block the request/response path at all (#3584 review item 1).
 type elicitationBridge struct {
@@ -80,7 +80,8 @@ type elicitationBridge struct {
 }
 
 // swap atomically replaces the bridge's channel and returns the previous
-// value. RunStream calls swap(events) on entry and swap(prev) on exit.
+// value. RunStream calls swap(events) on entry; finalizeEventChannel
+// restores the previous channel via restoreAndClose on exit.
 func (b *elicitationBridge) swap(ch chan Event) chan Event {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -95,7 +96,7 @@ func (b *elicitationBridge) swap(ch chan Event) chan Event {
 // send itself is bounded by ctx: if ctx is done before the channel accepts
 // the event, send returns ctx.Err() instead of blocking forever. Combined
 // with callers invoking send from a detached goroutine (see
-// elicitationHandler), a full or abandoned channel can no longer delay —
+// requestElicitation), a full or abandoned channel can no longer delay —
 // let alone indefinitely block — the reliable sink delivery or response
 // handling that used to be sequenced before this call (#3584 item 1).
 //
@@ -186,7 +187,7 @@ func (w *elicitationWaiter) tryCancel() bool {
 
 // elicitationWaiters routes an elicitation response to the specific request
 // that is waiting for it, keyed by a correlation ID that is unique per
-// request (see elicitationHandler). This replaces the single shared
+// request (see requestElicitation). This replaces the single shared
 // elicitationRequestCh, which could only ever have one request in flight:
 // with concurrent (background-job) elicitations, a response arriving on
 // that shared channel could be delivered to an arbitrary waiter, and
@@ -197,7 +198,7 @@ func (w *elicitationWaiter) tryCancel() bool {
 // emitted, so a response that arrives immediately after — even before the
 // handler reaches its receive — is never lost. The registry key is always an
 // internally-generated ID (never the MCP wire ElicitationID, which two
-// different MCP servers can coincidentally reuse): see elicitationHandler.
+// different MCP servers can coincidentally reuse): see requestElicitation.
 type elicitationWaiters struct {
 	mu      sync.Mutex
 	pending map[string]*elicitationWaiter
@@ -232,7 +233,7 @@ func (w *elicitationWaiters) abandon(id string, wt *elicitationWaiter) {
 
 // cancel marks wt cancelled if it is still pending and removes it from the
 // registry. Returns true when this call won the cancel-vs-resolve race — the
-// caller (elicitationHandler's ctx.Done() branch) should then return ctx.Err().
+// caller (requestElicitation's ctx.Done() branch) should then return ctx.Err().
 // Returns false when resolve() already won: the caller must receive from
 // wt.ch instead, since a result is already there (or is about to land — the
 // buffered send in tryResolve never blocks).
@@ -344,9 +345,11 @@ func (r *LocalRuntime) ResumeElicitation(ctx context.Context, action tools.Elici
 // raises an elicitation request. This is the reliable route for
 // background-job elicitations (run_background_agent): their RunStream runs
 // on a detached goroutine and can race concurrent streams for the bridge's
-// single channel slot (#3584), so elicitationHandler calls this sink
-// directly, synchronously, and unconditionally — before it ever touches the
-// best-effort bridge — as the single, exactly-once delivery point. Embedders
+// single channel slot (#3584), so requestElicitation calls this sink
+// directly and synchronously — before it ever touches the best-effort
+// bridge — as the single, exactly-once delivery point. It is skipped when a
+// [WithElicitationHandler] handler is configured or the request is
+// auto-declined (non-interactive or headless). Embedders
 // (e.g. the TUI's App, or the API server for session-scoped SSE delivery)
 // register a handler here that forwards the event to their UI/transport.
 func (r *LocalRuntime) OnElicitationRequest(handler func(Event)) {
@@ -366,7 +369,7 @@ func (r *LocalRuntime) OnElicitationRequestWithContext(handler func(context.Cont
 
 // MirrorsElicitationOnRunStream marks LocalRuntime as a runtime whose
 // OnElicitationRequest sink is the single, exactly-once delivery point for
-// an elicitation request even though elicitationHandler ALSO best-effort-
+// an elicitation request even though requestElicitation ALSO best-effort-
 // sends the very same event on the RunStream channel, for the benefit of
 // out-of-process consumers reading RunStream directly (see
 // elicitationBridge). Embedders that forward RunStream events verbatim into
@@ -381,13 +384,10 @@ func (r *LocalRuntime) OnElicitationRequestWithContext(handler func(context.Cont
 // skipped unconditionally and silently dropped every remote elicitation).
 func (r *LocalRuntime) MirrorsElicitationOnRunStream() {}
 
-// emitElicitationRequest forwards an elicitation request event to the
-// registered sink, if any. Besides [LocalRuntime.EmitElicitationRequestForTesting],
-// this is the ONLY call site that invokes the sink (see elicitationHandler):
-// production callers must not add a second delivery path (e.g. re-forwarding
-// an event observed on a RunStream channel), or the exactly-once guarantee
-// this type documents no longer holds (#3584 item 5 — dual delivery
-// previously required a stateful App-side dedupe to paper over).
+// emitElicitationRequest is the test-seam variant of
+// [LocalRuntime.emitElicitationRequestContext], used by
+// [LocalRuntime.EmitElicitationRequestForTesting], which has no originating
+// run context.
 func (r *LocalRuntime) emitElicitationRequest(event Event) {
 	r.elicitationSinkMu.RLock()
 	handler, contextual := r.onElicitationRequest, r.onElicitationContext
@@ -401,6 +401,14 @@ func (r *LocalRuntime) emitElicitationRequest(event Event) {
 	}
 }
 
+// emitElicitationRequestContext forwards an elicitation request event to the
+// registered sink, if any. Besides the testing seam, requestElicitation's call
+// is the ONLY one that invokes the sink: production callers must not add a
+// second delivery path (e.g. re-forwarding an event observed on a RunStream
+// channel), or the exactly-once guarantee documented on
+// [LocalRuntime.OnElicitationRequest] no longer holds
+// (#3584 item 5 — dual delivery previously required a stateful App-side
+// dedupe to paper over).
 func (r *LocalRuntime) emitElicitationRequestContext(ctx context.Context, event Event) {
 	r.elicitationSinkMu.RLock()
 	handler := r.onElicitationRequest
@@ -416,8 +424,8 @@ func (r *LocalRuntime) emitElicitationRequestContext(ctx context.Context, event 
 }
 
 // EmitElicitationRequestForTesting invokes whatever OnElicitationRequest sink
-// is currently registered, exactly as elicitationHandler would, but without
-// the real MCP elicitation handshake. elicitationHandler is unexported, so
+// is currently registered, as requestElicitation would, but without
+// the real MCP elicitation handshake. requestElicitation is unexported, so
 // callers outside this package (e.g. pkg/server) cannot drive it directly to
 // prove a *specific* runtime instance has the expected sink wired; this
 // gives them a seam to do that instead of reconstructing the sink separately

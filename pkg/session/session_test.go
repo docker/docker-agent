@@ -81,7 +81,8 @@ func TestTrimMessagesWithToolCalls(t *testing.T) {
 
 	result := trimMessages(messages, maxItems)
 
-	// Both user messages are protected, so result includes them plus the most recent assistant/tool pair
+	// Both user messages are protected; the removals hit the oldest non-user
+	// messages and the orphaned tool result is dropped
 	toolCalls := make(map[string]bool)
 	for _, msg := range result {
 		if msg.Role == chat.MessageRoleAssistant {

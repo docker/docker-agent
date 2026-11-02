@@ -934,7 +934,7 @@ func (m mockModelStoreWithLimit) GetModel(_ context.Context, _ modelsdev.ID) (*m
 func TestCompaction(t *testing.T) {
 	t.Parallel()
 
-	// First stream: assistant issues a tool call and usage exceeds 90% threshold
+	// First stream: plain content whose usage (101) exceeds the 100-token limit
 	mainStream := newStreamBuilder().
 		AddContent("Hello there").
 		AddStopWithUsage(101, 0). // Context limit will be 100
@@ -1146,7 +1146,7 @@ func TestNewRuntime_InvalidCurrentAgentError(t *testing.T) {
 
 // TestNewRuntime_ModelStorePrecedence pins the resolution order for the
 // runtime's models.dev store: an explicit WithModelStore wins; otherwise a
-// store carried on the ModelSwitcherConfig is adopted (this is how the team
+// store carried on the modelcatalog.Config is adopted (this is how the team
 // loader shares the catalog it already warmed); otherwise the runtime builds
 // its own lazy store. Sharing the warmed store is what keeps the first /model
 // open from re-paying the multi-MB catalog parse.

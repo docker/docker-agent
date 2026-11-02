@@ -152,7 +152,7 @@ func captureAfterLLMCall(t *testing.T, store ModelStore) (*hooks.Input, *session
 // TestAfterLLMCallHook_PopulatesUsageAndCost pins the priced-call
 // contract: when the model has a pricing table, after_llm_call carries
 // the provider's token usage and a non-nil Cost equal to the value the
-// runtime records on the assistant message (same computeMessageCost
+// runtime records on the assistant message (same pricing.ComputeMessageCost
 // call, threaded to both).
 func TestAfterLLMCallHook_PopulatesUsageAndCost(t *testing.T) {
 	t.Parallel()
@@ -164,7 +164,7 @@ func TestAfterLLMCallHook_PopulatesUsageAndCost(t *testing.T) {
 	assert.Equal(t, int64(10), in.Usage.InputTokens)
 	assert.Equal(t, int64(5), in.Usage.OutputTokens)
 
-	// Same arithmetic as computeMessageCost; inputs chosen for exact
+	// Same arithmetic as pricing.ComputeMessageCost; inputs chosen for exact
 	// float64 representation so equality is reliable.
 	expected := (float64(10)*rate.Input + float64(5)*rate.Output) / 1e6
 	require.NotNil(t, in.Cost, "Cost must be non-nil for a priced model")
@@ -173,7 +173,7 @@ func TestAfterLLMCallHook_PopulatesUsageAndCost(t *testing.T) {
 
 	// The headline guarantee: the cost the hook reports is the same
 	// cost the session bills for the turn. OwnCost sums the recorded
-	// assistant message's Cost, set from the same computeMessageCost
+	// assistant message's Cost, set from the same pricing.ComputeMessageCost
 	// value threaded into recordAssistantMessage.
 	assert.InDelta(t, *in.Cost, sess.OwnCost(), 1e-9,
 		"hook Cost must equal the cost the session recorded for the turn")
@@ -328,7 +328,7 @@ func TestSanitizeToolCallName(t *testing.T) {
 		// Name starting with invalid char falls back to unknown_tool
 		{`" path="foo"`, "unknown_tool"},
 		{"", "unknown_tool"},
-		// Name longer than 64 chars is capped
+		// Leading invalid chars (here NUL bytes) fall back to unknown_tool
 		{string(make([]byte, 80)), "unknown_tool"}, // all zero bytes are invalid
 	}
 

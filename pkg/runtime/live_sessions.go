@@ -85,9 +85,9 @@ type liveSessionEntry struct {
 	compactCh chan liveCompactionRequest
 }
 
-// registerLiveSession adds sess to the live-session registry. Called by
-// RunStream before the run goroutine starts so the session is targetable for
-// the whole lifetime of its stream.
+// registerLiveSession adds sess to the live-session registry with the default
+// idle-retry policy. Test helper; runStream calls
+// registerLiveSessionWithIdleRetry directly.
 func (r *LocalRuntime) registerLiveSession(sess *session.Session) *liveSessionEntry {
 	return r.registerLiveSessionWithIdleRetry(sess, defaultIdleStreamRetryPolicy())
 }

@@ -220,9 +220,9 @@ func TestHandleStreamError_ContextCanceled_Fatal(t *testing.T) {
 }
 
 // errModelStore is a ModelStore that always returns an error from GetModel,
-// keeping doCompact from progressing past its model-lookup guard. It lets
-// handleStreamError tests exercise the retry branch without Summarize
-// trying to drive a real compaction agent.
+// so compaction bails at its context-limit guard. It lets
+// handleStreamError tests exercise the retry branch without
+// compactWithReason driving a real compaction agent.
 type errModelStore struct{ ModelStore }
 
 func (errModelStore) GetModel(_ context.Context, _ modelsdev.ID) (*modelsdev.Model, error) {

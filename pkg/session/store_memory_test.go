@@ -10,13 +10,13 @@ import (
 )
 
 // openMemoryStore returns a SQLiteSessionStore backed by an in-memory database
-// and a t.Cleanup that closes it. Tests use this to avoid the overhead of
+// and registers a t.Cleanup that closes it. Tests use this to avoid the overhead of
 // allocating a temp directory and writing WAL files to disk.
 func openMemoryStore(t *testing.T) *SQLiteSessionStore {
 	t.Helper()
-	// SQLite ":memory:" databases are private to a single connection, so the
-	// store's MaxOpenConns=1 setting (applied by sqliteutil for file DBs) is
-	// implicitly satisfied here too. We open with database/sql directly so
+	// SQLite ":memory:" databases are private to a single connection, so pin
+	// the pool to one connection (as sqliteutil does for file DBs) to keep
+	// every query on the same database. We open with database/sql directly so
 	// the test does not depend on a working filesystem.
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
