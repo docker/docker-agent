@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.156.2] - 2026-11-02
+
+Maintenance release with dependency updates.
+
+
 ## [v1.155.0] - 2026-11-02
 
 This release adds new MCP transport options, a CloudGPU provider, and improved elicitation forms for Claude Code, alongside a range of bug fixes for MCP environment handling, streaming finish reasons, and tool schema correctness.
@@ -7278,3 +7283,5 @@ This release improves the terminal user interface with better error handling and
 [v1.154.0]: https://github.com/docker/docker-agent/releases/tag/v1.154.0
 
 [v1.155.0]: https://github.com/docker/docker-agent/releases/tag/v1.155.0
+
+[v1.156.2]: https://github.com/docker/docker-agent/releases/tag/v1.156.2
