@@ -62,7 +62,7 @@ Docker Agent dispatches the following hook events:
 | `on_agent_switch`           | When the runtime moves the active agent (transfer_task, handoff, return)          | No         |
 | `on_session_resume`         | When the user explicitly approves continuation past `max_iterations`              | No         |
 | `on_tool_approval_decision` | After the runtime's approval chain (permissions / yolo / readonly / ask) resolves | No         |
-| `worktree_create`           | After `docker agent run --worktree` creates a git worktree, before the session     | Yes        |
+| `worktree_create`           | After a git worktree is created — by `docker agent run --worktree` (before the session) or for a [background agent task](../../tools/background-agents/index.md#isolated-coding-tasks) with `worktree: true` (before the child's tools load) | Yes        |
 | `before_agent_run`          | Once per agent activation, before its model runs — can [route](#agent-routing-hooks) to another agent | Yes |
 | `after_agent_complete`      | Once after an agent completes successfully — can [route](#agent-routing-hooks) onward | Yes |
 
@@ -80,7 +80,7 @@ The shared catalog in `pkg/hooks/events` drives configuration validation,
 dispatch strategy, output aggregation, and strict output validation. Tests keep
 this table, the configuration fields, and the JSON schema synchronized.
 “Context” means additional context is consumed by the runtime; `worktree_create`
-shows it to the CLI user. The internal preempting `pre_tool_use` lane is parallel,
+shows it to the CLI user, or adds it to the instructions of an isolated background task. The internal preempting `pre_tool_use` lane is parallel,
 collects metadata, and does not rewrite input.
 
 | Event | Execution | Can block | Failure default | Context | Rewrite |
@@ -1045,7 +1045,9 @@ hooks:
         fi
 ```
 
-Unlike most events, `worktree_create` is dispatched from the CLI rather than the run loop, because the worktree (and the working directory the runtime, session, tools, and snapshot machinery all capture) must be settled before the runtime and session exist. See [`examples/worktree_create_hook.yaml`](https://github.com/docker/docker-agent/blob/main/examples/worktree_create_hook.yaml) for the full file.
+`worktree_create` also fires when `run_background_agent` is called with `worktree: true`. Hooks run inside the task's new checkout with `agent_name` and `parent_session_id` set, before the child's toolsets and skills are loaded. Their additional context is added to the child's instructions, and a blocking decision (or error) fails the task; the checkout and branch are retained.
+
+For `docker agent run --worktree`, `worktree_create` is dispatched from the CLI rather than the run loop, because the worktree (and the working directory the runtime, session, tools, and snapshot machinery all capture) must be settled before the runtime and session exist. See [`examples/worktree_create_hook.yaml`](https://github.com/docker/docker-agent/blob/main/examples/worktree_create_hook.yaml) for the full file.
 
 ### Pre-Compact: steer the summary
 
