@@ -157,6 +157,69 @@ func TestHandleStream_RefusalDropsPartialToolCalls(t *testing.T) {
 	assert.True(t, res.Stopped, "a refusal ends the turn")
 }
 
+// TestHandleStream_LengthDropsTruncatedToolCalls guards the turn that ends with
+// finish_reason "length" while a tool call is still streaming. The arguments are
+// cut off mid-object, so executing the call would run a tool with half an
+// argument object; it is retracted like a refusal instead, and the turn ends as
+// length so `run --exec` reports truncation and ACP returns max_tokens (#4775).
+func TestHandleStream_LengthDropsTruncatedToolCalls(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddToolCallName("call_1", "write_file").
+		AddToolCallArguments("call_1", `{"path":"notes.txt","content":"hel`).
+		AddLengthWithUsage(10, 5).
+		Build()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess,
+		NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, chat.FinishReasonLength, res.FinishReason)
+	assert.Empty(t, res.Calls, "a cut-off tool call must not be executed")
+	assert.True(t, res.Stopped, "a truncated turn ends instead of running the partial call")
+
+	var retracted bool
+	for _, ev := range drainEvents(evCh) {
+		if _, ok := ev.(*ToolCallsRetractedEvent); ok {
+			retracted = true
+		}
+	}
+	assert.True(t, retracted, "the truncated call must be announced as retracted")
+}
+
+// TestHandleStream_LengthKeepsPartialText is the other half of the truncation
+// contract: the text streamed before the cut-off is real output and must be
+// kept, so the caller can report "truncated" with the partial answer.
+func TestHandleStream_LengthKeepsPartialText(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent("The first three steps are").
+		AddLengthWithUsage(10, 5).
+		Build()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess,
+		NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, chat.FinishReasonLength, res.FinishReason)
+	assert.Equal(t, "The first three steps are", res.Content)
+	assert.True(t, res.Stopped)
+}
+
 // TestHandleStream_ToolCallAndStopInSameChunk reproduces the LiteLLM/Gemini bug
 // where a subagent's tool call is silently dropped because the provider packs
 // the tool call and finish_reason:"stop" into the same streaming chunk. The

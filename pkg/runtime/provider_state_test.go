@@ -71,6 +71,37 @@ func TestHandleStream_ProviderStatePropagates(t *testing.T) {
 		require.NotNil(t, res.ProviderState)
 	})
 
+	t.Run("kept on a length turn that retracts nothing", func(t *testing.T) {
+		t.Parallel()
+		res := runHandleStream(t, newStreamBuilder().
+			AddThinkingSignature("sig-signed").
+			AddContent("partial answer").
+			AddStopWithProviderState(chat.FinishReasonLength, testProviderState()).
+			Build())
+
+		assert.Equal(t, chat.FinishReasonLength, res.FinishReason)
+		assert.True(t, res.Stopped)
+		require.NotNil(t, res.ProviderState,
+			"a length turn that retracts no calls keeps the raw response the next request replays")
+		assert.Equal(t, "sig-signed", res.ThinkingSignature)
+	})
+
+	t.Run("dropped with the calls it retracts on a length turn", func(t *testing.T) {
+		t.Parallel()
+		res := runHandleStream(t, newStreamBuilder().
+			AddThinkingSignature("sig-signed").
+			AddToolCallName("toolu_1", "read_file").
+			AddToolCallArguments("toolu_1", `{"pa`).
+			AddStopWithProviderState(chat.FinishReasonLength, testProviderState()).
+			Build())
+
+		assert.Equal(t, chat.FinishReasonLength, res.FinishReason)
+		assert.Empty(t, res.Calls)
+		assert.Nil(t, res.ProviderState, "the retracted tool_use blocks live in the raw response")
+		assert.Empty(t, res.ThinkingSignature,
+			"the kept signature no longer describes the flattened thinking")
+	})
+
 	t.Run("dropped on refusal", func(t *testing.T) {
 		t.Parallel()
 		res := runHandleStream(t, newStreamBuilder().

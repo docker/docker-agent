@@ -210,6 +210,17 @@ func (b *streamBuilder) AddStopWithUsage(input, output int64) *streamBuilder {
 	return b
 }
 
+func (b *streamBuilder) AddLengthWithUsage(input, output int64) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index:        0,
+			FinishReason: chat.FinishReasonLength,
+		}},
+		Usage: &chat.Usage{InputTokens: input, OutputTokens: output},
+	})
+	return b
+}
+
 func (b *streamBuilder) AddToolCallStopWithUsage(input, output int64) *streamBuilder {
 	b.responses = append(b.responses, chat.MessageStreamResponse{
 		Choices: []chat.MessageStreamChoice{{
