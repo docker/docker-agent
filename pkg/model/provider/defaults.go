@@ -237,7 +237,8 @@ func applyCatalogDefaults(dst *latest.ModelConfig, alias catalog.Provider) {
 	apiType, _ := dst.ProviderOpts["api_type"].(string)
 	unauthenticatedEndpoint := dst.BaseURL != "" && apiType != "" && alias.APIType == "openai"
 	// Native SDKs resolve endpoint environment overrides before their own defaults.
-	sdkEndpoint := alias.Name == alias.APIType && (alias.APIType == "openai" || alias.APIType == "anthropic")
+	sdkEndpoint := alias.Name == alias.APIType &&
+		(alias.APIType == "openai" || alias.APIType == "anthropic" || alias.APIType == "google")
 	if dst.BaseURL == "" && !sdkEndpoint {
 		dst.BaseURL = alias.BaseURL
 	}

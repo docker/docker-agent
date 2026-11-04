@@ -298,9 +298,21 @@ func TestApplyCatalogDefaults(t *testing.T) {
 			wantTokenKey: "X_KEY",
 		},
 		{
-			name:  "google defers authentication to its API implementation",
+			name:  "google defers endpoint and authentication to its SDK",
 			dst:   &latest.ModelConfig{},
-			alias: catalog.Provider{APIType: "google", TokenEnvVars: []string{"GOOGLE_API_KEY", "GEMINI_API_KEY"}},
+			alias: catalog.Lookup("google"),
+		},
+		{
+			name:        "google preserves explicit endpoint",
+			dst:         &latest.ModelConfig{BaseURL: "https://override"},
+			alias:       catalog.Lookup("google"),
+			wantBaseURL: "https://override",
+		},
+		{
+			name:        "google preserves explicit catalog endpoint",
+			dst:         &latest.ModelConfig{BaseURL: catalog.Lookup("google").BaseURL},
+			alias:       catalog.Lookup("google"),
+			wantBaseURL: catalog.Lookup("google").BaseURL,
 		},
 		{
 			name:         "preserves explicit BaseURL",

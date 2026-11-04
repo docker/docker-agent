@@ -144,10 +144,6 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			httpClient.Transport = &bearerTokenTransport{source: tokenSource, base: httpClient.Transport}
 		}
 
-		baseURL := cfg.BaseURL
-		if backend == genai.BackendVertexAI && catalog.IsDefaultEndpoint(cfg.Provider, baseURL) {
-			baseURL = ""
-		}
 		client, err := genai.NewClient(ctx, &genai.ClientConfig{
 			APIKey:     apiKey,
 			Project:    project,
@@ -155,7 +151,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			Backend:    backend,
 			HTTPClient: httpClient,
 			HTTPOptions: genai.HTTPOptions{
-				BaseURL: baseURL,
+				BaseURL: cfg.BaseURL,
 			},
 		})
 		if err != nil {
