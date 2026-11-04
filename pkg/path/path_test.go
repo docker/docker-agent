@@ -56,6 +56,32 @@ func TestValidatePathInDirectory(t *testing.T) {
 			allowedDir:  tmpDir,
 			expectError: false,
 		},
+		{
+			name:        "file name starting with two dots",
+			path:        "..env",
+			allowedDir:  tmpDir,
+			expectError: false,
+		},
+		{
+			name:        "directory name starting with two dots",
+			path:        filepath.Join("..config", "agent.yaml"),
+			allowedDir:  tmpDir,
+			expectError: false,
+		},
+		{
+			name:        "parent directory itself",
+			path:        "..",
+			allowedDir:  tmpDir,
+			expectError: true,
+			errorMsg:    "path outside allowed directory",
+		},
+		{
+			name:        "sibling directory sharing the prefix",
+			path:        filepath.Join("..", filepath.Base(tmpDir)+"-other", "test.yaml"),
+			allowedDir:  tmpDir,
+			expectError: true,
+			errorMsg:    "path outside allowed directory",
+		},
 	}
 
 	for _, tt := range tests {
@@ -72,9 +98,43 @@ func TestValidatePathInDirectory(t *testing.T) {
 				require.NoError(t, err)
 				require.NotEmpty(t, result)
 				absAllowedDir, _ := filepath.Abs(tt.allowedDir)
-				relPath, err := filepath.Rel(absAllowedDir, result)
+				require.True(t, IsWithin(result, absAllowedDir))
+			}
+		})
+	}
+}
+
+func TestValidatePathInDirectoryWithoutAllowedDir(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		path        string
+		expectError bool
+	}{
+		{name: "relative path", path: "agent.yaml"},
+		{name: "relative name starting with two dots", path: "..env"},
+		{name: "relative directory starting with two dots", path: filepath.Join("..config", "agent.yaml")},
+		{name: "relative parent traversal", path: filepath.Join("..", "agent.yaml"), expectError: true},
+		{name: "relative parent directory", path: "..", expectError: true},
+		{name: "absolute path", path: filepath.Join(string(filepath.Separator), "opt", "agent.yaml")},
+		{name: "absolute name containing two dots", path: filepath.Join(string(filepath.Separator), "opt", "app..v2", "agent.yaml")},
+		{name: "absolute parent traversal", path: string(filepath.Separator) + strings.Join([]string{"opt", "..", "etc", "passwd"}, string(filepath.Separator)), expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := ValidatePathInDirectory(tt.path, "")
+
+			if tt.expectError {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), "directory traversal")
+				require.Empty(t, result)
+			} else {
 				require.NoError(t, err)
-				require.False(t, strings.HasPrefix(relPath, ".."))
+				require.Equal(t, filepath.Clean(tt.path), result)
 			}
 		})
 	}
