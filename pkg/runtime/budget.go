@@ -417,6 +417,20 @@ func (r *LocalRuntime) recordBudget(sess *session.Session, a *agent.Agent, usage
 	r.recordBudgetSpend(sess, a, usage, cost, active, events, false)
 }
 
+func budgetUsage(usage *chat.Usage, attempts []chat.UsageAttempt) *chat.Usage {
+	if len(attempts) == 0 {
+		return usage
+	}
+	total := &chat.Usage{}
+	for _, attempt := range attempts {
+		total.InputTokens = addBudgetTokens(total.InputTokens, attempt.InputTokens)
+		total.OutputTokens = addBudgetTokens(total.OutputTokens, attempt.OutputTokens)
+		total.CachedInputTokens = addBudgetTokens(total.CachedInputTokens, attempt.CachedInputTokens)
+		total.CacheWriteTokens = addBudgetTokens(total.CacheWriteTokens, attempt.CacheWriteTokens)
+	}
+	return total
+}
+
 func (r *LocalRuntime) recordBudgetSpend(sess *session.Session, a *agent.Agent, usage *chat.Usage, cost *float64, active time.Duration, events EventSink, unknown bool) {
 	s := r.currentBudget()
 	if s == nil {
