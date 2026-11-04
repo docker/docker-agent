@@ -107,6 +107,10 @@ func TestValidatePathInDirectory(t *testing.T) {
 func TestValidatePathInDirectoryWithoutAllowedDir(t *testing.T) {
 	t.Parallel()
 
+	// A volume-qualified root, so the absolute cases are absolute on Windows
+	// too (`\opt` alone has no volume there and is treated as relative).
+	root := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
+
 	tests := []struct {
 		name        string
 		path        string
@@ -117,9 +121,9 @@ func TestValidatePathInDirectoryWithoutAllowedDir(t *testing.T) {
 		{name: "relative directory starting with two dots", path: filepath.Join("..config", "agent.yaml")},
 		{name: "relative parent traversal", path: filepath.Join("..", "agent.yaml"), expectError: true},
 		{name: "relative parent directory", path: "..", expectError: true},
-		{name: "absolute path", path: filepath.Join(string(filepath.Separator), "opt", "agent.yaml")},
-		{name: "absolute name containing two dots", path: filepath.Join(string(filepath.Separator), "opt", "app..v2", "agent.yaml")},
-		{name: "absolute parent traversal", path: string(filepath.Separator) + strings.Join([]string{"opt", "..", "etc", "passwd"}, string(filepath.Separator)), expectError: true},
+		{name: "absolute path", path: filepath.Join(root, "opt", "agent.yaml")},
+		{name: "absolute name containing two dots", path: filepath.Join(root, "opt", "app..v2", "agent.yaml")},
+		{name: "absolute parent traversal", path: root + strings.Join([]string{"opt", "..", "etc", "passwd"}, string(filepath.Separator)), expectError: true},
 	}
 
 	for _, tt := range tests {
