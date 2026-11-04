@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"testing"
@@ -438,6 +439,75 @@ func TestStreamAdapter_SignatureOnlyChunk(t *testing.T) {
 			assert.Empty(t, done.Choices[0].Delta.ThoughtSignature)
 			_, err = adapter.Recv()
 			require.ErrorIs(t, err, io.EOF)
+		})
+	}
+}
+
+// Truncation and safety stops must reach the runtime as length and refusal,
+// including when they arrive on a finish-only or prompt-feedback-only chunk,
+// and must win over the tool_calls inference.
+func TestStreamAdapter_TerminalFinishReasons(t *testing.T) {
+	t.Parallel()
+
+	text := func(s string, reason genai.FinishReason) *genai.GenerateContentResponse {
+		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Parts: []*genai.Part{{Text: s}}}, FinishReason: reason,
+		}}}
+	}
+	call := func(reason genai.FinishReason) *genai.GenerateContentResponse {
+		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+			Content:      &genai.Content{Parts: []*genai.Part{genai.NewPartFromFunctionCall("lookup", map[string]any{"q": "x"})}},
+			FinishReason: reason,
+		}}}
+	}
+	finishOnly := func(reason genai.FinishReason) *genai.GenerateContentResponse {
+		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{FinishReason: reason}}}
+	}
+	promptBlocked := &genai.GenerateContentResponse{PromptFeedback: &genai.GenerateContentResponsePromptFeedback{BlockReason: genai.BlockedReasonSafety}}
+
+	tests := []struct {
+		name  string
+		resps []*genai.GenerateContentResponse
+		want  chat.FinishReason
+	}{
+		{"max tokens on text chunk", []*genai.GenerateContentResponse{text("partial", genai.FinishReasonMaxTokens)}, chat.FinishReasonLength},
+		{"max tokens on finish-only chunk", []*genai.GenerateContentResponse{text("partial", ""), finishOnly(genai.FinishReasonMaxTokens)}, chat.FinishReasonLength},
+		{"safety on text chunk", []*genai.GenerateContentResponse{text("partial", genai.FinishReasonSafety)}, chat.FinishReasonRefusal},
+		{"recitation on finish-only chunk", []*genai.GenerateContentResponse{text("partial", ""), finishOnly(genai.FinishReasonRecitation)}, chat.FinishReasonRefusal},
+		{"max tokens beats tool calls", []*genai.GenerateContentResponse{call(genai.FinishReasonMaxTokens)}, chat.FinishReasonLength},
+		{"safety beats tool calls", []*genai.GenerateContentResponse{call(""), finishOnly(genai.FinishReasonSafety)}, chat.FinishReasonRefusal},
+		{"safety beats an earlier max tokens", []*genai.GenerateContentResponse{text("a", genai.FinishReasonMaxTokens), finishOnly(genai.FinishReasonSafety)}, chat.FinishReasonRefusal},
+		{"blocked prompt with no candidates", []*genai.GenerateContentResponse{promptBlocked}, chat.FinishReasonRefusal},
+		{"stop stays stop", []*genai.GenerateContentResponse{text("done", genai.FinishReasonStop)}, chat.FinishReasonStop},
+		{"tool calls with stop stay tool_calls", []*genai.GenerateContentResponse{call(genai.FinishReasonStop)}, chat.FinishReasonToolCalls},
+		{"other stays stop", []*genai.GenerateContentResponse{text("done", genai.FinishReasonOther)}, chat.FinishReasonStop},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			adapter := NewStreamAdapter(func(fn func(*genai.GenerateContentResponse, error) bool) {
+				for _, r := range tt.resps {
+					if !fn(r, nil) {
+						return
+					}
+				}
+			}, "test-model", true)
+			defer adapter.Close()
+
+			var reasons []chat.FinishReason
+			for {
+				resp, err := adapter.Recv()
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				require.NoError(t, err)
+				for _, c := range resp.Choices {
+					if c.FinishReason != "" {
+						reasons = append(reasons, c.FinishReason)
+					}
+				}
+			}
+			assert.Equal(t, []chat.FinishReason{tt.want}, reasons)
 		})
 	}
 }
