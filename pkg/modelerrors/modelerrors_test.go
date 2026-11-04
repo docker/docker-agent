@@ -152,6 +152,8 @@ func TestIsContextOverflowError(t *testing.T) {
 		{name: "reduce your prompt", err: errors.New("please reduce your prompt"), expected: true},
 		{name: "reduce the length", err: errors.New("please reduce the length of the messages"), expected: true},
 		{name: "token limit", err: errors.New("token limit exceeded"), expected: true},
+		{name: "llama.cpp exceeds context size", err: errors.New("error receiving from stream: HTTP 400: request (12009 tokens) exceeds the available context size (2048 tokens), try increasing it"), expected: true},
+		{name: "llama.cpp exceeds context size (older wording, #577)", err: errors.New("error, status code: 400, status: 400 Bad Request, message: the request exceeds the available context size, try increasing it"), expected: true},
 		{name: "wrapped ContextOverflowError", err: &ContextOverflowError{Underlying: errors.New("test")}, expected: true},
 		{name: "errors.As wrapped", err: fmt.Errorf("all models failed: %w", &ContextOverflowError{Underlying: errors.New("test")}), expected: true},
 		{name: "500 internal server error", err: errors.New("500 Internal Server Error"), expected: false},
@@ -187,6 +189,14 @@ func TestClassifyOverflow(t *testing.T) {
 			name: "openai context_length_exceeded structured code",
 			err: errors.New(
 				`POST "https://api.openai.com/v1/chat/completions": 400 Bad Request {"error":{"message":"maximum context length is 128000 tokens","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+			),
+			want: OverflowKindTokens,
+		},
+		{
+			// Body captured from Docker Model Runner (llama.cpp) with a 2048-token context.
+			name: "llama.cpp exceed_context_size_error structured type",
+			err: errors.New(
+				`POST "http://localhost:12434/engines/llama.cpp/v1/chat/completions": 400 Bad Request {"error":{"code":400,"message":"request (12009 tokens) exceeds the available context size (2048 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":12009,"n_ctx":2048}}`,
 			),
 			want: OverflowKindTokens,
 		},
