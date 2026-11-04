@@ -616,6 +616,7 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 		// Any real movement turns a multi-click into a drag: the copy now
 		// belongs to the release handler, not the debounced word copy.
 		if line != m.selection.lastClickLine || col != m.selection.lastClickCol {
+			m.selection.dragged = true
 			m.selection.pendingCopyID++
 		}
 		m.selection.update(line, col)
@@ -659,7 +660,7 @@ func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.C
 			line, col := m.mouseToLineCol(msg.X, msg.Y)
 
 			// If the mouse didn't move since the press, this wasn't a drag.
-			if line == m.selection.lastClickLine && col == m.selection.lastClickCol {
+			if !m.selection.dragged && line == m.selection.lastClickLine && col == m.selection.lastClickCol {
 				if m.selection.hasRange() {
 					// Word/line selection from a multi-click: keep it, the
 					// debounced copy fires.
