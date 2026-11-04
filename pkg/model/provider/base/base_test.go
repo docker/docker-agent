@@ -140,14 +140,18 @@ func TestConfigNativeToolSearchEnabled(t *testing.T) {
 	}
 }
 
-// Only the user-supplied base_url excludes hosted tool search: the resolved
-// endpoint may legitimately point at a local test server.
-func TestConfigNativeToolSearchEnabled_IgnoresResolvedBaseURL(t *testing.T) {
+// The resolved endpoint counts like base_url: OPENAI_BASE_URL also reaches an
+// OpenAI-compatible server. The default endpoint, as resolved behind a
+// gateway, keeps hosted tool search.
+func TestConfigNativeToolSearchEnabled_ResolvedBaseURL(t *testing.T) {
 	t.Parallel()
 
 	cfg := Config{
 		ModelConfig: latest.ModelConfig{Provider: "openai", Model: "gpt-5.4", ProviderOpts: map[string]any{"native_tool_search": true}},
 		BaseURL:     "http://127.0.0.1:1234",
 	}
+	assert.False(t, cfg.NativeToolSearchEnabled())
+
+	cfg.BaseURL = "https://api.openai.com/v1"
 	assert.True(t, cfg.NativeToolSearchEnabled())
 }

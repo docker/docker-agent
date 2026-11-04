@@ -4,6 +4,7 @@
 package contracts
 
 import (
+	"cmp"
 	"context"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -37,6 +38,12 @@ type Config struct {
 	// BaseURL is the resolved endpoint actually used by the provider, unlike
 	// ModelConfig.BaseURL, which contains the user-supplied value.
 	BaseURL string
+}
+
+// Endpoint returns where requests go: the user-supplied base_url, else the
+// endpoint resolved at construction (e.g. from OPENAI_BASE_URL).
+func (c *Config) Endpoint() string {
+	return cmp.Or(c.ModelConfig.BaseURL, c.BaseURL)
 }
 
 // SetDispatchConfig takes ownership of a caller-isolated configuration for reconstruction.
@@ -98,13 +105,13 @@ func (c *Config) ImageOutputEnabled(ctx context.Context) bool {
 // opts this model into provider-hosted tool search. Strictly opt-in and gated
 // to verified endpoints (see [modelinfo.SupportsHostedToolSearch]); only then
 // do [tools.Tool.InCatalog] tools reach the provider through tool search. A
-// user-supplied base_url means an OpenAI-compatible server, not
-// api.openai.com, and is excluded like elsewhere in the openai provider; the
-// resolved [Config.BaseURL] is deliberately not consulted so tests can point
-// the SDK at a local server. An explicit api_type of openai_chatcompletions
-// routes off the Responses API, which alone serves tool_search.
+// custom [Config.Endpoint], set by base_url or OPENAI_BASE_URL, means an
+// OpenAI-compatible server, not api.openai.com, and is excluded like
+// elsewhere in the openai provider. An explicit api_type of
+// openai_chatcompletions routes off the Responses API, which alone serves
+// tool_search.
 func (c *Config) NativeToolSearchEnabled() bool {
-	if !catalog.IsDefaultEndpoint(c.ModelConfig.Provider, c.ModelConfig.BaseURL) || c.ModelConfig.ProviderOpts["api_type"] == "openai_chatcompletions" {
+	if !catalog.IsDefaultEndpoint(c.ModelConfig.Provider, c.Endpoint()) || c.ModelConfig.ProviderOpts["api_type"] == "openai_chatcompletions" {
 		return false
 	}
 	enabled, _ := providerutil.GetProviderOptBool(c.ModelConfig.ProviderOpts, "native_tool_search")
