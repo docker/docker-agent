@@ -549,7 +549,12 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			return nil, fmt.Errorf("agent %s: %w", agentConfig.Name, err)
 		}
 		instruction := expander.Expand(ctx, agentConfig.Instruction, nil)
+		// The factory runs later on the runtime's context, which carries no team
+		// scope. Rejoin the load's scope so rebuilt agents (worktree background
+		// agents) keep sharing the parent team's `shared: team` toolsets.
+		loadCtx := ctx
 		factory := func(ctx context.Context, dir string) (*agent.Agent, error) {
+			ctx = tools.InheritTeamScope(ctx, loadCtx)
 			workspaceConfig := runConfig.Clone()
 			workspaceConfig.WorkingDir = dir
 			workspaceExpander := loadOpts.newExpander(workspaceConfig.EnvProvider())

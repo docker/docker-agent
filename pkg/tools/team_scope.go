@@ -19,6 +19,18 @@ func WithTeamScope(ctx context.Context) context.Context {
 	return context.WithValue(ctx, teamScopeKey{}, &teamScope{sets: map[string]ToolSet{}})
 }
 
+// InheritTeamScope returns ctx carrying the team scope of from, if it has one.
+// Rebuilds that run on a later context (a worktree background agent rebuilding
+// its team) use it to rejoin the scope of the load they came from. Without a
+// scope on from, ctx is returned unchanged.
+func InheritTeamScope(ctx, from context.Context) context.Context {
+	scope, ok := from.Value(teamScopeKey{}).(*teamScope)
+	if !ok {
+		return ctx
+	}
+	return context.WithValue(ctx, teamScopeKey{}, scope)
+}
+
 // TeamScoped returns the toolset stored under key in ctx's team scope,
 // building it with create on first use. Without a team scope the toolset is
 // private to its agent.

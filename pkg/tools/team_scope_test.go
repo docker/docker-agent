@@ -41,4 +41,19 @@ func TestTeamScoped(t *testing.T) {
 		b := tools.TeamScoped(t.Context(), "todo", create)
 		assert.NotSame(t, a, b)
 	})
+
+	t.Run("inherited scope is shared with its origin", func(t *testing.T) {
+		t.Parallel()
+		origin := tools.WithTeamScope(t.Context())
+		later := tools.InheritTeamScope(t.Context(), origin)
+
+		assert.Same(t, tools.TeamScoped(origin, "todo", create), tools.TeamScoped(later, "todo", create))
+	})
+
+	t.Run("inheriting without a scope changes nothing", func(t *testing.T) {
+		t.Parallel()
+		later := tools.InheritTeamScope(t.Context(), t.Context())
+
+		assert.NotSame(t, tools.TeamScoped(later, "todo", create), tools.TeamScoped(later, "todo", create))
+	})
 }

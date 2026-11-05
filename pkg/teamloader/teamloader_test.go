@@ -2004,3 +2004,53 @@ func TestLoadWithConfig_SharedTodoScopes(t *testing.T) {
 		assert.Same(t, tabA[0], tabB[0])
 	})
 }
+
+// A worktree background agent rebuilds its team with Team.ForWorkingDir on the
+// runtime's context, which carries no team scope. The rebuilt agents must still
+// share the originating load's `shared: team` list, and only that load's.
+func TestLoadWithConfig_SharedTodoTeamSurvivesWorkingDirRebuild(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+
+	load := func(t *testing.T) *LoadResult {
+		t.Helper()
+
+		data := []byte(`agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    sub_agents: [first, second]
+  first:
+    model: openai/gpt-4o
+    instruction: test
+    toolsets:
+      - type: todo
+        shared: team
+  second:
+    model: openai/gpt-4o
+    instruction: test
+    toolsets:
+      - type: todo
+        shared: team
+`)
+		result, err := LoadWithConfig(t.Context(), config.NewBytesSource("t.yaml", data), &config.RuntimeConfig{},
+			withTestProviderRegistry(WithToolsetRegistry(NewToolsetRegistry(map[string]ToolsetCreator{"todo": todo.Creator})))...)
+		require.NoError(t, err)
+		return result
+	}
+
+	parent := load(t)
+	other := load(t)
+
+	// An ordinary context, as the runtime passes to ForWorkingDir.
+	rebuilt, err := parent.Team.ForWorkingDir(t.Context(), t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rebuilt.Dispose(context.WithoutCancel(t.Context())) })
+
+	before := todoSets(t, parent, "first", "second")
+	after := todoSets(t, &LoadResult{Team: rebuilt}, "first", "second")
+	unrelated := todoSets(t, other, "first")
+
+	assert.Same(t, before[0], after[0], "rebuilt agent must use the parent's team list")
+	assert.Same(t, before[0], after[1], "rebuilt agents must share one list")
+	assert.NotSame(t, before[0], unrelated[0], "other loads must stay isolated")
+}
