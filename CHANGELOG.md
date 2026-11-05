@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.157.1] - 2026-11-05
+
+Maintenance release with dependency updates.
+
+
 ## [v1.156.2] - 2026-11-02
 
 Maintenance release with dependency updates.
@@ -7285,3 +7290,5 @@ This release improves the terminal user interface with better error handling and
 [v1.155.0]: https://github.com/docker/docker-agent/releases/tag/v1.155.0
 
 [v1.156.2]: https://github.com/docker/docker-agent/releases/tag/v1.156.2
+
+[v1.157.1]: https://github.com/docker/docker-agent/releases/tag/v1.157.1
