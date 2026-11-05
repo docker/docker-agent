@@ -96,7 +96,7 @@ models:
       native_tool_search: true
 ```
 
-Deferred tools are declared with `defer_loading: true` alongside a server-executed `tool_search` tool on Responses API requests. Strictly opt-in: only `openai` models that support deferred tools (gpt-5.4 and later) qualify; the option is ignored elsewhere (`chatgpt`, OpenAI-compatible endpoints including a custom `base_url`, Chat Completions requests) and the legacy behaviour is kept.
+Deferred tools are declared with `defer_loading: true` alongside a server-executed `tool_search` tool on Responses API requests. Strictly opt-in: only `openai` models that support deferred tools (gpt-5.4 and later) qualify; the option is ignored elsewhere (`chatgpt`, OpenAI-compatible endpoints including a custom `base_url` or `OPENAI_BASE_URL`, Chat Completions requests) and the legacy behaviour is kept.
 
 See [`examples/deferred_native_tool_search.yaml`](https://github.com/docker/docker-agent/blob/main/examples/deferred_native_tool_search.yaml) for a complete example.
 
