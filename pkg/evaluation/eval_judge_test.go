@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 )
 
 func TestEvaluateWithEvaluatorJudge(t *testing.T) {
@@ -126,7 +127,7 @@ func TestJudgeSourceEncryptedConfig(t *testing.T) {
 			rc := &config.RuntimeConfig{
 				Config:                 config.Config{EncryptedConfig: explicit},
 				EnvProviderOverride:    environment.NewNoEnvProvider(),
-				ModelsDevStoreOverride: modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot()),
+				ModelsDevStoreOverride: modelsdev.NewDatabaseStore(embedded.Snapshot()),
 			}
 			source := encryptedJudgeSource{Source: config.NewBytesSource("agent.yaml", nil), encrypted: "discovered"}
 			runner := newRunner(source, rc, Config{})

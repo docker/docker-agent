@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 // TestRemovedFieldHint_FieldRemovedInOlderVersion pins the main case this
@@ -20,7 +21,8 @@ func TestRemovedFieldHint_FieldRemovedInOlderVersion(t *testing.T) {
 	t.Parallel()
 
 	err := &yaml.UnknownFieldError{Message: `unknown field "safer"`}
-	hint := removedFieldHint(latest.Version, err)
+	parsers, _ := versions(legacy.Register)
+	hint := removedFieldHint(latest.Version, err, parsers)
 
 	assert.Contains(t, hint, "'safer'")
 	assert.Contains(t, hint, "config version 14")
@@ -35,7 +37,8 @@ func TestRemovedFieldHint_FieldNeverExisted(t *testing.T) {
 	t.Parallel()
 
 	err := &yaml.UnknownFieldError{Message: `unknown field "not_a_real_key_ever"`}
-	hint := removedFieldHint(latest.Version, err)
+	parsers, _ := versions(legacy.Register)
+	hint := removedFieldHint(latest.Version, err, parsers)
 
 	assert.Empty(t, hint)
 }
@@ -49,7 +52,8 @@ func TestRemovedFieldHint_FieldStillValid(t *testing.T) {
 	t.Parallel()
 
 	err := &yaml.UnknownFieldError{Message: `unknown field "model"`}
-	hint := removedFieldHint(latest.Version, err)
+	parsers, _ := versions(legacy.Register)
+	hint := removedFieldHint(latest.Version, err, parsers)
 
 	assert.Empty(t, hint)
 }
@@ -60,7 +64,8 @@ func TestRemovedFieldHint_FieldStillValid(t *testing.T) {
 func TestRemovedFieldHint_NonUnknownFieldError(t *testing.T) {
 	t.Parallel()
 
-	hint := removedFieldHint(latest.Version, errors.New("some other parse error"))
+	parsers, _ := versions(legacy.Register)
+	hint := removedFieldHint(latest.Version, errors.New("some other parse error"), parsers)
 
 	assert.Empty(t, hint)
 }
@@ -71,7 +76,8 @@ func TestRemovedFieldHint_NonNumericVersion(t *testing.T) {
 	t.Parallel()
 
 	err := &yaml.UnknownFieldError{Message: `unknown field "safer"`}
-	hint := removedFieldHint("not-a-version", err)
+	parsers, _ := versions(legacy.Register)
+	hint := removedFieldHint("not-a-version", err, parsers)
 
 	assert.Empty(t, hint)
 }
@@ -84,7 +90,7 @@ func TestRemovedFieldHint_NonNumericVersion(t *testing.T) {
 func TestSchemaFieldNames_SaferOnlyInV14(t *testing.T) {
 	t.Parallel()
 
-	parsers, _ := versions()
+	parsers, _ := versions(legacy.Register)
 
 	assert.True(t, schemaFieldNames(parsers, "14")["safer"], "safer should still be reachable from v14's schema")
 	assert.False(t, schemaFieldNames(parsers, "15")["safer"], "safer was removed as of v15")
@@ -103,6 +109,6 @@ func TestSchemaFieldNames_SaferOnlyInV14(t *testing.T) {
 func TestSchemaFieldNames_UntaggedFieldFallsBackToLowercaseName(t *testing.T) {
 	t.Parallel()
 
-	parsers, _ := versions()
+	parsers, _ := versions(legacy.Register)
 	assert.True(t, schemaFieldNames(parsers, latest.Version)["name"], "AgentConfig.Name has no json/yaml tag and must fall back to its lowercased Go name")
 }

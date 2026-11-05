@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -56,7 +57,7 @@ func reloadedClaudeAPIHistory(t *testing.T) []chat.Message {
 // the store production passes to every client: Bedrock reads attachment
 // support from it.
 func embeddedCatalog() options.Opt {
-	return options.WithModelsDevStore(modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot()))
+	return options.WithModelsDevStore(modelsdev.NewDatabaseStore(embedded.Snapshot()))
 }
 
 // wireBlocks returns the content blocks of the i-th message on the wire: 1 is

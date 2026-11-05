@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 const flavoredConfig = `version: "13"
@@ -42,7 +43,7 @@ flavors:
 
 func loadFlavored(t *testing.T, doc string, flavors ...string) (*latest.Config, error) {
 	t.Helper()
-	return Load(t.Context(), NewBytesSource("config.yaml", []byte(doc)), WithFlavors(flavors...))
+	return Load(t.Context(), NewBytesSource("config.yaml", []byte(doc)), WithFlavors(flavors...), WithVersions(legacy.Register))
 }
 
 func TestFlavorsIgnoredWhenNoneEnabled(t *testing.T) {

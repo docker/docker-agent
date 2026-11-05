@@ -20,7 +20,7 @@ var cops = []cop.Cop{
 	ConfigVersionImport,
 	ConfigPackageName,
 	ConfigVersionConstant,
-	LatestImportsPredecessor,
+	ConfigVersionBoundary,
 	ConfigLatestTagConsistency,
 	ConfigVersionsRegistered,
 	TUIViewPurity,

@@ -44,6 +44,7 @@ type fetcher func(ctx context.Context, etag string) (*Database, string, error)
 type Store struct {
 	cacheFile     string
 	knownProvider func(string) bool
+	fallback      func() *Database
 	// fetch retrieves the catalog from the network. It defaults to
 	// fetchFromAPI and is overridable via WithFetcher so tests can stub the
 	// network out without mutating package-level state.
@@ -66,7 +67,15 @@ type Opt func(*storeOptions)
 type storeOptions struct {
 	cacheFile     string
 	knownProvider func(string) bool
+	fallback      func() *Database
 	fetch         fetcher
+}
+
+// WithFallback supplies a catalog when neither cache nor network has data.
+// The callback runs lazily and may be shared by concurrent stores; treat its
+// result as read-only. Without it, a cache/network miss returns an empty catalog.
+func WithFallback(load func() *Database) Opt {
+	return func(o *storeOptions) { o.fallback = load }
 }
 
 // WithCache overrides the path of the on-disk cache file used by the Store.
@@ -107,7 +116,8 @@ func WithKnownProvider(fn func(string) bool) Opt {
 
 // NewStore creates a new Store backed by an on-disk cache. By default the
 // cache lives at ~/.cagent/models_dev.json; use WithCache to override the
-// location.
+// location. A cache/network miss uses WithFallback when configured, otherwise
+// an empty catalog.
 // Callers should create one Store and share it rather than calling NewStore
 // repeatedly. RuntimeConfig.ModelsDevStore() is the standard way to obtain
 // a shared instance.
@@ -133,6 +143,7 @@ func NewStore(opts ...Opt) (*Store, error) {
 	return &Store{
 		cacheFile:     cacheFile,
 		knownProvider: options.knownProvider,
+		fallback:      options.fallback,
 		fetch:         fetch,
 	}, nil
 }
@@ -168,12 +179,12 @@ func (s *Store) getDatabase(ctx context.Context, allowFetch bool) (*Database, er
 		// network. Kept out of s.db so it can never satisfy a later
 		// fetch-eligible lookup for a known provider.
 		if s.cacheDB == nil {
-			s.cacheDB, _ = loadDatabase(ctx, s.cacheFile, false, s.fetcher())
+			s.cacheDB, _ = loadDatabase(ctx, s.cacheFile, false, s.fetcher(), s.fallback)
 		}
 		return s.cacheDB, nil
 	}
 
-	db, authoritative := loadDatabase(ctx, s.cacheFile, true, s.fetcher())
+	db, authoritative := loadDatabase(ctx, s.cacheFile, true, s.fetcher(), s.fallback)
 	// Only memoize a result that came from the on-disk cache or a live fetch.
 	// The embedded fallback snapshot is deliberately NOT pinned, so a later
 	// lookup retries the fetch once the network (or cache) recovers instead of
@@ -336,16 +347,16 @@ func lookupModel(provider Provider, id ID) (Model, bool) {
 //
 // When allowFetch is false the network is never touched: a fresh cache is
 // returned as-is, a stale cache is returned regardless of age, and a missing
-// cache falls back to the snapshot embedded at build time. This lets lookups
+// cache falls back to the configured fallback catalog. This lets lookups
 // for providers models.dev cannot know about resolve locally without a doomed
-// outbound call, while still offering a real catalog on a cold cache.
+// outbound call. Without a fallback callback the catalog is empty.
 //
 // loadDatabase always returns a non-nil database. The second return value is
 // true when the database came from the on-disk cache or a live fetch, and
-// false when it fell back to the snapshot embedded at build time. Callers use
+// false when it fell back to the configured fallback catalog. Callers use
 // this to avoid memoizing the fallback so a later lookup can retry once the
 // cache or network recovers.
-func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool, fetch fetcher) (db *Database, authoritative bool) {
+func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool, fetch fetcher, fallback func() *Database) (db *Database, authoritative bool) {
 	// Try to load from cache first
 	cached, err := loadFromCache(cacheFile)
 	if err == nil && (!allowFetch || time.Since(cached.LastRefresh) < refreshInterval) {
@@ -354,13 +365,13 @@ func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool, fetch 
 
 	if !allowFetch {
 		// No fresh cache and fetching is disallowed: use a stale cache if we
-		// have one, otherwise fall back to the snapshot baked into the binary
+		// have one, otherwise fall back to the configured fallback catalog
 		// so the caller still resolves against a real catalog with no network
 		// call.
 		if cached != nil {
 			return &cached.Database, true
 		}
-		return embeddedSnapshot(), false
+		return fallbackDatabase(fallback), false
 	}
 
 	// Cache is stale or doesn't exist — try a conditional fetch with the ETag.
@@ -376,11 +387,10 @@ func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool, fetch 
 			slog.DebugContext(ctx, "API fetch failed, using stale cache", "error", fetchErr)
 			return &cached.Database, true
 		}
-		// No cache either — fall back to the snapshot embedded at build time
-		// instead of failing outright, so a fresh binary on a machine that
-		// can't reach models.dev still has a usable catalog.
-		slog.DebugContext(ctx, "API fetch failed and no cache available, using embedded snapshot", "error", fetchErr)
-		return embeddedSnapshot(), false
+		// No cache either — fall back to the configured fallback catalog
+		// instead of failing outright (or return an empty catalog when unset).
+		slog.DebugContext(ctx, "API fetch failed and no cache available, using fallback catalog", "error", fetchErr)
+		return fallbackDatabase(fallback), false
 	}
 
 	// database is nil when the server returned 304 Not Modified.
@@ -399,6 +409,15 @@ func loadDatabase(ctx context.Context, cacheFile string, allowFetch bool, fetch 
 	}
 
 	return database, true
+}
+
+func fallbackDatabase(load func() *Database) *Database {
+	if load != nil {
+		if db := load(); db != nil {
+			return db
+		}
+	}
+	return &Database{Providers: map[string]Provider{}}
 }
 
 // Fetch retrieves the models.dev catalog directly from the live API,

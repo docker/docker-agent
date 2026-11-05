@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/runtime/pricing"
 )
 
@@ -147,7 +148,7 @@ func TestConfigCostReplacesContextTiers(t *testing.T) {
 func TestApplyModelCostServiceTier(t *testing.T) {
 	t.Parallel()
 
-	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 	for _, tc := range []struct {
 		name, provider, model, tier string
 		cfg                         latest.ModelConfig
@@ -246,7 +247,7 @@ func TestApplyModelCostEndpointEligibility(t *testing.T) {
 func TestPublishedCostBoundary(t *testing.T) {
 	t.Parallel()
 
-	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 	// https://developers.openai.com/api/docs/pricing: USD per million tokens.
 	for _, tc := range []struct {
 		name, provider, model, tier string

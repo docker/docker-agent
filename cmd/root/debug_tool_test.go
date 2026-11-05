@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
 )
@@ -75,7 +76,7 @@ func runDebugToolConfigOutputs(t *testing.T, flags *debugFlags, cfg string, args
 	flags.runConfig.WorkingDir = dir
 	flags.runConfig.EnvProviderOverride = environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test-key"})
 	if flags.runConfig.ModelsDevStoreOverride == nil {
-		flags.runConfig.ModelsDevStoreOverride = modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+		flags.runConfig.ModelsDevStoreOverride = modelsdev.NewDatabaseStore(embedded.Snapshot())
 	}
 
 	var out, warnings bytes.Buffer
@@ -387,7 +388,7 @@ func TestDebugToolsetsCommand_IncludesDeferredTools(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte(debugToolConfig), 0o600))
 	flags := &debugFlags{toolsetsJSON: true}
 	flags.runConfig.EnvProviderOverride = environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test-key"})
-	flags.runConfig.ModelsDevStoreOverride = modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	flags.runConfig.ModelsDevStoreOverride = modelsdev.NewDatabaseStore(embedded.Snapshot())
 
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
@@ -1087,7 +1088,7 @@ func TestDebugToolUsesEmbeddedCatalog(t *testing.T) {
 	require.NotNil(t, flags.runConfig.ModelsDevStoreOverride)
 	db, err := flags.runConfig.ModelsDevStoreOverride.GetDatabase(t.Context())
 	require.NoError(t, err)
-	assert.Same(t, modelsdev.EmbeddedSnapshot(), db)
+	assert.Same(t, embedded.Snapshot(), db)
 }
 
 func TestDebugToolPreservesCatalogOverride(t *testing.T) {

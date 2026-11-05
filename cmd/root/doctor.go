@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	agentsources "github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
@@ -273,7 +274,7 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		if err != nil {
 			return nil, err
 		}
-		if agentCfg, err = config.Load(ctx, agentSource); err != nil {
+		if agentCfg, err = config.Load(ctx, agentSource, config.WithVersions(legacy.Register)); err != nil {
 			return nil, err
 		}
 	}

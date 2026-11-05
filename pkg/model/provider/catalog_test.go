@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 )
 
 func TestFindProvider(t *testing.T) {
@@ -70,7 +71,7 @@ func TestChatGPTAliasMatchesLogin(t *testing.T) {
 
 func TestProviderIDsMatchEmbeddedCatalog(t *testing.T) {
 	t.Parallel()
-	db := modelsdev.EmbeddedSnapshot()
+	db := embedded.Snapshot()
 	absent := map[string]string{
 		"api-route":  "model IDs come from API Route's /v1/models endpoint, not models.dev",
 		"atlascloud": "model IDs come from Atlas Cloud's /v1/models endpoint, not models.dev",

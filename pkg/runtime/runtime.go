@@ -252,6 +252,7 @@ type LocalRuntime struct {
 	agents                    *agentRouter
 	resumeChan                chan ResumeRequest // Queues a decision delivered before the prompt emitter parks.
 	tracer                    trace.Tracer
+	modelsDevFallback         func() *modelsdev.Database
 	modelsStore               ModelStore
 	sessionCompaction         bool
 	managedOAuth              bool
@@ -531,6 +532,12 @@ func WithProviderRegistry(registry *provider.Registry) Opt {
 			r.providerRegistry = registry
 		}
 	}
+}
+
+// WithModelsDevFallback supplies data for the default lazy catalog only.
+// Explicit stores, including the model-switcher store, retain precedence.
+func WithModelsDevFallback(load func() *modelsdev.Database) Opt {
+	return func(r *LocalRuntime) { r.modelsDevFallback = load }
 }
 
 func WithModelStore(store ModelStore) Opt {
@@ -851,7 +858,7 @@ func NewLocalRuntime(ctx context.Context, agents *team.Team, opts ...Opt) (*Loca
 		if r.modelSwitcherCfg != nil && r.modelSwitcherCfg.ModelsStore != nil {
 			r.modelsStore = r.modelSwitcherCfg.ModelsStore
 		} else {
-			r.modelsStore = &lazyModelStore{}
+			r.modelsStore = &lazyModelStore{fallback: r.modelsDevFallback}
 		}
 	}
 

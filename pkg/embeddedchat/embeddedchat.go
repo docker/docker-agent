@@ -196,6 +196,7 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 	runtimeOpts = append(runtimeOpts,
 		dagentruntime.WithWorkingDir(runConfig.WorkingDir),
 		dagentruntime.WithSessionStore(session.NewInMemorySessionStore()),
+		dagentruntime.WithModelsDevFallback(runConfig.ModelsDevFallback),
 	)
 	runtimeOpts = append(runtimeOpts, cfg.RuntimeOptions...)
 	rt, err := dagentruntime.New(ctx, tm, runtimeOpts...)

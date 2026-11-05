@@ -24,14 +24,15 @@ import (
 // Each runtime gets its own *Store; the per-runtime sync.Once only defers
 // construction, it does not share catalog state across runtimes.
 type lazyModelStore struct {
-	once sync.Once
-	st   *modelsdev.Store
-	err  error
+	once     sync.Once
+	st       *modelsdev.Store
+	err      error
+	fallback func() *modelsdev.Database
 }
 
 func (l *lazyModelStore) load() (*modelsdev.Store, error) {
 	l.once.Do(func() {
-		l.st, l.err = modelsdev.NewStore(modelsdev.WithKnownProvider(catalog.IsKnownProvider))
+		l.st, l.err = modelsdev.NewStore(modelsdev.WithKnownProvider(catalog.IsKnownProvider), modelsdev.WithFallback(l.fallback))
 	})
 	return l.st, l.err
 }

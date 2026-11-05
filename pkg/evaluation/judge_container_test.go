@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/providers"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
@@ -66,7 +67,7 @@ evaluators:
 	containerConfig := &config.RuntimeConfig{
 		Config:                 config.Config{Providers: userConfig.GetProviders()},
 		EnvProviderOverride:    environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "chat-key"}),
-		ModelsDevStoreOverride: modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot()),
+		ModelsDevStoreOverride: modelsdev.NewDatabaseStore(embedded.Snapshot()),
 	}
 	loaded, err := teamloader.LoadWithConfig(t.Context(), config.NewBytesSource("agent.yaml", []byte(agentYAML)), containerConfig,
 		teamloader.WithProviderRegistry(providers.NewDefaultRegistry()))

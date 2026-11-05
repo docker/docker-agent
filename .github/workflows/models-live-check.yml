@@ -1,6 +1,6 @@
 # Validates every example's model reference against the LIVE models.dev API,
 # as opposed to ci.yml's `task test` (which runs TestParseExamples against
-# only the committed pkg/modelsdev/snapshot.json and is fully hermetic).
+# only the committed pkg/modelsdev/embedded/snapshot.json and is fully hermetic).
 #
 # This check is deliberately NOT part of ci.yml and NOT a required PR check:
 # a failure here means the external models.dev catalog has drifted since the
@@ -47,7 +47,7 @@ jobs:
             echo
             echo "This is **not** caused by any pull request's diff. This scheduled check"
             echo "validates example model references against the live models.dev API, which"
-            echo "has moved on since \`pkg/modelsdev/snapshot.json\` was last refreshed."
+            echo "has moved on since \`pkg/modelsdev/embedded/snapshot.json\` was last refreshed."
             echo
             echo "The committed snapshot and \`TestParseExamples\` (the PR-blocking check) are"
             echo "unaffected. Fix by refreshing the snapshot (\`task update-models\`) and/or"

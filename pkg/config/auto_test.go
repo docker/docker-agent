@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 )
 
 func TestAvailableProviders_NoGateway(t *testing.T) {
@@ -1268,7 +1269,7 @@ func TestCloudProviderEnvVars(t *testing.T) {
 // Catalogued defaults must resolve through the production lookup against the committed snapshot.
 func TestDefaultModelsExistInModelsDev(t *testing.T) {
 	t.Parallel()
-	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 	for providerID, model := range DefaultModels {
 		t.Run(providerID, func(t *testing.T) {
 			t.Parallel()

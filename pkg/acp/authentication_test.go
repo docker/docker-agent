@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -46,7 +47,7 @@ func TestACPAuthenticationCredentialRefreshAndLogout(t *testing.T) {
 	wd := t.TempDir()
 	envFile := filepath.Join(wd, "credentials.env")
 	require.NoError(t, os.WriteFile(envFile, []byte("ACP_TEST_PROVIDER_KEY=\n"), 0o600))
-	rc := &config.RuntimeConfig{Config: config.Config{EnvFiles: []string{envFile}}, ModelsDevStoreOverride: modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())}
+	rc := &config.RuntimeConfig{Config: config.Config{EnvFiles: []string{envFile}}, ModelsDevStoreOverride: modelsdev.NewDatabaseStore(embedded.Snapshot())}
 	source := config.NewBytesSource("auth-test", []byte(`providers:
   test-provider:
     base_url: https://example.invalid/v1
@@ -478,7 +479,7 @@ func TestACPAuthenticationRestoredOverrideRefresh(t *testing.T) {
 			wd := t.TempDir()
 			envFile := filepath.Join(wd, "credentials.env")
 			require.NoError(t, os.WriteFile(envFile, []byte("ACP_DEFAULT_KEY=default\nACP_OVERRIDE_KEY=\n"), 0o600))
-			rc := &config.RuntimeConfig{Config: config.Config{EnvFiles: []string{envFile}}, ModelsDevStoreOverride: modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())}
+			rc := &config.RuntimeConfig{Config: config.Config{EnvFiles: []string{envFile}}, ModelsDevStoreOverride: modelsdev.NewDatabaseStore(embedded.Snapshot())}
 			source := config.NewBytesSource("override-auth", []byte(`providers:
   default-provider:
     base_url: https://example.invalid/v1

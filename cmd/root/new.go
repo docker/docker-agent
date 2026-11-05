@@ -73,6 +73,7 @@ func (f *newFlags) runNewCommand(cmd *cobra.Command, args []string) (commandErr 
 
 	rt, err := runtime.New(ctx, t,
 		runtime.WithProviderRegistry(loadResult.ProviderRegistry),
+		runtime.WithModelsDevFallback(f.runConfig.ModelsDevFallback),
 		runtime.WithTracer(otel.Tracer(AppName)),
 	)
 	if err != nil {

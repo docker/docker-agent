@@ -1,4 +1,4 @@
-package modelsdev
+package embedded
 
 import (
 	"context"
@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 // TestEmbeddedSnapshotIncludesGPT56Family is the regression test for the
@@ -20,7 +22,7 @@ import (
 func TestEmbeddedSnapshotIncludesGPT56Family(t *testing.T) {
 	t.Parallel()
 
-	db := embeddedSnapshot()
+	db := Snapshot()
 	require.NotNil(t, db)
 	openai, ok := db.Providers["openai"]
 	require.True(t, ok, "embedded snapshot must contain the openai provider")
@@ -45,7 +47,7 @@ func TestEmbeddedSnapshotIncludesGPT56Family(t *testing.T) {
 func TestEmbeddedSnapshotIncludesClaudeOpus5(t *testing.T) {
 	t.Parallel()
 
-	db := embeddedSnapshot()
+	db := Snapshot()
 	require.NotNil(t, db)
 	anthropic, ok := db.Providers["anthropic"]
 	require.True(t, ok, "embedded snapshot must contain the anthropic provider")
@@ -61,7 +63,7 @@ func TestEmbeddedSnapshotIncludesClaudeOpus5(t *testing.T) {
 func TestEmbeddedSnapshotKeepsLongContextTiers(t *testing.T) {
 	t.Parallel()
 
-	db := embeddedSnapshot()
+	db := Snapshot()
 	require.NotNil(t, db)
 	m, ok := db.Providers["openai"].Models["gpt-5.4"]
 	require.True(t, ok, "embedded snapshot must contain openai/gpt-5.4")
@@ -80,7 +82,7 @@ func TestEmbeddedSnapshotKeepsLongContextTiers(t *testing.T) {
 func TestEmbeddedSnapshotParses(t *testing.T) {
 	t.Parallel()
 
-	db := embeddedSnapshot()
+	db := Snapshot()
 	require.NotNil(t, db)
 	assert.NotEmpty(t, db.Providers, "embedded snapshot must contain providers")
 
@@ -97,10 +99,10 @@ func TestEmbeddedSnapshotParses(t *testing.T) {
 func TestEmbeddedSnapshotExported(t *testing.T) {
 	t.Parallel()
 
-	db := EmbeddedSnapshot()
+	db := Snapshot()
 	require.NotNil(t, db)
 	assert.NotEmpty(t, db.Providers, "EmbeddedSnapshot must contain providers")
-	assert.Same(t, embeddedSnapshot(), db, "EmbeddedSnapshot must return the same singleton as embeddedSnapshot")
+	assert.Same(t, Snapshot(), db, "EmbeddedSnapshot must return the same singleton as embeddedSnapshot")
 }
 
 // TestSnapshotDateParses verifies the embedded snapshot date is a valid,
@@ -147,13 +149,13 @@ func TestColdCacheFallsBackToSnapshot(t *testing.T) {
 	t.Parallel()
 
 	cacheFile := filepath.Join(t.TempDir(), "models_dev.json")
-	fetched, fetch := trackingFetcher()
-	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch))
+	fetched, fetch := snapshotTrackingFetcher()
+	store, err := modelsdev.NewStore(modelsdev.WithCache(cacheFile), modelsdev.WithFetcher(fetch), modelsdev.WithFallback(Snapshot))
 	require.NoError(t, err)
 
 	// gpt-4o is present in the embedded snapshot; the fetch fails, so the
 	// resolution must come from the snapshot.
-	m, err := store.GetModel(t.Context(), NewID("openai", "gpt-4o"))
+	m, err := store.GetModel(t.Context(), modelsdev.NewID("openai", "gpt-4o"))
 	require.NoError(t, err)
 	assert.True(t, *fetched, "a cold cache must still attempt a fetch first")
 	assert.NotEmpty(t, m.Name)
@@ -171,28 +173,28 @@ func TestSnapshotFallbackIsNotMemoized(t *testing.T) {
 	// First lookup: the network is down, so the fetch fails and we fall back
 	// to the embedded snapshot without memoizing it.
 	var firstFetched, secondFetched bool
-	fetch := func(context.Context, string) (*Database, string, error) {
+	fetch := func(context.Context, string) (*modelsdev.Database, string, error) {
 		if !firstFetched {
 			firstFetched = true
 			return nil, "", errors.New("fetch from API: network unreachable")
 		}
 		secondFetched = true
-		return &Database{Providers: map[string]Provider{
-			"openai": {Models: map[string]Model{
-				"fresh-model": {Name: "Freshly Fetched", Limit: Limit{Context: 12345}},
+		return &modelsdev.Database{Providers: map[string]modelsdev.Provider{
+			"openai": {Models: map[string]modelsdev.Model{
+				"fresh-model": {Name: "Freshly Fetched", Limit: modelsdev.Limit{Context: 12345}},
 			}},
 		}}, "etag-1", nil
 	}
-	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch))
+	store, err := modelsdev.NewStore(modelsdev.WithCache(cacheFile), modelsdev.WithFetcher(fetch), modelsdev.WithFallback(Snapshot))
 	require.NoError(t, err)
 
-	_, err = store.GetModel(t.Context(), NewID("openai", "gpt-4o"))
+	_, err = store.GetModel(t.Context(), modelsdev.NewID("openai", "gpt-4o"))
 	require.NoError(t, err)
 	assert.True(t, firstFetched)
 
 	// Network recovers: a second lookup must retry the fetch (the fallback was
 	// not pinned) and serve the freshly fetched catalog.
-	m, err := store.GetModel(t.Context(), NewID("openai", "fresh-model"))
+	m, err := store.GetModel(t.Context(), modelsdev.NewID("openai", "fresh-model"))
 	require.NoError(t, err)
 	assert.True(t, secondFetched, "a fetch failure must not be memoized; the next lookup must retry")
 	assert.Equal(t, 12345, m.Limit.Context, "the recovered fetch must serve fresh data, not the snapshot")
@@ -203,15 +205,15 @@ func TestSnapshotFallbackIsNotMemoized(t *testing.T) {
 func TestEmbeddedSnapshotHaiku55ContextTier(t *testing.T) {
 	t.Parallel()
 
-	db := embeddedSnapshot()
+	db := Snapshot()
 	require.NotNil(t, db)
 	for _, tc := range []struct {
 		provider, model string
-		base, tier      Rates
+		base, tier      modelsdev.Rates
 	}{
-		{"anthropic", "claude-haiku-5-5", Rates{0.1, 0.5, 0.01, 0.125}, Rates{0.5, 2.5, 0.05, 0.625}},
-		{"amazon-bedrock", "global.anthropic.claude-haiku-5-5", Rates{0.1, 0.5, 0.01, 0.125}, Rates{0.5, 2.5, 0.05, 0.625}},
-		{"amazon-bedrock", "us.anthropic.claude-haiku-5-5", Rates{0.11, 0.55, 0.011, 0.1375}, Rates{0.55, 2.75, 0.055, 0.6875}},
+		{"anthropic", "claude-haiku-5-5", modelsdev.Rates{Input: 0.1, Output: 0.5, CacheRead: 0.01, CacheWrite: 0.125}, modelsdev.Rates{Input: 0.5, Output: 2.5, CacheRead: 0.05, CacheWrite: 0.625}},
+		{"amazon-bedrock", "global.anthropic.claude-haiku-5-5", modelsdev.Rates{Input: 0.1, Output: 0.5, CacheRead: 0.01, CacheWrite: 0.125}, modelsdev.Rates{Input: 0.5, Output: 2.5, CacheRead: 0.05, CacheWrite: 0.625}},
+		{"amazon-bedrock", "us.anthropic.claude-haiku-5-5", modelsdev.Rates{Input: 0.11, Output: 0.55, CacheRead: 0.011, CacheWrite: 0.1375}, modelsdev.Rates{Input: 0.55, Output: 2.75, CacheRead: 0.055, CacheWrite: 0.6875}},
 	} {
 		t.Run(tc.provider+"/"+tc.model, func(t *testing.T) {
 			t.Parallel()
@@ -219,11 +221,19 @@ func TestEmbeddedSnapshotHaiku55ContextTier(t *testing.T) {
 			require.True(t, ok)
 			require.NotNil(t, m.Cost)
 			require.Len(t, m.Cost.Tiers, 1)
-			assert.Equal(t, TierSpec{Type: "context", Size: 100_000}, m.Cost.Tiers[0].Tier)
+			assert.Equal(t, modelsdev.TierSpec{Type: "context", Size: 100_000}, m.Cost.Tiers[0].Tier)
 
 			assert.Equal(t, tc.base, m.Cost.RatesFor(99_999))
 			assert.Equal(t, tc.base, m.Cost.RatesFor(100_000), "the threshold itself is still the base band")
 			assert.Equal(t, tc.tier, m.Cost.RatesFor(100_001))
 		})
+	}
+}
+
+func snapshotTrackingFetcher() (*bool, func(context.Context, string) (*modelsdev.Database, string, error)) {
+	fetched := new(bool)
+	return fetched, func(context.Context, string) (*modelsdev.Database, string, error) {
+		*fetched = true
+		return nil, "", errors.New("network unreachable")
 	}
 }

@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/shellpath"
 )
 
 func warmShell() {

@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -47,7 +48,7 @@ func TestChatCompletions_CatalogAliasesPreserveImages(t *testing.T) {
 			t.Run(provider.configured+"/"+mode, func(t *testing.T) {
 				t.Parallel()
 				model := provider.model
-				store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+				store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 				var override *latest.CapabilitiesConfig
 				wantImages := false
 				switch mode {

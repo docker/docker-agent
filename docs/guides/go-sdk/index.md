@@ -389,6 +389,63 @@ team, err := teamloader.Load(ctx, ocisource.New("myorg/agent:v1"), runConfig,
 >
 > If you call `teamloader.Load` without `loaderdefaults.Opts()`, JavaScript expansion, code mode, TOON, deferred tools and harness agents are now off until you enable them (see *Optional loader features* above). Code-built teams that use `harness:` agents must call `runtime.RegisterHarness(codingharness.Factory)`; `codingharness.Label` moved into the runtime.
 
+### Optional YAML history and embedded model catalog
+
+The core packages do not link historical YAML schemas or a model catalog snapshot.
+Both capabilities are independent opt-ins; the CLI and the shipped WASM demo enable
+both to preserve their existing behavior.
+
+`config.Load` and `teamloader.Load` accept only the current schema by default
+(version omitted or `latest.Version`). To accept historical YAML, import
+`pkg/config/legacy` and pass its registrar:
+
+```go
+cfg, err := config.Load(ctx, source, config.WithVersions(legacy.Register))
+
+team, err := teamloader.Load(ctx, source, runConfig,
+    teamloader.WithConfigVersions(legacy.Register),
+    // ...provider and toolset registries...
+)
+```
+
+This retains the usual strict parsing, validation, flavor patches and migrations.
+The selection is per load and inherited by external sub-agents. `loaderdefaults`
+already includes it. Without it, old versions fail with an unsupported-version
+error; historical syntax hints are only available when history is selected.
+
+`modelsdev.NewStore` still uses its disk cache and the live models.dev API, but a
+cache/network miss returns an empty catalog unless a fallback is supplied. To
+include the optional embedded data, import `pkg/modelsdev/embedded`:
+
+```go
+store, err := modelsdev.NewStore(modelsdev.WithFallback(embedded.Snapshot))
+
+// Or configure the shared store used by a team and its runtime:
+runConfig := &config.RuntimeConfig{
+    ModelsDevFallback: embedded.Snapshot,
+}
+
+// Entirely in-memory; no cache or network discovery:
+store = modelsdev.NewDatabaseStore(embedded.Snapshot())
+```
+
+`runtime.WithModelsDevFallback(embedded.Snapshot)` configures a standalone
+runtime's lazy default store. An explicit `runtime.WithModelStore` or the store
+carried by its model-switcher configuration takes precedence. A fallback callback
+runs only when needed and is not cached as authoritative, so live discovery can
+recover after a failed request. Callback results are shared; treat them as read-only
+and make callbacks safe for concurrent use across stores.
+
+For a small offline host, use an empty in-memory store instead and omit the
+`embedded` import. No metadata means no reliable catalog pricing or capability
+inference; specify model limits and capabilities when required. Removing the
+snapshot alone does not disable network discovery in a normal `NewStore`.
+
+**Go API migration:** `modelsdev.EmbeddedSnapshot()` is now `embedded.Snapshot()`;
+`modelsdev.SnapshotDate()` is now `embedded.SnapshotDate()`. Existing applications
+loading old YAML must opt in with `legacy.Register`. No build tags or process-wide
+registration are needed for either capability.
+
 ### Per-runtime feature configuration
 
 Prefer instance options over `runtime.RegisterHarness` and

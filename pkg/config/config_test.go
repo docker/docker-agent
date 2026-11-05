@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/environment"
 )
 
@@ -72,7 +73,7 @@ func TestAlloyModelNestedComposition(t *testing.T) {
 func TestMigrate_v0_v1_provider(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v0.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Equal(t, "openai", cfg.Models["gpt"].Provider)
@@ -81,7 +82,7 @@ func TestMigrate_v0_v1_provider(t *testing.T) {
 func TestMigrate_v1_provider(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/provider_v1.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Equal(t, "openai", cfg.Models["gpt"].Provider)
@@ -90,7 +91,7 @@ func TestMigrate_v1_provider(t *testing.T) {
 func TestMigrate_v0_v1_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v0.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -102,7 +103,7 @@ func TestMigrate_v0_v1_todo(t *testing.T) {
 func TestMigrate_v1_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/todo_v1.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -114,7 +115,7 @@ func TestMigrate_v1_todo(t *testing.T) {
 func TestMigrate_v0_v1_shared_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v0.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -126,7 +127,7 @@ func TestMigrate_v0_v1_shared_todo(t *testing.T) {
 func TestMigrate_v1_shared_todo(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/shared_todo_v1.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -138,7 +139,7 @@ func TestMigrate_v1_shared_todo(t *testing.T) {
 func TestMigrate_v0_v1_think(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v0.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -149,7 +150,7 @@ func TestMigrate_v0_v1_think(t *testing.T) {
 func TestMigrate_v1_think(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/think_v1.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -160,7 +161,7 @@ func TestMigrate_v1_think(t *testing.T) {
 func TestMigrate_v0_v1_memory(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v0.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v0.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -172,7 +173,7 @@ func TestMigrate_v0_v1_memory(t *testing.T) {
 func TestMigrate_v1_memory(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v1.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/memory_v1.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	assert.Len(t, cfg.Agents.First().Toolsets, 2)
@@ -184,7 +185,7 @@ func TestMigrate_v1_memory(t *testing.T) {
 func TestMigrate_v1(t *testing.T) {
 	t.Parallel()
 
-	_, err := Load(t.Context(), NewFileSource("testdata/v1.yaml"))
+	_, err := Load(t.Context(), NewFileSource("testdata/v1.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 }
 
@@ -281,7 +282,7 @@ func TestCheckRequiredEnvVars(t *testing.T) {
 		t.Run(test.yaml, func(t *testing.T) {
 			t.Parallel()
 
-			cfg, err := Load(t.Context(), NewFileSource("testdata/env/"+test.yaml))
+			cfg, err := Load(t.Context(), NewFileSource("testdata/env/"+test.yaml), WithVersions(legacy.Register))
 			require.NoError(t, err)
 
 			err = CheckRequiredEnvVars(t.Context(), cfg, "", &noEnvProvider{})
@@ -305,7 +306,7 @@ func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 	t.Run("with token", func(t *testing.T) {
 		t.Parallel()
 
-		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"), WithVersions(legacy.Register))
 		require.NoError(t, err)
 
 		env := &fakeEnvProvider{vars: map[string]string{
@@ -319,7 +320,7 @@ func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 	t.Run("without token", func(t *testing.T) {
 		t.Parallel()
 
-		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"), WithVersions(legacy.Register))
 		require.NoError(t, err)
 
 		err = CheckRequiredEnvVars(t.Context(), cfg, "https://models.docker.com", &noEnvProvider{})
@@ -329,7 +330,7 @@ func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 	t.Run("non-docker gateway without token", func(t *testing.T) {
 		t.Parallel()
 
-		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"), WithVersions(legacy.Register))
 		require.NoError(t, err)
 
 		err = CheckRequiredEnvVars(t.Context(), cfg, "https://my-gateway.example.com", &noEnvProvider{})
@@ -339,7 +340,7 @@ func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 	t.Run("localhost gateway without token", func(t *testing.T) {
 		t.Parallel()
 
-		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"), WithVersions(legacy.Register))
 		require.NoError(t, err)
 
 		err = CheckRequiredEnvVars(t.Context(), cfg, "http://localhost:8080", &noEnvProvider{})
@@ -349,7 +350,7 @@ func TestCheckRequiredEnvVarsWithModelGateway(t *testing.T) {
 	t.Run("localhost gateway with token", func(t *testing.T) {
 		t.Parallel()
 
-		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"))
+		cfg, err := Load(t.Context(), NewFileSource("testdata/env/all.yaml"), WithVersions(legacy.Register))
 		require.NoError(t, err)
 
 		env := &fakeEnvProvider{vars: map[string]string{
@@ -1184,7 +1185,7 @@ agents:
     model: openai/gpt-4o
     instruction_file: prompt.md
 `
-	_, err := Load(t.Context(), NewBytesSource("test.yaml", []byte(cfgStr)))
+	_, err := Load(t.Context(), NewBytesSource("test.yaml", []byte(cfgStr)), WithVersions(legacy.Register))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown field "instruction_file"`)
 	assert.Contains(t, err.Error(), "supported by config version 11")
@@ -1225,7 +1226,7 @@ func TestLoadRemovedFieldHint(t *testing.T) {
       - type: shell
         safer: true
 `
-	_, err := Load(t.Context(), NewBytesSource("test.yaml", []byte(cfgStr)))
+	_, err := Load(t.Context(), NewBytesSource("test.yaml", []byte(cfgStr)), WithVersions(legacy.Register))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown field "safer"`)
 	assert.Contains(t, err.Error(), "config version 14")
@@ -1246,7 +1247,7 @@ agents:
     instruction: test
     force_handoff: root
 `
-	_, err := Load(t.Context(), NewBytesSource("test.yaml", []byte(cfgStr)))
+	_, err := Load(t.Context(), NewBytesSource("test.yaml", []byte(cfgStr)), WithVersions(legacy.Register))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `unknown field "force_handoff"`)
 	assert.Contains(t, err.Error(), "supported by config version 10")
