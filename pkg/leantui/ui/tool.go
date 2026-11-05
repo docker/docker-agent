@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
 	tooldefaults "github.com/docker/docker-agent/pkg/tui/components/tool/defaults"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
@@ -99,6 +100,7 @@ func RenderToolWithState(t *ToolView, width, frame int, sessionState service.Ses
 		}
 		content = view.View()
 	}
+	content = toolcommon.WithRunningTime(content, &msg, innerWidth)
 	lines := splitRenderedLines(renderToolBox(content, width), width)
 	for _, img := range t.images {
 		lines = append(lines, RenderInlineImage(img, width)...)

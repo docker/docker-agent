@@ -67,12 +67,12 @@ func render(msg *types.Message, s spinner.Spinner, sessionState service.SessionS
 // status: an animated spinner while the sub-agent runs, ✓ on success, ✗ on
 // error. The transfertask Base spinner is ModeSpinnerOnly, so s.View() is a
 // single 1-cell glyph whose width matches ✓/✗, keeping the task-text wrap math
-// stable (no elapsed-time suffix, unlike toolcommon.Icon).
+// stable.
 func statusIcon(msg *types.Message, s spinner.Spinner) string {
 	switch msg.ToolStatus {
 	case types.ToolStatusRunning, types.ToolStatusPending, types.ToolStatusConfirmation:
 		if msg.HideToolProgress {
-			return styles.ToolPendingIcon.Render("●")
+			return styles.ToolMessageStyle.MarginLeft(2).Render("●")
 		}
 		return styles.NoStyle.MarginLeft(2).Render(s.View())
 	case types.ToolStatusCompleted:

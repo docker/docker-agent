@@ -107,11 +107,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		if tv := m.screen.Transcript.Tool(e.ToolCallID); tv != nil && tv.Message() != nil {
 			tv.Message().AppendToolOutput(e.Output)
 			if tv.Message().ToolStatus == tuitypes.ToolStatusPending {
-				tv.Message().ToolStatus = tuitypes.ToolStatusRunning
-				if tv.Message().StartedAt == nil {
-					now := time.Now()
-					tv.Message().StartedAt = &now
-				}
+				tv.Message().SetToolStatus(tuitypes.ToolStatusRunning)
 			}
 		}
 	case *runtime.ToolCallResponseEvent:

@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -2024,11 +2023,7 @@ func (m *model) AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, t
 	for i := range slices.Backward(m.messages) {
 		msg := m.messages[i]
 		if msg.Type == types.MessageTypeToolCall && msg.ToolCall.ID == toolCall.ID {
-			msg.ToolStatus = status
-			if status == types.ToolStatusRunning && msg.StartedAt == nil {
-				now := time.Now()
-				msg.StartedAt = &now
-			}
+			msg.SetToolStatus(status)
 			if toolCall.Function.Arguments != "" {
 				if status == types.ToolStatusPending {
 					msg.ToolCall.Function.Arguments += toolCall.Function.Arguments
@@ -2083,11 +2078,7 @@ func (m *model) AppendToolOutput(msg *runtime.ToolCallOutputEvent) tea.Cmd {
 		}
 		toolMessage.AppendToolOutput(msg.Output)
 		if toolMessage.ToolStatus == types.ToolStatusPending {
-			toolMessage.ToolStatus = types.ToolStatusRunning
-			if toolMessage.StartedAt == nil {
-				now := time.Now()
-				toolMessage.StartedAt = &now
-			}
+			toolMessage.SetToolStatus(types.ToolStatusRunning)
 		}
 		m.invalidateItem(i)
 		return nil
@@ -2115,7 +2106,7 @@ func (m *model) AddToolResult(msg *runtime.ToolCallResponseEvent, status types.T
 		toolMessage := m.messages[i]
 		if toolMessage.Type == types.MessageTypeToolCall && toolMessage.ToolCall.ID == msg.ToolCallID {
 			toolMessage.Content = strings.ReplaceAll(msg.Response, "\t", "    ")
-			toolMessage.ToolStatus = status
+			toolMessage.SetToolStatus(status)
 			toolMessage.ToolResult = msg.Result.WithoutPayload()
 			toolMessage.Images = tuiimage.FromToolResult(msg.Result)
 			m.invalidateItem(i)
