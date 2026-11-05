@@ -3,6 +3,46 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.157.0] - 2026-11-05
+
+This release delivers several bug fixes across runtime token handling, model error recognition, and provider-specific behavior, along with a UI fix for text selection and a new build tag for embedders.
+
+## What's New
+
+- Adds `docker_agent_no_hook_templates` build tag, allowing embedders to drop `text/template` from the runtime to reduce binary size (relevant for WebAssembly targets)
+- Adds `worktree: true` opt-in for background agents to isolate concurrent tasks in separate git worktrees with independent checkouts, tools, and hooks
+- Validates structured output using `google/jsonschema-go`
+
+## Bug Fixes
+
+- Fixes tool calls cut off by the output-token limit being executed with truncated arguments instead of being retracted
+- Fixes llama.cpp context overflow errors not being recognized as token overflow, preventing auto-compact from triggering on Docker Model Runner
+- Fixes Gemini adapter not reporting `MAX_TOKENS` as a length stop or `SAFETY` stops as refusals, which could cause refused tool calls to execute and loop
+- Fixes `sort -ofile` and `tree -ofile` (option operands) being incorrectly classified as safe commands
+- Fixes server-side fallback token usage counting only the final attempt's tokens instead of all attempts, allowing token budgets to be exceeded
+- Fixes Google SDK endpoint precedence so that `GOOGLE_GEMINI_BASE_URL` and `GOOGLE_VERTEX_BASE_URL` environment variables are not overridden by injected catalog endpoints
+- Fixes `OPENAI_BASE_URL` not being considered when determining whether hosted (native) tool search should be disabled
+- Fixes double-click text selection to use Unicode word boundaries and grapheme-aware hit testing, highlighting, and clipboard extraction
+- Fixes runtime not preserving the raw thinking state of a length turn that retracts nothing
+### Pull Requests
+
+- [#4776](https://github.com/docker/docker-agent/pull/4776) - feat: isolate background agents in git worktrees
+- [#4784](https://github.com/docker/docker-agent/pull/4784) - fix(runtime): retract a tool call cut off by the token limit
+- [#4785](https://github.com/docker/docker-agent/pull/4785) - fix(modelerrors): recognize llama.cpp context overflow
+- [#4786](https://github.com/docker/docker-agent/pull/4786) - fix(gemini): report MAX_TOKENS as length and safety stops as refusal
+- [#4787](https://github.com/docker/docker-agent/pull/4787) - fix(safety): do not classify sort and tree with an option operand as safe
+- [#4788](https://github.com/docker/docker-agent/pull/4788) - build(deps): bump the actions group across 2 directories with 7 updates
+- [#4790](https://github.com/docker/docker-agent/pull/4790) - fix(google): preserve SDK endpoint precedence
+- [#4793](https://github.com/docker/docker-agent/pull/4793) - fix(openai): exclude OPENAI_BASE_URL from hosted tool search
+- [#4797](https://github.com/docker/docker-agent/pull/4797) - docs: update CHANGELOG.md for v1.156.2
+- [#4798](https://github.com/docker/docker-agent/pull/4798) - docs: auto-update for merged PRs (2026-11-03)
+- [#4799](https://github.com/docker/docker-agent/pull/4799) - fix(runtime): count all server fallback tokens toward budgets
+- [#4800](https://github.com/docker/docker-agent/pull/4800) - test(hooks): skip stdin JSON test when jq is missing
+- [#4801](https://github.com/docker/docker-agent/pull/4801) - Fix double-click text selection
+- [#4809](https://github.com/docker/docker-agent/pull/4809) - docs: auto-update for merged PRs (2026-11-05)
+- [#4811](https://github.com/docker/docker-agent/pull/4811) - Let embedders drop text/template from the runtime
+
+
 ## [v1.156.2] - 2026-11-02
 
 Maintenance release with dependency updates.
@@ -7285,3 +7325,5 @@ This release improves the terminal user interface with better error handling and
 [v1.155.0]: https://github.com/docker/docker-agent/releases/tag/v1.155.0
 
 [v1.156.2]: https://github.com/docker/docker-agent/releases/tag/v1.156.2
+
+[v1.157.0]: https://github.com/docker/docker-agent/releases/tag/v1.157.0
