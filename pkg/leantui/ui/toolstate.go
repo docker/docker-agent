@@ -3,7 +3,6 @@ package ui
 import (
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
@@ -94,11 +93,7 @@ func (t *ToolTracker) Upsert(agentName string, toolCall tools.ToolCall, toolDef 
 		}
 		msg.ToolDefinition = definition
 	}
-	msg.ToolStatus = status
-	if status == tuitypes.ToolStatusRunning && msg.StartedAt == nil {
-		now := time.Now()
-		msg.StartedAt = &now
-	}
+	msg.SetToolStatus(status)
 	if toolCall.ID != "" {
 		msg.ToolCall.ID = toolCall.ID
 	}
@@ -133,7 +128,7 @@ func (t *ToolTracker) Finish(id string, result ToolResult) *ToolView {
 	if result.Result != nil && result.Result.IsError {
 		status = tuitypes.ToolStatusError
 	}
-	tv.message.ToolStatus = status
+	tv.message.SetToolStatus(status)
 	definition := EnsureToolDefinition(tv.message.ToolCall, result.ToolDefinition)
 	if definition.Annotations.Title == "" && definition.Name == tv.message.ToolDefinition.Name {
 		definition.Annotations.Title = tv.message.ToolDefinition.Annotations.Title
@@ -186,7 +181,7 @@ func (t *ToolTracker) FinalizeAll(status tuitypes.ToolStatus) []*ToolView {
 			return
 		}
 		if tv.message.ToolStatus == tuitypes.ToolStatusPending || tv.message.ToolStatus == tuitypes.ToolStatusRunning {
-			tv.message.ToolStatus = status
+			tv.message.SetToolStatus(status)
 		}
 		if tv.message.ToolStatus == tuitypes.ToolStatusError && tv.message.Content == "" {
 			tv.message.Content = "Tool call ended before a result was received."

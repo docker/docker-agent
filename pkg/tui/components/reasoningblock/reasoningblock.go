@@ -257,11 +257,7 @@ func (m *Model) UpdateToolCall(toolCallID string, status types.ToolStatus, args 
 		if entry.msg.ToolCall.ID != toolCallID {
 			continue
 		}
-		entry.msg.ToolStatus = status
-		if status == types.ToolStatusRunning && entry.msg.StartedAt == nil {
-			now := time.Now()
-			entry.msg.StartedAt = &now
-		}
+		entry.msg.SetToolStatus(status)
 		if args != "" {
 			if status == types.ToolStatusPending {
 				entry.msg.ToolCall.Function.Arguments += args
@@ -282,11 +278,7 @@ func (m *Model) AppendToolOutput(toolCallID, output string) bool {
 		}
 		entry.msg.AppendToolOutput(output)
 		if entry.msg.ToolStatus == types.ToolStatusPending {
-			entry.msg.ToolStatus = types.ToolStatusRunning
-			if entry.msg.StartedAt == nil {
-				now := time.Now()
-				entry.msg.StartedAt = &now
-			}
+			entry.msg.SetToolStatus(types.ToolStatusRunning)
 		}
 		m.toolEntries[i] = entry
 		return true
@@ -306,7 +298,7 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		isCompleted := status == types.ToolStatusCompleted || status == types.ToolStatusError
 
 		entry.msg.Content = strings.ReplaceAll(content, "\t", "    ")
-		entry.msg.ToolStatus = status
+		entry.msg.SetToolStatus(status)
 		entry.msg.ToolResult = result.WithoutPayload()
 		entry.msg.Images = tuiimage.FromToolResult(result)
 
