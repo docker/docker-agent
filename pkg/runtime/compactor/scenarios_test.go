@@ -136,7 +136,7 @@ func TestScenario_TightBudgetDropsPriorSummaryFromInput(t *testing.T) {
 	sess := session.New(session.WithMessages(items))
 
 	// context 16k: summary budget 4k, keep budget 3.2k, available ~11.8k.
-	msgs, _ := extractMessages(sess, nil, 16_000, "")
+	msgs, _, _ := extractMessages(sess, nil, 16_000, "", 0)
 
 	var sawOldSummary bool
 	for _, m := range msgs {
