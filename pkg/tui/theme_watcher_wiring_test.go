@@ -87,6 +87,14 @@ func waitThemeWatchRun(t *testing.T, run themeWatchRun) {
 	assert.ErrorIs(t, run.ctx.Err(), context.Canceled)
 }
 
+// switchTheme applies ref until the test ends; the theme registry is process-global.
+func switchTheme(t *testing.T, ref string) {
+	t.Helper()
+	previous := styles.CurrentTheme().Ref
+	t.Cleanup(func() { styles.ApplyThemeRef(previous) })
+	styles.ApplyThemeRef(ref)
+}
+
 func TestWatchCurrentTheme_TargetsAppliedTheme(t *testing.T) {
 	m, _ := newTestModel(t)
 	fw := setupThemeWatcher(t, m)
@@ -109,12 +117,28 @@ func TestApplyThemeChanged_RetargetsWatcher(t *testing.T) {
 	m.watchCurrentTheme()
 	first := nextThemeWatchRun(t, fw)
 
+	switchTheme(t, "dracula")
 	_, _ = m.applyThemeChanged()
 
 	second := nextThemeWatchRun(t, fw)
-	assert.Equal(t, styles.CurrentTheme().Ref, second.ref)
+	assert.Equal(t, "dracula", second.ref)
 	waitThemeWatchRun(t, first)
 	require.NoError(t, second.ctx.Err())
+}
+
+// Hot reloads re-apply the same theme; a restart would drop an edit still
+// being debounced.
+func TestApplyThemeChanged_KeepsRunOnSameTheme(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.statusBar = statusbar.New(m)
+	fw := setupThemeWatcher(t, m)
+	m.watchCurrentTheme()
+	run := nextThemeWatchRun(t, fw)
+
+	_, _ = m.applyThemeChanged()
+
+	assert.Empty(t, fw.runs)
+	require.NoError(t, run.ctx.Err())
 }
 
 func TestCleanupManagedResources_CancelsThemeWatcher(t *testing.T) {
@@ -288,6 +312,7 @@ func TestWatchCurrentTheme_JoinsPreviousRun(t *testing.T) {
 		fw.release = release
 		m.watchCurrentTheme()
 		first := nextThemeWatchRun(t, fw)
+		switchTheme(t, "dracula")
 		returned := make(chan struct{})
 		go func() {
 			defer close(returned)
