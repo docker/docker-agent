@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime/compactor"
 	"github.com/docker/docker-agent/pkg/session"
@@ -419,6 +420,10 @@ func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, s
 		case *ErrorEvent:
 			if runErr == nil {
 				runErr = errors.New(e.Error)
+				// Keep token overflows typed so the compactor can retry smaller.
+				if e.Code == ErrorCodeContextExceeded {
+					runErr = childTokenOverflowError{msg: e.Error}
+				}
 			}
 		}
 	}
@@ -429,4 +434,15 @@ func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, s
 		events.Emit(BudgetUsage(parent.ID, a.Name(), budget.snapshot()))
 	}
 	return runErr
+}
+
+// childTokenOverflowError carries a compaction child run's context_exceeded error:
+// the message stays verbatim while [modelerrors.OverflowKindOf] still sees a
+// token overflow.
+type childTokenOverflowError struct{ msg string }
+
+func (e childTokenOverflowError) Error() string { return e.msg }
+
+func (e childTokenOverflowError) Unwrap() error {
+	return &modelerrors.ContextOverflowError{Underlying: errors.New(e.msg), Kind: modelerrors.OverflowKindTokens}
 }
