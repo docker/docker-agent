@@ -208,10 +208,11 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 	agentHosts := agentNetworkAllowlist(ctx, agentCfg)
 	userHosts := userCfg.SandboxAllowlist
 
+	offline := modelsdev.OfflineEnabled()
 	printModelsGateway(cmd.ErrOrStderr(), runConfig.ModelsGateway)
 	printGatewayLoginInjection(cmd.ErrOrStderr(), loginKit)
 	if opts.Workload == "" {
-		printModelsDevAllowance(cmd.ErrOrStderr())
+		printModelsDevAllowance(cmd.ErrOrStderr(), offline)
 		printToolInstallAllowance(cmd.ErrOrStderr(), kitResult)
 		printAgentNetworkAllowlist(cmd.ErrOrStderr(), agentHosts)
 		printUserSandboxAllowlist(cmd.ErrOrStderr(), userHosts)
@@ -238,7 +239,7 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		toolHosts = kitResult.ToolInstallHosts
 	}
 	if opts.Workload == "" {
-		allowSandboxHosts(ctx, backend, name, runConfig.ModelsGateway, toolHosts, agentHosts, userHosts)
+		allowSandboxHosts(ctx, backend, name, runConfig.ModelsGateway, offline, toolHosts, agentHosts, userHosts)
 	}
 
 	// Resolve env vars the agent needs and forward them into the sandbox.
@@ -258,6 +259,13 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		envFlags = append(envFlags, "-e", envModelsGateway)
 		envVars = append(envVars, envModelsGateway+"="+gateway)
 	}
+
+	// The guest builds its own catalog Store from its process environment, and
+	// only explicit -e values cross the sandbox boundary. Forward the offline
+	// switches explicitly for the same reason as the gateway.
+	offlineFlags, offlineVars := offlineSandboxEnv(os.Getenv)
+	envFlags = append(envFlags, offlineFlags...)
+	envVars = append(envVars, offlineVars...)
 
 	// For a docker.com gateway (loginKit != "") DOCKER_TOKEN inside the
 	// sandbox is the login kit's proxy-managed sentinel, swapped for a
@@ -391,17 +399,18 @@ func dockerAgentArgs(cmd *cobra.Command, args []string, configDir string, alias 
 
 // allowSandboxHosts adds per-sandbox allow-network rules for every
 // host the in-sandbox runtime is known to need: the models.dev
-// catalog API (always), the configured models gateway (when set), the
-// package hosts the auto-installer reaches for (when the kit build
-// identified at least one auto-installable toolset), and any extra
-// hosts the agent author declared in runtime.network_allowlist. The
-// default sandbox proxy denies all of them; without this, the inner
+// catalog API (unless offline), the configured models gateway (when
+// set), the package hosts the auto-installer reaches for (when the kit
+// build identified at least one auto-installable toolset), and any
+// extra hosts the agent author declared in runtime.network_allowlist.
+// The default sandbox proxy denies all of them; without this, the inner
 // agent's first request returns a misleading "403 Blocked by network
 // policy".
 //
 // Holes are punched only when the corresponding feature is in play:
-//   - models.dev is always opened — every run resolves model
-//     metadata (limits, pricing, capabilities) against the catalog;
+//   - models.dev is opened unless offline mode is enabled, because every
+//     run otherwise resolves model metadata (limits, pricing,
+//     capabilities) against the catalog;
 //   - the gateway host is added only when gatewayURL is non-empty;
 //   - the per-agent install hosts come from the kit build, which
 //     looks each toolset up against the aqua registry and contributes
@@ -419,20 +428,11 @@ func dockerAgentArgs(cmd *cobra.Command, args []string, configDir string, alias 
 // support per-sandbox policies is logged at debug level and the run
 // proceeds. The user will then see a network-policy 403 from the
 // inner and we surface that diagnostic verbatim.
-func allowSandboxHosts(ctx context.Context, backend *sandbox.Backend, name, gatewayURL string, toolInstallHosts, agentHosts, userHosts []string) {
-	var hosts []string
-	hosts = append(hosts, modelsdev.APIHost)
-	hosts = append(hosts, toolInstallHosts...)
-	hosts = append(hosts, agentHosts...)
-	hosts = append(hosts, userHosts...)
-
-	if gatewayURL != "" {
-		if h := gatewayHostPort(gatewayURL); h != "" {
-			hosts = append(hosts, h)
-		} else {
-			slog.DebugContext(ctx, "Could not extract host from models-gateway URL; not allowlisting",
-				"gateway", gatewayURL)
-		}
+func allowSandboxHosts(ctx context.Context, backend *sandbox.Backend, name, gatewayURL string, offline bool, toolInstallHosts, agentHosts, userHosts []string) {
+	hosts := sandboxAllowlist(gatewayURL, offline, toolInstallHosts, agentHosts, userHosts)
+	if gatewayURL != "" && gatewayHostPort(gatewayURL) == "" {
+		slog.DebugContext(ctx, "Could not extract host from models-gateway URL; not allowlisting",
+			"gateway", gatewayURL)
 	}
 
 	if len(hosts) == 0 {
@@ -442,6 +442,42 @@ func allowSandboxHosts(ctx context.Context, backend *sandbox.Backend, name, gate
 		slog.WarnContext(ctx, "Failed to allowlist sandbox hosts; the inner agent may see HTTP 403",
 			"sandbox", name, "hosts", hosts, "error", err)
 	}
+}
+
+// sandboxAllowlist returns the hosts to open in the sandbox proxy.
+// models.dev is omitted in offline mode: the guest resolves from its
+// cache or embedded snapshot and must not reach the catalog host.
+func sandboxAllowlist(gatewayURL string, offline bool, toolInstallHosts, agentHosts, userHosts []string) []string {
+	var hosts []string
+	if !offline {
+		hosts = append(hosts, modelsdev.APIHost)
+	}
+	hosts = append(hosts, toolInstallHosts...)
+	hosts = append(hosts, agentHosts...)
+	hosts = append(hosts, userHosts...)
+
+	if gatewayURL != "" {
+		if h := gatewayHostPort(gatewayURL); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
+}
+
+// offlineSandboxEnv returns -e flags and sandbox-CLI env entries that carry
+// the models.dev offline switches into the guest. Only explicit -e values
+// cross the sandbox boundary, and setting the value on the CLI process keeps
+// it out of the slog'd argv.
+func offlineSandboxEnv(getenv func(string) string) (flags, envVars []string) {
+	for _, name := range []string{modelsdev.EnvModelsDev, modelsdev.EnvOffline} {
+		value := getenv(name)
+		if value == "" {
+			continue
+		}
+		flags = append(flags, "-e", name)
+		envVars = append(envVars, name+"="+value)
+	}
+	return flags, envVars
 }
 
 // gatewayHostPort returns the "host" or "host:port" portion of a
@@ -614,10 +650,13 @@ func printGatewayLoginInjection(w io.Writer, loginKit string) {
 	fmt.Fprintln(w, "Gateway auth: the sandbox proxy injects your Docker login token into gateway requests")
 }
 
-// printModelsDevAllowance prints that the models.dev catalog host is
-// always allowlisted in the sandbox proxy, since every run resolves
-// model metadata against it.
-func printModelsDevAllowance(w io.Writer) {
+// printModelsDevAllowance prints whether the models.dev catalog host is
+// allowlisted in the sandbox proxy.
+func printModelsDevAllowance(w io.Writer, offline bool) {
+	if offline {
+		fmt.Fprintln(w, "Models catalog: offline mode; not allowlisting models.dev in the sandbox proxy")
+		return
+	}
 	fmt.Fprintf(w, "Models catalog: allowlisting %s in the sandbox proxy\n", modelsdev.APIHost)
 }
 

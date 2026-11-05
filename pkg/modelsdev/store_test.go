@@ -60,6 +60,7 @@ func TestKnownProviderGatesFetch(t *testing.T) {
 		WithCache(cacheFile),
 		WithKnownProvider(func(p string) bool { return p == "openai" }),
 		WithFetcher(fetch),
+		WithOffline(false),
 	)
 	require.NoError(t, err)
 
@@ -87,7 +88,7 @@ func TestNoPredicateAlwaysAllowsFetch(t *testing.T) {
 
 	cacheFile := filepath.Join(t.TempDir(), "models_dev.json")
 	fetched, fetch := trackingFetcher()
-	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch))
+	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch), WithOffline(false))
 	require.NoError(t, err)
 
 	_, _ = store.GetModel(expiredContext(t), NewID("mistral_gateway", "mistral-small-latest"))
@@ -111,6 +112,7 @@ func TestFetchDisallowedServesFromCache(t *testing.T) {
 	store, err := NewStore(
 		WithCache(cacheFile),
 		WithKnownProvider(func(p string) bool { return p == "openai" }),
+		WithOffline(false),
 	)
 	require.NoError(t, err)
 
@@ -152,6 +154,7 @@ func BenchmarkGetModelFetchDisallowed(b *testing.B) {
 	store, err := NewStore(
 		WithCache(cacheFile),
 		WithKnownProvider(func(p string) bool { return p == "openai" }),
+		WithOffline(false),
 	)
 	require.NoError(b, err)
 
@@ -176,7 +179,7 @@ func TestRefreshBypassesFreshCache(t *testing.T) {
 	}})
 
 	fetched := false
-	store, err := NewStore(WithCache(cacheFile), WithFetcher(func(context.Context, string) (*Database, string, error) {
+	store, err := NewStore(WithCache(cacheFile), WithOffline(false), WithFetcher(func(context.Context, string) (*Database, string, error) {
 		fetched = true
 		return &Database{Providers: map[string]Provider{
 			"openai": {Models: map[string]Model{"gpt-new": {Name: "GPT New"}}},
@@ -221,7 +224,7 @@ func TestRefreshNotModifiedKeepsCache(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(cacheFile, data, 0o600))
 
-	store, err := NewStore(WithCache(cacheFile), WithFetcher(func(_ context.Context, etag string) (*Database, string, error) {
+	store, err := NewStore(WithCache(cacheFile), WithOffline(false), WithFetcher(func(_ context.Context, etag string) (*Database, string, error) {
 		assert.Equal(t, `"etag-1"`, etag, "Refresh must send the cached ETag")
 		return nil, etag, nil // 304 Not Modified
 	}))
@@ -248,7 +251,7 @@ func TestRefreshFetchError(t *testing.T) {
 	}})
 
 	_, fetch := trackingFetcher()
-	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch))
+	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch), WithOffline(false))
 	require.NoError(t, err)
 
 	require.Error(t, store.Refresh(t.Context()))
@@ -270,6 +273,7 @@ func TestRefreshNotModifiedWithoutCacheReturnsError(t *testing.T) {
 
 	store, err := NewStore(
 		WithCache(filepath.Join(t.TempDir(), "models_dev.json")),
+		WithOffline(false),
 		WithFetcher(func(context.Context, string) (*Database, string, error) {
 			return nil, "", nil
 		}),
@@ -288,7 +292,7 @@ func TestRefreshDoesNotBlockReadersDuringFetch(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	store, err := NewStore(WithCache(cacheFile), WithFetcher(func(context.Context, string) (*Database, string, error) {
+	store, err := NewStore(WithCache(cacheFile), WithOffline(false), WithFetcher(func(context.Context, string) (*Database, string, error) {
 		close(started)
 		<-release
 		return &Database{}, "", nil
@@ -528,6 +532,7 @@ func TestStore_GetModel_CatalogAliasFetchPolicy(t *testing.T) {
 			model := "catalog-fetch-test"
 			store, err := NewStore(
 				WithCache(filepath.Join(t.TempDir(), CacheFileName)),
+				WithOffline(false),
 				WithKnownProvider(func(provider string) bool {
 					checked = append(checked, provider)
 					return tc.known && provider == "moonshot"
@@ -605,4 +610,173 @@ func TestStore_ResolveModelAlias_LegacyProviders(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// TestOfflineFromEnv covers both opt-out variables: DOCKER_AGENT_MODELS_DEV=off
+// and DOCKER_AGENT_OFFLINE=<truthy>.
+func TestOfflineFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		modelsDev string
+		offline   string
+		want      bool
+	}{
+		{name: "unset"},
+		{name: "models.dev off", modelsDev: "off", want: true},
+		{name: "models.dev OFF", modelsDev: "OFF", want: true},
+		{name: "models.dev false", modelsDev: "false", want: true},
+		{name: "models.dev 0", modelsDev: "0", want: true},
+		{name: "models.dev no", modelsDev: "no", want: true},
+		{name: "models.dev on", modelsDev: "on"},
+		{name: "offline 1", offline: "1", want: true},
+		{name: "offline true", offline: "true", want: true},
+		{name: "offline yes", offline: "yes", want: true},
+		{name: "offline on", offline: "on", want: true},
+		{name: "offline 0", offline: "0"},
+		{name: "offline false", offline: "false"},
+		{name: "either variable disables", modelsDev: "on", offline: "1", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvModelsDev, tc.modelsDev)
+			t.Setenv(EnvOffline, tc.offline)
+			assert.Equal(t, tc.want, OfflineEnabled())
+		})
+	}
+}
+
+// TestOfflineUsesEmbeddedSnapshotOnColdCache checks the offline fallback: with
+// no cache, lookups resolve from the build-time snapshot and never fetch.
+func TestOfflineUsesEmbeddedSnapshotOnColdCache(t *testing.T) {
+	t.Parallel()
+
+	cacheFile := filepath.Join(t.TempDir(), CacheFileName)
+	fetched, fetch := trackingFetcher()
+	store, err := NewStore(WithCache(cacheFile), WithOffline(true), WithFetcher(fetch))
+	require.NoError(t, err)
+
+	ctx := expiredContext(t)
+	db, err := store.GetDatabase(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, db)
+	assert.False(t, *fetched, "offline mode must never fetch")
+	assert.Len(t, db.Providers, len(embeddedSnapshot().Providers))
+
+	m, err := store.GetModel(ctx, NewID("openai", "gpt-4o"))
+	require.NoError(t, err)
+	assert.NotEmpty(t, m.Name)
+	assert.False(t, *fetched)
+}
+
+// TestOfflineUsesStaleCache checks that offline mode serves an expired cache
+// instead of refetching it.
+func TestOfflineUsesStaleCache(t *testing.T) {
+	t.Parallel()
+
+	cacheFile := filepath.Join(t.TempDir(), CacheFileName)
+	data, err := json.Marshal(CachedData{
+		Database: Database{Providers: map[string]Provider{
+			"offline-only": {Models: map[string]Model{
+				"cached-model": {Name: "Cached Model", Limit: Limit{Context: 32000}},
+			}},
+		}},
+		LastRefresh: time.Now().Add(-72 * time.Hour),
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cacheFile, data, 0o600))
+
+	fetched, fetch := trackingFetcher()
+	store, err := NewStore(WithCache(cacheFile), WithOffline(true), WithFetcher(fetch))
+	require.NoError(t, err)
+
+	m, err := store.GetModel(expiredContext(t), NewID("offline-only", "cached-model"))
+	require.NoError(t, err)
+	assert.Equal(t, 32000, m.Limit.Context)
+	assert.False(t, *fetched)
+}
+
+// TestOfflineEnvWiresIntoNewStore checks both opt-out switches are honoured by
+// the default constructor, including on a cold guest cache (the sandbox case).
+func TestOfflineEnvWiresIntoNewStore(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		val  string
+	}{
+		{name: "DOCKER_AGENT_MODELS_DEV=off", key: EnvModelsDev, val: "off"},
+		{name: "DOCKER_AGENT_OFFLINE=1", key: EnvOffline, val: "1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(EnvModelsDev, "")
+			t.Setenv(EnvOffline, "")
+			t.Setenv(tc.key, tc.val)
+
+			cacheFile := filepath.Join(t.TempDir(), CacheFileName)
+			fetched, fetch := trackingFetcher()
+			store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch))
+			require.NoError(t, err)
+
+			db, err := store.GetDatabase(expiredContext(t))
+			require.NoError(t, err)
+			require.NotNil(t, db)
+			assert.False(t, *fetched, "%s must disable the fetch with an empty cache", tc.key)
+			assert.NotEmpty(t, db.Providers, "the embedded snapshot must still serve the guest")
+		})
+	}
+}
+
+// TestOfflineEnvDisabledKeepsFetching guards the default behaviour: an unset
+// or non-disabling environment still fetches a cold cache.
+func TestOfflineEnvDisabledKeepsFetching(t *testing.T) {
+	t.Setenv(EnvModelsDev, "on")
+	t.Setenv(EnvOffline, "0")
+
+	cacheFile := filepath.Join(t.TempDir(), CacheFileName)
+	fetched, fetch := trackingFetcher()
+	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch))
+	require.NoError(t, err)
+
+	_, _ = store.GetModel(expiredContext(t), NewID("openai", "gpt-4o"))
+	assert.True(t, *fetched, "a disabled offline switch must keep fetching")
+}
+
+// TestWithOfflineOverridesEnv checks that callers can force the online path
+// even when the environment asks for offline mode.
+func TestWithOfflineOverridesEnv(t *testing.T) {
+	t.Setenv(EnvOffline, "1")
+
+	fetched := false
+	store, err := NewStore(
+		WithCache(filepath.Join(t.TempDir(), CacheFileName)),
+		WithOffline(false),
+		WithFetcher(func(context.Context, string) (*Database, string, error) {
+			fetched = true
+			return &Database{Providers: map[string]Provider{
+				"openai": {Models: map[string]Model{"gpt-4o": {Name: "GPT-4o"}}},
+			}}, "", nil
+		}),
+	)
+	require.NoError(t, err)
+
+	_, err = store.GetModel(t.Context(), NewID("openai", "gpt-4o"))
+	require.NoError(t, err)
+	assert.True(t, fetched)
+}
+
+// TestRefreshOfflineReturnsError checks that a forced refresh never reaches
+// the network in offline mode.
+func TestRefreshOfflineReturnsError(t *testing.T) {
+	t.Parallel()
+
+	fetched, fetch := trackingFetcher()
+	store, err := NewStore(
+		WithCache(filepath.Join(t.TempDir(), CacheFileName)),
+		WithOffline(true),
+		WithFetcher(fetch),
+	)
+	require.NoError(t, err)
+
+	err = store.Refresh(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "offline")
+	assert.False(t, *fetched)
 }

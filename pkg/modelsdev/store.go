@@ -30,6 +30,14 @@ const (
 	ModelsDevAPIURL = "https://" + APIHost + "/api.json"
 	CacheFileName   = "models_dev.json"
 	refreshInterval = 24 * time.Hour
+
+	// EnvModelsDev disables the catalog download when set to "off" (or
+	// "false"/"0"/"no"). Any other value, including unset, keeps the default
+	// online behaviour.
+	EnvModelsDev = "DOCKER_AGENT_MODELS_DEV"
+	// EnvOffline disables all catalog network access when set to a truthy
+	// value ("1", "true", "yes", "on", case-insensitive).
+	EnvOffline = "DOCKER_AGENT_OFFLINE"
 )
 
 // fetcher fetches the models.dev catalog. If etag is non-empty it is sent as
@@ -50,6 +58,9 @@ type Store struct {
 	fetch     fetcher
 	refreshMu sync.Mutex
 	mu        sync.Mutex
+	// offline forces every lookup down the cache-or-embedded path, never the
+	// network. Set at construction from EnvModelsDev/EnvOffline or WithOffline.
+	offline bool
 	// db is the authoritative catalog from the full (fetch-eligible) load path.
 	db *Database
 	// cacheDB is a cache-only snapshot served to fetch-disallowed lookups. It is
@@ -67,6 +78,8 @@ type storeOptions struct {
 	cacheFile     string
 	knownProvider func(string) bool
 	fetch         fetcher
+	// offline is nil when unset, so NewStore falls back to the environment.
+	offline *bool
 }
 
 // WithCache overrides the path of the on-disk cache file used by the Store.
@@ -105,6 +118,16 @@ func WithKnownProvider(fn func(string) bool) Opt {
 	}
 }
 
+// WithOffline disables catalog network access for the Store: lookups resolve
+// from the on-disk cache, then from the snapshot embedded at build time, and
+// never contact models.dev. When unset, the offline state comes from
+// DOCKER_AGENT_MODELS_DEV=off or DOCKER_AGENT_OFFLINE=<truthy>.
+func WithOffline(offline bool) Opt {
+	return func(o *storeOptions) {
+		o.offline = &offline
+	}
+}
+
 // NewStore creates a new Store backed by an on-disk cache. By default the
 // cache lives at ~/.cagent/models_dev.json; use WithCache to override the
 // location.
@@ -130,11 +153,33 @@ func NewStore(opts ...Opt) (*Store, error) {
 	if fetch == nil {
 		fetch = fetchFromAPI
 	}
+
+	offline := OfflineEnabled()
+	if options.offline != nil {
+		offline = *options.offline
+	}
 	return &Store{
 		cacheFile:     cacheFile,
 		knownProvider: options.knownProvider,
 		fetch:         fetch,
+		offline:       offline,
 	}, nil
+}
+
+// OfflineEnabled reports whether DOCKER_AGENT_MODELS_DEV=off or
+// DOCKER_AGENT_OFFLINE=<truthy> asks for network-free catalog access. Sandbox
+// dispatch uses it to carry the switch into the guest and to skip the
+// models.dev proxy allowlist.
+func OfflineEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvModelsDev))) {
+	case "off", "false", "0", "no":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvOffline))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // NewDatabaseStore creates a Store pre-populated with the given database.
@@ -156,6 +201,10 @@ func (s *Store) GetDatabase(ctx context.Context) (*Database, error) {
 func (s *Store) getDatabase(ctx context.Context, allowFetch bool) (*Database, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.offline {
+		allowFetch = false
+	}
 
 	// The authoritative catalog, once loaded, serves every lookup — including
 	// fetch-disallowed ones, which then benefit from the fresher data.
@@ -192,6 +241,9 @@ func (s *Store) getDatabase(ctx context.Context, allowFetch bool) (*Database, er
 func (s *Store) Refresh(ctx context.Context) error {
 	if s.cacheFile == "" {
 		return errors.New("models.dev catalog refresh is unavailable for an in-memory store")
+	}
+	if s.offline {
+		return errors.New("models.dev catalog refresh is disabled in offline mode")
 	}
 
 	// Serialize refreshes without blocking catalog readers during network I/O.

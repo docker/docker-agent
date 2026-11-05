@@ -32,7 +32,7 @@ func TestVercelAstraContextBoundary(t *testing.T) {
 							writeCache(t, cache, *db)
 						}
 						var err error
-						store, err = NewStore(WithCache(cache), WithFetcher(func(context.Context, string) (*Database, string, error) {
+						store, err = NewStore(WithCache(cache), WithOffline(false), WithFetcher(func(context.Context, string) (*Database, string, error) {
 							assert.Equal(t, "fetch", path, "fresh cache must not fetch")
 							return db, "etag", nil
 						}))

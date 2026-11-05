@@ -148,7 +148,7 @@ func TestColdCacheFallsBackToSnapshot(t *testing.T) {
 
 	cacheFile := filepath.Join(t.TempDir(), "models_dev.json")
 	fetched, fetch := trackingFetcher()
-	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch))
+	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch), WithOffline(false))
 	require.NoError(t, err)
 
 	// gpt-4o is present in the embedded snapshot; the fetch fails, so the
@@ -183,7 +183,7 @@ func TestSnapshotFallbackIsNotMemoized(t *testing.T) {
 			}},
 		}}, "etag-1", nil
 	}
-	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch))
+	store, err := NewStore(WithCache(cacheFile), WithFetcher(fetch), WithOffline(false))
 	require.NoError(t, err)
 
 	_, err = store.GetModel(t.Context(), NewID("openai", "gpt-4o"))
