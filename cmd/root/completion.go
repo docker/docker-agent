@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -65,7 +66,7 @@ func completeMessage(cmd *cobra.Command, args []string, toComplete string) ([]st
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	cfg, err := config.Load(cmd.Context(), agentSource)
+	cfg, err := config.Load(cmd.Context(), agentSource, config.WithVersions(legacy.Register))
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}

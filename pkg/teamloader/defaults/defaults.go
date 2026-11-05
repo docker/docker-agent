@@ -7,6 +7,7 @@ package defaults
 import (
 	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/js"
@@ -31,6 +32,7 @@ func Opts() []teamloader.Opt {
 // LoaderOpts returns loader defaults without registering runtime factories.
 func LoaderOpts() []teamloader.Opt {
 	return []teamloader.Opt{
+		teamloader.WithConfigVersions(legacy.Register),
 		teamloader.WithToolsetRegistry(toolsets.NewDefaultToolsetRegistry()),
 		teamloader.WithProviderRegistry(providers.NewDefaultRegistry()),
 		teamloader.WithSourceResolver(resolveExternalAgent),

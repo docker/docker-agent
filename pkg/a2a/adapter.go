@@ -18,6 +18,7 @@ import (
 	"google.golang.org/genai"
 
 	dagent "github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
@@ -118,6 +119,7 @@ func runDockerAgent(ctx agent.InvocationContext, t *team.Team, agentName string,
 		// Create runtime
 		rt, err := runtime.New(ctx, t,
 			runtime.WithCurrentAgent(agentName),
+			runtime.WithModelsDevFallback(embedded.Snapshot),
 			runtime.WithSessionStore(sessStore),
 			// Match the tracer scope used by `cmd/root/run.go` so
 			// MCP / A2A / API spans share the same instrumentation

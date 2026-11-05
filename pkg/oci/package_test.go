@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/content"
 	"github.com/docker/docker-agent/pkg/protect"
@@ -139,7 +140,7 @@ agents:
 	assert.NotContains(t, string(data), "instruction_file")
 
 	// The pushed artifact loads without the original local file present.
-	cfg, err := config.Load(t.Context(), config.NewBytesSource("pulled.yaml", data))
+	cfg, err := config.Load(t.Context(), config.NewBytesSource("pulled.yaml", data), config.WithVersions(legacy.Register))
 	require.NoError(t, err)
 	assert.Equal(t, "You are a self-contained agent.", cfg.Agents.First().Instruction)
 }
@@ -196,7 +197,7 @@ agent "helper" {
 	assert.NotContains(t, string(data), "file(")
 
 	// The pushed artifact is YAML that loads without the original directory.
-	cfg, err := config.Load(t.Context(), config.NewBytesSource("pulled.yaml", data))
+	cfg, err := config.Load(t.Context(), config.NewBytesSource("pulled.yaml", data), config.WithVersions(legacy.Register))
 	require.NoError(t, err)
 	assert.Equal(t, "You are the root.", cfg.Agents.First().Instruction)
 }

@@ -31,6 +31,7 @@ func RuntimeOpts(loaded *teamloader.LoadResult, runConfig *config.RuntimeConfig)
 	}
 	return []runtime.Opt{
 		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
+		runtime.WithModelsDevFallback(runConfig.ModelsDevFallback),
 		runtime.WithBudget(loaded.Budget),
 		runtime.WithNamedBudgets(loaded.Budgets, loaded.AgentBudgets),
 	}

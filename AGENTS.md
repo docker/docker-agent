@@ -122,6 +122,7 @@ is a quick reference.
 - The schema is **versioned**
 - `./pkg/config/v0`, `./pkg/config/v1`, ... packages handle older versions of the config
 - `./pkg/config/latest` package handles the current, work-in-progress config format
+- `./pkg/config/legacy/register.go` opts into historical parsers and the final migration bridge; when freezing a new version, update both. The core/latest packages must not import historical schemas.
 - When adding new features to the config, **only add them to the latest config**
 - Older config types are **frozen** — do not modify them
 - When adding new features to the config:

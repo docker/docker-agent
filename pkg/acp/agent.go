@@ -438,6 +438,7 @@ func (a *Agent) newRuntime(ctx context.Context, sessionID, workingDir string, se
 		runtime.WithSessionStore(a.sessionStore),
 		runtime.WithProviderRegistry(loadResult.ProviderRegistry),
 		runtime.WithModelSwitcherConfig(switcher),
+		runtime.WithModelsDevFallback(rc.ModelsDevFallback),
 		runtime.WithWorkingDir(workingDir),
 		// Match the CLI tracer scope so runtime spans remain enabled in ACP mode.
 		runtime.WithTracer(otel.Tracer(version.AppName)),

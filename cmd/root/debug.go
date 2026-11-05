@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
@@ -167,7 +168,7 @@ func (f *debugFlags) runDebugConfigCommand(cmd *cobra.Command, args []string) (c
 	}
 
 	flavors := slices.Concat(f.runConfig.Flavors, args[1:])
-	cfg, err := config.Load(cmd.Context(), agentSource, config.WithFlavors(flavors...))
+	cfg, err := config.Load(cmd.Context(), agentSource, config.WithFlavors(flavors...), config.WithVersions(legacy.Register))
 	if err != nil {
 		return err
 	}

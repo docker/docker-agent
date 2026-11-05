@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -27,7 +28,7 @@ func TestACPCapabilityMatrix(t *testing.T) {
 				t.Run(fmt.Sprintf("fs=%d/terminal=%t/elicitation=%d", fsBits, terminal, elicitBits), func(t *testing.T) {
 					t.Parallel()
 					source := config.NewBytesSource("matrix", []byte("agents:\n  root:\n    model: openai/gpt-4o\n    toolsets:\n      - type: filesystem\n      - type: shell\n      - type: environment\n"))
-					a := NewAgent(source, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}, EnvProviderOverride: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test"}), ModelsDevStoreOverride: modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())}, session.NewInMemorySessionStore())
+					a := NewAgent(source, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}, EnvProviderOverride: environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test"}), ModelsDevStoreOverride: modelsdev.NewDatabaseStore(embedded.Snapshot())}, session.NewInMemorySessionStore())
 					defer func() { require.NoError(t, a.Stop(t.Context())) }()
 					caps := acpsdk.ClientCapabilities{Fs: acpsdk.FileSystemCapabilities{ReadTextFile: fsBits&1 != 0, WriteTextFile: fsBits&2 != 0}, Terminal: terminal}
 					if elicitBits != 0 {

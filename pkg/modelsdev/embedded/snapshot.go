@@ -1,4 +1,5 @@
-package modelsdev
+// Package embedded provides the optional build-time models.dev catalog.
+package embedded
 
 import (
 	_ "embed"
@@ -7,9 +8,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
-//go:generate go run ./internal/gen
+//go:generate go run ../internal/gen
 
 // snapshotJSON is a snapshot of the models.dev catalog, refreshed at build
 // time by `go generate ./pkg/modelsdev/...` (see internal/gen). It is the
@@ -28,7 +31,7 @@ var snapshotDateRaw string
 
 var (
 	snapshotOnce sync.Once
-	snapshotDB   *Database
+	snapshotDB   *modelsdev.Database
 )
 
 // embeddedSnapshot returns the catalog baked into the binary at build time.
@@ -37,29 +40,29 @@ var (
 // "provider not found" instead of crashing the process. The parse failure is
 // logged because, with the hardcoded context-limit fallback gone, a corrupt
 // snapshot would otherwise silently clamp large-context models with no signal.
-func embeddedSnapshot() *Database {
+func embeddedSnapshot() *modelsdev.Database {
 	snapshotOnce.Do(func() {
-		var providers map[string]Provider
+		var providers map[string]modelsdev.Provider
 		if err := json.Unmarshal(snapshotJSON, &providers); err != nil {
 			slog.Warn("embedded models.dev snapshot is malformed; context-window limits will be wrong", "error", err)
-			snapshotDB = &Database{}
+			snapshotDB = &modelsdev.Database{}
 			return
 		}
-		snapshotDB = &Database{Providers: providers}
+		snapshotDB = &modelsdev.Database{Providers: providers}
 	})
 	return snapshotDB
 }
 
-// EmbeddedSnapshot returns the models.dev catalog committed to the repo at
-// pkg/modelsdev/snapshot.json and baked into the binary at build time. It
+// Snapshot returns the models.dev catalog committed to the repo at
+// pkg/modelsdev/embedded/snapshot.json and baked into the binary at build time. It
 // never touches the network or the filesystem cache, which makes it the
 // right catalog for hermetic tests that must validate against exactly what
 // is checked in — e.g. TestParseExamples — rather than whatever the live
 // models.dev API happens to say at the instant the test runs.
 //
-// The returned *Database is a shared, process-wide singleton: callers must
+// The returned *modelsdev.Database is a shared, process-wide singleton: callers must
 // treat it as read-only.
-func EmbeddedSnapshot() *Database {
+func Snapshot() *modelsdev.Database {
 	return embeddedSnapshot()
 }
 

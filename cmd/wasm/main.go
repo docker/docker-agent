@@ -88,6 +88,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 // compatState tracks the chat() call in flight so abort() can cancel it.
@@ -137,7 +138,7 @@ func parseConfigJS(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return throwingError("parseConfig: expected yaml string argument")
 	}
-	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())))
+	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())), config.WithVersions(legacy.Register))
 	if err != nil {
 		return throwingError(fmt.Sprintf("parseConfig: %v", err))
 	}
@@ -148,7 +149,7 @@ func listAgentsJS(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return throwingError("listAgents: expected yaml string argument")
 	}
-	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())))
+	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())), config.WithVersions(legacy.Register))
 	if err != nil {
 		return throwingError(fmt.Sprintf("listAgents: %v", err))
 	}

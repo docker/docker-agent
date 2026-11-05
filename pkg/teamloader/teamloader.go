@@ -49,6 +49,7 @@ type loadOptions struct {
 	toolsetRegistry  ToolsetRegistry
 	providerRegistry *provider.Registry
 	sourceResolver   SourceResolver
+	configVersions   config.VersionRegistrar
 	newExpander      func(environment.Provider) Expander
 	codeMode         func(...tools.ToolSet) tools.ToolSet
 	toon             func(tools.ToolSet, string) tools.ToolSet
@@ -100,6 +101,16 @@ func WithProviderRegistry(registry *provider.Registry) Opt {
 		if registry != nil {
 			opts.providerRegistry = registry
 		}
+		return nil
+	}
+}
+
+// WithConfigVersions enables additional config versions for this load and its
+// external agents. Pass legacy.Register from pkg/config/legacy for historical
+// support. The last option wins; nil restores the latest-only default.
+func WithConfigVersions(register config.VersionRegistrar) Opt {
+	return func(opts *loadOptions) error {
+		opts.configVersions = register
 		return nil
 	}
 }
@@ -276,7 +287,7 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 	}
 
 	// Load the agent's configuration
-	cfg, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...))
+	cfg, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...), config.WithVersions(loadOpts.configVersions))
 	if err != nil {
 		return nil, err
 	}
@@ -1395,6 +1406,7 @@ func inheritOptions(parent *loadOptions) Opt {
 		opts.toolsetRegistry = parent.toolsetRegistry
 		opts.providerRegistry = parent.providerRegistry
 		opts.sourceResolver = parent.sourceResolver
+		opts.configVersions = parent.configVersions
 		opts.newExpander = parent.newExpander
 		opts.codeMode = parent.codeMode
 		opts.toon = parent.toon

@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -1405,7 +1406,7 @@ func TestPromptCachingEnabled_TypeMismatch(t *testing.T) {
 func TestDetectCachingSupport_SupportedModel(t *testing.T) {
 	t.Parallel()
 
-	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 
 	// Uses the committed models.dev snapshot to verify Claude models support caching
 	supported := detectCachingSupport(t.Context(), "anthropic.claude-opus-4-7", store)
@@ -1415,7 +1416,7 @@ func TestDetectCachingSupport_SupportedModel(t *testing.T) {
 func TestDetectCachingSupport_UnsupportedModel(t *testing.T) {
 	t.Parallel()
 
-	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 
 	// Llama doesn't have cache pricing in models.dev
 	supported := detectCachingSupport(t.Context(), "meta.llama3-8b-instruct-v1:0", store)
@@ -1425,7 +1426,7 @@ func TestDetectCachingSupport_UnsupportedModel(t *testing.T) {
 func TestDetectCachingSupport_UnknownModel(t *testing.T) {
 	t.Parallel()
 
-	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 
 	// Unknown model should gracefully return false, not panic
 	supported := detectCachingSupport(t.Context(), "nonexistent.model.that.does.not.exist:v1", store)

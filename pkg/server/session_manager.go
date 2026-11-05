@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/eventmerge"
 	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
@@ -1725,6 +1726,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 		// runtime.* spans go silent in HTTP-server mode.
 		runtime.WithTracer(otel.Tracer(version.AppName)),
 		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
+		runtime.WithModelsDevFallback(rc.ModelsDevFallback),
 		runtime.WithBudget(loadResult.Budget),
 		runtime.WithNamedBudgets(loadResult.Budgets, loadResult.AgentBudgets),
 	}
@@ -1867,7 +1869,7 @@ func (sm *SessionManager) LoadAgentConfig(ctx context.Context, agentFilename str
 		return nil, err
 	}
 
-	cfg, err := config.Load(ctx, agentSource)
+	cfg, err := config.Load(ctx, agentSource, config.WithVersions(legacy.Register))
 	if err != nil {
 		return nil, sm.sourceLoadError(agentFilename, err)
 	}

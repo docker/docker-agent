@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/hcl"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 )
 
 // modelsDevCatalogProviders validates ChatGPT example names against OpenAI's
@@ -104,7 +105,7 @@ func TestParseExamples(t *testing.T) {
 	// fail when the PR's own diff (an example or the committed snapshot)
 	// introduces an inconsistency, never because the live models.dev catalog
 	// moved on since the snapshot was last refreshed. See issue #4134.
-	modelsStore := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	modelsStore := modelsdev.NewDatabaseStore(embedded.Snapshot())
 
 	for _, file := range collectExamples(t) {
 		t.Run(file, func(t *testing.T) {
@@ -184,7 +185,7 @@ func TestExamplesAgainstLiveModelsDev(t *testing.T) {
 		"live models.dev API:\n  %s\n\n"+
 		"Fix by refreshing the snapshot (`task update-models`) and/or updating the affected\n"+
 		"example(s) to reference a model the live catalog still carries.",
-		modelsdev.SnapshotDate().Format("2006-01-02"), strings.Join(drifted, "\n  "))
+		embedded.SnapshotDate().Format("2006-01-02"), strings.Join(drifted, "\n  "))
 }
 
 func TestParseExamplesAfterMarshalling(t *testing.T) {

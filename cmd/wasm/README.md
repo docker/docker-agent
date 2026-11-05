@@ -25,6 +25,19 @@ provider clients and the MCP client). Size depends on the toolchain
 and enabled features; compression and `-ldflags="-s -w"` can reduce transfer
 size. No size-reduction ratio is guaranteed.
 
+### Selecting YAML history and catalog data
+
+This demo explicitly opts into all supported YAML versions using
+`config.WithVersions(legacy.Register)` and
+`teamloader.WithConfigVersions(legacy.Register)`, and supplies
+`embedded.Snapshot()` as its in-memory model catalog. Its behavior is unchanged.
+
+Custom entry points can omit either package independently. The core loader then
+accepts only the current schema, and model stores have no embedded fallback unless
+supplied with `modelsdev.WithFallback`. Keep an explicitly empty in-memory store
+if you also want to avoid cache/network discovery. See the Go SDK guide's
+*Optional YAML history and embedded model catalog* section.
+
 ### Optional RAG
 
 RAG is disabled by default. Include it explicitly with:

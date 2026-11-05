@@ -25,6 +25,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/session"
 )
@@ -70,7 +71,7 @@ func Evaluate(ctx context.Context, ttyOut, out io.Writer, isTTY bool, runName st
 	if err != nil {
 		return nil, fmt.Errorf("resolving agent: %w", err)
 	}
-	agentConfig, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...))
+	agentConfig, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...), config.WithVersions(legacy.Register))
 	if err != nil {
 		return nil, fmt.Errorf("loading agent: %w", err)
 	}

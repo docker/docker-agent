@@ -26,6 +26,8 @@ type RuntimeConfig struct {
 	envProviderOnce     sync.Once
 	envFilesErr         error
 
+	// ModelsDevFallback supplies optional catalog data after a cache/network miss.
+	ModelsDevFallback      func() *modelsdev.Database
 	ModelsDevStoreOverride *modelsdev.Store
 	modelsDevStore         *modelsdev.Store
 	modelsDevStoreErr      error
@@ -106,6 +108,7 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 		envProviderCached:      env,
 		envFilesErr:            runConfig.envFilesErr,
 		ModelsDevStoreOverride: runConfig.ModelsDevStoreOverride,
+		ModelsDevFallback:      runConfig.ModelsDevFallback,
 		modelsDevStore:         store,
 		modelsDevStoreErr:      storeErr,
 		ProviderRegistry:       runConfig.ProviderRegistry,
@@ -148,6 +151,7 @@ func (runConfig *RuntimeConfig) ModelsDevStore() (*modelsdev.Store, error) {
 	runConfig.modelsDevStoreOnce.Do(func() {
 		runConfig.modelsDevStore, runConfig.modelsDevStoreErr = modelsdev.NewStore(
 			modelsdev.WithKnownProvider(catalog.IsKnownProvider),
+			modelsdev.WithFallback(runConfig.ModelsDevFallback),
 		)
 	})
 	return runConfig.modelsDevStore, runConfig.modelsDevStoreErr

@@ -24,7 +24,7 @@ var unknownFieldNamePattern = regexp.MustCompile(`unknown field "([^"]*)"`)
 // intentionally removed and should simply be deleted, not restored by
 // lowering the top-level 'version' field (which would just move the problem
 // to whichever version the config is eventually run against).
-func removedFieldHint(version string, parseErr error) string {
+func removedFieldHint(version string, parseErr error, parsers map[string]func([]byte) (any, error)) string {
 	unknownField, ok := errors.AsType[*yaml.UnknownFieldError](parseErr)
 	if !ok {
 		return ""
@@ -41,7 +41,6 @@ func removedFieldHint(version string, parseErr error) string {
 		return ""
 	}
 
-	parsers, _ := versions()
 	if schemaFieldNames(parsers, version)[field] {
 		// The field exists in the declared version too, so this isn't a
 		// removed-field case (e.g. the key is just nested wrong).

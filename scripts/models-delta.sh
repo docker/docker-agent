@@ -5,7 +5,7 @@
 #   scripts/models-delta.sh [--json-out FILE] [OLD NEW]
 #
 # With no positional arguments, compares the version of
-# pkg/modelsdev/snapshot.json at HEAD against the current working-tree copy —
+# pkg/modelsdev/embedded/snapshot.json at HEAD against the current working-tree copy —
 # i.e. "what would `task update-models` change if I committed it right now".
 # This is also exactly what the update-models workflow runs after refreshing
 # the snapshot, so the local and CI code paths never drift apart.
@@ -59,10 +59,10 @@ trap '[ -n "$cleanup_old" ] && rm -f "$cleanup_old"; [ -n "$delta_json" ] && rm 
 if [ -z "$old" ]; then
   cleanup_old="$(mktemp)"
   old="$cleanup_old"
-  git -C "$ROOT" show "HEAD:pkg/modelsdev/snapshot.json" > "$old"
+  git -C "$ROOT" show "HEAD:pkg/modelsdev/embedded/snapshot.json" > "$old"
 fi
 if [ -z "$new" ]; then
-  new="$ROOT/pkg/modelsdev/snapshot.json"
+  new="$ROOT/pkg/modelsdev/embedded/snapshot.json"
 fi
 
 for f in "$old" "$new"; do

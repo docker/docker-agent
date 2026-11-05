@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -302,7 +303,7 @@ func EnvForSource(ctx context.Context, source config.Source, env environment.Pro
 }
 
 func gatherSourceEnvVars(ctx context.Context, source config.Source, env environment.Provider, flavors []string, defaults ...*config.RuntimeConfig) ([]string, error) {
-	cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...))
+	cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...), config.WithVersions(legacy.Register))
 	if err != nil {
 		return nil, fmt.Errorf("loading agent config: %w", err)
 	}

@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/js"
@@ -233,7 +234,7 @@ func TestOverrideModel(t *testing.T) {
 			agentSource, err := sources.Resolve("testdata/basic.yaml", nil)
 			require.NoError(t, err)
 
-			team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry(WithModelOverrides(test.overrides))...)
+			team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry(WithConfigVersions(legacy.Register), WithModelOverrides(test.overrides))...)
 			if test.expectedErr != "" {
 				require.Contains(t, err.Error(), test.expectedErr)
 			} else {
@@ -719,7 +720,7 @@ func TestToolsetInstructions(t *testing.T) {
 	agentSource, err := sources.Resolve("testdata/tool-instruction.yaml", nil)
 	require.NoError(t, err)
 
-	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry()...)
+	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{}, withTestProviderRegistry(WithConfigVersions(legacy.Register))...)
 	require.NoError(t, err)
 
 	agent, err := team.Agent("root")
@@ -847,7 +848,7 @@ func TestWithPromptFiles(t *testing.T) {
 			agentSource, err := sources.Resolve("testdata/basic.yaml", nil)
 			require.NoError(t, err)
 
-			var opts []Opt
+			opts := []Opt{WithConfigVersions(legacy.Register)}
 			if len(tt.cliPromptFiles) > 0 {
 				opts = append(opts, WithPromptFiles(tt.cliPromptFiles))
 			}
@@ -884,7 +885,7 @@ agents:
 
 	// Load with CLI prompt files - should merge with config
 	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{},
-		withTestProviderRegistry(WithPromptFiles([]string{"cli-file.md"}))...)
+		withTestProviderRegistry(WithConfigVersions(legacy.Register), WithPromptFiles([]string{"cli-file.md"}))...)
 	require.NoError(t, err)
 
 	rootAgent, err := team.Agent("root")
@@ -917,7 +918,7 @@ agents:
 
 	// CLI specifies a file that's already in config - should deduplicate
 	team, err := Load(t.Context(), agentSource, &config.RuntimeConfig{},
-		withTestProviderRegistry(WithPromptFiles([]string{"AGENTS.md", "extra.md"}))...)
+		withTestProviderRegistry(WithConfigVersions(legacy.Register), WithPromptFiles([]string{"AGENTS.md", "extra.md"}))...)
 	require.NoError(t, err)
 
 	rootAgent, err := team.Agent("root")
