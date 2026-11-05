@@ -298,6 +298,29 @@ func listImports(t *testing.T, pkg string) map[string]bool {
 	return imports
 }
 
+// text/template looks methods up by name at run time, which makes the linker
+// keep every exported method of every reachable type. Embedders building with
+// docker_agent_no_hook_templates must get a runtime that doesn't import it.
+func TestNoHookTemplatesDropsTextTemplate(t *testing.T) {
+	t.Parallel()
+	const tags = "docker_agent_no_hook_templates"
+	cmd := exec.CommandContext(t.Context(), "go", "list", "-deps", "-tags", tags,
+		"./pkg/runtime", "./pkg/teamloader")
+	cmd.Dir = ".."
+	cmd.Env = append(os.Environ(), "GOOS=js", "GOARCH=wasm")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+	for dep := range strings.FieldsSeq(string(out)) {
+		assert.NotContains(t, []string{"text/template", "html/template", "github.com/xeipuuv/gojsonschema"}, dep)
+	}
+
+	cmd = exec.CommandContext(t.Context(), "go", "test", "-count=1", "-tags", tags,
+		"-run", "HookTemplatesDisabled", "./pkg/hooks", "./pkg/hooks/builtins")
+	cmd.Dir = ".."
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, "%s", out)
+}
+
 func TestLocalRuntimeDoesNotImportRemoteTransport(t *testing.T) {
 	t.Parallel()
 	const prefix = "github.com/docker/docker-agent/pkg/runtime"

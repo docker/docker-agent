@@ -1,3 +1,5 @@
+//go:build !docker_agent_no_hook_templates
+
 package builtins
 
 import (
