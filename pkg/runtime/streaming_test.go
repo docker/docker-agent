@@ -619,18 +619,20 @@ func TestHandleStream_IdleTimeoutAfterResponseStarted(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			stream := newResponseThenStalledStream(tt.response)
-			a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
-			sess := session.New(session.WithUserMessage("go"))
-			cancelStream := func(error) { stream.Close() }
+			synctest.Test(t, func(t *testing.T) {
+				stream := newResponseThenStalledStream(tt.response)
+				a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+				sess := session.New(session.WithUserMessage("go"))
+				cancelStream := func(error) { stream.Close() }
 
-			res, err := handleStream(
-				t.Context(), cancelStream, stream, a, nil, sess,
-				NewChannelSink(make(chan Event, 64)), 50*time.Millisecond,
-			)
+				res, err := handleStream(
+					t.Context(), cancelStream, stream, a, nil, sess,
+					NewChannelSink(make(chan Event, 64)), 30*time.Second,
+				)
 
-			require.ErrorIs(t, err, errStreamIdle)
-			assert.True(t, res.ResponseStarted)
+				require.ErrorIs(t, err, errStreamIdle)
+				assert.True(t, res.ResponseStarted)
+			})
 		})
 	}
 }
