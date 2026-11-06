@@ -26,7 +26,10 @@ import (
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/artifacts"
 	"github.com/docker/docker-agent/pkg/runtime/eventmerge"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/shellpath"
@@ -308,17 +311,17 @@ func (a *App) CurrentAgentTools(ctx context.Context) ([]tools.Tool, error) {
 // Only the local runtime (which holds the team) implements it; remote runtimes
 // don't, so the agent-details config sections are simply omitted for them.
 type agentConfigProvider interface {
-	AgentConfigInfo(ctx context.Context, agentName string) runtime.AgentConfigInfo
+	AgentConfigInfo(ctx context.Context, agentName string) inspection.AgentConfigInfo
 }
 
 // AgentConfigInfo returns the named agent's static configuration for the
 // read-only agent-details dialog, or the zero value when it can't be resolved
 // (remote runtime or unknown agent). It reads resolved config only and starts
 // no toolsets.
-func (a *App) AgentConfigInfo(ctx context.Context, agentName string) runtime.AgentConfigInfo {
+func (a *App) AgentConfigInfo(ctx context.Context, agentName string) inspection.AgentConfigInfo {
 	cp, ok := a.runtime.(agentConfigProvider)
 	if !ok {
-		return runtime.AgentConfigInfo{}
+		return inspection.AgentConfigInfo{}
 	}
 	return cp.AgentConfigInfo(ctx, agentName)
 }
@@ -1493,7 +1496,7 @@ type contextBreakdownProvider interface {
 // local runtime implements it; remote runtimes never deliver generated-file
 // payloads, so UIs treat the missing capability as "nothing to resolve".
 type generatedFileResolver interface {
-	ResolveGeneratedFile(ctx context.Context, ref runtime.GeneratedFileRef) (*runtime.ResolvedGeneratedFile, error)
+	ResolveGeneratedFile(ctx context.Context, ref artifacts.GeneratedFileRef) (*artifacts.ResolvedGeneratedFile, error)
 }
 
 // CanResolveGeneratedFiles reports whether the runtime can resolve
@@ -1508,7 +1511,7 @@ func (a *App) CanResolveGeneratedFiles() bool {
 // Returns an error wrapping [runtime.ErrUnsupported] when the runtime does
 // not own local generated media (e.g. remote runtimes). Callers must treat
 // any error as "unavailable" — never surface its text to the user.
-func (a *App) ResolveGeneratedFile(ctx context.Context, ref runtime.GeneratedFileRef) (*runtime.ResolvedGeneratedFile, error) {
+func (a *App) ResolveGeneratedFile(ctx context.Context, ref artifacts.GeneratedFileRef) (*artifacts.ResolvedGeneratedFile, error) {
 	resolver, ok := a.runtime.(generatedFileResolver)
 	if !ok {
 		return nil, fmt.Errorf("generated file resolution: %w", runtime.ErrUnsupported)
@@ -1792,7 +1795,7 @@ func (a *App) RefreshModelsCatalog(ctx context.Context) error {
 
 // AvailableModels returns the list of models available for selection.
 // Returns nil if model switching is not supported.
-func (a *App) AvailableModels(ctx context.Context) []runtime.ModelChoice {
+func (a *App) AvailableModels(ctx context.Context) []modelcatalog.ModelChoice {
 	start := time.Now()
 	if !a.runtime.SupportsModelSwitching() {
 		slog.DebugContext(ctx, "App available models skipped; model switching unsupported", "duration", time.Since(start))
@@ -1812,7 +1815,7 @@ func (a *App) AvailableModels(ctx context.Context) []runtime.ModelChoice {
 	baseModels := a.runtime.AvailableModels(ctx)
 	runtimeDuration := time.Since(runtimeStart)
 	decorateStart := time.Now()
-	models := runtime.DecorateModelChoices(baseModels, currentRef, customRefs)
+	models := modelcatalog.DecorateModelChoices(baseModels, currentRef, customRefs)
 	slog.DebugContext(ctx, "App available models completed",
 		"duration", time.Since(start),
 		"runtime_duration", runtimeDuration,

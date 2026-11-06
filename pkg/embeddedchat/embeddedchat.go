@@ -12,6 +12,7 @@ import (
 
 	dagentcfg "github.com/docker/docker-agent/pkg/config"
 	dagentruntime "github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -175,7 +176,7 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 		}
 		tm = loaded.Team
 
-		modelSwitcher := &dagentruntime.ModelSwitcherConfig{
+		modelSwitcher := &modelcatalog.Config{
 			Models:             loaded.Models,
 			Providers:          loaded.Providers,
 			ModelsGateway:      runConfig.ModelsGateway,
@@ -195,6 +196,7 @@ func New(ctx context.Context, cfg Config) (*Session, error) {
 	runtimeOpts = append(runtimeOpts,
 		dagentruntime.WithWorkingDir(runConfig.WorkingDir),
 		dagentruntime.WithSessionStore(session.NewInMemorySessionStore()),
+		dagentruntime.WithModelsDevFallback(runConfig.ModelsDevFallback),
 	)
 	runtimeOpts = append(runtimeOpts, cfg.RuntimeOptions...)
 	rt, err := dagentruntime.New(ctx, tm, runtimeOpts...)

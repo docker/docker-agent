@@ -8,14 +8,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 )
 
 func TestModelPickerNavigation(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "default_model", Ref: "default_model", Provider: "openai", Model: "gpt-4o", IsDefault: true},
 		{Name: "fast_model", Ref: "fast_model", Provider: "openai", Model: "gpt-4o-mini"},
 		{Name: "smart_model", Ref: "smart_model", Provider: "anthropic", Model: "claude-sonnet-4-0"},
@@ -60,7 +60,7 @@ func TestModelPickerNavigation(t *testing.T) {
 func TestModelPickerFiltering(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "default_model", Ref: "default_model", Provider: "anthropic", Model: "claude-sonnet-4-0", IsDefault: true},
 		{Name: "openai_model", Ref: "openai_model", Provider: "openai", Model: "gpt-4o"},
 		{Name: "anthropic_model", Ref: "anthropic_model", Provider: "anthropic", Model: "claude-sonnet-4-0"},
@@ -91,7 +91,7 @@ func TestModelPickerFiltering(t *testing.T) {
 func TestModelPickerCustomModel(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "default_model", Ref: "openai/gpt-4o", Provider: "openai", Model: "gpt-4o", IsDefault: true},
 	}
 
@@ -115,7 +115,7 @@ func TestModelPickerCustomModel(t *testing.T) {
 func TestModelPickerRefreshShortcut(t *testing.T) {
 	t.Parallel()
 
-	d := NewModelPickerDialog([]runtime.ModelChoice{{
+	d := NewModelPickerDialog([]modelcatalog.ModelChoice{{
 		Name: "default_model", Ref: "default_model", Provider: "openai", Model: "gpt-4o", IsDefault: true,
 	}}).(*modelPickerDialog)
 	d.Init()
@@ -132,7 +132,7 @@ func TestModelPickerRefreshShortcut(t *testing.T) {
 func TestModelPickerRTypesIntoSearch(t *testing.T) {
 	t.Parallel()
 
-	d := NewModelPickerDialog([]runtime.ModelChoice{{
+	d := NewModelPickerDialog([]modelcatalog.ModelChoice{{
 		Name: "model_r", Ref: "model_r", Provider: "openai", Model: "gpt-4o",
 	}}).(*modelPickerDialog)
 	d.Init()
@@ -146,7 +146,7 @@ func TestModelPickerRTypesIntoSearch(t *testing.T) {
 func TestModelPickerRefreshShortcutWorksWithSearch(t *testing.T) {
 	t.Parallel()
 
-	d := NewModelPickerDialog([]runtime.ModelChoice{{
+	d := NewModelPickerDialog([]modelcatalog.ModelChoice{{
 		Name: "model_r", Ref: "model_r", Provider: "openai", Model: "gpt-4o",
 	}}).(*modelPickerDialog)
 	d.Init()
@@ -165,7 +165,7 @@ func TestModelPickerSorting(t *testing.T) {
 	t.Parallel()
 
 	// Create models in unsorted order
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "z_model", Ref: "z_model", Provider: "openai", Model: "gpt-4o"},
 		{Name: "default_model", Ref: "default_model", Provider: "anthropic", Model: "claude", IsDefault: true},
 		{Name: "a_model", Ref: "a_model", Provider: "anthropic", Model: "claude"},
@@ -185,7 +185,7 @@ func TestModelPickerSorting(t *testing.T) {
 func TestModelPickerViewShowsSelection(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "default_model", Ref: "default_model", Provider: "openai", Model: "gpt-4o", IsDefault: true},
 		{Name: "model1", Ref: "model1", Provider: "openai", Model: "gpt-4o"},
 		{Name: "model2", Ref: "model2", Provider: "anthropic", Model: "claude"},
@@ -218,16 +218,16 @@ func TestModelPickerPageNavigation(t *testing.T) {
 	t.Parallel()
 
 	// Create many models
-	var models []runtime.ModelChoice
+	var models []modelcatalog.ModelChoice
 	for i := range 20 {
-		models = append(models, runtime.ModelChoice{
+		models = append(models, modelcatalog.ModelChoice{
 			Name:     "model_" + string(rune('a'+i)),
 			Ref:      "model_" + string(rune('a'+i)),
 			Provider: "openai",
 			Model:    "gpt-4o",
 		})
 	}
-	models = append(models, runtime.ModelChoice{Name: "default_model", Ref: "default_model", Provider: "openai", Model: "gpt-4o", IsDefault: true})
+	models = append(models, modelcatalog.ModelChoice{Name: "default_model", Ref: "default_model", Provider: "openai", Model: "gpt-4o", IsDefault: true})
 
 	dialog := NewModelPickerDialog(models)
 	d := dialog.(*modelPickerDialog)
@@ -251,7 +251,7 @@ func TestModelPickerPageNavigation(t *testing.T) {
 func TestModelPickerEscape(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "default_model", Ref: "default_model", Provider: "openai", Model: "gpt-4o", IsDefault: true},
 	}
 
@@ -271,7 +271,7 @@ func TestModelPickerEscape(t *testing.T) {
 func TestModelPickerSelectDefault(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "default_model", Ref: "default_model", Provider: "openai", Model: "gpt-4o", IsDefault: true},
 		{Name: "other_model", Ref: "other_model", Provider: "anthropic", Model: "claude"},
 	}
@@ -398,7 +398,7 @@ func TestModelPickerSortingWithCatalog(t *testing.T) {
 	t.Parallel()
 
 	// Create models with mixed types: config, catalog, and custom
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "custom_model", Ref: "openai/custom", Provider: "openai", Model: "custom", IsCustom: true},
 		{Name: "GPT-4o", Ref: "openai/gpt-4o", Provider: "openai", Model: "gpt-4o", IsCatalog: true},
 		{Name: "z_config", Ref: "z_config", Provider: "openai", Model: "gpt-4o"},
@@ -442,7 +442,7 @@ func TestModelPickerSortingWithCatalog(t *testing.T) {
 func TestModelPickerCatalogSeparator(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "default_model", Ref: "default_model", Provider: "openai", Model: "gpt-4o", IsDefault: true},
 		{Name: "GPT-4o", Ref: "openai/gpt-4o", Provider: "openai", Model: "gpt-4o", IsCatalog: true},
 	}
@@ -464,7 +464,7 @@ func TestModelPickerCatalogSeparator(t *testing.T) {
 func TestModelPickerCustomSeparatorWithCatalog(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "config_model", Ref: "config_model", Provider: "openai", Model: "gpt-4o"},
 		{Name: "GPT-4o", Ref: "openai/gpt-4o", Provider: "openai", Model: "gpt-4o", IsCatalog: true},
 		{Name: "custom_model", Ref: "openai/custom", Provider: "openai", Model: "custom", IsCustom: true},
@@ -485,7 +485,7 @@ func TestModelPickerCustomSeparatorWithCatalog(t *testing.T) {
 func TestModelPickerCatalogFiltering(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "config_model", Ref: "config_model", Provider: "openai", Model: "gpt-4o"},
 		{Name: "GPT-4o", Ref: "openai/gpt-4o", Provider: "openai", Model: "gpt-4o", IsCatalog: true},
 		{Name: "Claude Sonnet", Ref: "anthropic/claude-sonnet-4-0", Provider: "anthropic", Model: "claude-sonnet-4-0", IsCatalog: true},
@@ -570,15 +570,15 @@ func TestRightAlign(t *testing.T) {
 func TestModelReference(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "openai/gpt-4o", modelReference(runtime.ModelChoice{Provider: "openai", Model: "gpt-4o"}))
-	assert.Equal(t, "openai/gpt-4o,anthropic/claude", modelReference(runtime.ModelChoice{Model: "openai/gpt-4o,anthropic/claude"}))
-	assert.Equal(t, "openai/custom", modelReference(runtime.ModelChoice{Ref: "openai/custom", IsCustom: true}))
+	assert.Equal(t, "openai/gpt-4o", modelReference(modelcatalog.ModelChoice{Provider: "openai", Model: "gpt-4o"}))
+	assert.Equal(t, "openai/gpt-4o,anthropic/claude", modelReference(modelcatalog.ModelChoice{Model: "openai/gpt-4o,anthropic/claude"}))
+	assert.Equal(t, "openai/custom", modelReference(modelcatalog.ModelChoice{Ref: "openai/custom", IsCustom: true}))
 }
 
 func TestModelPickerShowsPricingInRow(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{
 			Name: "default_model", Ref: "default_model",
 			Provider: "openai", Model: "gpt-4o", IsDefault: true,
@@ -608,7 +608,7 @@ func TestModelPickerShowsPricingInRow(t *testing.T) {
 func TestModelPickerDetailsPanel(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{
 			Name: "claude", Ref: "anthropic/claude-sonnet-4-0",
 			Provider: "anthropic", Model: "claude-sonnet-4-0", IsCatalog: true,
@@ -658,7 +658,7 @@ func TestModelPickerDetailsPanel(t *testing.T) {
 func TestModelPickerDetailsPanelMissingInfo(t *testing.T) {
 	t.Parallel()
 
-	models := []runtime.ModelChoice{
+	models := []modelcatalog.ModelChoice{
 		{Name: "plain", Ref: "plain", Provider: "openai", Model: "gpt-4o", IsDefault: true},
 	}
 
@@ -673,7 +673,7 @@ func TestModelPickerDetailsPanelMissingInfo(t *testing.T) {
 
 func TestModelPickerDMRMetadata(t *testing.T) {
 	t.Parallel()
-	d := NewModelPickerDialog([]runtime.ModelChoice{{
+	d := NewModelPickerDialog([]modelcatalog.ModelChoice{{
 		Name: "ai/qwen3", Ref: "dmr/ai/qwen3", Provider: "dmr", Model: "ai/qwen3",
 		Architecture: "qwen3", Parameters: "8B", Quantization: "Q4_K_M", Size: "4.9 GiB", ContextLimit: 32768,
 	}}).(*modelPickerDialog)
@@ -687,7 +687,7 @@ func TestModelPickerDMRMetadata(t *testing.T) {
 
 func TestDMRMetadataPreservesConfiguredPricing(t *testing.T) {
 	t.Parallel()
-	d := NewModelPickerDialog([]runtime.ModelChoice{{Name: "local", Ref: "local", Provider: "dmr", Parameters: "8B", InputCost: 1}}).(*modelPickerDialog)
+	d := NewModelPickerDialog([]modelcatalog.ModelChoice{{Name: "local", Ref: "local", Provider: "dmr", Parameters: "8B", InputCost: 1}}).(*modelPickerDialog)
 	d.Init()
 	d.Update(tea.WindowSizeMsg{Width: 140, Height: 50})
 	assert.Contains(t, d.View(), "$1 in")

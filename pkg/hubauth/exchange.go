@@ -85,7 +85,23 @@ func resolveLoginEndpoint() string {
 }
 
 func isDockerHost(host string) bool {
+	host = strings.ToLower(host)
 	return host == "docker.com" || strings.HasSuffix(host, ".docker.com")
+}
+
+// Staging reports whether the token exchange targets a Docker Hub staging host.
+func Staging() bool {
+	return isStagingEndpoint(loginEndpoint())
+}
+
+// isStagingEndpoint reports whether endpoint's host is a "*-stage" Docker host.
+func isStagingEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || !isDockerHost(u.Hostname()) {
+		return false
+	}
+	label, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
+	return strings.HasSuffix(label, "-stage")
 }
 
 func exchangeDisabled() bool {

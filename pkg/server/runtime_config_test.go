@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -171,11 +172,11 @@ func newAPIRuntimeForSession(t *testing.T, sm *SessionManager, sess *session.Ses
 	return run, loadedTeam
 }
 
-func apiRuntimeModelChoice(t *testing.T, run runtime.Runtime, ref string) runtime.ModelChoice {
+func apiRuntimeModelChoice(t *testing.T, run runtime.Runtime, ref string) modelcatalog.ModelChoice {
 	t.Helper()
 
 	choices := run.AvailableModels(t.Context())
-	index := slices.IndexFunc(choices, func(choice runtime.ModelChoice) bool { return choice.Ref == ref })
+	index := slices.IndexFunc(choices, func(choice modelcatalog.ModelChoice) bool { return choice.Ref == ref })
 	require.NotEqual(t, -1, index, "model %q missing from API runtime picker", ref)
 	return choices[index]
 }

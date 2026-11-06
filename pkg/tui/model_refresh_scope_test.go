@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/app"
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/dialog"
 )
@@ -32,9 +32,9 @@ func (r *delayedModelRuntime) RefreshModelsCatalog(context.Context) error {
 	return r.err
 }
 
-func (r *delayedModelRuntime) AvailableModels(context.Context) []runtime.ModelChoice {
+func (r *delayedModelRuntime) AvailableModels(context.Context) []modelcatalog.ModelChoice {
 	r.lists.Add(1)
-	return []runtime.ModelChoice{{Name: "original-model", Ref: "original-model"}}
+	return []modelcatalog.ModelChoice{{Name: "original-model", Ref: "original-model"}}
 }
 
 func TestModelRefreshStaysWithOriginatingPage(t *testing.T) {

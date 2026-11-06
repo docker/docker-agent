@@ -19,6 +19,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/runtime/artifacts"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/workspacemedia"
 )
@@ -307,21 +308,21 @@ func TestMaterializeGeneratedMedia_UnwritableRoot(t *testing.T) {
 
 // TestMaterializeGeneratedMedia_PartialSuccess_SingleBatchCall: ONE call with
 // a two-item batch where exactly one sibling fails (injected through the
-// workspacemediaWrite seam) must keep the surviving sibling's file, part,
+// artifact writer seam) must keep the surviving sibling's file, part,
 // and manifest record, and warn only for the failing one — the manifest is
 // written strictly per successful write.
 func TestMaterializeGeneratedMedia_PartialSuccess_SingleBatchCall(t *testing.T) {
 	r, store, _ := newMediaTestRuntime(t)
 	sess, root := workspaceSession(t, "sess-partial")
 
-	orig := workspacemediaWrite
-	workspacemediaWrite = func(workspaceRoot, requestedPath string, data []byte, mimeType string) (workspacemedia.Result, error) {
+	orig := r.artifacts().Write
+	r.artifacts().Write = func(workspaceRoot, requestedPath string, data []byte, mimeType string) (workspacemedia.Result, error) {
 		if mimeType == "image/jpeg" {
 			return workspacemedia.Result{}, errors.New("injected failure for deterministic partial-success test")
 		}
 		return orig(workspaceRoot, requestedPath, data, mimeType)
 	}
-	t.Cleanup(func() { workspacemediaWrite = orig })
+	t.Cleanup(func() { r.artifacts().Write = orig })
 
 	sink := &collectingSink{}
 	parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
@@ -337,7 +338,7 @@ func TestMaterializeGeneratedMedia_PartialSuccess_SingleBatchCall(t *testing.T) 
 	assert.Contains(t, warnings[0].Message, "2/2", "the failing item's index/total must reflect its real position in the batch")
 	assert.Contains(t, warnings[0].Message, "dog.jpg")
 	assert.Contains(t, warnings[0].Message, "image/jpeg")
-	assert.Contains(t, warnings[0].Message, retryWithDebugAdvice,
+	assert.Contains(t, warnings[0].Message, artifacts.RetryWithDebugAdvice,
 		"an unclassified failure must carry the retry-with-debug advice")
 	assert.NotContains(t, warnings[0].Message, "injected failure", "the raw error text must never reach the warning")
 	assertSafeWarningMessage(t, warnings[0].Message, sess.ID, root)
@@ -353,7 +354,7 @@ func TestMaterializeGeneratedMedia_PartialSuccess_SingleBatchCall(t *testing.T) 
 }
 
 // TestMaterializeGeneratedMedia_ClassifiedWriteFailureReasons drives every
-// classified writer-failure category through the workspacemediaWrite seam
+// classified writer-failure category through the r.artifacts().Write seam
 // and proves the per-item warning carries exactly the fixed classified
 // sentence — while the raw error (with its embedded secret path) reaches
 // only the debug log, never the warning.
@@ -400,11 +401,11 @@ func TestMaterializeGeneratedMedia_ClassifiedWriteFailureReasons(t *testing.T) {
 			slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 			t.Cleanup(func() { slog.SetDefault(prevLogger) })
 
-			orig := workspacemediaWrite
-			workspacemediaWrite = func(string, string, []byte, string) (workspacemedia.Result, error) {
+			orig := r.artifacts().Write
+			r.artifacts().Write = func(string, string, []byte, string) (workspacemedia.Result, error) {
 				return workspacemedia.Result{}, tc.writeErr
 			}
-			t.Cleanup(func() { workspacemediaWrite = orig })
+			t.Cleanup(func() { r.artifacts().Write = orig })
 
 			sink := &collectingSink{}
 			parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
@@ -418,7 +419,7 @@ func TestMaterializeGeneratedMedia_ClassifiedWriteFailureReasons(t *testing.T) {
 			assert.Contains(t, msg, "1/1")
 			assert.Contains(t, msg, "cat.png")
 			assert.Contains(t, msg, tc.wantReason)
-			assert.NotContains(t, msg, retryWithDebugAdvice, "a classified failure must show its reason, not the debug fallback")
+			assert.NotContains(t, msg, artifacts.RetryWithDebugAdvice, "a classified failure must show its reason, not the debug fallback")
 			assert.NotContains(t, msg, secretPath, "the warning must never leak a path embedded in the error")
 			assertSafeWarningMessage(t, msg, sess.ID, root)
 
@@ -482,7 +483,7 @@ func TestMaterializeGeneratedMedia_BlobStoreFailureKeepsWorkspaceFileAndWarns(t 
 	warnings := sink.warnings()
 	require.Len(t, warnings, 1)
 	assert.Contains(t, warnings[0].Message, "could not keep a portable copy with the session")
-	assert.Contains(t, warnings[0].Message, retryWithDebugAdvice)
+	assert.Contains(t, warnings[0].Message, artifacts.RetryWithDebugAdvice)
 	assert.NotContains(t, warnings[0].Message, "too large")
 	assertBoundedSingleLineUTF8(t, warnings[0].Message)
 }
@@ -513,7 +514,7 @@ func TestMaterializeGeneratedMedia_ManifestFailureKeepsFileAndWarns(t *testing.T
 	require.Len(t, warnings, 1)
 	assert.Contains(t, warnings[0].Message, "cat.png")
 	assert.Contains(t, warnings[0].Message, "could not record it for display")
-	assert.Contains(t, warnings[0].Message, retryWithDebugAdvice,
+	assert.Contains(t, warnings[0].Message, artifacts.RetryWithDebugAdvice,
 		"the manifest cause is unclassified storage internals, so the warning must carry the retry-with-debug advice")
 	assert.NotContains(t, warnings[0].Message, "see debug log")
 	assertBoundedSingleLineUTF8(t, warnings[0].Message)

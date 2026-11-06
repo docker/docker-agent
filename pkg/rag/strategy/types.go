@@ -20,8 +20,9 @@ type Strategy interface {
 	// CheckAndReindexChangedFiles checks for file changes and re-indexes if needed.
 	CheckAndReindexChangedFiles(ctx context.Context, docPaths []string, chunking ChunkingConfig) error
 
-	// StartFileWatcher starts monitoring files for changes.
-	StartFileWatcher(ctx context.Context, docPaths []string, chunking ChunkingConfig) error
+	// WatchFiles blocks until cancellation or failure, or returns nil if nothing needs watching.
+	// Use one active call per strategy; join it and other operations before Close.
+	WatchFiles(ctx context.Context, docPaths []string, chunking ChunkingConfig) error
 
 	// Close releases resources held by the strategy.
 	Close() error

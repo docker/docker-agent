@@ -230,6 +230,16 @@ func TestSetToolStatusRunningSetsStartedAt(t *testing.T) {
 	_, ok := tr.SetToolStatus("call-1", types.ToolStatusRunning)
 	require.True(t, ok)
 	assert.NotNil(t, tr.msgs[0].StartedAt)
+	assert.Nil(t, tr.msgs[0].FinishedAt)
+
+	_, ok = tr.SetToolStatus("call-1", types.ToolStatusCompleted)
+	require.True(t, ok)
+	require.NotNil(t, tr.msgs[0].FinishedAt)
+	assert.Contains(t, ansi.Strip(tr.Render(80)), "Completed in 0s")
+	finished := tr.msgs[0].FinishedAt
+	_, ok = tr.SetToolStatus("call-1", types.ToolStatusCompleted)
+	require.True(t, ok)
+	assert.Same(t, finished, tr.msgs[0].FinishedAt)
 }
 
 func TestTransferTaskGetsSeparator(t *testing.T) {

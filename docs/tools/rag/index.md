@@ -11,6 +11,12 @@ aliases:
 
 _Give your agents access to document knowledge bases with background indexing, multiple retrieval strategies, and hybrid search._
 
+> Relative document and database paths resolve from the agent's working directory
+> (or the configuration directory when no working directory is set). Default
+> database files are stored under the data directory, scoped by workspace, so
+> isolated worktrees do not mix indexed documents. Explicit absolute database
+> paths retain their sharing semantics.
+
 ## Overview
 
 The `rag` toolset lets agents search through your documents to find relevant information before responding. Knowledge bases are declared once at the top of the config under `rag:` and then referenced from any agent via `type: rag, ref: <name>`. Docker Agent supports:
@@ -44,6 +50,33 @@ agents:
     toolsets:
       - type: rag
         ref: my_docs
+```
+
+### Sharing a knowledge base between agents
+
+When several agents reference the same knowledge base, they share one index.
+Docker Agent indexes each document once, runs a single file watcher, and
+re-embeds a changed file once, no matter how many agents use it. Embedding
+calls are bounded by the knowledge base's own `max_embedding_concurrency`, not
+multiplied by the number of agents.
+
+References share an index only when they resolve to the same configuration
+and the same credentials. A reference that overrides `name:`, or a session
+loaded with different credentials, gets its own index. Background indexing
+for a shared knowledge base is not attributed to any session.
+
+```yaml
+agents:
+  researcher:
+    model: anthropic/claude-sonnet-4-5
+    toolsets:
+      - type: rag
+        ref: my_docs   # shares one index...
+  writer:
+    model: anthropic/claude-sonnet-4-5
+    toolsets:
+      - type: rag
+        ref: my_docs   # ...with this reference
 ```
 
 ## Retrieval Strategies

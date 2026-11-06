@@ -21,17 +21,16 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/docker/docker-agent/pkg/chat"
-	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/modelinfo"
-	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/rag/prompts"
 	"github.com/docker/docker-agent/pkg/rag/types"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -100,10 +99,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			// Explicit token_key configured - use that env var
 			authToken, tokenKey := authTokenForTokenKey(ctx, cfg, env)
 			if authToken == "" {
-				if cfg.Provider == "github-copilot" && cfg.TokenKey == "GITHUB_TOKEN" {
-					return nil, errors.New("GITHUB_TOKEN or GH_TOKEN environment variable is required")
-				}
-				return nil, fmt.Errorf("%s environment variable is required", tokenKey)
+				return nil, fmt.Errorf("%s environment variable is required", strings.Join(catalog.TokenKeys(cfg.Provider, tokenKey), " or "))
 			}
 			clientOptions = append(clientOptions, option.WithAPIKey(authToken))
 		case isCustomProvider(cfg):
@@ -125,23 +121,13 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			// (OPENAI_API_KEY from the OS env).
 		}
 
-		if cfg.Provider == "azure" {
-			// Azure configuration
-			if cfg.BaseURL != "" {
-				clientOptions = append(clientOptions, option.WithBaseURL(cfg.BaseURL))
-			}
-
-			// Azure API version from provider opts
-			if cfg.ProviderOpts != nil {
-				if apiVersion, exists := cfg.ProviderOpts["api_version"]; exists {
-					slog.DebugContext(ctx, "Setting API version", "api_version", apiVersion)
-					if apiVersionStr, ok := apiVersion.(string); ok {
-						clientOptions = append(clientOptions, option.WithQueryAdd("api-version", apiVersionStr))
-					}
-				}
-			}
-		} else if cfg.BaseURL != "" {
+		if cfg.BaseURL != "" {
 			clientOptions = append(clientOptions, option.WithBaseURL(cfg.BaseURL))
+		}
+		for key, name := range catalog.Lookup(cfg.Provider).QueryParams {
+			if value, ok := cfg.ProviderOpts[key].(string); ok {
+				clientOptions = append(clientOptions, option.WithQueryAdd(name, value))
+			}
 		}
 
 		// Apply custom HTTP headers from provider_opts (e.g. github-copilot's
@@ -219,9 +205,30 @@ func (c *Client) Close() {
 	}
 }
 
+// replaysReasoning reports whether stored assistant reasoning is replayed as
+// reasoning_content on Chat Completions requests. Replay defaults on; an
+// explicit provider_opts.replay_reasoning value can opt out.
+func (c *Client) replaysReasoning() bool {
+	return oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts)
+}
+
+// endpointConfig returns ModelConfig with BaseURL set to [base.Config.Endpoint],
+// so endpoint checks also see OPENAI_BASE_URL.
+func (c *Client) endpointConfig() *latest.ModelConfig {
+	cfg := c.ModelConfig
+	cfg.BaseURL = c.Endpoint()
+	return &cfg
+}
+
 // convertMessages converts chat.Message to openai.ChatCompletionMessageParamUnion
 // using the shared oaistream implementation.
 func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
+	// Gated here rather than inside the converter so that every path below --
+	// including the prompt-cache breakpoint path, which must keep computing the
+	// same body it will send -- sees the same messages.
+	if !c.replaysReasoning() {
+		messages = oaistream.WithoutReplayedReasoning(messages)
+	}
 	// Explicit prompt-cache breakpoints take priority over the consecutive-
 	// message merge below. [sendsExplicitCacheBreakpoints] only admits genuine
 	// OpenAI vendor endpoints — including a trusted named custom OpenAI
@@ -231,7 +238,7 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	// merging rewrites the stable message boundaries the markers pin. The
 	// self-hosted case the merge exists for (openai provider + custom
 	// base_url) is already excluded by the gate and still merges below.
-	if sendsExplicitCacheBreakpoints(&c.ModelConfig, c.ModelOptions.OpenAIVendor()) {
+	if sendsExplicitCacheBreakpoints(c.endpointConfig(), c.ModelOptions.OpenAIVendor()) {
 		return c.convertMessagesWithCacheBreakpoints(ctx, messages)
 	}
 	// Coalesce consecutive same-role (system/user) messages into one for generic
@@ -248,38 +255,11 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	// prompt-cache breakpoints never reach this path: such backends don't
 	// accept the OpenAI-only field, and the merge rewrites message boundaries
 	// the markers would pin.
-	if shouldMergeConsecutiveMessages(&c.ModelConfig) {
+	if shouldMergeConsecutiveMessages(c.endpointConfig()) {
 		converted := oaistream.ConvertMessages(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
 		return oaistream.MergeConsecutiveMessages(converted)
 	}
 	return oaistream.ConvertMessages(ctx, messages, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
-}
-
-// openModelHostProviders are built-in OpenAI-compatible aliases that front
-// arbitrary open-weight models (Qwen, GLM, Llama, DeepSeek, ...) whose
-// server-side chat templates may reject a request with more than one system
-// message. First-party APIs with a fixed, vendor-controlled model lineup
-// (openai, mistral, xai, minimax, github-copilot, opencode) tolerate multiple
-// system messages and are deliberately absent so their behavior is unchanged.
-var openModelHostProviders = map[string]bool{
-	"api-route":    true,
-	"atlascloud":   true,
-	"baseten":      true,
-	"daoxe":        true,
-	"ovhcloud":     true,
-	"openrouter":   true,
-	"nebius":       true,
-	"nvidia":       true,
-	"cerebras":     true,
-	"fireworks-ai": true,
-	"togetherai":   true,
-	"huggingface":  true,
-	"vercel":       true,
-	// Cloudflare Workers AI serves open-weight models directly; the AI Gateway
-	// fronts them (and other providers) through one endpoint. Both plausibly
-	// reach models with strict single-system-message chat templates.
-	"cloudflare-workers-ai": true,
-	"cloudflare-ai-gateway": true,
 }
 
 // shouldMergeConsecutiveMessages reports whether the chat-completions request
@@ -295,7 +275,7 @@ var openModelHostProviders = map[string]bool{
 // It is scoped to endpoints that plausibly front such models: explicit
 // chat-completions custom providers, a self-hosted server reached by pointing
 // the openai provider at a custom base_url (vLLM/SGLang), and the open-model
-// host aliases above. The official OpenAI API and other first-party APIs are
+// host aliases declared in the catalog. The official OpenAI API and other first-party APIs are
 // left untouched.
 func shouldMergeConsecutiveMessages(cfg *latest.ModelConfig) bool {
 	if cfg == nil {
@@ -307,10 +287,10 @@ func shouldMergeConsecutiveMessages(cfg *latest.ModelConfig) bool {
 	}
 	// A custom base_url on the openai provider means a self-hosted or
 	// third-party OpenAI-compatible server (e.g. vLLM), not api.openai.com.
-	if cfg.Provider == "openai" && cfg.BaseURL != "" {
+	if cfg.Provider == "openai" && !catalog.IsDefaultEndpoint(cfg.Provider, cfg.BaseURL) {
 		return true
 	}
-	return openModelHostProviders[modelsdev.CanonicalProviderID(cfg.Provider)]
+	return catalog.Lookup(cfg.Provider).MergeConsecutiveMessages
 }
 
 // contextLimit returns this model's context window in tokens, preferring an
@@ -903,13 +883,12 @@ func (c *Client) buildWSHeaderFn() func(ctx context.Context) (http.Header, error
 }
 
 func authTokenForTokenKey(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider) (string, string) {
-	token, _ := env.Get(ctx, cfg.TokenKey)
-	if token == "" && cfg.Provider == "github-copilot" && cfg.TokenKey == "GITHUB_TOKEN" {
-		if fallback, _ := env.Get(ctx, "GH_TOKEN"); fallback != "" {
-			return fallback, "GH_TOKEN"
+	for _, key := range catalog.TokenKeys(cfg.Provider, cfg.TokenKey) {
+		if token, _ := env.Get(ctx, key); token != "" {
+			return token, key
 		}
 	}
-	return token, cfg.TokenKey
+	return "", cfg.TokenKey
 }
 
 // webSocketEnabled reports whether transport=websocket can be honoured. WebSocket
@@ -935,7 +914,7 @@ func getTransport(cfg *latest.ModelConfig) string {
 }
 
 func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []chat.Message) []responses.ResponseInputItemUnionParam {
-	markBreakpoints := sendsExplicitCacheBreakpoints(&c.ModelConfig, c.ModelOptions.OpenAIVendor())
+	markBreakpoints := sendsExplicitCacheBreakpoints(c.endpointConfig(), c.ModelOptions.OpenAIVendor())
 	var input []responses.ResponseInputItemUnionParam
 	for _, msg := range messages {
 		if replay := c.replayResponse(msg); len(replay) > 0 {
@@ -1072,66 +1051,14 @@ func (c *Client) convertMessagesToResponseInput(ctx context.Context, messages []
 			}
 
 		case chat.MessageRoleTool:
-			// Tool response message - convert to function call output
 			item.OfFunctionCallOutput = &responses.ResponseInputItemFunctionCallOutputParam{
 				CallID: param.NewOpt(msg.ToolCallID),
-				Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-					OfString: param.NewOpt(msg.Content),
-				},
+				Output: c.convertToolResultOutput(ctx, msg),
 			}
 		}
 
 		if item.OfMessage != nil || item.OfInputMessage != nil || item.OfFunctionCall != nil || item.OfFunctionCallOutput != nil {
 			input = append(input, item)
-		}
-
-		// For tool messages with attachments, inject a follow-up user message
-		// since OpenAI function call outputs only support text.
-		if msg.Role == chat.MessageRoleTool && len(msg.MultiContent) > 0 {
-			var attachmentParts []responses.ResponseInputContentUnionParam
-			for _, part := range msg.MultiContent {
-				switch part.Type {
-				case chat.MessagePartTypeImageURL:
-					if part.ImageURL != nil {
-						detail := responses.ResponseInputImageContentDetailAuto
-						switch part.ImageURL.Detail {
-						case chat.ImageURLDetailHigh:
-							detail = responses.ResponseInputImageContentDetailHigh
-						case chat.ImageURLDetailLow:
-							detail = responses.ResponseInputImageContentDetailLow
-						}
-						attachmentParts = append(attachmentParts, responses.ResponseInputContentUnionParam{
-							OfInputImage: &responses.ResponseInputImageParam{
-								ImageURL: param.NewOpt(part.ImageURL.URL),
-								Detail:   responses.ResponseInputImageDetail(detail),
-							},
-						})
-					}
-				case chat.MessagePartTypeDocument:
-					if part.Document != nil {
-						docParts, err := convertDocumentToResponseInput(ctx, *part.Document, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
-						if err != nil {
-							slog.WarnContext(ctx, "failed to convert tool result document attachment", "error", err, "doc", part.Document.Name)
-							continue
-						}
-						attachmentParts = append(attachmentParts, docParts...)
-					}
-				}
-			}
-			if len(attachmentParts) > 0 {
-				label := responses.ResponseInputContentUnionParam{
-					OfInputText: &responses.ResponseInputTextParam{
-						Text: "Attached content from tool result:",
-					},
-				}
-				allParts := append([]responses.ResponseInputContentUnionParam{label}, attachmentParts...)
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfInputMessage: &responses.ResponseInputItemMessageParam{
-						Role:    "user",
-						Content: allParts,
-					},
-				})
-			}
 		}
 
 		// Translate the CacheControl marker into an explicit prompt-cache
@@ -1458,11 +1385,7 @@ func isCustomProvider(cfg *latest.ModelConfig) bool {
 // driven by modelinfo.SupportsResponsesAPI so new models are picked up by
 // naming convention rather than a hardcoded allow-list.
 func autoSelectsResponsesAPI(provider string) bool {
-	switch modelsdev.CanonicalProviderID(provider) {
-	case "openai", "github-copilot", "opencode", chatgpt.ProviderName:
-		return true
-	}
-	return false
+	return catalog.Lookup(provider).AutoResponses
 }
 
 // noThinkingMinOutputTokens is the minimum output-token budget we enforce for

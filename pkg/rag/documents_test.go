@@ -172,7 +172,7 @@ results:
 			mgr, err := newDocumentsManager(t, ragYAML, &model, testDocuments)
 			require.NoError(t, err)
 			require.NoError(t, mgr.Initialize(t.Context()))
-			require.NoError(t, mgr.StartFileWatcher(t.Context()), "nothing to watch")
+			require.NoError(t, mgr.WatchFiles(t.Context()), "nothing to watch")
 			require.NoError(t, mgr.CheckAndReindexChangedFiles(t.Context()), "nothing to re-index")
 
 			results, _, err := mgr.Query(t.Context(), "cat")

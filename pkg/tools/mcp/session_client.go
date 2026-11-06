@@ -34,8 +34,6 @@ type sessionClient struct {
 	toolListChangedHandler   func()
 	promptListChangedHandler func()
 	elicitationHandler       tools.ElicitationHandler
-	samplingHandler          tools.SamplingHandler
-	samplingWithToolsHandler tools.SamplingWithToolsHandler
 	oauthSuccessHandler      func()
 	inflight                 map[uint64]inflightCall
 	nextInflight             uint64
@@ -301,22 +299,6 @@ func (c *sessionClient) unregisterCallContext(id uint64) {
 	delete(c.inflight, id)
 }
 
-// requestContext returns the sole active tool call's context. MCP does not
-// identify which call caused a server-initiated request, so concurrent calls
-// deliberately fall back to an unscoped context rather than misroute it.
-func (c *sessionClient) requestContext(fallback context.Context) context.Context {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if len(c.inflight) != 1 {
-		return tools.WithoutHandlerScope(fallback)
-	}
-	for _, call := range c.inflight {
-		owner := trace.ContextWithSpanContext(fallback, trace.SpanContextFromContext(call.ctx))
-		return tools.WithHandlerScope(owner, call.scope)
-	}
-	return tools.WithoutHandlerScope(fallback)
-}
-
 func (c *sessionClient) elicitationContext(fallback context.Context) (context.Context, func()) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -368,96 +350,6 @@ func (c *sessionClient) SetElicitationHandler(handler tools.ElicitationHandler) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.elicitationHandler = handler
-}
-
-// handleSamplingRequest forwards incoming sampling/createMessage requests
-// from the MCP server to the registered handler. It is used as the gomcp
-// CreateMessageHandler callback for both stdio and remote clients.
-func (c *sessionClient) handleSamplingRequest(ctx context.Context, req *gomcp.CreateMessageRequest) (*gomcp.CreateMessageResult, error) {
-	ctx = c.requestContext(ctx)
-	slog.DebugContext(ctx, "Received sampling request from MCP server", "messages", len(req.Params.Messages))
-
-	c.mu.RLock()
-	handler := c.samplingHandler
-	c.mu.RUnlock()
-
-	if handler == nil {
-		return nil, errors.New("no sampling handler configured")
-	}
-
-	result, err := handler(ctx, req.Params)
-	if err != nil {
-		return nil, fmt.Errorf("sampling failed: %w", err)
-	}
-
-	return result, nil
-}
-
-// SetSamplingHandler sets the handler that processes sampling requests
-// from the MCP server.
-func (c *sessionClient) SetSamplingHandler(handler tools.SamplingHandler) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.samplingHandler = handler
-}
-
-// handleSamplingWithToolsRequest forwards incoming sampling/createMessage
-// requests that may include tools to the registered handler. It is used as
-// the gomcp CreateMessageWithToolsHandler callback for both stdio and remote
-// clients when the with-tools handler is registered.
-func (c *sessionClient) handleSamplingWithToolsRequest(ctx context.Context, req *gomcp.CreateMessageWithToolsRequest) (*gomcp.CreateMessageWithToolsResult, error) {
-	ctx = c.requestContext(ctx)
-	slog.DebugContext(ctx, "Received sampling-with-tools request from MCP server",
-		"messages", len(req.Params.Messages),
-		"tools", len(req.Params.Tools),
-	)
-
-	c.mu.RLock()
-	handler := c.samplingWithToolsHandler
-	c.mu.RUnlock()
-
-	if handler == nil {
-		return nil, errors.New("no sampling-with-tools handler configured")
-	}
-
-	result, err := handler(ctx, req.Params)
-	if err != nil {
-		return nil, fmt.Errorf("sampling failed: %w", err)
-	}
-
-	return result, nil
-}
-
-// SetSamplingWithToolsHandler sets the handler that processes sampling
-// requests carrying a tools array from the MCP server.
-func (c *sessionClient) SetSamplingWithToolsHandler(handler tools.SamplingWithToolsHandler) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.samplingWithToolsHandler = handler
-}
-
-// applySamplingHandlerOpts wires the SDK CreateMessage* callback into opts.
-//
-// The SDK panics if both CreateMessageHandler and CreateMessageWithToolsHandler
-// are populated, so we register exactly one. The with-tools callback is the
-// default — it gets registered even when both handler fields are still nil at
-// Initialize time. The callback itself reads c.samplingWithToolsHandler /
-// c.samplingHandler under c.mu at request time (see handleSamplingWithToolsRequest
-// above), so a SetSampling*Handler call that lands after Initialize — for
-// example, on a supervisor-driven reconnect that races configureToolsetHandlers
-// — still takes effect without a re-init. We only fall back to the basic
-// CreateMessageHandler when the caller has demonstrated that only the basic
-// path will ever be used (i.e. samplingHandler is set and samplingWithToolsHandler
-// is not).
-func (c *sessionClient) applySamplingHandlerOpts(opts *gomcp.ClientOptions) {
-	c.mu.RLock()
-	basicOnly := c.samplingHandler != nil && c.samplingWithToolsHandler == nil
-	c.mu.RUnlock()
-	if basicOnly {
-		opts.CreateMessageHandler = c.handleSamplingRequest
-		return
-	}
-	opts.CreateMessageWithToolsHandler = c.handleSamplingWithToolsRequest
 }
 
 // requestElicitation invokes the registered elicitation handler directly.

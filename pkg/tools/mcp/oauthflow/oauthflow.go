@@ -287,24 +287,6 @@ func parseTokenResponse(body io.Reader) (*OAuthToken, error) {
 	return token, nil
 }
 
-// RequestAuthorizationCode requests the user to open the authorization URL and waits for the callback
-func RequestAuthorizationCode(ctx context.Context, authURL string, callbackServer *CallbackServer, expectedState string) (string, string, error) {
-	if err := (*browserOpener.Load())(ctx, authURL); err != nil {
-		return "", "", err
-	}
-
-	code, state, err := callbackServer.WaitForCallback(ctx)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to receive authorization callback: %w", err)
-	}
-
-	if !constantTimeStateEqual(state, expectedState) {
-		return "", "", errors.New("OAuth state mismatch (possible CSRF attempt or stale callback)")
-	}
-
-	return code, state, nil
-}
-
 // constantTimeStateEqual compares two OAuth state values in constant time to
 // avoid leaking the expected value through timing side-channels. It returns
 // false when either value is empty so the caller doesn't accept a missing

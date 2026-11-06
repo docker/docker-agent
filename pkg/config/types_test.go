@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/types"
 )
 
@@ -536,7 +537,7 @@ agents:
             - type: bm25
               limit: 0
 `
-	_, err := Load(t.Context(), NewBytesSource("config.yaml", []byte(input)))
+	_, err := Load(t.Context(), NewBytesSource("config.yaml", []byte(input)), WithVersions(legacy.Register))
 	require.ErrorContains(t, err, "limit must be a whole number of at least 1, got 0")
 }
 
@@ -578,7 +579,7 @@ agents:
       - Be helpful.
       - Be concise.
 `
-	_, err := Load(t.Context(), NewBytesSource("config.yaml", []byte(input)))
+	_, err := Load(t.Context(), NewBytesSource("config.yaml", []byte(input)), WithVersions(legacy.Register))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "config version 15")
 }

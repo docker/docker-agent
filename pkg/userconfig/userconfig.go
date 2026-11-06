@@ -108,6 +108,8 @@ type Settings struct {
 	// Sound enables playing notification sounds on task success or failure.
 	// Defaults to false (user must explicitly opt-in).
 	Sound bool `yaml:"sound,omitempty"`
+	// KeepAwake prevents idle system sleep during agent runs. Disabled by default.
+	KeepAwake bool `yaml:"keep_awake,omitempty"`
 	// SoundThreshold is the minimum duration in seconds a task must run
 	// before a success sound is played. Defaults to 5 seconds.
 	SoundThreshold int `yaml:"sound_threshold,omitempty"`
@@ -116,6 +118,10 @@ type Settings struct {
 	// CacheStablePrompts keeps changing trusted context out of the frozen system
 	// prefix and appends chronological updates instead. Defaults to false.
 	CacheStablePrompts *bool `yaml:"cache_stable_prompts,omitempty"`
+	// BackgroundCompaction overlaps automatic summarization with agent work.
+	BackgroundCompaction bool `yaml:"background_compaction,omitempty"`
+	// BackgroundCompactionThreshold is a context-window percentage (1–99).
+	BackgroundCompactionThreshold int `yaml:"background_compaction_threshold,omitempty"`
 	// WarnOnCacheMiss shows a warning when a model call after the first one in
 	// a session reports no cached input tokens. Defaults to false.
 	WarnOnCacheMiss *bool `yaml:"warn_on_cache_miss,omitempty"`
@@ -219,6 +225,11 @@ func (s *Settings) GetTabTitleMaxLength() int {
 	return s.TabTitleMaxLength
 }
 
+// GetKeepAwake reports whether agent runs should inhibit idle system sleep.
+func (s *Settings) GetKeepAwake() bool {
+	return s != nil && s.KeepAwake
+}
+
 // GetSound returns whether sound notifications are enabled, defaulting to false.
 func (s *Settings) GetSound() bool {
 	if s == nil {
@@ -308,6 +319,15 @@ func (s *Settings) GetSafety() latest.SafetyMode {
 // CacheStablePromptsEnabled reports whether chronological instruction updates are enabled.
 func (s *Settings) CacheStablePromptsEnabled() bool {
 	return s != nil && s.CacheStablePrompts != nil && *s.CacheStablePrompts
+}
+
+const DefaultBackgroundCompactionThreshold = 70
+
+func (s *Settings) GetBackgroundCompactionThreshold() int {
+	if s == nil || s.BackgroundCompactionThreshold < 1 || s.BackgroundCompactionThreshold > 99 {
+		return DefaultBackgroundCompactionThreshold
+	}
+	return s.BackgroundCompactionThreshold
 }
 
 // CacheMissWarningsEnabled reports whether cache-miss notifications are enabled.

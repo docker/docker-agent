@@ -124,7 +124,7 @@ type compactionOutcome struct {
 func runCompaction(t *testing.T, rt *LocalRuntime, sess *session.Session, prompt string) compactionOutcome {
 	t.Helper()
 	events := make(chan Event, 64)
-	rt.compactWithReason(t.Context(), sess, prompt, compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, prompt, compactionReasonManual, NewChannelSink(events)))
 	close(events)
 
 	var out compactionOutcome
@@ -488,4 +488,35 @@ func TestPendingNativeCompactionTools(t *testing.T) {
 	assert.True(t, hasPendingCompactionTools(sess))
 	sess.AddMessage(&session.Message{Message: chat.Message{Role: chat.MessageRoleTool, ToolCallID: "two", Content: "done"}})
 	assert.False(t, hasPendingCompactionTools(sess))
+}
+
+// Each native compaction iteration is a request priced on its own: two
+// iterations below a context tier must not be priced as one above it.
+func TestNativeCompactionPricesEachIteration(t *testing.T) {
+	t.Parallel()
+
+	result := nativeResult()
+	result.Iterations = []chat.Usage{{InputTokens: 60_000}, {InputTokens: 60_000}}
+	result.Usage = chat.Usage{InputTokens: 120_000}
+	comp := &mockCompactor{id: "anthropic/claude-test", opts: nativeOpts, result: result}
+	root := agent.New("root", "system instruction", agent.WithModel(&tracedWrapper{inner: comp}))
+	tiered := modelsdev.Cost{Input: 1, Tiers: []modelsdev.CostTier{{
+		Rates: modelsdev.Rates{Input: 5}, Tier: modelsdev.TierSpec{Type: "context", Size: 100_000},
+	}}}
+	rt := newNativeRuntime(t, root, WithModelStore(mockModelStoreWithCost{cost: tiered}))
+	sess := nativeTestSession()
+
+	got := runCompaction(t, rt, sess, "")
+
+	require.Equal(t, CompactionOutcomeApplied, got.outcome)
+	require.NotNil(t, got.summary)
+	assert.InDelta(t, 2*60_000*1/1e6, got.summary.Cost, 1e-9, "base rate for each iteration, not the tier rate on the sum")
+	assert.Equal(t, int64(120_000), sess.Messages[len(sess.Messages)-1].Usage.InputTokens, "token accounting keeps the total")
+}
+
+func TestCompactionCostUnpricedIteration(t *testing.T) {
+	t.Parallel()
+
+	res := &chat.CompactionResult{Iterations: []chat.Usage{{InputTokens: 10}, {InputTokens: 10}}}
+	assert.Nil(t, compactionCost(res, nil, modelsdev.ParseIDOrZero("test/unknown"), base.Config{}), "an unpriced iteration leaves the compaction unpriced, not free")
 }

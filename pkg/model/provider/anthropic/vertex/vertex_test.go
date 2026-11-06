@@ -2,6 +2,7 @@ package vertex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -188,4 +189,39 @@ func TestRejectClaudeAPIOnlyFeatures(t *testing.T) {
 			require.ErrorContains(t, err, "requires the Claude API")
 		})
 	}
+}
+
+func TestNewClient_RejectsFallbacks(t *testing.T) {
+	t.Parallel()
+	for _, fallbacks := range []any{"default", []any{"claude-sonnet-4-6"}} {
+		cfg := &latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-4-8", ProviderOpts: map[string]any{"fallbacks": fallbacks}}
+		_, err := NewClient(t.Context(), cfg, environment.NewMapEnvProvider(nil), "project", "location")
+		require.ErrorContains(t, err, "requires the Claude API")
+	}
+}
+
+// Vertex cannot enable native compaction, so a block recorded on the Claude
+// API is not replayed; the summary text is sent instead.
+func TestVertexDoesNotReplayCompactionBlock(t *testing.T) {
+	t.Parallel()
+
+	var got []*http.Request
+	source := func(context.Context) (string, error) { return "token", nil }
+	cfg := &latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-5-5"}
+	client, err := NewClientWithTokenSource(t.Context(), cfg, environment.NewMapEnvProvider(nil), "test-project", "us-east5", source, recordingWrapper(&got))
+	require.NoError(t, err)
+
+	summary := chat.Message{Role: chat.MessageRoleUser, Content: chat.SummaryMessageContent("Summary."), Compaction: &chat.CompactionResult{
+		Provider: "anthropic", Summary: "Summary.",
+		Block: json.RawMessage(`{"type":"compaction","content":"Summary.","signature":"sig-c"}`),
+	}}
+	stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{summary, {Role: chat.MessageRoleUser, Content: "u3"}}, nil)
+	drain(t, stream, err)
+
+	require.Len(t, got, 1)
+	assert.NotContains(t, strings.Join(got[0].Header.Values("anthropic-beta"), ","), "compact-2026-09-04")
+	body, err := io.ReadAll(got[0].Body)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), `"type":"compaction"`)
+	assert.Contains(t, string(body), "Summary.")
 }

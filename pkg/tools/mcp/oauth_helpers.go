@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -15,9 +14,8 @@ import (
 // The OAuth authorization-code flow (state/PKCE generation, callback server,
 // token exchange/refresh, dynamic client registration) lives in the
 // oauthflow subpackage so packages that only drive the flow don't link the
-// whole MCP toolset. The forwarders and aliases below keep this package's
-// historical API working; only the header-scoping transport (which depends
-// on the upstream header resolver) remains here.
+// whole MCP toolset. Forwarders expose the scope-owned flow here too; the
+// header-scoping transport depends on the MCP upstream header resolver.
 
 // OAuthToken is an alias for [oauthflow.OAuthToken].
 type OAuthToken = oauthflow.OAuthToken
@@ -25,27 +23,14 @@ type OAuthToken = oauthflow.OAuthToken
 // AuthorizationServerMetadata is an alias for [oauthflow.AuthorizationServerMetadata].
 type AuthorizationServerMetadata = oauthflow.AuthorizationServerMetadata
 
-// CallbackServer is an alias for [oauthflow.CallbackServer].
-type CallbackServer = oauthflow.CallbackServer
+// CallbackAddress is immutable callback endpoint information.
+type CallbackAddress = oauthflow.CallbackAddress
 
-// NewCallbackServer creates an unstarted OAuth callback server using a random available port.
-func NewCallbackServer() *CallbackServer {
-	return oauthflow.NewCallbackServer()
-}
+// AuthorizationRequest describes the URL and state for one authorization.
+type AuthorizationRequest = oauthflow.AuthorizationRequest
 
-// NewCallbackServerOnPort creates an unstarted OAuth callback server for a specific port.
-// Use port 0 to let the OS pick an available port when Start is called.
-func NewCallbackServerOnPort(port int) *CallbackServer {
-	return oauthflow.NewCallbackServerOnPort(port)
-}
-
-func startCallbackServer(ctx context.Context, port int) (*CallbackServer, error) {
-	server := NewCallbackServerOnPort(port)
-	if err := server.Start(ctx); err != nil {
-		return nil, fmt.Errorf("failed to start callback server: %w", err)
-	}
-	return server, nil
-}
+// PrepareAuthorization prepares authorization after the callback port is bound.
+type PrepareAuthorization = oauthflow.PrepareAuthorization
 
 // GenerateState generates a random state parameter for OAuth CSRF protection
 func GenerateState() (string, error) {
@@ -62,9 +47,9 @@ func BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChall
 	return oauthflow.BuildAuthorizationURL(authEndpoint, clientID, redirectURI, state, codeChallenge, resourceURL, scopes)
 }
 
-// RequestAuthorizationCode requests the user to open the authorization URL and waits for the callback
-func RequestAuthorizationCode(ctx context.Context, authURL string, callbackServer *CallbackServer, expectedState string) (string, string, error) {
-	return oauthflow.RequestAuthorizationCode(ctx, authURL, callbackServer, expectedState)
+// RequestAuthorizationCode owns the callback listener for one authorization.
+func RequestAuthorizationCode(ctx context.Context, port int, prepare PrepareAuthorization) (string, string, error) {
+	return oauthflow.RequestAuthorizationCode(ctx, port, prepare)
 }
 
 // ExchangeCodeForToken exchanges an authorization code for an access token.

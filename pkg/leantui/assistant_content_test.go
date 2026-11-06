@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func leanTranscriptText(m *model) string {
@@ -96,4 +97,31 @@ func TestLeanRecoveryRestoresRootContextUsage(t *testing.T) {
 	m.handleEvent(t.Context(), runtime.StreamStarted("root", "root"))
 	m.handleEvent(t.Context(), runtime.StreamStopped("root", "root", "normal"))
 	require.Equal(t, int64(100), m.status.ContextLength)
+}
+
+func TestReasoningResetClearsCommittedAndPendingSegments(t *testing.T) {
+	t.Parallel()
+	m := bareModel(40)
+	ctx := t.Context()
+	for _, e := range []runtime.Event{
+		runtime.AgentChoiceReasoning("root", "other-session", "OTHER-SESSION", "answer"),
+		runtime.AgentChoiceReasoning("root", "s", "OTHER-MESSAGE", "other-message"),
+		runtime.AgentChoiceReasoning("root", "s", "DECLINED-COMMITTED", "answer"),
+		runtime.AgentChoice("root", "s", "KEPT-TEXT", "answer"),
+		runtime.PartialToolCall(tools.ToolCall{ID: "kept-tool", Function: tools.FunctionCall{Name: "shell"}}, tools.Tool{}, "root"),
+		runtime.AgentChoiceReasoning("root", "s", "DECLINED-PENDING", "answer"),
+		runtime.AgentChoiceReasoningReset("root", "s", "answer"),
+	} {
+		m.handleEvent(ctx, e)
+	}
+	frame := leanTranscriptText(m)
+	require.NotContains(t, frame, "DECLINED")
+	require.Contains(t, frame, "OTHER-SESSION")
+	require.Contains(t, frame, "OTHER-MESSAGE")
+	require.Contains(t, frame, "KEPT-TEXT")
+	require.Equal(t, 1, m.screen.Transcript.ToolCount())
+	m.handleEvent(ctx, runtime.AgentChoiceReasoning("root", "s", "FALLBACK", "answer"))
+	frame = leanTranscriptText(m)
+	require.Contains(t, frame, "FALLBACK")
+	require.NotContains(t, frame, "DECLINED")
 }

@@ -155,7 +155,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case anthropic.MessageStopEvent:
 		response.Choices[0].FinishReason = finishReason(a.stopReason, a.toolCall)
 		if !a.rawLost {
-			response.Choices[0].Delta.ProviderState = newProviderState(a.message.ID, a.message.Content)
+			response.Choices[0].Delta.ProviderState = newProviderState(a.message.ID, a.message.Model, a.message.Content)
 		}
 	}
 
@@ -185,13 +185,15 @@ func usageFromMessage(u anthropic.Usage) *chat.Usage {
 }
 
 // finishReason maps an Anthropic stop reason (received on message_delta) onto
-// the chat finish-reason vocabulary. An empty stop reason falls back to
+// the chat finish-reason vocabulary. model_context_window_exceeded means the
+// output filled the context window, so it is truncated just like max_tokens.
+// An empty stop reason falls back to
 // inferring tool_calls vs stop from whether a tool_use block was seen.
 func finishReason(stopReason anthropic.StopReason, sawToolUse bool) chat.FinishReason {
 	switch stopReason {
 	case anthropic.StopReasonToolUse:
 		return chat.FinishReasonToolCalls
-	case anthropic.StopReasonMaxTokens:
+	case anthropic.StopReasonMaxTokens, anthropic.StopReasonModelContextWindowExceeded:
 		return chat.FinishReasonLength
 	case anthropic.StopReasonRefusal:
 		return chat.FinishReasonRefusal

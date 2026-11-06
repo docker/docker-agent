@@ -20,8 +20,8 @@ import (
 // literal headers. Authentication and replacement belong to the caller, not OAuth.
 func NewSessionRemoteToolset(name, endpoint, transport string, headers map[string]string) *Toolset {
 	client := &sessionRemoteClient{
-		sessionClient: sessionClient{serverAddress: sanitizeRemoteAddress(endpoint), sanitizeError: sessionRemoteError},
-		endpoint:      endpoint, transport: transport, headers: maps.Clone(headers), base: httpclient.TransportForAllowPrivateIPs(false),
+		serverAddress: sanitizeRemoteAddress(endpoint), sanitizeError: sessionRemoteError,
+		endpoint: endpoint, transport: transport, headers: maps.Clone(headers), base: httpclient.TransportForAllowPrivateIPs(false),
 	}
 	ts := &Toolset{name: name, mcpClient: client, logID: sanitizeRemoteAddress(endpoint), description: buildRemoteDescription(endpoint, transport), sessionOwned: true}
 	ts.supervisor = newSupervisor(ts, lifecycle.Policy{Restart: lifecycle.RestartNever})
@@ -75,8 +75,14 @@ func (c *sessionRemoteClient) Initialize(ctx context.Context, _ *gomcp.Initializ
 		return nil, errors.New("unsupported session MCP transport")
 	}
 	changed, prompts := c.notificationHandlers()
-	opts := &gomcp.ClientOptions{ElicitationHandler: c.handleElicitationRequest, ToolListChangedHandler: changed, PromptListChangedHandler: prompts}
-	c.applySamplingHandlerOpts(opts)
+	// Override the SDK default that advertises deprecated roots support.
+	opts := &gomcp.ClientOptions{
+		Capabilities:             &gomcp.ClientCapabilities{},
+		ElicitationHandler:       c.handleElicitationRequest,
+		ToolListChangedHandler:   changed,
+		PromptListChangedHandler: prompts,
+	}
+
 	client := gomcp.NewClient(&gomcp.Implementation{Name: "docker agent", Version: "1.0.0"}, opts)
 	session, err := client.Connect(lifetime, &sessionRemoteTransport{Transport: transport, owner: c}, nil)
 	if err != nil {

@@ -272,7 +272,7 @@ func prepareClientMCP(ctx context.Context, servers []clientMCPServer, workingDir
 		} else {
 			server = mcptools.NewSessionRemoteToolset(name, spec.url, spec.transport, spec.headers)
 		}
-		tools.ConfigureHandlers(server, tools.ScopedElicitationHandler, tools.SamplingScopeHandler, tools.SamplingWithToolsScopeHandler, nil, false, "")
+		tools.ConfigureHandlers(server, tools.ScopedElicitationHandler, nil, false, "")
 		g.servers = append(g.servers, server)
 		if err := server.Start(ctx); err != nil {
 			return g, fmt.Errorf("starting client MCP server %d: %w", i, err)

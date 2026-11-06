@@ -259,3 +259,20 @@ func buildPartialToolCallEvents(n int) []runtime.Event {
 	}
 	return events
 }
+
+func TestReasoningResetIsOrderingBarrier(t *testing.T) {
+	t.Parallel()
+	reset := runtime.AgentChoiceReasoningReset("root", "s", "m")
+	require.False(t, Mergeable(reset))
+	events := []runtime.Event{
+		runtime.AgentChoiceReasoning("root", "s", "old", "m"),
+		runtime.AgentChoiceReasoning("root", "s", " thought", "m"), reset,
+		runtime.AgentChoiceReasoning("root", "s", "new", "m"),
+		runtime.AgentChoiceReasoning("root", "s", " thought", "m"),
+	}
+	got := Merge(events)
+	require.Len(t, got, 3)
+	require.Equal(t, "old thought", got[0].(*runtime.AgentChoiceReasoningEvent).Content)
+	require.Same(t, reset, got[1])
+	require.Equal(t, "new thought", got[2].(*runtime.AgentChoiceReasoningEvent).Content)
+}

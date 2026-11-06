@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -90,7 +91,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 	} else {
 		// Skip docker model status query when BaseURL is explicitly provided.
 		// This avoids unnecessary exec calls and speeds up tests/CI scenarios.
-		if cfg.BaseURL == "" && os.Getenv("MODEL_RUNNER_HOST") == "" {
+		if catalog.IsDefaultEndpoint(cfg.Provider, cfg.BaseURL) && os.Getenv("MODEL_RUNNER_HOST") == "" {
 			var err error
 			endpoint, engine, err = dmrmodels.DockerModelEndpointAndEngine(ctx)
 			switch {
@@ -194,6 +195,11 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	caps := c.attachmentCaps
 	if override := c.CapsOverride(); override != nil {
 		caps = modelinfo.CapsWith(override.Image, override.PDF, override.Audio, override.Video)
+	}
+	// Chat Completions reasoning replay defaults on;
+	// provider_opts.replay_reasoning: false opts out.
+	if !oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts) {
+		messages = oaistream.WithoutReplayedReasoning(messages)
 	}
 	openaiMessages := oaistream.ConvertMessagesWithCaps(ctx, messages, caps)
 	return oaistream.MergeConsecutiveMessages(openaiMessages)

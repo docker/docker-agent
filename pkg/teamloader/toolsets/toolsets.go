@@ -63,7 +63,7 @@ func DefaultToolsetCreators() map[string]teamloader.ToolsetCreator {
 		"model_picker":      teamloader.CreatorFromToolset(modelpicker.CreateToolSet),
 		"open_url":          openurl.Creator,
 		"openapi":           openapi.Creator,
-		"plan":              teamloader.Creator(plan.CreateToolSet),
+		"plan":              plan.Creator,
 		"rag":               rag.Creator,
 		"random":            teamloader.Creator(random.CreateToolSet),
 		"scheduler":         teamloader.Creator(scheduler.CreateToolSet),

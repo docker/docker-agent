@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/rag/database"
@@ -506,8 +507,9 @@ func (m *Manager) CheckAndReindexChangedFiles(ctx context.Context) (err error) {
 	return nil
 }
 
-// StartFileWatcher starts monitoring files and directories for changes
-func (m *Manager) StartFileWatcher(ctx context.Context) (err error) {
+// WatchFiles monitors all strategies until cancellation, joining them before returning.
+// Callers must cancel and join WatchFiles before Close.
+func (m *Manager) WatchFiles(ctx context.Context) (err error) {
 	tracer := otel.Tracer("github.com/docker/docker-agent/pkg/rag")
 	ctx, span := tracer.Start(
 		ctx, "rag.file_watcher.start",
@@ -522,13 +524,17 @@ func (m *Manager) StartFileWatcher(ctx context.Context) (err error) {
 		span.End()
 	}()
 
+	group, watchCtx := errgroup.WithContext(ctx)
 	for strategyName, strategyImpl := range m.strategies {
 		strategyCfg := m.strategyConfigs[strategyName]
-		if err := strategyImpl.StartFileWatcher(ctx, strategyCfg.Docs, strategyCfg.Chunking); err != nil {
-			return fmt.Errorf("strategy %s failed: %w", strategyName, err)
-		}
+		group.Go(func() error {
+			if err := strategyImpl.WatchFiles(watchCtx, strategyCfg.Docs, strategyCfg.Chunking); err != nil {
+				return fmt.Errorf("strategy %s failed: %w", strategyName, err)
+			}
+			return nil
+		})
 	}
-	return nil
+	return group.Wait()
 }
 
 // Events returns the event channel shared by all strategies and RAG operations for this manager.
@@ -542,7 +548,7 @@ func (m *Manager) Close() error {
 
 	var firstErr error
 
-	// Close all strategies (which closes their databases and file watchers)
+	// WatchFiles must have returned before closing the strategy databases.
 	for strategyName, strategyImpl := range m.strategies {
 		if err := strategyImpl.Close(); err != nil {
 			slog.Error("[RAG Manager] Failed to close strategy",

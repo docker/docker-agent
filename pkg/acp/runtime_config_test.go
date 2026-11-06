@@ -17,7 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -182,7 +182,7 @@ func TestACPRuntimeConfig_ModelSwitchingIsSessionOwned(t *testing.T) {
 			require.NotNil(t, initial.ModelConfig.ParallelToolCalls)
 			assert.False(t, *initial.ModelConfig.ParallelToolCalls)
 			choices := s.rt.AvailableModels(t.Context())
-			index := slices.IndexFunc(choices, func(c runtime.ModelChoice) bool { return c.Ref == "alternative" })
+			index := slices.IndexFunc(choices, func(c modelcatalog.ModelChoice) bool { return c.Ref == "alternative" })
 			require.NotEqual(t, -1, index)
 			assert.Equal(t, "fixture-family", choices[index].Family)
 			assert.Equal(t, 64000, choices[index].ContextLimit)

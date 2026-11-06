@@ -457,7 +457,7 @@ func callbackRedirectURLFrom(c *latest.RemoteOAuthConfig) string {
 
 // callbackPortFrom is a nil-safe accessor for the optional CallbackPort
 // field on a RemoteOAuthConfig; zero means "let the OS pick a free port",
-// both here and as NewCallbackServerOnPort's port argument.
+// both here and for the callback listener.
 func callbackPortFrom(c *latest.RemoteOAuthConfig) int {
 	if c == nil {
 		return 0
@@ -1270,74 +1270,66 @@ func (t *oauthTransport) handleManagedOAuthFlow(ctx context.Context, authServer,
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)
 	}
 
-	slog.DebugContext(ctx, "Starting OAuth callback server")
-	callbackServer, err := startCallbackServer(ctx, callbackPortFrom(t.oauthConfig))
-	if err != nil {
-		return err
-	}
-	defer func() {
-		// Detach from ctx's cancellation (the request may be done) but
-		// keep its trace context for the shutdown.
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if err := callbackServer.Shutdown(shutdownCtx); err != nil {
-			slog.ErrorContext(ctx, "Failed to shutdown callback server", "error", err)
-		}
-	}()
-
-	redirectURI := callbackServer.ResolveRedirectURI(callbackRedirectURLFrom(t.oauthConfig))
-	slog.DebugContext(ctx, "Using redirect URI", "uri", redirectURI)
-
-	clientID, clientSecret, scopes, authMethod, err := t.resolveClientCredentials(ctx, authServerMetadata, redirectURI, challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported)
-	if err != nil {
-		return err
-	}
-
-	state, err := GenerateState()
-	if err != nil {
-		return fmt.Errorf("failed to generate state: %w", err)
-	}
-
-	callbackServer.SetExpectedState(state)
-	verifier := GeneratePKCEVerifier()
+	var redirectURI, clientID, clientSecret, authMethod, verifier, state string
+	var scopes []string
 	resourceIndicator := cmp.Or(resourceMetadata.Resource, t.baseURL)
+	prepared := false
+	code, receivedState, err := RequestAuthorizationCode(ctx, callbackPortFrom(t.oauthConfig), func(ctx context.Context, address CallbackAddress) (AuthorizationRequest, error) {
+		redirectURI = address.ResolveRedirectURI(callbackRedirectURLFrom(t.oauthConfig))
+		slog.DebugContext(ctx, "Using redirect URI", "uri", redirectURI)
 
-	authURL := BuildAuthorizationURL(
-		authServerMetadata.AuthorizationEndpoint,
-		clientID,
-		redirectURI,
-		state,
-		oauth2.S256ChallengeFromVerifier(verifier),
-		resourceIndicator,
-		scopes,
-	)
+		clientID, clientSecret, scopes, authMethod, err = t.resolveClientCredentials(ctx, authServerMetadata, redirectURI, challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported)
+		if err != nil {
+			return AuthorizationRequest{}, err
+		}
 
-	result, err := t.elicit(ctx, &mcpsdk.ElicitParams{
-		Message:         fmt.Sprintf("The MCP server at %s requires OAuth authorization. Do you want to proceed?", t.baseURL),
-		RequestedSchema: nil,
-		Meta: map[string]any{
-			"docker-agent/type":       "oauth_flow",
-			"docker-agent/server_url": t.baseURL,
-		},
+		state, err = GenerateState()
+		if err != nil {
+			return AuthorizationRequest{}, fmt.Errorf("failed to generate state: %w", err)
+		}
+
+		verifier = GeneratePKCEVerifier()
+
+		authURL := BuildAuthorizationURL(
+			authServerMetadata.AuthorizationEndpoint,
+			clientID,
+			redirectURI,
+			state,
+			oauth2.S256ChallengeFromVerifier(verifier),
+			resourceIndicator,
+			scopes,
+		)
+
+		result, err := t.elicit(ctx, &mcpsdk.ElicitParams{
+			Message:         fmt.Sprintf("The MCP server at %s requires OAuth authorization. Do you want to proceed?", t.baseURL),
+			RequestedSchema: nil,
+			Meta: map[string]any{
+				"docker-agent/type":       "oauth_flow",
+				"docker-agent/server_url": t.baseURL,
+			},
+		})
+		if err != nil {
+			return AuthorizationRequest{}, fmt.Errorf("failed to send elicitation request: %w", err)
+		}
+
+		slog.DebugContext(ctx, "Elicitation response received", "result", result)
+
+		if result.Action != tools.ElicitationActionAccept {
+			return AuthorizationRequest{}, errors.New("user declined OAuth authorization")
+		}
+
+		slog.DebugContext(ctx, "Requesting authorization code", "url", sanitizeURLForLog(authURL))
+		span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "request_authorization_code")))
+
+		prepared = true
+		return AuthorizationRequest{URL: authURL, State: state}, nil
 	})
 	if err != nil {
-		return fmt.Errorf("failed to send elicitation request: %w", err)
-	}
-
-	slog.DebugContext(ctx, "Elicitation response received", "result", result)
-
-	if result.Action != tools.ElicitationActionAccept {
-		return errors.New("user declined OAuth authorization")
-	}
-
-	slog.DebugContext(ctx, "Requesting authorization code", "url", sanitizeURLForLog(authURL))
-	span.AddEvent("oauth.step", trace.WithAttributes(attribute.String("cagent.oauth.step", "request_authorization_code")))
-
-	code, receivedState, err := RequestAuthorizationCode(ctx, authURL, callbackServer, state)
-	if err != nil {
+		if !prepared {
+			return err
+		}
 		return fmt.Errorf("failed to get authorization code: %w", err)
 	}
-
 	if receivedState != state {
 		return errors.New("state mismatch in authorization response")
 	}

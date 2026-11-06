@@ -36,6 +36,9 @@ type result struct {
 	err       error
 	done      bool
 	toolCalls bool
+	// finish overrides the stop/tool_calls inference for a terminal
+	// MAX_TOKENS or safety stop.
+	finish chat.FinishReason
 }
 
 // NewStreamAdapter constructs a StreamAdapter from Gemini's iterator
@@ -60,6 +63,7 @@ func (g *StreamAdapter) run() {
 
 	hasContent := false
 	hasToolCalls := false
+	var terminal chat.FinishReason
 	var lastResponse *genai.GenerateContentResponse
 
 	// Consume the iterator
@@ -113,6 +117,10 @@ func (g *StreamAdapter) run() {
 		}
 
 		if resp != nil {
+			// Finish-only and prompt-feedback-only chunks are not forwarded,
+			// so read their terminal reason here.
+			terminal = mergeTerminalReason(terminal, responseTerminalReason(resp))
+
 			// Check for text content and generated inline media without using
 			// Text() to avoid warnings
 			hasText := false
@@ -156,14 +164,42 @@ func (g *StreamAdapter) run() {
 	})
 
 	// Send final message with appropriate stop reason
-	if hasContent || hasToolCalls {
+	if hasContent || hasToolCalls || terminal != "" {
 		if lastResponse == nil {
 			lastResponse = &genai.GenerateContentResponse{}
 		}
-		if !g.send(result{done: true, resp: lastResponse, toolCalls: hasToolCalls}) {
+		if !g.send(result{done: true, resp: lastResponse, toolCalls: hasToolCalls, finish: terminal}) {
 			return
 		}
 	}
+}
+
+// responseTerminalReason maps a truncation or safety stop to its chat finish
+// reason, or "" when the response doesn't carry one.
+func responseTerminalReason(resp *genai.GenerateContentResponse) chat.FinishReason {
+	if resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" && resp.PromptFeedback.BlockReason != genai.BlockedReasonUnspecified {
+		return chat.FinishReasonRefusal
+	}
+	var reason chat.FinishReason
+	for _, candidate := range resp.Candidates {
+		switch candidate.FinishReason {
+		case genai.FinishReasonMaxTokens:
+			reason = mergeTerminalReason(reason, chat.FinishReasonLength)
+		case genai.FinishReasonSafety, genai.FinishReasonRecitation, genai.FinishReasonBlocklist,
+			genai.FinishReasonProhibitedContent, genai.FinishReasonSPII, genai.FinishReasonImageSafety,
+			genai.FinishReasonImageProhibitedContent, genai.FinishReasonImageRecitation:
+			reason = mergeTerminalReason(reason, chat.FinishReasonRefusal)
+		}
+	}
+	return reason
+}
+
+// mergeTerminalReason keeps the stronger reason: refusal beats length.
+func mergeTerminalReason(current, next chat.FinishReason) chat.FinishReason {
+	if current == chat.FinishReasonRefusal || next == "" {
+		return current
+	}
+	return next
 }
 
 func (g *StreamAdapter) send(res result) bool {
@@ -228,11 +264,15 @@ func (g *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		resp.Choices[0].Delta.Role = string(chat.MessageRoleAssistant)
 
 		// A signature-only or usage-only chunk may follow the function calls.
-		if res.toolCalls {
+		// Truncation and safety stops win over both inferred reasons.
+		switch {
+		case res.finish != "":
+			resp.Choices[0].FinishReason = res.finish
+		case res.toolCalls:
 			resp.Choices[0].FinishReason = chat.FinishReasonToolCalls
 			// Don't include function calls in the final message - they were already sent
 			slog.Debug("Gemini: Final message with tool calls finish reason")
-		} else {
+		default:
 			resp.Choices[0].FinishReason = chat.FinishReasonStop
 		}
 	} else if res.resp != nil {

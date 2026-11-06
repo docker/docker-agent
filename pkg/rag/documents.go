@@ -97,7 +97,7 @@ func (d *documentStrategy) CheckAndReindexChangedFiles(context.Context, []string
 	return nil
 }
 
-func (d *documentStrategy) StartFileWatcher(context.Context, []string, strategy.ChunkingConfig) error {
+func (d *documentStrategy) WatchFiles(context.Context, []string, strategy.ChunkingConfig) error {
 	return nil
 }
 

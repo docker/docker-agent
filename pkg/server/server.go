@@ -24,10 +24,12 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/echolog"
 	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/eventmerge"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/upstream"
@@ -201,7 +203,7 @@ func (s *Server) getAgents(c echo.Context) error {
 	for k, agentSource := range s.sm.Sources {
 		slog.Debug("API source", "source", agentSource.Name())
 
-		cfg, err := config.Load(c.Request().Context(), agentSource)
+		cfg, err := config.Load(c.Request().Context(), agentSource, config.WithVersions(legacy.Register))
 		if err != nil {
 			slog.Error("Failed to load config from API source", "key", k, "error", err)
 			continue
@@ -948,7 +950,7 @@ func (s *Server) getSessionModels(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, runtime.SessionModelsResponse{
+	return c.JSON(http.StatusOK, modelcatalog.SessionModelsResponse{
 		Agent:           agentName,
 		CurrentModelRef: current,
 		Models:          choices,

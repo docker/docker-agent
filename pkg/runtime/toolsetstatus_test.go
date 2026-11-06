@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
@@ -40,7 +41,7 @@ func TestToolsetStatusFor_StatableReportsState(t *testing.T) {
 		},
 	}
 
-	got := toolsetStatusFor(ts)
+	got := inspection.ToolsetStatus(ts)
 	assert.Equal(t, "mcp(stdio cmd=foo)", got.Description)
 	assert.Equal(t, lifecycle.StateRestarting, got.State)
 	require.ErrorIs(t, got.LastError, want)
@@ -57,7 +58,7 @@ func TestToolsetStatusFor_NoStatableMeansReady(t *testing.T) {
 	t.Parallel()
 
 	ts := &describerOnly{desc: "filesystem"}
-	got := toolsetStatusFor(ts)
+	got := inspection.ToolsetStatus(ts)
 	assert.Equal(t, lifecycle.StateReady, got.State)
 	assert.Equal(t, 0, got.RestartCount)
 	require.NoError(t, got.LastError)
@@ -69,7 +70,7 @@ func TestToolsetStatusFor_RestartableReportsTrue(t *testing.T) {
 	t.Parallel()
 
 	ts := &restartableToolset{desc: "mcp(stdio cmd=foo)", state: lifecycle.StateInfo{State: lifecycle.StateReady}}
-	got := toolsetStatusFor(ts)
+	got := inspection.ToolsetStatus(ts)
 	assert.True(t, got.Restartable)
 }
 
@@ -77,7 +78,7 @@ func TestToolsetStatusFor_NonRestartableReportsFalse(t *testing.T) {
 	t.Parallel()
 
 	ts := &statefulToolset{desc: "filesystem", info: lifecycle.StateInfo{State: lifecycle.StateReady}}
-	got := toolsetStatusFor(ts)
+	got := inspection.ToolsetStatus(ts)
 	assert.False(t, got.Restartable)
 }
 
@@ -94,7 +95,7 @@ func TestToolsetStatusFor_UnwrapsStartable(t *testing.T) {
 	}
 	wrapped := tools.NewStartable(inner)
 
-	got := toolsetStatusFor(wrapped)
+	got := inspection.ToolsetStatus(wrapped)
 	assert.Equal(t, lifecycle.StateFailed, got.State)
 	require.ErrorIs(t, got.LastError, want)
 	assert.Equal(t, 5, got.RestartCount)
@@ -121,7 +122,7 @@ func TestToolsetStatusFor_UnsupervisedReportsStartingWithoutBlocking(t *testing.
 		<-inner.entered
 
 		resultCh := make(chan tools.ToolsetStatus, 1)
-		go func() { resultCh <- toolsetStatusFor(wrapped) }()
+		go func() { resultCh <- inspection.ToolsetStatus(wrapped) }()
 
 		select {
 		case status := <-resultCh:
@@ -133,6 +134,6 @@ func TestToolsetStatusFor_UnsupervisedReportsStartingWithoutBlocking(t *testing.
 		releaseStart()
 		require.NoError(t, <-startDone)
 
-		assert.Equal(t, lifecycle.StateReady, toolsetStatusFor(wrapped).State, "settled start reports Ready")
+		assert.Equal(t, lifecycle.StateReady, inspection.ToolsetStatus(wrapped).State, "settled start reports Ready")
 	})
 }

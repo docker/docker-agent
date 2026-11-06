@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/skills"
@@ -109,14 +110,15 @@ func (queueTestRuntime) CycleAgentThinkingLevel(context.Context, string) (effort
 func (queueTestRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
-func (queueTestRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
-func (queueTestRuntime) SupportsModelSwitching() bool                          { return false }
-func (queueTestRuntime) OnToolsChanged(func(runtime.Event))                    {}
-func (queueTestRuntime) OnBackgroundEvent(func(runtime.Event))                 {}
-func (queueTestRuntime) OnElicitationRequest(func(runtime.Event))              {}
-func (queueTestRuntime) QueueStatus() runtime.QueueStatus                      { return runtime.QueueStatus{} }
-func (queueTestRuntime) TogglePause(context.Context) (bool, error)             { return false, nil }
-func (queueTestRuntime) Close() error                                          { return nil }
+func (queueTestRuntime) AvailableModels(context.Context) []modelcatalog.ModelChoice { return nil }
+func (queueTestRuntime) SupportsModelSwitching() bool                               { return false }
+func (queueTestRuntime) OnToolsChanged(func(runtime.Event))                         {}
+func (queueTestRuntime) OnBackgroundEvent(func(runtime.Event))                      {}
+func (queueTestRuntime) OnElicitationRequest(func(runtime.Event))                   {}
+func (queueTestRuntime) QueueStatus() runtime.QueueStatus                           { return runtime.QueueStatus{} }
+
+func (queueTestRuntime) TogglePause(context.Context) (bool, error) { return false, nil }
+func (queueTestRuntime) Close() error                              { return nil }
 
 var _ runtime.Runtime = queueTestRuntime{}
 

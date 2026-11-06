@@ -5,8 +5,10 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/harness"
+	"github.com/docker/docker-agent/pkg/sessiontitle"
 )
 
 // harnessFactory is empty until a driver is registered (the CLI and
@@ -46,6 +48,20 @@ func (r *LocalRuntime) newHarnessProvider(cfg *latest.HarnessConfig) (harness.Pr
 		return nil, ErrHarnessNotRegistered
 	}
 	return (*factory)(cfg)
+}
+
+// harnessTitleGenerator titles a harness agent's sessions through its driver,
+// or returns nil when the driver cannot answer one-shot prompts.
+func (r *LocalRuntime) harnessTitleGenerator(a *agent.Agent) *sessiontitle.Generator {
+	p, err := r.newHarnessProvider(a.Harness())
+	if err != nil {
+		return nil
+	}
+	completer, ok := p.(harness.Completer)
+	if !ok {
+		return nil
+	}
+	return sessiontitle.NewFromCompleters(completer)
 }
 
 // harnessLabel is the model-slot label shown for a harness agent, e.g.

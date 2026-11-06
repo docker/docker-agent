@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/team"
 )
 
 func testProviderState() *chat.ProviderState {
@@ -70,6 +71,37 @@ func TestHandleStream_ProviderStatePropagates(t *testing.T) {
 		require.NotNil(t, res.ProviderState)
 	})
 
+	t.Run("kept on a length turn that retracts nothing", func(t *testing.T) {
+		t.Parallel()
+		res := runHandleStream(t, newStreamBuilder().
+			AddThinkingSignature("sig-signed").
+			AddContent("partial answer").
+			AddStopWithProviderState(chat.FinishReasonLength, testProviderState()).
+			Build())
+
+		assert.Equal(t, chat.FinishReasonLength, res.FinishReason)
+		assert.True(t, res.Stopped)
+		require.NotNil(t, res.ProviderState,
+			"a length turn that retracts no calls keeps the raw response the next request replays")
+		assert.Equal(t, "sig-signed", res.ThinkingSignature)
+	})
+
+	t.Run("dropped with the calls it retracts on a length turn", func(t *testing.T) {
+		t.Parallel()
+		res := runHandleStream(t, newStreamBuilder().
+			AddThinkingSignature("sig-signed").
+			AddToolCallName("toolu_1", "read_file").
+			AddToolCallArguments("toolu_1", `{"pa`).
+			AddStopWithProviderState(chat.FinishReasonLength, testProviderState()).
+			Build())
+
+		assert.Equal(t, chat.FinishReasonLength, res.FinishReason)
+		assert.Empty(t, res.Calls)
+		assert.Nil(t, res.ProviderState, "the retracted tool_use blocks live in the raw response")
+		assert.Empty(t, res.ThinkingSignature,
+			"the kept signature no longer describes the flattened thinking")
+	})
+
 	t.Run("dropped on refusal", func(t *testing.T) {
 		t.Parallel()
 		res := runHandleStream(t, newStreamBuilder().
@@ -118,4 +150,32 @@ func TestRecordAssistantMessage_SealsProviderState(t *testing.T) {
 	assert.NotNil(t, restored.ReplayableProviderState("anthropic"))
 	restored.Content = "Hello, edited"
 	assert.Nil(t, restored.ReplayableProviderState("anthropic"))
+}
+
+func TestRecordAssistantMessage_SealsAfterMedia(t *testing.T) {
+	store := session.NewInMemorySessionStore()
+	stream := &mockStream{responses: []chat.MessageStreamResponse{
+		{Choices: []chat.MessageStreamChoice{{Index: 0, Delta: chat.MessageDelta{Content: "Hello", Media: []chat.MediaDelta{{Data: []byte("png"), MimeType: "image/png", Name: "cat.png", Size: 3}}}}}},
+	}}
+	stream.responses = append(stream.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{Index: 0, FinishReason: chat.FinishReasonStop, Delta: chat.MessageDelta{ProviderState: testProviderState()}}},
+		Usage:   &chat.Usage{InputTokens: 1, OutputTokens: 1},
+	})
+	root := agent.New("root", "instructions", agent.WithModel(&mockProvider{id: "test/media", stream: stream}))
+	rt, err := New(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithSessionStore(store), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	sess := session.New(session.WithUserMessage("draw a cat"))
+	sess.WorkingDir = t.TempDir()
+	for range rt.RunStream(t.Context(), sess) {
+	}
+
+	stored, err := store.GetSession(t.Context(), sess.ID)
+	require.NoError(t, err)
+	messages := stored.GetAllMessages()
+	require.Len(t, messages, 2)
+	assistant := messages[1].Message
+	require.NotEmpty(t, assistant.MultiContent, "media is attached")
+	assert.NotNil(t, assistant.ReplayableProviderState("anthropic"), "the seal covers the media parts")
 }

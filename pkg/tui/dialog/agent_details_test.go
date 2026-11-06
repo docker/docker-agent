@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -17,19 +18,19 @@ import (
 // renderAgentDetails returns the ANSI-stripped rendered lines of the dialog
 // body. cfg populates the inline config sections (toolsets, sub-agents,
 // handoffs, fallbacks).
-func renderAgentDetails(a runtime.AgentDetails, cfg runtime.AgentConfigInfo) string {
+func renderAgentDetails(a runtime.AgentDetails, cfg inspection.AgentConfigInfo) string {
 	return renderAgentDetailsUsage(a, cfg, nil)
 }
 
 // renderAgentDetailsUsage is renderAgentDetails with a token-usage snapshot
 // for the context-usage line.
-func renderAgentDetailsUsage(a runtime.AgentDetails, cfg runtime.AgentConfigInfo, usage *runtime.Usage) string {
+func renderAgentDetailsUsage(a runtime.AgentDetails, cfg inspection.AgentConfigInfo, usage *runtime.Usage) string {
 	return renderAgentDetailsCost(a, cfg, usage, nil)
 }
 
 // renderAgentDetailsCost is renderAgentDetailsUsage with the agent's
 // cumulative attributed cost for the cost line (nil when unattributable).
-func renderAgentDetailsCost(a runtime.AgentDetails, cfg runtime.AgentConfigInfo, usage *runtime.Usage, cost *float64) string {
+func renderAgentDetailsCost(a runtime.AgentDetails, cfg inspection.AgentConfigInfo, usage *runtime.Usage, cost *float64) string {
 	d := NewAgentDetailsDialog(a, cfg, usage, cost).(*agentDetailsDialog)
 	return ansi.Strip(strings.Join(d.renderLines(80, 24), "\n"))
 }
@@ -43,7 +44,7 @@ func TestAgentDetailsDialog_RendersCoreFields(t *testing.T) {
 		Provider:    "anthropic",
 		Model:       "claude-opus-4-8",
 		Thinking:    "high",
-	}, runtime.AgentConfigInfo{})
+	}, inspection.AgentConfigInfo{})
 
 	assert.Contains(t, out, "root")
 	assert.Contains(t, out, "Executive assistant that routes work")
@@ -66,7 +67,7 @@ func TestAgentDetailsDialog_ThinkingVocabulary(t *testing.T) {
 				Provider: "openai",
 				Model:    "gpt-5.4",
 				Thinking: thinking,
-			}, runtime.AgentConfigInfo{})
+			}, inspection.AgentConfigInfo{})
 			if thinking == "" {
 				assert.NotContains(t, out, "Thinking:", "empty thinking label must omit the line")
 				return
@@ -85,7 +86,7 @@ func TestAgentDetailsDialog_RendersConfigSections(t *testing.T) {
 
 	withCfg := renderAgentDetails(runtime.AgentDetails{
 		Name: "root", Provider: "openai", Model: "gpt-5.4", Thinking: "high",
-	}, runtime.AgentConfigInfo{
+	}, inspection.AgentConfigInfo{
 		SubAgents: []string{"coder", "reviewer"},
 		Handoffs:  []string{"planner"},
 		Skills:    []string{"debugging", "refactor"},
@@ -96,7 +97,7 @@ func TestAgentDetailsDialog_RendersConfigSections(t *testing.T) {
 	assert.Contains(t, withCfg, "Skills (2): debugging, refactor")
 	assert.Contains(t, withCfg, "Fallback: anthropic/claude-opus-4-8")
 
-	empty := renderAgentDetails(runtime.AgentDetails{Name: "root", Model: "gpt-5.4"}, runtime.AgentConfigInfo{})
+	empty := renderAgentDetails(runtime.AgentDetails{Name: "root", Model: "gpt-5.4"}, inspection.AgentConfigInfo{})
 	assert.NotContains(t, empty, "Sub-agents (", "no sub-agents section when none configured")
 	assert.NotContains(t, empty, "Handoffs (", "no handoffs section when none configured")
 	assert.NotContains(t, empty, "Skills (", "no skills section when none configured")
@@ -116,7 +117,7 @@ func TestAgentDetailsDialog_TitleUsesAgentAccentColor(t *testing.T) {
 	t.Cleanup(func() { styles.SetAgentOrder(nil) })
 
 	titleOf := func(name string) string {
-		d := NewAgentDetailsDialog(runtime.AgentDetails{Name: name, Model: "gpt"}, runtime.AgentConfigInfo{}, nil, nil).(*agentDetailsDialog)
+		d := NewAgentDetailsDialog(runtime.AgentDetails{Name: name, Model: "gpt"}, inspection.AgentConfigInfo{}, nil, nil).(*agentDetailsDialog)
 		return d.renderLines(80, 24)[0] // raw title line, with ANSI styling
 	}
 
@@ -144,7 +145,7 @@ func TestAgentDetailsDialog_RendersCommands(t *testing.T) {
 			"plan":     {Description: "Hand off to the planner", Agent: "planner"},
 			"fix-lint": {Description: "Fix linting errors"},
 		},
-	}, runtime.AgentConfigInfo{})
+	}, inspection.AgentConfigInfo{})
 
 	assert.Contains(t, out, "Commands (2)")
 	assert.Contains(t, out, "/fix-lint")
@@ -160,7 +161,7 @@ func TestAgentDetailsDialog_HarnessNoThinkingNoCommands(t *testing.T) {
 		Name:        "slack",
 		Description: "Slack agent",
 		Model:       "claude-code",
-	}, runtime.AgentConfigInfo{})
+	}, inspection.AgentConfigInfo{})
 
 	assert.Contains(t, out, "slack")
 	assert.Contains(t, out, "Model: claude-code")
@@ -175,11 +176,11 @@ func TestAgentDetailsDialog_HarnessNoThinkingNoCommands(t *testing.T) {
 func TestAgentDetailsDialog_RendersToolsets(t *testing.T) {
 	t.Parallel()
 
-	out := renderAgentDetails(runtime.AgentDetails{Name: "root", Model: "gpt-5.4"}, runtime.AgentConfigInfo{
-		Toolsets: []runtime.ToolsetDetail{
-			{Name: "filesystem", State: runtime.ToolsetStarted, Tools: []string{"read_file", "write_file"}},
-			{Name: "git", State: runtime.ToolsetStopped, Tools: []string{"status", "commit"}},
-			{Name: "search", Kind: "MCP", State: runtime.ToolsetError},
+	out := renderAgentDetails(runtime.AgentDetails{Name: "root", Model: "gpt-5.4"}, inspection.AgentConfigInfo{
+		Toolsets: []inspection.ToolsetDetail{
+			{Name: "filesystem", State: inspection.ToolsetStarted, Tools: []string{"read_file", "write_file"}},
+			{Name: "git", State: inspection.ToolsetStopped, Tools: []string{"status", "commit"}},
+			{Name: "search", Kind: "MCP", State: inspection.ToolsetError},
 		},
 	})
 
@@ -201,7 +202,7 @@ func TestAgentDetailsDialog_RendersToolsets(t *testing.T) {
 func TestAgentDetailsDialog_RendersLiveStateLimitsOptionsSkills(t *testing.T) {
 	t.Parallel()
 
-	out := renderAgentDetails(runtime.AgentDetails{Name: "root", Model: "gpt-5.4"}, runtime.AgentConfigInfo{
+	out := renderAgentDetails(runtime.AgentDetails{Name: "root", Model: "gpt-5.4"}, inspection.AgentConfigInfo{
 		IsCurrent:               true,
 		MaxIterations:           50,
 		NumHistoryItems:         40,
@@ -221,7 +222,7 @@ func TestAgentDetailsDialog_RendersLiveStateLimitsOptionsSkills(t *testing.T) {
 func TestAgentDetailsDialog_LimitsOmitsUnsetValues(t *testing.T) {
 	t.Parallel()
 
-	out := renderAgentDetails(runtime.AgentDetails{Name: "root", Model: "gpt"}, runtime.AgentConfigInfo{
+	out := renderAgentDetails(runtime.AgentDetails{Name: "root", Model: "gpt"}, inspection.AgentConfigInfo{
 		NumHistoryItems: 40,
 	})
 	assert.Contains(t, out, "Limits: history 40")
@@ -238,22 +239,22 @@ func TestAgentDetailsDialog_ContextUsage(t *testing.T) {
 
 	agent := runtime.AgentDetails{Name: "root", Provider: "openai", Model: "gpt-5.4"}
 
-	withLimit := renderAgentDetailsUsage(agent, runtime.AgentConfigInfo{}, &runtime.Usage{
+	withLimit := renderAgentDetailsUsage(agent, inspection.AgentConfigInfo{}, &runtime.Usage{
 		ContextLength: 12_800,
 		ContextLimit:  128_000,
 	})
 	assert.Contains(t, withLimit, "Context: 12.8K of 128.0K tokens (10%)")
 
-	noLimit := renderAgentDetailsUsage(agent, runtime.AgentConfigInfo{}, &runtime.Usage{
+	noLimit := renderAgentDetailsUsage(agent, inspection.AgentConfigInfo{}, &runtime.Usage{
 		ContextLength: 8_200,
 	})
 	assert.Contains(t, noLimit, "Context: 8.2K tokens")
 	assert.NotContains(t, noLimit, "%)", "no percent without a context limit")
 
-	noUsage := renderAgentDetailsUsage(agent, runtime.AgentConfigInfo{}, nil)
+	noUsage := renderAgentDetailsUsage(agent, inspection.AgentConfigInfo{}, nil)
 	assert.NotContains(t, noUsage, "Context:", "no context line when the agent has not run")
 
-	emptyUsage := renderAgentDetailsUsage(agent, runtime.AgentConfigInfo{}, &runtime.Usage{})
+	emptyUsage := renderAgentDetailsUsage(agent, inspection.AgentConfigInfo{}, &runtime.Usage{})
 	assert.NotContains(t, emptyUsage, "Context:", "no context line for an empty snapshot")
 }
 
@@ -267,16 +268,16 @@ func TestAgentDetailsDialog_Cost(t *testing.T) {
 	agent := runtime.AgentDetails{Name: "root", Provider: "openai", Model: "gpt-5.4"}
 	costOf := func(c float64) *float64 { return &c }
 
-	cents := renderAgentDetailsCost(agent, runtime.AgentConfigInfo{}, nil, costOf(0.1284))
+	cents := renderAgentDetailsCost(agent, inspection.AgentConfigInfo{}, nil, costOf(0.1284))
 	assert.Contains(t, cents, "Cost: $0.13", "amounts at or above one cent use two decimals")
 
-	subCent := renderAgentDetailsCost(agent, runtime.AgentConfigInfo{}, nil, costOf(0.0042))
+	subCent := renderAgentDetailsCost(agent, inspection.AgentConfigInfo{}, nil, costOf(0.0042))
 	assert.Contains(t, subCent, "Cost: $0.0042", "non-zero amounts below one cent keep four decimals")
 
-	zero := renderAgentDetailsCost(agent, runtime.AgentConfigInfo{}, nil, costOf(0))
+	zero := renderAgentDetailsCost(agent, inspection.AgentConfigInfo{}, nil, costOf(0))
 	assert.Contains(t, zero, "Cost: $0.00", "an agent that ran at zero cost reads $0.00")
 
-	noCost := renderAgentDetailsCost(agent, runtime.AgentConfigInfo{}, nil, nil)
+	noCost := renderAgentDetailsCost(agent, inspection.AgentConfigInfo{}, nil, nil)
 	assert.NotContains(t, noCost, "Cost:", "no cost line when no cost is attributable")
 }
 
@@ -319,7 +320,7 @@ func TestAgentDetailsDialog_OmitsInstruction(t *testing.T) {
 		Name:        "root",
 		Description: "Routes work to sub-agents",
 		Model:       "gpt-5.4",
-	}, runtime.AgentConfigInfo{
+	}, inspection.AgentConfigInfo{
 		SubAgents: []string{"coder"},
 	})
 
@@ -330,23 +331,23 @@ func TestAgentDetailsDialog_OmitsInstruction(t *testing.T) {
 
 func TestAgentDetailsDialog_ExecutionCapabilities(t *testing.T) {
 	t.Parallel()
-	native := &runtime.ExecutionCapabilities{
-		Mode: runtime.ExecutionModeNative, ToolExecution: runtime.ToolExecutionDockerAgent,
-		ToolApproval: runtime.ToolApprovalDockerAgentPolicy, BudgetSupported: true,
+	native := &inspection.ExecutionCapabilities{
+		Mode: inspection.ExecutionModeNative, ToolExecution: inspection.ToolExecutionDockerAgent,
+		ToolApproval: inspection.ToolApprovalDockerAgentPolicy, BudgetSupported: true,
 		CompactionSupported: true, MidTurnSteeringSupported: true, PromptHookContextSupported: true,
 	}
-	external := &runtime.ExecutionCapabilities{
-		Mode: runtime.ExecutionModeHarness, ToolExecution: runtime.ToolExecutionHarnessReported,
-		ToolApproval: runtime.ToolApprovalExternal,
+	external := &inspection.ExecutionCapabilities{
+		Mode: inspection.ExecutionModeHarness, ToolExecution: inspection.ToolExecutionHarnessReported,
+		ToolApproval: inspection.ToolApprovalExternal,
 	}
-	out := renderAgentDetails(runtime.AgentDetails{Name: "root", ExecutionCapabilities: native}, runtime.AgentConfigInfo{})
+	out := renderAgentDetails(runtime.AgentDetails{Name: "root", ExecutionCapabilities: native}, inspection.AgentConfigInfo{})
 	assert.Contains(t, out, "Execution: native")
 	assert.Contains(t, out, "Tool execution: docker-agent")
 	assert.Contains(t, out, "Tool approval: docker-agent-policy")
 	assert.Contains(t, out, "Budgets: supported; requires runtime configuration")
 	assert.Contains(t, out, "Mid-turn steering: supported")
 
-	out = renderAgentDetails(runtime.AgentDetails{Name: "root", ExecutionCapabilities: native}, runtime.AgentConfigInfo{ExecutionCapabilities: external})
+	out = renderAgentDetails(runtime.AgentDetails{Name: "root", ExecutionCapabilities: native}, inspection.AgentConfigInfo{ExecutionCapabilities: external})
 	assert.Contains(t, out, "Execution: harness")
 	assert.Contains(t, out, "Tool execution: harness-reported")
 	assert.Contains(t, out, "Tool approval: external")
@@ -356,7 +357,7 @@ func TestAgentDetailsDialog_ExecutionCapabilities(t *testing.T) {
 	assert.Contains(t, out, "docker-agent does not approve them")
 	assert.NotContains(t, out, "Execution: native", "local inspection must take precedence over a stale roster")
 
-	out = renderAgentDetails(runtime.AgentDetails{Name: "legacy", Model: "codex"}, runtime.AgentConfigInfo{})
+	out = renderAgentDetails(runtime.AgentDetails{Name: "legacy", Model: "codex"}, inspection.AgentConfigInfo{})
 	assert.NotContains(t, out, "Execution:")
 	assert.NotContains(t, out, "Budgets:", "unknown metadata must not be inferred from a model label")
 }

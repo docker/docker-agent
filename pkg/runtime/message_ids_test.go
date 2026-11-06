@@ -81,7 +81,7 @@ func TestPersistentMessageIDsObserverStateIsRunLocal(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { require.NoError(t, store.Close()) }()
 	sess := session.New()
-	r := &LocalRuntime{observers: []EventObserver{newPersistenceObserver(store)}}
+	r := &LocalRuntime{observers: []func() EventObserver{func() EventObserver { return newPersistenceObserver(store) }}}
 	for _, content := range []string{"one", "two"} {
 		input := make(chan Event, 1)
 		input <- AgentChoice("root", sess.ID, content)

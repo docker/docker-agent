@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/agent"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
@@ -35,7 +36,7 @@ func (r *restartableToolset) Restart(context.Context) error {
 // nameForTest exposes the package-private nameFor helper for tests so
 // they exercise the same matching logic as production code.
 func nameForTest(ts tools.ToolSet, fallback string) string {
-	return nameFor(ts, fallback)
+	return inspection.ToolsetName(ts, fallback)
 }
 
 func TestNameFor_DescriberFallback(t *testing.T) {

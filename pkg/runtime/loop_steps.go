@@ -146,7 +146,7 @@ const (
 	streamErrorFatal
 )
 
-// handleStreamError classifies the error returned by tryModelWithFallback
+// handleStreamError classifies the error returned by fallbackExecutor.execute
 // and either drives auto-compaction recovery (allowed at most
 // r.maxOverflowCompactions consecutive times) or surfaces a fatal error.
 // Context cancellation is treated as a graceful stop.
@@ -194,7 +194,10 @@ func (r *LocalRuntime) handleStreamError(
 			"The conversation has exceeded the model's context window. Automatically compacting the conversation history...",
 			a.Name(),
 		))
-		r.compactWithReason(ctx, sess, "", compactionReasonOverflow, events)
+		if err := r.compactWithReason(ctx, sess, "", compactionReasonOverflow, events); err != nil {
+			events.Emit(ErrorForSession(sess.ID, err.Error()))
+			return streamErrorFatal
+		}
 		return streamErrorRetry
 	}
 

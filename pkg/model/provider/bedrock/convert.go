@@ -247,23 +247,29 @@ func convertImageURL(imageURL *chat.MessageImageURL) types.ContentBlock {
 }
 
 func convertAssistantContent(msg *chat.Message) []types.ContentBlock {
+	if blocks, ok := replayNativeBlocks(msg); ok {
+		return blocks
+	}
+
 	var blocks []types.ContentBlock
 
-	// Add thinking blocks first (order: thinking, text, tool_use)
-	if msg.ReasoningContent != "" && msg.ThinkingSignature != "" {
+	// Flattened fallback (order: thinking, text, tool_use). A signature without
+	// text is signed thinking whose display was omitted, not redacted content.
+	// A turn whose reasoning changed since it was recorded loses it.
+	if recovered, ok := recoveredNativeBlocks(msg); ok {
+		return recovered
+	}
+	recorded := msg.HasOwnRawContent(providerName)
+	if recorded && recordedReasoning(msg) {
+		slog.Warn("Bedrock: omitting thinking that changed after it was recorded")
+	}
+	if msg.ThinkingSignature != "" && !recorded {
 		blocks = append(blocks, &types.ContentBlockMemberReasoningContent{
 			Value: &types.ReasoningContentBlockMemberReasoningText{
 				Value: types.ReasoningTextBlock{
 					Text:      new(msg.ReasoningContent),
 					Signature: new(msg.ThinkingSignature),
 				},
-			},
-		})
-	} else if msg.ThinkingSignature != "" {
-		// Redacted thinking block (signature only)
-		blocks = append(blocks, &types.ContentBlockMemberReasoningContent{
-			Value: &types.ReasoningContentBlockMemberRedactedContent{
-				Value: []byte(msg.ThinkingSignature),
 			},
 		})
 	}

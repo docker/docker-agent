@@ -199,12 +199,6 @@ func (h *lspHandler) clearSessionLocked() {
 // fireToolsChanged invokes the registered tools-changed handlers, outside
 // h.mu so the runtime is free to call back into the toolset.
 func (h *lspHandler) fireToolsChanged() {
-	h.mu.Lock()
-	handler := h.toolsChangedHandler
-	h.mu.Unlock()
-	if handler != nil {
-		handler()
-	}
 	h.toolsChangedSubs.Notify()
 }
 

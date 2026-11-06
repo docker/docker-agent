@@ -25,7 +25,7 @@ func (b *Backend) CreateCloud(ctx context.Context, opts Options, stderr io.Write
 		return "", fmt.Errorf("generating cloud sandbox name: %w", err)
 	}
 	name := "docker-agent-" + hex.EncodeToString(nonce[:])
-	args := []string{"--detached", "--new", "--name", name, "--ttl", opts.TTL.String(), "--on-timeout", "stop"}
+	args := []string{"--detach", "--new", "--name", name, "--ttl", opts.TTL.String(), "--on-timeout", "stop"}
 	args = append(args, opts.kitFlags()...)
 	if opts.Template != "" {
 		args = append(args, "--template", opts.Template)

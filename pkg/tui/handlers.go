@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/evaluation"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/shellpath"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -752,6 +753,11 @@ func (m *appModel) openEffortPicker() (tea.Model, tea.Cmd) {
 		return m, notification.InfoCmd("Current model does not support thinking levels")
 	}
 	levels := modelinfo.SupportedThinkingLevels(agent.Provider, agent.Model)
+	if caps := agent.ExecutionCapabilities; caps != nil && caps.Mode == inspection.ExecutionModeHarness {
+		// A harness has no provider/model to derive levels from; the runtime
+		// resolves its CLI's effort levels locally.
+		levels = m.application.CurrentAgentThinkingLevels(m.ctx())
+	}
 	// "off" maps onto none; adaptive/token labels leave no level marked current.
 	current, ok := effort.Parse(agent.Thinking)
 	if !ok && agent.Thinking == "off" {
@@ -893,6 +899,10 @@ func (m *appModel) applyThemeChanged() (tea.Model, tea.Cmd) {
 
 // handleThemeFileChanged hot-reloads a theme that was modified on disk.
 func (m *appModel) handleThemeFileChanged(themeRef string) (tea.Model, tea.Cmd) {
+	// A canceled watcher may already have queued a notification for the old theme.
+	if themeRef != styles.CurrentTheme().Ref {
+		return m, nil
+	}
 	theme, err := styles.LoadTheme(themeRef)
 	if err != nil {
 		return m, notification.ErrorCmd(fmt.Sprintf("Failed to hot-reload theme: %v", err))
@@ -912,23 +922,26 @@ func (m *appModel) handleThemeFileChanged(themeRef string) (tea.Model, tea.Cmd) 
 func (m *appModel) handleOpenSettingsDialog() (tea.Model, tea.Cmd) {
 	settings := userconfig.Get()
 	preferences := messages.Preferences{
-		Layout:                m.layoutSettings,
-		SendMode:              m.sendMode,
-		SplitDiffView:         settings.GetSplitDiffView(),
-		ExpandThinking:        settings.GetExpandThinking(),
-		HideToolResults:       settings.HideToolResults,
-		RenderImages:          settings.GetRenderImages(),
-		ShowBanner:            settings.GetShowBanner(),
-		YOLO:                  settings.YOLO,
-		RestoreTabs:           settings.GetRestoreTabs(),
-		Snapshot:              settings.SnapshotsEnabled(),
-		CacheStablePrompts:    settings.CacheStablePromptsEnabled(),
-		WarnOnCacheMiss:       settings.CacheMissWarningsEnabled(),
-		Lean:                  settings.Lean,
-		TabTitleMaxLength:     settings.GetTabTitleMaxLength(),
-		Sound:                 settings.GetSound(),
-		SoundThreshold:        settings.GetSoundThreshold(),
-		InterruptConfirmation: messages.ParseInterruptMode(settings.GetInterruptConfirmation()),
+		Layout:                        m.layoutSettings,
+		SendMode:                      m.sendMode,
+		SplitDiffView:                 settings.GetSplitDiffView(),
+		ExpandThinking:                settings.GetExpandThinking(),
+		HideToolResults:               settings.HideToolResults,
+		RenderImages:                  settings.GetRenderImages(),
+		ShowBanner:                    settings.GetShowBanner(),
+		YOLO:                          settings.YOLO,
+		RestoreTabs:                   settings.GetRestoreTabs(),
+		Snapshot:                      settings.SnapshotsEnabled(),
+		BackgroundCompaction:          settings.BackgroundCompaction,
+		BackgroundCompactionThreshold: settings.GetBackgroundCompactionThreshold(),
+		CacheStablePrompts:            settings.CacheStablePromptsEnabled(),
+		WarnOnCacheMiss:               settings.CacheMissWarningsEnabled(),
+		Lean:                          settings.Lean,
+		TabTitleMaxLength:             settings.GetTabTitleMaxLength(),
+		KeepAwake:                     settings.GetKeepAwake(),
+		Sound:                         settings.GetSound(),
+		SoundThreshold:                settings.GetSoundThreshold(),
+		InterruptConfirmation:         messages.ParseInterruptMode(settings.GetInterruptConfirmation()),
 	}
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewSettingsDialog(preferences, !m.hideSidebar),
@@ -1043,12 +1056,18 @@ func savePreferences(p messages.Preferences) error {
 		s.RestoreTabs = boolPreference(p.RestoreTabs, false)
 		s.Snapshot = boolPreference(p.Snapshot, false)
 		s.CacheStablePrompts = boolPreference(p.CacheStablePrompts, false)
+		s.BackgroundCompaction = p.BackgroundCompaction
+		s.BackgroundCompactionThreshold = p.BackgroundCompactionThreshold
+		if s.BackgroundCompactionThreshold == userconfig.DefaultBackgroundCompactionThreshold {
+			s.BackgroundCompactionThreshold = 0
+		}
 		s.WarnOnCacheMiss = boolPreference(p.WarnOnCacheMiss, false)
 		s.HideToolResults = p.HideToolResults
 		s.RenderImages = boolPreference(p.RenderImages, true)
 		s.ShowBanner = boolPreference(p.ShowBanner, true)
 		s.YOLO = p.YOLO
 		s.Lean = p.Lean
+		s.KeepAwake = p.KeepAwake
 		s.Sound = p.Sound
 		s.InterruptConfirmation = string(p.InterruptConfirmation)
 		if p.SoundThreshold == userconfig.DefaultSoundThreshold {
@@ -1109,10 +1128,13 @@ func saveSettingsToUserConfig(layout messages.LayoutSettings, mode messages.Send
 		ExpandThinking: settings.GetExpandThinking(), HideToolResults: settings.HideToolResults,
 		RenderImages: settings.GetRenderImages(), ShowBanner: settings.GetShowBanner(),
 		YOLO: settings.YOLO, RestoreTabs: settings.GetRestoreTabs(), Snapshot: settings.SnapshotsEnabled(),
-		CacheStablePrompts: settings.CacheStablePromptsEnabled(),
-		WarnOnCacheMiss:    settings.CacheMissWarningsEnabled(),
-		Lean:               settings.Lean, TabTitleMaxLength: settings.GetTabTitleMaxLength(),
-		Sound: settings.GetSound(), SoundThreshold: settings.GetSoundThreshold(),
+		BackgroundCompaction:          settings.BackgroundCompaction,
+		BackgroundCompactionThreshold: settings.GetBackgroundCompactionThreshold(),
+		CacheStablePrompts:            settings.CacheStablePromptsEnabled(),
+		WarnOnCacheMiss:               settings.CacheMissWarningsEnabled(),
+		Lean:                          settings.Lean, TabTitleMaxLength: settings.GetTabTitleMaxLength(),
+		KeepAwake: settings.GetKeepAwake(),
+		Sound:     settings.GetSound(), SoundThreshold: settings.GetSoundThreshold(),
 		InterruptConfirmation: messages.ParseInterruptMode(settings.GetInterruptConfirmation()),
 	})
 }
@@ -1238,69 +1260,6 @@ func (m *appModel) handleAttachFile(filePath string) (tea.Model, tea.Cmd) {
 	return m, core.CmdHandler(dialog.OpenDialogMsg{
 		Model: dialog.NewFilePickerDialog(filePath),
 	})
-}
-
-// --- Speech-to-text ---
-
-func (m *appModel) handleStartSpeak() (tea.Model, tea.Cmd) {
-	if m.transcriber.IsRunning() {
-		return m, nil
-	}
-
-	// Close any previous channel to unblock stale waitForTranscript goroutines.
-	m.closeTranscriptCh()
-
-	ch := make(chan string, 100)
-	m.transcriptCh = ch
-	err := m.transcriber.Start(m.ctx(), func(delta string) {
-		select {
-		case ch <- delta:
-		default:
-		}
-	})
-	if err != nil {
-		m.closeTranscriptCh()
-		return m, notification.ErrorCmd(fmt.Sprintf("Failed to start listening: %v", err))
-	}
-
-	return m, tea.Batch(
-		notification.InfoCmd("🎤 Listening... (ENTER to send or ESC to cancel)"),
-		m.activeTab.editor.SetRecording(true),
-		m.waitForTranscript(),
-	)
-}
-
-func (m *appModel) handleStopSpeak() (tea.Model, tea.Cmd) {
-	if !m.transcriber.IsRunning() {
-		return m, nil
-	}
-
-	m.transcriber.Stop()
-	m.closeTranscriptCh()
-
-	return m, tea.Batch(m.activeTab.editor.SetRecording(false), notification.SuccessCmd("Stopped listening"))
-}
-
-// waitForTranscript returns a command that blocks until the next transcript
-// delta arrives and delivers it as a SpeakTranscriptMsg.
-func (m *appModel) waitForTranscript() tea.Cmd {
-	ch := m.transcriptCh
-	return func() tea.Msg {
-		delta, ok := <-ch
-		if !ok {
-			return nil
-		}
-		return messages.SpeakTranscriptMsg{Delta: delta}
-	}
-}
-
-// closeTranscriptCh closes the transcript channel and sets it to nil,
-// unblocking any goroutines waiting in waitForTranscript.
-func (m *appModel) closeTranscriptCh() {
-	if m.transcriptCh != nil {
-		close(m.transcriptCh)
-		m.transcriptCh = nil
-	}
 }
 
 func (m *appModel) handleElicitationResponse(action tools.ElicitationAction, content map[string]any, elicitationID string) (tea.Model, tea.Cmd) {

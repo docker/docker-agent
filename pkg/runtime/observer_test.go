@@ -189,6 +189,32 @@ func TestObserver_NilOptIsIgnored(t *testing.T) {
 	assert.Len(t, r.observers, 1, "nil observer must not be appended")
 }
 
+func TestObserverFactoryCreatesPerRunState(t *testing.T) {
+	t.Parallel()
+	var instances []*recordingObserver
+	rt := &LocalRuntime{}
+	WithEventObserverFactory(nil)(rt)
+	WithEventObserverFactory(func() EventObserver { return nil })(rt)
+	WithEventObserverFactory(func() EventObserver {
+		obs := &recordingObserver{}
+		instances = append(instances, obs)
+		return obs
+	})(rt)
+	for range 2 {
+		input := make(chan Event, 1)
+		input <- Warning("test", "root")
+		close(input)
+		for range rt.observe(t.Context(), session.New(), input) {
+		}
+	}
+	require.Len(t, instances, 2)
+	assert.NotSame(t, instances[0], instances[1])
+	for _, obs := range instances {
+		assert.Equal(t, int64(1), obs.startCalls.Load())
+		assert.Len(t, obs.snapshot(), 1)
+	}
+}
+
 // fnObserver adapts function values to the [EventObserver] interface
 // for tests that only need to observe a subset of the lifecycle hooks.
 type fnObserver struct {

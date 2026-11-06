@@ -106,7 +106,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand the tool's environment variables: %w", err)
 		}
-		env = append(env, os.Environ()...)
+		env = mergeChildEnv(env)
 		env = toolinstall.PrependBinDirToEnv(env)
 
 		return NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, cwd, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
@@ -119,7 +119,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		// every HTTP request (see remoteMCPClient.expandHeaders).
 		remoteURL := js.NewJsExpander(envProvider).Expand(ctx, toolset.Remote.URL, nil)
 
-		return newRemoteToolset(
+		ts := newRemoteToolset(
 			toolset.Name,
 			remoteURL,
 			toolset.Remote.TransportType,
@@ -129,7 +129,9 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 			envProvider,
 			oauthTokenStoreFromContext(ctx),
 			lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
-		), nil
+		)
+		ts.SetStandaloneSSE(toolset.Remote.StandaloneSSE)
+		return ts, nil
 
 	default:
 		return nil, errors.New("mcp toolset requires either ref, command, or remote configuration")
@@ -143,8 +145,6 @@ type mcpClient interface {
 	ListPrompts(ctx context.Context, request *mcp.ListPromptsParams) iter.Seq2[*mcp.Prompt, error]
 	GetPrompt(ctx context.Context, request *mcp.GetPromptParams) (*mcp.GetPromptResult, error)
 	SetElicitationHandler(handler tools.ElicitationHandler)
-	SetSamplingHandler(handler tools.SamplingHandler)
-	SetSamplingWithToolsHandler(handler tools.SamplingWithToolsHandler)
 	SetOAuthSuccessHandler(handler func())
 	SetManagedOAuth(managed bool)
 	SetUnmanagedOAuthRedirectURI(uri string)
@@ -192,12 +192,8 @@ type Toolset struct {
 	cachedPrompts []PromptInfo
 	cacheGen      uint64
 
-	// toolsChangedHandler is called after the tool cache is refreshed
-	// following a ToolListChanged notification from the server, or after
-	// a successful supervisor reconnect. Single legacy slot; toolsChangedSubs
-	// holds the per-runtime subscriptions notified alongside it.
-	toolsChangedHandler func()
-	toolsChangedSubs    tools.ChangeSubscribers
+	// Subscribers are notified after a tool-list refresh or successful reconnect.
+	toolsChangedSubs tools.ChangeSubscribers
 }
 
 // invalidateCache clears the cached tools and prompts and bumps the
@@ -219,13 +215,10 @@ var (
 
 // Verify that Toolset implements optional capability interfaces
 var (
-	_ tools.Instructable        = (*Toolset)(nil)
-	_ tools.Elicitable          = (*Toolset)(nil)
-	_ tools.Sampleable          = (*Toolset)(nil)
-	_ tools.SampleableWithTools = (*Toolset)(nil)
-	_ tools.OAuthCapable        = (*Toolset)(nil)
-	_ tools.ChangeNotifier      = (*Toolset)(nil)
-	_ tools.ChangeSubscriber    = (*Toolset)(nil)
+	_ tools.Instructable     = (*Toolset)(nil)
+	_ tools.Elicitable       = (*Toolset)(nil)
+	_ tools.OAuthCapable     = (*Toolset)(nil)
+	_ tools.ChangeSubscriber = (*Toolset)(nil)
 )
 
 // NewToolsetCommand creates a new MCP toolset from a command.
@@ -357,7 +350,7 @@ func firstOrZero[T any](s []T) T {
 
 // newSupervisor constructs a Supervisor wired to the toolset's mcpClient
 // using the provided policy as a base. Internal callbacks (OnDisconnect,
-// OnRestart, Logger) are always overridden so the supervisor can
+// OnRestart, Shutdown, Logger) are always overridden so the supervisor can
 // invalidate caches and refresh tools/prompts on reconnect; any values
 // passed in for those fields are ignored.
 //
@@ -367,6 +360,10 @@ func firstOrZero[T any](s []T) T {
 func newSupervisor(ts *Toolset, base lifecycle.Policy) *lifecycle.Supervisor {
 	connector := &clientConnector{ts: ts}
 	policy := base
+	policy.Shutdown = nil
+	if ts.sessionOwned {
+		policy.Shutdown = ts.shutdown
+	}
 	policy.Logger = slog.With("component", "mcp.supervisor", "server", ts.logID)
 	policy.OnDisconnect = func(error) {
 		ts.mu.Lock()
@@ -531,28 +528,7 @@ func (ts *Toolset) Stop(ctx context.Context) error {
 		return nil
 	}
 	if ts.sessionOwned {
-		var forceClose func()
-		var finalize func(context.Context) error
-		switch client := ts.mcpClient.(type) {
-		case *stdioMCPClient:
-			forceClose = client.cancelProcess
-		case *sessionRemoteClient:
-			forceClose = client.forceClose
-			finalize = client.Close
-		}
-		forced := make(chan struct{})
-		stopForce := context.AfterFunc(ctx, func() { forceClose(); close(forced) })
-		defer func() {
-			if !stopForce() {
-				<-forced
-			}
-			forceClose()
-		}()
-		err := ts.supervisor.Stop(ctx)
-		if finalize != nil {
-			err = errors.Join(err, finalize(ctx))
-		}
-		return errors.Join(err, ctx.Err())
+		return ts.supervisor.Stop(ctx)
 	}
 	if err := ts.supervisor.Stop(ctx); err != nil && ctx.Err() == nil {
 		slog.ErrorContext(ctx, "Failed to stop MCP toolset", "server", ts.logID, "error", err)
@@ -560,6 +536,32 @@ func (ts *Toolset) Stop(ctx context.Context) error {
 	}
 	slog.DebugContext(ctx, "Stopped MCP toolset successfully", "server", ts.logID)
 	return nil
+}
+
+// shutdown keeps session-owned transport cleanup inside the supervisor's stop barrier.
+func (ts *Toolset) shutdown(ctx context.Context, teardown func() error) error {
+	var forceClose func()
+	var finalize func(context.Context) error
+	switch client := ts.mcpClient.(type) {
+	case *stdioMCPClient:
+		forceClose = client.cancelProcess
+	case *sessionRemoteClient:
+		forceClose = client.forceClose
+		finalize = client.Close
+	}
+	forced := make(chan struct{})
+	stopForce := context.AfterFunc(ctx, func() { forceClose(); close(forced) })
+	defer func() {
+		if !stopForce() {
+			<-forced
+		}
+		forceClose()
+	}()
+	err := teardown()
+	if finalize != nil {
+		err = errors.Join(err, finalize(ctx))
+	}
+	return errors.Join(err, ctx.Err())
 }
 
 // clientConnector adapts an mcpClient to the lifecycle.Connector interface.
@@ -636,9 +638,6 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 					Form: &mcp.FormElicitationCapabilities{},
 					URL:  &mcp.URLElicitationCapabilities{},
 				},
-				Sampling: &mcp.SamplingCapabilities{
-					Tools: &mcp.SamplingToolsCapabilities{},
-				},
 			},
 		},
 	}
@@ -680,6 +679,7 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 	slog.DebugContext(ctx, "Started MCP toolset successfully", "server", ts.logID)
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
+	ts.invalidateCache()
 	ts.instructions = result.Instructions
 
 	return &clientSession{client: ts.mcpClient}, nil
@@ -769,13 +769,6 @@ func (ts *Toolset) refreshToolCache(ctx context.Context) {
 		return
 	}
 
-	ts.mu.Lock()
-	handler := ts.toolsChangedHandler
-	ts.mu.Unlock()
-
-	if handler != nil {
-		handler()
-	}
 	ts.toolsChangedSubs.Notify()
 }
 
@@ -1000,14 +993,6 @@ func (ts *Toolset) SetElicitationHandler(handler tools.ElicitationHandler) {
 	ts.mcpClient.SetElicitationHandler(handler)
 }
 
-func (ts *Toolset) SetSamplingHandler(handler tools.SamplingHandler) {
-	ts.mcpClient.SetSamplingHandler(handler)
-}
-
-func (ts *Toolset) SetSamplingWithToolsHandler(handler tools.SamplingWithToolsHandler) {
-	ts.mcpClient.SetSamplingWithToolsHandler(handler)
-}
-
 func (ts *Toolset) SetOAuthSuccessHandler(handler func()) {
 	ts.mcpClient.SetOAuthSuccessHandler(handler)
 }
@@ -1018,12 +1003,6 @@ func (ts *Toolset) SetManagedOAuth(managed bool) {
 
 func (ts *Toolset) SetUnmanagedOAuthRedirectURI(uri string) {
 	ts.mcpClient.SetUnmanagedOAuthRedirectURI(uri)
-}
-
-func (ts *Toolset) SetToolsChangedHandler(handler func()) {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	ts.toolsChangedHandler = handler
 }
 
 func (ts *Toolset) SubscribeToolsChanged(handler func()) func() {
@@ -1136,4 +1115,13 @@ func isConnectionError(err error) bool {
 	return errors.Is(classified, lifecycle.ErrTransport) ||
 		errors.Is(classified, lifecycle.ErrSessionMissing) ||
 		errors.Is(classified, lifecycle.ErrServerUnavailable)
+}
+
+// mergeChildEnv returns the child environment with the toolset's configured values taking
+// precedence over the host's. exec.Cmd dedupes duplicate keys by keeping the LAST entry, so the
+// host environment has to come first; appending os.Environ() last made every key the host also
+// exports win, which silently ran the toolset with the host's value (the opposite of what
+// shell/script toolsets document and of what tests pin for them).
+func mergeChildEnv(configured []string) []string {
+	return append(os.Environ(), configured...)
 }

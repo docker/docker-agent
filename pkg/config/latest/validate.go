@@ -370,7 +370,7 @@ func (t *Toolset) validate() error {
 	if t.Ref != "" && t.Type != "mcp" && t.Type != "rag" {
 		return errors.New("ref can only be used with type 'mcp' or 'rag'")
 	}
-	if (t.Remote.URL != "" || t.Remote.TransportType != "" || t.Remote.OAuth != nil) && t.Type != "mcp" {
+	if (t.Remote.URL != "" || t.Remote.TransportType != "" || t.Remote.OAuth != nil || t.Remote.StandaloneSSE) && t.Type != "mcp" {
 		return errors.New("remote can only be used with type 'mcp'")
 	}
 	if (len(t.Remote.Headers) > 0) && (t.Type != "mcp" && t.Type != "a2a") {
@@ -433,6 +433,9 @@ func (t *Toolset) validate() error {
 		}
 		if t.AllowPrivateIPsEnabled() && t.Remote.URL == "" && t.Ref == "" {
 			return errors.New("allow_private_ips can only be used with type 'fetch', 'api', 'openapi', 'a2a' or remote MCP toolsets")
+		}
+		if t.Remote.StandaloneSSE && t.Remote.URL == "" {
+			return errors.New("standalone_sse requires remote url to be set")
 		}
 		if t.Remote.OAuth != nil {
 			if t.Remote.URL == "" {

@@ -105,3 +105,18 @@ func TestLoaderOptsLoadsDefaultCapabilities(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, agentTools)
 }
+
+func TestLoaderOptsHistoricalVersions(t *testing.T) {
+	t.Parallel()
+	source := config.NewFileSource("../../config/testdata/provider_v0.yaml")
+	runConfig := &config.RuntimeConfig{
+		EnvProviderOverride:    environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test-key"}),
+		ModelsDevStoreOverride: modelsdev.NewDatabaseStore(&modelsdev.Database{}),
+	}
+	loaded, err := teamloader.Load(t.Context(), source, runConfig, LoaderOpts()...)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, loaded.Dispose(t.Context())) })
+	root, err := loaded.DefaultAgent()
+	require.NoError(t, err)
+	assert.Equal(t, "root", root.Name())
+}

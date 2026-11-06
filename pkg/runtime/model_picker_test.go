@@ -8,6 +8,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -21,7 +22,7 @@ func TestModelPickerUsesSessionHandoffCaller(t *testing.T) {
 	target := agent.New("target", "", agent.WithModel(&mockProvider{id: "test/target"}), agent.WithToolSets(picker))
 	root.SetModelOverride(&mockProvider{id: "test/root-override"})
 	target.SetModelOverride(&mockProvider{id: "test/target-override"})
-	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, target)), WithModelStore(mockModelStore{}), WithModelSwitcherConfig(&ModelSwitcherConfig{
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root, target)), WithModelStore(mockModelStore{}), WithModelSwitcherConfig(&modelcatalog.Config{
 		Models: map[string]latest.ModelConfig{"chosen": {Provider: "openai", Model: "gpt-4o-mini"}}, ProviderRegistry: testProviderRegistry(),
 	}))
 	require.NoError(t, err)

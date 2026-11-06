@@ -118,7 +118,7 @@ func TestEnableDisableLifecycle(t *testing.T) {
 	// Track tools-changed callbacks. Use atomic.Int32 to satisfy -race even
 	// though every call site here happens to be on the same goroutine.
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// Before enabling: only the always-on meta-tools. Disable and reset are
 	// hidden until at least one server is enabled.
@@ -378,7 +378,7 @@ func TestEnableSyncStartOAuthDeclined(t *testing.T) {
 	ts := New()
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	id := firstOAuthServerID(t, ts)
 	stubStartErr(ts, &mcptools.OAuthDeclinedError{URL: ts.byID[id].URL})
@@ -511,7 +511,7 @@ func TestEnableRetriesStartOnExistingUnstartedEntry(t *testing.T) {
 	}
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// First enable: defensive AuthorizationRequired fallback. Entry stays
 	// in t.enabled, message tells the model to call enable again.
@@ -575,7 +575,7 @@ func TestEnableSyncStartCancelledRollsBack(t *testing.T) {
 	}
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// First enable: Start returns context.Canceled. The handler must
 	// surface a tool error AND drop the entry so Tools() on the next
@@ -1167,7 +1167,7 @@ func TestResetAuthDisablesEnabledServer(t *testing.T) {
 	ts.removeOAuthToken = func(string) error { return nil }
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	oauthID := firstOAuthServerID(t, ts)
 
@@ -1229,7 +1229,7 @@ func TestResetAuthNotifiesEvenWhenKeyringFails(t *testing.T) {
 	ts.removeOAuthToken = func(string) error { return errors.New("keyring on fire") }
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	oauthID := firstOAuthServerID(t, ts)
 
@@ -1359,7 +1359,7 @@ func TestToolsOAuthDeclineRemovesServer(t *testing.T) {
 	wrapped := tools.NewStartable(fake)
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// Inject directly — handleEnable would build a real *mcp.Toolset
 	// that we cannot easily steer into a decline without a full OAuth
@@ -1465,7 +1465,7 @@ func TestToolsCancelledStartRemovesServer(t *testing.T) {
 	wrapped := tools.NewStartable(fake)
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	ts.mu.Lock()
 	ts.enabled[id] = wrapped
@@ -1530,7 +1530,7 @@ func TestToolsOAuthDeclineNoNotifyWhenAlreadyDisabled(t *testing.T) {
 	wrapped := tools.NewStartable(fake)
 
 	var changes atomic.Int32
-	ts.SetToolsChangedHandler(func() { changes.Add(1) })
+	ts.SubscribeToolsChanged(func() { changes.Add(1) })
 
 	// Simulate "fresh enable replaced our entry": Tools() captures the
 	// snapshot under RLock, releases it, then we mutate t.enabled. When

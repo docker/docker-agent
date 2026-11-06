@@ -1,8 +1,11 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -508,4 +511,39 @@ func TestRegistry_OpenAIProtocolVariantsFallBackToOpenAI(t *testing.T) {
 	_, err := r.New(t.Context(), cfg, environment.NewEnvListProvider(nil), options.WithProviders(providers))
 	require.NoError(t, err)
 	assert.Equal(t, 1, called)
+}
+
+// Not parallel: swaps the default slog logger.
+func TestCreateDirectProvider_WarnsWhenThinkingCannotBeDisabled(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	const warning = "thinking_budget none or 0 is sent as adaptive thinking with low effort"
+	none := func() *latest.ThinkingBudget { return &latest.ThinkingBudget{Effort: "none"} }
+	cases := []struct {
+		name     string
+		cfg      latest.ModelConfig
+		opts     []options.Opt
+		wantWarn bool
+	}{
+		{name: "configured none on opus 5.5", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5", ThinkingBudget: none()}, wantWarn: true},
+		{name: "configured none on bedrock fable", cfg: latest.ModelConfig{Provider: "amazon-bedrock", Model: "us.anthropic.claude-fable-5", ThinkingBudget: none()}, wantWarn: true},
+		{name: "internal no-thinking call", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5"}, opts: []options.Opt{options.WithNoThinking()}},
+		{name: "model can disable", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-5", ThinkingBudget: none()}},
+		{name: "openai-compatible provider", cfg: latest.ModelConfig{Provider: "openai", Model: "claude-opus-5-5", ThinkingBudget: none()}},
+		{name: "configured 0 on opus 5.5", cfg: latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5", ThinkingBudget: &latest.ThinkingBudget{}}, wantWarn: true},
+		{name: "vertex model garden", cfg: latest.ModelConfig{Provider: "google", Model: "claude-opus-5-5", ThinkingBudget: none(), ProviderOpts: map[string]any{"publisher": "anthropic"}}, wantWarn: true},
+		{name: "google without anthropic publisher", cfg: latest.ModelConfig{Provider: "google", Model: "claude-opus-5-5", ThinkingBudget: none()}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs.Reset()
+			r := NewRegistry(map[string]providerFactory{tc.cfg.Provider: tagFactory(tc.cfg.Provider)})
+			_, err := r.createDirectProvider(t.Context(), &tc.cfg, environment.NewMapEnvProvider(nil), tc.opts...)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantWarn, strings.Contains(logs.String(), warning), logs.String())
+		})
+	}
 }

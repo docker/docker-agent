@@ -14,7 +14,25 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
+
+func TestResolveBaseURLCatalogDefault(t *testing.T) {
+	t.Setenv("MODEL_RUNNER_HOST", "http://runner.example:12434")
+
+	cfg := &latest.ModelConfig{Provider: "dmr", BaseURL: catalog.Lookup("dmr").BaseURL}
+	endpoint, client := ResolveBaseURL(t.Context(), cfg, "")
+	assert.Equal(t, "http://runner.example:12434/engines/v1/", endpoint)
+	assert.Nil(t, client)
+	assert.Equal(t, catalog.Lookup("dmr").BaseURL, cfg.BaseURL)
+
+	cfg.BaseURL = "http://custom.example/v1"
+	endpoint, client = ResolveBaseURL(t.Context(), cfg, "")
+	assert.Equal(t, cfg.BaseURL, endpoint)
+	assert.Nil(t, client)
+}
 
 func TestGetDMRFallbackURLs(t *testing.T) {
 	t.Parallel()

@@ -20,7 +20,7 @@ import (
 // access until first use.
 //
 // This is a testability seam: tests can construct a runtime without paying
-// the cost (or risking the failure modes) of os.UserHomeDir + os.MkdirAll
+// the cost (or risking the failure modes) of os.UserCacheDir + os.MkdirAll
 // in NewLocalRuntime.
 func TestNewLocalRuntime_DefaultsToLazyModelStore(t *testing.T) {
 	t.Parallel()
@@ -63,10 +63,8 @@ func TestLazyModelStore_DefersError(t *testing.T) {
 	wantErr := errors.New("home dir unavailable")
 	calls := 0
 	l := &lazyModelStore{}
-	// Pre-seed a failed load via the once. We can't override l.once.Do
-	// directly, so simulate it by invoking load() with a stubbed-out
-	// internal: easier to test the contract via sync.Once behaviour using
-	// a small helper.
+	// Pre-seed a failed load by running the sync.Once directly so load()
+	// sees the cached error.
 	l.once.Do(func() {
 		calls++
 		l.err = wantErr
@@ -84,13 +82,14 @@ func TestLazyModelStore_DefersError(t *testing.T) {
 // #3165. The runtime's default ModelStore must not reach out to models.dev
 // when resolving a model for a user-defined custom provider, so a
 // self-contained custom-provider config stays usable when models.dev is
-// unreachable. This exercises the exact store the request loop (loop.go:405)
-// and session compaction (session_compaction.go:198) use in production.
+// unreachable. This exercises the exact store the request loop and session
+// compaction use in production.
 func TestLazyModelStore_GatesCustomProvider(t *testing.T) {
 	// Point the cache at an empty home so there is no on-disk catalog to fall
 	// back on: a cold start, as in a freshly-spawned pod. t.Setenv forbids
-	// t.Parallel, which is fine here. modelsdev.NewStore resolves the home
-	// via os.UserHomeDir, which reads USERPROFILE on Windows.
+	// t.Parallel, which is fine here. modelsdev.NewStore resolves the cache
+	// dir via os.UserCacheDir, which derives from HOME on macOS and from
+	// XDG_CACHE_HOME or HOME on Linux.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)

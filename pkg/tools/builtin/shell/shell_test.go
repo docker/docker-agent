@@ -90,9 +90,9 @@ func TestShellTool_HandlerError(t *testing.T) {
 	t.Parallel()
 	tool := New(nil, &config.RuntimeConfig{Config: config.Config{WorkingDir: t.TempDir()}})
 
-	// Hosted Windows command startup can exceed the production 30s default, so leave headroom.
+	// Avoid PowerShell's slow module discovery for nonexistent commands.
 	result, err := tool.handler.RunShell(t.Context(), RunShellArgs{
-		Cmd:     "command_that_does_not_exist",
+		Cmd:     "exit 1",
 		Cwd:     "",
 		Timeout: 120,
 	}, tools.NopRuntime{})

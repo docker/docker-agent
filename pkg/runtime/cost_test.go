@@ -11,12 +11,14 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
+	"github.com/docker/docker-agent/pkg/runtime/pricing"
 )
 
 // TestUsageHasTokens covers the helper that suppresses the missing-price
 // warning for empty/no-op turns. The per-message cost arithmetic and its
 // nil/unpriced branches are exercised by TestComputeMessageCost in
-// after_llm_call_test.go, which shares the same computeMessageCost source.
+// after_llm_call_test.go, which shares the same pricing.ComputeMessageCost source.
 func TestUsageHasTokens(t *testing.T) {
 	t.Parallel()
 	assert.False(t, usageHasTokens(nil), "nil usage has no tokens")
@@ -39,16 +41,16 @@ func TestApplyConfigCost(t *testing.T) {
 	t.Run("nil override is a no-op", func(t *testing.T) {
 		t.Parallel()
 		m := &modelsdev.Model{Cost: &modelsdev.Cost{Input: 3}}
-		assert.Same(t, m, applyConfigCost(m, id, nil))
-		assert.Nil(t, applyConfigCost(nil, id, nil))
+		assert.Same(t, m, pricing.ApplyConfigCost(m, id, nil))
+		assert.Nil(t, pricing.ApplyConfigCost(nil, id, nil))
 	})
 
 	t.Run("override replaces the catalogue price without mutating it", func(t *testing.T) {
 		t.Parallel()
 		catalogued := &modelsdev.Model{Name: "My Model", Cost: &modelsdev.Cost{Input: 3, Output: 15}}
-		m := applyConfigCost(catalogued, id, &latest.CostConfig{Input: 1.25, Output: 5})
+		m := pricing.ApplyConfigCost(catalogued, id, &latest.CostConfig{Input: 1.25, Output: 5})
 
-		cost := computeMessageCost(usage, m)
+		cost := pricing.ComputeMessageCost(usage, m)
 		require.NotNil(t, cost)
 		assert.InEpsilon(t, 6.25, *cost, 0.0001)
 		assert.Equal(t, "My Model", m.Name, "catalogue metadata must be preserved")
@@ -57,9 +59,9 @@ func TestApplyConfigCost(t *testing.T) {
 
 	t.Run("override prices an uncatalogued model", func(t *testing.T) {
 		t.Parallel()
-		m := applyConfigCost(nil, id, &latest.CostConfig{Input: 2, Output: 4})
+		m := pricing.ApplyConfigCost(nil, id, &latest.CostConfig{Input: 2, Output: 4})
 
-		cost := computeMessageCost(usage, m)
+		cost := pricing.ComputeMessageCost(usage, m)
 		require.NotNil(t, cost, "a config cost must make an uncatalogued model priced")
 		assert.InEpsilon(t, 6.0, *cost, 0.0001)
 		assert.Equal(t, "my-model", m.Name, "synthesized entry carries the model name for telemetry")
@@ -67,9 +69,9 @@ func TestApplyConfigCost(t *testing.T) {
 
 	t.Run("all-zero override is priced free, not unpriced", func(t *testing.T) {
 		t.Parallel()
-		m := applyConfigCost(nil, id, &latest.CostConfig{})
+		m := pricing.ApplyConfigCost(nil, id, &latest.CostConfig{})
 
-		cost := computeMessageCost(usage, m)
+		cost := pricing.ComputeMessageCost(usage, m)
 		require.NotNil(t, cost, "a zero price table still counts as priced")
 		assert.Zero(t, *cost)
 	})
@@ -113,7 +115,7 @@ func TestComputeMessageCostContextTiers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := computeMessageCost(&tc.usage, model)
+			got := pricing.ComputeMessageCost(&tc.usage, model)
 			require.NotNil(t, got)
 			assert.InDelta(t, tc.want, *got, 1e-9)
 		})
@@ -132,13 +134,13 @@ func TestConfigCostReplacesContextTiers(t *testing.T) {
 	}}
 	usage := &chat.Usage{InputTokens: 1_000_000}
 	for _, price := range []float64{0, 1.25} {
-		m := applyConfigCost(catalogued, modelsdev.NewID("openai", "test"), &latest.CostConfig{Input: price})
+		m := pricing.ApplyConfigCost(catalogued, modelsdev.NewID("openai", "test"), &latest.CostConfig{Input: price})
 		assert.Empty(t, m.Cost.Tiers)
-		got := computeMessageCost(usage, m)
+		got := pricing.ComputeMessageCost(usage, m)
 		require.NotNil(t, got)
 		assert.InDelta(t, price, *got, 1e-9)
 	}
-	got := computeMessageCost(usage, catalogued)
+	got := pricing.ComputeMessageCost(usage, catalogued)
 	require.NotNil(t, got)
 	assert.InDelta(t, 4.0, *got, 1e-9, "overrides must not mutate shared catalog tiers")
 }
@@ -146,7 +148,7 @@ func TestConfigCostReplacesContextTiers(t *testing.T) {
 func TestApplyModelCostServiceTier(t *testing.T) {
 	t.Parallel()
 
-	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 	for _, tc := range []struct {
 		name, provider, model, tier string
 		cfg                         latest.ModelConfig
@@ -188,8 +190,8 @@ func TestApplyModelCostServiceTier(t *testing.T) {
 				want  float64
 			}{{50_000, tc.short}, {500_000, tc.long}} {
 				usage := &chat.Usage{InputTokens: band.input, CachedInputTokens: 20_000, CacheWriteTokens: 30_000, OutputTokens: 5_000, ReasoningTokens: 3_000, ServiceTier: tc.tier}
-				priced := applyModelCost(model, id, usage, base.Config{ModelConfig: tc.cfg})
-				got := computeMessageCost(usage, priced)
+				priced := pricing.ApplyModelCost(model, id, usage, base.Config{ModelConfig: tc.cfg})
+				got := pricing.ComputeMessageCost(usage, priced)
 				require.NotNil(t, got)
 				assert.InDelta(t, band.want, *got, 1e-9)
 				assert.Equal(t, original, *model.Cost, "shared catalogue must not be mutated")
@@ -203,12 +205,12 @@ func TestApplyModelCostServiceTierUnpriced(t *testing.T) {
 
 	id := modelsdev.NewID("openai", "gpt-6-astra")
 	usage := &chat.Usage{InputTokens: 1_000_000, ServiceTier: "ultrafast"}
-	assert.Nil(t, applyModelCost(nil, id, usage, base.Config{}))
+	assert.Nil(t, pricing.ApplyModelCost(nil, id, usage, base.Config{}))
 	model := &modelsdev.Model{}
-	assert.Same(t, model, applyModelCost(model, id, usage, base.Config{}))
-	assert.Same(t, model, applyModelCost(model, id, nil, base.Config{}))
-	priced := applyModelCost(nil, id, usage, base.Config{ModelConfig: latest.ModelConfig{Cost: &latest.CostConfig{Input: 1.25}}})
-	cost := computeMessageCost(usage, priced)
+	assert.Same(t, model, pricing.ApplyModelCost(model, id, usage, base.Config{}))
+	assert.Same(t, model, pricing.ApplyModelCost(model, id, nil, base.Config{}))
+	priced := pricing.ApplyModelCost(nil, id, usage, base.Config{ModelConfig: latest.ModelConfig{Cost: &latest.CostConfig{Input: 1.25}}})
+	cost := pricing.ComputeMessageCost(usage, priced)
 	require.NotNil(t, cost)
 	assert.InDelta(t, 1.25, *cost, 1e-9)
 }
@@ -235,7 +237,7 @@ func TestApplyModelCostEndpointEligibility(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cost := computeMessageCost(usage, applyModelCost(model, id, usage, tc.config))
+			cost := pricing.ComputeMessageCost(usage, pricing.ApplyModelCost(model, id, usage, tc.config))
 			require.NotNil(t, cost)
 			assert.InDelta(t, tc.want, *cost, 1e-9)
 		})
@@ -245,7 +247,7 @@ func TestApplyModelCostEndpointEligibility(t *testing.T) {
 func TestPublishedCostBoundary(t *testing.T) {
 	t.Parallel()
 
-	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 	// https://developers.openai.com/api/docs/pricing: USD per million tokens.
 	for _, tc := range []struct {
 		name, provider, model, tier string
@@ -285,7 +287,7 @@ func TestPublishedCostBoundary(t *testing.T) {
 						rates = tc.long
 					}
 					want := (float64(usage.InputTokens)*rates.Input + float64(usage.CachedInputTokens)*rates.CacheRead + float64(usage.CacheWriteTokens)*rates.CacheWrite + 10_000*rates.Output) / 1e6
-					got := computeMessageCost(usage, applyModelCost(model, id, usage, base.Config{}))
+					got := pricing.ComputeMessageCost(usage, pricing.ApplyModelCost(model, id, usage, base.Config{}))
 					require.NotNil(t, got)
 					assert.InDelta(t, want, *got, 1e-9, "prompt=%d, varying %s tokens", prompt, bucket)
 				}

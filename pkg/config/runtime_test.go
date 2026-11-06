@@ -69,3 +69,18 @@ func TestEnvFilesError(t *testing.T) {
 		require.Error(t, rc.Clone().EnvFilesError())
 	})
 }
+
+func TestEnvProvider_OverrideSpansEnvFilesAndDefaultChain(t *testing.T) {
+	envFile := filepath.Join(t.TempDir(), "agent.env")
+	require.NoError(t, os.WriteFile(envFile, []byte(
+		"OVERRIDE_TEST_A=from-file\nDOCKER_AGENT_ENV_OVERRIDE_TEST_B=from-file\n"), 0o600))
+	t.Setenv("DOCKER_AGENT_ENV_OVERRIDE_TEST_A", "from-shell")
+	t.Setenv("OVERRIDE_TEST_B", "from-shell")
+
+	env := (&RuntimeConfig{EnvFiles: []string{envFile}}).EnvProvider()
+
+	a, _ := env.Get(t.Context(), "OVERRIDE_TEST_A")
+	assert.Equal(t, "from-shell", a, "a shell override beats a plain name in --env-from-file")
+	b, _ := env.Get(t.Context(), "OVERRIDE_TEST_B")
+	assert.Equal(t, "from-file", b, "an override in --env-from-file beats a plain shell export")
+}

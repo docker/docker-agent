@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/paths"
 )
 
@@ -20,7 +21,7 @@ func TestEnvProviderOverride(t *testing.T) {
 	cfg := &RuntimeConfig{
 		EnvProviderOverride:    env,
 		EnvProviderForTests:    environment.NewMapEnvProvider(map[string]string{"TOKEN": "legacy"}),
-		ModelsDevStoreOverride: modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot()),
+		ModelsDevStoreOverride: modelsdev.NewDatabaseStore(embedded.Snapshot()),
 		EnvFiles:               []string{"/does-not-exist.env"},
 	}
 	for _, c := range []*RuntimeConfig{cfg, cfg.Clone()} {
@@ -44,7 +45,7 @@ func TestCloneWithFreshEnvironment(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "credentials.env")
 	require.NoError(t, os.WriteFile(path, []byte("ACP_REFRESH_KEY=old\n"), 0o600))
-	rc := &RuntimeConfig{Config: Config{EnvFiles: []string{path}}, ModelsDevStoreOverride: modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())}
+	rc := &RuntimeConfig{Config: Config{EnvFiles: []string{path}}, ModelsDevStoreOverride: modelsdev.NewDatabaseStore(embedded.Snapshot())}
 	original := rc.EnvProvider()
 	require.NoError(t, os.WriteFile(path, []byte("ACP_REFRESH_KEY=new\n"), 0o600))
 	fresh := rc.CloneWithFreshEnvironment()
@@ -63,7 +64,7 @@ func TestCloneWithFreshEnvironmentErrorsAndOverrides(t *testing.T) {
 	for _, kind := range []string{"invalid path", "missing file", "malformed file", "override", "legacy override"} {
 		t.Run(kind, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "credentials.env")
-			rc := &RuntimeConfig{Config: Config{EnvFiles: []string{path}}, ModelsDevStoreOverride: modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())}
+			rc := &RuntimeConfig{Config: Config{EnvFiles: []string{path}}, ModelsDevStoreOverride: modelsdev.NewDatabaseStore(embedded.Snapshot())}
 			switch kind {
 			case "invalid path":
 				rc.EnvFiles = []string{"~unsupported/path"}
@@ -101,7 +102,7 @@ func TestCloneWithFreshEnvironmentNewDefaultFile(t *testing.T) {
 	paths.SetConfigDir(dir)
 	t.Cleanup(func() { paths.SetConfigDir("") })
 	t.Setenv("ACP_REFRESH_PRECEDENCE", "environment")
-	rc := &RuntimeConfig{ModelsDevStoreOverride: modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())}
+	rc := &RuntimeConfig{ModelsDevStoreOverride: modelsdev.NewDatabaseStore(embedded.Snapshot())}
 	original := rc.EnvProvider()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"), []byte("ACP_REFRESH_NEW_KEY=file\nACP_REFRESH_PRECEDENCE=file\n"), 0o600))
 	fresh := rc.CloneWithFreshEnvironment()

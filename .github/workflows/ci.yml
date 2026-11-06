@@ -137,12 +137,15 @@ jobs:
       # Static security audit of workflows and composite actions; config in
       # .github/zizmor.yml. Findings at low severity and above fail the job.
       - name: zizmor
-        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0
         with:
           advanced-security: false
           annotations: true
           min-severity: low
           version: v1.30.0
+
+      - name: Go cache pruning tests
+        run: node --test .github/actions/trim-go-cache/go-cache.test.mjs
 
       - name: Workflow invariants
         run: ./scripts/workflow-lint.sh
@@ -234,6 +237,37 @@ jobs:
 
       - name: WASM JavaScript bridge
         run: task test-wasm-bridge
+
+  # The TypeScript SDK is generated from Go types: fail when it is stale.
+  typescript:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.tested != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: $/.github/actions/setup-go
+        with:
+          cache-name: test-linux
+          save: 'false'
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: sdk/typescript/.nvmrc
+          package-manager-cache: false
+
+      - name: Check generated TypeScript SDK
+        run: task check-ts
+
+      - name: Pack TypeScript SDK
+        working-directory: sdk/typescript
+        run: |
+          npm run build
+          npm pack --dry-run --json \
+            | jq -e '.[0].files | map(.path) | contains(["dist/index.js", "dist/index.d.ts", "schemas/docker-agent.schema.json", "schemas/tool-args.schema.json"])'
 
   licenses:
     needs: changes
@@ -501,7 +535,7 @@ jobs:
   # Single required status check; see the header comment.
   gate:
     if: always()
-    needs: [ changes, lint, test-linux, test-windows, cross-compile, licenses, image ]
+    needs: [ changes, lint, test-linux, test-windows, cross-compile, typescript, licenses, image ]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

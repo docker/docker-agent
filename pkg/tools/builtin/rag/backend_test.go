@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/rag"
 	"github.com/docker/docker-agent/pkg/rag/database"
+	"github.com/docker/docker-agent/pkg/rag/strategy"
 	ragtypes "github.com/docker/docker-agent/pkg/rag/types"
 )
 
@@ -34,7 +35,7 @@ func (b *stubBackend) Initialize(ctx context.Context) error {
 	return nil
 }
 
-func (b *stubBackend) StartFileWatcher(ctx context.Context) error {
+func (b *stubBackend) WatchFiles(ctx context.Context) error {
 	if b.watch != nil {
 		return b.watch(ctx)
 	}
@@ -144,4 +145,38 @@ func TestNilBackend(t *testing.T) {
 			assert.Contains(t, tool.Instructions(), "search")
 		})
 	}
+}
+
+func TestStopJoinsManagerStrategiesBeforeClosing(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		started, release := make(chan struct{}), make(chan struct{})
+		var finished bool
+		probe := &watcherCapturingStrategy{
+			watchCtx: make(chan context.Context, 1),
+			watch: func(ctx context.Context) error {
+				close(started)
+				<-ctx.Done()
+				<-release
+				finished = true
+				return ctx.Err()
+			},
+			close: func() error {
+				assert.True(t, finished, "database closure must follow watcher completion")
+				return nil
+			},
+		}
+		mgr, err := rag.New(t.Context(), "test", rag.Config{StrategyConfigs: []strategy.Config{{Name: "probe", Strategy: probe}}}, nil)
+		require.NoError(t, err)
+		tool := New(mgr, "search")
+		require.NoError(t, tool.Start(t.Context()))
+		<-started
+		done := make(chan error, 1)
+		go func() { done <- tool.Stop(t.Context()) }()
+		synctest.Wait()
+		assert.Empty(t, done)
+		close(release)
+		require.NoError(t, <-done)
+		assert.True(t, finished)
+	})
 }

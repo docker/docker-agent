@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/artifacts"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/messages"
@@ -42,18 +43,18 @@ type resolverTestRuntime struct {
 
 	mu      sync.Mutex
 	results map[string]resolverResult
-	refs    []runtime.GeneratedFileRef
+	refs    []artifacts.GeneratedFileRef
 }
 
-func (r *resolverTestRuntime) ResolveGeneratedFile(_ context.Context, ref runtime.GeneratedFileRef) (*runtime.ResolvedGeneratedFile, error) {
+func (r *resolverTestRuntime) ResolveGeneratedFile(_ context.Context, ref artifacts.GeneratedFileRef) (*artifacts.ResolvedGeneratedFile, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.refs = append(r.refs, ref)
 	res, ok := r.results[ref.Path]
 	if !ok || res.err != nil {
-		return nil, runtime.ErrGeneratedFileUnavailable
+		return nil, artifacts.ErrGeneratedFileUnavailable
 	}
-	return &runtime.ResolvedGeneratedFile{Data: res.data, Path: res.path}, nil
+	return &artifacts.ResolvedGeneratedFile{Data: res.data, Path: res.path}, nil
 }
 
 func (r *resolverTestRuntime) resolveCalls() int {
@@ -587,7 +588,7 @@ func TestInit_RestoredSessionResolvesGeneratedMedia(t *testing.T) {
 	_, _ = p.update(resolveMedia(t, cmd))
 
 	assert.Equal(t, 1, rt.resolveCalls())
-	assert.Equal(t, []runtime.GeneratedFileRef{{
+	assert.Equal(t, []artifacts.GeneratedFileRef{{
 		OwnerSessionID: owner,
 		Root:           chat.ArtifactRootWorkspace,
 		Path:           "cat.png",

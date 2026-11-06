@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/model/provider/providers"
 	"github.com/docker/docker-agent/pkg/teamloader"
 )
@@ -100,7 +101,7 @@ func TestSourceLoader_Read_WithRefreshInterval_AfterExpiry(t *testing.T) {
 		synctest.Wait()
 		synctest.Sleep(110 * time.Millisecond)
 
-		// Read should refresh
+		// The background refresh loop has re-read the source
 		data, err := sl.Read(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, []byte("test data"), data)
@@ -334,7 +335,7 @@ func TestTeamloaderAdoptsEncryptedConfigThroughSourceLoader(t *testing.T) {
 	sl := newSourceLoader(t.Context(), inner, 0)
 
 	res, err := teamloader.LoadWithConfig(t.Context(), sl, &config.RuntimeConfig{},
-		teamloader.WithProviderRegistry(providers.NewDefaultRegistry()))
+		teamloader.WithProviderRegistry(providers.NewDefaultRegistry()), teamloader.WithConfigVersions(legacy.Register))
 	require.NoError(t, err)
 	assert.Equal(t, "packed-signed-config", res.EncryptedConfig,
 		"teamloader must adopt the envelope through the sourceLoader decorator")

@@ -100,7 +100,7 @@ func (m *mockStrategy) CheckAndReindexChangedFiles(ctx context.Context, docPaths
 	return nil
 }
 
-func (m *mockStrategy) StartFileWatcher(ctx context.Context, docPaths []string, chunking strategy.ChunkingConfig) error {
+func (m *mockStrategy) WatchFiles(ctx context.Context, docPaths []string, chunking strategy.ChunkingConfig) error {
 	return nil
 }
 
@@ -163,16 +163,28 @@ func TestStopAfterFailedStart(t *testing.T) {
 
 // watcherCapturingStrategy hands the context its file watcher receives to the
 // test so it can assert on the watcher's lifetime. Initialize is immediate
-// (inherited from mockStrategy) and StartFileWatcher returns as soon as the
-// watcher is "installed", mirroring the real strategies.
+// (inherited from mockStrategy); WatchFiles blocks until canceled.
 type watcherCapturingStrategy struct {
 	mockStrategy
 
 	watchCtx chan context.Context
+	watch    func(context.Context) error
+	close    func() error
 }
 
-func (m *watcherCapturingStrategy) StartFileWatcher(ctx context.Context, _ []string, _ strategy.ChunkingConfig) error {
+func (m *watcherCapturingStrategy) WatchFiles(ctx context.Context, _ []string, _ strategy.ChunkingConfig) error {
 	m.watchCtx <- ctx
+	if m.watch != nil {
+		return m.watch(ctx)
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (m *watcherCapturingStrategy) Close() error {
+	if m.close != nil {
+		return m.close()
+	}
 	return nil
 }
 

@@ -163,15 +163,13 @@ func (c *remoteMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeReq
 
 	toolChanged, promptChanged := c.notificationHandlers()
 
-	// Sampling registration is delegated to applySamplingHandlerOpts so the
-	// with-tools callback is wired eagerly even when handler fields are still
-	// nil at Initialize time — see that method for the ordering rationale.
+	// Override the SDK default that advertises deprecated roots support.
 	opts := &gomcp.ClientOptions{
+		Capabilities:             &gomcp.ClientCapabilities{},
 		ElicitationHandler:       c.handleElicitationRequest,
 		ToolListChangedHandler:   toolChanged,
 		PromptListChangedHandler: promptChanged,
 	}
-	c.applySamplingHandlerOpts(opts)
 
 	client := gomcp.NewClient(impl, opts)
 

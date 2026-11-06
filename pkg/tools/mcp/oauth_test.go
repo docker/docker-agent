@@ -450,34 +450,6 @@ func TestRefreshAccessToken_SendsEmptyClientIDWhenNotStored(t *testing.T) {
 	}
 }
 
-// TestCallbackServer_RejectsCallbackBeforeStateSet verifies that a callback
-// arriving before SetExpectedState is called is rejected (CSRF protection).
-func TestCallbackServer_RejectsCallbackBeforeStateSet(t *testing.T) {
-	t.Parallel()
-
-	cs := NewCallbackServer()
-	if err := cs.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cs.Shutdown(t.Context()) }()
-
-	// Send a callback before SetExpectedState has been called.
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, cs.GetRedirectURI()+"?code=authcode&state=anything", http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client := &http.Client{Transport: newTestTransport(t)}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d — callback accepted without expected state set", resp.StatusCode)
-	}
-}
-
 // TestExchangeCodeForToken_SlackNestedResponse verifies that Slack's
 // oauth.v2.user.access response shape (where the user access_token is
 // nested inside an `authed_user` object) is decoded correctly. Before

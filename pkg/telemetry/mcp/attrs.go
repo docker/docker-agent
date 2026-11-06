@@ -41,11 +41,8 @@ const (
 	MethodResourcesSubscribe = "resources/subscribe"
 	MethodResourcesUnsub     = "resources/unsubscribe"
 	MethodResourcesTemplates = "resources/templates/list"
-	MethodRootsList          = "roots/list"
-	MethodSamplingCreate     = "sampling/createMessage"
 	MethodToolsList          = "tools/list"
 	MethodToolsCall          = "tools/call"
-	MethodLoggingSetLevel    = "logging/setLevel"
 	MethodElicitationCreate  = "elicitation/create"
 )
 

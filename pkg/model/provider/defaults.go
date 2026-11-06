@@ -10,6 +10,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -37,7 +38,7 @@ func resolveProviderType(cfg *latest.ModelConfig) string {
 	if apiType, ok := cfg.ProviderOpts["api_type"].(string); ok && apiType != "" {
 		return apiType
 	}
-	if alias, exists := LookupAlias(cfg.Provider); exists && alias.APIType != "" {
+	if alias, exists := catalog.Find(cfg.Provider); exists && alias.APIType != "" {
 		return alias.APIType
 	}
 	return cfg.Provider
@@ -132,7 +133,7 @@ func isOpenAICompatibleProvider(providerType string) bool {
 		return true
 	}
 	// Otherwise, the type is OpenAI-compatible iff it's an alias that maps to OpenAI.
-	alias, exists := LookupAlias(providerType)
+	alias, exists := catalog.Find(providerType)
 	return exists && alias.APIType == "openai"
 }
 
@@ -166,8 +167,8 @@ func applyProviderDefaults(cfg *latest.ModelConfig, customProviders map[string]l
 	}
 
 	enhancedCfg.Provider = modelsdev.CanonicalProviderID(enhancedCfg.Provider)
-	if alias, exists := LookupAlias(enhancedCfg.Provider); exists {
-		applyAliasFallbacks(enhancedCfg, alias)
+	if alias, exists := catalog.Find(enhancedCfg.Provider); exists {
+		applyCatalogDefaults(enhancedCfg, alias)
 	}
 
 	// Apply model-specific defaults (e.g., thinking budget for Claude/GPT models)
@@ -230,14 +231,20 @@ func mergeFromProviderConfig(dst *latest.ModelConfig, src latest.ProviderConfig)
 	}
 }
 
-// applyAliasFallbacks applies BaseURL and TokenKey defaults from a built-in
+// applyCatalogDefaults applies BaseURL and TokenKey defaults from a built-in
 // alias when the model config does not already specify them.
-func applyAliasFallbacks(dst *latest.ModelConfig, alias Alias) {
-	if dst.BaseURL == "" {
+func applyCatalogDefaults(dst *latest.ModelConfig, alias catalog.Provider) {
+	apiType, _ := dst.ProviderOpts["api_type"].(string)
+	unauthenticatedEndpoint := dst.BaseURL != "" && apiType != "" && alias.APIType == "openai"
+	// Native SDKs resolve endpoint environment overrides before their own defaults.
+	sdkEndpoint := alias.Name == alias.APIType &&
+		(alias.APIType == "openai" || alias.APIType == "anthropic" || alias.APIType == "google")
+	if dst.BaseURL == "" && !sdkEndpoint {
 		dst.BaseURL = alias.BaseURL
 	}
-	if dst.TokenKey == "" {
-		dst.TokenKey = alias.TokenEnvVar
+	// Google chooses between API keys and Vertex OAuth/ADC at client construction.
+	if dst.TokenKey == "" && !unauthenticatedEndpoint && alias.APIType != "google" && len(alias.TokenEnvVars) > 0 {
+		dst.TokenKey = alias.TokenEnvVars[0]
 	}
 }
 
@@ -388,7 +395,7 @@ func isOpenAIVendor(cfg *latest.ModelConfig) bool {
 // exclusion [modelinfo.IsOpenAIVendor] cannot express on its own, since the
 // built-in alias registry lives in this package (see [isOpenAIVendor]'s doc).
 func isUnrecognizedOpenAIProtocolProvider(cfg *latest.ModelConfig) bool {
-	if _, isBuiltinAlias := LookupAlias(cfg.Provider); isBuiltinAlias {
+	if _, isBuiltinAlias := catalog.Find(cfg.Provider); isBuiltinAlias {
 		return false
 	}
 	switch resolveProviderType(cfg) {

@@ -35,6 +35,10 @@ In ACP mode, clients advertising terminal support execute the configured `shell`
 
 If a command still fails with a known shell-dialect error (for example PowerShell's `'&&' is not a valid statement separator`, a `cmd.exe`/`pwsh` "not recognized" error, or a POSIX-style `2>/dev/null` redirection on Windows), the tool prepends a `[shell-hint]` line to the output pointing the model at the corrective syntax before it retries. Hints are gated on the resolved shell so they only fire for genuine dialect mismatches (e.g. a PowerShell `&&` hint never fires for `pwsh`, which supports `&&` natively).
 
+### Command preview in the TUI
+
+In the TUI, multi-line shell commands are shown with syntax highlighting. When a command wraps a script for a common interpreter — `python`/`python3`, `node`/`nodejs`, `ruby`, `perl`, or `sh`/`bash`/`zsh` — through a heredoc (for example `python3 - <<'PY'`) or an inline flag (`-c` for Python and shell, `-e`/`--eval` for Node, `-e` for Ruby and Perl), the embedded script is highlighted in its own language and the surrounding command as bash. Highlighting is display-only and does not change the command that runs.
+
 ## Configuration
 
 ```yaml

@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 func TestMCPDefinitions_BasicRef(t *testing.T) {
@@ -149,7 +151,7 @@ func TestMCPDefinitions_EnvMerge(t *testing.T) {
 func TestMCPDefinitions_WorkingDir(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_working_dir.yaml"))
+	cfg, err := Load(t.Context(), NewFileSource("testdata/mcp_definitions_working_dir.yaml"), WithVersions(legacy.Register))
 	require.NoError(t, err)
 
 	// WorkingDir from the definition is inherited by the referencing toolset.

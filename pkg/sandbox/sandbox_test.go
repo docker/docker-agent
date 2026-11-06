@@ -76,6 +76,33 @@ func TestForWorkspace(t *testing.T) {
 			wantName: "my-sandbox",
 		},
 		{
+			name:     "array with matching workspace",
+			json:     `[{"id":"sandbox-id","name":"my-sandbox","workspaces":["/my/project"]}]`,
+			wd:       "/my/project",
+			wantName: "my-sandbox",
+		},
+		{
+			name:     "array with leading whitespace",
+			json:     " \n\t" + `[{"name":"my-sandbox","workspaces":["/my/project"]}]`,
+			wd:       "/my/project",
+			wantName: "my-sandbox",
+		},
+		{
+			name: "empty array",
+			json: `[]`,
+			wd:   "/my/project",
+		},
+		{
+			name: "array with no match",
+			json: `[{"name":"other","workspaces":["/other/project"]}]`,
+			wd:   "/my/project",
+		},
+		{
+			name: "malformed array",
+			json: `[{`,
+			wd:   "/my/project",
+		},
+		{
 			name: "no match",
 			json: `{"sandboxes":[{"name":"other","workspaces":["/other/project"]}]}`,
 			wd:   "/my/project",
@@ -448,6 +475,77 @@ esac`, log, listing))
 	require.ErrorContains(t, err, "decoding sandbox list")
 }
 
+func TestEnsureArrayListing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX argv capture")
+	}
+	fakeDir := t.TempDir()
+	workspace, err := sandbox.CanonicalPath(t.TempDir())
+	require.NoError(t, err)
+	configDir, err := sandbox.CanonicalPath(t.TempDir())
+	require.NoError(t, err)
+	listing := filepath.Join(fakeDir, "listing.json")
+	log := filepath.Join(fakeDir, "calls")
+	writeMockScript(t, fakeDir, "sbx", fmt.Sprintf(`
+printf '%%s\n' "$*" >> %q
+case "$1" in
+  ls) cat %q ;;
+  create) ;;
+  *) exit 99 ;;
+esac`, log, listing))
+	t.Setenv("PATH", fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	backend := sandbox.NewBackend(true, false)
+	opts := sandbox.Options{Template: "image:v1"}
+
+	require.NoError(t, os.WriteFile(listing, []byte("[]\n"), 0o600))
+	name, err := backend.Ensure(t.Context(), workspace, nil, configDir, "", opts)
+	require.NoError(t, err, "an empty array must allow sandbox creation")
+
+	for _, tc := range []struct {
+		name    string
+		listing string
+		wantErr string
+	}{
+		{
+			name: "reuse matching sandbox",
+			listing: fmt.Sprintf(`[
+  {"name":"unrelated","workspaces":[%q]},
+  {"name":%q,"workspaces":[%q,%q]}
+]`, workspace, name, workspace, configDir+":ro"),
+		},
+		{
+			name:    "refuse conflicting mounts",
+			listing: fmt.Sprintf(`[{"name":%q,"workspaces":[%q,%q]}]`, name, workspace, configDir),
+			wantErr: "already exists with different mounts",
+		},
+		{
+			name:    "refuse malformed array",
+			listing: `[{`,
+			wantErr: "decoding sandbox list",
+		},
+		{
+			name:    "refuse invalid entry",
+			listing: `[1]`,
+			wantErr: "decoding sandbox list",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(listing, []byte(tc.listing), 0o600))
+			got, err := backend.Ensure(t.Context(), workspace, nil, configDir, "", opts)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, name, got)
+			}
+		})
+	}
+	calls, err := os.ReadFile(log)
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(calls), "create "), "reuse and invalid listings must not create another sandbox")
+	assert.NotContains(t, string(calls), "rm")
+}
+
 func TestCreateCloud(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX argv capture")
@@ -472,7 +570,7 @@ printf 'sbx_test123\n'
 	require.Greater(t, len(argv), 6)
 	assert.Regexp(t, `^docker-agent-[a-f0-9]{32}$`, argv[5])
 	assert.Equal(t, []string{
-		"--cloud", "run", "--detached", "--new", "--name", argv[5], "--ttl", "1h0m0s", "--on-timeout", "stop",
+		"--cloud", "run", "--detach", "--new", "--name", argv[5], "--ttl", "1h0m0s", "--on-timeout", "stop",
 		"--kit", "docker/mixin:v3", "--kit", "./second", "--kit-arg", "greeting=hello world", "--kit-arg", "list=a,b", "./workload",
 	}, strings.Split(strings.TrimSpace(string(calls)), "\n"))
 	assert.Contains(t, backend.BuildExecCmd(t.Context(), id, "", true, nil, nil, nil).Args, "-t")

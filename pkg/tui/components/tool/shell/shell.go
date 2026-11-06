@@ -33,6 +33,22 @@ func renderShell(msg *types.Message, s spinner.Spinner, sessionState service.Ses
 		result = formatShellOutput(msg.Content, width)
 	}
 
+	if preview, ok := commandPreview(arg, width); ok {
+		header := toolcommon.RenderTool(msg, s, "", "", width, sessionState.HideToolResults())
+		if sessionState.HideToolResults() {
+			return header
+		}
+		content := header + "\n" + preview
+		if result != "" {
+			resultStyle := styles.ToolMessageStyle
+			if msg.ToolStatus == types.ToolStatusError {
+				resultStyle = styles.ToolErrorMessageStyle
+			}
+			content += "\n" + resultStyle.MarginLeft(styles.ToolCompletedIcon.GetMarginLeft()).Render(result)
+		}
+		return content
+	}
+
 	return toolcommon.RenderTool(msg, s, arg, result, width, sessionState.HideToolResults())
 }
 

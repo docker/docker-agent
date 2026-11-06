@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"testing/synctest"
@@ -22,8 +23,7 @@ func TestLoopFiresAtDeadline(t *testing.T) {
 				res, err := ts.createSchedule(t.Context(), CreateScheduleArgs{Prompt: "check build", When: when}, rt)
 				require.NoError(t, err)
 				require.False(t, res.IsError, res.Output)
-				require.NoError(t, ts.Start(t.Context()))
-				t.Cleanup(func() { require.NoError(t, ts.Stop(t.Context())) })
+				runScheduler(t, ts)
 
 				synctest.Sleep(time.Minute - time.Nanosecond)
 				require.Empty(t, rt.messages())
@@ -55,8 +55,7 @@ func TestLoopWakesForEarlierSchedule(t *testing.T) {
 		res, err := ts.createSchedule(t.Context(), CreateScheduleArgs{Prompt: "later", When: "in:1m"}, rt)
 		require.NoError(t, err)
 		require.False(t, res.IsError, res.Output)
-		require.NoError(t, ts.Start(t.Context()))
-		t.Cleanup(func() { require.NoError(t, ts.Stop(t.Context())) })
+		runScheduler(t, ts)
 		synctest.Wait()
 
 		res, err = ts.createSchedule(t.Context(), CreateScheduleArgs{Prompt: "earlier", When: "in:10s"}, rt)
@@ -91,8 +90,7 @@ func TestLoopRetriesFailedRecall(t *testing.T) {
 		res, err := ts.createSchedule(t.Context(), CreateScheduleArgs{Prompt: "retry", When: "in:10s"}, rt)
 		require.NoError(t, err)
 		require.False(t, res.IsError, res.Output)
-		require.NoError(t, ts.Start(t.Context()))
-		t.Cleanup(func() { require.NoError(t, ts.Stop(t.Context())) })
+		runScheduler(t, ts)
 
 		synctest.Sleep(10 * time.Second)
 		require.Len(t, rt.messages(), 1)
@@ -117,12 +115,44 @@ func TestLoopStopPreventsRecall(t *testing.T) {
 		res, err := ts.createSchedule(t.Context(), CreateScheduleArgs{Prompt: "stopped", When: "in:10s"}, rt)
 		require.NoError(t, err)
 		require.False(t, res.IsError, res.Output)
-		require.NoError(t, ts.Start(t.Context()))
-		t.Cleanup(func() { require.NoError(t, ts.Stop(t.Context())) })
+		stop := runScheduler(t, ts)
 		synctest.Wait()
 
-		require.NoError(t, ts.Stop(t.Context()))
+		stop()
 		synctest.Sleep(time.Minute)
 		require.Empty(t, rt.messages())
+	})
+}
+
+func runScheduler(t *testing.T, ts *ToolSet) func() {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ts.Run(ctx)
+	}()
+	stop := func() {
+		cancel()
+		<-done
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+func TestRunCanceledBeforeStart(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		ts := New()
+		rt := &fakeRuntime{recall: true}
+		res, err := ts.createSchedule(t.Context(), CreateScheduleArgs{Prompt: "stopped", When: "in:1s"}, rt)
+		require.NoError(t, err)
+		require.False(t, res.IsError)
+		synctest.Sleep(time.Second)
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		ts.Run(ctx)
+		require.Empty(t, rt.messages())
+		require.Len(t, ts.store.list(), 1)
 	})
 }

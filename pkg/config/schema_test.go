@@ -17,6 +17,7 @@ import (
 
 	hclconv "github.com/docker/docker-agent/pkg/config/hcl"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 // schemaFile is the path to the JSON schema file relative to the repo root.
@@ -365,7 +366,11 @@ func TestLoadOpenAPIMaxOutputBytes(t *testing.T) {
 			if tt.version != "" {
 				data = fmt.Appendf(data, "version: %q\n", tt.version)
 			}
-			cfg, err := Load(t.Context(), NewBytesSource("openapi.yaml", data))
+			var opts []LoadOption
+			if tt.version != "" {
+				opts = append(opts, WithVersions(legacy.Register))
+			}
+			cfg, err := Load(t.Context(), NewBytesSource("openapi.yaml", data), opts...)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				return

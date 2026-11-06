@@ -68,7 +68,7 @@ func TestWithMaxOverflowCompactions_Negative(t *testing.T) {
 }
 
 // TestWithMaxOverflowCompactions_Default verifies that the default cap
-// matches defaultMaxOverflowCompactions and produces exactly that many
+// matches defaultMaxOverflowCompactions and never exceeds that many
 // attempts before giving up.
 func TestWithMaxOverflowCompactions_Default(t *testing.T) {
 	t.Parallel()

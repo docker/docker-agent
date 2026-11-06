@@ -197,3 +197,31 @@ func TestCleanSelectedLines(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractSelectedTextGraphemeColumns(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		line       string
+		start, end int
+		want       string
+	}{
+		{"empty wide selection", "界 next", 1, 1, ""},
+		{"wide first cell", "界 next", 0, 1, "界"},
+		{"wide second cell", "界 next", 1, 2, "界"},
+		{"emoji", "👩‍💻 next", 0, 2, "👩‍💻"},
+		{"after emoji", "👩‍💻 next", 3, 7, "next"},
+		{"variation selector", "☀️ next", 0, 2, "☀️"},
+		{"combining mark", "cafe\u0301 next", 0, 4, "cafe\u0301"},
+		{"after combining mark", "cafe\u0301 next", 5, 9, "next"},
+		{"border after emoji", "│👩‍💻│next│", 4, 8, "next"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newSelectionModel([]string{tt.line})
+			m.selectRange(0, tt.start, 0, tt.end)
+			assert.Equal(t, tt.want, m.extractSelectedText())
+		})
+	}
+}

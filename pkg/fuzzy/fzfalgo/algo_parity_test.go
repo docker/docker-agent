@@ -37,6 +37,8 @@ var alphabets = []string{
 type corpusCase struct {
 	text    []byte
 	pattern []rune
+	ours    fzfutil.Chars
+	theirs  util.Chars
 }
 
 func randomRunes(rng *rand.Rand, n int) []rune {
@@ -98,7 +100,10 @@ func randomCorpus(rng *rand.Rand, n int) []corpusCase {
 			// Invalid UTF-8 decodes to one RuneError per byte
 			bytes[rng.IntN(len(bytes))] = 0xff
 		}
-		cases = append(cases, corpusCase{text: bytes, pattern: pattern})
+		cases = append(cases, corpusCase{
+			text: bytes, pattern: pattern,
+			ours: fzfutil.ToChars(bytes), theirs: util.ToChars(bytes),
+		})
 	}
 	return cases
 }
@@ -111,14 +116,8 @@ type slabs struct {
 func requireSameMatch(t *testing.T, c corpusCase, caseSensitive, normalize, forward, withPos bool, sl slabs) {
 	t.Helper()
 
-	ours := fzfutil.ToChars(c.text)
-	theirs := util.ToChars(c.text)
-	require.Equal(t, theirs.IsBytes(), ours.IsBytes())
-	require.Equal(t, theirs.MayFoldToAscii(), ours.MayFoldToASCII())
-	require.Equal(t, theirs.Length(), ours.Length())
-
-	gotRes, gotPos := fzfalgo.FuzzyMatchV2(caseSensitive, normalize, forward, &ours, c.pattern, withPos, sl.ours)
-	wantRes, wantPos := algo.FuzzyMatchV2(caseSensitive, normalize, forward, &theirs, c.pattern, withPos, sl.theirs)
+	gotRes, gotPos := fzfalgo.FuzzyMatchV2(caseSensitive, normalize, forward, &c.ours, c.pattern, withPos, sl.ours)
+	wantRes, wantPos := algo.FuzzyMatchV2(caseSensitive, normalize, forward, &c.theirs, c.pattern, withPos, sl.theirs)
 
 	sameRes := gotRes == fzfalgo.Result{Start: wantRes.Start, End: wantRes.End, Score: wantRes.Score}
 	samePos := (gotPos == nil) == (wantPos == nil) && (gotPos == nil || slices.Equal(*gotPos, *wantPos))
@@ -147,6 +146,10 @@ func requireParity(t *testing.T, cases []corpusCase) {
 	tiny := slabs{ours: fzfutil.MakeSlab(64, 8), theirs: util.MakeSlab(64, 8)}
 
 	for _, c := range cases {
+		require.Equal(t, c.theirs.IsBytes(), c.ours.IsBytes())
+		require.Equal(t, c.theirs.MayFoldToAscii(), c.ours.MayFoldToASCII())
+		require.Equal(t, c.theirs.Length(), c.ours.Length())
+
 		for _, caseSensitive := range []bool{false, true} {
 			for _, normalize := range []bool{false, true} {
 				for _, forward := range []bool{false, true} {

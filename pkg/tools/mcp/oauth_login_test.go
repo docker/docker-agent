@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,12 +15,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/tools/mcp/oauthflow"
 )
 
 // TestProbeUnauthenticated characterizes probeUnauthenticated: it makes one
@@ -316,56 +317,50 @@ func TestCallbackConfigAccessors(t *testing.T) {
 	assert.Equal(t, "https://proxy.example.test/cb", callbackRedirectURLFrom(configured))
 }
 
-// Keep the callback listener bound so other fixtures cannot claim its port.
-func reserveCallbackServer(t *testing.T) (int, func(context.Context, int) (*CallbackServer, error)) {
+// Keep the listener bound until the flow takes ownership; no close/rebind race.
+func reserveCallbackListener(t *testing.T) (int, func(context.Context, int, PrepareAuthorization) (string, string, error)) {
 	t.Helper()
-
-	server, err := startCallbackServer(t.Context(), 0)
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
-		defer cancel()
-		require.NoError(t, server.Shutdown(ctx))
-	})
-	return server.Port(), func(_ context.Context, port int) (*CallbackServer, error) {
-		if port != server.Port() {
-			return nil, fmt.Errorf("callback port = %d, want %d", port, server.Port())
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+	var claimed atomic.Bool
+	return port, func(ctx context.Context, requested int, prepare PrepareAuthorization) (string, string, error) {
+		if requested != port {
+			return "", "", fmt.Errorf("callback port = %d, want %d", requested, port)
 		}
-		return server, nil
+		if !claimed.CompareAndSwap(false, true) {
+			return "", "", errors.New("callback listener already claimed")
+		}
+		return oauthflow.RequestAuthorizationCodeOnListenerForTesting(ctx, listener, prepare)
 	}
 }
 
-func TestReserveCallbackServer(t *testing.T) {
+func TestReserveCallbackListener(t *testing.T) {
 	t.Parallel()
-
-	port, startCallback := reserveCallbackServer(t)
+	port, request := reserveCallbackListener(t)
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if listener != nil {
 		listener.Close()
 	}
 	require.Error(t, err, "the callback port must stay reserved")
-
-	_, err = startCallback(t.Context(), 0)
+	_, _, err = request(t.Context(), 0, nil)
 	require.Error(t, err, "the factory must reject an unexpected port")
-	server, err := startCallback(t.Context(), port)
-	require.NoError(t, err)
-	assert.Equal(t, port, server.Port())
+	expected := errors.New("preparation stopped")
+	_, _, err = request(t.Context(), port, func(_ context.Context, address CallbackAddress) (AuthorizationRequest, error) {
+		assert.Equal(t, port, address.Port())
+		return AuthorizationRequest{}, expected
+	})
+	require.ErrorIs(t, err, expected)
 }
 
-func startOAuthLogin(t *testing.T, remote latest.Remote, startCallback func(context.Context, int) (*CallbackServer, error)) <-chan error {
+func startOAuthLogin(t *testing.T, remote latest.Remote, request func(context.Context, int, PrepareAuthorization) (string, string, error)) <-chan error {
 	t.Helper()
-
 	ctx, cancel := context.WithCancel(t.Context())
 	errCh := make(chan error, 1)
 	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		errCh <- performOAuthLogin(ctx, remote, startCallback)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	go func() { defer close(done); errCh <- performOAuthLogin(ctx, remote, request) }()
+	t.Cleanup(func() { cancel(); <-done })
 	return errCh
 }
 
@@ -444,14 +439,14 @@ func TestPerformOAuthLogin_DefaultCallback_UsesLoopbackRedirect_EndToEnd(t *test
 // PerformOAuthLogin end to end with RemoteOAuthConfig.CallbackPort set: the
 // local callback server must bind that exact port, and the redirect URI
 // used for /authorize and the token exchange must carry it — the same
-// contract startCallbackServer gives the runtime's managed OAuth flow.
+// contract RequestAuthorizationCode gives the runtime's managed OAuth flow.
 func TestPerformOAuthLogin_CallbackPort_UsesConfiguredPort_EndToEnd(t *testing.T) {
 	resetDefaultStore(t)
 	store := NewInMemoryTokenStore()
 	SetDefaultTokenStoreFactory(func() OAuthTokenStore { return store })
 
 	urlCh := fakeBrowserOpener(t)
-	port, startCallback := reserveCallbackServer(t)
+	port, startCallback := reserveCallbackListener(t)
 
 	const mcpPath = "/mcp"
 	var tokenRedirectURI string
@@ -516,7 +511,7 @@ func TestPerformOAuthLogin_CallbackPort_UsesConfiguredPort_EndToEnd(t *testing.T
 // TestPerformOAuthLogin_CallbackPortAlreadyInUse_HardErrors proves that a
 // configured CallbackPort docker-agent cannot bind is a hard error (no
 // fallback to a random port, no browser, no token stored) — the same
-// failure mode startCallbackServer gives the runtime's managed flow.
+// failure mode RequestAuthorizationCode gives the runtime's managed flow.
 func TestPerformOAuthLogin_CallbackPortAlreadyInUse_HardErrors(t *testing.T) {
 	resetDefaultStore(t)
 	store := NewInMemoryTokenStore()
@@ -667,7 +662,7 @@ func TestPerformOAuthLogin_CallbackPortWithExplicitClient_EndToEnd(t *testing.T)
 	SetDefaultTokenStoreFactory(func() OAuthTokenStore { return store })
 
 	urlCh := fakeBrowserOpener(t)
-	port, startCallback := reserveCallbackServer(t)
+	port, startCallback := reserveCallbackListener(t)
 
 	const mcpPath = "/mcp"
 	var registerCalls int

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/rulebased"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
 )
 
@@ -50,8 +52,10 @@ func TestRoutedPricing(t *testing.T) {
 		outerRouter     bool
 		want            float64
 		unpriced        bool
+		reload          bool
 	}{
 		{name: "catalog leaf", want: 0.43},
+		{name: "catalog leaf survives reload", reload: true, want: 0.43},
 		{name: "unknown router", routerID: "local/router", want: 0.43},
 		{name: "router override does not leak", routerCost: &latest.CostConfig{Input: 99, Output: 99}, want: 0.43},
 		{name: "leaf override and cache classes", leafCost: &latest.CostConfig{Input: 1, Output: 2, CacheRead: 0.1, CacheWrite: 1.25}, want: 0.0995},
@@ -129,7 +133,15 @@ func TestRoutedPricing(t *testing.T) {
 			}
 			root := agent.New("root", "test", opts...)
 			rec := &recordingTelemetry{}
-			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithTelemetry(rec), WithModelStore(store), WithSessionCompaction(false), WithBudget(&latest.BudgetConfig{MaxCost: 100}))
+			rtOpts := []Opt{WithTelemetry(rec), WithModelStore(store), WithSessionCompaction(false), WithBudget(&latest.BudgetConfig{MaxCost: 100})}
+			dbPath := filepath.Join(t.TempDir(), "sessions.db")
+			if tc.reload {
+				sessions, err := sqlitestore.New(t.Context(), dbPath)
+				require.NoError(t, err)
+				t.Cleanup(func() { assert.NoError(t, sessions.Close()) })
+				rtOpts = append(rtOpts, WithSessionStore(sessions))
+			}
+			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), rtOpts...)
 			require.NoError(t, err)
 			var captured *hooks.Input
 			require.NoError(t, rt.hooksRegistry.RegisterBuiltin("capture-routing", func(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
@@ -224,12 +236,29 @@ func TestRoutedPricing(t *testing.T) {
 				assert.Equal(t, int64(100_000), records[turn].InputTokens)
 				assert.Equal(t, int64(5_000), records[turn].OutputTokens)
 			}
+			if tc.reload {
+				reopened, err := sqlitestore.New(t.Context(), dbPath)
+				require.NoError(t, err)
+				t.Cleanup(func() { assert.NoError(t, reopened.Close()) })
+				loaded, err := reopened.GetSession(t.Context(), sess.ID)
+				require.NoError(t, err)
+				var assistants int
+				for _, m := range loaded.OwnMessages() {
+					if m.Message.Role != chat.MessageRoleAssistant {
+						continue
+					}
+					assistants++
+					assert.Equal(t, wantID, m.Message.Model, "the serving model, not the router, is persisted")
+					assert.InDelta(t, tc.want, m.Message.Cost, 1e-9)
+				}
+				assert.Equal(t, 2, assistants)
+				assert.InDelta(t, 2*tc.want, loaded.OwnCost(), 1e-9)
+			}
 			if tc.outerRouter {
 				assert.Equal(t, 1, primary.callCount, "cooldown skips failed primary before successful fallback router")
 			}
 			switch {
 			case tc.fallback:
-				assert.Equal(t, leafID, router.LastSelectedModelID(), "failed route selection must not price the successful outer fallback")
 				assert.Equal(t, 1, leaf.callCount, "cooldown stays keyed to the failed outer router")
 				assert.Equal(t, 2, fallback.callCount)
 			case tc.noMatch:

@@ -3,6 +3,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -267,7 +268,7 @@ func TestThinkingPrefixMismatch_ExplicitOption(t *testing.T) {
 		client := newScriptedClient(srv, latest.ModelConfig{
 			Provider: "anthropic", Model: "claude-sonnet-4-5",
 			ThinkingBudget: &latest.ThinkingBudget{Tokens: 2048},
-			ProviderOpts:   map[string]any{"fallbacks": []any{"claude-fable-5-1"}},
+			ProviderOpts:   map[string]any{"fallbacks": []any{"claude-fable-5-2"}},
 		})
 		chatTurn(t, client, []chat.Message{user("hello")}, nil)
 
@@ -350,7 +351,8 @@ func TestDisabledThinking(t *testing.T) {
 		assert.Equal(t, "Title", msg.Content)
 
 		req := srv.request(t, 0)
-		assert.NotContains(t, req.body, "thinking", "the model's default thinking is left in place")
+		assert.Equal(t, "adaptive", req.thinking()["type"], "Fable cannot disable thinking")
+		assert.Equal(t, "low", req.outputConfig()["effort"])
 		assert.InDelta(t, noThinkingMinOutputTokens, req.body["max_tokens"], 0)
 		assert.NotContains(t, req.body, "temperature")
 	})
@@ -387,7 +389,7 @@ func TestSonnet5_DefaultsOmitSamplingAndThinking(t *testing.T) {
 
 		req := srv.request(t, 0)
 		assert.Equal(t, map[string]any{"type": "adaptive", "display": "summarized"}, req.thinking())
-		assert.Equal(t, "high", req.outputConfig()["effort"])
+		assert.NotContains(t, req.outputConfig(), "effort", "the model default effort applies")
 		assert.InDelta(t, 8192, req.body["max_tokens"], 0, "token budget no longer inflates max_tokens")
 		assert.NotContains(t, req.body, "temperature")
 	})
@@ -434,15 +436,19 @@ func TestThinkingDisplayUpdates(t *testing.T) {
 		for name, cfg := range map[string]*latest.ModelConfig{
 			"sonnet 5": {Provider: "anthropic", Model: "claude-sonnet-5", ProviderOpts: map[string]any{"thinking_display": "updates"}},
 			"mythos 5": {Provider: "anthropic", Model: "claude-mythos-5", ProviderOpts: map[string]any{"thinking_display": "updates"}},
-			"fallback": {Provider: "anthropic", Model: "claude-fable-5", ProviderOpts: map[string]any{
-				"thinking_display": "updates", "fallbacks": []any{"claude-sonnet-5"},
+			"fallback": {Provider: "anthropic", Model: "claude-fable-5-1", ProviderOpts: map[string]any{
+				"thinking_display": "updates", "fallbacks": []any{"claude-opus-4-8"},
 			}},
 		} {
 			_, err := NewClient(t.Context(), cfg, env)
 			require.ErrorContains(t, err, "does not support thinking_display: updates", name)
 		}
-		ok, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "anthropic", Model: "claude-fable-5-1", ProviderOpts: map[string]any{
+		_, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "anthropic", Model: "claude-fable-5-1", ProviderOpts: map[string]any{
 			"thinking_display": "updates", "fallbacks": []any{"claude-mythos-5-1"},
+		}}, env)
+		require.NoError(t, err, "every model in the chain supports updates")
+		ok, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "anthropic", Model: "claude-fable-5-2", ProviderOpts: map[string]any{
+			"thinking_display": "updates", "fallbacks": []any{"claude-fable-5-3"},
 		}}, env)
 		require.NoError(t, err)
 		assert.NotNil(t, ok)
@@ -636,7 +642,7 @@ func TestCachePreservingUpdates_RawReplayThenCompaction(t *testing.T) {
 	)
 	client := newScriptedClient(srv, latest.ModelConfig{
 		Provider: "anthropic", Model: "claude-fable-5-1",
-		ProviderOpts: map[string]any{cachePreservingUpdatesOpt: true},
+		ProviderOpts: map[string]any{cachePreservingUpdatesOpt: true, "native_compaction": true},
 	})
 	read, write := cuTool("read"), cuTool("write")
 
@@ -719,4 +725,413 @@ func TestProgressUpdatesNormalizedOption(t *testing.T) {
 	request := srv.request(t, 0)
 	assert.Contains(t, request.betas, anthropic.AnthropicBetaThinkingDisplayUpdates2026_08_18)
 	assert.Equal(t, "updates", request.thinking()["display"])
+}
+
+func TestClaude5Thinking(t *testing.T) {
+	t.Parallel()
+
+	send := func(t *testing.T, cfg latest.ModelConfig) capturedRequest {
+		t.Helper()
+		srv := newScriptedServer(t, textReply("msg_1", "ok"))
+		chatTurn(t, newScriptedClient(srv, cfg), []chat.Message{user("hello")}, nil)
+		return srv.request(t, 0)
+	}
+
+	t.Run("haiku 5.5 effort is adaptive", func(t *testing.T) {
+		t.Parallel()
+		req := send(t, latest.ModelConfig{Provider: "anthropic", Model: "claude-haiku-5-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "high"}})
+		assert.Equal(t, "adaptive", req.thinking()["type"])
+		assert.NotContains(t, req.thinking(), "budget_tokens")
+		assert.Equal(t, "high", req.outputConfig()["effort"])
+	})
+
+	t.Run("opus 5.5 none falls back to adaptive low", func(t *testing.T) {
+		t.Parallel()
+		req := send(t, latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}})
+		assert.Equal(t, "adaptive", req.thinking()["type"])
+		assert.Equal(t, "low", req.outputConfig()["effort"])
+	})
+
+	t.Run("sonnet 5 none is disabled", func(t *testing.T) {
+		t.Parallel()
+		req := send(t, latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-5", ThinkingBudget: &latest.ThinkingBudget{Effort: "none"}, Temperature: new(0.3)})
+		assert.Equal(t, map[string]any{"type": "disabled"}, req.thinking())
+		assert.NotContains(t, req.body, "temperature")
+	})
+
+	t.Run("mythos 5.1 has no default binding", func(t *testing.T) {
+		t.Parallel()
+		req := send(t, latest.ModelConfig{Provider: "anthropic", Model: "claude-mythos-5-1"})
+		assert.NotContains(t, req.body, "thinking")
+		assert.NotContains(t, req.raw, "block_binding")
+	})
+
+	t.Run("opus 5.5 token budget omits effort", func(t *testing.T) {
+		t.Parallel()
+		req := send(t, latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5", ThinkingBudget: &latest.ThinkingBudget{Tokens: 16000}})
+		assert.Equal(t, "adaptive", req.thinking()["type"])
+		assert.NotContains(t, req.outputConfig(), "effort")
+		assert.InDelta(t, 8192, req.body["max_tokens"], 0)
+	})
+}
+
+func TestClaude5RejectsFinalAssistantPrefill(t *testing.T) {
+	t.Parallel()
+
+	history := []chat.Message{user("hello"), {Role: chat.MessageRoleAssistant, Content: "Sure:"}}
+
+	srv := newScriptedServer(t, textReply("msg_1", "ok"))
+	client := newScriptedClient(srv, latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5"})
+	_, err := client.CreateChatCompletionStream(t.Context(), history, nil)
+	require.ErrorContains(t, err, "does not accept a final assistant message")
+	assert.Zero(t, srv.count(), "rejected before any request")
+
+	legacy := newScriptedServer(t, textReply("msg_1", "ok"))
+	chatTurn(t, newScriptedClient(legacy, latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-4-6"}), history, nil)
+	assert.Equal(t, 1, legacy.count())
+}
+
+// Through the factory a configured none arrives as a nil budget plus
+// WithNoThinking (see provider.applyModelDefaults).
+func TestClaude5NoThinkingOption(t *testing.T) {
+	t.Parallel()
+
+	send := func(t *testing.T, model string) capturedRequest {
+		t.Helper()
+		srv := newScriptedServer(t, textReply("msg_1", "ok"))
+		client := newScriptedClient(srv, latest.ModelConfig{Provider: "anthropic", Model: model}, options.WithNoThinking())
+		chatTurn(t, client, []chat.Message{user("hello")}, nil)
+		return srv.request(t, 0)
+	}
+
+	t.Run("sonnet 5 sends disabled", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, map[string]any{"type": "disabled"}, send(t, "claude-sonnet-5").thinking())
+	})
+
+	t.Run("opus 5.5 falls back to adaptive low", func(t *testing.T) {
+		t.Parallel()
+		req := send(t, "claude-opus-5-5")
+		assert.Equal(t, "adaptive", req.thinking()["type"])
+		assert.Equal(t, "low", req.outputConfig()["effort"])
+	})
+
+	t.Run("legacy model is unchanged", func(t *testing.T) {
+		t.Parallel()
+		assert.NotContains(t, send(t, "claude-sonnet-4-6").body, "thinking")
+	})
+}
+
+// A message produced on another provider (e.g. Bedrock before a fallback or a
+// model switch) carries that provider's raw state. Its flattened thinking must
+// still be replayed: signatures are portable across Claude platforms.
+func TestForeignProviderStateKeepsThinking(t *testing.T) {
+	t.Parallel()
+
+	assistant := chat.Message{
+		Role: chat.MessageRoleAssistant, ReasoningContent: "plan", ThinkingSignature: "sig",
+		ToolCalls: []tools.ToolCall{{ID: "t1", Type: "function", Function: tools.FunctionCall{Name: "read", Arguments: `{}`}}},
+	}
+	assistant.AttachProviderState(&chat.ProviderState{Provider: "amazon-bedrock", Content: json.RawMessage(`[]`)})
+	history := []chat.Message{
+		user("hello"), assistant,
+		{Role: chat.MessageRoleTool, ToolCallID: "t1", Content: "ok"},
+	}
+
+	for name, cfg := range map[string]latest.ModelConfig{
+		"standard": {Provider: "anthropic", Model: "claude-sonnet-4-5", ThinkingBudget: &latest.ThinkingBudget{Tokens: 2048}, ProviderOpts: map[string]any{"interleaved_thinking": false}},
+		"beta":     {Provider: "anthropic", Model: "claude-fable-5-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			chatTurn(t, newScriptedClient(srv, cfg), history, nil)
+
+			content, _ := srv.request(t, 0).messages()[1]["content"].([]any)
+			require.NotEmpty(t, content)
+			first, _ := content[0].(map[string]any)
+			assert.Equal(t, "thinking", first["type"])
+			assert.Equal(t, "sig", first["signature"])
+		})
+	}
+}
+
+// editedToolTurn is an assistant tool-use turn whose own raw state no longer
+// matches it (e.g. a hook redacted its reasoning).
+func editedToolTurn(toolIDs ...string) chat.Message {
+	msg := chat.Message{Role: chat.MessageRoleAssistant, ReasoningContent: "t", ThinkingSignature: "s"}
+	blocks := []string{`{"type":"thinking","thinking":"t","signature":"s"}`}
+	for _, id := range toolIDs {
+		msg.ToolCalls = append(msg.ToolCalls, tools.ToolCall{ID: id, Type: "function", Function: tools.FunctionCall{Name: "read", Arguments: `{}`}})
+		blocks = append(blocks, fmt.Sprintf(`{"type":"tool_use","id":%q,"name":"read","input":{}}`, id))
+	}
+	msg.AttachProviderState(&chat.ProviderState{Provider: providerStateName, Content: json.RawMessage("[" + strings.Join(blocks, ",") + "]")})
+	msg.ReasoningContent = "[REDACTED]"
+	return msg
+}
+
+func toolResult(id string) chat.Message {
+	return chat.Message{Role: chat.MessageRoleTool, ToolCallID: id, Content: "ok"}
+}
+
+func TestUnreplayableRawState(t *testing.T) {
+	t.Parallel()
+
+	thinking := map[string]latest.ModelConfig{
+		"standard": {Provider: "anthropic", Model: "claude-sonnet-4-5", ThinkingBudget: &latest.ThinkingBudget{Tokens: 2048}, ProviderOpts: map[string]any{"interleaved_thinking": false}},
+		"beta":     {Provider: "anthropic", Model: "claude-fable-5-1"},
+	}
+
+	for name, cfg := range thinking {
+		t.Run(name+"/earlier edited turn omits thinking", func(t *testing.T) {
+			t.Parallel()
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			chatTurn(t, newScriptedClient(srv, cfg), []chat.Message{user("q"), editedToolTurn("t1"), toolResult("t1"), user("next")}, nil)
+
+			content, _ := srv.request(t, 0).messages()[1]["content"].([]any)
+			for _, block := range content {
+				assert.NotEqual(t, "thinking", block.(map[string]any)["type"])
+			}
+		})
+
+		t.Run(name+"/edited turn in the active loop is refused", func(t *testing.T) {
+			t.Parallel()
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			_, err := newScriptedClient(srv, cfg).CreateChatCompletionStream(t.Context(), []chat.Message{user("q"), editedToolTurn("t1"), toolResult("t1")}, nil)
+			require.ErrorContains(t, err, "changed after it was recorded and cannot be replayed")
+			assert.Zero(t, srv.count())
+		})
+
+		t.Run(name+"/parallel tool calls in the active loop are refused", func(t *testing.T) {
+			t.Parallel()
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			_, err := newScriptedClient(srv, cfg).CreateChatCompletionStream(t.Context(),
+				[]chat.Message{user("q"), editedToolTurn("t1", "t2"), toolResult("t1"), toolResult("t2")}, nil)
+			require.ErrorContains(t, err, "current tool loop")
+		})
+
+		t.Run(name+"/content-less state keeps flattened thinking", func(t *testing.T) {
+			t.Parallel()
+			turn := chat.Message{
+				Role: chat.MessageRoleAssistant, ReasoningContent: "t", ThinkingSignature: "s",
+				ToolCalls: []tools.ToolCall{{ID: "t1", Type: "function", Function: tools.FunctionCall{Name: "read", Arguments: `{}`}}},
+			}
+			turn.AttachProviderState(&chat.ProviderState{Provider: providerStateName, Content: json.RawMessage(`[]`), RequestContext: json.RawMessage(`{}`)})
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			chatTurn(t, newScriptedClient(srv, cfg), []chat.Message{user("q"), turn, toolResult("t1")}, nil)
+
+			content, _ := srv.request(t, 0).messages()[1]["content"].([]any)
+			require.NotEmpty(t, content)
+			assert.Equal(t, "thinking", content[0].(map[string]any)["type"])
+		})
+	}
+
+	t.Run("thinking off allows the edited active-loop turn", func(t *testing.T) {
+		t.Parallel()
+		srv := newScriptedServer(t, textReply("msg_1", "ok"))
+		cfg := latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-4-5", ProviderOpts: map[string]any{"interleaved_thinking": false}}
+		chatTurn(t, newScriptedClient(srv, cfg), []chat.Message{user("q"), editedToolTurn("t1"), toolResult("t1")}, nil)
+		assert.Equal(t, 1, srv.count())
+	})
+}
+
+// Runtime transforms change a turn's text or tool calls without touching its
+// thinking: the recorded thinking is still replayed inside the tool loop.
+func TestIntactThinkingSurvivesRuntimeTransforms(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"read\" path=\"x","input":{"token":"abc"}}]`)
+	sanitized := func() chat.Message {
+		msg := chat.Message{
+			Role: chat.MessageRoleAssistant, ReasoningContent: "t", ThinkingSignature: "s",
+			ToolCalls: []tools.ToolCall{{ID: "t1", Type: "function", Function: tools.FunctionCall{Name: "read", Arguments: `{"token":"abc"}`}}},
+		}
+		msg.AttachProviderState(&chat.ProviderState{Provider: providerStateName, Content: raw})
+		return msg
+	}
+	redacted := func() chat.Message {
+		msg := sanitized()
+		msg.ToolCalls[0].Function.Arguments = `{"token":"[REDACTED]"}`
+		return msg
+	}
+
+	cfgs := map[string]latest.ModelConfig{
+		"standard": {Provider: "anthropic", Model: "claude-sonnet-4-5", ThinkingBudget: &latest.ThinkingBudget{Tokens: 2048}, ProviderOpts: map[string]any{"interleaved_thinking": false}},
+		"beta":     {Provider: "anthropic", Model: "claude-fable-5-1"},
+	}
+	for name, cfg := range cfgs {
+		for transform, turn := range map[string]func() chat.Message{"sanitized tool name": sanitized, "redacted arguments": redacted} {
+			t.Run(name+"/"+transform, func(t *testing.T) {
+				t.Parallel()
+				srv := newScriptedServer(t, textReply("msg_1", "ok"))
+				chatTurn(t, newScriptedClient(srv, cfg), []chat.Message{user("q"), turn(), toolResult("t1")}, nil)
+
+				content, _ := srv.request(t, 0).messages()[1]["content"].([]any)
+				require.Len(t, content, 2)
+				first := content[0].(map[string]any)
+				assert.Equal(t, "thinking", first["type"])
+				assert.Equal(t, "s", first["signature"])
+				second := content[1].(map[string]any)
+				assert.Equal(t, "read", second["name"], "the sanitized tool call is sent")
+			})
+		}
+	}
+}
+
+// recordedTurn seals msg with raw blocks, then applies edit, the way runtime
+// transforms (sanitized names, redaction) change a turn after recording.
+func recordedTurn(raw string, version int, msg chat.Message, edit func(*chat.Message)) chat.Message {
+	msg.Role = chat.MessageRoleAssistant
+	msg.AttachProviderState(&chat.ProviderState{Provider: providerStateName, Version: version, Content: json.RawMessage(raw)})
+	if edit != nil {
+		edit(&msg)
+	}
+	return msg
+}
+
+func readCall(id string) tools.ToolCall {
+	return tools.ToolCall{ID: id, Type: "function", Function: tools.FunctionCall{Name: "read", Arguments: `{}`}}
+}
+
+func TestRecordedThinkingRecovery(t *testing.T) {
+	t.Parallel()
+
+	cfgs := map[string]latest.ModelConfig{
+		"standard": {Provider: "anthropic", Model: "claude-sonnet-4-5", ThinkingBudget: &latest.ThinkingBudget{Tokens: 2048}, ProviderOpts: map[string]any{"interleaved_thinking": false}},
+		"beta":     {Provider: "anthropic", Model: "claude-fable-5-1"},
+	}
+	sanitize := func(m *chat.Message) {
+		for i := range m.ToolCalls {
+			m.ToolCalls[i].Function.Name = "read"
+		}
+	}
+
+	for name, cfg := range cfgs {
+		t.Run(name+"/split signature is recovered", func(t *testing.T) {
+			t.Parallel()
+			turn := recordedTurn(`[{"type":"thinking","thinking":"t","signature":"s1s2"},{"type":"tool_use","id":"t1","name":"read\" x","input":{}}]`, 1,
+				chat.Message{ReasoningContent: "t", ThinkingSignature: "s2", ToolCalls: []tools.ToolCall{{ID: "t1", Type: "function", Function: tools.FunctionCall{Name: `read" x`, Arguments: `{}`}}}}, sanitize)
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			chatTurn(t, newScriptedClient(srv, cfg), []chat.Message{user("q"), turn, toolResult("t1")}, nil)
+
+			content := srv.request(t, 0).messages()[1]["content"].([]any)
+			assert.Equal(t, "s1s2", content[0].(map[string]any)["signature"])
+			assert.Equal(t, "read", content[1].(map[string]any)["name"])
+		})
+
+		t.Run(name+"/interleaved thinking keeps its order", func(t *testing.T) {
+			t.Parallel()
+			raw := `[{"type":"thinking","thinking":"a","signature":"s1"},{"type":"tool_use","id":"t1","name":"read\" x","input":{}},` +
+				`{"type":"thinking","thinking":"b","signature":"s2"},{"type":"tool_use","id":"t2","name":"read\" y","input":{}}]`
+			turn := recordedTurn(raw, 1, chat.Message{ReasoningContent: "ab", ThinkingSignature: "s2", ToolCalls: []tools.ToolCall{
+				{ID: "t1", Type: "function", Function: tools.FunctionCall{Name: `read" x`, Arguments: `{}`}},
+				{ID: "t2", Type: "function", Function: tools.FunctionCall{Name: `read" y`, Arguments: `{}`}},
+			}}, sanitize)
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			chatTurn(t, newScriptedClient(srv, cfg), []chat.Message{user("q"), turn, toolResult("t1"), toolResult("t2")}, nil)
+
+			var types []string
+			for _, b := range srv.request(t, 0).messages()[1]["content"].([]any) {
+				types = append(types, b.(map[string]any)["type"].(string))
+			}
+			assert.Equal(t, []string{"thinking", "tool_use", "thinking", "tool_use"}, types)
+		})
+
+		t.Run(name+"/redacted-only thinking is refused when it cannot be recovered", func(t *testing.T) {
+			t.Parallel()
+			turn := recordedTurn(`[{"type":"redacted_thinking","data":"opaque"},{"type":"tool_use","id":"t1","name":"read","input":{}}]`, 1,
+				chat.Message{ToolCalls: []tools.ToolCall{readCall("t1")}}, func(m *chat.Message) { m.ToolCalls = append(m.ToolCalls, readCall("t2")) })
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			_, err := newScriptedClient(srv, cfg).CreateChatCompletionStream(t.Context(), []chat.Message{user("q"), turn, toolResult("t1"), toolResult("t2")}, nil)
+			require.ErrorContains(t, err, "cannot be replayed")
+		})
+
+		t.Run(name+"/cleared signature with intact thinking is recovered", func(t *testing.T) {
+			t.Parallel()
+			turn := recordedTurn(`[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"read","input":{}}]`, 1,
+				chat.Message{ReasoningContent: "t", ThinkingSignature: "s", ToolCalls: []tools.ToolCall{readCall("t1")}}, func(m *chat.Message) { m.ThinkingSignature = "" })
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			chatTurn(t, newScriptedClient(srv, cfg), []chat.Message{user("q"), turn, toolResult("t1")}, nil)
+			assert.Equal(t, "s", srv.request(t, 0).messages()[1]["content"].([]any)[0].(map[string]any)["signature"])
+		})
+
+		t.Run(name+"/newer state version is refused in the loop", func(t *testing.T) {
+			t.Parallel()
+			turn := recordedTurn(`[{"type":"thinking","thinking":"t","signature":"s"},{"type":"tool_use","id":"t1","name":"read","input":{}}]`, chat.ProviderStateVersion+1,
+				chat.Message{ReasoningContent: "t", ThinkingSignature: "s", ToolCalls: []tools.ToolCall{readCall("t1")}}, nil)
+			srv := newScriptedServer(t, textReply("msg_1", "ok"))
+			_, err := newScriptedClient(srv, cfg).CreateChatCompletionStream(t.Context(), []chat.Message{user("q"), turn, toolResult("t1")}, nil)
+			require.ErrorContains(t, err, "cannot be replayed")
+		})
+	}
+}
+
+// One client serves every conversation of a team load (AGENTS.md, "Client and
+// Session Lifetimes"): concurrent requests must not share any state.
+func TestSharedClientConcurrentSessions(t *testing.T) {
+	t.Parallel()
+
+	srv := newScriptedServer(t, textReply("msg_1", "ok"))
+	client := newScriptedClient(srv, latest.ModelConfig{Provider: "anthropic", Model: "claude-sonnet-5-5"})
+
+	type conversation struct{ marker, other string }
+	conversations := []conversation{{"alpha", "beta"}, {"beta", "alpha"}}
+	start := make(chan struct{})
+	errs := make(chan error, len(conversations))
+	var wg sync.WaitGroup
+	for _, c := range conversations {
+		wg.Go(func() {
+			<-start
+			messages := []chat.Message{
+				system("system-" + c.marker),
+				{Role: chat.MessageRoleUser, MultiContent: []chat.MessagePart{
+					{Type: chat.MessagePartTypeText, Text: "question-" + c.marker},
+					{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+						Name: "doc-" + c.marker + ".txt", MimeType: "text/plain",
+						Source: chat.DocumentSource{InlineText: "contents-" + c.marker},
+					}},
+				}},
+			}
+			requestTools := []tools.Tool{{Name: "tool_" + c.marker, Parameters: map[string]any{"type": "object"}}}
+			stream, err := client.CreateChatCompletionStream(t.Context(), messages, requestTools)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer stream.Close()
+			for {
+				if _, err := stream.Recv(); err != nil {
+					if !errors.Is(err, io.EOF) {
+						errs <- err
+					}
+					return
+				}
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	require.Equal(t, 2, srv.count())
+	var matched []string
+	for i := range 2 {
+		raw := srv.request(t, i).raw
+		for _, c := range conversations {
+			if !strings.Contains(raw, "system-"+c.marker) {
+				continue
+			}
+			matched = append(matched, c.marker)
+			for _, want := range []string{"question-" + c.marker, "contents-" + c.marker, "tool_" + c.marker} {
+				assert.Contains(t, raw, want)
+			}
+			for _, leaked := range []string{"system-" + c.other, "question-" + c.other, "contents-" + c.other, "tool_" + c.other} {
+				assert.NotContains(t, raw, leaked)
+			}
+		}
+	}
+	assert.ElementsMatch(t, []string{"alpha", "beta"}, matched, "each conversation is sent exactly once, as itself")
 }

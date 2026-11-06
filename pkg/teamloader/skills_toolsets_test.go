@@ -1,12 +1,15 @@
 package teamloader
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/tools"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 )
@@ -160,4 +163,79 @@ agents:
 		assert.NotEqual(t, "shell", tool.Name, "readonly agent must not expose the mutating shell tool via a fork skill")
 		assert.NotEqual(t, "run_shell_background", tool.Name, "readonly agent must not expose mutating background-shell tools via a fork skill")
 	}
+}
+
+func TestForkSkillToolsetsOwnedUntilTeamShutdown(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "dummy")
+	data := []byte(`toolsets:
+  worker:
+    type: worker
+agents:
+  root:
+    model: openai/gpt-4o
+    instruction: test
+    skills:
+      - name: builder
+        description: Build things.
+        context: fork
+        toolsets: [worker]
+        instructions: Build.
+`)
+	started, finished := make(chan context.Context, 1), make(chan struct{})
+	inner := &forkWorker{started: started, finished: finished}
+	registry := NewToolsetRegistry(map[string]ToolsetCreator{
+		"worker": func(context.Context, latest.Toolset, string, *config.RuntimeConfig, string) (tools.ToolSet, error) {
+			return inner, nil
+		},
+	})
+	tm, err := Load(t.Context(), config.NewBytesSource("fork_worker.yaml", data), &config.RuntimeConfig{},
+		withTestProviderRegistry(WithToolsetRegistry(registry))...)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, tm.StopToolSets(t.Context())) })
+	root, err := tm.Agent("root")
+	require.NoError(t, err)
+	for _, outcome := range root.StartToolSets(t.Context(), time.Second) {
+		require.Equal(t, tools.StartReady, (<-outcome).Kind)
+	}
+	assert.Empty(t, started, "ordinary startup must not start assistive toolsets")
+	var skillSet *skillstool.ToolSet
+	for _, ts := range root.ToolSets() {
+		if s, ok := skillSetFrom(ts); ok {
+			skillSet = s
+		}
+	}
+	require.NotNil(t, skillSet)
+	prepare := func() *skillstool.PreparedSkillFork {
+		prepared, failure, err := skillSet.PrepareForkSubSession(t.Context(), skillstool.RunSkillArgs{Name: "builder"}, tools.NopRuntime{})
+		require.NoError(t, err)
+		require.Nil(t, failure)
+		return prepared
+	}
+	first, second := prepare(), prepare()
+	require.Len(t, first.ToolSets, 1)
+	require.Same(t, first.ToolSets[0], second.ToolSets[0], "invocations share the team-owned lifecycle")
+	wrapper, ok := tools.As[*tools.StartableToolSet](first.ToolSets[0])
+	require.True(t, ok)
+	ctx, cancel := context.WithCancel(t.Context())
+	require.NoError(t, wrapper.Start(ctx))
+	runCtx := <-started
+	cancel()
+	require.NoError(t, wrapper.Start(t.Context()))
+	require.NoError(t, runCtx.Err(), "ending one invocation must not stop the shared worker")
+	require.NoError(t, tm.StopToolSets(ctx))
+	<-finished
+	require.ErrorIs(t, runCtx.Err(), context.Canceled)
+	assert.False(t, wrapper.IsStarted())
+}
+
+type forkWorker struct {
+	started  chan<- context.Context
+	finished chan<- struct{}
+}
+
+func (*forkWorker) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+func (w *forkWorker) Run(ctx context.Context) {
+	defer close(w.finished)
+	w.started <- ctx
+	<-ctx.Done()
 }

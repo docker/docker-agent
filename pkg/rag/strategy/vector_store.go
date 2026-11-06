@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"golang.org/x/sync/errgroup"
@@ -60,8 +59,6 @@ type VectorStore struct {
 	docProcessor chunk.DocumentProcessor
 	fileHashes   map[string]string
 	fileHashesMu sync.Mutex // Protects fileHashes map for concurrent access
-	watcher      *fsnotify.Watcher
-	watcherMu    sync.Mutex
 	events       chan<- types.Event
 	shouldIgnore func(path string) bool // Optional filter for gitignore support
 
@@ -89,10 +86,6 @@ type VectorStore struct {
 	// during initialization. Higher values speed up indexing but use more
 	// resources (CPU, GPU, memory, API rate limits).
 	fileIndexConcurrency int
-
-	// reindexMu prevents concurrent reindexing operations from the file watcher
-	// to avoid overwhelming the system and causing event channel saturation.
-	reindexMu sync.Mutex
 }
 
 type modelStore interface {
@@ -296,7 +289,7 @@ func (s *VectorStore) initialize(ctx context.Context, src documentSource, docPat
 
 		seenFiles[filePath] = true
 
-		needsIndexing, err := s.needsIndexing(src, filePath)
+		needsIndexing, err := s.needsIndexing(ctx, src, filePath)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to check if file needs indexing",
 				"path", filePath, "error", err)
@@ -468,7 +461,7 @@ func (s *VectorStore) CheckAndReindexChangedFiles(ctx context.Context, docPaths 
 
 		seenFiles[filePath] = true
 
-		needsIndexing, err := s.needsIndexing(src, filePath)
+		needsIndexing, err := s.needsIndexing(ctx, src, filePath)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to check if file needs indexing", "path", filePath, "error", err)
 			continue
@@ -492,58 +485,26 @@ func (s *VectorStore) CheckAndReindexChangedFiles(ctx context.Context, docPaths 
 	return nil
 }
 
-// StartFileWatcher starts monitoring files for changes
-func (s *VectorStore) StartFileWatcher(ctx context.Context, docPaths []string, chunking ChunkingConfig) error {
-	s.watcherMu.Lock()
-	defer s.watcherMu.Unlock()
-
-	watcher, err := fsnotify.NewWatcher()
+// WatchFiles monitors files until ctx is canceled. Use one active call per strategy.
+// Callers must join it before Close, along with any queries or other indexing.
+func (s *VectorStore) WatchFiles(ctx context.Context, docPaths []string, _ ChunkingConfig) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	watcher, err := fsnotify.NewBufferedWatcher(1024)
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %w", err)
 	}
-	s.watcher = watcher
-
-	for _, docPath := range docPaths {
-		if err := s.addPathToWatcher(ctx, docPath); err != nil {
-			slog.WarnContext(ctx, "Failed to watch path", "strategy", s.name, "path", docPath, "error", err)
-			continue
-		}
-		slog.DebugContext(ctx, "Watching path for changes", "strategy", s.name, "path", docPath)
-	}
-
-	go s.watchLoop(ctx, docPaths)
-
 	slog.InfoContext(ctx, "File watcher started", "strategy", s.name, "paths", docPaths)
-	return nil
+	return s.watchLoop(ctx, watcher, docPaths)
 }
 
 // Close releases resources
 func (s *VectorStore) Close() error {
-	s.watcherMu.Lock()
-	defer s.watcherMu.Unlock()
-
-	var firstErr error
-
-	// Close file watcher
-	if s.watcher != nil {
-		if err := s.watcher.Close(); err != nil {
-			slog.Warn("Failed to close file watcher", "strategy", s.name, "error", err)
-			firstErr = err
-		}
-		s.watcher = nil
-	}
-
-	// Close database connection
 	if s.db != nil {
-		if err := s.db.Close(); err != nil {
-			slog.Error("Failed to close database", "strategy", s.name, "error", err)
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
+		return s.db.Close()
 	}
-
-	return firstErr
+	return nil
 }
 
 // GetIndexingUsage returns usage statistics from indexing
@@ -588,7 +549,7 @@ func (s *VectorStore) loadExistingHashes(ctx context.Context) error {
 	return nil
 }
 
-func (s *VectorStore) needsIndexing(src documentSource, filePath string) (bool, error) {
+func (s *VectorStore) needsIndexing(ctx context.Context, src documentSource, filePath string) (bool, error) {
 	currentHash, err := src.hash(filePath)
 	if err != nil {
 		return false, fmt.Errorf("failed to hash file: %w", err)
@@ -599,16 +560,30 @@ func (s *VectorStore) needsIndexing(src documentSource, filePath string) (bool, 
 	storedHash, exists := s.fileHashes[filePath]
 	s.fileHashesMu.Unlock()
 
-	if !exists {
-		slog.Debug("File not in metadata, needs indexing", "path", filePath)
-		return true, nil
+	if exists && storedHash == currentHash {
+		return false, nil
 	}
 
-	needsIndexing := storedHash != currentHash
-	if needsIndexing {
-		slog.Debug("File hash changed, needs re-indexing", "path", filePath)
+	// Another store sharing this database may already have committed this
+	// version; the in-memory map only tracks this store's own writes.
+	meta, err := s.db.GetFileMetadata(ctx, filePath)
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to read file metadata, re-indexing", "path", filePath, "error", err)
+		return true, nil
 	}
-	return needsIndexing, nil
+	if meta != nil && meta.ChunkCount > 0 && meta.FileHash == currentHash {
+		s.fileHashesMu.Lock()
+		s.fileHashes[filePath] = currentHash
+		s.fileHashesMu.Unlock()
+		return false, nil
+	}
+
+	if exists {
+		slog.DebugContext(ctx, "File hash changed, needs re-indexing", "path", filePath)
+	} else {
+		slog.DebugContext(ctx, "File not in metadata, needs indexing", "path", filePath)
+	}
+	return true, nil
 }
 
 func (s *VectorStore) indexFile(ctx context.Context, src documentSource, filePath string) error {
@@ -723,11 +698,8 @@ func (s *VectorStore) buildEmbeddingInputs(ctx context.Context, filePath string,
 		g.SetLimit(s.embeddingConcurrency)
 
 		for i, ch := range chunks {
-			// Check for context cancellation
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			default:
+			if gctx.Err() != nil {
+				break
 			}
 
 			g.Go(func() error {
@@ -762,6 +734,9 @@ func (s *VectorStore) buildEmbeddingInputs(ctx context.Context, filePath string,
 		}
 
 		if err := g.Wait(); err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 	} else {
@@ -841,7 +816,7 @@ func (s *VectorStore) cleanupOrphanedDocuments(ctx context.Context, seenFiles ma
 	return nil
 }
 
-func (s *VectorStore) addPathToWatcher(ctx context.Context, path string) error {
+func (s *VectorStore) addPathToWatcher(ctx context.Context, watcher *fsnotify.Watcher, path string) error {
 	// Resolve path(s) using Processor (handles globs, directories, files)
 	files, err := fsx.CollectFiles(ctx, []string{path}, s.shouldIgnore)
 	if err != nil {
@@ -858,7 +833,7 @@ func (s *VectorStore) addPathToWatcher(ctx context.Context, path string) error {
 	for _, file := range files {
 		dir := filepath.Dir(file)
 		if !watchedDirs[dir] {
-			if err := s.watcher.Add(dir); err != nil {
+			if err := watcher.Add(dir); err != nil {
 				slog.WarnContext(ctx, "Failed to watch directory", "dir", dir, "error", err)
 			} else {
 				watchedDirs[dir] = true
@@ -870,7 +845,7 @@ func (s *VectorStore) addPathToWatcher(ctx context.Context, path string) error {
 	// If path is explicitly a directory, watch it recursively too
 	info, err := os.Stat(path)
 	if err == nil && info.IsDir() {
-		if err := s.watcher.Add(path); err == nil {
+		if err := watcher.Add(path); err == nil {
 			watchedDirs[path] = true
 		}
 
@@ -878,7 +853,7 @@ func (s *VectorStore) addPathToWatcher(ctx context.Context, path string) error {
 		_ = filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
 			if err == nil && info.IsDir() {
 				if !watchedDirs[p] {
-					if err := s.watcher.Add(p); err == nil {
+					if err := watcher.Add(p); err == nil {
 						watchedDirs[p] = true
 					}
 				}
@@ -890,39 +865,10 @@ func (s *VectorStore) addPathToWatcher(ctx context.Context, path string) error {
 	return nil
 }
 
-func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
-	// Capture watcher reference at goroutine start to avoid racing with Close()
-	// which sets s.watcher = nil under watcherMu.
-	s.watcherMu.Lock()
-	watcher := s.watcher
-	s.watcherMu.Unlock()
-	if watcher == nil {
-		return
-	}
-
+func (s *VectorStore) watchLoop(ctx context.Context, watcher *fsnotify.Watcher, docPaths []string) error {
 	src := s.files(docPaths)
 
-	var debounceTimer *time.Timer
-	debounceDuration := 2 * time.Second
-	pendingChanges := make(map[string]bool)
-	var pendingMu sync.Mutex
-
-	processChanges := func() {
-		// Prevent concurrent reindexing operations
-		if !s.reindexMu.TryLock() {
-			slog.DebugContext(ctx, "Skipping file change processing - reindexing already in progress", "strategy", s.name)
-			return
-		}
-		defer s.reindexMu.Unlock()
-
-		pendingMu.Lock()
-		changedFiles := make([]string, 0, len(pendingChanges))
-		for file := range pendingChanges {
-			changedFiles = append(changedFiles, file)
-		}
-		pendingChanges = make(map[string]bool)
-		pendingMu.Unlock()
-
+	processChanges := func(ctx context.Context, changedFiles []string) {
 		if len(changedFiles) == 0 {
 			return
 		}
@@ -954,7 +900,7 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 				continue
 			}
 
-			needsIndexing, err := s.needsIndexing(src, file)
+			needsIndexing, err := s.needsIndexing(ctx, src, file)
 			if err != nil {
 				slog.DebugContext(ctx, "File no longer exists or inaccessible", "path", file, "error", err)
 				continue
@@ -1013,69 +959,9 @@ func (s *VectorStore) watchLoop(ctx context.Context, docPaths []string) {
 		}
 	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			slog.InfoContext(ctx, "File watcher stopped", "strategy", s.name)
-			return
-
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return
-			}
-
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
-				continue
-			}
-
-			if event.Op&fsnotify.Create != 0 {
-				s.watcherMu.Lock()
-				if s.watcher != nil {
-					if err := s.addPathToWatcher(ctx, event.Name); err != nil {
-						slog.DebugContext(ctx, "Could not watch new path", "path", event.Name, "error", err)
-					}
-				}
-				s.watcherMu.Unlock()
-			}
-
-			// Early filter: only track changes for files that match configured doc patterns
-			matches, err := fsx.Matches(event.Name, docPaths)
-			if err != nil {
-				slog.DebugContext(ctx, "Could not match path against doc patterns", "path", event.Name, "error", err)
-				continue
-			}
-			if !matches {
-				continue
-			}
-			// Skip files that should be ignored (e.g., gitignore)
-			if s.shouldIgnore != nil && s.shouldIgnore(event.Name) {
-				continue
-			}
-
-			slog.DebugContext(ctx, "File system event detected",
-				"strategy", s.name,
-				"event", event.Op.String(),
-				"path", event.Name)
-
-			pendingMu.Lock()
-			pendingChanges[event.Name] = true
-			pendingMu.Unlock()
-
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			debounceTimer = time.AfterFunc(debounceDuration, processChanges)
-
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return
-			}
-			slog.ErrorContext(ctx, "File watcher error", "strategy", s.name, "error", err)
-		}
-	}
+	return watchFileChanges(ctx, watcher, s.name, docPaths, s.shouldIgnore,
+		func(ctx context.Context, path string) error { return s.addPathToWatcher(ctx, watcher, path) }, processChanges,
+		func(ctx context.Context) error { return s.CheckAndReindexChangedFiles(ctx, docPaths, ChunkingConfig{}) }, watcher.Close)
 }
 
 func (s *VectorStore) cleanupOrphanedDocumentsFromDisk(ctx context.Context, docPaths []string) error {

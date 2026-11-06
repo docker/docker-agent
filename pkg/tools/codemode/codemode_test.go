@@ -119,6 +119,40 @@ func TestCodeModeTool_TypeScriptDeclarationsInDescription(t *testing.T) {
 	assert.NotContains(t, allTools[0].Description, "Where Input follows the following JSON schema")
 }
 
+func TestCodeModeTool_RuntimeHandledToolsStayDirect(t *testing.T) {
+	t.Parallel()
+
+	// transfer_task is declared with a RuntimeHandler and no in-process Handler;
+	// wrapping it into the script toolset made every delegation fail with
+	// "tool \"transfer_task\" is not available in code mode" (#4713).
+	runtimeTool := tools.Tool{
+		Name:           "transfer_task",
+		RuntimeHandler: "transfer_task",
+		Parameters:     tools.MustSchemaFor[map[string]any](),
+	}
+	ordinary := tools.Tool{
+		Name:       "ordinary_tool",
+		Parameters: tools.MustSchemaFor[map[string]any](),
+		Handler: tools.NewHandler(func(context.Context, map[string]any) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("ok"), nil
+		}),
+	}
+	ts := Wrap(&testToolSet{tools: []tools.Tool{runtimeTool, ordinary}})
+	list, err := ts.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, list, 2)
+
+	script := list[0]
+	assert.Equal(t, "run_tools_with_javascript", script.Name)
+	assert.NotContains(t, script.Description, "TransferTask", "runtime-handled tools must not be declared as script functions")
+	assert.Contains(t, script.Description, "OrdinaryTool")
+
+	direct := list[1]
+	assert.Equal(t, "transfer_task", direct.Name)
+	assert.Equal(t, "transfer_task", direct.RuntimeHandler, "the runtime must still dispatch it")
+	assert.Nil(t, direct.Handler)
+}
+
 func TestCodeModeTool_RepeatableToolsStayDirect(t *testing.T) {
 	t.Parallel()
 
@@ -732,32 +766,20 @@ type capableToolSet struct {
 	testToolSet
 
 	elicitationHandler        tools.ElicitationHandler
-	samplingHandler           tools.SamplingHandler
-	samplingWithToolsHandler  tools.SamplingWithToolsHandler
 	oauthSuccessHandler       func()
 	managedOAuth              bool
 	unmanagedOAuthRedirectURI string
-	toolsChangedHandler       func()
+	toolsChangedSubs          tools.ChangeSubscribers
 }
 
 var (
-	_ tools.Elicitable          = (*capableToolSet)(nil)
-	_ tools.Sampleable          = (*capableToolSet)(nil)
-	_ tools.SampleableWithTools = (*capableToolSet)(nil)
-	_ tools.OAuthCapable        = (*capableToolSet)(nil)
-	_ tools.ChangeNotifier      = (*capableToolSet)(nil)
+	_ tools.Elicitable       = (*capableToolSet)(nil)
+	_ tools.OAuthCapable     = (*capableToolSet)(nil)
+	_ tools.ChangeSubscriber = (*capableToolSet)(nil)
 )
 
 func (c *capableToolSet) SetElicitationHandler(handler tools.ElicitationHandler) {
 	c.elicitationHandler = handler
-}
-
-func (c *capableToolSet) SetSamplingHandler(handler tools.SamplingHandler) {
-	c.samplingHandler = handler
-}
-
-func (c *capableToolSet) SetSamplingWithToolsHandler(handler tools.SamplingWithToolsHandler) {
-	c.samplingWithToolsHandler = handler
 }
 
 func (c *capableToolSet) SetOAuthSuccessHandler(handler func()) {
@@ -772,8 +794,8 @@ func (c *capableToolSet) SetUnmanagedOAuthRedirectURI(uri string) {
 	c.unmanagedOAuthRedirectURI = uri
 }
 
-func (c *capableToolSet) SetToolsChangedHandler(handler func()) {
-	c.toolsChangedHandler = handler
+func (c *capableToolSet) SubscribeToolsChanged(handler func()) func() {
+	return c.toolsChangedSubs.Subscribe(handler)
 }
 
 // TestCodeModeTool_ConfiguresCapabilityHandlers verifies that generic graph
@@ -789,24 +811,16 @@ func TestCodeModeTool_ConfiguresCapabilityHandlers(t *testing.T) {
 	elicitHandler := func(context.Context, *mcp.ElicitParams) (tools.ElicitationResult, error) {
 		return tools.ElicitationResult{}, nil
 	}
-	samplingHandler := func(context.Context, *mcp.CreateMessageParams) (*mcp.CreateMessageResult, error) {
-		return nil, nil
-	}
-	samplingWithToolsHandler := func(context.Context, *mcp.CreateMessageWithToolsParams) (*mcp.CreateMessageWithToolsResult, error) {
-		return nil, nil
-	}
 	oauthCalled := false
 
 	// tools.ConfigureHandlers is the exact call the runtime makes once per
 	// turn (see configureToolsetHandlers in pkg/runtime/loop.go); routing
 	// through it here instead of casting to each capability interface
 	// directly keeps this test aligned with the real call site.
-	tools.ConfigureHandlers(tool, elicitHandler, samplingHandler, samplingWithToolsHandler,
+	tools.ConfigureHandlers(tool, elicitHandler,
 		func() { oauthCalled = true }, true, "http://127.0.0.1:1234/callback")
 
 	require.NotNil(t, capable.elicitationHandler)
-	require.NotNil(t, capable.samplingHandler)
-	require.NotNil(t, capable.samplingWithToolsHandler)
 	require.NotNil(t, capable.oauthSuccessHandler)
 	capable.oauthSuccessHandler()
 	assert.True(t, oauthCalled)
@@ -814,11 +828,10 @@ func TestCodeModeTool_ConfiguresCapabilityHandlers(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:1234/callback", capable.unmanagedOAuthRedirectURI)
 
 	changedCalled := false
-	for _, notifier := range tools.FindAll[tools.ChangeNotifier](tool) {
-		notifier.SetToolsChangedHandler(func() { changedCalled = true })
+	for _, notifier := range tools.FindAll[tools.ChangeSubscriber](tool) {
+		t.Cleanup(notifier.SubscribeToolsChanged(func() { changedCalled = true }))
 	}
-	require.NotNil(t, capable.toolsChangedHandler)
-	capable.toolsChangedHandler()
+	capable.toolsChangedSubs.Notify()
 	assert.True(t, changedCalled)
 }
 
@@ -834,7 +847,7 @@ func TestCodeModeTool_ConfiguresCapabilitiesThroughStartableWrapper(t *testing.T
 	handler := func(context.Context, *mcp.ElicitParams) (tools.ElicitationResult, error) {
 		return tools.ElicitationResult{}, nil
 	}
-	tools.ConfigureHandlers(tool, handler, nil, nil, nil, false, "")
+	tools.ConfigureHandlers(tool, handler, nil, false, "")
 
 	assert.NotNil(t, capable.elicitationHandler)
 }
@@ -1061,4 +1074,75 @@ func TestCodeModeTool_RateLimitedInnerPacesRetry(t *testing.T) {
 	allTools, terr = composite.Tools(t.Context())
 	require.NoError(t, terr)
 	assert.Contains(t, allTools[0].Description, "RagSearch", "recovered inner's declarations must reappear")
+}
+
+type disposableRunnableToolSet struct {
+	started chan struct{}
+	done    chan struct{}
+	closed  chan struct{}
+}
+
+func (*disposableRunnableToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return nil, nil
+}
+
+func (r *disposableRunnableToolSet) Run(ctx context.Context) {
+	close(r.started)
+	<-ctx.Done()
+	close(r.done)
+}
+
+func (r *disposableRunnableToolSet) Close() error {
+	close(r.closed)
+	return nil
+}
+
+func TestCodeModeTool_DisposeCancelsCanonicalRunnable(t *testing.T) {
+	t.Parallel()
+	raw := &disposableRunnableToolSet{
+		started: make(chan struct{}), done: make(chan struct{}), closed: make(chan struct{}),
+	}
+	composite := Wrap(raw).(*codeModeTool)
+	owner := tools.NewStartable(composite)
+	children := composite.Children()
+	require.Len(t, children, 1)
+	assert.Same(t, composite.managed[0], children[0])
+	children[0] = nil
+	assert.Same(t, composite.managed[0], composite.Children()[0])
+
+	require.NoError(t, owner.Start(t.Context()))
+	<-raw.started
+	disposed := make(chan error, 1)
+	ctx := t.Context()
+	go func() { disposed <- owner.Dispose(ctx) }()
+	select {
+	case err := <-disposed:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("disposal did not cancel and join the Code Mode runnable")
+	}
+	select {
+	case <-raw.done:
+	default:
+		t.Fatal("disposal returned before the runnable stopped")
+	}
+	select {
+	case <-raw.closed:
+	default:
+		t.Fatal("disposal did not close the runnable")
+	}
+	require.NoError(t, owner.Dispose(ctx))
+	require.ErrorContains(t, owner.Start(ctx), "disposed")
+}
+
+func TestCodeModeTool_DisposeGatesChildListings(t *testing.T) {
+	t.Parallel()
+	composite := Wrap(&testToolSet{tools: []tools.Tool{{Name: "fetch_url"}}}).(*codeModeTool)
+	available := composite.availableToolsets()
+	require.Len(t, available, 1)
+	assert.Same(t, composite.managed[0], available[0])
+	require.NoError(t, tools.Dispose(t.Context(), composite))
+	_, err := available[0].Tools(t.Context())
+	require.ErrorContains(t, err, "disposed")
+	assert.Empty(t, composite.availableToolsets())
 }

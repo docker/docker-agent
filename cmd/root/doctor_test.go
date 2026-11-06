@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/docker/cli/cli"
@@ -374,6 +375,22 @@ func TestDoctorCommand_AgentFileVarsSatisfied(t *testing.T) {
 	assert.Contains(t, output, "No issues found.")
 }
 
+func TestDoctorCommand_AgentFileVarsSatisfiedByPrefixedName(t *testing.T) {
+	t.Parallel()
+
+	path := writeDoctorAgentFile(t)
+
+	output, err := executeDoctor(t, []string{path}, withDoctorTestEnv(
+		map[string]string{"DOCKER_AGENT_ENV_OPENAI_API_KEY": "key"},
+		[]string{"ai/qwen3:latest"}, nil,
+	))
+
+	require.NoError(t, err)
+	assert.Regexp(t, `OPENAI_API_KEY\s+models\s+found\s+environment \(DOCKER_AGENT_ENV_OPENAI_API_KEY\)`, output)
+	assert.Regexp(t, `openai\s+found\s+OPENAI_API_KEY\s+environment \(DOCKER_AGENT_ENV_OPENAI_API_KEY\)`, output)
+	assert.Contains(t, output, "No issues found.")
+}
+
 func TestDoctorCommand_AgentFileBehindGateway(t *testing.T) {
 	t.Parallel()
 
@@ -647,6 +664,66 @@ func TestCredentialCandidates(t *testing.T) {
 	assert.Equal(t, "GOOGLE_API_KEY (+2 more)", credentialCandidates([]string{"GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI"}))
 }
 
+func TestDoctorCommand_AutoSelectionSeesOverride(t *testing.T) {
+	t.Parallel()
+
+	output, err := executeDoctor(t, nil, withDoctorTestEnv(
+		map[string]string{"DOCKER_AGENT_ENV_ANTHROPIC_API_KEY": "key"},
+		nil, errors.New("connection refused"),
+	))
+
+	require.NoError(t, err)
+	assert.Contains(t, output, "auto -> anthropic/claude-sonnet-5")
+}
+
+func TestDoctorCommand_ProviderJSONKeepsCanonicalEnvVar(t *testing.T) {
+	t.Parallel()
+
+	output, err := executeDoctor(t, []string{"--json"}, withDoctorTestEnv(
+		map[string]string{"DOCKER_AGENT_ENV_ANTHROPIC_API_KEY": "key"},
+		[]string{"ai/qwen3:latest"}, nil,
+	))
+
+	require.NoError(t, err)
+	var report doctorReport
+	require.NoError(t, json.Unmarshal([]byte(output), &report))
+	idx := slices.IndexFunc(report.Providers, func(p doctorProviderStatus) bool { return p.Provider == "anthropic" })
+	require.GreaterOrEqual(t, idx, 0)
+	assert.Equal(t, "ANTHROPIC_API_KEY", report.Providers[idx].EnvVar)
+	assert.Equal(t, "DOCKER_AGENT_ENV_ANTHROPIC_API_KEY", report.Providers[idx].FoundAs)
+}
+
+func TestFindSource_EmptyOverrideFallsBack(t *testing.T) {
+	t.Parallel()
+
+	sources := []environment.Source{
+		{Name: "environment", Provider: environment.NewMapEnvProvider(map[string]string{"KEY": "plain"})},
+		{Name: "config-env-file", Provider: environment.NewMapEnvProvider(map[string]string{"DOCKER_AGENT_ENV_KEY": ""})},
+	}
+
+	source, foundAs, found := findSource(t.Context(), sources, "KEY")
+	require.True(t, found)
+	assert.Equal(t, "environment", source)
+	assert.Equal(t, "KEY", foundAs)
+}
+
+func TestFindSource_EmptyOverrideDoesNotHideLaterOverride(t *testing.T) {
+	t.Parallel()
+
+	sources := []environment.Source{
+		{Name: "environment", Provider: environment.NewMapEnvProvider(map[string]string{"DOCKER_AGENT_ENV_KEY": ""})},
+		{Name: "config-env-file", Provider: environment.NewMapEnvProvider(map[string]string{"DOCKER_AGENT_ENV_KEY": "override"})},
+	}
+
+	source, foundAs, found := findSource(t.Context(), sources, "KEY")
+	require.True(t, found)
+	assert.Equal(t, "config-env-file", source)
+	assert.Equal(t, "DOCKER_AGENT_ENV_KEY", foundAs)
+
+	value, _ := environment.NewPrefixedProvider(environment.SourceProviders(sources)...).Get(t.Context(), "KEY")
+	assert.Equal(t, "override", value, "doctor and the run-time chain must agree")
+}
+
 func TestFindSource_SkipsSourcesWithoutValue(t *testing.T) {
 	t.Parallel()
 
@@ -656,12 +733,27 @@ func TestFindSource_SkipsSourcesWithoutValue(t *testing.T) {
 		{Name: "filled", Provider: environment.NewMapEnvProvider(map[string]string{"KEY": "value"})},
 	}
 
-	source, found := findSource(t.Context(), sources, "KEY")
+	source, foundAs, found := findSource(t.Context(), sources, "KEY")
 	require.True(t, found)
 	assert.Equal(t, "filled", source)
+	assert.Equal(t, "KEY", foundAs)
 
-	_, found = findSource(t.Context(), sources, "OTHER")
+	_, _, found = findSource(t.Context(), sources, "OTHER")
 	assert.False(t, found)
+}
+
+func TestFindSource_PrefixedNameWinsAcrossSources(t *testing.T) {
+	t.Parallel()
+
+	sources := []environment.Source{
+		{Name: "environment", Provider: environment.NewMapEnvProvider(map[string]string{"KEY": "plain"})},
+		{Name: "config-env-file", Provider: environment.NewMapEnvProvider(map[string]string{"DOCKER_AGENT_ENV_KEY": "prefixed"})},
+	}
+
+	source, foundAs, found := findSource(t.Context(), sources, "KEY")
+	require.True(t, found)
+	assert.Equal(t, "config-env-file", source)
+	assert.Equal(t, "DOCKER_AGENT_ENV_KEY", foundAs)
 }
 
 func TestDoctorEvaluatorGlobalProvider(t *testing.T) {

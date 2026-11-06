@@ -62,18 +62,18 @@ func setOAuthLoginHTTPClientForTesting(c *http.Client) (restore func()) {
 // token request follows.
 //
 // The callback/redirect mechanics below mirror the runtime's managed OAuth
-// flow exactly: startCallbackServer honors RemoteOAuthConfig.CallbackPort
-// (0 lets the OS pick a free port, matching the prior NewCallbackServer
+// flow exactly: the callback flow honors RemoteOAuthConfig.CallbackPort
+// (0 lets the OS pick a free port, matching the prior random-port
 // behavior) and ResolveRedirectURI honors CallbackRedirectURL (verbatim,
 // with the ${callbackPort} placeholder substituted; the local callback
 // server's own address is used unchanged when it is empty). The resolved
 // redirect URI is then reused, identically, for DCR, /authorize, and the
 // token exchange below.
 func PerformOAuthLogin(ctx context.Context, remote latest.Remote) error {
-	return performOAuthLogin(ctx, remote, startCallbackServer)
+	return performOAuthLogin(ctx, remote, RequestAuthorizationCode)
 }
 
-func performOAuthLogin(ctx context.Context, remote latest.Remote, startCallback func(context.Context, int) (*CallbackServer, error)) error {
+func performOAuthLogin(ctx context.Context, remote latest.Remote, requestCode func(context.Context, int, PrepareAuthorization) (string, string, error)) error {
 	tokenStore := NewKeyringTokenStore()
 	client := oauthLoginHTTPClient()
 
@@ -101,61 +101,36 @@ func performOAuthLogin(ctx context.Context, remote latest.Remote, startCallback 
 		return fmt.Errorf("failed to fetch authorization server metadata: %w", err)
 	}
 
-	// Set up the callback server for the redirect, honoring
-	// RemoteOAuthConfig.CallbackPort/CallbackRedirectURL exactly like the
-	// runtime's managed OAuth flow does.
-	callbackServer, err := startCallback(ctx, callbackPortFrom(remote.OAuth))
-	if err != nil {
-		return err
-	}
-	defer func() {
-		// Detach from ctx's cancellation (the request may be done) but
-		// keep its trace context for the shutdown.
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if err := callbackServer.Shutdown(shutdownCtx); err != nil {
-			slog.ErrorContext(ctx, "Failed to shutdown callback server", "error", err)
-		}
-	}()
-
-	redirectURI := callbackServer.ResolveRedirectURI(callbackRedirectURLFrom(remote.OAuth))
-
-	clientID, clientSecret, scopes, authMethod, err := resolveStandaloneClientCredentials(
-		ctx, client, remote.OAuth, authServerMetadata, redirectURI,
-		challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported,
-	)
-	if err != nil {
-		return err
-	}
-
-	// Generate PKCE and state.
-	state, err := GenerateState()
-	if err != nil {
-		return fmt.Errorf("failed to generate state: %w", err)
-	}
-	callbackServer.SetExpectedState(state)
-	verifier := GeneratePKCEVerifier()
-	// remote.URL verbatim, never resourceMetadata.Resource: the resource
-	// indicator must match the token-store key exactly (see the
-	// PerformOAuthLogin doc comment above).
+	var redirectURI, clientID, clientSecret, authMethod, verifier, state string
+	var scopes []string
 	resourceIndicator := serverURL
-
-	authURL := BuildAuthorizationURL(
-		authServerMetadata.AuthorizationEndpoint,
-		clientID,
-		redirectURI,
-		state,
-		oauth2.S256ChallengeFromVerifier(verifier),
-		resourceIndicator,
-		scopes,
-	)
-
-	// Open the browser and wait for the callback.
-	code, receivedState, err := RequestAuthorizationCode(ctx, authURL, callbackServer, state)
+	prepared := false
+	code, receivedState, err := requestCode(ctx, callbackPortFrom(remote.OAuth), func(ctx context.Context, address CallbackAddress) (AuthorizationRequest, error) {
+		redirectURI = address.ResolveRedirectURI(callbackRedirectURLFrom(remote.OAuth))
+		var err error
+		clientID, clientSecret, scopes, authMethod, err = resolveStandaloneClientCredentials(
+			ctx, client, remote.OAuth, authServerMetadata, redirectURI,
+			challengeScopesFromWWWAuth(wwwAuth), resourceMetadata.ScopesSupported,
+		)
+		if err != nil {
+			return AuthorizationRequest{}, err
+		}
+		state, err = GenerateState()
+		if err != nil {
+			return AuthorizationRequest{}, fmt.Errorf("failed to generate state: %w", err)
+		}
+		verifier = GeneratePKCEVerifier()
+		authURL := BuildAuthorizationURL(authServerMetadata.AuthorizationEndpoint, clientID, redirectURI, state,
+			oauth2.S256ChallengeFromVerifier(verifier), resourceIndicator, scopes)
+		prepared = true
+		return AuthorizationRequest{URL: authURL, State: state}, nil
+	})
 	if err != nil {
+		if !prepared {
+			return err
+		}
 		return fmt.Errorf("failed to get authorization code: %w", err)
 	}
-
 	if receivedState != state {
 		return errors.New("state mismatch in authorization response")
 	}

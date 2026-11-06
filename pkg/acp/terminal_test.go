@@ -123,7 +123,12 @@ func (p *terminalPeer) methods() []string {
 	return names
 }
 
-func newTerminalFixture(t *testing.T, cfg latest.Toolset) (*terminalToolset, *terminalManager, context.Context, *terminalPeer) {
+func newTerminalFixture(t *testing.T, cfg latest.Toolset) (*terminalToolset, *Session, context.Context, *terminalPeer) {
+	t.Helper()
+	return terminalFixtureForSession(t, cfg, &Session{})
+}
+
+func terminalFixtureForSession(t *testing.T, cfg latest.Toolset, owner *Session) (*terminalToolset, *Session, context.Context, *terminalPeer) {
 	t.Helper()
 	wd := t.TempDir()
 	a := &Agent{clientTerminal: true}
@@ -131,12 +136,12 @@ func newTerminalFixture(t *testing.T, cfg latest.Toolset) (*terminalToolset, *te
 	peer := &terminalPeer{peer: writer}
 	conn := a.NewConnection(peer, reader)
 	conn.SetLogger(slog.New(slog.DiscardHandler))
-	owner := newTerminalManager(conn, "owner")
-	t.Cleanup(func() { owner.stop(t.Context()); _ = owner.wait(); _ = writer.Close(); <-conn.Done() })
+	owner.terminals = newTerminalManager(conn, "owner")
+	t.Cleanup(func() { <-owner.close(t.Context()); _ = writer.Close(); <-conn.Done() })
 	rc := &config.RuntimeConfig{Config: config.Config{WorkingDir: wd}, EnvProviderOverride: environment.NewMapEnvProvider(map[string]string{"CONFIGURED": "expanded=value"})}
 	toolset, err := newTerminalToolset(t.Context(), cfg, rc)
 	require.NoError(t, err)
-	return toolset.(*terminalToolset), owner, context.WithValue(t.Context(), terminalOwnerKey{}, owner), peer
+	return toolset.(*terminalToolset), owner, context.WithValue(t.Context(), terminalOwnerKey{}, owner.terminals), peer
 }
 
 func callTerminalTool(t *testing.T, ctx context.Context, ts *terminalToolset, args string) *tools.ToolCallResult {
@@ -315,9 +320,9 @@ func TestClientTerminalTimeoutAndUnknownCreate(t *testing.T) {
 		result := callTerminalTool(t, ctx, ts, `{"cmd":"command","timeout":1}`)
 		assert.True(t, result.IsError)
 		assert.Contains(t, result.Output, "outcome is unknown")
-		require.Error(t, owner.failure())
-		owner.stop(t.Context())
-		require.Error(t, owner.wait())
+		require.Error(t, owner.terminals.failure())
+		<-owner.close(t.Context())
+		require.Error(t, owner.cleanupErr)
 		assert.Equal(t, []string{"terminal/create"}, peer.methods(), "never retry an ambiguous execution")
 	})
 	synctest.Test(t, func(t *testing.T) {
@@ -364,20 +369,19 @@ func TestClientTerminalReleaseRetriesOnlyDuringFinalCleanup(t *testing.T) {
 		}
 		result := callTerminalTool(t, ctx, ts, `{"cmd":"command"}`)
 		assert.True(t, result.IsError)
-		require.Error(t, owner.failure())
+		require.Error(t, owner.terminals.failure())
 		again := callTerminalTool(t, ctx, ts, `{"cmd":"must not run"}`)
 		assert.True(t, again.IsError)
 		assert.Equal(t, 1, releases)
-		owner.stop(t.Context())
-		err := owner.wait()
+		<-owner.close(t.Context())
+		err := owner.cleanupErr
 		if persistent {
 			require.Error(t, err)
 		} else {
 			require.NoError(t, err)
 		}
 		assert.Equal(t, 2, releases)
-		owner.stop(t.Context())
-		_ = owner.wait()
+		<-owner.close(t.Context())
 		assert.Equal(t, 2, releases)
 	}
 }
@@ -411,9 +415,10 @@ func TestClientTerminalConcurrentOwnershipAndClose(t *testing.T) {
 		}
 		<-entered
 		<-entered
-		owner.stop(t.Context())
+		owner.close(t.Context())
 		wg.Wait()
-		require.NoError(t, owner.wait())
+		<-owner.close(t.Context())
+		require.NoError(t, owner.cleanupErr)
 		assert.Equal(t, 2, strings.Count(strings.Join(peer.methods(), ","), "terminal/release"))
 		result := callTerminalTool(t, ctx, ts, `{"cmd":"stale handler"}`)
 		assert.True(t, result.IsError)
@@ -630,12 +635,12 @@ func TestClientTerminalDefinitiveRejectionDoesNotPoisonOwner(t *testing.T) {
 		result := callTerminalTool(t, ctx, ts, `{"cmd":"command"}`)
 		assert.True(t, result.IsError)
 		assert.Contains(t, result.Output, "creation rejected")
-		require.NoError(t, owner.failure())
+		require.NoError(t, owner.terminals.failure())
 		peer.respond = nil
 		result = callTerminalTool(t, ctx, ts, `{"cmd":"retry"}`)
 		assert.False(t, result.IsError, result.Output)
-		owner.stop(t.Context())
-		require.NoError(t, owner.wait())
+		<-owner.close(t.Context())
+		require.NoError(t, owner.cleanupErr)
 	}
 }
 
@@ -652,9 +657,8 @@ func TestClientTerminalCloseJoinsLateCreateAndBackgroundWait(t *testing.T) {
 	for _, lateCreate := range []bool{false, true} {
 		t.Run(map[bool]string{false: "background wait", true: "late create"}[lateCreate], func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				ts, owner, ctx, peer := newTerminalFixture(t, latest.Toolset{})
-				a, s := newResumeFixture(t, ts.workingDir)
-				s.terminals = owner
+				a, s := newResumeFixture(t, t.TempDir())
+				ts, _, ctx, peer := terminalFixtureForSession(t, latest.Toolset{}, s)
 				entered := make(chan terminalRequest, 1)
 				peer.respond = func(r terminalRequest) (any, *acpsdk.RequestError) {
 					switch r.method {
@@ -689,6 +693,7 @@ func TestClientTerminalCloseJoinsLateCreateAndBackgroundWait(t *testing.T) {
 				assert.Contains(t, (<-done).Output, "cancelled")
 				require.NoError(t, <-closed)
 				assert.Equal(t, "terminal/release", peer.methods()[len(peer.methods())-1])
+				assert.Equal(t, 1, strings.Count(strings.Join(peer.methods(), ","), "terminal/release"))
 				before := len(peer.snapshot())
 				result := callTerminalTool(t, ctx, ts, `{"cmd":"stale owner"}`)
 				assert.True(t, result.IsError)
@@ -720,12 +725,12 @@ func TestClientTerminalWaitErrorAndMissingCreateID(t *testing.T) {
 		result := callTerminalTool(t, ctx, ts, `{"cmd":"command"}`)
 		assert.True(t, result.IsError)
 		if missingID {
-			require.Error(t, owner.failure())
+			require.Error(t, owner.terminals.failure())
 			assert.Equal(t, []string{"terminal/create"}, peer.methods())
 		} else {
 			assert.Contains(t, result.Output, "Error waiting")
 			assert.Equal(t, []string{"terminal/create", "terminal/wait_for_exit", "terminal/kill", "terminal/output", "terminal/release"}, peer.methods())
-			require.NoError(t, owner.failure())
+			require.NoError(t, owner.terminals.failure())
 		}
 	}
 }
@@ -758,7 +763,7 @@ func TestClientTerminalSessionIsolationAndDisconnectNoFallback(t *testing.T) {
 	assert.Equal(t, []acpsdk.SessionId{acpsdk.SessionId(first.id), second.SessionId}, ids)
 	// A missing connection is a client execution error, not a reason to run locally.
 	ts, owner, ctx, _ := newTerminalFixture(t, latest.Toolset{})
-	owner.conn = nil
+	owner.terminals.conn = nil
 	result := callTerminalTool(t, ctx, ts, `{"cmd":"echo must-not-run-locally"}`)
 	assert.True(t, result.IsError)
 	assert.Contains(t, result.Output, "connection unavailable")

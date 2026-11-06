@@ -214,6 +214,7 @@ func TestToolsetValidateAttributeTypeMismatch(t *testing.T) {
 		{name: "remote url on non-mcp", toolset: Toolset{Type: "shell", Remote: Remote{URL: "https://mcp.example.com"}}, wantErr: "remote can only be used with type 'mcp'"},
 		{name: "remote transport on non-mcp", toolset: Toolset{Type: "a2a", URL: "https://agent.example.com", Remote: Remote{TransportType: "sse"}}, wantErr: "remote can only be used with type 'mcp'"},
 		{name: "remote oauth on non-mcp", toolset: Toolset{Type: "shell", Remote: Remote{OAuth: &RemoteOAuthConfig{ClientID: "c"}}}, wantErr: "remote can only be used with type 'mcp'"},
+		{name: "remote standalone_sse on non-mcp", toolset: Toolset{Type: "shell", Remote: Remote{StandaloneSSE: true}}, wantErr: "remote can only be used with type 'mcp'"},
 		{name: "remote headers on wrong type", toolset: Toolset{Type: "shell", Remote: Remote{Headers: map[string]string{"A": "b"}}}, wantErr: "remote headers can only be used with type 'mcp' or 'a2a'"},
 		{name: "headers on wrong type", toolset: Toolset{Type: "shell", Headers: map[string]string{"A": "b"}}, wantErr: "headers can only be used with type 'openapi', 'a2a' or 'fetch'"},
 		{name: "config on non-mcp", toolset: Toolset{Type: "shell", Config: map[string]any{"k": "v"}}, wantErr: "config can only be used with type 'mcp'"},
@@ -277,6 +278,8 @@ func TestToolsetValidateOAuth(t *testing.T) {
 		wantErr string
 	}{
 		{name: "minimal oauth", toolset: remote(&RemoteOAuthConfig{ClientID: "client"})},
+		{name: "standalone_sse with remote url", toolset: Toolset{Type: "mcp", Remote: Remote{URL: "https://mcp.example.com", StandaloneSSE: true}}},
+		{name: "standalone_sse without remote url", toolset: Toolset{Type: "mcp", Command: "server", Remote: Remote{StandaloneSSE: true}}, wantErr: "standalone_sse requires remote url to be set"},
 		{name: "oauth without remote url", toolset: Toolset{Type: "mcp", Command: "server", Remote: Remote{OAuth: &RemoteOAuthConfig{ClientID: "client"}}}, wantErr: "oauth requires remote url to be set"},
 		{name: "missing clientId falls back to dynamic registration", toolset: remote(&RemoteOAuthConfig{})},
 		{name: "clientSecret without clientId", toolset: remote(&RemoteOAuthConfig{ClientSecret: "secret"}), wantErr: "oauth clientSecret requires clientId to be set"},

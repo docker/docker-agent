@@ -1,5 +1,6 @@
 # A keyword-search (BM25) assistant over documents the host hands to the
-# session. In the browser build (cmd/wasm) there is no filesystem: `docs`
+# session. The browser build requires -tags docker_agent_wasm_rag.
+# In the browser (cmd/wasm) there is no filesystem: `docs`
 # select among the paths of createSession's `documents` option instead, e.g.
 #
 #   await dockerAgent.createSession({

@@ -362,7 +362,7 @@ func TestThinkRootObserverPrecedesProducer(t *testing.T) {
 		caller := agent.New("root", "test", agent.WithModel(prov), agent.WithToolSets(think.New()))
 		rt := thinkRuntime(t, team.New(team.WithAgents(caller)), session.NewInMemorySessionStore(), "root")
 		release, entered, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
-		rt.observers = append(rt.observers, &fnObserver{onStart: func(context.Context, *session.Session) { close(entered); <-release }})
+		WithEventObserver(&fnObserver{onStart: func(context.Context, *session.Session) { close(entered); <-release }})(rt)
 		sess := session.New(session.WithUserMessage("start"))
 		sess.ToolsApproved = true
 		go func() { defer close(finished); assert.Equal(t, []string{"Thoughts:\nready"}, drainThink(t, rt, sess)) }()

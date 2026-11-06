@@ -170,6 +170,10 @@ func walkGitHubArchive(ctx context.Context, archive []byte, visit func(*tar.Head
 }
 
 func extractGitHubSkills(ctx context.Context, archive []byte, roots []string, destination string) error {
+	return extractGitHubSkillsWithFileLimit(ctx, archive, roots, destination, githubFilesLimit)
+}
+
+func extractGitHubSkillsWithFileLimit(ctx context.Context, archive []byte, roots []string, destination string, fileLimit int) error {
 	seen := make(map[string]string)
 	var files int
 	var total int64
@@ -198,7 +202,7 @@ func extractGitHubSkills(ctx context.Context, archive []byte, roots []string, de
 		}
 		files++
 		total += header.Size
-		if header.Size < 0 || header.Size > githubFileLimit || total > githubArchiveLimit || files > githubFilesLimit {
+		if header.Size < 0 || header.Size > githubFileLimit || total > githubArchiveLimit || files > fileLimit {
 			return errors.New("GitHub skill files exceed download limits")
 		}
 		body, err := readGitHubBody(reader, githubFileLimit)

@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/bedrock"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/model/provider/gemini"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -60,7 +61,7 @@ func googleFactory(ctx context.Context, cfg *latest.ModelConfig, env environment
 // only: there is no host CLI, socket or MODEL_RUNNER_HOST to discover one.
 func cloudDMR(ctx context.Context, cfg *latest.ModelConfig, _ environment.Provider, opts ...options.Opt) (provider.Provider, error) {
 	u, err := url.Parse(cfg.BaseURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || catalog.IsDefaultEndpoint("dmr", cfg.BaseURL) {
 		return nil, errors.New("dmr in the browser requires an explicit http(s) base_url")
 	}
 	return dmr.NewClient(ctx, cfg, opts...)

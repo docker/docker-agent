@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
@@ -18,7 +19,7 @@ func TestCanonicalProviderBehavior(t *testing.T) {
 			shouldMergeConsecutiveMessages(&latest.ModelConfig{Provider: legacy}),
 			shouldMergeConsecutiveMessages(&latest.ModelConfig{Provider: canonical}),
 		)
-		assert.NotContains(t, openModelHostProviders, legacy)
+		assert.NotContains(t, catalog.Providers, legacy)
 	}
 	assert.True(t, autoSelectsResponsesAPI("opencode"))
 	assert.True(t, autoSelectsResponsesAPI("opencode-zen"))

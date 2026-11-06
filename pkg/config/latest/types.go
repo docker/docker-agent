@@ -1787,6 +1787,9 @@ type Remote struct {
 	TransportType string             `json:"transport_type,omitempty"`
 	Headers       map[string]string  `json:"headers,omitempty"`
 	OAuth         *RemoteOAuthConfig `json:"oauth,omitempty"`
+	// StandaloneSSE opens the streamable-HTTP standalone SSE GET stream, which
+	// carries server-initiated messages (pings, tools/list_changed).
+	StandaloneSSE bool `json:"standalone_sse,omitempty"`
 }
 
 // RemoteOAuthConfig tunes the OAuth flow for remote MCP servers. ClientID

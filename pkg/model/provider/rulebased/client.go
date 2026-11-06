@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"sync/atomic"
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -21,7 +20,6 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
-	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -39,10 +37,6 @@ type Client struct {
 	routes   []Provider
 	fallback Provider
 	matcher  *matcher
-	// lastSelectedID holds the ID of the provider selected by the most recent
-	// call. A plain atomic pointer suffices because it is the only mutable
-	// field; everything else is set once at construction and read-only after.
-	lastSelectedID atomic.Pointer[modelsdev.ID]
 }
 
 // NewClient creates a new rule-based routing client.
@@ -120,8 +114,9 @@ func filterOutMaxTokens(opts []options.Opt) []options.Opt {
 	return filtered
 }
 
-// CreateChatCompletionStream selects a provider based on input and delegates the call.
-// The selected provider's ID is recorded in LastSelectedModelID.
+// CreateChatCompletionStream selects a provider based on input and delegates
+// the call. The returned stream reports the selected provider as its
+// ServingModel.
 func (c *Client) CreateChatCompletionStream(
 	ctx context.Context,
 	messages []chat.Message,
@@ -133,7 +128,6 @@ func (c *Client) CreateChatCompletionStream(
 	}
 
 	selectedID := provider.ID()
-	c.lastSelectedID.Store(&selectedID)
 	slog.DebugContext(ctx, "Rule-based router selected model",
 		"router", c.ID().String(),
 		"selected_model", selectedID.String(),
@@ -160,17 +154,6 @@ func (c *Client) CreateChatCompletionStream(
 		serving = inner.ServingModel()
 	}
 	return &routedStream{MessageStream: stream, serving: serving}, nil
-}
-
-// LastSelectedModelID returns the ID of the provider selected by the most
-// recent CreateChatCompletionStream call. This allows callers to display
-// the YAML-configured sub-model name for rule-based routing. Accounting uses
-// the request-bound ServingModel on the returned stream instead.
-func (c *Client) LastSelectedModelID() modelsdev.ID {
-	if id := c.lastSelectedID.Load(); id != nil {
-		return *id
-	}
-	return modelsdev.ID{}
 }
 
 // selectProvider finds the best matching provider for the messages.
@@ -227,4 +210,11 @@ type routedStream struct {
 
 func (s *routedStream) ServingModel() contracts.ServingModel {
 	return s.serving
+}
+
+func (s *routedStream) ServedBy() (contracts.ServingModel, bool) {
+	if served, ok := s.MessageStream.(contracts.ServedStream); ok {
+		return served.ServedBy()
+	}
+	return contracts.ServingModel{}, false
 }

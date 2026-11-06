@@ -135,7 +135,10 @@ func (t *tracedChat) CreateChatCompletionStream(ctx context.Context, messages []
 	}
 	wrapped := genai.WrapStream(span, stream)
 	if serving, ok := stream.(ServingStream); ok {
-		return &tracedServingStream{MessageStream: wrapped, serving: serving.ServingModel()}, nil
+		return &tracedServingStream{MessageStream: wrapped, serving: serving.ServingModel(), inner: stream}, nil
+	}
+	if _, ok := stream.(ServedStream); ok {
+		return &tracedServedStream{MessageStream: wrapped, inner: stream}, nil
 	}
 	return wrapped, nil
 }
@@ -293,8 +296,20 @@ type tracedServingStream struct {
 	chat.MessageStream
 
 	serving ServingModel
+	inner   chat.MessageStream
 }
 
 func (s *tracedServingStream) ServingModel() ServingModel {
 	return s.serving
 }
+
+func (s *tracedServingStream) ServedBy() (ServingModel, bool) { return ServedBy(s.inner) }
+
+// tracedServedStream forwards ServedBy, which is only final once the stream ends.
+type tracedServedStream struct {
+	chat.MessageStream
+
+	inner chat.MessageStream
+}
+
+func (s *tracedServedStream) ServedBy() (ServingModel, bool) { return ServedBy(s.inner) }

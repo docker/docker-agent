@@ -140,14 +140,14 @@ func TestRunStream_EscapingGeneratedMediaCompletesWithoutElicitation(t *testing.
 func TestMaterializeGeneratedMedia_RedirectFailurePreservesSibling(t *testing.T) {
 	r, _, _ := newMediaTestRuntime(t)
 	sess, root := workspaceSession(t, "redirect-partial")
-	original := workspacemediaWrite
-	workspacemediaWrite = func(workspaceRoot, requested string, data []byte, mimeType string) (workspacemedia.Result, error) {
+	original := r.artifacts().Write
+	r.artifacts().Write = func(workspaceRoot, requested string, data []byte, mimeType string) (workspacemedia.Result, error) {
 		if requested == "bad.png" {
 			return workspacemedia.Result{}, os.ErrPermission
 		}
 		return original(workspaceRoot, requested, data, mimeType)
 	}
-	t.Cleanup(func() { workspacemediaWrite = original })
+	t.Cleanup(func() { r.artifacts().Write = original })
 	parts := r.materializeGeneratedMedia(t.Context(), sess, []chat.MediaDelta{
 		{Data: []byte("bad"), MimeType: "image/png", RequestedPath: "/outside/bad.png", Size: 3},
 		{Data: []byte("good"), MimeType: "image/png", RequestedPath: "nested/good.png", Size: 4},

@@ -17,6 +17,29 @@ import (
 	"github.com/docker/docker-agent/pkg/testutil/geminiintegration"
 )
 
+func TestDirectAPIKeyCatalogAlternatives(t *testing.T) {
+	t.Parallel()
+
+	cfg := &latest.ModelConfig{Provider: "google", TokenKey: "GOOGLE_API_KEY"}
+	env := environment.NewMapEnvProvider(map[string]string{
+		"GEMINI_API_KEY":            "alternative-key",
+		"GOOGLE_GENAI_USE_VERTEXAI": "true",
+	})
+	key, err := directAPIKey(t.Context(), cfg, env)
+	require.NoError(t, err)
+	assert.Equal(t, "alternative-key", key)
+
+	cfg.TokenKey = "CUSTOM_KEY"
+	_, err = directAPIKey(t.Context(), cfg, env)
+	require.ErrorContains(t, err, "CUSTOM_KEY")
+
+	cfg.TokenKey = "GOOGLE_API_KEY"
+	_, err = directAPIKey(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{
+		"GOOGLE_GENAI_USE_VERTEXAI": "true",
+	}))
+	require.Error(t, err)
+}
+
 func TestNewClient_TokenKey(t *testing.T) {
 	t.Parallel()
 	type testCase struct {

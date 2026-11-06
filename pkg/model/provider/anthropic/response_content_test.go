@@ -158,6 +158,8 @@ func TestStreamAdapter_RecordsRawContentOnMessageStop(t *testing.T) {
 			require.NotNil(t, msg.ProviderState)
 			assert.Equal(t, providerStateName, msg.ProviderState.Provider)
 			assert.Equal(t, "msg_raw", msg.ProviderState.MessageID)
+			assert.Equal(t, chat.ProviderStateVersion, msg.ProviderState.Version)
+			assert.Equal(t, "claude-test", msg.ProviderState.Model)
 			assert.NotEmpty(t, msg.ProviderState.ContentHash)
 			assert.JSONEq(t, interleavedThinkingWire, string(msg.ProviderState.Content))
 		})

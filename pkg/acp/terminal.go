@@ -26,8 +26,6 @@ type terminalManager struct {
 	unreleased map[string]error
 	uncertain  error
 	closing    bool
-	done       chan struct{}
-	closeErr   error
 	pending    sync.WaitGroup
 }
 
@@ -146,40 +144,32 @@ func (op *terminalOperation) kill(ctx context.Context) error {
 	return err
 }
 
-func (m *terminalManager) stop(ctx context.Context) {
+// retire closes admission before the session starts asynchronous cleanup.
+func (m *terminalManager) retire() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closing {
 		return
 	}
 	m.closing = true
-	m.done = make(chan struct{})
 	for op := range m.active {
 		op.cancel()
 	}
-	go func() {
-		m.pending.Wait()
-		// Operations have relinquished ownership; only this final sweep can release now.
-		m.mu.Lock()
-		ids := make([]string, 0, len(m.unreleased))
-		for id := range m.unreleased {
-			ids = append(ids, id)
-		}
-		m.mu.Unlock()
-		for _, id := range ids {
-			_ = m.release(ctx, id)
-		}
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		m.closeErr = m.failureLocked()
-		close(m.done)
-	}()
 }
 
-func (m *terminalManager) wait() error {
+// cleanup is run once by the owning session, after retirement.
+func (m *terminalManager) cleanup(ctx context.Context) error {
+	m.retire()
+	m.pending.Wait()
+	// Operations have relinquished ownership; only this final sweep can release now.
 	m.mu.Lock()
-	done := m.done
+	ids := make([]string, 0, len(m.unreleased))
+	for id := range m.unreleased {
+		ids = append(ids, id)
+	}
 	m.mu.Unlock()
-	<-done
-	return m.closeErr
+	for _, id := range ids {
+		_ = m.release(ctx, id)
+	}
+	return m.failure()
 }

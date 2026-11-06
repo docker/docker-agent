@@ -66,6 +66,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		return nil, err
 	}
 	globalOptions := options.Apply(opts...)
+	if err := validateFallbackHost(cfg, globalOptions.Gateway()); err != nil {
+		slog.ErrorContext(ctx, "Anthropic client creation failed", "error", err)
+		return nil, err
+	}
 
 	anthropicClient := &Client{
 		Config: base.Config{
@@ -229,6 +233,10 @@ func (c *Client) CreateChatCompletionStream(
 		"message_count", len(messages),
 		"tool_count", len(requestTools))
 
+	if _, ok := modelinfo.LookupClaude5(c.ModelConfig.Model); ok && providerutil.FinalAssistantPrefill(messages) {
+		return nil, fmt.Errorf("%s does not accept a final assistant message (prefill)", c.ModelConfig.Model)
+	}
+
 	// Default to 8192 if maxTokens is not set (0)
 	// This is a safe default that works for all Anthropic models
 	maxTokens := c.ModelOptions.MaxTokens()
@@ -254,15 +262,17 @@ func (c *Client) CreateChatCompletionStream(
 	//  - interleaved thinking
 	//  - structured output (requires beta header)
 	//  - task_budget (requires the task-budgets beta header)
+	//  - server-side fallbacks (only the beta types carry fallback blocks)
 	if c.interleavedThinkingEnabled() ||
 		c.ModelOptions.StructuredOutput() != nil ||
 		!c.ModelConfig.TaskBudget.IsZero() || c.thinkingBindingBehavior() != "" ||
 		c.progressUpdatesEnabled() ||
-		cacheDiagnosticsEnabled(c.ModelConfig.ProviderOpts) || cachePreservingUpdatesEnabled(c.ModelConfig.ProviderOpts) || hasNativeCompaction(messages) {
+		cacheDiagnosticsEnabled(c.ModelConfig.ProviderOpts) || cachePreservingUpdatesEnabled(c.ModelConfig.ProviderOpts) || c.hasNativeCompaction(messages) ||
+		fallbacksEnabled(c.ModelConfig.ProviderOpts) {
 		return c.createBetaStream(ctx, client, messages, requestTools, maxTokens)
 	}
 
-	requestTools = c.toolsWithSupportedDeferral(requestTools)
+	requestTools = c.toolsWithSupportedDeferral(ctx, requestTools, messages)
 	allTools, err := convertTools(requestTools)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to convert tools for Anthropic request", "error", err)
@@ -337,12 +347,7 @@ func (c *Client) CreateChatCompletionStream(
 	// Add fine-grained tool streaming beta header; the standard Messages API
 	// composes the anthropic-beta header manually (no params.Betas field).
 	betas := "fine-grained-tool-streaming-2025-05-14"
-	var requestOpts []option.RequestOption
-	if fallbacks := fallbackModels(c.ModelConfig.ProviderOpts); len(fallbacks) > 0 {
-		betas += "," + serverSideFallbackBeta
-		requestOpts = append(requestOpts, fallbacksBody(fallbacks))
-	}
-	requestOpts = append(requestOpts, option.WithHeader("anthropic-beta", betas))
+	requestOpts := []option.RequestOption{option.WithHeader("anthropic-beta", betas)}
 
 	stream := client.Messages.NewStreaming(ctx, params, requestOpts...)
 	trackUsage := c.TrackUsageEnabled()
@@ -386,6 +391,7 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 	// Track whether the last appended assistant message included tool_use blocks
 	// so we can ensure the immediate next message is the grouped tool_result user message.
 	pendingAssistantToolUse := false
+	loopStart := chat.ActiveToolLoopStart(messages)
 
 	for i := 0; i < len(messages); i++ {
 		msg := &messages[i]
@@ -416,10 +422,17 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 				pendingAssistantToolUse = len(msg.ToolCalls) > 0
 				continue
 			}
+			if blocks, ok := recoveredParams(msg); ok {
+				anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(blocks...))
+				pendingAssistantToolUse = len(msg.ToolCalls) > 0
+				continue
+			}
 			contentBlocks := make([]anthropic.ContentBlockParamUnion, 0)
 
 			// Include thinking blocks when present to preserve extended thinking context
-			if msg.ProviderState == nil && msg.ThinkingSignature != "" {
+			if include, err := c.flattenedThinking(i, loopStart, msg); err != nil {
+				return nil, err
+			} else if include {
 				contentBlocks = append(contentBlocks, anthropic.NewThinkingBlock(msg.ThinkingSignature, msg.ReasoningContent))
 			}
 
@@ -701,19 +714,46 @@ func (c *Client) supportsDeferredTools() bool {
 	return modelinfo.SupportsDeferredTools(c.ModelConfig.Provider, c.ModelConfig.Model)
 }
 
-func (c *Client) toolsWithSupportedDeferral(requestTools []tools.Tool) []tools.Tool {
-	if c.supportsDeferredTools() {
+// toolsWithSupportedDeferral sends deferred tools as regular tools when the
+// request can't load them: the model lacks tool search, or the load point is
+// an error result, where Anthropic rejects tool_reference content.
+func (c *Client) toolsWithSupportedDeferral(ctx context.Context, requestTools []tools.Tool, messages []chat.Message) []tools.Tool {
+	if !c.supportsDeferredTools() {
+		return withoutDeferral(requestTools, func(tools.Tool) bool { return true })
+	}
+	errorResults := errorToolResultIDs(messages)
+	atErrorResult := func(tool tools.Tool) bool {
+		return tool.Deferred && errorResults[tool.DeferredAtToolCallID]
+	}
+	if !slices.ContainsFunc(requestTools, atErrorResult) {
 		return requestTools
 	}
+	slog.WarnContext(ctx, "Anthropic: deferred tools are anchored at an error tool result, loading them upfront")
+	return withoutDeferral(requestTools, atErrorResult)
+}
+
+func withoutDeferral(requestTools []tools.Tool, undefer func(tools.Tool) bool) []tools.Tool {
 	result := slices.Clip(slices.Clone(requestTools))
 	if result == nil {
 		result = []tools.Tool{}
 	}
 	for i := range result {
-		result[i].Deferred = false
-		result[i].DeferredAtToolCallID = ""
+		if undefer(result[i]) {
+			result[i].Deferred = false
+			result[i].DeferredAtToolCallID = ""
+		}
 	}
 	return result
+}
+
+func errorToolResultIDs(messages []chat.Message) map[string]bool {
+	ids := make(map[string]bool)
+	for i := range messages {
+		if messages[i].Role == chat.MessageRoleTool && messages[i].IsError && messages[i].ToolCallID != "" {
+			ids[messages[i].ToolCallID] = true
+		}
+	}
+	return ids
 }
 
 func convertTools(tooles []tools.Tool) ([]anthropic.ToolUnionParam, error) {

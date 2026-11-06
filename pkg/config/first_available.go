@@ -9,7 +9,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
-	modelprovider "github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
 // ResolveFirstAvailableModels resolves reachable `first_available` models in the
@@ -228,7 +228,7 @@ func resolveCandidate(cfg *latest.Config, ref string, selectors map[string]bool)
 }
 
 func validateCandidateProvider(cfg *latest.Config, ref, provider string) error {
-	if provider == "" || modelprovider.IsKnownProvider(provider) {
+	if provider == "" || catalog.IsKnownProvider(provider) {
 		return nil
 	}
 	if _, exists := cfg.Providers[provider]; exists {

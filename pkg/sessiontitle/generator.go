@@ -38,9 +38,17 @@ const (
 	titleGenerationTimeout = 30 * time.Second
 )
 
+// Completer answers a one-shot prompt outside docker-agent's model providers,
+// such as an external coding harness CLI.
+type Completer interface {
+	Name() string
+	Complete(ctx context.Context, systemPrompt, prompt string) (string, error)
+}
+
 // Generator generates session titles using a one-shot LLM completion.
 type Generator struct {
-	models []provider.Provider
+	models     []provider.Provider
+	completers []Completer
 }
 
 // New creates a title Generator from the ordered candidate models. Nil
@@ -59,13 +67,29 @@ func New(models ...provider.Provider) *Generator {
 	return &Generator{models: usable}
 }
 
+// NewFromCompleters creates a title Generator from the ordered candidate
+// completers. Nil completers are skipped.
+func NewFromCompleters(completers ...Completer) *Generator {
+	usable := make([]Completer, 0, len(completers))
+	for _, c := range completers {
+		if c != nil {
+			usable = append(usable, c)
+		}
+	}
+	if len(usable) == 0 {
+		return nil
+	}
+	return &Generator{completers: usable}
+}
+
 // Generate produces a title for a session based on the provided user messages.
 // It performs one-shot LLM calls directly via the provider's
 // CreateChatCompletionStream, avoiding the overhead of spinning up a nested
-// runtime, and falls back to the next model on failure.
-// Returns an empty string if no models or messages are configured.
+// runtime, and falls back to the next candidate on failure; completers come
+// after models.
+// Returns an empty string if no candidates or messages are configured.
 func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages []string) (title string, err error) {
-	if g == nil || len(g.models) == 0 || len(userMessages) == 0 {
+	if g == nil || g.candidateCount() == 0 || len(userMessages) == 0 {
 		return "", nil
 	}
 
@@ -85,7 +109,7 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithAttributes(
 			attribute.String(genai.AttrConversationID, sessionID),
-			attribute.Int("cagent.sessiontitle.candidate_count", len(g.models)),
+			attribute.Int("cagent.sessiontitle.candidate_count", g.candidateCount()),
 		),
 	)
 	defer func() {
@@ -102,10 +126,8 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 
 	slog.DebugContext(ctx, "Generating title for session", "session_id", sessionID, "message_count", len(userMessages))
 
-	messages := buildPrompt(userMessages)
-
 	var errs []error
-	for idx, baseModel := range g.models {
+	for idx := range g.candidateCount() {
 		// Assign to the named-return `err` so a context cancellation
 		// is observed by the deferred span closure as a recorded
 		// error rather than silently slipping through.
@@ -113,9 +135,9 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 			return "", err
 		}
 
-		title, err := generateOnce(ctx, baseModel, messages)
+		title, name, err := g.attempt(ctx, idx, userMessages)
 		if err == nil {
-			slog.DebugContext(ctx, "Generated session title", "session_id", sessionID, "title", title, "model", baseModel.ID())
+			slog.DebugContext(ctx, "Generated session title", "session_id", sessionID, "title", title, "model", name)
 			return title, nil
 		}
 
@@ -125,12 +147,43 @@ func (g *Generator) Generate(ctx context.Context, sessionID string, userMessages
 		// which model failed and why instead of just the last one.
 		slog.DebugContext(ctx, "Title generation attempt failed",
 			"session_id", sessionID,
-			"model", baseModel.ID(),
+			"model", name,
 			"attempt", idx+1,
 			"error", err)
 	}
 
-	return "", fmt.Errorf("all %d title model(s) failed: %w", len(g.models), errors.Join(errs...))
+	return "", fmt.Errorf("all %d title model(s) failed: %w", g.candidateCount(), errors.Join(errs...))
+}
+
+func (g *Generator) candidateCount() int {
+	return len(g.models) + len(g.completers)
+}
+
+// attempt asks the idx-th candidate for a title, models first, and returns
+// the candidate's name for logs.
+func (g *Generator) attempt(ctx context.Context, idx int, userMessages []string) (title, name string, err error) {
+	if idx < len(g.models) {
+		model := g.models[idx]
+		title, err = generateOnce(ctx, model, buildPrompt(userMessages))
+		return title, model.ID().String(), err
+	}
+	c := g.completers[idx-len(g.models)]
+	title, err = completeOnce(ctx, c, buildUserPrompt(userMessages))
+	return title, c.Name(), err
+}
+
+// completeOnce is generateOnce for a Completer.
+func completeOnce(ctx context.Context, c Completer, prompt string) (string, error) {
+	raw, err := c.Complete(ctx, systemPrompt, prompt)
+	if err != nil {
+		return "", fmt.Errorf("completer %q: %w", c.Name(), err)
+	}
+
+	title := sanitizeTitle(raw)
+	if title == "" {
+		return "", fmt.Errorf("empty title output from completer %q", c.Name())
+	}
+	return title, nil
 }
 
 // generateOnce performs a single one-shot title generation call against
@@ -193,14 +246,19 @@ func drainStream(stream chat.MessageStream) (string, error) {
 // buildPrompt formats the user messages into the system+user message pair
 // sent to the model.
 func buildPrompt(userMessages []string) []chat.Message {
+	return []chat.Message{
+		{Role: chat.MessageRoleSystem, Content: systemPrompt},
+		{Role: chat.MessageRoleUser, Content: buildUserPrompt(userMessages)},
+	}
+}
+
+// buildUserPrompt formats the user messages into the title request.
+func buildUserPrompt(userMessages []string) string {
 	var formatted strings.Builder
 	for i, msg := range userMessages {
 		fmt.Fprintf(&formatted, "%d. %s\n", i+1, msg)
 	}
-	return []chat.Message{
-		{Role: chat.MessageRoleSystem, Content: systemPrompt},
-		{Role: chat.MessageRoleUser, Content: fmt.Sprintf(userPromptFormat, formatted.String())},
-	}
+	return fmt.Sprintf(userPromptFormat, formatted.String())
 }
 
 // sanitizeTitle returns the first non-empty trimmed line of title, with any

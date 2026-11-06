@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/backoff"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
@@ -251,8 +252,9 @@ func (e *fallbackExecutor) classifyAttemptError(
 // retried immediately once across the whole delegated child run.
 //
 // Retry behavior:
-// - Retryable errors (5xx, timeouts): retry the same model with exponential backoff
-// - Non-retryable errors (429, 4xx): skip to the next model in the chain immediately
+//   - Retryable errors (5xx, timeouts): retry the same model with exponential backoff
+//   - Non-retryable errors (4xx; 429 unless WithRetryOnRateLimit is set and no
+//     fallbacks exist): skip to the next model in the chain immediately
 //
 // Cooldown behavior:
 //   - When the primary fails with a non-retryable error and a fallback succeeds, the executor
@@ -309,7 +311,7 @@ func (e *fallbackExecutor) execute(
 
 		// Each model in the chain gets (1 + retries) attempts for retryable errors.
 		// Non-retryable errors (429 with fallbacks, 4xx) skip immediately to the next model.
-		// 429 without fallbacks is retried directly on the same model.
+		// 429 without fallbacks is retried on the same model only with WithRetryOnRateLimit.
 		maxAttempts := 1 + fallbackRetries
 
 		for attempt := range maxAttempts {
@@ -391,6 +393,7 @@ func (e *fallbackExecutor) execute(
 			idleTimeout := streamIdleTimeoutFor(modelEntry.provider)
 			res, err := handleStream(streamCtx, streamCancel, stream, a, attemptTools, sess, events, idleTimeout)
 			res.Serving = servingModelFrom(stream)
+			res.Dispatched = dispatchedModelFrom(stream)
 			streamCancel(nil) // always release the child context
 			if err != nil {
 				lastErr = err
@@ -431,6 +434,7 @@ func (e *fallbackExecutor) execute(
 						announceServing(stream)
 						res, err = handleStream(streamCtx, streamCancel, stream, a, attemptTools, sess, events, idleTimeout)
 						res.Serving = servingModelFrom(stream)
+						res.Dispatched = dispatchedModelFrom(stream)
 					}
 					streamCancel(nil)
 					if err == nil {
@@ -495,11 +499,11 @@ const (
 
 // handleModelError classifies err and decides what to do next:
 //   - retryDecisionReturn   — context cancelled while sleeping; caller returns ctx.Err()
-//   - retryDecisionBreak    — non-retryable error or 429 with fallbacks; skip to next model
-//   - retryDecisionContinue — retryable error or 429 without fallbacks; retry same model
+//   - retryDecisionBreak    — non-retryable error, or 429 unless opt-in retry applies; skip to next model
+//   - retryDecisionContinue — retryable error, or 429 with opt-in retry, no fallbacks; retry same model
 //
 // Side-effect: sets *primaryFailedWithNonRetryable when the primary model fails with a
-// non-retryable (or rate-limited-with-fallbacks) error.
+// non-retryable (or non-retried rate-limit) error.
 func (e *fallbackExecutor) handleModelError(
 	ctx context.Context,
 	err error,
@@ -580,8 +584,28 @@ func finalModelFor(serving *provider.ServingModel, dispatched provider.Provider)
 }
 
 func servingModelFrom(stream chat.MessageStream) *provider.ServingModel {
+	if served, ok := provider.ServedBy(stream); ok {
+		return &served
+	}
 	if stream, ok := stream.(provider.ServingStream); ok {
 		return new(stream.ServingModel())
 	}
 	return nil
+}
+
+// dispatchedModelFrom reports the endpoint a stream was sent to, ignoring a
+// server fallback's handoff; nil when the stream doesn't say.
+func dispatchedModelFrom(stream chat.MessageStream) *provider.ServingModel {
+	if stream, ok := stream.(provider.ServingStream); ok {
+		return new(stream.ServingModel())
+	}
+	return nil
+}
+
+// dispatchedConfig is the config that prices the requested model's attempt.
+func dispatchedConfig(res streamResult, fallback base.Config) base.Config {
+	if res.Dispatched != nil {
+		return res.Dispatched.Config
+	}
+	return fallback
 }

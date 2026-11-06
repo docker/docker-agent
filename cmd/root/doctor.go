@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	agentsources "github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr"
@@ -67,6 +68,8 @@ type doctorProviderStatus struct {
 	Found    bool     `json:"found"`
 	EnvVar   string   `json:"env_var,omitempty"`
 	Source   string   `json:"source,omitempty"`
+	// FoundAs is set when the value came from DOCKER_AGENT_ENV_<EnvVar>.
+	FoundAs string `json:"found_as,omitempty"`
 }
 
 type doctorDMRStatus struct {
@@ -97,6 +100,8 @@ type doctorEnvRequirement struct {
 	RequiredBy string `json:"required_by"`
 	Found      bool   `json:"found"`
 	Source     string `json:"source,omitempty"`
+	// FoundAs is set when the value came from DOCKER_AGENT_ENV_<EnvVar>.
+	FoundAs string `json:"found_as,omitempty"`
 }
 
 type doctorFlags struct {
@@ -213,12 +218,9 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 
 	// Every lookup in the report goes through the same labeled source chain so
 	// the provider table, the auto-selection result, and the agent-file checks
-	// can never disagree with each other.
-	providers := make([]environment.Provider, 0, len(sources))
-	for _, source := range sources {
-		providers = append(providers, source.Provider)
-	}
-	env := environment.NewMultiProvider(providers...)
+	// can never disagree with each other. No 1Password wrapper: doctor reports
+	// presence and must not trigger `op` prompts.
+	env := environment.NewPrefixedProvider(environment.SourceProviders(sources)...)
 
 	report := &doctorReport{ModelsGateway: f.runConfig.ModelsGateway}
 
@@ -238,8 +240,11 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 	for _, p := range config.CloudProviderEnvVars() {
 		status := doctorProviderStatus{Provider: p.Provider, EnvVars: p.EnvVars}
 		for _, name := range p.EnvVars {
-			if source, ok := findSource(ctx, sources, name); ok {
+			if source, foundAs, ok := findSource(ctx, sources, name); ok {
 				status.Found, status.EnvVar, status.Source = true, name, source
+				if foundAs != name {
+					status.FoundAs = foundAs
+				}
 				break
 			}
 		}
@@ -269,7 +274,7 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		if err != nil {
 			return nil, err
 		}
-		if agentCfg, err = config.Load(ctx, agentSource); err != nil {
+		if agentCfg, err = config.Load(ctx, agentSource, config.WithVersions(legacy.Register)); err != nil {
 			return nil, err
 		}
 	}
@@ -314,7 +319,7 @@ func (f *doctorFlags) buildReport(ctx context.Context, agentRef string) (*doctor
 		// Mirrors the run-time preflight: the Docker AI Gateway authenticates
 		// with the Docker Desktop JWT, not per-provider API keys.
 		if environment.IsDockerDomainURL(f.runConfig.ModelsGateway) {
-			if _, ok := findSource(ctx, sources, environment.DockerDesktopTokenEnv); !ok {
+			if _, _, ok := findSource(ctx, sources, environment.DockerDesktopTokenEnv); !ok {
 				autoStatus.Usable = false
 				autoIssues = append(autoIssues,
 					"the models gateway requires a Docker sign-in and no DOCKER_TOKEN was found; sign in to Docker Desktop or run `docker login` (check with `docker agent debug auth`)")
@@ -404,9 +409,12 @@ func (f *doctorFlags) checkAgentFile(ctx context.Context, ref string, cfg *lates
 	var missing []string
 	for _, name := range slices.Sorted(maps.Keys(requiredBy)) {
 		requirement := doctorEnvRequirement{EnvVar: name, RequiredBy: strings.Join(requiredBy[name], ", ")}
-		if source, ok := findSource(ctx, sources, name); ok {
+		if source, foundAs, ok := findSource(ctx, sources, name); ok {
 			requirement.Found = true
 			requirement.Source = source
+			if foundAs != name {
+				requirement.FoundAs = foundAs
+			}
 		} else {
 			missing = append(missing, name)
 		}
@@ -524,17 +532,27 @@ func providerCredentialHint(provider, envVar string) string {
 	return "set " + envVar
 }
 
-// findSource returns the name of the first secret source that supplies a
-// non-empty value for the variable. Empty values are skipped so a source that
-// merely defines the variable (e.g. an env file with `KEY=`) is not reported
-// as supplying a credential.
-func findSource(ctx context.Context, sources []environment.Source, name string) (string, bool) {
-	for _, source := range sources {
-		if value, ok := source.Provider.Get(ctx, name); ok && value != "" {
-			return source.Name, true
+// findSource returns the first secret source that supplies a non-empty value
+// for the variable, and the name it was found under (DOCKER_AGENT_ENV_<NAME>
+// shadows <NAME> across all sources, as in the run-time chain). Empty values
+// are skipped so a source that merely defines the variable (e.g. an env file
+// with `KEY=`) is not reported as supplying a credential.
+func findSource(ctx context.Context, sources []environment.Source, name string) (source, foundAs string, found bool) {
+	for _, candidate := range environment.LookupNames(name) {
+		for _, s := range sources {
+			if value, ok := s.Provider.Get(ctx, candidate); ok && value != "" {
+				return s.Name, candidate, true
+			}
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+func sourceLabel(source, foundAs string) string {
+	if foundAs == "" {
+		return source
+	}
+	return source + " (" + foundAs + ")"
 }
 
 func describeDMRStatus(status string) string {
@@ -557,7 +575,7 @@ func printDoctorReport(w io.Writer, report *doctorReport) {
 	fmt.Fprintln(tw, "  PROVIDER\tSTATUS\tCREDENTIAL\tSOURCE")
 	for _, p := range report.Providers {
 		if p.Found {
-			fmt.Fprintf(tw, "  %s\tfound\t%s\t%s\n", p.Provider, p.EnvVar, p.Source)
+			fmt.Fprintf(tw, "  %s\tfound\t%s\t%s\n", p.Provider, p.EnvVar, sourceLabel(p.Source, p.FoundAs))
 		} else {
 			fmt.Fprintf(tw, "  %s\tnot set\t%s\t-\n", p.Provider, credentialCandidates(p.EnvVars))
 		}
@@ -605,7 +623,7 @@ func printDoctorReport(w io.Writer, report *doctorReport) {
 			fmt.Fprintln(tw, "  ENV VAR\tREQUIRED BY\tSTATUS\tSOURCE")
 			for _, r := range af.Requirements {
 				if r.Found {
-					fmt.Fprintf(tw, "  %s\t%s\tfound\t%s\n", r.EnvVar, r.RequiredBy, r.Source)
+					fmt.Fprintf(tw, "  %s\t%s\tfound\t%s\n", r.EnvVar, r.RequiredBy, sourceLabel(r.Source, r.FoundAs))
 				} else {
 					fmt.Fprintf(tw, "  %s\t%s\tnot set\t-\n", r.EnvVar, r.RequiredBy)
 				}

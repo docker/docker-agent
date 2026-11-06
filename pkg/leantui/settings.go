@@ -13,8 +13,11 @@ const (
 	settingYOLO
 	settingSnapshot
 	settingCacheStablePrompts
+	settingBackgroundCompaction
+	settingBackgroundCompactionThreshold
 	settingWarnOnCacheMiss
 	settingLean
+	settingKeepAwake
 	settingSound
 	settingSoundThreshold
 	settingRenderImages
@@ -25,28 +28,36 @@ const (
 )
 
 type leanSettings struct {
-	values            [settingCount]bool
-	original          [settingCount]bool
-	soundThreshold    int
-	originalThreshold int
+	values                      [settingCount]bool
+	original                    [settingCount]bool
+	soundThreshold              int
+	originalThreshold           int
+	backgroundThreshold         int
+	originalBackgroundThreshold int
 }
 
 func (m *model) openSettings() {
 	s := userconfig.Get()
 	values := [settingCount]bool{
-		settingFullFilePreview:    m.screen.Transcript.FullFilePreview(),
-		settingSendMode:           m.sendMode == messages.SendModeQueue,
-		settingYOLO:               s.YOLO,
-		settingSnapshot:           s.SnapshotsEnabled(),
-		settingCacheStablePrompts: s.CacheStablePromptsEnabled(),
-		settingWarnOnCacheMiss:    s.CacheMissWarningsEnabled(),
-		settingLean:               s.Lean,
-		settingSound:              s.GetSound(),
-		settingRenderImages:       s.GetRenderImages(),
-		settingShowBanner:         !m.hideBanner,
-		settingSplitDiff:          m.sessionState.SplitDiffView(),
+		settingFullFilePreview:      m.screen.Transcript.FullFilePreview(),
+		settingSendMode:             m.sendMode == messages.SendModeQueue,
+		settingYOLO:                 s.YOLO,
+		settingSnapshot:             s.SnapshotsEnabled(),
+		settingCacheStablePrompts:   s.CacheStablePromptsEnabled(),
+		settingBackgroundCompaction: s.BackgroundCompaction,
+		settingWarnOnCacheMiss:      s.CacheMissWarningsEnabled(),
+		settingLean:                 s.Lean,
+		settingKeepAwake:            s.GetKeepAwake(),
+		settingSound:                s.GetSound(),
+		settingRenderImages:         s.GetRenderImages(),
+		settingShowBanner:           !m.hideBanner,
+		settingSplitDiff:            m.sessionState.SplitDiffView(),
 	}
-	m.settings = &leanSettings{values: values, original: values, soundThreshold: s.GetSoundThreshold(), originalThreshold: s.GetSoundThreshold()}
+	m.settings = &leanSettings{
+		values: values, original: values,
+		soundThreshold: s.GetSoundThreshold(), originalThreshold: s.GetSoundThreshold(),
+		backgroundThreshold: s.GetBackgroundCompactionThreshold(), originalBackgroundThreshold: s.GetBackgroundCompactionThreshold(),
+	}
 	m.screen.Settings = &ui.SettingsModel{}
 	m.screen.Autocomplete.Dismiss()
 	m.refreshSettingsRows()
@@ -58,8 +69,11 @@ func (m *model) refreshSettingsRows() {
 		"Auto-approve tools by default (next launch)",
 		"Automatic snapshots (next launch)",
 		"Cache-stable dynamic prompts",
+		"Background compaction (next conversation turn)",
+		"Background compaction threshold",
 		"Warn on cache miss",
 		"Lean UI by default (next launch)",
+		"Keep machine awake (next agent run)",
 		"Completion sound",
 		"Sound threshold",
 		"Render images (next launch if not detected)",
@@ -90,6 +104,9 @@ func (m *model) refreshSettingsRows() {
 			if !m.settings.values[settingSound] {
 				value += " (sound off)"
 			}
+		}
+		if i == settingBackgroundCompactionThreshold {
+			value = fmt.Sprintf("%d%%", m.settings.backgroundThreshold)
 		}
 		rows[i] = ui.SettingRow{Label: label, Value: value}
 	}
@@ -123,7 +140,7 @@ func (m *model) handleSettingsKey(k ui.Key) {
 			m.changeSetting(1)
 		}
 	case ui.KeyEnter:
-		if m.settings.values != m.settings.original || m.settings.soundThreshold != m.settings.originalThreshold {
+		if m.settings.values != m.settings.original || m.settings.soundThreshold != m.settings.originalThreshold || m.settings.backgroundThreshold != m.settings.originalBackgroundThreshold {
 			if err := saveLeanSettings(m.settings); err != nil {
 				m.addNotice("✗ ", "Failed to save settings: "+err.Error(), ui.StError())
 				return
@@ -149,6 +166,10 @@ func (m *model) handleSettingsKey(k ui.Key) {
 func (m *model) changeSetting(delta int) {
 	panel := m.screen.Settings
 	row := panel.Selected
+	if row == settingBackgroundCompactionThreshold {
+		m.settings.backgroundThreshold = max(1, min(99, m.settings.backgroundThreshold+delta))
+		return
+	}
 	if row == settingSoundThreshold {
 		if m.settings.values[settingSound] {
 			m.settings.soundThreshold = max(1, min(300, m.settings.soundThreshold+delta))
@@ -188,12 +209,16 @@ func saveLeanSettings(p *leanSettings) error {
 				s.YOLO = value
 			case settingSnapshot:
 				s.Snapshot = enabledPreference(value)
+			case settingBackgroundCompaction:
+				s.BackgroundCompaction = value
 			case settingCacheStablePrompts:
 				s.CacheStablePrompts = enabledPreference(value)
 			case settingWarnOnCacheMiss:
 				s.WarnOnCacheMiss = enabledPreference(value)
 			case settingLean:
 				s.Lean = value
+			case settingKeepAwake:
+				s.KeepAwake = value
 			case settingSound:
 				s.Sound = value
 			case settingRenderImages:
@@ -204,6 +229,12 @@ func saveLeanSettings(p *leanSettings) error {
 				s.LeanFullFilePreview = value
 			case settingSplitDiff:
 				s.SplitDiffView = defaultOnPreference(value)
+			}
+		}
+		if p.backgroundThreshold != p.originalBackgroundThreshold {
+			s.BackgroundCompactionThreshold = p.backgroundThreshold
+			if s.BackgroundCompactionThreshold == userconfig.DefaultBackgroundCompactionThreshold {
+				s.BackgroundCompactionThreshold = 0
 			}
 		}
 		if p.soundThreshold != p.originalThreshold {

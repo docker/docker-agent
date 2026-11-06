@@ -4,9 +4,11 @@
 // summarization strategy.
 //
 // The runtime calls into this package once it has decided that
-// compaction should run (the trigger logic in pkg/runtime/loop.go) and
-// once it has dispatched the before_compaction hook (which may supply
-// its own summary, in which case this package is bypassed entirely).
+// compaction should run (proactive and background triggers in
+// compaction_controller.go, overflow recovery in loop_steps.go, manual
+// /compact via Summarize) and once it has dispatched the
+// before_compaction hook (which may supply its own summary, in which case
+// only [ComputeFirstKeptEntry] is used and [RunLLM] is skipped).
 // The runtime owns event emission and session mutation; this package
 // produces the summary text and reports the structural facts the
 // runtime needs to apply it.
@@ -37,14 +39,14 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
 // MaxSummaryTokens caps the summary's output length when using the
-// default LLM strategy. Exposed because the runtime subtracts it from
-// the model's context budget when deciding whether the model lookup
-// produced a workable limit. For small context windows the effective
-// cap is scaled down via [summaryTokenBudget] so the summary call
+// default LLM strategy. Exposed because the runtime clones the summary
+// model with this cap when resolving its context window. For small context
+// windows the effective cap is scaled down via [summaryTokenBudget] so the summary call
 // never consumes more than a quarter of the window.
 const MaxSummaryTokens = 16_000
 
@@ -55,6 +57,10 @@ const MaxSummaryTokens = 16_000
 // scaled down via [keepTokenBudget] so the kept tail never occupies
 // more than a fifth of the window.
 const maxKeepTokens = 20_000
+
+// maxSummaryOverflowRetries bounds how many times a summary request that
+// overflowed the model's window is retried with half the conversation.
+const maxSummaryOverflowRetries = 3
 
 // summaryTokenBudget returns the output-token cap for the summary
 // call, scaled to the context window. The fixed [MaxSummaryTokens]
@@ -121,16 +127,16 @@ type LLMArgs struct {
 	// Session is the parent session whose conversation is being
 	// compacted. The strategy reads from it but does not mutate it.
 	Session *session.Session
-	// Agent is the parent agent. Its model is cloned (with structured
-	// output disabled and a hard MaxTokens cap) to perform the
-	// summarization.
+	// Agent is the parent agent. Its compaction model (or, absent one,
+	// its own model) is cloned (with structured output disabled and a
+	// hard MaxTokens cap) to perform the summarization.
 	Agent *agent.Agent
 	// AdditionalPrompt is an optional extra instruction appended to
 	// the canonical compaction prompt (e.g. "focus on code changes").
 	// Empty in the proactive/overflow paths; populated by the manual
 	// /compact command.
 	AdditionalPrompt string
-	// ContextLimit is the parent model's context-window size in
+	// ContextLimit is the summary model's context-window size in
 	// tokens, used to truncate the conversation we hand to the
 	// summarizer so the request itself doesn't blow the window.
 	// Required: zero is rejected, since the LLM strategy needs a real
@@ -141,13 +147,14 @@ type LLMArgs struct {
 	RunAgent RunAgent
 }
 
-// RunLLM is the default LLM-based summarization strategy. It clones
-// the parent agent's model with summary-friendly options, builds a
-// fresh compaction agent + child session, hands the work to
+// RunLLM is the default LLM-based summarization strategy. It clones the
+// parent agent's compaction model (or its own model) with summary-friendly
+// options, builds a fresh compaction agent + child session, hands the work to
 // [LLMArgs.RunAgent], and returns the produced summary together with
 // the kept-tail boundary the runtime needs to apply it.
 //
-// Returns (nil, nil) when the model returns an empty summary; callers
+// Returns (nil, nil) when no conversation fits the summarization budget or
+// the model returns an empty summary; callers
 // should treat that as "compaction was a no-op" and skip the apply
 // step.
 func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
@@ -164,15 +171,19 @@ func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
 			attribute.Int64("cagent.compaction.context_limit", args.ContextLimit),
 		),
 	)
+	summaryAttempts := 0
 	defer func() {
+		if summaryAttempts > 0 {
+			span.SetAttributes(attribute.Int("cagent.compaction.summary_attempts", summaryAttempts))
+		}
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 		}
 		if result != nil {
-			// `Result.InputTokens` actually holds the compaction
-			// sub-session's *output* token count (the summary length)
-			// per the field's doc — name the span attribute by what the
+			// `Result.InputTokens` holds the compaction sub-session's
+			// *output* token count (the summary length), which becomes
+			// the parent's new input tally — name the span attribute by what the
 			// value is, not by what the source struct field is named.
 			span.SetAttributes(
 				attribute.Int("cagent.compaction.summary_output_tokens", int(result.InputTokens)),
@@ -215,56 +226,86 @@ func RunLLM(ctx context.Context, args LLMArgs) (result *Result, err error) {
 
 	compactionAgent := agent.New(args.Agent.Name(), "", agent.WithModel(summaryModel))
 
-	messages, firstKeptEntry := extractMessages(args.Session, compactionAgent, args.ContextLimit, args.AdditionalPrompt)
-
-	// The first and last entries are the synthesized compaction
-	// system/user prompts; anything between them is the conversation to
-	// summarize. Running the summarizer without a conversation would
-	// make it fabricate a "there is no history" reply that then
-	// REPLACES the real session history, so treat this as a no-op
-	// instead (the session is left untouched).
-	if len(messages) <= 2 {
-		slog.WarnContext(ctx, "Compaction skipped: no conversation messages fit the summarization budget",
-			"session_id", args.Session.ID, "context_limit", args.ContextLimit)
-		return nil, nil
-	}
-
-	compactionSession := session.New(
-		session.WithTitle("Generating summary"),
-		session.WithMessages(toItems(messages)),
-		// The summarization run happens in the same workspace as the session
-		// being compacted; empty stays empty for workspace-less sessions.
-		session.WithWorkingDir(args.Session.WorkingDir),
+	// conversationBudget caps the conversation handed to the summarizer;
+	// zero means "whatever fits ContextLimit".
+	var (
+		conversationBudget int64
+		priorCost          float64
+		priorUsage         chat.Usage
+		overflowErr        error
 	)
-	seedLen := len(compactionSession.Messages)
+	for attempt := 0; ; attempt++ {
+		messages, firstKeptEntry, conversationTokens := extractMessages(args.Session, compactionAgent, args.ContextLimit, args.AdditionalPrompt, conversationBudget)
 
-	if err := args.RunAgent(ctx, compactionAgent, compactionSession); err != nil {
-		return nil, fmt.Errorf("run compaction agent: %w", err)
+		// The first and last entries are the synthesized compaction
+		// system/user prompts; anything between them is the conversation to
+		// summarize. Running the summarizer without a conversation would
+		// make it fabricate a "there is no history" reply that then
+		// REPLACES the real session history, so treat this as a no-op
+		// instead (the session is left untouched).
+		if len(messages) <= 2 {
+			if overflowErr != nil {
+				return nil, fmt.Errorf("run compaction agent: %w", overflowErr)
+			}
+			slog.WarnContext(ctx, "Compaction skipped: no conversation messages fit the summarization budget",
+				"session_id", args.Session.ID, "context_limit", args.ContextLimit, "conversation_budget", conversationBudget)
+			return nil, nil
+		}
+
+		compactionSession := session.New(
+			session.WithTitle("Generating summary"),
+			session.WithMessages(toItems(messages)),
+			// The summarization run happens in the same workspace as the session
+			// being compacted; empty stays empty for workspace-less sessions.
+			session.WithWorkingDir(args.Session.WorkingDir),
+		)
+		seedLen := len(compactionSession.Messages)
+
+		summaryAttempts++
+		if err := args.RunAgent(ctx, compactionAgent, compactionSession); err != nil {
+			// ContextLimit is often a catalogue figure; the serving route can
+			// enforce a smaller window, in which case the summary request (nearly
+			// the whole history) overflows exactly like the request it is meant
+			// to rescue. Retry with half the conversation each time.
+			if attempt >= maxSummaryOverflowRetries || modelerrors.OverflowKindOf(err) != modelerrors.OverflowKindTokens || conversationTokens < 2 {
+				return nil, fmt.Errorf("run compaction agent: %w", err)
+			}
+			_, failedUsage := runUsage(compactionSession, seedLen)
+			overflowErr = err
+			priorCost += compactionSession.TotalCost()
+			priorUsage.Add(&failedUsage)
+			conversationBudget = conversationTokens / 2
+			slog.WarnContext(ctx, "Summary request overflowed the model's context window; retrying with less conversation",
+				"session_id", args.Session.ID, "attempt", attempt+1,
+				"conversation_tokens", conversationTokens, "conversation_budget", conversationBudget)
+			continue
+		}
+
+		// Only assistant content produced by the summarization run counts as
+		// the summary. The session was seeded with the conversation being
+		// summarized, so GetLastAssistantMessageContent would fall back to the
+		// conversation's own last assistant reply when the model returned an
+		// empty response — and that bogus "summary" would then replace the
+		// real history. Scanning past the seed makes an empty model response
+		// a no-op instead.
+		summary := lastAssistantContentAfter(compactionSession, seedLen)
+		if summary == "" {
+			slog.WarnContext(ctx, "Compaction skipped: summarization model produced no summary",
+				"session_id", args.Session.ID, "model", summaryModel.ID().String())
+			return nil, nil
+		}
+
+		model, usage := runUsage(compactionSession, seedLen)
+		usage.Add(&priorUsage)
+		return &Result{
+			Summary:        summary,
+			FirstKeptEntry: firstKeptEntry,
+			Cost:           priorCost + compactionSession.TotalCost(),
+			Model:          model,
+			Usage:          usage,
+			InputTokens:    compactionSession.OutputTokens,
+		}, nil
 	}
-
-	// Only assistant content produced by the summarization run counts as
-	// the summary. The session was seeded with the conversation being
-	// summarized, so GetLastAssistantMessageContent would fall back to the
-	// conversation's own last assistant reply when the model returned an
-	// empty response — and that bogus "summary" would then replace the
-	// real history. Scanning past the seed makes an empty model response
-	// a no-op instead.
-	summary := lastAssistantContentAfter(compactionSession, seedLen)
-	if summary == "" {
-		slog.WarnContext(ctx, "Compaction skipped: summarization model produced no summary",
-			"session_id", args.Session.ID, "model", summaryModel.ID().String())
-		return nil, nil
-	}
-
-	model, usage := runUsage(compactionSession, seedLen)
-	return &Result{
-		Summary:        summary,
-		FirstKeptEntry: firstKeptEntry,
-		Cost:           compactionSession.TotalCost(),
-		Model:          model,
-		Usage:          usage,
-		InputTokens:    compactionSession.OutputTokens,
-	}, nil
 }
 
 // runUsage aggregates the model name and token usage of the messages the
@@ -314,8 +355,10 @@ func ComputeFirstKeptEntry(sess *session.Session, contextLimit int64) int {
 //
 // If the conversation tail itself doesn't fit in
 // (contextLimit − summary budget − prompt-overhead), older messages
-// are dropped from the front of the to-compact list to make room.
-func extractMessages(sess *session.Session, _ *agent.Agent, contextLimit int64, additionalPrompt string) ([]chat.Message, int) {
+// are dropped from the front of the to-compact list to make room. A
+// positive conversationBudget tightens that budget further. The third
+// return value is the estimated size of the conversation actually sent.
+func extractMessages(sess *session.Session, _ *agent.Agent, contextLimit int64, additionalPrompt string, conversationBudget int64) ([]chat.Message, int, int64) {
 	messages, sessIndices, itemCount := sess.CompactionInput()
 	messages = builtins.BoundToolMessages(messages)
 
@@ -342,16 +385,57 @@ func extractMessages(sess *session.Session, _ *agent.Agent, contextLimit int64, 
 		contextLimit-summaryTokenBudget(contextLimit)-
 			compaction.EstimateMessageTokens(&systemPromptMessage)-
 			compaction.EstimateMessageTokens(&userPromptMessage))
-	firstIndex := compaction.FirstIndexInBudget(messages, contextAvailable)
+	if conversationBudget > 0 {
+		contextAvailable = min(contextAvailable, conversationBudget)
+	}
+	// On overflow retries keep a prior summary in front: front-truncation
+	// would drop it first, losing all history it carries.
+	all := messages
+	var pinned []chat.Message
+	if conversationBudget > 0 && len(all) > 1 && isPriorSummary(sess, all[0]) {
+		pinned, messages = all[:1], all[1:]
+	}
+	// Same estimator as FirstIndexInBudget, so a retry budgeted at half of
+	// conversationTokens is guaranteed to send less.
+	estimator := compaction.NewSliceEstimator(messages)
+	pinnedTokens := estimateTokens(estimator, pinned)
+	if pinnedTokens >= contextAvailable {
+		pinned, messages, pinnedTokens = nil, all, 0
+		estimator = compaction.NewSliceEstimator(messages)
+	}
+	firstIndex := compaction.FirstIndexInBudget(messages, contextAvailable-pinnedTokens)
 	if firstIndex < len(messages) {
 		messages = messages[firstIndex:]
 	} else {
 		messages = nil
 	}
+	conversationTokens := pinnedTokens + estimateTokens(estimator, messages)
+	if len(pinned) > 0 && len(messages) == 0 {
+		slog.Warn("Summary retry budget only fits the prior summary; conversation since it is not summarized",
+			"session_id", sess.ID, "conversation_budget", conversationBudget)
+	}
 
-	messages = append([]chat.Message{systemPromptMessage}, messages...)
-	messages = append(messages, userPromptMessage)
-	return messages, firstKeptEntry
+	request := make([]chat.Message, 0, len(pinned)+len(messages)+2)
+	request = append(request, systemPromptMessage)
+	request = append(request, pinned...)
+	request = append(request, messages...)
+	request = append(request, userPromptMessage)
+	return request, firstKeptEntry, conversationTokens
+}
+
+// isPriorSummary reports whether m is the synthetic message
+// [session.Session.CompactionInput] emits for the session's last summary.
+func isPriorSummary(sess *session.Session, m chat.Message) bool {
+	last := sess.LastSummary()
+	return last != "" && m.Role == chat.MessageRoleUser && m.Content == session.SummaryMessageContent(last)
+}
+
+func estimateTokens(estimator compaction.Estimator, messages []chat.Message) int64 {
+	var n int64
+	for i := range messages {
+		n += estimator.EstimateMessageTokens(&messages[i])
+	}
+	return n
 }
 
 // firstKeptSessionIndex translates a split index produced against the

@@ -38,9 +38,8 @@ type openAIAliasProvider struct {
 	model    string // default model to send
 	greeting string // words the mock server streams back, joined into one reply
 
-	// mergesSystemMessages is true for open-model hosts (openModelHostProviders
-	// in the openai client) whose strict chat templates require the per-source
-	// system messages to be coalesced into a single leading one (issue #3344).
+	// mergesSystemMessages is true for open-model hosts whose strict chat
+	// templates require a single leading system message (issue #3344).
 	// First-party APIs with a fixed model lineup leave them untouched.
 	mergesSystemMessages bool
 
@@ -65,11 +64,45 @@ var openAIAliasProviders = []openAIAliasProvider{
 		liveOptInEnvVar:      "DOCKER_AGENT_RUN_API_ROUTE_LIVE_TEST",
 	},
 	{
+		provider:             "lunaroute",
+		envVar:               "LUNAROUTE_API_KEY",
+		testKey:              "lr_test-lunaroute-key",
+		model:                "glm-5.3",
+		greeting:             "Hello from Lunaroute",
+		mergesSystemMessages: true,
+		liveOptInEnvVar:      "DOCKER_AGENT_RUN_LUNAROUTE_LIVE_TEST",
+	},
+	{
+		provider:             "orcarouter",
+		envVar:               "ORCAROUTER_API_KEY",
+		testKey:              "test-orcarouter-key",
+		model:                "orcarouter/auto",
+		greeting:             "Hello from OrcaRouter",
+		mergesSystemMessages: true,
+		liveOptInEnvVar:      "DOCKER_AGENT_RUN_ORCAROUTER_LIVE_TEST",
+	},
+	{
 		provider:             "atlascloud",
 		envVar:               "ATLASCLOUD_API_KEY",
 		testKey:              "test-atlascloud-key",
 		model:                "qwen/qwen3.8-max",
 		greeting:             "Hello from Atlas Cloud",
+		mergesSystemMessages: true,
+	},
+	{
+		provider:             "runcrate",
+		envVar:               "RUNCRATE_API_KEY",
+		testKey:              "test-runcrate-key",
+		model:                "deepseek-ai/DeepSeek-V4.1-Flash",
+		greeting:             "Hello from Runcrate",
+		mergesSystemMessages: true,
+	},
+	{
+		provider:             "cloudgpu",
+		envVar:               "CLOUDGPU_API_KEY",
+		testKey:              "test-cloudgpu-key",
+		model:                "deepseek-v4.1-flash",
+		greeting:             "Hello from CloudGPU",
 		mergesSystemMessages: true,
 	},
 	{
@@ -311,7 +344,8 @@ func TestOpenAIAliasProvider_EndToEndRequest(t *testing.T) {
 //
 //	DEEPSEEK_API_KEY=sk-... go test -run TestOpenAIAliasProvider_LiveAPI ./pkg/model/provider/
 //
-// API Route additionally requires DOCKER_AGENT_RUN_API_ROUTE_LIVE_TEST=1.
+// API Route additionally requires DOCKER_AGENT_RUN_API_ROUTE_LIVE_TEST=1;
+// OrcaRouter and Lunaroute also require their respective DOCKER_AGENT_RUN_*_LIVE_TEST=1 opt-ins.
 func TestOpenAIAliasProvider_LiveAPI(t *testing.T) {
 	for _, p := range openAIAliasProviders {
 		t.Run(p.provider, func(t *testing.T) {
@@ -320,18 +354,26 @@ func TestOpenAIAliasProvider_LiveAPI(t *testing.T) {
 	}
 }
 
-func TestAPIRouteLiveAPIRequiresExplicitOptIn(t *testing.T) {
-	var p openAIAliasProvider
-	for _, candidate := range openAIAliasProviders {
-		if candidate.provider == "api-route" {
-			p = candidate
-			break
+func TestOpenAIAliasProvider_LiveAPIRequiresExplicitOptIn(t *testing.T) {
+	for _, p := range openAIAliasProviders {
+		if p.liveOptInEnvVar != "" {
+			t.Run(p.provider, func(t *testing.T) {
+				assertLiveAPIRequiresExplicitOptIn(t, p)
+			})
 		}
 	}
-	require.NotEmpty(t, p.liveOptInEnvVar)
+}
+
+func assertLiveAPIRequiresExplicitOptIn(t *testing.T, p openAIAliasProvider) {
+	t.Helper()
 	var requests atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	var mu sync.Mutex
+	var hosts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		mu.Lock()
+		hosts = append(hosts, r.Host)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "text/event-stream")
 		writeSSEChunk(w, map[string]any{
 			"id": "chatcmpl-test", "object": "chat.completion.chunk", "model": p.model,
@@ -356,6 +398,9 @@ func TestAPIRouteLiveAPIRequiresExplicitOptIn(t *testing.T) {
 		runOpenAIAliasProviderLiveAPI(t, p, server.URL)
 	})
 	require.Equal(t, int32(1), requests.Load())
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{strings.TrimPrefix(server.URL, "http://")}, hosts)
 }
 
 func runOpenAIAliasProviderLiveAPI(t *testing.T, p openAIAliasProvider, baseURL string) {

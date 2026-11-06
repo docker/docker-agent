@@ -1,16 +1,27 @@
-# Demonstrates Anthropic's server-side fallbacks (beta): when the primary
-# model refuses a request (e.g. Claude Fable 5's safety classifiers), the API
-# retries with the listed fallback models in order, in a single round trip.
+# Demonstrates Anthropic's server-side fallbacks (beta, Claude API only):
+# when the primary model refuses a request, the API retries on a fallback
+# model in a single round trip. `fallbacks: default` uses the model Anthropic
+# recommends for the refusal's category; a list (up to three) is tried in
+# order.
 models:
-  fable:
+  opus:
     provider: anthropic
-    model: claude-fable-5-1
+    model: claude-opus-4-8
     provider_opts:
       fallbacks:
-        - claude-opus-4-8
+        - claude-opus-4-7
+  opus-default:
+    provider: anthropic
+    model: claude-opus-4-8
+    provider_opts:
+      fallbacks: default
 
 agents:
   root:
-    model: fable
-    description: Assistant on Claude Fable 5 with a server-side fallback model
+    model: opus
+    description: Assistant on Claude Opus 4.8 with a server-side fallback model
+    instruction: You are a helpful assistant.
+  default-routing:
+    model: opus-default
+    description: Assistant whose refused requests use Anthropic's recommended fallback
     instruction: You are a helpful assistant.

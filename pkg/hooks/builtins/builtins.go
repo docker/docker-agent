@@ -42,6 +42,8 @@
 //     tool name internally; no-op for non-shell
 //     calls.
 //   - http_post              (any event)       — POST args[1] to args[0]
+//   - keep_awake             (session_start, session_end) — CLI-owned sleep
+//     inhibitor, installed via [RegisterKeepAwake] and controlled by user settings.
 //
 // Reference any of them from a hook YAML entry as
 // `{type: builtin, command: "<name>"}`. The runtime additionally

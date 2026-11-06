@@ -284,8 +284,8 @@ func TestDispatcher_RoutesToRuntimeHandler(t *testing.T) {
 	}
 	em := &captureEmitter{}
 
-	// Toolset handler must NOT be called when a runtime handler is registered
-	// for the same name.
+	// Toolset handler must NOT be called when the tool declares a
+	// RuntimeHandler.
 	tool := tools.Tool{
 		Name:           "transfer_task",
 		RuntimeHandler: "transfer_task",

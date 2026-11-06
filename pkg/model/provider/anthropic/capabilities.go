@@ -1,6 +1,10 @@
 package anthropic
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/docker/docker-agent/pkg/modelinfo"
+)
 
 // claudeModel is the family and version parsed from a Claude model id.
 type claudeModel struct {
@@ -49,22 +53,37 @@ func leadingDigits(s string) (n, width int) {
 	return n, width
 }
 
+// The predicates below answer from [modelinfo.LookupClaude5] for the Claude
+// 5.x table and fall back to name heuristics for every other ID.
+
 func usesDefaultThinking(model string) bool {
+	if _, ok := modelinfo.LookupClaude5(model); ok {
+		return true
+	}
 	m, ok := parseClaudeModel(model)
 	return ok && (m.atLeast("opus", 5, 0) || m.atLeast("sonnet", 5, 0) || m.family == "fable" || m.family == "mythos")
 }
 
 func requiresThinking(model string) bool {
+	if c5, ok := modelinfo.LookupClaude5(model); ok {
+		return !c5.CanDisableThinking
+	}
 	m, ok := parseClaudeModel(model)
 	return ok && (m.family == "fable" || m.family == "mythos")
 }
 
 func checksThinkingPrefix(model string) bool {
+	if c5, ok := modelinfo.LookupClaude5(model); ok {
+		return c5.ChecksThinkingPrefix
+	}
 	m, ok := parseClaudeModel(model)
 	return ok && (m.atLeast("fable", 5, 1) || m.atLeast("mythos", 5, 1))
 }
 
 func rejectsSampling(model string) bool {
+	if _, ok := modelinfo.LookupClaude5(model); ok {
+		return true
+	}
 	m, ok := parseClaudeModel(model)
 	return ok && (m.atLeast("opus", 4, 7) || m.atLeast("sonnet", 5, 0) || m.atLeast("haiku", 5, 0) || m.family == "fable" || m.family == "mythos")
 }

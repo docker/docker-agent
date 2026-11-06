@@ -40,7 +40,7 @@ func ConvertMultiContent(ctx context.Context, multiContent []chat.MessagePart, i
 // non-nil override declares the model's attachment capabilities explicitly,
 // bypassing the models.dev lookup (issue #2741).
 func ConvertMessages(ctx context.Context, messages []chat.Message, id modelsdev.ID, store *modelsdev.Store, override *modelinfo.CapsOverride) []openai.ChatCompletionMessageParamUnion {
-	return convertMessagesWithCaps(ctx, messages, modelinfo.ResolveCaps(ctx, store, id, override))
+	return ConvertMessagesWithTransform(ctx, messages, modelinfo.ResolveCaps(ctx, store, id, override), nil)
 }
 
 // ConvertMessagesWithCaps is the caps-injectable variant of [ConvertMessages].
@@ -48,7 +48,7 @@ func ConvertMessages(ctx context.Context, messages []chat.Message, id modelsdev.
 // Docker Model Runner), which must supply attachment capabilities explicitly
 // rather than resolving them from a store.
 func ConvertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities) []openai.ChatCompletionMessageParamUnion {
-	return convertMessagesWithCaps(ctx, messages, mc)
+	return ConvertMessagesWithTransform(ctx, messages, mc, nil)
 }
 
 func convertMultiContentWithCaps(ctx context.Context, multiContent []chat.MessagePart, mc modelinfo.ModelCapabilities) []openai.ChatCompletionContentPartUnionParam {
@@ -79,17 +79,26 @@ func convertMultiContentWithCaps(ctx context.Context, multiContent []chat.Messag
 	return parts
 }
 
-func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities) []openai.ChatCompletionMessageParamUnion {
+// ConvertMessagesWithTransform decorates each source message's converted items
+// before deferring tool attachments. The transform receives the source index,
+// keeping provider-specific metadata attached to its original content.
+func ConvertMessagesWithTransform(ctx context.Context, messages []chat.Message, mc modelinfo.ModelCapabilities, transform func(int, []openai.ChatCompletionMessageParamUnion)) []openai.ChatCompletionMessageParamUnion {
 	openaiMessages := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
+	var deferred []openai.ChatCompletionMessageParamUnion
 	for i := range messages {
 		msg := &messages[i]
 
 		// Skip invalid assistant messages upfront. This can happen if the model is out of tokens (max_tokens reached)
-		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" {
+		if msg.Role == chat.MessageRoleAssistant && len(msg.ToolCalls) == 0 && len(msg.MultiContent) == 0 && strings.TrimSpace(msg.Content) == "" && strings.TrimSpace(msg.ReasoningContent) == "" {
 			continue
+		}
+		if msg.Role != chat.MessageRoleTool {
+			openaiMessages = append(openaiMessages, deferred...)
+			deferred = nil
 		}
 
 		var openaiMessage openai.ChatCompletionMessageParamUnion
+		var attachmentParts []openai.ChatCompletionContentPartUnionParam
 
 		switch msg.Role {
 		case chat.MessageRoleSystem:
@@ -117,10 +126,12 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 
 		case chat.MessageRoleAssistant:
 			assistantParam := openai.ChatCompletionAssistantMessageParam{}
+			hasContent := false
 
 			if len(msg.MultiContent) == 0 {
 				if msg.Content != "" {
 					assistantParam.Content.OfString = param.NewOpt(msg.Content)
+					hasContent = true
 				}
 			} else {
 				// Convert multi-content for assistant messages
@@ -136,7 +147,31 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 				}
 				if len(contentParts) > 0 {
 					assistantParam.Content.OfArrayOfContentParts = contentParts
+					hasContent = true
 				}
+			}
+
+			// Replay stored reasoning so a reasoning model can see its own previous
+			// reasoning instead of re-deriving it (#4363). openai-go has no
+			// reasoning_content field on the assistant param -- it is a non-standard
+			// extension (openai/openai-go#558) -- so it can only go through
+			// SetExtraFields.
+			//
+			// Scope: this replays reasoning carried by a turn that is retained in
+			// session history, i.e. one that also has content or tool calls. A turn
+			// whose only payload is reasoning is dropped earlier, by the history
+			// filters (session.isUsageOnlyMessage and session.normalizeMessageContent
+			// both key on content and tool calls), so it never reaches this
+			// converter. Retaining such turns is a separate change with context-size
+			// consequences.
+			//
+			// Whether reasoning reaches this converter at all is the caller's policy;
+			// provider clients clear it when replay_reasoning is disabled. See
+			// [ReplayReasoning].
+			if strings.TrimSpace(msg.ReasoningContent) != "" {
+				assistantParam.SetExtraFields(map[string]any{
+					"reasoning_content": msg.ReasoningContent,
+				})
 			}
 
 			if msg.FunctionCall != nil {
@@ -160,6 +195,13 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 				assistantParam.ToolCalls = toolCalls
 			}
 
+			// content is only optional when tool_calls are present, and llama.cpp rejects
+			// an assistant message carrying neither, so a reasoning-only turn must still
+			// send content: "". See issue #4363.
+			if !hasContent && len(assistantParam.ToolCalls) == 0 {
+				assistantParam.Content.OfString = param.NewOpt("")
+			}
+
 			openaiMessage.OfAssistant = &assistantParam
 
 		case chat.MessageRoleTool:
@@ -167,7 +209,6 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 				ToolCallID: msg.ToolCallID,
 			}
 
-			var attachmentParts []openai.ChatCompletionContentPartUnionParam
 			if len(msg.MultiContent) == 0 {
 				toolParam.Content.OfString = param.NewOpt(msg.Content)
 			} else {
@@ -178,7 +219,9 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 						textParts = append(textParts, openai.ChatCompletionContentPartTextParam{Text: part.Text})
 					case chat.MessagePartTypeImageURL:
 						if part.ImageURL != nil {
-							textParts = append(textParts, openai.ChatCompletionContentPartTextParam{Text: part.ImageURL.URL})
+							attachmentParts = append(attachmentParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+								URL: part.ImageURL.URL, Detail: string(part.ImageURL.Detail),
+							}))
 						}
 					case chat.MessagePartTypeDocument:
 						if part.Document != nil {
@@ -187,31 +230,34 @@ func convertMessagesWithCaps(ctx context.Context, messages []chat.Message, mc mo
 								slog.WarnContext(ctx, "failed to convert tool result document attachment", "error", err, "doc", part.Document.Name)
 								continue
 							}
-							for _, docPart := range docParts {
-								if docPart.OfImageURL != nil {
-									textParts = append(textParts, openai.ChatCompletionContentPartTextParam{Text: docPart.OfImageURL.ImageURL.URL})
-								} else {
-									attachmentParts = append(attachmentParts, docPart)
-								}
-							}
+							attachmentParts = append(attachmentParts, docParts...)
 						}
 					}
 				}
-				toolParam.Content.OfArrayOfContentParts = textParts
+				if len(textParts) == 0 {
+					toolParam.Content.OfString = param.NewOpt(msg.Content)
+				} else {
+					toolParam.Content.OfArrayOfContentParts = textParts
+				}
 			}
 
 			openaiMessage.OfTool = &toolParam
-			openaiMessages = append(openaiMessages, openaiMessage)
-			if len(attachmentParts) > 0 {
-				label := openai.TextContentPart("Attached content from tool result:")
-				allParts := append([]openai.ChatCompletionContentPartUnionParam{label}, attachmentParts...)
-				openaiMessages = append(openaiMessages, openai.UserMessage(allParts))
-			}
-			continue
 		}
 
-		openaiMessages = append(openaiMessages, openaiMessage)
+		converted := []openai.ChatCompletionMessageParamUnion{openaiMessage}
+		if len(attachmentParts) > 0 {
+			label := openai.TextContentPart("Attached content from tool result (tool_call_id=" + msg.ToolCallID + "):")
+			allParts := append([]openai.ChatCompletionContentPartUnionParam{label}, attachmentParts...)
+			converted = append(converted, openai.UserMessage(allParts))
+		}
+		if transform != nil {
+			transform(i, converted)
+		}
+		openaiMessages = append(openaiMessages, converted[0])
+		// Every tool reply must precede the generated user attachment messages.
+		deferred = append(deferred, converted[1:]...)
 	}
+	openaiMessages = append(openaiMessages, deferred...)
 	return openaiMessages
 }
 
@@ -296,8 +342,16 @@ func MergeConsecutiveMessages(openaiMessages []openai.ChatCompletionMessageParam
 					}
 					mergedContent.WriteString(str)
 				} else if parts := getMultiContent(msgToMerge); parts != nil {
+					if mergedContent.Len() > 0 {
+						mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
+						mergedContent.Reset()
+					}
 					mergedMultiContent = append(mergedMultiContent, parts...)
 				} else if textParts := getSystemTextParts(msgToMerge); textParts != nil {
+					if mergedContent.Len() > 0 {
+						mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
+						mergedContent.Reset()
+					}
 					// Convert text parts to union params
 					for _, textPart := range textParts {
 						mergedMultiContent = append(mergedMultiContent, openai.ChatCompletionContentPartUnionParam{
@@ -308,6 +362,9 @@ func MergeConsecutiveMessages(openaiMessages []openai.ChatCompletionMessageParam
 					}
 				}
 				j++
+			}
+			if len(mergedMultiContent) > 0 && mergedContent.Len() > 0 {
+				mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
 			}
 
 			// Create the merged message

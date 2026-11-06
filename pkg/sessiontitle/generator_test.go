@@ -305,6 +305,62 @@ func TestNew_KeepsUndeclaredAndExplicitFalseCandidates(t *testing.T) {
 	assert.Zero(t, declaredFalse.calls)
 }
 
+type mockCompleter struct {
+	name   string
+	answer string
+	err    error
+	calls  int
+
+	systemPrompt, prompt string
+}
+
+func (c *mockCompleter) Name() string { return c.name }
+
+func (c *mockCompleter) Complete(_ context.Context, systemPrompt, prompt string) (string, error) {
+	c.calls++
+	c.systemPrompt, c.prompt = systemPrompt, prompt
+	return c.answer, c.err
+}
+
+func TestNewFromCompleters_NoUsableCandidates_ReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, NewFromCompleters())
+	assert.Nil(t, NewFromCompleters(nil, nil))
+}
+
+func TestGenerator_Generate_Completer(t *testing.T) {
+	t.Parallel()
+
+	c := &mockCompleter{name: "claude-code", answer: "\n  Fix the login bug  \nSecond line"}
+
+	title, err := NewFromCompleters(c).Generate(t.Context(), "sess-1", []string{"the login form rejects valid passwords"})
+	require.NoError(t, err)
+	assert.Equal(t, "Fix the login bug", title)
+	assert.Equal(t, systemPrompt, c.systemPrompt)
+	assert.Contains(t, c.prompt, "1. the login form rejects valid passwords")
+}
+
+func TestGenerator_Generate_CompleterFallsBackAndReportsEachFailure(t *testing.T) {
+	t.Parallel()
+
+	failing := &mockCompleter{name: "first", err: errors.New("exit status 1")}
+	empty := &mockCompleter{name: "second", answer: "\n\n"}
+	title, err := NewFromCompleters(failing, empty).Generate(t.Context(), "sess-1", []string{"hello"})
+	require.Error(t, err)
+	assert.Empty(t, title)
+	assert.Contains(t, err.Error(), "all 2 title model(s) failed")
+	assert.Contains(t, err.Error(), `completer "first": exit status 1`)
+	assert.Contains(t, err.Error(), `empty title output from completer "second"`)
+
+	working := &mockCompleter{name: "third", answer: "Greeting"}
+	title, err = NewFromCompleters(failing, working).Generate(t.Context(), "sess-1", []string{"hello"})
+	require.NoError(t, err)
+	assert.Equal(t, "Greeting", title)
+	assert.Equal(t, 2, failing.calls)
+	assert.Equal(t, 1, working.calls)
+}
+
 func TestGeneratorCloneFailuresExhaustCandidates(t *testing.T) {
 	t.Parallel()
 	synthetic := errors.New("synthetic rebuild failure")

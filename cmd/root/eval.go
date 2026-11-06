@@ -60,7 +60,7 @@ func newEvalCmd() *cobra.Command {
 		"docker-agent image to inject into eval containers (default: pinned to this CLI's own release version, e.g. docker/docker-agent:1.2.3; falls back to docker/docker-agent:edge for dev builds); pass \"none\" to skip injection and trust the base image's own binary")
 	cmd.Flags().StringVar(&flags.ContainerRuntime, "container-runtime", evaluation.DefaultContainerRuntime, "Container runtime executable for building and running evaluations")
 	cmd.Flags().BoolVar(&flags.KeepContainers, "keep-containers", false, "Keep containers after evaluation (don't use --rm)")
-	cmd.Flags().StringSliceVarP(&flags.EnvVars, "env", "e", nil, "Environment variables to pass to container (KEY or KEY=VALUE)")
+	cmd.Flags().StringSliceVarP(&flags.EnvVars, "env", "e", nil, "Environment variables to pass to container (KEY or KEY=VALUE; none forwarded automatically)")
 	cmd.Flags().IntVar(&flags.Repeat, "repeat", 1, "Number of times to repeat each evaluation (useful for computing baselines)")
 	cmd.Flags().StringVar(&flags.baseline, "baseline", "", "Compare against a previously saved run JSON (<output>/<run>.json) and exit non-zero on regression")
 	cmd.Flags().Float64Var(&flags.regressionTolerance, "regression-tolerance", 0, "How far an aggregate quality rate may fall before --baseline reports a regression (0-1)")

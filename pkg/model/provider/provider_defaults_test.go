@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
 // TestMergeFromProviderConfig_Fields exercises every individual field merge
@@ -279,48 +280,65 @@ func TestMergeFromProviderConfig_Fields(t *testing.T) {
 	}
 }
 
-func TestApplyAliasFallbacks(t *testing.T) {
+func TestApplyCatalogDefaults(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name         string
 		dst          *latest.ModelConfig
-		alias        Alias
+		alias        catalog.Provider
 		wantBaseURL  string
 		wantTokenKey string
 	}{
 		{
 			name:         "fills empty BaseURL and TokenKey",
 			dst:          &latest.ModelConfig{},
-			alias:        Alias{BaseURL: "https://api.example.com", TokenEnvVar: "X_KEY"},
+			alias:        catalog.Provider{BaseURL: "https://api.example.com", TokenEnvVars: []string{"X_KEY"}},
 			wantBaseURL:  "https://api.example.com",
 			wantTokenKey: "X_KEY",
 		},
 		{
+			name:  "google defers endpoint and authentication to its SDK",
+			dst:   &latest.ModelConfig{},
+			alias: catalog.Lookup("google"),
+		},
+		{
+			name:        "google preserves explicit endpoint",
+			dst:         &latest.ModelConfig{BaseURL: "https://override"},
+			alias:       catalog.Lookup("google"),
+			wantBaseURL: "https://override",
+		},
+		{
+			name:        "google preserves explicit catalog endpoint",
+			dst:         &latest.ModelConfig{BaseURL: catalog.Lookup("google").BaseURL},
+			alias:       catalog.Lookup("google"),
+			wantBaseURL: catalog.Lookup("google").BaseURL,
+		},
+		{
 			name:         "preserves explicit BaseURL",
 			dst:          &latest.ModelConfig{BaseURL: "https://override"},
-			alias:        Alias{BaseURL: "https://default", TokenEnvVar: "X_KEY"},
+			alias:        catalog.Provider{BaseURL: "https://default", TokenEnvVars: []string{"X_KEY"}},
 			wantBaseURL:  "https://override",
 			wantTokenKey: "X_KEY",
 		},
 		{
 			name:         "preserves explicit TokenKey",
 			dst:          &latest.ModelConfig{TokenKey: "OVERRIDE"},
-			alias:        Alias{BaseURL: "https://default", TokenEnvVar: "DEFAULT"},
+			alias:        catalog.Provider{BaseURL: "https://default", TokenEnvVars: []string{"DEFAULT"}},
 			wantBaseURL:  "https://default",
 			wantTokenKey: "OVERRIDE",
 		},
 		{
 			name:         "alias with only BaseURL (e.g. ollama)",
 			dst:          &latest.ModelConfig{},
-			alias:        Alias{BaseURL: "http://localhost:11434/v1"},
+			alias:        catalog.Provider{BaseURL: "http://localhost:11434/v1"},
 			wantBaseURL:  "http://localhost:11434/v1",
 			wantTokenKey: "",
 		},
 		{
 			name:         "alias with only TokenEnvVar (e.g. azure)",
 			dst:          &latest.ModelConfig{},
-			alias:        Alias{TokenEnvVar: "AZURE_API_KEY"},
+			alias:        catalog.Provider{TokenEnvVars: []string{"AZURE_API_KEY"}},
 			wantBaseURL:  "",
 			wantTokenKey: "AZURE_API_KEY",
 		},
@@ -329,7 +347,7 @@ func TestApplyAliasFallbacks(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			applyAliasFallbacks(tt.dst, tt.alias)
+			applyCatalogDefaults(tt.dst, tt.alias)
 			assert.Equal(t, tt.wantBaseURL, tt.dst.BaseURL)
 			assert.Equal(t, tt.wantTokenKey, tt.dst.TokenKey)
 		})
@@ -401,7 +419,7 @@ func TestSetProviderOptIfAbsent(t *testing.T) {
 }
 
 // TestApplyProviderDefaults_AliasFallback covers the alias-only branch
-// (no custom-provider entry) which exercises applyAliasFallbacks indirectly.
+// (no custom-provider entry) which exercises applyCatalogDefaults indirectly.
 func TestApplyProviderDefaults_AliasFallback(t *testing.T) {
 	t.Parallel()
 

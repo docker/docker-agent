@@ -121,3 +121,19 @@ func TestRecoveredSessionClearsNestedBusyWithoutStartingQueuedRun(t *testing.T) 
 	require.False(t, p.working)
 	require.Len(t, p.messageQueue, 1)
 }
+
+func TestReasoningResetRuntimeEventReachesMessageList(t *testing.T) {
+	t.Parallel()
+	p, sess := newContentTestPage(t)
+	for _, e := range []runtime.Event{
+		runtime.AgentChoiceReasoning("root", sess.ID, "DECLINED", "answer"),
+		runtime.AgentChoiceReasoningReset("root", sess.ID, "answer"),
+		runtime.AgentChoiceReasoning("root", sess.ID, "FALLBACK", "answer"),
+		runtime.StreamStopped(sess.ID, "root", "normal"),
+	} {
+		handled, _ := p.handleRuntimeEvent(e)
+		require.True(t, handled)
+	}
+	require.Equal(t, 1, p.messages.MessageTypeCount(types.MessageTypeAssistantReasoningBlock))
+	require.NotContains(t, ansi.Strip(p.messages.View()), "DECLINED")
+}

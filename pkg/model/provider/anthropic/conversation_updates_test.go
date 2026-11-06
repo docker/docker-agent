@@ -994,6 +994,7 @@ func TestValidateCachePreservingUpdates(t *testing.T) {
 		{name: "supported", cfg: latest.ModelConfig{Model: "claude-opus-5", ProviderOpts: map[string]any{cachePreservingUpdatesOpt: true}}},
 		{name: "sonnet 5", cfg: latest.ModelConfig{Model: "claude-sonnet-5", ProviderOpts: map[string]any{cachePreservingUpdatesOpt: true}}, wantErr: `"claude-sonnet-5" does not support cache_preserving_updates`},
 		{name: "unsupported fallback", cfg: latest.ModelConfig{Model: "claude-fable-5-1", ProviderOpts: map[string]any{cachePreservingUpdatesOpt: true, "fallbacks": []any{"claude-opus-4-8", "claude-sonnet-4-6"}}}, wantErr: `"claude-sonnet-4-6" does not support`},
+		{name: "default fallbacks check the primary only", cfg: latest.ModelConfig{Model: "claude-fable-5-1", ProviderOpts: map[string]any{cachePreservingUpdatesOpt: true, "fallbacks": "default"}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

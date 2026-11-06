@@ -56,10 +56,17 @@ type Message struct {
 	Content      string        `json:"content"`
 	MultiContent []MessagePart `json:"multi_content,omitempty"`
 
-	// This property is used for the "reasoning" feature supported by deepseek-reasoner
-	// which is not in the official documentation.
-	// the doc from deepseek:
-	// - https://api-docs.deepseek.com/api/create-chat-completion#responses
+	// ReasoningContent carries the reasoning text of a reasoning model. It is a
+	// generic internal field, not one wire field: it is filled from
+	// delta.reasoning_content / delta.reasoning on OpenAI-compatible streams
+	// (DeepSeek, Qwen, vLLM, llama.cpp, ...), from Anthropic and Bedrock thinking
+	// blocks, from Gemini reasoning parts, and from the OpenAI Responses API.
+	// Providers that keep reasoning signed or encrypted of their own store that
+	// alongside in ThinkingSignature or ThoughtSignature.
+	//
+	// Replaying it on later turns stops a reasoning model from re-deriving work it
+	// already produced. Chat Completions replay defaults on and can be disabled
+	// with provider_opts.replay_reasoning for incompatible endpoints.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 
 	// ThinkingSignature is used for Anthropic's extended thinking feature
@@ -191,6 +198,16 @@ type MessageDelta struct {
 	// pointer — a scalar field silently dropped every blob but the last. See
 	// [MediaDelta].
 	Media []MediaDelta `json:"media,omitempty"`
+	// ServerFallback marks the point where the provider handed the turn to
+	// a fallback model: work streamed before it is superseded.
+	ServerFallback *ServerFallback `json:"server_fallback,omitempty"`
+}
+
+// ServerFallback is a provider-side handoff from one model to the next
+// within a single response.
+type ServerFallback struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // MessageStreamChoice represents a choice in a streaming response
@@ -208,6 +225,9 @@ type MessageStreamResponse struct {
 	Model   string                `json:"model"`
 	Choices []MessageStreamChoice `json:"choices"`
 	Usage   *Usage                `json:"usage,omitempty"`
+	// UsageAttempts lists each model that ran when a server fallback spread
+	// the response across models; Usage describes only the last one.
+	UsageAttempts []UsageAttempt `json:"usage_attempts,omitempty"`
 }
 
 type Usage struct {
@@ -218,6 +238,25 @@ type Usage struct {
 	ReasoningTokens   int64 `json:"reasoning_tokens,omitempty"`
 	// ServiceTier is the actual processing tier reported by the provider, not the requested tier.
 	ServiceTier string `json:"service_tier,omitempty"`
+}
+
+// UsageAttempt is one attempt of a response a server fallback spread across
+// models, billed at that model's rates unless Billed is false.
+type UsageAttempt struct {
+	Model  string `json:"model"`
+	Billed bool   `json:"billed"`
+	// Dispatched marks the attempt of the requested model, whose reported ID
+	// may be a resolved form of the configured one.
+	Dispatched        bool  `json:"dispatched,omitempty"`
+	InputTokens       int64 `json:"input_tokens"`
+	OutputTokens      int64 `json:"output_tokens"`
+	CachedInputTokens int64 `json:"cached_input_tokens"`
+	CacheWriteTokens  int64 `json:"cached_write_tokens"`
+}
+
+// Usage returns the attempt's token counts as a Usage.
+func (a UsageAttempt) Usage() *Usage {
+	return &Usage{InputTokens: a.InputTokens, OutputTokens: a.OutputTokens, CachedInputTokens: a.CachedInputTokens, CacheWriteTokens: a.CacheWriteTokens}
 }
 
 // PromptTokens sums the disjoint fresh, cache-read, and cache-write input buckets.

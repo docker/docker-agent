@@ -145,22 +145,19 @@ func TestSubscribeToolsetEvents_FanOutAcrossStreams(t *testing.T) {
 	requireRAGProgress(t, eventsB)
 }
 
-// subscribableToolSet implements both tools-changed capabilities and counts
+// subscribableToolSet implements tools-changed subscriptions and counts
 // live subscriptions so tests can assert on leaks.
 type subscribableToolSet struct {
-	subs   tools.ChangeSubscribers
-	live   atomic.Int32
-	legacy atomic.Pointer[func()]
+	subs tools.ChangeSubscribers
+	live atomic.Int32
 }
 
 var (
 	_ tools.ToolSet          = (*subscribableToolSet)(nil)
-	_ tools.ChangeNotifier   = (*subscribableToolSet)(nil)
 	_ tools.ChangeSubscriber = (*subscribableToolSet)(nil)
 )
 
 func (s *subscribableToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
-func (s *subscribableToolSet) SetToolsChangedHandler(handler func())       { s.legacy.Store(&handler) }
 
 func (s *subscribableToolSet) SubscribeToolsChanged(handler func()) func() {
 	s.live.Add(1)
@@ -186,7 +183,7 @@ func newToolsChangedRuntime(t *testing.T, ts tools.ToolSet) *LocalRuntime {
 // TestOnToolsChanged_SubscribesPerRuntime verifies that runtimes sharing a
 // toolset each hold their own subscription: both are notified, re-
 // registering replaces only the caller's subscription, and Close releases it
-// without disturbing the other runtime. The legacy single slot stays unused.
+// without disturbing the other runtime.
 func TestOnToolsChanged_SubscribesPerRuntime(t *testing.T) {
 	t.Parallel()
 
@@ -199,7 +196,6 @@ func TestOnToolsChanged_SubscribesPerRuntime(t *testing.T) {
 	rtA.OnToolsChanged(func(Event) { callsA.Add(1) })
 	rtB.OnToolsChanged(func(Event) { callsB.Add(1) })
 	assert.Equal(t, int32(2), ts.live.Load(), "one live subscription per runtime")
-	assert.Nil(t, ts.legacy.Load(), "subscribable toolsets must not have their legacy slot overwritten")
 
 	ts.fire()
 	assert.Equal(t, int32(1), callsA.Load())
@@ -214,28 +210,4 @@ func TestOnToolsChanged_SubscribesPerRuntime(t *testing.T) {
 
 	rtB.OnToolsChanged(nil)
 	assert.Zero(t, ts.live.Load(), "nil handler unsubscribes")
-}
-
-// legacyNotifierToolSet only implements the single-slot ChangeNotifier.
-type legacyNotifierToolSet struct {
-	handler atomic.Pointer[func()]
-}
-
-func (l *legacyNotifierToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
-func (l *legacyNotifierToolSet) SetToolsChangedHandler(handler func())       { l.handler.Store(&handler) }
-
-// TestOnToolsChanged_LegacyNotifierFallback keeps toolsets that predate
-// ChangeSubscriber working through the single-slot setter.
-func TestOnToolsChanged_LegacyNotifierFallback(t *testing.T) {
-	t.Parallel()
-
-	ts := &legacyNotifierToolSet{}
-	rt := newToolsChangedRuntime(t, ts)
-
-	var calls atomic.Int32
-	rt.OnToolsChanged(func(Event) { calls.Add(1) })
-	handler := ts.handler.Load()
-	require.NotNil(t, handler)
-	(*handler)()
-	assert.Equal(t, int32(1), calls.Load())
 }

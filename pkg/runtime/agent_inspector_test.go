@@ -13,6 +13,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
@@ -134,12 +135,12 @@ func TestAgentConfigInfo_Inspector(t *testing.T) {
 	require.Len(t, got.Toolsets, 2)
 	fs := got.Toolsets[0]
 	assert.Equal(t, "filesystem", fs.Name)
-	assert.Equal(t, ToolsetStarted, fs.State)
+	assert.Equal(t, inspection.ToolsetStarted, fs.State)
 	assert.Equal(t, []string{"read_file", "write_file"}, fs.Tools, "started toolset reports live tool names")
 
 	git := got.Toolsets[1]
 	assert.Equal(t, "git", git.Name)
-	assert.Equal(t, ToolsetStopped, git.State)
+	assert.Equal(t, inspection.ToolsetStopped, git.State)
 	assert.Equal(t, []string{"status", "commit"}, git.Tools, "stopped toolset reports its declared allow-list")
 }
 
@@ -198,10 +199,10 @@ func TestAgentConfigInfo_ToolsetMidStartReportsStartingWithDeclaredTools(t *test
 		go func() { startDone <- startable.Start(ctx) }()
 		<-inner.entered
 
-		infoDone := make(chan AgentConfigInfo, 1)
+		infoDone := make(chan inspection.AgentConfigInfo, 1)
 		go func() { infoDone <- r.AgentConfigInfo(ctx, "root") }()
 
-		var got AgentConfigInfo
+		var got inspection.AgentConfigInfo
 		select {
 		case got = <-infoDone:
 		case <-time.After(5 * time.Second):
@@ -211,7 +212,7 @@ func TestAgentConfigInfo_ToolsetMidStartReportsStartingWithDeclaredTools(t *test
 		require.Len(t, got.Toolsets, 1)
 		docs := got.Toolsets[0]
 		assert.Equal(t, "docs", docs.Name)
-		assert.Equal(t, ToolsetStarted, docs.State, "the Starting lifecycle state buckets as started/serving, not stopped or error")
+		assert.Equal(t, inspection.ToolsetStarted, docs.State, "the Starting lifecycle state buckets as started/serving, not stopped or error")
 		assert.Equal(t, []string{"search_docs"}, docs.Tools, "mid-start toolset falls back to the declared allow-list, not an empty live list")
 
 		statuses := r.AgentToolsetStatuses("root")
@@ -240,7 +241,7 @@ func TestAgentConfigInfo_Degrades(t *testing.T) {
 
 	r := &LocalRuntime{team: tm, agents: newAgentRouter(tm, "root")}
 
-	assert.Equal(t, AgentConfigInfo{}, r.AgentConfigInfo(t.Context(), "missing"), "unknown agent -> zero value")
+	assert.Equal(t, inspection.AgentConfigInfo{}, r.AgentConfigInfo(t.Context(), "missing"), "unknown agent -> zero value")
 
 	got := r.AgentConfigInfo(t.Context(), "other")
 	assert.False(t, got.IsCurrent, "non-current agent")

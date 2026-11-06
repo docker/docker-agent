@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -86,11 +85,13 @@ type Model interface {
 	AddCancelledMessage() tea.Cmd
 	AddWelcomeMessage(content string) tea.Cmd
 	AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status types.ToolStatus) tea.Cmd
+	RemoveToolCalls(toolCallIDs []string)
 	AppendToolOutput(msg *runtime.ToolCallOutputEvent) tea.Cmd
 	AddToolResult(msg *runtime.ToolCallResponseEvent, status types.ToolStatus) tea.Cmd
 	AppendToLastMessage(agentName, content string) tea.Cmd
 	AppendAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd
 	AppendReasoningContent(sessionID, messageID, agentName, content string) tea.Cmd
+	ResetReasoningContent(sessionID, messageID, agentName string) tea.Cmd
 	ReconcileAssistantContent(sessionID, messageID, agentName, content string) tea.Cmd
 	AppendAssistantMediaContent(sessionID, messageID, agentName string, media []types.AssistantMedia) tea.Cmd
 	AdoptAssistantMediaIdentity(sessionID, messageID, agentName string, media []types.AssistantMedia)
@@ -614,6 +615,7 @@ func (m *model) handleMouseMotion(msg tea.MouseMotionMsg) (layout.Model, tea.Cmd
 		// Any real movement turns a multi-click into a drag: the copy now
 		// belongs to the release handler, not the debounced word copy.
 		if line != m.selection.lastClickLine || col != m.selection.lastClickCol {
+			m.selection.dragged = true
 			m.selection.pendingCopyID++
 		}
 		m.selection.update(line, col)
@@ -657,7 +659,7 @@ func (m *model) handleMouseRelease(msg tea.MouseReleaseMsg) (layout.Model, tea.C
 			line, col := m.mouseToLineCol(msg.X, msg.Y)
 
 			// If the mouse didn't move since the press, this wasn't a drag.
-			if line == m.selection.lastClickLine && col == m.selection.lastClickCol {
+			if !m.selection.dragged && line == m.selection.lastClickLine && col == m.selection.lastClickCol {
 				if m.selection.hasRange() {
 					// Word/line selection from a multi-click: keep it, the
 					// debounced copy fires.
@@ -2021,11 +2023,7 @@ func (m *model) AddOrUpdateToolCall(agentName string, toolCall tools.ToolCall, t
 	for i := range slices.Backward(m.messages) {
 		msg := m.messages[i]
 		if msg.Type == types.MessageTypeToolCall && msg.ToolCall.ID == toolCall.ID {
-			msg.ToolStatus = status
-			if status == types.ToolStatusRunning && msg.StartedAt == nil {
-				now := time.Now()
-				msg.StartedAt = &now
-			}
+			msg.SetToolStatus(status)
 			if toolCall.Function.Arguments != "" {
 				if status == types.ToolStatusPending {
 					msg.ToolCall.Function.Arguments += toolCall.Function.Arguments
@@ -2080,11 +2078,7 @@ func (m *model) AppendToolOutput(msg *runtime.ToolCallOutputEvent) tea.Cmd {
 		}
 		toolMessage.AppendToolOutput(msg.Output)
 		if toolMessage.ToolStatus == types.ToolStatusPending {
-			toolMessage.ToolStatus = types.ToolStatusRunning
-			if toolMessage.StartedAt == nil {
-				now := time.Now()
-				toolMessage.StartedAt = &now
-			}
+			toolMessage.SetToolStatus(types.ToolStatusRunning)
 		}
 		m.invalidateItem(i)
 		return nil
@@ -2112,7 +2106,7 @@ func (m *model) AddToolResult(msg *runtime.ToolCallResponseEvent, status types.T
 		toolMessage := m.messages[i]
 		if toolMessage.Type == types.MessageTypeToolCall && toolMessage.ToolCall.ID == msg.ToolCallID {
 			toolMessage.Content = strings.ReplaceAll(msg.Response, "\t", "    ")
-			toolMessage.ToolStatus = status
+			toolMessage.SetToolStatus(status)
 			toolMessage.ToolResult = msg.Result.WithoutPayload()
 			toolMessage.Images = tuiimage.FromToolResult(msg.Result)
 			m.invalidateItem(i)
@@ -2439,13 +2433,38 @@ func (m *model) removeSpinner() {
 }
 
 func (m *model) removePendingToolCallMessages() {
+	m.removeToolCallMessages(func(msg *types.Message) bool {
+		return msg.ToolStatus == types.ToolStatusPending || msg.ToolStatus == types.ToolStatusRunning
+	})
+}
+
+// RemoveToolCalls drops tool calls that will never run, whether they render
+// on their own or inside a reasoning block.
+func (m *model) RemoveToolCalls(toolCallIDs []string) {
+	for i, msg := range m.messages {
+		if msg.Type != types.MessageTypeAssistantReasoningBlock || i >= len(m.views) {
+			continue
+		}
+		if block, ok := m.views[i].(*reasoningblock.Model); ok {
+			for _, id := range toolCallIDs {
+				if block.RemoveToolCall(id) {
+					m.invalidateItem(i)
+				}
+			}
+		}
+	}
+	m.removeToolCallMessages(func(msg *types.Message) bool {
+		return slices.Contains(toolCallIDs, msg.ToolCall.ID)
+	})
+}
+
+func (m *model) removeToolCallMessages(match func(*types.Message) bool) {
 	toolCallMessages := make([]*types.Message, 0, len(m.messages))
 	views := make([]layout.Model, 0, len(m.views))
 	removedBeforeGroup := 0
 
 	for i, msg := range m.messages {
-		if msg.Type == types.MessageTypeToolCall &&
-			(msg.ToolStatus == types.ToolStatusPending || msg.ToolStatus == types.ToolStatusRunning) {
+		if msg.Type == types.MessageTypeToolCall && match(msg) {
 			if i < m.groupStart {
 				removedBeforeGroup++
 			}

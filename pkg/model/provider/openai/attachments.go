@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/openai/openai-go/v3/packages/param"
@@ -79,4 +80,63 @@ func convertDocumentToResponseInputWithCaps(ctx context.Context, doc chat.Docume
 	default:
 		return nil, fmt.Errorf("unknown attachment strategy %d", strategy)
 	}
+}
+
+// convertToolResultOutput keeps multimodal content associated with its call ID.
+func (c *Client) convertToolResultOutput(ctx context.Context, msg chat.Message) responses.ResponseInputItemFunctionCallOutputOutputUnionParam {
+	var content responses.ResponseFunctionCallOutputItemListParam
+	if msg.Content != "" && !slices.ContainsFunc(msg.MultiContent, func(p chat.MessagePart) bool { return p.Type == chat.MessagePartTypeText }) {
+		content = append(content, responses.ResponseFunctionCallOutputItemUnionParam{OfInputText: &responses.ResponseInputTextContentParam{Text: msg.Content}})
+	}
+	for _, part := range msg.MultiContent {
+		switch part.Type {
+		case chat.MessagePartTypeText:
+			content = append(content, responses.ResponseFunctionCallOutputItemUnionParam{
+				OfInputText: &responses.ResponseInputTextContentParam{Text: part.Text},
+			})
+		case chat.MessagePartTypeImageURL:
+			if part.ImageURL != nil {
+				detail := responses.ResponseInputImageContentDetailAuto
+				switch part.ImageURL.Detail {
+				case chat.ImageURLDetailHigh:
+					detail = responses.ResponseInputImageContentDetailHigh
+				case chat.ImageURLDetailLow:
+					detail = responses.ResponseInputImageContentDetailLow
+				}
+				content = append(content, responses.ResponseFunctionCallOutputItemUnionParam{
+					OfInputImage: &responses.ResponseInputImageContentParam{ImageURL: param.NewOpt(part.ImageURL.URL), Detail: detail},
+				})
+			}
+		case chat.MessagePartTypeDocument:
+			if part.Document == nil {
+				continue
+			}
+			parts, err := convertDocumentToResponseInput(ctx, *part.Document, c.ID(), c.ModelOptions.ModelsDevStore(), c.CapsOverride())
+			if err != nil {
+				slog.WarnContext(ctx, "failed to convert tool result document attachment", "error", err, "doc", part.Document.Name)
+				continue
+			}
+			for _, p := range parts {
+				switch {
+				case p.OfInputText != nil:
+					content = append(content, responses.ResponseFunctionCallOutputItemUnionParam{OfInputText: &responses.ResponseInputTextContentParam{Text: p.OfInputText.Text}})
+				case p.OfInputImage != nil:
+					content = append(content, responses.ResponseFunctionCallOutputItemUnionParam{OfInputImage: &responses.ResponseInputImageContentParam{
+						ImageURL: p.OfInputImage.ImageURL, FileID: p.OfInputImage.FileID, Detail: responses.ResponseInputImageContentDetail(p.OfInputImage.Detail),
+					}})
+				case p.OfInputFile != nil:
+					content = append(content, responses.ResponseFunctionCallOutputItemUnionParam{OfInputFile: &responses.ResponseInputFileContentParam{
+						FileData: p.OfInputFile.FileData, FileID: p.OfInputFile.FileID, FileURL: p.OfInputFile.FileURL, Filename: p.OfInputFile.Filename,
+					}})
+				}
+			}
+		}
+	}
+	if len(content) == 0 {
+		return responses.ResponseInputItemFunctionCallOutputOutputUnionParam{OfString: param.NewOpt(msg.Content)}
+	}
+	if len(content) == 1 && content[0].OfInputText != nil {
+		return responses.ResponseInputItemFunctionCallOutputOutputUnionParam{OfString: param.NewOpt(content[0].OfInputText.Text)}
+	}
+	return responses.ResponseInputItemFunctionCallOutputOutputUnionParam{OfResponseFunctionCallOutputItemArray: content}
 }

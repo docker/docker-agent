@@ -157,6 +157,69 @@ func TestHandleStream_RefusalDropsPartialToolCalls(t *testing.T) {
 	assert.True(t, res.Stopped, "a refusal ends the turn")
 }
 
+// TestHandleStream_LengthDropsTruncatedToolCalls guards the turn that ends with
+// finish_reason "length" while a tool call is still streaming. The arguments are
+// cut off mid-object, so executing the call would run a tool with half an
+// argument object; it is retracted like a refusal instead, and the turn ends as
+// length so `run --exec` reports truncation and ACP returns max_tokens (#4775).
+func TestHandleStream_LengthDropsTruncatedToolCalls(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddToolCallName("call_1", "write_file").
+		AddToolCallArguments("call_1", `{"path":"notes.txt","content":"hel`).
+		AddLengthWithUsage(10, 5).
+		Build()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess,
+		NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, chat.FinishReasonLength, res.FinishReason)
+	assert.Empty(t, res.Calls, "a cut-off tool call must not be executed")
+	assert.True(t, res.Stopped, "a truncated turn ends instead of running the partial call")
+
+	var retracted bool
+	for _, ev := range drainEvents(evCh) {
+		if _, ok := ev.(*ToolCallsRetractedEvent); ok {
+			retracted = true
+		}
+	}
+	assert.True(t, retracted, "the truncated call must be announced as retracted")
+}
+
+// TestHandleStream_LengthKeepsPartialText is the other half of the truncation
+// contract: the text streamed before the cut-off is real output and must be
+// kept, so the caller can report "truncated" with the partial answer.
+func TestHandleStream_LengthKeepsPartialText(t *testing.T) {
+	t.Parallel()
+
+	stream := newStreamBuilder().
+		AddContent("The first three steps are").
+		AddLengthWithUsage(10, 5).
+		Build()
+
+	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+	sess := session.New(session.WithUserMessage("go"))
+
+	evCh := make(chan Event, 64)
+	res, err := handleStream(
+		t.Context(), nil, stream, a, nil, sess,
+		NewChannelSink(evCh), defaultStreamIdleTimeout,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, chat.FinishReasonLength, res.FinishReason)
+	assert.Equal(t, "The first three steps are", res.Content)
+	assert.True(t, res.Stopped)
+}
+
 // TestHandleStream_ToolCallAndStopInSameChunk reproduces the LiteLLM/Gemini bug
 // where a subagent's tool call is silently dropped because the provider packs
 // the tool call and finish_reason:"stop" into the same streaming chunk. The
@@ -214,6 +277,43 @@ func TestHandleStream_ToolCallThenSeparateStop(t *testing.T) {
 	assert.JSONEq(t, `{"query":"x"}`, res.Calls[0].Function.Arguments)
 	assert.Equal(t, chat.FinishReasonToolCalls, res.FinishReason)
 	assert.False(t, res.Stopped)
+}
+
+// TestHandleStream_ContentInTerminalChunk covers providers that send the last
+// text delta in the same chunk as the terminal finish_reason: that text must
+// end up in the result and in the live events instead of being dropped.
+func TestHandleStream_ContentInTerminalChunk(t *testing.T) {
+	t.Parallel()
+
+	for _, reason := range []chat.FinishReason{chat.FinishReasonStop, chat.FinishReasonLength} {
+		t.Run(string(reason), func(t *testing.T) {
+			t.Parallel()
+
+			b := newStreamBuilder().
+				AddReasoning("thinking ").
+				AddContent("M").
+				AddContent("1-deepseek-v4")
+			b.responses = append(b.responses, chat.MessageStreamResponse{
+				Choices: []chat.MessageStreamChoice{{
+					Index:        0,
+					FinishReason: reason,
+					Delta: chat.MessageDelta{
+						Content:          ".1-flash",
+						ReasoningContent: "done",
+					},
+				}},
+				Usage: &chat.Usage{InputTokens: 1, OutputTokens: 1},
+			})
+
+			res, live := runMarkerStream(t, b.Build())
+
+			assert.Equal(t, "M1-deepseek-v4.1-flash", res.Content)
+			assert.Equal(t, res.Content, live)
+			assert.Equal(t, "thinking done", res.ReasoningContent)
+			assert.Equal(t, reason, res.FinishReason)
+			assert.True(t, res.Stopped)
+		})
+	}
 }
 
 // TestHandleStream_MediaAccumulatesAlongsideText verifies that a
@@ -438,10 +538,6 @@ func (s *stalledStream) Close() {
 	s.closeOnce.Do(func() { close(s.unblock) })
 }
 
-// TestHandleStream_IdleTimeout verifies that handleStream returns an error
-// wrapping errStreamIdle when no SSE chunk arrives within the idle window.
-// It also checks that the provided cancelStream function is called so the
-// HTTP transport can close the underlying TCP connection.
 func TestHandleStream_ProductionIdleTimeoutBoundary(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := newStalledStream()
@@ -474,6 +570,10 @@ func TestHandleStream_ProductionIdleTimeoutBoundary(t *testing.T) {
 	})
 }
 
+// TestHandleStream_IdleTimeout verifies that handleStream returns an error
+// wrapping errStreamIdle when no SSE chunk arrives within the idle window.
+// It also checks that the provided cancelStream function is called so the
+// HTTP transport can close the underlying TCP connection.
 func TestHandleStream_IdleTimeout(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := newStalledStream()
@@ -519,18 +619,21 @@ func TestHandleStream_IdleTimeoutAfterResponseStarted(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			stream := newResponseThenStalledStream(tt.response)
-			a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
-			sess := session.New(session.WithUserMessage("go"))
-			cancelStream := func(error) { stream.Close() }
+			// Synthetic time: the idle timer cannot fire before the first chunk is handled.
+			synctest.Test(t, func(t *testing.T) {
+				stream := newResponseThenStalledStream(tt.response)
+				a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
+				sess := session.New(session.WithUserMessage("go"))
+				cancelStream := func(error) { stream.Close() }
 
-			res, err := handleStream(
-				t.Context(), cancelStream, stream, a, nil, sess,
-				NewChannelSink(make(chan Event, 64)), 50*time.Millisecond,
-			)
+				res, err := handleStream(
+					t.Context(), cancelStream, stream, a, nil, sess,
+					NewChannelSink(make(chan Event, 64)), 50*time.Millisecond,
+				)
 
-			require.ErrorIs(t, err, errStreamIdle)
-			assert.True(t, res.ResponseStarted)
+				require.ErrorIs(t, err, errStreamIdle)
+				assert.True(t, res.ResponseStarted)
+			})
 		})
 	}
 }
@@ -580,8 +683,9 @@ func TestHandleStream_ContextCancellation(t *testing.T) {
 	// Cancel the context once handleStream is provably blocked in Recv.
 	go func() {
 		<-stream.recvStarted
+		// Don't Close the stream here: an EOF racing ctx.Done() lets handleStream
+		// return success. Its deferred Close unblocks the reader goroutine.
 		cancel()
-		stream.Close() // unblock the stalled Recv so the reader goroutine can exit
 	}()
 
 	evCh := make(chan Event, 64)

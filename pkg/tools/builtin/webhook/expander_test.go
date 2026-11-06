@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -54,8 +55,13 @@ func TestNilTemplateExpander(t *testing.T) {
 			tool.client = &fakeDoer{}
 			verdict, _, _ := tool.attempt(t.Context(), SendArgs{Message: "hello"})
 			assert.Equal(t, delivered, verdict)
-			assert.Panics(t, func() { tool.expander.ExpandMap(t.Context(), map[string]string{}) })
-			assert.Panics(t, func() { tool.expander.Expand(t.Context(), "${env.VALUE}", nil) })
+			t.Run("nil receiver panics", func(t *testing.T) {
+				if runtime.GOOS == "windows" {
+					t.Skip("recovered hardware faults can corrupt memory on Windows: golang/go#81238")
+				}
+				assert.Panics(t, func() { tool.expander.ExpandMap(t.Context(), map[string]string{}) })
+				assert.Panics(t, func() { tool.expander.Expand(t.Context(), "${env.VALUE}", nil) })
+			})
 		})
 	}
 }

@@ -156,23 +156,26 @@ func ParseInterruptMode(raw string) InterruptMode {
 
 // Preferences contains the persistent values managed by the settings dialog.
 type Preferences struct {
-	Layout                LayoutSettings
-	SendMode              SendMode
-	SplitDiffView         bool
-	ExpandThinking        bool
-	HideToolResults       bool
-	RenderImages          bool
-	ShowBanner            bool
-	YOLO                  bool
-	RestoreTabs           bool
-	Snapshot              bool
-	CacheStablePrompts    bool
-	WarnOnCacheMiss       bool
-	Lean                  bool
-	TabTitleMaxLength     int
-	Sound                 bool
-	SoundThreshold        int
-	InterruptConfirmation InterruptMode
+	Layout                        LayoutSettings
+	SendMode                      SendMode
+	SplitDiffView                 bool
+	ExpandThinking                bool
+	HideToolResults               bool
+	RenderImages                  bool
+	ShowBanner                    bool
+	YOLO                          bool
+	RestoreTabs                   bool
+	Snapshot                      bool
+	BackgroundCompaction          bool
+	BackgroundCompactionThreshold int
+	CacheStablePrompts            bool
+	WarnOnCacheMiss               bool
+	Lean                          bool
+	TabTitleMaxLength             int
+	KeepAwake                     bool
+	Sound                         bool
+	SoundThreshold                int
+	InterruptConfirmation         InterruptMode
 }
 
 // Settings dialog messages.

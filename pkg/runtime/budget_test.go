@@ -463,3 +463,52 @@ func TestSharedBudgetCostOverflowSaturates(t *testing.T) {
 	assert.True(t, snapshot.Unpriced)
 	assert.EqualValues(t, 2, snapshot.Tokens)
 }
+
+func TestBudgetUsageAttempts(t *testing.T) {
+	t.Parallel()
+	terminal := &chat.Usage{InputTokens: 10, OutputTokens: 1, CachedInputTokens: 5, CacheWriteTokens: 6}
+	before := *terminal
+	for _, tc := range []struct {
+		name     string
+		usage    *chat.Usage
+		attempts []chat.UsageAttempt
+		tokens   int64
+	}{
+		{name: "ordinary response", usage: terminal, tokens: 22},
+		{
+			name: "attempts replace terminal usage", usage: terminal, tokens: 91,
+			attempts: []chat.UsageAttempt{
+				{Billed: true, InputTokens: 60, OutputTokens: 2, CachedInputTokens: 3, CacheWriteTokens: 4},
+				{Billed: true, InputTokens: 10, OutputTokens: 1, CachedInputTokens: 5, CacheWriteTokens: 6},
+			},
+		},
+		{
+			name: "unbilled refusals still consume tokens", usage: terminal, tokens: 89,
+			attempts: []chat.UsageAttempt{
+				{InputTokens: 60, CachedInputTokens: 3, CacheWriteTokens: 4},
+				{Billed: true, InputTokens: 10, OutputTokens: 1, CachedInputTokens: 5, CacheWriteTokens: 6},
+			},
+		},
+		{
+			name: "attempts without terminal usage", tokens: 7,
+			attempts: []chat.UsageAttempt{{Billed: true, InputTokens: 5, OutputTokens: 2}},
+		},
+		{
+			name: "negative reports cannot offset spend", usage: terminal, tokens: 20,
+			attempts: []chat.UsageAttempt{{InputTokens: 10, OutputTokens: -20}, {InputTokens: 10}},
+		},
+		{
+			name: "attempt overflow saturates", usage: terminal, tokens: math.MaxInt64,
+			attempts: []chat.UsageAttempt{{InputTokens: math.MaxInt64}, {InputTokens: 1, OutputTokens: 1}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := newBudgetTracker(&latest.BudgetConfig{MaxTokens: tc.tokens})
+			b.record("root", budgetUsage(tc.usage, tc.attempts), new(0.0), 0)
+			assert.Equal(t, tc.tokens, b.snapshot().Tokens)
+			require.NotNil(t, b.exceeded())
+			assert.Equal(t, before, *terminal)
+		})
+	}
+}

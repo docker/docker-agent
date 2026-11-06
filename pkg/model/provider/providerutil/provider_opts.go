@@ -146,3 +146,20 @@ var samplingProviderOptsKeys = []string{
 func SamplingProviderOptsKeys() []string {
 	return slices.Clone(samplingProviderOptsKeys)
 }
+
+// HasProviderOpt reports whether key is set to a non-empty value: absent,
+// nil, "" and an empty list all count as unset.
+func HasProviderOpt(opts map[string]any, key string) bool {
+	switch v := opts[key].(type) {
+	case nil:
+		return false
+	case string:
+		return v != ""
+	case []any:
+		return len(v) > 0
+	case []string:
+		return len(v) > 0
+	default:
+		return true
+	}
+}

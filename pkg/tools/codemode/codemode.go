@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 
@@ -37,12 +36,11 @@ func Wrap(toolsets ...tools.ToolSet) tools.ToolSet {
 	for i, toolset := range toolsets {
 		managed[i] = tools.NewStartable(toolset)
 	}
-	return &codeModeTool{toolsets: toolsets, managed: managed}
+	return &codeModeTool{managed: managed}
 }
 
 type codeModeTool struct {
-	toolsets []tools.ToolSet
-	managed  []*tools.StartableToolSet
+	managed []*tools.StartableToolSet
 
 	// lifecycleMu serializes composite Start and Stop calls. Each child wrapper
 	// remains the sole owner of its child's lifecycle state.
@@ -63,10 +61,13 @@ func (c *codeModeTool) Name() string {
 	return "code_mode"
 }
 
-// Children exposes the wrapped toolsets for capability discovery. Code Mode
-// still owns their lifecycle; graph traversal does not start or stop children.
+// Children exposes the canonical lifecycle owners for graph traversal.
 func (c *codeModeTool) Children() []tools.ToolSet {
-	return slices.Clone(c.toolsets)
+	var children []tools.ToolSet
+	for _, managed := range c.managed {
+		children = append(children, managed)
+	}
+	return children
 }
 
 type RunToolsWithJavascriptArgs struct {
@@ -74,17 +75,24 @@ type RunToolsWithJavascriptArgs struct {
 }
 
 func isExcludedTool(tool tools.Tool) bool {
+	// Tools executed by a host-owned RuntimeHandler (transfer_task, handoff,
+	// run_skill, the background-agent tools, ...) have no in-process Handler,
+	// so a call from the script would fail with "not available in code mode".
+	// Keep them direct so the runtime dispatches them as before.
+	if tool.RuntimeHandler != "" {
+		return true
+	}
 	// Repeatable calls need their own dispatch results for loop detection.
 	return tool.Category == "todo" || tool.AllowRepeatedCalls
 }
 
 // availableToolsets returns children whose canonical lifecycle wrapper says
 // they can currently contribute tools.
-func (c *codeModeTool) availableToolsets() []tools.ToolSet {
-	available := make([]tools.ToolSet, 0, len(c.toolsets))
-	for i, toolset := range c.toolsets {
-		if c.managed[i].TryIsAvailable() {
-			available = append(available, toolset)
+func (c *codeModeTool) availableToolsets() []*tools.StartableToolSet {
+	var available []*tools.StartableToolSet
+	for _, managed := range c.managed {
+		if managed.TryIsAvailable() {
+			available = append(available, managed)
 		}
 	}
 	return available
@@ -151,10 +159,10 @@ func (c *codeModeTool) Start(ctx context.Context) error {
 		errs []error
 		lost bool
 	)
-	for i, managed := range c.managed {
+	for _, managed := range c.managed {
 		wasStarted := managed.TryIsStarted()
 		if err := managed.Start(ctx); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", tools.DescribeToolSet(c.toolsets[i]), err))
+			errs = append(errs, fmt.Errorf("%s: %w", tools.DescribeToolSet(managed.ToolSet), err))
 			if wasStarted || managed.ShouldReportRecoveryFailure() {
 				lost = true
 			}

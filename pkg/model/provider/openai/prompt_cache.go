@@ -23,6 +23,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 )
@@ -53,7 +54,7 @@ func sendsExplicitCacheBreakpoints(cfg *latest.ModelConfig, openAIVendor bool) b
 	if !modelinfo.OpenAISupportsExplicitPromptCache(cfg.Model) {
 		return false
 	}
-	if cfg.Provider == "openai" && cfg.BaseURL != "" {
+	if cfg.Provider == "openai" && !catalog.IsDefaultEndpoint(cfg.Provider, cfg.BaseURL) {
 		return false
 	}
 	return modelinfo.IsOpenAIVendor(cfg.Provider, cfg.Model) || openAIVendor
@@ -64,23 +65,15 @@ func sendsExplicitCacheBreakpoints(cfg *latest.ModelConfig, openAIVendor bool) b
 // each source message's CacheControl marker into an explicit breakpoint on
 // the last supported content block converted from that message.
 //
-// Conversion runs per source message (the generic converter keeps no
-// cross-message state, so the output is identical to one-shot conversion) so
-// markers stay attached to the right message even when a source message is
-// filtered out or expands into extra items (e.g. the injected attachment
-// follow-up for tool results, whose blocks still belong to the marked
-// source message's boundary).
+// Decorate before tool attachments are deferred, so their markers retain the
+// originating source boundary without interrupting a parallel tool-result batch.
 func (c *Client) convertMessagesWithCacheBreakpoints(ctx context.Context, messages []chat.Message) []openai.ChatCompletionMessageParamUnion {
 	mc := modelinfo.ResolveCaps(ctx, c.ModelOptions.ModelsDevStore(), c.ID(), c.CapsOverride())
-	out := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
-	for i := range messages {
-		converted := oaistream.ConvertMessagesWithCaps(ctx, messages[i:i+1], mc)
+	return oaistream.ConvertMessagesWithTransform(ctx, messages, mc, func(i int, converted []openai.ChatCompletionMessageParamUnion) {
 		if messages[i].CacheControl {
 			markChatCacheBreakpoint(converted)
 		}
-		out = append(out, converted...)
-	}
-	return out
+	})
 }
 
 // markChatCacheBreakpoint places an explicit breakpoint on the last supported

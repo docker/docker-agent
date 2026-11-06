@@ -14,7 +14,6 @@ package transcript
 import (
 	"slices"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -169,11 +168,7 @@ func (t *Transcript) FinalizeToolCalls(status types.ToolStatus) {
 // refreshToolView applies a status to tool message i and recreates its view.
 func (t *Transcript) refreshToolView(i int, status types.ToolStatus) tea.Cmd {
 	msg := t.msgs[i]
-	msg.ToolStatus = status
-	if status == types.ToolStatusRunning && msg.StartedAt == nil {
-		now := time.Now()
-		msg.StartedAt = &now
-	}
+	msg.SetToolStatus(status)
 	animation.StopView(t.views[i])
 	var prev *types.Message
 	if i > 0 {

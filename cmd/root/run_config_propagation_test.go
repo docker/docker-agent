@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -165,10 +166,10 @@ func createCLIRuntimeConfig(t *testing.T, f *runExecFlags, loaded *teamloader.Lo
 	return rt, sess
 }
 
-func cliRuntimeModelChoice(t *testing.T, rt runtime.Runtime, ref string) runtime.ModelChoice {
+func cliRuntimeModelChoice(t *testing.T, rt runtime.Runtime, ref string) modelcatalog.ModelChoice {
 	t.Helper()
 	choices := rt.AvailableModels(t.Context())
-	index := slices.IndexFunc(choices, func(choice runtime.ModelChoice) bool { return choice.Ref == ref })
+	index := slices.IndexFunc(choices, func(choice modelcatalog.ModelChoice) bool { return choice.Ref == ref })
 	require.NotEqual(t, -1, index, "model %q missing from CLI runtime picker", ref)
 	return choices[index]
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -22,6 +23,10 @@ import (
 )
 
 func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) string {
+	if r.isolatedWorktree {
+		events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeModelError, "external harness agents do not support isolated background worktrees"))
+		return turnEndReasonError
+	}
 	ctx, span := r.startSpan(ctx, "runtime.harness", trace.WithAttributes(traceAttributesForHarness(sess, a)...))
 	defer span.End()
 
@@ -33,6 +38,11 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "harness configuration error")
 		return turnEndReasonError
+	}
+	if eliciter, ok := provider.(harness.Eliciter); ok {
+		if elicit := r.harnessElicitation(ctx, sess, a); elicit != nil {
+			provider = eliciter.WithElicitation(elicit)
+		}
 	}
 
 	modelID := agentModelLabel(ctx, a)
@@ -235,6 +245,28 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 	span.SetAttributes(attribute.Int("content.length", len(content)))
 	span.SetStatus(codes.Ok, "harness completed")
 	return endReason
+}
+
+// harnessElicitation lets a harness ask the user mid-turn through the
+// elicitation flow, or returns nil when nobody can answer, so the harness
+// keeps asking in plain text.
+func (r *LocalRuntime) harnessElicitation(ctx context.Context, sess *session.Session, a *agent.Agent) tools.ElicitationHandler {
+	if r.nonInteractive || sess.NonInteractive {
+		return nil
+	}
+	if !tools.InteractivePromptsAllowed(ctx) && !r.hasElicitationSink() && r.directElicitation == nil {
+		return nil
+	}
+	return func(ctx context.Context, req *mcp.ElicitParams) (tools.ElicitationResult, error) {
+		return r.requestElicitation(ctx, elicitationSpec{
+			message:   req.Message,
+			mode:      req.Mode,
+			schema:    req.RequestedSchema,
+			meta:      req.Meta,
+			agentName: a.Name(),
+			sessionID: sess.ID,
+		})
+	}
 }
 
 func agentModelLabel(ctx context.Context, a *agent.Agent) string {

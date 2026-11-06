@@ -1,4 +1,3 @@
-//nolint:staticcheck // Sampling is supported during the MCP deprecation window.
 package runtime
 
 import (
@@ -9,7 +8,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -70,12 +68,6 @@ func TestCloneFailuresReachRuntimeCallers(t *testing.T) {
 			a := agent.New("root", "test", agent.WithModel(p), agent.WithCompactionModel(p))
 			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(a)), WithCurrentAgent("root"), WithModelStore(mockModelStoreWithLimit{limit: 100_000}))
 			require.NoError(t, err)
-			_, err = rt.samplingHandler(t.Context(), &mcp.CreateMessageParams{Messages: []*mcp.SamplingMessage{{Role: "user", Content: &mcp.TextContent{Text: "hello"}}}, MaxTokens: 128})
-			require.ErrorIs(t, err, tt.want)
-			require.ErrorContains(t, err, "cloning model for sampling")
-			_, err = rt.samplingWithToolsHandler(t.Context(), &mcp.CreateMessageWithToolsParams{Messages: []*mcp.SamplingMessageV2{{Role: "user", Content: []mcp.Content{&mcp.TextContent{Text: "hello"}}}}, MaxTokens: 128})
-			require.ErrorIs(t, err, tt.want)
-			require.ErrorContains(t, err, "cloning model for sampling")
 			n, err := rt.compactionContextLimitChecked(t.Context(), a)
 			assert.Zero(t, n)
 			require.ErrorIs(t, err, tt.want)
@@ -104,35 +96,6 @@ func TestCloneFailuresReachRuntimeCallers(t *testing.T) {
 			assert.Equal(t, 1, failures)
 			assert.Equal(t, before, sess.MessagesSnapshot())
 			assert.Zero(t, requests.Load(), "neither inference nor base discovery is allowed")
-		})
-	}
-}
-
-func TestSamplingCloneOptionsReachBothHandlers(t *testing.T) {
-	t.Parallel()
-	for _, withTools := range []bool{false, true} {
-		t.Run(map[bool]string{false: "without tools", true: "with tools"}[withTools], func(t *testing.T) {
-			t.Parallel()
-			clone := &mockProvider{id: "test/clone", stream: newStreamBuilder().AddContent("sampled").Build()}
-			p := &cloneFailureProvider{Config: base.Config{ModelConfig: latest.ModelConfig{Provider: "test", Model: "base"}, RebuildProvider: func(_ context.Context, cfg *latest.ModelConfig, opts ...options.Opt) (provider.Provider, error) {
-				m := options.Apply(opts...)
-				assert.Nil(t, m.StructuredOutput())
-				assert.True(t, m.NoThinking())
-				assert.Equal(t, int64(512), m.MaxTokens())
-				assert.Equal(t, int64(512), *cfg.MaxTokens)
-				return clone, nil
-			}}}
-			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "", agent.WithModel(p)))), WithCurrentAgent("root"), WithModelStore(mockModelStore{}))
-			require.NoError(t, err)
-			if withTools {
-				res, err := rt.samplingWithToolsHandler(t.Context(), &mcp.CreateMessageWithToolsParams{MaxTokens: 512, Messages: []*mcp.SamplingMessageV2{{Role: "user", Content: []mcp.Content{&mcp.TextContent{Text: "hello"}}}}})
-				require.NoError(t, err)
-				assert.Equal(t, "test/clone", res.Model)
-			} else {
-				res, err := rt.samplingHandler(t.Context(), &mcp.CreateMessageParams{MaxTokens: 512, Messages: []*mcp.SamplingMessage{{Role: "user", Content: &mcp.TextContent{Text: "hello"}}}})
-				require.NoError(t, err)
-				assert.Equal(t, "test/clone", res.Model)
-			}
 		})
 	}
 }

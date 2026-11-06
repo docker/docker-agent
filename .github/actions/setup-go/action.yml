@@ -6,7 +6,8 @@ description: >-
   setup-go's built-in cache is keyed on go.sum alone, so a single snapshot is
   shared by every job and never refreshed once saved. Caches are saved on main
   only, when the job ends and only if `save` is true; everywhere else they are
-  restore-only so PR branches never fill the cache quota.
+  restore-only so PR branches never fill the cache quota. Build-cache saves
+  discard inherited entries the job did not use.
 
 inputs:
   cache-name:
@@ -14,9 +15,13 @@ inputs:
     required: false
     default: ${{ github.job }}
   cache-version:
-    description: All-platform Go-cache invalidation version.
+    description: All-platform module-cache invalidation version.
     required: false
     default: '2'
+  build-cache-version:
+    description: Build-cache format; separate from the module-cache version.
+    required: false
+    default: '3'
   save:
     description: Save the build cache on main. Set false for jobs that share another job's namespace.
     required: false
@@ -84,16 +89,22 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.paths.outputs.build }}
-        key: gobuild-v${{ inputs.cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        key: gobuild-v${{ inputs.build-cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
         restore-keys: |
-          gobuild-v${{ inputs.cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.sum') }}-
-          gobuild-v${{ inputs.cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-
+          gobuild-v${{ inputs.build-cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.sum') }}-
+          gobuild-v${{ inputs.build-cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-
 
     - if: github.ref != 'refs/heads/main' || inputs.save != 'true'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.paths.outputs.build }}
-        key: gobuild-v${{ inputs.cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+        key: gobuild-v${{ inputs.build-cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
         restore-keys: |
-          gobuild-v${{ inputs.cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.sum') }}-
-          gobuild-v${{ inputs.cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-
+          gobuild-v${{ inputs.build-cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-${{ hashFiles('go.sum') }}-
+          gobuild-v${{ inputs.build-cache-version }}-${{ runner.os }}-${{ inputs.cache-name }}-
+
+    # Post steps run in reverse order: prune after the job, before cache/save.
+    - if: github.ref == 'refs/heads/main' && inputs.save == 'true'
+      uses: $/.github/actions/trim-go-cache
+      with:
+        path: ${{ steps.paths.outputs.build }}

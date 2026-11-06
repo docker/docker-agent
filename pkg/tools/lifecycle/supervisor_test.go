@@ -1080,8 +1080,9 @@ func TestSupervisor_CrashLoopStopIsClean(t *testing.T) {
 
 		assert.NilError(t, s.Stop(t.Context()))
 		assert.Check(t, is.Equal(s.State().State, lifecycle.StateStopped))
-		// A permanently-stopped supervisor never restarts, crash loop or not.
-		assert.Check(t, errors.Is(s.Start(t.Context()), lifecycle.ErrNotStarted))
+		assert.Check(t, s.PendingCrashLoopError() == nil)
+		// The next start reaches the connector instead of the old crash-loop gate.
+		assert.ErrorContains(t, s.Start(t.Context()), "scripted connector exhausted")
 	})
 }
 

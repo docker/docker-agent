@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,9 +25,8 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
-	"github.com/docker/docker-agent/pkg/environment"
-	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -73,7 +71,7 @@ func Evaluate(ctx context.Context, ttyOut, out io.Writer, isTTY bool, runName st
 	if err != nil {
 		return nil, fmt.Errorf("resolving agent: %w", err)
 	}
-	agentConfig, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...))
+	agentConfig, err := config.Load(ctx, agentSource, config.WithFlavors(runConfig.Flavors...), config.WithVersions(legacy.Register))
 	if err != nil {
 		return nil, fmt.Errorf("loading agent: %w", err)
 	}
@@ -154,8 +152,14 @@ func (r *Runner) Run(ctx context.Context, ttyOut, out io.Writer, isTTY bool) ([]
 	fmt.Fprintf(out, "Running %d evaluations with concurrency %d\n\n", len(evals), r.Concurrency)
 
 	progress := newProgressBar(ttyOut, out, r.TTYFd, len(evals), isTTY)
-	progress.start()
-	defer progress.stop()
+	// Keep rendering until workers finish, even after evaluation cancellation.
+	progressCtx, stopProgress := context.WithCancel(context.WithoutCancel(ctx))
+	var progressWG sync.WaitGroup
+	progressWG.Go(func() { progress.run(progressCtx) })
+	defer func() {
+		stopProgress()
+		progressWG.Wait()
+	}()
 
 	results := make([]Result, len(evals))
 
@@ -449,35 +453,7 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 		env = append(env, name+"="+value)
 	}
 
-	if r.runConfig.ModelsGateway != "" {
-		addEnv("DOCKER_AGENT_MODELS_GATEWAY", r.runConfig.ModelsGateway)
-
-		if token, ok := r.runConfig.EnvProvider().Get(ctx, environment.DockerDesktopTokenEnv); ok && token != "" {
-			addEnv(environment.DockerDesktopTokenEnv, token)
-		}
-	} else {
-		for _, name := range config.ProviderAPIKeyEnvVars() {
-			if val, ok := r.runConfig.EnvProvider().Get(ctx, name); ok && val != "" {
-				addEnv(name, val)
-			}
-		}
-	}
-
-	if r.agentConfig != nil {
-		cfg := *r.agentConfig
-		cfg.Agents = slices.Clone(cfg.Agents)
-		cfg.Providers = maps.Clone(cfg.Providers)
-		config.MergeGlobalProviders(&cfg, r.runConfig.Providers)
-		config.MergeAgentHooks(&cfg, config.MergeHooks(r.runConfig.GlobalHooks, r.runConfig.CLIHooks()))
-		evaluatorOpts := append([]options.Opt{options.WithGateway(r.runConfig.ModelsGateway)}, r.runConfig.EvaluatorOptions...)
-		for _, name := range config.RequiredEvaluatorEnvVars(&cfg, evaluatorOpts...) {
-			if val, ok := r.runConfig.EnvProvider().Get(ctx, name); ok && val != "" {
-				addEnv(name, val)
-			}
-		}
-	}
-
-	// Pass additional environment variables specified via -e flag
+	// Only forward environment variables explicitly requested via -e.
 	// Format: KEY or KEY=VALUE
 	for _, entry := range r.EnvVars {
 		if key, val, hasValue := strings.Cut(entry, "="); hasValue && key != "" {
@@ -522,7 +498,7 @@ func (r *Runner) runDockerAgentInContainer(ctx context.Context, imageID string, 
 
 	containerRuntime := r.containerRuntimeOrDefault()
 	cmd := exec.CommandContext(ctx, containerRuntime, args...)
-	cmd.Env = append(env, os.Environ()...)
+	cmd.Env = append(os.Environ(), env...)
 	// On cancellation send SIGINT instead of the default SIGKILL: the
 	// Docker-compatible CLI proxies SIGINT to the container (SIGKILL is never
 	// proxied and would leave the container running daemon-side). The
@@ -675,9 +651,7 @@ func buildTranscript(events []map[string]any) string {
 				name, _ = td["name"].(string)
 			}
 			response, _ := event["response"].(string)
-			if len(response) > 500 {
-				response = response[:500] + "...(truncated)"
-			}
+			// Keep the evidence the agent saw; truncation can turn correct answers into grading failures.
 			fmt.Fprintf(&transcript, "[Tool %q returns: %s]\n\n", name, response)
 			if output, ok := outputs[index]; ok {
 				agentName, _ := event["agent_name"].(string)

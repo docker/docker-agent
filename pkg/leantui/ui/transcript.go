@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/tools"
@@ -145,6 +146,16 @@ func (t *Transcript) AppendAssistantContent(identity streamcontent.Identity, con
 // AppendReasoningContent shares the assistant message's logical identity.
 func (t *Transcript) AppendReasoningContent(identity streamcontent.Identity, content string) {
 	t.appendPending(blockReasoning, identity, content)
+}
+
+// ResetReasoningContent removes both live reasoning and segments flushed by tools.
+func (t *Transcript) ResetReasoningContent(identity streamcontent.Identity) {
+	if t.pending != nil && t.pending.kind == blockReasoning && t.pending.identity == identity {
+		t.pending = nil
+	}
+	t.blocks = slices.DeleteFunc(t.blocks, func(b *block) bool {
+		return b.kind == blockReasoning && b.identity == identity
+	})
 }
 
 // ReconcileAssistantContent repairs incomplete live text from the saved message.

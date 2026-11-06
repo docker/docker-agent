@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/httpsec"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
@@ -190,6 +191,8 @@ func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, ag
 		Version: version.Version,
 	}, &mcp.ServerOptions{
 		KeepAlive: runConfig.MCPKeepAlive,
+		// Override the SDK default that advertises deprecated MCP logging.
+		Capabilities: &mcp.ServerCapabilities{},
 	})
 
 	agentNames := t.AgentNames()
@@ -277,6 +280,7 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 
 		rt, err := runtime.New(ctx, t,
 			runtime.WithCurrentAgent(agentName),
+			runtime.WithModelsDevFallback(embedded.Snapshot),
 			runtime.WithNonInteractive(true),
 			// See pkg/a2a/adapter.go for rationale — without this
 			// the runtime's startSpan is a no-op when cagent runs as

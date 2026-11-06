@@ -114,7 +114,7 @@ func TestAgentRouter_ResolveSession_UnknownPinFallsBackToCurrent(t *testing.T) {
 }
 
 // TestAgentRouter_ConcurrentSafety drives many concurrent Name/Set/Current
-// calls under -race to confirm the mutex contract.
+// calls under -race to confirm the atomic-pointer contract.
 func TestAgentRouter_ConcurrentSafety(t *testing.T) {
 	t.Parallel()
 

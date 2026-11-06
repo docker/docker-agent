@@ -65,6 +65,17 @@ func validateNumberFieldWithMessage(val float64, field ElicitationField) string 
 	return ""
 }
 
+// validateSelectionCount checks a multiselect against minItems and maxItems.
+func validateSelectionCount(count int, field ElicitationField) string {
+	if count < field.MinItems {
+		return fmt.Sprintf("Select at least %d", field.MinItems)
+	}
+	if field.MaxItems > 0 && count > field.MaxItems {
+		return fmt.Sprintf("Select at most %d", field.MaxItems)
+	}
+	return ""
+}
+
 // validateFormat validates a string value against a JSON Schema format.
 func validateFormat(val, format string) bool {
 	return validateFormatWithMessage(val, format) == ""

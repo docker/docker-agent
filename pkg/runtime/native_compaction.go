@@ -14,9 +14,12 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/compaction"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime/compactor"
+	"github.com/docker/docker-agent/pkg/runtime/pricing"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -123,8 +126,7 @@ func (r *LocalRuntime) compactNatively(ctx context.Context, sess *session.Sessio
 		slog.DebugContext(ctx, "Failed to get model definition for native compaction cost", "model_id", modelID.String(), "error", err)
 		m = nil
 	}
-	m = applyModelCost(m, modelID, &res.Usage, native.BaseConfig())
-	messageCost := computeMessageCost(&res.Usage, m)
+	messageCost := compactionCost(res, m, modelID, native.BaseConfig())
 	r.recordBudget(sess, a, &res.Usage, messageCost, r.now().Sub(started), events)
 	if strings.TrimSpace(res.Summary) == "" {
 		slog.WarnContext(ctx, "Compaction skipped: native compaction produced no summary",
@@ -151,6 +153,26 @@ func (r *LocalRuntime) compactNatively(ctx context.Context, sess *session.Sessio
 		}),
 		Compaction: nativeResult,
 	}, nil
+}
+
+// compactionCost prices each compaction iteration as its own request, so a
+// context tier is chosen per request and never on the summed usage. Nil when
+// any iteration cannot be priced.
+func compactionCost(res *chat.CompactionResult, m *modelsdev.Model, modelID modelsdev.ID, cfg base.Config) *float64 {
+	iterations := res.Iterations
+	if len(iterations) == 0 {
+		iterations = []chat.Usage{res.Usage}
+	}
+	var total float64
+	for i := range iterations {
+		usage := iterations[i]
+		cost := pricing.ComputeMessageCost(&usage, pricing.ApplyModelCost(m, modelID, &usage, cfg))
+		if cost == nil {
+			return nil
+		}
+		total += *cost
+	}
+	return &total
 }
 
 func hasPendingCompactionTools(sess *session.Session) bool {

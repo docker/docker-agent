@@ -254,8 +254,10 @@ func TestToolSetImplementsInterfaces(t *testing.T) {
 
 	var ts tools.ToolSet = New()
 
-	_, ok := ts.(tools.Startable)
-	require.True(t, ok, "must implement tools.Startable")
+	_, ok := ts.(tools.Runnable)
+	require.True(t, ok, "must implement tools.Runnable")
+	_, ok = ts.(tools.Startable)
+	require.False(t, ok, "Run must be owned by the caller")
 	_, ok = ts.(tools.Instructable)
 	require.True(t, ok, "must implement tools.Instructable")
 
@@ -267,7 +269,7 @@ func TestToolSetImplementsInterfaces(t *testing.T) {
 func TestStartStopIsClean(t *testing.T) {
 	t.Parallel()
 
-	ts := New()
+	ts := tools.NewStartable(New())
 	require.NoError(t, ts.Start(t.Context()))
 	require.NoError(t, ts.Stop(t.Context()))
 }

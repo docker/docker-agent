@@ -61,7 +61,7 @@ func (m *mockStrategy) CheckAndReindexChangedFiles(ctx context.Context, docPaths
 	return nil
 }
 
-func (m *mockStrategy) StartFileWatcher(ctx context.Context, docPaths []string, chunking strategy.ChunkingConfig) error {
+func (m *mockStrategy) WatchFiles(ctx context.Context, docPaths []string, chunking strategy.ChunkingConfig) error {
 	return nil
 }
 
@@ -140,7 +140,7 @@ func (s *blockingStrategy) CheckAndReindexChangedFiles(context.Context, []string
 	return nil
 }
 
-func (s *blockingStrategy) StartFileWatcher(context.Context, []string, strategy.ChunkingConfig) error {
+func (s *blockingStrategy) WatchFiles(context.Context, []string, strategy.ChunkingConfig) error {
 	return nil
 }
 

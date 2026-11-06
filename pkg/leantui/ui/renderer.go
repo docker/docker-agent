@@ -93,10 +93,11 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int, liveToolR
 		return
 	}
 
-	newViewportTop := max(0, len(newLines)-r.height)
+	// Shrinking content cannot pull immutable scrollback back into the viewport.
+	newViewportTop := max(r.viewportTop, len(newLines)-r.height)
 	// Changes to a live block may start above the viewport. Repaint only the
 	// visible rows rather than clearing terminal scrollback on every update.
-	if first < r.viewportTop || newViewportTop < r.viewportTop {
+	if first < r.viewportTop || len(newLines) < len(r.prev) {
 		if first < newViewportTop {
 			// Scrollback cannot be edited; replay the changed suffix without erasing history.
 			r.redrawSuffix(newLines, first, cursorLine, cursorCol, liveRows)
@@ -134,13 +135,6 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int, liveToolR
 	}
 	cur = renderEnd
 
-	// Clear stale trailing rows that remain when content shrank.
-	for i := len(newLines); i < len(r.prev); i++ {
-		b.WriteString("\r\n")
-		b.WriteString(seqEraseLine)
-		cur++
-	}
-
 	r.viewportTop = newViewportTop
 	cur = r.moveCursor(&b, cur, cursorLine, cursorCol)
 
@@ -156,7 +150,7 @@ func (r *Renderer) Frame(newLines []string, cursorLine, cursorCol int, liveToolR
 // erasing the terminal's scrollback. Growth scrolls the screen before painting
 // the new visible tail; shrinkage simply replaces the visible rows.
 func (r *Renderer) repaintVisible(newLines []string, cursorLine, cursorCol int) {
-	top := max(0, len(newLines)-r.height)
+	top := max(r.viewportTop, len(newLines)-r.height)
 	var b strings.Builder
 	b.WriteString(seqSyncStart)
 	b.WriteString(seqHideCursor)

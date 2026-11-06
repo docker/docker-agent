@@ -28,6 +28,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
@@ -132,12 +133,12 @@ func (f *fakeRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.L
 func (f *fakeRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
-func (f *fakeRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
-func (f *fakeRuntime) SupportsModelSwitching() bool                          { return false }
-func (f *fakeRuntime) OnToolsChanged(func(runtime.Event))                    {}
-func (f *fakeRuntime) OnBackgroundEvent(func(runtime.Event))                 {}
-func (f *fakeRuntime) OnElicitationRequest(func(runtime.Event))              {}
-func (f *fakeRuntime) Close() error                                          { return nil }
+func (f *fakeRuntime) AvailableModels(context.Context) []modelcatalog.ModelChoice { return nil }
+func (f *fakeRuntime) SupportsModelSwitching() bool                               { return false }
+func (f *fakeRuntime) OnToolsChanged(func(runtime.Event))                         {}
+func (f *fakeRuntime) OnBackgroundEvent(func(runtime.Event))                      {}
+func (f *fakeRuntime) OnElicitationRequest(func(runtime.Event))                   {}
+func (f *fakeRuntime) Close() error                                               { return nil }
 
 type blockingPromptRuntime struct {
 	fakeRuntime

@@ -17,8 +17,10 @@ import (
 	"github.com/docker/docker-agent/pkg/fake"
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -52,7 +54,7 @@ func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, p
 	isolateState(t)
 
 	runConfig := startReplayProxy(t, proxyOpts)
-	modelsStore := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	modelsStore := modelsdev.NewDatabaseStore(embedded.Snapshot())
 	runConfig.ModelsDevStoreOverride = modelsStore
 
 	ctx := t.Context()
@@ -73,7 +75,7 @@ func newTUIWithProxyOptions(t *testing.T, agentFile string, width, height int, p
 	rt, err := runtime.New(ctx, team,
 		runtime.WithSessionStore(store),
 		runtime.WithCurrentAgent(agent.Name()),
-		runtime.WithModelSwitcherConfig(&runtime.ModelSwitcherConfig{
+		runtime.WithModelSwitcherConfig(&modelcatalog.Config{
 			Models:             loadResult.Models,
 			Providers:          loadResult.Providers,
 			ModelsGateway:      runConfig.ModelsGateway,

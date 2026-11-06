@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/embeddedchat"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
@@ -19,7 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/modelsdev"
-	"github.com/docker/docker-agent/pkg/rag"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -48,7 +49,7 @@ type sessionOptions struct {
 	History []chat.Message
 	// Documents are the session's documents, keyed by logical path: the
 	// only thing `type: rag` toolsets can index. Nothing is read from disk.
-	Documents rag.Documents
+	Documents map[string][]byte
 }
 
 // host holds the registries every session is built from. The browser entry
@@ -58,7 +59,7 @@ type sessionOptions struct {
 // rag toolset sees the session's documents.
 type host struct {
 	providers   *provider.Registry
-	newToolsets func(documents rag.Documents) teamloader.ToolsetRegistry
+	newToolsets func(documents map[string][]byte) teamloader.ToolsetRegistry
 }
 
 var browserHost = host{providers: demoProviders, newToolsets: browserToolsets}
@@ -82,7 +83,7 @@ var browserBuiltinHooks = []string{
 // modelsStore is the models.dev catalog baked into the binary: the browser
 // has no cache directory to refresh a live copy into.
 var modelsStore = sync.OnceValue(func() *modelsdev.Store {
-	return modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	return modelsdev.NewDatabaseStore(embedded.Snapshot())
 })
 
 // browserWorkingDir is the session's working directory. There is no
@@ -112,7 +113,7 @@ func lifetimeContext(parent context.Context, toolProxy string) (context.Context,
 // skipped with a warning at load time.
 func (h host) newSession(ctx context.Context, opts sessionOptions) (*embeddedchat.Session, error) {
 	source := config.NewBytesSource("config.yaml", []byte(opts.YAML))
-	cfg, err := config.Load(ctx, source)
+	cfg, err := config.Load(ctx, source, config.WithVersions(legacy.Register))
 	if err != nil {
 		return nil, err
 	}
@@ -156,6 +157,7 @@ func (h host) newSession(ctx context.Context, opts sessionOptions) (*embeddedcha
 		RuntimeConfig: runConfig,
 		LoadOpts: []teamloader.Opt{
 			teamloader.WithProviderRegistry(h.providers),
+			teamloader.WithConfigVersions(legacy.Register),
 			teamloader.WithToolsetRegistry(h.newToolsets(opts.Documents)),
 			// ${...} in instructions is plain JavaScript over the session
 			// env: goja has no I/O, so nothing reaches the host.
@@ -179,7 +181,7 @@ func (h host) newSession(ctx context.Context, opts sessionOptions) (*embeddedcha
 // toolset declarations that point at them (see checkBrowserToolset). The
 // loader only warns when a toolset fails to build, so this is what turns
 // those into a createSession rejection.
-func checkBrowserConfig(ctx context.Context, cfg *latest.Config, agentName string, env environment.Provider, documents rag.Documents) error {
+func checkBrowserConfig(ctx context.Context, cfg *latest.Config, agentName string, env environment.Provider, documents map[string][]byte) error {
 	if agentName != "" && !slices.ContainsFunc(cfg.Agents, func(a latest.AgentConfig) bool { return a.Name == agentName }) {
 		return fmt.Errorf("agent %q not found", agentName)
 	}

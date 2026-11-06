@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/modelpicker"
 	"github.com/docker/docker-agent/pkg/programstatus"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
@@ -572,7 +573,7 @@ func (m *model) loadSessionTranscript(sess *session.Session) {
 	}
 }
 
-func modelCommands(models []runtime.ModelChoice) []ui.Command {
+func modelCommands(models []modelcatalog.ModelChoice) []ui.Command {
 	cmds := make([]ui.Command, 0, len(models))
 	for _, choice := range models {
 		desc := choice.Name

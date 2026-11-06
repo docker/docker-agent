@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -80,14 +81,14 @@ func (stubRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.Leve
 func (stubRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
-func (stubRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
-func (stubRuntime) SupportsModelSwitching() bool                          { return false }
-func (stubRuntime) OnToolsChanged(func(runtime.Event))                    {}
-func (stubRuntime) OnBackgroundEvent(func(runtime.Event))                 {}
-func (stubRuntime) OnElicitationRequest(func(runtime.Event))              {}
-func (stubRuntime) QueueStatus() runtime.QueueStatus                      { return runtime.QueueStatus{} }
-func (stubRuntime) TogglePause(context.Context) (bool, error)             { return false, nil }
-func (stubRuntime) Close() error                                          { return nil }
+func (stubRuntime) AvailableModels(context.Context) []modelcatalog.ModelChoice { return nil }
+func (stubRuntime) SupportsModelSwitching() bool                               { return false }
+func (stubRuntime) OnToolsChanged(func(runtime.Event))                         {}
+func (stubRuntime) OnBackgroundEvent(func(runtime.Event))                      {}
+func (stubRuntime) OnElicitationRequest(func(runtime.Event))                   {}
+func (stubRuntime) QueueStatus() runtime.QueueStatus                           { return runtime.QueueStatus{} }
+func (stubRuntime) TogglePause(context.Context) (bool, error)                  { return false, nil }
+func (stubRuntime) Close() error                                               { return nil }
 
 var _ runtime.Runtime = stubRuntime{}
 

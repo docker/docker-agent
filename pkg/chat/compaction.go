@@ -34,6 +34,9 @@ type CompactionResult struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model,omitempty"`
 	Usage    Usage  `json:"usage"`
+	// Iterations holds each request the compaction made, when the provider
+	// reports them: each is priced on its own, while Usage is their total.
+	Iterations []Usage `json:"iterations,omitempty"`
 }
 
 // Clone returns an independent copy of r (nil-safe).
@@ -50,6 +53,7 @@ func (r *CompactionResult) Clone() *CompactionResult {
 	if len(r.RequestContext) > 0 {
 		cp.RequestContext = slices.Clone(r.RequestContext)
 	}
+	cp.Iterations = slices.Clone(r.Iterations)
 	return &cp
 }
 

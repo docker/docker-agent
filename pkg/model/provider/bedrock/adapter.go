@@ -22,6 +22,9 @@ type streamAdapter struct {
 	currentToolID   string
 	currentToolName string
 
+	// Native content blocks, replayed verbatim on the next turn.
+	recorder blockRecorder
+
 	// Buffered state for proper event ordering
 	// Bedrock sends MessageStop before Metadata, but runtime expects usage before FinishReason
 	pendingFinishReason chat.FinishReason
@@ -34,6 +37,7 @@ func newStreamAdapter(stream *bedrockruntime.ConverseStreamEventStream, model st
 		stream:     stream,
 		model:      model,
 		trackUsage: trackUsage,
+		recorder:   blockRecorder{model: model},
 	}
 }
 
@@ -53,7 +57,8 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 					Index:        0,
 					FinishReason: a.pendingFinishReason,
 					Delta: chat.MessageDelta{
-						Role: string(chat.MessageRoleAssistant),
+						Role:          string(chat.MessageRoleAssistant),
+						ProviderState: a.recorder.state(),
 					},
 				},
 			},
@@ -86,7 +91,8 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 						Index:        0,
 						FinishReason: a.pendingFinishReason,
 						Delta: chat.MessageDelta{
-							Role: string(chat.MessageRoleAssistant),
+							Role:          string(chat.MessageRoleAssistant),
+							ProviderState: a.recorder.state(),
 						},
 					},
 				},
@@ -122,6 +128,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if start, ok := ev.Value.Start.(*types.ContentBlockStartMemberToolUse); ok {
 			a.currentToolID = derefString(start.Value.ToolUseId)
 			a.currentToolName = derefString(start.Value.Name)
+			a.recorder.start(blockIndex(ev.Value.ContentBlockIndex), a.currentToolID, a.currentToolName)
 
 			// Emit initial tool call
 			response.Choices[0].Delta.ToolCalls = []tools.ToolCall{{
@@ -136,6 +143,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case *types.ConverseStreamOutputMemberContentBlockDelta:
 		// Handle content block delta - text or tool input
 		if ev.Value.Delta != nil {
+			a.recorder.delta(blockIndex(ev.Value.ContentBlockIndex), ev.Value.Delta)
 			switch delta := ev.Value.Delta.(type) {
 			case *types.ContentBlockDeltaMemberText:
 				response.Choices[0].Delta.Content = delta.Value
@@ -158,7 +166,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 				case *types.ReasoningContentBlockDeltaMemberSignature:
 					response.Choices[0].Delta.ThinkingSignature = reasoningDelta.Value
 				case *types.ReasoningContentBlockDeltaMemberRedactedContent:
-					response.Choices[0].Delta.ThinkingSignature = string(reasoningDelta.Value)
+					// Opaque bytes: kept only in the recorded native blocks.
 				default:
 					return chat.MessageStreamResponse{}, fmt.Errorf("unknown reasoning delta type: %T", reasoningDelta)
 				}
@@ -166,6 +174,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		}
 
 	case *types.ConverseStreamOutputMemberContentBlockStop:
+		a.recorder.stop(blockIndex(ev.Value.ContentBlockIndex))
 		slog.Debug("Bedrock stream: content block stop", "index", ev.Value.ContentBlockIndex)
 
 	case *types.ConverseStreamOutputMemberMessageStop:
@@ -177,7 +186,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 			a.pendingFinishReason = chat.FinishReasonToolCalls
 		case types.StopReasonEndTurn, types.StopReasonStopSequence:
 			a.pendingFinishReason = chat.FinishReasonStop
-		case types.StopReasonMaxTokens:
+		case types.StopReasonMaxTokens, types.StopReasonModelContextWindowExceeded:
 			a.pendingFinishReason = chat.FinishReasonLength
 		case types.StopReasonGuardrailIntervened, types.StopReasonContentFiltered:
 			a.pendingFinishReason = chat.FinishReasonRefusal
@@ -250,4 +259,11 @@ func derefInt32(i *int32) int32 {
 		return 0
 	}
 	return *i
+}
+
+func blockIndex(idx *int32) int32 {
+	if idx == nil {
+		return 0
+	}
+	return *idx
 }

@@ -109,16 +109,6 @@ agents:
     await session.close();
   });
 
-  it("indexes rag toolsets over the documents option, never over files", async () => {
-    const yaml = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "examples", "handbook-rag.yaml"), "utf8");
-    const env = { OPENROUTER_API_KEY: "k" };
-    await assert.rejects(dockerAgent.createSession({ yaml, env }), /selects none of the supplied documents/);
-    await assert.rejects(dockerAgent.createSession({ yaml, env, documents: "handbook" }), /options.documents: must be an object/);
-    await assert.rejects(dockerAgent.createSession({ yaml, env, documents: { "handbook/leave.md": 42 } }), /must be a string/);
-    const session = await dockerAgent.createSession({ yaml, env, documents: { "handbook/leave.md": "25 days of vacation" } });
-    await session.close();
-  });
-
   it("rejects an unknown agent name and a non-https tool proxy", async () => {
     const env = { LOCAL_KEY: "k" };
     await assert.rejects(dockerAgent.createSession({ yaml: unreachableAgent, env, agentName: "nope" }), /agent "nope" not found/);

@@ -749,3 +749,25 @@ func TestStructuredOutputToolMode_ProgrammaticBrokenSchemaFailsRun(t *testing.T)
 	allMsgs, _ := prov.calls()
 	assert.Empty(t, allMsgs, "a broken schema must fail the run before any model call")
 }
+
+// A reminder retry would end the request on the plain-text assistant turn,
+// which Claude 5.x rejects as a prefill: fail after one inference instead.
+func TestStructuredOutputToolMode_Claude5FailsWithoutReminder(t *testing.T) {
+	t.Parallel()
+
+	prov := &soRecordingProvider{queueProvider: queueProvider{id: "anthropic/claude-opus-5-5", streams: []chat.MessageStream{
+		newStreamBuilder().AddContent("plain text").AddStopWithUsage(3, 2).Build(),
+	}}}
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov), agent.WithStructuredOutput(toolModeStructuredOutput()))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Answer me"))
+	errs := errorEvents(runAndCollect(t, rt, sess))
+	require.Len(t, errs, 1)
+	assert.Equal(t, ErrorCodeStructuredOutputFailed, errs[0].Code)
+
+	calls, _ := prov.calls()
+	assert.Len(t, calls, 1, "no reminder retry for a model that rejects a final assistant message")
+	assert.Contains(t, sess.GetLastAssistantMessageContent(), "did not deliver structured output")
+}

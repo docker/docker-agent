@@ -20,7 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
-	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/modelsgateway"
 	"github.com/docker/docker-agent/pkg/telemetry"
@@ -46,6 +46,7 @@ const listTimeout = 5 * time.Second
 // from the snapshot) prevents surprising side effects like `docker agent models
 // --provider ollama` issuing a real GET against localhost.
 var liveFetchProviders = map[string]bool{
+	"lunaroute":   true,
 	"opencode":    true,
 	"opencode-go": true,
 }
@@ -323,7 +324,7 @@ func (f *modelsListFlags) collectModels(ctx context.Context, env environment.Pro
 	}
 
 	for providerID, prov := range db.Providers {
-		if !provider.IsCatalogProvider(providerID) {
+		if !catalog.IsCatalogProvider(providerID) {
 			continue
 		}
 		if !f.all && !availableProviders[providerID] {
@@ -441,16 +442,18 @@ type openAIModelsResponse struct {
 //     provider that requires the API key on /v1/models.
 //   - Bounded by listTimeout (5s) so a slow endpoint cannot stall `models list`.
 func fetchProviderModels(ctx context.Context, providerName string, env environment.Provider) []string {
-	alias, ok := provider.LookupAlias(providerName)
-	if !ok || alias.BaseURL == "" {
+	alias, ok := catalog.Find(providerName)
+	if !ok || alias.BaseURL == "" || alias.APIType != "openai" {
 		return nil
 	}
 
 	var token string
 	// Send the alias's declared API key so providers that require it on
 	// /v1/models authenticate the request instead of returning 401/403.
-	if alias.TokenEnvVar != "" {
-		token, _ = env.Get(ctx, alias.TokenEnvVar)
+	for _, key := range alias.TokenEnvVars {
+		if token, _ = env.Get(ctx, key); token != "" {
+			break
+		}
 	}
 
 	return fetchOpenAICompatibleModels(ctx, alias.BaseURL, token)

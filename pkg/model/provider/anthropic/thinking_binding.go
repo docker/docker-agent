@@ -7,10 +7,12 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
-	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 )
 
 func validateThinkingOptions(cfg *latest.ModelConfig) error {
+	if err := validateFallbackSpec(cfg); err != nil {
+		return err
+	}
 	if err := validateThinkingDisplay(cfg); err != nil {
 		return err
 	}
@@ -29,8 +31,7 @@ func (c *Client) thinkingBindingBehavior() string {
 	if value, ok := c.ModelConfig.ProviderOpts["thinking_prefix_mismatch"].(string); ok {
 		return value
 	}
-	fallbacks, _ := providerutil.GetProviderOptStringSlice(c.ModelConfig.ProviderOpts, "fallbacks")
-	if slices.ContainsFunc(append([]string{c.ModelConfig.Model}, fallbacks...), checksThinkingPrefix) {
+	if slices.ContainsFunc(append([]string{c.ModelConfig.Model}, fallbackTargets(c.ModelConfig.ProviderOpts)...), checksThinkingPrefix) {
 		return "drop_block"
 	}
 	return ""

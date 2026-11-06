@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -29,7 +30,7 @@ type modelSwitchingRuntime struct {
 
 	mu              sync.Mutex
 	currentAgent    string
-	availableModels []runtime.ModelChoice
+	availableModels []modelcatalog.ModelChoice
 	overrides       map[string]string
 	setErr          error
 
@@ -49,7 +50,7 @@ type modelSwitchingRuntime struct {
 	setAgentModelDelay <-chan struct{}
 }
 
-func newModelSwitchingRuntime(models []runtime.ModelChoice) *modelSwitchingRuntime {
+func newModelSwitchingRuntime(models []modelcatalog.ModelChoice) *modelSwitchingRuntime {
 	return &modelSwitchingRuntime{
 		currentAgent:    "root",
 		availableModels: models,
@@ -61,13 +62,13 @@ func (m *modelSwitchingRuntime) CurrentAgentName(context.Context) string { retur
 
 func (m *modelSwitchingRuntime) SupportsModelSwitching() bool { return true }
 
-func (m *modelSwitchingRuntime) AvailableModels(_ context.Context) []runtime.ModelChoice {
+func (m *modelSwitchingRuntime) AvailableModels(_ context.Context) []modelcatalog.ModelChoice {
 	m.mu.Lock()
 	delay := m.availableModelsDelay
 	called := m.availableModelsCalled
 	out := slices.Clone(m.availableModels)
 	if out == nil {
-		out = []runtime.ModelChoice{}
+		out = []modelcatalog.ModelChoice{}
 	}
 	m.mu.Unlock()
 
@@ -169,7 +170,7 @@ func TestAttachedServer_GetSessionModels(t *testing.T) {
 	sess.AgentModelOverrides = map[string]string{"root": "openai/gpt-4o"}
 	require.NoError(t, store.AddSession(ctx, sess))
 
-	choices := []runtime.ModelChoice{
+	choices := []modelcatalog.ModelChoice{
 		{Name: "default", Ref: "openai/gpt-4o-mini", Provider: "openai", Model: "gpt-4o-mini", IsDefault: true},
 		{Name: "custom", Ref: "openai/gpt-4o", Provider: "openai", Model: "gpt-4o"},
 	}
@@ -181,7 +182,7 @@ func TestAttachedServer_GetSessionModels(t *testing.T) {
 	addr := startAttachedServer(t, ctx, sm)
 	resp := httpDoTCP(t, ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/models", nil)
 
-	var got runtime.SessionModelsResponse
+	var got modelcatalog.SessionModelsResponse
 	require.NoError(t, json.Unmarshal(resp, &got))
 
 	assert.Equal(t, "root", got.Agent)
@@ -205,7 +206,7 @@ func TestAttachedServer_GetSessionModels_DefaultMarkedCurrent(t *testing.T) {
 	sess := session.New()
 	require.NoError(t, store.AddSession(ctx, sess))
 
-	choices := []runtime.ModelChoice{
+	choices := []modelcatalog.ModelChoice{
 		{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true},
 		{Name: "other", Ref: "openai/gpt-4o"},
 	}
@@ -217,7 +218,7 @@ func TestAttachedServer_GetSessionModels_DefaultMarkedCurrent(t *testing.T) {
 	addr := startAttachedServer(t, ctx, sm)
 	resp := httpDoTCP(t, ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/models", nil)
 
-	var got runtime.SessionModelsResponse
+	var got modelcatalog.SessionModelsResponse
 	require.NoError(t, json.Unmarshal(resp, &got))
 
 	assert.Empty(t, got.CurrentModelRef)
@@ -238,7 +239,7 @@ func TestAttachedServer_GetSessionModels_AppendsCustomModels(t *testing.T) {
 	sess.CustomModelsUsed = []string{"openai/gpt-4o"}
 	require.NoError(t, store.AddSession(ctx, sess))
 
-	choices := []runtime.ModelChoice{
+	choices := []modelcatalog.ModelChoice{
 		{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true},
 	}
 	fake := newModelSwitchingRuntime(choices)
@@ -249,7 +250,7 @@ func TestAttachedServer_GetSessionModels_AppendsCustomModels(t *testing.T) {
 	addr := startAttachedServer(t, ctx, sm)
 	resp := httpDoTCP(t, ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/models", nil)
 
-	var got runtime.SessionModelsResponse
+	var got modelcatalog.SessionModelsResponse
 	require.NoError(t, json.Unmarshal(resp, &got))
 
 	require.Len(t, got.Models, 2)
@@ -302,8 +303,8 @@ func TestAttachedServer_SetSessionModel_PersistsViaRunAgent(t *testing.T) {
 
 func TestAttachedServer_RunAgent_EmptyModelLeavesOverrideUntouched(t *testing.T) {
 	// An empty model field on the runAgent body must be a no-op for the
-	// override (it is not a request to clear it). The TUI relies on this
-	// when it sends a regular user turn after a previous /model PATCH.
+	// override (it is not a request to clear it). Clients rely on this to
+	// send regular turns without resetting a previously applied override.
 	t.Parallel()
 
 	ctx := t.Context()
@@ -1131,9 +1132,8 @@ func TestSessionManager_SetSessionAgentModel_DoesNotHoldMuxDuringRuntimeIO(t *te
 }
 
 // applyStoredOverrides is the helper called by runtimeForSession to
-// re-apply persisted overrides on a freshly-built runtime. We can't
-// drive runtimeForSession with a fake runtime (it constructs a real
-// LocalRuntime), so we cover the helper's contract directly here.
+// re-apply persisted overrides on a freshly-built runtime. These cases
+// cover the helper's contract directly.
 func TestApplyStoredOverrides(t *testing.T) {
 	t.Parallel()
 

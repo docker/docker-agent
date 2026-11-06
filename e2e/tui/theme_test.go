@@ -3,7 +3,6 @@ package tui_test
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -38,17 +37,13 @@ func TestTheme_HotReload(t *testing.T) {
 	d.Send(messages.ChangeThemeMsg{ThemeRef: "user:hotreload"}).
 		WaitFor(tuitest.Contains("Theme changed to Hot Reload Before"))
 
-	// The watcher arms asynchronously (ThemeChangedMsg is sequenced after the
-	// notification above) and debounces events for 500ms, so a single write
-	// could slip in before fsnotify is attached. Re-edit the file on every
-	// poll — like a user tweaking colors — until the reload lands. The 700ms
-	// interval exceeds the debounce so rewrites cannot starve the timer.
-	require.Eventually(t, func() bool {
-		require.NoError(t, os.WriteFile(themePath, []byte("version: 1\nname: Hot Reload After\n"), 0o644))
-		return strings.Contains(d.Frame(), "Theme hot-reloaded")
-	}, 15*time.Second, 700*time.Millisecond, "editing the theme file should hot-reload it")
-
-	require.Eventually(t, func() bool {
-		return styles.CurrentTheme().Name == "Hot Reload After"
-	}, 3*time.Second, 50*time.Millisecond, "styles.CurrentTheme() should pick up the edited theme")
+	// Process a retarget synchronously so a single immediate edit exercises readiness.
+	d.Send(messages.ThemeChangedMsg{})
+	for _, name := range []string{"Hot Reload After", "Hot Reload Again"} {
+		require.NoError(t, os.WriteFile(themePath, []byte("version: 1\nname: "+name+"\n"), 0o644))
+		require.Eventually(t, func() bool {
+			return styles.CurrentTheme().Name == name
+		}, 5*time.Second, 50*time.Millisecond, "a single edit should hot-reload the theme")
+		d.WaitFor(tuitest.Contains("Theme hot-reloaded"))
+	}
 }

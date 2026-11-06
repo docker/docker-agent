@@ -80,11 +80,8 @@ func pointerIdentity(v any) (notifierIdentity, bool) {
 	return notifierIdentity{typ: rv.Type(), ptr: rv.Pointer()}, true
 }
 
-// subscribeToolsChanged subscribes emitToolsChanged to every tools-changed
-// notifier reachable from the team's toolsets and returns the unsubscribe
-// functions. ChangeSubscriber toolsets get a subscription of their own, so
-// several runtimes sharing a toolset all stay notified; toolsets that only
-// implement ChangeNotifier fall back to the single legacy slot.
+// subscribeToolsChanged gives each runtime its own subscriptions to tool-list
+// changes throughout the team's toolsets and returns their release functions.
 func (r *LocalRuntime) subscribeToolsChanged() []func() {
 	var unsubs []func()
 	for _, name := range r.team.AgentNames() {
@@ -93,15 +90,9 @@ func (r *LocalRuntime) subscribeToolsChanged() []func() {
 			continue
 		}
 		for _, ts := range a.ToolSets() {
-			tools.Walk(ts, func(ts tools.ToolSet) bool {
-				switch n := ts.(type) {
-				case tools.ChangeSubscriber:
-					unsubs = append(unsubs, n.SubscribeToolsChanged(r.emitToolsChanged))
-				case tools.ChangeNotifier:
-					n.SetToolsChangedHandler(r.emitToolsChanged)
-				}
-				return true
-			})
+			for _, subscriber := range tools.FindAll[tools.ChangeSubscriber](ts) {
+				unsubs = append(unsubs, subscriber.SubscribeToolsChanged(r.emitToolsChanged))
+			}
 		}
 	}
 	return unsubs

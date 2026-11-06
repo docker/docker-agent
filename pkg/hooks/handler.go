@@ -95,8 +95,21 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{}
 	r.Register(HookTypeCommand, newCommandFactory())
-	r.Register(HookTypeBuiltin, r.builtinFactory)
 	return r
+}
+
+// Clone copies registrations so runtime-owned callbacks can be rebound independently.
+func (r *Registry) Clone() *Registry {
+	cloned := NewRegistry()
+	r.factories.Range(func(kind HookType, factory HandlerFactory) bool {
+		cloned.Register(kind, factory)
+		return true
+	})
+	r.builtins.Range(func(name string, fn BuiltinFunc) bool {
+		cloned.builtins.Store(name, fn)
+		return true
+	})
+	return cloned
 }
 
 // Register associates a factory with a hook type, replacing any prior one.
@@ -106,7 +119,11 @@ func (r *Registry) Register(t HookType, f HandlerFactory) {
 
 // Lookup returns the factory registered for t, or (nil, false).
 func (r *Registry) Lookup(t HookType) (HandlerFactory, bool) {
-	return r.factories.Load(t)
+	factory, ok := r.factories.Load(t)
+	if !ok && t == HookTypeBuiltin {
+		return r.builtinFactory, true
+	}
+	return factory, ok
 }
 
 // RegisterBuiltin makes fn callable as `{type: builtin, command: name}`.

@@ -64,7 +64,6 @@ var (
 	_ tools.Startable        = (*ToolSet)(nil)
 	_ tools.Instructable     = (*ToolSet)(nil)
 	_ tools.StartReporter    = (*ToolSet)(nil)
-	_ tools.ChangeNotifier   = (*ToolSet)(nil)
 	_ tools.ChangeSubscriber = (*ToolSet)(nil)
 )
 
@@ -82,13 +81,8 @@ type lspHandler struct {
 	// it via ensureInitialized to lazy-start on first use.
 	supervisor *lifecycle.Supervisor
 
-	// toolsChangedHandler is called after the supervisor's Connect has
-	// populated h.capabilities, so the runtime can re-fetch the (now
-	// capability-filtered) tool list. nil until SetToolsChangedHandler is
-	// called. toolsChangedSubs holds the per-runtime subscriptions
-	// notified alongside it.
-	toolsChangedHandler func()
-	toolsChangedSubs    tools.ChangeSubscribers
+	// Subscribers refresh the capability-filtered tool list after Connect.
+	toolsChangedSubs tools.ChangeSubscribers
 
 	// Configuration
 	command    string
@@ -364,7 +358,9 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	if err != nil {
 		return nil, fmt.Errorf("failed to expand the tool's environment variables: %w", err)
 	}
-	env = append(env, os.Environ()...)
+	// Host first so the configured env wins: exec.Cmd keeps the last value for a duplicate
+	// key, which is the layering shell/script toolsets document.
+	env = append(os.Environ(), env...)
 	env = toolinstall.PrependBinDirToEnv(env)
 
 	cwd := workingdir.Resolve(toolset.WorkingDir, runConfig.WorkingDir)
@@ -554,7 +550,7 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	if caps == nil {
 		// The server has not been initialised yet. Advertise the full
 		// catalogue: the runtime will refresh after the first Connect
-		// completes (via toolsChangedHandler), at which point we filter.
+		// completes (via tools-changed subscriptions), at which point we filter.
 		return all, nil
 	}
 	return filterByCapabilities(all, caps), nil
@@ -568,16 +564,7 @@ func (h *lspHandler) snapshotCapabilities() *lspServerCapabilities {
 	return h.capabilities
 }
 
-// SetToolsChangedHandler registers a callback that is invoked after the
-// supervisor reaches Ready and the server's capability matrix becomes
-// available. The runtime uses this to re-query Tools() and pick up the
-// capability-filtered list.
-func (t *ToolSet) SetToolsChangedHandler(handler func()) {
-	t.handler.mu.Lock()
-	defer t.handler.mu.Unlock()
-	t.handler.toolsChangedHandler = handler
-}
-
+// SubscribeToolsChanged registers a callback for capability-filtered tool-list changes.
 func (t *ToolSet) SubscribeToolsChanged(handler func()) func() {
 	return t.handler.toolsChangedSubs.Subscribe(handler)
 }

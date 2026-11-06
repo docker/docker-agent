@@ -23,8 +23,10 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/eventmerge"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/team"
@@ -47,7 +49,8 @@ type activeRuntimes struct {
 	deleting         atomic.Bool // Set before deletion waits for an in-flight model transaction
 }
 
-// SessionManager manages sessions for HTTP and Connect-RPC servers.
+// SessionManager manages sessions for the HTTP API server and the --listen
+// control plane.
 type SessionManager struct {
 	runtimeSessions *concurrent.Map[string, *activeRuntimes]
 	deletedSessions *concurrent.Map[string, *activeRuntimes]
@@ -1034,8 +1037,8 @@ var (
 // RunSession runs a session with the given messages.
 //
 // When modelOverride is non-empty, it is applied to the session's current
-// agent before any user messages are appended (and persisted via
-// SetSessionAgentModel) so the override is in effect for this turn and
+// agent before any user messages are appended (and persisted by the
+// session metadata update that follows) so the override is in effect for this turn and
 // every subsequent one. Validation happens before the messages are
 // recorded so a bad ref does not leave an orphaned user message in the
 // history.
@@ -1113,7 +1116,7 @@ func (sm *SessionManager) RunSession(ctx context.Context, sessionID, agentFilena
 		sess = runtimeSession.session
 	}
 
-	// Apply the model override (if any) before persisting the user
+	// Apply the model override (if any) before appending the user
 	// messages so that an invalid ref does not leave an orphaned user
 	// message in the history. The streaming and modelSwitch locks keep the
 	// runtime, persisted snapshot, live session, and rollback in one transaction.
@@ -1696,7 +1699,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 		authorSafetyDefault = session.SafetyPolicy(t.RuntimeSafety())
 	}
 
-	modelSwitcherCfg := &runtime.ModelSwitcherConfig{
+	modelSwitcherCfg := &modelcatalog.Config{
 		Models:             loadResult.Models,
 		Providers:          loadResult.Providers,
 		ModelsGateway:      rc.ModelsGateway,
@@ -1723,6 +1726,7 @@ func (sm *SessionManager) runtimeForSession(ctx context.Context, sess *session.S
 		// runtime.* spans go silent in HTTP-server mode.
 		runtime.WithTracer(otel.Tracer(version.AppName)),
 		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
+		runtime.WithModelsDevFallback(rc.ModelsDevFallback),
 		runtime.WithBudget(loadResult.Budget),
 		runtime.WithNamedBudgets(loadResult.Budgets, loadResult.AgentBudgets),
 	}
@@ -1865,7 +1869,7 @@ func (sm *SessionManager) LoadAgentConfig(ctx context.Context, agentFilename str
 		return nil, err
 	}
 
-	cfg, err := config.Load(ctx, agentSource)
+	cfg, err := config.Load(ctx, agentSource, config.WithVersions(legacy.Register))
 	if err != nil {
 		return nil, sm.sourceLoadError(agentFilename, err)
 	}
@@ -2135,8 +2139,8 @@ var ErrModelSwitchingNotSupported = errors.New("model switching not supported by
 
 // ErrSessionNotRunning is returned by methods that require an active
 // runtime for the session (i.e. RunSession must have been called or
-// AttachRuntime invoked) when none is found. HTTP handlers map this to
-// 404 to distinguish from other runtime errors.
+// AttachRuntime invoked) when none is found. GET /sessions/:id/models maps
+// this to 404; steer and followup surface it as 409.
 var ErrSessionNotRunning = errors.New("session not found or not running")
 
 // AvailableSessionModels returns the list of models available for the
@@ -2152,7 +2156,7 @@ var ErrSessionNotRunning = errors.New("session not found or not running")
 // override points at an inline provider/model not present in the agent
 // config, a synthetic choice is appended (mirrors App.AvailableModels via
 // the shared runtime.DecorateModelChoices helper).
-func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID string) (string, string, []runtime.ModelChoice, error) {
+func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID string) (string, string, []modelcatalog.ModelChoice, error) {
 	rs, ok := sm.runtimeSessions.Load(sessionID)
 	if !ok {
 		return "", "", nil, ErrSessionNotRunning
@@ -2179,7 +2183,7 @@ func (sm *SessionManager) AvailableSessionModels(ctx context.Context, sessionID 
 	}
 	rs.modelSwitch.Unlock()
 
-	choices := runtime.DecorateModelChoices(rs.runtime.AvailableModels(ctx), current, customRefs)
+	choices := modelcatalog.DecorateModelChoices(rs.runtime.AvailableModels(ctx), current, customRefs)
 	return agentName, current, choices, nil
 }
 

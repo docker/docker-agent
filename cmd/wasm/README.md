@@ -21,9 +21,47 @@ cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" cmd/wasm/web/wasm_exec.js
 ```
 
 The output is a large `.wasm` (the runtime, the YAML parser, three LLM
-provider clients, RAG and the MCP client). Size depends on the toolchain
-and optional providers; compression and `-ldflags="-s -w"` can reduce transfer
+provider clients and the MCP client). Size depends on the toolchain
+and enabled features; compression and `-ldflags="-s -w"` can reduce transfer
 size. No size-reduction ratio is guaranteed.
+
+### Selecting YAML history and catalog data
+
+This demo explicitly opts into all supported YAML versions using
+`config.WithVersions(legacy.Register)` and
+`teamloader.WithConfigVersions(legacy.Register)`, and supplies
+`embedded.Snapshot()` as its in-memory model catalog. Its behavior is unchanged.
+
+Custom entry points can omit either package independently. The core loader then
+accepts only the current schema, and model stores have no embedded fallback unless
+supplied with `modelsdev.WithFallback`. Keep an explicitly empty in-memory store
+if you also want to avoid cache/network discovery. See the Go SDK guide's
+*Optional YAML history and embedded model catalog* section.
+
+### Optional RAG
+
+RAG is disabled by default. Include it explicitly with:
+
+```sh
+GOOS=js GOARCH=wasm go build -tags docker_agent_wasm_rag \
+  -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
+```
+
+Providers, MCP, portable tools, JavaScript expansion, code mode, TOON and
+deferred tools are unchanged. The independent `docker_agent_wasm_cloud` tag
+can be combined with `docker_agent_wasm_rag` to enable both features.
+
+Without RAG, configs declaring a `type: rag` toolset are rejected at session
+creation rather than silently skipped. The JavaScript API is unchanged:
+`documents` is still accepted and validated, but supplying it cannot enable
+RAG in a binary built without it.
+
+This removes `pkg/rag`'s implementation and its toolset from the production
+dependency closure, not the shared `rag/types` and `rag/prompts` packages.
+The Go runtime, YAML/config handling, LLM clients, MCP, JavaScript engine,
+HTTP tools and embedded model catalog remain. Expect modest savings,
+not a minimal binary; the size difference depends on the toolchain and build
+flags.
 
 ### Optional cloud providers
 
@@ -55,14 +93,17 @@ See `examples/cloud-bedrock.yaml` and `examples/cloud-vertex.yaml`.
 ## Run (Node)
 
 ```sh
-# Go tests of the runtime bridge, with a mocked provider registry.
+# Go runtime bridge tests, including default, RAG-enabled and cloud builds.
 task test-wasm-js
 
 # Smoke test of parseConfig/listAgents against the built binary.
 node cmd/wasm/smoke_test.js
 
-# JS bridge tests: session handles, chat(), failure modes.
+# JS bridge tests against the default build: session handles, chat(), failure modes.
 node --test cmd/wasm/node/bridge_test.js
+
+# Build and test both default and RAG-enabled JavaScript APIs.
+task test-wasm-bridge
 ```
 
 Both Node scripts load `web/docker-agent.wasm` through `node/boot.js`, which
@@ -76,9 +117,10 @@ task test-wasm-browser
 CHROME_BIN=/path/to/chrome task test-wasm-browser
 ```
 
-Requires Chrome and `openssl`; no npm dependencies. The runner starts local
-mock model and HTTPS proxy servers, tests real browser streaming, tools,
-RAG, approval, cancellation and proxy redirects, then removes its temporary
+Requires Chrome and `openssl`; no npm dependencies. The task builds with
+`docker_agent_wasm_rag` so RAG is covered. The runner starts local mock model
+and HTTPS proxy servers, tests real browser streaming, tools, RAG, approval,
+cancellation and proxy redirects, then removes its temporary
 profile and certificate. It does not contact model services. This validates
 Chromium; Safari and Firefox are not covered.
 
@@ -212,7 +254,7 @@ when a model's API key is missing from `env`, or when `agentName` is unknown.
 | `toolProxy?` | HTTPS URL of a trusted egress proxy (`httpclient.WithEgressProxy`). Browsers cannot enforce the SSRF guard on `fetch`, so remote MCP, `fetch`, `api` and `openapi` requests are routed through it and fail closed without one (unless the toolset sets `allow_private_ips: true`). |
 | `oauthRedirectURI?` | `redirect_uri` advertised for MCP server OAuth flows; the flow itself is relayed to the host as an `elicitation` event. |
 | `autoApprove?` | Run tool calls without asking, like `--yolo`. Otherwise calls the safety policy does not clear raise a `tool_confirmation` event. |
-| `documents?` | `{"handbook/leave.md": "...", ...}` — the session's documents, keyed by logical path. They are the only thing `type: rag` toolsets can index: a RAG's `docs` select among these paths (exact path, directory prefix or glob), and a `docs` entry selecting nothing rejects the session. Values must be strings; at most 1000 documents and 16 MiB in total. See `examples/handbook-rag.yaml`. |
+| `documents?` | `{"handbook/leave.md": "...", ...}` — the session's documents, keyed by logical path. When RAG is enabled with `docker_agent_wasm_rag`, they are the only thing `type: rag` toolsets can index: a RAG's `docs` select among these paths (exact path, directory prefix or glob), and a `docs` entry selecting nothing rejects the session. Values must be strings; at most 1000 documents and 16 MiB in total, including in no-RAG builds. See `examples/handbook-rag.yaml`. |
 
 The trusted proxy receives the target URL in the `url` query parameter, with
 the original method, body and credentials. It must enforce destination IP
@@ -263,8 +305,10 @@ cancels the previous). Safe to call before the call has started running.
 
 | Event | Fields |
 | --- | --- |
-| `delta` | `content?` or `reasoning?` — a streamed chunk. |
+| `delta` | `message_id, content?` or `message_id, reasoning?` — a streamed chunk; accumulate reasoning separately per message. |
+| `reasoning_reset` | `message_id` — discard that message's accumulated reasoning, preserving text, tools and other messages; subsequent reasoning starts fresh. |
 | `tool_call_delta` | `id, name, arguments` — a streamed chunk of a tool call's arguments. |
+| `tool_calls_retracted` | `ids` — tool calls announced by `tool_call_delta` that will never run (refusal or server fallback). |
 | `tool_call` | `id, name, args` — the call is about to run. |
 | `tool_confirmation` | `id, name, args` — the runtime waits for `confirm()`. |
 | `tool_output` | `id, name, output` — incremental output of a running call. |
@@ -277,6 +321,10 @@ cancels the previous). Safe to call before the call has started running.
 | `warning` | `message` |
 | `error` | `message` — the turn failed; the promise rejects with the same message. |
 | `finish` | `reason: "stop"` — the turn completed. |
+
+The demo applies reasoning resets to its live bubble by `message_id`, without
+removing text or tool cards. Run its actual HTML event-consumer regression with
+`node --test cmd/wasm/web/events_test.js` (also included in `task test-wasm-bridge`).
 
 ### Differences from the previous bespoke loop
 
@@ -303,7 +351,7 @@ What the browser build supports, and what it refuses and why.
 
 | Area | In the browser |
 | --- | --- |
-| Toolsets | `datetime`, `mcp` (remote only), [`calculator`](../../docs/tools/calculator/index.md), `think`, `random`, `todo`, `plan`, `memory`, `user_prompt`, `session_context`, `fetch`, `api`, `openapi`, `model_picker`, `rag` (over `documents`). See `examples/portable-team.yaml` and `examples/handbook-rag.yaml`. |
+| Toolsets | `datetime`, `mcp` (remote only), [`calculator`](../../docs/tools/calculator/index.md), `think`, `random`, `todo`, `plan`, `memory`, `user_prompt`, `session_context`, `fetch`, `api`, `openapi`, `model_picker`, `rag` (over `documents`, opt-in with `docker_agent_wasm_rag`). See `examples/portable-team.yaml` and `examples/handbook-rag.yaml`. |
 | Toolset options | `tools`, `readonly`, `instruction`, `model`, `toon`, `defer`, `timeout`, `allow_private_ips`. |
 | Agent features | `code_mode_tools`, sub-agents, handoffs, fallbacks, compaction, `add_date`, `add_environment_info`, structured output, `${...}` JavaScript in instructions and descriptions. |
 | Hooks | `type: builtin` only: `add_context`, `add_date`, `add_environment_info`, `limit_large_tool_results`, `max_iterations`, `redact_secrets`. `limit_large_tool_results` keeps only the bounded tail excerpt: there is no filesystem to spill the full result to, and the notice says so. |
@@ -328,7 +376,7 @@ evaluator is not wired.
 MCP: in a browser they go through `toolProxy` and fail closed without one,
 unless the toolset sets `allow_private_ips: true`.
 
-`rag` runs the shared `pkg/rag` pipeline — `bm25`, `chunked-embeddings` and
+When enabled, `rag` runs the shared `pkg/rag` pipeline — `bm25`, `chunked-embeddings` and
 `semantic-embeddings`, fusion and reranking — over the session's `documents`
 instead of files: the index is built in memory when the tool first starts,
 results report the documents' logical paths, `return_full_content` reads
@@ -346,7 +394,8 @@ documents is rejected when the session is created.
   `tasks`, `environment`, `scheduler`, `webhook`, `open_url`, `a2a`,
   `mcp_catalog` and `background_agents` need a process, a filesystem, a
   socket or the host environment and are not registered.
-- **RAG**: a strategy `database` (nothing persists), `chunking.code_aware`
+- **RAG**: all `type: rag` toolsets in a no-RAG build (see *Optional RAG*).
+  When enabled, a strategy `database` (nothing persists), `chunking.code_aware`
   (tree-sitter needs cgo) and `respect_vcs: true` (no checkout) are
   rejected; `docs` never reach the filesystem.
 - **Hooks**: `type: command` and the builtins that read files or run git.
@@ -373,7 +422,8 @@ documents is rejected when the session is created.
 | --- | --- |
 | `main.go` | JS API registration, `parseConfig`/`listAgents`, `createSession`, the stateless `chat()`/`abort()`. |
 | `runtime.go` | Builds an `embeddedchat.Session` from YAML with the browser registries and loader features; audits the config for host-only features. |
-| `toolsets.go` | The per-session toolset registry: remote MCP plus the portable builtins, `rag` over the session documents, and the per-toolset browser checks. |
+| `toolsets.go` | The per-session toolset registry: remote MCP plus the portable builtins, build-selected RAG registration, and the per-toolset browser checks. |
+| `rag.go` / `rag_off.go` | Build-tagged RAG implementation and the no-RAG registry variant. |
 | `session.go` | `chatSession`: one conversation, its lifetime context, send/confirm/abort/restart/close. JS-agnostic, tested from Go. |
 | `events.go` | Projects runtime events onto the JS event shapes. |
 | `handle.go` | The JS session object and the lifetime of its callbacks. |
@@ -424,7 +474,6 @@ GOOS=js GOARCH=wasm go build -o cmd/wasm/web/docker-agent.wasm ./cmd/wasm
 # Runtime bridge tests under Node's Go/WASM runner, with mocked models.
 task test-wasm-js
 
-# JS surface against the built binary.
-node cmd/wasm/smoke_test.js
-node --test cmd/wasm/node/bridge_test.js
+# JS surface against both default and RAG-enabled binaries.
+task test-wasm-bridge
 ```

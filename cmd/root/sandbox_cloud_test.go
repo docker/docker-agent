@@ -114,7 +114,7 @@ esac
 			require.NoError(t, err)
 			lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
 			require.Len(t, lines, 3)
-			assert.Regexp(t, `^--cloud run --detached --new --name docker-agent-[a-f0-9]{32} --ttl 1h0m0s --on-timeout stop docker-agent$`, lines[0])
+			assert.Regexp(t, `^--cloud run --detach --new --name docker-agent-[a-f0-9]{32} --ttl 1h0m0s --on-timeout stop docker-agent$`, lines[0])
 			assert.Contains(t, lines[1], "--cloud exec -i ")
 			assert.NotContains(t, lines[1], " -t ")
 			assert.NotContains(t, lines[1], " -w ")

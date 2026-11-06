@@ -81,10 +81,10 @@ func TestCloudCancellationHelper(*testing.T) {
 	switch args[1] {
 	case "run":
 		name := args[slices.Index(args, "--name")+1]
-		data, _ := json.Marshal(map[string]any{"sandboxes": []map[string]string{
+		data, _ := json.Marshal([]map[string]string{
 			{"name": "someone-else", "id": "sbx_unrelated"},
 			{"name": name, "id": "sbx_owned123"},
-		}})
+		})
 		_ = os.WriteFile(state, data, 0o600)
 		if phase != "create-without-id" {
 			_, _ = os.Stdout.WriteString("sbx_owned123\n")

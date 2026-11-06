@@ -98,6 +98,80 @@ func TestRendererStreamingWrappedParagraphDoesNotDuplicateLines(t *testing.T) {
 	require.Equal(t, append(expected, "", "input", "", "footer"), actual)
 }
 
+func TestRendererShrinkThenGrowDoesNotArchiveVisibleRowsTwice(t *testing.T) {
+	t.Parallel()
+	r, buf := newTestRenderer(3)
+	screen := scrollbackScreen{rows: make([]string, 3)}
+	frames := [][]string{
+		{"history", "answer", "temporary", "input", "footer"},
+		{"history", "answer", "input", "footer"},
+		{"history", "answer", "next", "input", "footer"},
+		{"history", "answer", "next", "last", "input", "footer"},
+	}
+	for _, lines := range frames {
+		r.Frame(lines, len(lines)-2, 0)
+		screen.write(buf.String())
+		buf.Reset()
+		require.Equal(t, []string{"history", "answer"}, screen.history[:2])
+	}
+	require.Equal(t, []string{"history", "answer", "next"}, screen.history)
+	require.Equal(t, []string{"last", "input", "footer"}, screen.rows)
+}
+
+func TestRendererStreamingMarkdownDoesNotDuplicateLines(t *testing.T) {
+	t.Parallel()
+	const text = `The garden project has several tasks planned for the weekend:
+
+- Prepare the vegetable beds.
+- Label the seed trays.
+- Inspect the watering system.
+- Move the young plants into larger containers.
+- Replace the damaged fence panels near the compost heap.
+- Set aside spare pots for the next planting season.
+
+The schedule **depends on the weather forecast**.
+
+The main question is **which tasks can happen indoors**:
+
+- Seed trays can stay on the workshop shelves until the seedlings are ready to move outside.
+- Larger containers should remain near the greenhouse where they are protected from cold winds.
+
+Keep the paths clear while moving supplies. Any tools left outside should be cleaned and returned to the shed before the evening rain arrives.
+
+### 3. Supplies
+
+Check the cupboard for **everything needed next week**:
+
+- Extra gardening gloves.
+- Replacement plant labels.`
+	for _, height := range []int{5, 12, 24} {
+		for _, chunkSize := range []int{1, 7, 40} {
+			t.Run(fmt.Sprintf("height=%d/chunk=%d", height, chunkSize), func(t *testing.T) {
+				t.Parallel()
+				r, buf := newTestRenderer(height)
+				screen := scrollbackScreen{rows: make([]string, height)}
+				for end := chunkSize; end < len(text)+chunkSize; end += chunkSize {
+					lines := RenderAssistantLines(text[:min(end, len(text))], 80)
+					lines = append(lines, "", "input", "", "footer")
+					r.Frame(lines, len(lines)-3, 0)
+					screen.write(buf.String())
+					buf.Reset()
+				}
+				var expected []string
+				for _, line := range RenderAssistantLines(text, 80) {
+					expected = append(expected, ansi.Strip(line))
+				}
+				actual := append(slices.Clone(screen.history), screen.rows...)
+				// Transient markdown spacing may already be in immutable scrollback.
+				isBlank := func(line string) bool { return strings.TrimSpace(line) == "" }
+				require.Equal(t,
+					slices.DeleteFunc(append(expected, "", "input", "", "footer"), isBlank),
+					slices.DeleteFunc(actual, isBlank))
+			})
+		}
+	}
+}
+
 func TestRendererRepeatedOffscreenChangesDoNotReplayUnchangedAnswers(t *testing.T) {
 	t.Parallel()
 	r, buf := newTestRenderer(3)

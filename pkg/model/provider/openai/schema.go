@@ -202,7 +202,11 @@ func walkSchema(schema map[string]any, fn func(map[string]any)) {
 // $ref nodes are left untouched (no additionalProperties/type injection): a
 // newly-required $ref property is instead wrapped as
 // {"anyOf": [<$ref>, {"type": "null"}]}, OpenAI's documented pattern for an
-// optional reference, so the model isn't forced to always emit it.
+// optional reference, so the model isn't forced to always emit it. Nullable
+// array and object properties use the same anyOf form, whether they were
+// newly made nullable or already declared as a ["array", "null"] type pair:
+// strict mode rejects the type-pair form when the object lives behind a
+// $ref/$defs indirection. Scalar properties keep the ["T", "null"] form.
 func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters {
 	if schema == nil {
 		schema = map[string]any{"type": "object", "properties": map[string]any{}}
@@ -255,16 +259,36 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 		propertyOrder := tools.SchemaPropertyNames(node)
 		for _, propName := range propertyOrder {
 			newRequired = append(newRequired, propName)
-			if !originallyRequired[propName] {
-				if propMap, ok := properties[propName].(map[string]any); ok {
-					if _, isRef := propMap["$ref"]; isRef {
-						properties[propName] = map[string]any{
-							"anyOf": []any{propMap, map[string]any{"type": "null"}},
-						}
-					} else if t, ok := propMap["type"].(string); ok {
-						propMap["type"] = []string{t, "null"}
-					}
-				}
+
+			propMap, ok := properties[propName].(map[string]any)
+			if !ok {
+				continue
+			}
+
+			if containerType, isNullableContainer := nullableContainerType(propMap); isNullableContainer {
+				propMap["type"] = containerType
+				properties[propName] = nullableAnyOf(propMap)
+				continue
+			}
+
+			if originallyRequired[propName] {
+				continue
+			}
+
+			_, isRef := propMap["$ref"]
+			_, hasEnum := propMap["enum"]
+			_, hasConst := propMap["const"]
+			t, isScalarType := propMap["type"].(string)
+			switch {
+			case isRef || t == "array" || t == "object":
+				properties[propName] = nullableAnyOf(propMap)
+			case hasEnum || hasConst:
+				// A "null" type alongside enum/const still rejects null (both
+				// apply), and the type may be a multi-type array. Wrapping
+				// keeps the values intact and adds null as an alternative.
+				properties[propName] = nullableAnyOf(propMap)
+			case isScalarType:
+				propMap["type"] = []string{t, "null"}
 			}
 		}
 
@@ -272,6 +296,46 @@ func makeAllRequired(schema shared.FunctionParameters) shared.FunctionParameters
 	})
 
 	return schema
+}
+
+// nullableContainerType reports the container type ("array" or "object") of a
+// schema whose "type" is exactly that container type plus "null", in either
+// order and in any of the slice representations produced by schema generators.
+func nullableContainerType(schema map[string]any) (string, bool) {
+	var types []string
+	switch t := schema["type"].(type) {
+	case []string:
+		types = t
+	case []any:
+		for _, v := range t {
+			s, ok := v.(string)
+			if !ok {
+				return "", false
+			}
+			types = append(types, s)
+		}
+	default:
+		return "", false
+	}
+
+	if len(types) != 2 {
+		return "", false
+	}
+	for i, t := range types {
+		other := types[1-i]
+		if t == "null" && (other == "array" || other == "object") {
+			return other, true
+		}
+	}
+	return "", false
+}
+
+// nullableAnyOf wraps schema as {"anyOf": [schema, {"type": "null"}]}, the
+// nullable form OpenAI strict mode accepts for non-scalar schemas.
+func nullableAnyOf(schema map[string]any) map[string]any {
+	return map[string]any{
+		"anyOf": []any{schema, map[string]any{"type": "null"}},
+	}
 }
 
 // isCompositionNode reports whether node describes its shape via $ref or a
@@ -295,7 +359,8 @@ func isCompositionNode(node map[string]any) bool {
 
 // ensureTypeFields ensures every schema node that is a map has a "type" key.
 // OpenAI Responses API requires all schema nodes to have an explicit type.
-// Nodes with "properties" default to "object"; other nodes default to "object" as well.
+// enum/const nodes get the type of their values (pydantic emits a typeless
+// enum for a mixed Literal); other nodes default to "object".
 // $ref/anyOf/oneOf/allOf nodes are left as leaves — see isCompositionNode.
 func ensureTypeFields(schema shared.FunctionParameters) shared.FunctionParameters {
 	if schema == nil {
@@ -307,7 +372,7 @@ func ensureTypeFields(schema shared.FunctionParameters) shared.FunctionParameter
 			return
 		}
 		if _, hasType := node["type"]; !hasType {
-			node["type"] = "object"
+			node["type"] = tools.DefaultType(node)
 		}
 	})
 
@@ -346,21 +411,34 @@ func fixSchemaArrayItems(schema shared.FunctionParameters) shared.FunctionParame
 			continue
 		}
 
-		checkForMissingItems := false
-		switch t := prop["type"].(type) {
-		case string:
-			checkForMissingItems = t == "array"
-		case []string:
-			checkForMissingItems = slices.Contains(t, "array")
-		}
-		if !checkForMissingItems {
-			continue
-		}
-
-		if _, ok := prop["items"]; !ok {
-			prop["items"] = map[string]any{"type": "object"}
+		addMissingArrayItems(prop)
+		if variants, ok := prop["anyOf"].([]any); ok {
+			for _, variant := range variants {
+				if variantMap, ok := variant.(map[string]any); ok {
+					addMissingArrayItems(variantMap)
+				}
+			}
 		}
 	}
 
 	return schema
+}
+
+// addMissingArrayItems gives an array schema without "items" a default
+// {"type": "object"} items schema, which OpenAI requires.
+func addMissingArrayItems(schema map[string]any) {
+	isArray := false
+	switch t := schema["type"].(type) {
+	case string:
+		isArray = t == "array"
+	case []string:
+		isArray = slices.Contains(t, "array")
+	}
+	if !isArray {
+		return
+	}
+
+	if _, ok := schema["items"]; !ok {
+		schema["items"] = map[string]any{"type": "object"}
+	}
 }

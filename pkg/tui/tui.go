@@ -20,6 +20,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/audio/transcribe"
+	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/history"
 	"github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/plans"
@@ -165,8 +166,12 @@ type appModel struct {
 	completions  completion.Manager
 
 	// Speech-to-text
+	envProvider  environment.Provider
 	transcriber  Transcriber
-	transcriptCh chan string // bridges transcriber goroutine → Bubble Tea event loop
+	speechMu     sync.Mutex
+	speechCtx    context.Context //nolint:containedctx // Owns transcription across UI and external shutdown.
+	cancelSpeech context.CancelFunc
+	speech       *speechRun
 
 	// Working state indicator (resize handle spinner)
 	workingSpinner spinner.Spinner
@@ -207,12 +212,15 @@ type appModel struct {
 	// perform a full terminal release/restore cycle on focus events.
 	program *tea.Program
 
-	// themeWatcher hot-reloads the active custom theme: it watches the
-	// current theme's backing file and reports edits as ThemeFileChangedMsg.
-	// Created in SetProgram (the callback needs the program to inject
-	// messages into the event loop) and re-targeted after every theme
-	// change via watchCurrentTheme.
-	themeWatcher themeFileWatcher
+	// The lifetime context is immutable; themeMu guards run replacement and joining.
+	themeMu        sync.Mutex
+	themeCtx       context.Context //nolint:containedctx // Owns theme watching across UI and external shutdown.
+	cancelThemes   context.CancelFunc
+	themeWatcher   themeFileWatcher
+	themeChanges   chan messages.ThemeFileChangedMsg
+	cancelThemeRun context.CancelFunc
+	themeRunDone   <-chan struct{}
+	themeRunRef    string
 
 	// dockerDesktop enables terminal mode restoration after a focus change.
 	dockerDesktop bool
@@ -299,11 +307,8 @@ type appModel struct {
 	imageWriter *tuiimage.Writer
 }
 
-// themeFileWatcher is the subset of *styles.ThemeWatcher the model drives.
-// It is an interface so tests can record Watch/Stop calls.
 type themeFileWatcher interface {
-	Watch(themeRef string) error
-	Stop()
+	Run(ctx context.Context, themeRef string, ready func()) error
 }
 
 // Transcriber is the speech-to-text interface used by the TUI. It is an
@@ -311,9 +316,7 @@ type themeFileWatcher interface {
 // can inject a fake implementation via WithTranscriber and so that the TUI
 // does not depend on a concrete audio backend.
 type Transcriber interface {
-	Start(ctx context.Context, handler transcribe.TranscriptHandler) error
-	Stop()
-	IsRunning() bool
+	Run(ctx context.Context, finish <-chan struct{}, handler transcribe.TranscriptHandler, ready func(context.Context)) error
 	IsSupported() bool
 }
 
@@ -399,6 +402,14 @@ func WithAppName(name string) Option {
 	}
 }
 
+// WithEnvProvider sets the secret chain used by /speak to read
+// OPENAI_API_KEY. If not provided, defaults to environment.NewDefaultProvider().
+func WithEnvProvider(env environment.Provider) Option {
+	return func(m *appModel) {
+		m.envProvider = env
+	}
+}
+
 // WithVersion sets the application version.
 //
 // If not provided, defaults to version.Version.
@@ -481,6 +492,8 @@ func WithToolRenderers(renderers map[string]tool.Builder) Option {
 // New creates a new Model.
 func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initialWorkingDir string, cleanup func(), opts ...Option) tea.Model {
 	tuiCtx := func() context.Context { return context.WithoutCancel(ctx) }
+	themeCtx, cancelThemes := context.WithCancel(ctx)
+	speechCtx, cancelSpeech := context.WithCancel(ctx)
 
 	ar := animation.NewRuntime()
 
@@ -512,6 +525,11 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	m := &appModel{
 		ar:            ar,
 		shutdownDone:  ctx.Done(),
+		themeCtx:      themeCtx,
+		cancelThemes:  cancelThemes,
+		speechCtx:     speechCtx,
+		cancelSpeech:  cancelSpeech,
+		themeChanges:  make(chan messages.ThemeFileChangedMsg),
 		toolRenderers: tooldefaults.NewRegistry(),
 		buildCommandCategories: func(ctx context.Context, _ tea.Model) []commands.Category {
 			return commanddefaults.BuildCommandCategories(ctx, initialApp)
@@ -528,7 +546,6 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		dialogMgr:                     dialog.New(),
 		completions:                   completion.New(),
 		tour:                          tour.New(),
-		transcriber:                   transcribe.New(os.Getenv("OPENAI_API_KEY")),
 		workingSpinner:                spinner.New(ar, spinner.ModeSpinnerOnly, styles.SpinnerDotsHighlightStyle),
 		focusedPanel:                  PanelEditor,
 		editorLines:                   3,
@@ -545,6 +562,12 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 	// Apply options
 	for _, opt := range opts {
 		opt(m)
+	}
+	if m.transcriber == nil {
+		if m.envProvider == nil {
+			m.envProvider = environment.NewDefaultProvider()
+		}
+		m.transcriber = transcribe.New(m.envProvider)
 	}
 
 	// Create initial editor (after options are applied so command builder is set)
@@ -592,18 +615,12 @@ func (m *appModel) Resolve(v any) any {
 }
 
 // SetProgram sets the tea.Program for the supervisor to send routed messages.
-// It also starts the theme file watcher, whose callback needs the program to
-// inject hot-reload messages into the event loop.
+// It also starts watching the active theme.
 func (m *appModel) SetProgram(p *tea.Program) {
 	m.program = p
 	m.supervisor.SetProgram(p)
 
-	if m.themeWatcher != nil {
-		m.themeWatcher.Stop()
-	}
-	m.themeWatcher = styles.NewThemeWatcher(func(themeRef string) {
-		p.Send(messages.ThemeFileChangedMsg{ThemeRef: themeRef})
-	})
+	m.themeWatcher = styles.NewThemeWatcher(m.sendThemeChange)
 	m.watchCurrentTheme()
 }
 
@@ -611,15 +628,67 @@ func (m *appModel) SetProgram(p *tea.Program) {
 // so edits to its backing file hot-reload it. The watcher no-ops for themes
 // without a user theme file (e.g. built-ins).
 func (m *appModel) watchCurrentTheme() {
-	if m.themeWatcher == nil {
+	m.themeMu.Lock()
+	defer m.themeMu.Unlock()
+
+	themeRef := styles.CurrentTheme().Ref
+	if m.cancelThemeRun != nil {
+		select {
+		case <-m.themeRunDone:
+		default:
+			// Restarting would drop an edit still in the watcher's debounce window.
+			if themeRef == m.themeRunRef {
+				return
+			}
+		}
+		m.cancelThemeRun()
+		<-m.themeRunDone
+	}
+	if m.themeWatcher == nil || m.themeCtx.Err() != nil {
 		return
 	}
-	theme := styles.CurrentTheme()
-	if theme.Ref == "" {
+	if themeRef == "" {
 		return
 	}
-	if err := m.themeWatcher.Watch(theme.Ref); err != nil {
-		slog.Warn("Failed to watch theme file", "theme", theme.Ref, "error", err)
+	ctx, cancel := context.WithCancel(m.themeCtx)
+	m.cancelThemeRun = cancel
+	watcher := m.themeWatcher
+	ready, done := make(chan struct{}), make(chan struct{})
+	m.themeRunDone = done
+	m.themeRunRef = themeRef
+	go func() {
+		defer close(done)
+		defer cancel()
+		if err := watcher.Run(ctx, themeRef, func() { close(ready) }); err != nil {
+			slog.WarnContext(ctx, "Failed to watch theme file", "theme", themeRef, "error", err)
+		}
+	}()
+	select {
+	case <-ready:
+	case <-done:
+	}
+}
+
+// sendThemeChange never ties filesystem cleanup to the UI consuming a message.
+func (m *appModel) sendThemeChange(ctx context.Context, themeRef string) {
+	select {
+	case m.themeChanges <- messages.ThemeFileChangedMsg{ThemeRef: themeRef}:
+	case <-ctx.Done():
+	}
+}
+
+func (m *appModel) waitForThemeChange() tea.Cmd {
+	ctx, changes := m.themeCtx, m.themeChanges
+	if changes == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case msg := <-changes:
+			return msg
+		case <-ctx.Done():
+			return nil
+		}
 	}
 }
 
@@ -697,6 +766,9 @@ func (m *appModel) editorOpts() []editor.Option {
 func (m *appModel) initSessionComponents(tabID string, a *app.App, sess *session.Session) {
 	m.cancelSidebarPlanEdit()
 	tab := m.ensureTab(tabID)
+	if run := m.stopSpeechForTab(tab); run != nil {
+		run.editor.SetRecording(false)
+	}
 	if tab.chatPage != nil {
 		m.retireAttention(tab)
 		chat.Cleanup(tab.chatPage)
@@ -742,7 +814,7 @@ func (m *appModel) contextShutdownCmd() tea.Cmd {
 
 // Init initializes the model.
 func (m *appModel) Init() tea.Cmd {
-	return tea.Batch(m.init(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.refreshPlanSidebarCmd(), m.initTmuxVisibilityCmd(), m.refreshProgramStatus(), m.programStatusProbeCmd())
+	return tea.Batch(m.init(), m.waitForThemeChange(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.refreshPlanSidebarCmd(), m.initTmuxVisibilityCmd(), m.refreshProgramStatus(), m.programStatusProbeCmd())
 }
 
 // autoThemeInitCmd enables DEC mode 2031 (terminal color-scheme reports) so
@@ -1487,7 +1559,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyThemeChanged()
 
 	case messages.ThemeFileChangedMsg:
-		return m.handleThemeFileChanged(msg.ThemeRef)
+		model, cmd := m.handleThemeFileChanged(msg.ThemeRef)
+		return model, tea.Batch(cmd, m.waitForThemeChange())
 
 	// --- Settings (/settings) ---
 
@@ -1514,10 +1587,8 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.StopSpeakMsg:
 		return m.handleStopSpeak()
 
-	case messages.SpeakTranscriptMsg:
-		m.activeTab.editor.InsertText(msg.Delta)
-		cmd := m.waitForTranscript()
-		return m, cmd
+	case speechEvent:
+		return m.handleSpeechEvent(msg)
 
 	// --- MCP prompts ---
 
@@ -1986,6 +2057,7 @@ func (m *appModel) handleSwitchTab(sessionID string) (tea.Model, tea.Cmd) {
 	}
 	m.cancelSidebarPlanEdit()
 	if outgoing != m.tabs[sessionID] {
+		m.cancelSpeechSend(outgoing)
 		m.parkAttention(outgoing)
 	}
 
@@ -2114,6 +2186,7 @@ func (m *appModel) handleCloseTab(sessionID string) (tea.Model, tea.Cmd) {
 
 	// Clean up per-session state
 	if tab := m.tabs[sessionID]; tab != nil {
+		m.stopSpeechForTab(tab)
 		if tab.chatPage != nil {
 			chat.Cleanup(tab.chatPage)
 		}
@@ -2348,12 +2421,10 @@ func (m *appModel) handleKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	// Check if we should stop transcription on Enter or Escape
-	if m.transcriber.IsRunning() {
+	if m.isTranscribing() {
 		switch {
 		case key.Matches(msg, transcriptionEnterKey):
-			model, cmd := m.handleStopSpeak()
-			sendCmd := m.activeTab.editor.SendContent()
-			return model, tea.Batch(cmd, sendCmd)
+			return m.handleFinishSpeak()
 
 		case key.Matches(msg, transcriptionEscapeKey):
 			return m.handleStopSpeak()
@@ -3176,9 +3247,18 @@ func (m *appModel) shutdownTimeoutOrDefault() time.Duration {
 // exit) and the context watcher (external cancellation).
 func (m *appModel) cleanupManagedResources() {
 	m.cleanupOnce.Do(func() {
-		if m.themeWatcher != nil {
-			m.themeWatcher.Stop()
+		if m.cancelSpeech != nil {
+			m.cancelSpeech()
 		}
+		m.stopSpeech()
+		if m.cancelThemes != nil {
+			m.cancelThemes()
+		}
+		m.themeMu.Lock()
+		if m.themeRunDone != nil {
+			<-m.themeRunDone
+		}
+		m.themeMu.Unlock()
 		if m.tuiStore != nil {
 			_ = m.tuiStore.Close()
 		}
@@ -3207,8 +3287,9 @@ func (m *appModel) Shutdown() {
 // wedged cleanup or arm parallel safety nets.
 func (m *appModel) cleanupAll() {
 	m.cleanupAllOnce.Do(func() {
-		m.transcriber.Stop()
-		m.closeTranscriptCh()
+		if m.cancelSpeech != nil {
+			m.cancelSpeech()
+		}
 		for _, tab := range m.tabs {
 			if tab.editor != nil {
 				tab.editor.Cleanup()

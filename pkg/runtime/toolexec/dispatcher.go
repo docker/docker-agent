@@ -94,14 +94,14 @@ type CallOutcome struct {
 
 // Emitter receives the events the [Dispatcher] emits while processing a
 // batch of tool calls. Runtimes typically implement this by sending typed
-// events to their event channel.
+// events to their event sink.
 //
 // Implementations must be safe for concurrent use: the dispatcher runs
 // independent tool calls from the same batch in parallel.
 //
 // The dispatcher emits the events below. Runtime-managed handlers
 // (registered via [Dispatcher.Handlers]) emit any additional runtime-specific
-// events directly via the channel they captured at registration time.
+// events directly via the event sink they captured at registration time.
 type Emitter interface {
 	EmitToolCall(toolCall tools.ToolCall, tool tools.Tool, agentName string)
 	EmitToolCallOutput(toolCallID string, tool tools.Tool, output, agentName string)
@@ -141,7 +141,7 @@ type HookDispatcher interface {
 // handler in tracing/telemetry/event-emission, so handlers MUST NOT emit
 // ToolCall/ToolCallResponse themselves. Handlers that need to emit other
 // event types should be wired by the caller to capture the relevant
-// channel via closure when registering the handler.
+// event sink via closure when registering the handler.
 type ToolHandler func(ctx context.Context, sess *session.Session, tc tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error)
 
 // ResumeRequest carries the user's response to a tool-confirmation prompt.
@@ -195,8 +195,9 @@ func NormalizeResumeType(t ResumeType) ResumeType {
 	}
 }
 
-// Dispatcher executes batches of tool calls. Construct one per runtime
-// (or per RunStream) and call [Dispatcher.Process] for each LLM response.
+// Dispatcher executes batches of tool calls. Construct one per batch (as
+// the runtime does) or reuse one across batches, and call
+// [Dispatcher.Process] for each LLM response.
 // The dispatcher is goroutine-safe only insofar as its dependencies are.
 type Dispatcher struct {
 	// Tracer records per-call spans. May be nil (no-op tracing).
@@ -333,9 +334,8 @@ type call struct {
 	// pre_tool_use preempt-yolo lane result cache. The first
 	// consultPreToolUsePreYolo call dispatches EventPreToolUsePreYolo
 	// and stores the verdict; subsequent calls return the cached
-	// result. Without the cache, approveAndRun + askUser +
-	// confirmationMetadata would dispatch the lane up to three times
-	// per tool call.
+	// result. askUser and confirmationMetadata read preYoloResult
+	// directly; recheckRewrittenInput resets the cache on purpose.
 	preYoloComputed bool
 	preYoloResult   *hooks.Result
 
@@ -539,7 +539,7 @@ func (c *call) autoApprovalAfterConfirmationWait() (PermissionDecision, bool) {
 		// Even under a preempt-yolo Ask, a session-scoped allow grant that
 		// landed while we were blocked on the resume channel (e.g. a
 		// concurrent "always allow this tool" decision) is an informed
-		// opt-in and takes effect. Mirrors approveAndRun's Stage 0: the
+		// opt-in and takes effect. Mirrors runToolGuards' preempt-Ask exception: the
 		// safety mode and the team/config layer stay subordinate.
 		if c.sessionPermissionsAllow() {
 			return PermissionDecision{Outcome: OutcomeAllow, Reason: ReasonChecker, Source: sessionPermissionsSource}, true
@@ -614,15 +614,16 @@ func (c *call) cancellationOutcome(ctx context.Context) CallOutcome {
 // preempt lane runs BEFORE the deterministic approval pipeline
 // ([Decide], --yolo, permission patterns, the default pre_tool_use
 // lane) so a deny/ask verdict here cannot be bypassed by
-// auto-approval rules. Returns nil when no preempt-yolo entry is
+// auto-approval rules (except an informed session-scoped grant overriding
+// an Ask — see [call.sessionPermissionsAllow]). Returns nil when no preempt-yolo entry is
 // registered, the hooks dispatcher itself is nil, or the chain
 // returned no opinion.
 //
-// Cached after the first call: approveAndRun consults it once,
-// askUser reads its Decision to skip permission_request when the
-// lane returned Ask, and confirmationMetadata reads its Metadata to
-// enrich the confirmation event. Without the cache the chain would
-// dispatch up to three times per call.
+// Called from consultMandatoryHooks (via runToolGuards, and again after a
+// rewrite via recheckRewrittenInput, which resets the cache). askUser and
+// confirmationMetadata read the cached preYoloResult directly: its Decision
+// skips permission_request when the lane returned Ask, and its Metadata
+// enriches the confirmation event.
 func (c *call) consultPreToolUsePreYolo(ctx context.Context) *hooks.Result {
 	if c.preYoloComputed {
 		return c.preYoloResult
@@ -1028,9 +1029,10 @@ func (c *call) runToolset(ctx context.Context) CallOutcome {
 	return CallOutcome{StopRun: stop, StopMessage: msg}
 }
 
-// runHandler executes a runtime-managed tool handler. Hooks do not fire
-// for runtime-managed handlers — they're internal plumbing, not user-
-// configurable tools.
+// runHandler executes a runtime-managed tool handler. post_tool_use does not
+// fire for runtime-managed handlers — they're internal plumbing, not user-
+// configurable tools. The approval-phase hooks and tool_response_transform
+// still do.
 func (c *call) runHandler(ctx context.Context, handler ToolHandler) CallOutcome {
 	_, stop := c.invoke(ctx, "runtime.tool.handler.runtime", func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error) {
 		start := time.Now()
@@ -1123,8 +1125,9 @@ func (r callRuntime) Supports(capability tools.Capability) bool {
 
 // invoke is the common pipeline shared by toolset tools and runtime-
 // managed handlers: tracing, event emission, telemetry, error
-// translation, and session message persistence. It is the only place
-// where a tool actually runs.
+// translation, and session message persistence. It is the only place a
+// model-requested tool call runs; nested RunTool invocations and Gate
+// actions run outside it.
 func (c *call) invoke(ctx context.Context, spanName string, exec func(ctx context.Context) (*tools.ToolCallResult, time.Duration, error)) (*tools.ToolCallResult, *StopRunError) {
 	attrs := []attribute.KeyValue{
 		attribute.String(genai.AttrOperationName, genai.OperationExecuteTool),

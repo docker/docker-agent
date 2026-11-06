@@ -15,7 +15,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/docker/docker-agent/pkg/modelpicker"
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -27,8 +27,8 @@ import (
 type modelPickerDialog struct {
 	pickerCore
 
-	models   []runtime.ModelChoice
-	filtered []runtime.ModelChoice
+	models   []modelcatalog.ModelChoice
+	filtered []modelcatalog.ModelChoice
 	errMsg   string // validation error message
 	refresh  key.Binding
 }
@@ -81,16 +81,16 @@ var modelPickerLayout = pickerLayout{
 }
 
 // NewModelPickerDialog creates a new model picker dialog.
-func NewModelPickerDialog(models []runtime.ModelChoice) Dialog {
+func NewModelPickerDialog(models []modelcatalog.ModelChoice) Dialog {
 	return newModelPickerDialog(models, "")
 }
 
 // NewModelPickerDialogWithQuery creates a model picker and restores its filter.
-func NewModelPickerDialogWithQuery(models []runtime.ModelChoice, query string) Dialog {
+func NewModelPickerDialogWithQuery(models []modelcatalog.ModelChoice, query string) Dialog {
 	return newModelPickerDialog(models, query)
 }
 
-func newModelPickerDialog(models []runtime.ModelChoice, query string) Dialog {
+func newModelPickerDialog(models []modelcatalog.ModelChoice, query string) Dialog {
 	start := time.Now()
 	d := &modelPickerDialog{
 		pickerCore: newPickerCore(modelPickerLayout, "Type to search or enter custom model (provider/model)…"),
@@ -101,7 +101,7 @@ func newModelPickerDialog(models []runtime.ModelChoice, query string) Dialog {
 	// Sort models: config first, then catalog, then custom.
 	sortStart := time.Now()
 	sortedModels := slices.Clone(models)
-	slices.SortFunc(sortedModels, func(a, b runtime.ModelChoice) int {
+	slices.SortFunc(sortedModels, func(a, b modelcatalog.ModelChoice) int {
 		return comparePickerSortKeys(modelSortKeys(a), modelSortKeys(b))
 	})
 	sortDuration := time.Since(sortStart)
@@ -119,7 +119,7 @@ func newModelPickerDialog(models []runtime.ModelChoice, query string) Dialog {
 }
 
 // modelSortKeys derives the sort key tuple from a runtime.ModelChoice.
-func modelSortKeys(m runtime.ModelChoice) pickerSortKeys {
+func modelSortKeys(m modelcatalog.ModelChoice) pickerSortKeys {
 	section := 0
 	switch {
 	case m.IsCustom:
@@ -329,10 +329,10 @@ func (d *modelPickerDialog) filterModels() {
 
 	// Keep an explicit provider/model option alongside fuzzy matches unless
 	// the query already identifies an available choice.
-	if isCustomQuery && !slices.ContainsFunc(d.models, func(model runtime.ModelChoice) bool {
+	if isCustomQuery && !slices.ContainsFunc(d.models, func(model modelcatalog.ModelChoice) bool {
 		return strings.EqualFold(model.Ref, query) || strings.EqualFold(model.Provider+"/"+model.Model, query)
 	}) {
-		d.filtered = append(d.filtered, runtime.ModelChoice{
+		d.filtered = append(d.filtered, modelcatalog.ModelChoice{
 			Name: "Custom: " + query,
 			Ref:  query,
 		})
@@ -456,7 +456,7 @@ func pickerRowStyles(selected bool) pickerRowPalette {
 	return p
 }
 
-func (d *modelPickerDialog) renderModel(model runtime.ModelChoice, selected bool, maxWidth int) string {
+func (d *modelPickerDialog) renderModel(model modelcatalog.ModelChoice, selected bool, maxWidth int) string {
 	if maxWidth <= 0 {
 		return ""
 	}
@@ -472,7 +472,7 @@ func pickerNameColWidth(maxWidth int) int {
 }
 
 // renderRowName renders the model name and any badges, padded to width.
-func renderRowName(model runtime.ModelChoice, width int, p pickerRowPalette) string {
+func renderRowName(model modelcatalog.ModelChoice, width int, p pickerRowPalette) string {
 	badges, badgeWidth := renderRowBadges(model, p)
 
 	nameMax := max(1, width-badgeWidth)
@@ -487,7 +487,7 @@ func renderRowName(model runtime.ModelChoice, width int, p pickerRowPalette) str
 }
 
 // renderRowBadges returns the rendered badge segment plus its width.
-func renderRowBadges(model runtime.ModelChoice, p pickerRowPalette) (string, int) {
+func renderRowBadges(model modelcatalog.ModelChoice, p pickerRowPalette) (string, int) {
 	var (
 		text  string
 		width int
@@ -509,7 +509,7 @@ func renderRowBadges(model runtime.ModelChoice, p pickerRowPalette) (string, int
 }
 
 // renderRowStats renders the three right-aligned stats columns.
-func renderRowStats(model runtime.ModelChoice, p pickerRowPalette) string {
+func renderRowStats(model modelcatalog.ModelChoice, p pickerRowPalette) string {
 	return renderStatsCell(formatCostPerMillion(model.InputCost), pickerInputColWidth, p, model.InputCost > 0) +
 		renderStatsCell(formatCostPerMillion(model.OutputCost), pickerOutputColWidth, p, model.OutputCost > 0) +
 		renderStatsCell(formatContextCell(model.ContextLimit), pickerContextColWidth, p, model.ContextLimit > 0)
@@ -529,7 +529,7 @@ func renderStatsCell(value string, width int, p pickerRowPalette, present bool) 
 
 // isAlloyModel returns true when the model is an alloy spec (no
 // provider, comma-separated provider/model list in Model).
-func isAlloyModel(model runtime.ModelChoice) bool {
+func isAlloyModel(model modelcatalog.ModelChoice) bool {
 	return model.Provider == "" && strings.Contains(model.Model, ",")
 }
 
@@ -594,7 +594,7 @@ func formatCostPerMillion(cost float64) string {
 
 // modelReference returns the technical "provider/model" reference for a
 // model choice, suitable for the details panel.
-func modelReference(model runtime.ModelChoice) string {
+func modelReference(model modelcatalog.ModelChoice) string {
 	switch {
 	case model.IsCustom:
 		return model.Ref
@@ -649,7 +649,7 @@ func (d *modelPickerDialog) renderDetails(width int) string {
 }
 
 // formatDetailsLines builds the four labelled rows shown for a model.
-func formatDetailsLines(model runtime.ModelChoice, s detailsStyles) []string {
+func formatDetailsLines(model modelcatalog.ModelChoice, s detailsStyles) []string {
 	row := func(label, value string) string {
 		return s.label.Render(leftPad(label, pickerDetailsLabelWidth)) + value
 	}
@@ -679,7 +679,7 @@ func formatDetailsLines(model runtime.ModelChoice, s detailsStyles) []string {
 }
 
 // formatPricingRow renders the pricing line of the details panel.
-func formatPricingRow(model runtime.ModelChoice, s detailsStyles) string {
+func formatPricingRow(model modelcatalog.ModelChoice, s detailsStyles) string {
 	var parts []string
 	if model.InputCost > 0 || model.OutputCost > 0 {
 		parts = append(parts,
@@ -701,7 +701,7 @@ func formatPricingRow(model runtime.ModelChoice, s detailsStyles) string {
 }
 
 // formatLimitsRow renders the limits line of the details panel.
-func formatLimitsRow(model runtime.ModelChoice, s detailsStyles) string {
+func formatLimitsRow(model modelcatalog.ModelChoice, s detailsStyles) string {
 	var parts []string
 	if model.ContextLimit > 0 {
 		parts = append(parts, s.value.Render(formatTokenCount(int64(model.ContextLimit))+" context window"))
@@ -716,7 +716,7 @@ func formatLimitsRow(model runtime.ModelChoice, s detailsStyles) string {
 }
 
 // formatModalitiesRow renders the modalities line of the details panel.
-func formatModalitiesRow(model runtime.ModelChoice, s detailsStyles) string {
+func formatModalitiesRow(model modelcatalog.ModelChoice, s detailsStyles) string {
 	if len(model.InputModalities) == 0 && len(model.OutputModalities) == 0 {
 		return s.muted.Render("unavailable")
 	}

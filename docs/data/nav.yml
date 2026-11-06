@@ -191,6 +191,8 @@
       url: /providers/cloudflare-workers-ai/
     - title: ChatGPT
       url: /providers/chatgpt/
+    - title: CloudGPU
+      url: /providers/cloudgpu/
     - title: DaoXE
       url: /providers/daoxe/
     - title: DeepSeek
@@ -209,6 +211,8 @@
       url: /providers/huggingface/
     - title: Local Models
       url: /providers/local/
+    - title: Lunaroute
+      url: /providers/lunaroute/
     - title: MiniMax
       url: /providers/minimax/
     - title: Mistral
@@ -227,10 +231,16 @@
       url: /providers/opencode-go/
     - title: OpenCode Zen
       url: /providers/opencode-zen/
+    - title: Opper
+      url: /providers/opper/
     - title: OpenRouter
       url: /providers/openrouter/
+    - title: OrcaRouter
+      url: /providers/orcarouter/
     - title: OVHcloud
       url: /providers/ovhcloud/
+    - title: Runcrate
+      url: /providers/runcrate/
     - title: Together AI
       url: /providers/together/
     - title: Vercel AI Gateway

@@ -144,7 +144,7 @@ func (r *LocalRuntime) ContextBreakdown(ctx context.Context, sess *session.Sessi
 	messages, summary := sess.GetMessagesAndLastSummary(a)
 	// Calibrate the heuristic against the provider-reported usage already
 	// recorded on this conversation, mirroring what the proactive
-	// compaction trigger does (see compactIfNeeded).
+	// compaction controller does (see addedContextTokens).
 	estimator := compaction.NewSliceEstimator(messages)
 
 	summaryContent := ""

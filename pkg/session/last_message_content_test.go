@@ -171,16 +171,16 @@ func TestGetLastMessageContent_Equivalence(t *testing.T) {
 	}
 	for seed := range int64(3000) {
 		s := lmcRandomTree(int(seed), 3, 12)
+		messages := s.GetAllMessages()
 		for _, role := range roles {
-			want := lmcBaseline(s, role)
+			want := lmcBaseline(messages, role)
 			got := s.getLastMessageContentByRole(role)
 			require.Equalf(t, want, got, "seed=%d role=%s", seed, role)
 		}
 	}
 }
 
-func lmcBaseline(s *Session, role chat.MessageRole) string {
-	messages := s.GetAllMessages()
+func lmcBaseline(messages []Message, role chat.MessageRole) string {
 	for _, message := range slices.Backward(messages) {
 		if message.Message.Role == role {
 			return strings.TrimSpace(message.Message.Content)
@@ -281,7 +281,7 @@ func BenchmarkGetLastAssistantMessageContent(b *testing.B) {
 		b.Run(sh.name+"/baseline_GetAllMessages", func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
-				_ = lmcBaseline(s, chat.MessageRoleAssistant)
+				_ = lmcBaseline(s.GetAllMessages(), chat.MessageRoleAssistant)
 			}
 		})
 		b.Run(sh.name+"/reverse_walk", func(b *testing.B) {

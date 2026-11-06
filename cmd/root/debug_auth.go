@@ -1,11 +1,14 @@
 package root
 
 import (
+	"cmp"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
 
+	secretsengine "github.com/docker/secrets-engine/client"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/cobra"
 
@@ -24,6 +27,22 @@ type authInfo struct {
 	Expired   bool      `json:"expired"`
 	Username  string    `json:"username,omitempty"`
 	Email     string    `json:"email,omitempty"`
+
+	SecretsEngine *secretsEngineInfo `json:"secrets_engine,omitempty"`
+}
+
+// secretsEngineInfo says why the secrets engine supplied no token, with the SDK's reason, socket and hint.
+type secretsEngineInfo struct {
+	Error  string `json:"error"`
+	Reason string `json:"reason,omitempty"`
+	Socket string `json:"socket,omitempty"`
+	Hint   string `json:"hint,omitempty"`
+}
+
+// noTokenInfo is the JSON output when no token is found.
+type noTokenInfo struct {
+	Error         string             `json:"error"`
+	SecretsEngine *secretsEngineInfo `json:"secrets_engine,omitempty"`
 }
 
 func newDebugAuthCmd() *cobra.Command {
@@ -43,13 +62,16 @@ func newDebugAuthCmd() *cobra.Command {
 			w := cmd.OutOrStdout()
 
 			token, source := desktop.GetTokenWithSource(ctx)
+			engine := newSecretsEngineInfo(desktop.SecretsEngineError(), token != "")
 			if token == "" {
 				if jsonOutput {
-					return json.NewEncoder(w).Encode(map[string]string{
-						"error": "no token found (is Docker Desktop running, or are you logged in with `docker login`?)",
+					return json.NewEncoder(w).Encode(noTokenInfo{
+						Error:         "no token found (is Docker Desktop running, or are you logged in with `docker login`?)",
+						SecretsEngine: engine,
 					})
 				}
 				fmt.Fprintln(w, "No token found. Is Docker Desktop running, or are you logged in with `docker login`?")
+				printSecretsEngineText(w, engine)
 				return nil
 			}
 
@@ -58,6 +80,7 @@ func newDebugAuthCmd() *cobra.Command {
 				return fmt.Errorf("failed to parse JWT: %w", err)
 			}
 			info.Source = string(source)
+			info.SecretsEngine = engine
 
 			userInfo := desktop.GetUserInfo(ctx)
 			info.Username = userInfo.Username
@@ -140,5 +163,37 @@ func printAuthInfoText(w io.Writer, info *authInfo) {
 		fmt.Fprintln(w, "Status:     ❌ Expired")
 	} else {
 		fmt.Fprintln(w, "Status:     ✅ Valid")
+	}
+
+	printSecretsEngineText(w, info.SecretsEngine)
+}
+
+// newSecretsEngineInfo describes why the secrets engine failed, leaving out "not running" when another source supplied a token.
+func newSecretsEngineInfo(err error, tokenFound bool) *secretsEngineInfo {
+	if err == nil || (tokenFound && errors.Is(err, secretsengine.ErrSecretsEngineNotRunning)) {
+		return nil
+	}
+	info := &secretsEngineInfo{Error: err.Error()}
+	if connErr, ok := errors.AsType[*secretsengine.ConnectError](err); ok {
+		if connErr.Reason != secretsengine.ReasonUnknown {
+			info.Reason = connErr.Reason.String()
+		}
+		info.Socket = connErr.SocketPath
+		info.Hint = connErr.Hint()
+	}
+	return info
+}
+
+func printSecretsEngineText(w io.Writer, info *secretsEngineInfo) {
+	if info == nil {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "Secrets engine: %s\n", cmp.Or(info.Reason, info.Error))
+	if info.Socket != "" {
+		fmt.Fprintf(w, "Socket:         %s\n", info.Socket)
+	}
+	if info.Hint != "" {
+		fmt.Fprintf(w, "Hint:           %s\n", info.Hint)
 	}
 }

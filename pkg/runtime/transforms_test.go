@@ -1,9 +1,9 @@
-// TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap covers the hot
 package runtime
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"slices"
@@ -28,6 +28,66 @@ import (
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
 )
+
+func TestRunStream_ToolImageFilteringPreservesResultsAndHistory(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		model     *modelsdev.Model
+		override  *latest.CapabilitiesConfig
+		wantImage bool
+	}{
+		{name: "text only", model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text"}}}},
+		{name: "unknown"},
+		{name: "vision", model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text", "image"}}}, wantImage: true},
+		{name: "override enables", override: &latest.CapabilitiesConfig{Image: true}, wantImage: true},
+		{name: "override disables", model: &modelsdev.Model{Modalities: modelsdev.Modalities{Input: []string{"text", "image"}}}, override: &latest.CapabilitiesConfig{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			prov := &recordingMsgProvider{
+				mockProvider: mockProvider{id: "test/tool-images", stream: newStreamBuilder().AddContent("ok").AddStopWithUsage(1, 1).Build()},
+				baseConfig:   base.Config{ModelConfig: latest.ModelConfig{Capabilities: tc.override}},
+			}
+			a := agent.New("root", "instructions", agent.WithModel(prov))
+			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(a)), WithSessionCompaction(false), WithModelStore(modalityModelStore{model: tc.model}))
+			require.NoError(t, err)
+			defer rt.Close()
+			messages := []chat.Message{
+				{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{
+					{ID: "A", Type: "function", Function: tools.FunctionCall{Name: "read_file", Arguments: `{}`}},
+					{ID: "B", Type: "function", Function: tools.FunctionCall{Name: "read_file", Arguments: `{}`}},
+				}},
+				{Role: chat.MessageRoleTool, ToolCallID: "B", MultiContent: chat.BuildToolResultMultiContent("", []tools.MediaContent{{MimeType: "image/png", Data: "Ag=="}}, nil)},
+				{Role: chat.MessageRoleTool, ToolCallID: "A", Content: "result A", MultiContent: chat.BuildToolResultMultiContent("result A", []tools.MediaContent{{MimeType: "image/png", Data: "AQ=="}}, nil)},
+			}
+			before, err := json.Marshal(messages)
+			require.NoError(t, err)
+			var items []session.Item
+			for i := range messages {
+				items = append(items, session.NewMessageItem(&session.Message{Message: messages[i]}))
+			}
+			sess := session.New(session.WithMessages(items))
+			for range rt.RunStream(t.Context(), sess) {
+			}
+			require.NotEmpty(t, prov.got)
+			var callIDs []string
+			for _, msg := range prov.got[0] {
+				if msg.Role == chat.MessageRoleTool {
+					callIDs = append(callIDs, msg.ToolCallID)
+					assert.Equal(t, tc.wantImage, hasImagePart([]chat.Message{msg}))
+					if msg.ToolCallID == "A" {
+						assert.Equal(t, "result A", msg.Content)
+					}
+				}
+			}
+			assert.Equal(t, []string{"B", "A"}, callIDs)
+			after, err := json.Marshal(messages)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(before), string(after))
+		})
+	}
+}
 
 // modalityModelStore returns a fixed [modelsdev.Model] regardless of
 // the requested ID. Runstream-level tests configure its Modalities to
@@ -106,7 +166,7 @@ func TestStripUnsupportedModalitiesTransform(t *testing.T) {
 	cases := []struct {
 		name string
 		caps *modelinfo.ModelCapabilities
-		// wantMime lists the expected surviving MultiContent parts, in
+		// wantParts lists the expected surviving MultiContent parts, in
 		// order, identified by text or MIME/kind.
 		wantParts []string
 	}{
@@ -284,6 +344,7 @@ func TestStripUnsupportedMediaContent_PreservesGeneratedMediaIndependently(t *te
 	assert.False(t, sawImageURL, "an ordinary user-attached image without ArtifactPath must still be stripped")
 }
 
+// TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap covers the hot
 // path: a runtime with no registered transforms returns the input
 // slice as-is without allocating a [hooks.Input].
 func TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap(t *testing.T) {
@@ -295,7 +356,7 @@ func TestApplyBeforeLLMCallTransforms_NoTransformsIsCheap(t *testing.T) {
 	r, err := NewLocalRuntime(t.Context(), tm, WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 
-	// Drop the runtime-shipped strip transform so we can observe the
+	// Drop the runtime-shipped strip transforms so we can observe the
 	// cheap-path behavior.
 	r.transforms = nil
 

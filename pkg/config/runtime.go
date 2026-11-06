@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
@@ -25,6 +26,8 @@ type RuntimeConfig struct {
 	envProviderOnce     sync.Once
 	envFilesErr         error
 
+	// ModelsDevFallback supplies optional catalog data after a cache/network miss.
+	ModelsDevFallback      func() *modelsdev.Database
 	ModelsDevStoreOverride *modelsdev.Store
 	modelsDevStore         *modelsdev.Store
 	modelsDevStoreErr      error
@@ -105,6 +108,7 @@ func (runConfig *RuntimeConfig) Clone() *RuntimeConfig {
 		envProviderCached:      env,
 		envFilesErr:            runConfig.envFilesErr,
 		ModelsDevStoreOverride: runConfig.ModelsDevStoreOverride,
+		ModelsDevFallback:      runConfig.ModelsDevFallback,
 		modelsDevStore:         store,
 		modelsDevStoreErr:      storeErr,
 		ProviderRegistry:       runConfig.ProviderRegistry,
@@ -146,7 +150,8 @@ func (runConfig *RuntimeConfig) ModelsDevStore() (*modelsdev.Store, error) {
 	}
 	runConfig.modelsDevStoreOnce.Do(func() {
 		runConfig.modelsDevStore, runConfig.modelsDevStoreErr = modelsdev.NewStore(
-			modelsdev.WithKnownProvider(provider.IsKnownProvider),
+			modelsdev.WithKnownProvider(catalog.IsKnownProvider),
+			modelsdev.WithFallback(runConfig.ModelsDevFallback),
 		)
 	})
 	return runConfig.modelsDevStore, runConfig.modelsDevStoreErr
@@ -187,7 +192,8 @@ func (runConfig *RuntimeConfig) EnvFilesError() error {
 }
 
 func (runConfig *RuntimeConfig) computedEnvProvider() environment.Provider {
-	defaultEnv := environment.NewDefaultProvider()
+	sources := environment.SourceProviders(environment.DefaultSources())
+	defaultEnv := environment.NewChain(sources...)
 
 	// Make env file paths absolute relative to the working directory.
 	absolutePaths, err := environment.AbsolutePaths(runConfig.WorkingDir, runConfig.EnvFiles)
@@ -205,6 +211,6 @@ func (runConfig *RuntimeConfig) computedEnvProvider() environment.Provider {
 		return defaultEnv
 	}
 
-	// Update the env provider to include env files
-	return environment.NewMultiProvider(envFilesProviders, defaultEnv)
+	// Env files join the same chain so overrides apply across all sources.
+	return environment.NewChain(append([]environment.Provider{envFilesProviders}, sources...)...)
 }

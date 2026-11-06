@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"slices"
 
 	"github.com/docker/docker-agent/pkg/session"
 )
@@ -54,7 +53,21 @@ func WithEventObserver(o EventObserver) Opt {
 		if o == nil {
 			return
 		}
-		r.observers = append(r.observers, o)
+		if factory, ok := o.(interface{ NewRunObserver() EventObserver }); ok {
+			r.observers = append(r.observers, factory.NewRunObserver)
+		} else {
+			r.observers = append(r.observers, func() EventObserver { return o })
+		}
+	}
+}
+
+// WithEventObserverFactory creates an independent observer for each RunStream.
+// Factories run synchronously before OnRunStart; nil results are ignored.
+func WithEventObserverFactory(factory func() EventObserver) Opt {
+	return func(r *LocalRuntime) {
+		if factory != nil {
+			r.observers = append(r.observers, factory)
+		}
 	}
 }
 
@@ -65,10 +78,10 @@ func WithEventObserver(o EventObserver) Opt {
 // channel. Observers run synchronously, so a slow observer
 // back-pressures the consumer.
 func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner <-chan Event) <-chan Event {
-	observers := slices.Clone(r.observers)
-	for i, obs := range observers {
-		if p, ok := obs.(*PersistenceObserver); ok {
-			observers[i] = newPersistenceObserver(p.store)
+	observers := make([]EventObserver, 0, len(r.observers))
+	for _, factory := range r.observers {
+		if obs := factory(); obs != nil {
+			observers = append(observers, obs)
 		}
 	}
 	for _, obs := range observers {

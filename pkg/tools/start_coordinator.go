@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 )
 
@@ -29,33 +28,16 @@ type StartOutcome struct {
 	ReportRecovery bool
 }
 
-// StartToolSets starts toolsets concurrently, with peer-dependent toolsets in
-// a second wave. The returned channels retain configuration order while each
-// outcome becomes available independently.
+// StartToolSets starts toolsets concurrently. The returned channels retain
+// configuration order while each outcome becomes available independently.
 func StartToolSets(ctx context.Context, toolsets []*StartableToolSet, timeout time.Duration) []<-chan StartOutcome {
 	outcomes := make([]<-chan StartOutcome, len(toolsets))
-	results := make([]chan StartOutcome, len(toolsets))
-	var independents sync.WaitGroup
-	var dependents []int
-
-	start := func(i int) {
-		started, err := toolsets[i].TryStartWithTimeout(ctx, timeout)
-		results[i] <- classifyStartOutcome(ctx, toolsets[i], started, err)
-	}
-
 	for i, toolset := range toolsets {
-		results[i] = make(chan StartOutcome, 1)
-		outcomes[i] = results[i]
-		if _, ok := As[PeerDependent](toolset); ok {
-			dependents = append(dependents, i)
-			continue
-		}
-		independents.Go(func() { start(i) })
-	}
-	for _, i := range dependents {
+		result := make(chan StartOutcome, 1)
+		outcomes[i] = result
 		go func() {
-			independents.Wait()
-			start(i)
+			started, err := toolset.TryStartWithTimeout(ctx, timeout)
+			result <- classifyStartOutcome(ctx, toolset, started, err)
 		}()
 	}
 	return outcomes

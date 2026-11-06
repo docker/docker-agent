@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/team"
@@ -58,7 +59,7 @@ func TestRunStreamServiceTierCost(t *testing.T) {
 			root := agent.New("root", "test", opts...)
 			rec := &recordingTelemetry{}
 			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
-				WithModelStore(modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())),
+				WithModelStore(modelsdev.NewDatabaseStore(embedded.Snapshot())),
 				WithSessionCompaction(false), WithTelemetry(rec), WithBudget(&latest.BudgetConfig{MaxCost: 100}))
 			require.NoError(t, err)
 			var captured *hooks.Input
@@ -121,7 +122,7 @@ func TestServiceTierMixedTurnsPersistCost(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(func() { assert.NoError(t, store.Close()) })
 			rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
-				WithModelStore(modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())),
+				WithModelStore(modelsdev.NewDatabaseStore(embedded.Snapshot())),
 				WithSessionStore(store), WithSessionCompaction(false), WithBudget(&latest.BudgetConfig{MaxCost: 100}))
 			require.NoError(t, err)
 			sess := session.New(session.WithTitle("Mixed tier accounting"), session.WithUserMessage("hi"))

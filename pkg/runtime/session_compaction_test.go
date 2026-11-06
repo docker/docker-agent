@@ -146,7 +146,7 @@ func TestDoCompactBeforeHookDeniesSkipsCompaction(t *testing.T) {
 	originalLen := len(sess.Messages)
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events)))
 	close(events)
 
 	var sawCompactionEvent, sawSummaryEvent bool
@@ -208,7 +208,7 @@ func TestDoCompactBeforeHookSuppliesSummary(t *testing.T) {
 	}))
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events)))
 	close(events)
 
 	var summaryEvent *SessionSummaryEvent
@@ -296,7 +296,7 @@ func TestDoCompactAfterHookFires(t *testing.T) {
 	sess.OutputTokens = 567
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonThreshold, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonThreshold, NewChannelSink(events)))
 	close(events)
 	for range events {
 	}
@@ -463,7 +463,7 @@ func TestDoCompactObservedRunDoesNotDuplicateSummary(t *testing.T) {
 
 	inner := make(chan Event, 32)
 	observed := rt.observe(t.Context(), sess, inner)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(inner))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(inner)))
 	close(inner)
 	for range observed {
 	}
@@ -508,7 +508,7 @@ func TestDoCompactNoHooksMatchesPriorBehavior(t *testing.T) {
 	}))
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events)))
 	close(events)
 
 	var startCount, doneCount int
@@ -558,7 +558,7 @@ func TestDoCompactSummaryEventCarriesCost(t *testing.T) {
 	}))
 
 	events := make(chan Event, 32)
-	rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events))
+	require.NoError(t, rt.compactWithReason(t.Context(), sess, "", compactionReasonManual, NewChannelSink(events)))
 	close(events)
 
 	var summaryEvent *SessionSummaryEvent

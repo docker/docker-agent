@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/artifacts"
 	"github.com/docker/docker-agent/pkg/session"
 	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
@@ -39,7 +40,7 @@ var generatedMediaIDs atomic.Uint64
 // the resolver needs.
 type generatedMediaRequest struct {
 	id       uint64
-	ref      runtime.GeneratedFileRef
+	ref      artifacts.GeneratedFileRef
 	name     string
 	mimeType string
 }
@@ -178,7 +179,7 @@ func (p *chatPage) generatedImageMedia(sessionID, messageID string, parts []chat
 		if src.ArtifactRoot == chat.ArtifactRootWorkspace && !seen {
 			requests = append(requests, generatedMediaRequest{
 				id: item.ID,
-				ref: runtime.GeneratedFileRef{
+				ref: artifacts.GeneratedFileRef{
 					OwnerSessionID: src.ArtifactOwnerSessionID,
 					Root:           src.ArtifactRoot,
 					Path:           src.ArtifactPath,

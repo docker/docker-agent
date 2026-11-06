@@ -75,6 +75,8 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		m.statusSession.FinishSetup(m.contentSession(""), e.Reason)
 		m.notifyStreamStopped(ctx, e.Reason)
 		m.handleStreamStopped(ctx)
+	case *runtime.AgentChoiceReasoningResetEvent:
+		m.screen.Transcript.ResetReasoningContent(m.contentIdentity.Resolve(m.contentSession(e.SessionID), e.MessageID))
 	case *runtime.AgentChoiceReasoningEvent:
 		m.screen.Transcript.AppendReasoningContent(m.contentIdentity.Resolve(m.contentSession(e.SessionID), e.MessageID), e.Content)
 	case *runtime.AgentChoiceEvent:
@@ -87,6 +89,10 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		identity := m.contentIdentity.Resolve(sessionID, e.Message.Message.MessageID)
 		m.screen.Transcript.ReconcileAssistantContent(identity, chat.VisibleAssistantContent(e.Message.Message.Content))
 		m.contentIdentity.Finish(sessionID)
+	case *runtime.ToolCallsRetractedEvent:
+		for _, id := range e.ToolCallIDs {
+			m.screen.Transcript.RemoveTool(id)
+		}
 	case *runtime.PartialToolCallEvent:
 		m.screen.Transcript.FlushPending()
 		toolDef := tools.Tool{Name: e.ToolCall.Function.Name}
@@ -101,11 +107,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 		if tv := m.screen.Transcript.Tool(e.ToolCallID); tv != nil && tv.Message() != nil {
 			tv.Message().AppendToolOutput(e.Output)
 			if tv.Message().ToolStatus == tuitypes.ToolStatusPending {
-				tv.Message().ToolStatus = tuitypes.ToolStatusRunning
-				if tv.Message().StartedAt == nil {
-					now := time.Now()
-					tv.Message().StartedAt = &now
-				}
+				tv.Message().SetToolStatus(tuitypes.ToolStatusRunning)
 			}
 		}
 	case *runtime.ToolCallResponseEvent:

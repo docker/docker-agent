@@ -28,6 +28,7 @@ type Agent struct {
 	welcomeMessage          string
 	instruction             string
 	toolsets                []*tools.StartableToolSet
+	ownedToolsets           []*tools.StartableToolSet
 	models                  []provider.Provider
 	fallbackModels          []provider.Provider                 // Fallback models to try if primary fails
 	fallbackRetries         int                                 // Number of retries per fallback model with exponential backoff
@@ -57,9 +58,11 @@ type Agent struct {
 	tools                   []tools.Tool
 	commands                types.Commands
 	harness                 *latest.HarnessConfig
+	harnessEffort           atomic.Pointer[string] // Optional harness effort override set at runtime
 	hooks                   *latest.HooksConfig
 	evaluators              map[string]evaluator.Evaluator
 	cache                   *cache.Cache
+	workingDirFactory       func(context.Context, string) (*Agent, error)
 	structuredOutput        *latest.StructuredOutput
 	// structuredOutputTool lazily compiles the tool-mode output tool once
 	// per agent (sync.OnceValues over structuredoutput.New); nil when the
@@ -391,9 +394,24 @@ func (a *Agent) Commands() types.Commands {
 	return a.commands
 }
 
-// Harness returns the external coding harness configuration for this agent.
+// Harness returns the external coding harness configuration for this agent,
+// with the runtime effort override applied.
 func (a *Agent) Harness() *latest.HarnessConfig {
+	if a.harness == nil {
+		return nil
+	}
+	if effort := a.harnessEffort.Load(); effort != nil {
+		cfg := *a.harness
+		cfg.Effort = *effort
+		return &cfg
+	}
 	return a.harness
+}
+
+// SetHarnessEffort overrides the configured harness effort, as
+// SetModelOverride does for a model's thinking level.
+func (a *Agent) SetHarnessEffort(effort string) {
+	a.harnessEffort.Store(&effort)
 }
 
 func (a *Agent) HasHarness() bool {
@@ -699,7 +717,7 @@ func (a *Agent) DrainWarnings() []string {
 
 func (a *Agent) StopToolSets(ctx context.Context) error {
 	var errs []error
-	for _, toolSet := range a.toolsets {
+	for _, toolSet := range slices.Concat(a.toolsets, a.ownedToolsets) {
 		// StopIfStarted checks-and-stops atomically under the toolset's
 		// lifecycle lock, so a toolset that was never started is left
 		// untouched, an in-flight Start that settles in time is stopped

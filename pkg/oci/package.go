@@ -16,6 +16,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/hcl"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/content"
 	"github.com/docker/docker-agent/pkg/protect"
 	"github.com/docker/docker-agent/pkg/version"
@@ -46,7 +47,7 @@ func PackageFileAsOCIToStore(ctx context.Context, agentSource config.Source, art
 		artifactRef += ":latest"
 	}
 
-	cfg, err := config.Load(ctx, agentSource)
+	cfg, err := config.Load(ctx, agentSource, config.WithVersions(legacy.Register))
 	if err != nil {
 		return "", fmt.Errorf("loading config: %w", err)
 	}

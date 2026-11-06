@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -13,7 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/gateway"
-	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
@@ -244,19 +243,25 @@ func addEnvVarsForModelConfig(ctx context.Context, model *latest.ModelConfig, cu
 				if effective == "" {
 					effective = "openai"
 				}
-				addEnvVarsForCoreProvider(ctx, effective, model, requiredEnv, env)
+				addEnvVarsForAPI(ctx, effective, model, requiredEnv, env)
 			}
 			return
 		}
 	}
-	if alias, exists := provider.LookupAlias(model.Provider); exists {
+	if alias, exists := catalog.Find(model.Provider); exists {
 		// Check built-in aliases
-		if alias.TokenEnvVar != "" {
-			if model.Provider == "github-copilot" {
-				requiredEnv[githubCopilotTokenEnvVar(ctx, env)] = true
-			} else {
-				requiredEnv[alias.TokenEnvVar] = true
+		switch {
+		case alias.APIType == "google" || alias.APIType == "amazon-bedrock":
+			addEnvVarsForAPI(ctx, alias.APIType, model, requiredEnv, env)
+		case len(alias.TokenEnvVars) > 0:
+			key := alias.TokenEnvVars[0]
+			for _, candidate := range catalog.TokenKeys(model.Provider, key) {
+				if value, _ := env.Get(ctx, candidate); value != "" {
+					key = candidate
+					break
+				}
 			}
+			requiredEnv[key] = true
 		}
 		// A templated alias base URL (e.g. Cloudflare's account/gateway-scoped
 		// endpoint) references env vars that must resolve when the provider is
@@ -265,22 +270,12 @@ func addEnvVarsForModelConfig(ctx context.Context, model *latest.ModelConfig, cu
 			requiredEnv[name] = true
 		}
 	} else {
-		addEnvVarsForCoreProvider(ctx, model.Provider, model, requiredEnv, env)
+		addEnvVarsForAPI(ctx, model.Provider, model, requiredEnv, env)
 	}
 }
 
-func githubCopilotTokenEnvVar(ctx context.Context, env environment.Provider) string {
-	if value, _ := env.Get(ctx, "GITHUB_TOKEN"); value != "" {
-		return "GITHUB_TOKEN"
-	}
-	if value, _ := env.Get(ctx, "GH_TOKEN"); value != "" {
-		return "GH_TOKEN"
-	}
-	return "GITHUB_TOKEN"
-}
-
-// addEnvVarsForCoreProvider adds the required env vars for a core provider type.
-func addEnvVarsForCoreProvider(ctx context.Context, providerType string, model *latest.ModelConfig, requiredEnv map[string]bool, env environment.Provider) {
+// addEnvVarsForAPI adds credentials required by the implemented API's auth scheme.
+func addEnvVarsForAPI(ctx context.Context, providerType string, model *latest.ModelConfig, requiredEnv map[string]bool, env environment.Provider) {
 	switch providerType {
 	case "openai":
 		requiredEnv["OPENAI_API_KEY"] = true
@@ -327,10 +322,11 @@ func GatherEnvVarsForTools(ctx context.Context, cfg *latest.Config) ([]string, e
 				if !ok {
 					requiredEnv[secret.Env] = true
 				} else {
-					os.Expand(value, func(name string) string {
+					// Use the same normalization the runtime applies, so `${env.X}`
+					// discovers X rather than the literal name "env.X".
+					for _, name := range environment.Refs(value) {
 						requiredEnv[name] = true
-						return ""
-					})
+					}
 				}
 			}
 		}

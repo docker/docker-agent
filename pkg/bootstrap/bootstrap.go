@@ -7,13 +7,14 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/teamloader"
 )
 
 // RuntimeOpts carries model-switching configuration and budgets into a runtime.
 // It resolves the shared environment and model store when called, not when applied.
 func RuntimeOpts(loaded *teamloader.LoadResult, runConfig *config.RuntimeConfig) []runtime.Opt {
-	modelSwitcherCfg := &runtime.ModelSwitcherConfig{
+	modelSwitcherCfg := &modelcatalog.Config{
 		Models:             loaded.Models,
 		Providers:          loaded.Providers,
 		ModelsGateway:      runConfig.ModelsGateway,
@@ -30,6 +31,7 @@ func RuntimeOpts(loaded *teamloader.LoadResult, runConfig *config.RuntimeConfig)
 	}
 	return []runtime.Opt{
 		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
+		runtime.WithModelsDevFallback(runConfig.ModelsDevFallback),
 		runtime.WithBudget(loaded.Budget),
 		runtime.WithNamedBudgets(loaded.Budgets, loaded.AgentBudgets),
 	}

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
 
 func TestSessionStdioHelper(t *testing.T) {
@@ -67,6 +69,19 @@ func TestSessionStdioHelper(t *testing.T) {
 			}
 		}
 	}
+	if os.Getenv("MCP_MODE") == "discovery" {
+		name, err := os.ReadFile(marker + ".capabilities")
+		if err != nil {
+			os.Exit(2)
+		}
+		server.RemoveTools("ping", "exit")
+		gomcp.AddTool(server, &gomcp.Tool{Name: string(name)}, func(context.Context, *gomcp.CallToolRequest, struct{}) (*gomcp.CallToolResult, any, error) {
+			return &gomcp.CallToolResult{}, nil, nil
+		})
+		server.AddPrompt(&gomcp.Prompt{Name: string(name)}, func(context.Context, *gomcp.GetPromptRequest) (*gomcp.GetPromptResult, error) {
+			return &gomcp.GetPromptResult{}, nil
+		})
+	}
 	_ = server.Run(t.Context(), &gomcp.StdioTransport{})
 	_ = os.WriteFile(marker+".stopped", []byte("stopped"), 0o600)
 	os.Exit(0)
@@ -86,6 +101,29 @@ func sessionTestToolset(t *testing.T, mode string) (*Toolset, string) {
 		_ = ts.Stop(ctx)
 	})
 	return ts, marker
+}
+
+func TestSessionStdioStartAfterStop(t *testing.T) {
+	t.Parallel()
+	ts, _ := sessionTestToolset(t, "normal")
+	for range 3 {
+		require.NoError(t, ts.Start(t.Context()))
+		available, err := ts.Tools(t.Context())
+		require.NoError(t, err)
+		found := false
+		for _, tool := range available {
+			if tool.Name != "session_ping" {
+				continue
+			}
+			result, err := tool.Handler(t.Context(), tools.ToolCall{Function: tools.FunctionCall{Name: tool.Name, Arguments: "{}"}}, tools.NopRuntime{})
+			require.NoError(t, err)
+			assert.Equal(t, "pong", result.Output)
+			found = true
+		}
+		require.True(t, found)
+		require.NoError(t, ts.Stop(t.Context()))
+		require.False(t, ts.IsStarted())
+	}
 }
 
 func TestSessionStdioSetupCancellation(t *testing.T) {
@@ -151,13 +189,15 @@ func TestSessionStdioStopUnblocksPipeWrite(t *testing.T) {
 		_, err := tool.Handler(t.Context(), tools.ToolCall{Function: tools.FunctionCall{Name: tool.Name, Arguments: string(args)}}, tools.NopRuntime{})
 		called <- err
 	}()
+	stopped := make(chan error, 1)
+	go func() { stopped <- ts.Stop(t.Context()) }()
+	require.Eventually(t, func() bool { return ts.State().State == lifecycle.StateStopped }, 5*time.Second, time.Millisecond)
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	stopped := make(chan error, 1)
-	go func() { stopped <- ts.Stop(ctx) }()
+	require.ErrorIs(t, ts.Stop(ctx), context.DeadlineExceeded)
 	select {
 	case err := <-stopped:
-		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(5 * time.Second):
 		t.Fatal("stop did not kill the blocked subprocess")
 	}
@@ -167,4 +207,67 @@ func TestSessionStdioStopUnblocksPipeWrite(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("tool call remained blocked after stop")
 	}
+}
+
+func TestSessionStdioResumeRefreshesDiscovery(t *testing.T) {
+	t.Parallel()
+	ts, marker := sessionTestToolset(t, "discovery")
+	for _, name := range []string{"before", "after"} {
+		require.NoError(t, os.WriteFile(marker+".capabilities", []byte(name), 0o600))
+		require.NoError(t, ts.Start(t.Context()))
+		available, err := ts.Tools(t.Context())
+		require.NoError(t, err)
+		require.Len(t, available, 1)
+		assert.Equal(t, "session_"+name, available[0].Name)
+		prompts, err := ts.ListPrompts(t.Context())
+		require.NoError(t, err)
+		require.Len(t, prompts, 1)
+		assert.Equal(t, name, prompts[0].Name)
+		require.NoError(t, ts.Stop(t.Context()))
+	}
+}
+
+func TestSessionStdioResumeWaitsForCleanup(t *testing.T) {
+	t.Parallel()
+	ts, _ := sessionTestToolset(t, "normal")
+	require.NoError(t, ts.Start(t.Context()))
+	cleaning, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		if release != nil {
+			close(release)
+		}
+	}()
+	client := ts.mcpClient.(*stdioMCPClient)
+	client.processMu.Lock()
+	cancelProcess := client.processCancel
+	var cleanups atomic.Int32
+	client.processCancel = func() {
+		if cleanups.Add(1) == 1 {
+			close(cleaning)
+			<-release
+		}
+		cancelProcess()
+	}
+	client.processMu.Unlock()
+	stopped := make(chan error, 1)
+	go func() { stopped <- ts.Stop(t.Context()) }()
+	<-cleaning
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, ts.Start(ctx), context.DeadlineExceeded)
+	close(release)
+	require.NoError(t, <-stopped)
+	release = nil
+	require.NoError(t, ts.Start(t.Context()))
+	available, err := ts.Tools(t.Context())
+	require.NoError(t, err)
+	for _, tool := range available {
+		if tool.Name == "session_ping" {
+			result, err := tool.Handler(t.Context(), tools.ToolCall{Function: tools.FunctionCall{Name: tool.Name, Arguments: "{}"}}, tools.NopRuntime{})
+			require.NoError(t, err)
+			assert.Equal(t, "pong", result.Output)
+			return
+		}
+	}
+	t.Fatal("ping tool missing after resume")
 }

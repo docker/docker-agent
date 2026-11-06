@@ -17,7 +17,8 @@
 //
 //	GOOS=js GOARCH=wasm go build -o web/docker-agent.wasm ./cmd/wasm
 //
-// and loaded by web/index.html via wasm_exec.js.
+// and loaded by web/index.html via wasm_exec.js. RAG is opt-in with
+// -tags docker_agent_wasm_rag.
 //
 // What this entry point does NOT do, by construction: run processes, read
 // or write files, listen on sockets, persist sessions. Configs that need
@@ -52,8 +53,10 @@
 //
 // `onEvent` is called with one of:
 //
-//	{type: "delta", content?: string, reasoning?: string}
+//	{type: "delta", message_id, content?: string, reasoning?: string}
+//	{type: "reasoning_reset", message_id} // discard this message's reasoning
 //	{type: "tool_call_delta", id, name, arguments}
+//	{type: "tool_calls_retracted", ids}           // drop these deltas: they will never run
 //	{type: "tool_call", id, name, args}
 //	{type: "tool_confirmation", id, name, args}   // answer with confirm()
 //	{type: "tool_output", id, name, output}
@@ -85,7 +88,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
-	"github.com/docker/docker-agent/pkg/rag"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 // compatState tracks the chat() call in flight so abort() can cancel it.
@@ -135,7 +138,7 @@ func parseConfigJS(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return throwingError("parseConfig: expected yaml string argument")
 	}
-	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())))
+	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())), config.WithVersions(legacy.Register))
 	if err != nil {
 		return throwingError(fmt.Sprintf("parseConfig: %v", err))
 	}
@@ -146,7 +149,7 @@ func listAgentsJS(_ js.Value, args []js.Value) any {
 	if len(args) < 1 {
 		return throwingError("listAgents: expected yaml string argument")
 	}
-	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())))
+	cfg, err := config.Load(context.Background(), config.NewBytesSource("config.yaml", []byte(args[0].String())), config.WithVersions(legacy.Register))
 	if err != nil {
 		return throwingError(fmt.Sprintf("listAgents: %v", err))
 	}
@@ -196,7 +199,7 @@ const (
 // jsDocuments copies a {path: content} object into the session's documents.
 // Values must be strings: there is no fallback that could quietly index a
 // stringified object.
-func jsDocuments(v js.Value) (rag.Documents, error) {
+func jsDocuments(v js.Value) (map[string][]byte, error) {
 	switch v.Type() {
 	case js.TypeUndefined, js.TypeNull:
 		return nil, nil
@@ -208,7 +211,7 @@ func jsDocuments(v js.Value) (rag.Documents, error) {
 	if keys.Length() > maxDocuments {
 		return nil, fmt.Errorf("%d documents exceed the limit of %d", keys.Length(), maxDocuments)
 	}
-	documents := make(rag.Documents, keys.Length())
+	documents := make(map[string][]byte, keys.Length())
 	total := 0
 	for i := range keys.Length() {
 		path := keys.Index(i).String()

@@ -62,6 +62,9 @@ func newClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 			return nil, fmt.Errorf("%s requires the Claude API and is not available on Vertex AI", name)
 		}
 	}
+	if providerutil.HasProviderOpt(cfg.ProviderOpts, "fallbacks") {
+		return nil, errors.New("fallbacks requires the Claude API and is not available on Vertex AI")
+	}
 	if env == nil {
 		return nil, errors.New("environment provider is required")
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/remote"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -48,16 +49,16 @@ func TestRecallSession_RemoteRuntimeReceivesIdleRecallAfterTurnCancellation(t *t
 	sm := newTestSessionManager(t, sess, fake)
 	srv := httptest.NewServer(NewWithManager(sm, "").e)
 	t.Cleanup(srv.Close)
-	client, err := runtime.NewClient(srv.URL)
+	client, err := remote.NewClient(srv.URL)
 	require.NoError(t, err)
-	remote, err := runtime.NewRemoteRuntime(client)
+	rt, err := remote.NewRuntime(client)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, remote.Close()) })
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
 	background := make(chan runtime.Event, 4)
-	remote.OnBackgroundEvent(func(event runtime.Event) { background <- event })
+	rt.OnBackgroundEvent(func(event runtime.Event) { background <- event })
 
 	turnCtx, cancel := context.WithCancel(t.Context())
-	for range remote.RunStream(turnCtx, &session.Session{ID: sess.ID}) {
+	for range rt.RunStream(turnCtx, &session.Session{ID: sess.ID}) {
 	}
 	cancel()
 	require.False(t, sm.HasEventSource(sess.ID), "ordinary RunSession must not duplicate its foreground events in the log")

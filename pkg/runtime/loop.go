@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -20,12 +19,10 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
-	"github.com/docker/docker-agent/pkg/compaction"
-	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider"
-	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/runtime/pricing"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
@@ -35,11 +32,12 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
 	"github.com/docker/docker-agent/pkg/userconfig"
-	"github.com/docker/docker-agent/pkg/workspacemedia"
 )
 
-// registerDefaultTools wires up the built-in tool handlers (delegation,
-// background agents, model switching) into the runtime's tool dispatch map.
+// registerDefaultTools wires up the built-in tool handlers (session context,
+// background agents) into the runtime's tool dispatch map. Caller-bound
+// handlers (transfer_task, handoff, change_model, ...) are bound per call in
+// processToolCalls.
 func (r *LocalRuntime) registerDefaultTools() {
 	r.toolMap[sessioncontext.ToolNameListSessions] = r.handleListSessions
 	r.toolMap[sessioncontext.ToolNameReadSession] = r.handleReadSession
@@ -51,124 +49,9 @@ func (r *LocalRuntime) registerDefaultTools() {
 	})
 }
 
-// appendSteerAndEmit adds a steer message to the session and emits the corresponding event.
-func (r *LocalRuntime) appendSteerAndEmit(sess *session.Session, sm QueuedMessage, events EventSink) {
-	msg := session.UserMessage(sm.Content, sm.MultiContent...)
-	msg.Message.MessageID = uuid.NewV4().String()
-	pos := sess.AddMessage(msg)
-	events.Emit(userMessageEvent(msg.Message, sess.ID, pos))
-}
-
-// drainAndEmitSteered drains all messages from the steer queue and injects
-// them into the session as individual user messages. When multiple messages
-// are drained, a "\n" is appended to the content of every non-last message.
-// Some chat templates concatenate consecutive user messages without a
-// separator before tokenisation, which would cause trailing/leading word
-// fragments from adjacent messages to be glued together. The "\n" prevents
-// this without merging the messages into one.
-//
-// It also snapshots the message count before any messages are added and
-// returns it alongside the drained flag so the caller can pass it to
-// compactIfNeeded without a separate len(sess.GetAllMessages()) call.
-//
-// NOTE: the appended \n is persisted in the session message and included in
-// UserMessageEvent. This is a deliberate trade-off: because the runtime passes
-// chat.Message slices directly to the provider, this is the only injection
-// point that doesn't require restructuring. TUI consumers may see a trailing
-// newline on non-last steered messages in multi-drain batches.
-//
-// After appending the drained messages it fires the
-// user_steering_messages_submit hook (the steering-queue analogue of
-// user_prompt_submit), passing the drained message text. The hook may
-// block the run (steerResult.stop) or contribute a transient system
-// message (steerResult.contextMsgs) that the caller threads into the
-// steered turn only — never persisted, exactly like user_prompt_submit.
-//
-// Returns drained=true with messageCountBefore set when any messages
-// were drained and emitted; otherwise drained=false.
-func (r *LocalRuntime) drainAndEmitSteered(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) steerResult {
-	// A routed invocation keeps later input queued until its boundary, so
-	// the steered text cannot change the assessment already made.
-	if sess.Routed() {
-		return steerResult{}
-	}
-	return r.drainSteeredQueue(ctx, sess, a, events)
-}
-
-// drainSteeredQueue unconditionally moves queued steering messages into the session.
-func (r *LocalRuntime) drainSteeredQueue(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) steerResult {
-	steered := r.steerQueue.Drain(ctx)
-	if len(steered) == 0 {
-		return steerResult{}
-	}
-	messageCountBefore := sess.OwnMessageCount()
-	contents := make([]string, 0, len(steered))
-	for i, sm := range steered {
-		contents = append(contents, sm.Content)
-		if i < len(steered)-1 {
-			sm = appendNewlineToQueuedMessage(sm)
-		}
-		r.appendSteerAndEmit(sess, sm, events)
-	}
-	stop, stopMsg, ctxMsgs := r.executeUserSteeringMessagesSubmitHooks(ctx, sess, a, contents, events)
-	return steerResult{
-		drained:            true,
-		messageCountBefore: messageCountBefore,
-		stop:               stop,
-		stopMsg:            stopMsg,
-		contextMsgs:        ctxMsgs,
-	}
-}
-
-// drainSteeredQueueAtBoundary drains the steering queue where an invocation
-// ends; routed conversations only ever drain here.
-func (r *LocalRuntime) drainSteeredQueueAtBoundary(ctx context.Context, sess *session.Session, a *agent.Agent, ls *loopState, events EventSink) steerResult {
-	if ls.route != nil {
-		return r.drainSteeredQueue(ctx, sess, a, events)
-	}
-	return r.drainAndEmitSteered(ctx, sess, a, events)
-}
-
-// steerResult is the outcome of a drainAndEmitSteered call: whether any
-// messages were drained, the pre-drain message count (for
-// compactIfNeeded), and the user_steering_messages_submit hook verdict
-// (a terminating stop and/or a transient context message to thread into
-// the steered turn).
-type steerResult struct {
-	drained            bool
-	messageCountBefore int
-	stop               bool
-	stopMsg            string
-	contextMsgs        []chat.Message
-}
-
-// appendNewlineToQueuedMessage returns sm with "\n" appended to its text
-// content; never mutates the caller's slice contents.
-// For plain-text messages Content is extended. For multi-content messages
-// only the last part is considered: if it is a text part, "\n" is appended
-// to it in a shallow copy of the slice. If the last part is not text type
-// (e.g. image), sm is returned unchanged — non-text parts carry their own
-// provider envelope that acts as a separator.
-func appendNewlineToQueuedMessage(sm QueuedMessage) QueuedMessage {
-	if len(sm.MultiContent) == 0 {
-		sm.Content += "\n"
-		return sm
-	}
-	// Only act if the last part is a text part.
-	last := len(sm.MultiContent) - 1
-	if sm.MultiContent[last].Type != chat.MessagePartTypeText {
-		return sm
-	}
-	// Shallow-copy the slice so we don't mutate the original.
-	parts := slices.Clone(sm.MultiContent)
-	parts[last].Text += "\n"
-	sm.MultiContent = parts
-	return sm
-}
-
 // emitHookDrivenShutdown fans out the standard Error /
-// notification(level=error) / on_error stanzas when a hook
-// (post_tool_use or before_llm_call) signals run termination.
+// notification(level=error) / on_error stanzas when a blocking hook
+// (e.g. post_tool_use or before_llm_call) signals run termination.
 func (r *LocalRuntime) emitHookDrivenShutdown(
 	ctx context.Context,
 	a *agent.Agent,
@@ -177,9 +60,9 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 	events EventSink,
 ) {
 	if message == "" {
-		// aggregate() always populates Result.Message on a deny
-		// verdict; the fallback covers any future hook that returns
-		// block without a reason.
+		// aggregate() may leave Result.Message empty on a deny
+		// verdict (e.g. exit 2 without stderr, or block without a
+		// reason).
 		message = "Agent terminated by a hook."
 	}
 	events.Emit(ErrorWithCodeForSession(sess.ID, ErrorCodeHookBlocked, message))
@@ -190,7 +73,9 @@ func (r *LocalRuntime) emitHookDrivenShutdown(
 // emits the StreamStopped event, fires hooks, records telemetry, restores the
 // previous elicitation channel, and closes the events channel.
 //
-// reason is one of the turnEndReason* constants and classifies how the
+// reason is one of the turnEndReason* constants (or
+// StreamStopReasonMaxIterations), or empty when the stream exits before any
+// turn classifies it (e.g. tool setup failure), and classifies how the
 // stream ended (e.g. "normal", "error", "canceled"). It is surfaced in
 // the StreamStoppedEvent so external consumers (boards, dashboards) can
 // distinguish between successful completion, crashes, and user-initiated
@@ -359,7 +244,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	// streamReason records the exit reason from the final turn so
 	// finalizeEventChannel can surface it in the StreamStoppedEvent.
-	// It is updated by each turn via runTurn (passed by pointer).
+	// It is copied from ls.exitReason after each runTurn.
 	//
 	// Register the cleanup defer immediately after the swap so every exit
 	// path finalizes, including the early returns below (tool setup
@@ -409,9 +294,10 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 
 	// session_start fires once per RunStream. Its AdditionalContext
 	// (typically the AddEnvironmentInfo env block) is held as transient
-	// extras and threaded into every model call below — never persisted,
-	// to keep the visible transcript clean and the user message tail
-	// stable.
+	// extras and threaded into every model call below — never added to
+	// the visible transcript (with cache_stable_prompts it is persisted
+	// only in the instruction-context snapshot), to keep the transcript
+	// clean and the user message tail stable.
 	sessionStart := r.executeSessionStartHooks(ctx, sess, a, sink)
 	ls := &loopState{
 		maxIterations:          sess.MaxIterations,
@@ -420,7 +306,9 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		sessionStartLegacyMsgs: sessionStart.legacyMessages(),
 		sessionStartSources:    sessionStart.sources,
 		route:                  route,
+		compaction:             newCompactionController(r, sess, sink, userconfig.Get()),
 	}
+	defer ls.compaction.Close(ctx)
 
 	// Emit team information
 	sink.Emit(TeamInfo(r.agentDetailsFromTeam(ctx), a.Name()))
@@ -434,9 +322,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 	}
 
 	ctx = tools.WithHandlerScope(ctx, tools.HandlerScope{
-		Elicitation:       r.elicitationHandler,
-		Sampling:          r.samplingHandler,
-		SamplingWithTools: r.samplingWithToolsHandler,
+		Elicitation: r.elicitationHandler,
 		OAuthSuccess: func() {
 			sink.Emit(Authorization(tools.ElicitationActionAccept, r.resolveSessionAgent(sess).Name()))
 		},
@@ -644,7 +530,7 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// the actual inference context), then tries provider discovery and
 		// the models.dev catalogue. The lookup above is reused inside resolveContextLimit
 		// only when context_size isn't supplied; we keep the explicit call
-		// here because m is also passed to [computeMessageCost] for
+		// here because m is also passed to [pricing.ComputeMessageCost] for
 		// per-turn cost computation.
 		// resolveContextLimit yields the primary model's window; effectiveContextLimit
 		// caps it to the dedicated compaction model's (smaller) window when one is
@@ -653,22 +539,15 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 		// trigger and the UI context gauge (issue #3241); it equals the primary
 		// window unless a smaller compaction model is configured.
 		contextLimit := r.effectiveContextLimit(ctx, a, r.resolveContextLimit(ctx, model, modelID))
-		inputTokens, outputTokens := sess.Usage()
-		if contextLimit > 0 && r.sessionCompactionEnabled(a) && compaction.ShouldCompact(inputTokens, outputTokens, 0, contextLimit, a.CompactionThreshold()) {
-			r.compactWithReason(ctx, sess, "", compactionReasonThreshold, sink)
-		}
+		ls.compaction.BeforeTurn(ctx, a, contextLimit)
 
 		// Drain steer messages queued while idle or before the first model call
 		// (covers idle-window and first-turn-miss races).
 		if sr := r.drainAndEmitSteered(ctx, sess, a, sink); sr.drained {
-			if sr.stop {
-				slog.WarnContext(ctx, "user_steering_messages_submit hook signalled run termination",
-					"agent", a.Name(), "session_id", sess.ID, "reason", sr.stopMsg)
-				r.emitHookDrivenShutdown(ctx, a, sess, sr.stopMsg, sink)
+			if r.applySteering(ctx, sess, a, ls, sr, sink) {
 				return
 			}
-			ls.userPromptMsgs = sr.contextMsgs
-			r.compactIfNeeded(ctx, sess, a, contextLimit, sr.messageCountBefore, sink)
+			ls.compaction.AfterMessages(ctx, a, contextLimit, sr.messageCountBefore)
 		}
 
 		// Proactive compaction may have exhausted the budget since the first check.
@@ -677,14 +556,14 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			return
 		}
 
-		// Everything from turn_start onwards is wrapped in a closure so a
+		// Everything from turn_start onwards is extracted into runTurn so a
 		// single deferred turn_end hook fires on every exit path: a normal
 		// stop, a follow-up continue, an error, a hook-driven shutdown, the
-		// loop-detector tripping, ctx cancellation, even a panic. The
-		// closure returns the loop control directive and the reason string
-		// reported via [hooks.Input.Reason]; the deferred dispatch then runs
-		// AFTER the closure body has assigned both, so callers see the same
-		// reason the runtime took. ctrl drives the outer for-loop's
+		// loop-detector tripping, ctx cancellation, even a panic. runTurn
+		// returns the loop control directive and records the reason reported
+		// via [hooks.Input.Reason] in ls.exitReason; the deferred dispatch
+		// runs AFTER both are set, so callers see the same reason the
+		// runtime took. ctrl drives the outer for-loop's
 		// continue-or-exit decision.
 		ctrl := r.runTurn(ctx, sess, a, m, model, modelID, contextLimit, sessionSpan, agentTools, ls, sink)
 		streamReason = ls.exitReason
@@ -721,6 +600,7 @@ const (
 // new per-stream tracking (cost ceiling, token budget, turn timing)
 // without touching any signature.
 type loopState struct {
+	compaction             *compactionController
 	iteration              int
 	maxIterations          int
 	overflowCompactions    int
@@ -915,7 +795,7 @@ func (r *LocalRuntime) runTurn(
 	// Try primary model with fallback chain if configured. The idle retry
 	// admission callback belongs to this loop invocation so a denial can stop
 	// this exact session before generic model-error handling runs.
-	agentTools = r.toolDeferrals.MarkAt(sess.ID, lastToolCallID(messages), agentTools)
+	agentTools = r.toolDeferrals.MarkAt(sess.ID, lastSuccessfulToolCallID(messages), agentTools)
 	admitIdleRetry := func() error {
 		if r.enforceBudget(ctx, sess, a, events) == iterationStop {
 			return budgetAdmissionError{}
@@ -956,7 +836,7 @@ func (r *LocalRuntime) runTurn(
 			}
 		}
 		// Serving endpoints may share an ID but have different rates or cost overrides.
-		m = applyModelCost(m, modelID, res.Usage, servingConfig)
+		m = pricing.ApplyModelCost(m, modelID, res.Usage, servingConfig)
 	}
 
 	// A successful model call resets the overflow compaction counter.
@@ -967,8 +847,11 @@ func (r *LocalRuntime) runTurn(
 	// assistant message — the hook's cost is therefore guaranteed to
 	// equal the cost the session bills for this turn. It is nil when
 	// the turn cannot be priced (no usage, or a model with no pricing
-	// table); see computeMessageCost.
-	msgCost := computeMessageCost(res.Usage, m)
+	// table); see pricing.ComputeMessageCost.
+	msgCost := pricing.ComputeMessageCost(res.Usage, m)
+	if len(res.UsageAttempts) > 0 && usedModel != nil {
+		msgCost = attemptsCost(ctx, res.UsageAttempts, dispatchedConfig(res, usedModel.BaseConfig()), r.modelsStore)
+	}
 	if res.Usage != nil {
 		modelName := "unknown"
 		if m != nil {
@@ -986,7 +869,7 @@ func (r *LocalRuntime) runTurn(
 	// bills or what after_llm_call reports. Sub-sessions reach the root
 	// run's tracker here, which is how delegated spend lands on the
 	// parent's budget. The turn's duration is attributed to this agent.
-	r.recordBudget(sess, a, res.Usage, msgCost, r.now().Sub(turnStart), events)
+	r.recordBudget(sess, a, budgetUsage(res.Usage, res.UsageAttempts), msgCost, r.now().Sub(turnStart), events)
 
 	// after_llm_call hooks fire on success only; failed calls
 	// fire on_error above. The assistant text content is passed
@@ -1070,14 +953,14 @@ func (r *LocalRuntime) runTurn(
 
 	// Re-probe toolsets after tool calls: an install/setup tool call may
 	// have made a previously-unavailable LSP or MCP connectable. reprobe()
-	// calls ensureToolSetsAreStarted, emits recovery notices, and updates
-	// the TUI tool-count immediately.
+	// calls ensureToolSetsAreStarted, emits pending failure warnings, and
+	// updates the TUI tool-count immediately.
 	//
 	// The new tools are picked up by the next iteration's getTools() call
 	// at the top of this loop, so the model sees them on its very next
 	// response — within the same user turn, without requiring a new user
-	// message. reprobe's return value is intentionally discarded here;
-	// the top-of-loop getTools() is the authoritative source.
+	// message. reprobe deliberately returns nothing; the top-of-loop
+	// getTools() is the authoritative source.
 	if len(res.Calls) > 0 {
 		r.reprobe(ctx, sess, a, agentTools, sessionSpan, events)
 	}
@@ -1137,15 +1020,11 @@ func (r *LocalRuntime) runTurn(
 
 	// Drain steer messages that arrived during tool calls.
 	if sr := r.drainAndEmitSteered(ctx, sess, a, events); sr.drained {
-		if sr.stop {
-			slog.WarnContext(ctx, "user_steering_messages_submit hook signalled run termination",
-				"agent", a.Name(), "session_id", sess.ID, "reason", sr.stopMsg)
-			r.emitHookDrivenShutdown(ctx, a, sess, sr.stopMsg, events)
+		if r.applySteering(ctx, sess, a, ls, sr, events) {
 			endReason = turnEndReasonHookBlocked
 			return turnExit
 		}
-		ls.userPromptMsgs = sr.contextMsgs
-		r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
+		ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBeforeTools)
 		endReason = turnEndReasonSteered
 		return turnContinue
 	}
@@ -1155,7 +1034,7 @@ func (r *LocalRuntime) runTurn(
 		// final answer: remind the model (bounded) or fail with a coded error.
 		if structuredOutputEnabled(sess, a) {
 			if !soFinalized {
-				ctrl, reason := r.structuredOutputStop(ctx, sess, a, ls, events)
+				ctrl, reason := r.structuredOutputStop(ctx, sess, a, modelID.Model, ls, events)
 				endReason = reason
 				return ctrl
 			}
@@ -1199,16 +1078,12 @@ func (r *LocalRuntime) runTurn(
 		// Re-check steer queue: closes the race between the mid-loop drain and this stop.
 		// Routed conversations defer it to this boundary and start a new invocation.
 		if sr := r.drainSteeredQueueAtBoundary(ctx, sess, a, ls, events); sr.drained {
-			if sr.stop {
-				slog.WarnContext(ctx, "user_steering_messages_submit hook signalled run termination",
-					"agent", a.Name(), "session_id", sess.ID, "reason", sr.stopMsg)
-				r.emitHookDrivenShutdown(ctx, a, sess, sr.stopMsg, events)
+			if r.applySteering(ctx, sess, a, ls, sr, events) {
 				endReason = turnEndReasonHookBlocked
 				return turnExit
 			}
-			ls.userPromptMsgs = sr.contextMsgs
 			r.restartRouting(sess, ls)
-			r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
+			ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBeforeTools)
 			endReason = turnEndReasonSteered
 			return turnContinue
 		}
@@ -1234,7 +1109,7 @@ func (r *LocalRuntime) runTurn(
 			}
 			ls.userPromptMsgs = ctxMsgs
 			r.restartRouting(sess, ls)
-			r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
+			ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBeforeTools)
 			endReason = turnEndReasonContinue
 			return turnContinue // re-enter the loop for a new turn
 		}
@@ -1247,7 +1122,7 @@ func (r *LocalRuntime) runTurn(
 		return turnExit
 	}
 
-	r.compactIfNeeded(ctx, sess, a, contextLimit, messageCountBeforeTools, events)
+	ls.compaction.AfterMessages(ctx, a, contextLimit, messageCountBeforeTools)
 	endReason = turnEndReasonContinue
 	return turnContinue
 }
@@ -1270,63 +1145,6 @@ func (r *LocalRuntime) Run(ctx context.Context, sess *session.Session) ([]sessio
 		}
 	}
 	return sess.GetAllMessages(), nil
-}
-
-func applyModelCost(m *modelsdev.Model, id modelsdev.ID, usage *chat.Usage, config base.Config) *modelsdev.Model {
-	cfg := config.ModelConfig
-	// Unreported routing endpoints and custom endpoints cannot use vendor tier multipliers.
-	isCustomEndpoint := func(endpoint string) bool {
-		return endpoint != "" && strings.TrimRight(endpoint, "/") != "https://api.openai.com/v1"
-	}
-	customEndpoint := isCustomEndpoint(cfg.BaseURL) || isCustomEndpoint(config.BaseURL)
-	if cfg.Cost != nil || customEndpoint || len(cfg.Routing) > 0 || m == nil || usage == nil {
-		return applyConfigCost(m, id, cfg.Cost)
-	}
-	cost := m.Cost.ForServiceTier(id, usage.ServiceTier)
-	if cost == m.Cost {
-		return m
-	}
-	out := *m
-	out.Cost = cost
-	return &out
-}
-
-// applyConfigCost overlays a config-declared price table (USD per 1M tokens)
-// onto the catalogue entry, returning m untouched when there is no override.
-// It never mutates m: the store caches entries shared across sessions. When
-// the model is uncatalogued (m == nil) a minimal entry is synthesized so the
-// call is still priced — this is the escape hatch for custom endpoints that
-// models.dev cannot describe.
-func applyConfigCost(m *modelsdev.Model, id modelsdev.ID, cost *latest.CostConfig) *modelsdev.Model {
-	if cost == nil {
-		return m
-	}
-	var out modelsdev.Model
-	if m != nil {
-		out = *m
-	} else {
-		out.Name = id.Model
-	}
-	out.Cost = &modelsdev.Cost{
-		Input:      cost.Input,
-		Output:     cost.Output,
-		CacheRead:  cost.CacheRead,
-		CacheWrite: cost.CacheWrite,
-	}
-	return &out
-}
-
-// computeMessageCost prices the whole call at the tier selected by its prompt size.
-// Nil means unpriced; a non-nil zero means free. Messages and hooks share this value.
-func computeMessageCost(usage *chat.Usage, m *modelsdev.Model) *float64 {
-	if usage == nil || m == nil || m.Cost == nil {
-		return nil
-	}
-	rates := m.Cost.RatesFor(usage.PromptTokens())
-	return new((float64(usage.InputTokens)*rates.Input +
-		float64(usage.OutputTokens)*rates.Output +
-		float64(usage.CachedInputTokens)*rates.CacheRead +
-		float64(usage.CacheWriteTokens)*rates.CacheWrite) / 1e6)
 }
 
 func shouldWarnOnCacheMiss(sess *session.Session, usage *MessageUsage) bool {
@@ -1353,7 +1171,7 @@ func shouldWarnOnCacheMiss(sess *session.Session, usage *MessageUsage) bool {
 // recordAssistantMessage adds the model's response to the session and returns
 // per-message usage information for the token-usage event. Empty responses with
 // usage are kept for accounting; session prompt assembly filters them out.
-// cost is the precomputed per-turn cost (see computeMessageCost); nil records
+// cost is the precomputed per-turn cost (see pricing.ComputeMessageCost); nil records
 // as 0, matching the previous "no pricing data" behaviour.
 func (r *LocalRuntime) recordAssistantMessage(
 	ctx context.Context,
@@ -1443,9 +1261,6 @@ func (r *LocalRuntime) recordAssistantMessage(
 		Cost:              messageCost,
 		FinishReason:      res.FinishReason,
 	}
-	// Sealed after name sanitization so the hash reflects what is persisted.
-	assistantMessage.AttachProviderState(res.ProviderState)
-
 	if len(res.Media) > 0 {
 		mediaParts := r.materializeGeneratedMedia(ctx, sess, res.Media, a.Name(), events)
 		if len(mediaParts) > 0 && strings.TrimSpace(res.Content) != "" {
@@ -1461,6 +1276,8 @@ func (r *LocalRuntime) recordAssistantMessage(
 		}
 		assistantMessage.MultiContent = append(assistantMessage.MultiContent, mediaParts...)
 	}
+	// Sealed after name sanitization and media so the hash reflects what is persisted.
+	assistantMessage.AttachProviderState(res.ProviderState)
 
 	addAgentMessage(sess, a, &assistantMessage, events)
 	slog.DebugContext(ctx, "Added assistant message to session", "agent", a.Name(), "total_messages", sess.AllMessageCount())
@@ -1506,207 +1323,6 @@ func sanitizeToolCallName(name string) string {
 	return name
 }
 
-// materializeGeneratedMedia writes each streamed [chat.MediaDelta] into the
-// owning session's workspace (the effective WorkingDir resolved via
-// [session.ResolveWorkingDir]) through [workspacemedia.Write] and returns
-// the corresponding document parts, so the persisted assistant message
-// keeps only a relative, owner-qualified workspace reference
-// ([chat.ArtifactRootWorkspace]) rather than raw bytes. sess.ID becomes the
-// reference's permanent owner (see chat.DocumentSource) — it never changes
-// even if this message is later copied into a branched or forked session.
-// Each successful write is also recorded in the session store's
-// generated-media manifest ([session.GeneratedMediaManifest]), the trust
-// anchor a resolver must consult before reading a workspace path back.
-//
-// The requested filename is the prompt-directed path when one exists
-// ([chat.MediaDelta.RequestedPath], populated by media-file marker pairing
-// in handleStream, or — for a turn whose single blob no marker named — by
-// deterministic explicit-filename extraction from the triggering user
-// message, see [applyUserPromptRequestedPath]), otherwise the sanitized
-// provider display name, otherwise a generic "generated-N"; the writer owns MIME/extension
-// correction and collision suffixing, and the part persists the exact final
-// path it returns. A corrected extension additionally surfaces a bounded
-// user-visible notice naming the final path. A prompt-directed path that
-// escapes the workspace (absolute, "..", or "~"-rooted) is redirected into
-// the workspace root under the sanitized basename with a bounded warning.
-//
-// When no workspace root is available (no provenance anywhere in the parent
-// chain, or a malformed stored value) every item fails with the same
-// per-item warning contract as a write failure — there is deliberately no
-// data-dir fallback, so generated files never land outside the workspace.
-//
-// A materialization failure drops that one media item, logs the detailed
-// error (including the workspace root) to the debug log only, and emits a
-// runtime [WarningEvent] carrying nothing but safe display metadata — the
-// exact 1-based failed item index and total batch count, the sanitized MIME
-// type, the sanitized provider-supplied name (or [fallbackDisplayName]
-// when that name is empty, whitespace-only, or missing — never omitted,
-// exactly like the strip_generated_media.go placeholder), and a fixed
-// classified reason from [mediaSaveFailureReason] (a retry-with-debug
-// hint when the cause is unclassified, never raw error text) — so the failure
-// is observable to the user/caller without leaking the absolute workspace
-// path or a raw OS error (which could contain that path) into a surface a
-// user might paste into a bug report or share screen. Both the name AND the
-// MIME type are provider-supplied, untrusted strings — sanitizeMimeType
-// (shared with strip_generated_media.go's placeholder text) strips control
-// characters and newlines the same way chat.SanitizeDisplayName does for
-// the name, applies the same [chat.MaxSanitizedFieldBytes] field bound, and
-// falls back to [fallbackMimeType] for empty/invalid input. Every formatted
-// warning/notice is additionally capped at [maxPlaceholderOrWarningBytes].
-// Only the sanitized MIME type is ever persisted into the resulting
-// [chat.Document]. One item's failure must not affect a sibling that saves
-// successfully in the same reply, and must not lose the (already generated)
-// accompanying text either.
-func (r *LocalRuntime) materializeGeneratedMedia(ctx context.Context, sess *session.Session, media []chat.MediaDelta, agentName string, events EventSink) []chat.MessagePart {
-	// Runs after marker pairing (handleStream already filled RequestedPath
-	// for marker-named blobs) and before any write, so marker precedence and
-	// the untrusted-path pipeline below apply unchanged.
-	applyUserPromptRequestedPath(media, sess.GetLastUserMessageContent())
-
-	root, rootErr := session.ResolveWorkingDir(ctx, sess, r.sessionLookup())
-	if rootErr != nil {
-		slog.DebugContext(ctx, "No workspace root for generated media; dropping every media item, keeping the rest of the turn",
-			"agent", agentName, "session_id", sess.ID, "error", rootErr)
-	} else {
-		// Seed the resolver cache so live inline rendering of this turn's
-		// media does not have to re-resolve the root from the store.
-		r.generatedFiles.setRoot(sess.ID, root)
-	}
-
-	parts := make([]chat.MessagePart, 0, len(media))
-	for i, m := range media {
-		safeName := chat.SanitizeDisplayName(m.Name)
-		safeMimeType := sanitizeMimeType(m.MimeType)
-		warnItemFailed := func(err error) {
-			slog.DebugContext(ctx, "Failed to materialize generated media into the workspace; dropping it, keeping the rest of the turn",
-				"agent", agentName, "session_id", sess.ID, "workspace_root", root, "mime_type", m.MimeType, "index", i+1, "error", err)
-			if events == nil {
-				return
-			}
-			displayName := safeName
-			if displayName == "" {
-				displayName = fallbackDisplayName
-			}
-			warning := fmt.Sprintf("Failed to save generated media item %d/%d (%s, %s). %s",
-				i+1, len(media), safeMimeType, displayName, mediaSaveFailureReason(err))
-			events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
-		}
-
-		if rootErr != nil {
-			warnItemFailed(rootErr)
-			continue
-		}
-
-		res, err := r.writeGeneratedMedia(generatedMediaItem{
-			workspaceRoot: root,
-			requestedPath: m.RequestedPath,
-			providerName:  safeName,
-			genericName:   fmt.Sprintf("generated-%d", i+1),
-			data:          m.Data,
-			mimeType:      m.MimeType,
-			agentName:     agentName,
-			index:         i + 1,
-			total:         len(media),
-		}, events)
-		if err != nil {
-			warnItemFailed(err)
-			continue
-		}
-		manifestRecorded := true
-		if err := r.recordGeneratedFile(ctx, sess.ID, chat.ArtifactRootWorkspace, res.RelPath, safeMimeType); err != nil {
-			manifestRecorded = false
-			// Keep the saved file, but warn that missing manifest authorization prevents display.
-			slog.DebugContext(ctx, "Failed to record generated media in the manifest; the file was written but may not display inline",
-				"agent", agentName, "session_id", sess.ID, "rel_path", res.RelPath, "error", err)
-			if events != nil {
-				warning := fmt.Sprintf("Saved generated media %s but could not record it for display; it may not render inline. %s", res.RelPath, retryWithDebugAdvice)
-				events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
-			}
-		}
-
-		if manifestRecorded {
-			if err := r.recordGeneratedBlob(ctx, sess.ID, res.RelPath, m.Data); err != nil {
-				slog.DebugContext(ctx, "Failed to store portable generated media; keeping the workspace file",
-					"agent", agentName, "session_id", sess.ID, "rel_path", res.RelPath, "error", err)
-				if events != nil {
-					warning := generatedBlobWarning(res.RelPath)
-					events.Emit(Warning(chat.TruncateUTF8Bytes(warning, maxPlaceholderOrWarningBytes), agentName))
-				}
-			}
-		}
-
-		if res.ExtensionCorrected && events != nil {
-			notice := fmt.Sprintf("Saved generated media as %s: the requested extension %q does not match the returned %s data",
-				res.RelPath, res.RequestedExtension, safeMimeType)
-			events.Emit(Warning(chat.TruncateUTF8Bytes(notice, maxPlaceholderOrWarningBytes), agentName))
-		}
-
-		parts = append(parts, chat.MessagePart{
-			Type: chat.MessagePartTypeDocument,
-			Document: &chat.Document{
-				Name:     path.Base(res.RelPath),
-				MimeType: safeMimeType,
-				Size:     m.Size,
-				Source: chat.DocumentSource{
-					ArtifactPath:           res.RelPath,
-					ArtifactRoot:           chat.ArtifactRootWorkspace,
-					ArtifactOwnerSessionID: sess.ID,
-				},
-			},
-		})
-	}
-	return parts
-}
-
-// sessionLookup adapts the runtime's session store to [session.Lookup] for
-// parent-chain WorkingDir resolution; nil when no store is configured.
-func (r *LocalRuntime) sessionLookup() session.Lookup {
-	if r.sessionStore == nil {
-		return nil
-	}
-	return r.sessionStore.GetSession
-}
-
-// recordGeneratedFile writes one manifest record after a successful write.
-// Materialization is the only writer of the manifest; resolvers always read
-// it back so authorization reflects current store state.
-func (r *LocalRuntime) recordGeneratedFile(ctx context.Context, sessionID string, root chat.ArtifactRootKind, finalPath, mimeType string) error {
-	manifest, ok := r.sessionStore.(session.GeneratedMediaManifest)
-	if !ok {
-		return fmt.Errorf("session store %T does not implement the generated-media manifest", r.sessionStore)
-	}
-	file := session.GeneratedFile{
-		SessionID: sessionID,
-		RelPath:   finalPath,
-		Root:      root,
-		MimeType:  mimeType,
-		CreatedAt: r.now(),
-	}
-	if err := manifest.AddGeneratedFile(ctx, file); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (r *LocalRuntime) recordGeneratedBlob(ctx context.Context, sessionID, finalPath string, data []byte) error {
-	blobs, ok := r.sessionStore.(session.GeneratedMediaBlobStore)
-	if !ok {
-		return fmt.Errorf("session store %T does not implement generated-media blob storage", r.sessionStore)
-	}
-	return blobs.AddGeneratedBlob(ctx, sessionID, finalPath, data)
-}
-
-func generatedBlobWarning(finalPath string) string {
-	return fmt.Sprintf("Saved generated media %s in the workspace, but could not keep a portable copy with the session. %s", finalPath, retryWithDebugAdvice)
-}
-
-// workspacemediaWrite is [workspacemedia.Write] behind a package-level
-// indirection so tests can inject a deterministic failure for one item in a
-// batch [LocalRuntime.materializeGeneratedMedia] call. Production code must
-// never reassign this; only *_test.go files do, always restoring it via
-// t.Cleanup.
-var workspacemediaWrite = workspacemedia.Write
-
 // usageHasTokens reports whether any billable tokens were recorded for a turn.
 // Used to suppress the missing-price warning for empty/no-op turns.
 func usageHasTokens(usage *chat.Usage) bool {
@@ -1717,67 +1333,6 @@ func usageHasTokens(usage *chat.Usage) bool {
 		usage.OutputTokens > 0 ||
 		usage.CachedInputTokens > 0 ||
 		usage.CacheWriteTokens > 0
-}
-
-// compactIfNeeded estimates the token impact of tool results added since
-// messageCountBefore and triggers proactive compaction when the estimated
-// total crosses the agent's compaction threshold (90% of the context window
-// by default). This prevents sending an oversized request on the next
-// iteration.
-func (r *LocalRuntime) compactIfNeeded(
-	ctx context.Context,
-	sess *session.Session,
-	a *agent.Agent,
-	contextLimit int64,
-	messageCountBefore int,
-	events EventSink,
-) {
-	// contextLimit is the effective budget (primary window, capped to a smaller
-	// dedicated compaction model's window when configured) computed by
-	// runStreamLoop, so this site fires consistently with the pre-turn trigger.
-	if !r.sessionCompactionEnabled(a) || contextLimit <= 0 {
-		return
-	}
-
-	// Estimate only over the session's own new messages: sub-session
-	// content recorded during tool calls (transfer_task and friends)
-	// never enters this session's prompt, so counting it here would
-	// attribute phantom tokens to a small parent conversation and
-	// trigger a compaction that wipes it (see issue #2871).
-	//
-	// The estimator is calibrated against the provider-reported usage
-	// already recorded on this session's assistant messages, so the
-	// heuristic guess for the fresh tool results tracks the provider's
-	// actual tokenizer instead of a fixed chars-per-token ratio.
-	ownMessages := sess.OwnMessages()
-	estimator := compaction.NewEstimator(func(yield func(*chat.Message) bool) {
-		for i := range ownMessages {
-			if !yield(&ownMessages[i].Message) {
-				return
-			}
-		}
-	})
-	newMessages := ownMessages[messageCountBefore:]
-	var addedTokens int64
-	for i := range newMessages {
-		addedTokens += estimator.EstimateMessageTokens(&newMessages[i].Message)
-	}
-
-	inputTokens, outputTokens := sess.Usage()
-	if !compaction.ShouldCompact(inputTokens, outputTokens, addedTokens, contextLimit, a.CompactionThreshold()) {
-		return
-	}
-
-	slog.InfoContext(ctx, "Proactive compaction: tool results pushed estimated context past the compaction threshold",
-		"agent", a.Name(),
-		"input_tokens", inputTokens,
-		"output_tokens", outputTokens,
-		"added_estimated_tokens", addedTokens,
-		"estimator_scale", estimator.Scale(),
-		"estimated_total", inputTokens+outputTokens+addedTokens,
-		"context_limit", contextLimit,
-	)
-	r.compactWithReason(ctx, sess, "", compactionReasonThreshold, events)
 }
 
 // getTools executes tool retrieval with automatic OAuth handling and applies
@@ -1822,8 +1377,6 @@ func (r *LocalRuntime) configureToolsetHandlers(a *agent.Agent) {
 	for _, toolset := range a.ToolSets() {
 		tools.ConfigureHandlers(toolset,
 			tools.ScopedElicitationHandler,
-			tools.SamplingScopeHandler,
-			tools.SamplingWithToolsScopeHandler,
 			nil,
 			r.managedOAuth,
 			r.unmanagedOAuthRedirectURI,
@@ -1940,9 +1493,12 @@ func formatToolWarning(a *agent.Agent, warnings []string) string {
 	return strings.TrimSuffix(builder.String(), "\n")
 }
 
-func lastToolCallID(messages []chat.Message) string {
+// lastSuccessfulToolCallID picks the load point for newly deferred tools.
+// Error results are skipped: Anthropic rejects tool_reference content in an
+// is_error tool_result, and load points never move once set.
+func lastSuccessfulToolCallID(messages []chat.Message) string {
 	for _, message := range slices.Backward(messages) {
-		if message.Role == chat.MessageRoleTool {
+		if message.Role == chat.MessageRoleTool && !message.IsError {
 			return message.ToolCallID
 		}
 	}
@@ -2012,21 +1568,17 @@ func (r *LocalRuntime) skillSubSessionTools(ctx context.Context, sess *session.S
 
 	agentTools = filterAllowedTools(agentTools, sess.AllowedTools)
 
-	for _, ts := range sess.ExtraToolSets {
+	for i, ts := range sess.ExtraToolSets {
 		tools.ConfigureHandlers(ts,
 			tools.ScopedElicitationHandler,
-			tools.SamplingScopeHandler,
-			tools.SamplingWithToolsScopeHandler,
 			nil,
 			r.managedOAuth,
 			r.unmanagedOAuthRedirectURI,
 		)
-		if startable, ok := tools.As[tools.Startable](ts); ok {
-			if err := startable.Start(ctx); err != nil {
-				slog.WarnContext(ctx, "Skill toolset failed to start; skipping",
-					"agent", a.Name(), "toolset", tools.DescribeToolSet(ts), "error", err)
-				continue
-			}
+		if err := r.extraToolsetRuns.start(ctx, sess, i, ts); err != nil {
+			slog.WarnContext(ctx, "Skill toolset failed to start; skipping",
+				"agent", a.Name(), "toolset", tools.DescribeToolSet(ts), "error", err)
+			continue
 		}
 		extra, err := ts.Tools(ctx)
 		if err != nil {

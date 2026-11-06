@@ -2,8 +2,10 @@ package openai
 
 import (
 	"encoding/json"
+	"maps"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/openai/openai-go/v3/shared"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -401,8 +403,15 @@ func TestMakeAllRequired_TypeArrayWithObject(t *testing.T) {
 	// Top-level should have additionalProperties: false
 	assert.Equal(t, false, updated["additionalProperties"])
 
-	// The schema property should also have additionalProperties: false
-	schemaProps := updated["properties"].(map[string]any)["schema"].(map[string]any)
+	// The nullable object is expressed as anyOf [object, null]
+	nullable := updated["properties"].(map[string]any)["schema"].(map[string]any)
+	variants := nullable["anyOf"].([]any)
+	require.Len(t, variants, 2)
+	assert.Equal(t, map[string]any{"type": "null"}, variants[1])
+
+	// The object variant should also have additionalProperties: false
+	schemaProps := variants[0].(map[string]any)
+	assert.Equal(t, "object", schemaProps["type"])
 	assert.Equal(t, false, schemaProps["additionalProperties"])
 
 	// All properties in schema should be required
@@ -1001,6 +1010,40 @@ func TestEnsureTypeFields_RefLeaf(t *testing.T) {
 	assert.Equal(t, "#/$defs/thing", p["$ref"])
 }
 
+// TestEnsureTypeFields_EnumConstTakeValueType ensures a typeless enum/const
+// node gets the type of its values rather than "object", which would reject
+// every value. pydantic emits such a node for Literal["auto", 0, 1].
+func TestEnsureTypeFields_EnumConstTakeValueType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		node map[string]any
+		want any
+	}{
+		{"string enum", map[string]any{"enum": []any{"a", "b"}}, "string"},
+		{"integer enum", map[string]any{"enum": []any{float64(1), float64(2)}}, "integer"},
+		{"number enum", map[string]any{"enum": []any{float64(1), 1.5}}, "number"},
+		{"boolean enum", map[string]any{"enum": []any{true}}, "boolean"},
+		{"mixed enum", map[string]any{"enum": []any{"auto", float64(0), nil}}, []any{"string", "integer", "null"}},
+		{"string const", map[string]any{"const": "x"}, "string"},
+		{"no values", map[string]any{"description": "d"}, "object"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			schema := shared.FunctionParameters{
+				"type":       "object",
+				"properties": map[string]any{"p": tt.node},
+			}
+
+			updated := ensureTypeFields(schema)
+
+			p := updated["properties"].(map[string]any)["p"].(map[string]any)
+			assert.Equal(t, tt.want, p["type"])
+		})
+	}
+}
+
 // TestEnsureTypeFields_CompositionNodesLeftAsLeaves ensures ensureTypeFields
 // never injects a "type" onto an anyOf/oneOf/allOf node. A "type" sibling
 // combines with these keywords via AND, so injecting one can make the
@@ -1190,4 +1233,200 @@ func TestFixSchemaArrayItems(t *testing.T) {
   ],
   "type": "object"
 }`, string(buf))
+}
+
+func TestConvertParametersToSchema_NullableContainers(t *testing.T) {
+	t.Parallel()
+
+	stringArray := func() map[string]any {
+		return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+	}
+	nullVariant := map[string]any{"type": "null"}
+	rootWith := func(prop map[string]any, required ...any) map[string]any {
+		return map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             required,
+			"properties":           map[string]any{"p": prop},
+		}
+	}
+	nestedBehindDefs := func(prop map[string]any) map[string]any {
+		return map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"required":             []any{"f"},
+			"properties":           map[string]any{"f": map[string]any{"$ref": "#/$defs/N"}},
+			"$defs": map[string]any{
+				"N": map[string]any{"$ref": "#/$defs/S"},
+				"S": rootWith(prop, "p"),
+			},
+		}
+	}
+	propertyOf := func(object map[string]any) map[string]any {
+		return object["properties"].(map[string]any)["p"].(map[string]any)
+	}
+
+	tests := []struct {
+		name       string
+		schema     map[string]any
+		property   func(out map[string]any) map[string]any
+		want       map[string]any
+		wantStrict bool
+	}{
+		{
+			name:   "required nullable array behind $defs and $ref",
+			schema: nestedBehindDefs(map[string]any{"type": []any{"array", "null"}, "items": map[string]any{"type": "string"}}),
+			property: func(out map[string]any) map[string]any {
+				return propertyOf(out["$defs"].(map[string]any)["S"].(map[string]any))
+			},
+			want:       map[string]any{"anyOf": []any{stringArray(), nullVariant}},
+			wantStrict: true,
+		},
+		{
+			name:   "required nullable array with null first, as emitted by schema generators",
+			schema: nestedBehindDefs(map[string]any{"type": []any{"null", "array"}, "items": map[string]any{"type": "string"}}),
+			property: func(out map[string]any) map[string]any {
+				return propertyOf(out["$defs"].(map[string]any)["S"].(map[string]any))
+			},
+			want:       map[string]any{"anyOf": []any{stringArray(), nullVariant}},
+			wantStrict: true,
+		},
+		{
+			name:       "optional top-level array",
+			schema:     rootWith(stringArray()),
+			property:   propertyOf,
+			want:       map[string]any{"anyOf": []any{stringArray(), nullVariant}},
+			wantStrict: true,
+		},
+		{
+			name:     "optional top-level array without items gets default items",
+			schema:   rootWith(map[string]any{"type": "array"}),
+			property: propertyOf,
+			want: map[string]any{"anyOf": []any{
+				map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				nullVariant,
+			}},
+			wantStrict: true,
+		},
+		{
+			name: "optional top-level object",
+			schema: rootWith(map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"a": map[string]any{"type": "string"}},
+			}),
+			property: propertyOf,
+			want: map[string]any{"anyOf": []any{
+				map[string]any{
+					"type":                 "object",
+					"additionalProperties": false,
+					"required":             []any{"a"},
+					"properties":           map[string]any{"a": map[string]any{"type": []string{"string", "null"}}},
+				},
+				nullVariant,
+			}},
+			wantStrict: true,
+		},
+		{
+			name:       "optional scalar keeps the type pair",
+			schema:     rootWith(map[string]any{"type": "string"}),
+			property:   propertyOf,
+			want:       map[string]any{"type": []string{"string", "null"}},
+			wantStrict: true,
+		},
+		{
+			name:       "optional $ref keeps the anyOf wrapper",
+			schema:     rootWith(map[string]any{"$ref": "#/$defs/thing"}),
+			property:   propertyOf,
+			want:       map[string]any{"anyOf": []any{map[string]any{"$ref": "#/$defs/thing"}, nullVariant}},
+			wantStrict: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			out, strict, err := ConvertParametersToSchema(tt.schema)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, tt.property(out))
+			if tt.wantStrict {
+				assert.True(t, strict)
+				assert.True(t, isStrictCompatible(out))
+			}
+			assertNoNullableContainerTypePairs(t, out)
+		})
+	}
+}
+
+func assertNoNullableContainerTypePairs(t *testing.T, schema map[string]any) {
+	t.Helper()
+
+	walkSchema(schema, func(node map[string]any) {
+		container, isNullablePair := nullableContainerType(node)
+		assert.False(t, isNullablePair, "found nullable %s type pair: %v", container, node)
+	})
+}
+
+// TestConvertParametersToSchema_EnumConstNullability checks typeless and
+// nullable enum/const properties through the full conversion by validating
+// instances against the result: optional ones must still accept null once
+// made required, and a required enum that lists null must keep accepting it.
+func TestConvertParametersToSchema_EnumConstNullability(t *testing.T) {
+	t.Parallel()
+	params := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode":  map[string]any{"enum": []any{"auto", 0, 1}},
+			"only":  map[string]any{"const": "x"},
+			"level": map[string]any{"type": "string", "enum": []any{"low", "high"}},
+			"pick":  map[string]any{"enum": []any{"auto", 0, nil}},
+		},
+		"required": []any{"pick"},
+	}
+
+	out, strict, err := ConvertParametersToSchema(params)
+	require.NoError(t, err)
+	assert.True(t, strict)
+
+	data, err := json.Marshal(out)
+	require.NoError(t, err)
+	var parsed jsonschema.Schema
+	require.NoError(t, json.Unmarshal(data, &parsed))
+	resolved, err := parsed.Resolve(nil)
+	require.NoError(t, err)
+
+	valid := map[string]any{"mode": "auto", "only": "x", "level": "low", "pick": "auto"}
+	tests := []struct {
+		name  string
+		field string
+		value any
+		ok    bool
+	}{
+		{"mixed enum string", "mode", "auto", true},
+		{"mixed enum integer", "mode", 0, true},
+		{"mixed enum omitted as null", "mode", nil, true},
+		{"mixed enum other", "mode", "bad", false},
+		{"const value", "only", "x", true},
+		{"const omitted as null", "only", nil, true},
+		{"const other", "only", "y", false},
+		{"typed enum omitted as null", "level", nil, true},
+		{"typed enum other", "level", "mid", false},
+		{"required enum allows null", "pick", nil, true},
+		{"required enum integer", "pick", 0, true},
+		{"required enum other", "pick", "bad", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			instance := maps.Clone(valid)
+			instance[tt.field] = tt.value
+			err := resolved.Validate(instance)
+			if tt.ok {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+			}
+		})
+	}
 }

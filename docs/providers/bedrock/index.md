@@ -170,6 +170,21 @@ Docker Agent recognizes these models (including Bedrock-style IDs) and transpare
 >
 > Bedrock Claude suppresses `temperature` and `top_p` while extended thinking is active — Anthropic requires `temperature=1.0` internally.
 
+### Claude 5.x models
+
+The nine Claude 5.x models listed in the [Anthropic provider guide](../anthropic/index.md#claude-5x-models) follow the same rules on Bedrock, including Bedrock-style IDs such as `us.anthropic.claude-sonnet-5-5-v1:0`:
+
+- Effort levels and `adaptive` are sent as adaptive thinking. An integer token budget becomes adaptive thinking with the model's default effort.
+- `temperature`, `top_p` and `top_k` are never sent.
+- `thinking_budget: none` sends `thinking: {"type": "disabled"}` on Haiku 5.5, Opus 5 and Sonnet 5. The other six get adaptive thinking with `low` effort and a startup warning.
+- Reasoning blocks are stored and replayed exactly as Bedrock returned them, in order: signed thinking (including signature-only thinking, the default display on these models), redacted thinking and the text and tool calls around them. If a message changed after it was received but its reasoning did not (for example a sanitized tool name or a redacted tool argument), its recorded reasoning is still replayed in its original place, with the current text and tool calls substituted. If the reasoning itself changed, it is sent without it, with a warning in the logs; inside the tool loop the next request continues, with thinking on, the request is refused instead, and a new user turn starts a fresh loop. Sessions saved by older versions keep that flattened replay; older versions ignore the stored blocks.
+- Mythos 5 is refused at startup: AWS serves it only through Bedrock Mantle, which Docker Agent does not support. Use Mythos 5.1, which is available on Converse, or the Claude API.
+
+> [!NOTE]
+> **Not yet verified live**
+>
+> The `disabled` value follows the Claude Messages contract; it has not yet been verified against live Bedrock Converse.
+
 ## Interleaved Thinking (Claude on Bedrock)
 
 Interleaved thinking lets the model reason between tool calls, not just at the start. This is useful for complex agentic tasks. Enable it alongside a thinking budget:

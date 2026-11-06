@@ -12,16 +12,29 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
 const nativeCompactionBeta anthropic.AnthropicBeta = "compact-2026-09-04"
 
-func hasNativeCompaction(messages []chat.Message) bool {
-	return slices.ContainsFunc(messages, func(m chat.Message) bool { return m.ReplayableCompaction(providerStateName) != nil })
+// nativeCompactionEnabled reports whether this client may send compaction
+// blocks. Vertex rejects the option, so it never replays a block recorded on
+// the Claude API and sends the summary text instead.
+func nativeCompactionEnabled(opts map[string]any) bool {
+	enabled, _ := providerutil.GetProviderOptBool(opts, "native_compaction")
+	return enabled
 }
 
-func compactionMessage(msg *chat.Message) (anthropic.BetaMessageParam, bool, error) {
+func (c *Client) hasNativeCompaction(messages []chat.Message) bool {
+	return nativeCompactionEnabled(c.ModelConfig.ProviderOpts) &&
+		slices.ContainsFunc(messages, func(m chat.Message) bool { return m.ReplayableCompaction(providerStateName) != nil })
+}
+
+func (c *Client) compactionMessage(msg *chat.Message) (anthropic.BetaMessageParam, bool, error) {
+	if !nativeCompactionEnabled(c.ModelConfig.ProviderOpts) {
+		return anthropic.BetaMessageParam{}, false, nil
+	}
 	compact := msg.ReplayableCompaction(providerStateName)
 	if compact == nil {
 		return anthropic.BetaMessageParam{}, false, nil
@@ -50,7 +63,7 @@ func (c *Client) CompactConversation(ctx context.Context, messages []chat.Messag
 	if err != nil {
 		return nil, err
 	}
-	requestTools = c.toolsWithSupportedDeferral(requestTools)
+	requestTools = c.toolsWithSupportedDeferral(ctx, requestTools, messages)
 	allTools, err := convertBetaTools(requestTools)
 	if err != nil {
 		return nil, err
@@ -123,17 +136,20 @@ func (c *Client) CompactConversation(ctx context.Context, messages []chat.Messag
 		return nil, errors.New("anthropic: unsigned compaction block")
 	}
 	var usage chat.Usage
+	var iterations []chat.Usage
 	if c.TrackUsageEnabled() {
 		// On-demand compaction bills iterations, not the zero top-level totals.
 		for _, iteration := range response.Usage.Iterations {
-			usage.Add(&chat.Usage{
+			u := chat.Usage{
 				InputTokens: iteration.InputTokens, OutputTokens: iteration.OutputTokens,
 				CacheWriteTokens: iteration.CacheCreationInputTokens, CachedInputTokens: iteration.CacheReadInputTokens,
-			})
+			}
+			usage.Add(&u)
+			iterations = append(iterations, u)
 		}
 	}
 	return &chat.CompactionResult{
 		Summary: block.Content, Block: json.RawMessage(block.RawJSON()), Provider: providerStateName,
-		Model: response.Model, Usage: usage, RequestContext: requestContext,
+		Model: response.Model, Usage: usage, Iterations: iterations, RequestContext: requestContext,
 	}, nil
 }

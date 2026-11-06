@@ -6,7 +6,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
+	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -40,6 +42,29 @@ func (m *model) AppendReasoningContent(sessionID, messageID, agentName, content 
 		last.SessionID, last.MessageID = sessionID, messageID
 	}
 	return cmd
+}
+
+// ResetReasoningContent clears every matching segment, including copyable backing text.
+func (m *model) ResetReasoningContent(sessionID, messageID, agentName string) tea.Cmd {
+	materialize := m.materializeDeferredTail()
+	for i, msg := range slices.Backward(m.messages) {
+		if msg.Type != types.MessageTypeAssistantReasoningBlock || msg.SessionID != sessionID || msg.MessageID != messageID || msg.Sender != agentName {
+			continue
+		}
+		block := m.views[i].(*reasoningblock.Model)
+		block.ClearReasoning()
+		msg.Content = ""
+		if block.ToolCount() == 0 {
+			animation.StopView(block)
+			m.messages = slices.Delete(m.messages, i, i+1)
+			m.views = slices.Delete(m.views, i, i+1)
+			if i < m.groupStart {
+				m.groupStart--
+			}
+		}
+	}
+	m.invalidateAllItems()
+	return materialize
 }
 
 // ReconcileAssistantContent replaces incomplete streamed text with the saved answer.

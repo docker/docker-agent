@@ -36,6 +36,10 @@ Keep comments short and to the point:
 - Ask clarifying questions only when truly necessary
 - When possible, call independent tools concurrently — it's faster
 
+### Model Providers
+
+When adding or changing a model provider, follow the [provider implementation checklist](docs/community/contributing/index.md#implementation-checklist).
+
 ### Client and Session Lifetimes
 
 - Provider clients are built per team load: once per session in `serve api`,
@@ -70,6 +74,9 @@ is a quick reference.
 - `task lint` — Run golangci-lint (uses `.golangci.yml` configuration)
 - `task format` — Format code using golangci-lint fmt
 - `task dev` — Run lint, test, and build in parallel
+- `task generate-ts` — Regenerate `sdk/typescript` after changing types the API
+  serves (`pkg/api`, sessions, config, runtime events) or builtin tools;
+  `task check-ts` is the CI check
 
 ## Docker and Cross-Platform Builds
 
@@ -115,6 +122,7 @@ is a quick reference.
 - The schema is **versioned**
 - `./pkg/config/v0`, `./pkg/config/v1`, ... packages handle older versions of the config
 - `./pkg/config/latest` package handles the current, work-in-progress config format
+- `./pkg/config/legacy/register.go` opts into historical parsers and the final migration bridge; when freezing a new version, update both. The core/latest packages must not import historical schemas.
 - When adding new features to the config, **only add them to the latest config**
 - Older config types are **frozen** — do not modify them
 - When adding new features to the config:

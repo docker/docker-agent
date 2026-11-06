@@ -114,7 +114,8 @@ func TestSanitizeToolCalls_DropsDuplicateToolResult(t *testing.T) {
 
 // TestGetMessages_ResumeAfterCompaction_NoOrphanedToolResult exercises the full
 // GetMessages reconstruction path that runs on the first turn after a session
-// is resumed (runtime/loop.go calls sess.GetMessages before the loop starts).
+// is resumed (runtime/loop.go's runTurn assembles each turn's prompt via
+// GetMessages/GetMessagesWithoutInstructionContext, which share getMessages).
 //
 // It reproduces the exact #1676 condition: a compaction summary whose
 // FirstKeptEntry boundary lands between an assistant tool_use and its

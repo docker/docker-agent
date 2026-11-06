@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"maps"
 	"slices"
 	"sync"
@@ -17,6 +18,15 @@ import (
 
 type Opt func(a *Agent)
 
+// WithWorkingDirFactory installs a constructor for fresh workspace-local toolsets.
+// The factory must return a new agent without links to the original team.
+// Install it after tool options; changing tools invalidates the factory.
+func WithWorkingDirFactory(factory func(context.Context, string) (*Agent, error)) Opt {
+	return func(a *Agent) {
+		a.workingDirFactory = factory
+	}
+}
+
 func WithInstruction(instruction string) Opt {
 	return func(a *Agent) {
 		a.instruction = instruction
@@ -30,7 +40,17 @@ func WithToolSets(toolSet ...tools.ToolSet) Opt {
 	}
 
 	return func(a *Agent) {
+		a.workingDirFactory = nil
 		a.toolsets = startableToolSet
+	}
+}
+
+// WithOwnedToolSets registers lazily started toolsets for agent shutdown without
+// exposing or starting them with the agent's ordinary tools.
+func WithOwnedToolSets(toolsets ...*tools.StartableToolSet) Opt {
+	return func(a *Agent) {
+		a.workingDirFactory = nil
+		a.ownedToolsets = append(a.ownedToolsets, toolsets...)
 	}
 }
 
@@ -38,6 +58,7 @@ func WithToolSets(toolSet ...tools.ToolSet) Opt {
 // Like other options, apply it before the agent is used by a runtime.
 func WithAdditionalToolSets(toolsets ...tools.ToolSet) Opt {
 	return func(a *Agent) {
+		a.workingDirFactory = nil
 		for _, ts := range toolsets {
 			a.toolsets = append(a.toolsets, tools.NewStartable(ts))
 		}
@@ -46,6 +67,7 @@ func WithAdditionalToolSets(toolsets ...tools.ToolSet) Opt {
 
 func WithTools(allTools ...tools.Tool) Opt {
 	return func(a *Agent) {
+		a.workingDirFactory = nil
 		a.tools = allTools
 	}
 }

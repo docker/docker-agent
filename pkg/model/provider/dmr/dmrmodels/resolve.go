@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
 const (
@@ -128,7 +129,7 @@ func getDMRFallbackURLs(containerized bool) []string {
 // possible.
 //
 // High‑level rules:
-//   - If the user explicitly configured a BaseURL or MODEL_RUNNER_HOST, use that (no fallbacks).
+//   - A non-default BaseURL or MODEL_RUNNER_HOST takes precedence (no fallbacks).
 //   - For Desktop endpoints (model-runner.docker.internal) on the host, route
 //     through the selected Docker Engine's experimental endpoints prefix.
 //   - For standalone / offload endpoints like http://172.17.0.1:12435/engines/v1/,
@@ -139,7 +140,7 @@ func getDMRFallbackURLs(containerized bool) []string {
 // It also returns an *http.Client when a custom transport (e.g., Docker Unix socket) is needed.
 func ResolveBaseURL(ctx context.Context, cfg *latest.ModelConfig, endpoint string) (string, *http.Client) {
 	// Explicit configuration — return immediately without fallback testing.
-	if cfg != nil && cfg.BaseURL != "" {
+	if cfg != nil && !catalog.IsDefaultEndpoint("dmr", cfg.BaseURL) {
 		slog.DebugContext(ctx, "DMR using explicitly configured BaseURL", "url", cfg.BaseURL)
 		return cfg.BaseURL, nil
 	}

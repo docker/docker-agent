@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -15,6 +16,43 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
+
+func TestConvertMessagesToGemini_ParallelAttachmentsKeepNativeOrigins(t *testing.T) {
+	t.Parallel()
+	messages := []chat.Message{
+		{Role: chat.MessageRoleAssistant, ThoughtSignature: []byte("signature"), ToolCalls: []tools.ToolCall{
+			{ID: "A", ProviderID: "native-A", Function: tools.FunctionCall{Name: "read_a", Arguments: `{}`}},
+			{ID: "B", ProviderID: "native-B", Function: tools.FunctionCall{Name: "read_b", Arguments: `{}`}},
+		}},
+		{Role: chat.MessageRoleTool, ToolCallID: "B", Content: "B", MultiContent: chat.BuildToolResultMultiContent("B", []tools.MediaContent{{MimeType: "image/png", Data: "Ag=="}}, nil)},
+		{Role: chat.MessageRoleTool, ToolCallID: "A", Content: "A", MultiContent: chat.BuildToolResultMultiContent("A", []tools.MediaContent{{MimeType: "image/png", Data: "AQ=="}}, nil)},
+		{Role: chat.MessageRoleUser, Content: "continue"},
+	}
+	before, err := json.Marshal(messages)
+	require.NoError(t, err)
+	converted := convertMessagesToGemini(t.Context(), messages, modelsdev.ID{Provider: "google", Model: "gemini-3-pro"}, modelsdev.NewDatabaseStore(&modelsdev.Database{}), nil)
+	raw, err := json.Marshal(converted)
+	require.NoError(t, err)
+	var wire []map[string]any
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	require.Len(t, wire, 3)
+	assert.Equal(t, "user", wire[1]["role"])
+	parts := wire[1]["parts"].([]any)
+	require.Len(t, parts, 2)
+	for i, id := range []string{"A", "B"} {
+		response := parts[i].(map[string]any)["functionResponse"].(map[string]any)
+		assert.Equal(t, "native-"+id, response["id"])
+		assert.Equal(t, map[string]any{"result": id}, response["response"])
+		assert.Equal(t, []byte{byte(i + 1)}, converted[1].Parts[i].FunctionResponse.Parts[0].InlineData.Data)
+		assert.Equal(t, "image/png", converted[1].Parts[i].FunctionResponse.Parts[0].InlineData.MIMEType)
+	}
+	assert.Equal(t, []byte("signature"), converted[0].Parts[0].ThoughtSignature)
+	assert.Empty(t, converted[0].Parts[1].ThoughtSignature)
+	assert.Equal(t, "continue", converted[2].Parts[0].Text)
+	after, err := json.Marshal(messages)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(before), string(after))
+}
 
 func TestBuildConfig_NoThinking(t *testing.T) {
 	t.Parallel()

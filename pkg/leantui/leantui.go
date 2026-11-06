@@ -11,6 +11,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/mattn/go-isatty"
+	"github.com/muesli/cancelreader"
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/gitbranch"
@@ -88,9 +89,7 @@ func Run(ctx context.Context, cfg Config) error {
 
 	keys := make(chan ui.Key, 64)
 	events := make(chan any, 256)
-	resizes := make(chan [2]int, 4)
 	done := make(chan struct{})
-	defer close(done)
 
 	fileCompletion := completions.NewFileCompletionAt(loopCtx, cfg.WorkingDir)
 	if loader, ok := fileCompletion.(completions.AsyncLoader); ok {
@@ -103,7 +102,15 @@ func Run(ctx context.Context, cfg Config) error {
 		}()
 	}
 
-	go readKeys(term.Reader(), keys, done)
+	keysDone := make(chan struct{})
+	go func() {
+		defer close(keysDone)
+		readKeys(term.Reader(), keys, done)
+	}()
+	defer func() {
+		close(done)
+		<-keysDone
+	}()
 	subscriptionReady := make(chan struct{})
 	go func() {
 		m.app.SubscribeReliable(loopCtx, func(msg tea.Msg) {
@@ -117,19 +124,6 @@ func Run(ctx context.Context, cfg Config) error {
 	}()
 	<-subscriptionReady
 	m.app.Start(loopCtx)
-	go func() {
-		for {
-			w, h, ok := term.Resized()
-			if !ok {
-				return
-			}
-			select {
-			case resizes <- [2]int{w, h}:
-			case <-done:
-				return
-			}
-		}
-	}()
 
 	if cfg.FirstMessage != nil || cfg.FirstMessageAttachment != "" {
 		first := ""
@@ -148,6 +142,8 @@ func Run(ctx context.Context, cfg Config) error {
 
 	animationTicker := time.NewTicker(100 * time.Millisecond)
 	defer animationTicker.Stop()
+	resizeTicker := time.NewTicker(250 * time.Millisecond)
+	defer resizeTicker.Stop()
 	branchChanges := branchWatcher.Changes()
 
 	probeTimer := time.NewTimer(200 * time.Millisecond)
@@ -178,10 +174,8 @@ func Run(ctx context.Context, cfg Config) error {
 			m.handleEvent(loopCtx, ev)
 			m.publishProgramStatus()
 			m.render()
-		case sz := <-resizes:
-			m.width, m.height = sz[0], sz[1]
-			m.r.SetSize(sz[0], sz[1])
-			m.render()
+		case <-resizeTicker.C:
+			m.resize(term.Size())
 		case <-animationTicker.C:
 			if m.busy || m.screen.Transcript.ToolCount() > 0 {
 				m.spinnerFrame++
@@ -212,7 +206,9 @@ func readKeys(r io.Reader, keys chan<- ui.Key, done <-chan struct{}) {
 		err  error
 	}
 	reads := make(chan readResult)
+	readerDone := make(chan struct{})
 	go func() {
+		defer close(readerDone)
 		for {
 			buf := make([]byte, 8192)
 			n, err := r.Read(buf)
@@ -224,6 +220,17 @@ func readKeys(r io.Reader, keys chan<- ui.Key, done <-chan struct{}) {
 			if err != nil {
 				return
 			}
+		}
+	}()
+	defer func() {
+		select {
+		case <-readerDone:
+			return
+		default:
+		}
+		// Some terminals cannot interrupt Read; do not hang shutdown in that case.
+		if reader, ok := r.(cancelreader.CancelReader); ok && reader.Cancel() {
+			<-readerDone
 		}
 	}()
 	p := &ui.InputParser{}
@@ -361,6 +368,15 @@ func newModel(term *ui.Terminal, cfg Config) *model {
 		sendMode:         messages.ParseSendMode(userconfig.Get().GetBusySendMode()),
 		hideBanner:       cfg.ShowBanner != nil && !*cfg.ShowBanner,
 	}
+}
+
+func (m *model) resize(width, height int) {
+	if width == m.width && height == m.height {
+		return
+	}
+	m.width, m.height = width, height
+	m.r.SetSize(width, height)
+	m.render()
 }
 
 // render assembles the full frame and reconciles it with the terminal.

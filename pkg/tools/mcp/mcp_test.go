@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -69,10 +70,6 @@ func (m *mockMCPClient) GetPrompt(context.Context, *mcp.GetPromptParams) (*mcp.G
 }
 
 func (m *mockMCPClient) SetElicitationHandler(tools.ElicitationHandler) {}
-
-func (m *mockMCPClient) SetSamplingHandler(tools.SamplingHandler) {}
-
-func (m *mockMCPClient) SetSamplingWithToolsHandler(tools.SamplingWithToolsHandler) {}
 
 func (m *mockMCPClient) SetOAuthSuccessHandler(func()) {}
 
@@ -862,4 +859,21 @@ func TestRemoteToolsetReconnectsAfterCleanClose(t *testing.T) {
 		require.Len(t, toolList, 1)
 		assert.Equal(t, "test-remote_ping", toolList[0].Name)
 	})
+}
+
+func TestMergeChildEnv_ToolsetEnvWins(t *testing.T) {
+	t.Setenv("DOCKER_AGENT_ENV_PRECEDENCE_PROBE", "host")
+
+	env := mergeChildEnv([]string{"DOCKER_AGENT_ENV_PRECEDENCE_PROBE=toolset"})
+
+	var got []string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "DOCKER_AGENT_ENV_PRECEDENCE_PROBE=") {
+			got = append(got, entry)
+		}
+	}
+	// exec.Cmd keeps the last duplicate, so the configured value must be the last one.
+	if len(got) != 2 || got[len(got)-1] != "DOCKER_AGENT_ENV_PRECEDENCE_PROBE=toolset" {
+		t.Fatalf("configured env must come last for exec.Cmd to prefer it, got %v", got)
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/sources"
 	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/remote"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -208,7 +209,7 @@ func (b *remoteBackend) CreateSessionRequest(workingDir string) runtime.CreateSe
 
 func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadResult, req runtime.CreateSessionRequest) (runtime.Runtime, *session.Session, func(), error) {
 	token := cmp.Or(b.flags.remoteAuthToken, os.Getenv("DOCKER_AGENT_REMOTE_AUTH_TOKEN"))
-	client, err := runtime.NewClient(b.flags.remoteAddress, runtime.WithAuthToken(token))
+	client, err := remote.NewClient(b.flags.remoteAddress, remote.WithAuthToken(token))
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create remote client: %w", err)
 	}
@@ -226,9 +227,9 @@ func (b *remoteBackend) CreateSession(ctx context.Context, _ *teamloader.LoadRes
 		return nil, nil, nil, err
 	}
 
-	rt, err := runtime.NewRemoteRuntime(client,
-		runtime.WithRemoteCurrentAgent(req.AgentName),
-		runtime.WithRemoteAgentFilename(b.agentFileName),
+	rt, err := remote.NewRuntime(client,
+		remote.WithRemoteCurrentAgent(req.AgentName),
+		remote.WithRemoteAgentFilename(b.agentFileName),
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create remote runtime: %w", err)

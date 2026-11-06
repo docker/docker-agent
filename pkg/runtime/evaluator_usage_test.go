@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -255,7 +254,7 @@ func TestEvaluatorUsageConcurrentSessions(t *testing.T) {
 	assert.Equal(t, int64(275), rt.currentBudget().trackers[runBudgetName].snapshot().Tokens)
 }
 
-func TestEvaluatorUsagePersistenceAndSSE(t *testing.T) {
+func TestEvaluatorUsagePersistence(t *testing.T) {
 	t.Parallel()
 	store, err := sqlitestore.New(t.Context(), filepath.Join(t.TempDir(), "sessions.db"))
 	require.NoError(t, err)
@@ -283,28 +282,6 @@ func TestEvaluatorUsagePersistenceAndSSE(t *testing.T) {
 	reloaded, err = store.GetSession(t.Context(), sess.ID)
 	require.NoError(t, err)
 	assert.Len(t, evaluationItems(reloaded), 1)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		payload, err := json.Marshal(event)
-		assert.NoError(t, err)
-		_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
-	}))
-	t.Cleanup(server.Close)
-	client := newTestClient(t, server.URL)
-	stream, err := client.StreamSessionEvents(t.Context(), sess.ID)
-	require.NoError(t, err)
-	var received []*EvaluationUsageEvent
-	for e := range stream {
-		if usage, ok := e.(*EvaluationUsageEvent); ok {
-			received = append(received, usage)
-		}
-	}
-	require.Len(t, received, 1)
-	assert.Equal(t, event.Evaluation, received[0].Evaluation)
-	assert.Equal(t, event.SessionID, received[0].SessionID)
-	assert.Equal(t, event.AgentName, received[0].AgentName)
-	assert.True(t, event.Timestamp.Equal(received[0].Timestamp))
 }
 
 func TestEvaluatorAccountingPersistsAfterCancellation(t *testing.T) {

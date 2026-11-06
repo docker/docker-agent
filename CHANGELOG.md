@@ -3,6 +3,307 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.157.0] - 2026-11-05
+
+This release delivers several bug fixes across runtime token handling, model error recognition, and provider-specific behavior, along with a UI fix for text selection and a new build tag for embedders.
+
+## What's New
+
+- Adds `docker_agent_no_hook_templates` build tag, allowing embedders to drop `text/template` from the runtime to reduce binary size (relevant for WebAssembly targets)
+- Adds `worktree: true` opt-in for background agents to isolate concurrent tasks in separate git worktrees with independent checkouts, tools, and hooks
+- Validates structured output using `google/jsonschema-go`
+
+## Bug Fixes
+
+- Fixes tool calls cut off by the output-token limit being executed with truncated arguments instead of being retracted
+- Fixes llama.cpp context overflow errors not being recognized as token overflow, preventing auto-compact from triggering on Docker Model Runner
+- Fixes Gemini adapter not reporting `MAX_TOKENS` as a length stop or `SAFETY` stops as refusals, which could cause refused tool calls to execute and loop
+- Fixes `sort -ofile` and `tree -ofile` (option operands) being incorrectly classified as safe commands
+- Fixes server-side fallback token usage counting only the final attempt's tokens instead of all attempts, allowing token budgets to be exceeded
+- Fixes Google SDK endpoint precedence so that `GOOGLE_GEMINI_BASE_URL` and `GOOGLE_VERTEX_BASE_URL` environment variables are not overridden by injected catalog endpoints
+- Fixes `OPENAI_BASE_URL` not being considered when determining whether hosted (native) tool search should be disabled
+- Fixes double-click text selection to use Unicode word boundaries and grapheme-aware hit testing, highlighting, and clipboard extraction
+- Fixes runtime not preserving the raw thinking state of a length turn that retracts nothing
+### Pull Requests
+
+- [#4776](https://github.com/docker/docker-agent/pull/4776) - feat: isolate background agents in git worktrees
+- [#4784](https://github.com/docker/docker-agent/pull/4784) - fix(runtime): retract a tool call cut off by the token limit
+- [#4785](https://github.com/docker/docker-agent/pull/4785) - fix(modelerrors): recognize llama.cpp context overflow
+- [#4786](https://github.com/docker/docker-agent/pull/4786) - fix(gemini): report MAX_TOKENS as length and safety stops as refusal
+- [#4787](https://github.com/docker/docker-agent/pull/4787) - fix(safety): do not classify sort and tree with an option operand as safe
+- [#4788](https://github.com/docker/docker-agent/pull/4788) - build(deps): bump the actions group across 2 directories with 7 updates
+- [#4790](https://github.com/docker/docker-agent/pull/4790) - fix(google): preserve SDK endpoint precedence
+- [#4793](https://github.com/docker/docker-agent/pull/4793) - fix(openai): exclude OPENAI_BASE_URL from hosted tool search
+- [#4797](https://github.com/docker/docker-agent/pull/4797) - docs: update CHANGELOG.md for v1.156.2
+- [#4798](https://github.com/docker/docker-agent/pull/4798) - docs: auto-update for merged PRs (2026-11-03)
+- [#4799](https://github.com/docker/docker-agent/pull/4799) - fix(runtime): count all server fallback tokens toward budgets
+- [#4800](https://github.com/docker/docker-agent/pull/4800) - test(hooks): skip stdin JSON test when jq is missing
+- [#4801](https://github.com/docker/docker-agent/pull/4801) - Fix double-click text selection
+- [#4809](https://github.com/docker/docker-agent/pull/4809) - docs: auto-update for merged PRs (2026-11-05)
+- [#4811](https://github.com/docker/docker-agent/pull/4811) - Let embedders drop text/template from the runtime
+
+
+## [v1.156.2] - 2026-11-02
+
+Maintenance release with dependency updates.
+
+
+## [v1.155.0] - 2026-11-02
+
+This release adds new MCP transport options, a CloudGPU provider, and improved elicitation forms for Claude Code, alongside a range of bug fixes for MCP environment handling, streaming finish reasons, and tool schema correctness.
+
+## What's New
+
+- Adds `remote.standalone_sse` option to MCP toolsets, enabling the streamable-HTTP standalone SSE stream via YAML configuration
+- Adds CloudGPU as a built-in provider in the embedded catalog, discoverable via `CLOUDGPU_API_KEY` with `deepseek-v4.1-flash` as the default model
+- Adds multi-select and titled choices support in elicitation forms (checkboxes for array fields, option titles and descriptions for `oneOf`/`anyOf` choices)
+- Puts Claude Code's questions (`AskUserQuestion`) and plan approvals (`ExitPlanMode`) to the user as elicitation forms instead of plain text
+
+## Improvements
+
+- Centralizes providers into an embedded catalog, replacing hard-coded provider and alias tables
+
+## Bug Fixes
+
+- Fixes `${env.X}` expansion in MCP toolset env preflight to match runtime expansion behavior
+- Fixes MCP supervisors failing to start after an explicit stop; allows reconnection without public API changes
+- Fixes text content being dropped when a provider sends the last content delta in the same chunk as a terminal finish reason
+- Fixes MCP toolset `env` values being silently overridden by the host environment; toolset env now takes precedence
+- Fixes `model_context_window_exceeded` stop reason on Anthropic and Bedrock being treated as a normal stop instead of truncation
+- Fixes typeless enum/const schemas being incorrectly typed as `object`; type is now derived from the enum/const values
+- Fixes `OPENAI_BASE_URL` not being treated as a custom endpoint, causing incorrect behavior with local servers
+- Fixes held-back `stop`/`length` finish reason being lost or reported as `stop` when usage arrives in a separate final chunk
+- Fixes concurrent session compaction requests; concurrent manual or overflow compactions are now rejected with `compaction already in progress`
+- Fixes tool results in evaluation judge transcripts being silently truncated to 500 bytes; full tool responses are now preserved
+- Fixes MCP stop and resume to be transport-safe
+
+## Technical Changes
+
+- Refreshes the embedded models.dev catalog snapshot
+- Updates CloudGPU documentation example to use `kimi-k3` model
+### Pull Requests
+
+- [#3770](https://github.com/docker/docker-agent/pull/3770) - Make standalone SSE usage in mcp tools configurable
+- [#4712](https://github.com/docker/docker-agent/pull/4712) - fix(config): expand ${env.X} in the MCP toolset env preflight
+- [#4713](https://github.com/docker/docker-agent/pull/4713) - fix(codemode): keep runtime-handled tools out of the script toolset
+- [#4716](https://github.com/docker/docker-agent/pull/4716) - fix: allow MCP supervisors to start after an explicit stop
+- [#4718](https://github.com/docker/docker-agent/pull/4718) - fix(runtime): keep text sent with a terminal finish reason
+- [#4741](https://github.com/docker/docker-agent/pull/4741) - feat(mcp): add remote.standalone_sse to open the streamable-HTTP standalone stream
+- [#4744](https://github.com/docker/docker-agent/pull/4744) - fix(mcp): give the toolset's env precedence over the host environment
+- [#4754](https://github.com/docker/docker-agent/pull/4754) - fix(codemode): keep runtime-handled tools out of the script toolset
+- [#4755](https://github.com/docker/docker-agent/pull/4755) - refactor: centralize providers in an embedded catalog
+- [#4758](https://github.com/docker/docker-agent/pull/4758) - docs: update CHANGELOG.md for v1.154.0
+- [#4759](https://github.com/docker/docker-agent/pull/4759) - fix(anthropic,bedrock): treat model_context_window_exceeded as truncation
+- [#4760](https://github.com/docker/docker-agent/pull/4760) - fix(tools): type typeless enum/const schemas from their values
+- [#4761](https://github.com/docker/docker-agent/pull/4761) - docs: add model provider contribution guide
+- [#4762](https://github.com/docker/docker-agent/pull/4762) - chore: update Go dependencies
+- [#4763](https://github.com/docker/docker-agent/pull/4763) - feat: add CloudGPU provider (centralized catalog)
+- [#4767](https://github.com/docker/docker-agent/pull/4767) - feat(harness): put Claude Code's questions and plan approvals to the user
+- [#4769](https://github.com/docker/docker-agent/pull/4769) - fix: reject concurrent session compaction requests
+- [#4771](https://github.com/docker/docker-agent/pull/4771) - fix(evaluation): preserve full tool results in judge transcripts
+- [#4772](https://github.com/docker/docker-agent/pull/4772) - docs: auto-update for merged PRs (2026-10-30)
+- [#4773](https://github.com/docker/docker-agent/pull/4773) - fix(openai): treat OPENAI_BASE_URL as a custom endpoint
+- [#4774](https://github.com/docker/docker-agent/pull/4774) - fix(oaistream): keep a held-back stop/length finish reason
+- [#4778](https://github.com/docker/docker-agent/pull/4778) - chore: bump Go dependencies
+- [#4781](https://github.com/docker/docker-agent/pull/4781) - docs(cloudgpu): use kimi-k3 in examples
+- [#4789](https://github.com/docker/docker-agent/pull/4789) - chore: refresh models.dev snapshot (+116 -124 ~284)
+
+
+## [v1.154.0] - 2026-10-28
+
+This release adds support for the Lunaroute AI provider and fixes compatibility with recent sbx sandbox releases.
+
+## What's New
+- Adds Lunaroute as an OpenAI-compatible provider, including credential-based selection and model discovery
+
+## Bug Fixes
+- Fixes compatibility with recent sbx sandbox releases, accepting both array and legacy envelope listings from `sbx ls --json` and updating the cloud flag for sbx 0.48–0.50.0
+### Pull Requests
+
+- [#4750](https://github.com/docker/docker-agent/pull/4750) - feat: add Lunaroute provider support
+- [#4752](https://github.com/docker/docker-agent/pull/4752) - docs: update CHANGELOG.md for v1.153.0
+- [#4753](https://github.com/docker/docker-agent/pull/4753) - fix: support recent sbx sandbox releases
+
+
+## [v1.153.0] - 2026-10-28
+
+This release adds several new provider aliases, opt-in background session compaction, sleep inhibition during agent runs, and full Claude API server-side fallback support, alongside numerous bug fixes and internal refactoring.
+
+## What's New
+
+- Adds **Opper** as a built-in OpenAI-compatible provider alias (`opper`, base URL `https://api.opper.ai/v3/compat`)
+- Adds **Runcrate** as a built-in OpenAI-compatible provider alias (`runcrate`, base URL `https://api.runcrate.ai/v1`)
+- Adds **OrcaRouter** as a built-in OpenAI-compatible provider alias (`orcarouter`, base URL `https://api.orcarouter.ai/v1`)
+- Adds opt-in background session compaction: context compaction can now run in the background while the agent continues working, configurable via `/settings` or `settings.background_compaction` in user config
+- Adds opt-in **Keep machine awake** setting (`settings.keep_awake`) that prevents sleep during agent runs on macOS, Linux, and Windows
+- Adds support for `DOCKER_AGENT_ENV_<NAME>`-prefixed secret variables, allowing provider API keys to be scoped to docker-agent without affecting other tools that share the same variable names
+- Adds Claude API server-side fallback support: docker-agent now sends `fallbacks` with the July beta, reports fallback markers and the serving model, bills each fallback attempt at its own model's rates, and supports Claude 5.x fallback chains
+- Adds Docker Hub authentication via the Docker secrets engine, preferring it over the legacy Desktop backend API endpoint
+- Adds `feat(auth)`: shows why the secrets engine supplied no token in debug auth output
+- Adds `feat(harness)`: session titles and `/effort` / Shift+Tab effort switching for Claude Code harness agents
+- Makes RAG opt-in in the WASM build via the `docker_agent_wasm_rag` build tag; the default WASM build no longer includes RAG dependencies
+
+## Improvements
+
+- Replays reasoning content in OpenAI-compatible streams, with opt-out, so reasoning models no longer re-derive already-produced reasoning after tool calls
+- Fixes native compaction replay to apply only where it is enabled, and prices native compaction iterations separately per Claude 5.x lifecycle
+- Resolves the `/speak` OpenAI key through the full secret chain (including `op://` references, env files, and Docker Desktop) instead of reading only from the environment
+
+## Bug Fixes
+
+- Fixes doubled/duplicated lines in the lean TUI when streamed markdown content temporarily shrinks during rendering
+- Fixes crash when anchoring deferred tools at error tool results, which previously caused sessions to become unrecoverable after a handoff with a failing tool call in the same batch
+- Fixes secrets engine auth fallback behavior so a slow or stalled engine no longer stalls debug auth or loses legacy account info
+- Fixes the lean TUI shutdown race between canceling input and restoring the terminal
+- Fixes RAG embedding builders to be joined before returning on cancellation, and snapshots BM25 statistics safely during queries
+- Fixes several gaps in server fallback handling: settling fallback turns in the adapter and WASM UI, keeping fallback markers on every beta request, and correctly attributing sticky-routed turns
+- Fixes tool lifecycle ownership gaps: preserves nested lifecycle restart ownership, propagates nested worker completion, and keeps nested lifecycle probes nonblocking
+- Fixes the secrets engine to correctly take the account and expiry from the engine session
+- Fixes an empty `DOCKER_AGENT_ENV_` override so it no longer hides overrides in later sources
+- Fixes injected transcribers in the TUI and allows finish to interrupt the key lookup
+- Fixes Baseten model configuration to use catalogued models after the models.dev snapshot refresh
+
+## Technical Changes
+
+- Removes deprecated MCP sampling, roots, and logging capabilities per MCP SEP-2577
+- Removes unused `PeerDependent` toolset startup; all toolsets now start concurrently
+- Consolidates tool-list change notifications onto subscriptions, removing `tools.ChangeNotifier` and `SetToolsChangedHandler`
+- Refactors the runtime into focused sub-packages: MCP sampling adapter, model discovery/picker catalog, generated artifact service, agent inspection, per-run observer lifetimes, model discovery cache, model pricing policy, and remote execution
+- Refactors the OAuth callback server into a single blocking `RequestAuthorizationCode` call scoped to one authorization
+- Refactors the scheduler worker lifetime into a single blocking `Run(ctx)` call
+- Refactors the lean TUI terminal resize handling into the event loop, removing the dedicated goroutine and channel
+- Refactors file watching in RAG to be context-owned
+- Refactors ACP terminal cleanup to be session-owned
+- Removes the client-wide `lastSelectedID` from the rule-based provider client
+- Adds a `SplitGoroutineLifetime` lint cop (disabled by default) for detecting split-lifecycle goroutine ownership patterns
+- Expresses nullable arrays and objects as `anyOf` in strict OpenAI tool schemas to fix schema validation rejections from the OpenAI Responses API
+- Refreshes the embedded models.dev catalog snapshot (two updates: +338/−454 and +34/−28 model entries)
+### Pull Requests
+
+- [#4007](https://github.com/docker/docker-agent/pull/4007) - feat: add OrcaRouter as a built-in OpenAI-compatible provider
+- [#4485](https://github.com/docker/docker-agent/pull/4485) - fix(oaistream): replay reasoning content with opt-out
+- [#4535](https://github.com/docker/docker-agent/pull/4535) - feat(desktop): prefer the secrets engine for Docker Hub authentication
+- [#4677](https://github.com/docker/docker-agent/pull/4677) - feat: add Opper as an OpenAI-compatible provider alias
+- [#4680](https://github.com/docker/docker-agent/pull/4680) - chore(deps): bump certifi from 2025.4.26 to 2026.10.19 in /examples/dhi/dhi_mcp_server in the pip group across 1 directory
+- [#4681](https://github.com/docker/docker-agent/pull/4681) - docs: update CHANGELOG.md for v1.152.0
+- [#4686](https://github.com/docker/docker-agent/pull/4686) - test(claude): pin Haiku 5.5 price tier, reload pricing and shared-client isolation
+- [#4688](https://github.com/docker/docker-agent/pull/4688) - fix: Claude 5.x compaction lifecycle (replay gate, per-iteration cost) with end-to-end tests
+- [#4689](https://github.com/docker/docker-agent/pull/4689) - test: pin Claude 5.x requests after a model or transport switch and reload
+- [#4690](https://github.com/docker/docker-agent/pull/4690) - feat(anthropic): server-side fallback request side (July beta, default, Claude API only)
+- [#4691](https://github.com/docker/docker-agent/pull/4691) - feat: Claude API server fallback stream and continuation
+- [#4692](https://github.com/docker/docker-agent/pull/4692) - refactor(evaluation): scope progress rendering to its run
+- [#4693](https://github.com/docker/docker-agent/pull/4693) - test: avoid command discovery in shell error test
+- [#4694](https://github.com/docker/docker-agent/pull/4694) - refactor(oauth): scope callback serving to authorization
+- [#4695](https://github.com/docker/docker-agent/pull/4695) - fix: don't anchor deferred tools at error tool results
+- [#4696](https://github.com/docker/docker-agent/pull/4696) - refactor(leantui): poll terminal size in the event loop
+- [#4697](https://github.com/docker/docker-agent/pull/4697) - refactor(rag): make file watching context-owned
+- [#4698](https://github.com/docker/docker-agent/pull/4698) - feat(lint): add split goroutine lifetime cop (disabled by default)
+- [#4699](https://github.com/docker/docker-agent/pull/4699) - refactor(acp): make terminal cleanup session-owned
+- [#4700](https://github.com/docker/docker-agent/pull/4700) - feat: bill Claude API server fallback per attempt and allow Claude 5.x chains
+- [#4701](https://github.com/docker/docker-agent/pull/4701) - docs(secrets): credential helper only supplies DOCKER_TOKEN
+- [#4705](https://github.com/docker/docker-agent/pull/4705) - refactor(scheduler): scope worker lifetime to blocking Run(ctx)
+- [#4706](https://github.com/docker/docker-agent/pull/4706) - test(windows): avoid recovered nil-expander hardware faults
+- [#4707](https://github.com/docker/docker-agent/pull/4707) - fix(desktop): preserve secrets-engine auth fallback behavior
+- [#4708](https://github.com/docker/docker-agent/pull/4708) - feat: read DOCKER_AGENT_ENV_-prefixed secret variables
+- [#4709](https://github.com/docker/docker-agent/pull/4709) - fix(tui): resolve the /speak OpenAI key through the secret chain
+- [#4710](https://github.com/docker/docker-agent/pull/4710) - refactor(rulebased): remove the client-wide lastSelectedID
+- [#4717](https://github.com/docker/docker-agent/pull/4717) - feat: add Runcrate as an OpenAI-compatible provider alias
+- [#4720](https://github.com/docker/docker-agent/pull/4720) - chore: refresh models.dev snapshot (+338 -454 ~2857)
+- [#4721](https://github.com/docker/docker-agent/pull/4721) - fix(leantui): prevent doubled lines during streaming
+- [#4723](https://github.com/docker/docker-agent/pull/4723) - feat: add opt-in background session compaction
+- [#4724](https://github.com/docker/docker-agent/pull/4724) - refactor(runtime): extract MCP sampling adapter
+- [#4725](https://github.com/docker/docker-agent/pull/4725) - refactor(runtime)!: extract model discovery and picker catalog
+- [#4726](https://github.com/docker/docker-agent/pull/4726) - refactor(runtime)!: extract generated artifact service
+- [#4727](https://github.com/docker/docker-agent/pull/4727) - refactor(runtime): consolidate steering submission handling
+- [#4728](https://github.com/docker/docker-agent/pull/4728) - refactor(runtime)!: separate read-only agent inspection
+- [#4729](https://github.com/docker/docker-agent/pull/4729) - refactor(runtime): make per-run observer lifetimes explicit
+- [#4730](https://github.com/docker/docker-agent/pull/4730) - refactor(runtime): share model discovery cache mechanics
+- [#4731](https://github.com/docker/docker-agent/pull/4731) - refactor(runtime): extract pure model pricing policy
+- [#4732](https://github.com/docker/docker-agent/pull/4732) - refactor(runtime)!: extract remote execution without moving shared types
+- [#4735](https://github.com/docker/docker-agent/pull/4735) - feat(harness): session titles and /effort for Claude Code harness agents
+- [#4736](https://github.com/docker/docker-agent/pull/4736) - refactor: consolidate tool-list change notifications on subscriptions
+- [#4737](https://github.com/docker/docker-agent/pull/4737) - refactor: remove deprecated MCP roots, sampling, and logging support
+- [#4738](https://github.com/docker/docker-agent/pull/4738) - refactor: remove unused peer-dependent toolset startup
+- [#4739](https://github.com/docker/docker-agent/pull/4739) - chore: refresh models.dev snapshot (+34 -28 ~82)
+- [#4740](https://github.com/docker/docker-agent/pull/4740) - docs: remove per-tab settings descriptions from TUI page
+- [#4742](https://github.com/docker/docker-agent/pull/4742) - feat: add opt-in sleep inhibition during agent runs
+- [#4745](https://github.com/docker/docker-agent/pull/4745) - openai: express nullable arrays and objects as anyOf in strict tool schemas
+- [#4746](https://github.com/docker/docker-agent/pull/4746) - chore: bump 16 Go dependencies
+- [#4748](https://github.com/docker/docker-agent/pull/4748) - feat(wasm): make RAG opt-in
+
+
+## [v1.152.0] - 2026-10-21
+
+This release delivers significant Claude 5.x support improvements, RAG sharing optimizations, security hardening for the REST API, and history load performance gains.
+
+## What's New
+
+- Adds syntax highlighting for scripts in common shell wrappers, including Python, Node/JavaScript, Ruby, Perl, and shell heredocs in the TUI
+- Adds an explicit Claude 5.x model table covering nine models, replacing name-based guesses for request policy on Anthropic Direct, Vertex, and Bedrock
+- Adds warnings and refusals when Claude 5.x cannot honor `thinking_budget none`, and rejects final assistant prefill for Claude 5.x
+- Refuses server-side fallback involving Claude 5.x and refuses Claude Mythos 5 on Bedrock (unsupported configurations)
+- Adds versioned, attributed provider raw state (`ProviderState` gains `Version` and `Model` fields) with explicit policy for unreplayable thinking blocks
+- Adds helpers for raw-state replay policy and seals provider state after generated media
+
+## Improvements
+
+- Deduplicates history entries in linear time on load, replacing a quadratic scan-and-splice approach
+- Redacts loaded history messages concurrently across available CPU workers, reducing sequential redaction overhead
+- Shares a single RAG index, file watcher, and embedding concurrency cap across all agents referencing the same RAG definition, eliminating redundant re-indexing
+- Accumulates Bedrock native block text in a `strings.Builder` instead of copying immutable strings on every delta, fixing quadratic behavior on Bedrock streams
+
+## Bug Fixes
+
+- Fixes OAuth token endpoint auth method: registration now requests `client_secret_post` unless the server only offers `basic` or `none`, and token exchange follows the registered method
+- Fixes OAuth default: omitted `token_endpoint_auth_methods_supported` and `token_endpoint_auth_method` now default to `client_secret_basic`
+- Locks down the REST session API against CSRF and DNS rebinding: rejects cross-origin requests on all methods, validates `Host` headers on unauthenticated TCP listeners, and requires tokens on non-loopback listeners
+- Fixes Anthropic Haiku 5.x: omits sampling parameters (e.g. temperature) that the model rejects
+- Fixes RAG: skips re-embedding files already indexed by another store, and does not attribute shared background indexing to a session
+- Fixes Bedrock: captures, persists, and replays native Claude reasoning blocks in order; never replays unsigned reasoning blocks
+- Fixes Anthropic: preserves thinking blocks from another provider's raw state
+- Fixes structured output on Claude 5.x: fails correctly without a prefill retry
+- Fixes provider factory: keeps VertexAI out of the factory's dependencies; scopes the Claude 5.x thinking warning to Model Garden and zero budgets
+- Fixes images in tool results: restores typed image attachments after tool replies, handles the explicit-cache path, and preserves following user text on message merge
+- Fixes theme watcher races: `ThemeWatcher` now uses a blocking, context-owned `Run` method instead of an internally managed goroutine
+- Fixes transcription: preserves transcripts and errors through dictation finalization; `Capturer.Run` and `Transcriber.Run` are now context-owned per run
+- Replaces models removed from the models.dev snapshot
+
+## Technical Changes
+
+- Refreshes the embedded models.dev catalog snapshot (+661 added, -71 removed, ~381 modified)
+- Updates Go to 1.27.3, picking up security fixes
+### Pull Requests
+
+- [#4584](https://github.com/docker/docker-agent/pull/4584) - feat(anthropic): reject server-side fallback involving Claude 5.x until #4584
+- [#4595](https://github.com/docker/docker-agent/pull/4595) - fix(oauth): send the registered token auth method
+- [#4631](https://github.com/docker/docker-agent/pull/4631) - chore: refresh models.dev snapshot (+661 -71 ~381)
+- [#4632](https://github.com/docker/docker-agent/pull/4632) - fix: lock down REST session API against CSRF and DNS rebinding
+- [#4633](https://github.com/docker/docker-agent/pull/4633) - perf(history): deduplicate entries in linear time on load
+- [#4635](https://github.com/docker/docker-agent/pull/4635) - chore(deps): bump portcullis to v1.1.2
+- [#4638](https://github.com/docker/docker-agent/pull/4638) - docs: update CHANGELOG.md for v1.151.0
+- [#4639](https://github.com/docker/docker-agent/pull/4639) - perf(history): redact loaded messages concurrently
+- [#4640](https://github.com/docker/docker-agent/pull/4640) - fix(anthropic): omit sampling params for Haiku 5.x
+- [#4647](https://github.com/docker/docker-agent/pull/4647) - test(teamloader): stop LSP tests from auto-installing gopls
+- [#4648](https://github.com/docker/docker-agent/pull/4648) - test(runtime): make TestHandleStream_ContextCancellation deterministic
+- [#4649](https://github.com/docker/docker-agent/pull/4649) - feat: highlight scripts in common shell wrappers
+- [#4650](https://github.com/docker/docker-agent/pull/4650) - fix(rag): share one index across agents referencing the same RAG
+- [#4657](https://github.com/docker/docker-agent/pull/4657) - fix(claude): explicit Claude 5.x model table for request policy
+- [#4658](https://github.com/docker/docker-agent/pull/4658) - feat(claude): refuse Claude 5.x fallbacks and Mythos 5 on Bedrock
+- [#4661](https://github.com/docker/docker-agent/pull/4661) - fix: preserve images in tool results
+- [#4662](https://github.com/docker/docker-agent/pull/4662) - docs: document TUI shell command syntax highlighting (2026-10-20)
+- [#4663](https://github.com/docker/docker-agent/pull/4663) - chore: bump direct Go dependencies
+- [#4666](https://github.com/docker/docker-agent/pull/4666) - fix(bedrock): capture and replay native Claude reasoning blocks
+- [#4667](https://github.com/docker/docker-agent/pull/4667) - perf(bedrock): accumulate native block text in a strings.Builder
+- [#4668](https://github.com/docker/docker-agent/pull/4668) - feat(provider): versioned raw state and explicit policy for unreplayable thinking
+- [#4669](https://github.com/docker/docker-agent/pull/4669) - test: disable tool installation when loading examples
+- [#4670](https://github.com/docker/docker-agent/pull/4670) - test: shrink GitHub archive file-count fixtures
+- [#4673](https://github.com/docker/docker-agent/pull/4673) - fix: harden context-owned theme watching
+- [#4674](https://github.com/docker/docker-agent/pull/4674) - refactor: make transcription and capture context-owned per run
+- [#4675](https://github.com/docker/docker-agent/pull/4675) - test: speed up test fixtures and completion checks
+- [#4676](https://github.com/docker/docker-agent/pull/4676) - ci: prune unused Go build-cache entries before saving
+- [#4679](https://github.com/docker/docker-agent/pull/4679) - bump Go to 1.27.3
+
+
 ## [v1.151.0] - 2026-10-19
 
 This release adds Atlas Cloud and API Route as new provider aliases, introduces live background agent visibility in the sidebar, streaming file previews in the lean TUI, and the Command Code harness type, alongside numerous bug fixes for A2A compatibility, provider cloning, think tool concurrency, and TUI settings.
@@ -7014,3 +7315,15 @@ This release improves the terminal user interface with better error handling and
 [v1.150.0]: https://github.com/docker/docker-agent/releases/tag/v1.150.0
 
 [v1.151.0]: https://github.com/docker/docker-agent/releases/tag/v1.151.0
+
+[v1.152.0]: https://github.com/docker/docker-agent/releases/tag/v1.152.0
+
+[v1.153.0]: https://github.com/docker/docker-agent/releases/tag/v1.153.0
+
+[v1.154.0]: https://github.com/docker/docker-agent/releases/tag/v1.154.0
+
+[v1.155.0]: https://github.com/docker/docker-agent/releases/tag/v1.155.0
+
+[v1.156.2]: https://github.com/docker/docker-agent/releases/tag/v1.156.2
+
+[v1.157.0]: https://github.com/docker/docker-agent/releases/tag/v1.157.0

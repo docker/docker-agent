@@ -42,10 +42,9 @@ func TestNew_RejectsNilAndBadSchema(t *testing.T) {
 	require.ErrorContains(t, err, "schema")
 }
 
-// TestNew_OnlyLocalRefsAllowed pins the security contract: gojsonschema
-// resolves $ref at compile time, so anything but a same-document fragment
-// (network, filesystem or cross-document access) must be rejected before
-// compilation ever sees the schema.
+// TestNew_OnlyLocalRefsAllowed pins the security contract: anything but a
+// same-document fragment (network, filesystem or cross-document access)
+// must be rejected before compilation ever sees the schema.
 func TestNew_OnlyLocalRefsAllowed(t *testing.T) {
 	t.Parallel()
 
@@ -121,6 +120,50 @@ func TestNew_LocalRefIsAcceptedAndResolved(t *testing.T) {
 
 	_, err = ot.Validate(`{"answer":42}`)
 	require.ErrorContains(t, err, "local_refs")
+}
+
+func TestNew_SchemaDrafts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		schema  string
+		wantErr string
+	}{
+		{name: "no $schema", schema: ""},
+		{name: "draft-07", schema: "http://json-schema.org/draft-07/schema#"},
+		{name: "draft 2020-12", schema: "https://json-schema.org/draft/2020-12/schema"},
+		{name: "draft-04 rejected at load", schema: "http://json-schema.org/draft-04/schema#", wantErr: "unsupported $schema"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			schema := map[string]any{
+				"type":                 "object",
+				"definitions":          map[string]any{"n": map[string]any{"type": "integer"}},
+				"properties":           map[string]any{"n": map[string]any{"$ref": "#/definitions/n"}},
+				"required":             []any{"n"},
+				"additionalProperties": false,
+			}
+			if tt.schema != "" {
+				schema["$schema"] = tt.schema
+			}
+			ot, err := New(&latest.StructuredOutput{Name: "drafts", Schema: schema})
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+
+			_, err = ot.Validate(`{"n":1}`)
+			require.NoError(t, err)
+			_, err = ot.Validate(`{"n":1.5}`)
+			require.ErrorContains(t, err, "drafts")
+			_, err = ot.Validate(`{"n":1,"x":2}`)
+			require.ErrorContains(t, err, "drafts")
+		})
+	}
 }
 
 func TestDefinition_UsesConfiguredSchemaAsParameters(t *testing.T) {

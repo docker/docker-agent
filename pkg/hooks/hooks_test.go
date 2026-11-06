@@ -584,7 +584,7 @@ func TestExecuteStopReceivesResponseContent(t *testing.T) {
 	// Exercise the process protocol directly: stop's stdout is observational.
 	factory, ok := NewRegistry().Lookup(HookTypeCommand)
 	require.True(t, ok)
-	handler, err := factory(HandlerEnv{WorkingDir: t.TempDir()}, Hook{Command: printStdinJSONFieldCmd("stop_response")})
+	handler, err := factory(HandlerEnv{WorkingDir: t.TempDir()}, Hook{Command: printStdinJSONFieldCmd(t, "stop_response")})
 	require.NoError(t, err)
 	input, err := (&Input{HookEventName: EventStop, StopResponse: "final answer content"}).ToJSON()
 	require.NoError(t, err)
@@ -620,7 +620,7 @@ func TestExecuteNotificationReceivesLevel(t *testing.T) {
 	// Notification stdout is observational; inspect the process protocol directly.
 	factory, ok := NewRegistry().Lookup(HookTypeCommand)
 	require.True(t, ok)
-	handler, err := factory(HandlerEnv{WorkingDir: t.TempDir()}, Hook{Command: printStdinJSONFieldCmd("notification_level")})
+	handler, err := factory(HandlerEnv{WorkingDir: t.TempDir()}, Hook{Command: printStdinJSONFieldCmd(t, "notification_level")})
 	require.NoError(t, err)
 	input, err := (&Input{
 		HookEventName:     EventNotification,

@@ -106,14 +106,14 @@ func TestIsProviderEnabled(t *testing.T) {
 	}
 }
 
-// TestSetToolsChangedHandler_RegisterAndFire ensures the handler set
+// TestSubscribeToolsChanged_RegisterAndFire ensures the handler set
 // via the public API is what gets called when the connector fires it.
-func TestSetToolsChangedHandler_RegisterAndFire(t *testing.T) {
+func TestSubscribeToolsChanged_RegisterAndFire(t *testing.T) {
 	t.Parallel()
 
 	tool := New("nope", nil, nil, t.TempDir())
 	called := 0
-	tool.SetToolsChangedHandler(func() { called++ })
+	tool.SubscribeToolsChanged(func() { called++ })
 
 	// Simulate the connector firing the handler post-init.
 	tool.handler.fireToolsChanged()
@@ -121,21 +121,18 @@ func TestSetToolsChangedHandler_RegisterAndFire(t *testing.T) {
 }
 
 // TestSubscribeToolsChanged_FanOut ensures per-runtime subscriptions fire
-// alongside the legacy handler and can be released independently.
+// and can be released independently.
 func TestSubscribeToolsChanged_FanOut(t *testing.T) {
 	t.Parallel()
 
 	tool := New("nope", nil, nil, t.TempDir())
-	var legacy, first, second int
-	tool.SetToolsChangedHandler(func() { legacy++ })
+	var first, second int
 	unsubFirst := tool.SubscribeToolsChanged(func() { first++ })
 	tool.SubscribeToolsChanged(func() { second++ })
 
 	tool.handler.fireToolsChanged()
 	unsubFirst()
 	tool.handler.fireToolsChanged()
-
-	assert.Equal(t, 2, legacy)
 	assert.Equal(t, 1, first)
 	assert.Equal(t, 2, second)
 }

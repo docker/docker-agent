@@ -50,6 +50,7 @@ import (
 	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	pathx "github.com/docker/docker-agent/pkg/path"
@@ -423,13 +424,13 @@ func promote(stagingDir, finalDir string) error {
 
 func loadConfig(ctx context.Context, opts Options) (*latestcfg.Config, error) {
 	if opts.Source != nil {
-		return config.Load(ctx, opts.Source, config.WithFlavors(opts.Flavors...))
+		return config.Load(ctx, opts.Source, config.WithFlavors(opts.Flavors...), config.WithVersions(legacy.Register))
 	}
 	source, err := sources.Resolve(opts.AgentRef, opts.EnvProvider)
 	if err != nil {
 		return nil, err
 	}
-	return config.Load(ctx, source, config.WithFlavors(opts.Flavors...))
+	return config.Load(ctx, source, config.WithFlavors(opts.Flavors...), config.WithVersions(legacy.Register))
 }
 
 // stageSkills copies every local skill the agent config enables into

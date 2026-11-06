@@ -183,7 +183,7 @@ linters:
         text: "SA1019:.*FunctionCall.*deprecated"
       # MCP sampling (SEP-2577) is deprecated upstream but functional during
       # the deprecation window; migrating off it is a separate effort
-      - path: ^(e2e/sampling_test|pkg/runtime/sampling(_test)?|pkg/tools/sampling|pkg/tools/codemode/codemode_test|pkg/tools/mcp/(mcp|session_client)(_test)?)\.go$
+      - path: ^(e2e/sampling_test|pkg/runtime/sampling(_test)?|pkg/runtime/sampling/sampling(_test)?|pkg/tools/sampling|pkg/tools/codemode/codemode_test|pkg/tools/mcp/(mcp|session_client)(_test)?)\.go$
         linters:
           - staticcheck
         text: "SA1019:.*sampling feature is deprecated"

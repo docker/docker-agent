@@ -359,19 +359,26 @@ func TestEveryRefusedTokenStaysRefused(t *testing.T) {
 }
 
 func TestGetUserInfo(t *testing.T) {
+	desktopAccount := DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}
+
 	t.Run("prefers what Docker Desktop reports", func(t *testing.T) {
 		backend := &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")}
-		backend.info = &DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}
+		backend.info = &desktopAccount
 		installFakeBackend(t, backend)
 
-		assert.Equal(t, DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}, GetUserInfo(t.Context()))
+		assert.Equal(t, desktopAccount, GetUserInfo(t.Context()))
+	})
+
+	t.Run("keeps Docker Desktop's email when the token carries none", func(t *testing.T) {
+		backend := &fakeBackend{token: makeIdentityToken(t, desktopAccount.Username, "")}
+		backend.info = &desktopAccount
+		installFakeBackend(t, backend)
+
+		assert.Equal(t, desktopAccount, GetUserInfo(t.Context()))
 	})
 
 	t.Run("falls back to the token claims", func(t *testing.T) {
-		// Docker Desktop is not around (or not signed in): the token itself
-		// says who we are.
-		backend := &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")}
-		installFakeBackend(t, backend)
+		installFakeBackend(t, &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")})
 
 		assert.Equal(t, DockerHubInfo{Username: "claims-user", Email: "claims@example.com"}, GetUserInfo(t.Context()))
 	})
@@ -499,6 +506,8 @@ func installFakeBackend(t *testing.T, backend *fakeBackend) {
 		return "", errors.New("no Docker access token in the credential store")
 	}
 	t.Cleanup(func() { mintToken = oldMint })
+
+	installNoSecretsEngine(t)
 
 	clearCache := func() {
 		cache.Lock()

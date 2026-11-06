@@ -61,7 +61,8 @@ type liveCompactionRequest struct {
 
 // liveSessionEntry tracks one active RunStream in the live-session registry.
 type liveSessionEntry struct {
-	sess *session.Session
+	owner *LocalRuntime
+	sess  *session.Session
 	// agentName is resolved once at registration: exact for pinned
 	// sessions (background agents) and equal to the current agent at
 	// stream start otherwise (transfer_task swaps the current agent
@@ -85,23 +86,33 @@ type liveSessionEntry struct {
 	compactCh chan liveCompactionRequest
 }
 
-// registerLiveSession adds sess to the live-session registry. Called by
-// RunStream before the run goroutine starts so the session is targetable for
-// the whole lifetime of its stream.
+// registerLiveSession adds sess to the live-session registry with the default
+// idle-retry policy. Test helper; runStream calls
+// registerLiveSessionWithIdleRetry directly.
 func (r *LocalRuntime) registerLiveSession(sess *session.Session) *liveSessionEntry {
 	return r.registerLiveSessionWithIdleRetry(sess, defaultIdleStreamRetryPolicy())
 }
 
 func (r *LocalRuntime) registerLiveSessionWithIdleRetry(sess *session.Session, policy idleStreamRetryPolicy) *liveSessionEntry {
 	entry := &liveSessionEntry{
+		owner:     r,
 		sess:      sess,
 		agentName: r.sessionAgentName(sess),
 		idleRetry: policy.allowance(),
 		compactCh: make(chan liveCompactionRequest, 1),
 	}
+	if r.liveSessionParent != nil {
+		parent := r.liveSessionParent
+		parent.liveSessionsMu.Lock()
+		entry.treeRootID = parent.treeRootIDLocked(sess)
+		parent.liveSessions[sess.ID] = entry
+		parent.liveSessionsMu.Unlock()
+	}
 	r.liveSessionsMu.Lock()
 	defer r.liveSessionsMu.Unlock()
-	entry.treeRootID = r.treeRootIDLocked(sess)
+	if r.liveSessionParent == nil {
+		entry.treeRootID = r.treeRootIDLocked(sess)
+	}
 	r.liveSessions[sess.ID] = entry
 	return entry
 }
@@ -138,6 +149,13 @@ func (r *LocalRuntime) finishLiveSession(ctx context.Context, entry *liveSession
 		delete(r.liveSessions, entry.sess.ID)
 	}
 	r.liveSessionsMu.Unlock()
+	if parent := r.liveSessionParent; parent != nil {
+		parent.liveSessionsMu.Lock()
+		if parent.liveSessions[entry.sess.ID] == entry {
+			delete(parent.liveSessions, entry.sess.ID)
+		}
+		parent.liveSessionsMu.Unlock()
+	}
 
 	for {
 		select {
@@ -179,7 +197,11 @@ func (r *LocalRuntime) LiveSessions(ctx context.Context, current *session.Sessio
 
 	children := make([]LiveSession, 0, len(entries))
 	for _, entry := range entries {
-		children = append(children, r.liveSessionRow(ctx, entry.sess, entry.agentName, false))
+		owner := r
+		if entry.owner != nil {
+			owner = entry.owner
+		}
+		children = append(children, owner.liveSessionRow(ctx, entry.sess, entry.agentName, false))
 	}
 	slices.SortStableFunc(children, func(a, b LiveSession) int {
 		if c := cmp.Compare(a.AgentName, b.AgentName); c != 0 {
@@ -235,6 +257,9 @@ func (r *LocalRuntime) CompactLiveSession(_ context.Context, sessionID, addition
 	if !ok {
 		return fmt.Errorf("session %s is not live (unknown or already finished)", sessionID)
 	}
+	if _, running := r.activeCompactions.Load(sessionID); running {
+		return ErrCompactionInProgress
+	}
 	select {
 	case entry.compactCh <- liveCompactionRequest{additionalPrompt: additionalPrompt, events: events}:
 		return nil
@@ -286,7 +311,9 @@ func (r *LocalRuntime) runLiveCompactionRequest(ctx context.Context, sess *sessi
 		}
 		req.events.Emit(event)
 	})
-	r.compactWithReason(ctx, sess, req.additionalPrompt, compactionReasonManual, sink)
+	if err := r.compactWithReason(ctx, sess, req.additionalPrompt, compactionReasonManual, sink); err != nil {
+		sink.Emit(ErrorForSession(sess.ID, err.Error()))
+	}
 	if !completed {
 		req.events.Emit(SessionCompactionCompleted(sess.ID, CompactionOutcomeSkipped, r.sessionAgentName(sess)))
 	}

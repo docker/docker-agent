@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/model/provider/rulebased"
+	"github.com/docker/docker-agent/pkg/modelinfo"
 )
 
 type Factory func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error)
@@ -154,6 +156,9 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 		opts = append(opts, options.WithGateway(""))
 	}
 	providerType := resolveProviderType(enhancedCfg)
+	if budget.IsDisabled() && !globalOptions.NoThinking() {
+		warnThinkingCannotBeDisabled(ctx, providerType, enhancedCfg)
+	}
 	factory, ok := r.factory(providerType)
 	if !ok {
 		slog.ErrorContext(ctx, "Unknown provider type", "type", providerType)
@@ -163,6 +168,13 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	if err != nil {
 		return nil, err
 	}
+	if setter, ok := p.(interface{ SetDispatchConfig(cfg *latest.ModelConfig) }); ok {
+		source, err := copyModelConfig(*constructionCfg)
+		if err != nil {
+			return nil, err
+		}
+		setter.SetDispatchConfig(&source)
+	}
 	r.attachRebuilder(p, nil, env)
 	// Wrap leaf providers with the GenAI semconv tracer so every chat
 	// completion emits a `chat {model}` CLIENT span and the standard
@@ -170,6 +182,27 @@ func (r *Registry) createDirectProvider(ctx context.Context, cfg *latest.ModelCo
 	// createRuleBasedRouter is left bare — its routed targets go through
 	// resolveRoutedModel → createDirectProvider and end up wrapped here.
 	return instrumentProvider(p), nil
+}
+
+// warnThinkingCannotBeDisabled flags a configured thinking_budget none or 0
+// that a native Claude transport cannot honor. Internal no-thinking calls
+// (titles, sampling) are not configured by the user and stay silent.
+func warnThinkingCannotBeDisabled(ctx context.Context, providerType string, cfg *latest.ModelConfig) {
+	switch providerType {
+	case "anthropic", "amazon-bedrock":
+	case "google":
+		// Only Model Garden's Anthropic publisher reaches a Claude client. Not
+		// vertexai.IsModelGardenConfig: importing vertexai links the OpenAI SDK.
+		if publisher, _ := cfg.ProviderOpts["publisher"].(string); !strings.EqualFold(publisher, "anthropic") {
+			return
+		}
+	default:
+		return
+	}
+	if c5, ok := modelinfo.LookupClaude5(cfg.Model); ok && !c5.CanDisableThinking {
+		slog.WarnContext(ctx, "model cannot disable thinking; thinking_budget none or 0 is sent as adaptive thinking with low effort",
+			"model", cfg.Model, "provider", providerType)
+	}
 }
 
 func (r *Registry) attachRebuilder(p Provider, models map[string]latest.ModelConfig, env environment.Provider) {

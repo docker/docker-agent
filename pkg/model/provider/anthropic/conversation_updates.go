@@ -48,7 +48,7 @@ func validateCachePreservingUpdates(cfg *latest.ModelConfig) error {
 	if !cachePreservingUpdatesEnabled(cfg.ProviderOpts) {
 		return nil
 	}
-	fallbacks, _ := providerutil.GetProviderOptStringSlice(cfg.ProviderOpts, "fallbacks")
+	fallbacks := fallbackTargets(cfg.ProviderOpts)
 	for _, model := range append([]string{cfg.Model}, fallbacks...) {
 		if !supportsConversationUpdates(model) {
 			return fmt.Errorf("anthropic: model %q does not support %s (requires Claude Opus 4.8+, Fable 5+ or Mythos 5+)", model, cachePreservingUpdatesOpt)

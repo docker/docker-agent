@@ -11,6 +11,7 @@ package provider
 import (
 	"context"
 
+	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/contracts"
@@ -25,6 +26,18 @@ type ServingModel = contracts.ServingModel
 
 // ServingStream reports the serving endpoint when it differs from the dispatched provider.
 type ServingStream = contracts.ServingStream
+
+// ServedStream reports a model that served the response in place of the dispatched one.
+type ServedStream = contracts.ServedStream
+
+// ServedBy reports the model that served a finished stream in place of the
+// dispatched one; false when the stream doesn't say or nothing changed.
+func ServedBy(stream chat.MessageStream) (ServingModel, bool) {
+	if served, ok := stream.(ServedStream); ok {
+		return served.ServedBy()
+	}
+	return ServingModel{}, false
+}
 
 // EmbeddingProvider is a provider that supports embeddings.
 type EmbeddingProvider = contracts.EmbeddingProvider

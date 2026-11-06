@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/modelpicker"
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/tui/components/completion"
 )
 
@@ -39,8 +39,8 @@ func TestAutocompleteScopedCommands(t *testing.T) {
 	t.Parallel()
 	a := NewAutocomplete()
 	a.SetCommands(testCommands())
-	gpt := runtime.ModelChoice{Name: "GPT Five", Ref: "openai/gpt-5", Provider: "openai", Model: "gpt-5"}
-	sonnet := runtime.ModelChoice{Name: "Claude Sonnet", Ref: "anthropic/claude-sonnet-4-6", Provider: "anthropic", Model: "claude-sonnet-4-6"}
+	gpt := modelcatalog.ModelChoice{Name: "GPT Five", Ref: "openai/gpt-5", Provider: "openai", Model: "gpt-5"}
+	sonnet := modelcatalog.ModelChoice{Name: "Claude Sonnet", Ref: "anthropic/claude-sonnet-4-6", Provider: "anthropic", Model: "claude-sonnet-4-6"}
 	a.SetScopedCommands("model ", []Command{
 		{Name: gpt.Ref, MatchScore: func(query string) (int, bool) { return modelpicker.Score(gpt, query) }, Kind: CmdBuiltin},
 		{Name: sonnet.Ref, MatchScore: func(query string) (int, bool) { return modelpicker.Score(sonnet, query) }, Kind: CmdBuiltin},
@@ -138,7 +138,7 @@ func TestAutocompleteModelFallback(t *testing.T) {
 	t.Parallel()
 	a := NewAutocomplete()
 	a.SetCommands(testCommands())
-	gpt := runtime.ModelChoice{Name: "GPT Five", Ref: "openai/gpt-5", Provider: "openai", Model: "gpt-5"}
+	gpt := modelcatalog.ModelChoice{Name: "GPT Five", Ref: "openai/gpt-5", Provider: "openai", Model: "gpt-5"}
 	a.SetModels([]Command{{
 		Name: gpt.Ref,
 		MatchScore: func(query string) (int, bool) {
@@ -184,7 +184,7 @@ func TestAutocompleteModelSelectionWithSpaces(t *testing.T) {
 	for _, pasted := range []bool{false, true} {
 		a := NewAutocomplete()
 		a.SetCommands(testCommands())
-		astra := runtime.ModelChoice{Name: "Astra", Ref: "openai/astra", Provider: "openai", Model: "astra"}
+		astra := modelcatalog.ModelChoice{Name: "Astra", Ref: "openai/astra", Provider: "openai", Model: "astra"}
 		a.SetModels([]Command{{Name: astra.Ref, MatchScore: func(query string) (int, bool) {
 			return modelpicker.Score(astra, query)
 		}}})

@@ -349,73 +349,6 @@ func TestSessionRemoteLegacyDelete(t *testing.T) {
 	}
 }
 
-//nolint:staticcheck // Exercise shutdown of legacy server-initiated sampling.
-func TestSessionRemoteIncomingSamplingClose(t *testing.T) {
-	t.Parallel()
-	server := gomcp.NewServer(&gomcp.Implementation{Name: "sampling", Version: "1"}, nil)
-	released := make(chan struct{})
-	server.AddReceivingMiddleware(func(next gomcp.MethodHandler) gomcp.MethodHandler {
-		return func(ctx context.Context, method string, req gomcp.Request) (gomcp.Result, error) {
-			if method == "server/discover" {
-				return nil, errors.New("legacy server")
-			}
-			return next(ctx, method, req)
-		}
-	})
-	gomcp.AddTool(server, &gomcp.Tool{Name: "sample"}, func(ctx context.Context, req *gomcp.CallToolRequest, _ struct{}) (*gomcp.CallToolResult, any, error) {
-		ctx, cancel := context.WithCancel(ctx)
-		stop := context.AfterFunc(t.Context(), cancel)
-		defer stop()
-		defer cancel()
-		go func() {
-			select {
-			case <-released:
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
-		_, err := req.Session.CreateMessageWithTools(ctx, &gomcp.CreateMessageWithToolsParams{MaxTokens: 1})
-		return &gomcp.CallToolResult{}, nil, err
-	})
-	hs := httptest.NewServer(sessionRemoteHandler("sse", server))
-	defer hs.Close()
-	defer close(released)
-	ts := localSessionRemote(t, hs.URL, "sse", nil)
-	entered, finished := make(chan struct{}), make(chan struct{})
-	ts.SetSamplingWithToolsHandler(func(ctx context.Context, _ *gomcp.CreateMessageWithToolsParams) (*gomcp.CreateMessageWithToolsResult, error) {
-		close(entered)
-		<-ctx.Done()
-		close(finished)
-		return nil, ctx.Err()
-	})
-	require.NoError(t, ts.Start(t.Context()))
-	done := make(chan error, 1)
-	go func() {
-		_, err := ts.mcpClient.CallTool(t.Context(), &gomcp.CallToolParams{Name: "sample", Arguments: map[string]any{}})
-		done <- err
-	}()
-	select {
-	case <-entered:
-	case err := <-done:
-		t.Fatalf("sampling not entered: %v", err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("sampling not entered")
-	}
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
-	require.ErrorIs(t, ts.Stop(ctx), context.DeadlineExceeded)
-	select {
-	case <-finished:
-	default:
-		t.Fatal("Stop returned before incoming handler finished")
-	}
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("call did not finish")
-	}
-}
-
 func TestSessionRemoteFailedSubscriptionCleanup(t *testing.T) {
 	t.Parallel()
 	breakStream := make(chan struct{})
@@ -517,4 +450,31 @@ func TestSessionRemoteDoesNotResumeInterruptedStream(t *testing.T) {
 	_, err := ts.Tools(ctx)
 	require.Error(t, err)
 	assert.Zero(t, gets.Load(), "SDK must not resume a client-owned SSE stream")
+}
+
+func TestSessionRemoteStartAfterStop(t *testing.T) {
+	t.Parallel()
+	for _, transport := range []string{"streamable", "sse"} {
+		t.Run(transport, func(t *testing.T) {
+			t.Parallel()
+			server := gomcp.NewServer(&gomcp.Implementation{Name: "resume", Version: "1"}, nil)
+			gomcp.AddTool(server, &gomcp.Tool{Name: "ping"}, func(context.Context, *gomcp.CallToolRequest, struct{}) (*gomcp.CallToolResult, any, error) {
+				return &gomcp.CallToolResult{Content: []gomcp.Content{&gomcp.TextContent{Text: "pong"}}}, nil, nil
+			})
+			hs := httptest.NewServer(sessionRemoteHandler(transport, server))
+			defer hs.Close()
+			ts := localSessionRemote(t, hs.URL, transport, nil)
+			defer func() { require.NoError(t, ts.Stop(t.Context())) }()
+			for range 3 {
+				require.NoError(t, ts.Start(t.Context()))
+				available, err := ts.Tools(t.Context())
+				require.NoError(t, err)
+				require.Len(t, available, 1)
+				result, err := available[0].Handler(t.Context(), tools.ToolCall{Function: tools.FunctionCall{Name: available[0].Name, Arguments: "{}"}}, tools.NopRuntime{})
+				require.NoError(t, err)
+				assert.Equal(t, "pong", result.Output)
+				require.NoError(t, ts.Stop(t.Context()))
+			}
+		})
+	}
 }

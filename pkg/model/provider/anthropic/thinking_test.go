@@ -160,9 +160,15 @@ func TestValidateThinkingDisplay(t *testing.T) {
 			model: "claude-sonnet-4-5",
 			opts: map[string]any{
 				"thinking_display": "display",
-				"fallbacks":        []any{"claude-haiku-4-5", "claude-sonnet-5"},
+				"fallbacks":        []any{"claude-haiku-4-5", "claude-sonnet-4-6"},
 			},
-			wantErr: `model "claude-sonnet-5" does not support thinking_display: "display"`,
+			wantErr: `model "claude-sonnet-4-6" does not support thinking_display: "display"`,
+		},
+		{
+			// The server picks default targets, so only the primary is checked.
+			name:  "display with default fallbacks",
+			model: "claude-sonnet-4-5",
+			opts:  map[string]any{"thinking_display": "display", "fallbacks": "default"},
 		},
 	}
 

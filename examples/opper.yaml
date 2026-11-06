@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  opper_model:
+    provider: opper
+    model: claude-sonnet-4-6
+
+agents:
+  root:
+    model: opper_model
+    description: Assistant using Opper
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think

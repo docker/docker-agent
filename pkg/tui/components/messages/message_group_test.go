@@ -4,12 +4,14 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/reasoningblock"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
@@ -131,4 +133,37 @@ func TestMessageGroupRebasedAfterLoadingRemoved(t *testing.T) {
 	m.AppendToLastMessage("root", " reply")
 	require.Len(t, m.messages, 3)
 	require.Equal(t, "new reply", m.messages[2].Content)
+}
+
+// Retracted tool calls disappear wherever they render, and only them.
+func TestRemoveToolCalls(t *testing.T) {
+	t.Parallel()
+
+	m := NewScrollableView(animation.NewRuntime(), 80, 24, &service.SessionState{}).(*model)
+	m.AppendReasoning("root", "plan")
+	m.AddOrUpdateToolCall("root", tools.ToolCall{ID: "in-block", Function: tools.FunctionCall{Name: "shell"}}, tools.Tool{}, types.ToolStatusPending)
+	m.AddOrUpdateToolCall("root", tools.ToolCall{ID: "kept-in-block", Function: tools.FunctionCall{Name: "shell"}}, tools.Tool{}, types.ToolStatusPending)
+	m.BreakMessageGroup()
+	m.AddOrUpdateToolCall("root", tools.ToolCall{ID: "standalone", Function: tools.FunctionCall{Name: "shell"}}, tools.Tool{}, types.ToolStatusPending)
+	m.AddOrUpdateToolCall("root", tools.ToolCall{ID: "kept", Function: tools.FunctionCall{Name: "shell"}}, tools.Tool{}, types.ToolStatusPending)
+
+	block, ok := m.views[0].(*reasoningblock.Model)
+	require.True(t, ok)
+	require.Equal(t, 2, block.ToolCount())
+
+	m.RemoveToolCalls([]string{"in-block", "standalone"})
+
+	assert.False(t, block.HasToolCall("in-block"))
+	assert.True(t, block.HasToolCall("kept-in-block"))
+	assert.Equal(t, 1, block.ToolCount())
+	var standalone []string
+	for _, msg := range m.messages {
+		if msg.Type == types.MessageTypeToolCall {
+			standalone = append(standalone, msg.ToolCall.ID)
+		}
+	}
+	assert.Equal(t, []string{"kept"}, standalone)
+	block.SetExpanded(true)
+	view := block.View()
+	assert.NotContains(t, view, "in-block", "the retracted call no longer renders")
 }

@@ -6,7 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,6 +19,67 @@ import (
 	"github.com/docker/docker-agent/pkg/tui/service"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
+
+func TestRunningToolFooter(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"shell", "write_file", "custom_tool", "transfer_task"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			view := NewToolView("root", tools.ToolCall{Function: tools.FunctionCall{
+				Name: name, Arguments: `{"cmd":"pwd","path":"/tmp/file","content":"preview","agent":"helper","task":"help"}`,
+			}}, tools.Tool{Name: name}, tuitypes.ToolStatusRunning)
+			started := time.Now().Add(-5100 * time.Millisecond)
+			view.message.StartedAt = &started
+			render := func() string {
+				return ansi.Strip(strings.Join(RenderToolWithState(view, 80, 0, nil), "\n"))
+			}
+			text := render()
+			assert.Equal(t, 1, strings.Count(text, "Running for 5s"))
+			assert.True(t, strings.HasSuffix(strings.TrimSpace(text), "Running for 5s"))
+			if name == "write_file" {
+				assert.Contains(t, text, "preview")
+			}
+			started = time.Now().Add(-90100 * time.Millisecond)
+			assert.Contains(t, render(), "Running for 1m30s")
+			for _, status := range []tuitypes.ToolStatus{tuitypes.ToolStatusPending, tuitypes.ToolStatusConfirmation, tuitypes.ToolStatusCompleted, tuitypes.ToolStatusError} {
+				view.message.ToolStatus = status
+				assert.NotContains(t, render(), "Running for")
+			}
+		})
+	}
+}
+
+func TestFinishedToolRetainsDuration(t *testing.T) {
+	t.Parallel()
+
+	for _, failed := range []bool{false, true} {
+		for _, finalize := range []bool{false, true} {
+			tracker := NewToolTracker()
+			call := tools.ToolCall{ID: "call", Function: tools.FunctionCall{Name: "shell", Arguments: `{"cmd":"pwd"}`}}
+			tracker.Upsert("root", call, tools.Tool{Name: "shell"}, tuitypes.ToolStatusRunning)
+			started := time.Now().Add(-5100 * time.Millisecond)
+			tracker.Get(call.ID).message.StartedAt = &started
+			var snapshot *ToolView
+			label := "Completed in 5s"
+			status := tuitypes.ToolStatusCompleted
+			if failed {
+				label = "Failed after 5s"
+				status = tuitypes.ToolStatusError
+			}
+			if finalize {
+				snapshot = tracker.FinalizeAll(status)[0]
+			} else {
+				snapshot = tracker.Finish(call.ID, ToolResult{Result: &tools.ToolCallResult{IsError: failed}})
+			}
+			require.NotNil(t, snapshot.message.FinishedAt)
+			first := RenderToolWithState(snapshot, 80, 0, nil)
+			assert.Contains(t, ansi.Strip(strings.Join(first, "\n")), label)
+			assert.Equal(t, first, RenderToolWithState(snapshot, 80, 100, nil))
+			assert.Contains(t, ansi.Strip(strings.Join(RenderToolWithState(snapshot, 40, 0, nil), "\n")), label)
+		}
+	}
+}
 
 func TestToolViewReusesInstanceRegistry(t *testing.T) {
 	t.Parallel()

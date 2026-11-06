@@ -2,11 +2,13 @@ package config
 
 import (
 	"context"
+	"slices"
+	"strconv"
 	"sync"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/environment"
-	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
 // bedrockCredentialIndicators are quick heuristics for AWS credentials, which
@@ -26,6 +28,26 @@ var bedrockCredentialIndicators = []string{
 	"AWS_WEB_IDENTITY_TOKEN_FILE",
 	"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
 	"AWS_ROLE_ARN",
+}
+
+// apiCredentialIndicators supplements token detection for APIs with native auth.
+func apiCredentialIndicators(apiType string) []string {
+	switch apiType {
+	case "google":
+		return []string{"GOOGLE_GENAI_USE_VERTEXAI"}
+	case "amazon-bedrock":
+		return bedrockCredentialIndicators
+	default:
+		return nil
+	}
+}
+
+func credentialConfigured(name, value string) bool {
+	if name == "GOOGLE_GENAI_USE_VERTEXAI" {
+		enabled, _ := strconv.ParseBool(value)
+		return enabled
+	}
+	return value != ""
 }
 
 // DiscoveryAvailableProviders reports which providers are directly usable
@@ -48,11 +70,9 @@ func DiscoveryAvailableProviders(ctx context.Context, env environment.Provider) 
 	for _, p := range cloudProviders {
 		names = append(names, p.envVars...)
 	}
-	names = append(names, bedrockCredentialIndicators...)
-	for _, alias := range provider.EachAlias() {
-		if alias.TokenEnvVar != "" {
-			names = append(names, alias.TokenEnvVar)
-		}
+	for _, alias := range catalog.Providers {
+		names = append(names, alias.TokenEnvVars...)
+		names = append(names, apiCredentialIndicators(alias.APIType)...)
 		// A templated base URL (e.g. Cloudflare's account/gateway-scoped
 		// endpoint) also needs the vars it references.
 		names = append(names, environment.Refs(alias.BaseURL)...)
@@ -63,15 +83,16 @@ func DiscoveryAvailableProviders(ctx context.Context, env environment.Provider) 
 	available := make(map[string]bool)
 	for _, p := range cloudProviders {
 		for _, envVar := range p.envVars {
-			if values[envVar] != "" {
+			if credentialConfigured(envVar, values[envVar]) {
 				available[p.name] = true
 				break
 			}
 		}
 	}
 
-	for name, alias := range provider.EachAlias() {
-		if alias.TokenEnvVar == "" || values[alias.TokenEnvVar] == "" {
+	for name, alias := range catalog.Providers {
+		keys := slices.Concat(alias.TokenEnvVars, apiCredentialIndicators(alias.APIType))
+		if !slices.ContainsFunc(keys, func(key string) bool { return credentialConfigured(key, values[key]) }) {
 			continue
 		}
 		// Without the vars its base URL references the alias resolves to a
@@ -81,13 +102,6 @@ func DiscoveryAvailableProviders(ctx context.Context, env environment.Provider) 
 			continue
 		}
 		available[name] = true
-	}
-
-	for _, indicator := range bedrockCredentialIndicators {
-		if values[indicator] != "" {
-			available["amazon-bedrock"] = true
-			break
-		}
 	}
 
 	return available

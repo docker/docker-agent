@@ -12,6 +12,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -35,7 +36,7 @@ func TestRunStream_CatalogAliasesFilterImages(t *testing.T) {
 			t.Run(provider.configured+"/"+mode, func(t *testing.T) {
 				t.Parallel()
 				model := provider.model
-				store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+				store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 				var override *latest.CapabilitiesConfig
 				wantImages := false
 				switch mode {

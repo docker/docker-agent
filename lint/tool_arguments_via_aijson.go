@@ -18,7 +18,6 @@ var ToolArgumentsViaAIJSON = &cop.Func{
 	Scope: cop.And(
 		cop.Not(cop.UnderDir("pkg/model")),
 		cop.Not(cop.UnderDir("pkg/tui")),
-		cop.Not(cop.OnlyFile("pkg/runtime/sampling.go")),
 		cop.Not(cop.OnlyFile("examples/golibrary/renderer/main.go")),
 	),
 	Run: func(p *cop.Pass) {

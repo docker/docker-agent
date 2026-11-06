@@ -1,9 +1,8 @@
 // Package toolexec hosts utilities used by the runtime to execute tool
 // calls. It is intentionally free of runtime-private state so its
-// primitives can be reused, tested in isolation, and incrementally
-// grown into a fully fledged tool dispatcher.
+// primitives can be reused and tested in isolation.
 //
-// The package currently provides:
+// The package provides, among others:
 //
 //   - Dispatcher: runs tool-call batches, including approval flow, hook
 //     dispatch, tracing, telemetry, and event emission.

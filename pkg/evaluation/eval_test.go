@@ -977,7 +977,7 @@ func TestBuildTranscript(t *testing.T) {
 			},
 		},
 		{
-			name: "long tool response truncated",
+			name: "long tool response preserved",
 			events: []map[string]any{
 				{
 					"type":         "tool_call_response",
@@ -989,7 +989,7 @@ func TestBuildTranscript(t *testing.T) {
 				},
 			},
 			wantContains: []string{
-				"...(truncated)",
+				`[Tool "shell" returns: ` + strings.Repeat("x", 600) + "]",
 			},
 		},
 		{
@@ -1035,6 +1035,40 @@ func TestBuildTranscript(t *testing.T) {
 					lastIdx = idx
 				}
 			}
+		})
+	}
+}
+
+func TestBuildTranscriptPreservesToolEvidence(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		response string
+	}{
+		{name: "empty"},
+		{name: "below former limit", response: strings.Repeat("x", 499)},
+		{name: "at former limit", response: strings.Repeat("x", 500)},
+		{name: "above former limit", response: strings.Repeat("x", 501)},
+		{name: "verification at end", response: strings.Repeat("build output\n", 100) + "verification: PASS\n"},
+		{name: "evidence in middle", response: strings.Repeat("x", 600) + "\nERROR: tests failed\n" + strings.Repeat("y", 600)},
+		{name: "UTF-8 across former boundary", response: strings.Repeat("x", 499) + "世界\n"},
+		{name: "large result", response: strings.Repeat("log output\n", 10000) + "verification: PASS\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			events := []map[string]any{
+				{
+					"type":            "tool_call_response",
+					"response":        tt.response,
+					"tool_definition": map[string]any{"name": "shell"},
+				},
+				{"type": "agent_choice", "agent_name": "root", "content": "Reported the command result."},
+			}
+			transcript := buildTranscript(events)
+			assert.Equal(t, "[Tool \"shell\" returns: "+tt.response+"]\n\n[Agent root says]:\nReported the command result.\n\n", transcript)
+			assert.True(t, utf8.ValidString(transcript))
 		})
 	}
 }

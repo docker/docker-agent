@@ -96,3 +96,55 @@ func TestServingModelThroughRegistry(t *testing.T) {
 		})
 	}
 }
+
+// servedTestStream learns the model that served it while it streams.
+type servedTestStream struct {
+	instrumentTestStream
+
+	served string
+}
+
+func (s *servedTestStream) Recv() (chat.MessageStreamResponse, error) {
+	s.served = "fallback"
+	return s.instrumentTestStream.Recv()
+}
+
+func (s *servedTestStream) ServedBy() (ServingModel, bool) {
+	if s.served == "" {
+		return ServingModel{}, false
+	}
+	return ServingModel{ID: modelsdev.NewID("test", s.served)}, true
+}
+
+// ServedBy is final only once the stream has ended, so wrappers must read it
+// late rather than snapshot it at creation.
+func TestServedByThroughRegistry(t *testing.T) {
+	t.Parallel()
+
+	for name, routed := range map[string]bool{"direct": false, "routed": true} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			underlying := &servedTestStream{}
+			registry := NewRegistry(map[string]Factory{"test": func(_ context.Context, cfg *latest.ModelConfig, _ environment.Provider, _ ...options.Opt) (Provider, error) {
+				return &registryServingProvider{Config: base.Config{ModelConfig: *cfg}, stream: underlying}, nil
+			}})
+			cfg := &latest.ModelConfig{Provider: "test", Model: "child"}
+			if routed {
+				cfg.Model = "router"
+				cfg.Routing = []latest.RoutingRule{{Model: "test/child", Examples: []string{"poetry"}}}
+			}
+			p, err := registry.New(t.Context(), cfg, nil)
+			require.NoError(t, err)
+			stream, err := p.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "poetry"}}, nil)
+			require.NoError(t, err)
+
+			_, ok := ServedBy(stream)
+			assert.False(t, ok, "nothing served yet")
+			_, _ = stream.Recv()
+			served, ok := ServedBy(stream)
+			require.True(t, ok)
+			assert.Equal(t, modelsdev.NewID("test", "fallback"), served.ID)
+			stream.Close()
+		})
+	}
+}

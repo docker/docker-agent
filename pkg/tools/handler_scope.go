@@ -10,10 +10,8 @@ import (
 // HandlerScope binds host callbacks to one runtime request. Toolsets keep
 // stable dispatchers and resolve the actual owner from the operation context.
 type HandlerScope struct {
-	Elicitation       ElicitationHandler
-	Sampling          SamplingHandler
-	SamplingWithTools SamplingWithToolsHandler
-	OAuthSuccess      func()
+	Elicitation  ElicitationHandler
+	OAuthSuccess func()
 }
 
 type (
@@ -47,24 +45,6 @@ func ScopedElicitationHandler(ctx context.Context, req *mcp.ElicitParams) (Elici
 		return scope.Elicitation(ctx, req)
 	}
 	return ElicitationResult{}, errors.New("no request-scoped elicitation handler configured")
-}
-
-// SamplingScopeHandler dispatches an MCP sampling request through the current
-// request scope.
-func SamplingScopeHandler(ctx context.Context, req *mcp.CreateMessageParams) (*mcp.CreateMessageResult, error) { //nolint:staticcheck // MCP sampling remains supported during its deprecation window.
-	if scope, ok := HandlerScopeFrom(ctx); ok && scope.Sampling != nil {
-		return scope.Sampling(ctx, req)
-	}
-	return nil, errors.New("no request-scoped sampling handler configured")
-}
-
-// SamplingWithToolsScopeHandler dispatches sampling-with-tools through the
-// current request scope.
-func SamplingWithToolsScopeHandler(ctx context.Context, req *mcp.CreateMessageWithToolsParams) (*mcp.CreateMessageWithToolsResult, error) { //nolint:staticcheck // MCP sampling remains supported during its deprecation window.
-	if scope, ok := HandlerScopeFrom(ctx); ok && scope.SamplingWithTools != nil {
-		return scope.SamplingWithTools(ctx, req)
-	}
-	return nil, errors.New("no request-scoped sampling-with-tools handler configured")
 }
 
 func NotifyScopedOAuthSuccess(ctx context.Context) {

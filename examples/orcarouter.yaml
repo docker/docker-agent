@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=../agent-schema.json
+
+models:
+  orcarouter_model:
+    provider: orcarouter
+    model: orcarouter/auto
+
+agents:
+  root:
+    model: orcarouter_model
+    description: Assistant using OrcaRouter
+    instruction: |
+      You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+      - type: think

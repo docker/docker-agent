@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -37,7 +38,7 @@ type cycleThinkingRuntime struct {
 	followUps  []runtime.QueuedMessage
 	steered    []runtime.QueuedMessage
 	steerErr   error
-	models     []runtime.ModelChoice
+	models     []modelcatalog.ModelChoice
 	modelRef   string
 	modelErr   error
 	store      session.Store
@@ -163,7 +164,7 @@ func (r *cycleThinkingRuntime) SetAgentThinkingLevel(_ context.Context, _ string
 	return level, nil
 }
 
-func (r *cycleThinkingRuntime) AvailableModels(context.Context) []runtime.ModelChoice {
+func (r *cycleThinkingRuntime) AvailableModels(context.Context) []modelcatalog.ModelChoice {
 	return r.models
 }
 func (r *cycleThinkingRuntime) SupportsModelSwitching() bool             { return r.supports }
@@ -448,7 +449,7 @@ func TestModelCommandOpensModelAutocomplete(t *testing.T) {
 	t.Parallel()
 	rt := &cycleThinkingRuntime{
 		supports: true,
-		models: []runtime.ModelChoice{
+		models: []modelcatalog.ModelChoice{
 			{Name: "GPT 5", Ref: "openai/gpt-5", Provider: "openai", Model: "gpt-5", IsCurrent: true, IsDefault: true},
 			{Name: "Sonnet", Ref: "anthropic/claude-sonnet-4-6", Provider: "anthropic", Model: "claude-sonnet-4-6"},
 		},
@@ -772,7 +773,7 @@ func TestSlashModelFallback(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rt := &cycleThinkingRuntime{
 				supports: true,
-				models: []runtime.ModelChoice{
+				models: []modelcatalog.ModelChoice{
 					{Name: "Sonnet", Ref: "anthropic/claude-sonnet-4-6", Provider: "anthropic", Model: "claude-sonnet-4-6"},
 				},
 			}
@@ -794,7 +795,7 @@ func TestSlashModelFallback(t *testing.T) {
 
 func TestSlashModelFallbackDisabled(t *testing.T) {
 	t.Parallel()
-	rt := &cycleThinkingRuntime{supports: true, models: []runtime.ModelChoice{{Ref: "openai/gpt-5", Model: "gpt-5"}}}
+	rt := &cycleThinkingRuntime{supports: true, models: []modelcatalog.ModelChoice{{Ref: "openai/gpt-5", Model: "gpt-5"}}}
 	m := bareModel(24)
 	m.app = app.New(t.Context(), rt, session.New())
 	m.disabledCommands = map[string]bool{"model": true}

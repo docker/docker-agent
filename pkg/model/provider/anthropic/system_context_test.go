@@ -184,8 +184,9 @@ func TestTurnScopedReminders_HTTP(t *testing.T) {
 func TestTurnScopedReminders_HTTP_AssistantTailUsesTopLevel(t *testing.T) {
 	t.Parallel()
 	srv := newScriptedServer(t, thinkingTextReply("msg_1", "think", "a1"))
+	// Claude 5.x rejects a final assistant message, so use a model that accepts one.
 	client := newScriptedClient(srv, latest.ModelConfig{
-		Provider: "anthropic", Model: "claude-fable-5-1",
+		Provider: "anthropic", Model: "claude-opus-4-8",
 		ProviderOpts: map[string]any{cachePreservingUpdatesOpt: true},
 	})
 	hist := []chat.Message{system("A"), scopedSystem("remind"), user("u1"), {Role: chat.MessageRoleAssistant, Content: "partial"}}

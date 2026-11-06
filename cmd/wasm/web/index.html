@@ -902,7 +902,8 @@ async function run() {
 
   const bubble = appendMessage("assistant", "");
   let assistantContent = "";
-  let assistantReason  = "";
+  const reasoningByMessage = new Map();
+  const assistantReason = () => [...reasoningByMessage.values()].join("");
 
   const yaml = getYaml();
   const env  = { OPENROUTER_API_KEY: getKey() || "" };
@@ -919,13 +920,18 @@ async function run() {
           if (event.content) {
             assistantContent += event.content;
             bubble.classList.remove("streaming");
-            renderAssistant(bubble, assistantReason, assistantContent);
+            renderAssistant(bubble, assistantReason(), assistantContent);
           }
           if (event.reasoning) {
-            assistantReason += event.reasoning;
+            const id = event.message_id || "";
+            reasoningByMessage.set(id, (reasoningByMessage.get(id) || "") + event.reasoning);
             bubble.classList.remove("streaming");
-            renderAssistant(bubble, assistantReason, assistantContent);
+            renderAssistant(bubble, assistantReason(), assistantContent);
           }
+          scrollToBottomIfPinned();
+        } else if (event.type === "reasoning_reset") {
+          reasoningByMessage.delete(event.message_id || "");
+          renderAssistant(bubble, assistantReason(), assistantContent);
           scrollToBottomIfPinned();
         } else if (event.type === "tool_call") {
           appendSystemMessage(`🔧 Calling tool: **${event.name}**`);

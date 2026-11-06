@@ -425,12 +425,41 @@ func TestGitHubRejectsUnsafeArchives(t *testing.T) {
 func TestGitHubArchiveLimits(t *testing.T) {
 	base := githubTestEntry{name: "repo-commit/skills/build/SKILL.md", body: githubTestSkill("build", "Safe skill")}
 	t.Run("file count", func(t *testing.T) {
-		entries := []githubTestEntry{base}
-		for i := range githubFilesLimit {
-			entries = append(entries, githubTestEntry{name: fmt.Sprintf("repo-commit/skills/build/file-%04d", i)})
+		const limit = 3
+		for _, test := range []struct {
+			name  string
+			files int
+		}{
+			{name: "at limit", files: limit},
+			{name: "one over limit", files: limit + 1},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				entries := []githubTestEntry{
+					{name: "repo-commit/skills/build/", typeflag: tar.TypeDir},
+					{name: "repo-commit/README.md", body: "unselected"},
+					base,
+				}
+				for i := range test.files - 1 {
+					entries = append(entries, githubTestEntry{name: fmt.Sprintf("repo-commit/skills/build/file-%04d", i)})
+				}
+				destination := t.TempDir()
+				err := extractGitHubSkillsWithFileLimit(t.Context(), githubTestArchive(t, entries...), []string{"skills/build"}, destination, limit)
+				if test.files == limit {
+					require.NoError(t, err)
+				} else {
+					require.ErrorContains(t, err, "download limits")
+				}
+
+				files, err := os.ReadDir(filepath.Join(destination, "skills", "build"))
+				require.NoError(t, err)
+				require.Len(t, files, limit)
+				content, err := os.ReadFile(filepath.Join(destination, "skills", "build", skillFile))
+				require.NoError(t, err)
+				assert.Equal(t, base.body, string(content))
+				assert.NoFileExists(t, filepath.Join(destination, "README.md"))
+				assert.NoFileExists(t, filepath.Join(destination, "skills", "build", "file-0002"))
+			})
 		}
-		err := extractGitHubSkills(t.Context(), githubTestArchive(t, entries...), []string{"skills/build"}, t.TempDir())
-		require.ErrorContains(t, err, "download limits")
 	})
 	t.Run("total selected size", func(t *testing.T) {
 		entries := []githubTestEntry{base}

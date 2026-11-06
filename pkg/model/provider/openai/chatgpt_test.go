@@ -311,11 +311,7 @@ func TestChatGPTImageInputFromOpenAICatalog(t *testing.T) {
 
 			input, ok := captured().body["input"].([]any)
 			require.True(t, ok)
-			wantLen := 3
-			if tc.wantImage {
-				wantLen++
-			}
-			require.Len(t, input, wantLen)
+			require.Len(t, input, 3)
 			user := input[0].(map[string]any)
 			assert.Equal(t, "user", user["role"])
 			toolCall := input[1].(map[string]any)
@@ -323,17 +319,25 @@ func TestChatGPTImageInputFromOpenAICatalog(t *testing.T) {
 			toolOutput := input[2].(map[string]any)
 			assert.Equal(t, "function_call_output", toolOutput["type"])
 			assert.Equal(t, "call_image", toolOutput["call_id"])
-			assert.Equal(t, "screenshot captured", toolOutput["output"])
+			if tc.wantImage {
+				output := toolOutput["output"].([]any)
+				require.Len(t, output, 2)
+				assert.Equal(t, "screenshot captured", output[0].(map[string]any)["text"])
+			} else {
+				assert.Equal(t, "screenshot captured", toolOutput["output"])
+			}
 
 			var images int
 			for _, item := range input {
 				msg := item.(map[string]any)
 				content, _ := msg["content"].([]any)
+				if msg["type"] == "function_call_output" {
+					content, _ = msg["output"].([]any)
+				}
 				for _, part := range content {
 					p := part.(map[string]any)
 					assert.NotEqual(t, "input_file", p["type"], "OpenAI PDF input must not be inherited")
 					if p["type"] == "input_image" {
-						assert.Equal(t, "user", msg["role"])
 						assert.Equal(t, "data:image/png;base64,AQID", p["image_url"])
 						images++
 					}
@@ -341,11 +345,8 @@ func TestChatGPTImageInputFromOpenAICatalog(t *testing.T) {
 			}
 			if tc.wantImage {
 				assert.Equal(t, 2, images, "attachment and tool image must both reach the backend")
-				followUp := input[3].(map[string]any)
-				assert.Equal(t, "user", followUp["role"])
-				content := followUp["content"].([]any)
+				content := toolOutput["output"].([]any)
 				require.Len(t, content, 2)
-				assert.Equal(t, "Attached content from tool result:", content[0].(map[string]any)["text"])
 				assert.Equal(t, "input_image", content[1].(map[string]any)["type"])
 			} else {
 				assert.Zero(t, images)

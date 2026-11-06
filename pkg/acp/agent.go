@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
@@ -121,8 +122,11 @@ func (s *Session) close(ctx context.Context) <-chan struct{} {
 	}
 	s.initTurns()
 	s.cleanupDone = make(chan struct{})
+	var terminalsClosed chan error
 	if s.terminals != nil {
-		s.terminals.stop(ctx)
+		s.terminals.retire()
+		terminalsClosed = make(chan error, 1)
+		go func() { terminalsClosed <- s.terminals.cleanup(ctx) }()
 	}
 	var mcpClosed chan error
 	if s.clientMCP != nil {
@@ -143,8 +147,8 @@ func (s *Session) close(ctx context.Context) <-chan struct{} {
 				s.cleanupErr = errors.Join(s.cleanupErr, fmt.Errorf("closing ACP runtime: %w", err))
 			}
 		}
-		if s.terminals != nil {
-			s.cleanupErr = errors.Join(s.cleanupErr, s.terminals.wait())
+		if terminalsClosed != nil {
+			s.cleanupErr = errors.Join(s.cleanupErr, <-terminalsClosed)
 		}
 		if mcpClosed != nil {
 			s.cleanupErr = errors.Join(s.cleanupErr, <-mcpClosed)
@@ -417,7 +421,7 @@ func (a *Agent) newRuntime(ctx context.Context, sessionID, workingDir string, se
 	acpSess.configEnabled = true
 	acpSess.configModels = loadResult.Models
 	acpSess.configProviders = loadResult.Providers
-	switcher := &runtime.ModelSwitcherConfig{
+	switcher := &modelcatalog.Config{
 		Models: loadResult.Models, Providers: loadResult.Providers, ProviderRegistry: loadResult.ProviderRegistry,
 		AgentDefaultModels: loadResult.AgentDefaultModels, ModelsGateway: rc.ModelsGateway,
 		EncryptedConfig: loadResult.EncryptedConfig, EnvProvider: rc.EnvProvider(),
@@ -434,6 +438,7 @@ func (a *Agent) newRuntime(ctx context.Context, sessionID, workingDir string, se
 		runtime.WithSessionStore(a.sessionStore),
 		runtime.WithProviderRegistry(loadResult.ProviderRegistry),
 		runtime.WithModelSwitcherConfig(switcher),
+		runtime.WithModelsDevFallback(rc.ModelsDevFallback),
 		runtime.WithWorkingDir(workingDir),
 		// Match the CLI tracer scope so runtime spans remain enabled in ACP mode.
 		runtime.WithTracer(otel.Tracer(version.AppName)),

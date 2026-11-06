@@ -49,6 +49,68 @@ export ANTHROPIC_API_KEY=your_key_here
 | `task dev`         | Run lint, test, and build in parallel           |
 | `task build-local` | Build for local platform via Docker             |
 | `task cross`       | Cross-platform builds (all architectures)       |
+| `task generate-ts` | Regenerate the TypeScript SDK from Go types     |
+| `task check-ts`    | Check the generated TypeScript SDK (needs Node) |
+
+## Adding a model provider
+
+First decide whether the provider can use an existing API implementation or needs
+its own backend. A user can also configure an OpenAI-compatible endpoint without
+adding a built-in provider; see [provider definitions](../../providers/custom/index.md).
+
+### Compatible providers
+
+For a built-in provider using an existing API, start with the embedded
+[provider catalog](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/catalog/providers.json).
+Choose a canonical provider ID (the models.dev ID where available), API type,
+endpoint, credentials and default model as appropriate. The
+[catalog type](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/catalog/catalog.go)
+documents the metadata and selection rules; use behavior flags only when they
+apply to the provider. Catalog order affects automatic provider selection. Check
+the [models.dev ID tests](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/catalog_test.go)
+if the provider is absent from the embedded snapshot.
+
+A typical OpenAI-compatible provider uses the existing OpenAI implementation;
+it does not need a separate client or factory.
+
+### Native backends
+
+If the protocol or authentication cannot be handled by an existing backend,
+implement the [provider contract](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/contracts/contracts.go),
+register its factory in the [default registry](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/providers/providers.go),
+and add catalog metadata as appropriate. Check the optional provider interfaces
+in the contract if the backend supports additional capabilities.
+
+### Implementation checklist
+
+For either path, inspect the affected integrations rather than assuming a catalog
+entry covers them all:
+
+- **Configuration and dispatch:** Follow [defaults and overrides](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/defaults.go)
+  through the [factory](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/factory.go).
+  For new backends, consider whether other registries, such as [WASM](https://github.com/docker/docker-agent/blob/main/cmd/wasm/providers.go),
+  should support them. If the public config changes, update [latest](https://github.com/docker/docker-agent/blob/main/pkg/config/latest/types.go),
+  `agent-schema.json`, docs and an example; leave frozen versions unchanged.
+- **Credentials and discovery:** Check [credential preflight](https://github.com/docker/docker-agent/blob/main/pkg/config/gather.go),
+  [auto-selection](https://github.com/docker/docker-agent/blob/main/pkg/config/auto.go) and
+  [discovery](https://github.com/docker/docker-agent/blob/main/pkg/config/discovery.go),
+  particularly for native authentication or templated endpoints.
+- **Model listing:** Inspect [models.dev lookup](https://github.com/docker/docker-agent/blob/main/pkg/modelsdev/store.go),
+  the [runtime model picker](https://github.com/docker/docker-agent/blob/main/pkg/runtime/modelcatalog/catalog.go)
+  and [CLI listing](https://github.com/docker/docker-agent/blob/main/cmd/root/models.go).
+  Auto-selection, the picker and the CLI have different eligibility rules; a
+  catalog entry does not by itself enable live endpoint discovery.
+- **Tests and docs:** Start with [catalog tests](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/catalog/catalog_test.go),
+  [alias request tests](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/openai_alias_providers_test.go)
+  and [factory tests](https://github.com/docker/docker-agent/blob/main/pkg/model/provider/factory_test.go).
+  Cover affected defaults, overrides, credentials, requests, streaming, errors,
+  selection and discovery as applicable; see tests alongside those integrations.
+  Update the [provider credentials overview](../../providers/overview/index.md#provider-credentials)
+  and add user-facing setup docs or examples as needed.
+
+Run the relevant tests and the [development checks](#development-commands); live
+API tests can make external requests, so use them only when intentionally
+testing with credentials.
 
 ## Debugging TUI Tests
 
@@ -130,7 +192,7 @@ cumulative, not peak memory, and profiles do not include `go/packages` subproces
 ## Lint rules
 
 `task lint` runs the shared and project-specific cops selected in `lint/main.go`.
-Reusable checks come from [rubocop-go](https://github.com/dgageot/rubocop-go/blob/0bcefab0242e991adbd535e1acc9c6c680d68d5d/docs/shared-cops.md)
+Reusable checks come from [rubocop-go](https://github.com/dgageot/rubocop-go/blob/0b7e76d9373ad390ac84652375150459bde13ebe/docs/shared-cops.md)
 (pinned in `go.mod`); project-specific checks and frozen-config exclusions stay
 in `lint/`. Cop IDs and `//rubocop:disable` annotations are unchanged. Add shared checks by their
 constructors, not by enabling the entire upstream catalog. 40 of the 42 shared
@@ -464,7 +526,7 @@ GOOS=js GOARCH=wasm go test -count=1 \
 Expected: selected fixtures run rather than skip and their existing assertions
 pass. They cover streaming keepalives/tool replay, request wire shape, auth and
 transport wrapping, embeddings, image-output guards, runtime/TUI error propagation,
-CLI tools/title/sampling, and WASM session/token flows. These are existing
+CLI tools/title, and WASM session/token flows. These are existing
 regressions, not live-backend entitlement or new model acceptance tests. Record
 head SHA, OS/Go/Node versions, command, pass/fail/skip and sanitized evidence.
 A skip is not a pass, and pure unit success is not integration evidence.
@@ -474,3 +536,32 @@ implementer, even to verify the skip path. Validation is limited to pure gate
 units, source placement review, compile-only checks, static analysis and builds.
 Future fixture additions must be guarded before server, proxy, transport, SDK
 flow or browser-session setup, with pure cases and non-Gemini rows kept separate.
+
+## Toolset worker lifetimes
+
+Toolsets with a background loop and no startup handshake can implement
+`tools.Runnable.Run(ctx)` instead of `tools.Startable`. `Run` blocks until
+cancellation and joins its work before returning; timers and other run resources
+stay local. Callers must not run the same toolset concurrently.
+
+Agent, additional-toolset, Code Mode, and fork-skill paths use the canonical
+`tools.NewStartable` wrapper. It owns one run, preserves startup context values
+without inheriting startup cancellation, and cancels and joins on shutdown—even
+with an already-canceled shutdown context. `Startable` takes precedence over
+`Runnable` so existing lifecycle wrappers retain ownership. Fork-skill toolsets
+are started lazily and owned until team shutdown, not one skill invocation.
+
+For direct scheduler users, replace `Start`/`Stop` with a caller-owned `Run(ctx)`
+and cancellation/join, or wrap it once with `tools.NewStartable`. Two independent
+wrappers around the same raw worker are not a shared lifecycle. The wrapper is
+an intentional bridge to legacy host `Start`/`Stop`; it does not make those host
+lifetimes structured.
+
+Raw runnable session extras supplied programmatically are instead adopted once
+by their runtime and joined by `Close`; existing lifecycle wrappers remain
+borrowed. Keep a session's extras fixed during execution. Share one explicit
+wrapper when sharing a worker across runtimes or using a noncomparable runnable
+value across sessions. Runtime adoption deduplicates comparable worker providers
+across decorated references; noncomparable workers are scoped to a session slot.
+Runnable-only workers do not support the separate `Restartable` capability;
+stop and start their canonical wrapper to replace a run.

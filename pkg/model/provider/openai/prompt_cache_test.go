@@ -523,6 +523,132 @@ func TestConvertMessages_CacheControlToolAttachment(t *testing.T) {
 	assert.Equal(t, explicitBreakpoint, last["prompt_cache_breakpoint"])
 }
 
+func TestChatCompletions_ToolImagesKeepBatchAndCacheOrigins(t *testing.T) {
+	t.Parallel()
+	for _, cached := range []bool{false, true} {
+		name := "generic"
+		if cached {
+			name = "explicit cache"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &latest.ModelConfig{Provider: "azure", Model: "gpt-4o", ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"}}
+			if cached {
+				cfg.Model = "gpt-5.6"
+			}
+			result := func(id, url string, marked bool) chat.Message {
+				return chat.Message{Role: chat.MessageRoleTool, ToolCallID: id, CacheControl: marked, MultiContent: []chat.MessagePart{
+					{Type: chat.MessagePartTypeText, Text: "result " + id},
+					{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: url}},
+				}}
+			}
+			req := promptCacheChatRequest(t, cfg, []chat.Message{
+				{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{
+					{ID: "A", Type: "function", Function: tools.FunctionCall{Name: "read_file", Arguments: `{}`}},
+					{ID: "B", Type: "function", Function: tools.FunctionCall{Name: "read_file", Arguments: `{}`}},
+				}},
+				result("B", "data:image/png;base64,Ag==", true),
+				{Role: chat.MessageRoleAssistant},
+				result("A", "data:image/png;base64,AQ==", false),
+				{Role: chat.MessageRoleUser, Content: "continue"},
+			})
+			messages := req["messages"].([]any)
+			if !cached {
+				require.Len(t, messages, 4)
+				assert.Equal(t, "tool", messages[1].(map[string]any)["role"])
+				assert.Equal(t, "tool", messages[2].(map[string]any)["role"])
+				parts := messages[3].(map[string]any)["content"].([]any)
+				require.Len(t, parts, 5)
+				assert.Contains(t, parts[0].(map[string]any)["text"], "tool_call_id=B")
+				assert.Contains(t, parts[2].(map[string]any)["text"], "tool_call_id=A")
+				assert.Equal(t, "continue", parts[4].(map[string]any)["text"])
+				assertNoPromptCacheFields(t, req)
+				return
+			}
+			require.Len(t, messages, 6)
+			var roles []any
+			for _, msg := range messages {
+				roles = append(roles, msg.(map[string]any)["role"])
+			}
+			assert.Equal(t, []any{"assistant", "tool", "tool", "user", "user", "user"}, roles)
+			assert.Equal(t, "B", messages[1].(map[string]any)["tool_call_id"])
+			assert.Equal(t, "A", messages[2].(map[string]any)["tool_call_id"])
+			for i, id := range []string{"B", "A"} {
+				parts := messages[3+i].(map[string]any)["content"].([]any)
+				assert.Contains(t, parts[0].(map[string]any)["text"], "tool_call_id="+id)
+				image := parts[1].(map[string]any)
+				assert.Equal(t, "image_url", image["type"])
+				_, marked := image["prompt_cache_breakpoint"]
+				assert.Equal(t, cached && id == "B", marked)
+			}
+		})
+	}
+}
+
+func TestResponses_ToolImagesKeepCallAndCacheOrigins(t *testing.T) {
+	t.Parallel()
+	for _, cached := range []bool{false, true} {
+		name := "generic"
+		if cached {
+			name = "explicit cache"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			model := "gpt-4o"
+			if cached {
+				model = "gpt-5.6"
+			}
+			cfg := &latest.ModelConfig{Provider: "azure", Model: model, ProviderOpts: map[string]any{"api_type": "openai_responses"}, Capabilities: &latest.CapabilitiesConfig{Image: true, PDF: true}}
+			messages := []chat.Message{
+				{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{
+					{ID: "A", Type: "function", Function: tools.FunctionCall{Name: "read_file", Arguments: `{}`}},
+					{ID: "B", Type: "function", Function: tools.FunctionCall{Name: "read_file", Arguments: `{}`}},
+				}},
+				{Role: chat.MessageRoleTool, ToolCallID: "B", Content: "B", CacheControl: true, MultiContent: []chat.MessagePart{
+					{Type: chat.MessagePartTypeText, Text: "B"},
+					{Type: chat.MessagePartTypeImageURL, ImageURL: &chat.MessageImageURL{URL: "data:image/png;base64,Ag==", Detail: chat.ImageURLDetailHigh}},
+				}},
+				{Role: chat.MessageRoleTool, ToolCallID: "A", Content: "A", MultiContent: []chat.MessagePart{
+					{Type: chat.MessagePartTypeText, Text: "A"},
+					{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "a.png", MimeType: "image/png", Source: chat.DocumentSource{InlineData: []byte{1}}}},
+					{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "report.pdf", MimeType: "application/pdf", Source: chat.DocumentSource{InlineData: []byte("%PDF")}}},
+					{Type: chat.MessagePartTypeDocument, Document: &chat.Document{Name: "report.txt", MimeType: "text/plain", Source: chat.DocumentSource{InlineText: "report body"}}},
+				}},
+			}
+			req := promptCacheResponsesRequest(t, cfg, messages)
+			input := req["input"].([]any)
+			require.Len(t, input, 4, "attachments must stay inside their function_call_output")
+			for i, id := range []string{"B", "A"} {
+				result := input[2+i].(map[string]any)
+				assert.Equal(t, "function_call_output", result["type"])
+				assert.Equal(t, id, result["call_id"])
+				output := result["output"].([]any)
+				assert.Equal(t, id, output[0].(map[string]any)["text"])
+				image := output[1].(map[string]any)
+				assert.Equal(t, "input_image", image["type"])
+				_, marked := image["prompt_cache_breakpoint"]
+				assert.Equal(t, cached && id == "B", marked)
+				if id == "B" {
+					require.Len(t, output, 2)
+					assert.Equal(t, "data:image/png;base64,Ag==", image["image_url"])
+					assert.Equal(t, "high", image["detail"])
+				} else {
+					require.Len(t, output, 4)
+					assert.Equal(t, "data:image/png;base64,AQ==", image["image_url"])
+					file := output[2].(map[string]any)
+					assert.Equal(t, "input_file", file["type"])
+					assert.Equal(t, "report.pdf", file["filename"])
+					assert.Equal(t, "data:application/pdf;base64,JVBERg==", file["file_data"])
+					assert.Contains(t, output[3].(map[string]any)["text"], "report body")
+				}
+			}
+			if !cached {
+				assertNoPromptCacheFields(t, req)
+			}
+		})
+	}
+}
+
 // TestConvertMessages_CacheControlEmptyMessages verifies the edge behavior of
 // content-less and filtered marked messages: no panic, no marker, and no
 // accidental marking of a neighboring message.

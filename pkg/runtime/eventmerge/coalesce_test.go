@@ -294,3 +294,23 @@ func transcript(events []runtime.Event) []string {
 	}
 	return lines
 }
+
+func TestCoalesceFlushesReasoningBeforeReset(t *testing.T) {
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		in := make(chan runtime.Event, 8)
+		out := Coalesce(t.Context(), in, window)
+		in <- runtime.AgentChoiceReasoning("root", "s", "first", "m")
+		receive(t, out)
+		reset := runtime.AgentChoiceReasoningReset("root", "s", "m")
+		in <- runtime.AgentChoiceReasoning("root", "s", "old", "m")
+		in <- runtime.AgentChoiceReasoning("root", "s", " thought", "m")
+		in <- reset
+		in <- runtime.AgentChoiceReasoning("root", "s", "new", "m")
+		close(in)
+		require.Equal(t, "old thought", receive(t, out).(*runtime.AgentChoiceReasoningEvent).Content)
+		require.Same(t, reset, receive(t, out))
+		require.Equal(t, "new", receive(t, out).(*runtime.AgentChoiceReasoningEvent).Content)
+		assertClosed(t, out)
+	})
+}

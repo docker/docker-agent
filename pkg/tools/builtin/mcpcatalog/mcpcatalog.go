@@ -18,7 +18,7 @@
 //     once at least one server is enabled.
 //
 // Activated servers' tools are merged into Tools(); tool list changes are
-// reported via a tools.ChangeNotifier handler so the runtime refreshes
+// reported via a tools.ChangeSubscriber subscription so the runtime refreshes
 // the LLM's tool catalogue as soon as a server is enabled or disabled.
 //
 // Known limitation: the runtime's MCP-prompt discovery looks for
@@ -91,10 +91,9 @@ type Toolset struct {
 	// elicitation, OAuth-success refreshes and the managed-vs-unmanaged flag
 	// behave identically to a YAML-declared `mcp.remote` toolset. Tool-list
 	// changes from inner toolsets are routed through notifyToolsChanged so
-	// the legacy handler and every subscriber see them.
+	// every subscriber sees them.
 	elicitationHandler        tools.ElicitationHandler
 	oauthSuccessHandler       func()
-	toolsChangedHandler       func()
 	toolsChangedSubs          tools.ChangeSubscribers
 	managedOAuth              bool
 	managedOAuthSet           bool // distinguishes "default" from "explicitly false"
@@ -119,7 +118,6 @@ var (
 	_ tools.Startable        = (*Toolset)(nil)
 	_ tools.Instructable     = (*Toolset)(nil)
 	_ tools.Describer        = (*Toolset)(nil)
-	_ tools.ChangeNotifier   = (*Toolset)(nil)
 	_ tools.ChangeSubscriber = (*Toolset)(nil)
 	_ tools.Elicitable       = (*Toolset)(nil)
 	_ tools.OAuthCapable     = (*Toolset)(nil)
@@ -375,31 +373,13 @@ func (t *Toolset) SetUnmanagedOAuthRedirectURI(uri string) {
 	}
 }
 
-// SetToolsChangedHandler is invoked by the runtime to be notified when
-// the set of available tools changes: on every Enable / Disable (the
-// meta-tool surface) and whenever an activated MCP toolset reports a
-// change, which every inner toolset routes through notifyToolsChanged.
-func (t *Toolset) SetToolsChangedHandler(handler func()) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.toolsChangedHandler = handler
-}
-
-// SubscribeToolsChanged adds a handler for the same changes as
-// SetToolsChangedHandler without displacing other runtimes' handlers.
+// SubscribeToolsChanged observes enable/disable and activated servers' tool-list changes.
 func (t *Toolset) SubscribeToolsChanged(handler func()) func() {
 	return t.toolsChangedSubs.Subscribe(handler)
 }
 
-// notifyToolsChanged fans a tool-surface change out to the legacy handler
-// and every subscriber. Called outside t.mu so handlers may re-enter.
+// notifyToolsChanged runs outside t.mu so subscribers may re-enter.
 func (t *Toolset) notifyToolsChanged() {
-	t.mu.Lock()
-	handler := t.toolsChangedHandler
-	t.mu.Unlock()
-	if handler != nil {
-		handler()
-	}
 	t.toolsChangedSubs.Notify()
 }
 
@@ -736,7 +716,8 @@ func (t *Toolset) handleEnable(ctx context.Context, args EnableArgs) (*tools.Too
 		if t.oauthSuccessHandler != nil {
 			mcpToolset.SetOAuthSuccessHandler(t.oauthSuccessHandler)
 		}
-		mcpToolset.SetToolsChangedHandler(t.notifyToolsChanged)
+		// The catalog owns this child, so forwarding lasts for the child's lifetime.
+		mcpToolset.SubscribeToolsChanged(t.notifyToolsChanged)
 		if t.managedOAuthSet {
 			mcpToolset.SetManagedOAuth(t.managedOAuth)
 		}

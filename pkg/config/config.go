@@ -26,7 +26,8 @@ import (
 type LoadOption func(*loadOptions)
 
 type loadOptions struct {
-	flavors []string
+	flavors  []string
+	versions VersionRegistrar
 }
 
 // WithFlavors enables the named flavor patches for this load. Order matters:
@@ -63,18 +64,19 @@ func Load(ctx context.Context, source Source, opts ...LoadOption) (*latest.Confi
 	}
 	raw.Version = cmp.Or(raw.Version, latest.Version)
 
-	oldConfig, err := parseCurrentVersion(data, raw.Version)
+	parsers, upgraders := versions(loadOpts.versions)
+	oldConfig, err := parseCurrentVersion(data, raw.Version, parsers)
 	if err != nil {
 		msg := yaml.FormatError(err, true, true)
-		if hint := newerVersionHint(data, raw.Version, err); hint != "" {
+		if hint := newerVersionHint(data, raw.Version, err, parsers); hint != "" {
 			msg += "\n" + hint
-		} else if hint := removedFieldHint(raw.Version, err); hint != "" {
+		} else if hint := removedFieldHint(raw.Version, err, parsers); hint != "" {
 			msg += "\n" + hint
 		}
 		return nil, fmt.Errorf("parsing config file\n%s", msg)
 	}
 
-	config, err := migrateToLatestConfig(oldConfig, data)
+	config, err := migrateToLatestConfig(oldConfig, data, upgraders)
 	if err != nil {
 		return nil, fmt.Errorf("migrating config: %w", err)
 	}
@@ -190,8 +192,7 @@ func CheckRequiredEnvVars(ctx context.Context, cfg *latest.Config, modelsGateway
 	return nil
 }
 
-func parseCurrentVersion(data []byte, version string) (any, error) {
-	parsers, _ := versions()
+func parseCurrentVersion(data []byte, version string, parsers map[string]func([]byte) (any, error)) (any, error) {
 	parser, found := parsers[version]
 	if !found {
 		return nil, fmt.Errorf("unsupported config version: %v (valid versions: %s)", version, strings.Join(slices.Sorted(maps.Keys(parsers)), ", "))
@@ -208,7 +209,7 @@ func parseCurrentVersion(data []byte, version string) (any, error) {
 // Best-effort: a newer version may accept the config for unrelated reasons
 // (laxer schema), so the original unknown-field error is always shown before
 // the hint.
-func newerVersionHint(data []byte, version string, parseErr error) string {
+func newerVersionHint(data []byte, version string, parseErr error, parsers map[string]func([]byte) (any, error)) string {
 	var unknownField *yaml.UnknownFieldError
 	var typeErr *yaml.TypeError
 	if !errors.As(parseErr, &unknownField) && !errors.As(parseErr, &typeErr) {
@@ -220,7 +221,6 @@ func newerVersionHint(data []byte, version string, parseErr error) string {
 		return ""
 	}
 
-	parsers, _ := versions()
 	var newer []int
 	for v := range parsers {
 		if n, err := strconv.Atoi(v); err == nil && n > current {
@@ -239,10 +239,9 @@ func newerVersionHint(data []byte, version string, parseErr error) string {
 	return ""
 }
 
-func migrateToLatestConfig(c any, raw []byte) (latest.Config, error) {
+func migrateToLatestConfig(c any, raw []byte, upgraders []func(any, []byte) (any, error)) (latest.Config, error) {
 	var err error
 
-	_, upgraders := versions()
 	for _, upgrade := range upgraders {
 		c, err = upgrade(c, raw)
 		if err != nil {
@@ -250,7 +249,11 @@ func migrateToLatestConfig(c any, raw []byte) (latest.Config, error) {
 		}
 	}
 
-	return c.(latest.Config), nil
+	cfg, ok := c.(latest.Config)
+	if !ok {
+		return latest.Config{}, fmt.Errorf("migration did not produce latest.Config (got %T)", c)
+	}
+	return cfg, nil
 }
 
 func validateConfig(cfg *latest.Config) error {

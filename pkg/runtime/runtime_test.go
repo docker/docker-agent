@@ -29,6 +29,7 @@ import (
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/permissions"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -203,6 +204,17 @@ func (b *streamBuilder) AddStopWithUsage(input, output int64) *streamBuilder {
 		Choices: []chat.MessageStreamChoice{{
 			Index:        0,
 			FinishReason: chat.FinishReasonStop,
+		}},
+		Usage: &chat.Usage{InputTokens: input, OutputTokens: output},
+	})
+	return b
+}
+
+func (b *streamBuilder) AddLengthWithUsage(input, output int64) *streamBuilder {
+	b.responses = append(b.responses, chat.MessageStreamResponse{
+		Choices: []chat.MessageStreamChoice{{
+			Index:        0,
+			FinishReason: chat.FinishReasonLength,
 		}},
 		Usage: &chat.Usage{InputTokens: input, OutputTokens: output},
 	})
@@ -933,7 +945,7 @@ func (m mockModelStoreWithLimit) GetModel(_ context.Context, _ modelsdev.ID) (*m
 func TestCompaction(t *testing.T) {
 	t.Parallel()
 
-	// First stream: assistant issues a tool call and usage exceeds 90% threshold
+	// First stream: plain content whose usage (101) exceeds the 100-token limit
 	mainStream := newStreamBuilder().
 		AddContent("Hello there").
 		AddStopWithUsage(101, 0). // Context limit will be 100
@@ -1145,7 +1157,7 @@ func TestNewRuntime_InvalidCurrentAgentError(t *testing.T) {
 
 // TestNewRuntime_ModelStorePrecedence pins the resolution order for the
 // runtime's models.dev store: an explicit WithModelStore wins; otherwise a
-// store carried on the ModelSwitcherConfig is adopted (this is how the team
+// store carried on the modelcatalog.Config is adopted (this is how the team
 // loader shares the catalog it already warmed); otherwise the runtime builds
 // its own lazy store. Sharing the warmed store is what keeps the first /model
 // open from re-paying the multi-MB catalog parse.
@@ -1163,7 +1175,7 @@ func TestNewRuntime_ModelStorePrecedence(t *testing.T) {
 		cfgStore := &mockCatalogStore{}
 		rt, err := NewLocalRuntime(t.Context(), newTeam(),
 			WithModelStore(explicit),
-			WithModelSwitcherConfig(&ModelSwitcherConfig{ModelsStore: cfgStore}),
+			WithModelSwitcherConfig(&modelcatalog.Config{ModelsStore: cfgStore}),
 		)
 		require.NoError(t, err)
 		assert.Same(t, explicit, rt.modelsStore)
@@ -1173,7 +1185,7 @@ func TestNewRuntime_ModelStorePrecedence(t *testing.T) {
 		t.Parallel()
 		cfgStore := &mockCatalogStore{}
 		rt, err := NewLocalRuntime(t.Context(), newTeam(),
-			WithModelSwitcherConfig(&ModelSwitcherConfig{ModelsStore: cfgStore}),
+			WithModelSwitcherConfig(&modelcatalog.Config{ModelsStore: cfgStore}),
 		)
 		require.NoError(t, err)
 		assert.Same(t, cfgStore, rt.modelsStore)
@@ -1182,7 +1194,7 @@ func TestNewRuntime_ModelStorePrecedence(t *testing.T) {
 	t.Run("falls back to lazy store when neither is set", func(t *testing.T) {
 		t.Parallel()
 		rt, err := NewLocalRuntime(t.Context(), newTeam(),
-			WithModelSwitcherConfig(&ModelSwitcherConfig{}),
+			WithModelSwitcherConfig(&modelcatalog.Config{}),
 		)
 		require.NoError(t, err)
 		assert.IsType(t, &lazyModelStore{}, rt.modelsStore)
@@ -3834,6 +3846,88 @@ func TestReprobe_NewToolsAvailableAfterToolCall(t *testing.T) {
 		}
 	}
 	assert.Contains(t, toolsetInfoCounts, 2, "ToolsetInfo with count=2 expected after reprobe")
+}
+
+// TestReprobe_DeferredToolsSkipErrorLoadPoint covers docker-agent#4671: when a
+// parallel batch ends with an error result, newly deferred tools must anchor
+// at a successful result. Anthropic rejects tool_reference content in an
+// is_error tool_result, and the load point is resent on every later request.
+func TestReprobe_DeferredToolsSkipErrorLoadPoint(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New(session.WithUserMessage("Install MCP and update todos"))
+	sess.Title = "deferral load point test"
+	sess.ToolsApproved = true
+
+	installTool := tools.Tool{
+		Name:       "install_mcp",
+		Parameters: map[string]any{},
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("installed"), nil
+		},
+	}
+	failingTool := tools.Tool{
+		Name:       "update_todos",
+		Parameters: map[string]any{},
+		Handler: func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+			// Batch calls run in parallel and record results as they finish:
+			// wait for install_mcp so the error result lands last.
+			assert.Eventually(t, func() bool {
+				return slices.ContainsFunc(sess.GetAllMessages(), func(m session.Message) bool {
+					return m.Message.Role == chat.MessageRoleTool && m.Message.ToolCallID == "call_1"
+				})
+			}, 5*time.Second, time.Millisecond)
+			return tools.ResultError("todo not found"), nil
+		},
+	}
+
+	turn1 := newStreamBuilder().
+		AddToolCallName("call_1", "install_mcp").
+		AddToolCallArguments("call_1", `{}`).
+		AddToolCallName("call_2", "update_todos").
+		AddToolCallArguments("call_2", `{}`).
+		AddToolCallStopWithUsage(5, 5).
+		Build()
+	turn2 := newStreamBuilder().
+		AddContent("done").
+		AddStopWithUsage(3, 3).
+		Build()
+
+	prov := &recordingProvider{
+		id:      "test/mock-model",
+		streams: []*mockStream{turn1, turn2},
+	}
+	root := agent.New("root", "test",
+		agent.WithModel(prov),
+		agent.WithToolSets(
+			newStubToolSet(nil, []tools.Tool{installTool, failingTool}, nil),
+			&flappyRuntimeToolSet{newTool: tools.Tool{Name: "mcp_hello", Parameters: map[string]any{}}, failUntil: 2},
+		),
+	)
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+	rt.registerDefaultTools()
+
+	for range rt.RunStream(t.Context(), sess) {
+	}
+
+	var toolResults []chat.Message
+	for _, msg := range sess.GetAllMessages() {
+		if msg.Message.Role == chat.MessageRoleTool {
+			toolResults = append(toolResults, msg.Message)
+		}
+	}
+	require.Len(t, toolResults, 2)
+	require.Equal(t, "call_2", toolResults[1].ToolCallID, "the error result must be last to exercise the bug")
+	require.True(t, toolResults[1].IsError)
+
+	prov.mu.Lock()
+	defer prov.mu.Unlock()
+	require.GreaterOrEqual(t, len(prov.recordedCalls), 2, "expected at least 2 model calls")
+	idx := slices.IndexFunc(prov.recordedCalls[1], func(tool tools.Tool) bool { return tool.Name == "mcp_hello" })
+	require.NotEqual(t, -1, idx, "turn 2 must include mcp_hello after reprobe")
+	assert.True(t, prov.recordedCalls[1][idx].Deferred)
+	assert.Equal(t, "call_1", prov.recordedCalls[1][idx].DeferredAtToolCallID)
 }
 
 // TestReprobe_NoChangeMeansNoExtraEvents verifies that reprobe is a no-op

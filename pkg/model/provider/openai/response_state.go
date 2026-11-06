@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/httpclient"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -22,7 +23,7 @@ func (c *Client) firstPartyResponses() bool {
 	if c.ModelConfig.Provider == chatgpt.ProviderName {
 		return c.ModelConfig.BaseURL == "" || strings.TrimRight(c.ModelConfig.BaseURL, "/") == chatgpt.BaseURL
 	}
-	return c.ModelConfig.Provider == "openai" && c.ModelConfig.BaseURL == ""
+	return c.ModelConfig.Provider == "openai" && catalog.IsDefaultEndpoint(c.ModelConfig.Provider, c.Endpoint())
 }
 
 // Native search needs ordered output replay to retain its loaded tools.

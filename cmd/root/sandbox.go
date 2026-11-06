@@ -22,6 +22,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -93,7 +94,7 @@ func loadAgentConfig(ctx context.Context, agentRef string, flavors []string) *la
 	if err != nil {
 		return nil
 	}
-	cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...))
+	cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...), config.WithVersions(legacy.Register))
 	if err != nil {
 		return nil
 	}
@@ -201,7 +202,7 @@ func runInSandbox(ctx context.Context, cmd *cobra.Command, args []string, runCon
 		}
 	}
 
-	agentCfg, err := config.Load(ctx, source, config.WithFlavors(runConfig.Flavors...))
+	agentCfg, err := config.Load(ctx, source, config.WithFlavors(runConfig.Flavors...), config.WithVersions(legacy.Register))
 	if err != nil {
 		return fmt.Errorf("loading sandbox agent: %w", err)
 	}

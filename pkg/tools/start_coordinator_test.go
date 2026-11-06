@@ -3,7 +3,6 @@ package tools_test
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,8 +13,7 @@ import (
 )
 
 type coordinatedToolSet struct {
-	err     error
-	started atomic.Bool
+	err error
 }
 
 func (t *coordinatedToolSet) Tools(context.Context) ([]tools.Tool, error) {
@@ -23,28 +21,10 @@ func (t *coordinatedToolSet) Tools(context.Context) ([]tools.Tool, error) {
 }
 
 func (t *coordinatedToolSet) Start(context.Context) error {
-	if t.err != nil {
-		return t.err
-	}
-	t.started.Store(true)
-	return nil
+	return t.err
 }
 
 func (t *coordinatedToolSet) Stop(context.Context) error {
-	t.started.Store(false)
-	return nil
-}
-
-type dependentToolSet struct {
-	coordinatedToolSet
-
-	peer        *coordinatedToolSet
-	peerStarted atomic.Bool
-}
-
-func (*dependentToolSet) StartsAfterPeers() {}
-func (t *dependentToolSet) Start(context.Context) error {
-	t.peerStarted.Store(t.peer.started.Load())
 	return nil
 }
 
@@ -63,19 +43,4 @@ func TestStartToolSetsClassifiesAndPreservesOrder(t *testing.T) {
 	assert.Check(t, cmp.Equal(secondOutcome.Kind, tools.StartFailed))
 	assert.ErrorIs(t, secondOutcome.Err, failed)
 	assert.Check(t, secondOutcome.ReportFailure)
-}
-
-func TestStartToolSetsStartsDependentToolSetsSecond(t *testing.T) {
-	t.Parallel()
-
-	peer := &coordinatedToolSet{}
-	dependent := &dependentToolSet{peer: peer}
-	outcomes := tools.StartToolSets(t.Context(), []*tools.StartableToolSet{
-		tools.NewStartable(dependent),
-		tools.NewStartable(peer),
-	}, time.Second)
-
-	assert.Check(t, cmp.Equal((<-outcomes[0]).Kind, tools.StartReady))
-	assert.Check(t, cmp.Equal((<-outcomes[1]).Kind, tools.StartReady))
-	assert.Check(t, dependent.peerStarted.Load())
 }

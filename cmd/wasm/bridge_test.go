@@ -13,7 +13,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/model/provider"
-	"github.com/docker/docker-agent/pkg/rag"
 )
 
 func TestCompatChatDeclinesConfirmationWithoutHandler(t *testing.T) {
@@ -161,13 +160,20 @@ func TestParseDecisionAndElicitationAnswer(t *testing.T) {
 func TestJSDocuments(t *testing.T) {
 	eval := func(src string) js.Value { return js.Global().Call("eval", "("+src+")") }
 
-	docs, err := jsDocuments(eval("undefined"))
+	for _, src := range []string{"undefined", "null"} {
+		docs, err := jsDocuments(eval(src))
+		require.NoError(t, err)
+		assert.Nil(t, docs, "no documents means the rag toolset has nothing to select from")
+	}
+
+	docs, err := jsDocuments(eval("({})"))
 	require.NoError(t, err)
-	assert.Nil(t, docs, "no documents means the rag toolset has nothing to select from")
+	assert.NotNil(t, docs)
+	assert.Empty(t, docs)
 
 	docs, err = jsDocuments(eval("({'guide.md': 'hello', 'notes/todo.md': ''})"))
 	require.NoError(t, err)
-	assert.Equal(t, rag.Documents{"guide.md": []byte("hello"), "notes/todo.md": []byte{}}, docs)
+	assert.Equal(t, map[string][]byte{"guide.md": []byte("hello"), "notes/todo.md": {}}, docs)
 
 	for name, tc := range map[string]struct{ src, want string }{
 		"not an object": {"'guide.md'", "must be an object"},

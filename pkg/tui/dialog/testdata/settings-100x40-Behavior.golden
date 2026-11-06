@@ -15,16 +15,16 @@
 │          ── Session defaults ────────────────────────────────────────────────               │
 │            [ ] Restore tabs on launch                                                       │
 │            [ ] Automatic snapshots                                                          │
+│            [ ] Keep machine awake (next agent run)                                          │
 │            [ ] Cache-stable dynamic prompts                                                 │
+│            [ ] Background compaction                                                        │
+│            Background compaction threshold                             ‹ 70 % ›             │
 │            [ ] Lean UI by default                                                           │
 │            Tab title max length                                    ‹ 20 chars ›             │
 │                                                                                             │
 │                                                                                             │
 │          ── Interrupts ──────────────────────────────────────────────────────               │
 │            Interrupt confirmation                   ‹ Always (confirm dialog) ›             │
-│                                                                                             │
-│                                                                                             │
-│                                                                                             │
 │                                                                                             │
 │                                                                                             │
 │                                                                                             │

@@ -127,20 +127,23 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 			HideAgents:       true,
 			ShowPlans:        true,
 		},
-		SendMode:           messages.SendModeQueue,
-		SplitDiffView:      false,
-		ExpandThinking:     true,
-		HideToolResults:    true,
-		ShowBanner:         false,
-		YOLO:               true,
-		RestoreTabs:        true,
-		Snapshot:           true,
-		CacheStablePrompts: true,
-		WarnOnCacheMiss:    true,
-		Lean:               true,
-		TabTitleMaxLength:  42,
-		Sound:              true,
-		SoundThreshold:     17,
+		SendMode:                      messages.SendModeQueue,
+		SplitDiffView:                 false,
+		ExpandThinking:                true,
+		HideToolResults:               true,
+		ShowBanner:                    false,
+		YOLO:                          true,
+		RestoreTabs:                   true,
+		Snapshot:                      true,
+		BackgroundCompaction:          true,
+		BackgroundCompactionThreshold: 65,
+		CacheStablePrompts:            true,
+		WarnOnCacheMiss:               true,
+		Lean:                          true,
+		TabTitleMaxLength:             42,
+		KeepAwake:                     true,
+		Sound:                         true,
+		SoundThreshold:                17,
 	}
 	require.NoError(t, savePreferences(preferences))
 
@@ -154,10 +157,13 @@ func TestSavePreferences_RoundTripAndPreservesExtra(t *testing.T) {
 	assert.Equal(t, preferences.YOLO, settings.YOLO)
 	assert.Equal(t, preferences.RestoreTabs, settings.GetRestoreTabs())
 	assert.Equal(t, preferences.Snapshot, settings.SnapshotsEnabled())
+	assert.Equal(t, preferences.BackgroundCompaction, settings.BackgroundCompaction)
+	assert.Equal(t, preferences.BackgroundCompactionThreshold, settings.GetBackgroundCompactionThreshold())
 	assert.Equal(t, preferences.CacheStablePrompts, settings.CacheStablePromptsEnabled())
 	assert.Equal(t, preferences.WarnOnCacheMiss, settings.CacheMissWarningsEnabled())
 	assert.Equal(t, preferences.Lean, settings.Lean)
 	assert.Equal(t, preferences.TabTitleMaxLength, settings.GetTabTitleMaxLength())
+	assert.Equal(t, preferences.KeepAwake, settings.GetKeepAwake())
 	assert.Equal(t, preferences.Sound, settings.GetSound())
 	assert.Equal(t, preferences.SoundThreshold, settings.GetSoundThreshold())
 	assert.Equal(t, "kept", settings.Extra["future_setting"])

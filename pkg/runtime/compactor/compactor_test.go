@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -128,7 +129,7 @@ func TestExtractMessages(t *testing.T) {
 			t.Parallel()
 			sess := session.New(session.WithMessages(tt.messages))
 			a := agent.New("test", "test prompt")
-			result, _ := extractMessages(sess, a, tt.contextLimit, tt.additionalPrompt)
+			result, _, _ := extractMessages(sess, a, tt.contextLimit, tt.additionalPrompt, 0)
 
 			require.GreaterOrEqual(t, len(result), tt.wantConversationMsgCount+2)
 			assert.Equal(t, chat.MessageRoleSystem, result[0].Role)
@@ -158,7 +159,7 @@ func TestExtractMessages_KeepsRecentMessages(t *testing.T) {
 	t.Parallel()
 
 	// Create a session with many messages, some large enough that the last
-	// ~MaxKeepTokens are kept aside.
+	// ~maxKeepTokens are kept aside.
 	var items []session.Item
 	for range 10 {
 		items = append(items, session.NewMessageItem(&session.Message{
@@ -177,7 +178,7 @@ func TestExtractMessages_KeepsRecentMessages(t *testing.T) {
 	sess := session.New(session.WithMessages(items))
 	a := agent.New("test", "test prompt")
 
-	result, firstKeptEntry := extractMessages(sess, a, 200_000, "")
+	result, firstKeptEntry, _ := extractMessages(sess, a, 200_000, "", 0)
 
 	// 20 messages × ~5k tokens = ~100k. maxKeepTokens=20k → ~4 messages kept.
 	compactedMsgCount := len(result) - 2 // minus system and user prompt
@@ -792,5 +793,191 @@ func TestRunLLMCloneFailureLeavesSessionIntact(t *testing.T) {
 		require.ErrorIs(t, err, want)
 		assert.Nil(t, result)
 		assert.Equal(t, before, sess.MessagesSnapshot())
+	}
+}
+
+func overflowTestSession() *session.Session {
+	big := strings.Repeat("x", 7_000)
+	sess := session.New()
+	for i := range 20 {
+		sess.AddMessage(session.UserMessage(fmt.Sprintf("step %d", i)))
+		sess.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: big}))
+	}
+	return sess
+}
+
+func conversationTokens(cs *session.Session) int64 {
+	msgs := cs.GetAllMessages()
+	var n int64
+	for i := range msgs {
+		m := msgs[i].Message
+		if m.Role == chat.MessageRoleSystem || i == len(msgs)-1 {
+			continue
+		}
+		n += compaction.EstimateMessageTokens(&m)
+	}
+	return n
+}
+
+// TestRunLLM_RetriesSmallerAfterSummaryOverflow covers a serving window
+// smaller than ContextLimit: the summary request overflows and must be
+// retried with strictly less conversation until it fits.
+func TestRunLLM_RetriesSmallerAfterSummaryOverflow(t *testing.T) {
+	t.Parallel()
+
+	const window = 8_000
+	sess := overflowTestSession()
+	a := agent.New("root", "instr", agent.WithModel(fakeProvider{id: modelsdev.NewID("fake", "model")}))
+
+	var sizes []int64
+	result, err := RunLLM(t.Context(), LLMArgs{
+		Session:      sess,
+		Agent:        a,
+		ContextLimit: 1_000_000,
+		RunAgent: func(_ context.Context, _ *agent.Agent, cs *session.Session) error {
+			size := conversationTokens(cs)
+			sizes = append(sizes, size)
+			if size > window {
+				cs.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Cost: 0.25, Usage: &chat.Usage{InputTokens: 7}}))
+				return modelerrors.NewContextOverflowError(errors.New("maximum context length exceeded"))
+			}
+			cs.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "the summary", Cost: 1, Usage: &chat.Usage{InputTokens: 100}}))
+			return nil
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "the summary", result.Summary)
+	require.Greater(t, len(sizes), 1)
+	for i := 1; i < len(sizes); i++ {
+		assert.LessOrEqual(t, sizes[i], sizes[i-1]/2, "each retry must halve the conversation")
+	}
+	assert.LessOrEqual(t, sizes[len(sizes)-1], int64(window))
+	failed := len(sizes) - 1
+	assert.InDelta(t, 1+0.25*float64(failed), result.Cost, 1e-9, "failed attempts' cost must not be dropped")
+	assert.Equal(t, int64(100+7*failed), result.Usage.InputTokens)
+}
+
+// TestRunLLM_SummaryOverflowRetriesAreBounded verifies a summarizer that
+// keeps overflowing fails with the overflow error after a bounded number of
+// attempts instead of looping or silently skipping.
+func TestRunLLM_SummaryOverflowRetriesAreBounded(t *testing.T) {
+	t.Parallel()
+
+	sess := overflowTestSession()
+	a := agent.New("root", "instr", agent.WithModel(fakeProvider{id: modelsdev.NewID("fake", "model")}))
+
+	calls := 0
+	result, err := RunLLM(t.Context(), LLMArgs{
+		Session:      sess,
+		Agent:        a,
+		ContextLimit: 1_000_000,
+		RunAgent: func(context.Context, *agent.Agent, *session.Session) error {
+			calls++
+			return modelerrors.NewContextOverflowError(errors.New("maximum context length exceeded"))
+		},
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Equal(t, modelerrors.OverflowKindTokens, modelerrors.OverflowKindOf(err))
+	assert.Equal(t, 1+maxSummaryOverflowRetries, calls)
+	assert.Len(t, sess.Messages, 40, "a failed compaction must not modify the session")
+}
+
+// TestRunLLM_NonOverflowErrorIsNotRetried keeps non-overflow failures
+// (auth, network, provider errors) on the single-attempt path.
+func TestRunLLM_NonOverflowErrorIsNotRetried(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"generic error", errors.New("boom")},
+		{"wire overflow", &modelerrors.ContextOverflowError{Underlying: errors.New("request too large"), Kind: modelerrors.OverflowKindWire}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			a := agent.New("root", "instr", agent.WithModel(fakeProvider{id: modelsdev.NewID("fake", "model")}))
+			calls := 0
+			_, err := RunLLM(t.Context(), LLMArgs{
+				Session:      overflowTestSession(),
+				Agent:        a,
+				ContextLimit: 1_000_000,
+				RunAgent: func(context.Context, *agent.Agent, *session.Session) error {
+					calls++
+					return tt.err
+				},
+			})
+			require.ErrorIs(t, err, tt.err)
+			assert.Equal(t, 1, calls)
+		})
+	}
+}
+
+func priorSummarySession(summary string) *session.Session {
+	big := strings.Repeat("x", 7_000)
+	items := []session.Item{{Summary: summary}}
+	for i := range 20 {
+		items = append(items,
+			session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: fmt.Sprintf("step %d", i)}}),
+			session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleAssistant, Content: big}}),
+		)
+	}
+	return session.New(session.WithMessages(items))
+}
+
+// TestRunLLM_OverflowRetryKeepsPriorSummary: retries front-truncate the
+// conversation, which would drop the prior summary first and lose every
+// fact it carries.
+func TestRunLLM_OverflowRetryKeepsPriorSummary(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		summary  string
+		wantKept bool
+	}{
+		{"summary fits the retry budget", "IMPORTANT old facts", true},
+		// Larger than any retry budget: falls back to plain truncation
+		// rather than sending an oversized request.
+		{"summary larger than the retry budget", "IMPORTANT old facts " + strings.Repeat("y", 140_000), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sess := priorSummarySession(tt.summary)
+			a := agent.New("root", "instr", agent.WithModel(fakeProvider{id: modelsdev.NewID("fake", "model")}))
+
+			var attempts []bool
+			result, err := RunLLM(t.Context(), LLMArgs{
+				Session:      sess,
+				Agent:        a,
+				ContextLimit: 1_000_000,
+				RunAgent: func(_ context.Context, _ *agent.Agent, cs *session.Session) error {
+					var saw bool
+					for _, m := range cs.GetAllMessages() {
+						if strings.Contains(m.Message.Content, "IMPORTANT old facts") {
+							saw = true
+						}
+					}
+					attempts = append(attempts, saw)
+					if len(attempts) == 1 {
+						return modelerrors.NewContextOverflowError(errors.New("maximum context length exceeded"))
+					}
+					cs.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "the summary"}))
+					return nil
+				},
+			})
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Len(t, attempts, 2)
+			assert.True(t, attempts[0], "the first attempt sends the whole conversation")
+			assert.Equal(t, tt.wantKept, attempts[1])
+		})
 	}
 }

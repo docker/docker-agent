@@ -6,9 +6,9 @@
 //
 //   node cmd/wasm/browser/smoke_test.js [--build] [--verbose] [--chrome <path>]
 //
-// Builds web/docker-agent.wasm when missing (or with --build). The
-// in-browser scenarios live in page.js. Requires Chrome, openssl and the Go
-// toolchain that built the binary (for wasm_exec.js).
+// Builds web/docker-agent.wasm with RAG when missing (or with --build).
+// An existing binary must include docker_agent_wasm_rag. Scenarios live in
+// page.js. Requires Chrome, openssl and the matching Go toolchain.
 
 "use strict";
 
@@ -35,7 +35,7 @@ function goroot() {
 function ensureWasm() {
   if (fs.existsSync(wasmPath) && !args.includes("--build")) return;
   console.log("building", path.relative(process.cwd(), wasmPath));
-  execFileSync("go", ["build", "-o", wasmPath, "./cmd/wasm"], {
+  execFileSync("go", ["build", "-tags", "docker_agent_wasm_rag", "-o", wasmPath, "./cmd/wasm"], {
     cwd: path.join(root, "..", ".."),
     env: { ...process.env, GOOS: "js", GOARCH: "wasm" },
     stdio: "inherit",

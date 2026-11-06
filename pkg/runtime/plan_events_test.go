@@ -3,9 +3,6 @@ package runtime
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -37,38 +34,6 @@ func TestPlanChangedEventSerialization(t *testing.T) {
 	assert.Equal(t, 3, decoded.Version)
 	assert.Equal(t, "architect", decoded.GetAgentName())
 	assert.NotContains(t, string(data), "content", "the event must never carry plan content")
-}
-
-// TestClient_DecodesPlanChangedEvent verifies the event is registered in the
-// client's event registry, so remote runtimes deliver it typed rather than
-// dropping it.
-func TestClient_DecodesPlanChangedEvent(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "data: {\"type\":\"plan_changed\",\"scope\":\"shared\",\"name\":\"release\",\"action\":\"status\",\"version\":4}\n\n")
-	}))
-	t.Cleanup(srv.Close)
-
-	c := newTestClient(t, srv.URL)
-
-	ch, err := c.StreamSessionEvents(t.Context(), "s")
-	require.NoError(t, err)
-
-	var got *PlanChangedEvent
-	for ev := range ch {
-		if planEv, ok := ev.(*PlanChangedEvent); ok {
-			got = planEv
-			break
-		}
-	}
-	require.NotNil(t, got, "plan_changed must decode to *PlanChangedEvent")
-	assert.Equal(t, "release", got.Name)
-	assert.Equal(t, "status", got.Action)
-	assert.Equal(t, 4, got.Version)
-	assert.Equal(t, "shared", got.Scope)
 }
 
 // planToolHandler finds one of the plan toolset's tools by name. The write

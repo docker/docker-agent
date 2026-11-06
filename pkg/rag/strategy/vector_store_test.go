@@ -389,7 +389,7 @@ func TestIndexFile_InterruptedCommitLeavesHashUnrecorded(t *testing.T) {
 	require.NoError(t, dbErr)
 	assert.Empty(t, all, "an interrupted commit must leave no file metadata behind")
 
-	needsIndexing, err := store.needsIndexing(fileSource{}, path)
+	needsIndexing, err := store.needsIndexing(t.Context(), fileSource{}, path)
 	require.NoError(t, err)
 	assert.True(t, needsIndexing, "file must still be considered not indexed after the interruption")
 
@@ -464,7 +464,7 @@ func TestLoadExistingHashes_SkipsZeroChunkMetadata(t *testing.T) {
 
 	require.NoError(t, store.loadExistingHashes(t.Context()))
 
-	needsIndexing, err := store.needsIndexing(fileSource{}, path)
+	needsIndexing, err := store.needsIndexing(t.Context(), fileSource{}, path)
 	require.NoError(t, err)
 	assert.True(t, needsIndexing, "a zero-chunk metadata row must not be treated as indexed")
 }
@@ -495,7 +495,7 @@ func TestIndexFile_FileBecomesEmptyCleansUpPreviousVersion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, all, "an emptied file must have no leftover metadata/chunks")
 
-	needsIndexing, err := store.needsIndexing(fileSource{}, path)
+	needsIndexing, err := store.needsIndexing(t.Context(), fileSource{}, path)
 	require.NoError(t, err)
 	assert.True(t, needsIndexing, "fileHashes entry must be cleared so the file is re-checked")
 }

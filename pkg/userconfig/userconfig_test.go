@@ -1029,6 +1029,19 @@ func TestGet_WithHideToolResults(t *testing.T) {
 	assert.True(t, settings.HideToolResults)
 }
 
+func TestSettings_GetKeepAwake(t *testing.T) {
+	t.Parallel()
+	assert.False(t, (*Settings)(nil).GetKeepAwake())
+	assert.False(t, (&Settings{}).GetKeepAwake())
+	assert.True(t, (&Settings{KeepAwake: true}).GetKeepAwake())
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &Config{Settings: &Settings{KeepAwake: true}}
+	require.NoError(t, cfg.saveTo(configFile))
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+	assert.True(t, loaded.GetSettings().GetKeepAwake())
+}
+
 func TestSettings_GetSound(t *testing.T) {
 	t.Parallel()
 

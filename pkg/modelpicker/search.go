@@ -8,16 +8,16 @@ import (
 	"github.com/junegunn/fzf/src/algo"
 	"github.com/junegunn/fzf/src/util"
 
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 )
 
 type scoredChoice struct {
-	choice runtime.ModelChoice
+	choice modelcatalog.ModelChoice
 	score  int
 }
 
 // Score returns fzf's match score for a model choice and query.
-func Score(choice runtime.ModelChoice, query string) (int, bool) {
+func Score(choice modelcatalog.ModelChoice, query string) (int, bool) {
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return 0, true
@@ -38,7 +38,7 @@ func Score(choice runtime.ModelChoice, query string) (int, bool) {
 
 // Filter returns matching choices ranked by fzf score. An empty query keeps
 // the input order.
-func Filter(choices []runtime.ModelChoice, query string) []runtime.ModelChoice {
+func Filter(choices []modelcatalog.ModelChoice, query string) []modelcatalog.ModelChoice {
 	if strings.TrimSpace(query) == "" {
 		if len(choices) == 0 {
 			return nil
@@ -56,7 +56,7 @@ func Filter(choices []runtime.ModelChoice, query string) []runtime.ModelChoice {
 		return cmp.Compare(b.score, a.score)
 	})
 
-	result := make([]runtime.ModelChoice, len(matches))
+	result := make([]modelcatalog.ModelChoice, len(matches))
 	for i, match := range matches {
 		result[i] = match.choice
 	}

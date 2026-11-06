@@ -3,10 +3,11 @@ package messages
 import (
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/mattn/go-runewidth"
 
 	"github.com/docker/docker-agent/pkg/tui/styles"
 )
@@ -19,6 +20,7 @@ type selectionState struct {
 	endLine         int
 	endCol          int
 	mouseButtonDown bool
+	dragged         bool
 	mouseY          int // Screen Y coordinate for autoscroll
 
 	// Word anchor for double-click drags: while anchored, the selection
@@ -126,6 +128,7 @@ func (s *selectionState) normalized() (startLine, startCol, endLine, endCol int)
 // 2=double, 3=triple). Counting cycles after a triple-click so a fourth
 // quick click starts a fresh drag selection.
 func (s *selectionState) detectClickType(line, col int) int {
+	s.dragged = false
 	now := time.Now()
 	colDiff := col - s.lastClickCol
 	isConsecutive := !s.lastClickTime.IsZero() &&
@@ -203,37 +206,34 @@ func (m *model) selectWordAt(line, col int) bool {
 		return false
 	}
 
-	originalLine := m.renderedLine(line)
-	plainLine := stripBorderChars(ansi.Strip(originalLine))
-	if plainLine == "" {
+	// Keep table separators and borders in place so columns match the screen.
+	clusters := lineGraphemes(ansi.Strip(m.renderedLine(line)))
+	if len(clusters) == 0 {
 		return false
 	}
 
-	// Calculate border offset to adjust column position
-	borderOffset := runewidth.StringWidth(ansi.Strip(originalLine)) - runewidth.StringWidth(plainLine)
-	runes := []rune(plainLine)
-
-	// Convert display column to rune index
-	runeIdx := min(max(0, displayWidthToRuneIndex(plainLine, max(0, col-borderOffset))), len(runes)-1)
-	if runeIdx < 0 {
+	idx := 0
+	for idx < len(clusters)-1 && col >= clusters[idx].endCol {
+		idx++
+	}
+	r, _ := utf8.DecodeRuneInString(clusters[idx].text)
+	if boxDrawingChars[r] {
 		return false
 	}
+	onWord, onSpace := isWordChar(r), unicode.IsSpace(r)
+	sameClass := func(cluster lineGrapheme) bool {
+		r, _ := utf8.DecodeRuneInString(cluster.text)
+		return !boxDrawingChars[r] && isWordChar(r) == onWord && unicode.IsSpace(r) == onSpace
+	}
 
-	// Find word boundaries - determine if we're on a word or non-word char
-	onWordChar := isWordChar(runes[runeIdx])
-	startIdx, endIdx := runeIdx, runeIdx
-
-	// Expand to find contiguous characters of the same type
-	for startIdx > 0 && isWordChar(runes[startIdx-1]) == onWordChar {
+	startIdx, endIdx := idx, idx
+	for startIdx > 0 && sameClass(clusters[startIdx-1]) {
 		startIdx--
 	}
-	for endIdx < len(runes)-1 && isWordChar(runes[endIdx+1]) == onWordChar {
+	for endIdx < len(clusters)-1 && sameClass(clusters[endIdx+1]) {
 		endIdx++
 	}
-
-	// Convert rune indices back to display columns, accounting for border offset
-	startCol := runeIndexToDisplayWidth(plainLine, startIdx) + borderOffset
-	endCol := runeIndexToDisplayWidth(plainLine, endIdx+1) + borderOffset
+	startCol, endCol := clusters[startIdx].startCol, clusters[endIdx].endCol
 
 	// Set selection
 	m.selection.active = true
@@ -244,6 +244,10 @@ func (m *model) selectWordAt(line, col int) bool {
 	m.selection.endCol = endCol
 	m.selection.mouseButtonDown = false
 	return true
+}
+
+func isWordChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '_'
 }
 
 // selectLineAt selects the entire line at the given line position.
@@ -262,9 +266,9 @@ func (m *model) selectLineAt(line int) bool {
 	}
 
 	// Find start column: position of first non-whitespace character
-	startCol := runewidth.StringWidth(plainLine) - runewidth.StringWidth(strings.TrimLeft(plainLine, " \t"))
+	startCol := ansi.StringWidth(plainLine) - ansi.StringWidth(strings.TrimLeft(plainLine, " \t"))
 	// Find end column: position after last non-whitespace character
-	endCol := runewidth.StringWidth(strings.TrimRight(plainLine, " \t"))
+	endCol := ansi.StringWidth(strings.TrimRight(plainLine, " \t"))
 
 	// Set selection to cover only the text content (excluding padding/borders)
 	m.selection.active = true
@@ -285,8 +289,8 @@ func (m *model) applySelectionHighlight(lines []string, viewportStartLine int) [
 
 	getLineBounds := func(line string) (textStart, textEnd int) {
 		plainLine := ansi.Strip(line)
-		textStart = runewidth.StringWidth(plainLine) - runewidth.StringWidth(strings.TrimLeft(plainLine, " \t"))
-		textEnd = runewidth.StringWidth(strings.TrimRight(plainLine, " \t"))
+		textStart = ansi.StringWidth(plainLine) - ansi.StringWidth(strings.TrimLeft(plainLine, " \t"))
+		textEnd = ansi.StringWidth(strings.TrimRight(plainLine, " \t"))
 		return textStart, textEnd
 	}
 

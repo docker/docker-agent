@@ -14,6 +14,11 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 )
 
+const (
+	copilotIntegrationIDHeader  = "Copilot-Integration-Id"
+	copilotIntegrationIDDefault = "copilot-developer-cli"
+)
+
 func TestUserHeaders(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

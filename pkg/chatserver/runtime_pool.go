@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/version"
@@ -67,6 +68,7 @@ func (p *runtimePool) Get(agent string) (runtimeRunner, error) {
 	// spans go silent in OpenAI-compatible chat-completions mode.
 	rt, err := runtime.New(p.ctx(), p.team,
 		runtime.WithCurrentAgent(agent),
+		runtime.WithModelsDevFallback(embedded.Snapshot),
 		runtime.WithTracer(otel.Tracer(version.AppName)),
 	)
 	if err != nil {

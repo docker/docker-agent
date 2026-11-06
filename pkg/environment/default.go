@@ -74,17 +74,22 @@ func newConfigEnvFileProvider() (Provider, error) {
 }
 
 // NewDefaultProvider creates a provider chain from [DefaultSources].
-// The whole chain is wrapped so that values shaped like "op://..." are resolved
-// as 1Password secret references through the `op` CLI.
 func NewDefaultProvider() Provider {
-	sources := DefaultSources()
+	return NewChain(SourceProviders(DefaultSources())...)
+}
 
+// NewChain looks providers up in order, with DOCKER_AGENT_ENV_<NAME> shadowing
+// <NAME> across all of them, and resolves "op://" values through the 1Password
+// CLI. The 1Password wrapper is outermost so an override can be a reference.
+func NewChain(providers ...Provider) Provider {
+	return NewOnePasswordProvider(NewPrefixedProvider(providers...))
+}
+
+// SourceProviders returns the providers of sources, in order.
+func SourceProviders(sources []Source) []Provider {
 	providers := make([]Provider, 0, len(sources))
 	for _, source := range sources {
 		providers = append(providers, source.Provider)
 	}
-
-	// Resolve any "op://" secret references through the 1Password CLI,
-	// regardless of which provider returned the value.
-	return NewOnePasswordProvider(NewMultiProvider(providers...))
+	return providers
 }

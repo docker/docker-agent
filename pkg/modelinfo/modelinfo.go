@@ -39,6 +39,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
@@ -181,7 +182,8 @@ func isAdaptiveOnlyOpus(modelID string) bool {
 // `thinking.type=enabled` (token-based extended thinking) and instead requires
 // `thinking.type=adaptive`.
 //
-// Applies to Claude Opus 4.6, 4.7, 4.8, 5, and their dated variants (e.g.
+// Applies to every model in the Claude 5.x table ([LookupClaude5]) and to
+// Claude Opus 4.6, 4.7, 4.8, 5, and their dated variants (e.g.
 // claude-opus-4-7-20251101, claude-opus-5-20260724). Bedrock-style identifiers
 // such as "global.anthropic.claude-opus-5" are recognised too.
 // For these models the agent transparently switches a token-based budget to
@@ -189,6 +191,9 @@ func isAdaptiveOnlyOpus(modelID string) bool {
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func RejectsTokenThinking(modelID string) bool {
+	if _, ok := LookupClaude5(modelID); ok {
+		return true
+	}
 	return isAdaptiveOnlyOpus(modelID)
 }
 
@@ -201,7 +206,8 @@ func RejectsTokenThinking(modelID string) bool {
 // Claude 3.x) reject `thinking.type=adaptive`/`output_config.effort` with a 400
 // and must use token-based extended thinking (`thinking.type=enabled`) instead.
 //
-// Supported: Opus 4.6/4.7/4.8/5 (which additionally reject token budgets, see
+// Supported: every model in the Claude 5.x table ([LookupClaude5]), and by
+// name heuristics Opus 4.6/4.7/4.8/5 (which additionally reject token budgets, see
 // [RejectsTokenThinking]), Sonnet 4.6, the Claude 5 families (e.g. Sonnet 5,
 // Opus 5), and the codenamed frontier models (Fable, Mythos). Bedrock-style
 // identifiers such as "global.anthropic.claude-sonnet-4-6" are recognised too.
@@ -211,6 +217,9 @@ func RejectsTokenThinking(modelID string) bool {
 //
 // See https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
 func SupportsAdaptiveThinking(modelID string) bool {
+	if _, ok := LookupClaude5(modelID); ok {
+		return true
+	}
 	m := normalize(modelID)
 	if bare, ok := bedrockClaudeModelName(m); ok {
 		m = bare
@@ -504,16 +513,6 @@ func HasOpenAIQualifier(modelID string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelID)), openAIQualifierPrefix)
 }
 
-// openAIVendorProviders are the provider names whose models are genuinely
-// OpenAI's own, as opposed to a third-party vendor that merely speaks the
-// OpenAI-compatible wire protocol through a built-in alias. See
-// [IsOpenAIVendor].
-var openAIVendorProviders = map[string]bool{
-	"openai":  true,
-	"chatgpt": true,
-	"azure":   true,
-}
-
 // IsOpenAIVendor reports whether a (provider, modelID) pair genuinely names an
 // OpenAI vendor endpoint, as opposed to a third-party provider that merely
 // speaks the OpenAI-compatible wire protocol (xai, mistral, and other
@@ -537,7 +536,8 @@ var openAIVendorProviders = map[string]bool{
 // alias registry — that registry lives above modelinfo in the import graph,
 // so it cannot be folded in here.
 func IsOpenAIVendor(provider, modelID string) bool {
-	if openAIVendorProviders[strings.ToLower(strings.TrimSpace(provider))] {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if catalog.Lookup(provider).OpenAIVendor {
 		return true
 	}
 	return HasOpenAIQualifier(modelID)

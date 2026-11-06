@@ -10,11 +10,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
-	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 )
 
 func TestAvailableProviders_NoGateway(t *testing.T) {
@@ -82,11 +82,44 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "api-route",
 		},
 		{
+			name:             "lunaroute api key present",
+			envVars:          map[string]string{"LUNAROUTE_API_KEY": "lr_test"},
+			expectedProvider: "lunaroute",
+		},
+		{
+			name: "orcarouter api key present",
+			envVars: map[string]string{
+				"ORCAROUTER_API_KEY": "test-key",
+			},
+			expectedProvider: "orcarouter",
+		},
+		{
 			name: "atlascloud api key present",
 			envVars: map[string]string{
 				"ATLASCLOUD_API_KEY": "test-key",
 			},
 			expectedProvider: "atlascloud",
+		},
+		{
+			name: "opper api key present",
+			envVars: map[string]string{
+				"OPPER_API_KEY": "test-key",
+			},
+			expectedProvider: "opper",
+		},
+		{
+			name: "runcrate api key present",
+			envVars: map[string]string{
+				"RUNCRATE_API_KEY": "test-key",
+			},
+			expectedProvider: "runcrate",
+		},
+		{
+			name: "cloudgpu api key present",
+			envVars: map[string]string{
+				"CLOUDGPU_API_KEY": "test-key",
+			},
+			expectedProvider: "cloudgpu",
 		},
 		{
 			name: "baseten api key present",
@@ -337,12 +370,55 @@ func TestAutoModelConfig(t *testing.T) {
 			expectedMaxTokens: 32000,
 		},
 		{
+			name: "opper provider",
+			envVars: map[string]string{
+				"OPPER_API_KEY": "test-key",
+			},
+			expectedProvider:  "opper",
+			expectedModel:     "claude-sonnet-4-6",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "runcrate provider",
+			envVars: map[string]string{
+				"RUNCRATE_API_KEY": "test-key",
+			},
+			expectedProvider:  "runcrate",
+			expectedModel:     "deepseek-ai/DeepSeek-V4.1-Flash",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "cloudgpu provider",
+			envVars: map[string]string{
+				"CLOUDGPU_API_KEY": "test-key",
+			},
+			expectedProvider:  "cloudgpu",
+			expectedModel:     "deepseek-v4.1-flash",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name:              "lunaroute provider",
+			envVars:           map[string]string{"LUNAROUTE_API_KEY": "lr_test"},
+			expectedProvider:  "lunaroute",
+			expectedModel:     "glm-5.3",
+			expectedMaxTokens: 32000,
+		},
+		{
+			name: "orcarouter provider",
+			envVars: map[string]string{
+				"ORCAROUTER_API_KEY": "test-key",
+			},
+			expectedProvider:  "orcarouter",
+			expectedModel:     "orcarouter/auto",
+			expectedMaxTokens: 32000,
+		},
+		{
 			name: "baseten provider",
 			envVars: map[string]string{
 				"BASETEN_API_KEY": "test-key",
 			},
 			expectedProvider:  "baseten",
-			expectedModel:     "deepseek-ai/DeepSeek-V4-Pro",
+			expectedModel:     "deepseek-ai/DeepSeek-V4-Pro-0813",
 			expectedMaxTokens: 32000,
 		},
 		{
@@ -517,7 +593,7 @@ func TestDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Test that DefaultModels map has all expected providers
-	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "openrouter", "atlascloud", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "amazon-bedrock", "opencode", "opencode-go", "github-copilot"}
+	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "openrouter", "api-route", "orcarouter", "atlascloud", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "amazon-bedrock", "opencode", "opencode-go", "github-copilot"}
 
 	for _, provider := range expectedProviders {
 		t.Run(provider, func(t *testing.T) {
@@ -535,8 +611,11 @@ func TestDefaultModels(t *testing.T) {
 	assert.Equal(t, "ai/qwen3:latest", DefaultModels["dmr"])
 	assert.Equal(t, "mistral-small-latest", DefaultModels["mistral"])
 	assert.Equal(t, "meta-llama/llama-4-maverick", DefaultModels["openrouter"])
+	assert.Equal(t, "orcarouter/auto", DefaultModels["orcarouter"])
+	assert.Equal(t, "glm-5.3", DefaultModels["lunaroute"])
+	assert.Equal(t, "deepseek-v4.1-flash", DefaultModels["cloudgpu"])
 	assert.Equal(t, "qwen/qwen3.8-max", DefaultModels["atlascloud"])
-	assert.Equal(t, "deepseek-ai/DeepSeek-V4-Pro", DefaultModels["baseten"])
+	assert.Equal(t, "deepseek-ai/DeepSeek-V4-Pro-0813", DefaultModels["baseten"])
 	assert.Equal(t, "Qwen3.5-397B-A17B", DefaultModels["ovhcloud"])
 	assert.Equal(t, "llama-3.3-70b-versatile", DefaultModels["groq"])
 	assert.Equal(t, "accounts/fireworks/models/kimi-k3", DefaultModels["fireworks-ai"])
@@ -555,7 +634,7 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Verify that AutoModelConfig always returns a model from DefaultModels
-	providers := []string{"openai", "anthropic", "google", "mistral", "openrouter", "atlascloud", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "opencode", "github-copilot"}
+	providers := []string{"openai", "anthropic", "google", "mistral", "openrouter", "api-route", "orcarouter", "atlascloud", "cloudgpu", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "opencode", "github-copilot"}
 
 	for _, provider := range providers {
 		t.Run(provider, func(t *testing.T) {
@@ -577,8 +656,14 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 				envVars["MISTRAL_API_KEY"] = "test-key"
 			case "openrouter":
 				envVars["OPENROUTER_API_KEY"] = "test-key"
+			case "api-route":
+				envVars["API_ROUTE_API_KEY"] = "test-key"
+			case "orcarouter":
+				envVars["ORCAROUTER_API_KEY"] = "test-key"
 			case "atlascloud":
 				envVars["ATLASCLOUD_API_KEY"] = "test-key"
+			case "cloudgpu":
+				envVars["CLOUDGPU_API_KEY"] = "test-key"
 			case "baseten":
 				envVars["BASETEN_API_KEY"] = "test-key"
 			case "ovhcloud":
@@ -1157,51 +1242,6 @@ func (e *stubPullError) Error() string { return e.fullDetail }
 
 func (e *stubPullError) ModelPullErrorSummary() string { return e.summary }
 
-func TestProviderAPIKeyEnvVars(t *testing.T) {
-	t.Parallel()
-
-	vars := ProviderAPIKeyEnvVars()
-
-	// Sorted and deduplicated for reproducibility.
-	assert.True(t, slices.IsSorted(vars), "env vars must be sorted, got %v", vars)
-	assert.Equal(t, slices.Compact(slices.Clone(vars)), vars, "env vars must be deduplicated")
-
-	// The dedicated single-secret model API keys must be present.
-	for _, name := range []string{
-		"OPENAI_API_KEY",
-		"ANTHROPIC_API_KEY",
-		"GOOGLE_API_KEY",
-		"MISTRAL_API_KEY",
-		"OPENROUTER_API_KEY",
-		"ATLASCLOUD_API_KEY",
-		"XAI_API_KEY",
-		"NEBIUS_API_KEY",
-	} {
-		assert.Contains(t, vars, name)
-	}
-
-	// Non-secret detection/mode flags and multi-variable credential sets must
-	// never be exposed as forwardable API keys.
-	for _, name := range []string{
-		"GOOGLE_GENAI_USE_VERTEXAI",
-		"GEMINI_API_KEY",
-		"AWS_ACCESS_KEY_ID",
-		"AWS_PROFILE",
-		"AWS_ROLE_ARN",
-		"AWS_BEARER_TOKEN_BEDROCK",
-	} {
-		assert.NotContains(t, vars, name)
-	}
-
-	// Broad, general-purpose tokens must not be forwarded as model credentials.
-	assert.NotContains(t, vars, "GITHUB_TOKEN")
-	assert.NotContains(t, vars, "GH_TOKEN")
-
-	// The ChatGPT OAuth access token is a subscription credential, not an
-	// API key, and must never be forwarded into isolated environments.
-	assert.NotContains(t, vars, chatgpt.TokenEnvVar)
-}
-
 func TestCloudProviderEnvVars(t *testing.T) {
 	t.Parallel()
 
@@ -1229,11 +1269,11 @@ func TestCloudProviderEnvVars(t *testing.T) {
 // Catalogued defaults must resolve through the production lookup against the committed snapshot.
 func TestDefaultModelsExistInModelsDev(t *testing.T) {
 	t.Parallel()
-	store := modelsdev.NewDatabaseStore(modelsdev.EmbeddedSnapshot())
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 	for providerID, model := range DefaultModels {
 		t.Run(providerID, func(t *testing.T) {
 			t.Parallel()
-			require.True(t, provider.IsKnownProvider(providerID))
+			require.True(t, catalog.IsKnownProvider(providerID))
 			require.Equal(t, providerID, modelsdev.CanonicalProviderID(providerID))
 			if modelsDevAbsentProviders[providerID] {
 				return // Providers with their own catalogs cannot be validated against models.dev.
@@ -1252,7 +1292,7 @@ func TestCloudProvidersCanonical(t *testing.T) {
 	t.Parallel()
 	for _, cfg := range cloudProviders {
 		assert.Equal(t, cfg.name, modelsdev.CanonicalProviderID(cfg.name))
-		assert.True(t, provider.IsKnownProvider(cfg.name), cfg.name)
+		assert.True(t, catalog.IsKnownProvider(cfg.name), cfg.name)
 		assert.Contains(t, DefaultModels, cfg.name)
 	}
 }

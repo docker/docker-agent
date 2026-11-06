@@ -10,6 +10,7 @@
 !/pkg/chatserver/openapi.json
 !/pkg/config/sources/builtin-agents/*.yaml
 !/pkg/safety/safety_patterns.json
-!/pkg/modelsdev/snapshot.json
+!/pkg/modelsdev/embedded/snapshot.json
+!/pkg/model/provider/catalog/providers.json
 !/pkg/tools/builtin/mcpcatalog/servers.json
 !/pkg/tui/styles/themes/*.yaml

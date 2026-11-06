@@ -9,6 +9,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/types"
 	"github.com/docker/docker-agent/pkg/hooks"
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -18,7 +19,7 @@ type Event interface {
 }
 
 // SessionScoped is implemented by events that belong to a specific session.
-// The PersistentRuntime uses this to filter out sub-session events that
+// The PersistenceObserver uses this to filter out sub-session events that
 // should not be persisted into the parent session's history.
 type SessionScoped interface {
 	GetSessionID() string
@@ -97,6 +98,24 @@ func PartialToolCall(toolCall tools.ToolCall, toolDefinition tools.Tool, agentNa
 		ToolCall:       toolCall,
 		ToolDefinition: toolDef,
 		AgentContext:   newAgentContext(agentName),
+	}
+}
+
+// ToolCallsRetractedEvent is sent when tool calls announced by
+// PartialToolCallEvent will never run: a refusal or a server fallback
+// superseded them.
+type ToolCallsRetractedEvent struct {
+	AgentContext
+
+	Type        string   `json:"type"`
+	ToolCallIDs []string `json:"tool_call_ids"`
+}
+
+func ToolCallsRetracted(toolCallIDs []string, agentName string) Event {
+	return &ToolCallsRetractedEvent{
+		Type:         "tool_calls_retracted",
+		ToolCallIDs:  toolCallIDs,
+		AgentContext: newAgentContext(agentName),
 	}
 }
 
@@ -265,6 +284,27 @@ func AgentChoiceReasoning(agentName, sessionID, content string, messageID ...str
 		Content:      content,
 		SessionID:    sessionID,
 		AgentContext: newAgentContext(agentName),
+	}
+}
+
+// AgentChoiceReasoningResetEvent discards reasoning already streamed for one message.
+// Text and tool calls are unaffected; later reasoning starts from an empty buffer.
+type AgentChoiceReasoningResetEvent struct {
+	AgentContext
+
+	Type      string `json:"type"`
+	SessionID string `json:"session_id"`
+	MessageID string `json:"message_id"`
+}
+
+func (e *AgentChoiceReasoningResetEvent) GetSessionID() string { return e.SessionID }
+
+func AgentChoiceReasoningReset(agentName, sessionID, messageID string) Event {
+	return &AgentChoiceReasoningResetEvent{
+		AgentContext: newAgentContext(agentName),
+		Type:         "agent_choice_reasoning_reset",
+		SessionID:    sessionID,
+		MessageID:    messageID,
 	}
 }
 
@@ -482,9 +522,9 @@ func NewTokenUsageEvent(sessionID, agentName string, usage *Usage) Event {
 	}
 }
 
-// GetSessionID makes TokenUsageEvent satisfy [SessionScoped] so the
-// observer fan-out can drop sub-session events without each observer
-// re-implementing the check.
+// GetSessionID makes TokenUsageEvent satisfy [SessionScoped] so observers
+// that filter on it (e.g. PersistenceObserver) can drop sub-session
+// token-usage events.
 func (e *TokenUsageEvent) GetSessionID() string { return e.SessionID }
 
 // SessionUsage builds a Usage from the session's current token counts, the
@@ -649,8 +689,9 @@ func (e *SessionCompactionEvent) GetSessionID() string { return e.SessionID }
 // StreamStopReasonMaxIterations identifies a stream stopped at its iteration limit.
 const StreamStopReasonMaxIterations = "max_iterations"
 
-// StreamStoppedEvent reports that a RunStream loop has stopped. Reason carries
-// the turnEndReason* classification (normal, error, canceled) so consumers can
+// StreamStoppedEvent reports that a RunStream loop has stopped. Reason is a
+// turnEndReason* value (e.g. normal, error, canceled) or
+// StreamStopReasonMaxIterations, so consumers can
 // tell successful completion apart from crashes and user-initiated stops.
 //
 // Delivery is bounded-blocking: finalizeEventChannel waits (up to a deadline)
@@ -734,7 +775,7 @@ type ElicitationRequestEvent struct {
 	URL     string `json:"url,omitempty"`
 	// ElicitationID is the internally-generated correlation ID used to route
 	// a ResumeElicitation response back to this specific request (see
-	// elicitationHandler). It is always set and always unique, regardless of
+	// requestElicitation). It is always set and always unique, regardless of
 	// whether the originating MCP server supplied its own wire ID: two
 	// independent servers can coincidentally reuse the same wire ID, so that
 	// value is never used for routing (#3584).
@@ -1026,7 +1067,7 @@ type AgentInfoEvent struct {
 	// only alongside CompactionModel.
 	PrimaryContextLimit int64 `json:"primary_context_limit,omitempty"`
 	// Nil means unknown; model-only update events may omit this field.
-	ExecutionCapabilities *ExecutionCapabilities `json:"execution_capabilities,omitempty"`
+	ExecutionCapabilities *inspection.ExecutionCapabilities `json:"execution_capabilities,omitempty"`
 }
 
 func AgentInfo(agentName, model, description, welcomeMessage string, contextLimit ...int64) Event {
@@ -1055,9 +1096,9 @@ type AgentDetails struct {
 	// configuration: an effort level (e.g. "high"), "adaptive", a decimal token
 	// count for token-based budgets, or "off" when disabled. Empty when the
 	// model has no selectable thinking configuration.
-	Thinking              string                 `json:"thinking,omitempty"`
-	Commands              types.Commands         `json:"commands,omitempty"`
-	ExecutionCapabilities *ExecutionCapabilities `json:"execution_capabilities,omitempty"`
+	Thinking              string                            `json:"thinking,omitempty"`
+	Commands              types.Commands                    `json:"commands,omitempty"`
+	ExecutionCapabilities *inspection.ExecutionCapabilities `json:"execution_capabilities,omitempty"`
 }
 
 // TeamInfoEvent is sent when team information is available
@@ -1249,7 +1290,7 @@ func HookBlocked(toolCall tools.ToolCall, toolDefinition tools.Tool, message, ag
 }
 
 // MessageAddedEvent is emitted when a message is added to the session.
-// This event is used by the PersistentRuntime wrapper to persist messages.
+// This event is used by the PersistenceObserver to persist messages.
 type MessageAddedEvent struct {
 	AgentContext
 
@@ -1277,7 +1318,7 @@ func MessageAdded(sessionID string, msg *session.Message, agentName string) Even
 }
 
 // SubSessionCompletedEvent is emitted when a sub-session completes and is added to parent.
-// This event is used by the PersistentRuntime wrapper to persist sub-sessions.
+// This event is used by the PersistenceObserver to persist sub-sessions.
 type SubSessionCompletedEvent struct {
 	AgentContext
 

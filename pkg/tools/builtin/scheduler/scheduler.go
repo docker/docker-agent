@@ -30,15 +30,13 @@ type ToolSet struct {
 	now   func() time.Time
 	wake  chan struct{}
 
-	mu     sync.Mutex
-	rt     tools.Runtime
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	mu sync.Mutex
+	rt tools.Runtime
 }
 
 var (
 	_ tools.ToolSet      = (*ToolSet)(nil)
-	_ tools.Startable    = (*ToolSet)(nil)
+	_ tools.Runnable     = (*ToolSet)(nil)
 	_ tools.Instructable = (*ToolSet)(nil)
 )
 
@@ -107,29 +105,10 @@ func (t *ToolSet) fireDue(ctx context.Context, now time.Time) {
 	}
 }
 
-func (t *ToolSet) Start(context.Context) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	t.mu.Lock()
-	t.cancel = cancel
-	t.mu.Unlock()
-
-	t.wg.Go(func() { t.loop(ctx) })
-	return nil
-}
-
-func (t *ToolSet) Stop(context.Context) error {
-	t.mu.Lock()
-	cancel := t.cancel
-	t.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	t.wg.Wait()
-	return nil
-}
-
-func (t *ToolSet) loop(ctx context.Context) {
-	for {
+// Run delivers due schedules until ctx is canceled. The caller owns the run
+// and must wait for it to return before starting another.
+func (t *ToolSet) Run(ctx context.Context) {
+	for ctx.Err() == nil {
 		wait := loopMaxWait
 		if d, ok := t.store.untilNext(t.now()); ok && d < wait {
 			wait = d
@@ -142,6 +121,9 @@ func (t *ToolSet) loop(ctx context.Context) {
 		case <-t.wake:
 			timer.Stop()
 		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
 			t.fireDue(ctx, t.now())
 		}
 	}

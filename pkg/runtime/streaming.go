@@ -47,10 +47,12 @@ func streamIdleTimeoutFor(p provider.Provider) time.Duration {
 }
 
 // errStreamIdle is the sentinel error returned when the upstream model stream
-// produces no SSE events for longer than defaultStreamIdleTimeout. It does
-// not wrap any standard context error so that the retry/fallback machinery
-// treats it as a non-retryable, non-context-cancelled failure and surfaces a
-// clear error message to the user.
+// produces no SSE events for longer than the stream's idle timeout
+// (streamIdleTimeoutFor). It does not wrap any standard context error so that
+// the retry/fallback machinery treats it as a non-context-cancelled failure
+// and surfaces a clear error message to the user. It is non-retryable except
+// for the single pre-response retry granted to direct transfer_task children
+// (see isRetryableIdleStream).
 var errStreamIdle = errors.New("model stream stalled: no data received from upstream")
 
 // streamResult holds the aggregated result of processing a single chat
@@ -75,7 +77,13 @@ type streamResult struct {
 	Stopped      bool
 	FinishReason chat.FinishReason
 	Usage        *chat.Usage
-	Serving      *provider.ServingModel
+	// UsageAttempts lists each model that ran when a server fallback spread
+	// the response across models; Usage describes only the last one.
+	UsageAttempts []chat.UsageAttempt
+	Serving       *provider.ServingModel
+	// Dispatched is the endpoint the request went to (e.g. a router's leaf),
+	// before a server fallback handed it to another model.
+	Dispatched *provider.ServingModel
 }
 
 // handleStream reads a chat.MessageStream to completion, emitting streaming
@@ -141,6 +149,7 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	var toolCalls []tools.ToolCall
 	var media []chat.MediaDelta
 	var messageUsage *chat.Usage
+	var usageAttempts []chat.UsageAttempt
 	var providerFinishReason chat.FinishReason
 	var responseStarted bool
 
@@ -155,6 +164,9 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	// xmlToolCallGate suppresses AgentChoice events once a <tool_call> tag is
 	// seen, preventing raw XML from rendering in the TUI.
 	xmlToolCallGate := false
+	// serverHandoff records a server fallback: the text kept from the declined
+	// model must not be mined for XML tool calls it was never allowed to make.
+	serverHandoff := false
 	for _, t := range agentTools {
 		toolDefMap[t.Name] = t
 	}
@@ -199,7 +211,7 @@ func handleStream(ctx context.Context, cancelStream context.CancelCauseFunc, str
 	// no structured tool calls were received. Called from both the early-return
 	// and EOF paths.
 	applyXMLFallback := func() {
-		if len(toolCalls) > 0 {
+		if len(toolCalls) > 0 || serverHandoff {
 			return
 		}
 		extracted, textBefore, found := extractXMLToolCalls(fullContent.String())
@@ -261,6 +273,9 @@ mainLoop:
 				// token counts, so the last value is the most accurate.
 				messageUsage = response.Usage
 			}
+			if len(response.UsageAttempts) > 0 {
+				usageAttempts = response.UsageAttempts
+			}
 
 			if len(response.Choices) == 0 {
 				continue
@@ -278,6 +293,29 @@ mainLoop:
 
 			if choice.Delta.ProviderState != nil {
 				providerState = choice.Delta.ProviderState
+			}
+
+			// A server fallback supersedes the declined model's tool calls and
+			// thinking: they must never run, and the next request drops them.
+			// Its text stays, as the API keeps it.
+			if fb := choice.Delta.ServerFallback; fb != nil {
+				responseStarted = true
+				if len(toolCalls) > 0 {
+					slog.WarnContext(ctx, "Dropping tool calls superseded by a server fallback",
+						"agent", a.Name(), "tool_calls", len(toolCalls), "from", fb.From, "to", fb.To)
+					events.Emit(ToolCallsRetracted(toolCallIDs(toolCalls), a.Name()))
+				}
+				toolCalls = nil
+				clear(toolCallIndex)
+				clear(emittedPartial)
+				if fullReasoningContent.Len() > 0 {
+					events.Emit(AgentChoiceReasoningReset(a.Name(), sess.ID, messageID))
+				}
+				fullReasoningContent.Reset()
+				thinkingSignature = ""
+				serverHandoff = true
+				xmlToolCallGate = false
+				events.Emit(Warning(fmt.Sprintf("%s declined this turn; %s continues it.", fb.From, fb.To), a.Name()))
 			}
 
 			// A terminal chunk can also carry media; collect it before returning.
@@ -356,23 +394,62 @@ mainLoop:
 				}
 			}
 
+			// Text in a terminal chunk belongs to the answer too: some
+			// OpenAI-compatible providers send the last delta together with
+			// finish_reason, so accumulate it before the early return below.
+			if choice.Delta.ReasoningContent != "" {
+				responseStarted = true
+				events.Emit(AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent, messageID))
+				fullReasoningContent.WriteString(choice.Delta.ReasoningContent)
+			}
+
+			// Capture thinking signature for Anthropic extended thinking
+			if choice.Delta.ThinkingSignature != "" {
+				responseStarted = true
+				thinkingSignature = choice.Delta.ThinkingSignature
+			}
+
+			if choice.Delta.Content != "" {
+				responseStarted = true
+				appendContent(markerFilter.Push(choice.Delta.Content))
+			}
+
 			if choice.FinishReason == chat.FinishReasonStop || choice.FinishReason == chat.FinishReasonLength || choice.FinishReason == chat.FinishReasonRefusal {
 				finishAssistantText()
 				recordUsage()
 				finishReason := choice.FinishReason
-				if finishReason == chat.FinishReasonRefusal {
+				if finishReason == chat.FinishReasonRefusal || finishReason == chat.FinishReasonLength {
 					// A refusal voids tool calls streamed before the safety
-					// classifier ended the turn: executing them would perform
-					// actions the model refused to complete, and replaying their
+					// classifier ended the turn; a length turn was cut off by
+					// the token limit, so a call streamed into it can carry half
+					// an argument object. Executing either would perform an
+					// action the model did not complete, and replaying their
 					// tool_use blocks without results breaks the next request.
 					// The raw response still holds those blocks, so it goes too.
+					// Dropping them is also what lets the turn end as length:
+					// that is what makes `run --exec` report truncation and ACP
+					// return max_tokens, instead of a partial call hiding it.
 					if len(toolCalls) > 0 {
-						slog.WarnContext(ctx, "Dropping tool calls from refused turn",
-							"agent", a.Name(), "tool_calls", len(toolCalls))
+						slog.WarnContext(ctx, "Dropping tool calls from refused or truncated turn",
+							"agent", a.Name(), "finish_reason", finishReason, "tool_calls", len(toolCalls))
+						events.Emit(ToolCallsRetracted(toolCallIDs(toolCalls), a.Name()))
 						toolCalls = nil
 						openAIResponse = nil
+						// The raw response holds those blocks too, and the signature
+						// kept here belongs to thinking the flattened text no longer
+						// describes. Drop all three together: replaying them would
+						// send tool_use blocks without results, or changed thinking
+						// under a signature the provider did not issue for it.
+						providerState = nil
+						thinkingSignature = ""
+						thoughtSignature = nil
 					}
-					providerState = nil
+					if finishReason == chat.FinishReasonRefusal {
+						// A refusal voids the turn's provider state even when it
+						// carried no tool calls; a length turn keeps it unless the
+						// calls above were retracted.
+						providerState = nil
+					}
 				} else {
 					applyXMLFallback()
 					if finishReason == chat.FinishReasonStop && len(toolCalls) > 0 {
@@ -392,6 +469,7 @@ mainLoop:
 					Stopped:           len(toolCalls) == 0, // stop only when there are no tool calls to execute
 					FinishReason:      finishReason,
 					Usage:             messageUsage,
+					UsageAttempts:     usageAttempts,
 					ResponseStarted:   responseStarted,
 				}, nil
 			}
@@ -403,26 +481,9 @@ mainLoop:
 				providerFinishReason = choice.FinishReason
 			}
 
-			if choice.Delta.ReasoningContent != "" {
-				responseStarted = true
-				events.Emit(AgentChoiceReasoning(a.Name(), sess.ID, choice.Delta.ReasoningContent, messageID))
-				fullReasoningContent.WriteString(choice.Delta.ReasoningContent)
-			}
-
-			// Capture thinking signature for Anthropic extended thinking
-			if choice.Delta.ThinkingSignature != "" {
-				responseStarted = true
-				thinkingSignature = choice.Delta.ThinkingSignature
-			}
-
-			if choice.Delta.Content != "" {
-				responseStarted = true
-				appendContent(markerFilter.Push(choice.Delta.Content))
-			}
-
 		case <-ctx.Done():
-			// Context cancelled (SIGTERM, Ctrl+C, or idle-timeout cancel from
-			// this function). Return promptly so graceful shutdown can proceed.
+			// Context cancelled (SIGTERM, Ctrl+C, or the caller cancelling the
+			// stream). Return promptly so graceful shutdown can proceed.
 			return failedResult(), ctx.Err()
 
 		case <-idleTimer.C:
@@ -452,7 +513,6 @@ mainLoop:
 	// on. Turns with tool calls keep Stopped=false so the loop executes them.
 	// Media is irrelevant to this decision: with no tool calls pending, the turn
 	// is over either way (media or not) — stopping is what ends it correctly.
-	// NOTE(krissetto): this can likely be removed once compaction works properly with all providers (aka dmr)
 	stoppedNoToolCalls := len(toolCalls) == 0
 
 	// Prefer the provider's explicit finish reason when available (e.g.
@@ -493,6 +553,15 @@ mainLoop:
 		Stopped:           stoppedNoToolCalls,
 		FinishReason:      finishReason,
 		Usage:             messageUsage,
+		UsageAttempts:     usageAttempts,
 		ResponseStarted:   responseStarted,
 	}, nil
+}
+
+func toolCallIDs(calls []tools.ToolCall) []string {
+	ids := make([]string, len(calls))
+	for i, tc := range calls {
+		ids[i] = tc.ID
+	}
+	return ids
 }

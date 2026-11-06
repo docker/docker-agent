@@ -3,7 +3,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -16,7 +15,6 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/memory/database/inmemory"
-	"github.com/docker/docker-agent/pkg/rag"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/api/client"
@@ -27,7 +25,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 	"github.com/docker/docker-agent/pkg/tools/builtin/openapi"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
-	ragtool "github.com/docker/docker-agent/pkg/tools/builtin/rag"
 	"github.com/docker/docker-agent/pkg/tools/builtin/random"
 	"github.com/docker/docker-agent/pkg/tools/builtin/sessioncontext"
 	"github.com/docker/docker-agent/pkg/tools/builtin/think"
@@ -44,11 +41,11 @@ import (
 // A registry is built per session because todo (shared: true), plan and
 // memory keep state: the agents of one team share it, two sessions never do.
 // rag indexes the session's documents in place of files.
-func browserToolsets(documents rag.Documents) teamloader.ToolsetRegistry {
+func browserToolsets(documents map[string][]byte) teamloader.ToolsetRegistry {
 	return teamloader.NewToolsetRegistry(browserToolsetCreators(documents))
 }
 
-func browserToolsetCreators(documents rag.Documents) map[string]teamloader.ToolsetCreator {
+func browserToolsetCreators(documents map[string][]byte) map[string]teamloader.ToolsetCreator {
 	sharedTodos := sync.OnceValue(func() *todo.ToolSet { return todo.New() })
 	plans := sync.OnceValue(func() tools.ToolSet {
 		// Plans live in memory and there are no files to move them through.
@@ -59,7 +56,7 @@ func browserToolsetCreators(documents rag.Documents) map[string]teamloader.Tools
 	})
 	memories := sync.OnceValue(inmemory.New)
 
-	return map[string]teamloader.ToolsetCreator{
+	creators := map[string]teamloader.ToolsetCreator{
 		"datetime":   teamloader.Creator(datetime.CreateToolSet),
 		"mcp":        mcpCreator,
 		"calculator": teamloader.Creator(calculator.CreateToolSet),
@@ -84,8 +81,9 @@ func browserToolsetCreators(documents rag.Documents) map[string]teamloader.Tools
 		"api":             client.Creator(js.NewJsExpander),
 		"openapi":         openapiCreator,
 		"model_picker":    teamloader.CreatorFromToolset(modelpicker.CreateToolSet),
-		"rag":             ragCreator(documents),
 	}
+	registerRAG(creators, documents)
+	return creators
 }
 
 // memoryPersistenceClaim opens the memory toolset's instructions and is
@@ -115,37 +113,9 @@ func openapiCreator(ctx context.Context, toolset latest.Toolset, parentDir strin
 	return openapi.Creator(ctx, toolset, parentDir, runConfig, configName)
 }
 
-// ragCreator is ragtool.CreateToolSet over the session's documents: the
-// manager indexes them in memory instead of files and starts no watcher, and
-// the toolset keeps its tool, events and start behaviour.
-func ragCreator(documents rag.Documents) teamloader.ToolsetCreator {
-	if documents == nil {
-		documents = rag.Documents{} // nil would mean "read files"
-	}
-	return func(ctx context.Context, toolset latest.Toolset, parentDir string, runConfig *config.RuntimeConfig, _ string) (tools.ToolSet, error) {
-		if err := checkRAG(toolset, documents); err != nil {
-			return nil, err
-		}
-		ragName := cmp.Or(toolset.Name, "rag")
-		mgr, err := rag.NewManager(ctx, ragName, toolset.RAGConfig, rag.ManagersBuildConfig{
-			ParentDir:     parentDir,
-			ModelsGateway: runConfig.ModelsGateway,
-			Env:           runConfig.EnvProvider(),
-			Models:        runConfig.Models,
-			Providers:     runConfig.Providers,
-			RuntimeConfig: runConfig,
-			Documents:     documents,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create RAG manager: %w", err)
-		}
-		return ragtool.New(mgr, cmp.Or(mgr.ToolName(), ragName), ragtool.WithIndexingTimeout(toolset.RAGConfig.GetIndexingTimeout())), nil
-	}
-}
-
 // checkBrowserToolset rejects toolset declarations the browser build cannot
 // honour, so they fail the load instead of being skipped with a warning.
-func checkBrowserToolset(ctx context.Context, ts latest.Toolset, env environment.Provider, documents rag.Documents) error {
+func checkBrowserToolset(ctx context.Context, ts latest.Toolset, env environment.Provider, documents map[string][]byte) error {
 	switch ts.Type {
 	case "mcp":
 		return checkRemoteMCP(ts)
@@ -193,37 +163,4 @@ func checkOpenAPI(ctx context.Context, ts latest.Toolset, env environment.Provid
 		return fmt.Errorf("openapi url %q: only http(s) specs can be fetched in the browser", spec)
 	}
 	return nil
-}
-
-// checkRAG rejects what the session documents cannot honour: docs that
-// select none of them, a database (nothing persists), code-aware chunking
-// (tree-sitter needs cgo) and VCS ignore files (there is no checkout).
-func checkRAG(ts latest.Toolset, documents rag.Documents) error {
-	if ts.RAGConfig == nil {
-		return errors.New("rag toolset requires a rag_config block")
-	}
-	var errs []error
-	if cfg := ts.RAGConfig; cfg.RespectVCS != nil && *cfg.RespectVCS {
-		errs = append(errs, errors.New("respect_vcs: there is no VCS checkout in the browser"))
-	}
-	checkDocs := func(loc string, docs []string) {
-		if _, err := rag.SelectDocuments(browserWorkingDir, rag.GetAbsolutePaths(browserWorkingDir, docs), documents); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", loc, err))
-		}
-	}
-	checkDocs("docs", ts.RAGConfig.Docs)
-	for i, s := range ts.RAGConfig.Strategies {
-		loc := fmt.Sprintf("strategies[%d]", i)
-		checkDocs(loc+".docs", s.Docs)
-		if !s.Database.IsEmpty() {
-			errs = append(errs, fmt.Errorf("%s.database: nothing is persisted in the browser; documents are indexed in memory for the session", loc))
-		}
-		if s.Chunking.CodeAware {
-			errs = append(errs, fmt.Errorf("%s.chunking.code_aware: tree-sitter needs cgo and is not available in the browser", loc))
-		}
-		if respectVCS, _ := s.Params["respect_vcs"].(bool); respectVCS {
-			errs = append(errs, fmt.Errorf("%s.respect_vcs: there is no VCS checkout in the browser", loc))
-		}
-	}
-	return errors.Join(errs...)
 }

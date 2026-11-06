@@ -14,6 +14,14 @@ type Startable interface {
 	Stop(ctx context.Context) error
 }
 
+// Runnable is implemented by toolsets with background work but no startup handshake.
+// Run blocks until cancellation and joins all work before returning. It must not
+// run concurrently on the same toolset. NewStartable owns a detached run until
+// Stop; Startable takes precedence when both capabilities are present.
+type Runnable interface {
+	Run(ctx context.Context)
+}
+
 // StartReporter is implemented by toolsets whose live lifecycle state can
 // be queried independently of the StartableToolSet wrapper's latched state
 // (e.g. an MCP toolset whose supervisor lost the session in the background).
@@ -22,19 +30,6 @@ type Startable interface {
 // an inner that started successfully and later died.
 type StartReporter interface {
 	IsStarted() bool
-}
-
-// PeerDependent is implemented by toolsets whose Start reads from the
-// agent's other toolsets. Callers that start an agent's toolsets
-// concurrently must start these only after every other toolset has
-// settled, or their Start would race the very toolsets it depends on.
-//
-// Note the guarantee is best-effort: a peer whose start is already in
-// flight elsewhere is skipped, not awaited, so a PeerDependent Start must
-// still tolerate a peer that is not ready yet. Prefer resolving peer state
-// lazily, as the deferred toolset does.
-type PeerDependent interface {
-	StartsAfterPeers()
 }
 
 // Statable is implemented by toolsets that expose a lifecycle state
@@ -70,21 +65,6 @@ type Elicitable interface {
 	SetElicitationHandler(handler ElicitationHandler)
 }
 
-// Sampleable is implemented by toolsets that support MCP sampling
-// (sampling/createMessage). MCP servers use sampling to delegate LLM calls
-// back to the host; the handler is expected to drive the host's model.
-type Sampleable interface {
-	SetSamplingHandler(handler SamplingHandler)
-}
-
-// SampleableWithTools is implemented by toolsets that support MCP sampling
-// requests carrying a tools array (sampling-with-tools). The handler is
-// invoked instead of the basic SamplingHandler when both are registered and
-// the SDK negotiates the with-tools variant on the wire.
-type SampleableWithTools interface {
-	SetSamplingWithToolsHandler(handler SamplingWithToolsHandler)
-}
-
 // OAuthCapable is implemented by toolsets that support OAuth flows.
 type OAuthCapable interface {
 	SetOAuthSuccessHandler(handler func())
@@ -104,14 +84,6 @@ func GetInstructions(ts ToolSet) string {
 		return i.Instructions()
 	}
 	return ""
-}
-
-// ChangeNotifier is implemented by toolsets that can notify when their
-// tool list changes (e.g. after an MCP ToolListChanged notification).
-// The single handler slot is replaced on every call; hosts that may share
-// a toolset with other runtimes should prefer ChangeSubscriber.
-type ChangeNotifier interface {
-	SetToolsChangedHandler(handler func())
 }
 
 // ChangeSubscriber is implemented by toolsets whose tool-list changes can
@@ -185,15 +157,9 @@ func (c *ChangeSubscribers) Notify() {
 }
 
 // ConfigureHandlers sets all applicable handlers throughout a toolset graph.
-func ConfigureHandlers(ts ToolSet, elicitHandler ElicitationHandler, samplingHandler SamplingHandler, samplingWithToolsHandler SamplingWithToolsHandler, oauthHandler func(), managedOAuth bool, unmanagedOAuthRedirectURI string) {
+func ConfigureHandlers(ts ToolSet, elicitHandler ElicitationHandler, oauthHandler func(), managedOAuth bool, unmanagedOAuthRedirectURI string) {
 	for _, e := range FindAll[Elicitable](ts) {
 		e.SetElicitationHandler(elicitHandler)
-	}
-	for _, s := range FindAll[Sampleable](ts) {
-		s.SetSamplingHandler(samplingHandler)
-	}
-	for _, s := range FindAll[SampleableWithTools](ts) {
-		s.SetSamplingWithToolsHandler(samplingWithToolsHandler)
 	}
 	for _, o := range FindAll[OAuthCapable](ts) {
 		o.SetOAuthSuccessHandler(oauthHandler)

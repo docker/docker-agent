@@ -15,7 +15,9 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
-func TestLastSelectedModelID_Concurrent(t *testing.T) {
+// One router serves every conversation of a team load: each stream must report
+// its own route, never another request's.
+func TestServingModel_ConcurrentRoutes(t *testing.T) {
 	t.Parallel()
 
 	cfg := &latest.ModelConfig{
@@ -50,9 +52,6 @@ func TestLastSelectedModelID_Concurrent(t *testing.T) {
 				}
 				require.Equal(t, want, stream.(contracts.ServingStream).ServingModel().ID)
 			}
-		})
-		wg.Go(func() {
-			_ = client.LastSelectedModelID()
 		})
 	}
 	wg.Wait()
