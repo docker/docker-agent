@@ -253,3 +253,26 @@ func TestLegacyReadOnlyAutoApprove(t *testing.T) {
 	assert.False(t, legacyReadOnlyAutoApprove(session.SafetyPolicyBalanced, labelSafeAnnotation),
 		"balanced already allows via the mode table")
 }
+
+func TestDecide_FindExecGrantsOverrideMode(t *testing.T) {
+	t.Parallel()
+	for _, tool := range []string{"shell", "run_background_job"} {
+		for _, cmd := range []string{"find / -exec rm -rf {} +", "find . -maxdepth 1 -name seed -exec sh -c 'touch marker' {} +"} {
+			args := map[string]any{"cmd": cmd}
+			label := safety.LabelToolCall(tool, args, false, false)
+			assert.NotEqual(t, safety.ClassSafe, label.Class, cmd)
+			for _, tc := range []struct {
+				mode session.SafetyPolicy
+				want PermissionOutcome
+			}{
+				{session.SafetyPolicyBalanced, OutcomeAsk},
+				{session.SafetyPolicyStrict, OutcomeAsk},
+				{session.SafetyPolicyRestricted, OutcomeDeny},
+			} {
+				assert.Equal(t, tc.want, Decide(tc.mode, label, nil, tool, args).Outcome, cmd)
+				checkers := []NamedChecker{{Checker: newChecker(t, []string{tool + ":cmd=find*"}, nil, nil), Source: "rules", Tier: TierTeam}}
+				assert.Equal(t, OutcomeAllow, Decide(tc.mode, label, checkers, tool, args).Outcome, cmd)
+			}
+		}
+	}
+}
