@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -19,14 +20,14 @@ func ValidatePathInDirectory(path, allowedDir string) (string, error) {
 	}
 
 	if filepath.IsAbs(cleanPath) && allowedDir == "" {
-		if strings.Contains(path, "..") {
+		if hasParentSegment(path) {
 			return "", errors.New("path contains directory traversal sequences")
 		}
 		return cleanPath, nil
 	}
 
 	if allowedDir == "" {
-		if strings.HasPrefix(cleanPath, "..") {
+		if hasParentSegment(cleanPath) {
 			return "", errors.New("path contains directory traversal sequences")
 		}
 		return cleanPath, nil
@@ -55,9 +56,20 @@ func ValidatePathInDirectory(path, allowedDir string) (string, error) {
 		return "", fmt.Errorf("cannot determine relative path: %w", err)
 	}
 
-	if strings.HasPrefix(relPath, "..") {
+	if hasParentSegment(relPath) {
 		return "", fmt.Errorf("path outside allowed directory: %s", path)
 	}
 
 	return absTargetPath, nil
+}
+
+// hasParentSegment reports whether p has a ".." path element. Names that only
+// start with or contain dots, such as "..env" or "app..v2", are ordinary
+// names, not traversal.
+func hasParentSegment(p string) bool {
+	return slices.Contains(strings.FieldsFunc(p, isPathSeparator), "..")
+}
+
+func isPathSeparator(r rune) bool {
+	return r == '/' || r == filepath.Separator
 }
