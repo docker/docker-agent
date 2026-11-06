@@ -2,6 +2,8 @@ package gemini
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"regexp"
@@ -20,6 +22,10 @@ var textExtractRegex = regexp.MustCompile(`"text"\s*:\s*"([^"\\]*(\\.[^"\\]*)*)"
 
 const http2BodyClosedError = "http2: response body closed"
 
+// ErrInvalidFunctionCall is returned when Gemini ends a response with
+// MALFORMED_FUNCTION_CALL or UNEXPECTED_TOOL_CALL.
+var ErrInvalidFunctionCall = errors.New("gemini: model produced an invalid function call")
+
 // StreamAdapter adapts the Gemini streaming iterator to chat.MessageStream
 type StreamAdapter struct {
 	iter       func(func(*genai.GenerateContentResponse, error) bool)
@@ -37,7 +43,7 @@ type result struct {
 	done      bool
 	toolCalls bool
 	// finish overrides the stop/tool_calls inference for a terminal
-	// MAX_TOKENS or safety stop.
+	// MAX_TOKENS or safety stop, or an unfinished continuation.
 	finish chat.FinishReason
 }
 
@@ -63,6 +69,7 @@ func (g *StreamAdapter) run() {
 
 	hasContent := false
 	hasToolCalls := false
+	continuing := false
 	var terminal chat.FinishReason
 	var lastResponse *genai.GenerateContentResponse
 
@@ -120,6 +127,7 @@ func (g *StreamAdapter) run() {
 			// Finish-only and prompt-feedback-only chunks are not forwarded,
 			// so read their terminal reason here.
 			terminal = mergeTerminalReason(terminal, responseTerminalReason(resp))
+			continuing = continuationPending(continuing, resp)
 
 			// Check for text content and generated inline media without using
 			// Text() to avoid warnings
@@ -158,10 +166,21 @@ func (g *StreamAdapter) run() {
 					return false
 				}
 			}
+
+			if err := invalidFunctionCall(resp); err != nil {
+				g.send(result{err: err})
+				return false
+			}
 		}
 
 		return true
 	})
+
+	// The SDK resumes a CONTINUATION stop itself; one still pending here
+	// means generation is incomplete, so it must not end as stop.
+	if continuing {
+		terminal = mergeTerminalReason(terminal, chat.FinishReasonLength)
+	}
 
 	// Send final message with appropriate stop reason
 	if hasContent || hasToolCalls || terminal != "" {
@@ -192,6 +211,38 @@ func responseTerminalReason(resp *genai.GenerateContentResponse) chat.FinishReas
 		}
 	}
 	return reason
+}
+
+// continuationPending reports whether generation is still waiting on a
+// continuation after resp: a CONTINUATION stop or a continuation token sets
+// it, and any other finish reason clears it.
+func continuationPending(pending bool, resp *genai.GenerateContentResponse) bool {
+	for _, candidate := range resp.Candidates {
+		switch candidate.FinishReason {
+		case genai.FinishReasonContinuation:
+			pending = true
+		case "", genai.FinishReasonUnspecified:
+			pending = pending || len(candidate.ContinuationToken) > 0
+		default:
+			pending = false
+		}
+	}
+	return pending
+}
+
+// invalidFunctionCall returns an error when Gemini ended the response on a
+// function call it could not produce.
+func invalidFunctionCall(resp *genai.GenerateContentResponse) error {
+	for _, candidate := range resp.Candidates {
+		switch candidate.FinishReason {
+		case genai.FinishReasonMalformedFunctionCall, genai.FinishReasonUnexpectedToolCall:
+			if candidate.FinishMessage == "" {
+				return fmt.Errorf("%w (%s)", ErrInvalidFunctionCall, candidate.FinishReason)
+			}
+			return fmt.Errorf("%w (%s): %s", ErrInvalidFunctionCall, candidate.FinishReason, candidate.FinishMessage)
+		}
+	}
+	return nil
 }
 
 // mergeTerminalReason keeps the stronger reason: refusal beats length.

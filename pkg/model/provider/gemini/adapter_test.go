@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -464,6 +465,13 @@ func TestStreamAdapter_TerminalFinishReasons(t *testing.T) {
 		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{FinishReason: reason}}}
 	}
 	promptBlocked := &genai.GenerateContentResponse{PromptFeedback: &genai.GenerateContentResponsePromptFeedback{BlockReason: genai.BlockedReasonSafety}}
+	// The SDK clears the finish reason of a chunk carrying a continuation
+	// token; when it then doesn't resume, the stream just ends.
+	checkpoint := func(s string) *genai.GenerateContentResponse {
+		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Parts: []*genai.Part{{Text: s}}}, ContinuationToken: []byte("tok"),
+		}}}
+	}
 
 	tests := []struct {
 		name  string
@@ -481,6 +489,9 @@ func TestStreamAdapter_TerminalFinishReasons(t *testing.T) {
 		{"stop stays stop", []*genai.GenerateContentResponse{text("done", genai.FinishReasonStop)}, chat.FinishReasonStop},
 		{"tool calls with stop stay tool_calls", []*genai.GenerateContentResponse{call(genai.FinishReasonStop)}, chat.FinishReasonToolCalls},
 		{"other stays stop", []*genai.GenerateContentResponse{text("done", genai.FinishReasonOther)}, chat.FinishReasonStop},
+		{"continuation without a token is length", []*genai.GenerateContentResponse{text("partial", genai.FinishReasonContinuation)}, chat.FinishReasonLength},
+		{"unresumed continuation token is length", []*genai.GenerateContentResponse{checkpoint("partial")}, chat.FinishReasonLength},
+		{"continued stream that stops stays stop", []*genai.GenerateContentResponse{checkpoint("a"), text("b", genai.FinishReasonStop)}, chat.FinishReasonStop},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -508,6 +519,63 @@ func TestStreamAdapter_TerminalFinishReasons(t *testing.T) {
 				}
 			}
 			assert.Equal(t, []chat.FinishReason{tt.want}, reasons)
+		})
+	}
+}
+
+// An invalid function call must fail the turn: ending it as stop would hide
+// that the model never produced the call it was making.
+func TestStreamAdapter_InvalidFunctionCallFails(t *testing.T) {
+	t.Parallel()
+
+	failed := func(text string, reason genai.FinishReason) *genai.GenerateContentResponse {
+		cand := &genai.Candidate{FinishReason: reason, FinishMessage: "Malformed function call: lookup(q="}
+		if text != "" {
+			cand.Content = &genai.Content{Parts: []*genai.Part{{Text: text}}}
+		}
+		return &genai.GenerateContentResponse{Candidates: []*genai.Candidate{cand}}
+	}
+	call := &genai.GenerateContentResponse{Candidates: []*genai.Candidate{{
+		Content: &genai.Content{Parts: []*genai.Part{genai.NewPartFromFunctionCall("lookup", map[string]any{"q": "x"})}},
+	}}}
+
+	tests := []struct {
+		name     string
+		resps    []*genai.GenerateContentResponse
+		wantText string
+	}{
+		{"malformed call on a finish-only chunk", []*genai.GenerateContentResponse{failed("", genai.FinishReasonMalformedFunctionCall)}, ""},
+		{"malformed call after text", []*genai.GenerateContentResponse{failed("Let me look that up.", genai.FinishReasonMalformedFunctionCall)}, "Let me look that up."},
+		{"unexpected tool call after a function call", []*genai.GenerateContentResponse{call, failed("", genai.FinishReasonUnexpectedToolCall)}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			adapter := NewStreamAdapter(func(fn func(*genai.GenerateContentResponse, error) bool) {
+				for _, r := range tt.resps {
+					if !fn(r, nil) {
+						return
+					}
+				}
+			}, "test-model", true)
+			defer adapter.Close()
+
+			var text strings.Builder
+			var streamErr error
+			for {
+				resp, err := adapter.Recv()
+				if err != nil {
+					streamErr = err
+					break
+				}
+				for _, c := range resp.Choices {
+					text.WriteString(c.Delta.Content)
+					assert.Empty(t, c.FinishReason, "an invalid function call must not finish the turn")
+				}
+			}
+			require.ErrorIs(t, streamErr, ErrInvalidFunctionCall)
+			require.ErrorContains(t, streamErr, "Malformed function call: lookup(q=")
+			assert.Equal(t, tt.wantText, text.String())
 		})
 	}
 }
