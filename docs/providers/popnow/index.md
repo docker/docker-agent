@@ -65,7 +65,7 @@ PopNow model IDs end in a task suffix, and chat models use `/chat`:
 | `deepseek/v4-flash/chat` | DeepSeek V4 Flash |
 | `moonshot/kimi-k3/chat` | Kimi K3 |
 
-Model IDs are case-sensitive. Check the live [`/v1/models` endpoint](https://api.popnow.ai/v1/models) for current IDs and availability. Only models with the `chat` task work with Docker Agent.
+Model IDs are case-sensitive. Check the [PopNow model catalog](https://popnow.ai/api/models) for current IDs and availability. Only models with the `chat` task work with Docker Agent.
 
 PopNow is not in the models.dev catalog, so Docker Agent has no catalog-derived pricing or context limits for these models. Attachment capabilities conservatively fall back to text-only; image and PDF attachments are dropped, with a warning logged once per model.
 
