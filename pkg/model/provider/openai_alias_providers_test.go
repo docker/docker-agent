@@ -90,6 +90,14 @@ var openAIAliasProviders = []openAIAliasProvider{
 		mergesSystemMessages: true,
 	},
 	{
+		provider:             "popnow",
+		envVar:               "POPNOW_API_KEY",
+		testKey:              "test-popnow-key",
+		model:                "deepseek/v4-flash/chat",
+		greeting:             "Hello from PopNow",
+		mergesSystemMessages: true,
+	},
+	{
 		provider:             "runcrate",
 		envVar:               "RUNCRATE_API_KEY",
 		testKey:              "test-runcrate-key",

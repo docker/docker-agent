@@ -33,6 +33,7 @@ var modelsDevAbsentProviders = map[string]bool{
 	"api-route":             true, // API Route model IDs come from its own /v1/models endpoint, not models.dev.
 	"lunaroute":             true, // Lunaroute model IDs come from its own /v1/models endpoint, not models.dev.
 	"atlascloud":            true, // Atlas Cloud model IDs come from its own /v1/models endpoint, not models.dev.
+	"popnow":                true, // PopNow model IDs come from its own /v1/models endpoint, not models.dev.
 	"cloudgpu":              true, // CloudGPU model IDs come from its own /v1/models endpoint, not models.dev.
 	"runcrate":              true, // Runcrate model IDs come from its own /v1/models endpoint, not models.dev.
 	"dmr":                   true, // Docker Model Runner (local, not in catalog)

@@ -239,6 +239,8 @@
       url: /providers/orcarouter/
     - title: OVHcloud
       url: /providers/ovhcloud/
+    - title: PopNow
+      url: /providers/popnow/
     - title: Runcrate
       url: /providers/runcrate/
     - title: Together AI
