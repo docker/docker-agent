@@ -258,6 +258,11 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 		span.End()
 	}()
 
+	// External agents join the importing team, so only the root load opens a scope.
+	if externalDepthFromContext(ctx) == 0 {
+		ctx = tools.WithTeamScope(ctx)
+	}
+
 	var agents []*agent.Agent
 	defer func() {
 		if err != nil {
@@ -555,7 +560,12 @@ func LoadWithConfig(ctx context.Context, agentSource config.Source, runConfig *c
 			return nil, fmt.Errorf("agent %s: %w", agentConfig.Name, err)
 		}
 		instruction := expander.Expand(ctx, agentConfig.Instruction, nil)
+		// The factory runs later on the runtime's context, which carries no team
+		// scope. Rejoin the load's scope so rebuilt agents (worktree background
+		// agents) keep sharing the parent team's `shared: team` toolsets.
+		loadCtx := ctx
 		factory := func(ctx context.Context, dir string) (*agent.Agent, error) {
+			ctx = tools.InheritTeamScope(ctx, loadCtx)
 			workspaceConfig := runConfig.Clone()
 			workspaceConfig.WorkingDir = dir
 			workspaceExpander := loadOpts.newExpander(workspaceConfig.EnvProvider())

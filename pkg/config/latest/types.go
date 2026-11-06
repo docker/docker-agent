@@ -1639,7 +1639,7 @@ type Toolset struct {
 	Env map[string]string `json:"env,omitempty"`
 
 	// For the `todo` tool
-	Shared bool `json:"shared,omitempty"`
+	Shared SharedScope `json:"shared,omitempty"`
 
 	// For the `memory` and `tasks` tools
 	Path string `json:"path,omitempty"`
@@ -1775,6 +1775,73 @@ func (t *Toolset) UnmarshalYAML(unmarshal func(any) error) error {
 	}
 	*t = Toolset(tmp)
 	return t.validate()
+}
+
+// SharedScope is how far a toolset's state is shared. YAML accepts a boolean
+// (true shares across the whole process) or "team" (shared by the agents of
+// one team load only).
+type SharedScope string
+
+const (
+	SharedScopeNone    SharedScope = ""
+	SharedScopeProcess SharedScope = "process"
+	SharedScopeTeam    SharedScope = "team"
+)
+
+func (s *SharedScope) set(v any) error {
+	switch v := v.(type) {
+	case nil:
+		*s = SharedScopeNone
+	case bool:
+		*s = SharedScopeNone
+		if v {
+			*s = SharedScopeProcess
+		}
+	case string:
+		if v != string(SharedScopeTeam) {
+			return fmt.Errorf("invalid shared value %q: must be true, false or %q", v, SharedScopeTeam)
+		}
+		*s = SharedScopeTeam
+	default:
+		return fmt.Errorf("invalid shared value %v: must be true, false or %q", v, SharedScopeTeam)
+	}
+	return nil
+}
+
+func (s *SharedScope) UnmarshalYAML(unmarshal func(any) error) error {
+	var v any
+	if err := unmarshal(&v); err != nil {
+		return err
+	}
+	return s.set(v)
+}
+
+func (s *SharedScope) UnmarshalJSON(data []byte) error {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	return s.set(v)
+}
+
+// MarshalYAML keeps the boolean spelling for process scope so a marshaled
+// config reads back unchanged.
+func (s SharedScope) MarshalYAML() (any, error) {
+	return s.marshalValue(), nil
+}
+
+func (s SharedScope) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.marshalValue())
+}
+
+func (s SharedScope) marshalValue() any {
+	switch s {
+	case SharedScopeProcess:
+		return true
+	case SharedScopeTeam:
+		return string(SharedScopeTeam)
+	}
+	return false
 }
 
 // AllowPrivateIPsEnabled reports the effective boolean value for allow_private_ips.

@@ -72,7 +72,7 @@ func DefaultToolsetCreators() map[string]teamloader.ToolsetCreator {
 		"shell":             shell.Creator,
 		"tasks":             tasks.Creator,
 		"think":             teamloader.Creator(think.CreateToolSet),
-		"todo":              teamloader.CreatorFromToolset(todo.CreateToolSet),
+		"todo":              todo.Creator,
 		"user_prompt":       teamloader.Creator(userprompt.CreateToolSet),
 		"webhook":           webhook.Creator,
 	}
