@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
@@ -884,10 +886,25 @@ func processMCPContent(toolResult *mcp.CallToolResult) *tools.ToolCallResult {
 	var images, audios []tools.MediaContent
 	var documents []tools.DocumentContent
 
+	// Each content block is a separate item (FastMCP, for instance, returns
+	// one TextContent per element of a list result), so blocks must not run
+	// together: "a.txt" + "b.txt" would reach the model as "a.txtb.txt".
+	// A block that already ends or starts with whitespace ("See: ") is joined
+	// as is, so text followed by a link or resource still reads inline.
+	write := func(s string) {
+		if s == "" {
+			return
+		}
+		if cur := text.String(); cur != "" && !endsWithSpace(cur) && !startsWithSpace(s) {
+			text.WriteByte('\n')
+		}
+		text.WriteString(s)
+	}
+
 	for _, c := range toolResult.Content {
 		switch c := c.(type) {
 		case *mcp.TextContent:
-			text.WriteString(c.Text)
+			write(c.Text)
 		case *mcp.ImageContent:
 			images = append(images, encodeMedia(c.Data, c.MIMEType))
 		case *mcp.AudioContent:
@@ -897,16 +914,16 @@ func processMCPContent(toolResult *mcp.CallToolResult) *tools.ToolCallResult {
 				// Escape ] in name and ) in URI to prevent broken markdown links.
 				name := strings.ReplaceAll(c.Name, "]", "\\]")
 				uri := strings.ReplaceAll(c.URI, ")", "%29")
-				fmt.Fprintf(&text, "[%s](%s)", name, uri)
+				write(fmt.Sprintf("[%s](%s)", name, uri))
 			} else {
-				text.WriteString(c.URI)
+				write(c.URI)
 			}
 		case *mcp.EmbeddedResource:
 			if c.Resource == nil {
 				continue
 			}
 			if c.Resource.Text != "" {
-				text.WriteString(c.Resource.Text)
+				write(c.Resource.Text)
 				continue
 			}
 			if len(c.Resource.Blob) > 0 {
@@ -918,8 +935,8 @@ func processMCPContent(toolResult *mcp.CallToolResult) *tools.ToolCallResult {
 				case strings.HasPrefix(c.Resource.MIMEType, "audio/"):
 					audios = append(audios, encodeMedia(c.Resource.Blob, c.Resource.MIMEType))
 				default:
-					fmt.Fprintf(&text, "[embedded resource %s (%s, %d bytes)]",
-						c.Resource.URI, c.Resource.MIMEType, len(c.Resource.Blob))
+					write(fmt.Sprintf("[embedded resource %s (%s, %d bytes)]",
+						c.Resource.URI, c.Resource.MIMEType, len(c.Resource.Blob)))
 				}
 			}
 		}
@@ -933,6 +950,16 @@ func processMCPContent(toolResult *mcp.CallToolResult) *tools.ToolCallResult {
 		Documents:         documents,
 		StructuredContent: toolResult.StructuredContent,
 	}
+}
+
+func endsWithSpace(s string) bool {
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return unicode.IsSpace(r)
+}
+
+func startsWithSpace(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	return unicode.IsSpace(r)
 }
 
 // encodeMedia re-encodes raw bytes (as decoded by the MCP SDK) back to base64
