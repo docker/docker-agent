@@ -137,7 +137,7 @@ directories. Use a kit to clone a repository remotely or transfer files explicit
 may be explicit local paths, ZIPs, git references, or OCI artifacts. sbx owns
 builds, caching, composition order, argument validation, credential capabilities,
 and permission checks. All members of a composition must use the same kit grammar.
-The built-in sbx docker-agent workload is currently v2: select a v3 workload when
+CI publishes the v3 workload `docker/sbx-kit-docker-agent`; select it when
 adding v3 mixins.
 
 ```bash
@@ -150,9 +150,9 @@ docker agent run --cloud --sandbox-kit ./my-workload \
 
 The workload must provide `docker-agent` on PATH. `--template` cannot be combined
 with `--sandbox-kit`; cloud template launches also cannot take mixins. See the
-[example v3 workload](https://github.com/docker/docker-agent/tree/main/docs/configuration/sandbox/kit),
+[maintained v3 workload](https://github.com/docker/docker-agent/tree/main/sandbox),
 which declares network policy, provider credentials, shared skills, agent context,
-and headless/resume session commands.
+headless prompts, and interactive session commands.
 
 With an explicit workload, Docker Agent disables its host auto-kit so it does
 not hide sbx-provided skills/context. It also leaves network policy to the kit
@@ -255,6 +255,37 @@ host set` line in the launch summary), the runner now prints a hint
 pointing at this command so you can turn the missing host into a
 one-line, persistent fix instead of relying on the wider conservative
 fallback host set.
+
+## Published v3 kit
+
+This repository publishes `docker/sbx-kit-docker-agent` for Linux amd64 and
+arm64. It packages the same binary and development tools as the legacy template,
+plus a v3 descriptor for proxy-managed provider credentials, network policy,
+shared skills, `AGENTS.md` context, and headless/interactive sessions.
+
+| Tag | Source |
+| --- | --- |
+| `:edge` | Current `main`, after the CI gate passes |
+| `:latest` | Most recent `v*` release |
+| `:1.2.3` | The matching `v1.2.3` release |
+
+```console
+$ docker agent run --sandbox --sandbox-kit docker/sbx-kit-docker-agent:latest default
+$ sbx run docker/sbx-kit-docker-agent:edge .
+```
+
+The direct sbx launch runs the built-in `default` agent with `--yolo` inside
+the sandbox. The Docker Agent wrapper supplies its own command and safety
+flags. Pin a digest for reproducibility; moving a tag does not update existing
+sandboxes. Publishing the kit does not change the default `--sandbox` template.
+
+Credentials for Anthropic, GitHub/Copilot, Google, Mistral, Nebius, OpenAI,
+OpenRouter, and xAI are optional and proxy-managed. Configure them through sbx;
+no API keys are included in the image. The egress policy covers those providers,
+models.dev, and Docker Hub. Add mixins for other providers or tool-download
+hosts. [Cloud credential limitations](#cloud-sandboxes) still apply.
+
+See the [kit source and build instructions](https://github.com/docker/docker-agent/tree/main/sandbox).
 
 ## Sandbox templates
 

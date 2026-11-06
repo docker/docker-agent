@@ -3,6 +3,7 @@
 ARG GO_VERSION="1.27.3"
 ARG ALPINE_VERSION="3.23"
 ARG XX_VERSION="1.9.0"
+ARG SANDBOX_TARGET="runtime"
 
 # xx is a helper for cross-compilation
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:${XX_VERSION} AS xx
@@ -99,7 +100,13 @@ COPY --from=builder-linux --chmod=0755 /binaries/docker-agent-$TARGETOS-$TARGETA
 LABEL com.docker.sandboxes.flavor="docker-agent-docker"
 CMD [ "docker-agent" ]
 
-FROM alpine:${ALPINE_VERSION}
+# v3 workload: the same source-built binary and tools as the legacy template.
+FROM template AS kit
+WORKDIR /home/agent/workspace
+ENTRYPOINT ["docker-agent", "run", "--sandbox=false", "--yolo", "default"]
+CMD []
+
+FROM alpine:${ALPINE_VERSION} AS runtime
 RUN apk add --no-cache ca-certificates docker-cli && \
     addgroup -S docker-agent && adduser -S -G docker-agent docker-agent && \
     mkdir /data /work && chmod 777 /data /work
@@ -111,3 +118,6 @@ COPY --from=builder-linux /binaries/docker-agent-$TARGETOS-$TARGETARCH /docker-a
 USER docker-agent
 WORKDIR /work
 ENTRYPOINT ["/docker-agent"]
+
+# Kit source builds select the workload; ordinary image builds keep the runtime.
+FROM ${SANDBOX_TARGET}

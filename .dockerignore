@@ -14,3 +14,4 @@
 !/pkg/model/provider/catalog/providers.json
 !/pkg/tools/builtin/mcpcatalog/servers.json
 !/pkg/tui/styles/themes/*.yaml
+!/sandbox.yaml

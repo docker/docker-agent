@@ -1,0 +1,171 @@
+# syntax=docker/sandbox-kit:3
+# yaml-language-server: $schema=https://raw.githubusercontent.com/docker/sandbox-kit-spec/main/schema/kit.schema.json
+schemaVersion: "3"
+kind: workload
+dockerfile: ./Dockerfile
+displayName: Docker Agent
+author: Docker, Inc.
+description: Docker Agent with development tools and proxy-managed model credentials.
+sourceUrl: https://github.com/docker/docker-agent
+licenses: [Apache-2.0]
+version: "${{ kit.args.version }}"
+args:
+  contentStage:
+    default: kit
+    enum: [kit]
+    buildArg: SANDBOX_TARGET
+    description: Select the sandbox workload in the shared Dockerfile.
+  version:
+    default: 0.0.0-dev
+    buildArg: KIT_VERSION
+    description: Docker Agent version built by this checkout.
+
+capabilities:
+  - type: com.docker.sandbox/sbx@1
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - models.dev:443
+          - api.anthropic.com:443
+          - claude.ai:443
+          - console.anthropic.com:443
+          - api.business.githubcopilot.com:443
+          - api.enterprise.githubcopilot.com:443
+          - api.github.com:443
+          - api.githubcopilot.com:443
+          - api.individual.githubcopilot.com:443
+          - copilot.github.com:443
+          - github.com:443
+          - raw.githubusercontent.com:443
+          - aiplatform.googleapis.com:443
+          - generativelanguage.googleapis.com:443
+          - oauth2.googleapis.com:443
+          - vertexai.googleapis.com:443
+          - api.mistral.ai:443
+          - api.studio.nebius.com:443
+          - api.openai.com:443
+          - openrouter.ai:443
+          - api.x.ai:443
+          - registry-1.docker.io:443
+          - auth.docker.io:443
+          - production.cloudflare.docker.com:443
+          - production.cloudfront.docker.com:443
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: Anthropic API access
+    config:
+      service: anthropic
+      phase: runtime
+      apiKey:
+        name: ANTHROPIC_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api.anthropic.com, header: x-api-key, format: "%s"}
+          - {domain: claude.ai, header: x-api-key, format: "%s"}
+          - {domain: console.anthropic.com, header: x-api-key, format: "%s"}
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: GitHub and Copilot access
+    config:
+      service: github
+      phase: runtime
+      apiKey:
+        name: GITHUB_TOKEN
+        proxyManaged: true
+        inject:
+          - {domain: api.business.githubcopilot.com, header: Authorization, format: "Bearer %s"}
+          - {domain: api.enterprise.githubcopilot.com, header: Authorization, format: "Bearer %s"}
+          - {domain: api.github.com, header: Authorization, format: "Bearer %s"}
+          - {domain: api.githubcopilot.com, header: Authorization, format: "Bearer %s"}
+          - {domain: api.individual.githubcopilot.com, header: Authorization, format: "Bearer %s"}
+          - {domain: copilot.github.com, header: Authorization, format: "Bearer %s"}
+          - {domain: github.com, header: Authorization, format: "Bearer %s"}
+          - {domain: raw.githubusercontent.com, header: Authorization, format: "Bearer %s"}
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: Google AI API access
+    config:
+      service: google
+      phase: runtime
+      apiKey:
+        name: GOOGLE_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: aiplatform.googleapis.com, header: x-goog-api-key, format: "%s"}
+          - {domain: generativelanguage.googleapis.com, header: x-goog-api-key, format: "%s"}
+          - {domain: oauth2.googleapis.com, header: x-goog-api-key, format: "%s"}
+          - {domain: vertexai.googleapis.com, header: x-goog-api-key, format: "%s"}
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: Mistral API access
+    config:
+      service: mistral
+      phase: runtime
+      apiKey:
+        name: MISTRAL_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api.mistral.ai, header: Authorization, format: "Bearer %s"}
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: Nebius API access
+    config:
+      service: nebius
+      phase: runtime
+      apiKey:
+        name: NEBIUS_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api.studio.nebius.com, header: Authorization, format: "Bearer %s"}
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: OpenAI API access
+    config:
+      service: openai
+      phase: runtime
+      apiKey:
+        name: OPENAI_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api.openai.com, header: Authorization, format: "Bearer %s"}
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: OpenRouter API access
+    config:
+      service: openrouter
+      phase: runtime
+      apiKey:
+        name: OPENROUTER_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: openrouter.ai, header: Authorization, format: "Bearer %s"}
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: xAI API access
+    config:
+      service: xai
+      phase: runtime
+      apiKey:
+        name: XAI_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api.x.ai, header: Authorization, format: "Bearer %s"}
+  - type: com.docker.sandbox/agent-skills@1
+    optional: true
+    config:
+      path: /home/agent/.agents/skills
+      mode: readonly
+  - type: com.docker.sandbox/agent-context@1
+    config:
+      filename: AGENTS.md
+      directory: /home/agent
+  - type: com.docker.sandbox/agent-sessions@1
+    config:
+      prompt: [--exec, --, "{{.Prompt}}"]
+  - type: com.docker.sandbox/agent-interactive-sessions@1
+    optional: true
+    config:
+      prompt: [--, "{{.Prompt}}"]
+      resume: [--session, "{{.SessionID}}"]
+      continue: [--session, "-1"]
