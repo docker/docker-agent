@@ -75,6 +75,7 @@ func TestProviderIDsMatchEmbeddedCatalog(t *testing.T) {
 	absent := map[string]string{
 		"api-route":  "model IDs come from API Route's /v1/models endpoint, not models.dev",
 		"atlascloud": "model IDs come from Atlas Cloud's /v1/models endpoint, not models.dev",
+		"popnow":     "model IDs come from PopNow's /v1/models endpoint, not models.dev",
 		"cloudgpu":   "model IDs come from CloudGPU's /v1/models endpoint, not models.dev",
 		"chatgpt":    "subscription backend, distinct from OpenAI",
 		"lunaroute":  "model IDs come from Lunaroute’s /v1/models endpoint, not models.dev",

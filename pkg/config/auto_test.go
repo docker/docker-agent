@@ -101,6 +101,13 @@ func TestAvailableProviders_NoGateway(t *testing.T) {
 			expectedProvider: "atlascloud",
 		},
 		{
+			name: "popnow api key present",
+			envVars: map[string]string{
+				"POPNOW_API_KEY": "test-key",
+			},
+			expectedProvider: "popnow",
+		},
+		{
 			name: "opper api key present",
 			envVars: map[string]string{
 				"OPPER_API_KEY": "test-key",
@@ -593,7 +600,7 @@ func TestDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Test that DefaultModels map has all expected providers
-	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "openrouter", "api-route", "orcarouter", "atlascloud", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "amazon-bedrock", "opencode", "opencode-go", "github-copilot"}
+	expectedProviders := []string{"openai", "anthropic", "google", "dmr", "mistral", "openrouter", "api-route", "orcarouter", "atlascloud", "popnow", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "amazon-bedrock", "opencode", "opencode-go", "github-copilot"}
 
 	for _, provider := range expectedProviders {
 		t.Run(provider, func(t *testing.T) {
@@ -615,6 +622,7 @@ func TestDefaultModels(t *testing.T) {
 	assert.Equal(t, "glm-5.3", DefaultModels["lunaroute"])
 	assert.Equal(t, "deepseek-v4.1-flash", DefaultModels["cloudgpu"])
 	assert.Equal(t, "qwen/qwen3.8-max", DefaultModels["atlascloud"])
+	assert.Equal(t, "deepseek/v4-flash/chat", DefaultModels["popnow"])
 	assert.Equal(t, "deepseek-ai/DeepSeek-V4-Pro-0813", DefaultModels["baseten"])
 	assert.Equal(t, "Qwen3.5-397B-A17B", DefaultModels["ovhcloud"])
 	assert.Equal(t, "llama-3.3-70b-versatile", DefaultModels["groq"])
@@ -634,7 +642,7 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 	t.Parallel()
 
 	// Verify that AutoModelConfig always returns a model from DefaultModels
-	providers := []string{"openai", "anthropic", "google", "mistral", "openrouter", "api-route", "orcarouter", "atlascloud", "cloudgpu", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "opencode", "github-copilot"}
+	providers := []string{"openai", "anthropic", "google", "mistral", "openrouter", "api-route", "orcarouter", "atlascloud", "popnow", "cloudgpu", "baseten", "ovhcloud", "groq", "fireworks-ai", "deepseek", "cerebras", "togetherai", "huggingface", "moonshotai", "vercel", "opencode", "github-copilot"}
 
 	for _, provider := range providers {
 		t.Run(provider, func(t *testing.T) {
@@ -662,6 +670,8 @@ func TestAutoModelConfig_IntegrationWithDefaultModels(t *testing.T) {
 				envVars["ORCAROUTER_API_KEY"] = "test-key"
 			case "atlascloud":
 				envVars["ATLASCLOUD_API_KEY"] = "test-key"
+			case "popnow":
+				envVars["POPNOW_API_KEY"] = "test-key"
 			case "cloudgpu":
 				envVars["CLOUDGPU_API_KEY"] = "test-key"
 			case "baseten":
