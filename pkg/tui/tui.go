@@ -220,6 +220,7 @@ type appModel struct {
 	themeChanges   chan messages.ThemeFileChangedMsg
 	cancelThemeRun context.CancelFunc
 	themeRunDone   <-chan struct{}
+	themeRunRef    string
 
 	// dockerDesktop enables terminal mode restoration after a focus change.
 	dockerDesktop bool
@@ -630,14 +631,22 @@ func (m *appModel) watchCurrentTheme() {
 	m.themeMu.Lock()
 	defer m.themeMu.Unlock()
 
+	themeRef := styles.CurrentTheme().Ref
 	if m.cancelThemeRun != nil {
+		select {
+		case <-m.themeRunDone:
+		default:
+			// Restarting would drop an edit still in the watcher's debounce window.
+			if themeRef == m.themeRunRef {
+				return
+			}
+		}
 		m.cancelThemeRun()
 		<-m.themeRunDone
 	}
 	if m.themeWatcher == nil || m.themeCtx.Err() != nil {
 		return
 	}
-	themeRef := styles.CurrentTheme().Ref
 	if themeRef == "" {
 		return
 	}
@@ -646,6 +655,7 @@ func (m *appModel) watchCurrentTheme() {
 	watcher := m.themeWatcher
 	ready, done := make(chan struct{}), make(chan struct{})
 	m.themeRunDone = done
+	m.themeRunRef = themeRef
 	go func() {
 		defer close(done)
 		defer cancel()

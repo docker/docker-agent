@@ -172,8 +172,10 @@ func sendA2AMessage(t *testing.T, url, requestID, messageID, text string) a2aRes
 func startA2AServer(t *testing.T, agentFile string, runConfig *config.RuntimeConfig) a2a.AgentCard {
 	t.Helper()
 
+	// Not ":0": on macOS that dual-stack bind can take a port another test
+	// already holds on 127.0.0.1, which then answers our requests.
 	var lc net.ListenConfig
-	ln, err := lc.Listen(t.Context(), "tcp", ":0")
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
 	sessionDB := filepath.Join(t.TempDir(), "session.db")
@@ -196,8 +198,7 @@ func startA2AServer(t *testing.T, agentFile string, runConfig *config.RuntimeCon
 		}
 	})
 
-	port := ln.Addr().(*net.TCPAddr).Port
-	serverURL := fmt.Sprintf("http://localhost:%d", port)
+	serverURL := "http://" + ln.Addr().String()
 
 	cardReq, err := http.NewRequestWithContext(t.Context(), http.MethodGet, serverURL+a2asrv.WellKnownAgentCardPath, http.NoBody)
 	require.NoError(t, err)
