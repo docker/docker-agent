@@ -15,6 +15,8 @@ _Docker Agent's default interface is a rich, interactive terminal UI with file a
 
 Both the full TUI and the lean TUI display a centered ASCII art Docker Agent banner on startup when the chat is empty. The banner is automatically hidden once the agent starts responding or when a custom welcome message is configured. You can disable the banner entirely from the **Appearance** tab of `/settings`, or by setting `show_banner: false` in your [user settings](../../configuration/user-settings/index.md).
 
+To draw your own art in the full TUI instead, pass `--banner-file <path>` with a text file. A line holding only a form feed (`\f`) separates frames; a file with several frames plays them in a loop, one every 100ms, until the conversation starts. Lines may carry ANSI color sequences. Art larger than the chat area is cropped around its center, so a backdrop sized for a large terminal fills a small one. The lean TUI keeps the default banner.
+
 ```bash
 # Launch with a config
 $ docker agent run agent.yaml
@@ -30,6 +32,9 @@ $ docker agent run agent.yaml --debug
 
 # Override the application name shown in the status bar and window title
 $ docker agent run agent.yaml --app-name "My Project"
+
+# Replace the startup banner with your own art (several frames play as an animation)
+$ docker agent run agent.yaml --banner-file ./banner.txt
 
 # Preselect a color theme
 $ docker agent run agent.yaml --theme dracula
