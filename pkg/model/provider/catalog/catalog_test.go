@@ -45,7 +45,48 @@ func TestEmbeddedProviders(t *testing.T) {
 				assert.NotEmpty(t, key)
 				assert.NotEmpty(t, param)
 			}
+			switch alias.APIFlavor {
+			case "", APIFlavorOpenAI, APIFlavorOpenAICompatible, APIFlavorGateway:
+			default:
+				t.Errorf("unknown api_flavor %q", alias.APIFlavor)
+			}
 		})
+	}
+}
+
+func TestProviderAPIFlavor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		provider string
+		want     APIFlavor
+	}{
+		{"openai", APIFlavorOpenAI},
+		{"chatgpt", APIFlavorOpenAI},
+		{"azure", APIFlavorOpenAI},
+		{"mistral", APIFlavorOpenAICompatible},
+		{"openrouter", APIFlavorGateway},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			t.Parallel()
+
+			provider, ok := Find(tt.provider)
+			require.True(t, ok)
+			assert.Equal(t, tt.want, provider.APIFlavor)
+		})
+	}
+}
+
+func TestOpenAIVendorProvidersUseOpenAIFlavor(t *testing.T) {
+	t.Parallel()
+
+	for _, provider := range Ordered() {
+		if provider.OpenAIVendor {
+			assert.Equal(t, APIFlavorOpenAI, provider.APIFlavor,
+				"%s is openai_vendor but has api_flavor %q", provider.Name, provider.APIFlavor)
+		}
 	}
 }
 

@@ -13,6 +13,16 @@ import (
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
+// APIFlavor distinguishes first-party OpenAI endpoints from
+// OpenAI-compatible providers and multi-vendor gateways.
+type APIFlavor string
+
+const (
+	APIFlavorOpenAI           APIFlavor = "openai"
+	APIFlavorOpenAICompatible APIFlavor = "openai-compatible"
+	APIFlavorGateway          APIFlavor = "gateway"
+)
+
 // Provider describes a provider's API and transport defaults.
 // Callers must treat maps and slices returned by this package as read-only.
 type Provider struct {
@@ -20,6 +30,9 @@ type Provider struct {
 	Name string `json:"name"`
 	// APIType selects the registered API implementation that serves this provider.
 	APIType string `json:"api_type"`
+	// APIFlavor classifies the provider's relationship to the OpenAI API.
+	// Empty means the provider has not been classified yet.
+	APIFlavor APIFlavor `json:"api_flavor,omitempty"`
 	// BaseURL is the default endpoint; API implementations resolve dynamic endpoints themselves.
 	// Environment references such as ${CLOUDFLARE_ACCOUNT_ID} expand at construction time.
 	BaseURL string `json:"base_url,omitempty"`
