@@ -77,7 +77,7 @@ func TestConvertBetaMessages_MergesConsecutiveToolMessages(t *testing.T) {
 
 	userMsg2Map, ok := marshalToMap(betaMessages[2])
 	require.True(t, ok)
-	content := contentArray(userMsg2Map)
+	content, _ := userMsg2Map["content"].([]any)
 	require.Len(t, content, 2, "User message should have 2 tool_result blocks")
 }
 
