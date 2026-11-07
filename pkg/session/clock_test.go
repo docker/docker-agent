@@ -33,7 +33,7 @@ func TestNew_UsesInjectedClockAndID(t *testing.T) {
 	t.Parallel()
 	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
 
-	s := New(WithClock(fixedClock(fixed)), WithIDGen(stubIDs(t, "test-session-1")))
+	s := New(withClock(fixedClock(fixed)), withIDGen(stubIDs(t, "test-session-1")))
 
 	if s.ID != "test-session-1" {
 		t.Errorf("ID = %q, want %q", s.ID, "test-session-1")
@@ -48,7 +48,7 @@ func TestNew_UsesInjectedClockAndID(t *testing.T) {
 
 func TestNew_WithIDOverridesGenerator(t *testing.T) {
 	t.Parallel()
-	s := New(WithIDGen(stubIDs(t)), WithID("explicit-id"))
+	s := New(withIDGen(stubIDs(t)), WithID("explicit-id"))
 
 	if s.ID != "explicit-id" {
 		t.Errorf("ID = %q, want %q", s.ID, "explicit-id")
@@ -106,7 +106,7 @@ func TestWithMessageOptions_UseInjectedClock(t *testing.T) {
 	want := fixed.Format(time.RFC3339)
 
 	s := New(
-		WithClock(fixedClock(fixed)),
+		withClock(fixedClock(fixed)),
 		WithUserMessage("user"),
 		WithSystemMessage("system"),
 		WithImplicitUserMessage("implicit"),
@@ -134,5 +134,27 @@ func TestDuration_DeterministicWithExplicitTimestamps(t *testing.T) {
 	want := 5 * time.Second
 	if got != want {
 		t.Errorf("Duration() = %v, want %v", got, want)
+	}
+}
+
+// withClock injects the time source used for the session's CreatedAt, for
+// timestamping messages it generates (summaries, compaction input), and for
+// messages added through WithUserMessage/WithSystemMessage/
+// WithImplicitUserMessage. Because those message options read the clock when
+// they run, withClock must precede them in the option list (the natural
+// ordering). Primarily for tests that need a deterministic clock; production
+// code leaves it unset and falls back to time.Now.
+func withClock(now func() time.Time) Opt {
+	return func(s *Session) {
+		s.clock = now
+	}
+}
+
+// withIDGen injects the generator used to mint the session ID when no explicit
+// ID is provided. Primarily for tests that need deterministic IDs; production
+// code leaves it unset and falls back to a random UUID.
+func withIDGen(gen func() string) Opt {
+	return func(s *Session) {
+		s.idgen = gen
 	}
 }
