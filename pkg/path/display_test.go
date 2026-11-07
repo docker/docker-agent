@@ -23,6 +23,10 @@ func TestShortenHomeUsesPlatformNativeHome(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 
 	assert.Equal(t, filepath.Join("~", "file.txt"), ShortenHome(filepath.Join(home, "file.txt")))
+
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	assert.Equal(t, "a/../b", ShortenHome("a/../b"))
 }
 
 func TestShortenHomeDir(t *testing.T) {
