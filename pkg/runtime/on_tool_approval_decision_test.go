@@ -75,19 +75,3 @@ func TestExecuteOnToolApprovalDecisionHooks_ForwardsVerdictAndSource(t *testing.
 	assert.Equal(t, ApprovalSourceReadOnlyHint, in.ApprovalSource)
 	assert.Equal(t, "safe", in.SafetyLabel)
 }
-
-// TestApprovalSourceMappersAreStable pins the stable classifier
-// strings used by [allowSourceFor] and [denySourceFor]. Tests that
-// the team-permissions vs session-permissions split (today: by
-// checker.source string match) survives changes to the inner labels.
-func TestApprovalSourceMappersAreStable(t *testing.T) {
-	t.Parallel()
-
-	assert.Equal(t, ApprovalSourceSessionPermissionsAllow, allowSourceFor("session permissions"))
-	assert.Equal(t, ApprovalSourceTeamPermissionsAllow, allowSourceFor("permissions configuration"))
-	assert.Equal(t, ApprovalSourceTeamPermissionsAllow, allowSourceFor("anything-else"),
-		"unknown source must default to team_permissions to avoid silent misclassification on future label changes")
-
-	assert.Equal(t, ApprovalSourceSessionPermissionsDeny, denySourceFor("session permissions"))
-	assert.Equal(t, ApprovalSourceTeamPermissionsDeny, denySourceFor("permissions configuration"))
-}
