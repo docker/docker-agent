@@ -924,13 +924,13 @@ description: Subproject version
 	}
 }
 
-func TestFindGitRoot(t *testing.T) {
+func TestGitAnchoredDirs(t *testing.T) {
 	t.Parallel()
 	t.Run("git directory at current", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		require.NoError(t, os.Mkdir(filepath.Join(tmpDir, ".git"), 0o755))
-		got := findGitRoot(tmpDir)
-		assert.Equal(t, tmpDir, got)
+		got := gitAnchoredDirs(tmpDir)
+		assert.Equal(t, []string{tmpDir}, got)
 	})
 
 	t.Run("git directory at parent", func(t *testing.T) {
@@ -938,22 +938,24 @@ func TestFindGitRoot(t *testing.T) {
 		require.NoError(t, os.Mkdir(filepath.Join(tmpDir, ".git"), 0o755))
 		nestedDir := filepath.Join(tmpDir, "sub", "nested")
 		require.NoError(t, os.MkdirAll(nestedDir, 0o755))
-		got := findGitRoot(nestedDir)
-		assert.Equal(t, tmpDir, got)
+		got := gitAnchoredDirs(nestedDir)
+		assert.Equal(t, []string{tmpDir, filepath.Join(tmpDir, "sub"), nestedDir}, got)
 	})
 
 	t.Run("git file (worktree)", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		// .git as a file (like in worktrees)
 		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".git"), []byte("gitdir: /somewhere/else/.git"), 0o644))
-		got := findGitRoot(tmpDir)
-		assert.Equal(t, tmpDir, got)
+		nestedDir := filepath.Join(tmpDir, "sub")
+		require.NoError(t, os.Mkdir(nestedDir, 0o755))
+		got := gitAnchoredDirs(nestedDir)
+		assert.Equal(t, []string{tmpDir, nestedDir}, got)
 	})
 
 	t.Run("no git repo", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		got := findGitRoot(tmpDir)
-		assert.Empty(t, got)
+		got := gitAnchoredDirs(tmpDir)
+		assert.Equal(t, []string{tmpDir}, got)
 	})
 }
 
