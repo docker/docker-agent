@@ -241,6 +241,8 @@
       url: /providers/ovhcloud/
     - title: Runcrate
       url: /providers/runcrate/
+    - title: Standard Compute
+      url: /providers/standardcompute/
     - title: Together AI
       url: /providers/together/
     - title: Vercel AI Gateway

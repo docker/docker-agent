@@ -162,6 +162,7 @@ func TestShouldMergeConsecutiveMessages_Gating(t *testing.T) {
 		{"api-route, no base_url", &latest.ModelConfig{Provider: "api-route", Model: "gpt-6.1-sol"}, true},
 		{"baseten", &latest.ModelConfig{Provider: "baseten", Model: "zai-org/GLM-5.2"}, true},
 		{"daoxe, no base_url", &latest.ModelConfig{Provider: "daoxe", Model: "claude-sonnet-4-6"}, true},
+		{"standardcompute, no base_url", &latest.ModelConfig{Provider: "standardcompute", Model: "standardcompute"}, true},
 		{"opper, no base_url", &latest.ModelConfig{Provider: "opper", Model: "claude-sonnet-4-6"}, true},
 		{"runcrate, no base_url", &latest.ModelConfig{Provider: "runcrate", Model: "deepseek-ai/DeepSeek-V4.1-Flash"}, true},
 		{"cloudgpu, no base_url", &latest.ModelConfig{Provider: "cloudgpu", Model: "deepseek-v4.1-flash"}, true},
