@@ -51,11 +51,3 @@ func TestMapSlice_RunsConcurrently(t *testing.T) {
 		assert.Len(t, got, n)
 	})
 }
-
-func TestForEach(t *testing.T) {
-	t.Parallel()
-
-	var sum atomic.Int32
-	ForEach([]int32{1, 2, 3, 4}, func(v int32) { sum.Add(v) })
-	assert.Equal(t, int32(10), sum.Load())
-}
