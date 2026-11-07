@@ -1428,7 +1428,7 @@ func (r *LocalRuntime) subscribePlanChanges(sess *session.Session, events EventS
 	var unsubs []func()
 	for _, ts := range toolsets {
 		for _, notifier := range tools.FindAll[plan.ChangeNotifier](ts) {
-			if key, identifiable := notifierDedupKey(notifier); identifiable {
+			if key, identifiable := pointerIdentity(notifier); identifiable {
 				if _, dup := seen[key]; dup {
 					continue
 				}
@@ -1450,23 +1450,6 @@ func (r *LocalRuntime) subscribePlanChanges(sess *session.Session, events EventS
 type notifierIdentity struct {
 	typ reflect.Type
 	ptr uintptr
-}
-
-// notifierDedupKey derives a dedup identity for n, reporting ok=false when
-// none is safe. Interface map keys hash the dynamic value, which panics at
-// runtime for non-comparable implementations (e.g. a value struct with a
-// func field) — and even a comparable struct type panics when an interface
-// field holds a non-comparable value. Pointer identity is the only
-// universally hash-safe choice, and it covers the case dedup exists for:
-// the registry-created *plan.ToolSet singleton shared by every agent.
-// Non-pointer implementations skip dedup — a duplicate subscription is
-// benign, a panic is not.
-func notifierDedupKey(n plan.ChangeNotifier) (notifierIdentity, bool) {
-	v := reflect.ValueOf(n)
-	if v.Kind() != reflect.Pointer {
-		return notifierIdentity{}, false
-	}
-	return notifierIdentity{typ: v.Type(), ptr: v.Pointer()}, true
 }
 
 // emitAgentWarnings drains and emits any pending toolset warnings as
