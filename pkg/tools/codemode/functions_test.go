@@ -47,19 +47,17 @@ func TestToolToTypeScriptExamples(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		parameters map[string]any
-		output     map[string]any
-		want       string
+		name        string
+		description string
+		parameters  map[string]any
+		output      map[string]any
+		want        string
 	}{
 		{
-			name:       "primitive aliases",
+			name:       "primitive aliases and empty description",
 			parameters: map[string]any{"type": "string"},
 			output:     map[string]any{"type": "boolean"},
-			want: `/**
- * Example tool
- */
-type ExampleToolInput = string;
+			want: "/**\n * \n */\n" + `type ExampleToolInput = string;
 
 type ExampleToolOutput = boolean;
 
@@ -67,7 +65,8 @@ declare function ExampleTool(args: ExampleToolInput): Promise<ExampleToolOutput>
 `,
 		},
 		{
-			name: "nested object, enum, nullable array, and property comments",
+			name:        "nested object, enum, nullable array, and property comments",
+			description: "\n \tExample tool */\r\n\n",
 			parameters: map[string]any{
 				"type":     "object",
 				"required": []string{"filter"},
@@ -86,10 +85,7 @@ declare function ExampleTool(args: ExampleToolInput): Promise<ExampleToolOutput>
 				"type":  []any{"array", "null"},
 				"items": map[string]any{"type": "number"},
 			},
-			want: `/**
- * Example tool
- */
-interface ExampleToolInput {
+			want: "/**\n * \n * Example tool *\\/\n * \n * \n */\n" + `interface ExampleToolInput {
   // Filter to apply
   // before searching
   filter: {
@@ -103,7 +99,8 @@ declare function ExampleTool(args: ExampleToolInput): Promise<ExampleToolOutput>
 `,
 		},
 		{
-			name: "unions and intersections",
+			name:        "unions and intersections",
+			description: "Example tool",
 			parameters: map[string]any{
 				"oneOf": []any{
 					map[string]any{"type": "string"},
@@ -131,7 +128,8 @@ declare function ExampleTool(args: ExampleToolInput): Promise<ExampleToolOutput>
 `,
 		},
 		{
-			name: "references and typed additional properties",
+			name:        "references and typed additional properties",
+			description: "Example tool",
 			parameters: map[string]any{
 				"type": "object",
 				"$defs": map[string]any{
@@ -163,7 +161,7 @@ declare function ExampleTool(args: ExampleToolInput): Promise<ExampleToolOutput>
 			t.Parallel()
 			tool := tools.Tool{
 				Name:         "example_tool",
-				Description:  "Example tool",
+				Description:  tt.description,
 				Parameters:   tt.parameters,
 				OutputSchema: tt.output,
 			}
