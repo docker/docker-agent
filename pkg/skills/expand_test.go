@@ -73,7 +73,8 @@ func TestExpandCommands(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := ExpandCommands(t.Context(), tt.content, ShellRunner(t.TempDir()))
+			result, err := ExpandCommandsWithError(t.Context(), tt.content, ShellRunner(t.TempDir()))
+			require.NoError(t, err)
 			assert.Equal(t, tt.want, result)
 		})
 	}
@@ -86,7 +87,8 @@ func TestExpandCommands_WorkingDirectory(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "test.txt"), []byte("hello"), 0o644))
 
-	result := ExpandCommands(t.Context(), "Content: !`cat test.txt`", ShellRunner(tmpDir))
+	result, err := ExpandCommandsWithError(t.Context(), "Content: !`cat test.txt`", ShellRunner(tmpDir))
+	require.NoError(t, err)
 	assert.Equal(t, "Content: hello", result)
 }
 
@@ -97,7 +99,8 @@ func TestExpandCommands_ScriptExecution(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "info.sh"), []byte("#!/bin/sh\necho from-script"), 0o755))
 
-	result := ExpandCommands(t.Context(), "Output: !`./info.sh`", ShellRunner(tmpDir))
+	result, err := ExpandCommandsWithError(t.Context(), "Output: !`./info.sh`", ShellRunner(tmpDir))
+	require.NoError(t, err)
 	assert.Equal(t, "Output: from-script", result)
 }
 
@@ -105,7 +108,8 @@ func TestExpandCommands_FailedCommand(t *testing.T) {
 	t.Parallel()
 	skipOnWindows(t)
 
-	result := ExpandCommands(t.Context(), "Before !`nonexistent_command_12345` after", ShellRunner(t.TempDir()))
+	result, err := ExpandCommandsWithError(t.Context(), "Before !`nonexistent_command_12345` after", ShellRunner(t.TempDir()))
+	require.NoError(t, err)
 	assert.Contains(t, result, "Before ")
 	assert.Contains(t, result, "[error executing `nonexistent_command_12345`:")
 	assert.Contains(t, result, " after")
@@ -118,7 +122,8 @@ func TestExpandCommands_RefusedCommand(t *testing.T) {
 		return "", errors.New("the user rejected the command")
 	}
 
-	result := ExpandCommands(t.Context(), "Status: !`git status`", run)
+	result, err := ExpandCommandsWithError(t.Context(), "Status: !`git status`", run)
+	require.NoError(t, err)
 	assert.Equal(t, "Status: [error executing `git status`: the user rejected the command]", result)
 }
 
