@@ -474,7 +474,7 @@ var formatHandlers = map[string]formatHandler{
 	},
 	"text": {
 		accept:          "text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1",
-		convertFromHTML: htmlToText,
+		convertFromHTML: html2text.HTML2Text,
 	},
 }
 
@@ -498,10 +498,6 @@ func htmlToMarkdown(html string) string {
 		return html
 	}
 	return markdown
-}
-
-func htmlToText(html string) string {
-	return html2text.HTML2Text(html)
 }
 
 // CreateToolSet is used by the tools registry.
