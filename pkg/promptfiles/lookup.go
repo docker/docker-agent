@@ -79,14 +79,6 @@ func PathsFromEnv(workDir, homeDir, filename string) []string {
 	return Paths(workDir, homeDir, os.Getenv(skills.KitDirEnv), filename)
 }
 
-// FindInHierarchy searches for filename starting at startDir and
-// walking up the directory tree. Returns the path of the first match,
-// or "" if none.
-func FindInHierarchy(startDir, filename string) string {
-	path, _ := findInHierarchy(startDir, filename)
-	return path
-}
-
 func findInHierarchy(startDir, filename string) (string, error) {
 	dir, err := filepath.Abs(startDir)
 	if err != nil {
