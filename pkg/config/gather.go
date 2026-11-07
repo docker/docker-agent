@@ -342,15 +342,6 @@ func sortedKeys(requiredEnv map[string]bool) []string {
 	return slices.Sorted(maps.Keys(requiredEnv))
 }
 
-// GatherEnvVarsForEvaluators returns credentials needed by referenced evaluator hooks.
-func GatherEnvVarsForEvaluators(cfg *latest.Config, modelsGateway ...string) []string {
-	evaluatorGateway := ""
-	if len(modelsGateway) != 0 {
-		evaluatorGateway = modelsGateway[0]
-	}
-	return RequiredEvaluatorEnvVars(cfg, options.WithGateway(evaluatorGateway))
-}
-
 // RequiredEvaluatorEnvVars mirrors the effective evaluator connection options.
 func RequiredEvaluatorEnvVars(cfg *latest.Config, opts ...options.Opt) []string {
 	required := map[string]bool{}

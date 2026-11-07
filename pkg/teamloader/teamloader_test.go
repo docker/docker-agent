@@ -174,7 +174,7 @@ func gatherExampleEnvVars(t *testing.T, examples []string) map[string]bool {
 		for _, env := range config.GatherEnvVarsForModels(ctx, cfg, environment.NewOsEnvProvider()) {
 			envs[env] = true
 		}
-		for _, env := range config.GatherEnvVarsForEvaluators(cfg) {
+		for _, env := range config.RequiredEvaluatorEnvVars(cfg) {
 			envs[env] = true
 		}
 		toolEnvs, _ := config.GatherEnvVarsForTools(ctx, cfg)
