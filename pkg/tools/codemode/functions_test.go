@@ -195,12 +195,16 @@ func TestSchemaType(t *testing.T) {
 		{name: "array of union", schema: map[string]any{"type": "array", "items": map[string]any{"type": []any{"string", "null"}}}, want: "(string | null)[]"},
 		{name: "inferred array", schema: map[string]any{"items": map[string]any{"type": "boolean"}}, want: "boolean[]"},
 		{name: "unknown", schema: map[string]any{}, want: "unknown"},
+		{name: "nil schema", schema: nil, want: "unknown"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, schemaType(tt.schema, tt.schema, 0))
+			if tt.name == "nullable" {
+				assert.Equal(t, map[string]any{"type": []any{"string", "null"}}, tt.schema)
+			}
 		})
 	}
 }
