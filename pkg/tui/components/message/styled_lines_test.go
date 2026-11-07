@@ -49,7 +49,7 @@ func TestStyledAssistantLinesMatchLipgloss(t *testing.T) {
 			if width < 4 {
 				continue
 			}
-			rendered, err := markdown.NewRenderer(width - style.GetHorizontalFrameSize()).Render(streamingMarkdownContent)
+			rendered, err := markdown.NewFastRenderer(width - style.GetHorizontalFrameSize()).Render(streamingMarkdownContent)
 			require.NoError(t, err)
 			require.Equal(t, referenceAssistantLines(style, width, rendered), styledAssistantLines(style, width, rendered), "markdown width %d", width)
 		}
@@ -77,7 +77,7 @@ func BenchmarkStyledAssistantLines(b *testing.B) {
 	style := styles.AssistantMessageStyle.Foreground(lipgloss.Color("#c0caf5")).BorderForeground(lipgloss.Color("#414868"))
 	for _, width := range []int{40, 100, 160} {
 		b.Run(strconv.Itoa(width), func(b *testing.B) {
-			rendered, err := markdown.NewRenderer(width - style.GetHorizontalFrameSize()).Render(streamingMarkdownContent)
+			rendered, err := markdown.NewFastRenderer(width - style.GetHorizontalFrameSize()).Render(streamingMarkdownContent)
 			require.NoError(b, err)
 			for name, content := range map[string]string{
 				"markdown": rendered,
