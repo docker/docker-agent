@@ -169,3 +169,15 @@ func TestCellSizeUsesAvailableWidthForWideImage(t *testing.T) {
 	assert.Equal(t, 60, cols)
 	assert.Equal(t, 17, rows)
 }
+
+func TestKittySequenceChunksLargePayload(t *testing.T) {
+	t.Parallel()
+	data := bytes.Repeat([]byte("x"), 4096)
+
+	seq := KittySequence(data, 10, 5)
+	encoded := base64.StdEncoding.EncodeToString(data)
+
+	assert.Contains(t, seq, "m=1")
+	assert.Contains(t, seq, "\x1b_Gm=0;")
+	assert.Contains(t, seq, encoded[:100])
+}

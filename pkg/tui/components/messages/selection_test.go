@@ -321,7 +321,7 @@ func TestDoubleClickRenderedMarkdownWords(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rendered, err := markdown.NewRenderer(80).Render(tt.markdown)
+			rendered, err := markdown.NewFastRenderer(80).Render(tt.markdown)
 			require.NoError(t, err)
 			lines := strings.Split(rendered, "\n")
 			for line, renderedLine := range lines {

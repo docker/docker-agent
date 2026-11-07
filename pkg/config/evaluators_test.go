@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
 
 func TestEvaluatorCredentialsRespectModelsGateway(t *testing.T) {
@@ -23,21 +24,21 @@ func TestEvaluatorCredentialsRespectModelsGateway(t *testing.T) {
 		},
 		Agents: latest.Agents{{Name: "root", Model: "openai/gpt-5-mini"}},
 	}
-	assert.Empty(t, GatherEnvVarsForEvaluators(cfg))
+	assert.Empty(t, RequiredEvaluatorEnvVars(cfg))
 	MergeAgentHooks(cfg, &latest.HooksConfig{ToolGuard: latest.HookMatcherConfigs{{Hooks: latest.HookDefinitions{{
 		Type: "evaluator", Evaluator: "risk", EvaluatorPolicy: &latest.EvaluatorPolicy{
 			Decisions: map[string]string{"true": "ask"}, MinProbability: 0.9, Fallback: "ask",
 		},
 	}}}}})
 	require.NoError(t, cfg.Validate())
-	assert.Equal(t, []string{"CORP_KEY"}, GatherEnvVarsForEvaluators(cfg))
+	assert.Equal(t, []string{"CORP_KEY"}, RequiredEvaluatorEnvVars(cfg))
 	for _, gateway := range []string{"", "https://gateway.example.com"} {
 		err := CheckRequiredEnvVars(t.Context(), cfg, gateway, environment.NewMapEnvProvider(map[string]string{"OPENAI_API_KEY": "test"}))
 		if gateway == "" {
 			require.ErrorContains(t, err, "CORP_KEY")
 		} else {
 			require.NoError(t, err)
-			assert.Empty(t, GatherEnvVarsForEvaluators(cfg, gateway))
+			assert.Empty(t, RequiredEvaluatorEnvVars(cfg, options.WithGateway(gateway)))
 		}
 		require.NoError(t, CheckRequiredEnvVars(t.Context(), cfg, gateway, environment.NewMapEnvProvider(map[string]string{
 			"OPENAI_API_KEY": "test", "CORP_KEY": "test",
@@ -46,10 +47,10 @@ func TestEvaluatorCredentialsRespectModelsGateway(t *testing.T) {
 	def := cfg.Evaluators["risk"]
 	def.TokenKey = "OVERRIDE_KEY"
 	cfg.Evaluators["risk"] = def
-	assert.Equal(t, []string{"OVERRIDE_KEY"}, GatherEnvVarsForEvaluators(cfg))
+	assert.Equal(t, []string{"OVERRIDE_KEY"}, RequiredEvaluatorEnvVars(cfg))
 	def.BypassModelsGateway = true
 	cfg.Evaluators["risk"] = def
-	assert.Equal(t, []string{"OVERRIDE_KEY"}, GatherEnvVarsForEvaluators(cfg, "https://gateway.example.com"))
+	assert.Equal(t, []string{"OVERRIDE_KEY"}, RequiredEvaluatorEnvVars(cfg, options.WithGateway("https://gateway.example.com")))
 	require.ErrorContains(t, CheckRequiredEnvVars(t.Context(), cfg, "https://gateway.example.com", environment.NewNoEnvProvider()), "OVERRIDE_KEY")
 }
 

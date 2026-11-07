@@ -39,16 +39,9 @@ type ExpansionAbort interface {
 	AbortExpansion()
 }
 
-// ExpandCommands replaces all !`command` patterns in content. Runner errors
-// are embedded in the result; callers that need abort semantics should use
-// [ExpandCommandsWithError].
-func ExpandCommands(ctx context.Context, content string, run Runner) string {
-	expanded, _ := ExpandCommandsWithError(ctx, content, run)
-	return expanded
-}
-
-// ExpandCommandsWithError behaves like [ExpandCommands], but propagates an
-// [ExpansionAbort] or context cancellation returned by the runner.
+// ExpandCommandsWithError replaces !`command` patterns in content. Runner errors
+// are embedded in the result, except [ExpansionAbort] and context cancellation,
+// which stop expansion and propagate to the caller.
 func ExpandCommandsWithError(ctx context.Context, content string, run Runner) (string, error) {
 	matches := commandPattern.FindAllStringIndex(content, -1)
 	if len(matches) == 0 {

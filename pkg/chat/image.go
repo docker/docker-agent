@@ -2,7 +2,6 @@ package chat
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"image"
@@ -175,21 +174,6 @@ func ResizeImage(data []byte, mimeType string) (*ImageResizeResult, error) {
 		Height:         newH,
 		Resized:        true,
 	}, nil
-}
-
-// ResizeImageBase64 is a convenience wrapper around ResizeImage that accepts
-// and returns base64-encoded image data. The base64-encoded result is returned
-// separately to avoid mutating the ImageResizeResult.Data field.
-func ResizeImageBase64(b64Data, mimeType string) (b64Result string, metadata *ImageResizeResult, err error) {
-	raw, err := base64.StdEncoding.DecodeString(b64Data)
-	if err != nil {
-		return "", nil, fmt.Errorf("decode base64: %w", err)
-	}
-	result, err := ResizeImage(raw, mimeType)
-	if err != nil {
-		return "", nil, err
-	}
-	return base64.StdEncoding.EncodeToString(result.Data), result, nil
 }
 
 // FormatDimensionNote produces a human-readable note describing the resize mapping.

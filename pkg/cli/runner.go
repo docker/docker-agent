@@ -498,7 +498,7 @@ func ParseAttachCommand(userInput string) (messageText, attachPath string) {
 
 // CreateUserMessageWithAttachment creates a user message with optional file attachment.
 // All attachment processing (MIME detection, image resize, text inlining) is delegated
-// to [chat.ProcessAttachment], which runs once at message-assembly time.
+// to [chat.ProcessAttachmentWithMetadata], which runs once at message-assembly time.
 //
 // Returns the prepared session.Message and the absolute path of the file that
 // was actually attached. The returned path is empty when no attachment was
@@ -552,7 +552,7 @@ func CreateUserMessageWithAttachment(ctx context.Context, userContent, attachmen
 		})
 
 	default:
-		// Binary files (images, PDFs, etc.) — delegate to ProcessAttachment.
+		// Binary files (images, PDFs, etc.) — delegate to ProcessAttachmentWithMetadata.
 		if !chat.IsSupportedMimeType(chat.DetectMimeType(absPath)) {
 			slog.WarnContext(ctx, "Unsupported attachment file type", "path", absPath)
 			return noAttachment()

@@ -173,7 +173,13 @@ func TestPathsDiscoveryFailureKeepsPartialMatches(t *testing.T) {
 			require.Error(t, err)
 			assert.Equal(t, []string{valid}, paths)
 			assert.Equal(t, paths, Paths(work, home, kit, promptFile))
-			assert.Equal(t, valid, FindInHierarchy(work, promptFile))
+			found, lookupErr := findInHierarchy(work, promptFile)
+			assert.Equal(t, valid, found)
+			if location == "hierarchy" {
+				require.Error(t, lookupErr)
+			} else {
+				require.NoError(t, lookupErr)
+			}
 		})
 	}
 }

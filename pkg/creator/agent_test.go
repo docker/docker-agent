@@ -101,7 +101,7 @@ func TestBuildInstructions_CustomProviders(t *testing.T) {
 	})
 }
 
-func TestAgent(t *testing.T) {
+func TestLoad(t *testing.T) {
 	t.Parallel()
 
 	ctx := t.Context()
@@ -118,12 +118,13 @@ func TestAgent(t *testing.T) {
 	}
 
 	// The auto model will be resolved based on available providers
-	team, err := Agent(ctx, runConfig, "")
+	result, err := Load(ctx, runConfig, "")
 	require.NoError(t, err)
-	require.NotNil(t, team)
+	require.NotNil(t, result)
+	require.NotNil(t, result.Team)
 
 	// Verify the team has a root agent
-	rootAgent, err := team.DefaultAgent()
+	rootAgent, err := result.Team.DefaultAgent()
 	require.NoError(t, err)
 	require.NotNil(t, rootAgent)
 	assert.Equal(t, "root", rootAgent.Name())

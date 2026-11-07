@@ -271,8 +271,7 @@ type Session struct {
 
 	// clock and idgen are per-session sources of time and identity. They are
 	// indirected (rather than calling time.Now/uuid.NewV4 directly) so that
-	// tests can inject a deterministic clock and ID generator via WithClock
-	// and WithIDGen without mutating any process-global state — which keeps
+	// tests can inject a deterministic clock and ID generator via test options without mutating any process-global state — which keeps
 	// such tests safe to run with t.Parallel(). Sessions created outside New
 	// (e.g. via JSON deserialization or struct literals) leave these nil; use
 	// the now() and newID() accessors which fall back to real implementations.
@@ -1752,28 +1751,6 @@ func WithID(id string) Opt {
 	}
 }
 
-// WithClock injects the time source used for the session's CreatedAt, for
-// timestamping messages it generates (summaries, compaction input), and for
-// messages added through WithUserMessage/WithSystemMessage/
-// WithImplicitUserMessage. Because those message options read the clock when
-// they run, WithClock must precede them in the option list (the natural
-// ordering). Primarily for tests that need a deterministic clock; production
-// code leaves it unset and falls back to time.Now.
-func WithClock(now func() time.Time) Opt {
-	return func(s *Session) {
-		s.clock = now
-	}
-}
-
-// WithIDGen injects the generator used to mint the session ID when no explicit
-// ID is provided. Primarily for tests that need deterministic IDs; production
-// code leaves it unset and falls back to a random UUID.
-func WithIDGen(gen func() string) Opt {
-	return func(s *Session) {
-		s.idgen = gen
-	}
-}
-
 // WithExcludedTools sets tool names that should be filtered out of the agent's
 // tool list for this session. This prevents recursive tool calls in skill
 // sub-sessions.
@@ -2153,7 +2130,7 @@ func New(opts ...Opt) *Session {
 	}
 
 	// Generate the ID and creation time after options run so that
-	// WithClock/WithIDGen (and WithID) can influence them. WithID short-
+	// injected clock/ID sources (and WithID) can influence them. WithID short-
 	// circuits the generator when an explicit ID was provided.
 	if s.ID == "" {
 		s.ID = s.newID()

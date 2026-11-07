@@ -74,15 +74,15 @@ func writeTempFile(t *testing.T, ext string, data []byte) string {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// ProcessAttachment — MessagePartTypeFile
+// ProcessAttachmentWithMetadata — MessagePartTypeFile
 // ──────────────────────────────────────────────────────────────────────────────
 
-func TestProcessAttachment_JPEG_Passthrough(t *testing.T) {
+func TestProcessAttachmentWithMetadata_JPEG_Passthrough(t *testing.T) {
 	t.Parallel()
 	data := encodeJPEGBytes(100, 100)
 	path := writeTempFile(t, ".jpg", data)
 
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: &chat.MessageFile{Path: path, MimeType: "image/jpeg"},
 	})
@@ -93,12 +93,12 @@ func TestProcessAttachment_JPEG_Passthrough(t *testing.T) {
 	assert.Equal(t, filepath.Base(path), doc.Name)
 }
 
-func TestProcessAttachment_PNG_Passthrough(t *testing.T) {
+func TestProcessAttachmentWithMetadata_PNG_Passthrough(t *testing.T) {
 	t.Parallel()
 	data := encodePNGBytes(100, 100, false)
 	path := writeTempFile(t, ".png", data)
 
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: &chat.MessageFile{Path: path, MimeType: "image/png"},
 	})
@@ -107,12 +107,12 @@ func TestProcessAttachment_PNG_Passthrough(t *testing.T) {
 	assert.NotEmpty(t, doc.Source.InlineData)
 }
 
-func TestProcessAttachment_PNG_WithAlpha_StaysPNG(t *testing.T) {
+func TestProcessAttachmentWithMetadata_PNG_WithAlpha_StaysPNG(t *testing.T) {
 	t.Parallel()
 	data := encodePNGBytes(100, 100, true)
 	path := writeTempFile(t, ".png", data)
 
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: &chat.MessageFile{Path: path, MimeType: "image/png"},
 	})
@@ -122,12 +122,12 @@ func TestProcessAttachment_PNG_WithAlpha_StaysPNG(t *testing.T) {
 	assert.NotEmpty(t, doc.Source.InlineData)
 }
 
-func TestProcessAttachment_ImageTooLarge_Resized(t *testing.T) {
+func TestProcessAttachmentWithMetadata_ImageTooLarge_Resized(t *testing.T) {
 	t.Parallel()
 	bigData := encodeJPEGBytes(chat.MaxImageDimension+200, chat.MaxImageDimension+200)
 	path := writeTempFile(t, ".jpg", bigData)
 
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: &chat.MessageFile{Path: path, MimeType: "image/jpeg"},
 	})
@@ -167,12 +167,12 @@ func TestProcessAttachmentWithMetadata_IdempotentResend(t *testing.T) {
 	assert.Empty(t, note, "expected no dimension note for an image that wasn't resized")
 }
 
-func TestProcessAttachment_PDF_Passthrough(t *testing.T) {
+func TestProcessAttachmentWithMetadata_PDF_Passthrough(t *testing.T) {
 	t.Parallel()
 	pdfBytes := []byte("%PDF-1.4 fake pdf content for testing")
 	path := writeTempFile(t, ".pdf", pdfBytes)
 
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: &chat.MessageFile{Path: path, MimeType: "application/pdf"},
 	})
@@ -182,7 +182,7 @@ func TestProcessAttachment_PDF_Passthrough(t *testing.T) {
 	assert.Empty(t, doc.Source.InlineText)
 }
 
-func TestProcessAttachment_BinaryFileTooLarge_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_BinaryFileTooLarge_Error(t *testing.T) {
 	t.Parallel()
 	// Sparse file: Stat.Size > MaxInlineBinarySize without allocating memory.
 	path := writeTempFile(t, ".pdf", nil)
@@ -191,7 +191,7 @@ func TestProcessAttachment_BinaryFileTooLarge_Error(t *testing.T) {
 	require.NoError(t, f.Truncate(chat.MaxInlineBinarySize+1))
 	require.NoError(t, f.Close())
 
-	_, err = chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	_, _, err = chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: &chat.MessageFile{Path: path},
 	})
@@ -199,12 +199,12 @@ func TestProcessAttachment_BinaryFileTooLarge_Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "too large")
 }
 
-func TestProcessAttachment_TextFile_InlineText(t *testing.T) {
+func TestProcessAttachmentWithMetadata_TextFile_InlineText(t *testing.T) {
 	t.Parallel()
 	content := "Hello, this is a text file.\nLine 2."
 	path := writeTempFile(t, ".txt", []byte(content))
 
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: &chat.MessageFile{Path: path, MimeType: "text/plain"},
 	})
@@ -213,12 +213,12 @@ func TestProcessAttachment_TextFile_InlineText(t *testing.T) {
 	assert.Contains(t, doc.Source.InlineText, content)
 }
 
-func TestProcessAttachment_MarkdownFile_InlineText(t *testing.T) {
+func TestProcessAttachmentWithMetadata_MarkdownFile_InlineText(t *testing.T) {
 	t.Parallel()
 	content := "# Title\n\nBody paragraph."
 	path := writeTempFile(t, ".md", []byte(content))
 
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: &chat.MessageFile{Path: path},
 	})
@@ -227,9 +227,9 @@ func TestProcessAttachment_MarkdownFile_InlineText(t *testing.T) {
 	assert.Contains(t, doc.Source.InlineText, content)
 }
 
-func TestProcessAttachment_MissingFile_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_MissingFile_Error(t *testing.T) {
 	t.Parallel()
-	_, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	_, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: &chat.MessageFile{Path: "/nonexistent/path/file.jpg"},
 	})
@@ -237,9 +237,9 @@ func TestProcessAttachment_MissingFile_Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "cannot stat")
 }
 
-func TestProcessAttachment_NilFile_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_NilFile_Error(t *testing.T) {
 	t.Parallel()
-	_, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	_, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeFile,
 		File: nil,
 	})
@@ -247,15 +247,15 @@ func TestProcessAttachment_NilFile_Error(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// ProcessAttachment — MessagePartTypeImageURL
+// ProcessAttachmentWithMetadata — MessagePartTypeImageURL
 // ──────────────────────────────────────────────────────────────────────────────
 
-func TestProcessAttachment_DataURI_JPEG(t *testing.T) {
+func TestProcessAttachmentWithMetadata_DataURI_JPEG(t *testing.T) {
 	t.Parallel()
 	jpegData := encodeJPEGBytes(50, 50)
 	dataURI := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(jpegData)
 
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type:     chat.MessagePartTypeImageURL,
 		ImageURL: &chat.MessageImageURL{URL: dataURI},
 	})
@@ -264,12 +264,12 @@ func TestProcessAttachment_DataURI_JPEG(t *testing.T) {
 	assert.True(t, doc.MimeType == "image/jpeg" || doc.MimeType == "image/png")
 }
 
-func TestProcessAttachment_DataURI_PNG(t *testing.T) {
+func TestProcessAttachmentWithMetadata_DataURI_PNG(t *testing.T) {
 	t.Parallel()
 	pngData := encodePNGBytes(50, 50, false)
 	dataURI := "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngData)
 
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type:     chat.MessagePartTypeImageURL,
 		ImageURL: &chat.MessageImageURL{URL: dataURI},
 	})
@@ -277,9 +277,9 @@ func TestProcessAttachment_DataURI_PNG(t *testing.T) {
 	assert.NotEmpty(t, doc.Source.InlineData)
 }
 
-func TestProcessAttachment_DataURI_NonBase64_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_DataURI_NonBase64_Error(t *testing.T) {
 	t.Parallel()
-	_, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	_, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type:     chat.MessagePartTypeImageURL,
 		ImageURL: &chat.MessageImageURL{URL: "data:text/plain,hello"},
 	})
@@ -287,11 +287,11 @@ func TestProcessAttachment_DataURI_NonBase64_Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "not base64")
 }
 
-func TestProcessAttachment_RemoteURL_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_RemoteURL_Error(t *testing.T) {
 	t.Parallel()
 	// Remote http(s):// URLs are not supported; callers must download locally.
 	for _, scheme := range []string{"http://", "https://"} {
-		_, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+		_, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 			Type:     chat.MessagePartTypeImageURL,
 			ImageURL: &chat.MessageImageURL{URL: scheme + "example.com/photo.jpg"},
 		})
@@ -300,9 +300,9 @@ func TestProcessAttachment_RemoteURL_Error(t *testing.T) {
 	}
 }
 
-func TestProcessAttachment_UnsupportedScheme_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_UnsupportedScheme_Error(t *testing.T) {
 	t.Parallel()
-	_, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	_, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type:     chat.MessagePartTypeImageURL,
 		ImageURL: &chat.MessageImageURL{URL: "ftp://example.com/image.jpg"},
 	})
@@ -310,9 +310,9 @@ func TestProcessAttachment_UnsupportedScheme_Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported image URL scheme")
 }
 
-func TestProcessAttachment_NilImageURL_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_NilImageURL_Error(t *testing.T) {
 	t.Parallel()
-	_, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	_, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type:     chat.MessagePartTypeImageURL,
 		ImageURL: nil,
 	})
@@ -320,13 +320,13 @@ func TestProcessAttachment_NilImageURL_Error(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// ProcessAttachment — MessagePartTypeDocument
+// ProcessAttachmentWithMetadata — MessagePartTypeDocument
 // ──────────────────────────────────────────────────────────────────────────────
 
-func TestProcessAttachment_Document_WithInlineData_Passthrough(t *testing.T) {
+func TestProcessAttachmentWithMetadata_Document_WithInlineData_Passthrough(t *testing.T) {
 	t.Parallel()
 	pdfBytes := []byte("%PDF-1.4 test")
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeDocument,
 		Document: &chat.Document{
 			Name:     "spec.pdf",
@@ -339,10 +339,10 @@ func TestProcessAttachment_Document_WithInlineData_Passthrough(t *testing.T) {
 	assert.Equal(t, "application/pdf", doc.MimeType)
 }
 
-func TestProcessAttachment_Document_WithInlineText_Passthrough(t *testing.T) {
+func TestProcessAttachmentWithMetadata_Document_WithInlineText_Passthrough(t *testing.T) {
 	t.Parallel()
 	text := "# Markdown content"
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeDocument,
 		Document: &chat.Document{
 			Name:     "readme.md",
@@ -355,10 +355,10 @@ func TestProcessAttachment_Document_WithInlineText_Passthrough(t *testing.T) {
 	assert.Empty(t, doc.Source.InlineData)
 }
 
-func TestProcessAttachment_Document_ImageInlineData_Transcoded(t *testing.T) {
+func TestProcessAttachmentWithMetadata_Document_ImageInlineData_Transcoded(t *testing.T) {
 	t.Parallel()
 	jpegData := encodeJPEGBytes(40, 40)
-	doc, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	doc, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeDocument,
 		Document: &chat.Document{
 			Name:     "photo.jpg",
@@ -371,9 +371,9 @@ func TestProcessAttachment_Document_ImageInlineData_Transcoded(t *testing.T) {
 	assert.True(t, doc.MimeType == "image/jpeg" || doc.MimeType == "image/png")
 }
 
-func TestProcessAttachment_Document_NoContent_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_Document_NoContent_Error(t *testing.T) {
 	t.Parallel()
-	_, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	_, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeDocument,
 		Document: &chat.Document{
 			Name:     "empty.md",
@@ -385,9 +385,9 @@ func TestProcessAttachment_Document_NoContent_Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "no inline content")
 }
 
-func TestProcessAttachment_Document_NilDocument_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_Document_NilDocument_Error(t *testing.T) {
 	t.Parallel()
-	_, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	_, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type:     chat.MessagePartTypeDocument,
 		Document: nil,
 	})
@@ -395,12 +395,12 @@ func TestProcessAttachment_Document_NilDocument_Error(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// ProcessAttachment — unsupported type
+// ProcessAttachmentWithMetadata — unsupported type
 // ──────────────────────────────────────────────────────────────────────────────
 
-func TestProcessAttachment_UnsupportedType_Error(t *testing.T) {
+func TestProcessAttachmentWithMetadata_UnsupportedType_Error(t *testing.T) {
 	t.Parallel()
-	_, err := chat.ProcessAttachment(t.Context(), chat.MessagePart{
+	_, _, err := chat.ProcessAttachmentWithMetadata(chat.MessagePart{
 		Type: chat.MessagePartTypeText,
 		Text: "hello",
 	})

@@ -2,7 +2,6 @@ package chat
 
 import (
 	"bytes"
-	"encoding/base64"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -179,19 +178,4 @@ func TestFormatDimensionNote(t *testing.T) {
 		assert.Contains(t, note, "Multiply X coordinates by 2.00")
 		assert.Contains(t, note, "Y coordinates by 1.00")
 	})
-}
-
-func TestResizeImageBase64(t *testing.T) {
-	t.Parallel()
-
-	data := createTestPNG(t, 100, 100)
-	b64 := base64.StdEncoding.EncodeToString(data)
-
-	b64Result, result, err := ResizeImageBase64(b64, "image/png")
-	require.NoError(t, err)
-	assert.False(t, result.Resized)
-	// Result data stays as raw bytes
-	assert.Equal(t, data, result.Data)
-	// Base64 result is returned separately
-	assert.Equal(t, b64, b64Result)
 }
