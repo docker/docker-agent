@@ -13,7 +13,6 @@ import (
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
-	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	loaderdefaults "github.com/docker/docker-agent/pkg/teamloader/defaults"
 )
@@ -51,15 +50,6 @@ func Load(ctx context.Context, runConfig *config.RuntimeConfig, modelNameOverrid
 		runConfig,
 		append(loaderdefaults.Opts(), teamloader.WithModelOverrides([]string{modelNameOverride}))...,
 	)
-}
-
-// Agent creates and returns a team configured for the agent builder functionality.
-func Agent(ctx context.Context, runConfig *config.RuntimeConfig, modelNameOverride string) (*team.Team, error) {
-	result, err := Load(ctx, runConfig, modelNameOverride)
-	if err != nil {
-		return nil, err
-	}
-	return result.Team, nil
 }
 
 // buildInstructions creates the full instruction set for the creator agent,
