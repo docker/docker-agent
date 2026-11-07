@@ -3,6 +3,7 @@ package logging
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -146,5 +147,26 @@ func withMaxSize(size int64) Option {
 func withMaxBackups(count int) Option {
 	return func(r *RotatingFile) {
 		r.maxBackups = count
+	}
+}
+
+func TestRotatingFileConfiguredBackups(t *testing.T) {
+	t.Parallel()
+	for _, count := range []int{1, 2, 3} {
+		t.Run(strconv.Itoa(count), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "test.log")
+			rf, err := NewRotatingFile(path, withMaxSize(1), withMaxBackups(count))
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, rf.Close()) })
+			for range count + 2 {
+				_, err := rf.Write([]byte("x"))
+				require.NoError(t, err)
+			}
+			for i := 1; i <= count; i++ {
+				assert.FileExists(t, path+"."+strconv.Itoa(i))
+			}
+			assert.NoFileExists(t, path+"."+strconv.Itoa(count+1))
+		})
 	}
 }
