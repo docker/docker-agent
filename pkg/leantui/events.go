@@ -10,6 +10,7 @@ import (
 	"github.com/docker/docker-agent/pkg/sound"
 	"github.com/docker/docker-agent/pkg/tools"
 	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	msgtypes "github.com/docker/docker-agent/pkg/tui/messages"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 	"github.com/docker/docker-agent/pkg/userconfig"
@@ -113,7 +114,7 @@ func (m *model) handleEvent(ctx context.Context, ev any) {
 	case *runtime.ToolCallResponseEvent:
 		var images []ui.InlineImage
 		if m.renderImages {
-			images = inlineImagesFromToolResult(e.Result)
+			images = tuiimage.FromToolResult(e.Result)
 		}
 		m.screen.Transcript.FinishTool(e.ToolCallID, ui.ToolResult{Response: e.Response, Result: e.Result, AgentName: e.GetAgentName(), ToolDefinition: e.ToolDefinition, Images: images}, m.sessionState)
 	case *runtime.ToolCallConfirmationEvent:

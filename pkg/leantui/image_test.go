@@ -14,6 +14,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/leantui/ui"
 	"github.com/docker/docker-agent/pkg/tools"
+	tuiimage "github.com/docker/docker-agent/pkg/tui/image"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -28,7 +29,7 @@ func TestInlineImagesFromToolResultIncludesImagesAndImageDocuments(t *testing.T)
 		},
 	}
 
-	images := inlineImagesFromToolResult(result)
+	images := tuiimage.FromToolResult(result)
 
 	require.Len(t, images, 2)
 	assert.Equal(t, "image-1", images[0].Name)
@@ -40,7 +41,7 @@ func TestInlineImagesFromToolResultIncludesImagesAndImageDocuments(t *testing.T)
 func TestRenderToolIncludesInlineImage(t *testing.T) {
 	t.Parallel()
 	b64 := testPNGBase64(t)
-	images := inlineImagesFromToolResult(&tools.ToolCallResult{
+	images := tuiimage.FromToolResult(&tools.ToolCallResult{
 		Images: []tools.MediaContent{{Data: b64, MimeType: "image/png"}},
 	})
 	require.Len(t, images, 1)
@@ -65,7 +66,7 @@ func TestRenderToolIncludesInlineImage(t *testing.T) {
 
 func TestInlineImageFromBase64RejectsNonImages(t *testing.T) {
 	t.Parallel()
-	_, ok := inlineImageFromBase64("notes.txt", "text/plain", base64.StdEncoding.EncodeToString([]byte("hello")))
+	_, ok := tuiimage.FromBase64("notes.txt", "text/plain", base64.StdEncoding.EncodeToString([]byte("hello")))
 	assert.False(t, ok)
 }
 
