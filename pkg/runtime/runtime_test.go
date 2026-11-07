@@ -942,6 +942,19 @@ func (m mockModelStoreWithLimit) GetModel(_ context.Context, _ modelsdev.ID) (*m
 	return &modelsdev.Model{Limit: modelsdev.Limit{Context: m.limit}, Cost: &modelsdev.Cost{}}, nil
 }
 
+func TestJoinPrompts(t *testing.T) {
+	t.Parallel()
+
+	assert.Empty(t, joinPrompts("", ""))
+	assert.Equal(t, "note", joinPrompts("note", ""))
+	assert.Equal(t, "result", joinPrompts("", "result"))
+	assert.Equal(t, "note\n\nresult", joinPrompts("note", "result"))
+	assert.Equal(t, " \t\n", joinPrompts(" \t\n", ""))
+	assert.Equal(t, "\n\t ", joinPrompts("", "\n\t "))
+	assert.Equal(t, " note \n\n\n\tresult\n", joinPrompts(" note \n", "\tresult\n"))
+	assert.Equal(t, "second\n\nfirst\n\nresult", joinPrompts("second", joinPrompts("first", "result")))
+}
+
 func TestCompaction(t *testing.T) {
 	t.Parallel()
 
