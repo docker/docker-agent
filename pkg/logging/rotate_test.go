@@ -14,7 +14,7 @@ func TestRotatingFile_Write(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")
 
-	rf, err := NewRotatingFile(path, WithMaxSize(100), WithMaxBackups(2))
+	rf, err := NewRotatingFile(path, withMaxSize(100), withMaxBackups(2))
 	require.NoError(t, err)
 	defer rf.Close()
 
@@ -33,7 +33,7 @@ func TestRotatingFile_Rotate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")
 
-	rf, err := NewRotatingFile(path, WithMaxSize(50), WithMaxBackups(2))
+	rf, err := NewRotatingFile(path, withMaxSize(50), withMaxBackups(2))
 	require.NoError(t, err)
 	defer rf.Close()
 
@@ -70,7 +70,7 @@ func TestRotatingFile_MaxBackups(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.log")
 
-	rf, err := NewRotatingFile(path, WithMaxSize(20), WithMaxBackups(2))
+	rf, err := NewRotatingFile(path, withMaxSize(20), withMaxBackups(2))
 	require.NoError(t, err)
 	defer rf.Close()
 
@@ -109,7 +109,7 @@ func TestRotatingFile_AppendsToExisting(t *testing.T) {
 	err := os.WriteFile(path, []byte("existing\n"), 0o600)
 	require.NoError(t, err)
 
-	rf, err := NewRotatingFile(path, WithMaxSize(1000), WithMaxBackups(2))
+	rf, err := NewRotatingFile(path, withMaxSize(1000), withMaxBackups(2))
 	require.NoError(t, err)
 	defer rf.Close()
 
@@ -135,4 +135,16 @@ func TestRotatingFile_CreatesDirectory(t *testing.T) {
 
 	_, err = os.Stat(path)
 	require.NoError(t, err)
+}
+
+func withMaxSize(size int64) Option {
+	return func(r *RotatingFile) {
+		r.maxSize = size
+	}
+}
+
+func withMaxBackups(count int) Option {
+	return func(r *RotatingFile) {
+		r.maxBackups = count
+	}
 }
