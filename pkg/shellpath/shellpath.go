@@ -53,7 +53,7 @@ func DetectShell() (shell string, argsPrefix []string) {
 		return DetectWindowsShell()
 	}
 
-	return defaultUnixShell(), []string{"-c"}
+	return DetectUnixShell(), []string{"-c"}
 }
 
 // DetectWindowsShell returns the shell binary and argument prefix for Windows.
@@ -80,11 +80,6 @@ func lookPowerShell() (string, bool) {
 // DetectUnixShell returns the user's shell from the SHELL environment variable,
 // falling back to /bin/sh.
 func DetectUnixShell() string {
-	return defaultUnixShell()
-}
-
-// defaultUnixShell returns the user's shell from SHELL or /bin/sh.
-func defaultUnixShell() string {
 	if shell := os.Getenv("SHELL"); shell != "" {
 		return shell
 	}
