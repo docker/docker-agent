@@ -204,7 +204,7 @@ func (f *modelsListFlags) runModelsListCommand(cmd *cobra.Command, args []string
 
 	switch f.format {
 	case "json":
-		return f.renderJSON(cmd, rows)
+		return encodeJSON(cmd, rows)
 	default:
 		f.renderTable(cmd, rows)
 	}
@@ -553,10 +553,4 @@ func (f *modelsListFlags) renderTable(cmd *cobra.Command, rows []modelRow) {
 		fmt.Fprintf(w, "%s\t%s\t%s\n", r.Provider, r.Model, def)
 	}
 	w.Flush()
-}
-
-func (f *modelsListFlags) renderJSON(cmd *cobra.Command, rows []modelRow) error {
-	enc := json.NewEncoder(cmd.OutOrStdout())
-	enc.SetIndent("", "  ")
-	return enc.Encode(rows)
 }
