@@ -247,7 +247,7 @@ func toolsetEnv(ctx context.Context, toolset latest.Toolset, runConfig *config.R
 
 // New creates a new shell toolset.
 func New(env []string, runConfig *config.RuntimeConfig) *ToolSet {
-	shell, argsPrefix := detectShell()
+	shell, argsPrefix := shellpath.DetectShell()
 
 	handler := &shellHandler{
 		shell:           shell,
@@ -258,13 +258,6 @@ func New(env []string, runConfig *config.RuntimeConfig) *ToolSet {
 	}
 
 	return &ToolSet{handler: handler}
-}
-
-// detectShell returns the appropriate shell and arguments based on the platform.
-// It delegates to shellpath.DetectShell which uses absolute paths to prevent
-// PATH hijacking (CWE-426).
-func detectShell() (shell string, argsPrefix []string) {
-	return shellpath.DetectShell()
 }
 
 // checkWorkDir verifies the working directory exists and is a directory,
