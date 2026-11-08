@@ -27,9 +27,19 @@ type Command struct {
 // commands first, then agent commands, each group alphabetically sorted.
 func FilterCommands(all []Command, prefix string) []Command {
 	prefix = strings.ToLower(prefix)
-	return filterCommands(all, func(c Command) bool {
-		return strings.HasPrefix(strings.ToLower(c.Name), prefix)
+	var out []Command
+	for _, c := range all {
+		if strings.HasPrefix(strings.ToLower(c.Name), prefix) {
+			out = append(out, c)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b Command) int {
+		if order := cmp.Compare(a.Kind, b.Kind); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.Name, b.Name)
 	})
+	return out
 }
 
 // FilterScopedCommands ranks argument completions with their configured matcher.
@@ -58,20 +68,4 @@ func FilterScopedCommands(all []Command, query string) []Command {
 		result[i] = match.command
 	}
 	return result
-}
-
-func filterCommands(all []Command, match func(Command) bool) []Command {
-	var out []Command
-	for _, c := range all {
-		if match(c) {
-			out = append(out, c)
-		}
-	}
-	slices.SortStableFunc(out, func(a, b Command) int {
-		if order := cmp.Compare(a.Kind, b.Kind); order != 0 {
-			return order
-		}
-		return cmp.Compare(a.Name, b.Name)
-	})
-	return out
 }
