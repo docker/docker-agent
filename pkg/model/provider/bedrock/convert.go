@@ -292,7 +292,7 @@ func convertAssistantContent(msg *chat.Message) []types.ContentBlock {
 		}
 
 		// Convert input map to document (required by Bedrock)
-		inputDoc := mapToDocument(input)
+		inputDoc := document.NewLazyDocument(input)
 
 		blocks = append(blocks, &types.ContentBlockMemberToolUse{
 			Value: types.ToolUseBlock{
@@ -304,10 +304,6 @@ func convertAssistantContent(msg *chat.Message) []types.ContentBlock {
 	}
 
 	return blocks
-}
-
-func mapToDocument(m map[string]any) document.Interface {
-	return document.NewLazyDocument(m)
 }
 
 func convertToolConfig(requestTools []tools.Tool, enableCaching bool) *types.ToolConfiguration {
