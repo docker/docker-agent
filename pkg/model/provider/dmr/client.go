@@ -343,7 +343,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
 
 	slog.DebugContext(ctx, "DMR chat completion stream created successfully", "model", c.ModelConfig.Model, "base_url", c.BaseURL)
-	return newStreamAdapter(stream, trackUsage), nil
+	return oaistream.NewStreamAdapter(stream, trackUsage), nil
 }
 
 // jsonSchema is a helper type that implements json.Marshaler for map[string]any
