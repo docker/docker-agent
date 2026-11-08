@@ -113,18 +113,14 @@ func (s *ToolSet) Skills() []skills.Skill {
 	return s.skills
 }
 
-func (s *ToolSet) findSkill(name string) *skills.Skill {
+// FindSkill returns the skill with the given name, or nil if not found.
+func (s *ToolSet) FindSkill(name string) *skills.Skill {
 	for i := range s.skills {
 		if s.skills[i].Name == name {
 			return &s.skills[i]
 		}
 	}
 	return nil
-}
-
-// FindSkill returns the skill with the given name, or nil if not found.
-func (s *ToolSet) FindSkill(name string) *skills.Skill {
-	return s.findSkill(name)
 }
 
 // ReadSkillContent returns the content of a skill's SKILL.md by name, or the
@@ -136,7 +132,7 @@ func (s *ToolSet) FindSkill(name string) *skills.Skill {
 // unannounced. Command expansion is disabled for remote skills to prevent
 // arbitrary code execution on behalf of a third-party server.
 func (s *ToolSet) ReadSkillContent(ctx context.Context, name string, rt tools.Runtime) (string, error) {
-	skill := s.findSkill(name)
+	skill := s.FindSkill(name)
 	if skill == nil {
 		return "", fmt.Errorf("skill %q not found", name)
 	}
@@ -190,7 +186,7 @@ func (s *ToolSet) confirmedRunner(rt tools.Runtime, skillName string) skills.Run
 // ReadSkillFile returns the content of a supporting file within a skill.
 // The path is relative to the skill's base directory (e.g. "references/FORMS.md").
 func (s *ToolSet) ReadSkillFile(ctx context.Context, skillName, relativePath string, rt tools.Runtime) (string, error) {
-	skill := s.findSkill(skillName)
+	skill := s.FindSkill(skillName)
 	if skill == nil {
 		return "", fmt.Errorf("skill %q not found", skillName)
 	}
@@ -414,7 +410,7 @@ type PreparedSkillFork struct {
 // is responsible for the runtime-specific orchestration (sub-session creation,
 // tracing, event forwarding).
 func (s *ToolSet) PrepareForkSubSession(ctx context.Context, args RunSkillArgs, rt tools.Runtime) (*PreparedSkillFork, *tools.ToolCallResult, error) {
-	skill := s.findSkill(args.Name)
+	skill := s.FindSkill(args.Name)
 	if skill == nil {
 		return nil, tools.ResultError(fmt.Sprintf("skill %q not found", args.Name)), nil
 	}
