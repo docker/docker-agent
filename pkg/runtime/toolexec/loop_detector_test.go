@@ -10,6 +10,24 @@ import (
 	"github.com/docker/docker-agent/pkg/tools/builtin/backgroundjobs"
 )
 
+func TestCanonicalJSON(t *testing.T) {
+	t.Parallel()
+	for input, want := range map[string]string{
+		`[{"z":[{"b":2,"a":1},null,[],{}],"a":true},{"b":false}]`: `[{"a":true,"z":[{"a":1,"b":2},null,[],{}]},{"b":false}]`,
+		` null `:                        `null`,
+		` [ ] `:                         `[]`,
+		` { } `:                         `{}`,
+		`{"x":{"a":1},"x":{"b":2}}`:     `{"x":{"b":2}}`,
+		`[1.0,1e2,-0,9007199254740993]`: `[1,100,-0,9007199254740992]`,
+		`{"<":"<&>\u2028\u2029","s":"quote\"\\\n"}`: `{"\u003c":"\u003c\u0026\u003e\u2028\u2029","s":"quote\"\\\n"}`,
+		` {"a":1,} `:    ` {"a":1,} `,
+		` {"a":1e999} `: ` {"a":1e999} `,
+		"":              "",
+	} {
+		assert.Equal(t, want, canonicalJSON(input), "input: %q", input)
+	}
+}
+
 func TestLoopDetector(t *testing.T) {
 	t.Parallel()
 	makeCalls := func(pairs ...string) []tools.ToolCall {
