@@ -54,8 +54,6 @@ func newEventQueue() *eventQueue {
 	return &eventQueue{ready: make(chan struct{}, 1)}
 }
 
-func (q *eventQueue) push(msg tea.Msg) { q.pushGeneration(msg, 0) }
-
 func (q *eventQueue) pushGeneration(msg tea.Msg, generation uint64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
