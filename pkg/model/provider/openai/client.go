@@ -540,7 +540,7 @@ func (c *Client) CreateChatCompletionStream(
 	stream := client.Chat.Completions.NewStreaming(ctx, params)
 
 	slog.DebugContext(ctx, "OpenAI chat completion stream created successfully", "model", c.ModelConfig.Model)
-	return newStreamAdapter(stream, trackUsage), nil
+	return oaistream.NewStreamAdapter(stream, trackUsage), nil
 }
 
 // warnThinkingBudgetIgnored logs, once per client, that a configured and
