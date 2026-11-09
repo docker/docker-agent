@@ -28,13 +28,13 @@ import (
 //go:embed builtin-agents/default.yaml
 var defaultAgent []byte
 
-//go:embed builtin-agents/coder.yaml
-var coderAgent []byte
+//go:embed builtin-agents/minimal.yaml
+var minimalAgent []byte
 
 // builtinAgents maps built-in agent names to their embedded YAML configurations.
 var builtinAgents = map[string][]byte{
 	"default": defaultAgent,
-	"coder":   coderAgent,
+	"minimal": minimalAgent,
 }
 
 // BuiltinAgentNames returns the names of all built-in agents.
