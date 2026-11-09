@@ -126,6 +126,9 @@ func TestModelsListCommand_JSONFormat(t *testing.T) {
 	var rows []modelRow
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &rows))
 	assert.NotEmpty(t, rows)
+	want, err := json.MarshalIndent(rows, "", "  ")
+	require.NoError(t, err)
+	assert.Equal(t, string(want)+"\n", buf.String())
 
 	// At least one should be the default
 	hasDefault := false
