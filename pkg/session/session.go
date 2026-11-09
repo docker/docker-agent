@@ -1966,7 +1966,7 @@ func (s *Session) GetSafetyPolicy() SafetyPolicy {
 func (s *Session) ModelStateSnapshot() (map[string]string, []string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return cloneStringMap(s.AgentModelOverrides), cloneStringSlice(s.CustomModelsUsed)
+	return cloneStringMap(s.AgentModelOverrides), slices.Clone(s.CustomModelsUsed)
 }
 
 // AgentModelOverride returns the override for agentName, if present.
@@ -1999,7 +1999,7 @@ func (s *Session) ReplaceModelState(overrides map[string]string, customModels []
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.AgentModelOverrides = cloneStringMap(overrides)
-	s.CustomModelsUsed = cloneStringSlice(customModels)
+	s.CustomModelsUsed = slices.Clone(customModels)
 }
 
 // ClonePermissions returns a deep copy of the session's PermissionsConfig.
