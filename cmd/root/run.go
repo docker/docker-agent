@@ -161,7 +161,8 @@ func newRunCmd() *cobra.Command {
 		Example: `  docker-agent run ./agent.yaml
   docker-agent run ./team.yaml --agent root
   docker-agent run # project config or built-in default agent
-  docker-agent run coder # built-in coding agent
+  docker-agent run default # built-in coding agent
+  docker-agent run minimal # small general-purpose configuration
   docker-agent run ./echo.yaml "INSTRUCTIONS"
   docker-agent run ./echo.yaml "First question" "Follow-up question"
   echo "INSTRUCTIONS" | docker-agent run ./echo.yaml -

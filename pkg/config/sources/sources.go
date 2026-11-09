@@ -28,13 +28,13 @@ import (
 //go:embed builtin-agents/default.yaml
 var defaultAgent []byte
 
-//go:embed builtin-agents/coder.yaml
-var coderAgent []byte
+//go:embed builtin-agents/minimal.yaml
+var minimalAgent []byte
 
 // builtinAgents maps built-in agent names to their embedded YAML configurations.
 var builtinAgents = map[string][]byte{
 	"default": defaultAgent,
-	"coder":   coderAgent,
+	"minimal": minimalAgent,
 }
 
 // BuiltinAgentNames returns the names of all built-in agents.
@@ -192,7 +192,7 @@ func resolve(agentFilename string) (string, error) {
 }
 
 func resolvePath(agentFilename string) (string, error) {
-	// Built-in agent names (e.g. "default", "coder") are either user defined aliases or embedded agents
+	// Aliases have already been resolved; remaining built-in names use embedded agents.
 	if _, ok := builtinAgents[agentFilename]; ok {
 		return agentFilename, nil
 	}

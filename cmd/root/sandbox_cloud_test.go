@@ -26,7 +26,7 @@ import (
 func TestCloudAgentArgs(t *testing.T) {
 	paths.SetConfigDir(t.TempDir())
 	t.Cleanup(func() { paths.SetConfigDir("") })
-	for _, ref := range []string{"default", "coder", "docker/agent:latest", "https://example.com/agent.yaml"} {
+	for _, ref := range []string{"default", "minimal", "docker/agent:latest", "https://example.com/agent.yaml"} {
 		cmd := newRunCmd()
 		require.NoError(t, cmd.ParseFlags([]string{"--cloud", "--exec", "--flavor", "a", "--flavor", "b", "--model", "openai/gpt-5.6"}))
 		got, err := cloudAgentArgs(cmd, []string{ref, "--sandbox", "hello"})
@@ -229,14 +229,18 @@ func TestCloudBuiltinsRequireExplicitModel(t *testing.T) {
 	// Provider sentinels from sbx are not evidence of cloud credentials.
 	t.Setenv("OPENAI_API_KEY", "proxy-managed")
 	t.Setenv("ANTHROPIC_API_KEY", "proxy-managed")
-	_, err := cloudAgentArgs(newRunCmd(), []string{"default"})
-	require.ErrorContains(t, err, "require --model")
-	cmd := newRunCmd()
-	require.NoError(t, cmd.ParseFlags([]string{"--model", "openai/gpt-5.6"}))
-	args, err := cloudAgentArgs(cmd, []string{"default"})
-	require.NoError(t, err)
-	assert.Contains(t, args, "openai/gpt-5.6")
-	assert.NotContains(t, args, "anthropic")
+	for _, ref := range []string{"default", "minimal"} {
+		t.Run(ref, func(t *testing.T) {
+			_, err := cloudAgentArgs(newRunCmd(), []string{ref})
+			require.ErrorContains(t, err, "require --model")
+			cmd := newRunCmd()
+			require.NoError(t, cmd.ParseFlags([]string{"--model", "openai/gpt-5.6"}))
+			args, err := cloudAgentArgs(cmd, []string{ref})
+			require.NoError(t, err)
+			assert.Contains(t, args, "openai/gpt-5.6")
+			assert.NotContains(t, args, "anthropic")
+		})
+	}
 }
 
 func TestSandboxRejectsEmptyLaunchSources(t *testing.T) {
