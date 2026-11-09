@@ -299,7 +299,7 @@ func (s *BM25Strategy) Query(ctx context.Context, query string, numResults int, 
 	}
 
 	// Get all documents
-	allDocs, err := s.getAllDocuments(ctx)
+	allDocs, err := s.db.GetAllDocuments(ctx)
 	if err != nil {
 		return nil, types.Usage{}, fmt.Errorf("failed to retrieve documents: %w", err)
 	}
@@ -479,16 +479,8 @@ func (s *BM25Strategy) calculateBM25Score(queryTerms []string, docTermFreq map[s
 	return math.Min(score/float64(len(queryTerms)), 1.0)
 }
 
-func (s *BM25Strategy) getAllDocuments(ctx context.Context) ([]database.Document, error) {
-	docs, err := s.db.GetAllDocuments(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return docs, nil
-}
-
 func (s *BM25Strategy) calculateAvgDocLength(ctx context.Context) error {
-	docs, err := s.getAllDocuments(ctx)
+	docs, err := s.db.GetAllDocuments(ctx)
 	if err != nil {
 		return err
 	}
