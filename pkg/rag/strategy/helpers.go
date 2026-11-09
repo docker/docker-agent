@@ -21,21 +21,13 @@ func MergeDocPaths(sharedDocs, strategyDocs []string, parentDir string) []string
 	seen := make(map[string]bool)
 	var result []string
 
-	// Add shared docs first
-	for _, doc := range sharedDocs {
-		absPath := makeAbsolute(doc, parentDir)
-		if !seen[absPath] {
-			seen[absPath] = true
-			result = append(result, absPath)
-		}
-	}
-
-	// Add strategy-specific docs
-	for _, doc := range strategyDocs {
-		absPath := makeAbsolute(doc, parentDir)
-		if !seen[absPath] {
-			seen[absPath] = true
-			result = append(result, absPath)
+	for _, docs := range [2][]string{sharedDocs, strategyDocs} {
+		for _, doc := range docs {
+			absPath := makeAbsolute(doc, parentDir)
+			if !seen[absPath] {
+				seen[absPath] = true
+				result = append(result, absPath)
+			}
 		}
 	}
 
