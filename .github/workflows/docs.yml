@@ -183,6 +183,6 @@ jobs:
   # this commit and runs htmltest on the output. A no-op until docker/docs
   # imports github.com/docker/docker-agent (issue #3371, Phase 2.1).
   upstream:
-    uses: docker/docs/.github/workflows/validate-upstream.yml@4937e25aa671f382c793fd03ba457bdb25e0d028 # main
+    uses: docker/docs/.github/workflows/validate-upstream.yml@16e452c8eaea26cec842cbf1065037fb2015001f # main
     with:
       module-name: docker/docker-agent
