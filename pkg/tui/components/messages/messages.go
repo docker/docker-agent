@@ -250,7 +250,6 @@ type model struct {
 	inlineEditMsgIndex      int            // Index of message being edited (-1 = not editing)
 	inlineEditSessionPos    int            // Session position for branching
 	inlineEditTextarea      textarea.Model // Textarea for inline editing
-	inlineEditOriginal      string         // Original content (for cancel)
 	inlineEditPrevSelection int            // Previous selection index before entering inline edit (-1 = was not in selection mode)
 
 	// Hover state for showing action labels (copy, edit) on messages
@@ -2759,7 +2758,6 @@ func (m *model) StartInlineEdit(msgIndex, sessionPosition int, content string) t
 
 	m.inlineEditMsgIndex = msgIndex
 	m.inlineEditSessionPos = sessionPosition
-	m.inlineEditOriginal = content
 
 	// Create and configure the textarea
 	ta := textarea.New()
@@ -2827,7 +2825,6 @@ func (m *model) CancelInlineEdit() tea.Cmd {
 
 	m.inlineEditMsgIndex = -1
 	m.inlineEditSessionPos = -1
-	m.inlineEditOriginal = ""
 	m.inlineEditTextarea = textarea.Model{}
 	m.inlineEditPrevSelection = -1
 
@@ -2874,7 +2871,6 @@ func (m *model) commitInlineEdit() tea.Cmd {
 	// Reset editing state
 	m.inlineEditMsgIndex = -1
 	m.inlineEditSessionPos = -1
-	m.inlineEditOriginal = ""
 	m.inlineEditTextarea = textarea.Model{}
 
 	m.invalidateAllItems()
