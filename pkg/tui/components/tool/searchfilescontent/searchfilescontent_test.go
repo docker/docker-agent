@@ -61,6 +61,15 @@ func TestExtractResult(t *testing.T) {
 	}
 }
 
+func TestExtractResult_NilOrForeignMeta(t *testing.T) {
+	t.Parallel()
+	for _, meta := range []any{nil, "unexpected"} {
+		if got := extractResult(&types.Message{ToolResult: &tools.ToolCallResult{Meta: meta}}); got != "no matches" {
+			t.Errorf("extractResult() = %q, want %q", got, "no matches")
+		}
+	}
+}
+
 func TestExtractArgs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

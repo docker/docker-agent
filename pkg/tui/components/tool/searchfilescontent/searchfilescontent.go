@@ -38,7 +38,7 @@ func extractArgs(args string) string {
 }
 
 func extractResult(msg *types.Message) string {
-	if msg.ToolResult == nil || msg.ToolResult.Meta == nil {
+	if msg.ToolResult == nil {
 		return "no matches"
 	}
 	meta, ok := msg.ToolResult.Meta.(filesystem.SearchFilesContentMeta)

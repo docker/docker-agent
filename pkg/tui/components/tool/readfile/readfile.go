@@ -20,7 +20,7 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 }
 
 func extractResult(msg *types.Message) string {
-	if msg.ToolResult == nil || msg.ToolResult.Meta == nil {
+	if msg.ToolResult == nil {
 		return ""
 	}
 	meta, ok := msg.ToolResult.Meta.(filesystem.ReadFileMeta)
