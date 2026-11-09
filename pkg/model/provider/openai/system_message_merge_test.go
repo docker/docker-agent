@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -34,6 +35,72 @@ func TestChatCompletions_MergesConsecutiveSystemMessages(t *testing.T) {
 		TokenKey:     "MY_TOKEN",
 		ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"},
 	})
+}
+
+// TestChatCompletions_StrictTemplateRequiresMerge proves the merge is what
+// makes a strict-template endpoint accept the per-source system messages: the
+// fake rejects a request with more than one system message, so the test only
+// passes when the client coalesces them first.
+func TestChatCompletions_StrictTemplateRequiresMerge(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		var payload struct {
+			Messages []struct {
+				Role string `json:"role"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, `{"error":{"message":"invalid request body"}}`, http.StatusBadRequest)
+			return
+		}
+
+		systemCount := 0
+		for _, msg := range payload.Messages {
+			if msg.Role == "system" {
+				systemCount++
+			}
+		}
+		if systemCount > 1 {
+			http.Error(w, `{"error":{"message":"System message must be at the beginning"}}`, http.StatusBadRequest)
+			return
+		}
+		writeSSEResponse(w)
+	}))
+	defer server.Close()
+
+	cfg := &latest.ModelConfig{
+		Provider:     "custom",
+		Model:        "qwen3",
+		TokenKey:     "MY_TOKEN",
+		BaseURL:      server.URL,
+		ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"},
+	}
+	env := environment.NewMapEnvProvider(map[string]string{"MY_TOKEN": "secret"})
+
+	client, err := NewClient(t.Context(), cfg, env)
+	require.NoError(t, err)
+
+	stream, err := client.CreateChatCompletionStream(
+		t.Context(),
+		[]chat.Message{
+			{Role: chat.MessageRoleSystem, Content: "You are a helpful assistant."},
+			{Role: chat.MessageRoleSystem, Content: "## Filesystem Tools"},
+			{Role: chat.MessageRoleUser, Content: "List the files."},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	defer stream.Close()
+	for {
+		_, err := stream.Recv()
+		if err != nil {
+			break
+		}
+	}
+	require.Equal(t, int32(1), requests.Load())
 }
 
 func TestAliases_MergeConsecutiveSystemMessages(t *testing.T) {
