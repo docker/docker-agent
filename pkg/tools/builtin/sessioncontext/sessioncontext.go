@@ -191,10 +191,6 @@ func renderMessage(m chat.Message) string {
 
 	var b strings.Builder
 	switch m.Role {
-	case chat.MessageRoleUser:
-		b.WriteString("## user\n")
-	case chat.MessageRoleAssistant:
-		b.WriteString("## assistant\n")
 	case chat.MessageRoleTool:
 		b.WriteString("## tool result\n")
 	default:
