@@ -850,15 +850,6 @@ func marshalToMap(v any) (map[string]any, bool) {
 	return m, true
 }
 
-// contentArray extracts the content array from a marshaled message map.
-// Used by both standard and Beta API validation/repair code.
-func contentArray(m map[string]any) []any {
-	if a, ok := m["content"].([]any); ok {
-		return a
-	}
-	return nil
-}
-
 // contextLimit returns the context window for this client's model, sourced
 // from models.dev (including the embedded snapshot) when available, and
 // falling back to the conservative 200k Claude floor only when no catalogue
