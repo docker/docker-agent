@@ -519,12 +519,7 @@ func validateNonEmptyEntries(field string, entries []string) error {
 // would resolve to the working directory and silently widen (or close) the
 // matched set in surprising ways.
 func validatePathRootEntries(field string, entries []string) error {
-	for i, e := range entries {
-		if strings.TrimSpace(e) == "" {
-			return fmt.Errorf("%s[%d] must not be empty", field, i)
-		}
-	}
-	return nil
+	return validateNonEmptyEntries(field, entries)
 }
 
 // validateDomainPatterns rejects empty / whitespace-only entries and
