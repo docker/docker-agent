@@ -181,7 +181,6 @@ type appModel struct {
 	viewCache            tea.View
 	viewCacheValid       bool
 	viewCacheInitialized bool
-	hasPointer           bool
 
 	paneHidden           bool
 	tmuxVisibilityProbe  func(context.Context) bool
@@ -967,9 +966,6 @@ func (m *appModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewCache, m.viewCacheValid = cached, true
 		}
 	}()
-	if _, ok := msg.(tea.MouseMotionMsg); !ok {
-		m.hasPointer = false
-	}
 	if _, isTick := msg.(animation.TickMsg); !isTick && !m.canReuseUsageView(msg) {
 		m.viewCacheValid = false
 	}
