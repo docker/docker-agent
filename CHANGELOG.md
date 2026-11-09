@@ -3,6 +3,37 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.158.0] - 2026-11-09
+
+This release adds optional config history and model catalog support, improves tool duration visibility in both TUIs, and fixes compaction overflow and theme hot-reload issues.
+
+## What's New
+
+- Makes config history and embedded model catalog optional for Go hosts, reducing dependencies and binary data when those features are not needed
+- Shows persistent tool duration footers in both TUIs, displaying live durations and retaining final "Completed in …" or "Failed after …" messages
+
+## Bug Fixes
+
+- Fixes compaction overflow by retrying the summary request with less history when the context budget is exceeded
+- Fixes embedded model snapshot not being included in image context
+- Fixes theme watcher stopping across same-theme reloads, which could cause hot-reload edits to be dropped
+
+## Technical Changes
+
+- Removes unused wrappers across multiple packages (chat, concurrent, markdown, TUI, promptfiles, genai, logging, session, httpclient, config, creator, skills)
+- Moves test-only helpers into test files and adds coverage for configured backup limits
+- Refreshes the embedded models.dev catalog snapshot (85 models added, 86 removed, ~258 updated)
+### Pull Requests
+
+- [#4812](https://github.com/docker/docker-agent/pull/4812) - docs: update CHANGELOG.md for v1.157.0
+- [#4814](https://github.com/docker/docker-agent/pull/4814) - Make config history and embedded model catalog optional
+- [#4817](https://github.com/docker/docker-agent/pull/4817) - fix(compaction): retry the summary with less history when it overflows
+- [#4819](https://github.com/docker/docker-agent/pull/4819) - feat: show persistent tool duration footers in both TUIs
+- [#4821](https://github.com/docker/docker-agent/pull/4821) - fix: flaky theme hot-reload, A2A agent card and stream idle-timeout tests
+- [#4823](https://github.com/docker/docker-agent/pull/4823) - refactor: remove unused wrappers and isolate test helpers
+- [#4829](https://github.com/docker/docker-agent/pull/4829) - chore: refresh models.dev snapshot (+85 -86 ~258)
+
+
 ## [v1.157.0] - 2026-11-05
 
 This release delivers several bug fixes across runtime token handling, model error recognition, and provider-specific behavior, along with a UI fix for text selection and a new build tag for embedders.
@@ -7327,3 +7358,5 @@ This release improves the terminal user interface with better error handling and
 [v1.156.2]: https://github.com/docker/docker-agent/releases/tag/v1.156.2
 
 [v1.157.0]: https://github.com/docker/docker-agent/releases/tag/v1.157.0
+
+[v1.158.0]: https://github.com/docker/docker-agent/releases/tag/v1.158.0
