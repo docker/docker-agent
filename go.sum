@@ -381,10 +381,10 @@ github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJw
 github.com/opencontainers/image-spec v1.1.1/go.mod h1:qpqAh3Dmcf36wStyyWU+kCeDgrGnAve2nCC8+7h8Q0M=
 github.com/pb33f/go-yaml v0.1.1 h1:yWGmhVdwzionRnSc/hEJwcfq6PaZL2QdYzyReXBbX7Q=
 github.com/pb33f/go-yaml v0.1.1/go.mod h1:QvWdkHP5VjFYAeHMQUkaPQqREaQnBNOXmWzAjNrnSdo=
-github.com/pb33f/jsonpath v0.8.4 h1:Yx7fxsKl8scgERL22WhKDs2c6gYNNUonPSWEG8Y194s=
-github.com/pb33f/jsonpath v0.8.4/go.mod h1:eO6mgdhw5RgzCxm/bXTi75VUs0/cCYJzdGjMCCUEI6M=
-github.com/pb33f/libopenapi v0.42.3 h1:0VXnFgz04LtWjIsmCqGYA5E2Mx0DOZcOTjy5KHYw88k=
-github.com/pb33f/libopenapi v0.42.3/go.mod h1:IlfeXtmcY38KEnGJ4OMWFA8I62BCNamuQa8omLnk6R0=
+github.com/pb33f/jsonpath v0.8.5 h1:wsbwJbz6MPUTy5fAtiIlOyQb3oblaa5M7qjtdz6orPw=
+github.com/pb33f/jsonpath v0.8.5/go.mod h1:eO6mgdhw5RgzCxm/bXTi75VUs0/cCYJzdGjMCCUEI6M=
+github.com/pb33f/libopenapi v0.42.4 h1:PUEDCi0JMZFC1G+Yxej7d5OQEDLcszgRrSC4j8kzYIU=
+github.com/pb33f/libopenapi v0.42.4/go.mod h1:ap6qfNXmQ55iuXzef+k/3o/1zJOoSLCvL2snqDghVHw=
 github.com/pb33f/ordered-map/v2 v2.3.2 h1:wDyaZ2Pv9QLh64X4utCeD5Zoi9nIv2aW3lwv172O5PQ=
 github.com/pb33f/ordered-map/v2 v2.3.2/go.mod h1:1OhFrXu3OYw3kM+FXF+Ug3ugmmZ9LE8z0JfQMLvtV0w=
 github.com/pb33f/testify v0.1.1 h1:mnHe7uxKt8dyNYEGUspow72VjD264DB5rOJq4bz5tJw=
