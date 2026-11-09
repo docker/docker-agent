@@ -244,7 +244,7 @@ func (s *VectorStore) initialize(ctx context.Context, src documentSource, docPat
 	}
 
 	// Track seen files for cleanup
-	seenFilesForCleanup := make(map[string]bool)
+	seenFiles := make(map[string]bool)
 	for _, f := range files {
 		// Check for context cancellation
 		select {
@@ -252,11 +252,11 @@ func (s *VectorStore) initialize(ctx context.Context, src documentSource, docPat
 			return ctx.Err()
 		default:
 		}
-		seenFilesForCleanup[f] = true
+		seenFiles[f] = true
 	}
 
 	// Clean up orphaned documents
-	if err := s.cleanupOrphanedDocuments(ctx, seenFilesForCleanup); err != nil {
+	if err := s.cleanupOrphanedDocuments(ctx, seenFiles); err != nil {
 		slog.ErrorContext(ctx, "Failed to cleanup orphaned documents during initialization", "error", err)
 	}
 
@@ -276,7 +276,6 @@ func (s *VectorStore) initialize(ctx context.Context, src documentSource, docPat
 	}
 
 	var fileStatuses []fileStatus
-	seenFiles := make(map[string]bool)
 	filesToIndex := 0
 
 	for _, filePath := range files {
@@ -286,8 +285,6 @@ func (s *VectorStore) initialize(ctx context.Context, src documentSource, docPat
 			return ctx.Err()
 		default:
 		}
-
-		seenFiles[filePath] = true
 
 		needsIndexing, err := s.needsIndexing(ctx, src, filePath)
 		if err != nil {
