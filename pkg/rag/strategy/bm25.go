@@ -32,14 +32,6 @@ func NewBM25FromConfig(ctx context.Context, cfg latest.RAGStrategyConfig, buildC
 	bParam := GetParam(cfg.Params, "b", 0.75)
 	threshold := GetParam(cfg.Params, "threshold", 0.0)
 
-	// Handle threshold as pointer (might be float or *float)
-	var thresholdVal float64
-	if thresholdPtr := GetParamPtr[float64](cfg.Params, "threshold"); thresholdPtr != nil {
-		thresholdVal = *thresholdPtr
-	} else {
-		thresholdVal = threshold
-	}
-
 	// Merge document paths
 	docs := MergeDocPaths(buildCtx.SharedDocs, cfg.Docs, buildCtx.ParentDir)
 
@@ -79,7 +71,7 @@ func NewBM25FromConfig(ctx context.Context, cfg latest.RAGStrategyConfig, buildC
 		Strategy:  strategy,
 		Docs:      docs,
 		Limit:     limit,
-		Threshold: thresholdVal,
+		Threshold: threshold,
 		Chunking:  chunkingCfg,
 	}, nil
 }
