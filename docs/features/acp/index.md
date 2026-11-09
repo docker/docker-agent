@@ -24,7 +24,12 @@ ACP is built on the [ACP Go SDK](https://github.com/coder/acp-go-sdk) and provid
 
 ## Usage
 
+Without an agent argument, the server uses the `default` built-in agent (or your `default` alias, if configured).
+
 ```bash
+# Start ACP server with the default agent
+$ docker agent serve acp
+
 # Start ACP server on stdio
 $ docker agent serve acp ./agent.yaml
 
@@ -433,7 +438,7 @@ Captured file contents are presentation-only metadata, excluded from generic res
 ## CLI Flags
 
 ```bash
-docker agent serve acp <agent-file>|<registry-ref> [flags]
+docker agent serve acp [<agent-file>|<registry-ref>] [flags]
 ```
 
 See the [CLI reference](../cli/index.md#docker-agent-serve-acp) for all flags, defaults, and shared runtime options.
