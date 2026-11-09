@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -299,8 +298,9 @@ func TestFilesystemPolicyRechecksEditBeforeWrite(t *testing.T) {
 func TestFilesystemRegistryRejectsUnreadableIgnoreRules(t *testing.T) {
 	t.Parallel()
 	wd := t.TempDir()
-	// A scanner error is portable, including privileged test processes.
-	require.NoError(t, os.WriteFile(filepath.Join(wd, ".agentsignore"), []byte(strings.Repeat("x", 70*1024)), 0o600))
+	ignorePath := filepath.Join(wd, ".agentsignore")
+	require.NoError(t, os.WriteFile(ignorePath, []byte("secrets.env\n"), 0o600))
+	makeUnreadable(t, ignorePath)
 	ts, err := createToolsetRegistry(&Agent{}).CreateTool(t.Context(), latest.Toolset{Type: "filesystem"}, wd,
 		&config.RuntimeConfig{Config: config.Config{WorkingDir: wd}}, "root")
 	require.ErrorContains(t, err, ".agentsignore")
