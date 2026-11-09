@@ -107,27 +107,36 @@ func TestExtractFieldKeepsLastValueWhenFragmentCannotParse(t *testing.T) {
 		Path string `json:"path"`
 	}
 
-	extractPath := ExtractField(func(a testArgs) string { return a.Path })
+	var calls []string
+	extractPath := ExtractField(func(a testArgs) string {
+		calls = append(calls, a.Path)
+		return a.Path
+	})
 
+	assert.Empty(t, extractPath(""))
+	assert.Empty(t, extractPath(`{}`))
 	assert.Equal(t, "/tmp/file", extractPath(`{"path": "/tmp/file"`))
 	assert.Equal(t, "/tmp/file", extractPath(`{"path": "/tmp/file",`))
+	assert.Empty(t, extractPath(`{"path": ""}`))
 	assert.Equal(t, "/tmp/file", extractPath(`{"path": "/tmp/file", "content": "hello\`))
 	assert.Equal(t, "/tmp/other", extractPath(`{"path": "/tmp/other"}`))
+	assert.Equal(t, []string{"", "/tmp/file", "", "/tmp/other"}, calls)
 }
 
 func TestStableExtractorKeepsLastNonEmptyValue(t *testing.T) {
 	t.Parallel()
 
+	var calls []string
 	extract := StableExtractor(func(args string) string {
-		if args == "bad" {
-			return ""
-		}
+		calls = append(calls, args)
 		return args
 	})
 
+	assert.Empty(t, extract(""))
 	assert.Equal(t, "first", extract("first"))
-	assert.Equal(t, "first", extract("bad"))
+	assert.Equal(t, "first", extract(""))
 	assert.Equal(t, "second", extract("second"))
+	assert.Equal(t, []string{"", "first", "", "second"}, calls)
 }
 
 func TestParsePartialArgs(t *testing.T) {
