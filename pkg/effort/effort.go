@@ -155,10 +155,8 @@ func NextSupportedLevel(supported []Level, current Level) Level {
 	if len(supported) == 0 {
 		return None
 	}
-	for i, l := range supported {
-		if l == current {
-			return supported[(i+1)%len(supported)]
-		}
+	if i := slices.Index(supported, current); i >= 0 {
+		return supported[(i+1)%len(supported)]
 	}
 	return supported[0]
 }
