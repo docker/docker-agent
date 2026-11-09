@@ -46,6 +46,22 @@ func TestTransportWrapper_NilByDefault(t *testing.T) {
 	assert.Nil(t, opts.TransportWrapper())
 }
 
+func TestWrapTransportUsesDefaultTransportWhenClientTransportNil(t *testing.T) {
+	t.Parallel()
+
+	var base http.RoundTripper
+	opts := Apply(WithHTTPTransportWrapper(func(got http.RoundTripper) http.RoundTripper {
+		base = got
+		return &sentinelTransport{base: got}
+	}))
+	client := &http.Client{}
+
+	opts.WrapTransport(t.Context(), client)
+
+	assert.Equal(t, http.DefaultTransport, base)
+	assert.IsType(t, &sentinelTransport{}, client.Transport)
+}
+
 func TestWithStructuredOutput_ModeHandling(t *testing.T) {
 	t.Parallel()
 

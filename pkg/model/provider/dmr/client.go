@@ -87,7 +87,6 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 		}
 		baseURL = fmt.Sprintf("%s://%s%s/v1/", u.Scheme, u.Host, strings.TrimSuffix(u.Path, "/"))
 		httpClient = httpclient.NewHTTPClient(ctx, base.GatewayHTTPOptions(u, dmrmodels.DefaultHostURL(), cfg, &globalOptions)...)
-		globalOptions.WrapTransport(ctx, httpClient)
 	} else {
 		// Skip docker model status query when BaseURL is explicitly provided.
 		// This avoids unnecessary exec calls and speeds up tests/CI scenarios.
@@ -119,17 +118,15 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 		baseURL, httpClient = dmrmodels.ResolveBaseURL(ctx, cfg, endpoint)
 	}
 
-	// A custom transport (e.g. the Docker Unix socket) must also be used by
-	// the OpenAI adapter, not just the direct HTTP calls.
-	var clientOptions []option.RequestOption
-	if httpClient != nil {
-		clientOptions = append(clientOptions, option.WithHTTPClient(httpClient))
-	}
-
 	// Ensure we always have a non-nil HTTP client for both OpenAI adapter and direct HTTP calls (rerank).
 	if httpClient == nil {
 		httpClient = &http.Client{} //rubocop:disable Lint/HTTPClientTransport // DMR local service; default transport is appropriate
 	}
+	// A custom transport (e.g. the Docker Unix socket) must also be used by
+	// the OpenAI adapter, not just the direct HTTP calls. Applying the wrapper
+	// here also covers direct mode, where DMR builds its own client.
+	globalOptions.WrapTransport(ctx, httpClient)
+	clientOptions := []option.RequestOption{option.WithHTTPClient(httpClient)}
 
 	if verifyViaAPI {
 		if err := checkModelAvailable(ctx, httpClient, baseURL, cfg.Model); err != nil {

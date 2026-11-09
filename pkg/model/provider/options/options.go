@@ -107,7 +107,11 @@ func (c *ModelOptions) WrapTransport(ctx context.Context, client *http.Client) {
 	if w == nil || client == nil {
 		return
 	}
-	if wrapped := w(client.Transport); wrapped != nil {
+	base := client.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	if wrapped := w(base); wrapped != nil {
 		client.Transport = wrapped
 	} else {
 		slog.WarnContext(ctx, "HTTP transport wrapper returned nil; using original transport")
