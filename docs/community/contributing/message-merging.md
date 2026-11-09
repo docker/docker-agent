@@ -23,7 +23,9 @@ The first probe wave is deliberately narrow:
 - Text-only fixtures. Multimodal parts, tool transcripts, structured output and
   explicit prompt-cache breakpoints are covered by hermetic tests instead.
 - Built-in catalog providers only. Custom provider definitions are out of scope
-  because their endpoint and template behaviour is deployment-specific.
+  because their endpoint and template behaviour is deployment-specific. DMR is
+  included and needs a local Model Runner; targets that cannot be constructed
+  are reported as `setup_error`, not as a merge result.
 
 The OpenAI API classification redesign tracked in
 [#4756](https://github.com/docker/docker-agent/issues/4756) is intentionally

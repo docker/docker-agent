@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -395,6 +397,33 @@ func TestMessageMergeProductionWiring(t *testing.T) {
 	}
 }
 
+func TestMessageMergeProbeRegistrySupportsDMR(t *testing.T) {
+	t.Parallel()
+
+	targets, err := parseMessageMergeTargets("1", "dmr/ai/qwen3:latest")
+	require.NoError(t, err)
+	require.Equal(t, []mergeProbeTarget{{Provider: "dmr", Model: "ai/qwen3:latest"}}, targets)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"))
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	p, err := fullTestRegistry().New(t.Context(), &latest.ModelConfig{
+		Provider: "dmr",
+		Model:    "ai/qwen3:latest",
+		BaseURL:  server.URL + "/engines/v1/",
+	}, environment.NewNoEnvProvider())
+	require.NoError(t, err)
+	closeProvider(p)
+}
+
 func runMessageMergeProbe(t *testing.T, target mergeProbeTarget) {
 	t.Helper()
 
@@ -448,11 +477,23 @@ func executeMessageMergeProbe(ctx context.Context, target mergeProbeTarget, scen
 	}
 	defer closeProvider(p)
 
+	return collectMessageMergeProbe(ctx, p, transport, target, scenario, variant), nil
+}
+
+func collectMessageMergeProbe(ctx context.Context, p Provider, transport *mergeProbeTransport, target mergeProbeTarget, scenario mergeProbeScenario, variant mergeProbeVariant) mergeProbeResult {
+	result := mergeProbeResult{
+		Commit:   mergeProbeCommit(),
+		Provider: target.Provider,
+		Model:    target.Model,
+		Scenario: scenario.Name,
+		Variant:  variant.Name,
+	}
+
 	stream, err := p.CreateChatCompletionStream(ctx, scenario.Messages, nil)
 	if err != nil {
 		result.Outcome = classifyMergeProbeError(transport, err)
 		result.APIPath, result.Requests, result.Attempts, result.Blocked, result.Status = transport.snapshot()
-		return result, nil
+		return result
 	}
 	defer stream.Close()
 
@@ -468,7 +509,7 @@ func executeMessageMergeProbe(ctx context.Context, target mergeProbeTarget, scen
 	if recvErr != nil {
 		result.Notes = mergeProbeErrorClass(recvErr)
 	}
-	return result, nil
+	return result
 }
 
 func recordMergeProbeResult(t *testing.T, result mergeProbeResult) {
@@ -493,9 +534,10 @@ func classifyMergeProbeError(transport *mergeProbeTransport, err error) string {
 	if transport.notApplicable() {
 		return mergeProbeNotApplicable
 	}
-	if errors.Is(err, errMergeProbeBudgetExhausted) {
-		return mergeProbeEndpointError
-	}
+
+	// A retry blocked by the request budget must not hide the response that
+	// caused the retry: a 429 stays rate-limited, a 400 stays a role or
+	// endpoint rejection.
 	snippet := strings.ToLower(transport.responseSnippet())
 	status := transport.statusCode()
 	switch {
@@ -862,6 +904,12 @@ func TestClassifyMergeProbe(t *testing.T) {
 			want:      mergeProbeRateLimited,
 		},
 		{
+			name:      "rate limited after retry budget exhaustion",
+			transport: statusTransport(http.StatusTooManyRequests, "slow down"),
+			err:       fmt.Errorf("retry blocked: %w", errMergeProbeBudgetExhausted),
+			want:      mergeProbeRateLimited,
+		},
+		{
 			name:      "role rejected",
 			transport: statusTransport(http.StatusBadRequest, "System message must be at the beginning"),
 			err:       errors.New("bad request"),
@@ -900,6 +948,49 @@ func TestClassifyMergeProbe(t *testing.T) {
 			assert.Equal(t, tt.want, classifyMergeProbe(tt.transport, tt.err, tt.content, tt.finish))
 		})
 	}
+}
+
+// TestMessageMergeProbeSDKRateLimitStaysRateLimited exercises the full SDK
+// path. The endpoint returns 429, the SDK retries, and the probe transport
+// blocks that retry on the request budget; the original 429 must still be the
+// reported outcome.
+func TestMessageMergeProbeSDKRateLimitStaysRateLimited(t *testing.T) {
+	t.Parallel()
+
+	var serverRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		serverRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+	}))
+	defer server.Close()
+
+	scenario := messageMergeProbeScenarios()[1]
+	variant := messageMergeProbeVariants(t.Context(), scenario)[1]
+	transport := newMergeProbeTransport(variant.Messages)
+	cfg := &latest.ModelConfig{
+		Provider:     "custom",
+		Model:        "probe",
+		TokenKey:     "PROBE_TOKEN",
+		BaseURL:      server.URL,
+		ProviderOpts: map[string]any{"api_type": "openai_chatcompletions"},
+	}
+	p, err := fullTestRegistry().New(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"PROBE_TOKEN": "test-token"}),
+		options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
+			transport.base = base
+			return transport
+		}))
+	require.NoError(t, err)
+	defer closeProvider(p)
+
+	result := collectMessageMergeProbe(t.Context(), p, transport, mergeProbeTarget{Provider: "custom", Model: "probe"}, scenario, variant)
+
+	assert.Equal(t, mergeProbeRateLimited, result.Outcome)
+	assert.Equal(t, http.StatusTooManyRequests, result.Status)
+	assert.Equal(t, 1, result.Requests)
+	assert.GreaterOrEqual(t, result.Blocked, 1)
+	assert.Equal(t, int32(1), serverRequests.Load())
 }
 
 func statusTransport(status int, snippet string) *mergeProbeTransport {

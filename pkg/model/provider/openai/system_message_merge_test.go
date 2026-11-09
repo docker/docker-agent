@@ -2,9 +2,11 @@ package openai
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -94,12 +96,20 @@ func TestChatCompletions_StrictTemplateRequiresMerge(t *testing.T) {
 	)
 	require.NoError(t, err)
 	defer stream.Close()
+
+	var content strings.Builder
 	for {
-		_, err := stream.Recv()
-		if err != nil {
+		resp, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
 			break
 		}
+		require.NoError(t, err)
+		for _, choice := range resp.Choices {
+			content.WriteString(choice.Delta.Content)
+		}
 	}
+
+	assert.Contains(t, content.String(), "ok")
 	require.Equal(t, int32(1), requests.Load())
 }
 
