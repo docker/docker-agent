@@ -107,11 +107,11 @@ func RenderToolWithState(t *ToolView, width, frame int, sessionState service.Ses
 	}
 
 	if msg.ToolCall.Function.Name != filesystem.ToolNameWriteFile && t.shouldKeepLastPendingLines(width, lines) {
-		return cloneLines(t.lastLines)
+		return slices.Clone(t.lastLines)
 	}
 	if t.message.ToolStatus == tuitypes.ToolStatusPending && len(lines) > 0 {
 		t.lastWidth = width
-		t.lastLines = cloneLines(lines)
+		t.lastLines = slices.Clone(lines)
 	} else if t.message.ToolStatus != tuitypes.ToolStatusPending {
 		t.lastLines = nil
 		t.lastWidth = 0
@@ -135,13 +135,6 @@ func (t *ToolView) shouldKeepLastPendingLines(width int, lines []string) bool {
 		return true
 	}
 	return len(lines) == len(t.lastLines) && totalContentWidth(lines) < totalContentWidth(t.lastLines)
-}
-
-func cloneLines(lines []string) []string {
-	if len(lines) == 0 {
-		return nil
-	}
-	return slices.Clone(lines)
 }
 
 func totalContentWidth(lines []string) int {
