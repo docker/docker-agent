@@ -112,6 +112,15 @@ Run the relevant tests and the [development checks](#development-commands); live
 API tests can make external requests, so use them only when intentionally
 testing with credentials.
 
+## Message-merging compatibility probes
+
+Consecutive system and user message merging is controlled by catalog policy, not
+by endpoint evidence. The [message-merging compatibility probes](message-merging.md)
+compare preserved boundaries with the existing merge under explicit opt-in and a
+fixed request budget. Use them before changing a provider's
+`merge_consecutive_messages` value, and record the scoped result instead of
+treating a skipped run as a pass.
+
 ## Debugging TUI Tests
 
 The headless TUI harness can save each captured frame for inspection:
