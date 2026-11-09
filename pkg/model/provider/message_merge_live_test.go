@@ -426,8 +426,17 @@ func executeMessageMergeProbe(ctx context.Context, target mergeProbeTarget, scen
 		Variant:  variant.Name,
 	}
 
+	// Keep paid probe requests bounded: the fixtures only need a few marker
+	// tokens, and zero temperature avoids comparing sampling noise.
+	maxTokens := int64(256)
+	temperature := 0.0
 	transport := newMergeProbeTransport(variant.Messages)
-	p, err := fullTestRegistry().New(ctx, &latest.ModelConfig{Provider: target.Provider, Model: target.Model}, environment.NewOsEnvProvider(),
+	p, err := fullTestRegistry().New(ctx, &latest.ModelConfig{
+		Provider:    target.Provider,
+		Model:       target.Model,
+		MaxTokens:   &maxTokens,
+		Temperature: &temperature,
+	}, environment.NewOsEnvProvider(),
 		options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
 			transport.base = base
 			return transport

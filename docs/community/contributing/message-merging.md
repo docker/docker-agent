@@ -43,6 +43,9 @@ DOCKER_AGENT_MESSAGE_MERGE_TARGETS=provider/model[,provider/model...]
 - Wildcards are rejected, so a typo cannot scan the catalog.
 - Each variant is limited to one physical HTTP request. SDK retries are counted
   through the probe transport and then blocked by the budget.
+- Probe requests set a small output budget (`max_tokens: 256`) and temperature
+  `0`, so scenarios only spend enough tokens to return their markers and
+  sampling noise does not decide the comparison.
 - Requests run sequentially, not in parallel, to avoid provider rate limits
   contaminating the comparison.
 - The report contains provider, model, API path, request count, HTTP status,
