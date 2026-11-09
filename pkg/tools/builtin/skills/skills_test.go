@@ -533,20 +533,22 @@ func TestSkillsToolset_ReadSkillFile_InlineRejected(t *testing.T) {
 
 func TestSkillsToolset_FindSkill(t *testing.T) {
 	t.Parallel()
-	st := New([]skills.Skill{
+	input := []skills.Skill{
 		{Name: "alpha", Description: "Alpha skill"},
 		{Name: "beta", Description: "Beta skill"},
-	}, "")
+		{Name: "alpha", Description: "Duplicate skill"},
+		{Name: "", Description: "Unnamed skill"},
+	}
+	st := New(input, "")
 
-	found := st.FindSkill("alpha")
-	require.NotNil(t, found)
-	assert.Equal(t, "alpha", found.Name)
-
-	found = st.FindSkill("beta")
-	require.NotNil(t, found)
-	assert.Equal(t, "beta", found.Name)
-
+	assert.Same(t, &input[0], st.FindSkill("alpha"))
+	assert.Same(t, &input[1], st.FindSkill("beta"))
+	assert.Same(t, &input[3], st.FindSkill(""))
 	assert.Nil(t, st.FindSkill("missing"))
+	assert.Nil(t, st.FindSkill("Alpha"))
+	assert.Nil(t, New(nil, "").FindSkill("alpha"))
+	assert.Nil(t, New([]skills.Skill{}, "").FindSkill(""))
+	assert.Panics(t, func() { (*ToolSet)(nil).FindSkill("alpha") })
 }
 
 func TestSkillsToolset_Instructions_ForkSkills(t *testing.T) {
