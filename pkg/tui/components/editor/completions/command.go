@@ -39,10 +39,6 @@ func (c *commandCompletion) Items() []completion.Item {
 		}
 	}
 
-	return sortItemsByLabel(items)
-}
-
-func sortItemsByLabel(items []completion.Item) []completion.Item {
 	slices.SortFunc(items, func(a, b completion.Item) int {
 		return strings.Compare(strings.ToLower(a.Label), strings.ToLower(b.Label))
 	})
