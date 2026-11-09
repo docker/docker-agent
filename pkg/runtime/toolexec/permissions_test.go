@@ -240,6 +240,18 @@ func TestDecide_ArgPatternNoMatchFallsToMode(t *testing.T) {
 	assert.Equal(t, ReasonMode, d.Reason)
 }
 
+func TestApprovalSourceMappersAreStable(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "session_permissions_allow", allowSourceForChecker("session permissions"))
+	assert.Equal(t, "team_permissions_allow", allowSourceForChecker("permissions configuration"))
+	assert.Equal(t, "team_permissions_allow", allowSourceForChecker("anything-else"))
+
+	assert.Equal(t, "session_permissions_deny", denySourceForChecker("session permissions"))
+	assert.Equal(t, "team_permissions_deny", denySourceForChecker("permissions configuration"))
+	assert.Equal(t, "team_permissions_deny", denySourceForChecker("anything-else"))
+}
+
 // The legacy read-only fast path applies only to annotation-derived
 // safety on sessions that never chose a mode.
 func TestLegacyReadOnlyAutoApprove(t *testing.T) {

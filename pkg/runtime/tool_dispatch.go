@@ -172,25 +172,6 @@ func (h *hookDispatcher) NotifyApprovalDecision(ctx context.Context, sess *sessi
 	h.r.executeOnToolApprovalDecisionHooks(ctx, sess, a, tc, decision, source, safetyLabel)
 }
 
-// allowSourceFor maps a permission-checker source label to the
-// corresponding approval-decision source classifier. Thin wrapper kept
-// in the runtime package so tests can pin the stable mapping without
-// reaching into [toolexec]'s internals.
-func allowSourceFor(checkerSource string) string {
-	if checkerSource == "session permissions" {
-		return ApprovalSourceSessionPermissionsAllow
-	}
-	return ApprovalSourceTeamPermissionsAllow
-}
-
-// denySourceFor mirrors allowSourceFor for the deny path.
-func denySourceFor(checkerSource string) string {
-	if checkerSource == "session permissions" {
-		return ApprovalSourceSessionPermissionsDeny
-	}
-	return ApprovalSourceTeamPermissionsDeny
-}
-
 // addAgentMessage records a chat message in the session and emits the
 // resulting MessageAdded event. Used for messages the runtime records
 // outside the dispatcher (assistant turns, stop messages, cached and harness
