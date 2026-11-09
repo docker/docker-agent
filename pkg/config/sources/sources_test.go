@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/userconfig"
 )
 
@@ -56,13 +57,15 @@ func TestResolveAgentFile_DefaultIsDefault(t *testing.T) {
 	assert.Equal(t, "default", resolved)
 }
 
-func TestResolveAgentFile_CoderIsCoder(t *testing.T) {
-	t.Parallel()
+func TestResolveAgentFile_MinimalIsMinimal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
-	resolved, err := resolve("coder")
+	resolved, err := resolve("minimal")
 
 	require.NoError(t, err)
-	assert.Equal(t, "coder", resolved)
+	assert.Equal(t, "minimal", resolved)
 }
 
 func TestResolveAgentFile_ReplaceAliasWithActualFile(t *testing.T) {
@@ -273,17 +276,88 @@ func TestResolve_DefaultAliasOverride(t *testing.T) {
 	assert.Contains(t, string(data), "Custom agent")
 }
 
-func TestResolve_CoderBuiltinAgent(t *testing.T) {
-	t.Parallel()
+func TestResolve_BuiltinAgents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
-	source, err := Resolve("coder", nil)
-	require.NoError(t, err)
-	assert.Equal(t, "coder", source.Name())
+	for _, ref := range []string{"", "default", "minimal"} {
+		t.Run(ref, func(t *testing.T) {
+			name := ref
+			if name == "" {
+				name = "default"
+			}
 
-	// Verify it reads the embedded coder agent config
-	data, err := source.Read(t.Context())
+			source, err := Resolve(ref, nil)
+			require.NoError(t, err)
+			assert.Equal(t, name, source.Name())
+			assert.Empty(t, source.ParentDir())
+			data, err := source.Read(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, builtinAgents[name], data)
+
+			resolved, err := ResolveSources(ref, nil)
+			require.NoError(t, err)
+			require.Len(t, resolved, 1)
+			require.Contains(t, resolved, name)
+			assert.Equal(t, name, resolved[name].Name())
+
+			fromConfig, alias, err := ResolveWithConfig(ref, &userconfig.Config{}, nil)
+			require.NoError(t, err)
+			assert.Nil(t, alias)
+			assert.Equal(t, name, fromConfig.Name())
+
+			cfg, err := config.Load(t.Context(), source)
+			require.NoError(t, err)
+			require.Len(t, cfg.Agents, 1)
+			root := cfg.Agents.First()
+			assert.Equal(t, "root", root.Name)
+			assert.NotEmpty(t, root.Description)
+			assert.NotEmpty(t, root.Instruction)
+			assert.Empty(t, root.SubAgents)
+			var toolsets []string
+			for _, toolset := range root.Toolsets {
+				toolsets = append(toolsets, toolset.Type)
+			}
+
+			if name == "default" {
+				assert.Contains(t, root.Instruction, "expert software engineer")
+				assert.NotEmpty(t, cfg.Models[root.Model].FirstAvailable)
+				assert.True(t, root.Skills.HasLocal())
+				assert.True(t, root.AddEnvironmentInfo)
+				assert.Equal(t, []string{"AGENTS.md"}, root.AddPromptFiles)
+				assert.Equal(t, []string{"file", "shell"}, toolsets)
+			} else {
+				assert.Equal(t, "auto", root.Model)
+				assert.Empty(t, cfg.Models)
+				assert.False(t, root.Skills.Enabled())
+				assert.False(t, root.AddEnvironmentInfo)
+				assert.Empty(t, root.AddPromptFiles)
+				assert.Empty(t, root.WelcomeMessage)
+				assert.Equal(t, []string{"file", "shell", "fetch"}, toolsets)
+			}
+		})
+	}
+}
+
+func TestResolve_DefaultAliasToMinimal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	cfg, err := userconfig.Load()
 	require.NoError(t, err)
-	assert.Contains(t, string(data), "Coding Agent")
+	require.NoError(t, cfg.SetAlias("default", &userconfig.Alias{Path: "minimal"}))
+	require.NoError(t, cfg.Save())
+
+	for _, ref := range []string{"", "default"} {
+		source, err := Resolve(ref, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "minimal", source.Name())
+		data, err := source.Read(t.Context())
+		require.NoError(t, err)
+		assert.Equal(t, minimalAgent, data)
+	}
 }
 
 func TestBuiltinAgentNames(t *testing.T) {
@@ -291,8 +365,7 @@ func TestBuiltinAgentNames(t *testing.T) {
 
 	names := BuiltinAgentNames()
 
-	assert.Contains(t, names, "default")
-	assert.Contains(t, names, "coder")
+	assert.Equal(t, []string{"default", "minimal"}, names)
 }
 
 func TestResolve_DefaultAliasToOCIReference(t *testing.T) {

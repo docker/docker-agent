@@ -192,7 +192,7 @@ func resolve(agentFilename string) (string, error) {
 }
 
 func resolvePath(agentFilename string) (string, error) {
-	// Built-in agent names (e.g. "default", "coder") are either user defined aliases or embedded agents
+	// Aliases have already been resolved; remaining built-in names use embedded agents.
 	if _, ok := builtinAgents[agentFilename]; ok {
 		return agentFilename, nil
 	}

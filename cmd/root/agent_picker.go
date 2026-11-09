@@ -38,7 +38,7 @@ const agentPickerDefaultsSpec = "defaults"
 // the user doesn't pass --agent-picker with an explicit list: the built-in
 // agents plus any agent config files found in ~/.agents.
 func defaultAgentPickerRefs() []string {
-	refs := []string{"default", "coder"}
+	refs := sources.BuiltinAgentNames()
 	home := paths.GetHomeDir()
 	if home == "" {
 		return refs

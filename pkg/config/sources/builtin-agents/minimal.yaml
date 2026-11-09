@@ -1,21 +1,8 @@
-metadata:
-  tags:
-    - general
-    - assistant
-
 agents:
   root:
     model: auto
-    description: A helpful AI assistant
-    welcome_message: |
-      Hello! I'm your AI assistant. How can I help you today?
-    instruction: |
-      You are a knowledgeable assistant that helps users with various tasks.
-      Be helpful, accurate, and concise in your responses.
-    skills: true
-    add_environment_info: true
-    add_prompt_files:
-      - AGENTS.md
+    description: A minimal general-purpose assistant
+    instruction: Be helpful, accurate, and concise.
     toolsets:
       - type: file
       - type: shell

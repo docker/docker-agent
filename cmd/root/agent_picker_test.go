@@ -61,7 +61,7 @@ func TestParseAgentPickerRefsDefaults(t *testing.T) {
 
 	// Without ~/.agents, only the built-in agents are offered.
 	for _, raw := range []string{"", "   ", ",,,"} {
-		assert.Equal(t, []string{"default", "coder"}, parseAgentPickerRefs(raw))
+		assert.Equal(t, []string{"default", "minimal"}, parseAgentPickerRefs(raw))
 	}
 
 	// Config files in ~/.agents are appended to the built-ins; directories
@@ -74,7 +74,7 @@ func TestParseAgentPickerRefsDefaults(t *testing.T) {
 
 	want := []string{
 		"default",
-		"coder",
+		"minimal",
 		filepath.Join(agentsDir, "assistant.yaml"),
 		filepath.Join(agentsDir, "gopher.yml"),
 	}
@@ -85,6 +85,21 @@ func TestParseAgentPickerRefsDefaults(t *testing.T) {
 
 	// An explicit list bypasses the defaults entirely.
 	assert.Equal(t, []string{"coder"}, parseAgentPickerRefs("coder"))
+}
+
+func TestLoadBuiltinAgentChoices(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	choices := loadAgentChoices(t.Context(), defaultAgentPickerRefs(), nil, nil)
+	require.Len(t, choices, 2)
+	for i, name := range []string{"default", "minimal"} {
+		assert.Equal(t, name, choices[i].ref)
+		require.NoError(t, choices[i].err)
+		assert.NotEmpty(t, choices[i].description)
+		assert.NotEmpty(t, choices[i].yaml)
+	}
 }
 
 func TestPrependAgentRef(t *testing.T) {

@@ -13,7 +13,8 @@ models:
 
 agents:
   root:
-    model: default
+    model: smart
+    description: A capable coding agent
     instruction: |
       You are an expert software engineer. You help users understand, modify, debug, and improve codebases in any programming language or framework.
 
@@ -47,8 +48,8 @@ agents:
       </communication>
 
       <tools>
-      - use `shell` to run commands in bash
-      - use write_file, edit_file and read_file for file operations
+      - Use `shell` to run commands in the user's environment.
+      - Use `write_file`, `edit_file`, and `read_file` for file operations.
       </tools>
 
     skills: true
