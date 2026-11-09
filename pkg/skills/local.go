@@ -175,22 +175,6 @@ func hasGitMarker(dir string) bool {
 	return info.IsDir() || info.Mode().IsRegular()
 }
 
-// findGitRoot finds the enclosing git repository root, or returns "" if dir
-// is not inside a git repository. Kept as a thin wrapper for test coverage
-// and callers that don't need the full directory list.
-func findGitRoot(dir string) string {
-	for current := dir; ; {
-		if hasGitMarker(current) {
-			return current
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return ""
-		}
-		current = parent
-	}
-}
-
 // loadSkillsFromDir loads skills from a directory.
 // If recursive is true, it walks all subdirectories looking for SKILL.md.
 // If recursive is false, it only looks at immediate subdirectories.
