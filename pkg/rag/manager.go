@@ -177,12 +177,7 @@ func (m *Manager) Initialize(ctx context.Context) (err error) {
 		"num_strategies", len(m.strategies))
 
 	// Initialize strategies in parallel to avoid blocking
-	type result struct {
-		strategyName string
-		err          error
-	}
-
-	resultsChan := make(chan result, len(m.strategies))
+	resultsChan := make(chan error, len(m.strategies))
 
 	for strategyName, strategyImpl := range m.strategies {
 		strategyCfg := m.strategyConfigs[strategyName]
@@ -214,7 +209,7 @@ func (m *Manager) Initialize(ctx context.Context) (err error) {
 					"rag_name", m.name,
 					"strategy", strategyName)
 			}
-			resultsChan <- result{strategyName: strategyName, err: err}
+			resultsChan <- err
 		}()
 	}
 
@@ -223,9 +218,9 @@ func (m *Manager) Initialize(ctx context.Context) (err error) {
 	var firstError error
 	for range len(m.strategies) {
 		select {
-		case res := <-resultsChan:
-			if res.err != nil && firstError == nil {
-				firstError = res.err
+		case err := <-resultsChan:
+			if err != nil && firstError == nil {
+				firstError = err
 			}
 		case <-ctx.Done():
 			return ctx.Err()
