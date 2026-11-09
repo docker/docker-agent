@@ -71,6 +71,40 @@ func WithEventObserverFactory(factory func() EventObserver) Opt {
 	}
 }
 
+type observerBarrier struct {
+	done chan struct{}
+}
+
+func (*observerBarrier) GetAgentName() string { return "" }
+
+type observerFlushKey struct{}
+
+// flushObservers orders direct store writes after previously emitted events.
+func flushObservers(ctx context.Context) error {
+	flush, _ := ctx.Value(observerFlushKey{}).(func(context.Context) error)
+	if flush == nil {
+		return nil
+	}
+	return flush(ctx)
+}
+
+func withObserverFlush(ctx context.Context, events chan<- Event) context.Context {
+	return context.WithValue(ctx, observerFlushKey{}, func(ctx context.Context) error {
+		barrier := &observerBarrier{done: make(chan struct{})}
+		select {
+		case events <- barrier:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-barrier.done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+}
+
 // observe wraps inner with the runtime's observer chain: each
 // observer sees [EventObserver.OnRunStart] before the first event,
 // then every event drained from inner is dispatched to each observer
@@ -91,6 +125,10 @@ func (r *LocalRuntime) observe(ctx context.Context, sess *session.Session, inner
 	go func() {
 		defer close(out)
 		for event := range inner {
+			if barrier, ok := event.(*observerBarrier); ok {
+				close(barrier.done)
+				continue
+			}
 			for _, obs := range observers {
 				obs.OnEvent(ctx, sess, event)
 			}
