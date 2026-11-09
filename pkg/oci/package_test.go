@@ -145,6 +145,66 @@ agents:
 	assert.Equal(t, "You are a self-contained agent.", cfg.Agents.First().Instruction)
 }
 
+func TestPackageFileAsOCIToStore_UTF8BOM(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name            string
+		versionFirst    bool
+		instructionFile bool
+	}{
+		{name: "version first", versionFirst: true},
+		{name: "agents first"},
+		{name: "version first with instruction file", versionFirst: true, instructionFile: true},
+		{name: "agents first with instruction file", instructionFile: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			agentFilename := filepath.Join(dir, "test.yaml")
+			agents := "agents:\n  root:\n    model: auto\n    description: Keep \ufeff inside\n"
+			if tc.instructionFile {
+				agents += "    instruction_file: prompt.md\n"
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "prompt.md"), []byte("You are a self-contained agent."), 0o644))
+			}
+			const version = "version: \"11\"\n"
+			testContent := agents + version
+			if tc.versionFirst {
+				testContent = version + agents
+			}
+			testContent = "\xef\xbb\xbf" + testContent
+			require.NoError(t, os.WriteFile(agentFilename, []byte(testContent), 0o644))
+
+			store, err := content.NewStore(content.WithBaseDir(t.TempDir()))
+			require.NoError(t, err)
+			agentSource, err := sources.Resolve(agentFilename, nil)
+			require.NoError(t, err)
+
+			const tag = "test-bom:v1"
+			digest, err := PackageFileAsOCIToStore(t.Context(), agentSource, tag, store)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = store.DeleteArtifact(digest) })
+
+			data, err := store.GetArtifact(tag)
+			require.NoError(t, err)
+			if tc.instructionFile {
+				assert.NotContains(t, data, "instruction_file")
+			} else {
+				assert.Equal(t, testContent, data)
+			}
+
+			cfg, err := config.Load(t.Context(), config.NewBytesSource("pulled.yaml", []byte(data)), config.WithVersions(legacy.Register))
+			require.NoError(t, err)
+			assert.Equal(t, "11", cfg.Version)
+			assert.Equal(t, "Keep \ufeff inside", cfg.Agents.First().Description)
+			if tc.instructionFile {
+				assert.Equal(t, "You are a self-contained agent.", cfg.Agents.First().Instruction)
+			}
+		})
+	}
+}
+
 func TestPackageFileAsOCIToStore_HCLInlinesLocalFiles(t *testing.T) {
 	t.Parallel()
 	// HCL configs resolve both instruction_file and file() against the local

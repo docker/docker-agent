@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path/filepath"
@@ -60,9 +61,11 @@ func PackageFileAsOCIToStore(ctx context.Context, agentSource config.Source, art
 	if err != nil {
 		return "", fmt.Errorf("reading file: %w", err)
 	}
-	isHCL := hcl.IsHCLSource(agentSource.Name(), data)
+	// Match config.Load's BOM handling without changing the preserved bytes.
+	parseData := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	isHCL := hcl.IsHCLSource(agentSource.Name(), parseData)
 	if !isHCL {
-		if err := yaml.Unmarshal(data, &raw); err != nil {
+		if err := yaml.Unmarshal(parseData, &raw); err != nil {
 			return "", fmt.Errorf("looking for version in config file\n%s", yaml.FormatError(err, true, true))
 		}
 	}
@@ -77,7 +80,7 @@ func PackageFileAsOCIToStore(ctx context.Context, agentSource config.Source, art
 	//     inlined into Instruction by config.Load, and a pulled artifact has
 	//     no local directory to resolve the original path against, so the raw
 	//     reference would be unreadable.
-	if raw.Version == "" || isHCL || configUsesInstructionFile(data) {
+	if raw.Version == "" || isHCL || configUsesInstructionFile(parseData) {
 		data, err = yaml.MarshalWithOptions(cfg, yaml.Indent(2))
 		if err != nil {
 			return "", fmt.Errorf("marshaling config: %w", err)

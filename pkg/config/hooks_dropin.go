@@ -61,7 +61,7 @@ func readHookDropIn(path string) (*latest.HooksConfig, error) {
 		return nil, err
 	}
 	var hooks latest.HooksConfig
-	if err := yaml.UnmarshalWithOptions(data, &hooks, yaml.Strict()); err != nil {
+	if err := yaml.UnmarshalWithOptions(trimUTF8BOM(data), &hooks, yaml.Strict()); err != nil {
 		return nil, err
 	}
 	if err := hooks.Validate(); err != nil {

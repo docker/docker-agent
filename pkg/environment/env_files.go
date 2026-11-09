@@ -1,6 +1,7 @@
 package environment
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -83,6 +84,10 @@ func ReadEnvFile(absolutePath string) ([]KeyValuePair, error) {
 	}
 
 	var lines []KeyValuePair
+
+	// PowerShell 5 (Out-File, Set-Content -Encoding utf8) writes UTF-8 with a
+	// byte order mark. TrimSpace keeps it, so it would end up in the first key.
+	buf = bytes.TrimPrefix(buf, []byte("\xef\xbb\xbf"))
 
 	for line := range strings.SplitSeq(string(buf), "\n") {
 		line = strings.TrimSpace(line)
