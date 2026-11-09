@@ -218,9 +218,6 @@ func argToString(v any) string {
 	switch val := v.(type) {
 	case string:
 		return val
-	case float64:
-		// JSON numbers are float64 - use %g for shortest representation
-		return fmt.Sprintf("%g", val)
 	default:
 		return fmt.Sprintf("%v", v)
 	}
