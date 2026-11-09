@@ -87,17 +87,17 @@ func TestDetectShell_Unix_Fallback(t *testing.T) {
 	}
 }
 
-func TestDefaultUnixShell(t *testing.T) {
+func TestDetectUnixShell(t *testing.T) {
 	t.Setenv("SHELL", "/usr/local/bin/fish")
-	got := defaultUnixShell()
+	got := DetectUnixShell()
 	if got != "/usr/local/bin/fish" {
-		t.Errorf("defaultUnixShell() = %q, want /usr/local/bin/fish", got)
+		t.Errorf("DetectUnixShell() = %q, want /usr/local/bin/fish", got)
 	}
 
 	t.Setenv("SHELL", "")
-	got = defaultUnixShell()
+	got = DetectUnixShell()
 	if got != "/bin/sh" {
-		t.Errorf("defaultUnixShell() = %q, want /bin/sh", got)
+		t.Errorf("DetectUnixShell() = %q, want /bin/sh", got)
 	}
 }
 
