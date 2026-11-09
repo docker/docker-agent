@@ -214,7 +214,7 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		endReason = turnEndReasonError
 		return endReason
 	}
-	completeRemainingToolCalls(harnessToolCompletedResult())
+	completeRemainingToolCalls(tools.ResultSuccess("Completed by external harness."))
 
 	content := strings.TrimSpace(streamed.String())
 	if content == "" && strings.TrimSpace(finalResult) != "" {
@@ -348,10 +348,6 @@ func harnessToolResult(ev harness.Event) *tools.ToolCallResult {
 		return tools.ResultError(output)
 	}
 	return tools.ResultSuccess(output)
-}
-
-func harnessToolCompletedResult() *tools.ToolCallResult {
-	return tools.ResultSuccess("Completed by external harness.")
 }
 
 func harnessToolCallArguments(ev harness.Event) string {
