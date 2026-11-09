@@ -268,13 +268,9 @@ func writeLineComments(doc *strings.Builder, description, indent string) {
 }
 
 func writeDocComment(doc *strings.Builder, description string) {
-	writeIndentedDocComment(doc, description, "")
-}
-
-func writeIndentedDocComment(doc *strings.Builder, description, indent string) {
-	doc.WriteString(indent + "/**\n")
+	doc.WriteString("/**\n")
 	for line := range strings.SplitSeq(description, "\n") {
-		doc.WriteString(indent + " * " + strings.ReplaceAll(strings.TrimSpace(line), "*/", "*\\/") + "\n")
+		doc.WriteString(" * " + strings.ReplaceAll(strings.TrimSpace(line), "*/", "*\\/") + "\n")
 	}
-	doc.WriteString(indent + " */\n")
+	doc.WriteString(" */\n")
 }
