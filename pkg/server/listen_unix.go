@@ -6,9 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"runtime"
 	"syscall"
 )
+
+func closeInheritedFile(file *os.File) error {
+	return file.Close()
+}
 
 func isConnectionRefused(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED)

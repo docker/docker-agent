@@ -8,31 +8,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// fdOwnershipPin keeps os.Files whose descriptor was handed to
-// Listen("fd://...") reachable for the life of the test process. Listen
-// adopts and closes the descriptor, so closing the os.File as well —
-// explicitly or via its GC cleanup — would close the same fd number a second
-// time after the OS has recycled it for another parallel test's socket,
-// corrupting that test's connection. Pinning for the whole process (rather
-// than runtime.KeepAlive until test end) matters because the recycled fd can
-// belong to a parallel test that outlives this one.
-var (
-	fdOwnershipPinMu sync.Mutex
-	fdOwnershipPin   []*os.File
-)
-
-func pinFDOwnership(file *os.File) {
-	fdOwnershipPinMu.Lock()
-	defer fdOwnershipPinMu.Unlock()
-	fdOwnershipPin = append(fdOwnershipPin, file)
-}
 
 func TestListen_FD(t *testing.T) {
 	t.Parallel()
@@ -42,16 +25,28 @@ func TestListen_FD(t *testing.T) {
 	require.NoError(t, err)
 	defer orig.Close()
 
+	wantAddr := orig.Addr()
 	file, err := orig.(*net.TCPListener).File()
 	require.NoError(t, err)
-	// Ownership of file's fd passes to Listen; see fdOwnershipPin.
+	require.NoError(t, orig.Close())
+	// Listen adopts the fd; file must never close it again.
 	pinFDOwnership(file)
 
 	ln, err := Listen(t.Context(), fmt.Sprintf("fd://%d", file.Fd()))
 	require.NoError(t, err)
 	defer ln.Close()
 
-	assert.NotNil(t, ln.Addr())
+	assert.Equal(t, wantAddr, ln.Addr())
+	runtime.GC()
+
+	require.NoError(t, ln.(*net.TCPListener).SetDeadline(time.Now().Add(5*time.Second)))
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	client, err := dialer.DialContext(t.Context(), "tcp", ln.Addr().String())
+	require.NoError(t, err)
+	defer client.Close()
+	conn, err := ln.Accept()
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
 }
 
 func TestListen_FD_InvalidNumber(t *testing.T) {
