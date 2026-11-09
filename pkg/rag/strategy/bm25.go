@@ -184,7 +184,7 @@ func (s *BM25Strategy) initialize(ctx context.Context, src documentSource, docPa
 		return fmt.Errorf("failed to collect files: %w", err)
 	}
 
-	seenFilesForCleanup := make(map[string]bool)
+	seenFiles := make(map[string]bool)
 	for _, f := range files {
 		// Check for context cancellation
 		select {
@@ -192,10 +192,10 @@ func (s *BM25Strategy) initialize(ctx context.Context, src documentSource, docPa
 			return ctx.Err()
 		default:
 		}
-		seenFilesForCleanup[f] = true
+		seenFiles[f] = true
 	}
 
-	if err := s.cleanupOrphanedDocuments(ctx, seenFilesForCleanup); err != nil {
+	if err := s.cleanupOrphanedDocuments(ctx, seenFiles); err != nil {
 		slog.ErrorContext(ctx, "Failed to cleanup orphaned documents", "error", err)
 	}
 
@@ -211,7 +211,6 @@ func (s *BM25Strategy) initialize(ctx context.Context, src documentSource, docPa
 	}
 
 	var fileStatuses []fileStatus
-	seenFiles := make(map[string]bool)
 	filesToIndex := 0
 
 	for _, filePath := range files {
@@ -221,8 +220,6 @@ func (s *BM25Strategy) initialize(ctx context.Context, src documentSource, docPa
 			return ctx.Err()
 		default:
 		}
-
-		seenFiles[filePath] = true
 
 		needsIndexing, err := s.needsIndexing(src, filePath)
 		if err != nil {
