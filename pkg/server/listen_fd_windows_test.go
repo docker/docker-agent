@@ -24,8 +24,7 @@ func TestCloseInheritedFile_NonSocket(t *testing.T) {
 	require.NoError(t, err)
 	defer file.Close()
 	require.NoError(t, closeInheritedFile(file))
-	_, err = file.Stat()
-	require.ErrorIs(t, err, os.ErrClosed)
+	require.ErrorIs(t, file.Close(), os.ErrClosed)
 }
 
 func TestListen_FD_ReleasesWinsockState(t *testing.T) {
