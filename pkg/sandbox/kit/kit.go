@@ -1015,34 +1015,6 @@ func plural(n int, what string) string {
 	return fmt.Sprintf("%s %ss", styleCount(strconv.Itoa(n)), what)
 }
 
-// needsAutoInstall reports whether cfg has at least one toolset that
-// the in-sandbox runtime would push through [toolinstall.EnsureCommand].
-// Today only MCP and LSP toolsets do; shell toolsets run a user-
-// supplied binary directly without auto-install.
-//
-// A toolset is a candidate when:
-//   - its type is "mcp" or "lsp" (top-level cfg.MCPs entries are
-//     also implicitly mcp);
-//   - it has a Command (no command means the in-sandbox runtime has
-//     nothing to look up on PATH);
-//   - its Version is not "false" / "off" (the per-toolset opt-out
-//     [toolinstall.EnsureCommand] honours).
-//
-// We deliberately don't try to predict whether the command will
-// actually be missing inside the sandbox image. We only know that on
-// the host. The sandbox image may already ship the binary, in which
-// case auto-install never fires and the allowlist we open is unused —
-// but unused allow rules are harmless, while a blocked auto-install
-// is an opaque "403 Blocked by network policy" that's hard to
-// diagnose. Erring on the side of allow keeps the failure mode loud
-// instead of mysterious.
-func needsAutoInstall(cfg *latestcfg.Config) bool {
-	if cfg == nil {
-		return false
-	}
-	return len(collectAutoInstallable(cfg)) > 0
-}
-
 // isAutoInstallable returns true if ts is the kind of toolset
 // [toolinstall.EnsureCommand] would touch.
 func isAutoInstallable(ts latestcfg.Toolset) bool {
