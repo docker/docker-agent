@@ -68,7 +68,7 @@ require (
 	github.com/rumpl/keepawake v0.1.0
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	github.com/stretchr/testify v1.12.1
 	github.com/temoto/robotstxt v1.1.2
 	github.com/wk8/go-ordered-map/v2 v2.1.9-0.20250401010720-46d686821e33
