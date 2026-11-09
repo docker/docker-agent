@@ -253,12 +253,15 @@ func TestServerInheritedListenerAuth(t *testing.T) {
 			original, err := Listen(t.Context(), addr)
 			require.NoError(t, err)
 			defer original.Close()
+			wantAddr := original.Addr()
 			file, err := original.(*net.TCPListener).File()
 			require.NoError(t, err)
+			require.NoError(t, original.Close())
 			pinFDOwnership(file)
 			ln, err := Listen(t.Context(), fmt.Sprintf("fd://%d", file.Fd()))
 			require.NoError(t, err)
 			defer ln.Close()
+			require.Equal(t, wantAddr, ln.Addr())
 
 			srv := NewWithManager(nil, "")
 			if addr == "0.0.0.0:0" {

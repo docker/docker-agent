@@ -8,7 +8,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// Keep files alive after their descriptors have been adopted elsewhere; their
+// finalizers must not close a recycled descriptor. os.File has no detach method.
+var (
+	fdOwnershipPinMu sync.Mutex
+	fdOwnershipPin   []*os.File
+)
+
+func pinFDOwnership(file *os.File) {
+	fdOwnershipPinMu.Lock()
+	defer fdOwnershipPinMu.Unlock()
+	fdOwnershipPin = append(fdOwnershipPin, file)
+}
 
 func Listen(ctx context.Context, addr string) (net.Listener, error) {
 	if path, ok := strings.CutPrefix(addr, "unix://"); ok {
@@ -36,7 +50,7 @@ func listenFD(raw string) (net.Listener, error) {
 	}
 
 	f := os.NewFile(uintptr(fd), "fd://"+raw)
-	defer f.Close() // net.FileListener duplicates the fd; close our copy
+	defer func() { _ = closeInheritedFile(f) }() // net.FileListener duplicates the fd; close our copy
 
 	ln, err := net.FileListener(f)
 	if err != nil {

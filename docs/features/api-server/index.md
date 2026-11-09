@@ -342,6 +342,11 @@ $ docker agent run agent.yaml --listen 127.0.0.1:8080
 $ docker agent run agent.yaml --listen unix:///tmp/my-run.sock
 ```
 
+`fd://N` adopts an inherited listening socket (a Winsock socket handle on
+Windows). It closes the supplied descriptor after duplicating it; callers must
+not close that descriptor again. The inherited listener retains its bound
+address and the same authentication requirements as a directly bound listener.
+
 The run keeps its interactive TUI; the control plane runs alongside it. A
 follow-up delivered over HTTP is processed exactly as if it had been typed
 into the TUI: it starts a turn even when the agent is idle, generates the
