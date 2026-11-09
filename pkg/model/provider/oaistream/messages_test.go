@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -255,6 +256,192 @@ func TestMergeMixedContentPreservesOrder(t *testing.T) {
 			assert.Equal(t, []string{"before", "part one", "between", "part two", "after"}, texts)
 		})
 	}
+}
+
+func TestMergeConsecutiveMessages_ExactContent(t *testing.T) {
+	t.Parallel()
+
+	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage("first system"),
+		openai.SystemMessage("second system"),
+		openai.UserMessage("first user"),
+		openai.UserMessage("second user"),
+	})
+
+	require.Len(t, merged, 2)
+	require.NotNil(t, merged[0].OfSystem)
+	assert.Equal(t, "first system\nsecond system", merged[0].OfSystem.Content.OfString.Value)
+	require.NotNil(t, merged[1].OfUser)
+	assert.Equal(t, "first user\nsecond user", merged[1].OfUser.Content.OfString.Value)
+}
+
+func TestMergeConsecutiveMessages_KeepsAssistantAndToolTurns(t *testing.T) {
+	t.Parallel()
+
+	assistant := openai.ChatCompletionMessageParamUnion{OfAssistant: &openai.ChatCompletionAssistantMessageParam{
+		Content: openai.ChatCompletionAssistantMessageParamContentUnion{OfString: param.NewOpt("calling tools")},
+		ToolCalls: []openai.ChatCompletionMessageToolCallUnionParam{{
+			OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+				ID: "call-a",
+				Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+					Name: "read_file", Arguments: `{"path":"a"}`,
+				},
+			},
+		}},
+	}}
+	toolA := openai.ChatCompletionMessageParamUnion{OfTool: &openai.ChatCompletionToolMessageParam{
+		ToolCallID: "call-a",
+		Content:    openai.ChatCompletionToolMessageParamContentUnion{OfString: param.NewOpt("result a")},
+	}}
+	toolB := openai.ChatCompletionMessageParamUnion{OfTool: &openai.ChatCompletionToolMessageParam{
+		ToolCallID: "call-b",
+		Content:    openai.ChatCompletionToolMessageParamContentUnion{OfString: param.NewOpt("result b")},
+	}}
+
+	input := []openai.ChatCompletionMessageParamUnion{assistant, toolA, toolB}
+	merged := MergeConsecutiveMessages(input)
+
+	require.Len(t, merged, len(input))
+	for i := range input {
+		assert.JSONEq(t, mustMarshalMessage(t, input[i]), mustMarshalMessage(t, merged[i]))
+	}
+}
+
+func TestMergeConsecutiveMessages_DoesNotHoistLateSystem(t *testing.T) {
+	t.Parallel()
+
+	input := []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage("leading"),
+		openai.UserMessage("question"),
+		openai.SystemMessage("late"),
+		openai.UserMessage("follow-up"),
+	}
+	merged := MergeConsecutiveMessages(input)
+
+	require.Len(t, merged, len(input))
+	for i := range input {
+		assert.JSONEq(t, mustMarshalMessage(t, input[i]), mustMarshalMessage(t, merged[i]))
+	}
+}
+
+func TestMergeConsecutiveMessages_PreservesMultimodalOrder(t *testing.T) {
+	t.Parallel()
+
+	const imageURL = "https://example.com/image.png"
+	first := openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{
+		openai.TextContentPart("before"),
+		openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: imageURL, Detail: "high"}),
+	})
+	second := openai.UserMessage("after")
+
+	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{first, second})
+	require.Len(t, merged, 1)
+	require.NotNil(t, merged[0].OfUser)
+
+	parts := merged[0].OfUser.Content.OfArrayOfContentParts
+	require.Len(t, parts, 3)
+	require.NotNil(t, parts[0].OfText)
+	assert.Equal(t, "before", parts[0].OfText.Text)
+	require.NotNil(t, parts[1].OfImageURL)
+	assert.Equal(t, imageURL, parts[1].OfImageURL.ImageURL.URL)
+	require.NotNil(t, parts[2].OfText)
+	assert.Equal(t, "after", parts[2].OfText.Text)
+}
+
+func TestMergeConsecutiveMessages_PreservesSingletonMetadata(t *testing.T) {
+	t.Parallel()
+
+	system := openai.SystemMessage("system with metadata")
+	system.OfSystem.SetExtraFields(map[string]any{"scope": "agent"})
+	user := openai.UserMessage("user with name")
+	user.OfUser.Name = param.NewOpt("alice")
+
+	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{system, user})
+
+	require.Len(t, merged, 2)
+	assert.Equal(t, map[string]any{"scope": "agent"}, merged[0].OfSystem.ExtraFields())
+	assert.Equal(t, "alice", merged[1].OfUser.Name.Value)
+	assert.JSONEq(t, mustMarshalMessage(t, system), mustMarshalMessage(t, merged[0]))
+	assert.JSONEq(t, mustMarshalMessage(t, user), mustMarshalMessage(t, merged[1]))
+}
+
+func TestMergeConsecutiveMessages_MetadataIsABarrier(t *testing.T) {
+	t.Parallel()
+
+	withExtra := openai.SystemMessage("first")
+	withExtra.OfSystem.SetExtraFields(map[string]any{"scope": "agent"})
+	plain := openai.SystemMessage("second")
+
+	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{withExtra, plain})
+
+	require.Len(t, merged, 2)
+	assert.Equal(t, "first", merged[0].OfSystem.Content.OfString.Value)
+	assert.Equal(t, "second", merged[1].OfSystem.Content.OfString.Value)
+	assert.Equal(t, map[string]any{"scope": "agent"}, merged[0].OfSystem.ExtraFields())
+}
+
+func TestMergeConsecutiveMessages_PartMetadataIsABarrier(t *testing.T) {
+	t.Parallel()
+
+	part := openai.TextContentPart("first")
+	part.OfText.SetExtraFields(map[string]any{"tenant": "a"})
+	withMetadata := openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{part})
+	plain := openai.UserMessage("second")
+
+	merged := MergeConsecutiveMessages([]openai.ChatCompletionMessageParamUnion{withMetadata, plain})
+
+	require.Len(t, merged, 2)
+	require.Len(t, merged[0].OfUser.Content.OfArrayOfContentParts, 1)
+	assert.Equal(t, map[string]any{"tenant": "a"}, merged[0].OfUser.Content.OfArrayOfContentParts[0].OfText.ExtraFields())
+	assert.Equal(t, "second", merged[1].OfUser.Content.OfString.Value)
+}
+
+func TestMergeConsecutiveMessages_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	input := []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage("system a"),
+		openai.SystemMessage("system b"),
+		openai.UserMessage("user a"),
+		openai.UserMessage("user b"),
+	}
+	once := MergeConsecutiveMessages(input)
+	twice := MergeConsecutiveMessages(once)
+
+	assert.JSONEq(t, mustMarshalMessages(t, once), mustMarshalMessages(t, twice))
+}
+
+func TestMergeConsecutiveMessages_DoesNotMutateInput(t *testing.T) {
+	t.Parallel()
+
+	input := []openai.ChatCompletionMessageParamUnion{
+		openai.SystemMessage("system a"),
+		openai.SystemMessage("system b"),
+		openai.UserMessage([]openai.ChatCompletionContentPartUnionParam{
+			openai.TextContentPart("look"),
+			openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: "https://example.com/i.png"}),
+		}),
+		openai.UserMessage("thanks"),
+	}
+	before := mustMarshalMessages(t, input)
+
+	_ = MergeConsecutiveMessages(input)
+
+	assert.JSONEq(t, before, mustMarshalMessages(t, input))
+}
+
+func mustMarshalMessage(t *testing.T, msg openai.ChatCompletionMessageParamUnion) string {
+	t.Helper()
+	data, err := json.Marshal(msg)
+	require.NoError(t, err)
+	return string(data)
+}
+
+func mustMarshalMessages(t *testing.T, messages []openai.ChatCompletionMessageParamUnion) string {
+	t.Helper()
+	data, err := json.Marshal(messages)
+	require.NoError(t, err)
+	return string(data)
 }
 
 func TestJSONSchema_MarshalJSON(t *testing.T) {
