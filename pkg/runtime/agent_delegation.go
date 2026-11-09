@@ -244,7 +244,7 @@ func newSubSession(parent *session.Session, cfg SubSessionConfig, childAgent *ag
 	}
 	if prompt.isolationInstructions != "" {
 		sysMsg = strings.TrimSuffix(sysMsg, delegationPathInstructions)
-		sysMsg = prependNote(sysMsg, prompt.setupContext)
+		sysMsg = joinPrompts(prompt.setupContext, sysMsg)
 		sysMsg += "\n\n" + prompt.isolationInstructions
 	}
 
@@ -601,29 +601,15 @@ func (r *LocalRuntime) runCollecting(ctx context.Context, parent *session.Sessio
 	// no explanation. Prepend an actionable note so the model (and, through it,
 	// the user) learns the server must be authorized interactively first.
 	if note := backgroundAuthRequiredNote(child); note != "" {
-		result = prependNote(result, note)
+		result = joinPrompts(note, result)
 	}
 	// Mid-call elicitations that were auto-declined because this background
 	// session had no UI to answer them (see elicitationHandler) are recorded
 	// against this sub-session's ID; surface them the same way (#3584).
 	for _, note := range executionRuntime.elicitationDeclines.drain(s.ID) {
-		result = prependNote(result, note)
+		result = joinPrompts(note, result)
 	}
 	return &agenttool.RunResult{Result: result}
-}
-
-// prependNote prepends note to result, separated by a blank line, handling
-// the case where either side is empty. Used to surface model-readable
-// context (OAuth-required, elicitation auto-declined) ahead of a background
-// sub-session's actual response.
-func prependNote(result, note string) string {
-	if note == "" {
-		return result
-	}
-	if result == "" {
-		return note
-	}
-	return note + "\n\n" + result
 }
 
 // backgroundAuthRequiredNote returns a model-readable note naming the child
