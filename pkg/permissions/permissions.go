@@ -196,11 +196,6 @@ func matchToolPattern(pattern, toolName string, args map[string]any) bool {
 		return false
 	}
 
-	// If no argument patterns, we're done - tool name matched
-	if len(argPatterns) == 0 {
-		return true
-	}
-
 	// All argument patterns must match (indexing a nil args map is safe in Go)
 	for argName, argPattern := range argPatterns {
 		argValue, exists := args[argName]
