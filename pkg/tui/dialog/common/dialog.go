@@ -46,9 +46,5 @@ func CenterPosition(screenWidth, screenHeight, dialogWidth, dialogHeight int) (r
 	col = max(0, (screenWidth-dialogWidth)/2)
 	row = max(0, (screenHeight-dialogHeight)/2)
 
-	// Ensure dialog fits on screen
-	col = min(col, max(0, screenWidth-dialogWidth))
-	row = min(row, max(0, screenHeight-dialogHeight))
-
 	return row, col
 }
