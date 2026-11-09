@@ -58,6 +58,13 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		return nil, err
 	}
 
+	if raw, ok := cfg.ProviderOpts["thinking_prefix_mismatch"]; ok {
+		value, valid := raw.(string)
+		if !valid || (value != "error" && value != "drop_block") {
+			return nil, errors.New("amazon-bedrock: thinking_prefix_mismatch must be error or drop_block")
+		}
+	}
+
 	globalOptions := options.Apply(opts...)
 
 	// Check for bearer token
@@ -393,7 +400,7 @@ func (c *Client) promptCachingEnabled() bool {
 func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 	fields := map[string]any{}
 
-	_, isClaude5 := modelinfo.LookupClaude5(c.ModelConfig.Model)
+	claude5, isClaude5 := modelinfo.LookupClaude5(c.ModelConfig.Model)
 
 	// Forward top_k from provider_opts (Anthropic on Bedrock supports it)
 	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok && !isClaude5 {
@@ -459,6 +466,20 @@ func (c *Client) buildAdditionalModelRequestFields() document.Interface {
 						"the anthropic_beta header will not be sent, which may cause the thinking budget to be ignored")
 				}
 			}
+		}
+	}
+
+	if isClaude5 && claude5.ChecksThinkingPrefix {
+		thinking, ok := fields["thinking"].(map[string]any)
+		if !ok && c.thinkingBudget() == nil && !c.ModelOptions.NoThinking() {
+			thinking = map[string]any{"type": "adaptive"}
+			fields["thinking"] = thinking
+		}
+		if thinking["type"] == "adaptive" {
+			behavior, _ := c.ModelConfig.ProviderOpts["thinking_prefix_mismatch"].(string)
+			thinking["block_binding"] = map[string]any{"prefix_mismatch_behavior": cmp.Or(behavior, "drop_block")}
+			betas, _ := fields["anthropic_beta"].([]string)
+			fields["anthropic_beta"] = append(betas, "thinking-binding-controls-2026-08-01")
 		}
 	}
 

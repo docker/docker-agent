@@ -1516,15 +1516,17 @@ func TestBuildRequest_Claude5(t *testing.T) {
 	t.Parallel()
 
 	adaptive := map[string]any{"type": "adaptive"}
+	bound := map[string]any{"type": "adaptive", "block_binding": map[string]any{"prefix_mismatch_behavior": "drop_block"}}
 	cases := []struct {
 		name             string
 		model            string
 		budget           *latest.ThinkingBudget
 		wantThinking     any
 		wantOutputConfig any
+		wantBindingBeta  bool
 	}{
-		{name: "no budget sends nothing", model: "us.anthropic.claude-sonnet-5-5-v1:0"},
-		{name: "effort is adaptive", model: "anthropic.claude-haiku-5-5", budget: &latest.ThinkingBudget{Effort: "high"}, wantThinking: adaptive, wantOutputConfig: map[string]any{"effort": "high"}},
+		{name: "no budget uses binding", model: "us.anthropic.claude-sonnet-5-5-v1:0", wantThinking: bound, wantBindingBeta: true},
+		{name: "effort is adaptive", model: "anthropic.claude-haiku-5-5", budget: &latest.ThinkingBudget{Effort: "high"}, wantThinking: bound, wantOutputConfig: map[string]any{"effort": "high"}, wantBindingBeta: true},
 		{name: "token budget uses model default effort", model: "anthropic.claude-sonnet-5", budget: &latest.ThinkingBudget{Tokens: 16000}, wantThinking: adaptive},
 		{name: "none is disabled when supported", model: "anthropic.claude-sonnet-5", budget: &latest.ThinkingBudget{Effort: "none"}, wantThinking: map[string]any{"type": "disabled"}},
 		{name: "none falls back to adaptive low", model: "anthropic.claude-fable-5", budget: &latest.ThinkingBudget{Effort: "none"}, wantThinking: adaptive, wantOutputConfig: map[string]any{"effort": "low"}},
@@ -1546,7 +1548,11 @@ func TestBuildRequest_Claude5(t *testing.T) {
 			assert.Equal(t, tc.wantThinking, fields["thinking"])
 			assert.Equal(t, tc.wantOutputConfig, fields["output_config"])
 			assert.NotContains(t, fields, "top_k")
-			assert.NotContains(t, fields, "anthropic_beta")
+			if tc.wantBindingBeta {
+				assert.Equal(t, []any{"thinking-binding-controls-2026-08-01"}, fields["anthropic_beta"])
+			} else {
+				assert.NotContains(t, fields, "anthropic_beta")
+			}
 
 			cfg := client.buildInferenceConfig(client.isThinkingEnabled())
 			assert.Nil(t, cfg.Temperature)
@@ -1619,4 +1625,80 @@ func TestNewClient_RejectsFallbacks(t *testing.T) {
 	client, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "amazon-bedrock", Model: "anthropic.claude-opus-4-8", ProviderOpts: map[string]any{"fallbacks": []any{}}}, env)
 	require.NoError(t, err, "an empty list is no fallback")
 	assert.NotNil(t, client)
+}
+
+func TestConverseStream_ThinkingBinding(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		model    string
+		budget   *latest.ThinkingBudget
+		option   string
+		noThink  bool
+		thinking any
+		output   any
+		beta     any
+	}{
+		{name: "fable default", model: "global.anthropic.claude-fable-5-2", thinking: "drop_block", beta: []any{"thinking-binding-controls-2026-08-01"}},
+		{name: "mythos explicit error", model: "us.anthropic.claude-mythos-5-2", budget: &latest.ThinkingBudget{Effort: "high"}, option: "error", thinking: "error", output: map[string]any{"effort": "high"}, beta: []any{"thinking-binding-controls-2026-08-01"}},
+		{name: "older checking model explicit drop", model: "anthropic.claude-opus-5-5", option: "drop_block", thinking: "drop_block", beta: []any{"thinking-binding-controls-2026-08-01"}},
+		{name: "disabled budget", model: "anthropic.claude-haiku-5-5", budget: &latest.ThinkingBudget{Effort: "none"}, thinking: map[string]any{"type": "disabled"}},
+		{name: "disabled option", model: "anthropic.claude-haiku-5-5", noThink: true, thinking: map[string]any{"type": "disabled"}},
+		{name: "required thinking cannot be disabled", model: "anthropic.claude-mythos-5-2", noThink: true, thinking: "drop_block", output: map[string]any{"effort": "low"}, beta: []any{"thinking-binding-controls-2026-08-01"}},
+		{name: "nonchecking registry model", model: "anthropic.claude-mythos-5-1", option: "error"},
+		{name: "unlisted future model", model: "anthropic.claude-fable-5-3", option: "error"},
+		{name: "older claude keeps interleaved beta", model: "anthropic.claude-sonnet-4-5", budget: &latest.ThinkingBudget{Tokens: 2048}, option: "error", thinking: map[string]any{"type": "enabled", "budget_tokens": float64(2048)}, beta: []any{"interleaved-thinking-2025-05-14"}},
+		{name: "non claude", model: "amazon.nova-pro-v1:0", option: "error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var body []byte
+			cfg := &latest.ModelConfig{Provider: "amazon-bedrock", Model: tc.model, ThinkingBudget: tc.budget}
+			if tc.option != "" {
+				cfg.ProviderOpts = map[string]any{"thinking_prefix_mismatch": tc.option}
+			}
+			opts := []options.Opt{options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+				return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					var err error
+					body, err = io.ReadAll(req.Body)
+					require.NoError(t, err)
+					return &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"message":"denied"}`)), Request: req}, nil
+				})
+			})}
+			if tc.noThink {
+				opts = append(opts, options.WithNoThinking())
+			}
+			env := environment.NewMapEnvProvider(map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "token", "AWS_REGION": "us-east-1"})
+			client, err := NewClient(t.Context(), cfg, env, opts...)
+			require.NoError(t, err)
+			_, err = client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, nil)
+			require.Error(t, err)
+			require.NotEmpty(t, body)
+			var request map[string]any
+			require.NoError(t, json.Unmarshal(body, &request))
+			fields, _ := request["additionalModelRequestFields"].(map[string]any)
+			wantThinking := tc.thinking
+			if behavior, ok := tc.thinking.(string); ok {
+				wantThinking = map[string]any{"type": "adaptive", "block_binding": map[string]any{"prefix_mismatch_behavior": behavior}}
+			}
+			assert.Equal(t, wantThinking, fields["thinking"])
+			assert.Equal(t, tc.output, fields["output_config"])
+			assert.Equal(t, tc.beta, fields["anthropic_beta"])
+		})
+	}
+}
+
+func TestNewClient_ThinkingPrefixMismatchValidation(t *testing.T) {
+	t.Parallel()
+	env := environment.NewMapEnvProvider(map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "token", "AWS_REGION": "us-east-1"})
+	for _, value := range []any{"invalid", "", 42, nil} {
+		_, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "amazon-bedrock", Model: "anthropic.claude-fable-5-2", ProviderOpts: map[string]any{"thinking_prefix_mismatch": value}}, env)
+		require.ErrorContains(t, err, "thinking_prefix_mismatch must be error or drop_block")
+	}
+	for _, value := range []string{"error", "drop_block"} {
+		_, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "amazon-bedrock", Model: "anthropic.claude-fable-5-2", ProviderOpts: map[string]any{"thinking_prefix_mismatch": value}}, env)
+		require.NoError(t, err)
+	}
 }
