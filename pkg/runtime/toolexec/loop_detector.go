@@ -2,7 +2,6 @@ package toolexec
 
 import (
 	"encoding/json"
-	"maps"
 	"slices"
 	"strings"
 
@@ -116,29 +115,9 @@ func canonicalJSON(s string) string {
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
 		return s
 	}
-	normalized := sortKeys(v)
-	out, err := json.Marshal(normalized)
+	out, err := json.Marshal(v)
 	if err != nil {
 		return s
 	}
 	return string(out)
-}
-
-// sortKeys recursively sorts map keys so json.Marshal produces deterministic output.
-func sortKeys(v any) any {
-	switch val := v.(type) {
-	case map[string]any:
-		sorted := make(map[string]any, len(val))
-		for _, k := range slices.Sorted(maps.Keys(val)) {
-			sorted[k] = sortKeys(val[k])
-		}
-		return sorted
-	case []any:
-		for i, item := range val {
-			val[i] = sortKeys(item)
-		}
-		return val
-	default:
-		return v
-	}
 }
