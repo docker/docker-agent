@@ -637,14 +637,14 @@ type HarnessConfig struct {
 // unchanged.
 type InstructionFiles []string
 
-func (f *InstructionFiles) unmarshal(scalar, list func(any) error) error {
+func (f *InstructionFiles) unmarshal(unmarshal func(any) error) error {
 	var one string
-	if err := scalar(&one); err == nil {
+	if err := unmarshal(&one); err == nil {
 		*f = nonEmptyInstructionFiles(one)
 		return nil
 	}
 	var many []string
-	if err := list(&many); err != nil {
+	if err := unmarshal(&many); err != nil {
 		return errors.New("instruction_file must be a string or a list of strings")
 	}
 	*f = nonEmptyInstructionFiles(many...)
@@ -666,7 +666,7 @@ func nonEmptyInstructionFiles(paths ...string) InstructionFiles {
 }
 
 func (f *InstructionFiles) UnmarshalYAML(unmarshal func(any) error) error {
-	return f.unmarshal(unmarshal, unmarshal)
+	return f.unmarshal(unmarshal)
 }
 
 func (f InstructionFiles) MarshalYAML() (any, error) {
@@ -680,10 +680,7 @@ func (f InstructionFiles) MarshalYAML() (any, error) {
 }
 
 func (f *InstructionFiles) UnmarshalJSON(data []byte) error {
-	return f.unmarshal(
-		func(v any) error { return json.Unmarshal(data, v) },
-		func(v any) error { return json.Unmarshal(data, v) },
-	)
+	return f.unmarshal(func(v any) error { return json.Unmarshal(data, v) })
 }
 
 func (f InstructionFiles) MarshalJSON() ([]byte, error) {
