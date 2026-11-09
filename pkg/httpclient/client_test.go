@@ -22,7 +22,7 @@ import (
 // throw-away temp dir so tests exercising gateway-bound requests never
 // read or write the real user-uuid file. The override is set once and
 // never mutated, so it stays safe for parallel tests. Tests needing a
-// deterministic UUID inject their own resolver via [withCagentIDSource].
+// deterministic UUID inject their own resolver.
 func TestMain(m *testing.M) {
 	//nolint:forbidigo // TestMain has no *testing.T, so t.TempDir is unavailable.
 	dir, err := os.MkdirTemp("", "httpclient-test-config-*")
@@ -339,7 +339,7 @@ func TestCagentIDHeader_GatewayBoundOnly(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			opts := append([]Opt{withCagentIDSource(idSource)}, tt.opts...)
+			opts := append([]Opt{func(o *HTTPOptions) { o.cagentID = idSource }}, tt.opts...)
 			headers := doRequest(t, opts...)
 
 			if tt.wantHeaderSent {

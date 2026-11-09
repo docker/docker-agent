@@ -30,8 +30,8 @@ type HTTPOptions struct {
 
 	// cagentID resolves the persistent install UUID stamped as
 	// `X-Cagent-Id` on gateway-bound requests. It defaults to
-	// [userid.Get]; tests inject their own source via
-	// [withCagentIDSource] to stay independent of global state.
+	// [userid.Get]; tests inject their own source to stay independent of
+	// global state.
 	cagentID func() string
 
 	// refreshAuth re-authenticates a request the server answered with 401.
@@ -203,16 +203,6 @@ func WithProxiedBaseURL(value string) Opt {
 		o.Header.Set("X-Cagent-Arch", runtime.GOARCH)
 		o.Header.Set("X-Cagent-Runtime", "cagent")
 		o.Header.Set("X-Cagent-Runtime-Version", version.Version)
-	}
-}
-
-// withCagentIDSource overrides the source of the `X-Cagent-Id` header.
-// Unexported because it exists solely so tests can supply a
-// deterministic, isolated [userid.Resolver] instead of the global
-// default.
-func withCagentIDSource(fn func() string) Opt {
-	return func(o *HTTPOptions) {
-		o.cagentID = fn
 	}
 }
 
