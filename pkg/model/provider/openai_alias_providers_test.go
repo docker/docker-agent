@@ -106,6 +106,14 @@ var openAIAliasProviders = []openAIAliasProvider{
 		mergesSystemMessages: true,
 	},
 	{
+		provider:             "standardcompute",
+		envVar:               "STANDARDCOMPUTE_API_KEY",
+		testKey:              "test-standardcompute-key",
+		model:                "standardcompute",
+		greeting:             "Hello from Standard Compute",
+		mergesSystemMessages: true,
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",
