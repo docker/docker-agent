@@ -356,7 +356,7 @@ func (t *ToolSet) createTask(ctx context.Context, params CreateTaskArgs) (*tools
 		return tools.ResultError(err.Error()), nil
 	}
 
-	return taskResult(task), nil
+	return tools.ResultJSON(task), nil
 }
 
 func (t *ToolSet) getTask(_ context.Context, params GetTaskArgs) (*tools.ToolCallResult, error) {
@@ -434,7 +434,7 @@ func (t *ToolSet) updateTask(ctx context.Context, params UpdateTaskArgs) (*tools
 		return tools.ResultError(err.Error()), nil
 	}
 
-	return taskResult(task), nil
+	return tools.ResultJSON(task), nil
 }
 
 func (t *ToolSet) deleteTask(ctx context.Context, params DeleteTaskArgs) (*tools.ToolCallResult, error) {
@@ -577,7 +577,7 @@ func (t *ToolSet) addDependency(ctx context.Context, params AddDependencyArgs) (
 		return tools.ResultError(err.Error()), nil
 	}
 
-	return taskResult(task), nil
+	return tools.ResultJSON(task), nil
 }
 
 func (t *ToolSet) removeDependency(ctx context.Context, params RemoveDependencyArgs) (*tools.ToolCallResult, error) {
@@ -612,11 +612,7 @@ func (t *ToolSet) removeDependency(ctx context.Context, params RemoveDependencyA
 		return tools.ResultError(err.Error()), nil
 	}
 
-	return taskResult(task), nil
-}
-
-func taskResult(task Task) *tools.ToolCallResult {
-	return tools.ResultJSON(task)
+	return tools.ResultJSON(task), nil
 }
 
 func taskWithEffectiveResult(task Task, tasks map[string]Task) *tools.ToolCallResult {
