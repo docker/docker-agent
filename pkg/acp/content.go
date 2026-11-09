@@ -21,15 +21,6 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 )
 
-// buildUserContent constructs user message text from ACP content blocks.
-func (a *Agent) buildUserContent(ctx context.Context, sessionID string, prompt []acp.ContentBlock) string {
-	msg := a.buildUserMessage(ctx, sessionID, prompt)
-	if msg == nil {
-		return ""
-	}
-	return msg.Message.Content
-}
-
 func (a *Agent) buildUserMessage(ctx context.Context, sessionID string, prompt []acp.ContentBlock) *session.Message {
 	var (
 		parts          []string
