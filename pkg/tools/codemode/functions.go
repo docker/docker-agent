@@ -86,7 +86,7 @@ func schemaType(schema, root map[string]any, level int) string {
 	if len(types) > 1 {
 		parts := make([]string, 0, len(types))
 		for _, typ := range types {
-			schemaCopy := cloneMap(schema)
+			schemaCopy := maps.Clone(schema)
 			schemaCopy["type"] = typ
 			parts = append(parts, schemaType(schemaCopy, root, level))
 		}
@@ -208,12 +208,6 @@ func resolveRef(root map[string]any, ref string) map[string]any {
 	}
 	resolved, _ := current.(map[string]any)
 	return resolved
-}
-
-func cloneMap(value map[string]any) map[string]any {
-	result := make(map[string]any, len(value))
-	maps.Copy(result, value)
-	return result
 }
 
 func stringSet(value any) map[string]bool {
