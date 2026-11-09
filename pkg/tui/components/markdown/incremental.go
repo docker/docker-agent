@@ -90,9 +90,7 @@ func (r *IncrementalRenderer) RenderWithCodeBlocks(input string) (string, []Code
 
 func (r *IncrementalRenderer) renderParts(input string) (string, string, []CodeBlock, error) {
 	if input == "" {
-		r.inputPrefix = ""
-		r.outputPrefix = ""
-		r.codeBlocksPrefix = nil
+		r.Reset()
 		return "", "", nil, nil
 	}
 
@@ -155,9 +153,7 @@ func (r *IncrementalRenderer) SetWidth(width int) {
 	}
 	r.width = width
 	r.fallback = NewFastRenderer(width)
-	r.inputPrefix = ""
-	r.outputPrefix = ""
-	r.codeBlocksPrefix = nil
+	r.Reset()
 }
 
 // Reset drops the cached prefix without changing the width. Use when the
@@ -175,9 +171,7 @@ func (r *IncrementalRenderer) fullRenderParts(input string) (string, string, []C
 		if err != nil {
 			return "", "", nil, err
 		}
-		r.inputPrefix = ""
-		r.outputPrefix = ""
-		r.codeBlocksPrefix = nil
+		r.Reset()
 		return "", out, blocks, nil
 	}
 
