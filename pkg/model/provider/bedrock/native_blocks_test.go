@@ -71,6 +71,7 @@ func TestConvertAssistantContent_ReplaysNativeBlocks(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "t1", *tool.Value.ToolUseId)
 	assert.Equal(t, "f", *tool.Value.Name)
+	assert.Equal(t, map[string]any{"x": float64(1)}, decodeRequestFields(t, tool.Value.Input))
 
 	last, ok := reasoningOf(t, blocks[3]).(*types.ReasoningContentBlockMemberReasoningText)
 	require.True(t, ok)

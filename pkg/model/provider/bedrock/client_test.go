@@ -89,6 +89,7 @@ func TestConvertMessages_AssistantWithToolCalls(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "tool-1", *toolUse.Value.ToolUseId)
 	assert.Equal(t, "get_weather", *toolUse.Value.Name)
+	assert.Equal(t, map[string]any{"location": "NYC"}, decodeRequestFields(t, toolUse.Value.Input))
 }
 
 func TestConvertMessages_ToolResult(t *testing.T) {

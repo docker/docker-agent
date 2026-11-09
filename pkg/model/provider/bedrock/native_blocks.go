@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -254,7 +255,7 @@ func toContentBlocks(blocks []nativeBlock) ([]types.ContentBlock, bool) {
 				input = map[string]any{}
 			}
 			out = append(out, &types.ContentBlockMemberToolUse{
-				Value: types.ToolUseBlock{ToolUseId: new(b.ID), Name: new(b.Name), Input: mapToDocument(input)},
+				Value: types.ToolUseBlock{ToolUseId: new(b.ID), Name: new(b.Name), Input: document.NewLazyDocument(input)},
 			})
 		default:
 			return nil, false
