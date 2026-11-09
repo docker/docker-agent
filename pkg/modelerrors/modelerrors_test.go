@@ -1008,3 +1008,29 @@ func TestRetryableHTTPStatus(t *testing.T) {
 		})
 	}
 }
+
+func TestInvalidFunctionCallClassification(t *testing.T) {
+	t.Parallel()
+
+	for _, detail := range []string{
+		"", "timeout", "500", "429", "number of function response parts",
+		"token limit", "request too large", "image exceeds", "unexpected EOF",
+		`{"error":{"code":"context_length_exceeded"}}`,
+	} {
+		t.Run(detail, func(t *testing.T) {
+			t.Parallel()
+			err := fmt.Errorf("stream failed: %w: %s", ErrInvalidFunctionCall, detail)
+			retryable, rateLimited, retryAfter := ClassifyModelError(err)
+			assert.False(t, retryable)
+			assert.False(t, rateLimited)
+			assert.Zero(t, retryAfter)
+			assert.False(t, isRetryableModelError(err))
+			assert.Zero(t, extractHTTPStatusCode(err))
+			assert.False(t, RetryableHTTPStatus(err))
+			assert.False(t, IsContextOverflowError(err))
+			assert.Empty(t, OverflowKindOf(err))
+			assert.False(t, IsStreamTruncationError(err))
+			assert.Equal(t, err.Error(), FormatError(err))
+		})
+	}
+}

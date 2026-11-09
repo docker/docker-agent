@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/gemini"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/testutil/geminiintegration"
@@ -105,5 +108,61 @@ func TestRunStream_GeminiTerminalFinishReasons(t *testing.T) {
 			}
 			assert.Zero(t, toolRuns.Load(), "a truncated, refused or failed turn must not run tools")
 		})
+	}
+}
+
+func TestRunStream_GeminiInvalidFunctionCallFallback(t *testing.T) {
+	geminiintegration.Require(t)
+	t.Parallel()
+
+	for _, reason := range []string{"MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"} {
+		for _, detail := range []string{"lookup(q=", "lookup(timeout=30", "lookup(limit=500", "lookup(limit=429", "lookup(q=token limit"} {
+			t.Run(reason+"/"+detail, func(t *testing.T) {
+				t.Parallel()
+
+				var primaryCalls atomic.Int64
+				message, err := json.Marshal("Malformed function call: " + detail)
+				require.NoError(t, err)
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					primaryCalls.Add(1)
+					assert.Contains(t, r.URL.Path, "/projects/test-project/locations/us-central1/")
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprintf(w, "data: {\"candidates\":[{\"finishReason\":%q,\"finishMessage\":%s}]}\n\n", reason, message)
+				}))
+				t.Cleanup(srv.Close)
+
+				cfg := &latest.ModelConfig{
+					Provider: "google", Model: "gemini-3.8-flash", BaseURL: srv.URL,
+					ProviderOpts: map[string]any{"project": "test-project", "location": "us-central1"},
+				}
+				client, err := gemini.NewClient(t.Context(), cfg, environment.NewNoEnvProvider(),
+					options.WithTokenSource(func(context.Context) (string, error) { return "test-token", nil }),
+				)
+				require.NoError(t, err)
+
+				fallback := &countingProvider{
+					id:     "fallback/success",
+					stream: newStreamBuilder().AddContent("Fallback answer").AddStopWithUsage(10, 5).Build(),
+				}
+				root := agent.New("root", "test", agent.WithModel(client), agent.WithFallbackModel(fallback))
+				rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}), WithRetryOnRateLimit())
+				require.NoError(t, err)
+
+				sess := session.New(session.WithUserMessage("hi"))
+				sess.NonInteractive = true
+				var content string
+				for ev := range rt.RunStream(t.Context(), sess) {
+					switch e := ev.(type) {
+					case *ErrorEvent:
+						t.Errorf("unexpected error: %s", e.Error)
+					case *AgentChoiceEvent:
+						content += e.Content
+					}
+				}
+				assert.Equal(t, "Fallback answer", content)
+				assert.EqualValues(t, 1, primaryCalls.Load(), "invalid calls must not retry the primary")
+				assert.Equal(t, 1, fallback.callCount)
+			})
+		}
 	}
 }

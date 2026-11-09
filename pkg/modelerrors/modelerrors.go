@@ -19,6 +19,10 @@ import (
 	"time"
 )
 
+// ErrInvalidFunctionCall indicates a model failed to produce a valid tool call.
+// Its diagnostic text must not be classified as a transport or context error.
+var ErrInvalidFunctionCall = errors.New("model produced an invalid function call")
+
 // StatusError wraps an HTTP API error with structured metadata for retry decisions.
 // Providers wrap SDK errors in this type so the retry loop can use errors.As
 // to extract status code and Retry-After without importing provider-specific SDKs.
@@ -238,7 +242,7 @@ func OverflowKindOf(err error) OverflowKind {
 // ("request too large") textually overlap with token-overflow phrasing in a
 // way that benefits from the wire match coming first.
 func classifyOverflow(err error) OverflowKind {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return ""
 	}
 	// Already-wrapped errors carry their Kind; respect it.
@@ -303,7 +307,7 @@ var statusCodeRegex = regexp.MustCompile(`\b([45]\d{2})\b`)
 // (e.g., "429 Too Many Requests", "500 Internal Server Error").
 // Returns 0 if no status code found.
 func extractHTTPStatusCode(err error) int {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return 0
 	}
 
@@ -432,7 +436,7 @@ var streamTruncationPatterns = []string{
 // request down (e.g. the idle-timeout cancel or a user Ctrl+C), not an upstream
 // drop, and must stay non-retryable.
 func IsStreamTruncationError(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -482,7 +486,7 @@ var nonRetryablePatterns = []string{
 // The key distinction is: 429 means "you're calling too fast, slow down" which
 // suggests we should try a different model, not keep hammering the same one.
 func isRetryableModelError(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return false
 	}
 
@@ -585,7 +589,7 @@ func parseRetryAfterHeader(value string) time.Duration {
 // deciding whether to retry (when no fallback is configured) or skip to the next
 // model (when fallbacks are available).
 func ClassifyModelError(err error) (retryable, rateLimited bool, retryAfter time.Duration) {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return false, false, 0
 	}
 

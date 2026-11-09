@@ -2,7 +2,6 @@ package gemini
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +13,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -24,7 +24,7 @@ const http2BodyClosedError = "http2: response body closed"
 
 // ErrInvalidFunctionCall is returned when Gemini ends a response with
 // MALFORMED_FUNCTION_CALL or UNEXPECTED_TOOL_CALL.
-var ErrInvalidFunctionCall = errors.New("gemini: model produced an invalid function call")
+var ErrInvalidFunctionCall = modelerrors.ErrInvalidFunctionCall
 
 // StreamAdapter adapts the Gemini streaming iterator to chat.MessageStream
 type StreamAdapter struct {
@@ -237,9 +237,9 @@ func invalidFunctionCall(resp *genai.GenerateContentResponse) error {
 		switch candidate.FinishReason {
 		case genai.FinishReasonMalformedFunctionCall, genai.FinishReasonUnexpectedToolCall:
 			if candidate.FinishMessage == "" {
-				return fmt.Errorf("%w (%s)", ErrInvalidFunctionCall, candidate.FinishReason)
+				return fmt.Errorf("gemini: %w (%s)", ErrInvalidFunctionCall, candidate.FinishReason)
 			}
-			return fmt.Errorf("%w (%s): %s", ErrInvalidFunctionCall, candidate.FinishReason, candidate.FinishMessage)
+			return fmt.Errorf("gemini: %w (%s): %s", ErrInvalidFunctionCall, candidate.FinishReason, candidate.FinishMessage)
 		}
 	}
 	return nil
