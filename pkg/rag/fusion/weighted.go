@@ -55,14 +55,13 @@ func (wf *WeightedFusion) Fuse(strategyResults map[string][]database.SearchResul
 	for strategyName, results := range strategyResults {
 		weight := wf.weights[strategyName]
 
-		for rank, result := range results {
+		for _, result := range results {
 			docID := result.Document.SourcePath + "_" + strconv.Itoa(result.Document.ChunkIndex)
 
 			if _, exists := docScores[docID]; !exists {
 				docScores[docID] = &fusedDocument{
 					Document:       result.Document,
 					StrategyScores: make(map[string]float64),
-					StrategyRanks:  make(map[string]int),
 					FusionScore:    0,
 				}
 			}
@@ -70,7 +69,6 @@ func (wf *WeightedFusion) Fuse(strategyResults map[string][]database.SearchResul
 			// Weighted sum: score * weight
 			docScores[docID].FusionScore += result.Similarity * weight
 			docScores[docID].StrategyScores[strategyName] = result.Similarity
-			docScores[docID].StrategyRanks[strategyName] = rank + 1
 		}
 	}
 

@@ -39,14 +39,13 @@ func (mf *MaxScoreFusion) Fuse(strategyResults map[string][]database.SearchResul
 	docScores := make(map[string]*fusedDocument)
 
 	for strategyName, results := range strategyResults {
-		for rank, result := range results {
+		for _, result := range results {
 			docID := result.Document.SourcePath + "_" + strconv.Itoa(result.Document.ChunkIndex)
 
 			if _, exists := docScores[docID]; !exists {
 				docScores[docID] = &fusedDocument{
 					Document:       result.Document,
 					StrategyScores: make(map[string]float64),
-					StrategyRanks:  make(map[string]int),
 					FusionScore:    result.Similarity,
 				}
 			} else if result.Similarity > docScores[docID].FusionScore {
@@ -55,7 +54,6 @@ func (mf *MaxScoreFusion) Fuse(strategyResults map[string][]database.SearchResul
 			}
 
 			docScores[docID].StrategyScores[strategyName] = result.Similarity
-			docScores[docID].StrategyRanks[strategyName] = rank + 1
 		}
 	}
 
