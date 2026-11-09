@@ -298,7 +298,7 @@ func newHarnessToolCall(seq int, ev harness.Event, arguments string) harnessTool
 	if name == "" {
 		name = "tool"
 	}
-	key := harnessToolEventID(ev)
+	key := ev.ToolID
 	callID := key
 	if callID == "" {
 		callID = fmt.Sprintf("harness-%d", seq)
@@ -325,7 +325,7 @@ func newHarnessToolCall(seq int, ev harness.Event, arguments string) harnessTool
 }
 
 func pendingToolCallForEvent(pending map[string]harnessToolCall, ev harness.Event) (harnessToolCall, bool) {
-	key := harnessToolEventID(ev)
+	key := ev.ToolID
 	if key != "" {
 		pending, ok := pending[key]
 		return pending, ok
@@ -368,7 +368,7 @@ func harnessToolCallArguments(ev harness.Event) string {
 }
 
 func shouldSkipHarnessToolCall(ev harness.Event) bool {
-	return strings.TrimSpace(ev.ToolName) != "" && strings.TrimSpace(ev.ToolArgs) == "" && harnessToolEventID(ev) == ""
+	return strings.TrimSpace(ev.ToolName) != "" && strings.TrimSpace(ev.ToolArgs) == "" && ev.ToolID == ""
 }
 
 func isHarnessReplayText(existing, next string) bool {
@@ -382,10 +382,6 @@ func isHarnessReplayText(existing, next string) bool {
 
 func normalizeHarnessText(s string) string {
 	return strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
-}
-
-func harnessToolEventID(ev harness.Event) string {
-	return ev.ToolID
 }
 
 func harnessUsage(u *harness.Usage) *chat.Usage {
