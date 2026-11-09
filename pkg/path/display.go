@@ -28,11 +28,7 @@ func RelativeTo(p, baseDir string) string {
 
 // ShortenHome replaces the current user's home directory prefix with "~".
 func ShortenHome(p string) string {
-	homeDir := paths.GetHomeDir()
-	if homeDir == "" {
-		return p
-	}
-	return ShortenHomeDir(p, homeDir)
+	return ShortenHomeDir(p, paths.GetHomeDir())
 }
 
 // ShortenHomeDir replaces a leading homeDir prefix with "~".
