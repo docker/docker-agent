@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/config"
@@ -59,18 +60,11 @@ func ExtraWorkspaceForSource(wd string, source config.Source) string {
 
 	// No extra mount needed if the file is already under the workspace.
 	rel, err := filepath.Rel(absWd, absParent)
-	if err == nil && rel != ".." && !startsWithParent(rel) {
+	if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return ""
 	}
 
 	return absParent
-}
-
-// startsWithParent reports whether rel begins with a "../" segment,
-// which means absParent is not a subdirectory of absWd.
-func startsWithParent(rel string) bool {
-	const dotdot = ".." + string(filepath.Separator)
-	return len(rel) >= len(dotdot) && rel[:len(dotdot)] == dotdot
 }
 
 // GuestAgentRef pins built-ins to a file so the guest cannot resolve their names
