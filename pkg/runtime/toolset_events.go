@@ -71,7 +71,7 @@ func (r *LocalRuntime) subscribeToolsetEvents(sess *session.Session, events Even
 
 // pointerIdentity derives a dedup key for v, reporting ok=false for
 // non-pointer implementations, which are then subscribed without dedup.
-// See notifierDedupKey for why pointer identity is the only hash-safe choice.
+// Hashing interface values can panic for non-comparable implementations.
 func pointerIdentity(v any) (notifierIdentity, bool) {
 	rv := reflect.ValueOf(v)
 	if rv.Kind() != reflect.Pointer {

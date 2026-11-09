@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +18,18 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/plan"
 )
+
+func TestPointerIdentity_Nil(t *testing.T) {
+	t.Parallel()
+
+	key, ok := pointerIdentity(nil)
+	assert.False(t, ok)
+	assert.Equal(t, notifierIdentity{}, key)
+	var notifier plan.ChangeNotifier = (*fakePlanNotifier)(nil)
+	key, ok = pointerIdentity(notifier)
+	assert.True(t, ok)
+	assert.Equal(t, notifierIdentity{typ: reflect.TypeFor[*fakePlanNotifier]()}, key)
+}
 
 func TestPlanChangedEventSerialization(t *testing.T) {
 	t.Parallel()
