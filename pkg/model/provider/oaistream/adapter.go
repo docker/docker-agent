@@ -69,13 +69,18 @@ func (a *StreamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	for i := range openaiResponse.Choices {
 		choice := &openaiResponse.Choices[i]
 
-		finishReasonStr := choice.FinishReason
-		if a.trackUsage && !openaiResponse.JSON.Usage.Valid() && (finishReasonStr == "stop" || finishReasonStr == "length") {
-			a.heldFinishReason = chat.FinishReason(finishReasonStr)
-			finishReasonStr = ""
+		finishReason := chat.FinishReason(choice.FinishReason)
+		// content_filter (Azure OpenAI, OpenAI moderation) ends the turn
+		// like a refusal, as on the Responses API path.
+		if finishReason == "content_filter" {
+			finishReason = chat.FinishReasonRefusal
+		}
+		if a.trackUsage && !openaiResponse.JSON.Usage.Valid() &&
+			(finishReason == chat.FinishReasonStop || finishReason == chat.FinishReasonLength || finishReason == chat.FinishReasonRefusal) {
+			a.heldFinishReason = finishReason
+			finishReason = ""
 		}
 
-		finishReason := chat.FinishReason(finishReasonStr)
 		// Track the finish reason for when we get usage info
 		if finishReason != chat.FinishReasonNull && finishReason != "" {
 			a.lastFinishReason = finishReason

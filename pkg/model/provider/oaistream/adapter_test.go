@@ -321,6 +321,9 @@ func TestStreamAdapter_HeldFinishReason(t *testing.T) {
 		{"no finish reason at all", chunkContent + chunkDone, true, nil, nil},
 		{"usage chunk without finish", chunkContent + chunkUsageOnly + chunkDone, true, []string{"stop"}, []bool{true}},
 		{"track_usage off passes length through", chunkContent + finishChunk("length") + chunkUsageOnly + chunkDone, false, []string{"length", "length"}, []bool{false, false}},
+		{"content_filter then usage chunk", chunkContent + finishChunk("content_filter") + chunkUsageOnly + chunkDone, true, []string{"refusal"}, []bool{true}},
+		{"content_filter, no usage, DONE", chunkContent + finishChunk("content_filter") + chunkDone, true, []string{"refusal"}, []bool{false}},
+		{"track_usage off maps content_filter", chunkContent + finishChunk("content_filter") + chunkDone, false, []string{"refusal"}, []bool{false}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
