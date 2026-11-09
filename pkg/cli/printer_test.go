@@ -20,6 +20,13 @@ func TestFormatToolCallResponse_Map(t *testing.T) {
 	assert.Equal(t, ` → (text: "hello")`, formatted)
 }
 
+func TestFormatToolCallResponse_MultilineString(t *testing.T) {
+	t.Parallel()
+	formatted := formatToolCallResponse(`{"text": "a\nb"}`)
+
+	assert.Equal(t, ` → (text: "a\nb")`, formatted)
+}
+
 func TestFormatToolCallResponse_MapOfEmptyArray(t *testing.T) {
 	t.Parallel()
 	formatted := formatToolCallResponse(`{"array": []}`)

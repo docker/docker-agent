@@ -332,13 +332,6 @@ func formatParsedJSON(data any) string {
 func formatJSONValue(key string, value any) string {
 	switch v := value.(type) {
 	case string:
-		// Handle multiline strings by displaying with actual newlines
-		if strings.Contains(v, "\n") {
-			// Format as: key: "content with
-			// actual line breaks"
-			return fmt.Sprintf("%s: %q", bold(key), v)
-		}
-		// Regular string with proper escaping
 		return fmt.Sprintf("%s: %q", bold(key), v)
 
 	case []any:
