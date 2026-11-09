@@ -240,6 +240,22 @@ func TestPrintResult(t *testing.T) {
 		assert.Contains(t, buf.String(), "no tool calls")
 	})
 
+	t.Run("control characters are sanitized", func(t *testing.T) {
+		t.Parallel()
+		controls := make([]byte, 32)
+		for i := range controls {
+			controls[i] = byte(i)
+		}
+		raw := string(controls) + "\x7fé\xff"
+		want := strings.Repeat(" ", 33) + "é�"
+		var buf bytes.Buffer
+		replay.PrintResult(&buf, replay.Compare(
+			indexed(turn("", call(raw, raw))),
+			indexed(turn("", call("other", "{}"))),
+		), "old", "new")
+		assert.Contains(t, buf.String(), "     "+want+"("+want+")\n")
+	})
+
 	t.Run("huge arguments are truncated", func(t *testing.T) {
 		t.Parallel()
 		var buf bytes.Buffer
