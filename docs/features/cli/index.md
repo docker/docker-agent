@@ -389,10 +389,10 @@ $ docker agent serve a2a myorg/agent:tag
 
 ### `docker agent serve acp`
 
-Start an ACP (Agent Client Protocol) server over stdio. This allows external clients to interact with your agents using the ACP protocol.
+Start an ACP (Agent Client Protocol) server over stdio. This allows external clients to interact with your agents using the ACP protocol. If no config is specified, uses the `default` built-in agent (or your `default` alias, if configured).
 
 ```bash
-$ docker agent serve acp <config> [flags]
+$ docker agent serve acp [config] [flags]
 ```
 
 | Flag                      | Default                     | Description                                       |
@@ -403,6 +403,7 @@ All [runtime configuration flags](#runtime-configuration-flags) are also accepte
 
 ```bash
 # Examples
+$ docker agent serve acp
 $ docker agent serve acp agent.yaml
 $ docker agent serve acp ./team.yaml
 $ docker agent serve acp myorg/agent:tag
