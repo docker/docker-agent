@@ -38,10 +38,6 @@ func validateResumeWorkingDir(saved, requested string) error {
 	return nil
 }
 
-func (a *Agent) resumeRegisteredSession(ctx context.Context, s *Session, workingDir string, additionalDirs []string, servers []clientMCPServer, op *agentOperation) error {
-	return a.reconnectRegisteredSession(ctx, s, workingDir, additionalDirs, servers, op, false, nil)
-}
-
 func (a *Agent) reconnectRegisteredSession(ctx context.Context, s *Session, workingDir string, additionalDirs []string, servers []clientMCPServer, op *agentOperation, replay bool, configuration *sessionConfiguration) error {
 	saved, _ := s.workspaceSnapshot()
 	if err := validateResumeWorkingDir(saved, workingDir); err != nil {
@@ -124,10 +120,6 @@ func (a *Agent) discardClientMCP(ctx context.Context, op *agentOperation, s *Ses
 		}
 	}
 	return err
-}
-
-func (a *Agent) reserveResume(ctx context.Context, s *Session) error {
-	return a.reserveReconnect(ctx, s, false)
 }
 
 func (a *Agent) reserveReconnect(ctx context.Context, s *Session, replay bool) error {
