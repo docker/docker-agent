@@ -221,9 +221,6 @@ func (r *LocalRuntime) runHarnessAgent(ctx context.Context, sess *session.Sessio
 		content = strings.TrimSpace(finalResult)
 		events.Emit(AgentChoice(a.Name(), sess.ID, content, messageID))
 	}
-	if content == "" {
-		content = strings.TrimSpace(finalResult)
-	}
 
 	// A harness reports its own TotalCostUSD, which the harness
 	// library defaults to 0 whenever the harness output omits a cost
