@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -576,4 +577,58 @@ func TestDoCompactSummaryEventCarriesCost(t *testing.T) {
 		"the summary item records the summarization stream's cost")
 	assert.InDelta(t, last.Cost, summaryEvent.Cost, 1e-9,
 		"the emitted event must carry the same cost that was applied to the session")
+}
+
+func TestCompactionWaitsForPendingObserverWrites(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		store := &pendingMessageStore{Store: session.NewInMemorySessionStore(), release: make(chan struct{})}
+		prov := &mockCompactor{id: "anthropic/claude-test", opts: nativeOpts, result: nativeResult()}
+		root := agent.New("root", "test", agent.WithModel(prov))
+		rt := newNativeRuntime(t, root, WithSessionStore(store), WithSessionCompaction(true))
+		t.Cleanup(func() { require.NoError(t, rt.Close()) })
+		sess := session.New(session.WithUserMessage("already compacted"))
+		sess.SetUsage(95_000, 0)
+		observed := rt.RunStream(t.Context(), sess)
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			for event := range observed {
+				if e, ok := event.(*ErrorEvent); ok {
+					t.Errorf("unexpected error event: %s", e.Error)
+				}
+			}
+		}()
+		synctest.Wait()
+		assert.False(t, store.compacted, "summary persistence must wait for the preceding user message")
+		close(store.release)
+		<-finished
+		assert.True(t, store.compacted)
+		synctest.Wait()
+
+		saved, err := store.GetSession(t.Context(), sess.ID)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(saved.Messages), 2)
+		require.True(t, saved.Messages[0].IsMessage(), "the user message must precede the summary")
+		assert.Equal(t, "already compacted", saved.Messages[0].Message.Message.Content)
+		assert.Equal(t, "native summary", saved.Messages[1].Summary)
+	})
+}
+
+type pendingMessageStore struct {
+	session.Store
+
+	release   chan struct{}
+	compacted bool
+}
+
+func (s *pendingMessageStore) AddMessage(ctx context.Context, id string, msg *session.Message) (int64, error) {
+	<-s.release
+	return s.Store.AddMessage(ctx, id, msg)
+}
+
+func (s *pendingMessageStore) PersistCompaction(ctx context.Context, sess *session.Session, input, output int64, item session.Item) error {
+	s.compacted = true
+	return s.Store.PersistCompaction(ctx, sess, input, output, item)
 }

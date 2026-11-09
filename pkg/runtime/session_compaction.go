@@ -194,6 +194,10 @@ func (r *LocalRuntime) applyCompactionResult(ctx context.Context, sess *session.
 	// Atomically persist the metadata and summary before mutating the live
 	// session. A failed write is a failed compaction: no success summary event
 	// is emitted and the in-memory continuation remains unchanged.
+	if err := flushObservers(ctx); err != nil {
+		events.Emit(ErrorForSession(sess.ID, fmt.Sprintf("Failed to flush events before session compaction: %v", err)))
+		return CompactionOutcomeFailed
+	}
 	if err := r.sessionStore.PersistCompaction(ctx, sess, result.InputTokens, 0, item); err != nil {
 		slog.ErrorContext(ctx, "Failed to persist session compaction", "session_id", sess.ID, "error", err)
 		events.Emit(ErrorForSession(sess.ID, fmt.Sprintf("Failed to persist session compaction: %v", err)))

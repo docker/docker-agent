@@ -174,7 +174,7 @@ func (r *LocalRuntime) runStream(ctx context.Context, sess *session.Session, idl
 		if rootStream {
 			defer r.activeRootStreams.Add(-1)
 		}
-		r.runStreamLoop(ctx, sess, entry, events)
+		r.runStreamLoop(withObserverFlush(ctx, events), sess, entry, events)
 	}()
 	return out
 }
