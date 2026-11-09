@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -104,7 +105,7 @@ func (d *snapshotsDialog) View() string {
 	content := NewContent(inner).AddTitle("Snapshots").AddSeparator().AddSpace()
 
 	if len(d.fileCounts) > 0 {
-		count := pluralize(len(d.fileCounts), "snapshot", "snapshots") + " captured"
+		count := toolcommon.Pluralize(len(d.fileCounts), "snapshot", "snapshots") + " captured"
 		content = content.
 			AddContent(styles.DialogOptionsStyle.Width(inner).Render(count)).
 			AddSpace()
@@ -136,7 +137,7 @@ func (d *snapshotsDialog) bodyContent(inner int) string {
 	for i, count := range d.fileCounts {
 		rows = append(rows, d.renderRow(
 			fmt.Sprintf("Snapshot %d", i+1),
-			pluralize(count, "file", "files"),
+			toolcommon.Pluralize(count, "file", "files"),
 			d.selected == i+1,
 			inner,
 		))
@@ -163,12 +164,4 @@ func (d *snapshotsDialog) renderRow(name, desc string, selected bool, width int)
 	gap := max(0, width-lipgloss.Width(left))
 	return left + lipgloss.PlaceHorizontal(gap, lipgloss.Right, right,
 		lipgloss.WithWhitespaceStyle(descStyle))
-}
-
-func pluralize(n int, singular, plural string) string {
-	word := plural
-	if n == 1 {
-		word = singular
-	}
-	return fmt.Sprintf("%d %s", n, word)
 }
