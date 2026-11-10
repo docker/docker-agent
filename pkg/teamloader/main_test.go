@@ -2,10 +2,16 @@ package teamloader
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/docker/docker-agent/pkg/gateway"
+	"github.com/docker/docker-agent/pkg/testutil"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(testutil.RunWithTempHome(m.Run))
+}
 
 // testCatalog seeds a fake MCP catalog so teamloader tests that load configs
 // with MCP `ref:` toolsets run without a live network call.

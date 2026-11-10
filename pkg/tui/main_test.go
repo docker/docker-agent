@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 )
 
@@ -12,7 +13,7 @@ import (
 // branch name.
 func TestMain(m *testing.M) {
 	restore := sidebar.SetWorkingDirectoryForTesting("/work/app", "")
-	code := m.Run()
+	code := testutil.RunWithTempHome(m.Run)
 	restore()
 	os.Exit(code)
 }
