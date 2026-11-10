@@ -9,11 +9,12 @@ import (
 // ForServiceTier estimates tier pricing from the actual response tier without mutating c.
 // Other providers and unrecognized tiers retain their catalogue pricing.
 func (c *Cost) ForServiceTier(id ID, tier string) *Cost {
-	if c == nil || id.Provider != "openai" {
+	if c == nil || !hasTierPricing(id.Provider, tier) {
 		return c
 	}
 	// Current tier premiums; models with different rates need a cost override.
 	// https://developers.openai.com/api/docs/pricing
+	// https://platform.claude.com/docs/en/build-with-claude/fast-mode#pricing
 	var factor float64
 	switch tier {
 	case "fast", "priority":
@@ -40,6 +41,17 @@ func (c *Cost) ForServiceTier(id ID, tier string) *Cost {
 		out.Tiers[i].CacheWrite *= factor
 	}
 	return &out
+}
+
+func hasTierPricing(provider, tier string) bool {
+	switch provider {
+	case "openai":
+		return true
+	case "anthropic":
+		return tier == "fast"
+	default:
+		return false
+	}
 }
 
 // withFastPricing derives a uniform premium only when gateway and vendor base rates agree.

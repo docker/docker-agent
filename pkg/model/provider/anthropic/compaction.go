@@ -97,6 +97,7 @@ func (c *Client) CompactConversation(ctx context.Context, messages []chat.Messag
 	params.MaxTokens = adjusted
 	c.applyBetaThinkingConfig(&params, params.MaxTokens)
 	c.applyThinkingBinding(&params)
+	applySpeed(&params, c.ModelConfig.ProviderOpts)
 	var requestContext json.RawMessage
 	if cachePreservingUpdatesEnabled(c.ModelConfig.ProviderOpts) {
 		updates, err := applyConversationUpdates(ctx, c.ModelConfig.Model, &params, messages, nil)
@@ -143,6 +144,7 @@ func (c *Client) CompactConversation(ctx context.Context, messages []chat.Messag
 			u := chat.Usage{
 				InputTokens: iteration.InputTokens, OutputTokens: iteration.OutputTokens,
 				CacheWriteTokens: iteration.CacheCreationInputTokens, CachedInputTokens: iteration.CacheReadInputTokens,
+				ServiceTier: servedTier(response.Usage.Speed),
 			}
 			usage.Add(&u)
 			iterations = append(iterations, u)

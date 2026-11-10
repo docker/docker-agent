@@ -35,6 +35,24 @@ func TestCostForServiceTier(t *testing.T) {
 	}
 }
 
+func TestCostForServiceTierAnthropicFast(t *testing.T) {
+	t.Parallel()
+
+	cost := &Cost{
+		Input: 4, Output: 20, CacheRead: 0.4, CacheWrite: 5,
+		Tiers: []CostTier{{
+			Rates: Rates{Input: 8, Output: 30, CacheRead: 0.8, CacheWrite: 10},
+			Tier:  TierSpec{Type: "context", Size: 200_000},
+		}},
+	}
+	got := cost.ForServiceTier(NewID("anthropic", "claude-opus-5-5"), "fast")
+
+	require.NotSame(t, cost, got)
+	assert.Equal(t, Rates{Input: 8, Output: 40, CacheRead: 0.8, CacheWrite: 10}, got.RatesFor(200_000))
+	assert.Equal(t, Rates{Input: 16, Output: 60, CacheRead: 1.6, CacheWrite: 20}, got.RatesFor(200_001))
+	assert.Equal(t, Rates{Input: 4, Output: 20, CacheRead: 0.4, CacheWrite: 5}, cost.RatesFor(200_000), "shared catalogue must not be mutated")
+}
+
 func TestCostForServiceTierIndependentOfModel(t *testing.T) {
 	t.Parallel()
 
@@ -66,6 +84,11 @@ func TestCostForServiceTierUnchanged(t *testing.T) {
 		{"azure", "gpt-6-astra", "fast"},
 		{"chatgpt", "gpt-6-astra", "ultrafast"},
 		{"custom", "gpt-6-astra", "fast"},
+		{"anthropic", "claude-opus-5-5", ""},
+		{"anthropic", "claude-opus-5-5", "standard"},
+		{"anthropic", "claude-opus-5-5", "priority"},
+		{"anthropic", "claude-opus-5-5", "ultrafast"},
+		{"google", "claude-opus-5-5", "fast"},
 	} {
 		assert.Same(t, cost, cost.ForServiceTier(NewID(tc.provider, tc.model), tc.tier), "%+v", tc)
 	}

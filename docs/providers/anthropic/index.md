@@ -351,6 +351,33 @@ Object form (forward-compatible with future budget types):
 
 See the full schema on the [Model Configuration](../../configuration/models/index.md#task-budget) page.
 
+## Fast Mode
+
+Set `provider_opts.speed` to `fast` to request Anthropic's [fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode), which runs the same model at up to 2.5× higher output tokens per second:
+
+```yaml
+models:
+  fast-opus:
+    provider: anthropic
+    model: claude-opus-5-5
+    provider_opts:
+      speed: fast
+```
+
+Fast mode is available on supported models such as Claude Opus 5.5 and Claude Fable 5.2, and in research preview on Claude Opus 5 and Claude Opus 4.8. See Anthropic's documentation for the current list. Docker Agent does not maintain a model allowlist: on an unsupported model, or when the separate fast-mode rate limit is exceeded, the API error is returned as-is. It applies to all requests using the configured model, including internal calls such as title generation, compaction, and reranking.
+
+Setting `fast` routes requests through the Beta Messages API, sends `speed: "fast"`, and attaches the `fast-mode-2026-02-01` beta header, which Opus 5 and Opus 4.8 require and newer models ignore. `standard` and an empty value send nothing, leaving the API's default behavior unchanged, which lets a model override a `fast` default inherited from the provider configuration. Any other value, including a non-string, is rejected when the model is loaded.
+
+> [!WARNING]
+> Fast mode is billed at premium pricing, has its own rate limit, and switching speed invalidates the prompt cache. It is a Claude API feature and is not supported on Amazon Bedrock; availability on Vertex AI and Microsoft Foundry differs, so check Anthropic's documentation before enabling it there. It cannot be combined with the Batch API or Priority Tier.
+
+Cost estimates use the **actual response speed** (`usage.speed`), not the requested one. A `fast` response is estimated at 2× catalogue rates for input, output, cache reads, and cache writes, including the applicable long-context band, when the model is served by `provider: anthropic` without a custom `base_url`. A response reporting `standard` retains standard pricing.
+
+> [!NOTE]
+> Custom endpoints and gateways, rule-based routers, and server-side fallback attempts retain catalogue pricing, because they do not report a speed. Estimates do not include negotiated discounts. A model's [`cost` override](../../configuration/models/index.md#custom-token-pricing) replaces the entire price table and is never adjusted for fast mode.
+
+See [`examples/anthropic-fast-mode.yaml`](https://github.com/docker/docker-agent/blob/main/examples/anthropic-fast-mode.yaml) for a complete example.
+
 ## Server-Side Fallbacks
 
 When the primary model refuses a request (stop reason `refusal`), the Claude

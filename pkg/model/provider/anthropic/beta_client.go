@@ -114,6 +114,7 @@ func (c *Client) createBetaStream(
 	// Opus 4.7+) and enable the corresponding beta header. Older Claude
 	// models will reject the field — docker-agent does not gate by model.
 	configureTaskBudget(&params, c.ModelConfig.TaskBudget)
+	applySpeed(&params, c.ModelConfig.ProviderOpts)
 
 	if len(requestTools) > 0 {
 		slog.DebugContext(ctx, "Anthropic Beta API: Adding tools to request", "tool_count", len(requestTools))
@@ -313,6 +314,7 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 		params.TopK = param.NewOpt(topK)
 		slog.DebugContext(ctx, "Anthropic Beta provider_opts: set top_k", "value", topK)
 	}
+	applySpeed(&params, c.ModelConfig.ProviderOpts)
 
 	// Use streaming API to avoid timeout errors for operations that may take longer than 10 minutes
 	stream := client.Beta.Messages.NewStreaming(ctx, params)

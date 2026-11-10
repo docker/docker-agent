@@ -226,6 +226,7 @@ func betaUsageFromMessage(u anthropic.BetaUsage) *chat.Usage {
 		CachedInputTokens: u.CacheReadInputTokens,
 		CacheWriteTokens:  u.CacheCreationInputTokens,
 		ReasoningTokens:   u.OutputTokensDetails.ThinkingTokens,
+		ServiceTier:       servedTier(u.Speed),
 	}
 }
 

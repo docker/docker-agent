@@ -65,6 +65,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	if err := validateCachePreservingUpdates(cfg); err != nil {
 		return nil, err
 	}
+	if err := validateSpeed(cfg); err != nil {
+		slog.ErrorContext(ctx, "Anthropic client creation failed", "error", err)
+		return nil, err
+	}
 	globalOptions := options.Apply(opts...)
 	if err := validateFallbackHost(cfg, globalOptions.Gateway()); err != nil {
 		slog.ErrorContext(ctx, "Anthropic client creation failed", "error", err)
@@ -172,6 +176,9 @@ func NewClientFromFactoryWithOptions(ctx context.Context, cfg *latest.ModelConfi
 	if err := validateCachePreservingUpdates(cfg); err != nil {
 		return nil, err
 	}
+	if err := validateSpeed(cfg); err != nil {
+		return nil, err
+	}
 	globalOptions := options.Apply(opts...)
 
 	client, err := factory(ctx, globalOptions)
@@ -263,12 +270,14 @@ func (c *Client) CreateChatCompletionStream(
 	//  - structured output (requires beta header)
 	//  - task_budget (requires the task-budgets beta header)
 	//  - server-side fallbacks (only the beta types carry fallback blocks)
+	//  - fast mode (the speed parameter only exists on the beta types)
 	if c.interleavedThinkingEnabled() ||
 		c.ModelOptions.StructuredOutput() != nil ||
 		!c.ModelConfig.TaskBudget.IsZero() || c.thinkingBindingBehavior() != "" ||
 		c.progressUpdatesEnabled() ||
 		cacheDiagnosticsEnabled(c.ModelConfig.ProviderOpts) || cachePreservingUpdatesEnabled(c.ModelConfig.ProviderOpts) || c.hasNativeCompaction(messages) ||
-		fallbacksEnabled(c.ModelConfig.ProviderOpts) {
+		fallbacksEnabled(c.ModelConfig.ProviderOpts) ||
+		fastModeEnabled(c.ModelConfig.ProviderOpts) {
 		return c.createBetaStream(ctx, client, messages, requestTools, maxTokens)
 	}
 
