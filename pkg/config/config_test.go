@@ -725,6 +725,68 @@ func TestApplyModelOverrides(t *testing.T) {
 	}
 }
 
+// TestApplyModelOverrides_AlloySpecNotSplit guards the comma disambiguation in
+// applySingleOverride: commas inside an alloy (first_available) model spec must
+// not be mistaken for the packed "agent=spec,agent=spec" override format.
+func TestApplyModelOverrides_AlloySpecNotSplit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		override   string
+		expected   map[string]string             // agent name -> expected model
+		wantModels map[string]latest.ModelConfig // model refs that must be registered
+	}{
+		{
+			name:     "agent-scoped alloy spec preserves its commas",
+			override: "root=openai/a,anthropic/b",
+			expected: map[string]string{
+				"root":  "openai/a,anthropic/b",
+				"other": "anthropic/claude-3",
+			},
+			wantModels: map[string]latest.ModelConfig{
+				"openai/a":    {Provider: "openai", Model: "a"},
+				"anthropic/b": {Provider: "anthropic", Model: "b"},
+			},
+		},
+		{
+			name:     "global alloy spec applies whole to every agent",
+			override: "openai/a,anthropic/b",
+			expected: map[string]string{
+				"root":  "openai/a,anthropic/b",
+				"other": "openai/a,anthropic/b",
+			},
+			wantModels: map[string]latest.ModelConfig{
+				"openai/a":    {Provider: "openai", Model: "a"},
+				"anthropic/b": {Provider: "anthropic", Model: "b"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := &latest.Config{
+				Agents: []latest.AgentConfig{
+					{Name: "root", Model: "openai/gpt-4"},
+					{Name: "other", Model: "anthropic/claude-3"},
+				},
+				Models: make(map[string]latest.ModelConfig),
+			}
+
+			require.NoError(t, ApplyModelOverrides(cfg, []string{tt.override}))
+
+			for _, agent := range cfg.Agents {
+				assert.Equal(t, tt.expected[agent.Name], agent.Model, "wrong model for agent %s", agent.Name)
+			}
+			for modelName, want := range tt.wantModels {
+				assert.Equal(t, want, cfg.Models[modelName], "model %q should be registered", modelName)
+			}
+		})
+	}
+}
+
 func TestValidateConfig_HarnessAgentsSkipModelValidation(t *testing.T) {
 	t.Parallel()
 
