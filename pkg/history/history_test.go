@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -666,6 +667,151 @@ func TestNewAtDir(t *testing.T) {
 	reloaded, err := NewAtDir(dir)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"hello"}, reloaded.Messages)
+}
+
+func seedHistory(t *testing.T, baseDir string, count int) []string {
+	t.Helper()
+
+	var data bytes.Buffer
+	encoder := json.NewEncoder(&data)
+	messages := make([]string, count)
+	for i := range count {
+		messages[i] = fmt.Sprintf("prompt %d", i)
+		require.NoError(t, encoder.Encode(messages[i]))
+	}
+	dir := filepath.Join(baseDir, ".cagent")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "history"), data.Bytes(), 0o600))
+	return messages
+}
+
+// Each case is the first call on a lazy history, with and without a
+// background Load racing it: it must see the loaded history either way.
+func TestNewLazy(t *testing.T) {
+	t.Parallel()
+
+	const count = 500
+	last := fmt.Sprintf("prompt %d", count-1)
+	for _, tt := range []struct {
+		name string
+		call func(h *History) any
+		want any
+	}{
+		{"Len", func(h *History) any { return h.Len() }, count},
+		{"Previous", func(h *History) any { return h.Previous() }, last},
+		{"LatestMatch", func(h *History) any { return h.LatestMatch("prompt 49") }, last},
+		{"FindPrevContains", func(h *History) any { msg, _, _ := h.FindPrevContains("prompt", count); return msg }, last},
+		{"FindNextContains", func(h *History) any { msg, _, _ := h.FindNextContains("prompt", -1); return msg }, "prompt 0"},
+		{"SetCurrent", func(h *History) any { h.SetCurrent(1); return h.Previous() }, "prompt 0"},
+		{"Add", func(h *History) any { _ = h.Add("new prompt"); return h.Len() }, count + 1},
+	} {
+		for _, background := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/background=%t", tt.name, background), func(t *testing.T) {
+				t.Parallel()
+				tmpDir := t.TempDir()
+				seedHistory(t, tmpDir, count)
+
+				h, err := NewLazy(tmpDir)
+				require.NoError(t, err)
+				assert.Empty(t, h.Messages, "the constructor must not read the history file")
+
+				var wg sync.WaitGroup
+				defer wg.Wait()
+				if background {
+					wg.Go(func() { assert.NoError(t, h.Load()) })
+				}
+				assert.Equal(t, tt.want, tt.call(h))
+			})
+		}
+	}
+}
+
+func TestNewLazy_AddKeepsLoadedHistory(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	want := append(seedHistory(t, tmpDir, 500), "new prompt")
+
+	h, err := NewLazy(tmpDir)
+	require.NoError(t, err)
+	require.NoError(t, h.Add("new prompt"))
+	assert.Equal(t, want, h.Messages)
+
+	reloaded, err := New(tmpDir)
+	require.NoError(t, err)
+	assert.Equal(t, want, reloaded.Messages)
+}
+
+func TestNewLazy_MissingFile(t *testing.T) {
+	t.Parallel()
+
+	h, err := NewLazy(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, h.Load())
+	assert.Zero(t, h.Len())
+	assert.Empty(t, h.Previous())
+
+	require.NoError(t, h.Add("first"))
+	assert.Equal(t, "first", h.Previous())
+}
+
+// New fails on an unreadable history file; NewLazy has returned by then, so
+// Load reports it and the history starts empty.
+func TestNewLazy_UnreadableFile(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".cagent", "history"), 0o700))
+
+	_, err := New(tmpDir)
+	require.Error(t, err)
+
+	h, err := NewLazy(tmpDir)
+	require.NoError(t, err)
+	assert.Zero(t, h.Len())
+	require.Error(t, h.Load())
+	require.Error(t, h.Load(), "later calls report the same failure")
+}
+
+// Histories that are already loaded have nothing left to read.
+func TestHistory_LoadIsNoOpWhenEager(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	messages := seedHistory(t, tmpDir, 3)
+
+	h, err := New(tmpDir)
+	require.NoError(t, err)
+	h.SetCurrent(1)
+	require.NoError(t, os.Remove(filepath.Join(tmpDir, ".cagent", "history")))
+
+	require.NoError(t, h.Load())
+	assert.Equal(t, messages, h.Messages)
+	assert.Equal(t, "prompt 0", h.Previous(), "Load must not reset the cursor")
+}
+
+func TestNewLazy_LegacyImport(t *testing.T) {
+	t.Parallel()
+
+	t.Run("imported by the constructor", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".cagent"), 0o700))
+		legacy := filepath.Join(tmpDir, ".cagent", "history.json")
+		require.NoError(t, os.WriteFile(legacy, []byte(`{"messages":["legacy prompt"]}`), 0o600))
+
+		h, err := NewLazy(tmpDir)
+		require.NoError(t, err)
+		assert.NoFileExists(t, legacy)
+		assert.Equal(t, "legacy prompt", h.Previous())
+	})
+
+	t.Run("failure is returned", func(t *testing.T) {
+		t.Parallel()
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".cagent"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".cagent", "history.json"), []byte("not json"), 0o600))
+
+		_, err := NewLazy(tmpDir)
+		require.Error(t, err)
+	})
 }
 
 func TestHistory_Load(t *testing.T) {
