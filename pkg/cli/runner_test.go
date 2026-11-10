@@ -21,6 +21,7 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
+	"github.com/docker/docker-agent/pkg/testutil"
 	"github.com/docker/docker-agent/pkg/tools"
 	skillstool "github.com/docker/docker-agent/pkg/tools/builtin/skills"
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
@@ -30,7 +31,7 @@ func TestMain(m *testing.M) {
 	// PrepareUserMessage tests exercise ${...} expansion without going
 	// through Run, which normally does this registration.
 	jscommands.Register()
-	os.Exit(m.Run())
+	os.Exit(testutil.RunWithTempHome(m.Run))
 }
 
 // mockRuntime implements runtime.Runtime for testing the CLI runner.
