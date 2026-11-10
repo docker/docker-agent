@@ -376,6 +376,45 @@ Cost estimates use the **actual response speed** (`usage.speed`), not the reques
 > [!NOTE]
 > Server-side fallback attempts retain catalogue pricing, because they do not report a speed. A request routed by a rule-based router is priced by the model that served it, under the rules above. Estimates do not include negotiated discounts. A model's [`cost` override](../../configuration/models/index.md#custom-token-pricing) replaces the entire price table and is never adjusted for fast mode.
 
+### Global default
+
+To enable fast mode without editing each agent file, set it in your user configuration (`~/.config/cagent/config.yaml`). A `providers` entry with `provider: anthropic` is a native Anthropic provider, so it needs no `base_url`. Select it with its name:
+
+```yaml
+# ~/.config/cagent/config.yaml
+providers:
+  fast-claude:
+    provider: anthropic
+    provider_opts:
+      speed: fast
+```
+
+```bash
+docker agent run agent.yaml --model fast-claude/claude-opus-5-5
+```
+
+Naming the entry `anthropic` instead applies it to every model whose provider is `anthropic`, whether it comes from `--model anthropic/...`, an agent file, or `first_available`. It fills only the options a model leaves unset, so credentials and the endpoint still come from the built-in defaults:
+
+```yaml
+providers:
+  anthropic:
+    provider: anthropic # required; an entry without it is ignored with a warning
+    provider_opts:
+      speed: fast
+```
+
+Alternatively, `default_model` in its full form applies fast mode when a model resolves to `auto` (`--model auto` or `model: auto`). The `DOCKER_AGENT_DEFAULT_MODEL` environment variable only accepts `provider/model` and carries no options.
+
+```yaml
+default_model:
+  provider: anthropic
+  model: claude-opus-5-5
+  provider_opts:
+    speed: fast
+```
+
+A model-level `provider_opts.speed: standard` overrides the global value, and an agent file that defines its own `providers.anthropic` replaces the user-config entry entirely. A global entry named `anthropic` covers every Anthropic request, including sub-agents, title generation, and compaction, all at premium pricing. An invalid value fails when the first Anthropic model is created.
+
 See [`examples/anthropic-fast-mode.yaml`](https://github.com/docker/docker-agent/blob/main/examples/anthropic-fast-mode.yaml) for a complete example.
 
 ## Server-Side Fallbacks
