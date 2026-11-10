@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -64,6 +65,10 @@ func (b *workdirRecordingBackend) ResumeWorkingDir(context.Context) (string, boo
 func TestLoadTeamInWorktreeSetsWorkingDirBeforeLoad(t *testing.T) {
 	repo := initTestRepo(t)
 	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644))
+	for _, args := range [][]string{{"add", ".gitignore"}, {"commit", "-m", "ignore env files"}} {
+		out, err := exec.CommandContext(t.Context(), "git", append([]string{"-C", repo}, args...)...).CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
 	require.NoError(t, os.WriteFile(filepath.Join(repo, ".worktreeinclude"), []byte("*.env\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(repo, "local.env"), []byte("copied"), 0o600))
 
@@ -114,6 +119,48 @@ func TestLoadTeamInWorktreeBranchesFromBaseDir(t *testing.T) {
 
 	baseHead := gitHead(t, baseRepo)
 	assert.Equal(t, baseHead, gitHead(t, wt.Dir))
+}
+
+func TestLoadTeamInWorktreeDestinationIgnore(t *testing.T) {
+	for _, kind := range []string{"base", "pr"} {
+		t.Run(kind, func(t *testing.T) {
+			if kind == "pr" && goruntime.GOOS == "windows" {
+				t.Skip("shell script")
+			}
+			repo := initTestRepo(t)
+			runGit := func(args ...string) string {
+				t.Helper()
+				out, err := exec.CommandContext(t.Context(), "git", append([]string{"-C", repo}, args...)...).CombinedOutput()
+				require.NoError(t, err, string(out))
+				return string(out)
+			}
+			runGit("branch", "destination")
+			require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(repo, ".worktreeinclude"), []byte("*.env\n"), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(repo, "local.env"), []byte("secret"), 0o600))
+			paths.SetDataDir(t.TempDir())
+			t.Cleanup(func() { paths.SetDataDir("") })
+			f := &runExecFlags{worktree: true, worktreeBase: "destination"}
+			if kind == "pr" {
+				bin := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\ngit checkout destination\n"), 0o755))
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				f = &runExecFlags{worktreePR: "123"}
+			}
+			b := &workdirRecordingBackend{flags: f}
+			_, wt, _, err := f.loadTeamInWorktree(t.Context(), b, repo)
+			require.NoError(t, err)
+			require.NotNil(t, wt)
+			t.Cleanup(func() { _ = wt.Remove(context.WithoutCancel(t.Context())) })
+			assert.Empty(t, b.includedSeen)
+			assert.NoFileExists(t, filepath.Join(wt.Dir, "local.env"))
+			require.Len(t, wt.Warnings, 1)
+			assert.Contains(t, wt.Warnings[0], "not ignored in destination")
+			out, err := exec.CommandContext(t.Context(), "git", "-C", wt.Dir, "status", "--porcelain").CombinedOutput()
+			require.NoError(t, err, string(out))
+			assert.Empty(t, string(out))
+		})
+	}
 }
 
 // gitHead returns the commit HEAD points at in dir.

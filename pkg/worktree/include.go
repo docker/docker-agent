@@ -18,7 +18,7 @@ import (
 const worktreeInclude = ".worktreeinclude"
 
 // copyIncludedFiles returns warnings rather than failing after Git has created
-// the checkout. Both Git commands use NUL delimiters to preserve arbitrary names.
+// the checkout. Git commands use NUL delimiters to preserve arbitrary names.
 func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []string {
 	warn := func(err error) []string { return []string{fmt.Sprintf("%s: %v", worktreeInclude, err)} }
 	src, err := os.OpenRoot(source)
@@ -53,11 +53,38 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 	if len(candidates) == 0 {
 		return nil
 	}
-	ignored, err := gitBytes(ctx, source, candidates, "check-ignore", "-z", "--stdin")
+	ignoredInSource, err := checkIgnoredPaths(ctx, source, candidates)
 	if err != nil {
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
-			return warn(err)
+		return warn(err)
+	}
+	var ignored bytes.Buffer
+	for name := range bytes.SplitSeq(candidates, []byte{0}) {
+		if ignoredInSource[string(name)] {
+			ignored.Write(name)
+			ignored.WriteByte(0)
+		}
+	}
+	if ignored.Len() == 0 {
+		return nil
+	}
+	ignoredInDest, err := checkIgnoredPaths(ctx, dest, ignored.Bytes())
+	var warnings []string
+	failedInDest := make(map[string]bool)
+	if err != nil {
+		ignoredInDest = make(map[string]bool)
+		for name := range bytes.SplitSeq(ignored.Bytes(), []byte{0}) {
+			if len(name) == 0 {
+				continue
+			}
+			checked, err := checkIgnoredPaths(ctx, dest, append(bytes.Clone(name), 0))
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("%s: %q: checking destination ignore rules: %v", worktreeInclude, name, err))
+				failedInDest[string(name)] = true
+				continue
+			}
+			if checked[string(name)] {
+				ignoredInDest[string(name)] = true
+			}
 		}
 	}
 	dst, err := os.OpenRoot(dest)
@@ -66,8 +93,7 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 	}
 	defer dst.Close()
 
-	var warnings []string
-	for name := range bytes.SplitSeq(ignored, []byte{0}) {
+	for name := range bytes.SplitSeq(ignored.Bytes(), []byte{0}) {
 		if len(name) == 0 {
 			continue
 		}
@@ -90,11 +116,48 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 			warnings = append(warnings, fmt.Sprintf("%s: skipped nested repository %q", worktreeInclude, rel))
 			continue
 		}
+		if strings.EqualFold(filepath.Base(rel), ".gitignore") || strings.EqualFold(filepath.Base(rel), ".gitattributes") {
+			warnings = append(warnings, fmt.Sprintf("%s: %q: Git control files are not copied", worktreeInclude, rel))
+			continue
+		}
+		if failedInDest[string(name)] {
+			continue
+		}
+		if !ignoredInDest[string(name)] {
+			warnings = append(warnings, fmt.Sprintf("%s: %q: not ignored in destination; skipped", worktreeInclude, rel))
+			continue
+		}
 		if err := copyIncludedFile(src, dst, rel); err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: %q: %v", worktreeInclude, rel, err))
 		}
 	}
 	return warnings
+}
+
+func checkIgnoredPaths(ctx context.Context, dir string, paths []byte) (map[string]bool, error) {
+	var input bytes.Buffer
+	for name := range bytes.SplitSeq(paths, []byte{0}) {
+		if len(name) > 0 {
+			// A leading colon otherwise has Git pathspec-magic semantics.
+			input.WriteString("./")
+			input.Write(name)
+			input.WriteByte(0)
+		}
+	}
+	out, err := gitBytes(ctx, dir, input.Bytes(), "check-ignore", "-z", "--stdin")
+	if err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			return nil, err
+		}
+	}
+	ignored := make(map[string]bool)
+	for name := range bytes.SplitSeq(out, []byte{0}) {
+		if trimmed, ok := bytes.CutPrefix(name, []byte("./")); ok {
+			ignored[string(trimmed)] = true
+		}
+	}
+	return ignored, nil
 }
 
 func gitBytes(ctx context.Context, dir string, input []byte, args ...string) ([]byte, error) {

@@ -353,6 +353,8 @@ func TestBackgroundWorktreeSetupPrecedesToolConstruction(t *testing.T) {
 	t.Parallel()
 	dir := worktreeRepo(t)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.env\n"), 0o644))
+	worktreeGit(t, dir, "add", ".gitignore")
+	worktreeGit(t, dir, "commit", "-m", "ignore env files")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".worktreeinclude"), []byte("*.env\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "local.env"), []byte("from-source"), 0o600))
 	rt := loadWorktreeRuntime(t, dir, map[string]provider.Provider{
