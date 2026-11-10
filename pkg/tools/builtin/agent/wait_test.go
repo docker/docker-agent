@@ -410,3 +410,14 @@ func TestWorktreeMetadataOwnsItsSnapshot(t *testing.T) {
 	snapshot.Dir = "also mutated"
 	assert.Equal(t, "initial", task.worktreeSnapshot().Dir)
 }
+
+func TestWorktreeWarningsVisibleAfterCompletion(t *testing.T) {
+	t.Parallel()
+	task := &task{id: "task", done: make(chan struct{}), result: "done"}
+	task.setWorktree(&worktree.Worktree{Dir: "checkout", Warnings: []string{"copy failed"}})
+	for _, status := range []taskStatus{taskRunning, taskCompleted, taskFailed} {
+		task.storeStatus(status)
+		assert.Contains(t, task.formatView(status, 0), "Warning: copy failed")
+		assert.Equal(t, []string{"copy failed"}, task.waitResult().Warnings)
+	}
+}

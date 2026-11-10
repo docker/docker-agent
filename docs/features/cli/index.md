@@ -148,6 +148,22 @@ $ docker agent run agent.yaml --worktree-pr https://github.com/owner/repo/pull/1
 
 With `--worktree-pr`, the PR's head branch is checked out tracking its remote (via the [GitHub CLI](https://cli.github.com/)), so commits made during the run push straight back to the pull request. The worktree is stored under `<data-dir>/worktrees/pr-<number>`.
 
+#### Copy ignored files into worktrees
+
+Add a `.worktreeinclude` at the source repository root to copy selected **gitignored** files into new `--worktree`, `--worktree-pr`, and [background agent](../../tools/background-agents/index.md) worktrees before setup hooks run:
+
+```gitignore
+.env.local
+config/*.local.yaml
+!config/private.local.yaml
+```
+
+Patterns use Git's `.gitignore` syntax, including comments, negations and directory patterns. Git's normal rules for ignored parent directories apply: to exclude a child, include the parent with a pattern such as `cache/*` rather than `cache/`. Only files also ignored by the source checkout's Git rules are copied. This differs from tools that treat `.worktreeinclude` as a list of paths or also copy non-ignored files. Tracked changes and other untracked files are not copied. Missing `.worktreeinclude` leaves worktree creation unchanged.
+
+File permissions are preserved. Existing destination files are never overwritten; symlinks and special files are skipped. Failures and skipped protected files produce warnings without undoing the worktree. Background-task warnings appear in the task metadata and logs. Files blocked by the source checkout's nearest [`.agentsignore`](../../configuration/agentsignore/index.md) are not copied, even if included here. `.agentsignore` itself is not copied by this mechanism. As always, `.agentsignore` only governs the filesystem toolset, not shell or other independent tools.
+
+Copied files are independent copies. **Ignored files do not make a worktree dirty**, so an interactive run can remove a clean worktree and its copied files automatically. Changes to those copies do not propagate back to the source checkout; save anything needed before cleanup.
+
 When the interactive session ends, the worktree is cleaned up based on its state:
 
 - **Clean** (no uncommitted changes, untracked files, or new commits): the worktree and its branch are removed automatically.

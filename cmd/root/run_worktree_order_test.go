@@ -1,6 +1,7 @@
 package root
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -11,11 +12,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tui"
+	"github.com/docker/docker-agent/pkg/worktree"
 )
 
 // workdirRecordingBackend records the working directory the flags carry at the
@@ -25,6 +28,7 @@ import (
 type workdirRecordingBackend struct {
 	flags          *runExecFlags
 	workingDirSeen string
+	includedSeen   string
 }
 
 func (b *workdirRecordingBackend) LoadTeamRequest() runtime.LoadTeamRequest {
@@ -33,6 +37,8 @@ func (b *workdirRecordingBackend) LoadTeamRequest() runtime.LoadTeamRequest {
 
 func (b *workdirRecordingBackend) LoadTeam(context.Context, runtime.LoadTeamRequest) (*teamloader.LoadResult, error) {
 	b.workingDirSeen = b.flags.runConfig.WorkingDir
+	included, _ := os.ReadFile(filepath.Join(b.workingDirSeen, "local.env"))
+	b.includedSeen = string(included)
 	return nil, nil
 }
 
@@ -57,6 +63,9 @@ func (b *workdirRecordingBackend) ResumeWorkingDir(context.Context) (string, boo
 // up rooted in the user's checkout instead of the worktree.
 func TestLoadTeamInWorktreeSetsWorkingDirBeforeLoad(t *testing.T) {
 	repo := initTestRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("*.env\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".worktreeinclude"), []byte("*.env\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "local.env"), []byte("copied"), 0o600))
 
 	paths.SetDataDir(t.TempDir())
 	t.Cleanup(func() { paths.SetDataDir("") })
@@ -77,6 +86,7 @@ func TestLoadTeamInWorktreeSetsWorkingDirBeforeLoad(t *testing.T) {
 	// The crux: LoadTeam saw the worktree directory, so toolsets are rooted
 	// there.
 	assert.Equal(t, wt.Dir, b.workingDirSeen)
+	assert.Equal(t, "copied", b.includedSeen)
 	assert.Equal(t, wt.Dir, f.runConfig.WorkingDir)
 }
 
@@ -141,4 +151,10 @@ func initTestRepo(t *testing.T) string {
 		require.NoError(t, err, string(out))
 	}
 	return dir
+}
+
+func TestPrintWorktreeStatusWarnings(t *testing.T) {
+	var out bytes.Buffer
+	printWorktreeStatus(cli.NewPrinter(&out), &worktree.Worktree{Dir: "checkout", Branch: "branch", Warnings: []string{"one", "two"}})
+	assert.Equal(t, "Using git worktree: checkout (branch branch)\nWarning: one\nWarning: two\n", out.String())
 }
