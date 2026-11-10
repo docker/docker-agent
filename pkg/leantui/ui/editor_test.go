@@ -162,6 +162,9 @@ func TestEditorPersistentHistory(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, store.Add("from full tui"))
 
+	store, err = history.New(dir)
+	require.NoError(t, err)
+	require.Empty(t, store.Messages, "history must still be unloaded")
 	e := NewEditor("", store)
 	e.HistoryPrev()
 	assert.Equal(t, "from full tui", e.Text())
@@ -169,6 +172,7 @@ func TestEditorPersistentHistory(t *testing.T) {
 	require.NoError(t, e.RememberHistory("from lean tui"))
 	reloaded, err := history.New(dir)
 	require.NoError(t, err)
+	require.NoError(t, reloaded.Load())
 	assert.Equal(t, []string{"from full tui", "from lean tui"}, reloaded.Messages)
 }
 

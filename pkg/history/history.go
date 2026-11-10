@@ -21,46 +21,38 @@ import (
 // (used by [History.Previous] and [History.Next]) stays in [0, len(Messages)],
 // where len(Messages) means "past the most recent entry".
 type History struct {
-	// Messages is only filled on first use by NewLazy: read it through the
-	// methods there.
+	// Messages is populated by Load or the first method call. Call Load before
+	// reading it directly.
 	Messages []string
 
 	path    string
 	current int
-	// loadOnce is set by NewLazy: the history file is read on first use.
+	// loadOnce is set by New: the history file is read on first use.
 	loadOnce *sync.Once
 	loadErr  error
 }
 
-// New loads history from paths.GetDataDir()/history when baseDir is empty.
-// An explicit baseDir uses baseDir/.cagent/history instead.
+// New opens history at paths.GetDataDir()/history when baseDir is empty.
+// An explicit baseDir uses baseDir/.cagent/history instead. The history file
+// is read on first use, or earlier by [History.Load]. A failed read leaves
+// the history empty. Legacy history is imported before New returns.
 func New(baseDir string) (*History, error) {
-	h, err := open(baseDir)
-	if err != nil {
+	dir := baseDir
+	if dir == "" {
+		dir = paths.GetDataDir()
+	} else {
+		dir = filepath.Join(baseDir, ".cagent") //rubocop:disable Lint/StatePathViaPathsPackage // preserve the caller-supplied root layout
+	}
+	h := &History{path: filepath.Join(dir, "history"), loadOnce: &sync.Once{}}
+	if err := h.migrateOldHistory(dir); err != nil {
 		return nil, err
 	}
-	if err := h.load(); err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	h.current = len(h.Messages)
 	return h, nil
 }
 
-// NewLazy is New without reading the history file, which takes a while for a
-// large history: it is read on first use, or earlier by [History.Load]. A
-// failed read leaves the history empty.
-func NewLazy(baseDir string) (*History, error) {
-	h, err := open(baseDir)
-	if err != nil {
-		return nil, err
-	}
-	h.loadOnce = &sync.Once{}
-	return h, nil
-}
-
-// Load reads the history file of a NewLazy history, once; later calls return
-// the same error. It may run concurrently with the other methods, which wait
-// for it, so a caller can run it in the background ahead of first use.
+// Load reads the history file once; later calls return the same error. It may
+// run concurrently with the other methods, which wait for it, so a caller can
+// run it in the background ahead of first use.
 func (h *History) Load() error {
 	if h.loadOnce == nil {
 		return nil
@@ -77,21 +69,6 @@ func (h *History) Load() error {
 // ensureLoaded is Load for the methods: they carry on with an empty history.
 func (h *History) ensureLoaded() {
 	_ = h.Load()
-}
-
-// open resolves the history path and imports any legacy history file.
-func open(baseDir string) (*History, error) {
-	dir := baseDir
-	if dir == "" {
-		dir = paths.GetDataDir()
-	} else {
-		dir = filepath.Join(baseDir, ".cagent") //rubocop:disable Lint/StatePathViaPathsPackage // preserve the caller-supplied root layout
-	}
-	h := &History{path: filepath.Join(dir, "history")}
-	if err := h.migrateOldHistory(dir); err != nil {
-		return nil, err
-	}
-	return h, nil
 }
 
 // NewAtDir loads the history stored at dir/history, without the ".cagent"

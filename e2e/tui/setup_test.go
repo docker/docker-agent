@@ -127,11 +127,13 @@ func TestIsolateState_PromptHistory(t *testing.T) {
 		isolateState(t)
 		isolatedHistory, err := history.New("")
 		require.NoError(t, err)
+		require.NoError(t, isolatedHistory.Load())
 		require.Empty(t, isolatedHistory.Messages)
 		require.NoError(t, isolatedHistory.Add("test prompt"))
 
 		reloaded, err := history.New("")
 		require.NoError(t, err)
+		require.NoError(t, reloaded.Load())
 		require.Equal(t, []string{"test prompt"}, reloaded.Messages)
 		require.FileExists(t, filepath.Join(paths.GetDataDir(), "history"))
 		require.NoDirExists(t, filepath.Join(paths.GetHomeDir(), ".cagent"))
@@ -140,6 +142,7 @@ func TestIsolateState_PromptHistory(t *testing.T) {
 	require.Equal(t, home, paths.GetHomeDir())
 	hostHistory, err = history.New("")
 	require.NoError(t, err)
+	require.NoError(t, hostHistory.Load())
 	require.Equal(t, []string{"developer prompt"}, hostHistory.Messages)
 }
 

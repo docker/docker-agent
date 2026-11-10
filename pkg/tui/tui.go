@@ -513,7 +513,7 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 
 	// Initialize shared command history. Init reads it in the background: a
 	// large history would otherwise delay the first frame.
-	historyStore, err := history.NewLazy("")
+	historyStore, err := history.New("")
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to initialize command history", "error", err)
 	}

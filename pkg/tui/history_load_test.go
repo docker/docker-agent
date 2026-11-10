@@ -24,7 +24,7 @@ func TestLoadHistoryCmd(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, seeded.Add("earlier prompt"))
 
-		hist, err := history.NewLazy(dir)
+		hist, err := history.New(dir)
 		require.NoError(t, err)
 		require.Empty(t, hist.Messages)
 

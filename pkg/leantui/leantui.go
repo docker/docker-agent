@@ -65,7 +65,11 @@ func Run(ctx context.Context, cfg Config) error {
 
 	if cfg.History == nil {
 		cfg.History, err = history.New("")
+		if err == nil {
+			err = cfg.History.Load()
+		}
 		if err != nil {
+			cfg.History = nil
 			slog.WarnContext(ctx, "Failed to initialize command history", "error", err)
 		}
 	}
