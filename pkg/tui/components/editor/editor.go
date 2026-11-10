@@ -1794,7 +1794,7 @@ func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
 func (e *editor) handleHistorySearchKey(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, e.searchInput.KeyMap.PrevSuggestion):
-		e.cycleMatch(e.hist.FindPrevContains, len(e.hist.Messages))
+		e.cycleMatch(e.hist.FindPrevContains, e.hist.Len())
 		return e, nil
 
 	case key.Matches(msg, e.searchInput.KeyMap.NextSuggestion):
@@ -1863,7 +1863,7 @@ func (e *editor) historySearchComputeMatch() {
 		return
 	}
 
-	m, idx, ok := e.hist.FindPrevContains(e.historySearch.query, len(e.hist.Messages))
+	m, idx, ok := e.hist.FindPrevContains(e.historySearch.query, e.hist.Len())
 	if ok {
 		e.historySearch.match = m
 		e.historySearch.matchIndex = idx

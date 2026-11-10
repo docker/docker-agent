@@ -511,7 +511,8 @@ func New(ctx context.Context, spawner SessionSpawner, initialApp *app.App, initi
 		slog.WarnContext(ctx, "Failed to open TUI state store, tabs won't persist", "error", tsErr)
 	}
 
-	// Initialize shared command history
+	// Initialize shared command history. Init reads it in the background: a
+	// large history would otherwise delay the first frame.
 	historyStore, err := history.New("")
 	if err != nil {
 		slog.WarnContext(ctx, "Failed to initialize command history", "error", err)
@@ -813,7 +814,23 @@ func (m *appModel) contextShutdownCmd() tea.Cmd {
 
 // Init initializes the model.
 func (m *appModel) Init() tea.Cmd {
-	return tea.Batch(m.init(), m.waitForThemeChange(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.refreshPlanSidebarCmd(), m.initTmuxVisibilityCmd(), m.refreshProgramStatus(), m.programStatusProbeCmd())
+	return tea.Batch(m.init(), m.loadHistoryCmd(), m.waitForThemeChange(), m.tourStartupCmd(), m.autoThemeInitCmd(), m.refreshPlanSidebarCmd(), m.initTmuxVisibilityCmd(), m.refreshProgramStatus(), m.programStatusProbeCmd())
+}
+
+// loadHistoryCmd reads the command history off the UI goroutine, so the
+// editor rarely has to wait for it on a first keystroke.
+func (m *appModel) loadHistoryCmd() tea.Cmd {
+	hist := m.history
+	if hist == nil {
+		return nil
+	}
+	ctx := m.ctx()
+	return func() tea.Msg {
+		if err := hist.Load(); err != nil {
+			slog.WarnContext(ctx, "Failed to load command history", "error", err)
+		}
+		return nil
+	}
 }
 
 // autoThemeInitCmd enables DEC mode 2031 (terminal color-scheme reports) so

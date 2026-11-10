@@ -189,6 +189,7 @@ func (e *Editor) RememberHistory(s string) error {
 
 func (e *Editor) historyMessages() []string {
 	if e.historyStore != nil {
+		_ = e.historyStore.Load()
 		return e.historyStore.Messages
 	}
 	return e.history

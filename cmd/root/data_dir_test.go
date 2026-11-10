@@ -94,6 +94,7 @@ func TestDataDir_RootCommand(t *testing.T) {
 					h, err := history.New("")
 					require.NoError(t, err)
 					if tt.tilde {
+						require.NoError(t, h.Load())
 						assert.Equal(t, []string{"legacy prompt"}, h.Messages)
 						assert.NoFileExists(t, filepath.Join(expected, "history.json"))
 					}
