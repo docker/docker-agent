@@ -374,7 +374,7 @@ Setting `fast` routes requests through the Beta Messages API, sends `speed: "fas
 Cost estimates use the **actual response speed** (`usage.speed`), not the requested one. A `fast` response is estimated at 2× catalogue rates for input, output, cache reads, and cache writes, including the applicable long-context band, when the model is served by `provider: anthropic` at the default Anthropic endpoint. Any `base_url` or `ANTHROPIC_BASE_URL` override, including proxies, keeps catalogue pricing. A response reporting `standard` retains standard pricing. The 2× factor is derived from Anthropic's published fast-mode pricing at the time of writing and may drift if Anthropic changes it.
 
 > [!NOTE]
-> Rule-based routers and server-side fallback attempts retain catalogue pricing, because they do not report a speed. Estimates do not include negotiated discounts. A model's [`cost` override](../../configuration/models/index.md#custom-token-pricing) replaces the entire price table and is never adjusted for fast mode.
+> Server-side fallback attempts retain catalogue pricing, because they do not report a speed. A request routed by a rule-based router is priced by the model that served it, under the rules above. Estimates do not include negotiated discounts. A model's [`cost` override](../../configuration/models/index.md#custom-token-pricing) replaces the entire price table and is never adjusted for fast mode.
 
 See [`examples/anthropic-fast-mode.yaml`](https://github.com/docker/docker-agent/blob/main/examples/anthropic-fast-mode.yaml) for a complete example.
 
