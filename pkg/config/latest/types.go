@@ -178,6 +178,9 @@ func (m SafetyMode) Validate() error {
 // wants applied when this config is run. The values act as defaults
 // only: an explicit CLI flag or user-config setting always wins.
 type RuntimeDefaults struct {
+	// StreamIdleTimeout defaults the silence limit for every model in this file.
+	StreamIdleTimeout *StreamIdleTimeout `json:"stream_idle_timeout,omitempty" yaml:"stream_idle_timeout,omitempty"`
+
 	// Sandbox, when true, runs the agent inside a Docker sandbox by
 	// default — equivalent to passing --sandbox on the command line.
 	// Useful for agents that always need filesystem/network isolation.
@@ -1144,6 +1147,8 @@ func (a *AgentConfig) GetFallbackCooldown() time.Duration {
 
 // ModelConfig represents the configuration for a model
 type ModelConfig struct {
+	// StreamIdleTimeout overrides the agent-file stream silence limit.
+	StreamIdleTimeout *StreamIdleTimeout `json:"stream_idle_timeout,omitempty"`
 	// Name is the manifest model name (map key), populated at runtime.
 	// Not serialized — set by teamloader/model_switcher when resolving models.
 	Name     string `json:"-"`
@@ -1480,7 +1485,8 @@ func (f FlexibleModelConfig) MarshalYAML() (any, error) {
 
 // isShorthandOnly returns true if only provider and model are set
 func (f *FlexibleModelConfig) isShorthandOnly() bool {
-	return f.Description == "" &&
+	return f.StreamIdleTimeout == nil &&
+		f.Description == "" &&
 		f.Temperature == nil &&
 		f.MaxTokens == nil &&
 		f.TopP == nil &&

@@ -617,6 +617,7 @@ export interface Metadata {
 
 /** Go: pkg/config/latest/types.go ModelConfig */
 export interface ModelConfig {
+  stream_idle_timeout?: StreamIdleTimeout;
   provider?: string;
   model?: string;
   description?: string;
@@ -913,6 +914,7 @@ export interface RoutingRule {
 
 /** Go: pkg/config/latest/types.go RuntimeDefaults */
 export interface RuntimeDefaults {
+  stream_idle_timeout?: StreamIdleTimeout;
   sandbox?: boolean;
   safety?: SafetyMode;
   network_allowlist?: string[];
@@ -997,6 +999,9 @@ export interface ShellToolset {
 
 /** Go: pkg/config/latest/types.go SkillsConfig */
 export type SkillsConfig = boolean | (string | InlineSkill)[];
+
+/** Go: pkg/config/latest/stream_idle_timeout.go StreamIdleTimeout */
+export type StreamIdleTimeout = string | -1;
 
 /** Go: pkg/config/latest/types.go StructuredOutput */
 export interface StructuredOutput {

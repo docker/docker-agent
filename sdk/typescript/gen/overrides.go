@@ -15,6 +15,13 @@ func durationSchema(*builder) (*jsonschema.Schema, error) {
 	return &jsonschema.Schema{Type: "string", Description: `Go duration string such as "1m30s"; empty when unset.`}, nil
 }
 
+func streamIdleTimeoutSchema(*builder) (*jsonschema.Schema, error) {
+	return &jsonschema.Schema{AnyOf: []*jsonschema.Schema{
+		{Type: "string", Description: "Positive Go duration."},
+		{Type: "integer", Enum: []any{-1}, Description: "Disable the idle timer."},
+	}}, nil
+}
+
 func instructionFilesSchema(*builder) (*jsonschema.Schema, error) {
 	return &jsonschema.Schema{AnyOf: []*jsonschema.Schema{
 		{Type: "string"},

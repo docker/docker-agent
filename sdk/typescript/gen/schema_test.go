@@ -92,7 +92,7 @@ func TestSchemasMatchEncodedValues(t *testing.T) {
 	}
 	for _, d := range defs {
 		// A zero Toolset has no type; samples below cover every variant.
-		if d.goType == nil || nilable(d.goType) || d.goType == reflect.TypeFor[latest.Toolset]() {
+		if d.goType == nil || nilable(d.goType) || d.goType == reflect.TypeFor[latest.Toolset]() || d.goType == reflect.TypeFor[latest.StreamIdleTimeout]() {
 			continue
 		}
 		t.Run(d.name, func(t *testing.T) {
@@ -124,6 +124,7 @@ func TestSchemasMatchEncodedValues(t *testing.T) {
 	samples := map[string][]any{
 		"Toolset":           toolsets,
 		"Duration":          {latest.Duration{}, latest.Duration{Duration: 90 * time.Second}},
+		"StreamIdleTimeout": {latest.StreamIdleTimeout{Duration: time.Minute}, latest.StreamIdleTimeout{Duration: latest.DisabledStreamIdleTimeout}},
 		"InstructionFiles":  {latest.InstructionFiles{"a.md"}, latest.InstructionFiles{"a.md", "b.md"}},
 		"SkillsConfig":      {latest.SkillsConfig{}, latest.SkillsConfig{Sources: []string{latest.SkillSourceLocal}}, latest.SkillsConfig{Sources: []string{"https://example.com"}, Include: []string{"git"}, Inline: []latest.InlineSkill{{Name: "x", Description: "d", Instructions: "i"}}}},
 		"ThinkingBudget":    {latest.ThinkingBudget{Effort: "high"}, latest.ThinkingBudget{Tokens: 1024}},

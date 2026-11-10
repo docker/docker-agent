@@ -13,5 +13,8 @@ models:
   gemini-flex:
     provider: google
     model: gemini-2.5-flash
+    # A model override takes precedence over runtime.stream_idle_timeout.
+    # Keep at least 15m for Flex, which may queue before streaming.
+    stream_idle_timeout: 20m
     provider_opts:
       service_tier: flex # standard and priority are also accepted

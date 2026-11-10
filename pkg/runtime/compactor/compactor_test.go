@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -978,6 +979,64 @@ func TestRunLLM_OverflowRetryKeepsPriorSummary(t *testing.T) {
 			require.Len(t, attempts, 2)
 			assert.True(t, attempts[0], "the first attempt sends the whole conversation")
 			assert.Equal(t, tt.wantKept, attempts[1])
+		})
+	}
+}
+
+type timeoutCompactionProvider struct {
+	cfg base.Config
+}
+
+func (p *timeoutCompactionProvider) ID() modelsdev.ID {
+	return modelsdev.NewID(p.cfg.ModelConfig.Provider, p.cfg.ModelConfig.Model)
+}
+
+func (p *timeoutCompactionProvider) BaseConfig() base.Config { return p.cfg }
+
+func (*timeoutCompactionProvider) CreateChatCompletionStream(context.Context, []chat.Message, []tools.Tool) (chat.MessageStream, error) {
+	return nil, nil
+}
+
+func TestRunLLM_StreamIdleTimeout(t *testing.T) {
+	t.Parallel()
+	timeout := func(d time.Duration) *latest.StreamIdleTimeout { return &latest.StreamIdleTimeout{Duration: d} }
+	for _, tc := range []struct {
+		name      string
+		file      *latest.StreamIdleTimeout
+		model     *latest.StreamIdleTimeout
+		dedicated bool
+	}{
+		{name: "unset"},
+		{name: "parent model and file", file: timeout(time.Minute)},
+		{name: "disabled file", file: timeout(latest.DisabledStreamIdleTimeout)},
+		{name: "disabled parent model", file: timeout(time.Minute), model: timeout(latest.DisabledStreamIdleTimeout)},
+		{name: "disabled compaction model", file: timeout(time.Minute), model: timeout(latest.DisabledStreamIdleTimeout), dedicated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var rebuild base.RebuildProviderFunc
+			rebuild = func(_ context.Context, cfg *latest.ModelConfig, _ ...options.Opt) (provider.Provider, error) {
+				return &timeoutCompactionProvider{cfg: base.Config{ModelConfig: *cfg, RebuildProvider: rebuild}}, nil
+			}
+			model := &timeoutCompactionProvider{cfg: base.Config{ModelConfig: latest.ModelConfig{Provider: "fake", Model: "summary", StreamIdleTimeout: tc.model}, RebuildProvider: rebuild}}
+			opts := []agent.Opt{agent.WithModel(model), agent.WithStreamIdleTimeout(tc.file)}
+			if tc.dedicated {
+				opts = append(opts, agent.WithModel(fakeProvider{id: modelsdev.NewID("fake", "parent")}), agent.WithCompactionModel(model))
+			}
+			sess := session.New(session.WithMessages([]session.Item{
+				session.NewMessageItem(&session.Message{Message: chat.Message{Role: chat.MessageRoleUser, Content: "summarize"}}),
+			}))
+			result, err := RunLLM(t.Context(), LLMArgs{
+				Session: sess, Agent: agent.New("root", "", opts...), ContextLimit: 100_000,
+				RunAgent: func(ctx context.Context, child *agent.Agent, cs *session.Session) error {
+					assert.Equal(t, tc.file, child.StreamIdleTimeout())
+					assert.Equal(t, tc.model, child.Model(ctx).BaseConfig().ModelConfig.StreamIdleTimeout)
+					cs.AddMessage(session.NewAgentMessage("root", &chat.Message{Role: chat.MessageRoleAssistant, Content: "summary"}))
+					return nil
+				},
+			})
+			require.NoError(t, err)
+			require.NotNil(t, result)
 		})
 	}
 }
