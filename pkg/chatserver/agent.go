@@ -73,7 +73,7 @@ func buildSession(messages []ChatCompletionMessage, workingDir string) *session.
 	hasUser := false
 	for _, m := range messages {
 		role := strings.ToLower(strings.TrimSpace(m.Role))
-		if len(m.Parts) > 0 && (role == "" || (role != "system" && role != "assistant" && role != "tool")) {
+		if len(m.Parts) > 0 && role != "system" && role != "assistant" && role != "tool" {
 			// Multi-part content: route through chat.MultiContent so the
 			// runtime/provider sees image parts. Only user-style messages
 			// support images today.

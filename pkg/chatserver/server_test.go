@@ -460,6 +460,17 @@ func TestBuildSession_AcceptsImageParts(t *testing.T) {
 	assert.Equal(t, "https://example.com/x.png", last.MultiContent[1].ImageURL.URL)
 }
 
+func TestBuildSession_PartsRouting(t *testing.T) {
+	t.Parallel()
+	parts := []ContentPart{{Type: "text", Text: "hi"}}
+	for role, wantMulti := range map[string]bool{"": true, "user": true, "custom": true, "assistant": false, "system": false, "tool": false} {
+		sess := buildSession([]ChatCompletionMessage{{Role: role, Content: "body", Parts: parts}, {Role: "user", Content: "prompt"}}, "")
+		require.NotNil(t, sess)
+		first := sess.GetAllMessages()[0].Message
+		assert.Equal(t, wantMulti, len(first.MultiContent) > 0, "role %q", role)
+	}
+}
+
 func TestStopSequences_UnmarshalJSON(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
