@@ -110,7 +110,7 @@ When Docker Desktop is running, eligible MCP OAuth discovery, token, and helper 
 
 ## MCP Prompts
 
-MCP servers can expose **prompts** — named, parameterized templates that the server provides via the `/prompts` endpoint. Docker Agent discovers these at toolset startup and registers them as **slash commands** in the TUI, so you can invoke them directly from the input box.
+MCP servers can expose **prompts** — named, parameterized templates that the server provides via the `prompts/list` and `prompts/get` protocol methods. Docker Agent discovers these at toolset startup and registers them as **slash commands** in the TUI, so you can invoke them directly from the input box.
 
 ```text
 # Type / to see available prompts alongside built-in commands
@@ -127,7 +127,7 @@ MCP servers can expose **prompts** — named, parameterized templates that the s
 - When no argument is needed or all required arguments are supplied, the prompt runs immediately.
 
 > [!NOTE]
-> MCP prompt discovery requires a YAML-declared `mcp` toolset. Prompts from servers activated through the [Docker MCP Catalog](../../tools/mcp-catalog/index.md) (`ref: docker:<name>`) are not currently surfaced.
+> MCP prompt discovery requires a YAML-declared `mcp` toolset. Prompts from servers activated through the [Docker MCP Catalog](../../tools/mcp-catalog/index.md) (`type: mcp_catalog`, activated with `enable_remote_mcp_server`) are not currently surfaced. YAML-declared `type: mcp` entries with `ref: docker:<name>` do participate in prompt discovery.
 
 ## Embedded Resources
 
@@ -135,7 +135,7 @@ MCP tool results can include embedded resources — images, PDFs, and text files
 
 - **Anthropic** — images become `image` blocks in the `tool_result`; PDFs and other documents become `document` blocks.
 - **OpenAI** — images are forwarded as `input_image` data URIs; PDFs as `input_file` data URIs in the tool result content.
-- **OpenAI Chat Completions** (`api_type: openai_chatcompletions`, the default, and OpenAI-compatible providers) — tool messages only accept text, so images (including image documents) are sent as text in the tool message as their data URI or URL. PDFs and other documents are attached in a follow-up user message labeled "Attached content from tool result:".
+- **OpenAI Chat Completions** (`api_type: openai_chatcompletions`, selected automatically for models without Responses API support or set explicitly) — tool messages only accept text, so images (including image documents) are sent as text in the tool message as their data URI or URL. PDFs and other documents are attached in a follow-up user message labeled "Attached content from tool result:".
 - **Bedrock** and **Gemini** — receive equivalent provider-native representations.
 
 No configuration is required. When an MCP server returns an embedded resource alongside its text output, the resource is automatically attached and sent to the model on the next turn. This is useful for MCP servers that generate charts, export PDFs, or return binary data as part of their responses.

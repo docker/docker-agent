@@ -1265,6 +1265,18 @@ request -> evaluator +-- specialist --------------+-> final answer
 ```
 
 ```yaml
+evaluators:
+  task_route:
+    provider: typesafe
+    model: jev-latest
+    type: choice
+    instructions: Classify the work required by the request in input.
+    choices:
+      simple: A narrow question or routine explanation.
+      complex: A problem requiring detailed analysis.
+      research: A request requiring investigation and evidence.
+      unclear: A request missing essential information.
+
 agents:
   root:
     model: openai/gpt-5-mini
@@ -1278,6 +1290,18 @@ agents:
           routing_policy:
             routes: {simple: quick, complex: specialist, research: researcher, unclear: clarifier}
             min_probability: 0.85
+  quick:
+    model: openai/gpt-5-mini
+    instruction: Answer the question directly.
+  specialist:
+    model: openai/gpt-5-mini
+    instruction: Analyze the problem and explain your conclusions.
+  researcher:
+    model: openai/gpt-5-mini
+    instruction: Investigate the request and report evidence and limitations.
+  clarifier:
+    model: openai/gpt-5-mini
+    instruction: Ask for the missing information needed to answer the request.
 ```
 
 See [`examples/hook_routing.yaml`](https://github.com/docker/docker-agent/blob/main/examples/hook_routing.yaml)

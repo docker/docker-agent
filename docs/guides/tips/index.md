@@ -57,23 +57,28 @@ agents:
 
 ### Model Aliases Are Auto-Pinned
 
-Docker Agent automatically resolves model aliases to their latest pinned versions. This ensures reproducible behavior:
+Docker Agent resolves named-model aliases to dated IDs when a matching pinned model exists in its model catalog. Inline `provider/model` references and models with a custom `base_url` are left unchanged:
 
 ```yaml
-# You write:
-model: anthropic/claude-sonnet-4-5
+models:
+  claude:
+    provider: anthropic
+    model: claude-sonnet-4-5 # resolves to a matching dated ID from the catalog
 
-# docker-agent resolves to:
-# anthropic/claude-sonnet-4-5-20250929 (or latest available)
+agents:
+  root:
+    model: claude
 ```
 
-To use a specific version, specify it explicitly in your config.
+To guarantee the same version across catalog updates, specify a dated model ID explicitly in your config.
 
 ## Performance Tips
 
-### Defer Tools for Faster Startup
+<a id="defer-tools-for-faster-startup"></a>
 
-Large MCP toolsets can slow down agent startup. Use `defer` to load tools on-demand:
+### Defer Tools to Reduce Prompt Size
+
+Large MCP toolsets add tool definitions to the model's context. Use `defer` to expose those definitions on demand and reduce prompt size. The MCP servers still start normally:
 
 ```yaml
 agents:

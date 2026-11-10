@@ -238,7 +238,7 @@ models:
 
 ### Anthropic Team Setup
 
-Agents can use different models backed by the same named provider. Starting from the [Default Inheritance](#default-inheritance) example:
+Agents can use different models backed by the same named provider. Keep the `providers` and `models` sections from the [Default Inheritance](#default-inheritance) example and replace its `agents` section with:
 
 ```yaml
 agents:

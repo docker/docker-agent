@@ -51,7 +51,8 @@ $ docker agent run [config] [message...] [flags]
 | `--last`                                | Print only the final agent answer after all turns finish (requires `--exec`); omit thinking, tool calls/results, and intermediate responses |
 | `--hide-tool-calls`                     | Hide tool calls in the output                                                                                                             |
 | `--hide-tool-results`                   | Hide tool call results in the output                                                                                                      |
-| `--sandbox`                             | Run the agent in sandbox mode using `sbx` (see [Sandbox](../../configuration/sandbox/index.md))                                 |
+| `--sandbox`                             | Run the agent in sandbox mode using standalone `sbx` or the `docker sandbox` plugin (see [Sandbox](../../configuration/sandbox/index.md))                                 |
+| `--sbx` | Prefer standalone `sbx` when available (default: `true`); set `--sbx=false` to force the `docker sandbox` plugin. |
 | `--cloud` | Run in a fresh cloud sandbox without uploading host files/config/credentials; implies `--sandbox`. See [cloud sandbox mode](../../configuration/sandbox/index.md#cloud-sandboxes). |
 | `--sandbox-kit`, `--kit`, `--kit-arg` | Select an sbx workload and mixins, and pass kit arguments. Supports kits v3 through sbx. |
 | `--sandbox-ttl` | Cloud sandbox lifetime, default `1h`; stopped on expiry and when the agent exits. |

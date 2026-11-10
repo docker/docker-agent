@@ -443,7 +443,7 @@ File issues on the [GitHub issue tracker](https://github.com/docker/docker-agent
 1. **Fork** the repository and create a branch for your changes
 2. **Write** your code following the style and testing guidelines above
 3. **Test** your changes: run `task lint` and `task test`
-4. **Sign off** your commits with `git commit -s` (DCO required)
+4. **Sign and sign off** your commits with `git commit -S -s` (cryptographic signature and DCO required)
 5. **Open a pull request** against the `main` branch
 
 > [!TIP]
@@ -451,18 +451,18 @@ File issues on the [GitHub issue tracker](https://github.com/docker/docker-agent
 
 ## Sign Your Work
 
-All contributions require a Developer Certificate of Origin (DCO) sign-off:
+All contributions require a cryptographic commit signature and a Developer Certificate of Origin (DCO) sign-off. Configure [Git commit signing](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits) with a GPG or SSH key, then:
 
 ```bash
 # Set the identity used for the sign-off
 $ git config user.name "Your Name"
 $ git config user.email "your.email@example.com"
 
-# Add a DCO sign-off to this commit
-$ git commit -s -m "Your commit message"
+# Sign the commit and add a DCO sign-off
+$ git commit -S -s -m "Your commit message"
 ```
 
-`-s` adds a `Signed-off-by` trailer; it does not cryptographically sign the commit. To also sign with a GPG or SSH key, configure Git signing and use `git commit -S -s`.
+`-S` cryptographically signs the commit. The separate `-s` adds a `Signed-off-by` trailer for the DCO; it is not a cryptographic signature.
 
 ## Community
 

@@ -176,7 +176,7 @@ models:
 
 - Only works with Responses API models: `gpt-4.1+`, `o1`, `o3`, `o4`, `gpt-5`
 - NOT compatible with the `--models-gateway` flag (automatically falls back to SSE when a gateway is configured)
-- Requires `OPENAI_API_KEY` environment variable
+- Uses the configured credential source or `token_key`; defaults to `OPENAI_API_KEY` when neither is configured
 
 ### Example
 

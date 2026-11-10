@@ -23,7 +23,7 @@ Built-in tools are included with Docker Agent and require no external dependenci
 | `shell` | Execute shell commands synchronously | [Shell](../../tools/shell/index.md) |
 | `background_jobs` | Run and manage long-running shell commands | [Background Jobs](../../tools/background-jobs/index.md) |
 | `scheduler` | Schedule instructions to run at a time or on a recurring interval | [Scheduler](../../tools/scheduler/index.md) |
-| `environment` | Report the OS and resolved shell (read-only, no arguments, auto-approved) | [Environment](../../tools/environment/index.md) |
+| `environment` | Report the OS and resolved shell (read-only, no arguments; subject to approval policy) | [Environment](../../tools/environment/index.md) |
 | `datetime` | Current date and time in a model-chosen format and timezone (read-only) | [Date and Time](../../tools/datetime/index.md) |
 | `calculator` | Exact arithmetic without code execution | [Calculator](../../tools/calculator/index.md) |
 | `think` | Reasoning scratchpad | [Think](../../tools/think/index.md) |
@@ -374,7 +374,7 @@ See [`examples/toolset_instructions.yaml`](https://github.com/docker/docker-agen
 
 ## Deferred Tool Loading
 
-Load tools on-demand to speed up agent startup. When a toolset is deferred, its tools are registered lazily — the tool server process is not started until the agent first calls one of its tools. This is useful for large toolsets (e.g., an MCP server with hundreds of tools) where startup time matters.
+Expose tool definitions to the model on demand to reduce prompt size. Deferred toolsets still start normally, including their MCP server processes, but their tool definitions stay hidden until activated. This is useful for large toolsets, such as an MCP server with hundreds of tools; it does not delay server startup.
 
 ```yaml
 toolsets:

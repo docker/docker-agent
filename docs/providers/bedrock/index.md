@@ -126,7 +126,7 @@ Claude 5.x profile in this audit; do not generate IDs by copying prefixes.
 
 ## Thinking Budget (Claude on Bedrock)
 
-Bedrock Claude models support extended thinking — an internal reasoning phase before the model produces its response. Set `thinking_budget` to a token count (1024–32768) or an effort level string that maps automatically:
+Bedrock Claude models support extended thinking — an internal reasoning phase before the model produces its response. On models that accept fixed token budgets, set `thinking_budget` to at least 1024 and less than `max_tokens`, or use an effort level string that maps automatically:
 
 | Effort level | Token budget |
 | ------------ | ------------ |
@@ -140,7 +140,7 @@ Bedrock Claude models support extended thinking — an internal reasoning phase 
 models:
   bedrock-claude-thinking:
     provider: amazon-bedrock
-    model: global.anthropic.claude-sonnet-5
+    model: global.anthropic.claude-sonnet-4-5-20250929-v1:0
     thinking_budget: 8192   # tokens, or use an effort string like "medium"
     max_tokens: 16384       # must be > thinking_budget
     provider_opts:

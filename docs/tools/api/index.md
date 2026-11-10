@@ -71,7 +71,7 @@ The `api` toolset accepts the following toolset-level fields in addition to the 
 
 ### GET Requests
 
-For GET requests, parameters are interpolated into the URL:
+For GET requests, parameters are interpolated into the URL. Declare GET arguments as strings, including numeric query parameters; the GET handler decodes arguments into a string map:
 
 ```yaml
 toolsets:
@@ -86,9 +86,9 @@ toolsets:
           type: string
           description: Search query
         limit:
-          type: integer
-          description: Maximum results (default 10)
-      required: ["query"]
+          type: string
+          description: Maximum number of results
+      required: ["query", "limit"]
 ```
 
 ### POST Requests

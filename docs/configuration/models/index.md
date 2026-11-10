@@ -462,7 +462,7 @@ Use a string effort level. See [Gemini thinking budgets](../../providers/google/
 thinking_budget: none # or 0
 ```
 
-`none` and `0` both clear Docker Agent's local thinking configuration (omitting `thinking_budget` has the same effect). Whether that reaches the API as a real "off" switch depends on the model — see [Disabling Thinking](../../guides/thinking/index.md#disabling-thinking) in the guide.
+`none` and `0` request disabled thinking, but their effect depends on the model. Omitting `thinking_budget` leaves model defaults in place and is not necessarily equivalent: some Claude models disable thinking explicitly, while those that require it use adaptive thinking with low effort. See [Disabling Thinking](../../guides/thinking/index.md#disabling-thinking) in the guide.
 
 ## Task Budget
 
