@@ -152,30 +152,37 @@ func TestFastMode_Requests(t *testing.T) {
 		})
 	}
 
-	t.Run("compaction carries speed and bills the served tier", func(t *testing.T) {
-		t.Parallel()
-		reply := sseBody(
-			messageStart("msg_c", map[string]any{"usage": map[string]any{"input_tokens": 0, "output_tokens": 0, "speed": "fast"}}),
-			blockStart(0, map[string]any{"type": "compaction", "content": "S", "encrypted_content": "e", "signature": "s"}),
-			blockStop(0),
-			messageDelta("compaction", map[string]any{"output_tokens": 0, "iterations": []any{
-				map[string]any{"type": "compaction", "input_tokens": 1000, "output_tokens": 200},
-			}}),
-			messageStop,
-		)
-		srv := newScriptedServer(t, reply)
-		client := compactionClient(srv, map[string]any{"speed": "fast"})
+	for served, want := range map[string]string{"fast": "fast", "standard": ""} {
+		t.Run("compaction carries speed and bills the "+served+" tier", func(t *testing.T) {
+			t.Parallel()
+			testCompactionServedSpeed(t, served, want)
+		})
+	}
+}
 
-		result, err := client.CompactConversation(t.Context(), []chat.Message{user("u")}, nil, "")
-		require.NoError(t, err)
-		require.NotNil(t, result)
+func testCompactionServedSpeed(t *testing.T, served, wantTier string) {
+	t.Helper()
+	reply := sseBody(
+		messageStart("msg_c", map[string]any{"usage": map[string]any{"input_tokens": 0, "output_tokens": 0, "speed": served}}),
+		blockStart(0, map[string]any{"type": "compaction", "content": "S", "encrypted_content": "e", "signature": "s"}),
+		blockStop(0),
+		messageDelta("compaction", map[string]any{"output_tokens": 0, "iterations": []any{
+			map[string]any{"type": "compaction", "input_tokens": 1000, "output_tokens": 200},
+		}}),
+		messageStop,
+	)
+	srv := newScriptedServer(t, reply)
+	client := compactionClient(srv, map[string]any{"speed": "fast"})
 
-		req := srv.request(t, 0)
-		assert.Equal(t, "fast", req.body["speed"])
-		assert.Contains(t, req.betas, anthropic.AnthropicBetaFastMode2026_02_01)
-		require.Len(t, result.Iterations, 1)
-		assert.Equal(t, "fast", result.Iterations[0].ServiceTier)
-	})
+	result, err := client.CompactConversation(t.Context(), []chat.Message{user("u")}, nil, "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	req := srv.request(t, 0)
+	assert.Equal(t, "fast", req.body["speed"])
+	assert.Contains(t, req.betas, anthropic.AnthropicBetaFastMode2026_02_01)
+	require.Len(t, result.Iterations, 1)
+	assert.Equal(t, wantTier, result.Iterations[0].ServiceTier)
 }
 
 func countOf(betas []string, beta anthropic.AnthropicBeta) int {
@@ -211,4 +218,48 @@ func TestNewClient_RecordsEnvironmentEndpointForPricing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "https://proxy.example.com", proxied.Endpoint())
 	assert.InDelta(t, model.Cost.Input, inputPrice(proxied), 1e-9)
+}
+
+func TestFastMode_BillsTheServedSpeed(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct{ served, want string }{
+		{served: "fast", want: "fast"},
+		{served: "standard", want: ""},
+		{served: "", want: ""},
+	} {
+		t.Run("fast requested, "+tc.served+" served", func(t *testing.T) {
+			t.Parallel()
+			usage := map[string]any{"input_tokens": 10, "output_tokens": 0}
+			if tc.served != "" {
+				usage["speed"] = tc.served
+			}
+			reply := sseBody(
+				messageStart("msg_1", map[string]any{"usage": usage}),
+				blockStart(0, map[string]any{"type": "text", "text": ""}),
+				blockDelta(0, map[string]any{"type": "text_delta", "text": "ok"}),
+				blockStop(0),
+				messageDelta("end_turn", nil),
+				messageStop,
+			)
+			client := newScriptedClient(newScriptedServer(t, reply), latest.ModelConfig{
+				Provider: "anthropic", Model: "claude-opus-4-8", ProviderOpts: map[string]any{"speed": "fast"},
+			})
+			stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{user("hello")}, nil)
+			require.NoError(t, err)
+			defer stream.Close()
+
+			var tier string
+			for {
+				resp, err := stream.Recv()
+				if err != nil {
+					break
+				}
+				if resp.Usage != nil {
+					tier = resp.Usage.ServiceTier
+				}
+			}
+			assert.Equal(t, tc.want, tier)
+		})
+	}
 }
