@@ -441,6 +441,172 @@ func TestCheckDestinationPathsGlobalError(t *testing.T) {
 	}, warnings.entries)
 }
 
+func TestCheckDestinationPathsBoundedFailures(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"shared conflict", "global error"} {
+		t.Run(scenario, func(t *testing.T) {
+			const count = 4096
+			var paths bytes.Buffer
+			for i := range count {
+				fmt.Fprintf(&paths, "link/file-%04d.env\x00", i)
+			}
+			calls := 0
+			check := func(ctx context.Context, dir string, input []byte) (map[string]bool, error) {
+				calls++
+				if scenario == "shared conflict" {
+					return checkIgnoredPaths(ctx, dir, input)
+				}
+				return map[string]bool{"link/file-0000.env": true}, errors.New("global failure")
+			}
+			dir := t.TempDir()
+			if scenario == "shared conflict" {
+				dir = bootstrapRepo(t)
+				includeFile(t, dir, ".gitignore", "*.env\n", 0o644)
+				includeFile(t, dir, "target", "target", 0o600)
+				if err := os.Symlink("target", filepath.Join(dir, "link")); err != nil {
+					t.Skipf("symlink: %v", err)
+				}
+			}
+			var warnings includeWarnings
+			for range maxIncludeWarnings {
+				warnings.add("earlier warning")
+			}
+			warnings.protected = 1
+			warnings.cancelled = "cancellation warning"
+			ignored, failed := checkDestinationPaths(t.Context(), dir, paths.Bytes(), check, &warnings)
+			if scenario == "shared conflict" {
+				assert.Equal(t, 1, calls)
+			} else {
+				assert.Equal(t, maxDestinationChecks, calls)
+			}
+			assert.Empty(t, ignored)
+			assert.Len(t, failed, count)
+			for i := range count {
+				assert.True(t, failed[fmt.Sprintf("link/file-%04d.env", i)])
+			}
+			result := warnings.result()
+			assert.LessOrEqual(t, len(result), maxIncludeWarnings)
+			joined := strings.Join(result, "\n")
+			assert.Contains(t, joined, "additional warnings omitted")
+			assert.Contains(t, joined, "protected by .agentsignore")
+			assert.Contains(t, joined, "cancellation warning")
+			if scenario == "global error" {
+				assert.Contains(t, joined, "destination ignore check limit reached; 4096 files skipped without verification")
+				assert.Contains(t, joined, "global failure")
+			} else {
+				assert.Empty(t, warnings.checkLimit)
+			}
+		})
+	}
+}
+
+func TestCheckDestinationPathsBoundedMixedFailures(t *testing.T) {
+	t.Parallel()
+	var paths bytes.Buffer
+	for i := range 4096 {
+		fmt.Fprintf(&paths, "link/file-%04d.env\x00", i)
+	}
+	for i := range 4096 {
+		fmt.Fprintf(&paths, "safe/file-%04d.env\x00", i)
+	}
+	paths.WriteString("exposed.env\x00")
+	calls := 0
+	check := func(_ context.Context, _ string, input []byte) (map[string]bool, error) {
+		calls++
+		if bytes.Contains(input, []byte("link/")) {
+			return map[string]bool{"link/file-0000.env": true}, errors.New("collision")
+		}
+		ignored := make(map[string]bool)
+		for name := range bytes.SplitSeq(input, []byte{0}) {
+			if bytes.HasPrefix(name, []byte("safe/")) {
+				ignored[string(name)] = true
+			}
+		}
+		return ignored, nil
+	}
+	var warnings includeWarnings
+	ignored, failed := checkDestinationPaths(t.Context(), "", paths.Bytes(), check, &warnings)
+	assert.Equal(t, maxDestinationChecks, calls)
+	assert.Len(t, ignored, 4096)
+	for i := range 4096 {
+		assert.True(t, ignored[fmt.Sprintf("safe/file-%04d.env", i)])
+		assert.True(t, failed[fmt.Sprintf("link/file-%04d.env", i)])
+	}
+	assert.False(t, failed["exposed.env"])
+	assert.False(t, ignored["exposed.env"])
+	assert.Contains(t, warnings.checkLimit, "without verification: collision")
+}
+
+func TestCheckDestinationPathsUnevenAndSparseGitConflicts(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+	includeFile(t, dir, ".gitignore", "*.env\n!exposed.env\n", 0o644)
+	includeFile(t, dir, "target", "target", 0o600)
+	if err := os.Symlink("target", filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	var paths bytes.Buffer
+	for i := range 100 {
+		fmt.Fprintf(&paths, "a/%04d.env\x00", i)
+	}
+	for i := range 4096 {
+		fmt.Fprintf(&paths, "link/%04d.env\x00", i)
+	}
+	for i := range 100 {
+		fmt.Fprintf(&paths, "z/%04d.env\x00", i)
+	}
+	for i := range 64 {
+		fmt.Fprintf(&paths, "sparse-%04d.env\x00link/sparse-%04d.env\x00", i, i)
+	}
+	paths.WriteString("exposed.env\x00")
+	calls := 0
+	check := func(ctx context.Context, dir string, paths []byte) (map[string]bool, error) {
+		calls++
+		return checkIgnoredPaths(ctx, dir, paths)
+	}
+	var warnings includeWarnings
+	ignored, failed := checkDestinationPaths(t.Context(), dir, paths.Bytes(), check, &warnings)
+	assert.Equal(t, 2, calls)
+	assert.Len(t, ignored, 264)
+	assert.Len(t, failed, 4160)
+	for i := range 100 {
+		assert.True(t, ignored[fmt.Sprintf("a/%04d.env", i)])
+		assert.True(t, ignored[fmt.Sprintf("z/%04d.env", i)])
+	}
+	for i := range 64 {
+		assert.True(t, ignored[fmt.Sprintf("sparse-%04d.env", i)])
+		assert.True(t, failed[fmt.Sprintf("link/sparse-%04d.env", i)])
+	}
+	assert.False(t, ignored["exposed.env"])
+	assert.False(t, failed["exposed.env"])
+	assert.Empty(t, warnings.checkLimit)
+}
+
+func TestCheckDestinationPathsCancellationAtLimit(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var paths bytes.Buffer
+	for i := range 4096 {
+		fmt.Fprintf(&paths, "file-%04d\x00", i)
+	}
+	calls := 0
+	check := func(_ context.Context, _ string, _ []byte) (map[string]bool, error) {
+		calls++
+		if calls == maxDestinationChecks {
+			cancel()
+		}
+		return map[string]bool{"file-0000": true}, errors.New("failure")
+	}
+	var warnings includeWarnings
+	ignored, failed := checkDestinationPaths(ctx, "", paths.Bytes(), check, &warnings)
+	assert.Equal(t, maxDestinationChecks, calls)
+	assert.Empty(t, ignored)
+	assert.Empty(t, failed)
+	assert.Empty(t, warnings.checkLimit)
+	assert.ErrorIs(t, ctx.Err(), context.Canceled)
+}
+
 func TestCheckDestinationPathsCancellation(t *testing.T) {
 	t.Parallel()
 	for _, cancelAt := range []int{0, 1, 2} {

@@ -20,13 +20,15 @@ const (
 	worktreeInclude        = ".worktreeinclude"
 	maxIncludeWarnings     = 20
 	maxIncludeWarningBytes = 512
+	maxDestinationChecks   = 64
 )
 
 type includeWarnings struct {
-	entries   []string
-	omitted   int
-	protected int
-	cancelled string
+	entries    []string
+	omitted    int
+	protected  int
+	cancelled  string
+	checkLimit string
 }
 
 func (w *includeWarnings) add(message string) {
@@ -34,6 +36,10 @@ func (w *includeWarnings) add(message string) {
 		w.omitted++
 		return
 	}
+	w.entries = append(w.entries, truncateIncludeWarning(message))
+}
+
+func truncateIncludeWarning(message string) string {
 	if len(message) > maxIncludeWarningBytes {
 		message = message[:maxIncludeWarningBytes-3]
 		for !utf8.ValidString(message) {
@@ -41,10 +47,14 @@ func (w *includeWarnings) add(message string) {
 		}
 		message += "..."
 	}
-	w.entries = append(w.entries, message)
+	return message
 }
 
 func (w *includeWarnings) result() []string {
+	if w.checkLimit != "" && len(w.entries) == maxIncludeWarnings-3 {
+		w.entries = w.entries[:len(w.entries)-1]
+		w.omitted++
+	}
 	if w.protected == 1 {
 		w.entries = append(w.entries, worktreeInclude+": skipped a file protected by .agentsignore")
 	} else if w.protected > 1 {
@@ -52,6 +62,9 @@ func (w *includeWarnings) result() []string {
 	}
 	if w.cancelled != "" {
 		w.entries = append(w.entries, w.cancelled)
+	}
+	if w.checkLimit != "" {
+		w.entries = append(w.entries, truncateIncludeWarning(w.checkLimit))
 	}
 	if w.omitted > 0 {
 		w.entries = append(w.entries, fmt.Sprintf("%s: %d additional warnings omitted", worktreeInclude, w.omitted))
@@ -201,16 +214,24 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 func checkDestinationPaths(ctx context.Context, dir string, paths []byte, check func(context.Context, string, []byte) (map[string]bool, error), warnings *includeWarnings) (map[string]bool, map[string]bool) {
 	ignored := make(map[string]bool)
 	failed := make(map[string]bool)
-	names := bytes.Split(bytes.TrimSuffix(paths, []byte{0}), []byte{0})
-	var visit func([][]byte)
-	visit = func(batch [][]byte) {
-		if len(batch) == 0 || ctx.Err() != nil {
-			return
-		}
+	if len(paths) == 0 {
+		return ignored, failed
+	}
+	type pendingBatch struct {
+		names [][]byte
+		err   error
+	}
+	queue := []pendingBatch{{names: bytes.Split(bytes.TrimSuffix(paths, []byte{0}), []byte{0})}}
+	calls := 0
+	inspectAncestors := true
+	for len(queue) > 0 && calls < maxDestinationChecks && ctx.Err() == nil {
+		batch := queue[0].names
+		queue = queue[1:]
 		input := append(bytes.Join(batch, []byte{0}), 0)
+		calls++
 		checked, err := check(ctx, dir, input)
 		if ctx.Err() != nil {
-			return
+			return ignored, failed
 		}
 		if err == nil {
 			for name, isIgnored := range checked {
@@ -218,20 +239,80 @@ func checkDestinationPaths(ctx context.Context, dir string, paths []byte, check 
 					ignored[name] = true
 				}
 			}
-			return
+			continue
 		}
 		if len(batch) == 1 {
 			name := batch[0]
 			warnings.add(fmt.Sprintf("%s: %q: checking destination ignore rules: %v", worktreeInclude, name, err))
 			failed[string(name)] = true
-			return
+			continue
+		}
+		if inspectAncestors {
+			inspectAncestors = false
+			root, openErr := os.OpenRoot(dir)
+			if openErr == nil {
+				ancestors := make(map[string]error)
+				var remaining [][]byte
+				for _, name := range batch {
+					if ctx.Err() != nil {
+						root.Close()
+						return ignored, failed
+					}
+					if ancestorErr := destinationAncestorError(root, filepath.FromSlash(string(name)), ancestors); ancestorErr != nil {
+						warnings.add(fmt.Sprintf("%s: %q: checking destination ignore rules: %v", worktreeInclude, name, ancestorErr))
+						failed[string(name)] = true
+					} else {
+						remaining = append(remaining, name)
+					}
+				}
+				root.Close()
+				if len(remaining) != len(batch) {
+					if len(remaining) > 0 {
+						queue = append(queue, pendingBatch{remaining, err})
+					}
+					continue
+				}
+			}
 		}
 		mid := len(batch) / 2
-		visit(batch[:mid])
-		visit(batch[mid:])
+		queue = append(queue, pendingBatch{batch[:mid], err}, pendingBatch{batch[mid:], err})
 	}
-	visit(names)
+	if len(queue) > 0 && ctx.Err() == nil {
+		skipped := 0
+		for _, batch := range queue {
+			for _, name := range batch.names {
+				failed[string(name)] = true
+				skipped++
+			}
+		}
+		warnings.checkLimit = fmt.Sprintf("%s: destination ignore check limit reached; %d files skipped without verification: %v", worktreeInclude, skipped, queue[0].err)
+	}
 	return ignored, failed
+}
+
+func destinationAncestorError(root *os.Root, name string, cache map[string]error) error {
+	parts := strings.Split(name, string(filepath.Separator))
+	parent := "."
+	for _, part := range parts[:len(parts)-1] {
+		parent = filepath.Join(parent, part)
+		err, ok := cache[parent]
+		if !ok {
+			info, statErr := root.Lstat(parent)
+			switch {
+			case errors.Is(statErr, fs.ErrNotExist):
+				return nil
+			case statErr != nil:
+				err = statErr
+			case !info.IsDir() || info.Mode()&fs.ModeSymlink != 0:
+				err = fmt.Errorf("directory %q is not a real directory", parent)
+			}
+			cache[parent] = err
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func checkIgnoredPaths(ctx context.Context, dir string, paths []byte) (map[string]bool, error) {
