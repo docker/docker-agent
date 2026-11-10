@@ -351,6 +351,72 @@ Object form (forward-compatible with future budget types):
 
 See the full schema on the [Model Configuration](../../configuration/models/index.md#task-budget) page.
 
+## Fast Mode
+
+Set `provider_opts.speed` to `fast` to request Anthropic's [fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode), which runs the same model at up to 2.5× higher output tokens per second:
+
+```yaml
+models:
+  fast-opus:
+    provider: anthropic
+    model: claude-opus-5-5
+    provider_opts:
+      speed: fast
+```
+
+Fast mode is available on supported models such as Claude Opus 5.5 and Claude Fable 5.2, and in research preview on Claude Opus 5 and Claude Opus 4.8. See Anthropic's documentation for the current list. Docker Agent does not maintain a model allowlist: on an unsupported model, or when the separate fast-mode rate limit is exceeded, the API error is returned as-is. It applies to all requests using the configured model, including internal calls such as title generation, compaction, and reranking.
+
+Setting `fast` routes requests through the Beta Messages API, sends `speed: "fast"`, and attaches the `fast-mode-2026-02-01` beta header. Per Anthropic's documentation, only Opus 5 and Opus 4.8 require the beta header; Docker Agent sends it on every fast-mode request. `standard` and an empty value send nothing, leaving the API's default behavior unchanged, which lets a model override a `fast` default inherited from the provider configuration. Any other value, including a non-string, is rejected when the model is loaded.
+
+> [!WARNING]
+> Fast mode is billed at premium pricing, has its own rate limit, and switching speed invalidates the prompt cache. It is a Claude API feature and is not supported on Amazon Bedrock; availability on Vertex AI and Microsoft Foundry differs, so check Anthropic's documentation before enabling it there. It cannot be combined with the Batch API or Priority Tier.
+
+Cost estimates use the **actual response speed** (`usage.speed`), not the requested one: a request for `fast` that the API serves as `standard` is priced at standard rates. Anthropic [publishes](https://platform.claude.com/docs/en/build-with-claude/fast-mode#pricing) fast input and output prices at exactly twice standard (for example Claude Fable 5.2 at $16/$80 and Claude Opus 5.5 at $8/$40 per million tokens). It publishes no separate cache prices for fast mode and states that prompt-caching multipliers apply on top, so cache reads and cache writes are doubled as well, matching the fast entries gateways list for Claude Opus. Each catalogue rate, including the rates of any long-context band, is therefore multiplied by 2 for a `fast` response, when the model is served by `provider: anthropic` at the default Anthropic endpoint. Cache writes use the catalogue's single cache-write rate. Any `base_url` or `ANTHROPIC_BASE_URL` override, including proxies, keeps catalogue pricing. The factor is derived from Anthropic's published fast-mode pricing at the time of writing and may drift if Anthropic changes it.
+
+> [!NOTE]
+> Server-side fallback attempts retain standard pricing, because attempts do not report a speed, so a fast response that used fallbacks may be under-estimated. A request routed by a rule-based router is priced by the model that served it, under the rules above. Estimates do not include negotiated discounts. A model's [`cost` override](../../configuration/models/index.md#custom-token-pricing) replaces the entire price table and is never adjusted for fast mode.
+
+### Global default
+
+To enable fast mode without editing each agent file, set it in your user configuration (`~/.config/cagent/config.yaml`). A `providers` entry with `provider: anthropic` is a native Anthropic provider, so it needs no `base_url`. Select it with its name:
+
+```yaml
+# ~/.config/cagent/config.yaml
+providers:
+  fast-claude:
+    provider: anthropic
+    provider_opts:
+      speed: fast
+```
+
+```bash
+docker agent run agent.yaml --model fast-claude/claude-opus-5-5
+```
+
+Naming the entry `anthropic` instead applies it to every model whose provider is `anthropic`, whether it comes from `--model anthropic/...`, an agent file, or `first_available`. It fills only the options a model leaves unset, so credentials and the endpoint still come from the built-in defaults:
+
+```yaml
+providers:
+  anthropic:
+    provider: anthropic # required; an entry without it is ignored with a warning
+    provider_opts:
+      speed: fast
+```
+
+Alternatively, `default_model` in its full form applies fast mode when a model resolves to `auto` (`--model auto` or `model: auto`). The `DOCKER_AGENT_DEFAULT_MODEL` environment variable only accepts `provider/model` and carries no options.
+
+```yaml
+default_model:
+  provider: anthropic
+  model: claude-opus-5-5
+  provider_opts:
+    speed: fast
+```
+
+A model-level `provider_opts.speed: standard` overrides the global value, and an agent file that defines its own `providers.anthropic` replaces the user-config entry entirely. A global entry named `anthropic` covers every Anthropic request, including sub-agents, title generation, and compaction, all at premium pricing. An invalid value fails when the first Anthropic model is created.
+
+See [`examples/anthropic-fast-mode.yaml`](https://github.com/docker/docker-agent/blob/main/examples/anthropic-fast-mode.yaml) for a complete example.
+
 ## Server-Side Fallbacks
 
 When the primary model refuses a request (stop reason `refusal`), the Claude

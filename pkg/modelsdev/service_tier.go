@@ -9,37 +9,66 @@ import (
 // ForServiceTier estimates tier pricing from the actual response tier without mutating c.
 // Other providers and unrecognized tiers retain their catalogue pricing.
 func (c *Cost) ForServiceTier(id ID, tier string) *Cost {
-	if c == nil || id.Provider != "openai" {
+	if c == nil || !hasTierPricing(id.Provider, tier) {
 		return c
 	}
 	// Current tier premiums; models with different rates need a cost override.
 	// https://developers.openai.com/api/docs/pricing
-	var factor float64
-	switch tier {
-	case "fast", "priority":
-		factor = c.fastMultiplier
+	var factors Rates
+	switch {
+	case id.Provider == "anthropic":
+		factors = anthropicFastPremium
+	case tier == "fast" || tier == "priority":
+		factor := c.fastMultiplier
 		if factor == 0 {
 			factor = 2
 		}
-	case "ultrafast":
-		factor = 6
+		factors = uniformRates(factor)
+	case tier == "ultrafast":
+		factors = uniformRates(6)
 	default:
 		return c
 	}
 
 	out := *c
-	out.Input *= factor
-	out.Output *= factor
-	out.CacheRead *= factor
-	out.CacheWrite *= factor
+	base := Rates{Input: c.Input, Output: c.Output, CacheRead: c.CacheRead, CacheWrite: c.CacheWrite}.scaled(factors)
+	out.Input, out.Output, out.CacheRead, out.CacheWrite = base.Input, base.Output, base.CacheRead, base.CacheWrite
 	out.Tiers = slices.Clone(c.Tiers)
 	for i := range out.Tiers {
-		out.Tiers[i].Input *= factor
-		out.Tiers[i].Output *= factor
-		out.Tiers[i].CacheRead *= factor
-		out.Tiers[i].CacheWrite *= factor
+		out.Tiers[i].Rates = out.Tiers[i].scaled(factors)
 	}
 	return &out
+}
+
+// anthropicFastPremium multiplies each catalogue rate. Anthropic publishes fast
+// input and output prices at twice standard and states that prompt-caching
+// multipliers apply on top, so cache rates double as well; no separate cache
+// prices are published.
+// https://platform.claude.com/docs/en/build-with-claude/fast-mode#pricing
+var anthropicFastPremium = uniformRates(2)
+
+func uniformRates(factor float64) Rates {
+	return Rates{Input: factor, Output: factor, CacheRead: factor, CacheWrite: factor}
+}
+
+func (r Rates) scaled(factors Rates) Rates {
+	return Rates{
+		Input:      r.Input * factors.Input,
+		Output:     r.Output * factors.Output,
+		CacheRead:  r.CacheRead * factors.CacheRead,
+		CacheWrite: r.CacheWrite * factors.CacheWrite,
+	}
+}
+
+func hasTierPricing(provider, tier string) bool {
+	switch provider {
+	case "openai":
+		return true
+	case "anthropic":
+		return tier == "fast"
+	default:
+		return false
+	}
 }
 
 // withFastPricing derives a uniform premium only when gateway and vendor base rates agree.

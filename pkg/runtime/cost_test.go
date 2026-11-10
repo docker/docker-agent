@@ -175,6 +175,12 @@ func TestApplyModelCostServiceTier(t *testing.T) {
 		{name: "gateway fast already priced", provider: "vercel", model: "openai/gpt-6-astra-fast", tier: "fast", short: 2.29, long: 22.33},
 		{name: "Azure unchanged", provider: "azure", model: "gpt-6-astra", tier: "fast", short: 1.145, long: 11.165},
 		{name: "custom OpenAI endpoint unchanged", provider: "openai", model: "gpt-6-astra", tier: "ultrafast", cfg: latest.ModelConfig{BaseURL: "https://example.com/v1"}, short: 1.145, long: 11.165},
+		{name: "Opus 5.5 fast", provider: "anthropic", model: "claude-opus-5-5", tier: "fast", short: 0.908, long: 4.508},
+		{name: "Opus 5.5 standard", provider: "anthropic", model: "claude-opus-5-5", tier: "", short: 0.454, long: 2.254},
+		{name: "Opus 5.5 priority is not a premium tier", provider: "anthropic", model: "claude-opus-5-5", tier: "priority", short: 0.454, long: 2.254},
+		{name: "Opus 5.5 fast requested, standard served", provider: "anthropic", model: "claude-opus-5-5", tier: "", cfg: latest.ModelConfig{ProviderOpts: map[string]any{"speed": "fast"}}, short: 0.454, long: 2.254},
+		{name: "Fable 5.2 fast", provider: "anthropic", model: "claude-fable-5-2", tier: "fast", short: 1.808, long: 9.008},
+		{name: "custom Anthropic endpoint unchanged", provider: "anthropic", model: "claude-opus-5-5", tier: "fast", cfg: latest.ModelConfig{BaseURL: "https://example.com"}, short: 0.454, long: 2.254},
 		{name: "override wins over ultrafast and context bands", provider: "openai", model: "gpt-6-astra", tier: "ultrafast", cfg: latest.ModelConfig{Cost: &latest.CostConfig{Input: 1, Output: 2, CacheRead: 0.1, CacheWrite: 1.25}}, short: 0.0995, long: 0.5495},
 		{name: "zero override stays free", provider: "openai", model: "gpt-6-astra", tier: "fast", cfg: latest.ModelConfig{Cost: &latest.CostConfig{}}, short: 0, long: 0},
 	} {

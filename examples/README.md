@@ -242,6 +242,7 @@ remote MCP endpoints.
 | [`sampling-opts.yaml`](sampling-opts.yaml) | Provider-specific sampling parameters (`top_k`, `repetition_penalty`, …). |
 | [`thinking_budget.yaml`](thinking_budget.yaml) | Reasoning/thinking budgets across OpenAI, Anthropic and Google. |
 | [`task_budget.yaml`](task_budget.yaml) | Anthropic `task_budget`: cap total tokens spent across a multi-step agentic task. |
+| [`anthropic-fast-mode.yaml`](anthropic-fast-mode.yaml) | Anthropic fast mode with `provider_opts.speed`. |
 
 Provider examples use the canonical IDs `fireworks-ai`, `togetherai`,
 `moonshotai`, and `opencode`. The old IDs `fireworks`, `together`, `moonshot`,

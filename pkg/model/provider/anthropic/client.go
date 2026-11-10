@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 
@@ -65,6 +66,10 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	if err := validateCachePreservingUpdates(cfg); err != nil {
 		return nil, err
 	}
+	if err := validateSpeed(cfg); err != nil {
+		slog.ErrorContext(ctx, "Anthropic client creation failed", "error", err)
+		return nil, err
+	}
 	globalOptions := options.Apply(opts...)
 	if err := validateFallbackHost(cfg, globalOptions.Gateway()); err != nil {
 		slog.ErrorContext(ctx, "Anthropic client creation failed", "error", err)
@@ -94,6 +99,8 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		if cfg.BaseURL != "" {
 			requestOptions = append(requestOptions, option.WithBaseURL(cfg.BaseURL))
 		}
+		// The SDK itself honors ANTHROPIC_BASE_URL; record it so endpoint checks, such as pricing, see it.
+		anthropicClient.BaseURL = cmp.Or(cfg.BaseURL, os.Getenv("ANTHROPIC_BASE_URL"))
 		client := anthropic.NewClient(requestOptions...)
 		anthropicClient.clientFn = func(context.Context) (anthropic.Client, error) {
 			return client, nil
@@ -170,6 +177,9 @@ func NewClientFromFactoryWithOptions(ctx context.Context, cfg *latest.ModelConfi
 	// Apply options before invoking the factory so option side effects keep
 	// their pre-refactor ordering relative to credential discovery.
 	if err := validateCachePreservingUpdates(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateSpeed(cfg); err != nil {
 		return nil, err
 	}
 	globalOptions := options.Apply(opts...)
@@ -263,12 +273,14 @@ func (c *Client) CreateChatCompletionStream(
 	//  - structured output (requires beta header)
 	//  - task_budget (requires the task-budgets beta header)
 	//  - server-side fallbacks (only the beta types carry fallback blocks)
+	//  - fast mode (the speed parameter only exists on the beta types)
 	if c.interleavedThinkingEnabled() ||
 		c.ModelOptions.StructuredOutput() != nil ||
 		!c.ModelConfig.TaskBudget.IsZero() || c.thinkingBindingBehavior() != "" ||
 		c.progressUpdatesEnabled() ||
 		cacheDiagnosticsEnabled(c.ModelConfig.ProviderOpts) || cachePreservingUpdatesEnabled(c.ModelConfig.ProviderOpts) || c.hasNativeCompaction(messages) ||
-		fallbacksEnabled(c.ModelConfig.ProviderOpts) {
+		fallbacksEnabled(c.ModelConfig.ProviderOpts) ||
+		fastModeEnabled(c.ModelConfig.ProviderOpts) {
 		return c.createBetaStream(ctx, client, messages, requestTools, maxTokens)
 	}
 

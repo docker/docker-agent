@@ -315,6 +315,10 @@ that automatic model selection (`model: auto`) never picks a custom provider,
 so reference its models explicitly with `--model <name>/<model>` or
 `default_model`.
 
+An entry with a native `provider` (such as `provider: anthropic`) needs no
+`base_url` and can carry `provider_opts`; see
+[Anthropic fast mode](../anthropic/index.md#global-default) for an example.
+
 ## How It Works
 
 When you reference a provider:

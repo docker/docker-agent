@@ -149,6 +149,29 @@ func TestConfig_ProvidersRoundTrip(t *testing.T) {
 	assert.Equal(t, "MYPROVIDER_API_KEY", providers["myprovider"].TokenKey)
 }
 
+func TestConfig_LoadsAnthropicSpeedFromProvidersAndDefaultModel(t *testing.T) {
+	t.Parallel()
+
+	configFile := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configFile, []byte(`providers:
+  fast-claude:
+    provider: anthropic
+    provider_opts:
+      speed: fast
+default_model:
+  provider: anthropic
+  model: claude-opus-5-5
+  provider_opts:
+    speed: fast
+`), 0o600))
+
+	loaded, err := loadFrom(configFile, "")
+	require.NoError(t, err)
+
+	assert.Equal(t, "fast", loaded.GetProviders()["fast-claude"].ProviderOpts["speed"])
+	assert.Equal(t, "fast", loaded.DefaultModel.ProviderOpts["speed"])
+}
+
 func TestValidateAliasName(t *testing.T) {
 	t.Parallel()
 
