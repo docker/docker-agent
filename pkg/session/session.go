@@ -1041,7 +1041,7 @@ func (s *Session) PrepareInstructionContext(sources []InstructionSource) bool {
 	changed := false
 	if latestSummary > state.EpochStart {
 		state.EpochStart = latestSummary
-		state.Initial = cloneInstructionValues(state.Current)
+		state.Initial = maps.Clone(state.Current)
 		state.Updates = nil
 		changed = true
 	}
@@ -1134,10 +1134,6 @@ func sourceLabel(source InstructionSource) string {
 	return source.Key
 }
 
-func cloneInstructionValues(values map[string]InstructionValue) map[string]InstructionValue {
-	return maps.Clone(values)
-}
-
 func appendMissing(values []string, value string) []string {
 	if !slices.Contains(values, value) {
 		return append(values, value)
@@ -1152,8 +1148,8 @@ func cloneInstructionContext(state *InstructionContextState) *InstructionContext
 	return &InstructionContextState{
 		EpochStart: state.EpochStart,
 		Order:      slices.Clone(state.Order),
-		Initial:    cloneInstructionValues(state.Initial),
-		Current:    cloneInstructionValues(state.Current),
+		Initial:    maps.Clone(state.Initial),
+		Current:    maps.Clone(state.Current),
 		Updates:    slices.Clone(state.Updates),
 	}
 }
