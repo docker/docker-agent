@@ -3,6 +3,117 @@
 All notable changes to this project will be documented in this file.
 
 
+## [v1.159.0] - 2026-11-10
+
+This release adds new providers and Anthropic fast mode support, completes built-in agent definitions, fixes several correctness and security issues, and includes extensive internal refactoring.
+
+## What's New
+
+- Adds Obscurify.ai to the built-in provider catalog (OpenAI-compatible, default model `deepseek/deepseek-v4-flash`)
+- Adds fast mode to the Anthropic provider via `provider_opts.speed` (`fast` | `standard`) for the Messages API
+- Adds support for Claude Fable 5.2 and Mythos 5.2 on Bedrock
+- Completes default and minimal built-in agents; the built-in default is now a coding agent with a `minimal` general-purpose alternative
+- Emits a warning when a final reply is missing after tool use, instead of silently treating it as successful
+
+## Improvements
+
+- Ends the Kitty graphics terminal probe on the DA1 reply, reducing startup delay for terminals that do not support Kitty graphics
+- Loads prompt history off the startup path, cutting time to first TUI frame
+
+## Bug Fixes
+
+- Fixes MCP tool results where separate text blocks were concatenated without separators, causing file lists and other multi-element results to run together
+- Fixes Gemini handling of `MALFORMED_FUNCTION_CALL` / `UNEXPECTED_TOOL_CALL` to fail the stream with a non-retryable error instead of silently ending as a finished answer
+- Fixes Gemini to omit `thinkingConfig` for non-reasoning models (fixes Gemini Flash Image)
+- Fixes Gemini to keep invalid function calls non-retryable
+- Fixes OpenAI-compatible stream adapter to treat `content_filter` finish reason as a refusal instead of passing it through unhandled
+- Fixes config loading to accept agent configs and `.env` files saved with a UTF-8 BOM (affects files written by PowerShell 5 on Windows)
+- Fixes `.agentsignore` parsing to remove the 64 KiB per-line scanner limit
+- Fixes RAG package detection to stop dropping files with over-long lines
+- Fixes transcript writes to be flushed before compaction is persisted, preventing ordering issues on Windows
+- Fixes inherited Windows socket handles to be released with `closesocket` instead of `CloseHandle`
+- Fixes `docker agent serve acp` to use the default agent when no agent argument is specified
+- Fixes API read-only hints to apply only to GET requests; other HTTP methods are no longer incorrectly classified as read-only
+- Fixes sandbox auto-kits to exclude workspace prompt symlinks, preventing host targets from being copied in
+- Fixes message-merge probes to report aggregate prompt tokens correctly
+- Fixes Anthropic catalogue pricing to be preserved for `ANTHROPIC_BASE_URL` endpoints in fast mode
+
+## Technical Changes
+
+- Extensive internal refactoring across runtime, TUI, RAG, providers, shell, config, and other packages — removes redundant helpers, unused adapters, write-only state, and duplicate logic (net ~169 lines removed from production code)
+- Refreshes the models.dev catalog snapshot (32 models added, 14 removed, 84 updated)
+- Isolates test suites from the developer's home directory to prevent personal config from affecting test results
+- Adds opt-in message-merging compatibility probes for provider testing
+### Pull Requests
+
+- [#4751](https://github.com/docker/docker-agent/pull/4751) - feat: add Obscurify.ai to the built-in provider catalog
+- [#4802](https://github.com/docker/docker-agent/pull/4802) - fix(mcp): keep separate text blocks of a tool result apart
+- [#4808](https://github.com/docker/docker-agent/pull/4808) - fix(gemini): fail invalid function calls, end unfinished continuations
+- [#4825](https://github.com/docker/docker-agent/pull/4825) - fix(oaistream): end a content_filter turn as a refusal
+- [#4826](https://github.com/docker/docker-agent/pull/4826) - fix(config): accept agent configs and env files saved with a UTF-8 BOM
+- [#4827](https://github.com/docker/docker-agent/pull/4827) - build(deps): bump the actions group across 1 directory with 2 updates
+- [#4828](https://github.com/docker/docker-agent/pull/4828) - fix(rag): stop dropping files with over-long lines in package detection
+- [#4830](https://github.com/docker/docker-agent/pull/4830) - docs: update CHANGELOG.md for v1.158.0
+- [#4831](https://github.com/docker/docker-agent/pull/4831) - test(providers): add opt-in message-merging compatibility probes
+- [#4832](https://github.com/docker/docker-agent/pull/4832) - refactor(skills): remove unused git root helper
+- [#4833](https://github.com/docker/docker-agent/pull/4833) - refactor(runtime): remove unused approval source mappers
+- [#4834](https://github.com/docker/docker-agent/pull/4834) - refactor(kit): remove unused auto-install check
+- [#4835](https://github.com/docker/docker-agent/pull/4835) - refactor(shellpath): collapse redundant Unix shell helper
+- [#4836](https://github.com/docker/docker-agent/pull/4836) - fix(fsx): read .agentsignore lines without the 64 KiB scanner limit
+- [#4837](https://github.com/docker/docker-agent/pull/4837) - refactor(anthropic): remove test-only content helper
+- [#4838](https://github.com/docker/docker-agent/pull/4838) - refactor(httpclient): inline test-only ID source option
+- [#4839](https://github.com/docker/docker-agent/pull/4839) - refactor(tui): inline agent registry index lookups
+- [#4840](https://github.com/docker/docker-agent/pull/4840) - refactor(path): delegate home shortening to shared helper
+- [#4841](https://github.com/docker/docker-agent/pull/4841) - refactor(tui): remove test-only validation adapters
+- [#4842](https://github.com/docker/docker-agent/pull/4842) - refactor(providerutil): remove redundant nil-map guards
+- [#4843](https://github.com/docker/docker-agent/pull/4843) - refactor(tui): remove write-only pointer state
+- [#4844](https://github.com/docker/docker-agent/pull/4844) - refactor(fetch): remove HTML-to-text forwarding helper
+- [#4845](https://github.com/docker/docker-agent/pull/4845) - refactor(leantui): remove image forwarding layer
+- [#4846](https://github.com/docker/docker-agent/pull/4846) - refactor(tui): remove redundant extractor state flags
+- [#4847](https://github.com/docker/docker-agent/pull/4847) - refactor(runtime): reuse notifier pointer identity helper
+- [#4848](https://github.com/docker/docker-agent/pull/4848) - refactor(codemode): remove unused comment indentation layer
+- [#4849](https://github.com/docker/docker-agent/pull/4849) - refactor(codemode): use maps.Clone for schema copies
+- [#4850](https://github.com/docker/docker-agent/pull/4850) - refactor(runtime): reuse prompt joiner for delegation notes
+- [#4851](https://github.com/docker/docker-agent/pull/4851) - refactor(skills): consolidate skill lookup
+- [#4852](https://github.com/docker/docker-agent/pull/4852) - refactor(providers): remove stream adapter forwarders
+- [#4853](https://github.com/docker/docker-agent/pull/4853) - refactor(shell): remove shell detection forwarder
+- [#4854](https://github.com/docker/docker-agent/pull/4854) - refactor(mermaid): reuse sequence canvas for lifelines
+- [#4855](https://github.com/docker/docker-agent/pull/4855) - refactor(tasks): remove JSON result forwarder
+- [#4856](https://github.com/docker/docker-agent/pull/4856) - refactor(markdown): remove unused derived style state
+- [#4857](https://github.com/docker/docker-agent/pull/4857) - refactor(tui): reuse snapshot pluralization helper
+- [#4858](https://github.com/docker/docker-agent/pull/4858) - refactor(runtime): remove harness tool ID accessor
+- [#4859](https://github.com/docker/docker-agent/pull/4859) - refactor(tui): remove write-only inline edit content
+- [#4860](https://github.com/docker/docker-agent/pull/4860) - refactor(effort): use standard first-match lookup
+- [#4861](https://github.com/docker/docker-agent/pull/4861) - refactor(bedrock): remove lazy document forwarder
+- [#4862](https://github.com/docker/docker-agent/pull/4862) - refactor(runtime): remove redundant JSON key sorting
+- [#4863](https://github.com/docker/docker-agent/pull/4863) - refactor(cli): reuse model-list JSON encoder
+- [#4864](https://github.com/docker/docker-agent/pull/4864) - refactor(leantui): inline single-use command filter
+- [#4865](https://github.com/docker/docker-agent/pull/4865) - refactor(rag): stop collecting unused fusion ranks
+- [#4866](https://github.com/docker/docker-agent/pull/4866) - refactor(markdown): reuse incremental renderer reset
+- [#4867](https://github.com/docker/docker-agent/pull/4867) - refactor(rag): reuse initialization file sets
+- [#4868](https://github.com/docker/docker-agent/pull/4868) - refactor(leantui): clone cached tool lines directly
+- [#4869](https://github.com/docker/docker-agent/pull/4869) - refactor(config): share instruction-file decoder callback
+- [#4870](https://github.com/docker/docker-agent/pull/4870) - refactor(rag): remove BM25 document-loading adapter
+- [#4871](https://github.com/docker/docker-agent/pull/4871) - fix(runtime): flush transcript writes before persisting compaction
+- [#4872](https://github.com/docker/docker-agent/pull/4872) - fix(server): release inherited Windows sockets with closesocket
+- [#4875](https://github.com/docker/docker-agent/pull/4875) - Make the default built-in a coding agent
+- [#4876](https://github.com/docker/docker-agent/pull/4876) - fix(acp): use default agent when none is specified
+- [#4878](https://github.com/docker/docker-agent/pull/4878) - chore: bump direct Go dependencies
+- [#4879](https://github.com/docker/docker-agent/pull/4879) - Bump golang.org/x/term to v0.48.0
+- [#4880](https://github.com/docker/docker-agent/pull/4880) - chore: refresh models.dev snapshot (+32 -14 ~84)
+- [#4883](https://github.com/docker/docker-agent/pull/4883) - feat: support Claude Fable and Mythos 5.2
+- [#4884](https://github.com/docker/docker-agent/pull/4884) - fix(gemini): omit thinking config for non-reasoning models
+- [#4885](https://github.com/docker/docker-agent/pull/4885) - docs: correct configuration and tool guidance
+- [#4886](https://github.com/docker/docker-agent/pull/4886) - feat(anthropic): add fast mode via provider_opts.speed
+- [#4887](https://github.com/docker/docker-agent/pull/4887) - refactor: remove accidental complexity in 33 small, behavior-preserving steps
+- [#4888](https://github.com/docker/docker-agent/pull/4888) - perf(tui): cut time to first frame (Kitty probe, prompt history)
+- [#4892](https://github.com/docker/docker-agent/pull/4892) - Warn when a final reply is missing after tool use
+- [#4893](https://github.com/docker/docker-agent/pull/4893) - test: isolate test suites from the developer's home directory
+- [#4894](https://github.com/docker/docker-agent/pull/4894) - fix(providers): report aggregate prompt tokens in message-merge probes
+- [#4896](https://github.com/docker/docker-agent/pull/4896) - fix: restrict API read-only hints to GET requests
+- [#4897](https://github.com/docker/docker-agent/pull/4897) - fix(sandbox): keep workspace prompt symlinks out of auto-kits
+
+
 ## [v1.158.0] - 2026-11-09
 
 This release adds optional config history and model catalog support, improves tool duration visibility in both TUIs, and fixes compaction overflow and theme hot-reload issues.
@@ -7360,3 +7471,5 @@ This release improves the terminal user interface with better error handling and
 [v1.157.0]: https://github.com/docker/docker-agent/releases/tag/v1.157.0
 
 [v1.158.0]: https://github.com/docker/docker-agent/releases/tag/v1.158.0
+
+[v1.159.0]: https://github.com/docker/docker-agent/releases/tag/v1.159.0
