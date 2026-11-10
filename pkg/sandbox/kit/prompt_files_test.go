@@ -44,6 +44,111 @@ func TestBuild_RejectsPromptFileTraversal(t *testing.T) {
 	assert.Equal(t, "victim.txt", entries[0].Name())
 }
 
+func TestStagePromptFiles_WorkspaceSymlinksNotStaged(t *testing.T) {
+	t.Parallel()
+	for _, location := range []string{"workspace", "home"} {
+		for _, linkType := range []string{"absolute", "relative", "chain", "directory"} {
+			t.Run(location+"/"+linkType, func(t *testing.T) {
+				t.Parallel()
+				home := t.TempDir()
+				workspace := filepath.Join(home, "project")
+				require.NoError(t, os.Mkdir(workspace, 0o700))
+				targetDir := filepath.Join(home, "private")
+				if location == "workspace" {
+					targetDir = filepath.Join(workspace, "instructions")
+				}
+				require.NoError(t, os.Mkdir(targetDir, 0o700))
+				target := filepath.Join(targetDir, "AGENTS.md")
+				require.NoError(t, os.WriteFile(target, []byte("private document\n"), 0o600))
+
+				name := "AGENTS.md"
+				link := filepath.Join(workspace, name)
+				switch linkType {
+				case "relative":
+					rel, err := filepath.Rel(workspace, target)
+					require.NoError(t, err)
+					target = rel
+				case "chain":
+					require.NoError(t, os.Symlink(target, filepath.Join(workspace, "alias")))
+					target = "alias"
+				case "directory":
+					target = targetDir
+					link = filepath.Join(workspace, "linked")
+					name = filepath.Join("linked", "AGENTS.md")
+				}
+				require.NoError(t, os.Symlink(target, link))
+
+				kitDir := t.TempDir()
+				cfg := &latestcfg.Config{Agents: latestcfg.Agents{{Name: "root", AddPromptFiles: []string{name}}}}
+				entries, redactions, err := stagePromptFiles(kitDir, cfg, workspace, home, workspace)
+				require.NoError(t, err)
+				assert.Equal(t, []Entry{{Source: filepath.Join(workspace, name)}}, entries)
+				assert.Empty(t, redactions)
+				assert.NoFileExists(t, filepath.Join(kitDir, promptfiles.KitSubdir, name))
+			})
+		}
+	}
+}
+
+func TestStagePromptFiles_WorkspaceSymlinkKeepsHomePromptFile(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	workspace := filepath.Join(home, "project")
+	require.NoError(t, os.Mkdir(workspace, 0o700))
+	privateFile := filepath.Join(home, "private.txt")
+	require.NoError(t, os.WriteFile(privateFile, []byte("private document\n"), 0o600))
+	workspacePrompt := filepath.Join(workspace, "AGENTS.md")
+	require.NoError(t, os.Symlink(privateFile, workspacePrompt))
+	homePrompt := filepath.Join(home, "AGENTS.md")
+	require.NoError(t, os.WriteFile(homePrompt, []byte("home instructions\n"), 0o600))
+
+	kitDir := t.TempDir()
+	cfg := &latestcfg.Config{Agents: latestcfg.Agents{{Name: "root", AddPromptFiles: []string{"AGENTS.md"}}}}
+	entries, _, err := stagePromptFiles(kitDir, cfg, workspace, home, workspace)
+	require.NoError(t, err)
+	target := filepath.Join(promptfiles.KitSubdir, "AGENTS.md")
+	assert.Equal(t, []Entry{{Source: workspacePrompt}, {Source: homePrompt, Target: target}}, entries)
+	data, err := os.ReadFile(filepath.Join(kitDir, target))
+	require.NoError(t, err)
+	assert.Equal(t, "home instructions\n", string(data))
+}
+
+func TestStagePromptFiles_HomeSymlinkIntoWorkspaceNotStaged(t *testing.T) {
+	t.Parallel()
+	home, workspace := t.TempDir(), t.TempDir()
+	target := filepath.Join(workspace, "instructions.md")
+	require.NoError(t, os.WriteFile(target, []byte("workspace instructions\n"), 0o600))
+	homePrompt := filepath.Join(home, "AGENTS.md")
+	require.NoError(t, os.Symlink(target, homePrompt))
+
+	kitDir := t.TempDir()
+	cfg := &latestcfg.Config{Agents: latestcfg.Agents{{Name: "root", AddPromptFiles: []string{"AGENTS.md"}}}}
+	entries, _, err := stagePromptFiles(kitDir, cfg, workspace, home, workspace)
+	require.NoError(t, err)
+	assert.Equal(t, []Entry{{Source: homePrompt}}, entries)
+	assert.NoFileExists(t, filepath.Join(kitDir, promptfiles.KitSubdir, "AGENTS.md"))
+}
+
+func TestStagePromptFiles_WorkspacePrefixSiblingIsStaged(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	workspace, home := filepath.Join(base, "project"), filepath.Join(base, "project-home")
+	require.NoError(t, os.Mkdir(workspace, 0o700))
+	require.NoError(t, os.Mkdir(home, 0o700))
+	homePrompt := filepath.Join(home, "AGENTS.md")
+	require.NoError(t, os.WriteFile(homePrompt, []byte("home instructions\n"), 0o600))
+
+	kitDir := t.TempDir()
+	cfg := &latestcfg.Config{Agents: latestcfg.Agents{{Name: "root", AddPromptFiles: []string{"AGENTS.md"}}}}
+	entries, _, err := stagePromptFiles(kitDir, cfg, workspace, home, workspace)
+	require.NoError(t, err)
+	target := filepath.Join(promptfiles.KitSubdir, "AGENTS.md")
+	assert.Equal(t, []Entry{{Source: homePrompt, Target: target}}, entries)
+	data, err := os.ReadFile(filepath.Join(kitDir, target))
+	require.NoError(t, err)
+	assert.Equal(t, "home instructions\n", string(data))
+}
+
 func TestStagePromptFiles_NestedName(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
