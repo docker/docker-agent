@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
@@ -315,86 +316,129 @@ func getSystemTextParts(msg openai.ChatCompletionMessageParamUnion) []openai.Cha
 // This is needed by some local models (like those run by DMR) that don't handle
 // consecutive same-role messages well.
 func MergeConsecutiveMessages(openaiMessages []openai.ChatCompletionMessageParamUnion) []openai.ChatCompletionMessageParamUnion {
-	var mergedMessages []openai.ChatCompletionMessageParamUnion
+	mergedMessages := make([]openai.ChatCompletionMessageParamUnion, 0, len(openaiMessages))
 
-	for i := 0; i < len(openaiMessages); i++ {
-		currentMsg := openaiMessages[i]
-		currentRole := getMessageRole(currentMsg)
-
-		// Only merge system or user messages
-		if currentRole == "system" || currentRole == "user" {
-			var mergedContent strings.Builder
-			var mergedMultiContent []openai.ChatCompletionContentPartUnionParam
-			j := i
-
-			// Collect all consecutive messages with the same role
-			for j < len(openaiMessages) {
-				msgToMerge := openaiMessages[j]
-				msgRole := getMessageRole(msgToMerge)
-				if msgRole != currentRole {
-					break
-				}
-
-				// Extract content
-				if str, ok := getStringContent(msgToMerge); ok {
-					if mergedContent.Len() > 0 {
-						mergedContent.WriteString("\n")
-					}
-					mergedContent.WriteString(str)
-				} else if parts := getMultiContent(msgToMerge); parts != nil {
-					if mergedContent.Len() > 0 {
-						mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
-						mergedContent.Reset()
-					}
-					mergedMultiContent = append(mergedMultiContent, parts...)
-				} else if textParts := getSystemTextParts(msgToMerge); textParts != nil {
-					if mergedContent.Len() > 0 {
-						mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
-						mergedContent.Reset()
-					}
-					// Convert text parts to union params
-					for _, textPart := range textParts {
-						mergedMultiContent = append(mergedMultiContent, openai.ChatCompletionContentPartUnionParam{
-							OfText: &openai.ChatCompletionContentPartTextParam{
-								Text: textPart.Text,
-							},
-						})
-					}
-				}
-				j++
-			}
-			if len(mergedMultiContent) > 0 && mergedContent.Len() > 0 {
-				mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
-			}
-
-			// Create the merged message
-			var mergedMessage openai.ChatCompletionMessageParamUnion
-			if currentRole == "system" {
-				if len(mergedMultiContent) == 0 {
-					mergedMessage = openai.SystemMessage(mergedContent.String())
-				} else {
-					textParts := make([]openai.ChatCompletionContentPartTextParam, 0)
-					for _, part := range mergedMultiContent {
-						if part.OfText != nil {
-							textParts = append(textParts, *part.OfText)
-						}
-					}
-					mergedMessage = openai.SystemMessage(textParts)
-				}
-			} else {
-				if len(mergedMultiContent) == 0 {
-					mergedMessage = openai.UserMessage(mergedContent.String())
-				} else {
-					mergedMessage = openai.UserMessage(mergedMultiContent)
-				}
-			}
-
-			mergedMessages = append(mergedMessages, mergedMessage)
-			i = j - 1
-		} else {
-			mergedMessages = append(mergedMessages, currentMsg)
+	for i := 0; i < len(openaiMessages); {
+		currentRole := getMessageRole(openaiMessages[i])
+		if currentRole != "system" && currentRole != "user" {
+			mergedMessages = append(mergedMessages, openaiMessages[i])
+			i++
+			continue
 		}
+
+		j := i + 1
+		for j < len(openaiMessages) && getMessageRole(openaiMessages[j]) == currentRole {
+			j++
+		}
+
+		// Rebuilding a singleton would drop message-level fields (name, extra
+		// fields, part metadata) for no benefit. Metadata on any member of a
+		// run is treated as a barrier: merging would silently discard fields
+		// whose meaning this package cannot preserve.
+		if j == i+1 || hasMergeBarrier(openaiMessages[i:j]) {
+			mergedMessages = append(mergedMessages, openaiMessages[i:j]...)
+			i = j
+			continue
+		}
+
+		mergedMessages = append(mergedMessages, mergeMessageRun(openaiMessages[i:j], currentRole))
+		i = j
 	}
 
 	return mergedMessages
+}
+
+// hasMergeBarrier reports whether a same-role run carries metadata that a
+// rebuilt message would lose.
+func hasMergeBarrier(messages []openai.ChatCompletionMessageParamUnion) bool {
+	for _, msg := range messages {
+		switch {
+		case msg.OfSystem != nil:
+			if msg.OfSystem.Name.Valid() || len(msg.OfSystem.ExtraFields()) > 0 {
+				return true
+			}
+			for _, part := range msg.OfSystem.Content.OfArrayOfContentParts {
+				if len(part.ExtraFields()) > 0 {
+					return true
+				}
+			}
+		case msg.OfUser != nil:
+			if msg.OfUser.Name.Valid() || len(msg.OfUser.ExtraFields()) > 0 {
+				return true
+			}
+			if slices.ContainsFunc(msg.OfUser.Content.OfArrayOfContentParts, contentPartHasMetadata) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func contentPartHasMetadata(part openai.ChatCompletionContentPartUnionParam) bool {
+	if len(part.ExtraFields()) > 0 {
+		return true
+	}
+	switch {
+	case part.OfText != nil:
+		return len(part.OfText.ExtraFields()) > 0
+	case part.OfImageURL != nil:
+		return len(part.OfImageURL.ExtraFields()) > 0
+	case part.OfInputAudio != nil:
+		return len(part.OfInputAudio.ExtraFields()) > 0
+	case part.OfFile != nil:
+		return len(part.OfFile.ExtraFields()) > 0
+	}
+	return false
+}
+
+func mergeMessageRun(messages []openai.ChatCompletionMessageParamUnion, role string) openai.ChatCompletionMessageParamUnion {
+	var mergedContent strings.Builder
+	var mergedMultiContent []openai.ChatCompletionContentPartUnionParam
+
+	for _, msg := range messages {
+		if str, ok := getStringContent(msg); ok {
+			if mergedContent.Len() > 0 {
+				mergedContent.WriteString("\n")
+			}
+			mergedContent.WriteString(str)
+		} else if parts := getMultiContent(msg); parts != nil {
+			if mergedContent.Len() > 0 {
+				mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
+				mergedContent.Reset()
+			}
+			mergedMultiContent = append(mergedMultiContent, parts...)
+		} else if textParts := getSystemTextParts(msg); textParts != nil {
+			if mergedContent.Len() > 0 {
+				mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
+				mergedContent.Reset()
+			}
+			for _, textPart := range textParts {
+				mergedMultiContent = append(mergedMultiContent, openai.ChatCompletionContentPartUnionParam{
+					OfText: &openai.ChatCompletionContentPartTextParam{
+						Text: textPart.Text,
+					},
+				})
+			}
+		}
+	}
+	if len(mergedMultiContent) > 0 && mergedContent.Len() > 0 {
+		mergedMultiContent = append(mergedMultiContent, openai.TextContentPart(mergedContent.String()))
+	}
+
+	if role == "system" {
+		if len(mergedMultiContent) == 0 {
+			return openai.SystemMessage(mergedContent.String())
+		}
+		textParts := make([]openai.ChatCompletionContentPartTextParam, 0, len(mergedMultiContent))
+		for _, part := range mergedMultiContent {
+			if part.OfText != nil {
+				textParts = append(textParts, *part.OfText)
+			}
+		}
+		return openai.SystemMessage(textParts)
+	}
+	if len(mergedMultiContent) == 0 {
+		return openai.UserMessage(mergedContent.String())
+	}
+	return openai.UserMessage(mergedMultiContent)
 }

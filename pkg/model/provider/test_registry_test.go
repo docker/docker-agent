@@ -7,6 +7,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/anthropic"
 	"github.com/docker/docker-agent/pkg/model/provider/bedrock"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/model/provider/gemini"
 	"github.com/docker/docker-agent/pkg/model/provider/openai"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
@@ -20,8 +21,13 @@ func fullTestRegistry() *Registry {
 		"openai_responses":       openAITestFactory,
 		"anthropic":              anthropicTestFactory,
 		"google":                 googleTestFactory,
+		"dmr":                    dmrTestFactory,
 		"amazon-bedrock":         bedrockTestFactory,
 	})
+}
+
+func dmrTestFactory(ctx context.Context, cfg *latest.ModelConfig, _ environment.Provider, opts ...options.Opt) (Provider, error) {
+	return dmr.NewClient(ctx, cfg, opts...)
 }
 
 func openAITestFactory(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
