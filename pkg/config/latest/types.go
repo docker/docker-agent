@@ -1621,6 +1621,9 @@ type Toolset struct {
 	Remote  Remote   `json:"remote"`
 	Config  any      `json:"config,omitempty"`
 
+	// Experimental MCP features are disabled unless explicitly enabled.
+	Experimental *ToolsetExperimentalConfig `json:"experimental,omitempty" yaml:"experimental,omitempty"`
+
 	// For `mcp` and `lsp` tools - version/package reference for auto-installation.
 	// Format: "owner/repo" or "owner/repo@version"
 	// When empty and auto-install is enabled, docker agent auto-detects from the command name.
@@ -1762,6 +1765,10 @@ type Toolset struct {
 	// restart, and backoff behaviour. nil means "use the resilient defaults"
 	// (auto-restart on failure, 5 attempts, 1s..32s exponential backoff).
 	Lifecycle *LifecycleConfig `json:"lifecycle,omitempty"`
+}
+
+type ToolsetExperimentalConfig struct {
+	MCPEvents bool `json:"mcp_events,omitempty" yaml:"mcp_events,omitempty"`
 }
 
 func (t *Toolset) UnmarshalYAML(unmarshal func(any) error) error {

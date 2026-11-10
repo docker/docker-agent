@@ -168,6 +168,25 @@ Installed binaries are placed in `~/.cagent/tools/bin/` and cached so they are o
 > [!TIP]
 > Auto-install supports both Go packages (via `go install`) and GitHub release binaries (via archive download). The aqua registry metadata determines which method is used.
 
+## Experimental MCP Events
+
+MCP Events push subscriptions (proposed SEP-3415) are disabled by default.
+Enable them per MCP toolset:
+
+```yaml
+toolsets:
+  - type: mcp
+    command: my-mcp-server
+    experimental:
+      mcp_events: true
+```
+
+Compatible servers expose event discovery, subscription, and cancellation tools.
+Events enter the agent's recall/steering queue. Push delivery supports stdio and
+Streamable HTTP; polling, webhooks, and legacy SSE are not supported.
+See [`examples/mcp-events`](https://github.com/docker/docker-agent/tree/main/examples/mcp-events)
+for runnable demos.
+
 ## Toolset Lifecycle
 
 Long-running toolsets — local MCP servers (stdio), remote MCP servers (Streamable HTTP / SSE), and LSP servers — are managed by a single supervisor that can auto-reconnect them when they crash, time out, or drop their session. The `lifecycle` block on the toolset lets you tune that supervisor per toolset. It applies to every `type: mcp` and `type: lsp` toolset.

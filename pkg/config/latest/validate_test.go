@@ -8,6 +8,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestValidateExperimentalToolset(t *testing.T) {
+	t.Parallel()
+	ts := Toolset{Type: "mcp", Command: "example", Experimental: &ToolsetExperimentalConfig{MCPEvents: true}}
+	require.NoError(t, ts.validate())
+	ts.Type = "shell"
+	require.ErrorContains(t, ts.validate(), "experimental can only be used with type 'mcp'")
+}
+
 func TestValidateCompactionThreshold(t *testing.T) {
 	t.Parallel()
 

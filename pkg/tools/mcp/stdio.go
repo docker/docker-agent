@@ -70,10 +70,26 @@ func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequ
 		PromptListChangedHandler: promptChanged,
 	}
 
+	eventsEnabled := c.eventsEnabled()
+	if eventsEnabled {
+		opts.Capabilities.AddExtension(eventsExtension, nil)
+	}
 	client := gomcp.NewClient(&gomcp.Implementation{
 		Name:    "docker agent",
 		Version: "1.0.0",
 	}, opts)
+
+	var events *eventClient
+	if eventsEnabled {
+		var err error
+		events, err = newEventClient(client)
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.events = events
+		c.mu.Unlock()
+	}
 
 	connectCtx, processCtx := ctx, ctx
 	var cancel context.CancelFunc
@@ -97,7 +113,11 @@ func (c *stdioMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeRequ
 	cmd.Env = c.env
 	cmd.Dir = c.cwd
 	transport := &trackedCommandTransport{CommandTransport: gomcp.CommandTransport{Command: cmd}}
-	session, err := client.Connect(connectCtx, transport, nil)
+	var connectionTransport gomcp.Transport = transport
+	if eventsEnabled {
+		connectionTransport = &eventTransport{Transport: transport, events: events}
+	}
+	session, err := client.Connect(connectCtx, connectionTransport, nil)
 	if err != nil {
 		if cancel != nil {
 			cancel()

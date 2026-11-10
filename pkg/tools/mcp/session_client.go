@@ -29,6 +29,8 @@ import (
 // single-MCP agent, useless in any agent wired to two or more.
 type sessionClient struct {
 	session                  *gomcp.ClientSession
+	events                   *eventClient
+	experimentalEvents       bool
 	sanitizeError            func(error) error
 	serverAddress            string
 	toolListChangedHandler   func()
@@ -122,6 +124,7 @@ func (c *sessionClient) Wait() error {
 }
 
 func (c *sessionClient) Close(context.Context) error {
+	c.closeEvents()
 	if s := c.getSession(); s != nil {
 		return s.Close()
 	}

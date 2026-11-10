@@ -36,6 +36,17 @@ import (
 
 // CreateToolSet is used by the tools registry.
 func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	ts, err := createToolSet(ctx, toolset, runConfig)
+	if err != nil {
+		return nil, err
+	}
+	if mcpToolset, ok := ts.(*Toolset); ok {
+		mcpToolset.SetExperimentalEvents(toolset.Experimental != nil && toolset.Experimental.MCPEvents)
+	}
+	return ts, nil
+}
+
+func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
 	envProvider := runConfig.EnvProvider()
 	cwd := workingdir.Resolve(toolset.WorkingDir, runConfig.WorkingDir)
 
@@ -746,6 +757,12 @@ func (ts *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 		toolsList = append(toolsList, tool)
 
 		slog.DebugContext(ctx, "Added MCP tool", "tool", name)
+	}
+
+	if client, ok := ts.mcpClient.(interface {
+		eventTools(prefix string) []tools.Tool
+	}); ok {
+		toolsList = append(toolsList, client.eventTools(ts.name)...)
 	}
 
 	slog.DebugContext(ctx, "Listed MCP tools", "count", len(toolsList), "server", ts.logID)

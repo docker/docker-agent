@@ -171,7 +171,15 @@ func (c *remoteMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeReq
 		PromptListChangedHandler: promptChanged,
 	}
 
+	if c.eventsEnabled() && (c.transportType == "streamable" || c.transportType == "streamable-http") {
+		opts.Capabilities.AddExtension(eventsExtension, nil)
+	}
 	client := gomcp.NewClient(impl, opts)
+	if c.eventsEnabled() && (c.transportType == "streamable" || c.transportType == "streamable-http") {
+		if err := c.enableHTTPEvents(client, httpClient); err != nil {
+			return nil, err
+		}
+	}
 
 	// Connect to the MCP server
 	session, err := client.Connect(ctx, transport, nil)
@@ -180,6 +188,12 @@ func (c *remoteMCPClient) Initialize(ctx context.Context, _ *gomcp.InitializeReq
 	}
 
 	c.setSession(session)
+	c.mu.RLock()
+	hasEvents := c.events != nil
+	c.mu.RUnlock()
+	if hasEvents {
+		c.watchEventConnection()
+	}
 
 	slog.DebugContext(ctx, "Remote MCP client connected successfully")
 	return session.InitializeResult(), nil
