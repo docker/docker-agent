@@ -181,7 +181,7 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 			OutputSchema: outputSchema,
 			Handler:      t.callTool,
 			Annotations: tools.ToolAnnotations{
-				ReadOnlyHint: true,
+				ReadOnlyHint: t.config.Method == http.MethodGet,
 				Title:        cmp.Or(t.config.Name, "Query API"),
 			},
 		},

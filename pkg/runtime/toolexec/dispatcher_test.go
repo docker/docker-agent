@@ -3,6 +3,7 @@ package toolexec_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,11 +16,14 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
+	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/teamloader"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/api/client"
 )
 
 // captureEmitter records every event the dispatcher emits, in order, so
@@ -709,6 +713,72 @@ func TestDispatcher_ReadOnlyHintAutoApproves(t *testing.T) {
 	assert.Empty(t, em.confirmations, "read-only tool must not prompt the user")
 	require.Len(t, em.responses, 1)
 	assert.False(t, em.responses[0].IsError)
+}
+
+func TestDispatcher_APIToolSafety(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		method            string
+		mode              session.SafetyPolicy
+		wantCalls         int
+		wantConfirmations int
+	}{
+		{name: "restricted GET", method: http.MethodGet, mode: session.SafetyPolicyRestricted, wantCalls: 1},
+		{name: "restricted POST", method: http.MethodPost, mode: session.SafetyPolicyRestricted},
+		{name: "balanced GET", method: http.MethodGet, mode: session.SafetyPolicyBalanced, wantCalls: 1},
+		{name: "balanced POST", method: http.MethodPost, mode: session.SafetyPolicyBalanced, wantConfirmations: 1},
+		{name: "legacy GET", method: http.MethodGet, wantCalls: 1},
+		{name: "legacy POST", method: http.MethodPost, wantConfirmations: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			toolset := client.New(latest.APIToolConfig{
+				Name:     "test_api",
+				Method:   tc.method,
+				Endpoint: "https://example.com/api",
+			}, teamloader.NewEnvExpander(nil))
+			toolList, err := toolset.Tools(t.Context())
+			require.NoError(t, err)
+			require.Len(t, toolList, 1)
+
+			var handlerCalls int
+			toolList[0].Handler = func(context.Context, tools.ToolCall, tools.Runtime) (*tools.ToolCallResult, error) {
+				handlerCalls++
+				return tools.ResultSuccess("ok"), nil
+			}
+
+			a := newAgent()
+			sess := session.New(session.WithSafetyPolicy(tc.mode))
+			resume := make(chan toolexec.ResumeRequest, 1)
+			resume <- toolexec.ResumeRequest{Type: toolexec.ResumeTypeReject}
+			d := &toolexec.Dispatcher{
+				AgentFor: func(*session.Session) *agent.Agent { return a },
+				Resume:   resume,
+			}
+			em := &captureEmitter{}
+
+			d.Process(t.Context(), sess, []tools.ToolCall{{
+				ID:       "api_call",
+				Function: tools.FunctionCall{Name: "test_api", Arguments: "{}"},
+			}}, toolList, em)
+
+			assert.Equal(t, tc.wantCalls, handlerCalls)
+			assert.Len(t, em.confirmations, tc.wantConfirmations)
+			require.Len(t, em.responses, 1)
+			assert.Equal(t, tc.wantCalls == 0, em.responses[0].IsError)
+			if tc.wantConfirmations > 0 {
+				require.Len(t, em.confirmationMeta, 1)
+				assert.Equal(t, "unknown", em.confirmationMeta[0]["safety_label"])
+			}
+			if tc.mode == session.SafetyPolicyRestricted && tc.wantCalls == 0 {
+				assert.Contains(t, em.responses[0].Output, "restricted safety mode")
+			}
+		})
+	}
 }
 
 // Explicit Strict is ask-everything: even read-only tools prompt. Only
