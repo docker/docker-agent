@@ -35,7 +35,7 @@ func (c *Cost) ForServiceTier(id ID, tier string) *Cost {
 	out.Input, out.Output, out.CacheRead, out.CacheWrite = base.Input, base.Output, base.CacheRead, base.CacheWrite
 	out.Tiers = slices.Clone(c.Tiers)
 	for i := range out.Tiers {
-		out.Tiers[i].Rates = out.Tiers[i].Rates.scaled(factors)
+		out.Tiers[i].Rates = out.Tiers[i].scaled(factors)
 	}
 	return &out
 }
