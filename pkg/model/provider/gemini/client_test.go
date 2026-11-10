@@ -57,6 +57,14 @@ func TestConvertMessagesToGemini_ParallelAttachmentsKeepNativeOrigins(t *testing
 func TestBuildConfig_NoThinking(t *testing.T) {
 	t.Parallel()
 
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"gemini-2.5-flash-image": {Reasoning: false},
+			"gemini-2.5-flash":       {Reasoning: true},
+			"gemini-3-flash":         {Reasoning: true},
+		}},
+	}})
+
 	tests := []struct {
 		name          string
 		model         string
@@ -68,6 +76,12 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 			name:         "title generation omits thinking config",
 			model:        "gemini-3-flash",
 			opts:         []options.Opt{options.WithGeneratingTitle(), options.WithNoThinking()},
+			wantThinking: false,
+		},
+		{
+			name:         "MCP sampling omits thinking for non-thinking image model",
+			model:        "gemini-2.5-flash-image",
+			opts:         []options.Opt{options.WithNoThinking()},
 			wantThinking: false,
 		},
 		{
@@ -95,10 +109,10 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 					Model:          tt.model,
 					ThinkingBudget: &latest.ThinkingBudget{Effort: "high"},
 				},
-				ModelOptions: options.Apply(tt.opts...),
+				ModelOptions: options.Apply(append(tt.opts, options.WithModelsDevStore(store))...),
 			}}
 
-			config := client.buildConfig()
+			config := client.buildConfig(t.Context())
 			if !tt.wantThinking {
 				assert.Nil(t, config.ThinkingConfig)
 				return
@@ -115,6 +129,39 @@ func TestBuildConfig_NoThinking(t *testing.T) {
 			assert.Zero(t, *config.ThinkingConfig.ThinkingBudget)
 		})
 	}
+}
+
+func TestBuildConfig_NoThinkingNonReasoningPreservesStructuredOutput(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"gemini-2.5-flash-image": {Reasoning: false},
+		}},
+	}})
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"answer": map[string]any{"type": "string"},
+		},
+	}
+	client := &Client{Config: base.Config{
+		ModelConfig: latest.ModelConfig{
+			Provider: "google",
+			Model:    "gemini-2.5-flash-image",
+		},
+		ModelOptions: options.Apply(
+			options.WithNoThinking(),
+			options.WithStructuredOutput(&latest.StructuredOutput{Schema: schema}),
+			options.WithModelsDevStore(store),
+		),
+	}}
+
+	config := client.buildConfig(t.Context())
+
+	assert.Nil(t, config.ThinkingConfig)
+	assert.Equal(t, "application/json", config.ResponseMIMEType)
+	assert.Equal(t, schema, config.ResponseJsonSchema)
 }
 
 func TestBuildConfig_Gemini25_ThinkingBudget(t *testing.T) {
@@ -178,7 +225,7 @@ func TestBuildConfig_Gemini25_ThinkingBudget(t *testing.T) {
 				},
 			}
 
-			config := client.buildConfig()
+			config := client.buildConfig(t.Context())
 
 			require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 			assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
@@ -272,7 +319,7 @@ func TestBuildConfig_Gemini3_ThinkingLevel(t *testing.T) {
 				},
 			}
 
-			config := client.buildConfig()
+			config := client.buildConfig(t.Context())
 
 			require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 			assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
@@ -296,7 +343,7 @@ func TestBuildConfig_NoThinkingBudget(t *testing.T) {
 		},
 	}
 
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 
 	// When no ThinkingBudget is set, ThinkingConfig should not be configured
 	assert.Nil(t, config.ThinkingConfig, "ThinkingConfig should not be set when ThinkingBudget is nil")
@@ -316,7 +363,7 @@ func TestBuildConfig_Gemini3_FallbackToTokens(t *testing.T) {
 		},
 	}
 
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 
 	require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 	assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
@@ -340,7 +387,7 @@ func TestBuildConfig_Gemini3_DefaultEffort(t *testing.T) {
 		},
 	}
 
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 
 	require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 	assert.True(t, config.ThinkingConfig.IncludeThoughts, "IncludeThoughts should be true")
@@ -389,7 +436,7 @@ func TestBuildConfig_CaseInsensitiveModel(t *testing.T) {
 				client.ModelConfig.ThinkingBudget = &latest.ThinkingBudget{Effort: "medium"}
 			}
 
-			config := client.buildConfig()
+			config := client.buildConfig(t.Context())
 
 			require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set")
 			assert.Equal(t, tt.expectThinkingLevel, config.ThinkingConfig.ThinkingLevel, "ThinkingLevel should match")
@@ -613,7 +660,7 @@ func TestBuildConfig_ThinkingFromBudget(t *testing.T) {
 		},
 	}
 
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 
 	// ThinkingConfig should be set from ThinkingBudget
 	require.NotNil(t, config.ThinkingConfig, "ThinkingConfig should be set from ThinkingBudget")
