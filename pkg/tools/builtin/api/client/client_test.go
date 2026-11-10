@@ -154,6 +154,45 @@ func TestAPITool_IdentityHeaders(t *testing.T) {
 	assert.Equal(t, version.Version, ts.receivedHeaders.Get(useragent.HeaderAgentVersion))
 }
 
+func TestAPITool_ReadOnlyHint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		method   string
+		readOnly bool
+	}{
+		{name: "GET", method: http.MethodGet, readOnly: true},
+		{name: "POST", method: http.MethodPost},
+		{name: "PUT", method: http.MethodPut},
+		{name: "PATCH", method: http.MethodPatch},
+		{name: "DELETE", method: http.MethodDelete},
+		{name: "HEAD", method: http.MethodHead},
+		{name: "OPTIONS", method: http.MethodOptions},
+		{name: "empty"},
+		{name: "lowercase", method: "get"},
+		{name: "whitespace", method: " GET "},
+		{name: "custom", method: "CUSTOM"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tool := New(latest.APIToolConfig{
+				Name:     "test_api",
+				Method:   tc.method,
+				Endpoint: "https://example.com/api",
+			}, testExpander())
+
+			toolsList, err := tool.Tools(t.Context())
+			require.NoError(t, err)
+			require.Len(t, toolsList, 1)
+			assert.Equal(t, tc.readOnly, toolsList[0].Annotations.ReadOnlyHint)
+			assert.Nil(t, toolsList[0].Annotations.DestructiveHint)
+		})
+	}
+}
+
 func TestAPITool_DefaultOutputSchema(t *testing.T) {
 	t.Parallel()
 
