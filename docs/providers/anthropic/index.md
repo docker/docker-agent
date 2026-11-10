@@ -166,12 +166,14 @@ limited Google access, but the audited Google directory has no dedicated model c
 | Sonnet 5.5 | `claude-sonnet-5-5` | Documented | Documented | Documented |
 | Fable 5 | `claude-fable-5` | Documented | Documented | Documented |
 | Fable 5.1 | `claude-fable-5-1` | Documented | Documented | Documented |
+| Fable 5.2 | `claude-fable-5-2` | Documented | Documented | Documented |
 | Mythos 5 | `claude-mythos-5` | Documented, gated | Limited announcement | **Unsupported** (Mantle only) |
 | Mythos 5.1 | `claude-mythos-5-1` | Documented, gated | Limited announcement | Documented, gated (not Mantle) |
+| Mythos 5.2 | `claude-mythos-5-2` | Documented, gated | Limited announcement | Documented, gated |
 
-The audit found **24 corroborated native model/platform pairs** (9 Claude API +
-7 Vertex + 8 Bedrock runtime), **2 limited-access Mythos/Google announcements** and
-**1 explicitly unsupported Mythos 5/Converse pair**. This is not 26 implemented
+The audit found **29 corroborated native model/platform pairs** (11 Claude API +
+8 Vertex + 10 Bedrock runtime), **3 limited-access Mythos/Google announcements** and
+**1 explicitly unsupported Mythos 5/Converse pair**. These are not implemented
 or live-tested successes. All documented rows still require model access for your
 account and chosen endpoint. An absent Google card proves neither unavailability
 nor entitlement.
@@ -180,7 +182,10 @@ Sources: [Claude model overview](https://platform.claude.com/docs/en/models/over
 [Claude on Vertex](https://platform.claude.com/docs/en/build-with-claude/claude-on-vertex-ai),
 [Google's Claude directory](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude),
 [Mythos 5](https://platform.claude.com/docs/en/models/mythos-5/overview),
-[Mythos 5.1](https://platform.claude.com/docs/en/models/mythos-5-1/overview) and
+[Mythos 5.1](https://platform.claude.com/docs/en/models/mythos-5-1/overview),
+[Fable 5.2](https://platform.claude.com/docs/en/models/fable-5-2/overview),
+[Mythos 5.2](https://platform.claude.com/docs/en/models/mythos-5-2/overview),
+[Google Fable 5.2](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/fable-5-2) and
 [AWS endpoint availability](https://docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html).
 
 According to [model IDs and versions](https://platform.claude.com/docs/en/about-claude/models/model-ids-and-versions),
@@ -204,8 +209,10 @@ For regional profiles, regions and access requirements, follow the linked card.
 | [Sonnet 5.5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html) | `anthropic.claude-sonnet-5-5` | `global.anthropic.claude-sonnet-5-5` |
 | [Fable 5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-fable-5.html) | `anthropic.claude-fable-5` | `global.anthropic.claude-fable-5` |
 | [Fable 5.1](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-fable-5-1.html) | `anthropic.claude-fable-5-1` | `global.anthropic.claude-fable-5-1` |
+| [Fable 5.2](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-fable-5-2.html) | `anthropic.claude-fable-5-2` | `global.anthropic.claude-fable-5-2` |
 | [Mythos 5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-mythos-5.html) | `anthropic.claude-mythos-5` (Mantle only) | None; no runtime access |
 | [Mythos 5.1](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-mythos-5-1.html) | `anthropic.claude-mythos-5-1` | `global.anthropic.claude-mythos-5-1` |
+| [Mythos 5.2](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-mythos-5-2.html) | `anthropic.claude-mythos-5-2` | `global.anthropic.claude-mythos-5-2` |
 
 Do not copy one model's regional prefix set onto another. The bundled models.dev
 snapshot's prefix coverage differs from these cards in both directions; it is a
@@ -254,13 +261,13 @@ Anthropic accepts either an integer token budget or a string effort value. When 
 
 ### Claude 5.x models
 
-Docker Agent recognizes nine Claude 5.x models by ID: `claude-haiku-5-5`, `claude-opus-5`, `claude-opus-5-5`, `claude-sonnet-5`, `claude-sonnet-5-5`, `claude-fable-5`, `claude-fable-5-1`, `claude-mythos-5` and `claude-mythos-5-1`. Bedrock (`us.anthropic.…`) and Vertex (`…@date`) spellings are recognized too. For these models:
+Docker Agent recognizes eleven Claude 5.x models by ID: `claude-haiku-5-5`, `claude-opus-5`, `claude-opus-5-5`, `claude-sonnet-5`, `claude-sonnet-5-5`, `claude-fable-5`, `claude-fable-5-1`, `claude-fable-5-2`, `claude-mythos-5`, `claude-mythos-5-1` and `claude-mythos-5-2`. Bedrock (`us.anthropic.…`) and Vertex (`…@date`) spellings are recognized too. For these models:
 
 - Thinking is adaptive by default and accepts every effort level: `low`, `medium`, `high`, `xhigh` and `max`.
-- With `thinking_budget` unset, Haiku 5.5, Opus 5.5, Sonnet 5.5 and Fable 5.1 are sent explicit adaptive thinking (summarized display, no effort) so the server can check replayed thinking blocks; the other five keep their API default.
+- With `thinking_budget` unset, Haiku 5.5, Opus 5.5, Sonnet 5.5, Fable 5.1/5.2 and Mythos 5.2 are sent explicit adaptive thinking (summarized display, no effort) so the server can check replayed thinking blocks; the other five keep their API default.
 - An integer token budget becomes adaptive thinking with the model's default effort; `max_tokens` is not raised.
 - `temperature`, `top_p` and `top_k` are never sent.
-- `thinking_budget: none` (or `0`) sends `thinking: disabled` on Haiku 5.5, Opus 5 and Sonnet 5. The other six cannot disable thinking: they get adaptive thinking with `low` effort, and Docker Agent logs a warning at startup.
+- `thinking_budget: none` (or `0`) sends `thinking: disabled` on Haiku 5.5, Opus 5 and Sonnet 5. The other eight cannot disable thinking: they get adaptive thinking with `low` effort, and Docker Agent logs a warning at startup.
 - Server-side `fallbacks` work with these models on the Claude API, except Haiku 5.5, which has none (see [Server-Side Fallbacks](#server-side-fallbacks)).
 - A request that ends on an assistant message (a response prefill) is rejected before it is sent. Tool-mode structured output therefore fails after the first plain-text answer instead of retrying with a reminder.
 
@@ -497,7 +504,7 @@ changed since:
   declared at the end of `tools` with `defer_loading: true` and surfaced by a
   `tool_addition`;
 - an effort change becomes a per-message `output_config.effort` on Claude
-  Opus 5, Fable 5.1 and Mythos 5.1;
+  Opus 5, Fable 5.1/5.2 and Mythos 5.1/5.2;
 - per-call system extras (environment information, prompt files and hook
   reminders) become text-only, turn-scoped system messages. They remain in
   history verbatim but stop applying at the next user turn. If the prompt ends
@@ -523,8 +530,8 @@ Docker Agent attaches the `mid-conversation-tool-changes-2026-07-01`,
 that actually carry a tool change, a per-message effort or a turn-scoped
 reminder.
 
-Supported on Claude Opus 4.8, Opus 5, Fable 5, Fable 5.1, Mythos 5 and
-Mythos 5.1 (and their server-side fallbacks); Sonnet 5 and older models are
+Supported on Claude Opus 4.8, Opus 5, Fable 5/5.1/5.2 and Mythos 5/5.1/5.2
+(and their server-side fallbacks); Sonnet 5 and older models are
 rejected at configuration time. Fallback models must also support the request's per-message effort features. The option requires the Beta Messages API.
 
 ## Thinking Display
@@ -545,7 +552,7 @@ Valid values:
 
 - `summarized`: thinking blocks are returned with summarized thinking text (Docker Agent's default for adaptive/effort-based budgets).
 - `display`: thinking blocks are returned for display. Only accepted by pre-4.6 token-thinking models (e.g. Sonnet 4.5, Haiku 4.5); models from the adaptive-thinking generation onward (Opus/Sonnet 4.6+, Sonnet 5, Fable 5) reject it, and Docker Agent fails fast with a configuration error instead of sending a request the API would refuse.
-- `updates`: short progress updates between tool calls, with reasoning text omitted. Available on Fable 5/5.1 and Mythos 5.1; automatically enables `thinking-display-updates-2026-08-18`. No explicit budget is required, and an unset effort keeps the model default. Other models (including configured fallbacks) are rejected locally.
+- `updates`: short progress updates between tool calls, with reasoning text omitted. Available on Fable 5/5.1/5.2 and Mythos 5.1/5.2; automatically enables `thinking-display-updates-2026-08-18`. No explicit budget is required, and an unset effort keeps the model default. Other models (including configured fallbacks) are rejected locally.
 - `omitted`: thinking blocks are returned with an empty thinking field; the signature is still returned for multi-turn continuity. Useful to reduce time-to-first-text-token when streaming.
 
 Note: `thinking_display` applies to both `thinking_budget` with token counts and adaptive/effort-based budgets. For token-count budgets no default is applied (the API already defaults to `summarized`). Full thinking tokens are billed regardless of the `thinking_display` value.
@@ -573,7 +580,7 @@ thinking: Docker Agent refuses the request with an error instead, and a new user
 turn starts a fresh loop.
 
 On Claude models whose server checks thinking prefixes (Haiku 5.5, Opus 5.5,
-Sonnet 5.5 and Fable 5.1), Docker Agent defaults to
+Sonnet 5.5, Fable 5.1/5.2 and Mythos 5.2), Docker Agent defaults to
 `thinking.block_binding.prefix_mismatch_behavior: drop_block`: when earlier
 history changes, the API drops invalidated thinking instead of rejecting the
 request. Dropped blocks are reported in logs. Docker Agent does not default to
@@ -585,6 +592,8 @@ history strictly anyway, set `provider_opts.thinking_prefix_mismatch: error`, an
 avoid compaction, handoffs, `num_history_items` and toolsets that start late. You can explicitly
 select `drop_block` on other supported Claude models too. Both modes attach
 `thinking-binding-controls-2026-08-01`; neither repairs corrupted signatures.
+For the Bedrock Converse policy and observability limits, see the
+[Bedrock guide](../bedrock/index.md#claude-5x-models).
 
 ## Strict Tool Arguments
 

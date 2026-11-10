@@ -23,6 +23,7 @@ func TestThinkingBindingBehavior(t *testing.T) {
 		"fable 5.1":                           {model: "claude-fable-5-1", want: "drop_block"},
 		"fable 5.1 dated":                     {model: "claude-fable-5-1-20260901", want: "drop_block"},
 		"fable 5.2":                           {model: "claude-fable-5-2", want: "drop_block"},
+		"mythos 5.2":                          {model: "claude-mythos-5-2", want: "drop_block"},
 		"mythos 5.1 (no server prefix check)": {model: "claude-mythos-5-1"},
 		"gateway qualified":                   {model: "anthropic/claude-fable-5-1", want: "drop_block"},
 		"vertex":                              {model: "claude-fable-5-1@20260901", want: "drop_block"},

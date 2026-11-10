@@ -31,8 +31,10 @@ var claude5Models = map[string]Claude5Model{
 	"claude-sonnet-5-5": {ChecksThinkingPrefix: true},
 	"claude-fable-5":    {},
 	"claude-fable-5-1":  {ChecksThinkingPrefix: true},
+	"claude-fable-5-2":  {ChecksThinkingPrefix: true},
 	"claude-mythos-5":   {BedrockMantleOnly: true},
 	"claude-mythos-5-1": {},
+	"claude-mythos-5-2": {ChecksThinkingPrefix: true},
 }
 
 // LookupClaude5 returns the policy of a Claude 5.x model. It accepts bare,
