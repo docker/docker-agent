@@ -185,22 +185,24 @@ const (
 )
 
 type mergeProbeResult struct {
-	Commit       string `json:"commit"`
-	Provider     string `json:"provider"`
-	Model        string `json:"model"`
-	Scenario     string `json:"scenario"`
-	Variant      string `json:"variant"`
-	APIPath      string `json:"api_path,omitempty"`
-	Requests     int    `json:"requests"`
-	Attempts     int    `json:"attempts"`
-	Blocked      int    `json:"blocked,omitempty"`
-	Status       int    `json:"status,omitempty"`
-	Outcome      string `json:"outcome"`
-	StreamEnd    string `json:"stream_end,omitempty"`
-	MarkersOK    bool   `json:"markers_ok"`
-	InputTokens  int64  `json:"input_tokens,omitempty"`
-	OutputTokens int64  `json:"output_tokens,omitempty"`
-	Notes        string `json:"notes,omitempty"`
+	Commit                string `json:"commit"`
+	Provider              string `json:"provider"`
+	Model                 string `json:"model"`
+	Scenario              string `json:"scenario"`
+	Variant               string `json:"variant"`
+	APIPath               string `json:"api_path,omitempty"`
+	Requests              int    `json:"requests"`
+	Attempts              int    `json:"attempts"`
+	Blocked               int    `json:"blocked,omitempty"`
+	Status                int    `json:"status,omitempty"`
+	Outcome               string `json:"outcome"`
+	StreamEnd             string `json:"stream_end,omitempty"`
+	MarkersOK             bool   `json:"markers_ok"`
+	InputTokens           int64  `json:"input_tokens,omitempty"`
+	CachedInputTokens     int64  `json:"cached_input_tokens,omitempty"`
+	CacheWriteInputTokens int64  `json:"cache_write_input_tokens,omitempty"`
+	OutputTokens          int64  `json:"output_tokens,omitempty"`
+	Notes                 string `json:"notes,omitempty"`
 }
 
 // TestMessageMergeLive compares preserved message boundaries with the existing
@@ -613,14 +615,45 @@ func collectMessageMergeProbe(ctx context.Context, p Provider, transport *mergeP
 	result.Outcome = classifyMergeProbe(transport, recvErr, content, finish)
 	result.StreamEnd = mergeProbeStreamEnd(finish, recvErr)
 	result.MarkersOK = containsAllMarkers(content, scenario.Markers)
-	if usage != nil {
-		result.InputTokens = usage.InputTokens
-		result.OutputTokens = usage.OutputTokens
-	}
+	recordMergeProbeUsage(&result, usage)
 	if recvErr != nil {
 		result.Notes = mergeProbeErrorClass(recvErr)
 	}
 	return result
+}
+
+// recordMergeProbeUsage copies response usage into the report. InputTokens is
+// the aggregate prompt size (fresh + cache-read + cache-write), so preserve and
+// merge variants compare the same quantity regardless of cache hits.
+func recordMergeProbeUsage(result *mergeProbeResult, usage *chat.Usage) {
+	if usage == nil {
+		return
+	}
+	result.InputTokens = usage.PromptTokens()
+	result.CachedInputTokens = usage.CachedInputTokens
+	result.CacheWriteInputTokens = usage.CacheWriteTokens
+	result.OutputTokens = usage.OutputTokens
+}
+
+func TestMergeProbeResultCountsAllInputBuckets(t *testing.T) {
+	t.Parallel()
+
+	result := mergeProbeResult{}
+	recordMergeProbeUsage(&result, &chat.Usage{
+		InputTokens:       50,
+		CachedInputTokens: 30,
+		CacheWriteTokens:  20,
+		OutputTokens:      7,
+	})
+
+	assert.Equal(t, int64(100), result.InputTokens,
+		"input tokens must aggregate fresh, cache-read and cache-write buckets")
+	assert.Equal(t, int64(30), result.CachedInputTokens)
+	assert.Equal(t, int64(20), result.CacheWriteInputTokens)
+	assert.Equal(t, int64(7), result.OutputTokens)
+
+	recordMergeProbeUsage(&result, nil)
+	assert.Equal(t, int64(100), result.InputTokens, "a nil usage must not reset the counts")
 }
 
 func recordMergeProbeResult(t *testing.T, result mergeProbeResult) {
