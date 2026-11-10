@@ -371,6 +371,34 @@ func TestProcessMCPContent(t *testing.T) {
 			input:      &mcp.CallToolResult{},
 			wantOutput: "no output",
 		},
+		{
+			// FastMCP returns one TextContent per element of a list result.
+			name:       "separate text blocks do not run together",
+			input:      callToolResult(&mcp.TextContent{Text: "alpha.txt"}, &mcp.TextContent{Text: "beta.txt"}, &mcp.TextContent{Text: "gamma.txt"}),
+			wantOutput: "alpha.txt\nbeta.txt\ngamma.txt",
+		},
+		{
+			name:       "text block already ending in a newline is not doubled",
+			input:      callToolResult(&mcp.TextContent{Text: "line one\n"}, &mcp.TextContent{Text: "line two"}),
+			wantOutput: "line one\nline two",
+		},
+		{
+			name:       "empty text block adds no separator",
+			input:      callToolResult(&mcp.TextContent{Text: "a"}, &mcp.TextContent{Text: ""}, &mcp.TextContent{Text: "b"}),
+			wantOutput: "a\nb",
+		},
+		{
+			name:       "separate resource links do not run together",
+			input:      callToolResult(&mcp.ResourceLink{Name: "a", URI: "file:///a"}, &mcp.ResourceLink{Name: "b", URI: "file:///b"}),
+			wantOutput: "[a](file:///a)\n[b](file:///b)",
+		},
+		{
+			// Documents the trade-off: blocks are separate items, so a string
+			// split across blocks is not reassembled.
+			name:       "one string split across text blocks gets a newline at the split",
+			input:      callToolResult(&mcp.TextContent{Text: `{"id":"abc`}, &mcp.TextContent{Text: `def"}`}),
+			wantOutput: "{\"id\":\"abc\ndef\"}",
+		},
 
 		// --- images ---
 		{
