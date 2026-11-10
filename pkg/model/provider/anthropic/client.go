@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 
@@ -98,6 +99,8 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		if cfg.BaseURL != "" {
 			requestOptions = append(requestOptions, option.WithBaseURL(cfg.BaseURL))
 		}
+		// The SDK itself honors ANTHROPIC_BASE_URL; record it so endpoint checks, such as pricing, see it.
+		anthropicClient.BaseURL = os.Getenv("ANTHROPIC_BASE_URL")
 		client := anthropic.NewClient(requestOptions...)
 		anthropicClient.clientFn = func(context.Context) (anthropic.Client, error) {
 			return client, nil

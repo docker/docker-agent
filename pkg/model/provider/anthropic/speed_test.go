@@ -13,6 +13,9 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
+	"github.com/docker/docker-agent/pkg/runtime/pricing"
 	"github.com/docker/docker-agent/pkg/rag/types"
 )
 
@@ -183,4 +186,28 @@ func countOf(betas []string, beta anthropic.AnthropicBeta) int {
 		}
 	}
 	return count
+}
+
+func TestNewClient_RecordsEnvironmentEndpointForPricing(t *testing.T) {
+	cfg := &latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5"}
+	env := environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "test-key"})
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
+	id := modelsdev.NewID("anthropic", "claude-opus-5-5")
+	model, err := store.GetModel(t.Context(), id)
+	require.NoError(t, err)
+	usage := &chat.Usage{InputTokens: 1_000_000, ServiceTier: "fast"}
+	inputPrice := func(client *Client) float64 {
+		priced := pricing.ApplyModelCost(model, id, usage, client.Config)
+		return *pricing.ComputeMessageCost(usage, priced)
+	}
+
+	official, err := NewClient(t.Context(), cfg, env)
+	require.NoError(t, err)
+	assert.InDelta(t, 2*model.Cost.Input, inputPrice(official), 1e-9)
+
+	t.Setenv("ANTHROPIC_BASE_URL", "https://proxy.example.com")
+	proxied, err := NewClient(t.Context(), cfg, env)
+	require.NoError(t, err)
+	assert.Equal(t, "https://proxy.example.com", proxied.Endpoint())
+	assert.InDelta(t, model.Cost.Input, inputPrice(proxied), 1e-9)
 }
