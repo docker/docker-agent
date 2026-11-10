@@ -1,10 +1,15 @@
 package worktree
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,7 +54,7 @@ func TestWorktreeIncludeSelection(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		info, err := os.Stat(filepath.Join(wt.Dir, "cache", "nested", name))
 		require.NoError(t, err)
-		assert.Equal(t, os.FileMode(0o640), info.Mode().Perm())
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 	}
 }
 
@@ -90,7 +95,7 @@ func TestWorktreeIncludeSourceAgentsIgnore(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(wt.Dir, "root.env"))
 	assert.NoFileExists(t, filepath.Join(wt.Dir, "sub", "sub.env"))
 	assert.FileExists(t, filepath.Join(wt.Dir, "safe.env"))
-	assert.Len(t, wt.Warnings, 2)
+	assert.Equal(t, []string{`.worktreeinclude: skipped 2 files protected by .agentsignore`}, wt.Warnings)
 }
 
 func TestWorktreeIncludeDoesNotCopyAgentsIgnoreVariants(t *testing.T) {
@@ -111,10 +116,7 @@ func TestWorktreeIncludeDoesNotCopyAgentsIgnoreVariants(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(wt.Dir, "safe.env"))
 	require.NoError(t, err)
 	assert.Equal(t, "safe", string(content))
-	assert.Equal(t, []string{
-		`.worktreeinclude: skipped a file protected by .agentsignore`,
-		`.worktreeinclude: skipped a file protected by .agentsignore`,
-	}, wt.Warnings)
+	assert.Equal(t, []string{`.worktreeinclude: skipped 2 files protected by .agentsignore`}, wt.Warnings)
 }
 
 func TestWorktreeIncludeUppercaseActiveAgentsIgnore(t *testing.T) {
@@ -140,10 +142,7 @@ func TestWorktreeIncludeUppercaseActiveAgentsIgnore(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(wt.Dir, "safe.env"))
 	require.NoError(t, err)
 	assert.Equal(t, "safe", string(content))
-	assert.Equal(t, []string{
-		`.worktreeinclude: skipped a file protected by .agentsignore`,
-		`.worktreeinclude: skipped a file protected by .agentsignore`,
-	}, wt.Warnings)
+	assert.Equal(t, []string{`.worktreeinclude: skipped 2 files protected by .agentsignore`}, wt.Warnings)
 }
 
 func TestWorktreeIncludeUnsafePaths(t *testing.T) {
@@ -164,7 +163,7 @@ func TestWorktreeIncludeUnsafePaths(t *testing.T) {
 	require.NoError(t, err)
 	defer dst.Close()
 	for _, path := range []string{"../file", "link/file", "linked-file", "directory/file"} {
-		t.Run(path, func(t *testing.T) { require.Error(t, copyIncludedFile(src, dst, path)) })
+		t.Run(path, func(t *testing.T) { require.Error(t, copyIncludedFile(t.Context(), src, dst, path)) })
 	}
 	content, err := os.ReadFile(filepath.Join(outside, "file"))
 	require.NoError(t, err)
@@ -365,4 +364,308 @@ func TestWorktreeIncludeDestinationCheckFailure(t *testing.T) {
 	require.Len(t, warnings, 1)
 	assert.Contains(t, warnings[0], "checking destination ignore rules")
 	assert.NoFileExists(t, filepath.Join(dest, "local.env"))
+}
+
+func TestWorktreeIncludePrivateDirectories(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits")
+	}
+	t.Parallel()
+	for _, existing := range []bool{false, true} {
+		t.Run(strconv.FormatBool(existing), func(t *testing.T) {
+			dir := bootstrapRepo(t)
+			require.NoError(t, os.Chmod(dir, 0o755))
+			includeFile(t, dir, ".gitignore", "*.env\n", 0o644)
+			if existing {
+				includeFile(t, dir, "private/tracked", "tracked", 0o644)
+			}
+			runGit(t, dir, "add", ".gitignore")
+			if existing {
+				runGit(t, dir, "add", "private/tracked")
+			}
+			runGit(t, dir, "commit", "-m", "ignore local files")
+			includeFile(t, dir, ".worktreeinclude", "*.env\n", 0o644)
+			includeFile(t, dir, "private/secret.env", "secret", 0o644)
+			require.NoError(t, os.Chmod(filepath.Join(dir, "private"), 0o700))
+			root := t.TempDir()
+			wt, err := Create(t.Context(), dir, "private", WithRoot(root))
+			require.NoError(t, err)
+			require.NoError(t, os.Chmod(wt.Dir, 0o755))
+			assert.Empty(t, wt.Warnings)
+			parent, err := os.Stat(filepath.Join(wt.Dir, "private"))
+			require.NoError(t, err)
+			file, err := os.Stat(filepath.Join(wt.Dir, "private", "secret.env"))
+			require.NoError(t, err)
+			if existing {
+				assert.Equal(t, os.FileMode(0), file.Mode().Perm()&0o077)
+			} else {
+				assert.Equal(t, os.FileMode(0), parent.Mode().Perm()&0o077)
+			}
+		})
+	}
+}
+
+func TestWorktreeIncludeProtectedDestinationSymlink(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+	includeFile(t, dir, ".gitignore", "*.env\n", 0o644)
+	includeFile(t, dir, "target", "target", 0o600)
+	if err := os.Symlink("target", filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	runGit(t, dir, "add", ".gitignore", "link", "target")
+	runGit(t, dir, "commit", "-m", "destination symlink")
+	runGit(t, dir, "branch", "symlink-base")
+	require.NoError(t, os.Remove(filepath.Join(dir, "link")))
+	includeFile(t, dir, "link/hidden-name.env", "hidden-content", 0o600)
+	includeFile(t, dir, "link/unprotected.env", "other", 0o600)
+	includeFile(t, dir, "safe.env", "safe", 0o600)
+	includeFile(t, dir, ".agentsignore", "link/hidden-name.env\n", 0o600)
+	includeFile(t, dir, ".worktreeinclude", "*.env\n", 0o600)
+	wt, err := Create(t.Context(), dir, "protected-symlink", WithRoot(t.TempDir()), WithBase("symlink-base"))
+	require.NoError(t, err)
+	require.Len(t, wt.Warnings, 2)
+	joined := strings.Join(wt.Warnings, "\n")
+	assert.Contains(t, joined, "checking destination ignore rules")
+	assert.Contains(t, joined, "protected by .agentsignore")
+	assert.NotContains(t, joined, "hidden-name")
+	assert.NotContains(t, joined, "hidden-content")
+	assert.FileExists(t, filepath.Join(wt.Dir, "safe.env"))
+}
+
+func TestWorktreeIncludeWarningBudget(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+	includeFile(t, dir, ".gitignore", "protected/\n*.env\n", 0o644)
+	runGit(t, dir, "add", ".gitignore")
+	runGit(t, dir, "commit", "-m", "ignore local files")
+	runGit(t, dir, "branch", "base")
+	includeFile(t, dir, ".gitignore", "protected/\n*.env\n*.key\n", 0o644)
+	includeFile(t, dir, ".worktreeinclude", "protected/\n*.key\n", 0o644)
+	includeFile(t, dir, ".agentsignore", "protected/\n", 0o644)
+	for i := range 150 {
+		includeFile(t, dir, fmt.Sprintf("protected/hidden-%03d.env", i), "secret", 0o600)
+		includeFile(t, dir, fmt.Sprintf("exposed-%03d.key", i), "secret", 0o600)
+	}
+	wt, err := Create(t.Context(), dir, "warnings", WithRoot(t.TempDir()), WithBase("base"))
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(wt.Warnings), maxIncludeWarnings)
+	joined := strings.Join(wt.Warnings, "\n")
+	assert.LessOrEqual(t, len(joined), maxIncludeWarnings*(maxIncludeWarningBytes+1))
+	assert.Contains(t, joined, "skipped 150 files protected by .agentsignore")
+	assert.Contains(t, joined, "133 additional warnings omitted")
+	assert.NotContains(t, joined, "hidden-")
+}
+
+type cancelAfterCopyStarts struct {
+	context.Context //nolint:containedctx // Preserve cancellation while triggering it after the first write.
+
+	path   string
+	cancel context.CancelFunc
+	size   int64
+}
+
+func (c *cancelAfterCopyStarts) Err() error {
+	if info, err := os.Stat(c.path); err == nil && info.Size() > 0 {
+		c.size = info.Size()
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestWorktreeIncludeCancellationRemovesPartialFile(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+	includeFile(t, dir, ".gitignore", "*.env\n", 0o644)
+	runGit(t, dir, "add", ".gitignore")
+	runGit(t, dir, "commit", "-m", "ignore env files")
+	includeFile(t, dir, ".worktreeinclude", "*.env\n", 0o644)
+	includeFile(t, dir, "a.env", strings.Repeat("x", 512*1024), 0o600)
+	includeFile(t, dir, "b.env", "later", 0o600)
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	trigger := &cancelAfterCopyStarts{Context: ctx, cancel: cancel, path: filepath.Join(root, "worktrees", "cancelled", "a.env")}
+	wt, err := Create(trigger, dir, "cancelled", WithRoot(root))
+	require.NoError(t, err)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	assert.Positive(t, trigger.size)
+	assert.Less(t, trigger.size, int64(512*1024))
+	assert.DirExists(t, wt.Dir)
+	assert.NoFileExists(t, filepath.Join(wt.Dir, "a.env"))
+	assert.NoFileExists(t, filepath.Join(wt.Dir, "b.env"))
+	assert.Equal(t, []string{".worktreeinclude: copying cancelled: context canceled"}, wt.Warnings)
+}
+
+func TestIncludeWarningsTruncateUTF8(t *testing.T) {
+	var warnings includeWarnings
+	warnings.add(strings.Repeat("界", 300))
+	require.Len(t, warnings.result(), 1)
+	assert.LessOrEqual(t, len(warnings.entries[0]), maxIncludeWarningBytes)
+	assert.True(t, utf8.ValidString(warnings.entries[0]))
+}
+
+func TestWorktreeIncludePrivateSourceAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits")
+	}
+	t.Parallel()
+	base := t.TempDir()
+	require.NoError(t, os.Chmod(base, 0o755))
+	private := filepath.Join(base, "private")
+	public := filepath.Join(base, "public")
+	require.NoError(t, os.Mkdir(private, 0o700))
+	require.NoError(t, os.Mkdir(public, 0o755))
+	dir := filepath.Join(private, "repo")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "commit.gpgsign", "false")
+	includeFile(t, dir, ".gitignore", "*.env\n", 0o644)
+	runGit(t, dir, "add", ".gitignore")
+	runGit(t, dir, "commit", "-m", "base")
+	includeFile(t, dir, ".worktreeinclude", "*.env\n", 0o644)
+	includeFile(t, dir, "secret.env", "secret", 0o644)
+	wt, err := Create(t.Context(), dir, "ancestor", WithRoot(public))
+	require.NoError(t, err)
+	info, err := os.Stat(filepath.Join(wt.Dir, "secret.env"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0), info.Mode().Perm()&0o077)
+}
+
+type cancelBetweenCopies struct {
+	context.Context //nolint:containedctx // Observe the next loop check without cancelling the completed copy.
+
+	path   string
+	checks int
+	cancel context.CancelFunc
+}
+
+func (c *cancelBetweenCopies) Err() error {
+	if info, err := os.Stat(c.path); err == nil && info.Size() > 0 {
+		c.checks++
+		if c.checks == 3 {
+			c.cancel()
+		}
+	}
+	return c.Context.Err()
+}
+
+func TestWorktreeIncludeCancellationBetweenFiles(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+	includeFile(t, dir, ".gitignore", "*.env\n", 0o644)
+	runGit(t, dir, "add", ".gitignore")
+	runGit(t, dir, "commit", "-m", "ignore env files")
+	includeFile(t, dir, ".gitignore", "*.env\n*.key\n", 0o644)
+	includeFile(t, dir, ".worktreeinclude", "*.env\n*.key\n", 0o644)
+	includeFile(t, dir, "a.env", "first", 0o600)
+	includeFile(t, dir, "z.key", "second", 0o600)
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	trigger := &cancelBetweenCopies{Context: ctx, cancel: cancel, path: filepath.Join(root, "worktrees", "between", "a.env")}
+	wt, err := Create(trigger, dir, "between", WithRoot(root))
+	require.NoError(t, err)
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	assert.FileExists(t, filepath.Join(wt.Dir, "a.env"))
+	assert.NoFileExists(t, filepath.Join(wt.Dir, "z.key"))
+	assert.Equal(t, []string{".worktreeinclude: copying cancelled: context canceled"}, wt.Warnings)
+}
+
+func TestWorktreeIncludeCancelledWithoutConfig(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.Empty(t, copyIncludedFiles(ctx, dir, dir, t.TempDir()))
+}
+
+func TestWorktreeIncludePrivateDirectoryWithPublicAncestors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits")
+	}
+	t.Parallel()
+	// A 0700 test temp directory would mask the in-repository restriction.
+	base, err := os.MkdirTemp("/tmp", "worktree-include-public-") //nolint:forbidigo,usetesting // t.TempDir has private ancestors that hide permission regressions.
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, os.RemoveAll(base)) })
+	require.NoError(t, os.Chmod(base, 0o755))
+	dir := filepath.Join(base, "repo")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "commit.gpgsign", "false")
+	includeFile(t, dir, ".gitignore", "*.env\n", 0o644)
+	includeFile(t, dir, "private/tracked", "tracked", 0o644)
+	runGit(t, dir, "add", ".gitignore", "private/tracked")
+	runGit(t, dir, "commit", "-m", "base")
+	includeFile(t, dir, ".worktreeinclude", "*.env\n", 0o644)
+	includeFile(t, dir, "private/secret.env", "secret", 0o644)
+	require.NoError(t, os.Chmod(filepath.Join(dir, "private"), 0o700))
+	wt, err := Create(t.Context(), dir, "inside", WithRoot(base))
+	require.NoError(t, err)
+	info, err := os.Stat(filepath.Join(wt.Dir, "private", "secret.env"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0), info.Mode().Perm()&0o077)
+}
+
+func TestWorktreeIncludePrivateRepositoryRootWithPublicAncestors(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits")
+	}
+	t.Parallel()
+	base, err := os.MkdirTemp("/tmp", "worktree-include-root-") //nolint:forbidigo,usetesting // Private temp ancestors would mask the repository-root restriction.
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, os.RemoveAll(base)) })
+	require.NoError(t, os.Chmod(base, 0o755))
+	dir := filepath.Join(base, "repo")
+	require.NoError(t, os.Mkdir(dir, 0o700))
+	require.NoError(t, os.Chmod(dir, 0o700))
+	publicAncestors := func(path string) bool {
+		resolved, err := filepath.EvalSymlinks(path)
+		require.NoError(t, err)
+		for parent := filepath.Dir(resolved); ; parent = filepath.Dir(parent) {
+			info, err := os.Stat(parent)
+			require.NoError(t, err)
+			if info.Mode().Perm()&0o011 != 0o011 {
+				return false
+			}
+			if filepath.Dir(parent) == parent {
+				return true
+			}
+		}
+	}
+	if !publicAncestors(dir) {
+		t.Skip("repository ancestors must be traversable by group and others")
+	}
+	rootInfo, err := os.Stat(dir)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o700), rootInfo.Mode().Perm())
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "commit.gpgsign", "false")
+	includeFile(t, dir, ".gitignore", "*.env\n", 0o644)
+	runGit(t, dir, "add", ".gitignore")
+	runGit(t, dir, "commit", "-m", "base")
+	includeFile(t, dir, ".worktreeinclude", "*.env\n", 0o644)
+	source := filepath.Join(dir, "secret.env")
+	includeFile(t, dir, "secret.env", "secret", 0o644)
+	require.NoError(t, os.Chmod(source, 0o644))
+	wt, err := Create(t.Context(), dir, "private-root", WithRoot(base))
+	require.NoError(t, err)
+	assert.Empty(t, wt.Warnings)
+	require.NoError(t, os.Chmod(filepath.Join(base, "worktrees"), 0o755))
+	require.NoError(t, os.Chmod(wt.Dir, 0o755))
+	dest := filepath.Join(wt.Dir, "secret.env")
+	require.True(t, publicAncestors(dest), "destination ancestors must be traversable by group and others")
+	info, err := os.Stat(dest)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	contents, err := os.ReadFile(dest)
+	require.NoError(t, err)
+	assert.Equal(t, "secret", string(contents))
 }

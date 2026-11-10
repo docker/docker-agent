@@ -11,16 +11,69 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/docker/docker-agent/pkg/fsx"
 )
 
-const worktreeInclude = ".worktreeinclude"
+const (
+	worktreeInclude        = ".worktreeinclude"
+	maxIncludeWarnings     = 20
+	maxIncludeWarningBytes = 512
+)
+
+type includeWarnings struct {
+	entries   []string
+	omitted   int
+	protected int
+	cancelled string
+}
+
+func (w *includeWarnings) add(message string) {
+	if len(w.entries) >= maxIncludeWarnings-3 {
+		w.omitted++
+		return
+	}
+	if len(message) > maxIncludeWarningBytes {
+		message = message[:maxIncludeWarningBytes-3]
+		for !utf8.ValidString(message) {
+			message = message[:len(message)-1]
+		}
+		message += "..."
+	}
+	w.entries = append(w.entries, message)
+}
+
+func (w *includeWarnings) result() []string {
+	if w.protected == 1 {
+		w.entries = append(w.entries, worktreeInclude+": skipped a file protected by .agentsignore")
+	} else if w.protected > 1 {
+		w.entries = append(w.entries, fmt.Sprintf("%s: skipped %d files protected by .agentsignore", worktreeInclude, w.protected))
+	}
+	if w.cancelled != "" {
+		w.entries = append(w.entries, w.cancelled)
+	}
+	if w.omitted > 0 {
+		w.entries = append(w.entries, fmt.Sprintf("%s: %d additional warnings omitted", worktreeInclude, w.omitted))
+	}
+	return w.entries
+}
 
 // copyIncludedFiles returns warnings rather than failing after Git has created
 // the checkout. Git commands use NUL delimiters to preserve arbitrary names.
 func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []string {
-	warn := func(err error) []string { return []string{fmt.Sprintf("%s: %v", worktreeInclude, err)} }
+	var warnings includeWarnings
+	warn := func(err error) []string {
+		warnings.add(fmt.Sprintf("%s: %v", worktreeInclude, err))
+		return warnings.result()
+	}
+	cancelled := func() bool {
+		if err := ctx.Err(); err != nil {
+			warnings.cancelled = fmt.Sprintf("%s: copying cancelled: %v", worktreeInclude, err)
+			return true
+		}
+		return false
+	}
 	src, err := os.OpenRoot(source)
 	if err != nil {
 		return warn(err)
@@ -36,6 +89,9 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 	if !info.Mode().IsRegular() {
 		return warn(errors.New("configuration must be a regular file"))
 	}
+	if cancelled() {
+		return warnings.result()
+	}
 
 	matchers := make([]*fsx.AgentsIgnoreMatcher, 0, 2)
 	for _, dir := range []string{workingDir, source} {
@@ -48,37 +104,77 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 
 	candidates, err := gitBytes(ctx, source, nil, "ls-files", "-z", "-o", "-i", "--exclude-from="+worktreeInclude)
 	if err != nil {
-		return warn(err)
+		if cancelled() {
+			return warnings.result()
+		}
+		return warn(errors.New("could not enumerate included files"))
 	}
-	if len(candidates) == 0 {
-		return nil
+	var eligible bytes.Buffer
+	for name := range bytes.SplitSeq(candidates, []byte{0}) {
+		if cancelled() {
+			return warnings.result()
+		}
+		if len(name) == 0 {
+			continue
+		}
+		rel := filepath.FromSlash(string(name))
+		if !filepath.IsLocal(rel) {
+			warnings.add(fmt.Sprintf("%s: unsafe path %q", worktreeInclude, rel))
+			continue
+		}
+		blocked := strings.EqualFold(filepath.Base(rel), fsx.AgentsIgnoreFile)
+		for _, matcher := range matchers {
+			if matcher.Match(filepath.Join(source, rel)) {
+				blocked = true
+			}
+		}
+		if blocked {
+			warnings.protected++
+			continue
+		}
+		eligible.Write(name)
+		eligible.WriteByte(0)
 	}
-	ignoredInSource, err := checkIgnoredPaths(ctx, source, candidates)
+	if eligible.Len() == 0 {
+		return warnings.result()
+	}
+	ignoredInSource, err := checkIgnoredPaths(ctx, source, eligible.Bytes())
 	if err != nil {
+		if cancelled() {
+			return warnings.result()
+		}
 		return warn(err)
 	}
 	var ignored bytes.Buffer
-	for name := range bytes.SplitSeq(candidates, []byte{0}) {
+	for name := range bytes.SplitSeq(eligible.Bytes(), []byte{0}) {
 		if ignoredInSource[string(name)] {
 			ignored.Write(name)
 			ignored.WriteByte(0)
 		}
 	}
 	if ignored.Len() == 0 {
-		return nil
+		return warnings.result()
 	}
 	ignoredInDest, err := checkIgnoredPaths(ctx, dest, ignored.Bytes())
-	var warnings []string
 	failedInDest := make(map[string]bool)
 	if err != nil {
+		if cancelled() {
+			return warnings.result()
+		}
 		ignoredInDest = make(map[string]bool)
 		for name := range bytes.SplitSeq(ignored.Bytes(), []byte{0}) {
+			if cancelled() {
+				return warnings.result()
+			}
 			if len(name) == 0 {
 				continue
 			}
 			checked, err := checkIgnoredPaths(ctx, dest, append(bytes.Clone(name), 0))
 			if err != nil {
-				warnings = append(warnings, fmt.Sprintf("%s: %q: checking destination ignore rules: %v", worktreeInclude, name, err))
+				if cancelled() {
+					return warnings.result()
+				}
+				warnings.add(fmt.Sprintf("%s: %q: checking destination ignore rules: %v", worktreeInclude, name, err))
 				failedInDest[string(name)] = true
 				continue
 			}
@@ -94,44 +190,36 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 	defer dst.Close()
 
 	for name := range bytes.SplitSeq(ignored.Bytes(), []byte{0}) {
+		if cancelled() {
+			break
+		}
 		if len(name) == 0 {
 			continue
 		}
 		rel := filepath.FromSlash(string(name))
-		if !filepath.IsLocal(rel) {
-			warnings = append(warnings, fmt.Sprintf("%s: unsafe path %q", worktreeInclude, rel))
-			continue
-		}
-		blocked := strings.EqualFold(filepath.Base(rel), fsx.AgentsIgnoreFile)
-		for _, matcher := range matchers {
-			if matcher.Match(filepath.Join(source, rel)) {
-				blocked = true
-			}
-		}
-		if blocked {
-			warnings = append(warnings, worktreeInclude+": skipped a file protected by .agentsignore")
-			continue
-		}
 		if strings.HasSuffix(rel, string(filepath.Separator)) {
-			warnings = append(warnings, fmt.Sprintf("%s: skipped nested repository %q", worktreeInclude, rel))
+			warnings.add(fmt.Sprintf("%s: skipped nested repository %q", worktreeInclude, rel))
 			continue
 		}
 		if strings.EqualFold(filepath.Base(rel), ".gitignore") || strings.EqualFold(filepath.Base(rel), ".gitattributes") {
-			warnings = append(warnings, fmt.Sprintf("%s: %q: Git control files are not copied", worktreeInclude, rel))
+			warnings.add(fmt.Sprintf("%s: %q: Git control files are not copied", worktreeInclude, rel))
 			continue
 		}
 		if failedInDest[string(name)] {
 			continue
 		}
 		if !ignoredInDest[string(name)] {
-			warnings = append(warnings, fmt.Sprintf("%s: %q: not ignored in destination; skipped", worktreeInclude, rel))
+			warnings.add(fmt.Sprintf("%s: %q: not ignored in destination; skipped", worktreeInclude, rel))
 			continue
 		}
-		if err := copyIncludedFile(src, dst, rel); err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: %q: %v", worktreeInclude, rel, err))
+		if err := copyIncludedFile(ctx, src, dst, rel); err != nil {
+			if cancelled() {
+				break
+			}
+			warnings.add(fmt.Sprintf("%s: %q: %v", worktreeInclude, rel, err))
 		}
 	}
-	return warnings
+	return warnings.result()
 }
 
 func checkIgnoredPaths(ctx context.Context, dir string, paths []byte) (map[string]bool, error) {
@@ -176,53 +264,87 @@ func gitBytes(ctx context.Context, dir string, input []byte, args ...string) ([]
 
 // openDirectory rejects symlink components and verifies that each opened
 // directory is the one inspected, while os.Root keeps operations contained.
-func openDirectory(root *os.Root, parts []string, create bool) (*os.Root, error) {
+func openDirectory(root *os.Root, parts []string, create bool) (*os.Root, os.FileMode, error) {
 	current, err := root.OpenRoot(".")
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	info, err := current.Stat(".")
+	if err != nil {
+		current.Close()
+		return nil, 0, err
+	}
+	traverse := info.Mode().Perm() & 0o011
 	for _, part := range parts {
 		info, err := current.Lstat(part)
 		if errors.Is(err, fs.ErrNotExist) && create {
-			if err = current.Mkdir(part, 0o755); err == nil || errors.Is(err, fs.ErrExist) {
+			if err = current.Mkdir(part, 0o700); err == nil || errors.Is(err, fs.ErrExist) {
 				info, err = current.Lstat(part)
 			}
 		}
 		if err != nil {
 			current.Close()
-			return nil, err
+			return nil, 0, err
 		}
 		if !info.IsDir() || info.Mode()&fs.ModeSymlink != 0 {
 			current.Close()
-			return nil, fmt.Errorf("directory %q is not a real directory", part)
+			return nil, 0, fmt.Errorf("directory %q is not a real directory", part)
 		}
 		next, err := current.OpenRoot(part)
 		if err != nil {
 			current.Close()
-			return nil, err
+			return nil, 0, err
 		}
 		opened, err := next.Stat(".")
 		current.Close()
 		if err != nil {
 			next.Close()
-			return nil, err
+			return nil, 0, err
 		}
 		if !os.SameFile(info, opened) {
 			next.Close()
-			return nil, fmt.Errorf("directory %q changed while opening", part)
+			return nil, 0, fmt.Errorf("directory %q changed while opening", part)
 		}
+		traverse &= opened.Mode().Perm() & 0o011
 		current = next
 	}
-	return current, nil
+	return current, traverse, nil
 }
 
-func copyIncludedFile(src, dst *os.Root, rel string) error {
+func parentTraverse(path string) (os.FileMode, error) {
+	path, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return 0, err
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return 0, err
+	}
+	traverse := os.FileMode(0o011)
+	for path = filepath.Dir(path); ; path = filepath.Dir(path) {
+		info, err := os.Stat(path)
+		if err != nil {
+			return 0, err
+		}
+		traverse &= info.Mode().Perm() & 0o011
+		if parent := filepath.Dir(path); parent == path {
+			break
+		}
+	}
+	return traverse, nil
+}
+
+func copyIncludedFile(ctx context.Context, src, dst *os.Root, rel string) error {
 	if !filepath.IsLocal(rel) {
 		return fmt.Errorf("unsafe path %q", rel)
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	name := parts[len(parts)-1]
-	srcDir, err := openDirectory(src, parts[:len(parts)-1], false)
+	srcTraverse, err := parentTraverse(src.Name())
+	if err != nil {
+		return err
+	}
+	srcDir, srcInside, err := openDirectory(src, parts[:len(parts)-1], false)
 	if err != nil {
 		return err
 	}
@@ -247,18 +369,29 @@ func copyIncludedFile(src, dst *os.Root, rel string) error {
 		return errors.New("source changed while opening")
 	}
 
-	dstDir, err := openDirectory(dst, parts[:len(parts)-1], true)
+	dstDir, _, err := openDirectory(dst, parts[:len(parts)-1], true)
 	if err != nil {
 		return err
 	}
 	defer dstDir.Close()
+	srcTraverse &= srcInside
 	out, err := dstDir.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(out, in)
+	_, copyErr := io.Copy(struct{ io.Writer }{out}, &contextReader{check: ctx.Err, reader: in})
 	if copyErr == nil {
-		copyErr = out.Chmod(info.Mode().Perm())
+		copyErr = ctx.Err()
+	}
+	if copyErr == nil {
+		mode := info.Mode().Perm()
+		if srcTraverse&0o010 == 0 {
+			mode &^= 0o070
+		}
+		if srcTraverse&0o001 == 0 {
+			mode &^= 0o007
+		}
+		copyErr = out.Chmod(mode)
 	}
 	if err := out.Close(); copyErr == nil {
 		copyErr = err
@@ -267,4 +400,17 @@ func copyIncludedFile(src, dst *os.Root, rel string) error {
 		_ = dstDir.Remove(name)
 	}
 	return copyErr
+}
+
+// contextReader checks cancellation between filesystem reads.
+type contextReader struct {
+	check  func() error
+	reader io.Reader
+}
+
+func (r *contextReader) Read(p []byte) (int, error) {
+	if err := r.check(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
