@@ -98,10 +98,9 @@ type Options struct {
 	HostHome string
 
 	// Workspace is the absolute host path that the sandbox mounts as
-	// the agent's live working directory. Files under it are not
-	// staged into the kit because the sandbox sees them through the
-	// live mount; staging them would duplicate content and ship a
-	// stale, redacted copy alongside the live one.
+	// the agent's live working directory. Paths under it are left to
+	// the live mount, even if symlinks point outside it; their host
+	// targets are never imported through those paths.
 	Workspace string
 
 	// CacheDir is the parent directory under which the kit will be
@@ -178,15 +177,14 @@ type Entry struct {
 	// manifest so the sandbox cannot learn the host layout.
 	Source string `json:"-"`
 	// Target is the path relative to the kit root. Empty when the
-	// file isn't staged into the kit because it's already reachable
-	// inside the sandbox via the live workspace mount.
+	// file isn't staged into the kit because it's left to the live
+	// workspace mount.
 	Target string `json:"target,omitempty"`
 }
 
 // IsStaged reports whether the entry has a copy under the kit root.
-// A non-staged entry is one the agent reaches via the live workspace
-// mount instead, surfaced in the manifest and the printed summary so
-// the user can see what the agent will read.
+// A non-staged entry is left to the live workspace mount instead;
+// its symlink target may be unavailable inside the sandbox.
 func (e Entry) IsStaged() bool {
 	return e.Target != ""
 }
@@ -513,15 +511,9 @@ func localSkillFilter(cfg *latestcfg.Config) (map[string]bool, bool) {
 	return include, true
 }
 
-// stagePromptFiles walks every agent in cfg, records every
-// add_prompt_files entry the agent will read, and stages the ones
-// that aren't already reachable inside the sandbox via the live
-// workspace mount.
-//
-// Files under workspace are NOT copied (the live mount surfaces them
-// directly), but they are still recorded in the returned [Entry]
-// slice with Target == "" so the printed kit summary reflects every
-// file the agent will see — not just the ones the host had to ship.
+// stagePromptFiles records discovered add_prompt_files entries and stages
+// external files. Paths under workspace are left to the live mount, even
+// when symlinks point outside it, and recorded with Target == "".
 //
 // When a single name (e.g. "AGENTS.md") resolves to both a workspace
 // match and a host-home match we record both: the workspace one
@@ -559,11 +551,9 @@ func stagePromptFiles(kitDir string, cfg *latestcfg.Config, hostCwd, hostHome, w
 			seen[name] = true
 
 			for _, src := range promptfiles.Paths(hostCwd, hostHome, "", name) {
-				if isUnder(src, workspace) {
-					// The live mount will surface it inside the sandbox —
-					// no copy needed, but record the entry so the user can
-					// see in the kit summary that AGENTS.md (etc.) is
-					// covered.
+				if pathx.IsWithin(src, workspace) || isUnder(src, workspace) {
+					// Leave workspace paths to the live mount, even when a
+					// symlink points outside; never import its host target.
 					entries = append(entries, Entry{Source: src, Target: ""})
 					continue
 				}
