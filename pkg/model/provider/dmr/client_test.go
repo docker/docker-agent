@@ -2,6 +2,7 @@ package dmr
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"math"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1289,4 +1291,158 @@ func TestNoThinkingSetsChatTemplateKwargsAndBumpsMaxTokens(t *testing.T) {
 	ct, ok := req["chat_template_kwargs"].(map[string]any)
 	require.True(t, ok, "chat_template_kwargs must be present")
 	assert.Equal(t, false, ct["enable_thinking"])
+}
+
+func TestNewClientDisableAutoPullUsesAvailabilityAPI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping docker CLI shim test on Windows")
+	}
+
+	t.Setenv("MODEL_RUNNER_HOST", "")
+
+	t.Run("available model", func(t *testing.T) {
+		server := newDMRModelsServer(t, `{"data":[{"id":"ai/qwen3:latest"}]}`)
+		argsFile := filepath.Join(t.TempDir(), "args")
+		useDMRMockDocker(t, server.URL+"/engines/v1/", argsFile)
+
+		_, err := NewClient(t.Context(), &latest.ModelConfig{
+			Provider: "dmr",
+			Model:    "ai/qwen3:latest",
+		}, options.WithDisableAutoPull())
+		require.NoError(t, err)
+
+		args, err := os.ReadFile(argsFile)
+		require.NoError(t, err)
+		assert.Contains(t, string(args), "model status --json")
+		assert.NotContains(t, string(args), "model pull")
+	})
+
+	t.Run("missing model is rejected without pulling", func(t *testing.T) {
+		server := newDMRModelsServer(t, `{"data":[{"id":"ai/gemma3:latest"}]}`)
+		argsFile := filepath.Join(t.TempDir(), "args")
+		useDMRMockDocker(t, server.URL+"/engines/v1/", argsFile)
+
+		_, err := NewClient(t.Context(), &latest.ModelConfig{
+			Provider: "dmr",
+			Model:    "ai/qwen3:latest",
+		}, options.WithDisableAutoPull())
+		require.Error(t, err)
+
+		var notAvailable *ModelNotAvailableError
+		require.ErrorAs(t, err, &notAvailable)
+
+		args, err := os.ReadFile(argsFile)
+		require.NoError(t, err)
+		assert.NotContains(t, string(args), "model pull")
+	})
+}
+
+func TestNewClientAvailabilityCheckBypassesTransportWrapper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Skipping docker CLI shim test on Windows")
+	}
+
+	var serverRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		serverRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"ai/qwen3:latest"}]}`))
+	}))
+	defer server.Close()
+
+	argsFile := filepath.Join(t.TempDir(), "args")
+	useDMRMockDocker(t, server.URL+"/engines/v1/", argsFile)
+	t.Setenv("MODEL_RUNNER_HOST", "")
+
+	var wrapperCalls atomic.Int32
+	_, err := NewClient(t.Context(), &latest.ModelConfig{
+		Provider: "dmr",
+		Model:    "ai/qwen3:latest",
+	},
+		options.WithDisableAutoPull(),
+		options.WithGeneratingTitle(),
+		options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
+			return dmrRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				wrapperCalls.Add(1)
+				return nil, errors.New("transport wrapper must not intercept setup")
+			})
+		}),
+	)
+	require.NoError(t, err)
+	// One /models probe from endpoint discovery and one from availability.
+	assert.Equal(t, int32(2), serverRequests.Load())
+	assert.Zero(t, wrapperCalls.Load())
+}
+
+func TestNewClientDisableAutoPullChecksModelRunnerHostAvailability(t *testing.T) {
+	var serverRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		serverRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"ai/qwen3:latest"}]}`))
+	}))
+	defer server.Close()
+
+	t.Setenv("MODEL_RUNNER_HOST", server.URL)
+	t.Setenv("PATH", t.TempDir())
+
+	var wrapperCalls atomic.Int32
+	_, err := NewClient(t.Context(), &latest.ModelConfig{
+		Provider: "dmr",
+		Model:    "ai/qwen3:latest",
+	},
+		options.WithDisableAutoPull(),
+		options.WithGeneratingTitle(),
+		options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
+			return dmrRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				wrapperCalls.Add(1)
+				return nil, errors.New("transport wrapper must not intercept setup")
+			})
+		}),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), serverRequests.Load())
+	assert.Zero(t, wrapperCalls.Load())
+}
+
+func newDMRModelsServer(t *testing.T, models string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(models))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func useDMRMockDocker(t *testing.T, endpoint, argsFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> \"$DMR_ARGS_FILE\"\n" +
+		"case \"$*\" in\n" +
+		"  \"model status --json\")\n" +
+		"    printf '{\"endpoint\":\"%s\",\"running\":true}\\n' \"$DMR_TEST_ENDPOINT\"\n" +
+		"    ;;\n" +
+		"  \"model inspect \"*)\n" +
+		"    exit 1\n" +
+		"    ;;\n" +
+		"esac\n" +
+		"exit 0\n"
+	writeMockCLI(t, filepath.Join(dir, "docker"), script)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DMR_ARGS_FILE", argsFile)
+	t.Setenv("DMR_TEST_ENDPOINT", endpoint)
 }

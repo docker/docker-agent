@@ -46,6 +46,16 @@ func TestTransportWrapper_NilByDefault(t *testing.T) {
 	assert.Nil(t, opts.TransportWrapper())
 }
 
+func TestWithDisableAutoPull_RoundTrips(t *testing.T) {
+	t.Parallel()
+
+	src := Apply(WithDisableAutoPull())
+	require.True(t, src.DisableAutoPull())
+
+	dst := Apply(FromModelOptions(src)...)
+	assert.True(t, dst.DisableAutoPull())
+}
+
 func TestWrapTransportUsesDefaultTransportWhenClientTransportNil(t *testing.T) {
 	t.Parallel()
 

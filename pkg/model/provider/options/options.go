@@ -23,6 +23,7 @@ type ModelOptions struct {
 	generatingTitle      bool
 	compacting           bool
 	noThinking           bool
+	disableAutoPull      bool
 	maxTokens            int64
 	maxTokensInheritable bool
 	providers            map[string]latest.ProviderConfig
@@ -65,6 +66,13 @@ func (c *ModelOptions) MaxTokensInheritable() bool {
 
 func (c *ModelOptions) NoThinking() bool {
 	return c.noThinking
+}
+
+// DisableAutoPull reports whether providers must not download missing models
+// during client construction. DMR honors it by checking availability through
+// the read-only models API instead of running `docker model pull`.
+func (c *ModelOptions) DisableAutoPull() bool {
+	return c.disableAutoPull
 }
 
 func (c *ModelOptions) Providers() map[string]latest.ProviderConfig {
@@ -206,6 +214,14 @@ func WithNoThinking() Opt {
 	}
 }
 
+// WithDisableAutoPull prevents providers from downloading missing models
+// during client construction.
+func WithDisableAutoPull() Opt {
+	return func(cfg *ModelOptions) {
+		cfg.disableAutoPull = true
+	}
+}
+
 func WithProviders(providers map[string]latest.ProviderConfig) Opt {
 	return func(cfg *ModelOptions) {
 		cfg.providers = providers
@@ -293,6 +309,9 @@ func FromModelOptions(m ModelOptions) []Opt {
 	}
 	if m.noThinking {
 		out = append(out, WithNoThinking())
+	}
+	if m.disableAutoPull {
+		out = append(out, WithDisableAutoPull())
 	}
 	if m.maxTokens != 0 {
 		if m.maxTokensInheritable {

@@ -3,7 +3,7 @@ title: "Message-merging compatibility probes"
 description: "How to collect endpoint-scoped evidence for consecutive system and user message merging without changing production defaults."
 keywords: docker agent, contributing, providers, message merging, compatibility
 weight: 20
-canonical: https://docker.github.io/docker-agent/community/contributing/message-merging/
+canonical: https://docker.github.io/docker-agent/community/message-merging/
 ---
 
 The provider catalog records whether consecutive system or user messages must
@@ -24,8 +24,9 @@ The first probe wave is deliberately narrow:
   explicit prompt-cache breakpoints are covered by hermetic tests instead.
 - Built-in catalog providers only. Custom provider definitions are out of scope
   because their endpoint and template behaviour is deployment-specific. DMR is
-  included and needs a local Model Runner; targets that cannot be constructed
-  are reported as `setup_error`, not as a merge result.
+  included and needs a local Model Runner with the model already pulled; the
+  probe never downloads models. Targets that cannot be constructed are reported
+  as `setup_error`, not as a merge result.
 
 The OpenAI API classification redesign tracked in
 [#4756](https://github.com/docker/docker-agent/issues/4756) is intentionally
@@ -43,16 +44,19 @@ DOCKER_AGENT_MESSAGE_MERGE_TARGETS=provider/model[,provider/model...]
 - Credentials alone never start an inference request. The opt-in and target
   validation run before any provider or credential is constructed.
 - Wildcards are rejected, so a typo cannot scan the catalog.
-- Each variant is limited to one physical HTTP request. SDK retries are counted
-  through the probe transport and then blocked by the budget.
+- Each variant sends one inference request. SDK retries are counted through the
+  probe transport and then blocked by the budget.
+- DMR availability is checked through the read-only models API. The probe never
+  runs `docker model pull`, and a missing model is reported as `setup_error`.
 - Probe requests set a small output budget (`max_tokens: 256`) and temperature
   `0`, so scenarios only spend enough tokens to return their markers and
   sampling noise does not decide the comparison.
 - Requests run sequentially, not in parallel, to avoid provider rate limits
   contaminating the comparison.
-- The report contains provider, model, API path, request count, HTTP status,
-  outcome category, stream end, marker result and token usage. It does not
-  contain API keys, authorization headers, account ids or raw response bodies.
+- The report contains provider, model, normalized API path, request count, HTTP
+  status, outcome category, stream end, marker result and token usage. It does
+  not contain API keys, authorization headers, account ids or raw response
+  bodies.
 
 ## Running the probe
 
@@ -63,7 +67,7 @@ everything before the first slash.
 DOCKER_AGENT_RUN_MESSAGE_MERGE_LIVE_TESTS=1 \
 DOCKER_AGENT_MESSAGE_MERGE_TARGETS='deepseek/deepseek-v4-pro,openrouter/qwen/qwen3.6-35b' \
 DOCKER_AGENT_MESSAGE_MERGE_REPORT=/tmp/message-merge.jsonl \
-go test -count=1 -v -run '^TestMessageMergeLive$' ./pkg/model/provider
+go test -count=1 -buildvcs=true -v -run '^TestMessageMergeLive$' ./pkg/model/provider
 ```
 
 PowerShell:
@@ -72,12 +76,14 @@ PowerShell:
 $env:DOCKER_AGENT_RUN_MESSAGE_MERGE_LIVE_TESTS = "1"
 $env:DOCKER_AGENT_MESSAGE_MERGE_TARGETS = "deepseek/deepseek-v4-pro,openrouter/qwen/qwen3.6-35b"
 $env:DOCKER_AGENT_MESSAGE_MERGE_REPORT = "$env:TEMP\message-merge.jsonl"
-go test -count=1 -v -run '^TestMessageMergeLive$' ./pkg/model/provider
+go test -count=1 -buildvcs=true -v -run '^TestMessageMergeLive$' ./pkg/model/provider
 ```
 
-The test skips when the opt-in is absent. A target that cannot be constructed
-fails the run and records `setup_error`; a missing credential should be treated
-as a setup failure, not as a compatibility result.
+The test skips when the opt-in is absent. It fails when the test binary has no
+`vcs.revision`; `-buildvcs=true` is required so the JSONL report records the
+commit. A target that cannot be constructed fails the run and records
+`setup_error`; a missing credential should be treated as a setup failure, not as
+a compatibility result.
 
 ## Scenarios and variants
 

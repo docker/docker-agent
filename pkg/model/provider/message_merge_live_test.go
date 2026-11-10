@@ -11,7 +11,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -36,7 +38,7 @@ import (
 
 // The probes below are an experiment harness, not a compatibility guarantee.
 // They are disabled by default and only run when both an explicit opt-in and a
-// target list are present. See docs/community/contributing/message-merging.md.
+// target list are present. See docs/community/message-merging/index.md.
 const (
 	messageMergeLiveOptInEnv  = "DOCKER_AGENT_RUN_MESSAGE_MERGE_LIVE_TESTS"
 	messageMergeTargetsEnv    = "DOCKER_AGENT_MESSAGE_MERGE_TARGETS"
@@ -211,6 +213,8 @@ func TestMessageMergeLive(t *testing.T) {
 	}
 	require.NoError(t, err)
 
+	require.NoError(t, validateMergeProbeCommit(mergeProbeCommit()))
+
 	for _, target := range targets {
 		t.Run(target.String(), func(t *testing.T) {
 			runMessageMergeProbe(t, target)
@@ -282,6 +286,54 @@ func TestMessageMergeLiveRequiresExplicitOptIn(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, targets)
+		})
+	}
+}
+
+func TestValidateMergeProbeCommit(t *testing.T) {
+	t.Parallel()
+
+	require.Error(t, validateMergeProbeCommit(""))
+	require.Error(t, validateMergeProbeCommit("unknown"))
+	require.NoError(t, validateMergeProbeCommit("86de60512f90e7f2748bd9c93e0c4ffafd2d2cb3"))
+}
+
+func TestRedactMergeProbeAPIPath(t *testing.T) {
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "account-123")
+	t.Setenv("CLOUDFLARE_GATEWAY_ID", "gateway-456")
+
+	tests := []struct {
+		name     string
+		provider string
+		path     string
+		want     string
+	}{
+		{
+			name:     "workers ai account id",
+			provider: "cloudflare-workers-ai",
+			path:     "/client/v4/accounts/account-123/ai/v1/chat/completions",
+			want:     "/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1/chat/completions",
+		},
+		{
+			name:     "ai gateway account and gateway ids",
+			provider: "cloudflare-ai-gateway",
+			path:     "/v1/account-123/gateway-456/compat/chat/completions",
+			want:     "/v1/${CLOUDFLARE_ACCOUNT_ID}/${CLOUDFLARE_GATEWAY_ID}/compat/chat/completions",
+		},
+		{
+			name:     "provider without environment references",
+			provider: "deepseek",
+			path:     "/v1/chat/completions",
+			want:     "/v1/chat/completions",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactMergeProbeAPIPath(tt.provider, tt.path)
+			assert.Equal(t, tt.want, got)
+			assert.NotContains(t, got, "account-123")
+			assert.NotContains(t, got, "gateway-456")
 		})
 	}
 }
@@ -404,24 +456,60 @@ func TestMessageMergeProbeRegistrySupportsDMR(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []mergeProbeTarget{{Provider: "dmr", Model: "ai/qwen3:latest"}}, targets)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/chat/completions") {
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"))
-			return
-		}
-		w.WriteHeader(http.StatusAccepted)
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer server.Close()
+	scenario := messageMergeProbeScenarios()[1]
+	for _, variant := range messageMergeProbeVariants(t.Context(), scenario) {
+		t.Run(variant.Name, func(t *testing.T) {
+			t.Parallel()
 
-	p, err := fullTestRegistry().New(t.Context(), &latest.ModelConfig{
-		Provider: "dmr",
-		Model:    "ai/qwen3:latest",
-		BaseURL:  server.URL + "/engines/v1/",
-	}, environment.NewNoEnvProvider())
-	require.NoError(t, err)
-	closeProvider(p)
+			var serverRequests atomic.Int32
+			captured := make(chan []byte, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				serverRequests.Add(1)
+				if r.URL.Path != "/engines/v1/chat/completions" {
+					t.Errorf("unexpected setup request reached endpoint: %s", r.URL.Path)
+					http.Error(w, "unexpected path", http.StatusBadRequest)
+					return
+				}
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Errorf("reading probe request: %v", err)
+					http.Error(w, "invalid body", http.StatusBadRequest)
+					return
+				}
+				captured <- body
+				resp := messageMergeSSEResponse(r)
+				defer resp.Body.Close()
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, err = io.Copy(w, resp.Body)
+				assert.NoError(t, err)
+			}))
+			defer server.Close()
+
+			transport := newMergeProbeTransport(variant.Messages)
+			p, err := newMergeProbeProvider(t.Context(), &latest.ModelConfig{
+				Provider: "dmr",
+				Model:    "ai/qwen3:latest",
+				BaseURL:  server.URL + "/engines/v1/",
+			}, environment.NewNoEnvProvider(), transport)
+			require.NoError(t, err)
+			defer closeProvider(p)
+
+			result := collectMessageMergeProbe(t.Context(), p, transport, targets[0], scenario, variant)
+			require.Equal(t, mergeProbeAccepted, result.Outcome)
+			assert.Equal(t, "/engines/v1/chat/completions", result.APIPath)
+			assert.Equal(t, http.StatusOK, result.Status)
+			assert.Equal(t, 1, result.Requests)
+			assert.Equal(t, 1, result.Attempts)
+			assert.Zero(t, result.Blocked)
+			assert.Equal(t, int32(1), serverRequests.Load())
+
+			var payload struct {
+				Messages []json.RawMessage `json:"messages"`
+			}
+			require.NoError(t, json.Unmarshal(<-captured, &payload))
+			assert.JSONEq(t, mustMarshalOpenAIMessages(t, variant.Messages), string(mustMarshalRawMessages(t, payload.Messages)))
+		})
+	}
 }
 
 func runMessageMergeProbe(t *testing.T, target mergeProbeTarget) {
@@ -460,16 +548,12 @@ func executeMessageMergeProbe(ctx context.Context, target mergeProbeTarget, scen
 	maxTokens := int64(256)
 	temperature := 0.0
 	transport := newMergeProbeTransport(variant.Messages)
-	p, err := fullTestRegistry().New(ctx, &latest.ModelConfig{
+	p, err := newMergeProbeProvider(ctx, &latest.ModelConfig{
 		Provider:    target.Provider,
 		Model:       target.Model,
 		MaxTokens:   &maxTokens,
 		Temperature: &temperature,
-	}, environment.NewOsEnvProvider(),
-		options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
-			transport.base = base
-			return transport
-		}))
+	}, environment.NewOsEnvProvider(), transport)
 	if err != nil {
 		result.Outcome = mergeProbeSetupError
 		result.Notes = "provider_setup_failed"
@@ -478,6 +562,29 @@ func executeMessageMergeProbe(ctx context.Context, target mergeProbeTarget, scen
 	defer closeProvider(p)
 
 	return collectMessageMergeProbe(ctx, p, transport, target, scenario, variant), nil
+}
+
+func newMergeProbeProvider(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, transport *mergeProbeTransport) (Provider, error) {
+	var ready atomic.Bool
+	p, err := fullTestRegistry().New(ctx, cfg, env,
+		// A probe must never download a model during provider construction.
+		options.WithDisableAutoPull(),
+		options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
+			transport.base = base
+			return mergeProbeRoundTripper(func(req *http.Request) (*http.Response, error) {
+				// DMR configures its model during construction; setup calls must
+				// neither reach the endpoint nor mark the inference as off-path.
+				if !ready.Load() {
+					return nil, errors.New("message-merge probe blocks HTTP requests during provider setup")
+				}
+				return transport.RoundTrip(req)
+			})
+		}))
+	if err != nil {
+		return nil, err
+	}
+	ready.Store(true)
+	return p, nil
 }
 
 func collectMessageMergeProbe(ctx context.Context, p Provider, transport *mergeProbeTransport, target mergeProbeTarget, scenario mergeProbeScenario, variant mergeProbeVariant) mergeProbeResult {
@@ -492,13 +599,17 @@ func collectMessageMergeProbe(ctx context.Context, p Provider, transport *mergeP
 	stream, err := p.CreateChatCompletionStream(ctx, scenario.Messages, nil)
 	if err != nil {
 		result.Outcome = classifyMergeProbeError(transport, err)
-		result.APIPath, result.Requests, result.Attempts, result.Blocked, result.Status = transport.snapshot()
+		path, requests, attempts, blocked, status := transport.snapshot()
+		result.APIPath = redactMergeProbeAPIPath(target.Provider, path)
+		result.Requests, result.Attempts, result.Blocked, result.Status = requests, attempts, blocked, status
 		return result
 	}
 	defer stream.Close()
 
 	content, finish, usage, recvErr := consumeMergeProbeStream(stream)
-	result.APIPath, result.Requests, result.Attempts, result.Blocked, result.Status = transport.snapshot()
+	path, requests, attempts, blocked, status := transport.snapshot()
+	result.APIPath = redactMergeProbeAPIPath(target.Provider, path)
+	result.Requests, result.Attempts, result.Blocked, result.Status = requests, attempts, blocked, status
 	result.Outcome = classifyMergeProbe(transport, recvErr, content, finish)
 	result.StreamEnd = mergeProbeStreamEnd(finish, recvErr)
 	result.MarkersOK = containsAllMarkers(content, scenario.Markers)
@@ -528,6 +639,25 @@ func recordMergeProbeResult(t *testing.T, result mergeProbeResult) {
 	defer f.Close()
 	_, err = f.Write(append(data, '\n'))
 	require.NoError(t, err)
+}
+
+var mergeProbeEnvRefPattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// redactMergeProbeAPIPath replaces expanded catalog environment values (for
+// example a Cloudflare account id) with their `${NAME}` placeholders before
+// the path is logged or written to JSONL.
+func redactMergeProbeAPIPath(provider, path string) string {
+	for _, match := range mergeProbeEnvRefPattern.FindAllStringSubmatch(catalog.Lookup(provider).BaseURL, -1) {
+		name := match[1]
+		value := strings.TrimSpace(os.Getenv(name))
+		if value == "" {
+			continue
+		}
+		placeholder := "${" + name + "}"
+		path = strings.ReplaceAll(path, value, placeholder)
+		path = strings.ReplaceAll(path, url.PathEscape(value), placeholder)
+	}
+	return path
 }
 
 func classifyMergeProbeError(transport *mergeProbeTransport, err error) string {
@@ -600,7 +730,7 @@ func mergeProbeErrorClass(err error) string {
 }
 
 func mentionsRoleOrTemplate(lowerBody string) bool {
-	for _, needle := range []string{"system message", "system role", "must be at the beginning", "chat template", "template"} {
+	for _, needle := range []string{"system message", "system role", "roles must alternate", "must be at the beginning", "chat template", "template"} {
 		if strings.Contains(lowerBody, needle) {
 			return true
 		}
@@ -841,6 +971,13 @@ func mergeProbeCommit() string {
 	return "unknown"
 }
 
+func validateMergeProbeCommit(commit string) error {
+	if commit == "" || commit == "unknown" {
+		return errors.New("message-merge probes require VCS metadata; run go test with -buildvcs=true")
+	}
+	return nil
+}
+
 func messageRoles(messages []openai.ChatCompletionMessageParamUnion) []string {
 	roles := make([]string, 0, len(messages))
 	for _, msg := range messages {
@@ -914,6 +1051,24 @@ func TestClassifyMergeProbe(t *testing.T) {
 			transport: statusTransport(http.StatusBadRequest, "System message must be at the beginning"),
 			err:       errors.New("bad request"),
 			want:      mergeProbeRoleRejected,
+		},
+		{
+			name:      "role alternation rejected",
+			transport: statusTransport(http.StatusBadRequest, `{"error":{"message":"Conversation roles must alternate user/assistant/user/assistant/..."}}`),
+			err:       errors.New("bad request"),
+			want:      mergeProbeRoleRejected,
+		},
+		{
+			name:      "role alternation rejected after retry budget exhaustion",
+			transport: statusTransport(http.StatusBadRequest, "Conversation roles must alternate user/assistant/user/assistant/..."),
+			err:       fmt.Errorf("retry blocked: %w", errMergeProbeBudgetExhausted),
+			want:      mergeProbeRoleRejected,
+		},
+		{
+			name:      "unrelated role field error",
+			transport: statusTransport(http.StatusBadRequest, "The role field must be a string"),
+			err:       errors.New("bad request"),
+			want:      mergeProbeEndpointError,
 		},
 		{
 			name:      "endpoint error",
