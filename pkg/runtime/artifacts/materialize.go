@@ -119,7 +119,6 @@ func (r *Service) Materialize(ctx context.Context, sess *session.Session, media 
 			genericName:   fmt.Sprintf("generated-%d", i+1),
 			data:          m.Data,
 			mimeType:      m.MimeType,
-			agentName:     agentName,
 			index:         i + 1,
 			total:         len(media),
 		}, warn)

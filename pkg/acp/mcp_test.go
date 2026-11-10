@@ -386,7 +386,7 @@ func TestClientMCPCleanupFailureBlocksQueuedPrompt(t *testing.T) {
 		s.clientMCP = &clientMCPTools{current: &clientMCPGeneration{ctx: ctx, cancel: cancel}}
 		opCtx, op, err := a.beginSessionConstruction(t.Context(), s.id)
 		require.NoError(t, err)
-		require.NoError(t, a.reserveResume(opCtx, s))
+		require.NoError(t, a.reserveReconnect(opCtx, s, false))
 		queued := make(chan error, 1)
 		go func() {
 			_, finish, err := s.startTurn(t.Context())
@@ -534,7 +534,7 @@ func TestClientMCPFailedSessionRejectsAlreadyAdmittedResume(t *testing.T) {
 	spec.Stdio.Env = append(spec.Stdio.Env, acpsdk.EnvVariable{Name: "ACP_STARTED", Value: marker})
 	servers, err := validateClientMCPServers([]acpsdk.McpServer{spec})
 	require.NoError(t, err)
-	err = a.resumeRegisteredSession(ctx, s, "", nil, servers, op)
+	err = a.reconnectRegisteredSession(ctx, s, "", nil, servers, op, false, nil)
 	require.ErrorIs(t, err, boom)
 	a.finishOperation(op)
 	assert.NoFileExists(t, marker)

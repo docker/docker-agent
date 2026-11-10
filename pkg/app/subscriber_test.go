@@ -29,7 +29,7 @@ func TestEventQueueWakeupAndDrain(t *testing.T) {
 		}()
 		for i := range 10 {
 			synctest.Wait()
-			queue.push(i)
+			queue.pushGeneration(i, 0)
 			require.Equal(t, i, <-received)
 			synctest.Wait()
 			require.Nil(t, queue.pending, "draining must release the backlog storage")

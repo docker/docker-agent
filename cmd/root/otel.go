@@ -118,7 +118,7 @@ func newTracerProvider(ctx context.Context, res *resource.Resource, endpoint str
 		return trace.NewTracerProvider(opts...), nil
 	}
 
-	exp, err := otlptracehttp.New(ctx, traceExporterOptions(endpoint)...)
+	exp, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/traces")))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create trace exporter: %w", err)
 	}
@@ -136,7 +136,7 @@ func newMeterProvider(ctx context.Context, res *resource.Resource, endpoint stri
 	opts := []metric.Option{metric.WithResource(res)}
 
 	if endpoint != "" {
-		exp, err := otlpmetrichttp.New(ctx, metricExporterOptions(endpoint)...)
+		exp, err := otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/metrics")))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create metric exporter: %w", err)
 		}
@@ -155,7 +155,7 @@ func newLoggerProvider(ctx context.Context, res *resource.Resource, endpoint str
 	opts := []log.LoggerProviderOption{log.WithResource(res)}
 
 	if endpoint != "" {
-		exp, err := otlploghttp.New(ctx, logExporterOptions(endpoint)...)
+		exp, err := otlploghttp.New(ctx, otlploghttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/logs")))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create log exporter: %w", err)
 		}
@@ -210,18 +210,6 @@ func signalEndpointURL(endpoint, signalPath string) string {
 	}
 	u.Path = path.Join(u.Path, signalPath)
 	return u.String()
-}
-
-func traceExporterOptions(endpoint string) []otlptracehttp.Option {
-	return []otlptracehttp.Option{otlptracehttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/traces"))}
-}
-
-func metricExporterOptions(endpoint string) []otlpmetrichttp.Option {
-	return []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/metrics"))}
-}
-
-func logExporterOptions(endpoint string) []otlploghttp.Option {
-	return []otlploghttp.Option{otlploghttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/logs"))}
 }
 
 func shutdownTracerProvider(ctx context.Context, tp *trace.TracerProvider) error {

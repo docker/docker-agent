@@ -128,7 +128,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		if start, ok := ev.Value.Start.(*types.ContentBlockStartMemberToolUse); ok {
 			a.currentToolID = derefString(start.Value.ToolUseId)
 			a.currentToolName = derefString(start.Value.Name)
-			a.recorder.start(blockIndex(ev.Value.ContentBlockIndex), a.currentToolID, a.currentToolName)
+			a.recorder.start(derefInt32(ev.Value.ContentBlockIndex), a.currentToolID, a.currentToolName)
 
 			// Emit initial tool call
 			response.Choices[0].Delta.ToolCalls = []tools.ToolCall{{
@@ -143,7 +143,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 	case *types.ConverseStreamOutputMemberContentBlockDelta:
 		// Handle content block delta - text or tool input
 		if ev.Value.Delta != nil {
-			a.recorder.delta(blockIndex(ev.Value.ContentBlockIndex), ev.Value.Delta)
+			a.recorder.delta(derefInt32(ev.Value.ContentBlockIndex), ev.Value.Delta)
 			switch delta := ev.Value.Delta.(type) {
 			case *types.ContentBlockDeltaMemberText:
 				response.Choices[0].Delta.Content = delta.Value
@@ -174,7 +174,7 @@ func (a *streamAdapter) Recv() (chat.MessageStreamResponse, error) {
 		}
 
 	case *types.ConverseStreamOutputMemberContentBlockStop:
-		a.recorder.stop(blockIndex(ev.Value.ContentBlockIndex))
+		a.recorder.stop(derefInt32(ev.Value.ContentBlockIndex))
 		slog.Debug("Bedrock stream: content block stop", "index", ev.Value.ContentBlockIndex)
 
 	case *types.ConverseStreamOutputMemberMessageStop:
@@ -259,11 +259,4 @@ func derefInt32(i *int32) int32 {
 		return 0
 	}
 	return *i
-}
-
-func blockIndex(idx *int32) int32 {
-	if idx == nil {
-		return 0
-	}
-	return *idx
 }

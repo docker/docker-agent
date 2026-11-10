@@ -154,9 +154,5 @@ func (j *Judge) CheckRelevance(ctx context.Context, response string, criteria []
 		})
 	}
 
-	if len(errs) > 0 {
-		return results, errors.Join(errs...)
-	}
-
-	return results, nil
+	return results, errors.Join(errs...)
 }

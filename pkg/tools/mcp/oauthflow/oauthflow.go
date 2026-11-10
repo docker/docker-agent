@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -383,12 +384,8 @@ func selectTokenEndpointAuthMethod(supported []string) (string, error) {
 	if len(supported) == 0 {
 		return "client_secret_basic", nil
 	}
-	has := make(map[string]bool, len(supported))
-	for _, s := range supported {
-		has[s] = true
-	}
 	for _, want := range []string{"client_secret_post", "client_secret_basic", "none"} {
-		if has[want] {
+		if slices.Contains(supported, want) {
 			return want, nil
 		}
 	}

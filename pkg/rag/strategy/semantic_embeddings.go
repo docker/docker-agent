@@ -102,9 +102,6 @@ func NewSemanticEmbeddingsFromConfig(ctx context.Context, cfg latest.RAGStrategy
 	// Get optional parameters with defaults
 	similarityMetric := GetParam(cfg.Params, "similarity_metric", "cosine_similarity")
 	threshold := GetParam(cfg.Params, "threshold", 0.5)
-	if thresholdPtr := GetParamPtr[float64](cfg.Params, "threshold"); thresholdPtr != nil {
-		threshold = *thresholdPtr
-	}
 
 	batchSize := GetParam(cfg.Params, "embedding_batch_size", 50)
 	maxConcurrency := GetParam(cfg.Params, "max_embedding_concurrency", 3)

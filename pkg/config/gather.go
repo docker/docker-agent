@@ -125,7 +125,7 @@ func gatherEnvVarsForCompactionModel(ctx context.Context, cfg *latest.Config, ag
 	if err != nil {
 		return
 	}
-	if !bypassOnly || hasCustomBaseURL(&inline, cfg.Providers) {
+	if !bypassOnly || latest.HasCustomBaseURL(inline, cfg.Providers) {
 		addEnvVarsForModelConfig(ctx, &inline, cfg.Providers, requiredEnv, env)
 	}
 }
@@ -152,7 +152,7 @@ func gatherEnvVarsForModel(ctx context.Context, cfg *latest.Config, modelName st
 	if len(model.Routing) > 0 {
 		leaf = routerFallbackLeaf(cfg, model)
 	}
-	if !bypassOnly || rootBypassed || leaf.BypassModelsGateway || hasCustomBaseURL(&leaf, cfg.Providers) {
+	if !bypassOnly || rootBypassed || leaf.BypassModelsGateway || latest.HasCustomBaseURL(leaf, cfg.Providers) {
 		addEnvVarsForModelConfig(ctx, &leaf, cfg.Providers, requiredEnv, env)
 	}
 
@@ -163,7 +163,7 @@ func gatherEnvVarsForModel(ctx context.Context, cfg *latest.Config, modelName st
 			// Named model reference. A routed target bypasses when the router
 			// does (propagation), when it sets its own flag, or when it dials a
 			// custom base_url (implied bypass).
-			if !bypassOnly || rootBypassed || ruleModel.BypassModelsGateway || hasCustomBaseURL(&ruleModel, cfg.Providers) {
+			if !bypassOnly || rootBypassed || ruleModel.BypassModelsGateway || latest.HasCustomBaseURL(ruleModel, cfg.Providers) {
 				addEnvVarsForModelConfig(ctx, &ruleModel, cfg.Providers, requiredEnv, env)
 			}
 		} else if providerName, _, ok := strings.Cut(ruleModelName, "/"); ok {
@@ -171,7 +171,7 @@ func gatherEnvVarsForModel(ctx context.Context, cfg *latest.Config, modelName st
 			// Inline specs carry no flag of their own; they bypass via the
 			// router's propagated bypass or a custom provider's base_url.
 			inlineModel := latest.ModelConfig{Provider: providerName}
-			if !bypassOnly || rootBypassed || hasCustomBaseURL(&inlineModel, cfg.Providers) {
+			if !bypassOnly || rootBypassed || latest.HasCustomBaseURL(inlineModel, cfg.Providers) {
 				addEnvVarsForModelConfig(ctx, &inlineModel, cfg.Providers, requiredEnv, env)
 			}
 		}

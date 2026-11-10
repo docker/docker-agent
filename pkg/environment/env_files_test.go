@@ -109,10 +109,11 @@ func TestAbsolutePath(t *testing.T) {
 
 func TestReadEnvFilesEmpty(t *testing.T) {
 	t.Parallel()
-	lines, err := ReadEnvFiles([]string{})
-
-	require.NoError(t, err)
-	assert.Empty(t, lines)
+	for _, paths := range [][]string{nil, {}} {
+		lines, err := ReadEnvFiles(paths)
+		require.NoError(t, err)
+		assert.Nil(t, lines)
+	}
 }
 
 func TestReadEnvFiles(t *testing.T) {

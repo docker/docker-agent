@@ -342,7 +342,7 @@ func (s *InMemorySessionStore) UpdateSession(_ context.Context, session *Session
 		Permissions:         session.Permissions.Clone(),
 		Attributes:          maps.Clone(session.Attributes),
 		AgentModelOverrides: cloneStringMap(session.AgentModelOverrides),
-		CustomModelsUsed:    cloneStringSlice(session.CustomModelsUsed),
+		CustomModelsUsed:    slices.Clone(session.CustomModelsUsed),
 		InstructionContext:  cloneInstructionContext(session.InstructionContext),
 		AttachedFiles:       slices.Clone(session.AttachedFiles),
 		ParentID:            session.ParentID,
@@ -466,7 +466,7 @@ func compactionSessionSnapshot(session *Session, inputTokens, outputTokens int64
 		Permissions:         session.Permissions.Clone(),
 		Attributes:          maps.Clone(session.Attributes),
 		AgentModelOverrides: cloneStringMap(session.AgentModelOverrides),
-		CustomModelsUsed:    cloneStringSlice(session.CustomModelsUsed),
+		CustomModelsUsed:    slices.Clone(session.CustomModelsUsed),
 		InstructionContext:  cloneInstructionContext(session.InstructionContext),
 		ParentID:            session.ParentID,
 	}, resultingCost
@@ -1197,7 +1197,7 @@ func (s *SQLiteSessionStore) UpdateSession(ctx context.Context, session *Session
 		Permissions:         session.Permissions.Clone(),
 		Attributes:          maps.Clone(session.Attributes),
 		AgentModelOverrides: cloneStringMap(session.AgentModelOverrides),
-		CustomModelsUsed:    cloneStringSlice(session.CustomModelsUsed),
+		CustomModelsUsed:    slices.Clone(session.CustomModelsUsed),
 		InstructionContext:  cloneInstructionContext(session.InstructionContext),
 		ParentID:            session.ParentID,
 	}

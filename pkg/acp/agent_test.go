@@ -69,9 +69,10 @@ func TestBuildUserContent_ResourceLinkFallbackDoesNotExposeAbsoluteURI(t *testin
 	acpAgent := &Agent{sessions: make(map[string]*Session)}
 	uri := "file:///var/folders/40/w2lqxd4564132ydf4v_7s5wh0000gn/T/TemporaryItems/Screenshot%202026-06-15.png"
 
-	content := acpAgent.buildUserContent(t.Context(), "missing-session", []acpsdk.ContentBlock{
+	msg := acpAgent.buildUserMessage(t.Context(), "missing-session", []acpsdk.ContentBlock{
 		acpsdk.ResourceLinkBlock("Screenshot 2026-06-15.png", uri),
 	})
+	content := msg.Message.Content
 
 	assert.Contains(t, content, "Screenshot 2026-06-15.png")
 	assert.Contains(t, content, "content unavailable")

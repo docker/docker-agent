@@ -846,10 +846,6 @@ func userMessageOrdinalToItemIndex(s *session.Session, ordinal int) (int, error)
 	for i, item := range items {
 		switch {
 		case item.IsMessage():
-			// Mirror GetAllMessages: system messages don't count.
-			if item.Message.Message.Role == chat.MessageRoleSystem {
-				continue
-			}
 			if item.Message.Message.Role != chat.MessageRoleUser {
 				continue
 			}

@@ -95,7 +95,7 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	title := titleStyle.Render(toolconfirm.Title)
 	titleHeight := lipgloss.Height(title)
 
-	separator := d.renderSeparator(contentWidth)
+	separator := common.RenderSeparator(contentWidth)
 	separatorHeight := lipgloss.Height(separator)
 
 	question := styles.DialogQuestionStyle.Width(contentWidth).Render(toolconfirm.Question)
@@ -122,11 +122,6 @@ func (d *toolConfirmationDialog) SetSize(width, height int) tea.Cmd {
 	d.scrollView.SetSize(contentWidth, availableHeight)
 
 	return nil
-}
-
-// renderSeparator renders the separator line consistently.
-func (d *toolConfirmationDialog) renderSeparator(contentWidth int) string {
-	return common.RenderSeparator(contentWidth)
 }
 
 // renderOptions renders the Y/N/T/B/A decision block: the option
@@ -502,7 +497,7 @@ func (d *toolConfirmationDialog) View() string {
 	title := titleStyle.Render(toolconfirm.Title)
 
 	// Separator
-	separator := d.renderSeparator(contentWidth)
+	separator := common.RenderSeparator(contentWidth)
 
 	// Get scrollable tool call view
 	argumentsSection := d.scrollView.View()

@@ -91,7 +91,7 @@ func TestReliableSubscriberCancellationReleasesBlockedQueue(t *testing.T) {
 				synctest.Wait()
 				require.Empty(t, a.subs, "cleanup must not wait for a blocked callback")
 				require.Empty(t, queue.pending)
-				queue.push(runtime.SessionTitle(a.session.ID, "late"))
+				queue.pushGeneration(runtime.SessionTitle(a.session.ID, "late"), 0)
 				require.Empty(t, queue.pending, "retired fan-out snapshots cannot retain new events")
 			})
 		})

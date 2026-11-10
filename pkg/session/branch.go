@@ -103,10 +103,10 @@ func (s *Session) Clone() *Session {
 		Permissions:             s.Permissions.Clone(),
 		Attributes:              maps.Clone(s.Attributes),
 		AgentModelOverrides:     cloneStringMap(s.AgentModelOverrides),
-		CustomModelsUsed:        cloneStringSlice(s.CustomModelsUsed),
-		AttachedFiles:           cloneStringSlice(s.AttachedFiles),
-		ExcludedTools:           cloneStringSlice(s.ExcludedTools),
-		AllowedTools:            cloneStringSlice(s.AllowedTools),
+		CustomModelsUsed:        slices.Clone(s.CustomModelsUsed),
+		AttachedFiles:           slices.Clone(s.AttachedFiles),
+		ExcludedTools:           slices.Clone(s.ExcludedTools),
+		AllowedTools:            slices.Clone(s.AllowedTools),
 		ExtraToolSets:           slices.Clone(s.ExtraToolSets),
 		DisableStructuredOutput: s.DisableStructuredOutput,
 		AgentName:               s.AgentName,
@@ -114,7 +114,7 @@ func (s *Session) Clone() *Session {
 		handoffAgent:            s.handoffAgent,
 		routed:                  s.routed,
 		ParentID:                s.ParentID,
-		DelegationLineage:       cloneStringSlice(s.DelegationLineage),
+		DelegationLineage:       slices.Clone(s.DelegationLineage),
 		InstructionContext:      cloneInstructionContext(s.InstructionContext),
 		MessageUsageHistory:     slices.Clone(s.MessageUsageHistory),
 		EvaluationUsageHistory:  cloneEvaluations(s.EvaluationUsageHistory),
@@ -245,7 +245,7 @@ func copySessionMetadata(dst, src *Session, title string) {
 	dst.Permissions = src.Permissions.Clone()
 	dst.Attributes = src.AttributesSnapshot()
 	dst.AgentModelOverrides = cloneStringMap(src.AgentModelOverrides)
-	dst.CustomModelsUsed = cloneStringSlice(src.CustomModelsUsed)
+	dst.CustomModelsUsed = slices.Clone(src.CustomModelsUsed)
 	dst.AttachedFiles = src.AttachedFilesSnapshot()
 }
 
@@ -339,7 +339,7 @@ func cloneEvalCriteria(src *EvalCriteria) *EvalCriteria {
 		return nil
 	}
 	cp := *src
-	cp.Relevance = cloneStringSlice(src.Relevance)
+	cp.Relevance = slices.Clone(src.Relevance)
 	cp.Assertions = slices.Clone(src.Assertions)
 	return &cp
 }
@@ -349,8 +349,8 @@ func cloneEvalResult(src *EvalResult) *EvalResult {
 		return nil
 	}
 	cp := *src
-	cp.Successes = cloneStringSlice(src.Successes)
-	cp.Failures = cloneStringSlice(src.Failures)
+	cp.Successes = slices.Clone(src.Successes)
+	cp.Failures = slices.Clone(src.Failures)
 	cp.Checks = cloneEvalResultChecks(src.Checks)
 	if src.Termination != nil {
 		term := *src.Termination
@@ -392,13 +392,6 @@ func cloneStringMap(src map[string]string) map[string]string {
 		return nil
 	}
 	return maps.Clone(src)
-}
-
-func cloneStringSlice(src []string) []string {
-	if src == nil {
-		return nil
-	}
-	return slices.Clone(src)
 }
 
 func setParentIDs(sess *Session) {

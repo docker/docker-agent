@@ -12,14 +12,6 @@ import "strconv"
 //   - "off" stays "off"
 //   - an empty label yields "" (the model has no thinking configuration)
 func ThinkingDescription(label string) string {
-	switch label {
-	case "":
-		return ""
-	case "off":
-		return "off"
-	case "adaptive":
-		return "adaptive"
-	}
 	if isAllDigits(label) {
 		n, _ := strconv.ParseInt(label, 10, 64)
 		return FormatTokenCount(n) + " tokens"

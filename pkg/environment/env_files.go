@@ -60,10 +60,6 @@ func AbsolutePath(parentDir, relOrAbsPath string) (string, error) {
 }
 
 func ReadEnvFiles(absolutePaths []string) ([]KeyValuePair, error) {
-	if len(absolutePaths) == 0 {
-		return nil, nil
-	}
-
 	var allLines []KeyValuePair
 
 	for _, absolutePath := range absolutePaths {
