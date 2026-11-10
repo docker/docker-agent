@@ -3,6 +3,7 @@ package fsx
 import (
 	"bufio"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -67,17 +68,13 @@ func readAgentsIgnorePatterns(path string) ([]gitignore.Pattern, error) {
 	}
 	defer f.Close()
 
-	var patterns []gitignore.Pattern
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		patterns = append(patterns, gitignore.ParsePattern(line, nil))
-	}
-	if err := scanner.Err(); err != nil {
+	lines, err := readIgnoreLines(f)
+	if err != nil {
 		return nil, err
+	}
+	patterns := make([]gitignore.Pattern, 0, len(lines))
+	for _, line := range lines {
+		patterns = append(patterns, gitignore.ParsePattern(line, nil))
 	}
 	return patterns, nil
 }
@@ -92,16 +89,27 @@ func ReadAgentsIgnoreGlobs(path string) ([]string, error) {
 	}
 	defer f.Close()
 
-	var out []string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	return readIgnoreLines(f)
+}
+
+// readIgnoreLines returns the non-empty, non-comment lines of an
+// .agentsignore file. Lines are read with bufio.Reader.ReadString so an
+// over-long line cannot fail the load on bufio.Scanner's token limit.
+func readIgnoreLines(r io.Reader) ([]string, error) {
+	var lines []string
+	reader := bufio.NewReader(r)
+	for {
+		line, err := reader.ReadString('\n')
+		if trimmed := strings.TrimSpace(line); trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			lines = append(lines, trimmed)
 		}
-		out = append(out, line)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return lines, nil
+			}
+			return nil, err
+		}
 	}
-	return out, scanner.Err()
 }
 
 func (m *AgentsIgnoreMatcher) Match(path string) bool {
