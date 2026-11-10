@@ -29,8 +29,6 @@ func fastModeEnabled(opts map[string]any) bool {
 	return opts[speedOpt] == speedFast
 }
 
-// The beta header is sent for every model: Opus 5 and Opus 4.8 require it and
-// newer models ignore it, so no model allow-list is needed.
 func applySpeed(params *anthropic.BetaMessageNewParams, opts map[string]any) {
 	if !fastModeEnabled(opts) {
 		return

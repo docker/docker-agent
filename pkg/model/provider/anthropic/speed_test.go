@@ -217,7 +217,13 @@ func TestNewClient_RecordsEnvironmentEndpointForPricing(t *testing.T) {
 	proxied, err := NewClient(t.Context(), cfg, env)
 	require.NoError(t, err)
 	assert.Equal(t, "https://proxy.example.com", proxied.Endpoint())
+	assert.Equal(t, "https://proxy.example.com", proxied.BaseURL)
 	assert.InDelta(t, model.Cost.Input, inputPrice(proxied), 1e-9)
+
+	explicit, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5", BaseURL: "https://explicit.example.com"}, env)
+	require.NoError(t, err)
+	assert.Equal(t, "https://explicit.example.com", explicit.BaseURL)
+	assert.Equal(t, "https://explicit.example.com", explicit.Endpoint())
 }
 
 func TestFastMode_BillsTheServedSpeed(t *testing.T) {
@@ -239,7 +245,7 @@ func TestFastMode_BillsTheServedSpeed(t *testing.T) {
 				blockStart(0, map[string]any{"type": "text", "text": ""}),
 				blockDelta(0, map[string]any{"type": "text_delta", "text": "ok"}),
 				blockStop(0),
-				messageDelta("end_turn", nil),
+				messageDelta("end_turn", map[string]any{"output_tokens": 7, "input_tokens": 10, "cache_read_input_tokens": 3}),
 				messageStop,
 			)
 			client := newScriptedClient(newScriptedServer(t, reply), latest.ModelConfig{
@@ -249,17 +255,19 @@ func TestFastMode_BillsTheServedSpeed(t *testing.T) {
 			require.NoError(t, err)
 			defer stream.Close()
 
-			var tier string
+			var final *chat.Usage
 			for {
 				resp, err := stream.Recv()
 				if err != nil {
 					break
 				}
 				if resp.Usage != nil {
-					tier = resp.Usage.ServiceTier
+					final = resp.Usage
 				}
 			}
-			assert.Equal(t, tc.want, tier)
+			require.NotNil(t, final)
+			assert.Equal(t, int64(3), final.CachedInputTokens, "the message_delta usage was applied")
+			assert.Equal(t, tc.want, final.ServiceTier, "message_delta usage must not drop the speed from message_start")
 		})
 	}
 }

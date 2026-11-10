@@ -81,14 +81,23 @@ func TestLoadWithConfig_RejectsInvalidUserConfigAnthropicSpeed(t *testing.T) {
 	const wantError = "anthropic: speed must be fast or standard"
 	invalid := map[string]any{"speed": "turbo"}
 
-	t.Run("providers entry", func(t *testing.T) {
-		t.Parallel()
-		agent := []byte("agents:\n  root:\n    model: anthropic/claude-opus-5-5\n    instruction: test\n")
-		providers := map[string]latest.ProviderConfig{"anthropic": {Provider: "anthropic", ProviderOpts: invalid}}
+	for name, tc := range map[string]struct {
+		model, provider string
+		overrides       []string
+	}{
+		"built-in provider name": {model: "anthropic/claude-opus-5-5", provider: "anthropic"},
+		"custom provider name":   {model: "auto", provider: "fast-claude", overrides: []string{"fast-claude/claude-opus-5-5"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			agent := []byte("agents:\n  root:\n    model: " + tc.model + "\n    instruction: test\n")
+			providers := map[string]latest.ProviderConfig{tc.provider: {Provider: "anthropic", ProviderOpts: invalid}}
 
-		_, err := LoadWithConfig(t.Context(), config.NewBytesSource("agent.yaml", agent), userConfigRunConfig(providers, nil), withTestProviderRegistry()...)
-		require.ErrorContains(t, err, wantError)
-	})
+			_, err := LoadWithConfig(t.Context(), config.NewBytesSource("agent.yaml", agent), userConfigRunConfig(providers, nil),
+				withTestProviderRegistry(WithModelOverrides(tc.overrides))...)
+			require.ErrorContains(t, err, wantError)
+		})
+	}
 
 	t.Run("default_model", func(t *testing.T) {
 		t.Parallel()
