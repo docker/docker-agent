@@ -189,6 +189,7 @@ func countOf(betas []string, beta anthropic.AnthropicBeta) int {
 }
 
 func TestNewClient_RecordsEnvironmentEndpointForPricing(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "")
 	cfg := &latest.ModelConfig{Provider: "anthropic", Model: "claude-opus-5-5"}
 	env := environment.NewMapEnvProvider(map[string]string{"ANTHROPIC_API_KEY": "test-key"})
 	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
