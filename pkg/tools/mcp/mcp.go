@@ -19,6 +19,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -35,6 +36,17 @@ import (
 
 // CreateToolSet is used by the tools registry.
 func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
+	ts, err := createToolSet(ctx, toolset, runConfig)
+	if err != nil {
+		return nil, err
+	}
+	if mcpToolset, ok := ts.(interface{ SetExperimentalEvents(enabled bool) }); ok {
+		mcpToolset.SetExperimentalEvents(toolset.Experimental != nil && toolset.Experimental.MCPEvents)
+	}
+	return ts, nil
+}
+
+func createToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
 	envProvider := runConfig.EnvProvider()
 	cwd := workingdir.Resolve(toolset.WorkingDir, runConfig.WorkingDir)
 
@@ -718,11 +730,36 @@ func (ts *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 
 	slog.DebugContext(ctx, "Listing MCP tools (cache miss)", "server", ts.logID)
 
+	var eventToolsList []tools.Tool
+	if client, ok := ts.mcpClient.(interface {
+		eventTools(prefix string) []tools.Tool
+	}); ok {
+		eventToolsList = client.eventTools(ts.name)
+		if ts.callTimeout > 0 {
+			for i := range eventToolsList {
+				h := eventToolsList[i].Handler
+				eventToolsList[i].Handler = func(ctx context.Context, call tools.ToolCall, rt tools.Runtime) (*tools.ToolCallResult, error) {
+					callCtx, cancel := context.WithTimeout(ctx, ts.callTimeout)
+					defer cancel()
+					res, err := h(callCtx, call, rt)
+					if err != nil && ctx.Err() == nil && errors.Is(callCtx.Err(), context.DeadlineExceeded) {
+						return nil, fmt.Errorf("%w after %s", tools.ErrCallTimeout, ts.callTimeout)
+					}
+					return res, err
+				}
+			}
+		}
+	}
+
 	resp := ts.mcpClient.ListTools(ctx, &mcp.ListToolsParams{})
 
 	var toolsList []tools.Tool
 	for t, err := range resp {
 		if err != nil {
+			var rpcErr *jsonrpc.Error
+			if len(eventToolsList) > 0 && errors.As(err, &rpcErr) && rpcErr.Code == jsonrpc.CodeMethodNotFound {
+				break
+			}
 			return nil, err
 		}
 
@@ -746,6 +783,8 @@ func (ts *Toolset) Tools(ctx context.Context) ([]tools.Tool, error) {
 
 		slog.DebugContext(ctx, "Added MCP tool", "tool", name)
 	}
+
+	toolsList = append(toolsList, eventToolsList...)
 
 	slog.DebugContext(ctx, "Listed MCP tools", "count", len(toolsList), "server", ts.logID)
 
