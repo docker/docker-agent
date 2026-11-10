@@ -36,6 +36,8 @@
       url: /configuration/tools/
     - title: Budget
       url: /configuration/budget/
+    - title: Evaluators
+      url: /configuration/evaluators/
     - title: Custom Commands
       url: /configuration/commands/
     - title: Hooks

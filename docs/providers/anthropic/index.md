@@ -266,7 +266,7 @@ Docker Agent recognizes nine Claude 5.x models by ID: `claude-haiku-5-5`, `claud
 
 Other Claude IDs keep the existing name-based rules.
 
-**Token budget** (1024–32768 on models that accept manual extended thinking):
+**Token budget** (at least 1024 and less than `max_tokens`, within the supported range of a model that accepts manual extended thinking):
 
 ```yaml
 models:

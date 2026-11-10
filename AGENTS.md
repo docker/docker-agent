@@ -131,13 +131,17 @@ is a quick reference.
 
 # Git Practices
 
+All contributions require a cryptographic commit signature and a Developer
+Certificate of Origin (DCO) sign-off. Use `git commit -S -s`: `-S` signs the
+commit with a GPG or SSH key; `-s` adds the `Signed-off-by` trailer for the DCO.
+
 - Write clear, descriptive commit messages
 - Prefer [Conventional Commits](https://www.conventionalcommits.org/) format, e.g. `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`
 - Make commits logical and atomic
 - Group related changes together; avoid mixing unrelated changes
 - Keep branches focused on single features or fixes
 - Ensure your branch is up-to-date before submitting
-- Sign commits with a GPG or SSH key (`git commit -S`)
+- Sign and sign off every commit (`git commit -S -s`)
 
 # GitHub Actions
 
