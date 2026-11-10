@@ -5172,13 +5172,8 @@ func TestEmptyTurnEmitsWarning(t *testing.T) {
 	assert.Contains(t, warn.Message, "empty response")
 }
 
-// TestEmptyTrailingTurnAfterToolCallsIsSilent verifies that a natural empty
-// stop immediately following a tool-call turn does NOT emit the empty-response
-// warning. This is the common fork-skill tail (the last action is a tool call
-// such as commit/open-pr, then the model stops with nothing left to say); the
-// scary rate-limit / token-cap warning there is pure noise. Turns that stop
-// empty WITHOUT preceding tool work still warn (covered by TestEmptyTurnEmitsWarning).
-func TestEmptyTrailingTurnAfterToolCallsIsSilent(t *testing.T) {
+// Tool results do not prove completion; a missing final reply must be visible.
+func TestEmptyTrailingTurnAfterToolCallsWarns(t *testing.T) {
 	t.Parallel()
 
 	doneTool := tools.Tool{
@@ -5190,7 +5185,7 @@ func TestEmptyTrailingTurnAfterToolCallsIsSilent(t *testing.T) {
 	}
 
 	// Turn 1: model calls the tool and keeps going.
-	// Turn 2: model stops with no content and no tool calls (benign tail).
+	// Turn 2: model stops with no content and no tool calls.
 	turn1 := newStreamBuilder().
 		AddToolCallName("c1", "do_thing").
 		AddToolCallArguments("c1", `{}`).
@@ -5223,12 +5218,14 @@ func TestEmptyTrailingTurnAfterToolCallsIsSilent(t *testing.T) {
 		events = append(events, ev)
 	}
 
+	var warnings []string
 	for _, ev := range events {
 		if w, ok := ev.(*WarningEvent); ok {
-			assert.NotContains(t, w.Message, "empty response",
-				"a benign empty stop right after tool calls must not emit the empty-response warning")
+			warnings = append(warnings, w.Message)
 		}
 	}
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "stopped without a final reply after using tools")
 }
 
 // TestEmptyTurnWarning exercises the pure classification helper directly,
@@ -5236,10 +5233,10 @@ func TestEmptyTrailingTurnAfterToolCallsIsSilent(t *testing.T) {
 func TestEmptyTurnWarning(t *testing.T) {
 	t.Parallel()
 
-	t.Run("benign stop after tool calls is silent", func(t *testing.T) {
+	t.Run("empty stop after tool calls warns", func(t *testing.T) {
 		res := streamResult{Stopped: true}
 		got := emptyTurnWarning(res, true, "test/model", chat.FinishReasonStop)
-		assert.Empty(t, got)
+		assert.Contains(t, got, "stopped without a final reply after using tools")
 	})
 
 	t.Run("reasoning-only turn warns about reasoning", func(t *testing.T) {
@@ -5248,12 +5245,10 @@ func TestEmptyTurnWarning(t *testing.T) {
 		assert.Contains(t, got, "only reasoning")
 	})
 
-	t.Run("benign check takes precedence over reasoning-only", func(t *testing.T) {
-		// A reasoning-only turn that naturally stops right after tool work is
-		// still benign: the tool calls were the turn's real output.
+	t.Run("reasoning-only turn after tool calls warns about reasoning", func(t *testing.T) {
 		res := streamResult{Stopped: true, ReasoningContent: "thinking..."}
 		got := emptyTurnWarning(res, true, "test/model", chat.FinishReasonStop)
-		assert.Empty(t, got)
+		assert.Contains(t, got, "only reasoning")
 	})
 
 	t.Run("empty turn without prior tool calls warns", func(t *testing.T) {
@@ -5262,10 +5257,7 @@ func TestEmptyTurnWarning(t *testing.T) {
 		assert.Contains(t, got, "empty response")
 	})
 
-	t.Run("length finish after tool calls still warns (truncated, not benign)", func(t *testing.T) {
-		// A "length" stop means the reply was cut off by the output token
-		// limit; even after tool calls this is a real truncation the user
-		// should see, so it must NOT be silenced by the benign case.
+	t.Run("length finish after tool calls warns about an empty response", func(t *testing.T) {
 		res := streamResult{Stopped: true}
 		got := emptyTurnWarning(res, true, "test/model", chat.FinishReasonLength)
 		assert.Contains(t, got, "empty response")
