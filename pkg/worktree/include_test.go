@@ -93,6 +93,59 @@ func TestWorktreeIncludeSourceAgentsIgnore(t *testing.T) {
 	assert.Len(t, wt.Warnings, 2)
 }
 
+func TestWorktreeIncludeDoesNotCopyAgentsIgnoreVariants(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+	includeFile(t, dir, ".gitignore", ".AGENTSIGNORE\nnested/\n*.env\n", 0o644)
+	runGit(t, dir, "add", ".gitignore")
+	runGit(t, dir, "commit", "-m", "ignore local files")
+	includeFile(t, dir, ".worktreeinclude", ".AGENTSIGNORE\nnested/\n*.env\n", 0o644)
+	includeFile(t, dir, ".AGENTSIGNORE", "", 0o644)
+	includeFile(t, dir, "nested/.AgEnTsIgNoRe", "", 0o644)
+	includeFile(t, dir, "safe.env", "safe", 0o600)
+
+	wt, err := Create(t.Context(), dir, "ignore-variants", WithRoot(t.TempDir()))
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(wt.Dir, ".AGENTSIGNORE"))
+	assert.NoFileExists(t, filepath.Join(wt.Dir, "nested", ".AgEnTsIgNoRe"))
+	content, err := os.ReadFile(filepath.Join(wt.Dir, "safe.env"))
+	require.NoError(t, err)
+	assert.Equal(t, "safe", string(content))
+	assert.Equal(t, []string{
+		`.worktreeinclude: skipped a file protected by .agentsignore`,
+		`.worktreeinclude: skipped a file protected by .agentsignore`,
+	}, wt.Warnings)
+}
+
+func TestWorktreeIncludeUppercaseActiveAgentsIgnore(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+	includeFile(t, dir, ".gitignore", ".AGENTSIGNORE\n*.env\n", 0o644)
+	runGit(t, dir, "add", ".gitignore")
+	runGit(t, dir, "commit", "-m", "ignore local files")
+	includeFile(t, dir, ".worktreeinclude", ".AGENTSIGNORE\n*.env\n", 0o644)
+	includeFile(t, dir, ".AGENTSIGNORE", "private.env\n", 0o644)
+	if _, err := os.Stat(filepath.Join(dir, ".agentsignore")); os.IsNotExist(err) {
+		t.Skip("filesystem is case-sensitive")
+	} else {
+		require.NoError(t, err)
+	}
+	includeFile(t, dir, "private.env", "secret", 0o600)
+	includeFile(t, dir, "safe.env", "safe", 0o600)
+
+	wt, err := Create(t.Context(), dir, "uppercase-policy", WithRoot(t.TempDir()))
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(wt.Dir, ".AGENTSIGNORE"))
+	assert.NoFileExists(t, filepath.Join(wt.Dir, "private.env"))
+	content, err := os.ReadFile(filepath.Join(wt.Dir, "safe.env"))
+	require.NoError(t, err)
+	assert.Equal(t, "safe", string(content))
+	assert.Equal(t, []string{
+		`.worktreeinclude: skipped a file protected by .agentsignore`,
+		`.worktreeinclude: skipped a file protected by .agentsignore`,
+	}, wt.Warnings)
+}
+
 func TestWorktreeIncludeUnsafePaths(t *testing.T) {
 	t.Parallel()
 	source, dest, outside := t.TempDir(), t.TempDir(), t.TempDir()

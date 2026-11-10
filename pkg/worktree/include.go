@@ -102,7 +102,7 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 			warnings = append(warnings, fmt.Sprintf("%s: unsafe path %q", worktreeInclude, rel))
 			continue
 		}
-		blocked := filepath.Base(rel) == fsx.AgentsIgnoreFile
+		blocked := strings.EqualFold(filepath.Base(rel), fsx.AgentsIgnoreFile)
 		for _, matcher := range matchers {
 			if matcher.Match(filepath.Join(source, rel)) {
 				blocked = true
