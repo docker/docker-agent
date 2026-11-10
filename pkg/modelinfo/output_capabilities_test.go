@@ -41,6 +41,38 @@ func TestResolveToolCallSupport(t *testing.T) {
 	}
 }
 
+func TestResolveReasoningSupport(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"thinking-model":     {Reasoning: true},
+			"non-thinking-model": {Reasoning: false},
+		}},
+	}})
+
+	tests := []struct {
+		name  string
+		store *modelsdev.Store
+		model string
+		want  ReasoningSupport
+	}{
+		{name: "catalogue true", store: store, model: "thinking-model", want: ReasoningSupported},
+		{name: "catalogue false", store: store, model: "non-thinking-model", want: ReasoningUnsupported},
+		{name: "missing model", store: store, model: "missing", want: ReasoningSupportUnknown},
+		{name: "nil store", model: "thinking-model", want: ReasoningSupportUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := ResolveReasoningSupport(t.Context(), tt.store, modelsdev.NewID("google", tt.model))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestResolveOutputImage(t *testing.T) {
 	t.Parallel()
 

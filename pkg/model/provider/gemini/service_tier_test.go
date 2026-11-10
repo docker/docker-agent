@@ -45,7 +45,7 @@ func TestBuildConfig_ServiceTier(t *testing.T) {
 				ModelConfig: latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash", ProviderOpts: tt.opts},
 			}}
 
-			assert.Equal(t, tt.want, client.buildConfig().ServiceTier)
+			assert.Equal(t, tt.want, client.buildConfig(t.Context()).ServiceTier)
 		})
 	}
 }
@@ -59,7 +59,7 @@ func TestBuildConfig_ServiceTier_NoThinkingTitle(t *testing.T) {
 		ModelOptions: options.Apply(options.WithGeneratingTitle(), options.WithNoThinking()),
 	}}
 
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 	assert.Nil(t, config.ThinkingConfig)
 	assert.Equal(t, genai.ServiceTierFlex, config.ServiceTier)
 }

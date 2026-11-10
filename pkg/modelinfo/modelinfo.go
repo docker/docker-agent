@@ -773,6 +773,42 @@ func ResolveToolCallSupport(ctx context.Context, store *modelsdev.Store, id mode
 	return ToolCallUnsupported
 }
 
+// ReasoningSupport is the models.dev catalogue's tri-state reasoning capability.
+type ReasoningSupport uint8
+
+const (
+	ReasoningSupportUnknown ReasoningSupport = iota
+	ReasoningUnsupported
+	ReasoningSupported
+)
+
+// ResolveReasoningSupport reports whether models.dev says a model supports
+// reasoning. Missing catalogue data remains unknown rather than being treated
+// as a negative capability claim.
+func ResolveReasoningSupport(ctx context.Context, store *modelsdev.Store, id modelsdev.ID) ReasoningSupport {
+	if store == nil {
+		return ReasoningSupportUnknown
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, loadCapsTimeout)
+	defer cancel()
+
+	model, err := store.GetModel(ctx, id)
+	if err != nil {
+		if ctx.Err() != nil {
+			slog.WarnContext(ctx, "modelinfo: models.dev reasoning lookup timed out, leaving support unknown",
+				"model", id.String(), "timeout", loadCapsTimeout)
+		} else {
+			warnCapsLookupMiss(ctx, id, err)
+		}
+		return ReasoningSupportUnknown
+	}
+	if model.Reasoning {
+		return ReasoningSupported
+	}
+	return ReasoningUnsupported
+}
+
 // ResolveOutputImage applies an explicit image-output override when present;
 // otherwise it derives support from the models.dev output modalities. Missing
 // catalogue data conservatively disables image output.

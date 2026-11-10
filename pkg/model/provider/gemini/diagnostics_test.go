@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/testutil/geminiintegration"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -38,7 +39,7 @@ func TestNewRequestShape_Minimal(t *testing.T) {
 		apiSurface: apiSurfaceGeminiAPI,
 	}
 
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 	config.Tools = client.builtInTools()
 
 	shape := newRequestShape(client, config, 0, false)
@@ -74,7 +75,7 @@ func TestNewRequestShape_ToolsAndBuiltIns(t *testing.T) {
 		apiSurface: apiSurfaceVertexAI,
 	}
 
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 	config.Tools = client.builtInTools()
 
 	requestTools := []tools.Tool{
@@ -109,7 +110,7 @@ func TestNewRequestShape_ResponseModalitiesNormalized(t *testing.T) {
 	t.Parallel()
 
 	client := &Client{Config: base.Config{ModelConfig: latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash-image"}}}
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 	config.ResponseModalities = []string{" text ", "IMAGE", "text", ""}
 
 	shape := newRequestShape(client, config, 0, false)
@@ -118,24 +119,27 @@ func TestNewRequestShape_ResponseModalitiesNormalized(t *testing.T) {
 	assert.Equal(t, []string{"TEXT", "IMAGE"}, shape.ResponseModalities)
 }
 
-// TestNewRequestShape_NoThinkingRequested verifies the title-generation path
-// (options.WithNoThinking) is captured: a non-Gemini-3 model gets an
-// explicit ThinkingConfig even though the model config itself set no
-// thinking budget.
+// TestNewRequestShape_NoThinkingRequested verifies that diagnostics preserve
+// the no-thinking intent even when a non-reasoning model omits ThinkingConfig.
 func TestNewRequestShape_NoThinkingRequested(t *testing.T) {
 	t.Parallel()
 
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"google": {Models: map[string]modelsdev.Model{
+			"gemini-2.5-flash-image": {Reasoning: false},
+		}},
+	}})
 	client := &Client{
 		Config: base.Config{
 			ModelConfig:  latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash-image"},
-			ModelOptions: options.Apply(options.WithNoThinking()),
+			ModelOptions: options.Apply(options.WithNoThinking(), options.WithModelsDevStore(store)),
 		},
 	}
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 
 	shape := newRequestShape(client, config, 0, false)
 
-	assert.True(t, shape.ThinkingConfigSet)
+	assert.False(t, shape.ThinkingConfigSet)
 	assert.True(t, shape.NoThinkingRequested)
 }
 
@@ -152,7 +156,7 @@ func TestNewRequestShape_StructuredOutputPresent(t *testing.T) {
 			})),
 		},
 	}
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 
 	shape := newRequestShape(client, config, 0, false)
 
@@ -197,7 +201,7 @@ func TestNewRequestShape_OutputCapabilityUsesResolvedValue(t *testing.T) {
 				},
 				apiSurface: apiSurfaceGeminiAPI,
 			}
-			config := client.buildConfig()
+			config := client.buildConfig(t.Context())
 
 			shape := newRequestShape(client, config, 0, tt.resolvedEnabled)
 			assert.Equal(t, tt.wantKnown, shape.OutputCapabilityKnown)
@@ -218,7 +222,7 @@ func TestRequestShape_LogAttrsNeverLeaksToolSchemas(t *testing.T) {
 	const marker = "SECRET_TOOL_DESCRIPTION_MARKER"
 
 	client := &Client{Config: base.Config{ModelConfig: latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash"}}}
-	config := client.buildConfig()
+	config := client.buildConfig(t.Context())
 
 	requestTools := []tools.Tool{
 		{Name: "danger_tool", Description: marker, Parameters: map[string]any{"type": "object", "properties": map[string]any{marker: map[string]any{"type": "string"}}}},

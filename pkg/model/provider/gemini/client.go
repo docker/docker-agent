@@ -490,7 +490,7 @@ func extractMimeType(dataURLPrefix string) string {
 }
 
 // BuildConfig creates GenerateContentConfig from model config.
-func (c *Client) buildConfig() *genai.GenerateContentConfig {
+func (c *Client) buildConfig(ctx context.Context) *genai.GenerateContentConfig {
 	// Set before the NoThinking early return so every request (chat, rerank,
 	// title, compaction) is billed on the same tier.
 	config := &genai.GenerateContentConfig{
@@ -515,7 +515,7 @@ func (c *Client) buildConfig() *genai.GenerateContentConfig {
 	// Forward top_k from provider_opts (Gemini natively supports it)
 	if topK, ok := providerutil.GetProviderOptFloat64(c.ModelConfig.ProviderOpts, "top_k"); ok {
 		config.TopK = new(float32(topK))
-		slog.Debug("Gemini provider_opts: set top_k", "value", topK)
+		slog.DebugContext(ctx, "Gemini provider_opts: set top_k", "value", topK)
 	}
 
 	// Apply thinking configuration for Gemini models.
@@ -525,23 +525,25 @@ func (c *Client) buildConfig() *genai.GenerateContentConfig {
 			return config
 		}
 
-		// NoThinking requested (e.g. MCP sampling). For Gemini 3+ models
-		// that always think, use the lowest level and bump MaxOutputTokens so
-		// internal reasoning doesn't consume the entire budget. Gemini 2.5 and
-		// older can fully disable thinking with ThinkingBudget=0.
-		if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
-			config.ThinkingConfig = &genai.ThinkingConfig{
-				IncludeThoughts: false,
-				ThinkingLevel:   genai.ThinkingLevelLow,
-			}
-			const minOutputTokens int32 = 200
-			if config.MaxOutputTokens < minOutputTokens {
-				config.MaxOutputTokens = minOutputTokens
-			}
-		} else {
-			config.ThinkingConfig = &genai.ThinkingConfig{
-				IncludeThoughts: false,
-				ThinkingBudget:  new(int32(0)),
+		if modelinfo.ResolveReasoningSupport(ctx, c.ModelOptions.ModelsDevStore(), c.ID()) != modelinfo.ReasoningUnsupported {
+			// NoThinking requested (e.g. MCP sampling). For Gemini 3+ models
+			// that always think, use the lowest level and bump MaxOutputTokens so
+			// internal reasoning doesn't consume the entire budget. Gemini 2.5 and
+			// older can fully disable thinking with ThinkingBudget=0.
+			if modelinfo.UsesThinkingLevel(c.ModelConfig.Model) {
+				config.ThinkingConfig = &genai.ThinkingConfig{
+					IncludeThoughts: false,
+					ThinkingLevel:   genai.ThinkingLevelLow,
+				}
+				const minOutputTokens int32 = 200
+				if config.MaxOutputTokens < minOutputTokens {
+					config.MaxOutputTokens = minOutputTokens
+				}
+			} else {
+				config.ThinkingConfig = &genai.ThinkingConfig{
+					IncludeThoughts: false,
+					ThinkingBudget:  new(int32(0)),
+				}
 			}
 		}
 	} else if c.ModelConfig.ThinkingBudget != nil {
@@ -846,7 +848,7 @@ func (c *Client) CreateChatCompletionStream(
 		return nil, errors.New("at least one message is required")
 	}
 
-	config := c.buildConfig()
+	config := c.buildConfig(ctx)
 	imageOutputEnabled := c.ImageOutputEnabled(ctx)
 
 	if c.wantsImageResponseModalities(imageOutputEnabled) {
@@ -964,7 +966,7 @@ func (c *Client) Rerank(ctx context.Context, query string, documents []types.Doc
 	// Start with standard config from model definition (respects max_tokens,
 	// temperature, top_p, etc. from the model config).
 	// If the user hasn't configured these, we rely on Gemini API defaults.
-	cfg := c.buildConfig()
+	cfg := c.buildConfig(ctx)
 
 	// Override with reranking-specific structured output schema.
 	cfg.ResponseMIMEType = "application/json"
