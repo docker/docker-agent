@@ -18,7 +18,6 @@ type generatedMediaItem struct {
 	genericName   string
 	data          []byte
 	mimeType      string
-	agentName     string
 	index, total  int
 }
 
