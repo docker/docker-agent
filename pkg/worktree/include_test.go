@@ -1,7 +1,9 @@
 package worktree
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -342,15 +344,129 @@ func TestWorktreeIncludeDestinationSymlinkDoesNotBlockOtherFiles(t *testing.T) {
 	require.NoError(t, os.Remove(filepath.Join(dir, "link")))
 	includeFile(t, dir, "link/local.env", "secret", 0o600)
 	includeFile(t, dir, "safe.env", "safe", 0o600)
+	for i := range 64 {
+		includeFile(t, dir, fmt.Sprintf("cache/file-%03d.env", i), "cached", 0o600)
+	}
 	includeFile(t, dir, ".worktreeinclude", "*.env\n", 0o644)
 	wt, err := Create(t.Context(), dir, "symlink-dest", WithRoot(t.TempDir()), WithBase("destination-symlink"))
 	require.NoError(t, err)
 	require.Len(t, wt.Warnings, 1)
 	assert.Contains(t, wt.Warnings[0], "checking destination ignore rules")
 	assert.FileExists(t, filepath.Join(wt.Dir, "safe.env"))
+	for i := range 64 {
+		content, err := os.ReadFile(filepath.Join(wt.Dir, fmt.Sprintf("cache/file-%03d.env", i)))
+		require.NoError(t, err)
+		assert.Equal(t, "cached", string(content))
+	}
 	assert.Empty(t, gitOut(t, wt.Dir, "status", "--porcelain"))
 	runGit(t, wt.Dir, "add", "-A")
 	assert.Empty(t, gitOut(t, wt.Dir, "diff", "--cached", "--name-only"))
+}
+
+func TestCheckDestinationPathsGitBatchSplitting(t *testing.T) {
+	t.Parallel()
+	dir := bootstrapRepo(t)
+	includeFile(t, dir, ".gitignore", "*.env\n!exposed.env\n", 0o644)
+	includeFile(t, dir, "target", "target", 0o600)
+	if err := os.Symlink("target", filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	var paths bytes.Buffer
+	for i := range 512 {
+		fmt.Fprintf(&paths, "file-%03d.env\x00", i)
+	}
+	paths.WriteString("link/bad.env\x00exposed.env\x00")
+	calls := 0
+	check := func(ctx context.Context, dir string, paths []byte) (map[string]bool, error) {
+		calls++
+		return checkIgnoredPaths(ctx, dir, paths)
+	}
+	var warnings includeWarnings
+	ignored, failed := checkDestinationPaths(t.Context(), dir, paths.Bytes(), check, &warnings)
+	assert.LessOrEqual(t, calls, 21)
+	assert.Len(t, ignored, 512)
+	for i := range 512 {
+		assert.True(t, ignored[fmt.Sprintf("file-%03d.env", i)])
+	}
+	assert.False(t, ignored["exposed.env"])
+	assert.Equal(t, map[string]bool{"link/bad.env": true}, failed)
+	require.Len(t, warnings.entries, 1)
+	assert.Contains(t, warnings.entries[0], `"link/bad.env": checking destination ignore rules`)
+}
+
+func TestCheckDestinationPathsFailures(t *testing.T) {
+	t.Parallel()
+	paths := []byte("good\x00bad-one\x00line\nbreak\x00bad-two\x00unignored\x00")
+	var warnings includeWarnings
+	calls := 0
+	check := func(_ context.Context, _ string, input []byte) (map[string]bool, error) {
+		calls++
+		ignored := make(map[string]bool)
+		for name := range bytes.SplitSeq(input, []byte{0}) {
+			if bytes.HasPrefix(name, []byte("bad-")) {
+				return map[string]bool{"must-not-copy": true}, errors.New("collision")
+			}
+			if len(name) > 0 && string(name) != "unignored" {
+				ignored[string(name)] = true
+			}
+		}
+		return ignored, nil
+	}
+	ignored, failed := checkDestinationPaths(t.Context(), "", paths, check, &warnings)
+	assert.Less(t, calls, 2*5)
+	assert.Equal(t, map[string]bool{"good": true, "line\nbreak": true}, ignored)
+	assert.Equal(t, map[string]bool{"bad-one": true, "bad-two": true}, failed)
+	assert.Equal(t, []string{
+		`.worktreeinclude: "bad-one": checking destination ignore rules: collision`,
+		`.worktreeinclude: "bad-two": checking destination ignore rules: collision`,
+	}, warnings.entries)
+}
+
+func TestCheckDestinationPathsGlobalError(t *testing.T) {
+	t.Parallel()
+	var warnings includeWarnings
+	calls := 0
+	check := func(_ context.Context, _ string, _ []byte) (map[string]bool, error) {
+		calls++
+		return map[string]bool{"a": true}, errors.New("global failure")
+	}
+	ignored, failed := checkDestinationPaths(t.Context(), "", []byte("a\x00b\x00c\x00"), check, &warnings)
+	assert.Equal(t, 5, calls)
+	assert.Empty(t, ignored)
+	assert.Equal(t, map[string]bool{"a": true, "b": true, "c": true}, failed)
+	assert.Equal(t, []string{
+		`.worktreeinclude: "a": checking destination ignore rules: global failure`,
+		`.worktreeinclude: "b": checking destination ignore rules: global failure`,
+		`.worktreeinclude: "c": checking destination ignore rules: global failure`,
+	}, warnings.entries)
+}
+
+func TestCheckDestinationPathsCancellation(t *testing.T) {
+	t.Parallel()
+	for _, cancelAt := range []int{0, 1, 2} {
+		t.Run(strconv.Itoa(cancelAt), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			calls := 0
+			if cancelAt == 0 {
+				cancel()
+			}
+			check := func(_ context.Context, _ string, _ []byte) (map[string]bool, error) {
+				calls++
+				if calls == cancelAt {
+					cancel()
+				}
+				return nil, errors.New("failure")
+			}
+			var warnings includeWarnings
+			ignored, failed := checkDestinationPaths(ctx, "", []byte("a\x00b\x00c\x00d\x00"), check, &warnings)
+			assert.Equal(t, cancelAt, calls)
+			assert.Empty(t, ignored)
+			assert.Empty(t, failed)
+			assert.Empty(t, warnings.entries)
+			assert.ErrorIs(t, ctx.Err(), context.Canceled)
+		})
+	}
 }
 
 func TestWorktreeIncludeDestinationCheckFailure(t *testing.T) {

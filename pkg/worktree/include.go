@@ -155,33 +155,9 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 	if ignored.Len() == 0 {
 		return warnings.result()
 	}
-	ignoredInDest, err := checkIgnoredPaths(ctx, dest, ignored.Bytes())
-	failedInDest := make(map[string]bool)
-	if err != nil {
-		if cancelled() {
-			return warnings.result()
-		}
-		ignoredInDest = make(map[string]bool)
-		for name := range bytes.SplitSeq(ignored.Bytes(), []byte{0}) {
-			if cancelled() {
-				return warnings.result()
-			}
-			if len(name) == 0 {
-				continue
-			}
-			checked, err := checkIgnoredPaths(ctx, dest, append(bytes.Clone(name), 0))
-			if err != nil {
-				if cancelled() {
-					return warnings.result()
-				}
-				warnings.add(fmt.Sprintf("%s: %q: checking destination ignore rules: %v", worktreeInclude, name, err))
-				failedInDest[string(name)] = true
-				continue
-			}
-			if checked[string(name)] {
-				ignoredInDest[string(name)] = true
-			}
-		}
+	ignoredInDest, failedInDest := checkDestinationPaths(ctx, dest, ignored.Bytes(), checkIgnoredPaths, &warnings)
+	if cancelled() {
+		return warnings.result()
 	}
 	dst, err := os.OpenRoot(dest)
 	if err != nil {
@@ -220,6 +196,42 @@ func copyIncludedFiles(ctx context.Context, source, workingDir, dest string) []s
 		}
 	}
 	return warnings.result()
+}
+
+func checkDestinationPaths(ctx context.Context, dir string, paths []byte, check func(context.Context, string, []byte) (map[string]bool, error), warnings *includeWarnings) (map[string]bool, map[string]bool) {
+	ignored := make(map[string]bool)
+	failed := make(map[string]bool)
+	names := bytes.Split(bytes.TrimSuffix(paths, []byte{0}), []byte{0})
+	var visit func([][]byte)
+	visit = func(batch [][]byte) {
+		if len(batch) == 0 || ctx.Err() != nil {
+			return
+		}
+		input := append(bytes.Join(batch, []byte{0}), 0)
+		checked, err := check(ctx, dir, input)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			for name, isIgnored := range checked {
+				if isIgnored {
+					ignored[name] = true
+				}
+			}
+			return
+		}
+		if len(batch) == 1 {
+			name := batch[0]
+			warnings.add(fmt.Sprintf("%s: %q: checking destination ignore rules: %v", worktreeInclude, name, err))
+			failed[string(name)] = true
+			return
+		}
+		mid := len(batch) / 2
+		visit(batch[:mid])
+		visit(batch[mid:])
+	}
+	visit(names)
+	return ignored, failed
 }
 
 func checkIgnoredPaths(ctx context.Context, dir string, paths []byte) (map[string]bool, error) {
