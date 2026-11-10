@@ -891,6 +891,9 @@ func processMCPContent(toolResult *mcp.CallToolResult) *tools.ToolCallResult {
 	// together: "a.txt" + "b.txt" would reach the model as "a.txtb.txt".
 	// A block that already ends or starts with whitespace ("See: ") is joined
 	// as is, so text followed by a link or resource still reads inline.
+	// Trade-off: a server that split one logical string across blocks would
+	// now get a newline at each split. The SDKs serialize a value into a
+	// single block, so no known server does this.
 	write := func(s string) {
 		if s == "" {
 			return

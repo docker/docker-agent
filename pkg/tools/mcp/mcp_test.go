@@ -392,6 +392,13 @@ func TestProcessMCPContent(t *testing.T) {
 			input:      callToolResult(&mcp.ResourceLink{Name: "a", URI: "file:///a"}, &mcp.ResourceLink{Name: "b", URI: "file:///b"}),
 			wantOutput: "[a](file:///a)\n[b](file:///b)",
 		},
+		{
+			// Documents the trade-off: blocks are separate items, so a string
+			// split across blocks is not reassembled.
+			name:       "one string split across text blocks gets a newline at the split",
+			input:      callToolResult(&mcp.TextContent{Text: `{"id":"abc`}, &mcp.TextContent{Text: `def"}`}),
+			wantOutput: "{\"id\":\"abc\ndef\"}",
+		},
 
 		// --- images ---
 		{
