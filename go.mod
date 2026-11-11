@@ -2,7 +2,7 @@ module github.com/docker/docker-agent
 
 go 1.27
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	charm.land/bubbles/v2 v2.2.1
