@@ -18,25 +18,6 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// defaultStreamIdleTimeout is the maximum time handleStream will wait for the
-// next SSE chunk before declaring the upstream connection stalled. A
-// half-open TCP connection to the model gateway (remote side gone without
-// sending FIN) would otherwise block the goroutine forever and prevent
-// graceful shutdown.
-//
-// Five minutes is intentionally generous: LLM streams can legitimately pause
-// for tens of seconds during extended thinking. The timeout only fires when
-// absolutely no bytes arrive at the SSE layer (not just no new tokens).
-//
-// handleStream takes the idle timeout as a parameter rather than reading this
-// constant directly, so tests can pass a short timeout without mutating shared
-// state (and can therefore run in parallel).
-const defaultStreamIdleTimeout = 5 * time.Minute
-
-// flexStreamIdleTimeout replaces defaultStreamIdleTimeout for Gemini Flex
-// requests, which Google may queue for up to 15 minutes before the first byte.
-const flexStreamIdleTimeout = 15 * time.Minute
-
 // streamIdleTimeoutFor resolves explicit target, entry and file settings in order.
 func streamIdleTimeoutFor(p provider.Provider, stream chat.MessageStream, a *agent.Agent) time.Duration {
 	cfg := p.BaseConfig().ModelConfig
@@ -49,10 +30,7 @@ func streamIdleTimeoutFor(p provider.Provider, stream chat.MessageStream, a *age
 	if timeout := a.StreamIdleTimeout(); timeout != nil {
 		return timeout.Duration
 	}
-	if cfg.Provider == "google" && cfg.ProviderOpts["service_tier"] == "flex" {
-		return flexStreamIdleTimeout
-	}
-	return defaultStreamIdleTimeout
+	return latest.DisabledStreamIdleTimeout
 }
 
 // errStreamIdle is the sentinel error returned when the upstream model stream

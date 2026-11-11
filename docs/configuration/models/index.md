@@ -66,12 +66,11 @@ over the router or fallback entry setting, which takes precedence over the
 agent file's runtime setting.
 
 Use a positive Go duration such as `90s` or `2m30s`, or the integer `-1` to
-disable the idle timer. Zero and other negative values are invalid. When unset,
-the limit is 5 minutes, except a Google Gemini Flex entry defaults to 15 minutes.
-For routed requests this default is based on the entry, not the target. Set an
-explicit timeout on a routed Flex target (or its router) if it needs the longer
-window. An explicit runtime or model value overrides the Flex default: a shorter
-value can time out while a Flex request is still queued.
+disable the idle timer, overriding any lower-priority setting. Zero and other
+negative values are invalid. An omitted or null value inherits the next setting;
+when no setting applies, the idle timer is disabled for all models, including
+Gemini Flex and routed requests. A short configured timeout can expire while a
+Flex request is still queued.
 
 The timer measures silence while waiting for the first chunk and between chunks,
 not total request duration. Each chunk resets it. If it expires, Docker Agent

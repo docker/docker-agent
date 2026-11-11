@@ -41,7 +41,7 @@ func TestOpenAIResponseStateDiscardedOnRefusedTools(t *testing.T) {
 	stream := newStreamBuilder().AddToolCallName("call_1", "shell").AddToolCallArguments("call_1", `{}`).AddRefusal().Build()
 	stream.responses[len(stream.responses)-1].Choices[0].Delta.OpenAIResponse = &chat.OpenAIResponse{ID: "refused"}
 	root := agent.New("root", "test")
-	result, err := handleStream(t.Context(), nil, stream, root, nil, session.New(), NewChannelSink(make(chan Event, 10)), defaultStreamIdleTimeout)
+	result, err := handleStream(t.Context(), nil, stream, root, nil, session.New(), NewChannelSink(make(chan Event, 10)), testStreamIdleTimeout)
 	require.NoError(t, err)
 	assert.Nil(t, result.OpenAIResponse)
 	assert.Empty(t, result.Calls)

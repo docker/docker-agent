@@ -41,7 +41,7 @@ func runHandleStream(t *testing.T, stream *mockStream) streamResult {
 	sess := session.New(session.WithUserMessage("go"))
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(make(chan Event, 64)), defaultStreamIdleTimeout,
+		NewChannelSink(make(chan Event, 64)), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 	return res

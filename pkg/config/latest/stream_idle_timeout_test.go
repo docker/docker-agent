@@ -102,3 +102,29 @@ func TestFlexibleModelTimeoutRoundTrip(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal(data, &result))
 	assert.Equal(t, original, result)
 }
+
+func TestStreamIdleTimeoutOmittedAndNullInherit(t *testing.T) {
+	t.Parallel()
+	for _, format := range []string{"yaml", "json"} {
+		for _, tc := range []struct {
+			name string
+			yaml string
+			json string
+		}{
+			{name: "omitted", yaml: "runtime: {}\nmodels:\n  x: {}\n", json: `{"runtime":{},"models":{"x":{}}}`},
+			{name: "null", yaml: "runtime:\n  stream_idle_timeout: null\nmodels:\n  x:\n    stream_idle_timeout: null\n", json: `{"runtime":{"stream_idle_timeout":null},"models":{"x":{"stream_idle_timeout":null}}}`},
+		} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				var cfg Config
+				if format == "yaml" {
+					require.NoError(t, yaml.Unmarshal([]byte(tc.yaml), &cfg))
+				} else {
+					require.NoError(t, json.Unmarshal([]byte(tc.json), &cfg))
+				}
+				require.NotNil(t, cfg.Runtime)
+				assert.Nil(t, cfg.Runtime.StreamIdleTimeout)
+				assert.Nil(t, cfg.Models["x"].StreamIdleTimeout)
+			})
+		}
+	}
+}

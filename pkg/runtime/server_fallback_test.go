@@ -27,7 +27,7 @@ func runServerFallbackStream(t *testing.T, stream *mockStream) (streamResult, []
 	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
 	sess := session.New(session.WithUserMessage("go"))
 	evCh := make(chan Event, 64)
-	res, err := handleStream(t.Context(), nil, stream, a, nil, sess, NewChannelSink(evCh), defaultStreamIdleTimeout)
+	res, err := handleStream(t.Context(), nil, stream, a, nil, sess, NewChannelSink(evCh), testStreamIdleTimeout)
 	require.NoError(t, err)
 	close(evCh)
 	var events []Event

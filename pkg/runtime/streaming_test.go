@@ -120,7 +120,7 @@ func TestHandleStream_Refusal(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -148,7 +148,7 @@ func TestHandleStream_RefusalDropsPartialToolCalls(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -177,7 +177,7 @@ func TestHandleStream_LengthDropsTruncatedToolCalls(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -211,7 +211,7 @@ func TestHandleStream_LengthKeepsPartialText(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -238,7 +238,7 @@ func TestHandleStream_ToolCallAndStopInSameChunk(t *testing.T) {
 	evCh := make(chan Event, 64) // buffered so handleStream never blocks on Emit
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -268,7 +268,7 @@ func TestHandleStream_ToolCallThenSeparateStop(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -336,7 +336,7 @@ func TestHandleStream_MediaAccumulatesAlongsideText(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -368,7 +368,7 @@ func TestHandleStream_MediaOnlyTurnNotTreatedAsEmpty(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -400,7 +400,7 @@ func TestHandleStream_MultipleMediaBlobsInOneChunk(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -440,7 +440,7 @@ func TestHandleStream_MediaInTerminalChunkIsAccumulated(t *testing.T) {
 			evCh := make(chan Event, 64)
 			res, err := handleStream(
 				t.Context(), nil, stream, a, nil, sess,
-				NewChannelSink(evCh), defaultStreamIdleTimeout,
+				NewChannelSink(evCh), testStreamIdleTimeout,
 			)
 			require.NoError(t, err)
 
@@ -469,7 +469,7 @@ func TestHandleStream_WhitespaceOnlyContentStops(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -496,7 +496,7 @@ func TestHandleStream_ContentOnlyBareEOFStops(t *testing.T) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 
@@ -538,7 +538,9 @@ func (s *stalledStream) Close() {
 	s.closeOnce.Do(func() { close(s.unblock) })
 }
 
-func TestHandleStream_ProductionIdleTimeoutBoundary(t *testing.T) {
+const testStreamIdleTimeout = 5 * time.Minute
+
+func TestHandleStream_ConfiguredIdleTimeoutBoundary(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		stream := newStalledStream()
 		a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
@@ -548,16 +550,16 @@ func TestHandleStream_ProductionIdleTimeoutBoundary(t *testing.T) {
 		go func() {
 			_, err := handleStream(
 				t.Context(), func(error) { stream.Close() }, stream, a, nil, sess,
-				NewChannelSink(make(chan Event, 64)), defaultStreamIdleTimeout,
+				NewChannelSink(make(chan Event, 64)), testStreamIdleTimeout,
 			)
 			resultCh <- err
 		}()
 
 		<-stream.recvStarted
-		time.Sleep(defaultStreamIdleTimeout - time.Nanosecond) //nolint:forbidigo // Advances synthetic time to the boundary.
+		time.Sleep(testStreamIdleTimeout - time.Nanosecond) //nolint:forbidigo // Advances synthetic time to the boundary.
 		select {
 		case err := <-resultCh:
-			t.Fatalf("production idle timeout fired before five minutes: %v", err)
+			t.Fatalf("configured idle timeout fired before five minutes: %v", err)
 		default:
 		}
 		synctest.Sleep(time.Nanosecond) // Crosses the synthetic timeout boundary.
@@ -565,7 +567,7 @@ func TestHandleStream_ProductionIdleTimeoutBoundary(t *testing.T) {
 		case err := <-resultCh:
 			require.ErrorIs(t, err, errStreamIdle)
 		default:
-			t.Fatal("production idle timeout did not fire at five minutes")
+			t.Fatal("configured idle timeout did not fire at five minutes")
 		}
 	})
 }
@@ -727,7 +729,7 @@ func runMarkerStream(t *testing.T, stream *mockStream) (streamResult, string) {
 	evCh := make(chan Event, 64)
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, sess,
-		NewChannelSink(evCh), defaultStreamIdleTimeout,
+		NewChannelSink(evCh), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 	return res, agentChoiceText(evCh)
@@ -894,7 +896,7 @@ func TestHandleStream_PreservesProviderToolCallID(t *testing.T) {
 	a := agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/mock-model", stream: stream}))
 	res, err := handleStream(
 		t.Context(), nil, stream, a, nil, session.New(session.WithUserMessage("go")),
-		NewChannelSink(make(chan Event, 64)), defaultStreamIdleTimeout,
+		NewChannelSink(make(chan Event, 64)), testStreamIdleTimeout,
 	)
 	require.NoError(t, err)
 	require.Len(t, res.Calls, 1)

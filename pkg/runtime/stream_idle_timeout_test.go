@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/contracts"
 	"github.com/docker/docker-agent/pkg/modelsdev"
@@ -47,12 +48,12 @@ func TestStreamIdleTimeoutFor(t *testing.T) {
 		opts     map[string]any
 		want     time.Duration
 	}{
-		{name: "no opts", provider: "google", want: defaultStreamIdleTimeout},
-		{name: "google flex", provider: "google", opts: map[string]any{"service_tier": "flex"}, want: flexStreamIdleTimeout},
-		{name: "google priority", provider: "google", opts: map[string]any{"service_tier": "priority"}, want: defaultStreamIdleTimeout},
-		{name: "google standard", provider: "google", opts: map[string]any{"service_tier": "standard"}, want: defaultStreamIdleTimeout},
-		{name: "google non-string", provider: "google", opts: map[string]any{"service_tier": 1}, want: defaultStreamIdleTimeout},
-		{name: "openai flex", provider: "openai", opts: map[string]any{"service_tier": "flex"}, want: defaultStreamIdleTimeout},
+		{name: "no opts", provider: "google", want: latest.DisabledStreamIdleTimeout},
+		{name: "google flex", provider: "google", opts: map[string]any{"service_tier": "flex"}, want: latest.DisabledStreamIdleTimeout},
+		{name: "google priority", provider: "google", opts: map[string]any{"service_tier": "priority"}, want: latest.DisabledStreamIdleTimeout},
+		{name: "google standard", provider: "google", opts: map[string]any{"service_tier": "standard"}, want: latest.DisabledStreamIdleTimeout},
+		{name: "google non-string", provider: "google", opts: map[string]any{"service_tier": 1}, want: latest.DisabledStreamIdleTimeout},
+		{name: "openai flex", provider: "openai", opts: map[string]any{"service_tier": "flex"}, want: latest.DisabledStreamIdleTimeout},
 	}
 
 	for _, tt := range tests {
@@ -64,54 +65,63 @@ func TestStreamIdleTimeoutFor(t *testing.T) {
 	}
 }
 
-// Pins the idle boundary the fallback executor applies per provider: Gemini
-// Flex may sit in Google's queue for up to 15 minutes before the first byte,
-// while every other tier keeps the 5 minute default.
-func TestFallbackExecutor_StreamIdleTimeoutByServiceTier(t *testing.T) {
+func TestFallbackExecutor_UnconfiguredStreamRemainsCancelable(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		opts map[string]any
-		want time.Duration
+	flex := latest.ModelConfig{Provider: "google", Model: "gemini", ProviderOpts: map[string]any{"service_tier": "flex"}}
+	for _, tc := range []struct {
+		name     string
+		entry    latest.ModelConfig
+		target   *latest.ModelConfig
+		fallback bool
 	}{
-		{name: "google flex", opts: map[string]any{"service_tier": "flex"}, want: flexStreamIdleTimeout},
-		{name: "google priority", opts: map[string]any{"service_tier": "priority"}, want: defaultStreamIdleTimeout},
-		{name: "google default tier", want: defaultStreamIdleTimeout},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		{name: "ordinary", entry: latest.ModelConfig{Provider: "openai", Model: "m"}},
+		{name: "flex", entry: flex},
+		{name: "flex entry routed to ordinary", entry: flex, target: &latest.ModelConfig{Provider: "openai"}},
+		{name: "ordinary entry routed to flex", entry: latest.ModelConfig{Provider: "rulebased", Model: "router"}, target: &flex},
+		{name: "fallback attempt", entry: flex, fallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				stream := newStalledStream()
-				p := &configuredProvider{
-					cfg:    latest.ModelConfig{Provider: "google", Model: "gemini-2.5-flash", ProviderOpts: tt.opts},
-					stream: stream,
+				var modelStream chat.MessageStream = stream
+				if tc.target != nil {
+					modelStream = &dispatchedIdleStream{MessageStream: stream, model: contracts.ServingModel{Config: base.Config{ModelConfig: *tc.target}}}
 				}
-				a := agent.New("root", "test", agent.WithModel(p))
+				p := &configuredProvider{cfg: tc.entry, stream: modelStream}
+				var primary provider.Provider = p
+				var opts []agent.Opt
+				if tc.fallback {
+					primary = &failingProvider{id: "openai/primary", err: errors.New("failure")}
+					opts = append(opts, agent.WithFallbackModel(p))
+				}
+				opts = append(opts, agent.WithModel(primary))
+				a := agent.New("root", "test", opts...)
 				executor := newFallbackExecutor()
 				executor.cooldowns = newCooldownManager(time.Now)
-
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
 				errCh := make(chan error, 1)
 				go func() {
-					_, _, err := executor.execute(t.Context(), a, p, nil, nil, session.New(), &collectSink{}, nil, nil)
+					_, _, err := executor.execute(ctx, a, primary, nil, nil, session.New(), &collectSink{}, nil, nil)
 					errCh <- err
 				}()
 
 				<-stream.recvStarted
-				time.Sleep(tt.want - time.Nanosecond) //nolint:forbidigo // Advances synthetic time to the boundary.
+				synctest.Sleep(16 * time.Minute)
 				select {
 				case err := <-errCh:
-					t.Fatalf("idle timeout fired before %v: %v", tt.want, err)
+					t.Fatalf("unconfigured stream returned before cancellation: %v", err)
 				default:
 				}
-				synctest.Sleep(time.Nanosecond) // Crosses the synthetic timeout boundary.
+				cancel()
+				synctest.Wait()
 				select {
 				case err := <-errCh:
-					require.ErrorIs(t, err, errStreamIdle)
+					require.ErrorIs(t, err, context.Canceled)
 				default:
-					t.Fatalf("idle timeout did not fire at %v", tt.want)
+					t.Fatal("stream did not promptly return after cancellation")
 				}
 			})
 		})
@@ -137,9 +147,11 @@ func TestStreamIdleTimeoutPrecedence(t *testing.T) {
 		serving     *latest.ModelConfig
 		want        time.Duration
 	}{
-		{name: "flex default", want: flexStreamIdleTimeout},
+		{name: "flex default", want: latest.DisabledStreamIdleTimeout},
 		{name: "file overrides flex", file: timeout(time.Minute), want: time.Minute},
 		{name: "model overrides file", model: timeout(2 * time.Minute), file: timeout(time.Minute), want: 2 * time.Minute},
+		{name: "positive model overrides disabled file", model: timeout(2 * time.Minute), file: timeout(latest.DisabledStreamIdleTimeout), want: 2 * time.Minute},
+		{name: "positive target overrides disabled entry and file", model: timeout(latest.DisabledStreamIdleTimeout), file: timeout(latest.DisabledStreamIdleTimeout), serving: &latest.ModelConfig{StreamIdleTimeout: timeout(3 * time.Minute)}, want: 3 * time.Minute},
 		{name: "model disables", model: timeout(latest.DisabledStreamIdleTimeout), file: timeout(time.Minute), want: latest.DisabledStreamIdleTimeout},
 		{name: "file disables", file: timeout(latest.DisabledStreamIdleTimeout), want: latest.DisabledStreamIdleTimeout},
 		{name: "routed target wins", model: timeout(time.Second), file: timeout(time.Minute), serving: &latest.ModelConfig{Provider: "openai", StreamIdleTimeout: timeout(3 * time.Minute)}, want: 3 * time.Minute},
@@ -147,8 +159,8 @@ func TestStreamIdleTimeoutPrecedence(t *testing.T) {
 		{name: "entry wins over unconfigured target", model: timeout(2 * time.Second), file: timeout(time.Minute), serving: &latest.ModelConfig{Provider: "openai"}, want: 2 * time.Second},
 		{name: "entry disables for target", model: timeout(latest.DisabledStreamIdleTimeout), serving: &latest.ModelConfig{Provider: "openai"}, want: latest.DisabledStreamIdleTimeout},
 		{name: "file wins over unconfigured target", file: timeout(time.Minute), serving: &latest.ModelConfig{Provider: "openai"}, want: time.Minute},
-		{name: "flex entry with non-flex target", serving: &latest.ModelConfig{Provider: "openai"}, want: flexStreamIdleTimeout},
-		{name: "non-flex entry with flex target", entry: &latest.ModelConfig{Provider: "rulebased"}, serving: &flex, want: defaultStreamIdleTimeout},
+		{name: "flex entry with non-flex target", serving: &latest.ModelConfig{Provider: "openai"}, want: latest.DisabledStreamIdleTimeout},
+		{name: "non-flex entry with flex target", entry: &latest.ModelConfig{Provider: "rulebased"}, serving: &flex, want: latest.DisabledStreamIdleTimeout},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := flex
