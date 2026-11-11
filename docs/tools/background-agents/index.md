@@ -75,7 +75,7 @@ Set `worktree: true` to run concurrent coding tasks without sharing a checkout:
 {"agent": "coder", "task": "Implement the backend change and commit it", "worktree": true}
 ```
 
-This works when the calling session is in a Git repository **or an existing Git worktree**. Each task gets a fresh branch from that checkout's current `HEAD`, not the repository's default branch. Uncommitted and untracked files are **not copied**; commit shared starting changes before dispatching tasks. A missing repository or a failed setup is reported as a failed task.
+This works when the calling session is in a Git repository **or an existing Git worktree**. Each task gets a fresh branch from that checkout's current `HEAD`, not the repository's default branch. Uncommitted and untracked files are **not copied**, except for gitignored files selected by the source repository's [`.worktreeinclude`](../../features/cli/index.md#copy-ignored-files-into-worktrees); commit shared starting changes before dispatching tasks. Copied ignored files can be lost when a worktree is removed and do not propagate back to the source. A missing repository or a failed setup is reported as a failed task.
 
 The child gets fresh toolsets and hooks rooted in its checkout; the parent's tools and process working directory are unchanged. Blocking delegations (`transfer_task` and forked skills) inherit the isolated workspace. Nested background dispatch is rejected: start parallel worktree tasks from the top-level orchestrator. Model clients are reused, and tasks share the parent's run budget and inherit its safety policy and permissions. Configured `worktree_create` hooks run before tools and skills are loaded, so setup-created ignore files and directories take effect.
 

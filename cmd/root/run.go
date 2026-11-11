@@ -545,7 +545,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		return err
 	}
 	if createdWorktree != nil {
-		statusOut.Println("Using git worktree: " + createdWorktree.Dir + " (branch " + createdWorktree.Branch + ")")
+		printWorktreeStatus(statusOut, createdWorktree)
 		// loadResult is nil for the remote backend; worktrees are mutually
 		// exclusive with --remote so this is belt-and-suspenders, matching
 		// the nil-guard used for cleanup throughout this function.
@@ -742,6 +742,13 @@ func aliasOptions(cfg *userconfig.Config, agentFileName string) *userconfig.Alia
 		return nil
 	}
 	return alias
+}
+
+func printWorktreeStatus(out *cli.Printer, wt *worktree.Worktree) {
+	out.Println("Using git worktree: " + wt.Dir + " (branch " + wt.Branch + ")")
+	for _, warning := range wt.Warnings {
+		out.Println("Warning: " + warning)
+	}
 }
 
 func (f *runExecFlags) loadTeamInWorktree(ctx context.Context, b backend, wd string) (*teamloader.LoadResult, *worktree.Worktree, string, error) {

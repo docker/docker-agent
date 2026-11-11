@@ -148,6 +148,22 @@ $ docker agent run agent.yaml --worktree-pr https://github.com/owner/repo/pull/1
 
 With `--worktree-pr`, the PR's head branch is checked out tracking its remote (via the [GitHub CLI](https://cli.github.com/)), so commits made during the run push straight back to the pull request. The worktree is stored under `<data-dir>/worktrees/pr-<number>`.
 
+#### Copy ignored files into worktrees
+
+Add a `.worktreeinclude` at the source repository root to copy selected **gitignored** files into new `--worktree`, `--worktree-pr`, and [background agent](../../tools/background-agents/index.md) worktrees before setup hooks run:
+
+```gitignore
+.env.local
+config/*.local.yaml
+!config/private.local.yaml
+```
+
+Patterns use Git's `.gitignore` syntax, including comments, negations and directory patterns. Git's normal rules for ignored parent directories apply: to exclude a child, include the parent with a pattern such as `cache/*` rather than `cache/`. Only files ignored by Git in both the source and destination checkouts are copied. A file not ignored in the destination is skipped with a warning; add appropriate ignore rules to the destination base or PR if it is needed there. Destination checks retry failed batches up to a fixed limit; if the limit is reached, unverified files are skipped with a warning, even if some would otherwise be eligible. This differs from tools that treat `.worktreeinclude` as a list of paths or also copy non-ignored files. Tracked changes and other untracked files are not copied. Missing `.worktreeinclude` leaves worktree creation unchanged.
+
+File permissions are preserved except that group or other permissions are removed when source ancestor directories prevent traversal for that class. New parent directories are private (`0700`). Existing destination files are never overwritten; symlinks, special files, `.gitignore`, and `.gitattributes` files are skipped. This prevents copies from changing the destination's ignore rules or staging attributes. Failures and skipped protected files produce bounded warnings without undoing the worktree; repeated protected-file skips are aggregated, and omitted warnings are counted. Cancellation stops copying and removes an incomplete file, leaving the worktree in place. Background-task warnings appear in the task metadata and logs. Files blocked by the source checkout's nearest [`.agentsignore`](../../configuration/agentsignore/index.md) are not copied, even if included here. `.agentsignore` itself is not copied by this mechanism. As always, `.agentsignore` only governs the filesystem toolset, not shell or other independent tools.
+
+Copied files are independent copies. **Ignored files do not make a worktree dirty**, so an interactive run can remove a clean worktree and its copied files automatically. Changing the destination's ignore rules later can make copied files visible to ordinary `git add`; `git add -f` can stage ignored files even without such a change. Changes to those copies do not propagate back to the source checkout; save anything needed before cleanup.
+
 When the interactive session ends, the worktree is cleaned up based on its state:
 
 - **Clean** (no uncommitted changes, untracked files, or new commits): the worktree and its branch are removed automatically.

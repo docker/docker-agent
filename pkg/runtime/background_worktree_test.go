@@ -352,12 +352,18 @@ func TestBackgroundWorktreeRuntimeState(t *testing.T) {
 func TestBackgroundWorktreeSetupPrecedesToolConstruction(t *testing.T) {
 	t.Parallel()
 	dir := worktreeRepo(t)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.env\n"), 0o644))
+	worktreeGit(t, dir, "add", ".gitignore")
+	worktreeGit(t, dir, "commit", "-m", "ignore env files")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".worktreeinclude"), []byte("*.env\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "local.env"), []byte("from-source"), 0o600))
 	rt := loadWorktreeRuntime(t, dir, map[string]provider.Provider{
 		"root": &mockProvider{id: "test/mock-model"}, "first": &mockProvider{id: "test/mock-model"}, "second": &mockProvider{id: "test/mock-model"},
 	}, `    hooks:
       worktree_create:
         - type: command
           command: |
+            test "$(cat local.env)" = from-source || exit 1
             printf 'secret.txt\n' > .agentsignore
             printf 'secret' > secret.txt
             printf '{"hook_specific_output":{"hook_event_name":"worktree_create","additional_context":"setup context"}}'
@@ -612,4 +618,30 @@ func TestBackgroundWorktreeDescendantsKeepIsolationInstructions(t *testing.T) {
 		require.NoError(t, ts.(*tools.StartableToolSet).Start(t.Context()))
 	}
 	assert.False(t, isolated.bgAgents.HasActiveTasks())
+}
+
+func TestBackgroundWorktreeWarningsAreNotStreamed(t *testing.T) {
+	t.Parallel()
+	dir := worktreeRepo(t)
+	for name, content := range map[string]string{
+		".gitignore": "*.env\n", ".worktreeinclude": "*.env\n",
+		".agentsignore": "private.env\n", "private.env": "secret",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))
+	}
+	rt := loadWorktreeRuntime(t, dir, map[string]provider.Provider{"root": &mockProvider{}, "first": &mockProvider{}, "second": &mockProvider{}}, "")
+	var wt *worktree.Worktree
+	var output strings.Builder
+	workspace, err := rt.prepareBackgroundWorktree(t.Context(), agenttool.RunParams{
+		AgentName: "first", ParentSession: session.New(session.WithWorkingDir(dir)),
+		OnWorktree: func(tree *worktree.Worktree) { wt = tree },
+		OnContent:  func(content string) { output.WriteString(content) },
+	})
+	require.NoError(t, err)
+	require.NotNil(t, workspace)
+	require.NotNil(t, wt)
+	t.Cleanup(func() { require.NoError(t, wt.Remove(context.WithoutCancel(t.Context()))) })
+	assert.Equal(t, []string{".worktreeinclude: skipped a file protected by .agentsignore"}, wt.Warnings)
+	assert.Empty(t, output.String())
+	assert.NoFileExists(t, filepath.Join(wt.Dir, "private.env"))
 }
