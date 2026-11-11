@@ -1457,10 +1457,12 @@ func applyTextEditsToFile(filePath string, edits []lspTextEdit) error {
 }
 
 func applyTextEdit(lines []string, edit lspTextEdit) []string {
-	startLine := edit.Range.Start.Line
-	startChar := edit.Range.Start.Character
-	endLine := edit.Range.End.Line
-	endChar := edit.Range.End.Character
+	// Positions are signed on the wire; a server reporting negatives must
+	// not index or slice with them.
+	startLine := max(edit.Range.Start.Line, 0)
+	startChar := max(edit.Range.Start.Character, 0)
+	endLine := max(edit.Range.End.Line, 0)
+	endChar := max(edit.Range.End.Character, 0)
 
 	if startLine >= len(lines) {
 		return lines

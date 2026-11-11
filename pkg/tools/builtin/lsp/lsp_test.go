@@ -696,6 +696,20 @@ func TestApplyTextEdit_ThroughEnd(t *testing.T) {
 	}
 }
 
+func TestApplyTextEdit_NegativePositions(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{"hello world", "foo bar", "baz qux"}
+	// The LSP spec defines positions as uintegers, but nothing validates
+	// that on the wire; a misbehaving server can report negatives.
+	for _, edit := range []lspTextEdit{
+		{Range: lspRange{Start: lspPosition{Line: -1, Character: -1}, End: lspPosition{Line: -1, Character: -1}}, NewText: "x"},
+		{Range: lspRange{Start: lspPosition{Line: 0, Character: -3}, End: lspPosition{Line: -2, Character: 0}}, NewText: "y"},
+	} {
+		assert.NotPanics(t, func() { applyTextEdit(lines, edit) })
+	}
+}
+
 func TestFormatCodeActions_Empty(t *testing.T) {
 	t.Parallel()
 
