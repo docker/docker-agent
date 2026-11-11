@@ -146,6 +146,41 @@ func TestSchemasMatchEncodedValues(t *testing.T) {
 	}
 }
 
+func TestStreamIdleTimeoutSchema(t *testing.T) {
+	t.Parallel()
+
+	defs := map[string]*jsonschema.Schema{}
+	for _, d := range generated(t) {
+		defs[d.name] = d.schema
+	}
+	for _, name := range []string{"RuntimeDefaults", "ModelConfig"} {
+		t.Run(name, func(t *testing.T) {
+			require.Contains(t, defs, name)
+			field := defs[name].Properties["stream_idle_timeout"]
+			require.NotNil(t, field)
+			root := &jsonschema.Schema{Ref: field.Ref, Defs: defs}
+			resolved, err := root.Resolve(nil)
+			require.NoError(t, err)
+			for _, tc := range []struct {
+				value any
+				valid bool
+			}{
+				{nil, true},
+				{"1m30s", true},
+				{-1, true},
+				{0, false},
+				{-2, false},
+				{1.5, false},
+				{true, false},
+				{[]any{}, false},
+				{map[string]any{}, false},
+			} {
+				assert.Equal(t, tc.valid, resolved.Validate(tc.value) == nil, "%s: %#v", name, tc.value)
+			}
+		})
+	}
+}
+
 // fillEnums sets enum fields, whose zero value is not one of their
 // constants, to their first constant.
 func fillEnums(v reflect.Value, cfg *config, src *goSource) {

@@ -22,7 +22,7 @@ func TestStreamIdleTimeoutSchema(t *testing.T) {
 			value string
 			valid bool
 		}{
-			{"1m30s", true}, {"-1", true}, {"0", false}, {"-2", false}, {"0s", false}, {"-1s", false}, {"bad", false}, {"1.5", false},
+			{"null", true}, {"1m30s", true}, {"-1", true}, {"0", false}, {"-2", false}, {"0s", false}, {"-1s", false}, {"bad", false}, {"1.5", false}, {"true", false}, {"[]", false}, {"{}", false},
 		} {
 			doc := fmt.Sprintf(field, tc.value) + "agents:\n  root:\n    model: openai/gpt\n    instruction: test\n"
 			encoded, err := yaml.YAMLToJSON([]byte(doc))

@@ -19,6 +19,7 @@ func streamIdleTimeoutSchema(*builder) (*jsonschema.Schema, error) {
 	return &jsonschema.Schema{AnyOf: []*jsonschema.Schema{
 		{Type: "string", Description: "Positive Go duration."},
 		{Type: "integer", Enum: []any{-1}, Description: "Disable the idle timer."},
+		{Type: "null", Description: "Inherit the next setting."},
 	}}, nil
 }
 

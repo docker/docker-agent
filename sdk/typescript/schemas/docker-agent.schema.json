@@ -6748,6 +6748,10 @@
           "enum": [
             -1
           ]
+        },
+        {
+          "type": "null",
+          "description": "Inherit the next setting."
         }
       ]
     },

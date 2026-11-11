@@ -1001,7 +1001,7 @@ export interface ShellToolset {
 export type SkillsConfig = boolean | (string | InlineSkill)[];
 
 /** Go: pkg/config/latest/stream_idle_timeout.go StreamIdleTimeout */
-export type StreamIdleTimeout = string | -1;
+export type StreamIdleTimeout = string | -1 | null;
 
 /** Go: pkg/config/latest/types.go StructuredOutput */
 export interface StructuredOutput {

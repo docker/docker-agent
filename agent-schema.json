@@ -2032,7 +2032,8 @@
       "description": "Maximum idle time between model stream chunks, as a positive Go duration; integer -1 disables the timer.",
       "anyOf": [
         { "type": "string", "minLength": 2, "allOf": [{ "pattern": "[1-9]" }], "pattern": "^[+]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:ns|us|µs|μs|ms|s|m|h)(?:(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:ns|us|µs|μs|ms|s|m|h))*$" },
-        { "type": "integer", "enum": [-1] }
+        { "type": "integer", "enum": [-1] },
+        { "type": "null" }
       ]
     },
     "RuntimeDefaults": {
