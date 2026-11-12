@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/atomicfile"
@@ -220,17 +219,4 @@ func (r *Registry) Find(target string) (Record, error) {
 		}
 		return Record{}, fmt.Errorf("ambiguous target %q: matches sessions %s", target, strings.Join(ids, ", "))
 	}
-}
-
-// pidAlive reports whether the given pid corresponds to a live process.
-// Uses os.FindProcess + signal 0, the cross-platform idiom for liveness.
-func pidAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
 }

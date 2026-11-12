@@ -3,6 +3,7 @@ package runregistry
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -123,6 +124,23 @@ func TestList_DropsStaleRecords(t *testing.T) {
 
 	_, err = os.Stat(filepath.Join(r.Dir(), "999999.json"))
 	assert.True(t, os.IsNotExist(err))
+}
+
+func TestList_RealLiveness(t *testing.T) {
+	t.Parallel()
+	r := New(filepath.Join(t.TempDir(), "runs"))
+
+	exited := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^$")
+	require.NoError(t, exited.Run())
+	deadPID := exited.Process.Pid
+
+	writeRecord(t, r, strconv.Itoa(os.Getpid())+".json", Record{PID: os.Getpid(), Addr: "http://live", SessionID: "live", StartedAt: time.Now()})
+	writeRecord(t, r, strconv.Itoa(deadPID)+".json", Record{PID: deadPID, Addr: "http://dead", SessionID: "dead", StartedAt: time.Now()})
+
+	records, err := r.List()
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, "live", records[0].SessionID)
 }
 
 func TestLatest_PicksMostRecent(t *testing.T) {
