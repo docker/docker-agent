@@ -35,6 +35,8 @@ func TestCommandConfiguredPrefixes(t *testing.T) {
 			{"ls /tmp/*", "ls /tmp/example"},
 			{"ls 'file:name'*", "ls 'file:name' -l"},
 			{"curl https://example.com*", "curl https://example.com"},
+			{`'/opt/My Tools/ls' /tmp/*`, `'/opt/My Tools/ls' /tmp/example`},
+			{`"/opt/My Tools/ls" '/tmp/my*`, `"/opt/My Tools/ls" '/tmp/my files'`},
 		} {
 			t.Run(tool+"/"+tc.pattern, func(t *testing.T) {
 				checker := NewCheckerFromRules([]string{tool + ":cmd=" + tc.pattern}, nil, nil)
@@ -68,6 +70,30 @@ func TestCommandGenericGrantScope(t *testing.T) {
 		for _, pattern := range []string{"", ":cmd=*", ":cmd=ls**", ":cmd=[l]s*", ":command=ls*", ":cmd=ls; touch marker"} {
 			checker := NewCheckerFromRules([]string{tool + pattern}, nil, nil)
 			assert.Equal(t, Allow, checker.CheckWithArgs(tool, map[string]any{"cmd": "ls; touch marker", "command": "ls; touch marker"}), tool+pattern)
+		}
+	}
+}
+
+func TestCommandPrefixQuotedExecutable(t *testing.T) {
+	t.Parallel()
+	for _, tool := range []string{"shell", "run_background_job"} {
+		for _, executable := range []string{`'/opt/My Tools/ls'`, `"/opt/My Tools/ls"`, `/opt/My" Tools"/ls`, "'/opt/My\tTools/ls'", `"/opt/My'Tools/ls"`, `'ls'`} {
+			t.Run(tool+"/"+executable, func(t *testing.T) {
+				t.Parallel()
+				checker := NewCheckerFromRules([]string{tool + ":cmd=" + executable + "*"}, nil, nil)
+				for _, suffix := range []string{"", " -la", "\t/tmp"} {
+					assert.Equal(t, Allow, checker.CheckWithArgs(tool, map[string]any{"cmd": executable + suffix}))
+				}
+				for _, suffix := range []string{"evil", `'evil'`, `"evil"`} {
+					assert.Equal(t, Ask, checker.CheckWithArgs(tool, map[string]any{"cmd": executable + suffix}))
+				}
+			})
+		}
+		for _, prefix := range []string{`'/opt/My`, `"/opt/My`, `/opt/"My`, ` 'ls`, "\t\"ls"} {
+			checker := NewCheckerFromRules([]string{tool + ":cmd=" + prefix + "*"}, nil, nil)
+			for _, suffix := range []string{"", " Tools/ls'", " Tools/ls\"", "\tevil'"} {
+				assert.Equal(t, Ask, checker.CheckWithArgs(tool, map[string]any{"cmd": prefix + suffix}), tool+prefix+suffix)
+			}
 		}
 	}
 }

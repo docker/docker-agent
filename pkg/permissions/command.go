@@ -87,8 +87,23 @@ func commandAllowMatches(toolName, pattern string, args map[string]any) bool {
 	}
 	// Only command-name prefixes need a token boundary; argument/path prefixes
 	// intentionally match within an argument. The generic matcher checked the prefix.
-	if strings.ContainsAny(strings.TrimLeft(literal, " \t"), " \t") {
-		return true
+	var quote rune
+	for _, ch := range strings.TrimLeft(literal, " \t") {
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch ch {
+		case '\'', '"':
+			quote = ch
+		case ' ', '\t':
+			return true
+		}
+	}
+	if quote != 0 {
+		return false
 	}
 	rest, ok := strings.CutPrefix(strings.ToLower(cmd), strings.ToLower(literal))
 	return ok && (rest == "" || rest[0] == ' ' || rest[0] == '\t')
