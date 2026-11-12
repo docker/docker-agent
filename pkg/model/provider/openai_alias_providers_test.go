@@ -115,6 +115,15 @@ var openAIAliasProviders = []openAIAliasProvider{
 		liveOptInEnvVar:      "DOCKER_AGENT_RUN_OBSCURIFY_LIVE_TEST",
 	},
 	{
+		provider:             "hopbase",
+		envVar:               "HOPBASE_API_KEY",
+		testKey:              "test-hopbase-key",
+		model:                "glm-5.3",
+		greeting:             "Hello from HopBase",
+		mergesSystemMessages: true,
+		liveOptInEnvVar:      "DOCKER_AGENT_RUN_HOPBASE_LIVE_TEST",
+	},
+	{
 		provider: "deepseek",
 		envVar:   "DEEPSEEK_API_KEY",
 		testKey:  "sk-test-deepseek-key",

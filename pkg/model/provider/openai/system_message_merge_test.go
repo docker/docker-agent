@@ -243,6 +243,7 @@ func TestShouldMergeConsecutiveMessages_Gating(t *testing.T) {
 		{"runcrate, no base_url", &latest.ModelConfig{Provider: "runcrate", Model: "deepseek-ai/DeepSeek-V4.1-Flash"}, true},
 		{"cloudgpu, no base_url", &latest.ModelConfig{Provider: "cloudgpu", Model: "deepseek-v4.1-flash"}, true},
 		{"obscurify, no base_url", &latest.ModelConfig{Provider: "obscurify", Model: "deepseek/deepseek-v4-flash"}, true},
+		{"hopbase, no base_url", &latest.ModelConfig{Provider: "hopbase", Model: "glm-5.3"}, true},
 		{"ovhcloud", &latest.ModelConfig{Provider: "ovhcloud", Model: "Qwen3.5-397B-A17B"}, true},
 		{"open-model host alias cerebras", &latest.ModelConfig{Provider: "cerebras", Model: "qwen-3-coder-480b"}, true},
 		{"open-model host fireworks", &latest.ModelConfig{Provider: "fireworks", Model: "accounts/fireworks/models/kimi-k3"}, true},

@@ -225,6 +225,7 @@ remote MCP endpoints.
 | [`vercel.yaml`](vercel.yaml) | Vercel AI Gateway multi-provider router. |
 | [`cloudgpu.yaml`](cloudgpu.yaml) | CloudGPU OpenAI-compatible provider (`cloudgpu`). |
 | [`obscurify.yaml`](obscurify.yaml) | Obscurify.ai multi-model provider (`obscurify`). |
+| [`hopbase.yaml`](hopbase.yaml) | HopBase multi-model gateway (`hopbase`). |
 | [`cloudflare-workers-ai.yaml`](cloudflare-workers-ai.yaml) | Cloudflare Workers AI edge-hosted open models. |
 | [`cloudflare-ai-gateway.yaml`](cloudflare-ai-gateway.yaml) | Cloudflare AI Gateway multi-provider router. |
 | [`grok.yaml`](grok.yaml) | xAI Grok model. |
