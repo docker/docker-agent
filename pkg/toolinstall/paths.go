@@ -3,6 +3,7 @@ package toolinstall
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/paths"
@@ -38,13 +39,20 @@ func RegistryDir() string {
 // is prepended to the PATH entry. This allows installed tools to find
 // other installed tools (e.g., npx finding node).
 func PrependBinDirToEnv(env []string) []string {
-	binDir := BinDir()
+	return prependToPath(env, BinDir(), runtime.GOOS == "windows")
+}
+
+// prependToPath prepends dir to every PATH entry in env. Windows env names are
+// case-insensitive and usually spelled "Path"; missing it would append a second
+// entry that replaces the system PATH in the child.
+func prependToPath(env []string, dir string, caseInsensitive bool) []string {
 	result := make([]string, 0, len(env))
 	found := false
 
 	for _, e := range env {
-		if existing, ok := strings.CutPrefix(e, "PATH="); ok {
-			result = append(result, "PATH="+binDir+string(os.PathListSeparator)+existing)
+		key, existing, ok := strings.Cut(e, "=")
+		if ok && (key == "PATH" || (caseInsensitive && strings.EqualFold(key, "PATH"))) {
+			result = append(result, key+"="+dir+string(os.PathListSeparator)+existing)
 			found = true
 		} else {
 			result = append(result, e)
@@ -52,7 +60,7 @@ func PrependBinDirToEnv(env []string) []string {
 	}
 
 	if !found {
-		result = append(result, "PATH="+binDir)
+		result = append(result, "PATH="+dir)
 	}
 
 	return result
