@@ -289,6 +289,7 @@ When the agent encounters a task that matches a `context: fork` skill, it uses t
 - **Isolates the context window** — the sub-agent has its own conversation history, so lengthy tool-call chains don't eat into the parent's token budget
 - **Folds the result** — only the sub-agent's final answer is returned to the parent as the tool result
 - **Inherits the parent's model and tools** — the sub-agent can use all tools available to the parent agent (scope this with `allowed_tools` / `toolsets`, see [Scoping a fork skill's tools](#scoping-a-fork-skills-tools))
+- **Inherits the parent's safety policy and permissions** — tool calls inside the fork are gated like normal calls; `run_skill` only launches the sub-session, so it does not add an approval prompt of its own (strict mode still evaluates it like any other call)
 
 > [!TIP]
 > **When to use context: fork**

@@ -603,6 +603,25 @@ func TestSkillsToolset_Tools_WithForkSkills(t *testing.T) {
 	assert.Equal(t, ToolNameRunSkill, result[1].Name)
 }
 
+// TestSkillsToolset_RunSkillIsDelegationWrapper pins the annotation that
+// keeps the legacy and balanced approval modes from prompting on every fork
+// launch. Tool calls inside the fork are still gated by the child dispatcher.
+func TestSkillsToolset_RunSkillIsDelegationWrapper(t *testing.T) {
+	t.Parallel()
+	st := New([]skills.Skill{
+		{Name: "forked", Description: "Forked skill", Context: "fork"},
+	}, "")
+
+	result, err := st.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, result, 2)
+
+	runSkill := result[1]
+	require.Equal(t, ToolNameRunSkill, runSkill.Name)
+	assert.True(t, runSkill.Annotations.ReadOnlyHint)
+	assert.Equal(t, "Run Skill", runSkill.Annotations.Title)
+}
+
 func TestSkillsToolset_Tools_NoForkSkills(t *testing.T) {
 	t.Parallel()
 	st := New([]skills.Skill{

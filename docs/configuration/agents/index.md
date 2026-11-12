@@ -486,7 +486,7 @@ See [`examples/readonly.yaml`](https://github.com/docker/docker-agent/blob/main/
 > [!NOTE]
 > **Which tools are read-only?**
 >
-> Whether a tool is read-only is determined by its `ReadOnlyHint` annotation. For built-in tools, read-only operations (list/read/search) carry the hint; mutating operations (write/delete/execute) do not. Custom and MCP tools expose the hint via their own annotations.
+> Whether a tool is read-only is determined by its `ReadOnlyHint` annotation. For built-in tools, read-only operations (list/read/search) carry the hint. Delegation wrappers (`transfer_task`, `handoff`, `run_skill`) also carry it because the wrapper only changes control flow or starts a sub-session; the calls that follow are gated separately. Mutating operations (write/delete/execute) do not. Custom and MCP tools expose the hint via their own annotations.
 
 ## Complete Example
 
