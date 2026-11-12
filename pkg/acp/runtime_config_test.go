@@ -43,7 +43,8 @@ models:
     temperature: 0.2
     max_tokens: 321
     cost: {input: 3, output: 9}
-    provider_opts: {test_option: model, context_size: 8192}
+    context_window: 8192
+    provider_opts: {test_option: model}
   alternative:
     provider: openai
     model: gpt-4o-mini

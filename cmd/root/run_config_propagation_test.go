@@ -59,8 +59,8 @@ models:
     cost:
       input: 3
       output: 9
+    context_window: 8192
     provider_opts:
-      context_size: 8192
       test_option: model
 providers:
   private:

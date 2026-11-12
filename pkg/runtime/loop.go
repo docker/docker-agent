@@ -522,11 +522,10 @@ func (r *LocalRuntime) runStreamLoop(ctx context.Context, sess *session.Session,
 			slog.DebugContext(ctx, "Failed to get model definition", "error", err)
 		}
 		// We can only compact if we know the context limit.
-		// resolveContextLimit prefers provider_opts.context_size when set
-		// (some providers — notably Docker Model Runner — use it to size
-		// the actual inference context), then tries provider discovery and
+		// resolveContextLimit prefers the declared context_window (or
+		// provider_opts.context_size), then tries provider discovery and
 		// the models.dev catalogue. The lookup above is reused inside resolveContextLimit
-		// only when context_size isn't supplied; we keep the explicit call
+		// only when no window is declared; we keep the explicit call
 		// here because m is also passed to [pricing.ComputeMessageCost] for
 		// per-turn cost computation.
 		// resolveContextLimit yields the primary model's window; effectiveContextLimit

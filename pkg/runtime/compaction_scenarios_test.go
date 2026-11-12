@@ -61,9 +61,10 @@ func TestScenario_CompactionFailure_ReportsFailedOutcome(t *testing.T) {
 	sess := twoMessageSession()
 	kinds := collectCompactionEvents(t, rt, sess)
 
-	// The started/completed pairing is preserved for spinner logic, but
-	// the terminal event now reports the failure.
-	assert.Equal(t, []string{"compaction:started", "error", "compaction:completed:failed"}, kinds)
+	// The started/completed pairing is preserved for spinner logic, and the
+	// terminal event reports the failure. The explanation is a WarningEvent,
+	// not a transcript error (see compaction_unknown_window_test.go).
+	assert.Equal(t, []string{"compaction:started", "compaction:completed:failed"}, kinds)
 	assert.Len(t, sess.Messages, 2, "failed compaction must not modify the session")
 }
 

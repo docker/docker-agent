@@ -57,6 +57,9 @@ func (t *Config) Validate() error {
 		if err := m.Cost.validate(); err != nil {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
+		if err := m.validateContextWindow(); err != nil {
+			return fmt.Errorf("models.%s: %w", name, err)
+		}
 		if err := m.Auth.Validate(EffectiveProviderType(m, t.Providers)); err != nil {
 			return fmt.Errorf("models.%s: %w", name, err)
 		}
@@ -199,6 +202,9 @@ func (m *ModelConfig) validateFirstAvailable() error {
 	if m.Cost != nil {
 		return errors.New("first_available cannot be combined with cost (set it on the candidate models instead)")
 	}
+	if m.ContextWindow != nil {
+		return errors.New("first_available cannot be combined with context_window (set it on the candidate models instead)")
+	}
 	if m.OutputCapabilities != nil {
 		return errors.New("first_available cannot be combined with output_capabilities (set output_capabilities.image on the candidate models instead)")
 	}
@@ -206,6 +212,13 @@ func (m *ModelConfig) validateFirstAvailable() error {
 		if strings.TrimSpace(ref) == "" {
 			return fmt.Errorf("first_available[%d] must not be empty", i)
 		}
+	}
+	return nil
+}
+
+func (m *ModelConfig) validateContextWindow() error {
+	if m.ContextWindow != nil && *m.ContextWindow <= 0 {
+		return fmt.Errorf("context_window must be greater than 0, got %d", *m.ContextWindow)
 	}
 	return nil
 }

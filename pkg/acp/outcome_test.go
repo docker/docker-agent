@@ -396,7 +396,9 @@ func TestPromptCompactionDiagnosticDoesNotOverrideRecovery(t *testing.T) {
 	response, err := a.Prompt(t.Context(), promptRequest("test"))
 	require.NoError(t, err)
 	assert.Equal(t, acpsdk.StopReasonEndTurn, response.StopReason)
-	assert.Contains(t, strings.Join(peer.out.(*captureWriter).lines(), "\n"), "Failed to get model definition")
+	out := strings.Join(peer.out.(*captureWriter).lines(), "\n")
+	assert.Contains(t, out, "Warning: Session compaction failed: model")
+	assert.Contains(t, out, "has no known context window")
 }
 
 func TestPromptNaturalStopAtIterationCap(t *testing.T) {

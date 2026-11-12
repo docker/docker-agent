@@ -58,6 +58,16 @@ models:
     model: claude-haiku-4-5
 ```
 
+> [!NOTE]
+> **Unknown context window**
+>
+> Compaction needs the summary model's context window. Models outside the models.dev catalogue (custom endpoints, local models) have none unless you declare one. If compaction reports that a model "has no known context window", add `context_window` to that model's entry in the `models` section (for example `context_window: 200000`). See [Context Window](../../configuration/models/index.md#context-window).
+
+> [!NOTE]
+> **Declared windows and thresholds**
+>
+> A model's `context_window` (see [Context Window](../../configuration/models/index.md#context-window)) is the capacity the threshold is a fraction of. Setting it does not add a fixed-token trigger: with `context_window: 128000` and the default `0.9`, compaction fires above 115,200 tokens, and the `compaction_threshold` on the model or agent scales that fraction.
+
 > [!IMPORTANT]
 > **Context window mismatch**
 >
