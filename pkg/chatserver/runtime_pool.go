@@ -7,12 +7,13 @@ import (
 
 	"go.opentelemetry.io/otel"
 
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/version"
 )
 
-// runtimePool keeps a small set of `runtime.Runtime` instances ready for
+// runtimePool keeps a small set of `runtimeRunner` instances ready for
 // reuse, keyed by agent name. Building a runtime is non-trivial (it
 // resolves the agent's tools, creates per-agent hook executors, sets up
 // channels for resume/elicitation), so reusing the work across requests
@@ -32,7 +33,7 @@ type runtimePool struct {
 	maxIdle int
 
 	mu   sync.Mutex
-	idle map[string]chan runtime.Runtime
+	idle map[string]chan runtimeRunner
 }
 
 // errInvalidRuntime is returned when a caller asks for a runtime for an
@@ -49,13 +50,13 @@ func newRuntimePool(ctx context.Context, t *team.Team, maxIdle int) *runtimePool
 		team:    t,
 		ctx:     func() context.Context { return context.WithoutCancel(ctx) },
 		maxIdle: maxIdle,
-		idle:    make(map[string]chan runtime.Runtime),
+		idle:    make(map[string]chan runtimeRunner),
 	}
 }
 
 // Get returns a ready-to-use runtime for the given agent, either
 // recycled from the pool or freshly created.
-func (p *runtimePool) Get(agent string) (runtime.Runtime, error) {
+func (p *runtimePool) Get(agent string) (runtimeRunner, error) {
 	if p == nil {
 		return nil, errInvalidRuntime
 	}
@@ -67,6 +68,7 @@ func (p *runtimePool) Get(agent string) (runtime.Runtime, error) {
 	// spans go silent in OpenAI-compatible chat-completions mode.
 	rt, err := runtime.New(p.ctx(), p.team,
 		runtime.WithCurrentAgent(agent),
+		runtime.WithModelsDevFallback(embedded.Snapshot),
 		runtime.WithTracer(otel.Tracer(version.AppName)),
 	)
 	if err != nil {
@@ -79,7 +81,7 @@ func (p *runtimePool) Get(agent string) (runtime.Runtime, error) {
 // slot is full the runtime is discarded (not closed: the team owns the
 // underlying toolsets). The runtime must not be used by the caller
 // after Put returns.
-func (p *runtimePool) Put(agent string, rt runtime.Runtime) {
+func (p *runtimePool) Put(agent string, rt runtimeRunner) {
 	if p == nil || rt == nil || p.maxIdle == 0 {
 		return
 	}
@@ -92,7 +94,7 @@ func (p *runtimePool) Put(agent string, rt runtime.Runtime) {
 	}
 }
 
-func (p *runtimePool) takeIdle(agent string) runtime.Runtime {
+func (p *runtimePool) takeIdle(agent string) runtimeRunner {
 	p.mu.Lock()
 	ch, ok := p.idle[agent]
 	p.mu.Unlock()
@@ -107,12 +109,12 @@ func (p *runtimePool) takeIdle(agent string) runtime.Runtime {
 	}
 }
 
-func (p *runtimePool) channelFor(agent string) chan runtime.Runtime {
+func (p *runtimePool) channelFor(agent string) chan<- runtimeRunner {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ch, ok := p.idle[agent]
 	if !ok {
-		ch = make(chan runtime.Runtime, p.maxIdle)
+		ch = make(chan runtimeRunner, p.maxIdle)
 		p.idle[agent] = ch
 	}
 	return ch

@@ -2,27 +2,21 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
 
-	"github.com/docker/docker-agent/pkg/session"
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/modelpicker"
 )
 
 // findModelPickerTool returns the Tool from the current agent's
 // toolsets, or nil if the agent has no model_picker configured.
-func (r *LocalRuntime) findModelPickerTool() *modelpicker.ToolSet {
-	currentName := r.currentAgentName()
-	a, err := r.team.Agent(currentName)
-	if err != nil {
-		return nil
-	}
+func findModelPickerTool(a *agent.Agent) *modelpicker.ToolSet {
 	for _, ts := range a.ToolSets() {
-		if mpt, ok := tools.As[*modelpicker.ToolSet](ts); ok {
+		if mpt, ok := tools.Find[*modelpicker.ToolSet](ts); ok {
 			return mpt
 		}
 	}
@@ -30,9 +24,9 @@ func (r *LocalRuntime) findModelPickerTool() *modelpicker.ToolSet {
 }
 
 // handleChangeModel handles the change_model tool call by switching the current agent's model.
-func (r *LocalRuntime) handleChangeModel(ctx context.Context, _ *session.Session, toolCall tools.ToolCall, events EventSink) (*tools.ToolCallResult, error) {
+func (r *LocalRuntime) handleChangeModel(ctx context.Context, a *agent.Agent, toolCall tools.ToolCall, events EventSink) (*tools.ToolCallResult, error) {
 	var params modelpicker.ChangeModelArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
@@ -41,7 +35,7 @@ func (r *LocalRuntime) handleChangeModel(ctx context.Context, _ *session.Session
 	}
 
 	// Validate the requested model against the allowed list
-	mpt := r.findModelPickerTool()
+	mpt := findModelPickerTool(a)
 	if mpt == nil {
 		return tools.ResultError("model_picker is not configured for this agent"), nil
 	}
@@ -53,28 +47,24 @@ func (r *LocalRuntime) handleChangeModel(ctx context.Context, _ *session.Session
 		)), nil
 	}
 
-	return r.setModelAndEmitInfo(ctx, params.Model, events)
+	return r.setModelAndEmitInfo(ctx, a, params.Model, events)
 }
 
 // handleRevertModel handles the revert_model tool call by reverting the current agent to its default model.
-func (r *LocalRuntime) handleRevertModel(ctx context.Context, _ *session.Session, _ tools.ToolCall, events EventSink) (*tools.ToolCallResult, error) {
-	return r.setModelAndEmitInfo(ctx, "", events)
+func (r *LocalRuntime) handleRevertModel(ctx context.Context, a *agent.Agent, events EventSink) (*tools.ToolCallResult, error) {
+	return r.setModelAndEmitInfo(ctx, a, "", events)
 }
 
 // setModelAndEmitInfo sets the model for the current agent and emits an updated
 // AgentInfo event so the UI reflects the change. An empty modelRef reverts to
 // the agent's default model.
-func (r *LocalRuntime) setModelAndEmitInfo(ctx context.Context, modelRef string, events EventSink) (*tools.ToolCallResult, error) {
-	currentName := r.currentAgentName()
+func (r *LocalRuntime) setModelAndEmitInfo(ctx context.Context, a *agent.Agent, modelRef string, events EventSink) (*tools.ToolCallResult, error) {
+	currentName := a.Name()
 	if err := r.SetAgentModel(ctx, currentName, modelRef); err != nil {
 		return tools.ResultError(fmt.Sprintf("failed to set model: %v", err)), nil
 	}
 
-	if a, err := r.team.Agent(currentName); err == nil {
-		events.Emit(AgentInfo(a.Name(), r.getEffectiveModelID(ctx, a).String(), a.Description(), a.WelcomeMessage()))
-	} else {
-		slog.WarnContext(ctx, "Failed to retrieve agent after model change; UI may not reflect the update", "agent", currentName, "error", err)
-	}
+	events.Emit(AgentInfo(a.Name(), r.getEffectiveModelID(ctx, a).String(), a.Description(), a.WelcomeMessage()))
 
 	if modelRef == "" {
 		slog.InfoContext(ctx, "Model reverted via model_picker tool", "agent", currentName)

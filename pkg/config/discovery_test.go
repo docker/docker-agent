@@ -34,6 +34,26 @@ func TestDiscoveryAvailableProviders(t *testing.T) {
 			wantPresent: []string{"google"},
 		},
 		{
+			name:        "vertex mode enabled",
+			envVars:     map[string]string{"GOOGLE_GENAI_USE_VERTEXAI": "true"},
+			wantPresent: []string{"google"},
+		},
+		{
+			name:       "vertex mode disabled",
+			envVars:    map[string]string{"GOOGLE_GENAI_USE_VERTEXAI": "false"},
+			wantAbsent: []string{"google"},
+		},
+		{
+			name:        "copilot alternative token",
+			envVars:     map[string]string{"GH_TOKEN": "test-token"},
+			wantPresent: []string{"github-copilot"},
+		},
+		{
+			name:        "bedrock profile",
+			envVars:     map[string]string{"AWS_PROFILE": "development"},
+			wantPresent: []string{"amazon-bedrock"},
+		},
+		{
 			name:        "alias token surfaces the alias",
 			envVars:     map[string]string{"XAI_API_KEY": "xai-test"},
 			wantPresent: []string{"xai"},

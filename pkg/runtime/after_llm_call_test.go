@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/runtime/pricing"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 )
@@ -151,7 +152,7 @@ func captureAfterLLMCall(t *testing.T, store ModelStore) (*hooks.Input, *session
 // TestAfterLLMCallHook_PopulatesUsageAndCost pins the priced-call
 // contract: when the model has a pricing table, after_llm_call carries
 // the provider's token usage and a non-nil Cost equal to the value the
-// runtime records on the assistant message (same computeMessageCost
+// runtime records on the assistant message (same pricing.ComputeMessageCost
 // call, threaded to both).
 func TestAfterLLMCallHook_PopulatesUsageAndCost(t *testing.T) {
 	t.Parallel()
@@ -163,16 +164,16 @@ func TestAfterLLMCallHook_PopulatesUsageAndCost(t *testing.T) {
 	assert.Equal(t, int64(10), in.Usage.InputTokens)
 	assert.Equal(t, int64(5), in.Usage.OutputTokens)
 
-	// Same arithmetic as computeMessageCost; inputs chosen for exact
+	// Same arithmetic as pricing.ComputeMessageCost; inputs chosen for exact
 	// float64 representation so equality is reliable.
 	expected := (float64(10)*rate.Input + float64(5)*rate.Output) / 1e6
 	require.NotNil(t, in.Cost, "Cost must be non-nil for a priced model")
 	assert.InDelta(t, expected, *in.Cost, 1e-9,
-		"hook Cost must equal computeMessageCost(usage, model)")
+		"hook Cost must equal pricing.ComputeMessageCost(usage, model)")
 
 	// The headline guarantee: the cost the hook reports is the same
 	// cost the session bills for the turn. OwnCost sums the recorded
-	// assistant message's Cost, set from the same computeMessageCost
+	// assistant message's Cost, set from the same pricing.ComputeMessageCost
 	// value threaded into recordAssistantMessage.
 	assert.InDelta(t, *in.Cost, sess.OwnCost(), 1e-9,
 		"hook Cost must equal the cost the session recorded for the turn")
@@ -327,7 +328,7 @@ func TestSanitizeToolCallName(t *testing.T) {
 		// Name starting with invalid char falls back to unknown_tool
 		{`" path="foo"`, "unknown_tool"},
 		{"", "unknown_tool"},
-		// Name longer than 64 chars is capped
+		// Leading invalid chars (here NUL bytes) fall back to unknown_tool
 		{string(make([]byte, 80)), "unknown_tool"}, // all zero bytes are invalid
 	}
 
@@ -380,22 +381,46 @@ func TestComputeMessageCost(t *testing.T) {
 
 	t.Run("nil usage is unpriced", func(t *testing.T) {
 		t.Parallel()
-		assert.Nil(t, computeMessageCost(nil, &modelsdev.Model{Cost: rate}))
+		assert.Nil(t, pricing.ComputeMessageCost(nil, &modelsdev.Model{Cost: rate}))
 	})
 	t.Run("nil model is unpriced", func(t *testing.T) {
 		t.Parallel()
-		assert.Nil(t, computeMessageCost(&chat.Usage{InputTokens: 1}, nil))
+		assert.Nil(t, pricing.ComputeMessageCost(&chat.Usage{InputTokens: 1}, nil))
 	})
 	t.Run("model without pricing table is unpriced", func(t *testing.T) {
 		t.Parallel()
-		assert.Nil(t, computeMessageCost(&chat.Usage{InputTokens: 1}, &modelsdev.Model{}))
+		assert.Nil(t, pricing.ComputeMessageCost(&chat.Usage{InputTokens: 1}, &modelsdev.Model{}))
 	})
 	t.Run("priced computes from all token classes", func(t *testing.T) {
 		t.Parallel()
 		usage := &chat.Usage{InputTokens: 10, OutputTokens: 5, CachedInputTokens: 4, CacheWriteTokens: 2}
-		got := computeMessageCost(usage, &modelsdev.Model{Cost: rate})
+		got := pricing.ComputeMessageCost(usage, &modelsdev.Model{Cost: rate})
 		require.NotNil(t, got)
 		expected := (10*rate.Input + 5*rate.Output + 4*rate.CacheRead + 2*rate.CacheWrite) / 1e6
 		assert.InDelta(t, expected, *got, 1e-9)
+	})
+	t.Run("long prompt is billed at the long-context tier for every token class", func(t *testing.T) {
+		t.Parallel()
+		// openai/gpt-5.4: base band up to 272k prompt tokens, double above.
+		tiered := &modelsdev.Cost{
+			Input: 2.5, Output: 15, CacheRead: 0.25,
+			Tiers: []modelsdev.CostTier{{
+				Rates: modelsdev.Rates{Input: 5, Output: 22.5, CacheRead: 0.5},
+				Tier:  modelsdev.TierSpec{Type: "context", Size: 272_000},
+			}},
+		}
+		m := &modelsdev.Model{Cost: tiered}
+
+		// Fresh + cached input sum to exactly the threshold: base band.
+		atLimit := &chat.Usage{InputTokens: 72_000, CachedInputTokens: 200_000, OutputTokens: 1_000}
+		got := pricing.ComputeMessageCost(atLimit, m)
+		require.NotNil(t, got)
+		assert.InDelta(t, (72_000*2.5+200_000*0.25+1_000*15)/1e6, *got, 1e-9)
+
+		// One more cached token tips the whole request into the tier.
+		over := &chat.Usage{InputTokens: 72_000, CachedInputTokens: 200_001, OutputTokens: 1_000}
+		got = pricing.ComputeMessageCost(over, m)
+		require.NotNil(t, got)
+		assert.InDelta(t, (72_000*5+200_001*0.5+1_000*22.5)/1e6, *got, 1e-9)
 	})
 }

@@ -14,13 +14,16 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -166,6 +169,50 @@ func TestServer_WithMaxRequestBytesZeroFallback(t *testing.T) {
 	}
 }
 
+func TestServer_ListActiveSessionsIsLightweightAndIncludesStreaming(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	historical := session.New(session.WithWorkingDir("/historical"))
+	require.NoError(t, store.AddSession(ctx, historical))
+
+	idle := session.New(session.WithWorkingDir("/work"))
+	running := session.New(session.WithWorkingDir("/work"))
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, idle.ID, &fakeRuntime{}, idle)
+	runningGuard := sm.AttachRuntime(ctx, running.ID, &fakeRuntime{}, running)
+	runningGuard.Lock()
+	defer runningGuard.Unlock()
+
+	srv := NewWithManager(sm, "")
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/sessions?active=true", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var sessions []api.SessionsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sessions))
+	require.Len(t, sessions, 2, "stored sessions without an attached runtime are excluded")
+	assert.ElementsMatch(t, []api.SessionsResponse{
+		{ID: idle.ID, CreatedAt: idle.CreatedAt.Format(time.RFC3339), WorkingDir: "/work"},
+		{ID: running.ID, CreatedAt: running.CreatedAt.Format(time.RFC3339), WorkingDir: "/work", Streaming: true},
+	}, sessions)
+}
+
+func TestServer_ListActiveSessionsEmptyIsArray(t *testing.T) {
+	t.Parallel()
+
+	sm := NewSessionManager(t.Context(), config.Sources{}, session.NewInMemorySessionStore(), 0, &config.RuntimeConfig{})
+	srv := NewWithManager(sm, "")
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/sessions?active=true", http.NoBody)
+	rec := httptest.NewRecorder()
+	srv.e.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `[]`, rec.Body.String())
+}
+
 func TestServer_ListSessions(t *testing.T) {
 	t.Parallel()
 
@@ -204,9 +251,9 @@ func startServer(t *testing.T, ctx context.Context, agentsDir string) string {
 	var store mockStore
 	runConfig := config.RuntimeConfig{}
 
-	sources, err := config.ResolveSources(agentsDir, nil)
+	agentSources, err := sources.ResolveSources(agentsDir, nil)
 	require.NoError(t, err)
-	srv, err := New(ctx, store, &runConfig, 0, sources, "", 0)
+	srv, err := New(ctx, store, &runConfig, 0, agentSources, "", 0)
 	require.NoError(t, err)
 
 	socketPath := "unix://" + filepath.Join(t.TempDir(), "sock")
@@ -541,9 +588,9 @@ func startServerWithStore(t *testing.T, ctx context.Context, agentsDir string, s
 
 	runConfig := config.RuntimeConfig{}
 
-	sources, err := config.ResolveSources(agentsDir, nil)
+	agentSources, err := sources.ResolveSources(agentsDir, nil)
 	require.NoError(t, err)
-	srv, err := New(ctx, store, &runConfig, 0, sources, "", 0)
+	srv, err := New(ctx, store, &runConfig, 0, agentSources, "", 0)
 	require.NoError(t, err)
 
 	socketPath := "unix://" + filepath.Join(t.TempDir(), "sock")
@@ -571,4 +618,28 @@ func (s mockStore) GetSessions(context.Context) ([]*session.Session, error) {
 
 func (s mockStore) GetSessionSummaries(context.Context) ([]session.Summary, error) {
 	return nil, nil
+}
+
+func TestServerPreservesServingContext(t *testing.T) {
+	t.Parallel()
+	client := newTestHTTPClient(t)
+	type contextKey struct{}
+	ctx := context.WithValue(t.Context(), contextKey{}, "selected Docker connection")
+	srv := NewWithManager(nil, "")
+	srv.e.GET("/context", func(c echo.Context) error {
+		return c.String(http.StatusOK, c.Request().Context().Value(contextKey{}).(string))
+	})
+	var lc net.ListenConfig
+	ln, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() { _ = srv.Serve(ctx, ln) }()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+ln.Addr().String()+"/context", http.NoBody)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, "selected Docker connection", string(body))
 }

@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -68,5 +68,14 @@ func TestExtractResult(t *testing.T) {
 				t.Errorf("extractResult() = %q, want %q", result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestExtractResult_NilOrForeignMeta(t *testing.T) {
+	t.Parallel()
+	for _, meta := range []any{nil, "unexpected"} {
+		if got := extractResult(&types.Message{ToolResult: &tools.ToolCallResult{Meta: meta}}); got != "empty directory" {
+			t.Errorf("extractResult() = %q, want %q", got, "empty directory")
+		}
 	}
 }

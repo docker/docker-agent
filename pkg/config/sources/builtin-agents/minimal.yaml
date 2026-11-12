@@ -1,0 +1,9 @@
+agents:
+  root:
+    model: auto
+    description: A minimal general-purpose assistant
+    instruction: Be helpful, accurate, and concise.
+    toolsets:
+      - type: file
+      - type: shell
+      - type: fetch

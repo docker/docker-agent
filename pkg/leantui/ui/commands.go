@@ -1,7 +1,8 @@
 package ui
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"strings"
 )
 
@@ -26,9 +27,19 @@ type Command struct {
 // commands first, then agent commands, each group alphabetically sorted.
 func FilterCommands(all []Command, prefix string) []Command {
 	prefix = strings.ToLower(prefix)
-	return filterCommands(all, func(c Command) bool {
-		return strings.HasPrefix(strings.ToLower(c.Name), prefix)
+	var out []Command
+	for _, c := range all {
+		if strings.HasPrefix(strings.ToLower(c.Name), prefix) {
+			out = append(out, c)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b Command) int {
+		if order := cmp.Compare(a.Kind, b.Kind); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.Name, b.Name)
 	})
+	return out
 }
 
 // FilterScopedCommands ranks argument completions with their configured matcher.
@@ -48,8 +59,8 @@ func FilterScopedCommands(all []Command, query string) []Command {
 			matches = append(matches, scoredCommand{command: command, score: score})
 		}
 	}
-	sort.SliceStable(matches, func(i, j int) bool {
-		return matches[i].score > matches[j].score
+	slices.SortStableFunc(matches, func(a, b scoredCommand) int {
+		return cmp.Compare(b.score, a.score)
 	})
 
 	result := make([]Command, len(matches))
@@ -57,20 +68,4 @@ func FilterScopedCommands(all []Command, query string) []Command {
 		result[i] = match.command
 	}
 	return result
-}
-
-func filterCommands(all []Command, match func(Command) bool) []Command {
-	var out []Command
-	for _, c := range all {
-		if match(c) {
-			out = append(out, c)
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Kind != out[j].Kind {
-			return out[i].Kind < out[j].Kind
-		}
-		return out[i].Name < out[j].Name
-	})
-	return out
 }

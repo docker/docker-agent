@@ -1,9 +1,12 @@
 package e2e_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/docker/docker-agent/pkg/testutil/geminiintegration"
 )
 
 func TestDebug_Title(t *testing.T) {
@@ -31,6 +34,9 @@ func TestDebug_Title(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if strings.HasPrefix(tt.model, "google/") {
+				geminiintegration.Require(t)
+			}
 			t.Parallel()
 
 			title := runCLI(t, "debug", "title", "testdata/basic.yaml", "--model="+tt.model, "What can you do?")

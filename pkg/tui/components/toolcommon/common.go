@@ -101,21 +101,16 @@ func CompletePartialJSON(s string) (string, bool) {
 // parsed value while a later argument fragment is temporarily unparseable.
 func ExtractField[T any](field func(T) string) func(string) string {
 	var last string
-	var hasLast bool
 
 	return func(args string) string {
 		parsed, err := ParseArgs[T](args)
 		if err != nil {
-			if hasLast {
-				return last
-			}
-			return ""
+			return last
 		}
 
 		value := field(parsed)
 		if value != "" {
 			last = value
-			hasLast = true
 		}
 		return value
 	}
@@ -126,19 +121,13 @@ func ExtractField[T any](field func(T) string) func(string) string {
 // arguments where an intermediate JSON fragment may be impossible to parse.
 func StableExtractor(extract func(string) string) func(string) string {
 	var last string
-	var hasLast bool
 
 	return func(args string) string {
 		value := extract(args)
 		if value != "" {
 			last = value
-			hasLast = true
-			return value
 		}
-		if hasLast {
-			return last
-		}
-		return ""
+		return last
 	}
 }
 
@@ -149,17 +138,13 @@ const LongRunningThreshold = 60 * time.Second
 func Icon(msg *types.Message, inProgress spinner.Spinner) string {
 	switch msg.ToolStatus {
 	case types.ToolStatusRunning, types.ToolStatusPending:
+		if msg.HideToolProgress {
+			return styles.ToolMessageStyle.MarginLeft(2).Render("●")
+		}
 		// Animated spinner for both executing and streaming tool calls.
 		// With centralized animation ticks, all spinners share a single tick
 		// so there's no performance penalty for multiple animated spinners.
-		icon := styles.NoStyle.MarginLeft(2).Render(inProgress.View())
-		if msg.StartedAt != nil {
-			elapsed := time.Since(*msg.StartedAt)
-			if elapsed >= time.Second {
-				icon += " " + styles.ToolMessageStyle.Render(formatDuration(elapsed))
-			}
-		}
-		return icon
+		return styles.NoStyle.MarginLeft(2).Render(inProgress.View())
 	case types.ToolStatusCompleted:
 		return styles.ToolCompletedIcon.Render("✓")
 	case types.ToolStatusError:
@@ -169,6 +154,33 @@ func Icon(msg *types.Message, inProgress spinner.Spinner) string {
 	default:
 		return styles.WarningStyle.Render("?")
 	}
+}
+
+// WithRunningTime appends elapsed execution time beneath the tool content.
+func WithRunningTime(content string, msg *types.Message, width int) string {
+	if content == "" || msg.StartedAt == nil {
+		return content
+	}
+	elapsed := time.Since(*msg.StartedAt)
+	label := "Running for "
+	switch msg.ToolStatus {
+	case types.ToolStatusRunning:
+	case types.ToolStatusCompleted, types.ToolStatusError:
+		if msg.FinishedAt == nil {
+			return content
+		}
+		elapsed = msg.FinishedAt.Sub(*msg.StartedAt)
+		label = "Completed in "
+		if msg.ToolStatus == types.ToolStatusError {
+			label = "Failed after "
+		}
+	default:
+		return content
+	}
+	indent := min(2, max(width-1, 0))
+	text := label + formatDuration(max(elapsed, 0))
+	footer := styles.ToolMessageStyle.MarginLeft(indent).Render(strings.Join(WrapLines(text, max(width-indent, 1)), "\n"))
+	return strings.TrimRight(content, "\n") + "\n" + footer
 }
 
 // LongRunningWarning returns a warning string if the tool call has been

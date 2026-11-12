@@ -2,10 +2,13 @@ package skills
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,4 +240,72 @@ func TestDiskCache_NoCacheStoresButExpiresImmediately(t *testing.T) {
 
 	_, ok := cache.Get("https://example.com", "skill", "SKILL.md")
 	assert.False(t, ok, "no-cache must force a refetch on the next read")
+}
+
+func TestDiskCache_FileSizeLimit(t *testing.T) {
+	t.Parallel()
+	for _, chunked := range []bool{false, true} {
+		for _, size := range []int{maxCachedFileSize - 1, maxCachedFileSize, maxCachedFileSize + 1} {
+			t.Run(fmt.Sprintf("chunked=%t/size=%d", chunked, size), func(t *testing.T) {
+				t.Parallel()
+				body := strings.Repeat("x", size)
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if chunked {
+						w.(http.Flusher).Flush()
+					} else {
+						w.Header().Set("Content-Length", strconv.Itoa(size))
+					}
+					_, _ = io.WriteString(w, body)
+				}))
+				defer srv.Close()
+				cache := newDiskCache(t.TempDir())
+				content, err := cache.FetchAndStore(t.Context(), srv.URL, "skill", "SKILL.md", srv.URL)
+				path := filepath.Join(cache.cacheDir(srv.URL, "skill"), "SKILL.md")
+				if size > maxCachedFileSize {
+					require.ErrorContains(t, err, "file exceeds")
+					assert.Empty(t, content)
+					assert.NoFileExists(t, path)
+					assert.NoFileExists(t, path+".meta")
+					_, ok := cache.Get(srv.URL, "skill", "SKILL.md")
+					assert.False(t, ok)
+					return
+				}
+				require.NoError(t, err)
+				assert.Equal(t, body, content)
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				assert.Equal(t, body, string(data))
+				cached, ok := cache.Get(srv.URL, "skill", "SKILL.md")
+				assert.True(t, ok)
+				assert.Equal(t, body, cached)
+			})
+		}
+	}
+}
+
+func TestDiskCache_OversizedResponsePreservesExistingEntry(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/large" {
+			_, _ = io.WriteString(w, strings.Repeat("x", maxCachedFileSize+1))
+			return
+		}
+		_, _ = io.WriteString(w, "complete original")
+	}))
+	defer srv.Close()
+	cache := newDiskCache(t.TempDir())
+	_, err := cache.FetchAndStore(t.Context(), srv.URL, "skill", "SKILL.md", srv.URL)
+	require.NoError(t, err)
+	path := filepath.Join(cache.cacheDir(srv.URL, "skill"), "SKILL.md")
+	meta, err := os.ReadFile(path + ".meta")
+	require.NoError(t, err)
+
+	_, err = cache.FetchAndStore(t.Context(), srv.URL, "skill", "SKILL.md", srv.URL+"/large")
+	require.ErrorContains(t, err, "file exceeds")
+	content, ok := cache.Get(srv.URL, "skill", "SKILL.md")
+	assert.True(t, ok)
+	assert.Equal(t, "complete original", content)
+	after, err := os.ReadFile(path + ".meta")
+	require.NoError(t, err)
+	assert.Equal(t, meta, after)
 }

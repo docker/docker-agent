@@ -85,8 +85,9 @@ func StartFallback(ctx context.Context, agentName, primaryModel string, inCooldo
 	}
 }
 
-// IncrementAttempt counts one attempt against the chain. Called once per
-// (model × retry) iteration so the final span carries the total count.
+// IncrementAttempt counts one provider dispatch against the chain. Call it
+// immediately before each CreateChatCompletionStream invocation, including
+// the delegated idle-stream redispatch.
 func (s *FallbackSpan) IncrementAttempt() {
 	if s == nil {
 		return

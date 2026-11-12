@@ -66,8 +66,18 @@ func (w *Writer) SetSupported(supported bool) {
 	defer w.mu.Unlock()
 	if w.supported != supported {
 		w.supported = supported
+		if !supported {
+			w.overlays = nil
+		}
 		w.dirty = true
 	}
+}
+
+// Supported reports whether startup confirmed terminal image support.
+func (w *Writer) Supported() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.supported
 }
 
 // RenderingEnabled reports whether both the user setting and terminal support allow images.
@@ -77,12 +87,22 @@ func (w *Writer) RenderingEnabled() bool {
 	return w.enabled && w.supported
 }
 
+// Enabled reports the user preference independently of terminal support.
+func (w *Writer) Enabled() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.enabled
+}
+
 // SetEnabled controls whether image markers become terminal overlays.
 func (w *Writer) SetEnabled(enabled bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.enabled != enabled {
 		w.enabled = enabled
+		if !enabled {
+			w.overlays = nil
+		}
 		w.dirty = true
 	}
 }

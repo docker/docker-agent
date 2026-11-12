@@ -1,0 +1,14 @@
+models:
+  reader:
+    provider: google
+    model: gemini-3.8-flash
+    provider_opts:
+      url_context: true
+
+agents:
+  root:
+    model: reader
+    description: Read public documentation with Gemini URL Context
+    instruction: |
+      Read the public URLs supplied by the user and answer using their content.
+      Explain when a page cannot be retrieved; do not invent its contents.

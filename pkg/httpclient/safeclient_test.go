@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestNewAllowPrivateIPsClientReachesLoopback(t *testing.T) {
+func TestClientForAllowPrivateIPsReachesLoopback(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -18,7 +18,7 @@ func TestNewAllowPrivateIPsClientReachesLoopback(t *testing.T) {
 
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
 	require.NoError(t, err)
-	response, err := NewAllowPrivateIPsClient(time.Second).Do(request)
+	response, err := ClientForAllowPrivateIPs(time.Second, true).Do(request)
 	require.NoError(t, err)
 	defer response.Body.Close()
 	require.Equal(t, http.StatusNoContent, response.StatusCode)

@@ -19,6 +19,8 @@ import (
 	"github.com/docker/docker-agent/pkg/chatgpt"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -259,4 +261,96 @@ func TestChatGPTFallsBackToStoredLogin(t *testing.T) {
 	got := captured()
 	assert.Equal(t, "Bearer "+token, got.header.Get("Authorization"))
 	assert.Equal(t, "acc_stored", got.header.Get("chatgpt-account-id"))
+}
+
+func TestChatGPTImageInputFromOpenAICatalog(t *testing.T) {
+	t.Parallel()
+
+	store := modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+		"openai": {Models: map[string]modelsdev.Model{
+			"gpt-6.1-sol": {Modalities: modelsdev.Modalities{Input: []string{"text", "image", "pdf", "audio", "video"}}},
+		}},
+	}})
+	for _, tc := range []struct {
+		name      string
+		override  *latest.CapabilitiesConfig
+		wantImage bool
+	}{
+		{name: "no override", wantImage: true},
+		{name: "explicit image true", override: &latest.CapabilitiesConfig{Image: true}, wantImage: true},
+		{name: "explicit image false", override: &latest.CapabilitiesConfig{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server, captured := startFakeCodexBackend(t)
+			cfg := &latest.ModelConfig{
+				Provider: "chatgpt", Model: "gpt-6.1-sol", BaseURL: server.URL,
+				TokenKey: chatgpt.TokenEnvVar, Capabilities: tc.override,
+			}
+			env := environment.NewMapEnvProvider(map[string]string{
+				chatgpt.TokenEnvVar: chatgptTestToken(t, "acc_images"),
+			})
+			client, err := NewClient(t.Context(), cfg, env, options.WithModelsDevStore(store))
+			require.NoError(t, err)
+
+			image := chat.MessagePart{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+				Name: "screenshot.png", MimeType: "image/png", Source: chat.DocumentSource{InlineData: []byte{1, 2, 3}},
+			}}
+			pdf := chat.MessagePart{Type: chat.MessagePartTypeDocument, Document: &chat.Document{
+				Name: "report.pdf", MimeType: "application/pdf", Source: chat.DocumentSource{InlineData: []byte("%PDF")},
+			}}
+			drainChatStream(t, client, []chat.Message{
+				{Role: chat.MessageRoleUser, MultiContent: []chat.MessagePart{
+					{Type: chat.MessagePartTypeText, Text: "describe this image"}, image, pdf,
+				}},
+				{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{{
+					ID: "call_image", Type: "function", Function: tools.FunctionCall{Name: "screenshot", Arguments: `{}`},
+				}}},
+				{Role: chat.MessageRoleTool, ToolCallID: "call_image", Content: "screenshot captured", MultiContent: []chat.MessagePart{image, pdf}},
+			})
+
+			input, ok := captured().body["input"].([]any)
+			require.True(t, ok)
+			require.Len(t, input, 3)
+			user := input[0].(map[string]any)
+			assert.Equal(t, "user", user["role"])
+			toolCall := input[1].(map[string]any)
+			assert.Equal(t, "function_call", toolCall["type"])
+			toolOutput := input[2].(map[string]any)
+			assert.Equal(t, "function_call_output", toolOutput["type"])
+			assert.Equal(t, "call_image", toolOutput["call_id"])
+			if tc.wantImage {
+				output := toolOutput["output"].([]any)
+				require.Len(t, output, 2)
+				assert.Equal(t, "screenshot captured", output[0].(map[string]any)["text"])
+			} else {
+				assert.Equal(t, "screenshot captured", toolOutput["output"])
+			}
+
+			var images int
+			for _, item := range input {
+				msg := item.(map[string]any)
+				content, _ := msg["content"].([]any)
+				if msg["type"] == "function_call_output" {
+					content, _ = msg["output"].([]any)
+				}
+				for _, part := range content {
+					p := part.(map[string]any)
+					assert.NotEqual(t, "input_file", p["type"], "OpenAI PDF input must not be inherited")
+					if p["type"] == "input_image" {
+						assert.Equal(t, "data:image/png;base64,AQID", p["image_url"])
+						images++
+					}
+				}
+			}
+			if tc.wantImage {
+				assert.Equal(t, 2, images, "attachment and tool image must both reach the backend")
+				content := toolOutput["output"].([]any)
+				require.Len(t, content, 2)
+				assert.Equal(t, "input_image", content[1].(map[string]any)["type"])
+			} else {
+				assert.Zero(t, images)
+			}
+		})
+	}
 }

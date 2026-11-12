@@ -35,8 +35,8 @@ func TestRenderResizeHandle_SuffixNeverOverflows(t *testing.T) {
 	t.Parallel()
 
 	m, _ := newTestModel(t)
-	m.sessionState = &service.SessionState{}
-	m.sessionState.SetPauseState(service.PausePaused)
+	m.activeTab.sessionState = &service.SessionState{}
+	m.activeTab.sessionState.SetPauseState(service.PausePaused)
 
 	for _, width := range []int{5, 10, 20, 80, 200} {
 		out := m.renderResizeHandle(width)

@@ -287,7 +287,9 @@ func TestNextSupportedLevel(t *testing.T) {
 		{"wraps to first", supported, High, None},
 		{"unknown current resets to first", supported, XHigh, None},
 		{"empty supported returns none", nil, High, None},
+		{"nonnil empty supported returns none", []Level{}, High, None},
 		{"single level cycles onto itself", []Level{None}, None, None},
+		{"duplicates advance from first match", []Level{Low, Medium, Low, High}, Low, Medium},
 	}
 
 	for _, tt := range tests {

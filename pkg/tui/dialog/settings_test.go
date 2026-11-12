@@ -27,6 +27,7 @@ func TestSettingsDialogNormalizesValues(t *testing.T) {
 	assert.Equal(t, messages.SidebarRight, d.current.Layout.SidebarPosition)
 	assert.Equal(t, messages.InfoModeCompact, d.current.Layout.SidebarInfoMode,
 		"empty info mode normalizes to compact")
+	assert.False(t, d.current.Layout.ShowPlans, "Plans is off by default")
 
 	raw, ok := NewSettingsDialog(messages.Preferences{
 		SendMode: messages.SendMode("bogus"),
@@ -36,6 +37,18 @@ func TestSettingsDialogNormalizesValues(t *testing.T) {
 	assert.Equal(t, messages.SendModeSteer, raw.current.SendMode, "unknown send mode normalizes to steer")
 	assert.Equal(t, messages.InfoModeCompact, raw.current.Layout.SidebarInfoMode,
 		"unknown info mode normalizes to compact")
+}
+
+func TestSettingsDialogKeepAwake(t *testing.T) {
+	t.Parallel()
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.tab = tabBehavior
+	d.selected[tabBehavior] = rowKeepAwake
+	assert.False(t, d.current.KeepAwake)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	assert.True(t, d.current.KeepAwake)
+	d.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	assert.False(t, d.current.KeepAwake)
 }
 
 func TestSettingsDialogNavigation(t *testing.T) {
@@ -58,6 +71,12 @@ func TestSettingsDialogNavigation(t *testing.T) {
 
 	d.Update(down)
 	require.Equal(t, rowSessionPath, d.selected[tabAppearance])
+
+	d.selected[tabAppearance] = rowTools
+	d.Update(down)
+	require.Equal(t, rowPlans, d.selected[tabAppearance])
+	d.Update(down)
+	require.Equal(t, rowTodos, d.selected[tabAppearance])
 
 	for range 20 {
 		d.Update(down)
@@ -90,7 +109,10 @@ func TestSettingsDialogTabSwitching(t *testing.T) {
 func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
 	t.Parallel()
 
-	d, ok := NewSettingsDialog(messages.Preferences{SendMode: messages.SendModeSteer}, false).(*settingsDialog)
+	d, ok := NewSettingsDialog(messages.Preferences{
+		SendMode: messages.SendModeSteer,
+		Layout:   messages.LayoutSettings{ShowPlans: true},
+	}, false).(*settingsDialog)
 	require.True(t, ok)
 	d.Update(tea.WindowSizeMsg{Width: 100, Height: 50})
 
@@ -101,12 +123,21 @@ func TestSettingsDialogWithoutVisualsTab(t *testing.T) {
 	assert.NotContains(t, view, "Sidebar position")
 	assert.NotContains(t, view, "Sidebar info mode")
 	assert.NotContains(t, view, "Active agents only")
+	assert.NotContains(t, view, "Plans")
 	assert.Contains(t, view, "Split diff view")
 
 	assert.False(t, d.selectable(tabAppearance, rowInfoMode),
 		"the info mode row is not selectable without a sidebar")
 	assert.False(t, d.selectable(tabAppearance, rowActiveAgents),
 		"the agent filter row is not selectable without a sidebar")
+	assert.False(t, d.selectable(tabAppearance, rowPlans),
+		"the Plans row is not selectable without a sidebar")
+
+	d.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	assert.Equal(t, rowSplitDiff, d.selected[tabAppearance], "navigation skips every sidebar row")
+	d.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	assert.Equal(t, rowTheme, d.selected[tabAppearance], "reverse navigation skips every sidebar row")
+	assert.True(t, d.current.Layout.ShowPlans, "hidden sidebar preferences are preserved")
 }
 
 func TestSettingsDialogCyclesPositionAndPreviews(t *testing.T) {
@@ -231,6 +262,67 @@ func TestSettingsDialogTogglesSection(t *testing.T) {
 	assert.False(t, d.current.Layout.HideUsage, "space must toggle back")
 }
 
+func TestSettingsDialogPlansPreviewAndApply(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		initial bool
+	}{
+		{name: "enable", initial: false},
+		{name: "disable", initial: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestSettingsDialog(t, messages.LayoutSettings{ShowPlans: tt.initial})
+			d.selected[tabAppearance] = rowPlans
+
+			_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+			msgs := collectMsgs(cmd)
+			require.Len(t, msgs, 1)
+			preview, ok := msgs[0].(messages.PreviewLayoutMsg)
+			require.True(t, ok, "toggling Plans emits a live preview")
+			assert.Equal(t, !tt.initial, preview.Layout.ShowPlans)
+			assert.Equal(t, d.current.Layout, preview.Layout)
+
+			_, cmd = d.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+			msgs = collectMsgs(cmd)
+			require.Len(t, msgs, 2)
+			_, ok = msgs[0].(CloseDialogMsg)
+			require.True(t, ok)
+			applied, ok := msgs[1].(messages.ApplySettingsMsg)
+			require.True(t, ok)
+			assert.Equal(t, !tt.initial, applied.Preferences.Layout.ShowPlans)
+		})
+	}
+}
+
+func TestSettingsDialogCancelRestoresPlans(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		initial bool
+	}{
+		{name: "originally hidden", initial: false},
+		{name: "originally visible", initial: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestSettingsDialog(t, messages.LayoutSettings{ShowPlans: tt.initial})
+			d.selected[tabAppearance] = rowPlans
+			d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+			require.Equal(t, !tt.initial, d.current.Layout.ShowPlans)
+
+			_, cmd := d.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+			msgs := collectMsgs(cmd)
+			require.Len(t, msgs, 2)
+			cancel, ok := msgs[1].(messages.CancelLayoutPreviewMsg)
+			require.True(t, ok)
+			assert.Equal(t, d.original.Layout, cancel.Original)
+			assert.Equal(t, tt.initial, cancel.Original.ShowPlans)
+		})
+	}
+}
+
 func TestSettingsDialogTogglesActiveAgentsOnly(t *testing.T) {
 	t.Parallel()
 
@@ -316,6 +408,20 @@ func TestSettingsDialogTogglesCacheStablePrompts(t *testing.T) {
 	assert.Nil(t, cmd)
 	assert.True(t, d.current.CacheStablePrompts)
 	assert.Contains(t, ansi.Strip(d.View()), "Cache-stable dynamic prompts")
+}
+
+func TestSettingsDialogBackgroundCompaction(t *testing.T) {
+	t.Parallel()
+	d := newTestSettingsDialog(t, messages.LayoutSettings{})
+	d.tab = tabBehavior
+	assert.False(t, d.current.BackgroundCompaction)
+	assert.Equal(t, 70, d.current.BackgroundCompactionThreshold)
+	d.selected[tabBehavior] = rowBackgroundCompaction
+	d.Update(tea.KeyPressMsg{Code: tea.KeySpace})
+	assert.True(t, d.current.BackgroundCompaction)
+	d.selected[tabBehavior] = rowBackgroundCompactionThreshold
+	d.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	assert.Equal(t, 71, d.current.BackgroundCompactionThreshold)
 }
 
 func TestSettingsDialogTogglesShowBanner(t *testing.T) {
@@ -435,6 +541,7 @@ func TestSettingsDialogViewShowsVisualsRows(t *testing.T) {
 	assert.Contains(t, view, "Agents")
 	assert.Contains(t, view, "Active agents only")
 	assert.Contains(t, view, "Tools")
+	assert.Contains(t, view, "[ ] Plans", "Plans is available but off by default")
 	assert.Contains(t, view, "Todos")
 }
 
@@ -535,6 +642,7 @@ func TestRenderLayoutPreviewReflectsSections(t *testing.T) {
 	assert.Contains(t, full, "session/path", "a visible session path shows in the session label")
 	assert.Contains(t, full, "usage")
 	assert.Contains(t, full, "todos")
+	assert.NotContains(t, full, "plans")
 
 	trimmed := ansi.Strip(renderLayoutPreview(messages.LayoutSettings{
 		HideSessionPath: true,
@@ -546,6 +654,29 @@ func TestRenderLayoutPreviewReflectsSections(t *testing.T) {
 	assert.NotContains(t, trimmed, "usage")
 	assert.NotContains(t, trimmed, "todos")
 	assert.Contains(t, trimmed, "agents")
+}
+
+func TestRenderLayoutPreviewShowsPlans(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, []string{"session/path", "usage", "agents", "tools", "todos"},
+		visibleSectionLabels(messages.LayoutSettings{}))
+	assert.Equal(t, []string{"session/path", "usage", "agents", "tools", "todos", "plans"},
+		visibleSectionLabels(messages.LayoutSettings{ShowPlans: true}))
+
+	for _, position := range sidebarPositions {
+		t.Run(string(position), func(t *testing.T) {
+			settings := messages.LayoutSettings{SidebarPosition: position, ShowPlans: true}
+			if position == messages.SidebarTop || position == messages.SidebarBottom {
+				settings.HideUsage = true
+				settings.HideAgents = true
+				settings.HideTools = true
+			}
+			preview := ansi.Strip(renderLayoutPreview(settings, previewMaxWidth))
+			assert.Contains(t, preview, "plans")
+			assert.Contains(t, preview, "todos", "the preview must include both Todos and Plans")
+		})
+	}
 }
 
 func TestRenderLayoutPreviewPositions(t *testing.T) {

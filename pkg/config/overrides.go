@@ -3,31 +3,163 @@ package config
 import (
 	"errors"
 	"fmt"
+	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 )
 
-// ApplyModelOverrides applies CLI model overrides to the configuration
+type modelOverrideReceipt struct {
+	sourceModel       string
+	sourcePolicy      *bool
+	eligible          bool
+	requestedModel    string
+	expectedPostModel string
+	expectedPostValue latest.ModelConfig
+}
+
+type modelOverridePolicy struct {
+	modelRef          string
+	parallelToolCalls *bool
+}
+
+type modelOverrideState struct {
+	receipts      map[string]modelOverrideReceipt
+	policies      map[string]modelOverridePolicy
+	lastOverrides []string
+}
+
+func overrideState(cfg *latest.Config) *modelOverrideState {
+	state, _ := cfg.InternalModelOverrideState().(*modelOverrideState)
+	if state == nil {
+		state = &modelOverrideState{
+			receipts: make(map[string]modelOverrideReceipt),
+			policies: make(map[string]modelOverridePolicy),
+		}
+		cfg.SetInternalModelOverrideState(state)
+	}
+	return state
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	return new(*value)
+}
+
+func isConcreteModelConfig(model latest.ModelConfig) bool {
+	return model.Provider != "" && model.Model != "" && !strings.Contains(model.Model, ",") &&
+		len(model.Routing) == 0 && !model.IsFirstAvailable()
+}
+
+func sourceReceipt(cfg *latest.Config, state *modelOverrideState, agent latest.AgentConfig) modelOverrideReceipt {
+	if receipt, ok := state.receipts[agent.Name]; ok {
+		current, exists := cfg.Models[agent.Model]
+		if agent.Model == receipt.expectedPostModel && exists && reflect.DeepEqual(current, receipt.expectedPostValue) {
+			return receipt
+		}
+		delete(state.receipts, agent.Name)
+	}
+
+	model, exists := cfg.Models[agent.Model]
+	return modelOverrideReceipt{
+		sourceModel:  agent.Model,
+		sourcePolicy: cloneBool(model.ParallelToolCalls),
+		eligible:     agent.Harness == nil && exists && isConcreteModelConfig(model),
+	}
+}
+
+// ApplyModelOverridePolicy applies an inherited per-agent CLI override policy
+// to a copied model config. The manifest model map remains authoritative and
+// unmodified.
+func ApplyModelOverridePolicy(cfg *latest.Config, agentName, modelRef string, model *latest.ModelConfig) {
+	if cfg == nil || model == nil {
+		return
+	}
+	state, _ := cfg.InternalModelOverrideState().(*modelOverrideState)
+	if state == nil {
+		return
+	}
+	policy, ok := state.policies[agentName]
+	if !ok || policy.modelRef != modelRef {
+		return
+	}
+	model.ParallelToolCalls = cloneBool(policy.parallelToolCalls)
+}
+
+// ApplyModelOverrides applies CLI model overrides to the configuration.
 func ApplyModelOverrides(cfg *latest.Config, overrides []string) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+
+	state := overrideState(cfg)
+	if slices.Equal(overrides, state.lastOverrides) && receiptsIntact(cfg, state) {
+		return nil
+	}
+	invocationTargets := make(map[string]struct{}, len(cfg.Models))
+	for name := range cfg.Models {
+		invocationTargets[name] = struct{}{}
+	}
+	receipts := make(map[string]modelOverrideReceipt, len(cfg.Agents))
+	for _, agent := range cfg.Agents {
+		receipts[agent.Name] = sourceReceipt(cfg, state, agent)
+	}
+
 	for _, override := range overrides {
 		if err := applySingleOverride(cfg, override); err != nil {
 			return err
 		}
 	}
 
-	// After applying overrides, ensure new models are added to cfg.Models
-	return ensureModelsExist(cfg)
+	if err := ensureModelsExist(cfg); err != nil {
+		return err
+	}
+	policies := make(map[string]modelOverridePolicy)
+	for _, agent := range cfg.Agents {
+		receipt := receipts[agent.Name]
+		requestedRef := agent.Model
+		target := cfg.Models[requestedRef]
+		_, targetExisted := invocationTargets[requestedRef]
+		if receipt.eligible && receipt.sourcePolicy != nil && !targetExisted {
+			policies[agent.Name] = modelOverridePolicy{
+				modelRef:          requestedRef,
+				parallelToolCalls: cloneBool(receipt.sourcePolicy),
+			}
+		}
+		receipt.requestedModel = requestedRef
+		receipt.expectedPostModel = requestedRef
+		receipt.expectedPostValue = target
+		state.receipts[agent.Name] = receipt
+	}
+	state.policies = policies
+	state.lastOverrides = slices.Clone(overrides)
+	return nil
 }
 
-// applySingleOverride processes a single model override string
+func receiptsIntact(cfg *latest.Config, state *modelOverrideState) bool {
+	for _, agent := range cfg.Agents {
+		receipt, ok := state.receipts[agent.Name]
+		if !ok || agent.Model != receipt.expectedPostModel {
+			return false
+		}
+		model, exists := cfg.Models[agent.Model]
+		if !exists || !reflect.DeepEqual(model, receipt.expectedPostValue) {
+			return false
+		}
+	}
+	return len(state.receipts) == len(cfg.Agents)
+}
+
+// applySingleOverride processes a single model override string.
 func applySingleOverride(cfg *latest.Config, override string) error {
 	override = strings.TrimSpace(override)
 	if override == "" {
-		return nil // Skip empty overrides
+		return nil
 	}
 
-	// Handle comma-separated format: "agent1=model1,agent2=model2"
 	if strings.Contains(override, ",") {
 		for part := range strings.SplitSeq(override, ",") {
 			if err := applySingleOverride(cfg, part); err != nil {
@@ -37,7 +169,6 @@ func applySingleOverride(cfg *latest.Config, override string) error {
 		return nil
 	}
 
-	// Check if this is an agent-specific override (contains '=')
 	agentName, modelSpec, ok := strings.Cut(override, "=")
 	if ok {
 		agentName = strings.TrimSpace(agentName)
@@ -50,7 +181,6 @@ func applySingleOverride(cfg *latest.Config, override string) error {
 			return fmt.Errorf("empty model specification in override: %s", override)
 		}
 
-		// Apply to specific agent
 		ok := cfg.Agents.Update(agentName, func(a *latest.AgentConfig) {
 			a.Model = modelSpec
 		})
@@ -58,7 +188,6 @@ func applySingleOverride(cfg *latest.Config, override string) error {
 			return fmt.Errorf("unknown agent '%s'", agentName)
 		}
 	} else {
-		// Global override: apply to all agents
 		modelSpec := strings.TrimSpace(override)
 		if modelSpec == "" {
 			return errors.New("empty model specification")

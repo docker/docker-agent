@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/chat"
@@ -78,8 +79,7 @@ func (c *Client) withClaudeSchemaInstruction(ctx context.Context, messages []cha
 		"model", c.ModelConfig.Model, "name", structuredOutput.Name)
 
 	if len(messages) > 0 && messages[0].Role == chat.MessageRoleSystem && len(messages[0].MultiContent) == 0 {
-		out := make([]chat.Message, len(messages))
-		copy(out, messages)
+		out := slices.Clip(slices.Clone(messages))
 		out[0].Content += "\n\n" + instruction
 		return out
 	}

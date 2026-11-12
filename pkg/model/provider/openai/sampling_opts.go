@@ -8,14 +8,10 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 )
 
-// applySamplingProviderOpts forwards sampling-related provider_opts as extra
-// body fields on the OpenAI ChatCompletionNewParams. This enables custom
-// OpenAI-compatible providers (vLLM, Ollama, llama.cpp, etc.) to receive
-// parameters like top_k, repetition_penalty, min_p, etc. that the native
-// OpenAI API does not support but these backends do.
-func applySamplingProviderOpts(params *oai.ChatCompletionNewParams, opts map[string]any) {
+// applyChatProviderOpts combines sampling options and explicit extra_body overrides.
+func applyChatProviderOpts(params *oai.ChatCompletionNewParams, opts map[string]any) error {
 	if len(opts) == 0 {
-		return
+		return nil
 	}
 
 	extras := make(map[string]any)
@@ -40,7 +36,11 @@ func applySamplingProviderOpts(params *oai.ChatCompletionNewParams, opts map[str
 		}
 	}
 
+	if err := providerutil.MergeExtraBody(extras, opts); err != nil {
+		return err
+	}
 	if len(extras) > 0 {
 		params.SetExtraFields(extras)
 	}
+	return nil
 }

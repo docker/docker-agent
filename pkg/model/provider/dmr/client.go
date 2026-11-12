@@ -22,9 +22,11 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/model/provider/dmr/dmrmodels"
 	"github.com/docker/docker-agent/pkg/model/provider/oaistream"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/model/provider/providerutil"
 	"github.com/docker/docker-agent/pkg/modelinfo"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -85,53 +87,61 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 		}
 		baseURL = fmt.Sprintf("%s://%s%s/v1/", u.Scheme, u.Host, strings.TrimSuffix(u.Path, "/"))
 		httpClient = httpclient.NewHTTPClient(ctx, base.GatewayHTTPOptions(u, dmrmodels.DefaultHostURL(), cfg, &globalOptions)...)
-		globalOptions.WrapTransport(ctx, httpClient)
 	} else {
-		// Skip docker model status query when BaseURL is explicitly provided.
-		// This avoids unnecessary exec calls and speeds up tests/CI scenarios.
-		if cfg.BaseURL == "" && os.Getenv("MODEL_RUNNER_HOST") == "" {
-			var err error
-			endpoint, engine, err = dmrmodels.DockerModelEndpointAndEngine(ctx)
-			switch {
-			case err == nil:
-				// Auto-pull the model if needed
-				if err := pullDockerModelIfNeeded(ctx, cfg.Model); err != nil {
-					slog.DebugContext(ctx, "docker model pull failed", "error", err)
-					return nil, err
-				}
-			case dmrmodels.IsNotInstalledError(err):
-				slog.DebugContext(ctx, "docker model status query failed", "error", err)
-				return nil, ErrNotInstalled
-			default:
-				// The `docker model` CLI is unusable (broken plugin, docker not on
-				// PATH, ...) but the DMR endpoint may still be up: check model
-				// availability through the HTTP API below so a missing model fails
-				// here instead of as a raw HTTP 404 at message time.
-				slog.ErrorContext(ctx, "docker model status query failed", "error", err)
+		// Skip docker model status query when BaseURL is explicitly provided
+		// or MODEL_RUNNER_HOST selects the endpoint. This avoids unnecessary
+		// exec calls and speeds up tests/CI scenarios.
+		if catalog.IsDefaultEndpoint(cfg.Provider, cfg.BaseURL) {
+			if globalOptions.DisableAutoPull() {
+				// Never download: verify availability through the read-only API below.
 				verifyViaAPI = true
+			}
+			if os.Getenv("MODEL_RUNNER_HOST") == "" {
+				var err error
+				endpoint, engine, err = dmrmodels.DockerModelEndpointAndEngine(ctx)
+				switch {
+				case err == nil:
+					if !globalOptions.DisableAutoPull() {
+						if err := pullDockerModelIfNeeded(ctx, cfg.Model); err != nil {
+							slog.DebugContext(ctx, "docker model pull failed", "error", err)
+							return nil, err
+						}
+					}
+				case dmrmodels.IsNotInstalledError(err):
+					slog.DebugContext(ctx, "docker model status query failed", "error", err)
+					return nil, ErrNotInstalled
+				case dmrmodels.HasDockerConnection(ctx):
+					return nil, err
+				default:
+					// The `docker model` CLI is unusable (broken plugin, docker not on
+					// PATH, ...) but the DMR endpoint may still be up: check model
+					// availability through the HTTP API below so a missing model fails
+					// here instead of as a raw HTTP 404 at message time.
+					slog.ErrorContext(ctx, "docker model status query failed", "error", err)
+					verifyViaAPI = true
+				}
 			}
 		}
 
 		baseURL, httpClient = dmrmodels.ResolveBaseURL(ctx, cfg, endpoint)
 	}
 
-	// A custom transport (e.g. the Docker Unix socket) must also be used by
-	// the OpenAI adapter, not just the direct HTTP calls.
-	var clientOptions []option.RequestOption
-	if httpClient != nil {
-		clientOptions = append(clientOptions, option.WithHTTPClient(httpClient))
-	}
-
 	// Ensure we always have a non-nil HTTP client for both OpenAI adapter and direct HTTP calls (rerank).
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = &http.Client{} //rubocop:disable Lint/HTTPClientTransport // DMR local service; default transport is appropriate
 	}
-
+	// Check availability before installing the inference transport wrapper so
+	// setup preflight cannot be rejected by an inference-only wrapper.
 	if verifyViaAPI {
 		if err := checkModelAvailable(ctx, httpClient, baseURL, cfg.Model); err != nil {
 			return nil, err
 		}
 	}
+	// A custom transport (e.g. the Docker Unix socket) must also be used by
+	// the OpenAI adapter, not just the direct HTTP calls. Applying the wrapper
+	// here also covers direct mode, where DMR builds its own client.
+	globalOptions.WrapTransport(ctx, httpClient)
+	clientOptions := []option.RequestOption{option.WithHTTPClient(httpClient)}
 
 	clientOptions = append(clientOptions, option.WithBaseURL(baseURL), option.WithAPIKey("")) // DMR doesn't need auth
 
@@ -174,7 +184,7 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, opts ...options.Opt
 		client:         openai.NewClient(clientOptions...),
 		httpClient:     httpClient,
 		engine:         engine,
-		attachmentCaps: modelinfo.CapsWith(parsed.supportsImages, parsed.supportsPDF),
+		attachmentCaps: modelinfo.CapsWith(parsed.supportsImages, parsed.supportsPDF, false, false),
 	}, nil
 }
 
@@ -190,7 +200,12 @@ func (c *Client) convertMessages(ctx context.Context, messages []chat.Message) [
 	// (issue #2741).
 	caps := c.attachmentCaps
 	if override := c.CapsOverride(); override != nil {
-		caps = modelinfo.CapsWith(override.Image, override.PDF)
+		caps = modelinfo.CapsWith(override.Image, override.PDF, override.Audio, override.Video)
+	}
+	// Chat Completions reasoning replay defaults on;
+	// provider_opts.replay_reasoning: false opts out.
+	if !oaistream.ReplayReasoning(c.ModelConfig.ProviderOpts) {
+		messages = oaistream.WithoutReplayedReasoning(messages)
 	}
 	openaiMessages := oaistream.ConvertMessagesWithCaps(ctx, messages, caps)
 	return oaistream.MergeConsecutiveMessages(openaiMessages)
@@ -303,6 +318,9 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 		}
 	}
 
+	if err := providerutil.MergeExtraBody(extraFields, c.ModelConfig.ProviderOpts); err != nil {
+		return nil, err
+	}
 	if len(extraFields) > 0 {
 		params.SetExtraFields(extraFields)
 		slog.DebugContext(ctx, "DMR extra request fields applied", "fields", extraFields)
@@ -331,7 +349,7 @@ func (c *Client) CreateChatCompletionStream(ctx context.Context, messages []chat
 	stream := c.client.Chat.Completions.NewStreaming(ctx, params)
 
 	slog.DebugContext(ctx, "DMR chat completion stream created successfully", "model", c.ModelConfig.Model, "base_url", c.BaseURL)
-	return newStreamAdapter(stream, trackUsage), nil
+	return oaistream.NewStreamAdapter(stream, trackUsage), nil
 }
 
 // jsonSchema is a helper type that implements json.Marshaler for map[string]any

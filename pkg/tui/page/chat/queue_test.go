@@ -3,10 +3,11 @@ package chat
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
-	"time"
+	"testing/synctest"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/skills"
@@ -23,6 +25,7 @@ import (
 	mcptools "github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/commands"
+	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/core"
 	"github.com/docker/docker-agent/pkg/tui/messages"
@@ -107,14 +110,15 @@ func (queueTestRuntime) CycleAgentThinkingLevel(context.Context, string) (effort
 func (queueTestRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
-func (queueTestRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
-func (queueTestRuntime) SupportsModelSwitching() bool                          { return false }
-func (queueTestRuntime) OnToolsChanged(func(runtime.Event))                    {}
-func (queueTestRuntime) OnBackgroundEvent(func(runtime.Event))                 {}
-func (queueTestRuntime) OnElicitationRequest(func(runtime.Event))              {}
-func (queueTestRuntime) QueueStatus() runtime.QueueStatus                      { return runtime.QueueStatus{} }
-func (queueTestRuntime) TogglePause(context.Context) (bool, error)             { return false, nil }
-func (queueTestRuntime) Close() error                                          { return nil }
+func (queueTestRuntime) AvailableModels(context.Context) []modelcatalog.ModelChoice { return nil }
+func (queueTestRuntime) SupportsModelSwitching() bool                               { return false }
+func (queueTestRuntime) OnToolsChanged(func(runtime.Event))                         {}
+func (queueTestRuntime) OnBackgroundEvent(func(runtime.Event))                      {}
+func (queueTestRuntime) OnElicitationRequest(func(runtime.Event))                   {}
+func (queueTestRuntime) QueueStatus() runtime.QueueStatus                           { return runtime.QueueStatus{} }
+
+func (queueTestRuntime) TogglePause(context.Context) (bool, error) { return false, nil }
+func (queueTestRuntime) Close() error                              { return nil }
 
 var _ runtime.Runtime = queueTestRuntime{}
 
@@ -490,24 +494,27 @@ func dispatchTypedSkill(t *testing.T, p *chatPage, content string) {
 func TestHandleSendMsg_ForkSkillRunsViaFork(t *testing.T) {
 	t.Parallel()
 
-	skillSet := skillstool.New([]skills.Skill{{
-		Name:          "services",
-		Description:   "List services",
-		Context:       "fork",
-		InlineContent: "# Services\nList repository services.",
-	}}, t.TempDir())
-	rt := &skillDispatchRuntime{skillset: skillSet}
-	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
-	p.commandParser = skillCommandParser("services")
+	synctest.Test(t, func(t *testing.T) {
+		skillSet := skillstool.New([]skills.Skill{{
+			Name:          "services",
+			Description:   "List services",
+			Context:       "fork",
+			InlineContent: "# Services\nList repository services.",
+		}}, t.TempDir())
+		rt := &skillDispatchRuntime{skillset: skillSet}
+		sess := session.New()
+		p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+		p.commandParser = skillCommandParser("services")
 
-	dispatchTypedSkill(t, p, "/services please")
+		dispatchTypedSkill(t, p, "/services please")
 
-	require.Eventually(t, func() bool { return rt.forkCallCount() == 1 }, time.Second, 10*time.Millisecond)
-	assert.Equal(t, "services", rt.lastForkArgs().Name)
-	assert.Equal(t, "please", rt.lastForkArgs().Task)
-	assert.Zero(t, rt.runStreamCallCount(), "fork skills must not use the inline RunStream path")
-	assert.Zero(t, sess.MessageCount(), "fork skill dispatch must not append an inline user message")
+		synctest.Wait()
+		require.Equal(t, 1, rt.forkCallCount())
+		assert.Equal(t, "services", rt.lastForkArgs().Name)
+		assert.Equal(t, "please", rt.lastForkArgs().Task)
+		assert.Zero(t, rt.runStreamCallCount(), "fork skills must not use the inline RunStream path")
+		assert.Zero(t, sess.MessageCount(), "fork skill dispatch must not append an inline user message")
+	})
 }
 
 // TestHandleSendMsg_InlineSkillRunsViaResolveInput proves an inline skill
@@ -516,24 +523,27 @@ func TestHandleSendMsg_ForkSkillRunsViaFork(t *testing.T) {
 func TestHandleSendMsg_InlineSkillRunsViaResolveInput(t *testing.T) {
 	t.Parallel()
 
-	skillSet := skillstool.New([]skills.Skill{{
-		Name:          "services",
-		Description:   "List services",
-		InlineContent: "# Services\nList repository services.",
-	}}, t.TempDir())
-	rt := &skillDispatchRuntime{skillset: skillSet}
-	sess := session.New()
-	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
-	p.commandParser = skillCommandParser("services")
+	synctest.Test(t, func(t *testing.T) {
+		skillSet := skillstool.New([]skills.Skill{{
+			Name:          "services",
+			Description:   "List services",
+			InlineContent: "# Services\nList repository services.",
+		}}, t.TempDir())
+		rt := &skillDispatchRuntime{skillset: skillSet}
+		sess := session.New()
+		p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+		p.commandParser = skillCommandParser("services")
 
-	dispatchTypedSkill(t, p, "/services please")
+		dispatchTypedSkill(t, p, "/services please")
 
-	require.Eventually(t, func() bool { return sess.MessageCount() == 1 }, time.Second, 10*time.Millisecond)
-	assert.Zero(t, rt.forkCallCount(), "inline skills must not use fork dispatch")
-	require.Equal(t, 1, rt.runStreamCallCount())
-	assert.Contains(t, rt.lastRunMessage(), `<skill name="services">`)
-	assert.Contains(t, rt.lastRunMessage(), "List repository services.")
-	assert.Contains(t, rt.lastRunMessage(), "User's request: please")
+		synctest.Wait()
+		require.Equal(t, 1, sess.MessageCount())
+		assert.Zero(t, rt.forkCallCount(), "inline skills must not use fork dispatch")
+		require.Equal(t, 1, rt.runStreamCallCount())
+		assert.Contains(t, rt.lastRunMessage(), `<skill name="services">`)
+		assert.Contains(t, rt.lastRunMessage(), "List repository services.")
+		assert.Contains(t, rt.lastRunMessage(), "User's request: please")
+	})
 }
 
 // TestReadOnly_RejectsBypassQueueCommands ensures resolved skill/agent
@@ -583,16 +593,48 @@ func (r *steerRecordingRuntime) FollowUp(_ context.Context, msg runtime.QueuedMe
 	return nil
 }
 
+func (r *steerRecordingRuntime) CancelSteer(_ context.Context, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, msg := range r.steers {
+		if msg.ID != id {
+			continue
+		}
+		r.steers = append(r.steers[:i], r.steers[i+1:]...)
+		return true
+	}
+	return false
+}
+
+func (r *steerRecordingRuntime) CancelFollowUp(_ context.Context, id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, msg := range r.followUps {
+		if msg.ID != id {
+			continue
+		}
+		r.followUps = append(r.followUps[:i], r.followUps[i+1:]...)
+		return true
+	}
+	return false
+}
+
 func (r *steerRecordingRuntime) followedUp() []runtime.QueuedMessage {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]runtime.QueuedMessage(nil), r.followUps...)
+	if len(r.followUps) == 0 {
+		return nil
+	}
+	return slices.Clone(r.followUps)
 }
 
 func (r *steerRecordingRuntime) steered() []runtime.QueuedMessage {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]runtime.QueuedMessage(nil), r.steers...)
+	if len(r.steers) == 0 {
+		return nil
+	}
+	return slices.Clone(r.steers)
 }
 
 func TestFollowUpFlow_BusyAgent_UsesRuntimeFollowUpQueue(t *testing.T) {
@@ -636,6 +678,52 @@ func TestSteerFlow_BusyAgent_SteersMessage(t *testing.T) {
 	steered := rt.steered()
 	require.Len(t, steered, 1)
 	assert.Equal(t, "extra context", steered[0].Content)
+}
+
+func TestOptionUpRestoresAllPendingMessageTypes(t *testing.T) {
+	t.Parallel()
+
+	rt := &steerRecordingRuntime{}
+	sess := session.New()
+	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	p.working = true
+
+	_, steerCmd := p.handleSendMsg(messages.SendMsg{Content: "first steer"})
+	steerResult := steerCmd()
+	_, _ = p.Update(steerResult)
+	_, followCmd := p.handleSendMsg(messages.SendMsg{Content: "then follow up", FollowUp: true})
+	followResult := followCmd()
+	_, _ = p.Update(followResult)
+	p.enqueueMessage(messages.SendMsg{Content: "locally queued", Queue: true})
+
+	_, cmd := p.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
+
+	assert.Empty(t, rt.steered())
+	assert.Empty(t, rt.followedUp())
+	assert.Empty(t, p.pendingMessages)
+	assert.Empty(t, p.messageQueue)
+	msgs := runTimerCmd(t, cmd)
+	assert.Contains(t, msgs, messages.RestorePendingMessagesMsg{Content: "first steer\nthen follow up\nlocally queued"})
+	assert.Contains(t, msgs, messages.RequestFocusMsg{Target: messages.PanelEditor})
+}
+
+func TestConsumedSteerIsNotRestored(t *testing.T) {
+	t.Parallel()
+
+	rt := &steerRecordingRuntime{}
+	sess := session.New()
+	p := New(animation.NewRuntime(), t.Context(), app.New(t.Context(), rt, sess), service.NewSessionState(sess)).(*chatPage)
+	p.working = true
+
+	_, steerCmd := p.handleSendMsg(messages.SendMsg{Content: "already consumed"})
+	_, _ = p.Update(steerCmd())
+	require.Len(t, p.pendingMessages, 1)
+	p.consumePendingMessage("already consumed")
+
+	_, cmd := p.handleKeyPress(tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModAlt})
+
+	assert.Empty(t, p.pendingMessages)
+	assert.Contains(t, runTimerCmd(t, cmd), notification.ShowMsg{Text: "No pending messages", Type: notification.TypeInfo})
 }
 
 // TestSteerFlow_ExplicitQueue_SkipsSteering verifies the internal Queue
@@ -746,4 +834,16 @@ func TestSteerFlow_NoApp_FallsBackToQueue(t *testing.T) {
 	require.NotNil(t, cmd)
 	require.Len(t, p.messageQueue, 1)
 	assert.Equal(t, "hello", p.messageQueue[0].content)
+}
+
+func (r *skillDispatchRuntime) ReadSkillContent(ctx context.Context, sess *session.Session, name string) (string, error) {
+	st := r.CurrentAgentSkillsToolset()
+	if st == nil {
+		return "", nil
+	}
+	return st.ReadSkillContent(ctx, name, tools.NopRuntime{})
+}
+
+func (queueTestRuntime) ReadSkillContent(context.Context, *session.Session, string) (string, error) {
+	return "", nil
 }

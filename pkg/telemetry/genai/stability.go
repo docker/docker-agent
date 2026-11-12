@@ -55,8 +55,7 @@ var (
 )
 
 // CurrentStability returns the active stability mode. The result is
-// computed once per process from the env var; tests that need to flip
-// the mode at runtime should call ResetStabilityForTest first.
+// computed once per process from the env var.
 func CurrentStability() Stability {
 	stabilityMu.Lock()
 	once := &stabilityOnce
@@ -81,23 +80,6 @@ func CurrentStability() Stability {
 	stabilityMu.Lock()
 	defer stabilityMu.Unlock()
 	return cachedStability
-}
-
-// ResetStabilityForTest clears the cached stability value so a
-// subsequent CurrentStability call re-reads the env var. Test-only —
-// callers must ensure no other goroutine is in CurrentStability when
-// this runs. The mutex protects the sync.Once and cache fields against
-// other Reset calls and against the lock-protected segments of
-// CurrentStability, but CurrentStability releases the mutex before
-// invoking once.Do, so a concurrent reset there races on the
-// sync.Once memory itself (flagged under -race). All in-tree usage is
-// sequential (t.Setenv + t.Cleanup, no t.Parallel), so this is safe in
-// practice; do not introduce parallel callers.
-func ResetStabilityForTest() {
-	stabilityMu.Lock()
-	defer stabilityMu.Unlock()
-	stabilityOnce = sync.Once{}
-	cachedStability = StabilityDualEmit
 }
 
 // EmitLegacyAttributes reports whether legacy (pre-semconv) attribute

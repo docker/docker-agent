@@ -101,6 +101,7 @@ func TestSchemaForGemini(t *testing.T) {
 	assert.JSONEq(t, `
 {
     "type": "object",
+    "propertyOrdering": ["direction", "labels", "perPage", "repo"],
     "properties": {
       "direction": {
         "description": "Order",
@@ -177,11 +178,13 @@ func TestNonStringEnumSchemaForGemini(t *testing.T) {
 	assert.JSONEq(t, `
 {
     "type": "object",
+    "propertyOrdering": ["issue_fields"],
     "properties": {
       "issue_fields": {
         "type": "array",
         "items": {
           "type": "object",
+          "propertyOrdering": ["delete", "priority", "state"],
           "properties": {
             "delete": {
               "type": "boolean",
@@ -193,7 +196,6 @@ func TestNonStringEnumSchemaForGemini(t *testing.T) {
               "enum": ["1", "2.5"]
             },
             "state": {
-              "type": "object",
               "anyOf": [
                 {"type": "string", "enum": ["open"]},
                 {"type": "number", "enum": ["0"]}
@@ -261,6 +263,7 @@ func TestSchemaForAnthropic(t *testing.T) {
 			"type": "string"
 		}
 	},
+	"additionalProperties": false,
 	"required": ["repo"]
 }`, string(schemaJSON))
 }
@@ -302,16 +305,28 @@ func TestSchemaForOpenai(t *testing.T) {
 	"type": "object",
 	"properties": {
 		"direction": {
-			"description": "Order",
-			"enum": ["ASC", "DESC"],
-			"type": ["string", "null"]
+			"anyOf": [
+				{
+					"description": "Order",
+					"enum": ["ASC", "DESC"],
+					"type": "string"
+				},
+				{
+					"type": "null"
+				}
+			]
 		},
 		"labels": {
-			"description": "Filter",
-			"items": {
-				"type": "string"
-			},
-			"type": ["array", "null"]
+			"anyOf": [
+				{
+					"description": "Filter",
+					"items": {
+						"type": "string"
+					},
+					"type": "array"
+				},
+				{"type": "null"}
+			]
 		},
 		"perPage": {
 			"description": "Results",

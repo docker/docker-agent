@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
+	"github.com/docker/docker-agent/pkg/promptfiles"
 	"github.com/docker/docker-agent/pkg/runtime/toolexec"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -34,14 +35,17 @@ func (r *LocalRuntime) buildHooksExecutors() {
 		if err != nil {
 			continue
 		}
-		cfg := builtins.ApplyAgentDefaults(a.Hooks(), builtins.AgentDefaults{
-			AddDate:            a.AddDate(),
-			AddEnvironmentInfo: a.AddEnvironmentInfo(),
-			AddPromptFiles:     a.AddPromptFiles(),
-			RedactSecrets:      a.RedactSecrets(),
+		// Workspace agents share source configuration; only mutate a runtime-local copy.
+		cfg := builtins.ApplyAgentDefaults(a.Hooks().Clone(), builtins.AgentDefaults{
+			AddDate:             a.AddDate(),
+			AddEnvironmentInfo:  a.AddEnvironmentInfo(),
+			AddPromptFiles:      slices.Clone(a.AddPromptFiles()),
+			AddPromptFilesDepth: a.AddPromptFilesDepth(),
+			RedactSecrets:       a.RedactSecrets(),
 		})
 		cfg = applyAutoInjectors(cfg, r.autoInjectors)
 		cfg = applyCacheDefault(cfg, a)
+		cfg = builtins.GuardPromptFiles(cfg)
 		if cfg == nil {
 			continue
 		}
@@ -53,7 +57,7 @@ func (r *LocalRuntime) buildHooksExecutors() {
 // applyAutoInjectors runs each AutoInjector against cfg, allocating a
 // fresh Config when needed so a previously-empty agent picks up the
 // injector's hooks. Returns nil iff cfg ends up empty after every
-// injector has run, mirroring [ApplyAgentDefaults].
+// injector has run, mirroring [builtins.ApplyAgentDefaults].
 func applyAutoInjectors(cfg *hooks.Config, injectors []builtins.AutoInjector) *hooks.Config {
 	if len(injectors) == 0 {
 		return cfg
@@ -72,8 +76,8 @@ func applyAutoInjectors(cfg *hooks.Config, injectors []builtins.AutoInjector) *h
 	return cfg
 }
 
-// hooksExec returns the pre-built [hooks.Executor] for a, or nil when
-// the agent has no hooks (see [buildHooksExecutors]).
+// hooksExec returns the pre-built [hooks.Executor] for a, or nil for a
+// nil or unknown agent (see [LocalRuntime.buildHooksExecutors]).
 func (r *LocalRuntime) hooksExec(a *agent.Agent) *hooks.Executor {
 	if a == nil {
 		return nil
@@ -83,10 +87,10 @@ func (r *LocalRuntime) hooksExec(a *agent.Agent) *hooks.Executor {
 
 // dispatchHook is the common dispatch path shared by every hook
 // callsite: resolve the pre-built executor, dispatch, and emit any
-// [Result.SystemMessage] as a Warning event. Errors are logged at warn
-// level and surfaced as nil results so callers can use a single nil
-// check to mean "nothing useful came back" — covering the
-// not-configured, no-agent, and dispatch-failed cases uniformly.
+// [hooks.Result.SystemMessage] as a Warning event. Errors are logged at warn
+// level; for blockable events they become a deny Result (fail-closed),
+// otherwise nil. Not-configured, no-agent and unknown-agent cases also
+// return nil.
 //
 // events may be nil for fire-and-forget callsites (notification,
 // on_error, on_max_iterations, ...) where there's no Warning channel
@@ -122,6 +126,9 @@ func (r *LocalRuntime) dispatchHook(
 	}
 	if err != nil {
 		slog.WarnContext(ctx, "Hook execution failed", "event", event, "agent", a.Name(), "error", err)
+		if hooks.EventContract(event).CanBlock {
+			return &hooks.Result{ExitCode: -1, Message: err.Error()}
+		}
 		return nil
 	}
 
@@ -138,7 +145,7 @@ func (r *LocalRuntime) executeSessionStartHooks(ctx context.Context, sess *sessi
 	return observeInstructions(r.dispatchHook(ctx, a, hooks.EventSessionStart, &hooks.Input{
 		SessionID: sess.ID,
 		Source:    "startup",
-	}, events))
+	}, events), r.hasPromptFileGuard(a))
 }
 
 // executeTurnStartHooks fires turn_start before each model call. Recomputing
@@ -147,17 +154,42 @@ func (r *LocalRuntime) executeSessionStartHooks(ctx context.Context, sess *sessi
 func (r *LocalRuntime) executeTurnStartHooks(ctx context.Context, sess *session.Session, a *agent.Agent, events EventSink) instructionObservation {
 	return observeInstructions(r.dispatchHook(ctx, a, hooks.EventTurnStart, &hooks.Input{
 		SessionID: sess.ID,
-	}, events))
+	}, events), r.hasPromptFileGuard(a))
 }
 
 // Reason values reported in [hooks.Input.Reason] when [hooks.EventTurnEnd]
-// fires. The runtime guarantees that turn_end runs once per turn that
-// fired turn_start, no matter how the turn exited; the reason classifies
-// which exit path the runtime took.
+// fires. The same values (including the exported trio below, plus
+// hook_blocked/loop_detected/budget_exceeded) are also reported verbatim in
+// [StreamStoppedEvent.Reason] — loop.go passes its turnEndReason*
+// classification straight through to StreamStopped. The runtime guarantees
+// that turn_end runs once per turn that fired turn_start, no matter how the
+// turn exited; the reason classifies which exit path the runtime took.
 const (
-	// turnEndReasonNormal — the model finished the turn cleanly and the
+	// TurnEndReasonNormal — the model finished the turn cleanly and the
 	// run loop is about to break out (no further iterations).
-	turnEndReasonNormal = "normal"
+	TurnEndReasonNormal = "normal"
+	// TurnEndReasonError — the turn failed: a model-call error (including
+	// when handleStreamError recovers via overflow compaction and retries),
+	// a rejected routing decision, a structured-output failure, or a
+	// harness error.
+	TurnEndReasonError = "error"
+	// TurnEndReasonCanceled — the turn ended because the stream context
+	// was cancelled (e.g. user Ctrl+C). The deferred guard also maps a
+	// still-"normal" exit to canceled when ctx is done; a cancelled model
+	// call may report "error" instead.
+	TurnEndReasonCanceled = "canceled"
+)
+
+// The remaining turnEndReason values below also end up in
+// StreamStoppedEvent.Reason via loop.go's streamReason/ls.exitReason
+// plumbing, same as the exported trio above. They stay unexported because
+// nothing outside pkg/runtime constructs one of these values directly —
+// consumers (e.g. the TUI's isSuccessfulStop) only ever compare against the
+// string, never need to produce it.
+const (
+	// turnEndReasonNormal aliases [TurnEndReasonNormal] to avoid churning
+	// the call sites below.
+	turnEndReasonNormal = TurnEndReasonNormal
 	// turnEndReasonContinue — the turn finished cleanly and the loop is
 	// about to start a new iteration (e.g. after tool calls, or after a
 	// stop with a queued follow-up).
@@ -165,14 +197,11 @@ const (
 	// turnEndReasonSteered — the turn finished and was followed by
 	// drained steered messages, prompting a new iteration.
 	turnEndReasonSteered = "steered"
-	// turnEndReasonError — the model call failed and the runtime is
-	// shutting down the run (handleStreamError returned non-retry).
-	turnEndReasonError = "error"
-	// turnEndReasonCanceled — the turn ended because the stream context
-	// was cancelled (e.g. user Ctrl+C). Includes deferred firing on
-	// any return path while ctx is done.
-	turnEndReasonCanceled = "canceled"
-	// turnEndReasonHookBlocked — a hook (before_llm_call or
+	// turnEndReasonError aliases [TurnEndReasonError].
+	turnEndReasonError = TurnEndReasonError
+	// turnEndReasonCanceled aliases [TurnEndReasonCanceled].
+	turnEndReasonCanceled = TurnEndReasonCanceled
+	// turnEndReasonHookBlocked — a blocking hook (e.g. before_llm_call or
 	// post_tool_use) signalled run termination via a deny verdict.
 	turnEndReasonHookBlocked = "hook_blocked"
 	// turnEndReasonLoopDetected — the consecutive-tool-call loop
@@ -231,14 +260,20 @@ func (o instructionObservation) legacyMessages() []chat.Message {
 	return messages
 }
 
-func observeInstructions(result *hooks.Result) instructionObservation {
+func observeInstructions(result *hooks.Result, promptFileGuard bool) instructionObservation {
 	observation := instructionObservation{messages: contextMessages(result)}
 	if result == nil {
 		return observation
 	}
+	for _, failed := range result.FailedHooks {
+		if promptFileGuard && failed.Type == hooks.HookTypeBuiltin && failed.Command == builtins.AddPromptFiles {
+			observation.sources = append(observation.sources, session.InstructionSource{Group: promptfiles.InstructionGroup, SetMarker: true})
+		}
+	}
 	for _, source := range result.InstructionContext {
 		observation.sources = append(observation.sources, session.InstructionSource{
 			Key:            source.Key,
+			Path:           source.Path,
 			Group:          source.Group,
 			Label:          source.Label,
 			Content:        source.Content,
@@ -269,21 +304,25 @@ func (r *LocalRuntime) messagesWithDynamicContext(
 	a *agent.Agent,
 	sources []session.InstructionSource,
 	legacyExtras []chat.Message,
-) []chat.Message {
-	if !userconfig.Get().CacheStablePromptsEnabled() {
+) ([]chat.Message, error) {
+	stable := userconfig.Get().CacheStablePromptsEnabled()
+	if err := r.checkPromptFiles(ctx, sess, a, sources, stable); err != nil {
+		return nil, err
+	}
+	if !stable {
 		if sess.ClearInstructionContext() {
 			if err := r.sessionStore.UpdateSession(ctx, sess); err != nil {
 				slog.WarnContext(ctx, "Failed to clear instruction context", "session_id", sess.ID, "error", err)
 			}
 		}
-		return sess.GetMessagesWithoutInstructionContext(a, legacyExtras...)
+		return sess.GetMessagesWithoutInstructionContext(a, legacyExtras...), nil
 	}
 	if sess.PrepareInstructionContext(sources) {
 		if err := r.sessionStore.UpdateSession(ctx, sess); err != nil {
 			slog.WarnContext(ctx, "Failed to persist instruction context", "session_id", sess.ID, "error", err)
 		}
 	}
-	return sess.GetMessages(a)
+	return sess.GetMessages(a), nil
 }
 
 func instructionSource(key, label string, messages []chat.Message) session.InstructionSource {
@@ -317,6 +356,9 @@ func (r *LocalRuntime) executeSessionEndHooks(ctx context.Context, sess *session
 // are populated so builtins like cache_response can key on the user's
 // question and resolve the agent through the runtime closure.
 func (r *LocalRuntime) executeStopHooks(ctx context.Context, sess *session.Session, a *agent.Agent, responseContent string, events EventSink) {
+	if a.Cache() != nil {
+		ctx = context.WithValue(ctx, responseCacheBypassKey{}, promptHasAttachments(sess))
+	}
 	r.dispatchHook(ctx, a, hooks.EventStop, &hooks.Input{
 		SessionID:       sess.ID,
 		AgentName:       a.Name(),
@@ -463,6 +505,8 @@ const (
 	ApprovalSourceTeamPermissionsDeny     = "team_permissions_deny"
 	ApprovalSourcePreToolUseHookAllow     = "pre_tool_use_hook_allow"
 	ApprovalSourcePreToolUseHookDeny      = "pre_tool_use_hook_deny"
+	ApprovalSourceToolInputTransformDeny  = toolexec.ApprovalSourceToolInputTransformDeny
+	ApprovalSourceToolGuardDeny           = toolexec.ApprovalSourceToolGuardDeny
 	ApprovalSourceReadOnlyHint            = "readonly_hint"
 	ApprovalSourceModeBalanced            = "mode_balanced"
 	ApprovalSourceModeRestricted          = "mode_restricted"
@@ -651,13 +695,7 @@ func (r *LocalRuntime) executeUserPromptSubmitHooks(ctx context.Context, sess *s
 		SessionID: sess.ID,
 		Prompt:    prompt,
 	}, events)
-	if result == nil {
-		return false, "", nil
-	}
-	if !result.Allowed {
-		return true, result.Message, nil
-	}
-	return false, "", contextMessages(result)
+	return submissionResult(result)
 }
 
 // executeUserSteeringMessagesSubmitHooks fires
@@ -673,13 +711,7 @@ func (r *LocalRuntime) executeUserSteeringMessagesSubmitHooks(ctx context.Contex
 		SessionID:        sess.ID,
 		SteeringMessages: steeringMessages,
 	}, events)
-	if result == nil {
-		return false, "", nil
-	}
-	if !result.Allowed {
-		return true, result.Message, nil
-	}
-	return false, "", contextMessages(result)
+	return submissionResult(result)
 }
 
 // executeUserFollowupSubmitHooks fires user_followup_submit each time
@@ -696,13 +728,7 @@ func (r *LocalRuntime) executeUserFollowupSubmitHooks(ctx context.Context, sess 
 		SessionID: sess.ID,
 		Prompt:    prompt,
 	}, events)
-	if result == nil {
-		return false, "", nil
-	}
-	if !result.Allowed {
-		return true, result.Message, nil
-	}
-	return false, "", contextMessages(result)
+	return submissionResult(result)
 }
 
 // executePreCompactHooks fires pre_compact just before compaction.
@@ -737,4 +763,14 @@ func (r *LocalRuntime) executeSubagentStopHooks(ctx context.Context, parent, chi
 		AgentName:       subAgentName,
 		StopResponse:    response,
 	}, nil)
+}
+
+func submissionResult(result *hooks.Result) (stop bool, message string, contextMsgs []chat.Message) {
+	if result == nil {
+		return false, "", nil
+	}
+	if !result.Allowed {
+		return true, result.Message, nil
+	}
+	return false, "", contextMessages(result)
 }

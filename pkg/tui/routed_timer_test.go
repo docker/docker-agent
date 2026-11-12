@@ -12,40 +12,29 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tui/animation"
-	"github.com/docker/docker-agent/pkg/tui/core/layout"
 	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/page/chat"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/service/supervisor"
 )
 
-// timerRecordingPage scripts a chat.Page for the handleRoutedMsg contract:
-// it records the messages it was updated with and hands out canned commands
-// for the regular (UI) and routed-timer channels.
-type timerRecordingPage struct {
+// effectRecordingPage records delivery and returns independently classified commands.
+type effectRecordingPage struct {
 	mockChatPage
 
-	updates  []tea.Msg
-	uiCmd    tea.Cmd
-	timerCmd tea.Cmd
+	updates []tea.Msg
+	effects chat.Effects
 }
 
-func (p *timerRecordingPage) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
+func (p *effectRecordingPage) UpdateEffects(msg tea.Msg) (chat.Page, chat.Effects) {
 	p.updates = append(p.updates, msg)
-	return p, p.uiCmd
-}
-
-func (p *timerRecordingPage) VisualGeneration() uint64 { return 0 }
-
-func (p *timerRecordingPage) TakeRoutedTimers() tea.Cmd {
-	cmd := p.timerCmd
-	p.timerCmd = nil
-	return cmd
+	return p, p.effects
 }
 
 type (
-	uiMarkerMsg    struct{}
-	timerMarkerMsg struct{}
+	uiMarkerMsg     struct{}
+	timerMarkerMsg  struct{}
+	globalMarkerMsg struct{}
 )
 
 // newRoutedTestModel wires an appModel around a real supervisor holding two
@@ -62,29 +51,27 @@ func newRoutedTestModel(t *testing.T, makePage func(sess *session.Session, routi
 	m.supervisor = sv
 	require.Equal(t, activeID, sv.ActiveID())
 
-	m.chatPages[activeID] = makePage(sessA, activeID)
-	m.chatPages[backgroundID] = makePage(sessB, backgroundID)
-	m.chatPage = m.chatPages[activeID]
-	m.sessionStates[activeID] = service.NewSessionState(sessA)
-	m.sessionStates[backgroundID] = service.NewSessionState(sessB)
+	m.ensureTab(activeID).chatPage = makePage(sessA, activeID)
+	m.ensureTab(backgroundID).chatPage = makePage(sessB, backgroundID)
+	m.activeTab = m.tabs[activeID]
+	m.ensureTab(activeID).sessionState = service.NewSessionState(sessA)
+	m.ensureTab(backgroundID).sessionState = service.NewSessionState(sessB)
 	return m, activeID, backgroundID
 }
 
-// TestHandleRoutedMsg_InactiveTabKeepsRoutedTimers verifies the routing
-// contract for hidden tabs: the inner message is applied to the owning page,
-// its UI-only command is discarded, and its routed one-shot timers are the
-// command handleRoutedMsg returns — so presentation deadlines keep running
-// while the tab is hidden.
-func TestHandleRoutedMsg_InactiveTabKeepsRoutedTimers(t *testing.T) {
+func TestHandleRoutedMsg_InactiveTabDispatchesEffects(t *testing.T) {
 	t.Parallel()
 
 	m, _, backgroundID := newRoutedTestModel(t, func(*session.Session, string) chat.Page {
-		return &timerRecordingPage{
-			uiCmd:    func() tea.Msg { return uiMarkerMsg{} },
-			timerCmd: func() tea.Msg { return timerMarkerMsg{} },
+		return &effectRecordingPage{
+			effects: chat.Effects{
+				Visible: func() tea.Msg { return uiMarkerMsg{} },
+				Local:   func() tea.Msg { return timerMarkerMsg{} },
+				Global:  func() tea.Msg { return globalMarkerMsg{} },
+			},
 		}
 	})
-	background := m.chatPages[backgroundID].(*timerRecordingPage)
+	background := m.tabs[backgroundID].chatPage.(*effectRecordingPage)
 
 	inner := runtime.AgentSwitching(true, "root", "scout")
 	_, cmd := m.Update(messages.RoutedMsg{SessionID: backgroundID, Inner: inner})
@@ -94,6 +81,7 @@ func TestHandleRoutedMsg_InactiveTabKeepsRoutedTimers(t *testing.T) {
 
 	msgs := collectMsgs(cmd)
 	assert.True(t, hasMsg[timerMarkerMsg](msgs), "the page's routed timers are dispatched")
+	assert.True(t, hasMsg[globalMarkerMsg](msgs), "global effects are dispatched")
 	assert.False(t, hasMsg[uiMarkerMsg](msgs), "UI-only cmds of hidden pages stay discarded")
 
 	// A routed message for an unknown (closed) tab is dropped entirely.
@@ -123,7 +111,7 @@ func newRealChatPage(t *testing.T, sess *session.Session, routingID string) chat
 // the real pieces end to end: a transfer_task start routed to a hidden tab
 // shows the transfer box on that tab only (never on the active one) and
 // still arms the presentation timers — the command handleRoutedMsg returns —
-// even though the page's regular command is discarded.
+// without dispatching visible-only commands.
 func TestHandleRoutedMsg_TransferOnHiddenTabArmsTimersAndStaysLocal(t *testing.T) {
 	t.Parallel()
 
@@ -137,9 +125,36 @@ func TestHandleRoutedMsg_TransferOnHiddenTabArmsTimersAndStaysLocal(t *testing.T
 		Inner:     runtime.AgentSwitching(true, "root", "scout"),
 	})
 
-	assert.NotNil(t, cmd, "the hidden tab's presentation timers survive the UI-cmd discard")
-	assert.Contains(t, ansi.Strip(m.chatPages[backgroundID].View()), transferBoxMarker,
+	assert.NotNil(t, cmd, "the hidden tab's presentation timers run as local work")
+	assert.Contains(t, ansi.Strip(m.tabs[backgroundID].chatPage.View()), transferBoxMarker,
 		"the hop's box shows on its owning tab")
-	assert.NotContains(t, ansi.Strip(m.chatPages[activeID].View()), transferBoxMarker,
+	assert.NotContains(t, ansi.Strip(m.tabs[activeID].chatPage.View()), transferBoxMarker,
 		"the active tab shows nothing for another tab's hop")
+}
+
+func TestPageEffectsDispatchPreservesComposition(t *testing.T) {
+	t.Parallel()
+	for _, visible := range []bool{false, true} {
+		t.Run(map[bool]string{false: "hidden", true: "visible"}[visible], func(t *testing.T) {
+			t.Parallel()
+			var calls []string
+			leaf := func(name string) tea.Cmd {
+				return func() tea.Msg { calls = append(calls, name); return name }
+			}
+			effects := chat.Effects{
+				Local:   tea.Batch(leaf("local-1"), leaf("local-2")),
+				Visible: tea.Sequence(leaf("visible-1"), leaf("visible-2")),
+				Global:  tea.Sequence(leaf("global-1"), leaf("global-2")),
+			}
+			cmd := effects.Cmd(visible)
+			assert.Empty(t, calls, "selection must not execute commands in Update")
+			msgs := collectMsgs(cmd)
+			want := []tea.Msg{"local-1", "local-2", "global-1", "global-2"}
+			if visible {
+				want = []tea.Msg{"local-1", "local-2", "visible-1", "visible-2", "global-1", "global-2"}
+			}
+			assert.Equal(t, want, msgs, "nested batches and native sequences must survive dispatch")
+			assert.Len(t, calls, len(want), "each selected command runs exactly once")
+		})
+	}
 }

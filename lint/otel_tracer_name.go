@@ -3,7 +3,9 @@ package main
 import (
 	"go/ast"
 	"go/constant"
+	"go/token"
 	"go/types"
+	"strconv"
 	"strings"
 
 	"github.com/dgageot/rubocop-go/cop"
@@ -42,7 +44,7 @@ var OTelTracerName = &cop.Func{
 			}
 			arg := call.Args[0]
 			name, ok := tracerName(p, arg)
-			if !ok || name == expected || isAppName(p.Info, arg) {
+			if !ok || name == expected || isAppName(p, arg) {
 				return
 			}
 			if name == "cagent" {
@@ -73,13 +75,14 @@ func packageImportPath(pkgPath string) string {
 	return modulePath + "/" + strings.TrimPrefix(pkgPath, "./")
 }
 
-func isAppName(info *types.Info, expr ast.Expr) bool {
-	c, ok := constObject(info, expr)
+func isAppName(p *cop.Pass, expr ast.Expr) bool {
+	c, ok := constObject(p.Info, expr)
 	if !ok || c.Name() != "AppName" || c.Pkg() == nil {
 		return false
 	}
 	pkg := c.Pkg().Path()
-	return pkg == versionPkgPath || pkg == cmdRootPkgPath
+	return pkg == versionPkgPath || pkg == cmdRootPkgPath ||
+		c.Pkg() == p.Package && p.FileUnder("cmd/root")
 }
 
 func constStringValue(info *types.Info, expr ast.Expr) (string, bool) {
@@ -121,4 +124,17 @@ func tracerName(p *cop.Pass, expr ast.Expr) (string, bool) {
 		return val, true
 	}
 	return "", false
+}
+
+// stringLit returns the unquoted value of a string-literal expression.
+func stringLit(expr ast.Expr) (string, bool) {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	val, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return val, true
 }

@@ -107,6 +107,68 @@ func TestInlineSkills_Empty(t *testing.T) {
 	assert.Nil(t, inlineSkills(nil))
 }
 
+func TestOverrideWithInlineSkills_NoInlineKeepsLoaded(t *testing.T) {
+	t.Parallel()
+	loaded := []skills.Skill{{Name: "git"}, {Name: "docker"}}
+
+	assert.Equal(t, loaded, overrideWithInlineSkills(loaded, nil))
+}
+
+func TestOverrideWithInlineSkills_InlineWinsOverDiscovered(t *testing.T) {
+	t.Parallel()
+	// A discovered skill sharing a name with an inline one must be dropped,
+	// not merely appended after it: otherwise the model sees the name twice
+	// and lookups resolve to the discovered skill.
+	loaded := []skills.Skill{
+		{Name: "commit", Description: "from disk", FilePath: "/skills/commit/SKILL.md", Local: true},
+		{Name: "docker", Description: "from disk", Local: true},
+	}
+	inline := []skills.Skill{{Name: "commit", Description: "from config", InlineContent: "body"}}
+
+	result := overrideWithInlineSkills(loaded, inline)
+
+	require.Len(t, result, 2)
+	assert.Equal(t, "docker", result[0].Name)
+	assert.Equal(t, "commit", result[1].Name)
+	assert.Equal(t, "from config", result[1].Description)
+	assert.True(t, result[1].IsInline())
+}
+
+func TestOverrideWithInlineSkills_DropsEveryShadowedDuplicate(t *testing.T) {
+	t.Parallel()
+	// skills.Load keys local and remote skills separately, so the same name can
+	// appear more than once. An inline definition must displace all of them.
+	loaded := []skills.Skill{
+		{Name: "git", Description: "local", Local: true},
+		{Name: "git", Description: "remote"},
+	}
+	inline := []skills.Skill{{Name: "git", Description: "inline", InlineContent: "body"}}
+
+	result := overrideWithInlineSkills(loaded, inline)
+
+	require.Len(t, result, 1)
+	assert.Equal(t, "inline", result[0].Description)
+}
+
+func TestOverrideWithInlineSkills_DisjointNamesAreConcatenated(t *testing.T) {
+	t.Parallel()
+	loaded := []skills.Skill{{Name: "git", Local: true}}
+	inline := []skills.Skill{{Name: "changelog", InlineContent: "body"}}
+
+	result := overrideWithInlineSkills(loaded, inline)
+
+	require.Len(t, result, 2)
+	assert.Equal(t, "git", result[0].Name)
+	assert.Equal(t, "changelog", result[1].Name)
+}
+
+func TestOverrideWithInlineSkills_NoLoadedSkills(t *testing.T) {
+	t.Parallel()
+	inline := []skills.Skill{{Name: "changelog", InlineContent: "body"}}
+
+	assert.Equal(t, inline, overrideWithInlineSkills(nil, inline))
+}
+
 func TestFilterSkillsByName_KeepsAllDuplicateNameMatches(t *testing.T) {
 	t.Parallel()
 	// The loaded slice may contain multiple skills with the same name (e.g. one

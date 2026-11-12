@@ -8,7 +8,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// Keep files alive after their descriptors have been adopted elsewhere; their
+// finalizers must not close a recycled descriptor. os.File has no detach method.
+var (
+	fdOwnershipPinMu sync.Mutex
+	fdOwnershipPin   []*os.File
+)
+
+func pinFDOwnership(file *os.File) {
+	fdOwnershipPinMu.Lock()
+	defer fdOwnershipPinMu.Unlock()
+	fdOwnershipPin = append(fdOwnershipPin, file)
+}
 
 func Listen(ctx context.Context, addr string) (net.Listener, error) {
 	if path, ok := strings.CutPrefix(addr, "unix://"); ok {
@@ -36,7 +50,7 @@ func listenFD(raw string) (net.Listener, error) {
 	}
 
 	f := os.NewFile(uintptr(fd), "fd://"+raw)
-	defer f.Close() // net.FileListener duplicates the fd; close our copy
+	defer func() { _ = closeInheritedFile(f) }() // net.FileListener duplicates the fd; close our copy
 
 	ln, err := net.FileListener(f)
 	if err != nil {
@@ -47,17 +61,11 @@ func listenFD(raw string) (net.Listener, error) {
 }
 
 func listenUnix(ctx context.Context, path string) (net.Listener, error) {
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // socket access is gated by socket file permissions, not directory
 		return nil, err
 	}
-
-	var lnConfig net.ListenConfig
-	return lnConfig.Listen(ctx, "unix", path)
+	return listenUnixSocket(ctx, path)
 }
 
 func listenTCP(ctx context.Context, addr string) (net.Listener, error) {

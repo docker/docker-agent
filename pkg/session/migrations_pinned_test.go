@@ -15,7 +15,7 @@ import (
 // (ID, Name, Description, UpSQL, DownSQL) tuple is part of the on-disk
 // schema contract — editing any of those bytes after the fact means an
 // already-deployed database may run the new SQL even though the row in
-// schema_migrations still records the old name, leaving the schema in
+// the migrations table still records the old name, leaving the schema in
 // a state no version of the code has ever produced.
 //
 // The mechanism is a content hash: every migration's textual fields
@@ -39,7 +39,7 @@ func TestMigrationCatalogIsContentPinned(t *testing.T) {
 
 	got := digestMigrationCatalog(getAllMigrations())
 
-	const wantDigest = "73643834fd1cc3b0dfd2a2ba52593c0b79ba773d364045a8e3b99ba890b55476"
+	const wantDigest = "403f21f32ebfb6de873517a8849ce5518125ab273941c3045ce938bf030a05b2"
 	if got != wantDigest {
 		t.Fatalf(`migration catalogue content has changed.
 

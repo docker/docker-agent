@@ -3,7 +3,6 @@ package ui
 import (
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
@@ -88,13 +87,13 @@ func (t *ToolTracker) Upsert(agentName string, toolCall tools.ToolCall, toolDef 
 		msg.Sender = agentName
 	}
 	if toolDef.Name != "" || toolCall.Function.Name != "" {
-		msg.ToolDefinition = EnsureToolDefinition(toolCall, toolDef)
+		definition := EnsureToolDefinition(toolCall, toolDef)
+		if definition.Annotations.Title == "" && definition.Name == msg.ToolDefinition.Name {
+			definition.Annotations.Title = msg.ToolDefinition.Annotations.Title
+		}
+		msg.ToolDefinition = definition
 	}
-	msg.ToolStatus = status
-	if status == tuitypes.ToolStatusRunning && msg.StartedAt == nil {
-		now := time.Now()
-		msg.StartedAt = &now
-	}
+	msg.SetToolStatus(status)
 	if toolCall.ID != "" {
 		msg.ToolCall.ID = toolCall.ID
 	}
@@ -129,16 +128,69 @@ func (t *ToolTracker) Finish(id string, result ToolResult) *ToolView {
 	if result.Result != nil && result.Result.IsError {
 		status = tuitypes.ToolStatusError
 	}
-	tv.message.ToolStatus = status
-	tv.message.ToolDefinition = EnsureToolDefinition(tv.message.ToolCall, result.ToolDefinition)
+	tv.message.SetToolStatus(status)
+	definition := EnsureToolDefinition(tv.message.ToolCall, result.ToolDefinition)
+	if definition.Annotations.Title == "" && definition.Name == tv.message.ToolDefinition.Name {
+		definition.Annotations.Title = tv.message.ToolDefinition.Annotations.Title
+	}
+	tv.message.ToolDefinition = definition
 	tv.message.Content = strings.ReplaceAll(result.Response, "\t", "    ")
 	tv.message.ToolResult = result.Result.WithoutPayload()
 	tv.images = result.Images
 
 	msg := *tv.message
-	snapshot := &ToolView{message: &msg, images: tv.images}
+	snapshot := &ToolView{message: &msg, images: tv.images, renderers: tv.renderers, writeArgs: tv.writeArgs, fullFilePreview: tv.fullFilePreview}
 	t.Remove(id)
 	return snapshot
+}
+
+func (t *ToolTracker) Complete(id string, result ToolResult) {
+	order := slices.Clone(t.order)
+	if !slices.Contains(order, id) {
+		order = append(order, id)
+	}
+	view := t.Finish(id, result)
+	if view == nil {
+		return
+	}
+	t.byID[id] = view
+	t.order = order
+}
+
+// DrainCompleted commits only the completed prefix, preserving invocation order.
+func (t *ToolTracker) DrainCompleted() []*ToolView {
+	var views []*ToolView
+	for len(t.order) > 0 {
+		id := t.order[0]
+		view := t.byID[id]
+		if view == nil || view.message == nil || view.message.ToolStatus != tuitypes.ToolStatusCompleted && view.message.ToolStatus != tuitypes.ToolStatusError {
+			break
+		}
+		views = append(views, view)
+		t.Remove(id)
+	}
+	return views
+}
+
+// FinalizeAll marks every in-flight tool with a terminal status, returns
+// immutable snapshots in call order, and clears the tracker.
+func (t *ToolTracker) FinalizeAll(status tuitypes.ToolStatus) []*ToolView {
+	views := make([]*ToolView, 0, len(t.order))
+	t.ForEach(func(tv *ToolView) {
+		if tv.message == nil {
+			return
+		}
+		if tv.message.ToolStatus == tuitypes.ToolStatusPending || tv.message.ToolStatus == tuitypes.ToolStatusRunning {
+			tv.message.SetToolStatus(status)
+		}
+		if tv.message.ToolStatus == tuitypes.ToolStatusError && tv.message.Content == "" {
+			tv.message.Content = "Tool call ended before a result was received."
+		}
+		msg := *tv.message
+		views = append(views, &ToolView{message: &msg, images: tv.images, renderers: tv.renderers, writeArgs: tv.writeArgs, fullFilePreview: tv.fullFilePreview})
+	})
+	t.Reset()
+	return views
 }
 
 // ToolViewID returns a stable id for a tool call view.

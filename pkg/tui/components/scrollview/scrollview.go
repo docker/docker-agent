@@ -384,6 +384,7 @@ func (m *Model) syncScrollbar() {
 // complex grapheme clusters (ZWJ emoji, flags).
 func (m *Model) compose(lines []string, baseLine int) string {
 	contentWidth := m.ContentWidth()
+	contentLen := 0
 
 	// Pad or truncate each line to exact content width
 	for i, line := range lines {
@@ -401,9 +402,9 @@ func (m *Model) compose(lines []string, baseLine int) string {
 		case w < contentWidth:
 			lines[i] = line + strings.Repeat(" ", contentWidth-w)
 		}
+		contentLen += len(lines[i])
 	}
-
-	contentView := strings.Join(lines, "\n")
+	contentLen += max(0, len(lines)-1) // newline separators
 
 	// Zip the right-side column (scrollbar or placeholder) directly: every
 	// line is exactly contentWidth wide at this point, so JoinHorizontal's
@@ -413,7 +414,7 @@ func (m *Model) compose(lines []string, baseLine int) string {
 		sbLines := m.sb.ViewLines()
 		gap := strings.Repeat(" ", m.gapWidth)
 		var b strings.Builder
-		b.Grow(len(contentView) + len(lines)*(m.gapWidth+scrollbar.Width*4))
+		b.Grow(contentLen + len(lines)*(m.gapWidth+scrollbar.Width*4))
 		for i, line := range lines {
 			if i > 0 {
 				b.WriteByte('\n')
@@ -430,7 +431,7 @@ func (m *Model) compose(lines []string, baseLine int) string {
 	case m.reserveScrollbarSpace:
 		blank := strings.Repeat(" ", m.gapWidth+scrollbar.Width)
 		var b strings.Builder
-		b.Grow(len(contentView) + len(lines)*len(blank))
+		b.Grow(contentLen + len(lines)*len(blank))
 		for i, line := range lines {
 			if i > 0 {
 				b.WriteByte('\n')
@@ -440,7 +441,7 @@ func (m *Model) compose(lines []string, baseLine int) string {
 		}
 		return b.String()
 	default:
-		return contentView
+		return strings.Join(lines, "\n")
 	}
 }
 

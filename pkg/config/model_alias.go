@@ -26,7 +26,7 @@ func ResolveModelAliases(ctx context.Context, cfg *latest.Config, store *modelsd
 
 		// Skip alias resolution for models with custom base_url (direct or via provider)
 		// Custom endpoints like Azure Foundry use alias names as deployment names
-		if hasCustomBaseURL(&modelCfg, cfg.Providers) {
+		if latest.HasCustomBaseURL(modelCfg, cfg.Providers) {
 			slog.DebugContext(ctx, "Skipping model alias resolution for model with custom base_url",
 				"model_name", name, "provider", modelCfg.Provider, "model", modelCfg.Model)
 			continue
@@ -52,10 +52,4 @@ func ResolveModelAliases(ctx context.Context, cfg *latest.Config, store *modelsd
 
 func isInlineModelEntry(name string, modelCfg latest.ModelConfig) bool {
 	return name == modelCfg.Provider+"/"+modelCfg.Model
-}
-
-// hasCustomBaseURL checks if a model config has a custom base_url, either directly
-// or through a referenced provider definition.
-func hasCustomBaseURL(modelCfg *latest.ModelConfig, providers map[string]latest.ProviderConfig) bool {
-	return latest.HasCustomBaseURL(*modelCfg, providers)
 }

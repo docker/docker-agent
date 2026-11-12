@@ -340,13 +340,7 @@ func (c *manager) View() string {
 		visibleStart := c.scrollOffset
 		visibleEnd := min(c.scrollOffset+maxItems, len(c.filteredItems))
 
-		maxLabelLen := 0
-		for i := visibleStart; i < visibleEnd; i++ {
-			labelLen := lipgloss.Width(c.filteredItems[i].Label)
-			if labelLen > maxLabelLen {
-				maxLabelLen = labelLen
-			}
-		}
+		maxLabelLen := c.labelColumnWidth()
 
 		for i := visibleStart; i < visibleEnd; i++ {
 			item := c.filteredItems[i]
@@ -389,6 +383,14 @@ func (c *manager) View() string {
 	return styles.CompletionBoxStyle.Render(content)
 }
 
+func (c *manager) labelColumnWidth() int {
+	width := 0
+	for _, item := range c.items {
+		width = max(width, lipgloss.Width(item.Label))
+	}
+	return width
+}
+
 func (c *manager) GetLayers() []*lipgloss.Layer {
 	if !c.visible {
 		return nil
@@ -420,86 +422,67 @@ func (c *manager) notifySelectionChanged() tea.Cmd {
 	return core.CmdHandler(SelectionChangedMsg{Value: selectedItem.Value})
 }
 
-func (c *manager) filterItems(query string) {
-	// Pinned items are always shown at the top, in their original order.
-	var pinnedItems []Item
-	for _, item := range c.items {
-		if item.Pinned {
-			pinnedItems = append(pinnedItems, item)
-		}
+// FilterItems filters and ranks completion items using the same matching logic
+// as the popup manager.
+func FilterItems(items []Item, query string, matchMode MatchMode) []Item {
+	if query == "" {
+		return slices.Clone(items)
 	}
 
-	if query == "" {
-		// Preserve original order for non-pinned items.
-		c.filteredItems = make([]Item, 0, len(c.items))
-		c.filteredItems = append(c.filteredItems, pinnedItems...)
-		for _, item := range c.items {
-			if !item.Pinned {
-				c.filteredItems = append(c.filteredItems, item)
-			}
+	filtered := make([]Item, 0, len(items))
+	for _, item := range items {
+		if item.Pinned {
+			filtered = append(filtered, item)
 		}
-		// Reset selection when clearing the query
-		if c.selected >= len(c.filteredItems) {
-			c.selected = max(0, len(c.filteredItems)-1)
-		}
-		return
 	}
 
 	lowerQuery := strings.ToLower(query)
 	var matches []matchResult
-
-	for _, item := range c.items {
+	for _, item := range items {
 		if item.Pinned {
 			continue
 		}
+
 		var matched bool
 		var score int
-
-		if c.matchMode == MatchPrefix {
-			// Prefix matching: label or value (e.g. a slash command whose label
-			// doesn't share its prefix, like "/toolset-restart" -> "Restart
-			// Toolset") must start with the query (case-insensitive).
+		if matchMode == MatchPrefix {
 			if strings.HasPrefix(strings.ToLower(item.Label), lowerQuery) ||
 				strings.HasPrefix(strings.ToLower(strings.TrimPrefix(item.Value, "/")), lowerQuery) {
 				matched = true
-				score = 1000 - len(item.Label) // Shorter labels rank higher
+				score = 1000 - len(item.Label)
 			}
 		} else {
-			// Fuzzy matching
 			pattern := []rune(lowerQuery)
 			chars := util.ToChars([]byte(item.Label))
-			result, _ := algo.FuzzyMatchV1(
-				false, // caseSensitive
-				false, // normalize
-				true,  // forward
-				&chars,
-				pattern,
-				true, // withPos
-				nil,  // slab
-			)
+			result, _ := algo.FuzzyMatchV1(false, false, true, &chars, pattern, true, nil)
 			if result.Start >= 0 {
 				matched = true
 				score = result.Score
 			}
 		}
-
 		if matched {
-			matches = append(matches, matchResult{
-				item:  item,
-				score: score,
-			})
+			matches = append(matches, matchResult{item: item, score: score})
 		}
 	}
 
 	slices.SortFunc(matches, func(a, b matchResult) int {
 		return cmp.Compare(b.score, a.score)
 	})
-
-	// Build result: pinned items first, then sorted matches
-	c.filteredItems = make([]Item, 0, len(pinnedItems)+len(matches))
-	c.filteredItems = append(c.filteredItems, pinnedItems...)
 	for _, match := range matches {
-		c.filteredItems = append(c.filteredItems, match.item)
+		filtered = append(filtered, match.item)
+	}
+	return filtered
+}
+
+func (c *manager) filterItems(query string) {
+	c.filteredItems = FilterItems(c.items, query, c.matchMode)
+
+	if query == "" {
+		// Reset selection when clearing the query
+		if c.selected >= len(c.filteredItems) {
+			c.selected = max(0, len(c.filteredItems)-1)
+		}
+		return
 	}
 
 	// Adjust selection if it's beyond the filtered list

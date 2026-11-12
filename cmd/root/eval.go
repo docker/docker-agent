@@ -19,7 +19,10 @@ import (
 	"github.com/docker/docker-agent/pkg/telemetry"
 )
 
-const defaultJudgeModel = "anthropic/claude-opus-5"
+const (
+	defaultJudgeModel          = "openai/gpt-5.6-terra"
+	defaultEvaluatorJudgeModel = "typesafe/jev-latest"
+)
 
 type evalFlags struct {
 	evaluation.Config
@@ -48,13 +51,16 @@ func newEvalCmd() *cobra.Command {
 
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 	cmd.Flags().IntVarP(&flags.Concurrency, "concurrency", "c", runtime.NumCPU(), "Number of concurrent evaluation runs")
-	cmd.Flags().StringVar(&flags.JudgeModel, "judge-model", defaultJudgeModel, "Model to use for relevance checking (format: provider/model)")
+	cmd.Flags().StringVar(&flags.JudgeModel, "judge-model", defaultJudgeModel, "Model for relevance checking (provider/model, or a named evaluator with --judge-type evaluator)")
+	cmd.Flags().StringVar(&flags.JudgeType, "judge-type", evaluation.JudgeTypeLLM, "Judge model type: llm or evaluator")
 	cmd.Flags().StringVar(&flags.outputDir, "output", "", "Directory for results and logs (default: <eval-dir>/results)")
 	cmd.Flags().StringSliceVar(&flags.Only, "only", nil, "Only run evaluations with file names matching these patterns (can be specified multiple times)")
 	cmd.Flags().StringVar(&flags.BaseImage, "base-image", "", "Custom base image for running evaluations")
+	cmd.Flags().StringVar(&flags.AgentImage, "agent-image", "",
+		"docker-agent image to inject into eval containers (default: pinned to this CLI's own release version, e.g. docker/docker-agent:1.2.3; falls back to docker/docker-agent:edge for dev builds); pass \"none\" to skip injection and trust the base image's own binary")
 	cmd.Flags().StringVar(&flags.ContainerRuntime, "container-runtime", evaluation.DefaultContainerRuntime, "Container runtime executable for building and running evaluations")
 	cmd.Flags().BoolVar(&flags.KeepContainers, "keep-containers", false, "Keep containers after evaluation (don't use --rm)")
-	cmd.Flags().StringSliceVarP(&flags.EnvVars, "env", "e", nil, "Environment variables to pass to container (KEY or KEY=VALUE)")
+	cmd.Flags().StringSliceVarP(&flags.EnvVars, "env", "e", nil, "Environment variables to pass to container (KEY or KEY=VALUE; none forwarded automatically)")
 	cmd.Flags().IntVar(&flags.Repeat, "repeat", 1, "Number of times to repeat each evaluation (useful for computing baselines)")
 	cmd.Flags().StringVar(&flags.baseline, "baseline", "", "Compare against a previously saved run JSON (<output>/<run>.json) and exit non-zero on regression")
 	cmd.Flags().Float64Var(&flags.regressionTolerance, "regression-tolerance", 0, "How far an aggregate quality rate may fall before --baseline reports a regression (0-1)")
@@ -66,6 +72,10 @@ func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) (commandEr
 	if f.regressionTolerance > evaluation.MaxTolerance {
 		return fmt.Errorf("--regression-tolerance must be between 0 and %v; %v would disable the aggregate gate",
 			evaluation.MaxTolerance, f.regressionTolerance)
+	}
+
+	if err := f.resolveJudgeFlags(cmd); err != nil {
+		return err
 	}
 
 	telemetry.TrackCommand(cmd.Context(), "eval", args)
@@ -116,8 +126,14 @@ func (f *evalFlags) runEvalCommand(cmd *cobra.Command, args []string) (commandEr
 	fmt.Fprintf(logFile, "Agent: %s\n", agentFilename)
 	fmt.Fprintf(logFile, "Evals dir: %s\n", evalsDir)
 	fmt.Fprintf(logFile, "Judge model: %s\n", f.JudgeModel)
+	fmt.Fprintf(logFile, "Judge type: %s\n", f.JudgeType)
 	fmt.Fprintf(logFile, "Concurrency: %d\n", f.Concurrency)
 	fmt.Fprintf(logFile, "Container runtime: %s\n", f.ContainerRuntime)
+	if agentImage := evaluation.ResolvedAgentImage(f.Config); agentImage != "" {
+		fmt.Fprintf(logFile, "Agent image: %s\n", agentImage)
+	} else {
+		fmt.Fprintf(logFile, "Agent image: (none, trusting base image binary)\n")
+	}
 	fmt.Fprintf(logFile, "\n")
 
 	// Create tee writer to write to both console and log file
@@ -199,6 +215,19 @@ func (f *evalFlags) checkBaseline(out io.Writer, run *evaluation.EvalRun) error 
 
 	if comparison.Regressed {
 		return errors.New("evaluation regressed against baseline")
+	}
+	return nil
+}
+
+func (f *evalFlags) resolveJudgeFlags(cmd *cobra.Command) error {
+	switch f.JudgeType {
+	case evaluation.JudgeTypeLLM:
+	case evaluation.JudgeTypeEvaluator:
+		if !cmd.Flags().Changed("judge-model") {
+			f.JudgeModel = defaultEvaluatorJudgeModel
+		}
+	default:
+		return fmt.Errorf("invalid --judge-type %q: expected llm or evaluator", f.JudgeType)
 	}
 	return nil
 }

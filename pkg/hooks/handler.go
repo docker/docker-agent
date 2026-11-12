@@ -95,8 +95,21 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{}
 	r.Register(HookTypeCommand, newCommandFactory())
-	r.Register(HookTypeBuiltin, r.builtinFactory)
 	return r
+}
+
+// Clone copies registrations so runtime-owned callbacks can be rebound independently.
+func (r *Registry) Clone() *Registry {
+	cloned := NewRegistry()
+	r.factories.Range(func(kind HookType, factory HandlerFactory) bool {
+		cloned.Register(kind, factory)
+		return true
+	})
+	r.builtins.Range(func(name string, fn BuiltinFunc) bool {
+		cloned.builtins.Store(name, fn)
+		return true
+	})
+	return cloned
 }
 
 // Register associates a factory with a hook type, replacing any prior one.
@@ -106,7 +119,11 @@ func (r *Registry) Register(t HookType, f HandlerFactory) {
 
 // Lookup returns the factory registered for t, or (nil, false).
 func (r *Registry) Lookup(t HookType) (HandlerFactory, bool) {
-	return r.factories.Load(t)
+	factory, ok := r.factories.Load(t)
+	if !ok && t == HookTypeBuiltin {
+		return r.builtinFactory, true
+	}
+	return factory, ok
 }
 
 // RegisterBuiltin makes fn callable as `{type: builtin, command: name}`.
@@ -233,7 +250,8 @@ func (h *commandHandler) Run(ctx context.Context, input []byte) (HandlerResult, 
 		base = os.Environ()
 	}
 	traceEnv := genai.InjectTraceContextEnv(ctx)
-	envCopy := make([]string, 0, len(base)+len(traceEnv))
+	// A nil Cmd.Env would inherit the process environment.
+	envCopy := make([]string, 0, len(base)+len(traceEnv)) //rubocop:disable Lint/SlicesConcat
 	envCopy = append(envCopy, base...)
 	envCopy = append(envCopy, traceEnv...)
 	cmd.Env = envCopy
@@ -300,6 +318,18 @@ func (h *builtinHandler) Run(ctx context.Context, input []byte) (HandlerResult, 
 	var in Input
 	if err := json.Unmarshal(input, &in); err != nil {
 		return HandlerResult{ExitCode: -1}, fmt.Errorf("decode hook input: %w", err)
+	}
+	if in.HookEventName == EventToolInputTransform && in.ToolInput != nil {
+		// Rewrites must not round untouched integers in nested tool arguments.
+		var numbered struct {
+			ToolInput map[string]any `json:"tool_input"`
+		}
+		decoder := json.NewDecoder(bytes.NewReader(input))
+		decoder.UseNumber()
+		if err := decoder.Decode(&numbered); err != nil {
+			return HandlerResult{ExitCode: -1}, fmt.Errorf("decode hook tool input: %w", err)
+		}
+		in.ToolInput = numbered.ToolInput
 	}
 	// A working_dir override repoints Input.Cwd, the directory every
 	// builtin keys off. With no override Input.Cwd is left as-is so

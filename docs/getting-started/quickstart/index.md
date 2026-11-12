@@ -47,7 +47,7 @@ $ docker agent new --model openai/gpt-5
 $ docker agent new --model dmr/ai/gemma3-qat:12B --max-iterations 15
 ```
 
-This generates an `agent.yaml` in the current directory. Then run it:
+The builder chooses a filename based on the agent's purpose. Run the file it creates; for example, if it creates `agent.yaml`:
 
 ```bash
 $ docker agent run agent.yaml
@@ -120,7 +120,7 @@ Use `docker agent run --exec` for one-shot tasks:
 $ docker agent run --exec agent.yaml "Create a Dockerfile for a Node.js app"
 
 # Pipe input
-$ cat error.log | docker agent run --exec agent.yaml "What's wrong in this log?"
+$ { printf "What's wrong in this log?\n\n"; cat error.log; } | docker agent run --exec agent.yaml -
 ```
 
 ## Add More Power
@@ -153,4 +153,4 @@ agents:
 - [**Understand Agents**](../../concepts/agents/index.md) — learn how agents work and what you can configure.
 - [**Multi-Agent Systems**](../../concepts/multi-agent/index.md) — build teams of collaborating agents.
 - [**Configuration Reference**](../../configuration/overview/index.md) — full reference for all YAML and HCL options.
-- [**Troubleshooting**](../../community/troubleshooting/index.md) — something not working? Debug tips and common fixes.
+- [**Troubleshooting**](../../guides/troubleshooting/index.md) — something not working? Debug tips and common fixes.

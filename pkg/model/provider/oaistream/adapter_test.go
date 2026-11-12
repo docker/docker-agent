@@ -1,9 +1,11 @@
 package oaistream
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/openai/openai-go/v3"
@@ -23,7 +25,7 @@ func newTestStream(t *testing.T, sseData string) *ssestream.Stream[openai.ChatCo
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // body is closed by the stream
+	resp, err := srv.Client().Do(req) //nolint:bodyclose // body is closed by the stream
 	require.NoError(t, err)
 	return ssestream.NewStream[openai.ChatCompletionChunk](ssestream.NewDecoder(resp), nil)
 }
@@ -219,4 +221,146 @@ data: [DONE]
 	require.Len(t, resp.Choices, 1)
 	assert.Equal(t, "Hi", resp.Choices[0].Delta.Content)
 	assert.Empty(t, resp.Choices[0].Delta.ReasoningContent)
+}
+
+func TestStreamAdapter_ServiceTier(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, early, final, want string
+	}{
+		{name: "fast", final: `"fast"`, want: "fast"},
+		{name: "priority alias", final: `"priority"`, want: "priority"},
+		{name: "ultrafast", final: `"ultrafast"`, want: "ultrafast"},
+		{name: "early tier retained", early: `"fast"`, want: "fast"},
+		{name: "terminal downgrade wins", early: `"fast"`, final: `"default"`, want: "default"},
+		{name: "null retains earlier tier", early: `"ultrafast"`, final: `null`, want: "ultrafast"},
+		{name: "missing tier"},
+		{name: "null tier", final: `null`},
+		{name: "unknown tier preserved", final: `"future-tier"`, want: "future-tier"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			early, final := "", ""
+			if tc.early != "" {
+				early = `,"service_tier":` + tc.early
+			}
+			if tc.final != "" {
+				final = `,"service_tier":` + tc.final
+			}
+			sse := `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-6-astra","choices":[{"index":0,"delta":{"content":"Hi"}}]` + early + "}\n\n" +
+				`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gpt-6-astra","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":7,"total_tokens":107,"prompt_tokens_details":{"cached_tokens":20,"cache_write_tokens":30},"completion_tokens_details":{"reasoning_tokens":3}}` + final + "}\n\ndata: [DONE]\n\n"
+			for _, tracking := range []bool{true, false} {
+				adapter := NewStreamAdapter(newTestStream(t, sse), tracking)
+				t.Cleanup(adapter.Close)
+				_, err := adapter.Recv()
+				require.NoError(t, err)
+				resp, err := adapter.Recv()
+				require.NoError(t, err)
+				if !tracking {
+					assert.Nil(t, resp.Usage)
+					continue
+				}
+				require.NotNil(t, resp.Usage)
+				assert.Equal(t, tc.want, resp.Usage.ServiceTier)
+				assert.Equal(t, int64(50), resp.Usage.InputTokens)
+				assert.Equal(t, int64(100), resp.Usage.PromptTokens())
+				assert.Equal(t, int64(7), resp.Usage.OutputTokens)
+				assert.Equal(t, int64(3), resp.Usage.ReasoningTokens)
+			}
+		})
+	}
+}
+
+// collectFinish drains the adapter and returns every non-empty finish reason,
+// whether usage rode on the chunk that carried it, and the terminal error.
+func collectFinish(t *testing.T, adapter *StreamAdapter) (reasons []string, withUsage []bool, err error) {
+	t.Helper()
+	for {
+		resp, recvErr := adapter.Recv()
+		if recvErr != nil {
+			return reasons, withUsage, recvErr
+		}
+		for _, choice := range resp.Choices {
+			if choice.FinishReason != "" {
+				reasons = append(reasons, string(choice.FinishReason))
+				withUsage = append(withUsage, resp.Usage != nil)
+			}
+		}
+	}
+}
+
+const (
+	chunkContent    = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}` + "\n\n"
+	chunkUsageOnly  = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}` + "\n\n"
+	chunkDone       = "data: [DONE]\n\n"
+	chunkFinishTmpl = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"test","choices":[{"index":0,"delta":{},"finish_reason":"%s"}]}` + "\n\n"
+)
+
+func finishChunk(reason string) string { return fmt.Sprintf(chunkFinishTmpl, reason) }
+
+// With track_usage on, stop and length are held back until the usage chunk.
+// The held reason must survive: length is the only signal of a truncated
+// answer, and a stream that never sends usage must still report its reason.
+func TestStreamAdapter_HeldFinishReason(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sse        string
+		trackUsage bool
+		want       []string
+		wantUsage  []bool
+	}{
+		{"length then usage chunk", chunkContent + finishChunk("length") + chunkUsageOnly + chunkDone, true, []string{"length"}, []bool{true}},
+		{"stop then usage chunk", chunkContent + finishChunk("stop") + chunkUsageOnly + chunkDone, true, []string{"stop"}, []bool{true}},
+		{"tool_calls then usage chunk", chunkContent + finishChunk("tool_calls") + chunkUsageOnly + chunkDone, true, []string{"tool_calls", "tool_calls"}, []bool{false, true}},
+		{"stop, no usage, DONE", chunkContent + finishChunk("stop") + chunkDone, true, []string{"stop"}, []bool{false}},
+		{"length, no usage, DONE", chunkContent + finishChunk("length") + chunkDone, true, []string{"length"}, []bool{false}},
+		{"length, no usage, no DONE", chunkContent + finishChunk("length"), true, []string{"length"}, []bool{false}},
+		{"no finish reason at all", chunkContent + chunkDone, true, nil, nil},
+		{"usage chunk without finish", chunkContent + chunkUsageOnly + chunkDone, true, []string{"stop"}, []bool{true}},
+		{"track_usage off passes length through", chunkContent + finishChunk("length") + chunkUsageOnly + chunkDone, false, []string{"length", "length"}, []bool{false, false}},
+		{"content_filter then usage chunk", chunkContent + finishChunk("content_filter") + chunkUsageOnly + chunkDone, true, []string{"refusal"}, []bool{true}},
+		{"content_filter, no usage, DONE", chunkContent + finishChunk("content_filter") + chunkDone, true, []string{"refusal"}, []bool{false}},
+		{"track_usage off maps content_filter", chunkContent + finishChunk("content_filter") + chunkDone, false, []string{"refusal"}, []bool{false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			adapter := NewStreamAdapter(newTestStream(t, tt.sse), tt.trackUsage)
+			defer adapter.Close()
+
+			reasons, withUsage, err := collectFinish(t, adapter)
+			require.ErrorIs(t, err, io.EOF)
+			assert.Equal(t, tt.want, reasons)
+			assert.Equal(t, tt.wantUsage, withUsage)
+		})
+	}
+}
+
+// A transport failure after a held stop must surface as an error, not as a
+// clean stop: the answer may be incomplete.
+func TestStreamAdapter_HeldFinishReasonNotEmittedOnTransportError(t *testing.T) {
+	t.Parallel()
+
+	body := chunkContent + finishChunk("stop")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)+100))
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, http.NoBody)
+	require.NoError(t, err)
+	resp, err := srv.Client().Do(req) //nolint:bodyclose // body is closed by the stream
+	require.NoError(t, err)
+	adapter := NewStreamAdapter(ssestream.NewStream[openai.ChatCompletionChunk](ssestream.NewDecoder(resp), nil), true)
+	defer adapter.Close()
+
+	reasons, _, err := collectFinish(t, adapter)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, io.EOF)
+	assert.Empty(t, reasons)
 }

@@ -2,8 +2,10 @@ package tasks
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,6 +30,89 @@ func TestTasksTool_DisplayNames(t *testing.T) {
 	for _, tl := range all {
 		assert.NotEmpty(t, tl.DisplayName())
 		assert.NotEqual(t, tl.Name, tl.DisplayName())
+	}
+}
+
+func TestTasksTool_ConcurrentInstancesKeepEveryCreate(t *testing.T) {
+	t.Parallel()
+
+	const count = 40
+	storagePath := filepath.Join(t.TempDir(), "tasks.json")
+	type createResult struct {
+		result *tools.ToolCallResult
+		err    error
+	}
+	results := make(chan createResult, count)
+	var wg sync.WaitGroup
+	for i := range count {
+		wg.Go(func() {
+			result, err := New(storagePath).createTask(t.Context(), CreateTaskArgs{
+				Title: fmt.Sprintf("Task %d", i),
+			})
+			results <- createResult{result: result, err: err}
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	for got := range results {
+		require.NoError(t, got.err)
+		require.False(t, got.result.IsError, got.result.Output)
+	}
+	store, err := New(storagePath).load()
+	require.NoError(t, err)
+	require.Len(t, store.Tasks, count)
+}
+
+func TestTasksTool_MissingStoreStartsEmpty(t *testing.T) {
+	t.Parallel()
+
+	tool := newTestTasksTool(t)
+	store, err := tool.load()
+	require.NoError(t, err)
+	assert.Empty(t, store.Tasks)
+
+	result, err := tool.createTask(t.Context(), CreateTaskArgs{Title: "First"})
+	require.NoError(t, err)
+	require.False(t, result.IsError, result.Output)
+}
+
+func TestTasksTool_MalformedStoreIsPreserved(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		run  func(*ToolSet) (*tools.ToolCallResult, error)
+	}{
+		{
+			name: "create",
+			run: func(tool *ToolSet) (*tools.ToolCallResult, error) {
+				return tool.createTask(t.Context(), CreateTaskArgs{Title: "New"})
+			},
+		},
+		{
+			name: "update",
+			run: func(tool *ToolSet) (*tools.ToolCallResult, error) {
+				return tool.updateTask(t.Context(), UpdateTaskArgs{ID: "existing", Title: "Changed"})
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			tool := newTestTasksTool(t)
+			original := []byte(`{"tasks":`)
+			require.NoError(t, os.WriteFile(tool.filePath, original, 0o600))
+
+			result, err := test.run(tool)
+			require.NoError(t, err)
+			require.True(t, result.IsError)
+			assert.Contains(t, result.Output, "parsing task store")
+
+			got, err := os.ReadFile(tool.filePath)
+			require.NoError(t, err)
+			assert.Equal(t, original, got)
+		})
 	}
 }
 
@@ -122,19 +207,42 @@ func TestTasksTool_CreateTask_FromFile(t *testing.T) {
 	t.Parallel()
 	tool := newTestTasksTool(t)
 
-	mdFile := filepath.Join(tool.basePath, "desc.md")
+	require.NoError(t, os.Mkdir(filepath.Join(tool.basePath, "docs"), 0o755))
+	mdFile := filepath.Join(tool.basePath, "docs", "desc.md")
 	require.NoError(t, os.WriteFile(mdFile, []byte("# Description\nFrom file"), 0o644))
+	require.NoError(t, os.Symlink(filepath.Join("docs", "desc.md"), filepath.Join(tool.basePath, "desc-link.md")))
 
-	result, err := tool.createTask(t.Context(), CreateTaskArgs{
-		Title: "File task",
-		Path:  mdFile,
-	})
+	for _, path := range []string{mdFile, filepath.Join("docs", "desc.md"), "desc-link.md"} {
+		result, err := tool.createTask(t.Context(), CreateTaskArgs{
+			Title: "File task",
+			Path:  path,
+		})
+		require.NoError(t, err)
+		require.False(t, result.IsError, "%s: %s", path, result.Output)
+
+		var task Task
+		require.NoError(t, json.Unmarshal([]byte(result.Output), &task))
+		require.Equal(t, "# Description\nFrom file", task.Description)
+	}
+}
+
+func TestTasksTool_CreateTask_RejectsDescriptionOutsideBasePath(t *testing.T) {
+	t.Parallel()
+	tool := newTestTasksTool(t)
+
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "outside.md")
+	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o600))
+	require.NoError(t, os.Symlink(outside, filepath.Join(tool.basePath, "outside-link.md")))
+
+	relOutside, err := filepath.Rel(tool.basePath, outside)
 	require.NoError(t, err)
-	assert.False(t, result.IsError)
-
-	var task Task
-	require.NoError(t, json.Unmarshal([]byte(result.Output), &task))
-	assert.Equal(t, "# Description\nFrom file", task.Description)
+	for _, path := range []string{outside, relOutside, "outside-link.md"} {
+		result, err := tool.createTask(t.Context(), CreateTaskArgs{Title: "File task", Path: path})
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		require.NotContains(t, result.Output, "secret")
+	}
 }
 
 func TestTasksTool_GetTask(t *testing.T) {

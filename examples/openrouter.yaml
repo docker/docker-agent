@@ -3,7 +3,7 @@
 models:
   router:
     provider: openrouter
-    model: meta-llama/llama-3.3-70b-instruct
+    model: meta-llama/llama-4-maverick
 
 agents:
   root:

@@ -61,7 +61,7 @@ var errTransient = errors.New("temporary failure")
 // store nor reach the real Hub.
 var (
 	lookupCredentials = dockerConfigCredentials
-	httpClient        = &http.Client{
+	httpClient        = &http.Client{ //rubocop:disable Lint/HTTPClientTransport // no-redirect client for PAT; default transport is correct
 		// A redirect would resend the PAT to another host.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -85,7 +85,23 @@ func resolveLoginEndpoint() string {
 }
 
 func isDockerHost(host string) bool {
+	host = strings.ToLower(host)
 	return host == "docker.com" || strings.HasSuffix(host, ".docker.com")
+}
+
+// Staging reports whether the token exchange targets a Docker Hub staging host.
+func Staging() bool {
+	return isStagingEndpoint(loginEndpoint())
+}
+
+// isStagingEndpoint reports whether endpoint's host is a "*-stage" Docker host.
+func isStagingEndpoint(endpoint string) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || !isDockerHost(u.Hostname()) {
+		return false
+	}
+	label, _, _ := strings.Cut(strings.ToLower(u.Hostname()), ".")
+	return strings.HasSuffix(label, "-stage")
 }
 
 func exchangeDisabled() bool {

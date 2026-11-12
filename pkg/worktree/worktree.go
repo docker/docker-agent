@@ -52,6 +52,8 @@ type Worktree struct {
 	// BaseCommit is the commit the worktree's branch was created at. It is
 	// used to detect commits added during the session (see [Status]).
 	BaseCommit string
+	// Warnings reports files that could not be copied into the worktree.
+	Warnings []string
 }
 
 // Status describes whether a worktree holds work that would be lost if it
@@ -178,6 +180,7 @@ func Create(ctx context.Context, dir, name string, opts ...CreateOption) (*Workt
 		wt.BaseCommit = head
 	}
 
+	wt.Warnings = copyIncludedFiles(ctx, root, dir, dest)
 	return wt, nil
 }
 
@@ -235,6 +238,7 @@ func CreatePR(ctx context.Context, dir, ref string, opts ...CreateOption) (*Work
 	if head, err := gitOutput(ctx, dest, "rev-parse", "HEAD"); err == nil {
 		wt.BaseCommit = head
 	}
+	wt.Warnings = copyIncludedFiles(ctx, root, dir, dest)
 	return wt, nil
 }
 
@@ -338,8 +342,7 @@ func validateName(name string) error {
 func repoRoot(ctx context.Context, dir string) (string, error) {
 	out, err := gitOutput(ctx, dir, "rev-parse", "--show-toplevel")
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](err); ok {
 			return "", ErrNotGitRepository
 		}
 		return "", err

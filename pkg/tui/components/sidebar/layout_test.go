@@ -217,10 +217,9 @@ func BenchmarkSidebarVerticalView_NoCache(b *testing.B) {
 	// Add some tools
 	m.SetToolsetInfo(25, false)
 
-	b.ResetTimer()
 	b.ReportAllocs()
 
-	for range b.N {
+	for b.Loop() {
 		// Invalidate cache before each render to force full re-render
 		m.invalidateCache()
 		_ = m.verticalView()

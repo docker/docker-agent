@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -53,8 +54,16 @@ type soRecordingProvider struct {
 
 func (p *soRecordingProvider) CreateChatCompletionStream(ctx context.Context, msgs []chat.Message, ts []tools.Tool) (chat.MessageStream, error) {
 	p.mu.Lock()
-	p.allMsgs = append(p.allMsgs, append([]chat.Message(nil), msgs...))
-	p.allTools = append(p.allTools, append([]tools.Tool(nil), ts...))
+	msgSnapshot := slices.Clone(msgs)
+	if len(msgSnapshot) == 0 {
+		msgSnapshot = nil
+	}
+	p.allMsgs = append(p.allMsgs, msgSnapshot)
+	toolSnapshot := slices.Clone(ts)
+	if len(toolSnapshot) == 0 {
+		toolSnapshot = nil
+	}
+	p.allTools = append(p.allTools, toolSnapshot)
 	p.mu.Unlock()
 	return p.queueProvider.CreateChatCompletionStream(ctx, msgs, ts)
 }
@@ -136,6 +145,23 @@ func assertNoOrphanToolCalls(t *testing.T, sess *session.Session) {
 		}
 		for _, tc := range m.Message.ToolCalls {
 			assert.True(t, responded[tc.ID], "tool call %s has no tool response", tc.ID)
+		}
+	}
+}
+
+func TestStructuredOutputPlainTextRejectionDoesNotEmitImageWarning(t *testing.T) {
+	t.Parallel()
+
+	rt, _ := structuredOutputRuntime(t, toolModeStructuredOutput(), nil,
+		newStreamBuilder().AddContent("I created an image.").AddStopWithUsage(5, 5).Build(),
+		newStreamBuilder().AddContent("Still no structured output.").AddStopWithUsage(5, 5).Build(),
+		newStreamBuilder().AddContent("No tool call.").AddStopWithUsage(5, 5).Build(),
+	)
+	events := runAndCollect(t, rt, session.New(session.WithUserMessage("generate an image")))
+
+	for _, event := range events {
+		if warning, ok := event.(*WarningEvent); ok {
+			assert.NotEqual(t, missingGeneratedImageWarning, warning.Message)
 		}
 	}
 }
@@ -722,4 +748,26 @@ func TestStructuredOutputToolMode_ProgrammaticBrokenSchemaFailsRun(t *testing.T)
 
 	allMsgs, _ := prov.calls()
 	assert.Empty(t, allMsgs, "a broken schema must fail the run before any model call")
+}
+
+// A reminder retry would end the request on the plain-text assistant turn,
+// which Claude 5.x rejects as a prefill: fail after one inference instead.
+func TestStructuredOutputToolMode_Claude5FailsWithoutReminder(t *testing.T) {
+	t.Parallel()
+
+	prov := &soRecordingProvider{queueProvider: queueProvider{id: "anthropic/claude-opus-5-5", streams: []chat.MessageStream{
+		newStreamBuilder().AddContent("plain text").AddStopWithUsage(3, 2).Build(),
+	}}}
+	root := agent.New("root", "You are a test agent", agent.WithModel(prov), agent.WithStructuredOutput(toolModeStructuredOutput()))
+	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+	require.NoError(t, err)
+
+	sess := session.New(session.WithUserMessage("Answer me"))
+	errs := errorEvents(runAndCollect(t, rt, sess))
+	require.Len(t, errs, 1)
+	assert.Equal(t, ErrorCodeStructuredOutputFailed, errs[0].Code)
+
+	calls, _ := prov.calls()
+	assert.Len(t, calls, 1, "no reminder retry for a model that rejects a final assistant message")
+	assert.Contains(t, sess.GetLastAssistantMessageContent(), "did not deliver structured output")
 }

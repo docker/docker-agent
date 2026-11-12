@@ -7,7 +7,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 
 	"github.com/docker/docker-agent/pkg/attachment"
@@ -78,7 +77,7 @@ func convertDocumentWithCaps(ctx context.Context, doc chat.Document, mc modelinf
 				&types.ContentBlockMemberDocument{
 					Value: types.DocumentBlock{
 						Format: types.DocumentFormatPdf,
-						Name:   aws.String(sanitizeDocumentName(doc.Name)),
+						Name:   new(sanitizeDocumentName(doc.Name)),
 						Source: &types.DocumentSourceMemberBytes{
 							Value: doc.Source.InlineData,
 						},

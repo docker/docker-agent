@@ -92,7 +92,7 @@ func TestCheckModelAvailable(t *testing.T) {
 		server := newServer(`{"data":[]}`)
 		server.Close() // unreachable from the start
 
-		err := checkModelAvailable(t.Context(), &http.Client{}, server.URL+"/", "ai/qwen3")
+		err := checkModelAvailable(t.Context(), server.Client(), server.URL+"/", "ai/qwen3")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot query Docker Model Runner")
 		assert.Contains(t, err.Error(), "https://docs.docker.com/ai/model-runner/get-started/")

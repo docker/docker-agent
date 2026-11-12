@@ -3,6 +3,7 @@ package openapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -624,6 +625,90 @@ func TestOpenAPITool_EnumAndDefaultTypes(t *testing.T) {
 	limitProp := props["limit"].(map[string]any)
 	assert.Equal(t, []any{10, 25, 50, 100}, limitProp["enum"])
 	assert.Equal(t, 25, limitProp["default"])
+}
+
+func TestOpenAPITool_EnumAndDefaultValueTypes(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		schema string
+		want   any
+	}{
+		{"float", `{"type":"number","enum":[1.5],"default":1.5}`, 1.5},
+		{"boolean", `{"type":"boolean","enum":[false],"default":false}`, false},
+		{"null", `{"type":"null","enum":[null],"default":null}`, nil},
+		{"sequence", `{"type":"array","enum":[[1,true,null]],"default":[1,true,null]}`, []any{1, true, nil}},
+		{"mapping", `{"type":"object","enum":[{"enabled":true}],"default":{"enabled":true}}`, map[string]any{"enabled": true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			spec := `{
+				"openapi": "3.1.0",
+				"info": {"title": "Test", "version": "1.0.0"},
+				"paths": {
+					"/items": {
+						"get": {
+							"operationId": "listItems",
+							"parameters": [{"name": "value", "in": "query", "schema": ` + tt.schema + `}],
+							"responses": {"200": {"description": "ok"}}
+						}
+					}
+				}
+			}`
+			specServer := serveSpec(t, spec)
+			toolsList, err := newOpenAPIToolForTest(specServer.URL+"/openapi.json", nil).Tools(t.Context())
+			require.NoError(t, err)
+			require.Len(t, toolsList, 1)
+
+			schema := toolsList[0].Parameters.(map[string]any)
+			prop := schema["properties"].(map[string]any)["value"].(map[string]any)
+			assert.Equal(t, []any{tt.want}, prop["enum"])
+			require.Contains(t, prop, "default")
+			assert.Equal(t, tt.want, prop["default"])
+		})
+	}
+}
+
+type stubNodeDecoder struct {
+	value any
+	err   error
+}
+
+func (d stubNodeDecoder) Decode(target any) error {
+	*target.(*any) = d.value
+	return d.err
+}
+
+func TestYAMLNodeToValue(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		value any
+	}{
+		{"string", "active"},
+		{"integer", 25},
+		{"float", 1.5},
+		{"boolean", false},
+		{"null", nil},
+		{"sequence", []any{1, "two", nil}},
+		{"mapping", map[string]any{"enabled": true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.value, yamlNodeToValue(stubNodeDecoder{value: tt.value}, "fallback"))
+		})
+	}
+}
+
+func TestYAMLNodeToValue_DecodeError(t *testing.T) {
+	t.Parallel()
+
+	decoder := stubNodeDecoder{value: "partial", err: errors.New("decode failed")}
+	assert.Equal(t, "raw value", yamlNodeToValue(decoder, "raw value"))
+	assert.Empty(t, yamlNodeToValue(decoder, ""))
 }
 
 type testEnvProvider map[string]string

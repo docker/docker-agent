@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -25,8 +24,12 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 	"github.com/docker/docker-agent/pkg/echolog"
+	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/eventmerge"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools/mcp"
 	"github.com/docker/docker-agent/pkg/upstream"
@@ -77,6 +80,7 @@ func NewWithManager(sm *SessionManager, authToken string, opts ...Option) *Serve
 	}
 
 	e := echo.New()
+	e.Pre(sameOrigin())
 	e.Use(echolog.RedactedRequestLogger())
 	e.Use(middleware.BodyLimit(strconv.FormatInt(maxBytes, 10)))
 	e.Use(echo.WrapMiddleware(upstream.Handler))
@@ -105,30 +109,30 @@ func (s *Server) registerRoutes() {
 	group.GET("/sessions/:id", s.getSession)
 	group.GET("/sessions/:id/status", s.getSessionStatus)
 	group.GET("/sessions/:id/snapshot", s.getSessionSnapshot)
-	group.POST("/sessions/:id/resume", s.resumeSession)
+	group.POST("/sessions/:id/resume", s.resumeSession, requireJSON)
 	group.POST("/sessions/:id/tools/toggle", s.toggleSessionYolo)
-	group.PATCH("/sessions/:id/safety-policy", s.updateSessionSafetyPolicy)
-	group.PATCH("/sessions/:id/permissions", s.updateSessionPermissions)
-	group.PATCH("/sessions/:id/title", s.updateSessionTitle)
-	group.PATCH("/sessions/:id/tokens", s.updateSessionTokens)
-	group.PATCH("/sessions/:id/starred", s.setSessionStarred)
+	group.PATCH("/sessions/:id/safety-policy", s.updateSessionSafetyPolicy, requireJSON)
+	group.PATCH("/sessions/:id/permissions", s.updateSessionPermissions, requireJSON)
+	group.PATCH("/sessions/:id/title", s.updateSessionTitle, requireJSON)
+	group.PATCH("/sessions/:id/tokens", s.updateSessionTokens, requireJSON)
+	group.PATCH("/sessions/:id/starred", s.setSessionStarred, requireJSON)
 	group.GET("/sessions/:id/models", s.getSessionModels)
-	group.POST("/sessions", s.createSession)
-	group.POST("/sessions/:id/fork", s.forkSession)
+	group.POST("/sessions", s.createSession, requireJSON)
+	group.POST("/sessions/:id/fork", s.forkSession, requireJSON)
 	group.DELETE("/sessions/:id", s.deleteSession)
-	group.POST("/sessions/:id/agent/:agent", s.runAgent)
-	group.POST("/sessions/:id/agent/:agent/:agent_name", s.runAgent)
-	group.POST("/sessions/:id/elicitation", s.elicitation)
-	group.POST("/sessions/:id/steer", s.steerSession)
-	group.POST("/sessions/:id/followup", s.followUpSession)
+	group.POST("/sessions/:id/agent/:agent", s.runAgent, requireJSON)
+	group.POST("/sessions/:id/agent/:agent/:agent_name", s.runAgent, requireJSON)
+	group.POST("/sessions/:id/elicitation", s.elicitation, requireJSON)
+	group.POST("/sessions/:id/steer", s.steerSession, requireJSON)
+	group.POST("/sessions/:id/followup", s.followUpSession, requireJSON)
 	group.GET("/sessions/:id/events", s.sessionEvents)
-	group.POST("/sessions/:id/messages", s.addMessage)
-	group.PATCH("/sessions/:id/messages/:msg_id", s.updateMessage)
-	group.POST("/sessions/:id/summaries", s.addSummary)
+	group.POST("/sessions/:id/messages", s.addMessage, requireJSON)
+	group.PATCH("/sessions/:id/messages/:msg_id", s.updateMessage, requireJSON)
+	group.POST("/sessions/:id/summaries", s.addSummary, requireJSON)
 	group.GET("/sessions/:id/queue", s.getSessionQueueStatus)
 	group.GET("/sessions/:id/recovery", s.getSessionRecoveryData)
-	group.POST("/sessions/batch/delete", s.batchDeleteSessions)
-	group.POST("/sessions/batch/export", s.batchExportSessions)
+	group.POST("/sessions/batch/delete", s.batchDeleteSessions, requireJSON)
+	group.POST("/sessions/batch/export", s.batchExportSessions, requireJSON)
 
 	group.GET("/agents/:id/:agent_name/tools/count", s.getAgentToolCount)
 
@@ -141,6 +145,15 @@ func (s *Server) registerRoutes() {
 }
 
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	if err := httpsec.ValidateListenerAuth(ln.Addr(), s.authToken); err != nil {
+		return err
+	}
+
+	var handler http.Handler = s.e
+	if _, tcp := ln.Addr().(*net.TCPAddr); tcp && s.authToken == "" {
+		handler = httpsec.LoopbackHost(handler)
+	}
+
 	// Wrap the Echo handler with otelhttp so the configured W3C
 	// propagator extracts `traceparent` / `tracestate` / `baggage`
 	// from incoming API requests. Without this the API server's
@@ -148,7 +161,8 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	// manager) start fresh trace ids per request rather than
 	// chaining onto the calling client's trace.
 	srv := http.Server{
-		Handler:           otelhttp.NewHandler(s.e, "agent-api"),
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+		Handler:           otelhttp.NewHandler(handler, "agent-api"),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -189,7 +203,7 @@ func (s *Server) getAgents(c echo.Context) error {
 	for k, agentSource := range s.sm.Sources {
 		slog.Debug("API source", "source", agentSource.Name())
 
-		cfg, err := config.Load(c.Request().Context(), agentSource)
+		cfg, err := config.Load(c.Request().Context(), agentSource, config.WithVersions(legacy.Register))
 		if err != nil {
 			slog.Error("Failed to load config from API source", "key", k, "error", err)
 			continue
@@ -257,6 +271,10 @@ func agentSourceHTTPError(operation string, err error) error {
 }
 
 func (s *Server) getSessions(c echo.Context) error {
+	if c.QueryParam("active") == "true" {
+		return c.JSON(http.StatusOK, s.sm.GetActiveSessions())
+	}
+
 	sessions, err := s.sm.GetSessions(c.Request().Context())
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to get sessions: %v", err))
@@ -272,7 +290,7 @@ func (s *Server) getSessions(c echo.Context) error {
 			ID:           sess.ID,
 			Title:        title,
 			CreatedAt:    sess.CreatedAt.Format(time.RFC3339),
-			NumMessages:  len(sess.GetAllMessages()),
+			NumMessages:  sess.AllMessageCount(),
 			InputTokens:  inputTokens,
 			OutputTokens: outputTokens,
 			WorkingDir:   sess.WorkingDir,
@@ -328,7 +346,7 @@ func (s *Server) forkSession(c echo.Context) error {
 		InputTokens:   forked.InputTokens,
 		OutputTokens:  forked.OutputTokens,
 		WorkingDir:    forked.WorkingDir,
-		Permissions:   forked.Permissions,
+		Permissions:   forked.ClonePermissions(),
 	})
 }
 
@@ -350,7 +368,7 @@ func (s *Server) getSession(c echo.Context) error {
 		InputTokens:   inputTokens,
 		OutputTokens:  outputTokens,
 		WorkingDir:    sess.WorkingDir,
-		Permissions:   sess.Permissions,
+		Permissions:   sess.ClonePermissions(),
 	})
 }
 
@@ -510,7 +528,7 @@ func (s *Server) runAgent(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
 	}
 
-	streamChan, err := s.sm.RunSession(c.Request().Context(), sessionID, agentFilename, currentAgent, req.Messages, req.Model)
+	runEvents, err := s.sm.RunSession(c.Request().Context(), sessionID, agentFilename, currentAgent, req.Messages, req.Model)
 	if err != nil {
 		if errors.Is(err, ErrSessionBusy) {
 			return echo.NewHTTPError(http.StatusConflict, err.Error())
@@ -520,6 +538,7 @@ func (s *Server) runAgent(c echo.Context) error {
 		}
 		return agentSourceHTTPError("failed to run session", err)
 	}
+	streamChan := eventmerge.Coalesce(c.Request().Context(), runEvents, s.sm.streamCoalesceWindow)
 
 	c.Response().Header().Set("Content-Type", "text/event-stream")
 	c.Response().Header().Set("Cache-Control", "no-cache")
@@ -589,7 +608,7 @@ func (s *Server) elicitation(c echo.Context) error {
 //     blocks this regardless of state leakage, because the route then
 //     also requires bearer auth.
 //   - Operators running docker-agent on a network-reachable interface
-//     SHOULD configure --auth-token. Defaults to localhost-only via the
+//     must configure --auth-token. Defaults to localhost-only via the
 //     existing socket binding when not overridden.
 //
 // The handler never blocks: it hands the callback to the buffered
@@ -636,7 +655,7 @@ func (s *Server) steerSession(c echo.Context) error {
 	}
 
 	if err := s.sm.SteerSession(c.Request().Context(), sessionID, req.Messages); err != nil {
-		if strings.Contains(err.Error(), "queue full") {
+		if errors.Is(err, runtime.ErrSteerQueueFull) {
 			c.Response().Header().Set("Retry-After", "1")
 			return echo.NewHTTPError(http.StatusTooManyRequests, "steer queue full")
 		}
@@ -767,7 +786,7 @@ func (s *Server) followUpSession(c echo.Context) error {
 
 	streaming, duplicate, err := s.sm.FollowUpSession(c.Request().Context(), sessionID, req.Messages, idempotencyKey)
 	if err != nil {
-		if strings.Contains(err.Error(), "queue full") {
+		if errors.Is(err, runtime.ErrFollowUpQueueFull) {
 			c.Response().Header().Set("Retry-After", "1")
 			return echo.NewHTTPError(http.StatusTooManyRequests, "follow-up queue full")
 		}
@@ -931,7 +950,7 @@ func (s *Server) getSessionModels(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, runtime.SessionModelsResponse{
+	return c.JSON(http.StatusOK, modelcatalog.SessionModelsResponse{
 		Agent:           agentName,
 		CurrentModelRef: current,
 		Models:          choices,

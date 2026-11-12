@@ -27,7 +27,7 @@ settings:
   sound: true
 ```
 
-You rarely need to hand-edit this file. Most fields are managed from the TUI's `/settings` dialog (**Appearance**, **Behavior**, **Notifications** tabs) — press <kbd>Enter</kbd> there to apply and persist a change. A few fields (`permissions`, `hooks`, `keybindings`) have no dialog UI and are only set by editing the file directly.
+You rarely need to hand-edit this file. Most fields are managed from the TUI's `/settings` dialog (**Appearance**, **Behavior**, **Notifications** tabs) — press <kbd>Enter</kbd> there to apply and persist a change. The lean TUI has a smaller inline `/settings` panel with only relevant behavior settings: steering or queueing messages, default tool auto-approval, automatic snapshots, cache-stable prompts, cache-miss warnings, lean UI by default, completion sounds and their duration threshold, image rendering, the startup banner, split diffs, and full or last-10-line written-file previews. It has no theme, sidebar, or tab settings. Use the arrow keys or <kbd>Space</kbd> to change a value, <kbd>Enter</kbd> to save, or <kbd>Esc</kbd> to cancel. Settings marked **next launch** do not change the current session. A few fields (`permissions`, `hooks`, `keybindings`) have no dialog UI and are only set by editing the file directly.
 
 > [!NOTE]
 > This page documents `settings:`. The user config file also has top-level sections outside `settings:` — `aliases:`, `providers:`, `board:`, `credential_helper:`, `sandbox_allowlist:` — which are not covered here.
@@ -44,14 +44,17 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `theme` | string | `default` | Theme name, loaded from a built-in theme or `~/.cagent/themes/<name>.yaml`. The special value `auto` follows the terminal's light/dark background. See [Theming](../../features/tui/index.md#theming). |
 | `theme_dark` | string | `default` | Theme applied when `theme: auto` and the terminal background is dark. |
 | `theme_light` | string | `default-light` | Theme applied when `theme: auto` and the terminal background is light. |
-| `YOLO` | boolean | `false` | Auto-approve all tool calls globally, across every agent you run. Mirrors the `--yolo` flag and the `/yolo` command. Legacy alias for `safety: autonomous`; when both are set, `safety` wins. |
+| `YOLO` | boolean | `false` | Select the `autonomous` safety fallback globally. Unmatched calls are auto-approved, but deny rules, session-scoped ask rules, `tool_guard`, and `preempt_yolo` hooks can still block or prompt. Mirrors the `--yolo` flag and the `/yolo` command. Legacy alias for `safety: autonomous`; when both are set, `safety` wins. |
 | `safety` | string | _unset_ | Default [safety mode](../permissions/index.md#safety-modes) for new sessions: `strict`, `balanced`, `restricted`, or `autonomous` (any other value fails config loading). Wins over the legacy `YOLO` flag. Applied when no explicit `--safety`/`--yolo` flag and no alias safety option was given; wins over the agent YAML's `agents.<name>.safety` / `runtime.safety` defaults. Never changes the mode of a resumed session. |
 | `lean` | boolean | `false` | Make the [lean TUI](../../features/tui/index.md#lean-tui) (simplified, minimal-chrome interface) the default for interactive runs instead of the full TUI. |
 | `tab_title_max_length` | int | `20` | Maximum display length for tab titles; longer titles are truncated with an ellipsis. |
+| `lean_full_file_preview` | boolean | `false` | Show entire streamed file writes in the lean TUI instead of the last 10 file lines. Managed by **Written file preview** in the lean `/settings` panel. |
 | `restore_tabs` | boolean | `false` | Restore previously open tabs when launching the TUI. |
 | `sound` | boolean | `false` | Play a notification sound on task success or failure. |
 | `sound_threshold` | int | `10` | Minimum duration in seconds a task must run before a success sound plays (failures always play). |
 | `snapshot` | boolean | `false` | Enable automatic shadow-git snapshots at turn boundaries globally. See [Snapshots](../../features/snapshots/index.md). |
+| `background_compaction` | boolean | `false` | Generate automatic compaction summaries while the agent continues working. Apply completed summaries between turns, preserving messages added during generation. Unfinished work is cancelled when the stream ends. |
+| `background_compaction_threshold` | integer | `70` | Context-window percentage (1–99) at which background compaction starts. Invalid values fall back to 70. Set below the agent's blocking `compaction_threshold` (90% by default) to allow time for generation. |
 | `cache_stable_prompts` | boolean | `false` | Keep changing trusted context (date, environment info, dynamic prompt files) out of the frozen system prefix and append chronological updates instead, improving prompt-cache hit rates on long sessions. |
 | `warn_on_cache_miss` | boolean | `false` | Warn when a model call after the first one in a session reports no cached input tokens (a prompt-cache miss). Managed from the **Notifications** tab of `/settings`. |
 | `busy_send_mode` | string | `steer` | What happens to a message sent while the agent is working: `steer` injects it into the ongoing stream; `queue` holds it until the current turn ends. |
@@ -63,7 +66,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 
 ## Layout Settings
 
-`layout` customizes the TUI's sidebar. The zero value (an omitted `layout:` block, or any field left out) is the default: sidebar on the right, every section visible, normal spacing.
+`layout` customizes the TUI's sidebar. The zero value (an omitted `layout:` block, or any field left out) is the default: sidebar on the right, all sections except **Plans** visible, normal spacing.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -74,6 +77,7 @@ You rarely need to hand-edit this file. Most fields are managed from the TUI's `
 | `hide_agents` | boolean | `false` | Hide the Agents section. |
 | `active_agents_only` | boolean | `false` | Show only agents active in the current session in the Agents section (and the top/bottom band), instead of the whole configured team. Ignored while the Agents section is hidden. |
 | `hide_tools` | boolean | `false` | Hide the Tools section. |
+| `show_plans` | boolean | `false` | Show the [Plans sidebar section](../../features/tui/index.md#plans-sidebar) for shared plans. Full left/right sidebars list the five most recently updated plans; compact layouts show a count and browser shortcut. |
 | `hide_todos` | boolean | `false` | Hide the Todos section. |
 
 ```yaml
@@ -82,7 +86,10 @@ settings:
     sidebar_position: left
     section_spacing: compact
     hide_usage: true
+    show_plans: true
 ```
+
+Enable **Plans** under `/settings` → **Appearance** → **Sidebar sections**, or set `settings.layout.show_plans: true` as above. This is a global user preference, not an agent configuration field or a per-session plan. It displays the same shared plan store as `/plans` and `docker agent plans`, without classifying free-form statuses as active or completed. The section remains hidden in lean mode and with `--sidebar=false`.
 
 ## Complete Example
 
@@ -102,6 +109,8 @@ settings:
   sound_threshold: 10
   snapshot: true
   cache_stable_prompts: true
+  background_compaction: true
+  background_compaction_threshold: 70
   warn_on_cache_miss: true
   busy_send_mode: queue
   interrupt_confirmation: double-tap

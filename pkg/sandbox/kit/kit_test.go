@@ -926,7 +926,7 @@ models:
 	assert.Equal(t, []string{"alpha", "beta"}, stagedSkillNames(res))
 }
 
-func TestNeedsAutoInstall(t *testing.T) {
+func TestCollectAutoInstallable(t *testing.T) {
 	t.Parallel()
 
 	mcpInstallable := latestcfg.Toolset{Type: "mcp", Command: "fzf"}
@@ -938,16 +938,15 @@ func TestNeedsAutoInstall(t *testing.T) {
 	cases := []struct {
 		name string
 		cfg  *latestcfg.Config
-		want bool
+		want []latestcfg.Toolset
 	}{
-		{"nil cfg", nil, false},
-		{"empty cfg", &latestcfg.Config{}, false},
+		{"empty cfg", &latestcfg.Config{}, nil},
 		{
 			name: "agent has installable lsp",
 			cfg: &latestcfg.Config{
 				Agents: latestcfg.Agents{{Name: "root", Toolsets: []latestcfg.Toolset{lspInstallable}}},
 			},
-			want: true,
+			want: []latestcfg.Toolset{lspInstallable},
 		},
 		{
 			name: "top-level mcps entry",
@@ -956,28 +955,25 @@ func TestNeedsAutoInstall(t *testing.T) {
 					"x": {Toolset: mcpInstallable},
 				},
 			},
-			want: true,
+			want: []latestcfg.Toolset{mcpInstallable},
 		},
 		{
 			name: "auto-install disabled per toolset",
 			cfg: &latestcfg.Config{
 				Agents: latestcfg.Agents{{Name: "root", Toolsets: []latestcfg.Toolset{disabledByVersion}}},
 			},
-			want: false,
 		},
 		{
 			name: "no command means nothing to look up",
 			cfg: &latestcfg.Config{
 				Agents: latestcfg.Agents{{Name: "root", Toolsets: []latestcfg.Toolset{noCommand}}},
 			},
-			want: false,
 		},
 		{
 			name: "shell toolsets do not auto-install",
 			cfg: &latestcfg.Config{
 				Agents: latestcfg.Agents{{Name: "root", Toolsets: []latestcfg.Toolset{wrongType}}},
 			},
-			want: false,
 		},
 		{
 			name: "case-insensitive disable",
@@ -986,13 +982,20 @@ func TestNeedsAutoInstall(t *testing.T) {
 					"x": {Toolset: latestcfg.Toolset{Type: "mcp", Command: "fzf", Version: "FALSE"}},
 				},
 			},
-			want: false,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, needsAutoInstall(tc.cfg))
+			assert.Equal(t, tc.want, collectAutoInstallable(tc.cfg))
 		})
 	}
+}
+
+func TestResolveToolInstallHosts_NilConfig(t *testing.T) {
+	t.Parallel()
+
+	hosts, errs := resolveToolInstallHosts(t.Context(), nil)
+	assert.Nil(t, hosts)
+	assert.Nil(t, errs)
 }

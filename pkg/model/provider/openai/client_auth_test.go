@@ -1,6 +1,8 @@
 package openai
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,7 +13,44 @@ import (
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 )
+
+func TestNewClient_RefreshesConfiguredTokenSource(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		writeSSEResponse(w)
+	}))
+	defer server.Close()
+
+	calls := 0
+	source := func(context.Context) (string, error) {
+		calls++
+		return fmt.Sprintf("token-%d", calls), nil
+	}
+	client, err := NewClient(t.Context(), &latest.ModelConfig{
+		Provider: "openai",
+		Model:    "gpt-4o",
+		BaseURL:  server.URL,
+	}, environment.NewNoEnvProvider(), options.WithTokenSource(source))
+	require.NoError(t, err)
+
+	for range 2 {
+		stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, nil)
+		require.NoError(t, err)
+		for {
+			if _, err := stream.Recv(); err != nil {
+				break
+			}
+		}
+		stream.Close()
+	}
+
+	assert.Equal(t, []string{"Bearer token-2", "Bearer token-3"}, gotAuth)
+}
 
 // TestNewClient_NoTokenKeyUsesEnvProvider verifies that when no token_key is
 // configured, the API key is resolved through the environment provider chain

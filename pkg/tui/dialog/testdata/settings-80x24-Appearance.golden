@@ -1,0 +1,24 @@
+╭──────────────────────────────────────────────────────────────────────────╮
+│                                 Settings                                 │
+│                                                                          │
+│              Appearance   ·   Behavior   ·   Notifications               │
+│                                                                          │
+│  › Theme                                                  ‹ default › │  │
+│                                                                       │  │
+│  ── Sidebar layout ────────────────────────────────────────────────   │  │
+│    Sidebar position                                         ‹ Right › │  │
+│    Section spacing                                         ‹ Normal › │  │
+│    Sidebar info mode                                      ‹ Compact › │  │
+│                                                                       │  │
+│  ── Sidebar sections ──────────────────────────────────────────────   │  │
+│    [x] Session path                                                   │  │
+│    [x] Token usage                                                    │  │
+│    [x] Agents                                                         │  │
+│      [ ] Active agents only                                           │  │
+│    [x] Tools                                                          │  │
+│    [ ] Plans                                                          │  │
+│    [x] Todos                                                          │  │
+│                                                                          │
+│                                                                          │
+│      ↑↓ move  ←→/space change  tab category  enter open  esc cancel      │
+╰──────────────────────────────────────────────────────────────────────────╯

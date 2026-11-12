@@ -93,8 +93,10 @@ docker agent run ./golang_developer.yaml
 
 ## Telemetry
 
-We collect anonymous usage data to improve the tool. See [Telemetry](https://docker.github.io/docker-agent/community/telemetry).
+We collect anonymous usage data to improve the tool. See [Telemetry](https://docker.github.io/docker-agent/configuration/telemetry).
 
 ## Community
 
 [Docker Community Slack](http://dockr.ly/comm-slack) · [#docker-agent channel](https://dockercommunity.slack.com/archives/C09DASHHRU4)
+
+Explore [community projects, videos, and articles](docs/community/resources/index.md) about Docker Agent.

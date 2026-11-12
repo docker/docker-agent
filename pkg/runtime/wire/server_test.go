@@ -36,12 +36,12 @@ func (s *stubBackend) CreateSession(ctx context.Context, req runtime.CreateSessi
 // post is a small helper that issues a context-bound POST against the
 // test server, so test cancellation doesn't leak goroutines and the
 // noctx linter stays happy.
-func post(t *testing.T, url string, body []byte) *http.Response {
+func post(t *testing.T, client *http.Client, url string, body []byte) *http.Response {
 	t.Helper()
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, bytes.NewReader(body))
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	return resp
 }
@@ -50,7 +50,7 @@ func TestLoadTeam_RoundTrip(t *testing.T) {
 	t.Parallel()
 
 	var got runtime.LoadTeamRequest
-	srv := httptest.NewServer(wire.NewHandler(&stubBackend{
+	srv := httptest.NewTestServer(t, wire.NewHandler(&stubBackend{
 		loadFn: func(_ context.Context, req runtime.LoadTeamRequest) (wire.LoadTeamResponse, error) {
 			got = req
 			return wire.LoadTeamResponse{
@@ -59,7 +59,7 @@ func TestLoadTeam_RoundTrip(t *testing.T) {
 			}, nil
 		},
 	}))
-	t.Cleanup(srv.Close)
+	client := srv.Client()
 
 	body, err := json.Marshal(runtime.LoadTeamRequest{
 		ModelOverrides: []string{"openai/gpt-4o"},
@@ -67,7 +67,7 @@ func TestLoadTeam_RoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resp := post(t, srv.URL+"/v1/team/load", body)
+	resp := post(t, client, srv.URL+"/v1/team/load", body)
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -88,13 +88,13 @@ func TestCreateSession_RoundTrip(t *testing.T) {
 	t.Parallel()
 
 	var got runtime.CreateSessionRequest
-	srv := httptest.NewServer(wire.NewHandler(&stubBackend{
+	srv := httptest.NewTestServer(t, wire.NewHandler(&stubBackend{
 		sessFn: func(_ context.Context, req runtime.CreateSessionRequest) (wire.CreateSessionResponse, error) {
 			got = req
 			return wire.CreateSessionResponse{SessionID: "sess-123"}, nil
 		},
 	}))
-	t.Cleanup(srv.Close)
+	client := srv.Client()
 
 	body, err := json.Marshal(runtime.CreateSessionRequest{
 		AgentName:        "main",
@@ -107,7 +107,7 @@ func TestCreateSession_RoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	resp := post(t, srv.URL+"/v1/session/create", body)
+	resp := post(t, client, srv.URL+"/v1/session/create", body)
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -129,14 +129,14 @@ func TestCreateSession_RoundTrip(t *testing.T) {
 func TestLoadTeam_BackendErrorMapsTo500(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(wire.NewHandler(&stubBackend{
+	srv := httptest.NewTestServer(t, wire.NewHandler(&stubBackend{
 		loadFn: func(context.Context, runtime.LoadTeamRequest) (wire.LoadTeamResponse, error) {
 			return wire.LoadTeamResponse{}, errors.New("config invalid")
 		},
 	}))
-	t.Cleanup(srv.Close)
+	client := srv.Client()
 
-	resp := post(t, srv.URL+"/v1/team/load", []byte(`{}`))
+	resp := post(t, client, srv.URL+"/v1/team/load", []byte(`{}`))
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
@@ -145,14 +145,14 @@ func TestLoadTeam_BackendErrorMapsTo500(t *testing.T) {
 func TestCreateSession_ErrUnsupportedMapsTo501(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(wire.NewHandler(&stubBackend{
+	srv := httptest.NewTestServer(t, wire.NewHandler(&stubBackend{
 		sessFn: func(context.Context, runtime.CreateSessionRequest) (wire.CreateSessionResponse, error) {
 			return wire.CreateSessionResponse{}, fmt.Errorf("snapshots: %w", runtime.ErrUnsupported)
 		},
 	}))
-	t.Cleanup(srv.Close)
+	client := srv.Client()
 
-	resp := post(t, srv.URL+"/v1/session/create", []byte(`{}`))
+	resp := post(t, client, srv.URL+"/v1/session/create", []byte(`{}`))
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	assert.Equal(t, http.StatusNotImplemented, resp.StatusCode)
@@ -161,15 +161,15 @@ func TestCreateSession_ErrUnsupportedMapsTo501(t *testing.T) {
 func TestLoadTeam_RejectsUnknownField(t *testing.T) {
 	t.Parallel()
 
-	srv := httptest.NewServer(wire.NewHandler(&stubBackend{
+	srv := httptest.NewTestServer(t, wire.NewHandler(&stubBackend{
 		loadFn: func(context.Context, runtime.LoadTeamRequest) (wire.LoadTeamResponse, error) {
 			return wire.LoadTeamResponse{}, nil
 		},
 	}))
-	t.Cleanup(srv.Close)
+	client := srv.Client()
 
 	body := []byte(`{"model_overrides":["x"],"future_field":"oops"}`)
-	resp := post(t, srv.URL+"/v1/team/load", body)
+	resp := post(t, client, srv.URL+"/v1/team/load", body)
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -185,20 +185,20 @@ func TestLoadTeam_RejectsOversizedBody(t *testing.T) {
 	// what the test cares about is that the request never reaches
 	// the backend and the server stays healthy.
 	var reached bool
-	srv := httptest.NewServer(wire.NewHandler(&stubBackend{
+	srv := httptest.NewTestServer(t, wire.NewHandler(&stubBackend{
 		loadFn: func(context.Context, runtime.LoadTeamRequest) (wire.LoadTeamResponse, error) {
 			reached = true
 			return wire.LoadTeamResponse{}, nil
 		},
 	}))
-	t.Cleanup(srv.Close)
+	client := srv.Client()
 
 	// 2 MiB of JSON-string padding, well past the 1 MiB cap.
 	padding := bytes.Repeat([]byte("a"), 2<<20)
 	body := append([]byte(`{"model_overrides":["`), padding...)
 	body = append(body, []byte(`"]}`)...)
 
-	resp := post(t, srv.URL+"/v1/team/load", body)
+	resp := post(t, client, srv.URL+"/v1/team/load", body)
 	t.Cleanup(func() { _ = resp.Body.Close() })
 
 	assert.GreaterOrEqual(t, resp.StatusCode, 400, "oversized body must not return success")

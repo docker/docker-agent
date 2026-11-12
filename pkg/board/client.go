@@ -50,7 +50,7 @@ const reasonNormal = "normal"
 // e.g. the agent's VM was paused — not that the session is quiet, so the
 // stream is aborted and the watcher reconnects. Servers that predate
 // heartbeats never arm the watchdog, keeping long-lived idle streams working.
-var streamIdleTimeout = 45 * time.Second
+const streamIdleTimeout = 45 * time.Second
 
 // errStreamIdle reports a stream aborted by the idle watchdog.
 var errStreamIdle = errors.New("event stream idle: heartbeats stopped")

@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/docker/docker-agent/pkg/agent"
@@ -11,11 +13,22 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/runtime/compactor"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
 )
+
+var errCompactionBudgetExceeded = errors.New("compaction budget exhausted")
+
+// ErrCompactionInProgress indicates that the session already has an active compaction.
+var ErrCompactionInProgress = errors.New("compaction already in progress")
+
+func (r *LocalRuntime) acquireCompaction(sessionID string) bool {
+	_, loaded := r.activeCompactions.LoadOrStore(sessionID, struct{}{})
+	return !loaded
+}
 
 // Compaction reasons reported to BeforeCompaction / AfterCompaction hooks.
 const (
@@ -34,7 +47,7 @@ func (r *LocalRuntime) sessionCompactionEnabled(a *agent.Agent) bool {
 
 // doCompact orchestrates a session compaction. It is intentionally thin:
 // the heavy lifting (extracting the conversation, running the LLM, computing
-// the kept-tail boundary) lives in [pkg/runtime/compactor]; this function
+// the kept-tail boundary) lives in [compactor]; this function
 // owns only what's runtime-private: hook dispatch, session mutation, event
 // emission, and persistence.
 //
@@ -49,8 +62,10 @@ func (r *LocalRuntime) sessionCompactionEnabled(a *agent.Agent) bool {
 //     events; the conversation is left untouched.
 //   - If a BeforeCompaction hook supplies a non-empty Summary in
 //     HookSpecificOutput, the runtime applies that summary verbatim and
-//     skips the LLM-based summarization entirely. The kept-tail policy
-//     stays consistent across both paths via [compactor.ComputeFirstKeptEntry].
+//     skips both native and LLM-based summarization. The kept-tail policy
+//     stays consistent across the hook and LLM paths via
+//     [compactor.ComputeFirstKeptEntry]; native compaction keeps no tail
+//     (see [LocalRuntime.compactNatively]).
 //   - AfterCompaction fires after the summary has been applied; it is
 //     observational.
 //
@@ -63,7 +78,16 @@ func (r *LocalRuntime) sessionCompactionEnabled(a *agent.Agent) bool {
 // env / cwd / OS info is automatically present after a compaction without
 // any extra dispatch.
 func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *agent.Agent, additionalPrompt, reason string, events EventSink) {
-	contextLimit := r.compactionContextLimit(ctx, a)
+	result := r.generateCompaction(ctx, sess, a, additionalPrompt, reason, events)
+	if result == nil {
+		return
+	}
+	outcome := r.applyCompactionResult(ctx, sess, a, result, reason, events)
+	events.Emit(SessionCompactionCompleted(sess.ID, outcome, a.Name()))
+}
+
+func (r *LocalRuntime) generateCompaction(ctx context.Context, sess *session.Session, a *agent.Agent, additionalPrompt, reason string, events EventSink) (result *compactor.Result) {
+	contextLimit, limitErr := r.compactionContextLimitChecked(ctx, a)
 
 	// before_compaction: hooks can veto or supply a custom summary.
 	pre := r.executeBeforeCompactionHooks(ctx, sess, a, reason, contextLimit, events)
@@ -72,7 +96,7 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 			"session_id", sess.ID, "agent", a.Name(), "reason", reason,
 			"hook_message", pre.Message,
 		)
-		return
+		return nil
 	}
 
 	slog.DebugContext(ctx, "Generating summary for session", "session_id", sess.ID, "reason", reason)
@@ -84,42 +108,70 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	// that did nothing.
 	outcome := CompactionOutcomeApplied
 	defer func() {
-		events.Emit(SessionCompactionCompleted(sess.ID, outcome, a.Name()))
+		if result == nil {
+			events.Emit(SessionCompactionCompleted(sess.ID, outcome, a.Name()))
+		}
 	}()
 
 	// Choose the strategy: a hook-supplied summary if before_compaction
-	// returned one, otherwise the default LLM strategy.
-	result := summaryFromHook(sess, a, pre, contextLimit)
+	// returned one, then provider-native compaction when the model opts in,
+	// otherwise the default LLM strategy.
+	result = summaryFromHook(sess, a, pre, contextLimit)
 	if result == nil {
-		if contextLimit <= 0 {
-			slog.ErrorContext(ctx, "Failed to generate session summary",
-				"error", "model definition unavailable")
-			events.Emit(ErrorForSession(sess.ID, "Failed to get model definition"))
-			outcome = CompactionOutcomeFailed
-			return
-		}
-
-		var err error
-		result, err = compactor.RunLLM(ctx, compactor.LLMArgs{
-			Session:          sess,
-			Agent:            a,
-			AdditionalPrompt: additionalPrompt,
-			ContextLimit:     contextLimit,
-			RunAgent:         r.runCompactionAgent,
-		})
+		native, err := nativeCompactor(ctx, a)
 		if err != nil {
 			slog.ErrorContext(ctx, "Failed to generate session summary", "error", err)
 			events.Emit(ErrorForSession(sess.ID, err.Error()))
 			outcome = CompactionOutcomeFailed
-			return
+			return nil
+		}
+		if native != nil {
+			result, err = r.compactNatively(ctx, sess, a, native, additionalPrompt, events)
+		} else {
+			if limitErr != nil {
+				events.Emit(ErrorForSession(sess.ID, limitErr.Error()))
+				outcome = CompactionOutcomeFailed
+				return nil
+			}
+			if contextLimit <= 0 {
+				slog.ErrorContext(ctx, "Failed to generate session summary",
+					"error", "model definition unavailable")
+				events.Emit(ErrorForSession(sess.ID, "Failed to get model definition"))
+				outcome = CompactionOutcomeFailed
+				return nil
+			}
+			result, err = compactor.RunLLM(ctx, compactor.LLMArgs{
+				Session:          sess,
+				Agent:            a,
+				AdditionalPrompt: additionalPrompt,
+				ContextLimit:     contextLimit,
+				RunAgent: func(ctx context.Context, summaryAgent *agent.Agent, summarySession *session.Session) error {
+					return r.runCompactionAgent(ctx, summaryAgent, summarySession, sess, events)
+				},
+			})
+		}
+		if errors.Is(err, errCompactionBudgetExceeded) {
+			outcome = CompactionOutcomeSkipped
+			return nil
+		}
+		if err != nil {
+			slog.ErrorContext(ctx, "Failed to generate session summary", "error", err)
+			events.Emit(ErrorForSession(sess.ID, err.Error()))
+			outcome = CompactionOutcomeFailed
+			return nil
 		}
 		if result == nil {
 			// Empty summary — bail without applying anything.
 			outcome = CompactionOutcomeSkipped
-			return
+			return nil
 		}
 	}
 
+	return result
+}
+
+func (r *LocalRuntime) applyCompactionResult(ctx context.Context, sess *session.Session, a *agent.Agent, result *compactor.Result, reason string, events EventSink) string {
+	contextLimit := r.compactionContextLimit(ctx, a)
 	// Capture the pre-compaction token counts so the after_compaction
 	// hook can observe what was summarized ("compacted from X to Y").
 	// We snapshot before applying the result because the apply step
@@ -127,20 +179,40 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	// the new summary's estimated size.
 	preInputTokens, preOutputTokens := sess.Usage()
 
-	// Apply the summary to the session. This is intrinsically
-	// runtime-private: it mutates session-internal state and persists
-	// through the runtime's session store.
-	sess.ApplyCompaction(result.InputTokens, 0, session.Item{
+	// Apply and persist the summary as one intrinsic successful-compaction step.
+	// Manual Summarize calls do not pass through the RunStream observer chain,
+	// while normal observed runs do; marking the emitted event as persisted
+	// keeps the observer from appending a duplicate row.
+	item := session.Item{
 		Summary:        result.Summary,
 		FirstKeptEntry: result.FirstKeptEntry,
 		Cost:           result.Cost,
 		Model:          result.Model,
 		Usage:          summaryUsage(result),
-	})
-	_ = r.sessionStore.UpdateSession(ctx, sess)
+		Compaction:     result.Compaction,
+	}
+	// Atomically persist the metadata and summary before mutating the live
+	// session. A failed write is a failed compaction: no success summary event
+	// is emitted and the in-memory continuation remains unchanged.
+	if err := flushObservers(ctx); err != nil {
+		events.Emit(ErrorForSession(sess.ID, fmt.Sprintf("Failed to flush events before session compaction: %v", err)))
+		return CompactionOutcomeFailed
+	}
+	if err := r.sessionStore.PersistCompaction(ctx, sess, result.InputTokens, 0, item); err != nil {
+		slog.ErrorContext(ctx, "Failed to persist session compaction", "session_id", sess.ID, "error", err)
+		events.Emit(ErrorForSession(sess.ID, fmt.Sprintf("Failed to persist session compaction: %v", err)))
+		return CompactionOutcomeFailed
+	}
 
+	if result.Compaction != nil {
+		r.toolDeferrals.Reset(sess.ID)
+	}
 	slog.DebugContext(ctx, "Generated session summary", "session_id", sess.ID, "summary_length", len(result.Summary))
-	events.Emit(SessionSummary(sess.ID, result.Summary, a.Name(), result.FirstKeptEntry, result.Cost, result.Model, summaryUsage(result)))
+	summaryEvent := SessionSummary(sess.ID, result.Summary, a.Name(), result.FirstKeptEntry, result.Cost, result.Model, summaryUsage(result))
+	if e, ok := summaryEvent.(*SessionSummaryEvent); ok {
+		e.persisted = true
+	}
+	events.Emit(summaryEvent)
 
 	// after_compaction: observational. Fired only when a summary was
 	// actually applied to the session. The hook receives the
@@ -149,6 +221,7 @@ func (r *LocalRuntime) doCompact(ctx context.Context, sess *session.Session, a *
 	// counts live on sess.InputTokens / sess.OutputTokens after this
 	// returns and are exposed via the next TokenUsageEvent.
 	r.executeAfterCompactionHooks(ctx, sess, a, reason, contextLimit, preInputTokens, preOutputTokens, result.Summary, events)
+	return CompactionOutcomeApplied
 }
 
 // summaryUsage lifts a result's usage into the *chat.Usage form session
@@ -158,14 +231,13 @@ func summaryUsage(result *compactor.Result) *chat.Usage {
 	if result.Usage == (chat.Usage{}) {
 		return nil
 	}
-	usage := result.Usage
-	return &usage
+	return new(result.Usage)
 }
 
 // summaryFromHook lifts a before_compaction hook's Summary verdict into
 // a [compactor.Result] that the runtime can apply with the same code
 // path as the LLM strategy. Returns nil when no hook supplied a
-// summary (the caller then falls through to [compactor.RunLLM]).
+// summary (the caller then tries native compaction, else [compactor.RunLLM]).
 //
 // The hook only contributes the summary text; the runtime fills in the
 // kept-tail boundary (matching the LLM path's policy) and estimates the
@@ -201,21 +273,32 @@ func summaryFromHook(sess *session.Session, a *agent.Agent, pre *hooks.Result, c
 // pass the cloned summary-call provider so its provider_opts (which
 // match the underlying model) are considered.
 func (r *LocalRuntime) compactionContextLimit(ctx context.Context, a *agent.Agent) int64 {
+	limit, err := r.compactionContextLimitChecked(ctx, a)
+	if err != nil {
+		slog.DebugContext(ctx, "Compaction context window unresolvable", "error", err)
+	}
+	return limit
+}
+
+func (r *LocalRuntime) compactionContextLimitChecked(ctx context.Context, a *agent.Agent) (int64, error) {
 	if a == nil {
-		return 0
+		return 0, nil
 	}
 	model := a.CompactionModel()
 	if model == nil {
 		model = a.Model(ctx)
 	}
 	if model == nil {
-		return 0
+		return 0, nil
 	}
-	summaryModel := provider.CloneWithOptions(ctx, model,
+	summaryModel, err := provider.Clone(ctx, model,
 		options.WithStructuredOutput(nil),
 		options.WithMaxTokens(compactor.MaxSummaryTokens),
 	)
-	return r.resolveContextLimit(ctx, summaryModel, summaryModel.ID())
+	if err != nil {
+		return 0, fmt.Errorf("resolving compaction context window: %w", err)
+	}
+	return r.resolveContextLimit(ctx, summaryModel, summaryModel.ID()), nil
 }
 
 // effectiveContextLimit returns the context budget the running session
@@ -275,16 +358,20 @@ func compactionCaps(primaryLimit, compactionLimit int64) bool {
 // resolveContextLimit resolves the effective context window size for a
 // model. Resolution order:
 //
-//  1. The user-supplied [provider_opts.context_size], when set, is
+//  1. The user-supplied provider_opts.context_size, when set, is
 //     authoritative. Some providers (notably Docker Model Runner) use
 //     it to size the actual inference context, so we plan against the
 //     same number the engine will enforce. This also makes compaction
 //     work for local models that aren't catalogued in models.dev (e.g.
 //     a HuggingFace GGUF).
-//  2. Otherwise, the models.dev catalogue limit looked up by id.
-//  3. Otherwise, 0 (caller treats this as "can't compact").
+//  2. Otherwise, the provider's discovered runtime context window.
+//  3. Otherwise, the models.dev catalogue limit looked up by id.
+//  4. Otherwise, 0 (caller treats this as "can't compact").
 func (r *LocalRuntime) resolveContextLimit(ctx context.Context, p provider.Provider, id modelsdev.ID) int64 {
 	if n := providerContextLimit(p); n > 0 {
+		return n
+	}
+	if n := r.discoveredContextLimit(ctx, p); n > 0 {
 		return n
 	}
 	m, err := r.modelsStore.GetModel(ctx, id)
@@ -294,11 +381,12 @@ func (r *LocalRuntime) resolveContextLimit(ctx context.Context, p provider.Provi
 	return 0
 }
 
-// providerContextLimit reads [provider_opts.context_size] from a
+// providerContextLimit reads provider_opts.context_size from a
 // provider's resolved [latest.ModelConfig], returning 0 when unset or
-// not parseable as an integer. This is the fallback used when the
-// models.dev catalogue does not have an entry for the configured
-// model (typically Docker Model Runner with a HuggingFace GGUF model).
+// not parseable as an integer. resolveContextLimit checks it first; for
+// models absent from the models.dev catalogue (typically Docker Model Runner
+// with a HuggingFace GGUF model) it and the provider's discovered window
+// (see discoveredContextLimit) are the only sources.
 //
 // The parsing is shared with the provider clients (which clamp max_tokens
 // against the same window) via [latest.ContextSizeFromProviderOpts], so the
@@ -311,19 +399,54 @@ func providerContextLimit(p provider.Provider) int64 {
 }
 
 // runCompactionAgent runs an agent against a sub-session for compaction.
-// It is the runtime-side glue [pkg/runtime/compactor] invokes via callback,
-// which avoids creating an import cycle on [pkg/runtime].
+// It is the runtime-side glue [compactor] invokes via callback,
+// which avoids creating an import cycle on pkg/runtime.
 //
-// The sub-runtime inherits the parent's model store so the summary call is
-// priced from the same catalogue as every other call — otherwise the
-// compaction cost recorded on the summary item would silently be 0 whenever
-// the default lazy store cannot price the model the configured store can.
-func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess *session.Session) error {
+// The summary uses the parent's pricing and budgets, even when invoked manually.
+func (r *LocalRuntime) runCompactionAgent(ctx context.Context, a *agent.Agent, sess, parent *session.Session, events EventSink) error {
+	r.ensureBudget()
+	budget := r.currentBudget()
 	t := team.New(team.WithAgents(a))
-	rt, err := New(ctx, t, WithSessionCompaction(false), WithModelStore(r.modelsStore))
+	rt, err := New(ctx, t, WithSessionCompaction(false), WithModelStore(r.modelsStore),
+		WithClock(r.now), withSharedBudget(budget))
 	if err != nil {
 		return err
 	}
-	_, err = rt.Run(ctx, sess)
-	return err
+
+	warnUnpriced := !budget.unpricedSpend()
+	var runErr error
+	for event := range rt.RunStream(ctx, sess) {
+		switch e := event.(type) {
+		case *BudgetExceededEvent:
+			// Never let the child's synthetic stop message replace the conversation.
+			runErr = errCompactionBudgetExceeded
+			events.Emit(Warning(fmt.Sprintf("Compaction skipped: %s limit reached (used %s of %s).", e.ConfigPath, e.Used, e.Max), a.Name()))
+		case *ErrorEvent:
+			if runErr == nil {
+				runErr = errors.New(e.Error)
+				// Keep token overflows typed so the compactor can retry smaller.
+				if e.Code == ErrorCodeContextExceeded {
+					runErr = childTokenOverflowError{msg: e.Error}
+				}
+			}
+		}
+	}
+	if budget != nil {
+		if warnUnpriced && budget.unpricedSpend() {
+			events.Emit(Warning(unpricedSpendWarning, a.Name()))
+		}
+		events.Emit(BudgetUsage(parent.ID, a.Name(), budget.snapshot()))
+	}
+	return runErr
+}
+
+// childTokenOverflowError carries a compaction child run's context_exceeded error:
+// the message stays verbatim while [modelerrors.OverflowKindOf] still sees a
+// token overflow.
+type childTokenOverflowError struct{ msg string }
+
+func (e childTokenOverflowError) Error() string { return e.msg }
+
+func (e childTokenOverflowError) Unwrap() error {
+	return &modelerrors.ContextOverflowError{Underlying: errors.New(e.msg), Kind: modelerrors.OverflowKindTokens}
 }

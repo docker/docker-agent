@@ -139,6 +139,7 @@ type SessionsResponse struct {
 	InputTokens  int64  `json:"input_tokens"`
 	OutputTokens int64  `json:"output_tokens"`
 	WorkingDir   string `json:"working_dir,omitempty"`
+	Streaming    bool   `json:"streaming,omitempty"`
 }
 
 // SessionResponse represents a detailed session

@@ -3,6 +3,7 @@
 package hooks
 
 import (
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func warmShell() {}
 
 // Command hooks run under $SHELL (or /bin/sh) on non-Windows platforms.
 // These helpers generate the POSIX commands mirrored for PowerShell in
@@ -30,8 +33,13 @@ func emitContextEnvPwdCmd(envVars ...string) string {
 }
 
 // printStdinJSONFieldCmd returns a command printing one field of the JSON
-// document the hook receives on stdin.
-func printStdinJSONFieldCmd(field string) string {
+// document the hook receives on stdin. It skips the test when jq is missing;
+// otherwise the hook runs silently and the test fails on its output instead.
+func printStdinJSONFieldCmd(t *testing.T, field string) string {
+	t.Helper()
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not installed; it is required to read a JSON field from hook stdin")
+	}
 	return `cat | jq -r '.` + field + `'`
 }
 

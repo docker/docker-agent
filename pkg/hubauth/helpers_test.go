@@ -67,29 +67,51 @@ func installFakeHub(t *testing.T, token string) *fakeHub {
 	resetState(t)
 
 	hub := &fakeHub{token: token}
-	loginEndpoint = newServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		hub.mu.Lock()
-		hub.creds = append(hub.creds, credentials{body.Username, body.Password})
-		token, status, header := hub.token, hub.status, hub.header
-		hub.mu.Unlock()
-
-		maps.Copy(w.Header(), header)
-		if status != 0 {
-			w.WriteHeader(status)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
-	})
+	loginEndpoint = newServer(t, hub.ServeHTTP)
 	return hub
+}
+
+func (h *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	h.mu.Lock()
+	h.creds = append(h.creds, credentials{body.Username, body.Password})
+	token, status, header := h.token, h.status, h.header
+	h.mu.Unlock()
+
+	maps.Copy(w.Header(), header)
+	if status != 0 {
+		w.WriteHeader(status)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]string{"token": token})
+}
+
+func installInMemoryHub(t *testing.T, token string) *fakeHub {
+	t.Helper()
+	resetState(t)
+
+	hub := &fakeHub{token: token}
+	loginEndpoint = newInMemoryServer(t, hub.ServeHTTP)
+	return hub
+}
+
+func newInMemoryServer(t *testing.T, handler http.HandlerFunc) func() string {
+	t.Helper()
+	server := httptest.NewTestServer(t, handler)
+	oldClient := httpClient
+	client := *httpClient
+	client.Transport = server.Client().Transport
+	httpClient = &client
+	t.Cleanup(func() { httpClient = oldClient })
+	return func() string { return server.URL }
 }
 
 // newServer starts a test server and returns a resolver for its URL, shaped

@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/app"
 	boardtui "github.com/docker/docker-agent/pkg/board/tui"
+	"github.com/docker/docker-agent/pkg/bootstrap"
 	"github.com/docker/docker-agent/pkg/cli"
 	"github.com/docker/docker-agent/pkg/config"
 	latestcfg "github.com/docker/docker-agent/pkg/config/latest"
@@ -27,9 +28,11 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks/builtins"
 	"github.com/docker/docker-agent/pkg/input"
 	"github.com/docker/docker-agent/pkg/leantui"
+	"github.com/docker/docker-agent/pkg/model/provider/dmr"
 	"github.com/docker/docker-agent/pkg/permissions"
 	"github.com/docker/docker-agent/pkg/profiling"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/sandbox"
 	"github.com/docker/docker-agent/pkg/server"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
@@ -67,9 +70,16 @@ type runExecFlags struct {
 	// options and user settings (alias wins; within each scope safety wins
 	// over the legacy yolo/YOLO flag). Never populated from CLI flags or
 	// author YAML.
-	defaultSafety     session.SafetyPolicy
+	defaultSafety session.SafetyPolicy
+	// workingDirChanged records whether a non-empty --working-dir was
+	// explicitly passed on the command line. Captured before worktree and
+	// resume handling mutate runConfig.WorkingDir; only an explicit flag
+	// makes generic new-session actions in the TUI reuse the initial
+	// session's directory instead of opening the picker.
+	workingDirChanged bool
 	attachmentPath    string
 	remoteAddress     string
+	remoteAuthToken   string
 	modelOverrides    []string
 	promptFiles       []string
 	dryRun            bool
@@ -86,6 +96,7 @@ type runExecFlags struct {
 	tour              bool
 	sandbox           bool
 	sandboxTemplate   string
+	sandboxOptions    sandbox.Options
 	sbx               bool
 	noKit             bool
 	agentPickerSpec   string
@@ -99,6 +110,8 @@ type runExecFlags struct {
 	exec          bool
 	hideToolCalls bool
 	outputJSON    bool
+	last          bool
+	diagnostics   *cli.Printer
 
 	// Run only
 	hideToolResults bool
@@ -148,7 +161,8 @@ func newRunCmd() *cobra.Command {
 		Example: `  docker-agent run ./agent.yaml
   docker-agent run ./team.yaml --agent root
   docker-agent run # project config or built-in default agent
-  docker-agent run coder # built-in coding agent
+  docker-agent run default # built-in coding agent
+  docker-agent run minimal # small general-purpose configuration
   docker-agent run ./echo.yaml "INSTRUCTIONS"
   docker-agent run ./echo.yaml "First question" "Follow-up question"
   echo "INSTRUCTIONS" | docker-agent run ./echo.yaml -
@@ -175,6 +189,7 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().StringArrayVar(&flags.modelOverrides, "model", nil, "Override agent model: [agent=]provider/model (repeatable)")
 	cmd.PersistentFlags().BoolVar(&flags.dryRun, "dry-run", false, "Initialize the agent without executing anything")
 	cmd.PersistentFlags().StringVar(&flags.remoteAddress, "remote", "", "Use remote runtime with specified address")
+	cmd.PersistentFlags().StringVar(&flags.remoteAuthToken, "remote-auth-token", "", "Bearer token for --remote (defaults to DOCKER_AGENT_REMOTE_AUTH_TOKEN)")
 	cmd.PersistentFlags().StringVarP(&flags.sessionDB, "session-db", "s", "", "Path to the session database (default: <data-dir>/session.db)")
 	cmd.PersistentFlags().StringVar(&flags.sessionID, "session", "", "Continue from a previous session by ID or relative offset (e.g., -1 for last session). An explicit ID that does not exist yet is created with that ID.")
 	cmd.PersistentFlags().StringVar(&flags.fakeResponses, "fake", "", "Replay AI responses from cassette file (for testing)")
@@ -203,10 +218,16 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.PersistentFlags().BoolVar(&flags.sidebar, "sidebar", true, "Show the sidebar in the TUI (set --sidebar=false to hide it)")
 	cmd.PersistentFlags().StringVar(&flags.theme, "theme", "", "Preselect a TUI theme by name, or \"auto\" to match the terminal's light/dark background (overrides the theme from user config; ignored outside the interactive TUI)")
 	_ = cmd.RegisterFlagCompletionFunc("theme", completeTheme)
-	cmd.PersistentFlags().BoolVar(&flags.sandbox, "sandbox", false, "Run the agent inside a Docker sandbox (requires Docker Desktop with sandbox support)")
-	cmd.PersistentFlags().StringVar(&flags.sandboxTemplate, "template", "docker/docker-agent-sbx-templates:latest", "Template image for the sandbox (passed to docker sandbox create -t)")
+	cmd.PersistentFlags().BoolVar(&flags.sandbox, "sandbox", false, "Run the agent inside a Docker sandbox")
+	cmd.PersistentFlags().StringVar(&flags.sandboxTemplate, "template", "docker/docker-agent-sbx-templates:latest", "Local sandbox OCI image, or cloud template name with --cloud")
 	cmd.PersistentFlags().BoolVar(&flags.sbx, "sbx", true, "Prefer the sbx CLI backend when available (set --sbx=false to force docker sandbox)")
 	cmd.PersistentFlags().BoolVar(&flags.noKit, "no-kit", false, "Do not stage a docker-agent kit (skills, prompt files) when running in a sandbox")
+	cmd.PersistentFlags().BoolVar(&flags.sandboxOptions.Cloud, "cloud", false, "Use a cloud sandbox (implies --sandbox; no host files or credentials are uploaded)")
+	cmd.PersistentFlags().StringVar(&flags.sandboxOptions.Workload, "sandbox-kit", "", "Sandbox workload kit reference (directory, ZIP, git, or OCI; must provide docker-agent)")
+	cmd.PersistentFlags().StringArrayVar(&flags.sandboxOptions.Kits, "kit", nil, "Additional sandbox mixin kit reference (repeatable)")
+	cmd.PersistentFlags().StringArrayVar(&flags.sandboxOptions.KitArgs, "kit-arg", nil, "Sandbox kit argument KEY=VALUE (repeatable)")
+	cmd.PersistentFlags().DurationVar(&flags.sandboxOptions.TTL, "sandbox-ttl", time.Hour, "Cloud sandbox time-to-live; stopped on expiry")
+	cmd.MarkFlagsMutuallyExclusive("template", "sandbox-kit")
 	cmd.PersistentFlags().StringVar(&flags.agentPickerSpec, "agent-picker", "", "Show a full-screen picker to choose an agent before launching. Optional comma-separated list of agent refs; \"defaults\" (or no value) offers the built-in agents plus any configs in ~/.agents")
 	cmd.PersistentFlags().Lookup("agent-picker").NoOptDefVal = agentPickerDefaultsSpec
 	cmd.PersistentFlags().StringVarP(&flags.worktreeName, "worktree", "w", "", "Run the agent in a fresh git worktree of the working directory (isolates changes from your checkout). Optionally name it: --worktree=my-name")
@@ -233,11 +254,15 @@ func addRunOrExecFlags(cmd *cobra.Command, flags *runExecFlags) {
 	cmd.MarkFlagsMutuallyExclusive("worktree-base", "worktree-pr")
 	cmd.MarkFlagsMutuallyExclusive("remote", "worktree-base")
 	cmd.MarkFlagsMutuallyExclusive("sandbox", "worktree-base")
+	for _, flag := range []string{"remote", "worktree", "worktree-pr", "worktree-base"} {
+		cmd.MarkFlagsMutuallyExclusive("cloud", flag)
+	}
 
 	// --exec only
 	cmd.PersistentFlags().BoolVar(&flags.exec, "exec", false, "Execute without a TUI")
 	cmd.PersistentFlags().BoolVar(&flags.hideToolCalls, "hide-tool-calls", false, "Hide the tool calls in the output")
 	cmd.PersistentFlags().BoolVar(&flags.outputJSON, "json", false, "Output results in JSON format")
+	cmd.PersistentFlags().BoolVar(&flags.last, "last", false, "Print only the final agent answer (requires --exec); with --json, emit a JSON value")
 }
 
 func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (commandErr error) {
@@ -255,6 +280,17 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 		}()
 	}
 
+	if f.remoteAuthToken != "" && f.remoteAddress == "" {
+		return errors.New("--remote-auth-token requires --remote")
+	}
+	if f.last && !f.exec {
+		return errors.New("--last requires --exec")
+	}
+	f.diagnostics = cli.NewPrinter(cmd.ErrOrStderr())
+	if f.last {
+		ctx = dmr.WithPullOutput(ctx, cmd.ErrOrStderr())
+	}
+
 	// Validate an explicit --theme value early so a typo fails fast with a
 	// helpful message instead of silently falling back to the default theme
 	// once the TUI starts.
@@ -269,6 +305,9 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	}
 	f.safetyChanged = cmd.Flags().Changed("safety")
 	f.yoloChanged = cmd.Flags().Changed("yolo")
+	// Captured here because runOrExec later overwrites runConfig.WorkingDir
+	// for worktrees and resumed sessions.
+	f.workingDirChanged = cmd.Flags().Changed("working-dir") && f.runConfig.WorkingDir != ""
 
 	// A --session-workingdir-root that trims to empty (e.g. an unresolved
 	// shell variable) must fail loudly instead of silently disabling the
@@ -320,30 +359,47 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 	}
 
 	var discoveredProjectConfig bool
-	args, discoveredProjectConfig = f.discoverRunAgentArgs(args)
+	if !f.sandboxOptions.Cloud {
+		args, discoveredProjectConfig = f.discoverRunAgentArgs(args)
+	}
 
 	// Resolve alias / runtime-declared sandbox opt-in before dispatch.
 	// An explicit --sandbox=<bool> on the CLI always wins, so we only
 	// consult the lower-priority sources when the flag wasn't set.
-	var agentCfg *latestcfg.Config
-	if !cmd.Flags().Changed("sandbox") {
+	if !cmd.Flags().Changed("sandbox") && !f.sandboxOptions.Cloud {
 		var agentRef string
 		if len(args) > 0 {
 			agentRef = args[0]
 		}
-		f.sandbox, agentCfg = resolveSandboxDefault(ctx, agentRef, f.sandbox, f.runConfig.Flavors)
+		f.sandbox, _ = resolveSandboxDefault(ctx, agentRef, f.sandbox, f.runConfig.Flavors)
 	}
 
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	if discoveredProjectConfig {
-		out.Println("Using project config: " + args[0])
+		if f.last {
+			fmt.Fprintln(cmd.ErrOrStderr(), "Using project config: "+args[0])
+		} else {
+			out.Println("Using project config: " + args[0])
+		}
 	}
 
+	if f.sandboxOptions.Cloud {
+		if cmd.Flags().Changed("sandbox") && !f.sandbox {
+			return errors.New("--cloud cannot be combined with --sandbox=false")
+		}
+		f.sandbox = true
+	}
+	if err := validateSandboxOptions(cmd, f.sandbox, f.sandboxOptions); err != nil {
+		return err
+	}
 	if f.sandbox {
 		if cmd.Flags().Changed("worktree") || cmd.Flags().Changed("worktree-pr") {
 			return errors.New("--worktree/--worktree-pr cannot be combined with a sandboxed run")
 		}
-		return runInSandbox(ctx, cmd, args, &f.runConfig, f.sandboxTemplate, f.sbx, f.noKit, agentCfg)
+		if cmd.Flags().Changed("template") || (!f.sandboxOptions.Cloud && f.sandboxOptions.Workload == "") {
+			f.sandboxOptions.Template = f.sandboxTemplate
+		}
+		return runInSandbox(ctx, cmd, args, &f.runConfig, f.sbx, f.noKit, f.sandboxOptions)
 	}
 
 	// --worktree was provided (with or without a value). The string flag lets
@@ -364,6 +420,13 @@ func (f *runExecFlags) runRunCommand(cmd *cobra.Command, args []string) (command
 }
 
 func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []string, useTUI bool) error {
+	statusOut := out
+	if f.last {
+		statusOut = f.diagnostics
+		if statusOut == nil {
+			statusOut = cli.NewPrinter(os.Stderr)
+		}
+	}
 	slog.DebugContext(ctx, "Starting agent", "agent", f.agentName)
 
 	// Start profiling if requested
@@ -427,7 +490,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 				slog.ErrorContext(ctx, "Failed to cleanup recording proxy", "error", err)
 			}
 		}()
-		out.Println("Recording mode enabled, cassette: " + cassettePath)
+		statusOut.Println("Recording mode enabled, cassette: " + cassettePath)
 	}
 
 	b, err := f.selectBackend(agentFileName)
@@ -450,7 +513,7 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		if loadResult != nil {
 			stopToolSets(ctx, loadResult.Team)
 		}
-		out.Println("Dry run mode enabled. Agent initialized but will not execute.")
+		statusOut.Println("Dry run mode enabled. Agent initialized but will not execute.")
 		return nil
 	}
 
@@ -482,12 +545,12 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 		return err
 	}
 	if createdWorktree != nil {
-		out.Println("Using git worktree: " + createdWorktree.Dir + " (branch " + createdWorktree.Branch + ")")
+		printWorktreeStatus(statusOut, createdWorktree)
 		// loadResult is nil for the remote backend; worktrees are mutually
 		// exclusive with --remote so this is belt-and-suspenders, matching
 		// the nil-guard used for cleanup throughout this function.
 		if loadResult != nil {
-			if err := f.dispatchWorktreeCreate(ctx, out, loadResult.Team, createdWorktree); err != nil {
+			if err := f.dispatchWorktreeCreate(ctx, statusOut, loadResult.Team, createdWorktree); err != nil {
 				stopToolSets(ctx, loadResult.Team)
 				return err
 			}
@@ -533,6 +596,10 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 	}
 
 	var rec *recorder.Recorder
+	tuiOptions := f.tuiOpts(args)
+	if dir := f.explicitDefaultWorkingDir(sess); dir != "" {
+		tuiOptions = append(tuiOptions, tui.WithDefaultWorkingDir(dir))
+	}
 	runErr := func() error {
 		if f.lean {
 			return f.runLeanTUI(ctx, rt, sess, cleanup, args, opts...)
@@ -544,9 +611,9 @@ func (f *runExecFlags) runOrExec(ctx context.Context, out *cli.Printer, args []s
 				rec = recorder.New(m)
 				return rec
 			}
-			return runTUIWrapped(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(args), wrap, opts...)
+			return runTUIWrapped(ctx, rt, sess, b.Spawner(rt), cleanup, tuiOptions, wrap, opts...)
 		}
-		return runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, f.tuiOpts(args), opts...)
+		return runTUI(ctx, rt, sess, b.Spawner(rt), cleanup, tuiOptions, opts...)
 	}()
 	if rec != nil && rec.HasInput() {
 		writeGeneratedTUITest(ctx, out, rec, cassettePath, agentFileName)
@@ -666,7 +733,7 @@ func (f *runExecFlags) applyAliasOptions(ctx context.Context, alias *userconfig.
 }
 
 // aliasOptions resolves the alias options for an agent reference from an
-// already-loaded user config, mirroring config.ResolveAlias: the empty
+// already-loaded user config, mirroring sources.ResolveAlias: the empty
 // reference maps to the "default" alias, and an alias without options is
 // not returned.
 func aliasOptions(cfg *userconfig.Config, agentFileName string) *userconfig.Alias {
@@ -675,6 +742,13 @@ func aliasOptions(cfg *userconfig.Config, agentFileName string) *userconfig.Alia
 		return nil
 	}
 	return alias
+}
+
+func printWorktreeStatus(out *cli.Printer, wt *worktree.Worktree) {
+	out.Println("Using git worktree: " + wt.Dir + " (branch " + wt.Branch + ")")
+	for _, warning := range wt.Warnings {
+		out.Println("Warning: " + warning)
+	}
 }
 
 func (f *runExecFlags) loadTeamInWorktree(ctx context.Context, b backend, wd string) (*teamloader.LoadResult, *worktree.Worktree, string, error) {
@@ -868,59 +942,41 @@ func (f *runExecFlags) loadAgentFrom(ctx context.Context, req runtime.LoadTeamRe
 // current agent name are passed in because they're resolved by callers from
 // different sources (e.g. the spawner uses the same store as the parent).
 func (f *runExecFlags) runtimeOpts(loadResult *teamloader.LoadResult, runConfig *config.RuntimeConfig, sessStore session.Store, agentName string) []runtime.Opt {
-	modelSwitcherCfg := &runtime.ModelSwitcherConfig{
-		Models:             loadResult.Models,
-		Providers:          loadResult.Providers,
-		ModelsGateway:      runConfig.ModelsGateway,
-		EnvProvider:        runConfig.EnvProvider(),
-		ProviderRegistry:   loadResult.ProviderRegistry,
-		AgentDefaultModels: loadResult.AgentDefaultModels,
-	}
-	// Share the models.dev store the team loader already warmed (parsing the
-	// multi-MB catalog once) so the runtime doesn't build its own cold store
-	// and re-pay the parse on the first /model open. On error we leave it unset
-	// and the runtime falls back to its lazy default.
-	if store, err := runConfig.ModelsDevStore(); err == nil {
-		modelSwitcherCfg.ModelsStore = store
-	} else {
-		slog.Warn("Failed to obtain shared models.dev store; runtime will use its own", "error", err)
-	}
+	loadedOpts := bootstrap.RuntimeOpts(loadResult, runConfig)
 	opts := []runtime.Opt{
 		runtime.WithSessionStore(sessStore),
 		runtime.WithCurrentAgent(agentName),
 		runtime.WithWorkingDir(runConfig.WorkingDir),
 		runtime.WithTracer(otel.Tracer(AppName)),
-		runtime.WithModelSwitcherConfig(modelSwitcherCfg),
-		runtime.WithBudget(loadResult.Budget),
-		runtime.WithNamedBudgets(loadResult.Budgets, loadResult.AgentBudgets),
 	}
-	return opts
+	return append(opts, loadedOpts...)
 }
 
-// snapshotRuntimeOpts wires the snapshot builtin into a runtime.
+// builtinRuntimeOpts wires user-setting-controlled builtins into a runtime.
 // Returns the [runtime.Opt]s that hand the registry and the
 // [builtins.SnapshotController] auto-injector to the runtime, plus
 // the controller itself for the embedder to pass to the App via
-// [app.WithSnapshotController]. When snapshots aren't enabled,
-// returns no opts and a nil controller so callers don't have to
-// branch on f.snapshotsEnabled themselves.
+// [app.WithSnapshotController]. Keep-awake hooks are always installed and read
+// the user preference at each run. The snapshot controller is nil when disabled.
 //
 // A fresh registry is created here rather than reused across runtimes
 // so the spawner-created sub-runtimes get their own snapshot state
 // (each spawned session has independent /undo history).
-func (f *runExecFlags) snapshotRuntimeOpts() ([]runtime.Opt, builtins.SnapshotController, error) {
-	if !f.snapshotsEnabled {
-		return nil, nil, nil
-	}
+func (f *runExecFlags) builtinRuntimeOpts() ([]runtime.Opt, builtins.SnapshotController, error) {
 	reg := hooks.NewRegistry()
+	awake, err := builtins.RegisterKeepAwake(reg, func() bool { return userconfig.Get().GetKeepAwake() })
+	if err != nil {
+		return nil, nil, fmt.Errorf("register keep-awake builtin: %w", err)
+	}
+	opts := []runtime.Opt{runtime.WithHooksRegistry(reg), runtime.WithAutoInjector(awake)}
+	if !f.snapshotsEnabled {
+		return opts, nil, nil
+	}
 	ctrl, err := builtins.RegisterSnapshot(reg, true)
 	if err != nil {
 		return nil, nil, fmt.Errorf("register snapshot builtin: %w", err)
 	}
-	return []runtime.Opt{
-		runtime.WithHooksRegistry(reg),
-		runtime.WithAutoInjector(ctrl),
-	}, ctrl, nil
+	return append(opts, runtime.WithAutoInjector(ctrl)), ctrl, nil
 }
 
 func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadResult *teamloader.LoadResult, req runtime.CreateSessionRequest, sessStore session.Store) (runtime.Runtime, *session.Session, error) {
@@ -938,7 +994,7 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 	}
 	agentName := agt.Name()
 
-	rtOpts, ctrl, err := f.snapshotRuntimeOpts()
+	rtOpts, ctrl, err := f.builtinRuntimeOpts()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -977,8 +1033,8 @@ func (f *runExecFlags) createLocalRuntimeAndSession(ctx context.Context, loadRes
 			sess.HideToolResults = req.HideToolResults
 
 			// Apply any stored model overrides from the session
-			if len(sess.AgentModelOverrides) > 0 && localRt.SupportsModelSwitching() {
-				for agentName, modelRef := range sess.AgentModelOverrides {
+			if overrides, _ := sess.ModelStateSnapshot(); len(overrides) > 0 && localRt.SupportsModelSwitching() {
+				for agentName, modelRef := range overrides {
 					if err := localRt.SetAgentModel(ctx, agentName, modelRef); err != nil {
 						slog.WarnContext(ctx, "Failed to apply stored model override", "agent", agentName, "model", modelRef, "error", err)
 					}
@@ -1037,6 +1093,7 @@ func (f *runExecFlags) execCLIConfig(sess *session.Session) cli.Config {
 		AttachmentPath: f.attachmentPath,
 		HideToolCalls:  f.hideToolCalls,
 		OutputJSON:     f.outputJSON,
+		Last:           f.last,
 		AutoApprove:    sess.GetSafetyPolicy() == session.SafetyPolicyAutonomous,
 	}
 }
@@ -1051,8 +1108,7 @@ func readInitialMessage(args []string) (*string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read from stdin: %w", err)
 		}
-		text := string(buf)
-		return &text, nil
+		return new(string(buf)), nil
 	}
 
 	return &args[1], nil
@@ -1061,7 +1117,7 @@ func readInitialMessage(args []string) (*string, error) {
 // tuiOpts returns the TUI options derived from the current flags. args are
 // the run command's positional arguments, used to detect an initial message.
 func (f *runExecFlags) tuiOpts(args []string) []tui.Option {
-	var opts []tui.Option
+	opts := []tui.Option{tui.WithEnvProvider(f.runConfig.EnvProvider())}
 	if f.lean {
 		opts = append(opts, tui.WithLeanMode())
 	}
@@ -1081,6 +1137,23 @@ func (f *runExecFlags) tuiOpts(args []string) []tui.Option {
 		opts = append(opts, tui.WithTourOffer(telemetry.GetTelemetryEnabled()))
 	}
 	return opts
+}
+
+// explicitDefaultWorkingDir returns the working directory generic new-session
+// actions in the TUI should default to instead of opening the picker, or ""
+// when --working-dir was not explicitly supplied on this invocation. It
+// mirrors runTUIWrapped's resolution of the initial tab's directory (session
+// working dir, then process CWD) so new tabs open exactly where the initial
+// session did — the worktree or resume directory, not the raw flag value.
+func (f *runExecFlags) explicitDefaultWorkingDir(sess *session.Session) string {
+	if !f.workingDirChanged {
+		return ""
+	}
+	if sess.WorkingDir != "" {
+		return sess.WorkingDir
+	}
+	wd, _ := os.Getwd()
+	return wd
 }
 
 // shouldOfferTour reports whether this interactive run should show the
@@ -1109,7 +1182,6 @@ func (f *runExecFlags) runLeanTUI(ctx context.Context, rt runtime.Runtime, sess 
 		opts = append(opts, app.WithTitleGenerator(gen))
 	}
 	a := app.New(ctx, rt, sess, opts...)
-	a.Start(ctx)
 
 	firstMessage, err := readInitialMessage(args)
 	if err != nil {
@@ -1272,6 +1344,14 @@ func (f *runExecFlags) scopedSafetyDefault(safety latestcfg.SafetyMode, legacyYo
 // createSessionSpawner creates a function that can spawn new sessions with different working directories.
 func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore session.Store) tui.SessionSpawner {
 	return func(spawnCtx context.Context, workingDir string) (*app.App, *session.Session, func(), error) {
+		// The spawn dialog may hand us a relative or empty path; pin the
+		// spawned session's workspace provenance to an absolute root now,
+		// before anything below captures it.
+		workingDir, err := session.CaptureLocalWorkingDir(workingDir)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
 		// Create a copy of the runtime config with the new working directory
 		runConfigCopy := f.runConfig.Clone()
 		runConfigCopy.WorkingDir = workingDir
@@ -1300,7 +1380,7 @@ func (f *runExecFlags) createSessionSpawner(agentSource config.Source, sessStore
 			t.SetPermissions(permissions.Merge(t.Permissions(), ignoreRules))
 		}
 
-		rtOpts, ctrl, err := f.snapshotRuntimeOpts()
+		rtOpts, ctrl, err := f.builtinRuntimeOpts()
 		if err != nil {
 			return nil, nil, nil, err
 		}

@@ -4,17 +4,18 @@ import (
 	"fmt"
 
 	pathx "github.com/docker/docker-agent/pkg/path"
-	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
+	"github.com/docker/docker-agent/pkg/tui/messages"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
 
-type ToggleDiffViewMsg struct{}
+type ToggleDiffViewMsg = messages.ToggleDiffViewMsg
 
 // New creates the edit_file tool UI model.
 func New(ar *animation.Runtime, msg *types.Message, sessionState service.SessionStateReader) layout.Model {

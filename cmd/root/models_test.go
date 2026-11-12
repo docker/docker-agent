@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
@@ -34,8 +36,8 @@ func testCatalog() *modelsdev.Database {
 	return &modelsdev.Database{
 		Providers: map[string]modelsdev.Provider{
 			"anthropic": {Models: map[string]modelsdev.Model{
-				"claude-sonnet-4-6": {
-					Name:       "Claude Sonnet 4.6",
+				"claude-sonnet-5": {
+					Name:       "Claude Sonnet 5",
 					Modalities: modelsdev.Modalities{Output: []string{"text"}},
 				},
 				catalogOnlyModel: {
@@ -124,6 +126,9 @@ func TestModelsListCommand_JSONFormat(t *testing.T) {
 	var rows []modelRow
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &rows))
 	assert.NotEmpty(t, rows)
+	want, err := json.MarshalIndent(rows, "", "  ")
+	require.NoError(t, err)
+	assert.Equal(t, string(want)+"\n", buf.String())
 
 	// At least one should be the default
 	hasDefault := false
@@ -532,9 +537,8 @@ func newGatewayServer(t *testing.T, body string) (*httptest.Server, *atomic.Valu
 	return server, &lastAuth
 }
 
-// gatewayTestEnv is the hermetic env for gateway tests: httptest binds to
-// 127.0.0.1, which IsTrustedDockerURL treats as trusted, so discovery
-// requires the Docker Desktop token.
+// gatewayTestEnv is the hermetic env for gateway tests: loopback gateways are
+// trusted to receive an available Docker token but do not require one.
 func gatewayTestEnv(extra map[string]string) map[string]string {
 	env := map[string]string{environment.DockerDesktopTokenEnv: "test-docker-token"}
 	maps.Copy(env, extra)
@@ -567,7 +571,7 @@ func TestModelsListCommand_GatewayProviderFilter(t *testing.T) {
 	require.Len(t, rows, 1, "--provider must filter the live gateway results")
 	assert.Equal(t, "google", rows[0].Provider)
 	assert.Equal(t, "mock-gemini", rows[0].Model)
-	assert.Equal(t, "Bearer test-docker-token", lastAuth.Load(), "a trusted Docker gateway must be queried with the Docker token")
+	assert.Equal(t, "Bearer test-docker-token", lastAuth.Load(), "a trusted loopback gateway may receive the Docker token")
 }
 
 // TestModelsListCommand_GatewayNormalizesAndSorts covers the full live
@@ -581,7 +585,7 @@ func TestModelsListCommand_GatewayNormalizesAndSorts(t *testing.T) {
 	gateway, _ := newGatewayServer(t, `{"object":"list","data":[
 		{"id":"openai/mock-b"},
 		{"id":"openai/mock-b"},
-		{"id":"anthropic/claude-sonnet-4-6"},
+		{"id":"anthropic/claude-sonnet-5"},
 		{"id":"openai/text-embedding-3"},
 		{"id":"google/vector-model"},
 		{"id":"openai/image-only"},
@@ -613,10 +617,10 @@ func TestModelsListCommand_GatewayNormalizesAndSorts(t *testing.T) {
 	var rows []modelRow
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &rows))
 
-	// anthropic/claude-sonnet-4-6 is the gateway auto-selection default and
+	// anthropic/claude-sonnet-5 is the gateway auto-selection default and
 	// is genuinely served, so it is marked and sorted first.
 	assert.Equal(t, []modelRow{
-		{Provider: "anthropic", Model: "claude-sonnet-4-6", Default: true},
+		{Provider: "anthropic", Model: "claude-sonnet-5", Default: true},
 		{Provider: "openai", Model: "bare-model"},
 		{Provider: "openai", Model: "mock-a"},
 		{Provider: "openai", Model: "mock-b"},
@@ -677,7 +681,7 @@ func TestModelsListCommand_GatewayKeepsCustomProviders(t *testing.T) {
 
 	assert.Contains(t, refs, "openai/mock-gpt")
 	assert.Contains(t, refs, "myprovider/corp-model-a", "custom providers serve their own endpoints and stay listed")
-	assert.NotContains(t, refs, "anthropic/claude-sonnet-4-6", "live gateway results replace the static defaults")
+	assert.NotContains(t, refs, "anthropic/claude-sonnet-5", "live gateway results replace the static defaults")
 	assert.NotContains(t, refs, "anthropic/"+catalogOnlyModel, "live gateway results replace the catalog")
 }
 
@@ -689,10 +693,9 @@ func TestModelsListCommand_GatewayFallback(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		handler        http.HandlerFunc
-		env            map[string]string
-		wantNotQueried bool
+		name    string
+		handler http.HandlerFunc
+		env     map[string]string
 	}{
 		{
 			name:    "endpoint not found",
@@ -714,15 +717,11 @@ func TestModelsListCommand_GatewayFallback(t *testing.T) {
 			env: gatewayTestEnv(map[string]string{"ANTHROPIC_API_KEY": "test-key"}),
 		},
 		{
-			// httptest is localhost, hence Docker-trusted: without the token
-			// the live request must not even be attempted, but the auth
-			// failure must not remove directly usable providers.
 			name: "missing Docker token",
 			handler: func(w http.ResponseWriter, _ *http.Request) {
-				_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"openai/mock-gpt"}]}`))
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
 			},
-			env:            map[string]string{"ANTHROPIC_API_KEY": "test-key"},
-			wantNotQueried: true,
+			env: map[string]string{"ANTHROPIC_API_KEY": "test-key"},
 		},
 	}
 
@@ -730,9 +729,7 @@ func TestModelsListCommand_GatewayFallback(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			var queried atomic.Bool
 			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				queried.Store(true)
 				tt.handler(w, r)
 			}))
 			t.Cleanup(gateway.Close)
@@ -753,12 +750,9 @@ func TestModelsListCommand_GatewayFallback(t *testing.T) {
 			require.NoError(t, cmd.Execute())
 
 			output := buf.String()
-			assert.Contains(t, output, "claude-sonnet-4-6", "the direct anthropic provider must survive the gateway failure")
+			assert.Contains(t, output, "claude-sonnet-5", "the direct anthropic provider must survive the gateway failure")
 			assert.Contains(t, output, catalogOnlyModel, "the catalog fallback must be read")
 			assert.Contains(t, output, "corp-model-a", "a usable custom provider must survive the gateway failure")
-			if tt.wantNotQueried {
-				assert.False(t, queried.Load(), "a trusted Docker gateway must not be queried without the Docker token")
-			}
 		})
 	}
 }
@@ -791,7 +785,7 @@ func TestModelsListCommand_GatewayTimeoutFallsBack(t *testing.T) {
 
 	assert.Less(t, time.Since(start), 3*time.Second, "the caller deadline must win over the 5s discovery budget")
 	output := buf.String()
-	assert.Contains(t, output, "claude-sonnet-4-6", "the direct anthropic provider must survive the gateway timeout")
+	assert.Contains(t, output, "claude-sonnet-5", "the direct anthropic provider must survive the gateway timeout")
 	assert.Contains(t, output, catalogOnlyModel, "the in-memory catalog fallback must be read")
 }
 
@@ -815,4 +809,227 @@ func TestModelsListCommand_AliasCredentialsListAliasModels(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 
 	assert.Contains(t, buf.String(), "grok-4", "an alias credential must surface the alias's catalog models without --all")
+}
+
+func TestModelsListCommand_LegacyProviderFilter(t *testing.T) {
+	t.Parallel()
+	for _, legacy := range []string{"fireworks", "together", "moonshot", "opencode-zen"} {
+		t.Run(legacy, func(t *testing.T) {
+			t.Parallel()
+			canonical := modelsdev.CanonicalProviderID(legacy)
+			alias, ok := catalog.Find(canonical)
+			require.True(t, ok)
+			var buf bytes.Buffer
+			cmd := newModelsCmd(func(rc *config.RuntimeConfig) {
+				rc.EnvProviderForTests = environment.NewMapEnvProvider(map[string]string{alias.TokenEnvVars[0]: "test-key"})
+				rc.Providers = map[string]latest.ProviderConfig{}
+				rc.ModelsDevStoreOverride = modelsdev.NewDatabaseStore(&modelsdev.Database{Providers: map[string]modelsdev.Provider{
+					canonical: {Models: map[string]modelsdev.Model{"catalog-only": {Modalities: modelsdev.Modalities{Output: []string{"text"}}}}},
+				}})
+			})
+			cmd.SetOut(&buf)
+			cmd.SetErr(&buf)
+			cmd.SetArgs([]string{"--provider", legacy, "--format", "json"})
+			require.NoError(t, cmd.Execute())
+			var rows []modelRow
+			require.NoError(t, json.Unmarshal(buf.Bytes(), &rows))
+			require.NotEmpty(t, rows)
+			var catalogFound bool
+			for _, row := range rows {
+				assert.Equal(t, canonical, row.Provider)
+				catalogFound = catalogFound || row.Model == "catalog-only"
+			}
+			assert.True(t, catalogFound)
+		})
+	}
+}
+
+func TestModelsListCommand_LegacyNamedCustomProviderFilter(t *testing.T) {
+	t.Parallel()
+	for _, legacy := range []string{"fireworks", "together", "moonshot", "opencode-zen"} {
+		t.Run(legacy, func(t *testing.T) {
+			t.Parallel()
+			for _, name := range []string{legacy, strings.ToUpper(legacy[:1]) + legacy[1:]} {
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					server, _ := newCustomProviderServer(t, []string{"custom-model"})
+					for _, filter := range []string{legacy, strings.ToUpper(legacy[:1]) + legacy[1:], strings.ToUpper(legacy)} {
+						t.Run(filter, func(t *testing.T) {
+							t.Parallel()
+							var buf bytes.Buffer
+							cmd := newModelsCmd(
+								withTestConfig(map[string]string{"MYPROVIDER_API_KEY": "custom-key"}),
+								withProviders(map[string]latest.ProviderConfig{
+									name: {BaseURL: server.URL, TokenKey: "MYPROVIDER_API_KEY"},
+								}),
+							)
+							cmd.SetOut(&buf)
+							cmd.SetErr(&buf)
+							cmd.SetArgs([]string{"--provider", filter, "--format", "json"})
+							require.NoError(t, cmd.Execute())
+							var rows []modelRow
+							require.NoError(t, json.Unmarshal(buf.Bytes(), &rows))
+							require.Len(t, rows, 1)
+							assert.Equal(t, name, rows[0].Provider)
+							assert.Equal(t, "custom-model", rows[0].Model)
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestModelsListCommand_GatewayLegacyProviderFilter(t *testing.T) {
+	t.Parallel()
+	for _, legacy := range []string{"fireworks", "together", "moonshot", "opencode-zen"} {
+		t.Run(legacy, func(t *testing.T) {
+			t.Parallel()
+			canonical := modelsdev.CanonicalProviderID(legacy)
+			for _, servedProvider := range []string{legacy, canonical} {
+				t.Run(servedProvider, func(t *testing.T) {
+					t.Parallel()
+					servedID := servedProvider + "/served-model"
+					gw, _ := newGatewayServer(t, fmt.Sprintf(`{"object":"list","data":[{"id":%q},{"id":"openai/other-model"}]}`, servedID))
+					for _, filter := range []string{legacy, canonical} {
+						t.Run(filter, func(t *testing.T) {
+							t.Parallel()
+							var buf bytes.Buffer
+							cmd := newModelsCmd(
+								withTestConfig(gatewayTestEnv(nil)),
+								withProviders(map[string]latest.ProviderConfig{}),
+								withCatalog(&modelsdev.Database{}),
+							)
+							cmd.SetOut(&buf)
+							cmd.SetErr(&buf)
+							cmd.SetArgs([]string{"--models-gateway", gw.URL, "--provider", filter, "--format", "json"})
+							require.NoError(t, cmd.Execute())
+							var rows []modelRow
+							require.NoError(t, json.Unmarshal(buf.Bytes(), &rows))
+							require.Len(t, rows, 1)
+							assert.Equal(t, servedProvider, rows[0].Provider)
+							assert.Equal(t, "served-model", rows[0].Model)
+							assert.Equal(t, servedID, rows[0].Provider+"/"+rows[0].Model)
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestModelsListCommand_LegacyCustomProviderPrecedence(t *testing.T) {
+	t.Parallel()
+	for _, legacy := range []string{"fireworks", "together", "moonshot", "opencode-zen"} {
+		t.Run(legacy, func(t *testing.T) {
+			t.Parallel()
+			canonical := modelsdev.CanonicalProviderID(legacy)
+			name := strings.ToUpper(legacy[:1]) + legacy[1:]
+			custom, _ := newCustomProviderServer(t, []string{"custom-model"})
+			gw, _ := newGatewayServer(t, fmt.Sprintf(`{"object":"list","data":[{"id":%q},{"id":%q}]}`, canonical+"/gateway-model", legacy+"/legacy-gateway-model"))
+			for _, tt := range []struct {
+				filter string
+				want   []modelRow
+			}{
+				{legacy, []modelRow{{Provider: name, Model: "custom-model"}, {Provider: legacy, Model: "legacy-gateway-model"}}},
+				{canonical, []modelRow{{Provider: canonical, Model: "gateway-model"}}},
+			} {
+				t.Run(tt.filter, func(t *testing.T) {
+					t.Parallel()
+					env := gatewayTestEnv(nil)
+					env["MYPROVIDER_API_KEY"] = "custom-key"
+					var buf bytes.Buffer
+					cmd := newModelsCmd(
+						withTestConfig(env),
+						withCatalog(&modelsdev.Database{}),
+						withProviders(map[string]latest.ProviderConfig{
+							name: {BaseURL: custom.URL, TokenKey: "MYPROVIDER_API_KEY"},
+						}),
+					)
+					cmd.SetOut(&buf)
+					cmd.SetErr(&buf)
+					cmd.SetArgs([]string{"--models-gateway", gw.URL, "--provider", tt.filter, "--format", "json"})
+					require.NoError(t, cmd.Execute())
+					var rows []modelRow
+					require.NoError(t, json.Unmarshal(buf.Bytes(), &rows))
+					assert.Equal(t, tt.want, rows)
+				})
+			}
+		})
+	}
+}
+
+func TestModelsListCommand_CaseDuplicateCustomProviderFilter(t *testing.T) {
+	t.Parallel()
+	upper, _ := newCustomProviderServer(t, []string{"upper-model"})
+	lower, _ := newCustomProviderServer(t, []string{"lower-model"})
+	var buf bytes.Buffer
+	cmd := newModelsCmd(
+		withTestConfig(map[string]string{"MYPROVIDER_API_KEY": "custom-key"}),
+		withProviders(map[string]latest.ProviderConfig{
+			"Fireworks": {BaseURL: upper.URL, TokenKey: "MYPROVIDER_API_KEY"},
+			"fireworks": {BaseURL: lower.URL, TokenKey: "MYPROVIDER_API_KEY"},
+		}),
+	)
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{"--provider", "FiReWoRkS", "--format", "json"})
+	require.NoError(t, cmd.Execute())
+	var rows []modelRow
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &rows))
+	require.Len(t, rows, 2)
+	assert.Equal(t, "Fireworks", rows[0].Provider)
+	assert.Equal(t, "upper-model", rows[0].Model)
+	assert.Equal(t, "fireworks", rows[1].Provider)
+	assert.Equal(t, "lower-model", rows[1].Model)
+}
+
+func TestModelsListCommand_LunarouteLiveDiscovery(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/v1/models", r.URL.Path)
+		assert.Equal(t, "Bearer lr_test", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"glm-live-only"},{"id":"glm-live-only"},{"id":"text-embedding-test"}]}`))
+	}))
+	defer server.Close()
+
+	alias := catalog.Providers["lunaroute"]
+	defer func() { catalog.Providers["lunaroute"] = alias }()
+	localAlias := alias
+	localAlias.BaseURL = server.URL + "/v1"
+	catalog.Providers["lunaroute"] = localAlias
+
+	tests := []struct {
+		name         string
+		env          map[string]string
+		args         []string
+		wantRequests int32
+		wantLive     bool
+	}{
+		{"filtered with key", map[string]string{"LUNAROUTE_API_KEY": "lr_test"}, []string{"--provider", "lunaroute"}, 1, true},
+		{"no key", nil, []string{"--provider", "lunaroute"}, 0, false},
+		{"unfiltered", map[string]string{"LUNAROUTE_API_KEY": "lr_test"}, nil, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requests.Store(0)
+			var buf bytes.Buffer
+			cmd := newModelsCmd(withTestConfig(tt.env))
+			cmd.SetOut(&buf)
+			cmd.SetErr(&buf)
+			cmd.SetArgs(tt.args)
+			require.NoError(t, cmd.Execute())
+			assert.Equal(t, tt.wantRequests, requests.Load())
+			if tt.wantLive {
+				assert.Equal(t, 1, strings.Count(buf.String(), "glm-live-only"))
+				assert.Contains(t, buf.String(), "glm-5.3")
+				assert.NotContains(t, buf.String(), "text-embedding-test")
+			} else {
+				assert.NotContains(t, buf.String(), "glm-live-only")
+			}
+		})
+	}
 }

@@ -56,14 +56,14 @@ func TestHandleApplySettings_AppliesShowBanner(t *testing.T) {
 
 	m := newApplySettingsModel(t)
 	second := &mockChatPage{showBanner: true}
-	m.chatPages["second"] = second
+	m.ensureTab("second").chatPage = second
 
 	prefs := defaultTestPreferences()
 	prefs.ShowBanner = false
 	_, _ = m.handleApplySettings(messages.ApplySettingsMsg{Preferences: prefs})
 
 	assert.False(t, m.showBanner, "the preference is retained for future pages")
-	assert.False(t, m.chatPage.(*mockChatPage).showBanner, "the active page hides the banner")
+	assert.False(t, m.activeTab.chatPage.(*mockChatPage).showBanner, "the active page hides the banner")
 	assert.False(t, second.showBanner, "background pages hide the banner")
 	assert.False(t, userconfig.Get().GetShowBanner(), "the preference is persisted")
 }
@@ -90,7 +90,7 @@ func TestNew_AppliesPersistedShowBannerAtStartup(t *testing.T) {
 	t.Cleanup(m.cleanupManagedResources)
 
 	assert.False(t, m.showBanner)
-	m.chatPage.SetSize(160, 40)
-	assert.NotContains(t, ansi.Strip(m.chatPage.View()), tuibanner.Lines[0],
+	m.activeTab.chatPage.SetSize(160, 40)
+	assert.NotContains(t, ansi.Strip(m.activeTab.chatPage.View()), tuibanner.Lines[0],
 		"the initial page must honor the persisted setting")
 }

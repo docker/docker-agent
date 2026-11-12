@@ -75,9 +75,9 @@ the page is mounted on docs.docker.com.
 
 ## Canonical URLs
 
-Every content page is mounted on docs.docker.com, and this site
-tracks `main` while docs.docker.com is pinned to a release — so the
-stable page is the authoritative copy. Each
+Technical content is mounted on docs.docker.com. This site tracks
+`main` while docs.docker.com is pinned to a release, so the stable
+page is the authoritative copy. Each technical
 `docs/<section>/<page>/index.md` sets `canonical:` in its front
 matter (after `weight:`), derived from its path:
 
@@ -85,13 +85,49 @@ matter (after `weight:`), derived from its path:
 canonical: https://docs.docker.com/ai/docker-agent/<section>/<page>/
 ```
 
-The github.io layout renders it as the page's `rel=canonical` link;
-docs.docker.com ignores the value and self-canonicalizes. CI
-(`docs-lint` / `scripts/docs-check-canonical.sh`) fails when the
-value is missing or doesn't match the page path — mind it when
-scaffolding a new page from an existing one. The homepage, `404.md`
-and section `_index.md` files are not mirrored pages and don't set
-one.
+Community content is authoritative on github.io, not docs.docker.com:
+
+```yaml
+canonical: https://docker.github.io/docker-agent/community/<page>/
+```
+
+The github.io layout renders the value as the page's `rel=canonical`
+link; docs.docker.com ignores it and self-canonicalizes. CI
+(`docs / canonical`, `scripts/docs-check-canonical.sh`) rejects missing,
+duplicate or incorrect values. The homepage, `404.md` and section
+`_index.md` files don't set one.
+
+### Legacy community URLs
+
+Telemetry and OpenTelemetry Tracing live in `configuration/`;
+Troubleshooting lives in `guides/`. Moving a page requires both an
+`aliases:` entry for its old docs.docker.com path on the destination page
+and an old → new path entry in `data/redirects.yml` for github.io.
+`disableAliases: true` is intentional here: those aliases are consumed
+only by docs.docker.com.
+
+`layouts/_partials/redirects.html`, called from the home page, publishes
+redirect files via `resources.FromString`. They are not content pages, so
+they are absent from navigation, llms.txt and page lists. Each emits the
+target page's canonical, `noindex`, a meta refresh and a fallback link;
+JavaScript preserves query strings and fragments. Validate publication
+with both `hugo` and `hugo server` when changing the redirect mechanism.
+
+Link directly to the new Markdown files in authored content. CI runs
+`scripts/docs-check-community-links.sh` to reject stale technical
+`community/` URLs, docs.docker.com community URLs, and relative links
+from outside Community into it. Use the absolute github.io URL when
+linking from technical content to Contributing or Resources. The separate
+exclusion of Community from docker/docs mounts belongs in that repository;
+these source and canonical changes do not change its mounts.
+
+## Navigation
+
+Guides and Community are separate sidebar sections in `data/nav.yml`, not
+subgroups of Resources. Guides contains the practical guides imported on
+docs.docker.com; Community contains Contributing and Community Resources and
+is published only on github.io. Navigation labels do not change content paths
+or module mounts.
 
 ## llms.txt
 
@@ -102,7 +138,7 @@ Every nav entry must resolve to a real page with a non-empty
 `description:` in its front matter (whitespace-only counts as empty)
 — the build fails with an `errorf` naming the offending title/url
 otherwise, since the spec's `- [title](url): note` shape requires a
-note. CI (`docs-lint` / `scripts/docs-check-llms-txt.sh`) additionally
+note. CI (`docs / llms-txt`, `scripts/docs-check-llms-txt.sh`) additionally
 rebuilds the site and asserts the generated `llms.txt` matches
 `nav.yml`'s sections, titles, order, count **and per-entry URL**
 (each rendered link must match the nav url at the same position, not

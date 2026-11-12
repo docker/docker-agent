@@ -2,11 +2,13 @@ package skills
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/docker/docker-agent/pkg/safety"
 	"github.com/docker/docker-agent/pkg/skills"
 	"github.com/docker/docker-agent/pkg/tools"
 )
@@ -16,6 +18,10 @@ const (
 	ToolNameReadSkillFile = "read_skill_file"
 	ToolNameRunSkill      = "run_skill"
 )
+
+// metaSkill names the confirmation metadata key that tells the user
+// which skill an embedded command comes from.
+const metaSkill = "skill"
 
 var (
 	_ tools.ToolSet      = (*ToolSet)(nil)
@@ -60,10 +66,10 @@ func BuildSkillSystemMessage(prepared *PreparedSkillFork, attachedFiles []string
 // block from a SKILL.md payload. Returns the input unchanged if no
 // leading fence or no closing fence is found.
 func stripFrontmatter(content string) string {
-	if !strings.HasPrefix(content, "---") {
+	rest, ok := strings.CutPrefix(content, "---")
+	if !ok {
 		return content
 	}
-	rest := content[3:]
 	_, after, found := strings.Cut(rest, "\n---")
 	if !found {
 		return content
@@ -107,7 +113,8 @@ func (s *ToolSet) Skills() []skills.Skill {
 	return s.skills
 }
 
-func (s *ToolSet) findSkill(name string) *skills.Skill {
+// FindSkill returns the skill with the given name, or nil if not found.
+func (s *ToolSet) FindSkill(name string) *skills.Skill {
 	for i := range s.skills {
 		if s.skills[i].Name == name {
 			return &s.skills[i]
@@ -116,45 +123,70 @@ func (s *ToolSet) findSkill(name string) *skills.Skill {
 	return nil
 }
 
-// FindSkill returns the skill with the given name, or nil if not found.
-func (s *ToolSet) FindSkill(name string) *skills.Skill {
-	return s.findSkill(name)
-}
-
-// ReadSkillContent returns the content of a skill's SKILL.md by name.
-// For local skills, it expands any !`command` patterns in the content by
-// executing the commands and replacing the patterns with their stdout output.
-// Command expansion is disabled for remote and inline skills to prevent
-// arbitrary code execution.
-func (s *ToolSet) ReadSkillContent(ctx context.Context, name string) (string, error) {
-	skill := s.findSkill(name)
+// ReadSkillContent returns the content of a skill's SKILL.md by name, or the
+// body carried in the agent config for an inline skill.
+// For local and inline skills, it expands any !`command` patterns in the
+// content by executing the commands and replacing the patterns with their
+// stdout output. Every command is submitted to rt for approval first: a skill
+// body is data, not agent config, so a command hidden in one must never run
+// unannounced. Command expansion is disabled for remote skills to prevent
+// arbitrary code execution on behalf of a third-party server.
+func (s *ToolSet) ReadSkillContent(ctx context.Context, name string, rt tools.Runtime) (string, error) {
+	skill := s.FindSkill(name)
 	if skill == nil {
 		return "", fmt.Errorf("skill %q not found", name)
 	}
 
-	// Inline skills carry their body in memory; there is no file to read and
-	// no command expansion (their content comes from the trusted agent config
-	// author, but we keep behaviour identical to remote skills for safety).
-	if skill.IsInline() {
-		return skill.InlineContent, nil
+	// Inline skills carry their body in memory; there is no file to read.
+	content := skill.InlineContent
+	if !skill.IsInline() {
+		var err error
+		if content, err = readFileContent(skill.FilePath); err != nil {
+			return "", err
+		}
 	}
 
-	content, err := readFileContent(skill.FilePath)
-	if err != nil {
+	if err := checkContent(ctx, rt, skill, skill.FilePath, content); err != nil {
 		return "", err
 	}
 
-	if skill.Local {
-		content = skills.ExpandCommands(ctx, content, s.workingDir)
+	if !skill.ExpandsCommands() {
+		return content, nil
 	}
 
-	return content, nil
+	if rt == nil {
+		rt = tools.NopRuntime{}
+	}
+	return skills.ExpandCommandsWithError(ctx, content, s.confirmedRunner(rt, skill.Name))
+}
+
+// confirmedRunner returns the [skills.Runner] used to expand a local or inline
+// skill: each embedded command is presented to the user as a shell tool call
+// and only runs once approved.
+func (s *ToolSet) confirmedRunner(rt tools.Runtime, skillName string) skills.Runner {
+	return func(ctx context.Context, command string) (string, error) {
+		return rt.ConfirmAndRun(ctx, tools.ConfirmedRun{
+			ToolName: safety.ShellToolName,
+			Args:     map[string]any{"cmd": command, "cwd": s.workingDir},
+			Metadata: map[string]string{metaSkill: skillName},
+		}, func(ctx context.Context, approved tools.ConfirmedRun) (string, error) {
+			command, ok := safety.CommandArg(approved.Args)
+			if !ok || strings.TrimSpace(command) == "" {
+				return "", errors.New("pre_tool_use hook removed the shell command")
+			}
+			workDir, _ := approved.Args["cwd"].(string)
+			if workDir == "" {
+				workDir = s.workingDir
+			}
+			return skills.ShellRunner(workDir)(ctx, command)
+		})
+	}
 }
 
 // ReadSkillFile returns the content of a supporting file within a skill.
 // The path is relative to the skill's base directory (e.g. "references/FORMS.md").
-func (s *ToolSet) ReadSkillFile(skillName, relativePath string) (string, error) {
-	skill := s.findSkill(skillName)
+func (s *ToolSet) ReadSkillFile(ctx context.Context, skillName, relativePath string, rt tools.Runtime) (string, error) {
+	skill := s.FindSkill(skillName)
 	if skill == nil {
 		return "", fmt.Errorf("skill %q not found", skillName)
 	}
@@ -180,12 +212,39 @@ func (s *ToolSet) ReadSkillFile(skillName, relativePath string) (string, error) 
 		return "", fmt.Errorf("path %q escapes skill directory", relativePath)
 	}
 
-	content, err := readFileContent(absPath)
+	// Anchor the read to the skill directory so symlinks cannot escape it.
+	root, err := os.OpenRoot(skill.BaseDir)
 	if err != nil {
+		return "", fmt.Errorf("reading file: %w", err)
+	}
+	defer root.Close()
+
+	data, err := root.ReadFile(filepath.FromSlash(relativePath))
+	if err != nil {
+		return "", fmt.Errorf("reading file: %w", err)
+	}
+	content := string(data)
+
+	if err := checkContent(ctx, rt, skill, absPath, content); err != nil {
 		return "", err
 	}
-
 	return content, nil
+}
+
+func checkContent(ctx context.Context, rt tools.Runtime, skill *skills.Skill, path, content string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if rt == nil {
+		rt = tools.NopRuntime{}
+	}
+	source := "remote"
+	if skill.IsInline() {
+		source = "inline"
+	} else if skill.Local {
+		source = "local"
+	}
+	return rt.CheckSkillContent(ctx, tools.SkillContent{Name: skill.Name, Source: source, Path: path, Content: content})
 }
 
 func readFileContent(path string) (string, error) {
@@ -215,16 +274,19 @@ type readSkillFileArgs struct {
 	Path      string `json:"path" jsonschema:"The relative path to the file within the skill (e.g. references/FORMS.md)"`
 }
 
-func (s *ToolSet) handleReadSkill(ctx context.Context, args readSkillArgs) (*tools.ToolCallResult, error) {
-	content, err := s.ReadSkillContent(ctx, args.Name)
+func (s *ToolSet) handleReadSkill(ctx context.Context, args readSkillArgs, rt tools.Runtime) (*tools.ToolCallResult, error) {
+	content, err := s.ReadSkillContent(ctx, args.Name, rt)
 	if err != nil {
+		if abortsExpansion(err) {
+			return nil, err
+		}
 		return tools.ResultError(err.Error()), nil
 	}
 	return tools.ResultSuccess(content), nil
 }
 
-func (s *ToolSet) handleReadSkillFile(_ context.Context, args readSkillFileArgs) (*tools.ToolCallResult, error) {
-	content, err := s.ReadSkillFile(args.SkillName, args.Path)
+func (s *ToolSet) handleReadSkillFile(ctx context.Context, args readSkillFileArgs, rt tools.Runtime) (*tools.ToolCallResult, error) {
+	content, err := s.ReadSkillFile(ctx, args.SkillName, args.Path, rt)
 	if err != nil {
 		return tools.ResultError(err.Error()), nil
 	}
@@ -343,25 +405,29 @@ type PreparedSkillFork struct {
 // PrepareForkSubSession validates a run_skill request and loads the expanded
 // skill content. It returns either a populated PreparedSkillFork, or a
 // ToolCallResult describing why the call cannot proceed (skill missing,
-// skill not configured for fork mode, content read failure). The caller is
-// responsible for the runtime-specific orchestration (sub-session creation,
+// skill not configured for fork mode, content read failure). rt gates the
+// commands the skill body embeds — see [ToolSet.ReadSkillContent]. The caller
+// is responsible for the runtime-specific orchestration (sub-session creation,
 // tracing, event forwarding).
-func (s *ToolSet) PrepareForkSubSession(ctx context.Context, args RunSkillArgs) (*PreparedSkillFork, *tools.ToolCallResult) {
-	skill := s.findSkill(args.Name)
+func (s *ToolSet) PrepareForkSubSession(ctx context.Context, args RunSkillArgs, rt tools.Runtime) (*PreparedSkillFork, *tools.ToolCallResult, error) {
+	skill := s.FindSkill(args.Name)
 	if skill == nil {
-		return nil, tools.ResultError(fmt.Sprintf("skill %q not found", args.Name))
+		return nil, tools.ResultError(fmt.Sprintf("skill %q not found", args.Name)), nil
 	}
 
 	if !skill.IsFork() {
 		return nil, tools.ResultError(fmt.Sprintf(
 			"skill %q is not configured for forked execution (set context: fork); use read_skill instead",
 			args.Name,
-		))
+		)), nil
 	}
 
-	content, err := s.ReadSkillContent(ctx, args.Name)
+	content, err := s.ReadSkillContent(ctx, args.Name, rt)
 	if err != nil {
-		return nil, tools.ResultError(fmt.Sprintf("failed to read skill content: %s", err))
+		if abortsExpansion(err) {
+			return nil, nil, err
+		}
+		return nil, tools.ResultError(fmt.Sprintf("failed to read skill content: %s", err)), nil
 	}
 
 	return &PreparedSkillFork{
@@ -371,7 +437,12 @@ func (s *ToolSet) PrepareForkSubSession(ctx context.Context, args RunSkillArgs) 
 		Model:        skill.Model,
 		AllowedTools: skill.AllowedTools,
 		ToolSets:     s.forkToolSets[args.Name],
-	}, nil
+	}, nil, nil
+}
+
+func abortsExpansion(err error) bool {
+	_, abort := errors.AsType[skills.ExpansionAbort](err)
+	return abort || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func (s *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
@@ -386,7 +457,7 @@ func (s *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 			Description:  "Read the content of a skill by name. Use this when a user's request matches an available skill.",
 			Parameters:   tools.MustSchemaFor[readSkillArgs](),
 			OutputSchema: tools.MustSchemaFor[string](),
-			Handler:      tools.NewHandler(s.handleReadSkill),
+			Handler:      tools.NewRuntimeHandler(s.handleReadSkill),
 			Annotations: tools.ToolAnnotations{
 				Title:        "Read Skill",
 				ReadOnlyHint: true,
@@ -402,7 +473,7 @@ func (s *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 			Description:  "Read a supporting file from a skill (e.g. references, scripts, assets). Use when skill instructions reference additional files.",
 			Parameters:   tools.MustSchemaFor[readSkillFileArgs](),
 			OutputSchema: tools.MustSchemaFor[string](),
-			Handler:      tools.NewHandler(s.handleReadSkillFile),
+			Handler:      tools.NewRuntimeHandler(s.handleReadSkillFile),
 			Annotations: tools.ToolAnnotations{
 				Title:        "Read Skill File",
 				ReadOnlyHint: true,
@@ -413,11 +484,12 @@ func (s *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	// Expose run_skill if any skill uses context: fork
 	if s.hasForkSkills() {
 		result = append(result, tools.Tool{
-			Name:         ToolNameRunSkill,
-			Category:     "skills",
-			Description:  "Run a skill in a forked context with its own conversation history. Use this for skills marked with forked mode — never use transfer_task for skills.",
-			Parameters:   tools.MustSchemaFor[RunSkillArgs](),
-			OutputSchema: tools.MustSchemaFor[string](),
+			Name:           ToolNameRunSkill,
+			RuntimeHandler: ToolNameRunSkill,
+			Category:       "skills",
+			Description:    "Run a skill in a forked context with its own conversation history. Use this for skills marked with forked mode — never use transfer_task for skills.",
+			Parameters:     tools.MustSchemaFor[RunSkillArgs](),
+			OutputSchema:   tools.MustSchemaFor[string](),
 			Annotations: tools.ToolAnnotations{
 				Title: "Run Skill",
 			},

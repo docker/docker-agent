@@ -203,7 +203,7 @@ func resolveKeys() {
 // model is the top-level bubbletea model of the board.
 type model struct {
 	app     *board.App
-	refresh chan struct{}
+	refresh <-chan struct{}
 
 	width, height int
 
@@ -261,7 +261,7 @@ type model struct {
 	dragCol    int
 }
 
-func newModel(app *board.App, refresh chan struct{}) *model {
+func newModel(app *board.App, refresh <-chan struct{}) *model {
 	resolveKeys()
 	m := &model{
 		app:     app,

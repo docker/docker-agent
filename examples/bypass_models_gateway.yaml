@@ -18,19 +18,19 @@ models:
   # Routed through the gateway when one is configured.
   gateway-model:
     provider: openai
-    model: gpt-5
+    model: gpt-5.6-sol
 
   # Always talks directly to Anthropic, even when a gateway is configured.
   # Requires ANTHROPIC_API_KEY to be set.
   direct-model:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     bypass_models_gateway: true
 
   # A custom base_url implies the bypass; no flag needed.
   proxied-model:
     provider: openai
-    model: gpt-4o
+    model: gpt-5.6-sol
     base_url: https://proxy.internal.example.com/v1
 
 agents:

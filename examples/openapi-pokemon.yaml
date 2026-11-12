@@ -1,0 +1,13 @@
+agents:
+  root:
+    model: openai/gpt-4.1-mini
+    description: Pokédex lookup with complete API responses
+    instruction: |
+      Look up species using pokemon_retrieve with id set to their name.
+      Report types and sum the six stats[].base_stat values.
+      Use returned facts, not remembered values.
+    toolsets:
+      - type: openapi
+        url: https://raw.githubusercontent.com/PokeAPI/pokeapi/master/openapi.yml
+        tools: [pokemon_retrieve]
+        max_output_bytes: 0

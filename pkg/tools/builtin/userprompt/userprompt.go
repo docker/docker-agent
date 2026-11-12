@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/userprompt/types"
 )
 
-const ToolNameUserPrompt = "user_prompt"
+const ToolNameUserPrompt = types.ToolNameUserPrompt
 
 // CreateToolSet is used by the tools registry.
 func CreateToolSet() (tools.ToolSet, error) {
@@ -24,6 +26,7 @@ func New() *ToolSet {
 }
 
 type ToolSet struct {
+	mu                 sync.RWMutex
 	elicitationHandler tools.ElicitationHandler
 }
 
@@ -39,6 +42,8 @@ type Response struct {
 }
 
 func (t *ToolSet) SetElicitationHandler(elicitationHandler tools.ElicitationHandler) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.elicitationHandler = elicitationHandler
 }
 
@@ -72,7 +77,10 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 }
 
 func (t *ToolSet) userPrompt(ctx context.Context, params Args) (*tools.ToolCallResult, error) {
-	if t.elicitationHandler == nil {
+	t.mu.RLock()
+	handler := t.elicitationHandler
+	t.mu.RUnlock()
+	if handler == nil {
 		return tools.ResultError("user_prompt tool is not available in this context (no elicitation handler configured)"), nil
 	}
 
@@ -95,7 +103,7 @@ func (t *ToolSet) userPrompt(ctx context.Context, params Args) (*tools.ToolCallR
 		Meta:            meta,
 	}
 
-	result, err := t.elicitationHandler(ctx, req)
+	result, err := handler(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("elicitation request failed: %w", err)
 	}

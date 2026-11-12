@@ -19,6 +19,10 @@ import (
 	"time"
 )
 
+// ErrInvalidFunctionCall indicates a model failed to produce a valid tool call.
+// Its diagnostic text must not be classified as a transport or context error.
+var ErrInvalidFunctionCall = errors.New("model produced an invalid function call")
+
 // StatusError wraps an HTTP API error with structured metadata for retry decisions.
 // Providers wrap SDK errors in this type so the retry loop can use errors.As
 // to extract status code and Retry-After without importing provider-specific SDKs.
@@ -140,19 +144,20 @@ func (e *ContextOverflowError) Unwrap() error {
 // is heuristics derived from observed errors. Adding a provider only requires
 // appending a phrase.
 var tokenOverflowPatterns = []string{
-	"prompt is too long",                // Anthropic, Vertex (with Anthropic body)
-	"prompt too long",                   // Ollama ("prompt too long; exceeded ...")
-	"maximum context length",            // OpenAI, OpenRouter, DeepSeek, vLLM
-	"context length exceeded",           // OpenAI legacy
-	"context_length_exceeded",           // OpenAI structured code
-	"input is too long",                 // Bedrock
-	"input token count",                 // Gemini ("...exceeds the maximum")
-	"exceeds the context window",        // OpenAI Responses API
-	"reduce the length of the messages", // Groq
-	"exceeded model token limit",        // Kimi, Moonshot
-	"context window exceeds limit",      // MiniMax
-	"model_context_window_exceeded",     // z.ai
-	"max_tokens must be greater than",   // Anthropic edge case: thinking-budget cascade
+	"prompt is too long",                 // Anthropic, Vertex (with Anthropic body)
+	"prompt too long",                    // Ollama ("prompt too long; exceeded ...")
+	"maximum context length",             // OpenAI, OpenRouter, DeepSeek, vLLM
+	"context length exceeded",            // OpenAI legacy
+	"context_length_exceeded",            // OpenAI structured code
+	"input is too long",                  // Bedrock
+	"input token count",                  // Gemini ("...exceeds the maximum")
+	"exceeds the context window",         // OpenAI Responses API
+	"reduce the length of the messages",  // Groq
+	"exceeded model token limit",         // Kimi, Moonshot
+	"context window exceeds limit",       // MiniMax
+	"model_context_window_exceeded",      // z.ai
+	"exceeds the available context size", // llama.cpp server (Docker Model Runner)
+	"max_tokens must be greater than",    // Anthropic edge case: thinking-budget cascade
 	"maximum number of tokens",
 	"content length exceeds",
 	"exceeds the model's max token",
@@ -224,6 +229,7 @@ func OverflowKindOf(err error) OverflowKind {
 //	Tier 1 — structured signals (high confidence):
 //	  * body.error.type == "request_too_large"     → OverflowKindWire
 //	  * body.error.code == "context_length_exceeded" → OverflowKindTokens
+//	  * body.error.type == "exceed_context_size_error" → OverflowKindTokens (llama.cpp)
 //	  * HTTP status 413                            → OverflowKindWire
 //
 //	Tier 2 — substring patterns (best-effort fallback):
@@ -236,7 +242,7 @@ func OverflowKindOf(err error) OverflowKind {
 // ("request too large") textually overlap with token-overflow phrasing in a
 // way that benefits from the wire match coming first.
 func classifyOverflow(err error) OverflowKind {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return ""
 	}
 	// Already-wrapped errors carry their Kind; respect it.
@@ -254,6 +260,11 @@ func classifyOverflow(err error) OverflowKind {
 				return OverflowKindWire
 			}
 			if code := scalarString(parsed.Error.Code); code == "context_length_exceeded" {
+				return OverflowKindTokens
+			}
+			// llama.cpp server (and Docker Model Runner on top of it) reports
+			// an over-long prompt with its own type and a numeric code.
+			if parsed.Error.Type == "exceed_context_size_error" {
 				return OverflowKindTokens
 			}
 		}
@@ -296,13 +307,12 @@ var statusCodeRegex = regexp.MustCompile(`\b([45]\d{2})\b`)
 // (e.g., "429 Too Many Requests", "500 Internal Server Error").
 // Returns 0 if no status code found.
 func extractHTTPStatusCode(err error) int {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return 0
 	}
 
 	// Check for *StatusError first (preferred structured path).
-	var statusErr *StatusError
-	if errors.As(err, &statusErr) {
+	if statusErr, ok := errors.AsType[*StatusError](err); ok {
 		return statusErr.StatusCode
 	}
 
@@ -426,7 +436,7 @@ var streamTruncationPatterns = []string{
 // request down (e.g. the idle-timeout cancel or a user Ctrl+C), not an upstream
 // drop, and must stay non-retryable.
 func IsStreamTruncationError(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -476,7 +486,7 @@ var nonRetryablePatterns = []string{
 // The key distinction is: 429 means "you're calling too fast, slow down" which
 // suggests we should try a different model, not keep hammering the same one.
 func isRetryableModelError(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return false
 	}
 
@@ -579,7 +589,7 @@ func parseRetryAfterHeader(value string) time.Duration {
 // deciding whether to retry (when no fallback is configured) or skip to the next
 // model (when fallbacks are available).
 func ClassifyModelError(err error) (retryable, rateLimited bool, retryAfter time.Duration) {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrInvalidFunctionCall) {
 		return false, false, 0
 	}
 
@@ -595,8 +605,7 @@ func ClassifyModelError(err error) (retryable, rateLimited bool, retryAfter time
 	}
 
 	// Primary path: typed StatusError wrapped by provider adapters.
-	var statusErr *StatusError
-	if errors.As(err, &statusErr) {
+	if statusErr, ok := errors.AsType[*StatusError](err); ok {
 		if statusErr.StatusCode == http.StatusTooManyRequests {
 			return false, true, statusErr.RetryAfter
 		}
@@ -780,4 +789,19 @@ func scalarString(v any) string {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+// RetryableHTTPStatus reports whether err contains an HTTP status that warrants
+// backoff (429 rate-limit, 408 request-timeout, or a 5xx server error). It
+// checks for a *StatusError in the chain first; if none is found it falls back
+// to matching \b([45]\d{2})\b in the error message, which can produce false
+// positives for port numbers or similar numeric patterns. Callers that need
+// strict StatusError-only classification should pre-filter with errors.As.
+// No context-error handling is performed.
+func RetryableHTTPStatus(err error) bool {
+	code := extractHTTPStatusCode(err)
+	if code == 0 {
+		return false
+	}
+	return code == http.StatusTooManyRequests || isRetryableStatusCode(code)
 }

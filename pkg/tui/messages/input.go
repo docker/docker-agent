@@ -14,9 +14,6 @@ type (
 	// StopSpeakMsg stops speech-to-text transcription.
 	StopSpeakMsg struct{}
 
-	// SpeakTranscriptMsg contains transcription delta from speech-to-text.
-	SpeakTranscriptMsg struct{ Delta string }
-
 	// StartShellMsg starts an interactive shell.
 	StartShellMsg struct{}
 

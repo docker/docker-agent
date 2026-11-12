@@ -13,7 +13,7 @@ type (
 	// ShowMCPPromptInputMsg shows input dialog for MCP prompt.
 	ShowMCPPromptInputMsg struct {
 		PromptName string
-		PromptInfo any // mcptools.PromptInfo but avoiding import cycles
+		PromptInfo any // tools.PromptInfo
 	}
 
 	// ElicitationResponseMsg contains response to an elicitation request.

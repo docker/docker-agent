@@ -102,9 +102,6 @@ func NewSemanticEmbeddingsFromConfig(ctx context.Context, cfg latest.RAGStrategy
 	// Get optional parameters with defaults
 	similarityMetric := GetParam(cfg.Params, "similarity_metric", "cosine_similarity")
 	threshold := GetParam(cfg.Params, "threshold", 0.5)
-	if thresholdPtr := GetParamPtr[float64](cfg.Params, "threshold"); thresholdPtr != nil {
-		threshold = *thresholdPtr
-	}
 
 	batchSize := GetParam(cfg.Params, "embedding_batch_size", 50)
 	maxConcurrency := GetParam(cfg.Params, "max_embedding_concurrency", 3)
@@ -179,7 +176,8 @@ func NewSemanticEmbeddingsFromConfig(ctx context.Context, cfg latest.RAGStrategy
 
 	// Configure the embedding input builder to use the chat LLM
 	store.SetEmbeddingInputBuilder(newLLMSemanticEmbeddingBuilder(
-		chatProvider, js.NewJsExpander(buildCtx.Env), semanticPrompt, usageTracker, useASTContext))
+		chatProvider, js.NewJsExpander(buildCtx.Env), semanticPrompt, usageTracker, useASTContext,
+	))
 
 	return &Config{
 		Name:      strategyName,
@@ -518,10 +516,11 @@ func calculateSemanticUsageCost(ctx context.Context, modelsStore modelStore, id 
 		return 0
 	}
 
-	inputCost := float64(usage.InputTokens) * model.Cost.Input
-	outputCost := float64(usage.OutputTokens+usage.ReasoningTokens) * model.Cost.Output
-	cacheReadCost := float64(usage.CachedInputTokens) * model.Cost.CacheRead
-	cacheWriteCost := float64(usage.CacheWriteTokens) * model.Cost.CacheWrite
+	rates := model.Cost.RatesFor(usage.PromptTokens())
+	inputCost := float64(usage.InputTokens) * rates.Input
+	outputCost := float64(usage.OutputTokens+usage.ReasoningTokens) * rates.Output
+	cacheReadCost := float64(usage.CachedInputTokens) * rates.CacheRead
+	cacheWriteCost := float64(usage.CacheWriteTokens) * rates.CacheWrite
 
 	return (inputCost + outputCost + cacheReadCost + cacheWriteCost) / 1e6
 }

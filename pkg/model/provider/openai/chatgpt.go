@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"uuid"
 
-	"github.com/google/uuid"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
@@ -63,7 +63,7 @@ func chatgptTokenSource(env environment.Provider, tokenKey string) func(context.
 // expiry. Headers already set by the user (provider_opts.http_headers) win,
 // except Authorization, which must always carry a fresh token.
 func chatgptAuthMiddleware(tokenSource func(context.Context) (string, error)) option.Middleware {
-	sessionID := uuid.NewString()
+	sessionID := uuid.NewV4().String()
 
 	// The account id lives in the JWT and only changes when the token does,
 	// so memoize the parse instead of decoding on every request.

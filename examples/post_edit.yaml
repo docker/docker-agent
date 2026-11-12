@@ -7,4 +7,4 @@ agents:
       - type: filesystem
         post_edit:
           - path: "*.go"
-            cmd: "gofmt -w $path"
+            cmd: 'gofmt -w "${file}"'

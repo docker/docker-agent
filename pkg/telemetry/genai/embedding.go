@@ -2,6 +2,7 @@ package genai
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -157,7 +158,7 @@ func (s *EmbeddingSpan) End() {
 	if s.model != "" {
 		commonAttrs = append(commonAttrs, attribute.String(AttrRequestModel, s.model))
 	}
-	durationAttrs := append([]attribute.KeyValue(nil), commonAttrs...)
+	durationAttrs := slices.Clone(commonAttrs)
 	if errType != "" {
 		durationAttrs = append(durationAttrs, attribute.String("error.type", errType))
 	}
@@ -167,7 +168,7 @@ func (s *EmbeddingSpan) End() {
 		)
 	}
 	if inputTokens > 0 && insts.clientTokenUsage != nil {
-		tokenAttrs := append([]attribute.KeyValue(nil), commonAttrs...)
+		tokenAttrs := slices.Clone(commonAttrs)
 		tokenAttrs = append(tokenAttrs, attribute.String(AttrTokenType, TokenTypeInput))
 		insts.clientTokenUsage.Record(s.metricCtx, inputTokens,
 			metric.WithAttributes(tokenAttrs...),

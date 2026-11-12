@@ -305,6 +305,10 @@ func collectAgentCosts(sess *session.Session, costs map[string]float64) {
 				continue
 			}
 			costs[msg.AgentName] += msg.Message.Cost
+		case item.Evaluation != nil:
+			if e := item.Evaluation; e.AgentName != "" && e.Cost != nil {
+				costs[e.AgentName] += *e.Cost
+			}
 		case item.IsSubSession():
 			collectAgentCosts(item.SubSession, costs)
 		}

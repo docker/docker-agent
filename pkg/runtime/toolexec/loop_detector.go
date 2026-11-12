@@ -2,7 +2,6 @@ package toolexec
 
 import (
 	"encoding/json"
-	"maps"
 	"slices"
 	"strings"
 
@@ -50,8 +49,9 @@ func (d *LoopDetector) Reset() {
 // Record updates the detector with the latest tool call batch and returns
 // true if the consecutive-duplicate threshold has been reached.
 // Batches composed entirely of exempt (polling) tools are silently
-// skipped so that expected polling patterns are not flagged.
-func (d *LoopDetector) Record(calls []tools.ToolCall) bool {
+// skipped so that expected polling patterns are not flagged. exemptCallIDs
+// additionally exempts successful calls whose resolved tool permits repetition.
+func (d *LoopDetector) Record(calls []tools.ToolCall, exemptCallIDs ...string) bool {
 	if len(calls) == 0 {
 		return false
 	}
@@ -61,7 +61,7 @@ func (d *LoopDetector) Record(calls []tools.ToolCall) bool {
 	// are completely invisible to the detector: they neither increment the
 	// consecutive counter nor reset it, so a looping model cannot evade
 	// detection by interleaving a single polling call.
-	if d.isExemptBatch(calls) {
+	if d.isExemptBatch(calls, exemptCallIDs) {
 		return false
 	}
 
@@ -77,13 +77,11 @@ func (d *LoopDetector) Record(calls []tools.ToolCall) bool {
 }
 
 // isExemptBatch returns true when every call in the batch targets a
-// polling-exempt tool.
-func (d *LoopDetector) isExemptBatch(calls []tools.ToolCall) bool {
-	if len(d.exemptTools) == 0 {
-		return false
-	}
+// polling-exempt tool or an explicitly exempt call ID.
+func (d *LoopDetector) isExemptBatch(calls []tools.ToolCall, exemptCallIDs []string) bool {
 	for _, c := range calls {
-		if _, ok := d.exemptTools[c.Function.Name]; !ok {
+		_, polling := d.exemptTools[c.Function.Name]
+		if !polling && !slices.Contains(exemptCallIDs, c.ID) {
 			return false
 		}
 	}
@@ -117,29 +115,9 @@ func canonicalJSON(s string) string {
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
 		return s
 	}
-	normalized := sortKeys(v)
-	out, err := json.Marshal(normalized)
+	out, err := json.Marshal(v)
 	if err != nil {
 		return s
 	}
 	return string(out)
-}
-
-// sortKeys recursively sorts map keys so json.Marshal produces deterministic output.
-func sortKeys(v any) any {
-	switch val := v.(type) {
-	case map[string]any:
-		sorted := make(map[string]any, len(val))
-		for _, k := range slices.Sorted(maps.Keys(val)) {
-			sorted[k] = sortKeys(val[k])
-		}
-		return sorted
-	case []any:
-		for i, item := range val {
-			val[i] = sortKeys(item)
-		}
-		return val
-	default:
-		return v
-	}
 }

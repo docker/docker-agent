@@ -115,7 +115,7 @@ func searchRepositories(_ context.Context, _ *gomcp.CallToolRequest, in searchIn
 // startMCPServer mounts an in-process MCP server on a local HTTP test server and
 // returns it; the caller connects to its URL and closes it when done.
 func startMCPServer() *httptest.Server {
-	server := gomcp.NewServer(&gomcp.Implementation{Name: "repo-demo", Version: "0.1.0"}, nil)
+	server := gomcp.NewServer(&gomcp.Implementation{Name: "repo-demo", Version: "0.1.0"}, &gomcp.ServerOptions{Capabilities: &gomcp.ServerCapabilities{}})
 	gomcp.AddTool(server, &gomcp.Tool{
 		Name:         "search_repositories",
 		Description:  "Search GitHub-like repositories by keyword. Returns name, stars, and description.",
@@ -141,7 +141,7 @@ func run(ctx context.Context) error {
 
 	// Attach the in-process MCP server as a remote toolset named "github". Its
 	// "search_repositories" tool is therefore exposed as "github_search_repositories".
-	githubTools := mcptools.NewRemoteToolset("github", mcpHTTP.URL, "streamable", nil, nil)
+	githubTools := mcptools.NewRemoteToolsetWithAllowPrivateIPs("github", mcpHTTP.URL, "streamable", nil, nil, true)
 
 	llm, err := gemini.NewClient(ctx, &latest.ModelConfig{
 		Provider: "google",

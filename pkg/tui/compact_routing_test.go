@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/effort"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/sessiontitle"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -80,14 +81,14 @@ func (stubRuntime) CycleAgentThinkingLevel(context.Context, string) (effort.Leve
 func (stubRuntime) SetAgentThinkingLevel(context.Context, string, effort.Level) (effort.Level, error) {
 	return "", runtime.ErrUnsupported
 }
-func (stubRuntime) AvailableModels(context.Context) []runtime.ModelChoice { return nil }
-func (stubRuntime) SupportsModelSwitching() bool                          { return false }
-func (stubRuntime) OnToolsChanged(func(runtime.Event))                    {}
-func (stubRuntime) OnBackgroundEvent(func(runtime.Event))                 {}
-func (stubRuntime) OnElicitationRequest(func(runtime.Event))              {}
-func (stubRuntime) QueueStatus() runtime.QueueStatus                      { return runtime.QueueStatus{} }
-func (stubRuntime) TogglePause(context.Context) (bool, error)             { return false, nil }
-func (stubRuntime) Close() error                                          { return nil }
+func (stubRuntime) AvailableModels(context.Context) []modelcatalog.ModelChoice { return nil }
+func (stubRuntime) SupportsModelSwitching() bool                               { return false }
+func (stubRuntime) OnToolsChanged(func(runtime.Event))                         {}
+func (stubRuntime) OnBackgroundEvent(func(runtime.Event))                      {}
+func (stubRuntime) OnElicitationRequest(func(runtime.Event))                   {}
+func (stubRuntime) QueueStatus() runtime.QueueStatus                           { return runtime.QueueStatus{} }
+func (stubRuntime) TogglePause(context.Context) (bool, error)                  { return false, nil }
+func (stubRuntime) Close() error                                               { return nil }
 
 var _ runtime.Runtime = stubRuntime{}
 
@@ -112,7 +113,7 @@ func newCompactTestModel(t *testing.T, rt runtime.Runtime, sess *session.Session
 	t.Helper()
 	m, _ := newTestModel(t)
 	m.application = app.New(t.Context(), rt, sess)
-	page := m.chatPage.(*mockChatPage)
+	page := m.activeTab.chatPage.(*mockChatPage)
 	return m, page
 }
 
@@ -196,4 +197,8 @@ func TestHandleCompactSession_UnsupportedRuntimeNotifies(t *testing.T) {
 	require.True(t, ok, "expected a notification, got %T", msgs[0])
 	assert.Equal(t, notification.TypeError, note.Type)
 	assert.Contains(t, note.Text, "not supported")
+}
+
+func (stubRuntime) ReadSkillContent(context.Context, *session.Session, string) (string, error) {
+	return "", nil
 }

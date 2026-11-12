@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,7 +18,9 @@ import (
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/httpsec"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/servesafety"
 	"github.com/docker/docker-agent/pkg/session"
@@ -40,6 +43,7 @@ type ToolOutput struct {
 type HTTPOptions struct {
 	CLISafety      session.SafetyPolicy
 	AuthToken      string
+	Out            io.Writer
 	OnSafetyPolicy func(servesafety.Resolved)
 }
 
@@ -63,9 +67,16 @@ func StartMCPServer(ctx context.Context, agentFilename, agentName string, runCon
 
 // StartHTTPServer starts a streaming HTTP MCP server on the given listener
 func StartHTTPServer(ctx context.Context, agentFilename, agentName string, runConfig *config.RuntimeConfig, ln net.Listener, options HTTPOptions) error {
+	// Fail fast, before any config or team loading: the stateless HTTP
+	// transport (MCP 2026-07-28) rejects server-initiated requests such as
+	// ping, so keep-alive can never work here.
+	if runConfig.MCPKeepAlive != 0 {
+		return errors.New("MCP keep-alive is not supported over stateless HTTP; use the stdio transport instead")
+	}
+
 	slog.DebugContext(ctx, "Starting HTTP MCP server", "agent", agentFilename, "addr", ln.Addr())
 
-	agentSource, err := config.Resolve(agentFilename, nil)
+	agentSource, err := sources.Resolve(agentFilename, nil)
 	if err != nil {
 		return err
 	}
@@ -96,11 +107,11 @@ func StartHTTPServer(ctx context.Context, agentFilename, agentName string, runCo
 		return err
 	}
 
-	fmt.Printf("MCP HTTP server listening on http://%s\n", ln.Addr())
+	if options.Out != nil {
+		fmt.Fprintf(options.Out, "MCP HTTP server listening on http://%s\n", ln.Addr())
+	}
 
-	handler := http.Handler(mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server {
-		return server
-	}, nil))
+	handler := newStreamableHTTPHandler(server)
 	if options.AuthToken != "" {
 		handler = httpsec.BearerAuth(options.AuthToken)(handler)
 	}
@@ -135,8 +146,18 @@ func StartHTTPServer(ctx context.Context, agentFilename, agentName string, runCo
 	}
 }
 
+// newStreamableHTTPHandler builds the streamable HTTP handler used in
+// production. Stateless mode implements the sessionless MCP 2026-07-28
+// transport: no Mcp-Session-Id header, GET/DELETE rejected with 405, and
+// request-local state synthesized for legacy initialize-based clients.
+func newStreamableHTTPHandler(server *mcp.Server) http.Handler {
+	return mcp.NewStreamableHTTPHandler(func(_ *http.Request) *mcp.Server {
+		return server
+	}, &mcp.StreamableHTTPOptions{Stateless: true})
+}
+
 func createMCPServer(ctx context.Context, agentFilename, agentName string, runConfig *config.RuntimeConfig) (*mcp.Server, func(), error) {
-	agentSource, err := config.Resolve(agentFilename, nil)
+	agentSource, err := sources.Resolve(agentFilename, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -161,12 +182,17 @@ func createMCPServer(ctx context.Context, agentFilename, agentName string, runCo
 }
 
 func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, agentName string, runConfig *config.RuntimeConfig, safety session.SafetyPolicy) (*mcp.Server, error) {
-	// The SDK only starts keep-alive when KeepAlive > 0.
+	// The SDK only starts keep-alive when KeepAlive > 0. StartHTTPServer (and
+	// the CLI, for early UX) rejects a nonzero keep-alive, so this only ever
+	// takes effect for stdio: the stateless HTTP transport (MCP 2026-07-28)
+	// rejects server-initiated requests such as ping.
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    "docker agent",
 		Version: version.Version,
 	}, &mcp.ServerOptions{
 		KeepAlive: runConfig.MCPKeepAlive,
+		// Override the SDK default that advertises deprecated MCP logging.
+		Capabilities: &mcp.ServerCapabilities{},
 	})
 
 	agentNames := t.AgentNames()
@@ -179,6 +205,11 @@ func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, ag
 
 	if runConfig.MCPToolName != "" && len(agentNames) > 1 {
 		return nil, errors.New("--tool-name can only be used when exactly one agent is exposed")
+	}
+
+	workingDir, err := session.CaptureLocalWorkingDir(runConfig.WorkingDir)
+	if err != nil {
+		return nil, err
 	}
 
 	slog.DebugContext(ctx, "Adding MCP tools for agents", "count", len(agentNames))
@@ -208,17 +239,17 @@ func createMCPServerForTeam(ctx context.Context, t *team.Team, agentFilename, ag
 			OutputSchema: tools.MustSchemaFor[ToolOutput](),
 		}
 
-		mcp.AddTool(server, toolDef, createToolHandler(t, agentName, safety))
+		mcp.AddTool(server, toolDef, createToolHandler(t, agentName, safety, workingDir))
 	}
 
 	return server, nil
 }
 
-func CreateToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
-	return createToolHandler(t, agentName, safety)
+func CreateToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
+	return createToolHandler(t, agentName, safety, workingDir)
 }
 
-func createToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
+func createToolHandler(t *team.Team, agentName string, safety session.SafetyPolicy, workingDir string) func(context.Context, *mcp.CallToolRequest, ToolInput) (*mcp.CallToolResult, ToolOutput, error) {
 	return func(ctx context.Context, req *mcp.CallToolRequest, input ToolInput) (result *mcp.CallToolResult, output ToolOutput, err error) {
 		// Extract W3C trace context from `params._meta` (per the OTel
 		// MCP semconv) so the SERVER span chains onto the calling
@@ -245,20 +276,11 @@ func createToolHandler(t *team.Team, agentName string, safety session.SafetyPoli
 			return nil, ToolOutput{}, fmt.Errorf("failed to get agent: %w", err)
 		}
 
-		sessionOptions := []session.Opt{
-			session.WithTitle("MCP tool call"),
-			session.WithMaxIterations(ag.MaxIterations()),
-			session.WithMaxConsecutiveToolCalls(ag.MaxConsecutiveToolCalls()),
-			session.WithMaxOldToolCallTokens(ag.MaxOldToolCallTokens()),
-			session.WithMaxToolResultTokens(ag.MaxToolResultTokens()),
-			session.WithUserMessage(input.Message),
-			session.WithNonInteractive(true),
-			session.WithSafetyPolicy(safety),
-		}
-		sess := session.New(sessionOptions...)
+		sess := newToolCallSession(ag, input.Message, safety, workingDir)
 
 		rt, err := runtime.New(ctx, t,
 			runtime.WithCurrentAgent(agentName),
+			runtime.WithModelsDevFallback(embedded.Snapshot),
 			runtime.WithNonInteractive(true),
 			// See pkg/a2a/adapter.go for rationale — without this
 			// the runtime's startSpan is a no-op when cagent runs as
@@ -332,6 +354,21 @@ func agentToolAnnotations(ctx context.Context, ag *agent.Agent) (*mcp.ToolAnnota
 	}
 
 	return annotations, nil
+}
+
+func newToolCallSession(ag *agent.Agent, message string, safety session.SafetyPolicy, workingDir string) *session.Session {
+	return session.New(
+		session.WithTitle("MCP tool call"),
+		session.WithMaxIterations(ag.MaxIterations()),
+		session.WithMaxConsecutiveToolCalls(ag.MaxConsecutiveToolCalls()),
+		session.WithMaxOldToolCallTokens(ag.MaxOldToolCallTokens()),
+		session.WithMaxToolResultTokens(ag.MaxToolResultTokens()),
+		session.WithUserMessage(message),
+		session.WithToolsApproved(true),
+		session.WithNonInteractive(true),
+		session.WithSafetyPolicy(safety),
+		session.WithWorkingDir(workingDir),
+	)
 }
 
 // optionalBool returns the value of p, or fallback when p is nil.

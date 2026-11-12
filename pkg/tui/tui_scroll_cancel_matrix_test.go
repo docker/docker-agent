@@ -13,7 +13,7 @@ import (
 )
 
 func TestActualProgramScrollCancelResizeMatrixNeverNeedsRecoveryClick(t *testing.T) {
-	root, _, _ := wallClockRoot(t, 120, 40)
+	root, _, _ := frozenClockRoot(t, 120, 40)
 	_, _ = root.Update(messages.RoutedMsg{SessionID: "profile", Inner: agentruntime.StreamStarted("profile", "root")})
 	_, _ = root.Update(messages.RoutedMsg{SessionID: "profile", Inner: agentruntime.AgentChoiceReasoning("root", "profile", "thinking prefix λ界\n\n")})
 	chunk := "matrix marker **bold** `code` λ界 [link](https://example.com)\n\n"
@@ -22,10 +22,7 @@ func TestActualProgramScrollCancelResizeMatrixNeverNeedsRecoveryClick(t *testing
 		_ = root.View()
 	}
 	model := &streamingMotionModel{root: root, ready: make(chan struct{})}
-	program := tea.NewProgram(model, tea.WithInput(nil), tea.WithOutput(&wallClockCountingWriter{}), tea.WithWindowSize(120, 40))
-	done := make(chan error, 1)
-	go func() { _, err := program.Run(); done <- err }()
-	<-model.ready
+	program := startStreamingMotionProgram(t, model, tea.WithOutput(&wallClockCountingWriter{}))
 	sequence := []tea.Msg{
 		messages.WheelCoalescedMsg{Delta: -1_000_000, X: 40, Y: 20},
 		tea.MouseMotionMsg{X: 40, Y: 20},
@@ -47,7 +44,4 @@ func TestActualProgramScrollCancelResizeMatrixNeverNeedsRecoveryClick(t *testing
 		require.Equal(t, ansi.Strip(current), ansi.Strip(programFrame(t, program)), "inert click repaired viewport after %T", msg)
 	}
 	require.Contains(t, ansi.Strip(programFrame(t, program)), "matrix marker", "bottom viewport retains current stream content")
-	program.Quit()
-	require.NoError(t, <-done)
-	root.ar.Stop()
 }

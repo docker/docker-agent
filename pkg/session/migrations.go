@@ -8,8 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/docker/docker-agent/pkg/version"
 )
@@ -104,7 +103,8 @@ func (m *MigrationManager) checkForUnknownMigrations(ctx context.Context) error 
 			"%w: you are running docker-agent %s which supports migrations up to %d, "+
 				"but the session database has migration %d from a newer version; "+
 				"please upgrade docker-agent to the latest version",
-			ErrNewerDatabase, version.Version, maxKnownID, maxAppliedID)
+			ErrNewerDatabase, version.Version, maxKnownID, maxAppliedID,
+		)
 	}
 
 	return nil
@@ -444,6 +444,62 @@ func getAllMigrations() []Migration {
 			UpSQL:       `ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'run'`,
 			DownSQL:     `ALTER TABLE sessions DROP COLUMN origin`,
 		},
+		{
+			ID:          28,
+			Name:        "028_add_generated_media_manifest_table",
+			Description: "Record which workspace files generated-media materialization wrote, keyed by owning session and workspace-relative path",
+			// No foreign key to sessions(id): materialization may record a file
+			// before the (lazily persisted) session row exists. DeleteSession
+			// prunes manifest rows explicitly instead.
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS generated_media_manifest (
+					session_id TEXT NOT NULL,
+					rel_path TEXT NOT NULL,
+					mime_type TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					PRIMARY KEY (session_id, rel_path)
+				)
+			`,
+			DownSQL: `DROP TABLE IF EXISTS generated_media_manifest`,
+		},
+		{
+			ID:          29,
+			Name:        "029_add_generated_media_blob_table",
+			Description: "Store generated-media bytes in the session database for portable session rendering",
+			UpSQL: `
+				CREATE TABLE IF NOT EXISTS generated_media_blobs (
+					session_id TEXT NOT NULL,
+					rel_path TEXT NOT NULL,
+					data BLOB NOT NULL,
+					PRIMARY KEY (session_id, rel_path)
+				)
+			`,
+			DownSQL: `DROP TABLE IF EXISTS generated_media_blobs`,
+		},
+		{
+			ID:          30,
+			Name:        "030_add_root_kind_to_generated_media_manifest",
+			Description: "Add root_kind to generated_media_manifest so user-confirmed out-of-workspace generated files stay manifest-gated alongside workspace-relative ones",
+			UpSQL:       `ALTER TABLE generated_media_manifest ADD COLUMN root_kind TEXT NOT NULL DEFAULT 'workspace'`,
+		},
+		{
+			ID:          31,
+			Name:        "031_add_think_scratchpad",
+			Description: "Retain conversation-scoped think scratchpads under their root session",
+			UpSQL: `
+				CREATE TABLE think_scratchpad (
+					root_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+					session_id TEXT NOT NULL,
+					agent_name TEXT NOT NULL,
+					toolset_key TEXT NOT NULL,
+					seq INTEGER NOT NULL,
+					thought TEXT NOT NULL,
+					PRIMARY KEY (session_id, agent_name, toolset_key, seq)
+				);
+				CREATE INDEX idx_think_scratchpad_root ON think_scratchpad(root_id);
+			`,
+			DownSQL: `DROP TABLE think_scratchpad`,
+		},
 	}
 }
 
@@ -543,7 +599,7 @@ func migrateItem(ctx context.Context, db *sql.DB, sessionID string, position int
 		// Create sub-session and link to parent
 		subSessionID := item.SubSession.ID
 		if subSessionID == "" {
-			subSessionID = uuid.New().String()
+			subSessionID = uuid.NewV4().String()
 		}
 
 		// Check if sub-session already exists

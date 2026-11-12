@@ -154,3 +154,25 @@ func TestInstructionContextPersistsInSQLite(t *testing.T) {
 	require.Len(t, loaded.InstructionContext.Updates, 1)
 	assert.Equal(t, 1, loaded.InstructionContext.Updates[0].Position)
 }
+
+func TestInstructionContextSnapshotPreservesCheckedBytes(t *testing.T) {
+	t.Parallel()
+	sess := New(WithUserMessage("hello"))
+	source := InstructionSource{Key: "file", Path: "/AGENTS.md", Group: "core/prompt-files", Content: "approved", Available: true}
+	sess.PrepareInstructionContext([]InstructionSource{source})
+	snapshot := sess.InstructionContextSnapshot()
+	require.NotNil(t, snapshot)
+	assert.Equal(t, "/AGENTS.md", snapshot.Initial["file"].Path)
+	source.Content = "replacement"
+	sess.PrepareInstructionContext([]InstructionSource{source})
+	assert.Empty(t, snapshot.Updates)
+	assert.Equal(t, "approved", snapshot.Current["file"].Content)
+	messages, count := sess.GetMessagesWithInstructionContext(agent.New("test", "system"), snapshot)
+	assert.Equal(t, sess.ItemCount(), count)
+	for _, message := range messages {
+		assert.NotContains(t, message.Content, "replacement")
+	}
+	assert.Equal(t, "approved", messages[1].Content)
+	delete(snapshot.Current, "file")
+	assert.Contains(t, sess.InstructionContextSnapshot().Current, "file")
+}

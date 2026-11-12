@@ -2,6 +2,7 @@ package messages
 
 import (
 	"image/color"
+	"slices"
 	"strings"
 	"time"
 
@@ -86,8 +87,7 @@ func (m *model) applyCopiedFlash(lines []string, viewportStartLine int) []string
 		style = style.Background(bg)
 	}
 
-	result := make([]string, len(lines))
-	copy(result, lines)
+	result := slices.Clip(slices.Clone(lines))
 	result[idx] = ansi.Cut(line, 0, start) +
 		style.Render(types.CopiedFeedbackLabel) +
 		ansi.Cut(line, end, ansi.StringWidth(plain))

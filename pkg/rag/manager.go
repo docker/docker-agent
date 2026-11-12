@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/rag/database"
@@ -38,6 +39,7 @@ type ToolConfig struct {
 type Config struct {
 	Tool            ToolConfig
 	Docs            []string
+	Documents       Documents // When set, full documents are read from here instead of disk
 	Results         ResultsConfig
 	FusionConfig    *FusionConfig
 	StrategyConfigs []strategy.Config
@@ -175,12 +177,7 @@ func (m *Manager) Initialize(ctx context.Context) (err error) {
 		"num_strategies", len(m.strategies))
 
 	// Initialize strategies in parallel to avoid blocking
-	type result struct {
-		strategyName string
-		err          error
-	}
-
-	resultsChan := make(chan result, len(m.strategies))
+	resultsChan := make(chan error, len(m.strategies))
 
 	for strategyName, strategyImpl := range m.strategies {
 		strategyCfg := m.strategyConfigs[strategyName]
@@ -212,7 +209,7 @@ func (m *Manager) Initialize(ctx context.Context) (err error) {
 					"rag_name", m.name,
 					"strategy", strategyName)
 			}
-			resultsChan <- result{strategyName: strategyName, err: err}
+			resultsChan <- err
 		}()
 	}
 
@@ -221,9 +218,9 @@ func (m *Manager) Initialize(ctx context.Context) (err error) {
 	var firstError error
 	for range len(m.strategies) {
 		select {
-		case res := <-resultsChan:
-			if res.err != nil && firstError == nil {
-				firstError = res.err
+		case err := <-resultsChan:
+			if err != nil && firstError == nil {
+				firstError = err
 			}
 		case <-ctx.Done():
 			return ctx.Err()
@@ -505,8 +502,9 @@ func (m *Manager) CheckAndReindexChangedFiles(ctx context.Context) (err error) {
 	return nil
 }
 
-// StartFileWatcher starts monitoring files and directories for changes
-func (m *Manager) StartFileWatcher(ctx context.Context) (err error) {
+// WatchFiles monitors all strategies until cancellation, joining them before returning.
+// Callers must cancel and join WatchFiles before Close.
+func (m *Manager) WatchFiles(ctx context.Context) (err error) {
 	tracer := otel.Tracer("github.com/docker/docker-agent/pkg/rag")
 	ctx, span := tracer.Start(
 		ctx, "rag.file_watcher.start",
@@ -521,13 +519,17 @@ func (m *Manager) StartFileWatcher(ctx context.Context) (err error) {
 		span.End()
 	}()
 
+	group, watchCtx := errgroup.WithContext(ctx)
 	for strategyName, strategyImpl := range m.strategies {
 		strategyCfg := m.strategyConfigs[strategyName]
-		if err := strategyImpl.StartFileWatcher(ctx, strategyCfg.Docs, strategyCfg.Chunking); err != nil {
-			return fmt.Errorf("strategy %s failed: %w", strategyName, err)
-		}
+		group.Go(func() error {
+			if err := strategyImpl.WatchFiles(watchCtx, strategyCfg.Docs, strategyCfg.Chunking); err != nil {
+				return fmt.Errorf("strategy %s failed: %w", strategyName, err)
+			}
+			return nil
+		})
 	}
-	return nil
+	return group.Wait()
 }
 
 // Events returns the event channel shared by all strategies and RAG operations for this manager.
@@ -541,7 +543,7 @@ func (m *Manager) Close() error {
 
 	var firstErr error
 
-	// Close all strategies (which closes their databases and file watchers)
+	// WatchFiles must have returned before closing the strategy databases.
 	for strategyName, strategyImpl := range m.strategies {
 		if err := strategyImpl.Close(); err != nil {
 			slog.Error("[RAG Manager] Failed to close strategy",
@@ -643,8 +645,15 @@ func (m *Manager) reconstructFullDocuments(_ context.Context, results []database
 	return results
 }
 
-// readFile reads the content of a file
+// readFile reads the content of a file, or of the supplied document at that path
 func (m *Manager) readFile(path string) (string, error) {
+	if m.config.Documents != nil {
+		content, ok := m.config.Documents[path]
+		if !ok {
+			return "", fmt.Errorf("document %q was not supplied", path)
+		}
+		return string(content), nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file %s: %w", path, err)

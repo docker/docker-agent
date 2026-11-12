@@ -1,6 +1,7 @@
 package scrollview
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -74,15 +75,15 @@ func TestComposeMatchesJoinHorizontal(t *testing.T) {
 			m.syncScrollbar()
 
 			nLines := min(m.height, len(content)-m.scrollOffset)
-			lines := append([]string(nil), content[m.scrollOffset:m.scrollOffset+nLines]...)
+			lines := slices.Clone(content[m.scrollOffset : m.scrollOffset+nLines])
 			if m.NeedsScrollbar() {
 				for len(lines) < m.height {
 					lines = append(lines, "")
 				}
 			}
 
-			want := composeReference(m, append([]string(nil), lines...))
-			got := m.compose(append([]string(nil), lines...), m.scrollOffset)
+			want := composeReference(m, slices.Clone(lines))
+			got := m.compose(slices.Clone(lines), m.scrollOffset)
 			assert.Equal(t, want, got)
 		})
 	}

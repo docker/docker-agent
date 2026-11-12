@@ -184,8 +184,15 @@ func TestCommandCompletionArgumentItems_QueriesFreshOnEachCall(t *testing.T) {
 			},
 		},
 	}
-	c, ok := NewCommandCompletion(categories).(ArgumentCompleter)
+	provider := NewCommandCompletion(categories)
+	assert.Zero(t, callCount, "construction must not evaluate argument providers")
+	provider.Items()
+	assert.Zero(t, callCount, "listing commands must not evaluate argument providers")
+	c, ok := provider.(ArgumentCompleter)
 	require.True(t, ok)
+	_, matched := c.ArgumentItems("/unknown ")
+	require.False(t, matched)
+	assert.Zero(t, callCount, "unmatched commands must not evaluate argument providers")
 
 	first, matched := c.ArgumentItems("/toolset-restart ")
 	require.True(t, matched)

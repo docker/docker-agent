@@ -1,13 +1,10 @@
 # Builds the documentation site in docs/ with Hugo and publishes it to
-# GitHub Pages (docker.github.io/docker-agent). Replaces the legacy
-# branch-based Jekyll build; docs.docker.com renders the same Markdown
-# source through its Hugo module mount (see docs-upstream.yml).
+# GitHub Pages (docker.github.io/docker-agent). docs.docker.com renders the
+# same Markdown source through its Hugo module mount (see docs.yml, upstream).
 name: docs-deploy
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -18,26 +15,20 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/docs-deploy.yml"
+      - ".github/actions/setup-hugo/**"
       - "docs/**"
   workflow_dispatch:
 
-env:
-  # Kept in sync with the docker/docs HUGO_VERSION pin so both surfaces
-  # render with the same Hugo release.
-  HUGO_VERSION: 0.163.0
-
 jobs:
   build:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Install Hugo
-        run: |
-          curl -fsSL "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin hugo
-          hugo version
+      - uses: $/.github/actions/setup-hugo
 
       - name: Configure Pages
         id: pages
@@ -45,7 +36,9 @@ jobs:
 
       - name: Build site
         working-directory: docs
-        run: hugo --gc --baseURL "${{ steps.pages.outputs.base_url }}/"
+        env:
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: hugo --gc --baseURL "${BASE_URL}/"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
@@ -53,7 +46,11 @@ jobs:
           path: docs/public
 
   deploy:
+    timeout-minutes: 10
     needs: build
+    permissions:
+      pages: write
+      id-token: write
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -61,4 +58,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

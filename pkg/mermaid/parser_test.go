@@ -184,3 +184,29 @@ func TestParseMermaidRejectsUnsupportedOrIncompleteInput(t *testing.T) {
 	_, err = Parse("flowchart TD\nA[unfinished")
 	require.ErrorIs(t, err, ErrInvalidDiagram)
 }
+
+func TestMermaidFlowchartDirective(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		statement string
+		want      bool
+	}{
+		{"", true},
+		{" \t\n\u2003", true},
+		{"direction LR", true},
+		{" \tClAsSdEf\u2003highlight fill:red", true},
+		{"class node highlight", true},
+		{"style node fill:red", true},
+		{"click node callback", true},
+		{"linkStyle 0 stroke:red", true},
+		{"node --> other", false},
+		{"unknown direction", false},
+		{"directional LR", false},
+		{"\xff style", false},
+	} {
+		t.Run(tc.statement, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, mermaidFlowchartDirective(tc.statement))
+		})
+	}
+}

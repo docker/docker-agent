@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"cmp"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -10,6 +12,8 @@ import (
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/sound"
 	"github.com/docker/docker-agent/pkg/tools"
+	builtinshell "github.com/docker/docker-agent/pkg/tools/builtin/shell"
+	"github.com/docker/docker-agent/pkg/tui/components/messages"
 	"github.com/docker/docker-agent/pkg/tui/components/notification"
 	"github.com/docker/docker-agent/pkg/tui/components/sidebar"
 	"github.com/docker/docker-agent/pkg/tui/core"
@@ -32,6 +36,7 @@ import (
 //   - AgentChoiceEvent         → Append text to message
 //   - AgentChoiceReasoningEvent → Append reasoning block
 //   - UserMessageEvent         → Replace loading with user message
+//   - MessageAddedEvent        → Render generated media (local runs only)
 //
 // Tool Events:
 //   - PartialToolCallEvent      → Show tool call in progress
@@ -78,24 +83,48 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 	case *runtime.StreamStartedEvent:
 		return true, p.handleStreamStarted(msg)
 
+	case *runtime.SessionRecoveredEvent:
+		if p.isSubSessionEvent(msg.SessionID) {
+			return true, nil
+		}
+		p.streamDepth = 0
+		p.agentStack = nil
+		p.msgCancel = nil
+		p.streamCancelled = false
+		p.contentIdentity.Finish(p.contentSession(msg.SessionID))
+		p.sidebar.ResetStreamTracking()
+		model, cleanup := p.messages.Update(msg)
+		p.messages = model.(messages.Model)
+		return true, tea.Batch(cleanup, p.forwardToSidebar(msg), p.setWorking(false), p.setPendingResponse(false))
 	case *runtime.StreamStoppedEvent:
 		return true, p.handleStreamStopped(msg)
 
 	// ===== Content Events =====
 	case *runtime.UserMessageEvent:
 		p.showStartupBanner = false
+		p.consumePendingMessage(msg.Message)
 		return true, p.messages.ReplaceLoadingWithUser(msg.Message, msg.SessionPosition)
 
 	case *runtime.AgentChoiceEvent:
 		return true, p.handleAgentChoice(msg)
 
+	case *runtime.AgentChoiceReasoningResetEvent:
+		identity := p.contentIdentity.Resolve(p.contentSession(msg.SessionID), msg.MessageID)
+		return true, p.messages.ResetReasoningContent(identity.SessionID, identity.MessageID, msg.AgentName)
+
 	case *runtime.AgentChoiceReasoningEvent:
 		return true, p.handleAgentChoiceReasoning(msg)
 
+	case *runtime.MessageAddedEvent:
+		return true, p.handleMessageAdded(msg)
+
 	case *runtime.ShellOutputEvent:
-		return true, p.messages.AddShellOutputMessage(msg.Output)
+		return true, p.handleShellCommand(msg)
 
 	// ===== Tool Events =====
+	case *runtime.ToolCallsRetractedEvent:
+		p.messages.RemoveToolCalls(msg.ToolCallIDs)
+		return true, nil
 	case *runtime.PartialToolCallEvent:
 		return true, p.handlePartialToolCall(msg)
 
@@ -112,6 +141,15 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 		return true, p.handleToolCallResponse(msg)
 
 	// ===== Sidebar Info Events (forwarded) =====
+	case *runtime.BackgroundAgentStatusEvent:
+		return true, p.forwardToSidebar(msg)
+
+	case *runtime.EvaluationUsageEvent:
+		if sess := p.app.Session(); sess != nil {
+			sess.AddEvaluationUsageRecord(msg.Evaluation)
+		}
+		return true, nil
+
 	case *runtime.TokenUsageEvent:
 		p.handleTokenUsage(msg)
 		return true, nil
@@ -130,6 +168,9 @@ func (p *chatPage) handleRuntimeEvent(msg tea.Msg) (bool, tea.Cmd) {
 
 	case *runtime.AgentSwitchingEvent:
 		return true, p.handleAgentSwitching(msg)
+
+	case *runtime.AgentRouteEvent:
+		return true, notification.InfoCmd(routeSummary(msg))
 
 	case *runtime.ToolsetInfoEvent:
 		p.sidebar.SetSkillsInfo(len(p.app.CurrentAgentSkills()))
@@ -275,7 +316,8 @@ func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
 
 			// Track per-message usage for /cost dialog
 			if msg.Usage.LastMessage != nil {
-				sess.AddMessageUsageRecord(
+				sess.AddMessageUsageRecordForSession(
+					cmp.Or(msg.SessionID, sess.ID),
 					msg.AgentName,
 					msg.Usage.LastMessage.Model,
 					msg.Usage.LastMessage.Cost,
@@ -288,6 +330,10 @@ func (p *chatPage) handleTokenUsage(msg *runtime.TokenUsageEvent) {
 
 func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent) tea.Cmd {
 	slog.Debug("handleStreamStarted called", "agent", msg.AgentName, "session_id", msg.SessionID)
+	p.contentIdentity.Finish(p.contentSession(msg.SessionID))
+	if p.contentSessionID == p.contentSession(msg.SessionID) {
+		p.messages.BreakMessageGroup()
+	}
 	p.streamCancelled = false
 	p.streamDepth++
 	p.agentStack = append(p.agentStack, msg.AgentName)
@@ -298,10 +344,30 @@ func (p *chatPage) handleStreamStarted(msg *runtime.StreamStartedEvent) tea.Cmd 
 	return tea.Batch(pendingCmd, spinnerCmd, sidebarCmd)
 }
 
+func (p *chatPage) contentSession(sessionID string) string {
+	if sessionID == "" && p.app != nil {
+		if sess := p.app.Session(); sess != nil {
+			sessionID = sess.ID
+		}
+	}
+	return sessionID
+}
+
+// Content can interleave between parallel forks even when they use the same agent.
+func (p *chatPage) trackContentSession(sessionID string) {
+	sessionID = p.contentSession(sessionID)
+	if sessionID != p.contentSessionID {
+		p.messages.BreakMessageGroup()
+		p.contentSessionID = sessionID
+	}
+}
+
 func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
 	if p.streamCancelled {
 		return nil
 	}
+	p.trackContentSession(msg.SessionID)
+	identity := p.contentIdentity.Resolve(p.contentSession(msg.SessionID), msg.MessageID)
 	// Track that we've received assistant content
 	p.hasReceivedAssistantContent = true
 	// Clear pending response indicator - first chunk has arrived
@@ -309,16 +375,18 @@ func (p *chatPage) handleAgentChoice(msg *runtime.AgentChoiceEvent) tea.Cmd {
 	// Content is useful activity: acknowledge the sidebar's outbound transfer
 	// box when this agent is a delegation target.
 	activityCmd := p.sidebar.SetAgentActivity(msg.AgentName)
-	return tea.Batch(activityCmd, p.messages.AppendToLastMessage(msg.AgentName, msg.Content))
+	return tea.Batch(activityCmd, p.messages.AppendAssistantContent(identity.SessionID, identity.MessageID, msg.AgentName, msg.Content))
 }
 
 func (p *chatPage) handleAgentChoiceReasoning(msg *runtime.AgentChoiceReasoningEvent) tea.Cmd {
 	if p.streamCancelled {
 		return nil
 	}
+	p.trackContentSession(msg.SessionID)
+	identity := p.contentIdentity.Resolve(p.contentSession(msg.SessionID), msg.MessageID)
 	p.setPendingResponse(false)
 	activityCmd := p.sidebar.SetAgentActivity(msg.AgentName)
-	return tea.Batch(activityCmd, p.messages.AppendReasoning(msg.AgentName, msg.Content))
+	return tea.Batch(activityCmd, p.messages.AppendReasoningContent(identity.SessionID, identity.MessageID, msg.AgentName, msg.Content))
 }
 
 // handleAgentSwitching forwards transfer_task hop boundaries to the sidebar
@@ -353,6 +421,10 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 		"has_content", p.hasReceivedAssistantContent,
 		"stream_depth", p.streamDepth)
 
+	p.contentIdentity.Finish(p.contentSession(msg.SessionID))
+	if p.contentSessionID == p.contentSession(msg.SessionID) {
+		p.messages.BreakMessageGroup()
+	}
 	if p.streamDepth > 0 {
 		p.streamDepth--
 		// Keep agentStack in sync: only pop when there was a depth to decrement,
@@ -380,6 +452,9 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	// Outermost stream stopped — fully clean up. This is the exact-content
 	// boundary for the active root response; nested stops leave the parent's
 	// deferred tail intact until the parent itself stops or the user re-enters it.
+	if p.onRunFinish != nil {
+		p.onRunFinish(msg.Reason)
+	}
 	finalizeCmd := p.messages.FinalizeStream()
 	// Only play the success sound when the stream completed normally.
 	// Errors already trigger a failure sound via ErrorEvent, and
@@ -400,9 +475,13 @@ func (p *chatPage) handleStreamStopped(msg *runtime.StreamStoppedEvent) tea.Cmd 
 	var exitCmd tea.Cmd
 	if p.app.ShouldExitAfterFirstResponse() && p.hasReceivedAssistantContent {
 		slog.Debug("Exit after first response triggered, scheduling delayed exit")
-		exitCmd = tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
-			return msgtypes.ExitAfterFirstResponseMsg{}
-		})
+		routingID, application := p.routingID, p.app
+		exitCmd = p.global(tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
+			if routingID == "" {
+				return msgtypes.ExitAfterFirstResponseMsg{}
+			}
+			return GlobalMsg{TabID: routingID, Origin: p, Application: application, Inner: msgtypes.ExitAfterFirstResponseMsg{}}
+		}))
 	}
 
 	return tea.Batch(finalizeCmd, p.messages.ScrollToBottom(), spinnerCmd, sidebarCmd, queueCmd, exitCmd)
@@ -427,10 +506,7 @@ func (p *chatPage) handlePartialToolCall(msg *runtime.PartialToolCallEvent) tea.
 func (p *chatPage) handleToolCallConfirmation(msg *runtime.ToolCallConfirmationEvent) tea.Cmd {
 	spinnerCmd := p.setWorking(false)
 	toolCmd := p.messages.AddOrUpdateToolCall(msg.AgentName, msg.ToolCall, msg.ToolDefinition, types.ToolStatusConfirmation)
-	dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-		Model:            dialog.NewToolConfirmationDialog(p.ar, msg, p.sessionState),
-		OriginatingEvent: msg,
-	})
+	dialogCmd := p.attentionDialogCmd(msg)
 	return tea.Batch(toolCmd, p.messages.ScrollToBottom(), spinnerCmd, dialogCmd)
 }
 
@@ -444,6 +520,55 @@ func (p *chatPage) handleToolCall(msg *runtime.ToolCallEvent) tea.Cmd {
 
 func (p *chatPage) handleToolCallOutput(msg *runtime.ToolCallOutputEvent) tea.Cmd {
 	return tea.Batch(p.messages.AppendToolOutput(msg), p.messages.ScrollToBottom())
+}
+
+func (p *chatPage) handleShellCommand(msg *runtime.ShellOutputEvent) tea.Cmd {
+	if msg.CommandID == "" {
+		return p.messages.AddShellOutputMessage(msg.Output)
+	}
+
+	toolDef := tools.Tool{Name: builtinshell.ToolNameShell}
+	if msg.Command != "" {
+		arguments, _ := json.Marshal(map[string]string{"cmd": msg.Command})
+		toolCall := tools.ToolCall{
+			ID: msg.CommandID,
+			Function: tools.FunctionCall{
+				Name:      builtinshell.ToolNameShell,
+				Arguments: string(arguments),
+			},
+		}
+		if !msg.Done {
+			return tea.Batch(
+				p.messages.AddOrUpdateToolCall("", toolCall, toolDef, types.ToolStatusRunning),
+				p.messages.ScrollToBottom(),
+			)
+		}
+	}
+
+	if !msg.Done {
+		return tea.Batch(
+			p.messages.AppendToolOutput(&runtime.ToolCallOutputEvent{ToolCallID: msg.CommandID, Output: msg.Output}),
+			p.messages.ScrollToBottom(),
+		)
+	}
+
+	response := msg.Output
+	if msg.Error != "" && response == "" {
+		response = "Error: " + msg.Error
+	}
+	status := types.ToolStatusCompleted
+	if msg.Error != "" {
+		status = types.ToolStatusError
+	}
+	return tea.Batch(
+		p.messages.AddToolResult(&runtime.ToolCallResponseEvent{
+			ToolCallID:     msg.CommandID,
+			Response:       response,
+			Result:         &tools.ToolCallResult{Output: response, IsError: msg.Error != ""},
+			ToolDefinition: toolDef,
+		}, status),
+		p.messages.ScrollToBottom(),
+	)
 }
 
 func (p *chatPage) handleToolCallResponse(msg *runtime.ToolCallResponseEvent) tea.Cmd {
@@ -480,52 +605,22 @@ func (p *chatPage) handleBudgetExceeded(msg *runtime.BudgetExceededEvent) tea.Cm
 }
 
 func (p *chatPage) handleMaxIterationsReached(msg *runtime.MaxIterationsReachedEvent) tea.Cmd {
-	spinnerCmd := p.setWorking(false)
-	dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-		Model:            dialog.NewMaxIterationsDialog(msg.MaxIterations, p.app),
-		OriginatingEvent: msg,
-	})
-	return tea.Batch(spinnerCmd, dialogCmd)
+	return tea.Batch(p.setWorking(false), p.attentionDialogCmd(msg))
 }
 
 func (p *chatPage) handleElicitationRequest(msg *runtime.ElicitationRequestEvent) tea.Cmd {
-	spinnerCmd := p.setWorking(false)
+	return tea.Batch(p.setWorking(false), p.attentionDialogCmd(msg))
+}
 
-	// Check if this is an OAuth flow by looking at the meta type
-	// Guard against nil Meta map to prevent panic
-	if msg.Meta != nil {
-		if elicitationType, ok := msg.Meta["docker-agent/type"].(string); ok && elicitationType == "oauth_flow" {
-			// OAuth flow - show the OAuth authorization dialog
-			var serverURL string
-			if url, ok := msg.Meta["docker-agent/server_url"].(string); ok {
-				serverURL = url
-			}
-			dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-				Model:            dialog.NewOAuthAuthorizationDialog(p.ctx(), serverURL, p.app, msg.ElicitationID),
-				OriginatingEvent: msg,
-			})
-			return tea.Batch(spinnerCmd, dialogCmd)
-		}
+func (p *chatPage) attentionDialogCmd(event tea.Msg) tea.Cmd {
+	// Hosted pages leave attention delivery to the tab's FIFO in the root Update.
+	if p.routingID != "" {
+		return nil
 	}
-
-	// Check elicitation mode
-	switch msg.Mode {
-	case "url":
-		// URL-based elicitation - show URL dialog
-		dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewURLElicitationDialog(p.ctx(), msg.Message, msg.URL, msg.ElicitationID),
-			OriginatingEvent: msg,
-		})
-		return tea.Batch(spinnerCmd, dialogCmd)
-
-	default:
-		// Form-based elicitation (default) - show form dialog
-		dialogCmd := core.CmdHandler(dialog.OpenDialogMsg{
-			Model:            dialog.NewElicitationDialog(msg.Message, msg.Schema, msg.Meta, msg.ElicitationID),
-			OriginatingEvent: msg,
-		})
-		return tea.Batch(spinnerCmd, dialogCmd)
-	}
+	return core.CmdHandler(dialog.OpenDialogMsg{
+		Model:            dialog.NewAttentionDialog(p.ctx(), p.ar, p.app, p.sessionState, event, p.toolRenderers),
+		OriginatingEvent: event,
+	})
 }
 
 // isSuccessfulStop returns true when the stream reason indicates a
@@ -539,4 +634,17 @@ func isSuccessfulStop(reason string) bool {
 	default:
 		return false
 	}
+}
+
+// routeSummary is the one-line, task-free description of a routing transition.
+func routeSummary(e *runtime.AgentRouteEvent) string {
+	summary := fmt.Sprintf("Routing %s → %s", e.FromAgent, e.ToAgent)
+	if e.Selected != "" {
+		summary += " (" + e.Selected
+		if e.Probability != nil {
+			summary += fmt.Sprintf(" %.0f%%", *e.Probability*100)
+		}
+		summary += ")"
+	}
+	return summary
 }

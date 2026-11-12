@@ -2,7 +2,6 @@ package ui
 
 import (
 	"bytes"
-	"encoding/base64"
 	"image"
 	"image/color"
 	"image/png"
@@ -32,18 +31,6 @@ func TestRenderInlineImageIncludesKittyImageSequence(t *testing.T) {
 	assert.Contains(t, joined, "a=T")
 	assert.Contains(t, joined, "f=100")
 	assert.Contains(t, joined, "🖼")
-}
-
-func TestKittyImageSequenceChunksLargePayload(t *testing.T) {
-	t.Parallel()
-	data := bytes.Repeat([]byte("x"), 4096)
-
-	seq := KittyImageSequence(data, 10, 5)
-	encoded := base64.StdEncoding.EncodeToString(data)
-
-	assert.Contains(t, seq, "m=1")
-	assert.Contains(t, seq, "\x1b_Gm=0;")
-	assert.Contains(t, seq, encoded[:100])
 }
 
 func testPNGData(t *testing.T) []byte {

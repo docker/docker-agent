@@ -249,7 +249,7 @@ func TestNewHeaderTransport_DoesNotForwardHeadersAcrossOrigins(t *testing.T) {
 
 	client := &http.Client{
 		Transport: NewHeaderTransportForOrigin(
-			http.DefaultTransport,
+			source.Client().Transport,
 			source.URL,
 			map[string]string{"Authorization": "Bearer secret"},
 		),
@@ -280,7 +280,7 @@ func TestNewHeaderTransport_ForwardsHeadersOnSameOriginRedirect(t *testing.T) {
 
 	client := &http.Client{
 		Transport: NewHeaderTransportForOrigin(
-			http.DefaultTransport,
+			server.Client().Transport,
 			server.URL,
 			map[string]string{"Authorization": "Bearer secret"},
 		),

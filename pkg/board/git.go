@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/atomicfile"
@@ -148,8 +147,10 @@ func upstreamRemote(ctx context.Context, dir string) string {
 	if err != nil {
 		return "origin"
 	}
-	if slices.Contains(strings.Fields(out), "upstream") {
-		return "upstream"
+	for remote := range strings.FieldsSeq(out) {
+		if remote == "upstream" {
+			return "upstream"
+		}
 	}
 	return "origin"
 }

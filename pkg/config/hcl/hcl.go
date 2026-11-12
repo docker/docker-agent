@@ -68,7 +68,7 @@ func LooksLikeHCL(data []byte) bool {
 // topLevelHCLKeywords lists the block names that may legitimately appear at
 // the top level of a docker-agent HCL document.
 var topLevelHCLKeywords = []string{
-	"agent", "model", "provider", "mcp", "rag", "metadata", "permissions", "toolsets", "flavors",
+	"agent", "model", "evaluator", "provider", "mcp", "rag", "metadata", "permissions", "toolsets", "flavors",
 }
 
 // ToYAML parses an HCL document and returns an equivalent YAML document
@@ -137,13 +137,14 @@ func (r blockRule) expectedLabels() int {
 // the label under the same key.
 var blockRules = map[string]blockRule{
 	// Top-level keyed maps (and equivalents inside agents).
-	"agent":    {mode: modeMapByLabel, outKey: "agents"},
-	"model":    {mode: modeMapByLabel, outKey: "models"},
-	"provider": {mode: modeMapByLabel, outKey: "providers"},
-	"mcp":      {mode: modeMapByLabel, outKey: "mcps"},
-	"rag":      {mode: modeMapByLabel, outKey: "rag"},
-	"command":  {mode: modeMapByLabel, outKey: "commands"},
-	"skill":    {mode: modeMapByLabel, outKey: "skills"},
+	"agent":     {mode: modeMapByLabel, outKey: "agents"},
+	"model":     {mode: modeMapByLabel, outKey: "models"},
+	"evaluator": {mode: modeMapByLabel, outKey: "evaluators"},
+	"provider":  {mode: modeMapByLabel, outKey: "providers"},
+	"mcp":       {mode: modeMapByLabel, outKey: "mcps"},
+	"rag":       {mode: modeMapByLabel, outKey: "rag"},
+	"command":   {mode: modeMapByLabel, outKey: "commands"},
+	"skill":     {mode: modeMapByLabel, outKey: "skills"},
 	// Top-level reusable toolset definitions: `toolsets "name" { ... }` becomes
 	// toolsets: { name: { ... } }. Distinct from the agent-level `toolset`
 	// (singular) block, which aggregates into a list under the same key.
@@ -194,6 +195,10 @@ var blockRules = map[string]blockRule{
 	"session_end":             {mode: modeList, outKey: "session_end"},
 	"permission_request":      {mode: modeList, outKey: "permission_request"},
 	"tool_response_transform": {mode: modeList, outKey: "tool_response_transform"},
+	"tool_input_transform":    {mode: modeList, outKey: "tool_input_transform"},
+	"tool_guard":              {mode: modeList, outKey: "tool_guard"},
+	"before_agent_run":        {mode: modeList, outKey: "before_agent_run"},
+	"after_agent_complete":    {mode: modeList, outKey: "after_agent_complete"},
 }
 
 // lookupRule returns the conversion rule for a block, falling back to a

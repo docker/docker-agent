@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,7 +13,69 @@ import (
 	"github.com/docker/docker-agent/pkg/model/provider/base"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/tools"
 )
+
+func TestParallelToolAttachmentsStayInNativeResults(t *testing.T) {
+	t.Parallel()
+	for _, beta := range []bool{false, true} {
+		name := "standard"
+		if beta {
+			name = "beta"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			messages := []chat.Message{
+				{Role: chat.MessageRoleAssistant, ToolCalls: []tools.ToolCall{
+					{ID: "A", Function: tools.FunctionCall{Name: "read_file", Arguments: `{}`}},
+					{ID: "B", Function: tools.FunctionCall{Name: "read_file", Arguments: `{}`}},
+				}},
+				{Role: chat.MessageRoleTool, ToolCallID: "B", MultiContent: chat.BuildToolResultMultiContent("image B", []tools.MediaContent{{MimeType: "image/png", Data: "AQID"}}, nil)},
+				{Role: chat.MessageRoleTool, ToolCallID: "A", IsError: true, MultiContent: chat.BuildToolResultMultiContent("error A", nil, []tools.DocumentContent{{Name: "report.pdf", MimeType: "application/pdf", Data: "JVBERg=="}})},
+				{Role: chat.MessageRoleUser, Content: "continue"},
+			}
+			client := testAttachmentClient()
+			var converted any
+			var err error
+			if beta {
+				converted, err = client.convertBetaMessages(t.Context(), messages)
+			} else {
+				converted, err = client.convertMessages(t.Context(), messages)
+			}
+			require.NoError(t, err)
+			raw, err := json.Marshal(converted)
+			require.NoError(t, err)
+			var wire []struct {
+				Role    string `json:"role"`
+				Content []struct {
+					Type      string           `json:"type"`
+					ToolUseID string           `json:"tool_use_id"`
+					IsError   bool             `json:"is_error"`
+					Content   []map[string]any `json:"content"`
+				} `json:"content"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &wire))
+			require.Len(t, wire, 3)
+			assert.Equal(t, "user", wire[1].Role)
+			require.Len(t, wire[1].Content, 2)
+			for i, id := range []string{"B", "A"} {
+				result := wire[1].Content[i]
+				assert.Equal(t, "tool_result", result.Type)
+				assert.Equal(t, id, result.ToolUseID)
+				assert.Equal(t, id == "A", result.IsError)
+				require.Len(t, result.Content, 2)
+				source := result.Content[1]["source"].(map[string]any)
+				if id == "B" {
+					assert.Equal(t, "image", result.Content[1]["type"])
+					assert.Equal(t, "AQID", source["data"])
+				} else {
+					assert.Equal(t, "document", result.Content[1]["type"])
+					assert.Equal(t, "JVBERg==", source["data"])
+				}
+			}
+		})
+	}
+}
 
 func TestConvertToolResultBlockUsesClaudeCapabilityFallback(t *testing.T) {
 	t.Parallel()

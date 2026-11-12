@@ -51,7 +51,7 @@ func (c providerModelClient) Ask(
 	}
 	registry := c.registry
 	if registry == nil {
-		registry = provider.DefaultRegistry()
+		registry = provider.EmptyRegistry()
 	}
 	p, err := registry.New(ctx, &cfg, environment.NewDefaultProvider(), opts...)
 	if err != nil {
@@ -83,9 +83,7 @@ func (c providerModelClient) Ask(
 	return sb.String(), nil
 }
 
-// registerModelHook installs the [hooks.HookTypeModel] factory on r
-// using the runtime's default [hooks.ModelClient]. It is called once
-// from [NewLocalRuntime] alongside the builtins.
-func registerModelHook(r *hooks.Registry, registry *provider.Registry) {
+// RegisterModelHook installs provider-backed model hooks on r.
+func RegisterModelHook(r *hooks.Registry, registry *provider.Registry) {
 	r.Register(hooks.HookTypeModel, hooks.NewModelFactory(providerModelClient{registry: registry}))
 }

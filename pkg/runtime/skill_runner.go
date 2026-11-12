@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,32 +9,37 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/skills"
 )
 
-// handleRunSkill unmarshals the run_skill tool arguments and delegates
-// to RunSkillFork.
-func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink) (*tools.ToolCallResult, error) {
+// handleRunSkill unmarshals the run_skill tool arguments and delegates to
+// runSkillFork.
+func (r *LocalRuntime) handleRunSkill(ctx context.Context, sess *session.Session, toolCall tools.ToolCall, evts EventSink, rt tools.Runtime, caller *agent.Agent) (*tools.ToolCallResult, error) {
 	var args skills.RunSkillArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
-	return r.RunSkillFork(ctx, sess, args, evts)
+	return r.runSkillFork(ctx, sess, args, evts, rt, caller)
 }
 
 // RunSkillFork executes a `context: fork` skill as an isolated sub-session.
 // The expanded SKILL.md body becomes the child's first user message; the
-// agent's own system prompt is preserved. Shared by the run_skill tool
-// and the App's slash-command path.
+// agent's own system prompt is preserved. Entry point for callers outside a
+// tool call (the App's slash-command path); run_skill goes through
+// [LocalRuntime.handleRunSkill].
 func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, args skills.RunSkillArgs, evts EventSink) (*tools.ToolCallResult, error) {
-	// The caller resolves from the session, not the shared current agent:
-	// a fork skill invoked from a pinned background session must use the
-	// pinned agent's skills, identity, and model override, no matter where
-	// the concurrent foreground loop points (#3886).
-	caller := r.resolveSessionAgent(sess)
+	return r.runSkillFork(ctx, sess, args, evts, nil, r.resolveSessionAgent(sess))
+}
+
+// runSkillFork prepares and runs the fork sub-session. rt is the in-flight
+// tool call's runtime handle. Standalone invocations pass nil and skip embedded
+// commands because no tool call exists to own an approval prompt.
+func (r *LocalRuntime) runSkillFork(ctx context.Context, sess *session.Session, args skills.RunSkillArgs, evts EventSink, rt tools.Runtime, caller *agent.Agent) (*tools.ToolCallResult, error) {
+	// Tool calls retain the caller captured before approval; slash commands resolve it once.
 	if caller == nil {
 		return nil, errors.New("no agent resolved for the calling session")
 	}
@@ -46,14 +50,21 @@ func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, 
 		return tools.ResultError("no skills are available for agent " + ca), nil
 	}
 
-	prepared, errResult := st.PrepareForkSubSession(ctx, args)
+	if rt == nil {
+		rt = skillRuntime{runtime: r, agent: caller, sessionID: sess.ID}
+	}
+
+	prepared, errResult, err := st.PrepareForkSubSession(ctx, args, rt)
+	if err != nil {
+		return nil, err
+	}
 	if errResult != nil {
 		return errResult, nil
 	}
 
 	// Open the span before any pre-delegation work so model resolution
-	// (inside WithAgentModel) is recorded under runtime.run_skill rather
-	// than the parent session span.
+	// (inside WithAgentModel) is recorded under the invoke_workflow span
+	// rather than the parent session span.
 	//
 	// Skills are workflow-shaped (a coordinated process the agent
 	// orchestrates), so the GenAI semconv `invoke_workflow` operation
@@ -112,28 +123,25 @@ func (r *LocalRuntime) RunSkillFork(ctx context.Context, sess *session.Session, 
 	// Skills are sub-sessions of the caller, not delegations, so the
 	// runtime's currentAgent stays put and the delegation lineage is
 	// inherited unchanged (no DelegationLineage: not a delegation edge).
-	// When the caller session is itself pinned (a background agent's
-	// session), pin the child to the same agent so RunStream resolves it
-	// as the pinned caller instead of the shared current agent.
-	return r.runForwarding(ctx, sess, evts, delegationRequest{
-		SubSessionConfig: SubSessionConfig{
-			Task:                prepared.Task,
-			SystemMessage:       skills.BuildSkillSystemMessage(prepared, sess.AttachedFilesSnapshot()),
-			ImplicitUserMessage: skills.BuildSkillUserMessage(prepared),
-			AgentName:           ca,
-			Title:               "Skill: " + prepared.SkillName,
-			ToolsApproved:       sess.IsToolsApproved(),
-			SafetyPolicy:        sess.GetSafetyPolicy(),
-			Permissions:         sess.ClonePermissions(),
-			NonInteractive:      sess.NonInteractive,
-			PinAgent:            sess.AgentName != "",
-			ExcludedTools:       []string{skills.ToolNameRunSkill},
-			AllowedTools:        prepared.AllowedTools,
-			ExtraToolSets:       prepared.ToolSets,
-			// A fork skill's answer is free-form text consumed by the calling
-			// agent, not the agent's schema-constrained final output, so the
-			// child is exempt from tool-mode structured-output enforcement.
-			DisableStructuredOutput: true,
-		},
+	// Pin the child so a concurrent agent switch cannot change which agent consumes the skill.
+	return r.runForwarding(ctx, sess, caller, evts, delegationRequest{
+		Task:                prepared.Task,
+		SystemMessage:       skills.BuildSkillSystemMessage(prepared, sess.AttachedFilesSnapshot()),
+		ImplicitUserMessage: skills.BuildSkillUserMessage(prepared),
+		AgentName:           ca,
+		Title:               "Skill: " + prepared.SkillName,
+		ToolsApproved:       sess.IsToolsApproved(),
+		SafetyPolicy:        sess.GetSafetyPolicy(),
+		Permissions:         sess.ClonePermissions(),
+		NonInteractive:      sess.NonInteractive,
+		PinAgent:            true,
+		AllowHandoffs:       true,
+		ExcludedTools:       []string{skills.ToolNameRunSkill},
+		AllowedTools:        prepared.AllowedTools,
+		ExtraToolSets:       prepared.ToolSets,
+		// A fork skill's answer is free-form text consumed by the calling
+		// agent, not the agent's schema-constrained final output, so the
+		// child is exempt from tool-mode structured-output enforcement.
+		DisableStructuredOutput: true,
 	})
 }

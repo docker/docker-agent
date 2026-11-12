@@ -11,7 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
+	todo "github.com/docker/docker-agent/pkg/tools/builtin/todo/types"
 )
 
 // newVisibilityTestSidebar builds a sidebar with data in every optional

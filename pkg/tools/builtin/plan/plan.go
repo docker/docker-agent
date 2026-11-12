@@ -20,6 +20,7 @@ package plan
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,7 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -36,17 +37,18 @@ import (
 	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/paths"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/plan/types"
 )
 
 const (
-	ToolNameWritePlan          = "write_plan"
-	ToolNameReadPlan           = "read_plan"
-	ToolNameListPlans          = "list_plans"
-	ToolNameDeletePlan         = "delete_plan"
-	ToolNameUpdatePlanFromFile = "update_plan_from_file"
-	ToolNameExportPlanToFile   = "export_plan_to_file"
-	ToolNameSetPlanStatus      = "set_plan_status"
-	ToolNameGetPlanStatus      = "get_plan_status"
+	ToolNameWritePlan          = types.ToolNameWritePlan
+	ToolNameReadPlan           = types.ToolNameReadPlan
+	ToolNameListPlans          = types.ToolNameListPlans
+	ToolNameDeletePlan         = types.ToolNameDeletePlan
+	ToolNameUpdatePlanFromFile = types.ToolNameUpdatePlanFromFile
+	ToolNameExportPlanToFile   = types.ToolNameExportPlanToFile
+	ToolNameSetPlanStatus      = types.ToolNameSetPlanStatus
+	ToolNameGetPlanStatus      = types.ToolNameGetPlanStatus
 )
 
 // MaxPlanContentSize caps a plan's content (its markdown body): it bounds how
@@ -369,9 +371,9 @@ var sharedToolSet = sync.OnceValue(func() *ToolSet {
 	return New()
 })
 
-// CreateToolSet is used by the tools registry. It returns a process-wide
-// singleton so that all agents collaborating in the same process share one
-// storage over the global plans folder.
+// CreateToolSet returns a process-wide singleton over the global plans folder.
+// File imports and exports use the process working directory; Creator binds
+// them to an agent's workspace instead.
 func CreateToolSet() (tools.ToolSet, error) {
 	return sharedToolSet(), nil
 }
@@ -426,6 +428,9 @@ global shared folder, so every agent using this toolset sees the same plans.
 - Use delete_plan to remove a plan once it is no longer needed.
 
 ### Editing a large plan cheaply
+
+Relative import and export paths use your working directory; absolute paths
+are used as given. Plans themselves remain in the global shared folder.
 
 Re-sending the whole plan body on every edit is expensive. To avoid it:
 
@@ -494,7 +499,7 @@ func (t *ToolSet) writePlan(ctx context.Context, params WritePlanArgs) (*tools.T
 
 type UpdatePlanFromFileArgs struct {
 	Name              string `json:"name" jsonschema:"The plan name. Lowercase letters, digits, '-' and '_' only."`
-	Path              string `json:"path" jsonschema:"Path to a file whose contents become the new plan content. Lets you commit edits without re-sending the full plan body."`
+	Path              string `json:"path" jsonschema:"Path to a file whose contents become the new plan content. Relative paths use your working directory. Lets you commit edits without re-sending the full plan body."`
 	Title             string `json:"title,omitempty" jsonschema:"Optional human-readable title. Preserved from the previous revision when omitted."`
 	Author            string `json:"author,omitempty" jsonschema:"Optional label identifying who is writing the plan. Preserved from the previous revision when omitted."`
 	Status            string `json:"status,omitempty" jsonschema:"Optional free-form lifecycle status. Preserved from the previous revision when omitted."`
@@ -532,7 +537,7 @@ func (t *ToolSet) updatePlanFromFile(ctx context.Context, params UpdatePlanFromF
 
 type ExportPlanToFileArgs struct {
 	Name string `json:"name" jsonschema:"The name of the plan to export."`
-	Path string `json:"path" jsonschema:"Path to write the plan content to. The content is written to disk and is NOT returned as tool output, so you can materialise the plan cheaply before editing it."`
+	Path string `json:"path" jsonschema:"Path to write the plan content to. Relative paths use your working directory. The content is written to disk and is NOT returned as tool output, so you can materialise the plan cheaply before editing it."`
 }
 
 func (t *ToolSet) exportPlanToFile(ctx context.Context, params ExportPlanToFileArgs) (*tools.ToolCallResult, error) {
@@ -1098,8 +1103,8 @@ func (s *FilesystemStorage) List(ctx context.Context) ([]Summary, []string, erro
 		})
 	}
 
-	sort.Slice(plans, func(i, j int) bool {
-		return plans[i].Name < plans[j].Name
+	slices.SortFunc(plans, func(a, b Summary) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	return plans, warnings, nil

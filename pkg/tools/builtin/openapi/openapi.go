@@ -12,11 +12,11 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pb33f/libopenapi"
 	"github.com/pb33f/libopenapi/datamodel/high/base"
 	v3 "github.com/pb33f/libopenapi/datamodel/high/v3"
-	"go.yaml.in/yaml/v4"
 
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -27,6 +27,10 @@ import (
 	"github.com/docker/docker-agent/pkg/useragent"
 )
 
+type headerExpander interface {
+	ExpandMap(ctx context.Context, values map[string]string) map[string]string
+}
+
 // CreateToolSet is used by the tools registry.
 func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
 	expander := js.NewJsExpander(runConfig.EnvProvider())
@@ -35,6 +39,9 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	var opts []Option
 	if toolset.Timeout > 0 {
 		opts = append(opts, WithTimeout(time.Duration(toolset.Timeout)*time.Second))
+	}
+	if toolset.MaxOutputBytes != nil {
+		opts = append(opts, WithMaxOutputBytes(*toolset.MaxOutputBytes))
 	}
 	if toolset.AllowPrivateIPsEnabled() {
 		opts = append(opts, WithAllowPrivateIPs(true))
@@ -50,8 +57,9 @@ type ToolSet struct {
 	headers map[string]string
 
 	timeout         time.Duration
+	maxOutputBytes  int
 	allowPrivateIPs bool
-	expander        *js.Expander
+	expander        headerExpander
 }
 
 // Verify interface compliance.
@@ -70,6 +78,12 @@ func WithTimeout(d time.Duration) Option {
 	return func(t *ToolSet) { t.timeout = d }
 }
 
+// WithMaxOutputBytes limits the returned text; zero disables this cutoff.
+// The HTTP response still has a separate 1 MiB read limit.
+func WithMaxOutputBytes(limit int) Option {
+	return func(t *ToolSet) { t.maxOutputBytes = limit }
+}
+
 // WithAllowPrivateIPs disables SSRF dial-time protection on both the spec
 // fetch and the generated tools' HTTP calls. Operators opt in via
 // `allow_private_ips: true` when the spec or its servers legitimately
@@ -78,16 +92,21 @@ func WithAllowPrivateIPs(allow bool) Option {
 	return func(t *ToolSet) { t.allowPrivateIPs = allow }
 }
 
-func WithExpander(expander *js.Expander) Option {
+func WithExpander(expander headerExpander) Option {
+	if expander == nil {
+		expander = (*js.Expander)(nil)
+	}
 	return func(t *ToolSet) { t.expander = expander }
 }
 
 // New creates a new OpenAPI toolset from the given spec URL.
 func New(specURL string, headers map[string]string, opts ...Option) *ToolSet {
 	t := &ToolSet{
-		specURL: specURL,
-		headers: headers,
-		timeout: httpclient.DefaultToolHTTPTimeout,
+		specURL:        specURL,
+		headers:        headers,
+		timeout:        httpclient.DefaultToolHTTPTimeout,
+		maxOutputBytes: maxOutputSize,
+		expander:       (*js.Expander)(nil),
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -256,6 +275,7 @@ func (t *ToolSet) operationToTool(baseURL, path, method string, op *v3.Operation
 			method:          method,
 			headers:         t.headers,
 			timeout:         t.timeout,
+			maxOutputBytes:  t.maxOutputBytes,
 			allowPrivateIPs: t.allowPrivateIPs,
 			expander:        t.expander,
 		}).callTool),
@@ -375,13 +395,13 @@ func schemaProxyToProperty(proxy *base.SchemaProxy) map[string]any {
 		enumValues := make([]any, 0, len(s.Enum))
 		for _, node := range s.Enum {
 			if node != nil {
-				enumValues = append(enumValues, yamlNodeToValue(node))
+				enumValues = append(enumValues, yamlNodeToValue(node, node.Value))
 			}
 		}
 		prop["enum"] = enumValues
 	}
 	if s.Default != nil {
-		prop["default"] = yamlNodeToValue(s.Default)
+		prop["default"] = yamlNodeToValue(s.Default, s.Default.Value)
 	}
 
 	return prop
@@ -397,13 +417,15 @@ func schemaType(s *base.Schema) string {
 	return "string"
 }
 
-// yamlNodeToValue converts a yaml.Node to a native Go value, preserving the
-// original type (int, float, bool, null) instead of returning everything as a
-// string.
-func yamlNodeToValue(node *yaml.Node) any {
+type nodeDecoder interface {
+	Decode(target any) error
+}
+
+// yamlNodeToValue preserves decoded types, falling back to the raw value on error.
+func yamlNodeToValue(node nodeDecoder, fallback string) any {
 	var v any
 	if err := node.Decode(&v); err != nil {
-		return node.Value
+		return fallback
 	}
 	return v
 }
@@ -447,8 +469,9 @@ type openAPIHandler struct {
 	headers map[string]string
 
 	timeout         time.Duration
+	maxOutputBytes  int
 	allowPrivateIPs bool
-	expander        *js.Expander
+	expander        headerExpander
 }
 
 type openAPICallArgs map[string]any
@@ -480,7 +503,11 @@ func (h *openAPIHandler) callTool(ctx context.Context, params openAPICallArgs) (
 	}
 	req.Header.Set("Accept", "application/json")
 
-	headers := h.expander.ExpandMap(ctx, h.headers)
+	expander := h.expander
+	if expander == nil {
+		expander = (*js.Expander)(nil)
+	}
+	headers := expander.ExpandMap(ctx, h.headers)
 	setHeaders(req, headers)
 
 	client := httpclient.ClientForAllowPrivateIPs(h.timeout, h.allowPrivateIPs)
@@ -495,8 +522,18 @@ func (h *openAPIHandler) callTool(ctx context.Context, params openAPICallArgs) (
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	output := limitOutput(string(body))
-	if len(body) >= 1<<20 {
+	bodyTruncated := len(body) >= 1<<20
+	if bodyTruncated {
+		start := len(body) - 1
+		for start > 0 && !utf8.RuneStart(body[start]) {
+			start--
+		}
+		if !utf8.FullRune(body[start:]) {
+			body = body[:start]
+		}
+	}
+	output := limitOutput(string(body), h.maxOutputBytes)
+	if bodyTruncated {
 		output = "[WARNING: Response truncated at 1MB limit]\n" + output
 	}
 

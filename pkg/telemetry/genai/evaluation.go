@@ -3,8 +3,9 @@ package genai
 import (
 	"context"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/log/global"
 )
 
 // EvaluationResult describes one evaluation outcome that should be emitted
@@ -36,28 +37,28 @@ type EvaluationResult struct {
 // can join evaluation outcomes back onto the operation that produced
 // them. No-op when no logger provider is configured.
 func EmitEvaluationResult(ctx context.Context, result EvaluationResult) {
-	logger := global.GetLoggerProvider().Logger(instrumentationName)
+	logger := otel.Logger(instrumentationName)
 
 	var rec log.Record
 	rec.SetEventName("gen_ai.evaluation.result")
 	rec.SetSeverity(log.SeverityInfo)
 	rec.SetSeverityText("INFO")
 
-	rec.AddAttributes(log.String(AttrEvaluationName, result.Name))
+	rec.AddAttributes(attribute.String(AttrEvaluationName, result.Name))
 	if result.ScoreLabel != "" {
-		rec.AddAttributes(log.String(AttrEvaluationScoreLabel, result.ScoreLabel))
+		rec.AddAttributes(attribute.String(AttrEvaluationScoreLabel, result.ScoreLabel))
 	}
 	if result.HasScoreValue {
-		rec.AddAttributes(log.Float64(AttrEvaluationScoreValue, result.ScoreValue))
+		rec.AddAttributes(attribute.Float64(AttrEvaluationScoreValue, result.ScoreValue))
 	}
 	if result.Explanation != "" {
-		rec.AddAttributes(log.String(AttrEvaluationExplanation, result.Explanation))
+		rec.AddAttributes(attribute.String(AttrEvaluationExplanation, result.Explanation))
 	}
 	if result.ErrorType != "" {
-		rec.AddAttributes(log.String("error.type", result.ErrorType))
+		rec.AddAttributes(attribute.String("error.type", result.ErrorType))
 	}
 	if convID := ConversationIDFromContext(ctx); convID != "" {
-		rec.AddAttributes(log.String(AttrConversationID, convID))
+		rec.AddAttributes(attribute.String(AttrConversationID, convID))
 	}
 
 	logger.Emit(ctx, rec)

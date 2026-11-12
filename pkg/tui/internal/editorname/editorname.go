@@ -61,12 +61,16 @@ func FromEnv(visual, editorEnv string) string {
 		return "Vi"
 	}
 
-	parts := strings.Fields(editorCmd)
-	if len(parts) == 0 {
+	var executable string
+	for part := range strings.FieldsSeq(editorCmd) {
+		executable = part
+		break
+	}
+	if executable == "" {
 		return "$EDITOR"
 	}
 
-	baseName := filepath.Base(parts[0])
+	baseName := filepath.Base(executable)
 
 	for _, e := range editorPrefixes {
 		if strings.HasPrefix(baseName, e.prefix) {

@@ -1,6 +1,9 @@
 package tools
 
-import "sync"
+import (
+	"slices"
+	"sync"
+)
 
 // DeferralTracker marks tools absent from a session's first model call as deferred.
 type DeferralTracker struct {
@@ -25,6 +28,9 @@ func (t *DeferralTracker) MarkAt(sessionID, toolCallID string, requestTools []To
 	if !ok {
 		initial = make(map[string]struct{}, len(requestTools))
 		for _, tool := range requestTools {
+			if tool.SearchOnly {
+				continue
+			}
 			initial[tool.Name] = struct{}{}
 		}
 		t.initial[sessionID] = initial
@@ -32,10 +38,15 @@ func (t *DeferralTracker) MarkAt(sessionID, toolCallID string, requestTools []To
 		return requestTools
 	}
 
-	marked := make([]Tool, len(requestTools))
-	copy(marked, requestTools)
+	marked := slices.Clip(slices.Clone(requestTools))
+	if marked == nil {
+		marked = []Tool{}
+	}
 	loadPoints := t.loadPointBy[sessionID]
 	for i := range marked {
+		if marked[i].SearchOnly {
+			continue
+		}
 		if _, presentInitially := initial[marked[i].Name]; presentInitially {
 			continue
 		}
@@ -49,4 +60,12 @@ func (t *DeferralTracker) MarkAt(sessionID, toolCallID string, requestTools []To
 		marked[i].DeferredAtToolCallID = loadPoints[marked[i].Name]
 	}
 	return marked
+}
+
+// Reset forgets load points after the history containing them was compacted.
+func (t *DeferralTracker) Reset(sessionID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.initial, sessionID)
+	delete(t.loadPointBy, sessionID)
 }

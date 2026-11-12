@@ -77,22 +77,26 @@ func renderTemplate(tmplStr string, data templateData) (string, error) {
 // For tar.gz, the response body is streamed directly through gzip → tar.
 // For zip, the body is spooled to a temporary file (zip requires random access).
 // Raw/single-binary formats are handled by the caller before reaching this function.
-func (l limits) extractRelease(body io.ReadCloser, destDir, format string, files []PackageFile, tmplData templateData) error {
+func (l limits) extractRelease(body io.ReadCloser, root *os.Root, format string, files []PackageFile, tmplData templateData) error {
 	switch format {
 	case "tar.gz", "tgz":
-		return l.extractTarGz(body, destDir, files, tmplData)
+		return l.extractTarGz(body, root, files, tmplData)
 	case "zip":
-		return l.extractZipFromStream(body, destDir, files, tmplData)
+		return l.extractZipFromStream(body, root, files, tmplData)
 	default:
 		return fmt.Errorf("unsupported archive format: %s", format)
 	}
 }
 
-// writeRawBinary writes a raw (non-archived) binary stream directly to destPath
+// writeRawBinary writes a raw (non-archived) binary stream beneath root
 // with executable permissions. The body is bounded by maxFileUncompressed
 // to avoid an attacker-controlled release asset from filling the disk.
-func (l limits) writeRawBinary(r io.Reader, destPath string) error {
-	f, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) //nolint:gosec // extracted binary needs +x
+func (l limits) writeRawBinary(r io.Reader, root *os.Root, name string) error {
+	destPath, err := safePath(root.Name(), name)
+	if err != nil {
+		return err
+	}
+	f, err := root.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return fmt.Errorf("creating raw binary %s: %w", destPath, err)
 	}
@@ -116,7 +120,7 @@ func (l limits) writeRawBinary(r io.Reader, destPath string) error {
 // extractTarGz extracts files from a tar.gz archive.
 // It reads from the provided reader in a streaming fashion (gzip → tar)
 // without buffering the entire archive in memory.
-func (l limits) extractTarGz(r io.Reader, destDir string, files []PackageFile, tmplData templateData) error {
+func (l limits) extractTarGz(r io.Reader, root *os.Root, files []PackageFile, tmplData templateData) error {
 	gzReader, err := gzip.NewReader(r)
 	if err != nil {
 		return fmt.Errorf("extracting tar.gz: %w", err)
@@ -163,15 +167,15 @@ func (l limits) extractTarGz(r io.Reader, destDir string, files []PackageFile, t
 			return errExtractTooLarge
 		}
 
-		destPath, err := safePath(destDir, destName)
+		destPath, err := safePath(root.Name(), destName)
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil { //nolint:gosec // tar entry directory for extracted binaries
+		if err := root.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 			return err
 		}
 
-		f, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) //nolint:gosec // extracted binary needs +x
+		f, err := root.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
 			return err
 		}
@@ -196,7 +200,7 @@ func (l limits) extractTarGz(r io.Reader, destDir string, files []PackageFile, t
 // extractZip extracts files from a zip archive.
 // It requires random access via io.ReaderAt; callers should provide either
 // an *os.File (spooled to a temp file) or a *bytes.Reader.
-func (l limits) extractZip(ra io.ReaderAt, size int64, destDir string, files []PackageFile, tmplData templateData) error {
+func (l limits) extractZip(ra io.ReaderAt, size int64, root *os.Root, files []PackageFile, tmplData templateData) error {
 	reader, err := zip.NewReader(ra, size)
 	if err != nil {
 		return fmt.Errorf("extracting zip: %w", err)
@@ -229,12 +233,12 @@ func (l limits) extractZip(ra io.ReaderAt, size int64, destDir string, files []P
 			return errExtractTooLarge
 		}
 
-		destPath, err := safePath(destDir, destName)
+		destPath, err := safePath(root.Name(), destName)
 		if err != nil {
 			return err
 		}
 
-		n, err := l.extractZipFile(f, destPath)
+		n, err := l.extractZipFile(root, f, destPath)
 		if err != nil {
 			return err
 		}
@@ -247,8 +251,8 @@ func (l limits) extractZip(ra io.ReaderAt, size int64, destDir string, files []P
 	return nil
 }
 
-func (l limits) extractZipFile(f *zip.File, destPath string) (int64, error) {
-	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil { //nolint:gosec // zip entry directory for extracted binaries
+func (l limits) extractZipFile(root *os.Root, f *zip.File, destPath string) (int64, error) {
+	if err := root.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
 		return 0, err
 	}
 
@@ -258,7 +262,7 @@ func (l limits) extractZipFile(f *zip.File, destPath string) (int64, error) {
 	}
 	defer rc.Close()
 
-	outFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755) //nolint:gosec // extracted binary needs +x
+	outFile, err := root.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 	if err != nil {
 		return 0, err
 	}
@@ -277,7 +281,7 @@ func (l limits) extractZipFile(f *zip.File, destPath string) (int64, error) {
 // extractZipFromStream spools an io.Reader to a temporary file and then
 // extracts the zip archive. This avoids holding the entire archive in memory
 // while satisfying zip's requirement for random access (io.ReaderAt).
-func (l limits) extractZipFromStream(r io.Reader, destDir string, files []PackageFile, tmplData templateData) error {
+func (l limits) extractZipFromStream(r io.Reader, root *os.Root, files []PackageFile, tmplData templateData) error {
 	tmpFile, err := os.CreateTemp("", "cagent-zip-*.zip")
 	if err != nil {
 		return fmt.Errorf("creating temp file for zip: %w", err)
@@ -297,7 +301,7 @@ func (l limits) extractZipFromStream(r io.Reader, destDir string, files []Packag
 		return fmt.Errorf("seeking temp file: %w", err)
 	}
 
-	return l.extractZip(tmpFile, size, destDir, files, tmplData)
+	return l.extractZip(tmpFile, size, root, files, tmplData)
 }
 
 // buildFileMap builds a map from rendered src paths to destination binary names.
@@ -342,7 +346,7 @@ func matchFile(entryName string, fileMap map[string]string) (string, bool) {
 var errPathTraversal = errors.New("archive entry attempts path traversal")
 
 // safePath validates that joining destDir with name stays within destDir.
-// Returns the cleaned absolute path or an error on path traversal.
+// Returns the cleaned root-relative path or an error on path traversal.
 func safePath(destDir, name string) (string, error) {
 	destPath := filepath.Join(destDir, name)
 	cleanDest := filepath.Clean(destPath)
@@ -352,5 +356,5 @@ func safePath(destDir, name string) (string, error) {
 		return "", fmt.Errorf("%w: %q resolves to %q (outside %q)", errPathTraversal, name, cleanDest, destDir)
 	}
 
-	return cleanDest, nil
+	return filepath.Rel(destDir, cleanDest)
 }

@@ -542,7 +542,8 @@ func (m *model) renderFooter() string {
 	var details string
 	if card := m.selectedCard(); card != nil {
 		details = styles.MutedStyle.Underline(true).Render(toolcommon.TruncateText(
-			sanitize(card.Agent+" · "+card.Branch), max(m.width/2, 0))) + " "
+			sanitize(card.Agent+" · "+card.Branch), max(m.width/2, 0),
+		)) + " "
 	}
 
 	left := " " + toolcommon.TruncateText(strings.Join(parts, "  "), max(m.width-lipgloss.Width(details)-2, 1))

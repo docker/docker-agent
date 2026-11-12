@@ -1,5 +1,5 @@
 ---
 title: "Community"
-description: "Contributing, troubleshooting, and telemetry."
+description: "Contributing and community resources."
 weight: 80
 ---

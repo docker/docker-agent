@@ -13,13 +13,10 @@ import (
 )
 
 func TestActualProgramFirstChunkReplacesPrimedSpinnerWithoutClick(t *testing.T) {
-	root, _, _ := wallClockRoot(t, 120, 40)
+	root, _, _ := frozenClockRoot(t, 120, 40)
 	_, _ = root.Update(messages.RoutedMsg{SessionID: "profile", Inner: agentruntime.StreamStarted("profile", "root")})
 	model := &streamingMotionModel{root: root, ready: make(chan struct{})}
-	program := tea.NewProgram(model, tea.WithInput(nil), tea.WithOutput(&wallClockCountingWriter{}), tea.WithWindowSize(120, 40))
-	done := make(chan error, 1)
-	go func() { _, err := program.Run(); done <- err }()
-	<-model.ready
+	program := startStreamingMotionProgram(t, model, tea.WithOutput(&wallClockCountingWriter{}))
 	before := programFrame(t, program)
 	require.NotEmpty(t, strings.TrimSpace(ansi.Strip(before)))
 
@@ -32,8 +29,4 @@ func TestActualProgramFirstChunkReplacesPrimedSpinnerWithoutClick(t *testing.T) 
 	programAck(t, program)
 	recovered := programFrame(t, program)
 	require.Equal(t, ansi.Strip(current), ansi.Strip(recovered), "inert click must not repair the current viewport")
-
-	program.Quit()
-	require.NoError(t, <-done)
-	root.ar.Stop()
 }

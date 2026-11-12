@@ -66,12 +66,13 @@ func TestUnloadBuiltin_Registered(t *testing.T) {
 	require.NotNil(t, fn)
 }
 
+// The unload hook owns no injectable client and uses http.DefaultClient.
+// Keep its network tests serial so httptest cleanup cannot race other tests.
+
 // TestUnload_PostsToDefaultEndpoint exercises the happy path against a
 // real httptest server: the builtin must derive the `_unload` URL from
 // the model's BaseURL and POST `{"model": "<id>"}`.
 func TestUnload_PostsToDefaultEndpoint(t *testing.T) {
-	t.Parallel()
-
 	var (
 		gotPath string
 		gotBody map[string]string
@@ -98,8 +99,6 @@ func TestUnload_PostsToDefaultEndpoint(t *testing.T) {
 // `unload_api` on the model takes precedence over the default
 // derivation, and is rebased onto the BaseURL's host when relative.
 func TestUnload_HonoursOverrideUnloadAPI(t *testing.T) {
-	t.Parallel()
-
 	var gotPath string
 	server := countingServer(t, http.StatusOK, func(r *http.Request) { gotPath = r.URL.Path })
 
@@ -114,8 +113,6 @@ func TestUnload_HonoursOverrideUnloadAPI(t *testing.T) {
 // reachable unload endpoint) must be silently skipped, not errored
 // on, not POSTed to a fabricated URL.
 func TestUnload_FiltersPerElement(t *testing.T) {
-	t.Parallel()
-
 	var gotModels []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -152,8 +149,6 @@ func TestUnload_FiltersPerElement(t *testing.T) {
 // without a resolvable endpoint). Combining these into one table
 // makes the no-op contract obvious from the test body.
 func TestUnload_NoOpInputs(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		name string
 		in   func(*httptest.Server) *hooks.Input
@@ -201,7 +196,6 @@ func TestUnload_NoOpInputs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			var calls atomic.Int64
 			server := countingServer(t, http.StatusOK, func(*http.Request) { calls.Add(1) })
 
@@ -218,8 +212,6 @@ func TestUnload_NoOpInputs(t *testing.T) {
 // because agent switching has to keep moving even when the unload
 // endpoint is down.
 func TestUnload_SwallowsServerErrors(t *testing.T) {
-	t.Parallel()
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("boom"))

@@ -1,10 +1,8 @@
 package filesystem
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,59 +44,6 @@ func TestFilesystemTool_DefaultIsUnrestricted(t *testing.T) {
 	// Equivalent to filepath.Clean of the joined relative escape.
 	want := filepath.Clean(filepath.Join(tmpDir, "..", "..", "some", "escape"))
 	assert.Equal(t, want, resolved)
-}
-
-func TestCheckForeignPath(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		path   string
-		goos   string
-		reject bool
-	}{
-		{"/mnt/c/Users/x/compose.yml", "windows", true},
-		{`\foo\bar`, "windows", true},
-		{"C:foo", "windows", true},
-		{"C:", "windows", true},
-		{`C:\Users\x`, "windows", false},
-		{"C:/Users/x", "windows", false},
-		{"//server/share", "windows", false},
-		{`\\server\share`, "windows", false},
-		{"./mnt/c/x", "windows", false},
-		{"rel/path", "windows", false},
-		{"~/file.txt", "windows", false},
-		{`C:\Users\x`, "linux", true},
-		{"C:/Users/x", "darwin", true},
-		{"/mnt/c/Users/x", "linux", false},
-		{`./C:\weird`, "linux", false},
-		{"C:foo", "linux", false},
-		{"rel/path", "linux", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.goos+" "+tt.path, func(t *testing.T) {
-			err := checkForeignPath(tt.path, tt.goos)
-			if tt.reject {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
-// A foreign-OS absolute path must be rejected with guidance instead of
-// silently joining onto the working directory (issue seen on Windows with
-// "/mnt/c/..." resolving to "<wd>\mnt\c\...").
-func TestResolveAndCheckPath_RejectsForeignPath(t *testing.T) {
-	t.Parallel()
-	tool := New(t.TempDir())
-
-	foreign := `C:\Users\x\compose.yml`
-	if runtime.GOOS == "windows" {
-		foreign = "/mnt/c/Users/x/compose.yml"
-	}
-	_, err := tool.resolveAndCheckPath(foreign)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "relative to the working directory")
 }
 
 func TestFilesystemTool_AllowList_DotMeansWorkingDir(t *testing.T) {
@@ -406,15 +351,10 @@ func TestFilesystemTool_Instructions_MentionsRestrictions(t *testing.T) {
 	t.Parallel()
 	wd := t.TempDir()
 
-	// Default instructions: working directory stated (%q-quoted), no
-	// restriction text.
+	// Default instructions: no restriction text.
 	plain := New(wd).Instructions()
-	assert.Contains(t, plain, fmt.Sprintf("%q", wd))
 	assert.NotContains(t, plain, "restricted")
 	assert.NotContains(t, plain, "must not access")
-
-	// No working directory configured: no dangling `The working directory is ""`.
-	assert.NotContains(t, New("").Instructions(), "working directory is")
 
 	// With an allow-list: instructions mention the restriction.
 	allowed := newTestToolSet(t, wd, WithAllowList([]string{".", "~"})).Instructions()
@@ -605,4 +545,59 @@ func TestPathRootSet_OpensOSRootForSandboxing(t *testing.T) {
 	assert.NotNil(t, set.entries[0].root, "expected an *os.Root for an existing directory")
 
 	set.close()
+}
+
+func TestFilesystemTool_RejectsDanglingSymlinks(t *testing.T) {
+	t.Parallel()
+
+	for _, policy := range []string{"deny-only", "allow-and-deny", "missing-allow-root"} {
+		for _, ancestor := range []bool{false, true} {
+			name := "file"
+			if ancestor {
+				name = "ancestor"
+			}
+			t.Run(policy+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				wd := t.TempDir()
+				allowed := filepath.Join(wd, "public")
+				denied := filepath.Join(wd, "private")
+				require.NoError(t, os.Mkdir(denied, 0o700))
+
+				opts := []Opt{WithDenyList([]string{"private"})}
+				switch policy {
+				case "allow-and-deny":
+					opts = append(opts, WithAllowList([]string{"."}))
+				case "missing-allow-root":
+					opts = []Opt{WithAllowList([]string{"public"})}
+				}
+				tool := newTestToolSet(t, wd, opts...)
+				require.NoError(t, os.Mkdir(allowed, 0o700))
+				link := filepath.Join(allowed, "alias")
+				target := filepath.Join(denied, "new")
+				require.NoError(t, os.Symlink(filepath.Join("..", "private", "new"), link))
+				writePath := link
+				if ancestor {
+					writePath = filepath.Join(link, "file.txt")
+				}
+
+				result, err := tool.handleWriteFile(t.Context(), WriteFileArgs{Path: writePath, Content: "blocked"})
+				require.NoError(t, err)
+				require.True(t, result.IsError, result.Output)
+				assert.Contains(t, result.Output, "cannot resolve symlink")
+				_, err = os.Lstat(target)
+				require.ErrorIs(t, err, os.ErrNotExist)
+
+				result, err = tool.handleCreateDirectory(t.Context(), CreateDirectoryArgs{Paths: []string{filepath.Join(link, "dir")}})
+				require.NoError(t, err)
+				assert.True(t, result.IsError, result.Output)
+				assert.NoDirExists(t, target)
+
+				result, err = tool.handleWriteFile(t.Context(), WriteFileArgs{
+					Path: filepath.Join(allowed, "nested", "new.txt"), Content: "allowed",
+				})
+				require.NoError(t, err)
+				assert.False(t, result.IsError, result.Output)
+			})
+		}
+	}
 }

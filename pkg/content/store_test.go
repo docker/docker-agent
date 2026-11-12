@@ -12,7 +12,44 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/configsize"
 )
+
+func TestStoreGetArtifactSizeLimit(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		size      int64
+		wantError bool
+	}{
+		{name: "exact boundary", size: configsize.MaxBytes},
+		{name: "over boundary", size: configsize.MaxBytes + 1, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			store, err := NewStore(WithBaseDir(t.TempDir()))
+			require.NoError(t, err)
+			layer := static.NewLayer(make([]byte, test.size), types.OCIUncompressedLayer)
+			img, err := mutate.AppendLayers(empty.Image, layer)
+			require.NoError(t, err)
+			const ref = "size-test:latest"
+			_, err = store.StoreArtifact(img, ref)
+			require.NoError(t, err)
+
+			data, err := store.GetArtifact(ref)
+			if test.wantError {
+				require.ErrorIs(t, err, configsize.ErrTooLarge)
+				require.NotErrorIs(t, err, ErrStoreCorrupted)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, data, int(test.size))
+		})
+	}
+}
 
 func TestStoreBasicOperations(t *testing.T) {
 	t.Parallel()

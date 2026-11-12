@@ -14,17 +14,25 @@ func CreateToolSet() (tools.ToolSet, error) {
 	return New(), nil
 }
 
-type ToolSet struct {
-	thoughts []string
-}
+// ToolSet has nonzero size so distinct instances have distinct pointer identities.
+type ToolSet struct{ _ byte }
 
 type Args struct {
 	Thought string `json:"thought" jsonschema:"The thought to think about"`
 }
 
-func (t *ToolSet) callTool(_ context.Context, params Args) (*tools.ToolCallResult, error) {
-	t.thoughts = append(t.thoughts, params.Thought)
-	return tools.ResultSuccess("Thoughts:\n" + strings.Join(t.thoughts, "\n")), nil
+func (t *ToolSet) callTool(ctx context.Context, params Args, rt tools.Runtime) (*tools.ToolCallResult, error) {
+	thoughts := []string{params.Thought}
+	if appender, ok := rt.(tools.ScratchpadAppender); ok {
+		var err error
+		thoughts, err = appender.AppendThought(ctx, t, params.Thought)
+		if err != nil {
+			return tools.ResultError(err.Error()), nil
+		}
+	} else if _, unscoped := rt.(tools.NopRuntime); !unscoped {
+		return tools.ResultError("think scratchpad unavailable in this runtime"), nil
+	}
+	return tools.ResultSuccess("Thoughts:\n" + strings.Join(thoughts, "\n")), nil
 }
 
 func New() *ToolSet {
@@ -46,10 +54,10 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:         ToolNameThink,
 			Category:     "think",
-			Description:  "Use the tool to think about something. It will not obtain new information or change the database, but just append the thought to the log. Use it when complex reasoning or some cache memory is needed.",
+			Description:  "Use the tool to think about something. It will not obtain new information or change external data; it appends to an internal conversation scratchpad. Use it when complex reasoning or some cache memory is needed.",
 			Parameters:   tools.MustSchemaFor[Args](),
 			OutputSchema: tools.MustSchemaFor[string](),
-			Handler:      tools.NewHandler(t.callTool),
+			Handler:      tools.NewRuntimeHandler(t.callTool),
 			Annotations: tools.ToolAnnotations{
 				ReadOnlyHint: true,
 				Title:        "Think",

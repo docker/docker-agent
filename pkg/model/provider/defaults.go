@@ -5,11 +5,15 @@ import (
 	"context"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelinfo"
+	"github.com/docker/docker-agent/pkg/modelsdev"
 )
 
 // expandModelConfigEnv substitutes ${env.X} / ${X} references in the model
@@ -34,10 +38,67 @@ func resolveProviderType(cfg *latest.ModelConfig) string {
 	if apiType, ok := cfg.ProviderOpts["api_type"].(string); ok && apiType != "" {
 		return apiType
 	}
-	if alias, exists := LookupAlias(cfg.Provider); exists && alias.APIType != "" {
+	if alias, exists := catalog.Find(cfg.Provider); exists && alias.APIType != "" {
 		return alias.APIType
 	}
 	return cfg.Provider
+}
+
+// ResolveType returns the registry key a model config is served by once
+// custom providers (providers: section), built-in aliases and an explicit
+// api_type are applied — i.e. the factory [Registry.New] will look up for
+// it. A routing model resolves to its fallback provider/model. The config is
+// not mutated.
+func ResolveType(cfg *latest.ModelConfig, customProviders map[string]latest.ProviderConfig) string {
+	return resolveProviderType(applyProviderDefaults(cfg, customProviders))
+}
+
+// Adapt turns a provider package's concrete constructor (e.g.
+// anthropic.NewClient, which returns *anthropic.Client) into a [Factory] so
+// it can be registered without a hand-written closure:
+//
+//	provider.NewRegistry(map[string]provider.Factory{"anthropic": provider.Adapt(anthropic.NewClient)})
+func Adapt[P Provider](newClient func(context.Context, *latest.ModelConfig, environment.Provider, ...options.Opt) (P, error)) Factory {
+	return func(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, opts ...options.Opt) (Provider, error) {
+		p, err := newClient(ctx, cfg, env, opts...)
+		if err != nil {
+			return nil, err
+		}
+		return p, nil
+	}
+}
+
+// Has reports whether a factory is registered for providerType, a key as
+// returned by [ResolveType].
+func (r *Registry) Has(providerType string) bool {
+	if r == nil {
+		return false
+	}
+	_, ok := r.factory(providerType)
+	return ok
+}
+
+// factory looks up the factory for a resolved provider type. The OpenAI
+// protocol variants ("openai_chatcompletions", "openai_responses") fall back
+// to the "openai" factory, which serves both, so hand-picked registries only
+// need to register "openai" to cover custom OpenAI-compatible providers.
+func (r *Registry) factory(providerType string) (Factory, bool) {
+	if f, ok := r.factories[providerType]; ok {
+		return f, true
+	}
+	if strings.HasPrefix(providerType, "openai_") {
+		f, ok := r.factories["openai"]
+		return f, ok
+	}
+	return nil, false
+}
+
+// Types returns the registered provider types, sorted.
+func (r *Registry) Types() []string {
+	if r == nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(r.factories))
 }
 
 // resolveEffectiveProvider returns the effective provider type for a ProviderConfig.
@@ -72,7 +133,7 @@ func isOpenAICompatibleProvider(providerType string) bool {
 		return true
 	}
 	// Otherwise, the type is OpenAI-compatible iff it's an alias that maps to OpenAI.
-	alias, exists := LookupAlias(providerType)
+	alias, exists := catalog.Find(providerType)
 	return exists && alias.APIType == "openai"
 }
 
@@ -98,12 +159,16 @@ func applyProviderDefaults(cfg *latest.ModelConfig, customProviders map[string]l
 			"base_url", providerCfg.BaseURL,
 		)
 		mergeFromProviderConfig(enhancedCfg, providerCfg)
+		if providerCfg.Provider != "" {
+			enhancedCfg.Provider = modelsdev.CanonicalProviderID(enhancedCfg.Provider)
+		}
 		applyModelDefaults(enhancedCfg)
 		return enhancedCfg
 	}
 
-	if alias, exists := LookupAlias(cfg.Provider); exists {
-		applyAliasFallbacks(enhancedCfg, alias)
+	enhancedCfg.Provider = modelsdev.CanonicalProviderID(enhancedCfg.Provider)
+	if alias, exists := catalog.Find(enhancedCfg.Provider); exists {
+		applyCatalogDefaults(enhancedCfg, alias)
 	}
 
 	// Apply model-specific defaults (e.g., thinking budget for Claude/GPT models)
@@ -166,14 +231,20 @@ func mergeFromProviderConfig(dst *latest.ModelConfig, src latest.ProviderConfig)
 	}
 }
 
-// applyAliasFallbacks applies BaseURL and TokenKey defaults from a built-in
+// applyCatalogDefaults applies BaseURL and TokenKey defaults from a built-in
 // alias when the model config does not already specify them.
-func applyAliasFallbacks(dst *latest.ModelConfig, alias Alias) {
-	if dst.BaseURL == "" {
+func applyCatalogDefaults(dst *latest.ModelConfig, alias catalog.Provider) {
+	apiType, _ := dst.ProviderOpts["api_type"].(string)
+	unauthenticatedEndpoint := dst.BaseURL != "" && apiType != "" && alias.APIType == "openai"
+	// Native SDKs resolve endpoint environment overrides before their own defaults.
+	sdkEndpoint := alias.Name == alias.APIType &&
+		(alias.APIType == "openai" || alias.APIType == "anthropic" || alias.APIType == "google")
+	if dst.BaseURL == "" && !sdkEndpoint {
 		dst.BaseURL = alias.BaseURL
 	}
-	if dst.TokenKey == "" {
-		dst.TokenKey = alias.TokenEnvVar
+	// Google chooses between API keys and Vertex OAuth/ADC at client construction.
+	if dst.TokenKey == "" && !unauthenticatedEndpoint && alias.APIType != "google" && len(alias.TokenEnvVars) > 0 {
+		dst.TokenKey = alias.TokenEnvVars[0]
 	}
 }
 
@@ -219,7 +290,7 @@ func cloneModelConfig(cfg *latest.ModelConfig) *latest.ModelConfig {
 //     applies since most providers have no real "off" switch.
 //   - thinking_budget: none  →  normally normalised the same way (nil), EXCEPT
 //     on an OpenAI-family model that has a real API-level "none" effort
-//     (gpt-5.6+, see [modelinfo.OpenAISupportsNoneEffort]): there the explicit
+//     (see [modelinfo.OpenAISupportsNoneEffort]): there the explicit
 //     value is preserved so it actually reaches the API instead of silently
 //     falling back to the model's default ("medium").
 //   - thinking_budget explicitly set to a real value  →  kept as-is; interleaved_thinking
@@ -324,7 +395,7 @@ func isOpenAIVendor(cfg *latest.ModelConfig) bool {
 // exclusion [modelinfo.IsOpenAIVendor] cannot express on its own, since the
 // built-in alias registry lives in this package (see [isOpenAIVendor]'s doc).
 func isUnrecognizedOpenAIProtocolProvider(cfg *latest.ModelConfig) bool {
-	if _, isBuiltinAlias := LookupAlias(cfg.Provider); isBuiltinAlias {
+	if _, isBuiltinAlias := catalog.Find(cfg.Provider); isBuiltinAlias {
 		return false
 	}
 	switch resolveProviderType(cfg) {

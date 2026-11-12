@@ -7,7 +7,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/modelpicker"
-	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
+	"github.com/docker/docker-agent/pkg/tui/components/completion"
 )
 
 func testCommands() []Command {
@@ -38,8 +39,8 @@ func TestAutocompleteScopedCommands(t *testing.T) {
 	t.Parallel()
 	a := NewAutocomplete()
 	a.SetCommands(testCommands())
-	gpt := runtime.ModelChoice{Name: "GPT Five", Ref: "openai/gpt-5", Provider: "openai", Model: "gpt-5"}
-	sonnet := runtime.ModelChoice{Name: "Claude Sonnet", Ref: "anthropic/claude-sonnet-4-6", Provider: "anthropic", Model: "claude-sonnet-4-6"}
+	gpt := modelcatalog.ModelChoice{Name: "GPT Five", Ref: "openai/gpt-5", Provider: "openai", Model: "gpt-5"}
+	sonnet := modelcatalog.ModelChoice{Name: "Claude Sonnet", Ref: "anthropic/claude-sonnet-4-6", Provider: "anthropic", Model: "claude-sonnet-4-6"}
 	a.SetScopedCommands("model ", []Command{
 		{Name: gpt.Ref, MatchScore: func(query string) (int, bool) { return modelpicker.Score(gpt, query) }, Kind: CmdBuiltin},
 		{Name: sonnet.Ref, MatchScore: func(query string) (int, bool) { return modelpicker.Score(sonnet, query) }, Kind: CmdBuiltin},
@@ -92,6 +93,38 @@ func TestAutocompleteRenderWidth(t *testing.T) {
 	}
 }
 
+func TestAutocompleteFiles(t *testing.T) {
+	t.Parallel()
+	a := NewAutocomplete()
+	a.SetCommands(testCommands())
+	a.SetFiles([]completion.Item{
+		{Label: "pkg/leantui/update.go", Value: "@pkg/leantui/update.go"},
+		{Label: "README.md", Value: "@README.md"},
+	})
+
+	require.True(t, a.Sync("please inspect @plu"))
+	assert.True(t, a.IsFileCompletion())
+	file, ok := a.Current()
+	require.True(t, ok)
+	assert.Equal(t, "pkg/leantui/update.go", file.Name)
+	assert.Equal(t, "@pkg/leantui/update.go", file.Value)
+
+	assert.False(t, a.Sync("email@example.com"))
+	assert.False(t, a.Sync("done @pkg/leantui/update.go now"))
+}
+
+func TestEditorReplaceCurrentWord(t *testing.T) {
+	t.Parallel()
+	e := NewEditor("")
+	e.SetText("inspect @pkg/old.go please")
+	for range len(" please") {
+		e.MoveLeft()
+	}
+
+	e.ReplaceCurrentWord("@pkg/new.go ")
+	assert.Equal(t, "inspect @pkg/new.go  please", e.Text())
+}
+
 func TestAutocompleteBuiltinsBeforeAgent(t *testing.T) {
 	t.Parallel()
 	matches := FilterCommands(testCommands(), "")
@@ -99,4 +132,79 @@ func TestAutocompleteBuiltinsBeforeAgent(t *testing.T) {
 	last := matches[len(matches)-1]
 	assert.Equal(t, "plan", last.Name)
 	assert.Equal(t, CmdAgent, last.Kind)
+}
+
+func TestAutocompleteModelFallback(t *testing.T) {
+	t.Parallel()
+	a := NewAutocomplete()
+	a.SetCommands(testCommands())
+	gpt := modelcatalog.ModelChoice{Name: "GPT Five", Ref: "openai/gpt-5", Provider: "openai", Model: "gpt-5"}
+	a.SetModels([]Command{{
+		Name: gpt.Ref,
+		MatchScore: func(query string) (int, bool) {
+			return modelpicker.Score(gpt, query)
+		},
+	}})
+
+	for _, query := range []string{"/gpt", "/openai", "/five"} {
+		require.True(t, a.Sync(query))
+		cmd, ok := a.Current()
+		require.True(t, ok)
+		assert.Equal(t, gpt.Ref, cmd.Name)
+		assert.Equal(t, "/model openai/gpt-5", a.Completion(cmd))
+		assert.Contains(t, a.Render(80)[0], "/model openai/gpt-5")
+	}
+
+	require.True(t, a.Sync("/"))
+	require.True(t, a.Sync("/ne"))
+	cmd, ok := a.Current()
+	require.True(t, ok)
+	assert.Equal(t, "new", cmd.Name)
+	assert.Equal(t, "/new", a.Completion(cmd))
+
+	assert.False(t, a.Sync("/zzzzz"))
+	assert.False(t, a.Sync("hello"))
+}
+
+func TestAutocompleteCommandsAfterLeavingScope(t *testing.T) {
+	t.Parallel()
+	a := NewAutocomplete()
+	a.SetCommands(testCommands())
+	a.SetScopedCommands("model ", []Command{{Name: "openai/gpt-5"}})
+	require.True(t, a.Sync("/model "))
+
+	require.True(t, a.Sync("/ne"))
+	cmd, ok := a.Current()
+	require.True(t, ok)
+	assert.Equal(t, "/new", a.Completion(cmd))
+}
+
+func TestAutocompleteModelSelectionWithSpaces(t *testing.T) {
+	t.Parallel()
+	for _, pasted := range []bool{false, true} {
+		a := NewAutocomplete()
+		a.SetCommands(testCommands())
+		astra := modelcatalog.ModelChoice{Name: "Astra", Ref: "openai/astra", Provider: "openai", Model: "astra"}
+		a.SetModels([]Command{{Name: astra.Ref, MatchScore: func(query string) (int, bool) {
+			return modelpicker.Score(astra, query)
+		}}})
+		if !pasted {
+			require.True(t, a.Sync("/openai"))
+			require.True(t, a.Sync("/openai "))
+		}
+		require.True(t, a.Sync("/openai astra"))
+		cmd, ok := a.Current()
+		require.True(t, ok)
+		assert.Equal(t, "/model openai/astra", a.Completion(cmd))
+
+		assert.False(t, a.Sync("/openai nonexistent"))
+		require.True(t, a.Sync("/openai astra"))
+		a.Sync("/ne")
+		assert.Equal(t, autocompleteModels, a.mode)
+		require.True(t, a.Sync("/"))
+		require.True(t, a.Sync("/ne"))
+		cmd, ok = a.Current()
+		require.True(t, ok)
+		assert.Equal(t, "/new", a.Completion(cmd))
+	}
 }

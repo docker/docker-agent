@@ -1,6 +1,6 @@
 package messages
 
-import "github.com/docker/docker-agent/pkg/runtime"
+import "github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 
 // Agent messages control agent switching, commands, and model selection.
 type (
@@ -23,7 +23,7 @@ type (
 
 	// ModelPickerRefreshedMsg carries the asynchronously refreshed choices.
 	ModelPickerRefreshedMsg struct {
-		Models           []runtime.ModelChoice
+		Models           []modelcatalog.ModelChoice
 		Query            string
 		Err              error
 		CatalogRefreshed bool

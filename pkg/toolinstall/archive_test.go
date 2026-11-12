@@ -5,8 +5,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -74,7 +77,7 @@ func TestWriteRawBinary(t *testing.T) {
 	destPath := filepath.Join(destDir, executableName("mytool"))
 	content := "#!/bin/sh\necho hello"
 
-	err := defaultLimits().writeRawBinary(strings.NewReader(content), destPath)
+	err := defaultLimits().writeRawBinary(strings.NewReader(content), openExtractionRoot(t, destDir), executableName("mytool"))
 	require.NoError(t, err)
 	data, err := os.ReadFile(destPath)
 	require.NoError(t, err)
@@ -86,7 +89,7 @@ func TestWriteRawBinary(t *testing.T) {
 func TestWriteRawBinary_ErrorOnBadPath(t *testing.T) {
 	t.Parallel()
 
-	err := defaultLimits().writeRawBinary(strings.NewReader("data"), "/nonexistent/dir/binary")
+	err := defaultLimits().writeRawBinary(strings.NewReader("data"), openExtractionRoot(t, t.TempDir()), "nonexistent/dir/binary")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "creating raw binary")
 }
@@ -113,7 +116,7 @@ func TestExtractTarGz(t *testing.T) {
 	files := []PackageFile{{Name: "mytool", Src: "tool_{{.Version}}_{{.OS}}/bin/mytool"}}
 	data := templateData{Version: "1.0.0", OS: "linux", Arch: "amd64"}
 
-	require.NoError(t, defaultLimits().extractTarGz(&buf, destDir, files, data))
+	require.NoError(t, defaultLimits().extractTarGz(&buf, openExtractionRoot(t, destDir), files, data))
 
 	extracted, err := os.ReadFile(filepath.Join(destDir, executableName("mytool")))
 	require.NoError(t, err)
@@ -137,7 +140,7 @@ func TestExtractZip(t *testing.T) {
 	files := []PackageFile{{Name: "mytool", Src: "tool_{{.Version}}/bin/mytool"}}
 	data := templateData{Version: "1.0.0", OS: "linux", Arch: "amd64"}
 
-	require.NoError(t, defaultLimits().extractZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), destDir, files, data))
+	require.NoError(t, defaultLimits().extractZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), openExtractionRoot(t, destDir), files, data))
 
 	extracted, err := os.ReadFile(filepath.Join(destDir, executableName("mytool")))
 	require.NoError(t, err)
@@ -216,7 +219,7 @@ func TestSafePath(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Contains(t, result, destDir)
+			assert.Equal(t, filepath.Clean(tt.input), result)
 		})
 	}
 }
@@ -242,7 +245,7 @@ func TestExtractTarGz_PathTraversal(t *testing.T) {
 	destDir := t.TempDir()
 	// Map entry to a traversal dest name.
 	files := []PackageFile{{Name: "../../etc/passwd", Src: "evil"}}
-	err = defaultLimits().extractTarGz(&buf, destDir, files, templateData{})
+	err = defaultLimits().extractTarGz(&buf, openExtractionRoot(t, destDir), files, templateData{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errPathTraversal)
 }
@@ -263,7 +266,7 @@ func TestExtractZip_PathTraversal(t *testing.T) {
 	destDir := t.TempDir()
 	// Map entry to a traversal dest name.
 	files := []PackageFile{{Name: "../../etc/passwd", Src: "evil"}}
-	err = defaultLimits().extractZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), destDir, files, templateData{})
+	err = defaultLimits().extractZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), openExtractionRoot(t, destDir), files, templateData{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errPathTraversal)
 }
@@ -298,7 +301,7 @@ func TestExtractTarGz_TooLarge(t *testing.T) {
 	require.NoError(t, gw.Close())
 
 	files := []PackageFile{{Name: "mytool", Src: "tool/bin/mytool"}}
-	err = limitsWithFileCap(32).extractTarGz(&buf, t.TempDir(), files, templateData{})
+	err = limitsWithFileCap(32).extractTarGz(&buf, openExtractionRoot(t, t.TempDir()), files, templateData{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errExtractTooLarge)
 }
@@ -315,7 +318,7 @@ func TestExtractZip_TooLarge(t *testing.T) {
 	require.NoError(t, zw.Close())
 
 	files := []PackageFile{{Name: "mytool", Src: "tool/bin/mytool"}}
-	err = limitsWithFileCap(32).extractZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), t.TempDir(), files, templateData{})
+	err = limitsWithFileCap(32).extractZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), openExtractionRoot(t, t.TempDir()), files, templateData{})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errExtractTooLarge)
 }
@@ -323,8 +326,145 @@ func TestExtractZip_TooLarge(t *testing.T) {
 func TestWriteRawBinary_TooLarge(t *testing.T) {
 	t.Parallel()
 
-	dest := filepath.Join(t.TempDir(), "big")
-	err := limitsWithFileCap(32).writeRawBinary(strings.NewReader(strings.Repeat("A", 1024)), dest)
+	root := openExtractionRoot(t, t.TempDir())
+	err := limitsWithFileCap(32).writeRawBinary(strings.NewReader(strings.Repeat("A", 1024)), root, "big")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, errExtractTooLarge)
+}
+
+func openExtractionRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, root.Close()) })
+	return root
+}
+
+func extractTestBinary(t *testing.T, root *os.Root, format, name string) error {
+	t.Helper()
+	const content = "new binary"
+	files := []PackageFile{{Name: name, Src: "tool"}}
+	switch format {
+	case "tar.gz":
+		body := buildTarGz(t, "tool", []byte(content))
+		return defaultLimits().extractRelease(io.NopCloser(bytes.NewReader(body)), root, format, files, templateData{})
+	case "zip":
+		body := buildZip(t, "tool", []byte(content))
+		return defaultLimits().extractRelease(io.NopCloser(bytes.NewReader(body)), root, format, files, templateData{})
+	default:
+		return defaultLimits().writeRawBinary(strings.NewReader(content), root, executableName(name))
+	}
+}
+
+func extractionSymlink(t *testing.T, target, name string) {
+	t.Helper()
+	if err := os.Symlink(target, name); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		require.NoError(t, err)
+	}
+}
+
+func TestExtractionRejectsEscapingSymlinks(t *testing.T) {
+	t.Parallel()
+	for _, format := range []string{"tar.gz", "zip", "raw"} {
+		for _, parent := range []bool{false, true} {
+			for _, relative := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/parent=%t/relative=%t", format, parent, relative), func(t *testing.T) {
+					t.Parallel()
+					base := t.TempDir()
+					dest := filepath.Join(base, "dest")
+					outside := filepath.Join(base, "outside")
+					require.NoError(t, os.MkdirAll(dest, 0o755))
+					require.NoError(t, os.MkdirAll(outside, 0o755))
+					victim := filepath.Join(outside, executableName("tool"))
+					require.NoError(t, os.WriteFile(victim, []byte("untouched"), 0o600))
+					name := "tool"
+					target := victim
+					link := filepath.Join(dest, executableName(name))
+					if parent {
+						name = filepath.Join("sub", name)
+						target = outside
+						link = filepath.Join(dest, "sub")
+					}
+					if relative {
+						var err error
+						target, err = filepath.Rel(filepath.Dir(link), target)
+						require.NoError(t, err)
+					}
+					extractionSymlink(t, target, link)
+
+					err := extractTestBinary(t, openExtractionRoot(t, dest), format, name)
+					require.Error(t, err)
+					got, err := os.ReadFile(victim)
+					require.NoError(t, err)
+					assert.Equal(t, "untouched", string(got))
+				})
+			}
+		}
+	}
+}
+
+func TestExtractionAllowsContainedSymlinks(t *testing.T) {
+	t.Parallel()
+	for _, format := range []string{"tar.gz", "zip", "raw"} {
+		t.Run(format, func(t *testing.T) {
+			t.Parallel()
+			dest := t.TempDir()
+			require.NoError(t, os.Mkdir(filepath.Join(dest, "real"), 0o755))
+			extractionSymlink(t, "real", filepath.Join(dest, "sub"))
+			extractionSymlink(t, executableName("target"), filepath.Join(dest, "real", executableName("tool")))
+			require.NoError(t, extractTestBinary(t, openExtractionRoot(t, dest), format, filepath.Join("sub", "tool")))
+			got, err := os.ReadFile(filepath.Join(dest, "real", executableName("target")))
+			require.NoError(t, err)
+			assert.Equal(t, "new binary", string(got))
+		})
+	}
+}
+
+func TestExtractionRetainsRootAfterReplacement(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows prevents renaming an open directory")
+	}
+	for _, format := range []string{"tar.gz", "zip", "raw"} {
+		t.Run(format, func(t *testing.T) {
+			t.Parallel()
+			base := t.TempDir()
+			dest := filepath.Join(base, "dest")
+			moved := filepath.Join(base, "moved")
+			outside := filepath.Join(base, "outside")
+			require.NoError(t, os.Mkdir(dest, 0o755))
+			require.NoError(t, os.Mkdir(outside, 0o755))
+			root := openExtractionRoot(t, dest)
+			require.NoError(t, os.Rename(dest, moved))
+			extractionSymlink(t, outside, dest)
+
+			require.NoError(t, extractTestBinary(t, root, format, "tool"))
+			got, err := os.ReadFile(filepath.Join(moved, executableName("tool")))
+			require.NoError(t, err)
+			assert.Equal(t, "new binary", string(got))
+			entries, err := os.ReadDir(outside)
+			require.NoError(t, err)
+			assert.Empty(t, entries)
+		})
+	}
+}
+
+func TestExtractionDoesNotCreateOutsideDirectories(t *testing.T) {
+	t.Parallel()
+	for _, format := range []string{"tar.gz", "zip"} {
+		t.Run(format, func(t *testing.T) {
+			t.Parallel()
+			dest := t.TempDir()
+			outside := t.TempDir()
+			extractionSymlink(t, outside, filepath.Join(dest, "sub"))
+			err := extractTestBinary(t, openExtractionRoot(t, dest), format, filepath.Join("sub", "new", "tool"))
+			require.Error(t, err)
+			entries, err := os.ReadDir(outside)
+			require.NoError(t, err)
+			assert.Empty(t, entries)
+		})
+	}
 }

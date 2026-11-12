@@ -8,31 +8,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// fdOwnershipPin keeps os.Files whose descriptor was handed to
-// Listen("fd://...") reachable for the life of the test process. Listen
-// adopts and closes the descriptor, so closing the os.File as well —
-// explicitly or via its GC cleanup — would close the same fd number a second
-// time after the OS has recycled it for another parallel test's socket,
-// corrupting that test's connection. Pinning for the whole process (rather
-// than runtime.KeepAlive until test end) matters because the recycled fd can
-// belong to a parallel test that outlives this one.
-var (
-	fdOwnershipPinMu sync.Mutex
-	fdOwnershipPin   []*os.File
-)
-
-func pinFDOwnership(file *os.File) {
-	fdOwnershipPinMu.Lock()
-	defer fdOwnershipPinMu.Unlock()
-	fdOwnershipPin = append(fdOwnershipPin, file)
-}
 
 func TestListen_FD(t *testing.T) {
 	t.Parallel()
@@ -42,16 +25,28 @@ func TestListen_FD(t *testing.T) {
 	require.NoError(t, err)
 	defer orig.Close()
 
+	wantAddr := orig.Addr()
 	file, err := orig.(*net.TCPListener).File()
 	require.NoError(t, err)
-	// Ownership of file's fd passes to Listen; see fdOwnershipPin.
+	require.NoError(t, orig.Close())
+	// Listen adopts the fd; file must never close it again.
 	pinFDOwnership(file)
 
 	ln, err := Listen(t.Context(), fmt.Sprintf("fd://%d", file.Fd()))
 	require.NoError(t, err)
 	defer ln.Close()
 
-	assert.NotNil(t, ln.Addr())
+	assert.Equal(t, wantAddr, ln.Addr())
+	runtime.GC()
+
+	require.NoError(t, ln.(*net.TCPListener).SetDeadline(time.Now().Add(5*time.Second)))
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	client, err := dialer.DialContext(t.Context(), "tcp", ln.Addr().String())
+	require.NoError(t, err)
+	defer client.Close()
+	conn, err := ln.Accept()
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
 }
 
 func TestListen_FD_InvalidNumber(t *testing.T) {
@@ -185,9 +180,6 @@ func TestListen_Unix(t *testing.T) {
 	assert.Equal(t, "pong", string(body))
 }
 
-// TestListen_Unix_ReplacesStaleSocket verifies that a leftover socket file
-// from a previous run is removed so the bind succeeds (rather than failing
-// with "address already in use").
 func TestListen_Unix_ReplacesStaleSocket(t *testing.T) {
 	t.Parallel()
 
@@ -202,4 +194,93 @@ func TestListen_Unix_ReplacesStaleSocket(t *testing.T) {
 	require.NoError(t, err)
 	defer ln2.Close()
 	assert.Equal(t, "unix", ln2.Addr().Network())
+}
+
+func TestListen_Unix_PreservesRegularFile(t *testing.T) {
+	t.Parallel()
+
+	sockPath := filepath.Join(shortTempDir(t), "a.sock")
+	original := []byte("keep me")
+	require.NoError(t, os.WriteFile(sockPath, original, 0o640))
+
+	_, err := Listen(t.Context(), "unix://"+sockPath)
+	require.ErrorContains(t, err, "refusing to replace non-socket path")
+
+	got, err := os.ReadFile(sockPath)
+	require.NoError(t, err)
+	assert.Equal(t, original, got)
+}
+
+func TestListen_Unix_RejectsSymlink(t *testing.T) {
+	t.Parallel()
+
+	dir := shortTempDir(t)
+	target := filepath.Join(dir, "target")
+	sockPath := filepath.Join(dir, "a.sock")
+	require.NoError(t, os.WriteFile(target, []byte("keep me"), 0o600))
+	require.NoError(t, os.Symlink(target, sockPath))
+
+	_, err := Listen(t.Context(), "unix://"+sockPath)
+	require.ErrorContains(t, err, "refusing to replace non-socket path")
+
+	info, err := os.Lstat(sockPath)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&os.ModeSymlink)
+}
+
+func TestListen_Unix_DoesNotUnlinkLiveSocket(t *testing.T) {
+	t.Parallel()
+
+	sockPath := filepath.Join(shortTempDir(t), "a.sock")
+	ln, err := Listen(t.Context(), "unix://"+sockPath)
+	require.NoError(t, err)
+	defer ln.Close()
+
+	_, err = Listen(t.Context(), "unix://"+sockPath)
+	require.ErrorContains(t, err, "already in use")
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(t.Context(), "unix", sockPath)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
+}
+
+func TestListen_Unix_SerializesConcurrentStarts(t *testing.T) {
+	t.Parallel()
+
+	sockPath := filepath.Join(shortTempDir(t), "a.sock")
+	const starts = 8
+	listeners := make(chan net.Listener, starts)
+	errs := make(chan error, starts)
+	var wg sync.WaitGroup
+	for range starts {
+		wg.Go(func() {
+			ln, err := Listen(t.Context(), "unix://"+sockPath)
+			if err != nil {
+				errs <- err
+				return
+			}
+			listeners <- ln
+		})
+	}
+	wg.Wait()
+	close(listeners)
+	close(errs)
+
+	var successful []net.Listener
+	for ln := range listeners {
+		successful = append(successful, ln)
+	}
+	t.Cleanup(func() {
+		for _, ln := range successful {
+			_ = ln.Close()
+		}
+	})
+	assert.Len(t, successful, 1)
+	assert.Len(t, errs, starts-1)
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(t.Context(), "unix", sockPath)
+	require.NoError(t, err)
+	require.NoError(t, conn.Close())
 }

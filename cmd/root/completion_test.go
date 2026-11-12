@@ -10,6 +10,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCompleteBuiltinAgents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(t.TempDir())
+
+	for _, tt := range []struct {
+		prefix string
+		want   []string
+	}{
+		{prefix: "", want: []string{"default\tbuilt-in agent", "minimal\tbuilt-in agent"}},
+		{prefix: "min", want: []string{"minimal\tbuilt-in agent"}},
+		{prefix: "coder"},
+	} {
+		t.Run(tt.prefix, func(t *testing.T) {
+			completions, directive := completeAlias(tt.prefix)
+			assert.Equal(t, tt.want, completions)
+			assert.Equal(t, cobra.ShellCompDirectiveNoFileComp, directive)
+		})
+	}
+}
+
 func TestCompleteAgentFilename(t *testing.T) {
 	// Note: These tests change working directory so they cannot run in parallel
 

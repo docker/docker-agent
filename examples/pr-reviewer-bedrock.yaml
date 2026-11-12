@@ -455,7 +455,7 @@ agents:
 models:
   bedrock-opus:
     provider: amazon-bedrock
-    model: global.anthropic.claude-opus-4-5-20251101-v1:0
+    model: global.anthropic.claude-opus-5
     max_tokens: 64000
     thinking_budget: 32000
     provider_opts:

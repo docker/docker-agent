@@ -71,7 +71,7 @@ func newApplySettingsModel(t *testing.T) *appModel {
 	m.buildCommandCategories = func(context.Context, tea.Model) []commands.Category { return nil }
 	m.leanMode = true
 	m.tabBar = tabbar.New(animation.NewRuntime(), 0)
-	m.sessionState = service.NewSessionState(session.New())
+	m.activeTab.sessionState = service.NewSessionState(session.New())
 	return m
 }
 
@@ -102,7 +102,7 @@ func TestHandleApplySettings_RetainsInterruptMode(t *testing.T) {
 
 	m := newApplySettingsModel(t)
 	second := &mockChatPage{}
-	m.chatPages["second"] = second
+	m.ensureTab("second").chatPage = second
 
 	prefs := defaultTestPreferences()
 	prefs.InterruptConfirmation = messages.InterruptModeNone
@@ -110,7 +110,7 @@ func TestHandleApplySettings_RetainsInterruptMode(t *testing.T) {
 
 	assert.Equal(t, messages.InterruptModeNone, m.interruptMode,
 		"the preference is retained for future pages")
-	assert.Equal(t, messages.InterruptModeNone, m.chatPage.(*mockChatPage).interruptMode,
+	assert.Equal(t, messages.InterruptModeNone, m.activeTab.chatPage.(*mockChatPage).interruptMode,
 		"the active page receives the new mode")
 	assert.Equal(t, messages.InterruptModeNone, second.interruptMode,
 		"background pages receive the new mode")
@@ -131,7 +131,7 @@ func TestHandleApplySettings_NormalizesInvalidInterruptMode(t *testing.T) {
 	_, _ = m.handleApplySettings(messages.ApplySettingsMsg{Preferences: prefs})
 
 	assert.Equal(t, messages.InterruptModeAlways, m.interruptMode)
-	assert.Equal(t, messages.InterruptModeAlways, m.chatPage.(*mockChatPage).interruptMode,
+	assert.Equal(t, messages.InterruptModeAlways, m.activeTab.chatPage.(*mockChatPage).interruptMode,
 		"pages receive the normalized mode, not the raw value")
 }
 
@@ -168,9 +168,9 @@ func TestNew_AppliesPersistedInterruptModeAtStartup(t *testing.T) {
 
 			assert.Equal(t, tt.want, m.interruptMode)
 
-			_, _ = m.chatPage.Update(runtime.StreamStarted(sess.ID, "root"))
-			t.Cleanup(func() { _, _ = m.chatPage.Update(messages.StreamCancelledMsg{}) })
-			assert.Equal(t, tt.want == messages.InterruptModeAlways, opensInterruptDialog(m.chatPage),
+			_, _ = m.activeTab.chatPage.Update(runtime.StreamStarted(sess.ID, "root"))
+			t.Cleanup(func() { _, _ = m.activeTab.chatPage.Update(messages.StreamCancelledMsg{}) })
+			assert.Equal(t, tt.want == messages.InterruptModeAlways, opensInterruptDialog(m.activeTab.chatPage),
 				"the initial page must honor the persisted mode")
 		})
 	}

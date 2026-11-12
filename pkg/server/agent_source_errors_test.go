@@ -69,6 +69,7 @@ func TestAgentSourceHTTPStatus(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequestWithContext(t.Context(), tc.method, tc.path, bytes.NewBufferString(`{"messages":[]}`))
+			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 			srv.e.ServeHTTP(rec, req)
 			assert.Equal(t, tc.want, rec.Code)

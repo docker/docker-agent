@@ -3,10 +3,14 @@
 package filesystem
 
 import (
+	"context"
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMatchPostEdit(t *testing.T) {
@@ -109,4 +113,54 @@ func TestMatchPostEdit(t *testing.T) {
 			assert.Equal(t, tt.wantMatch, got)
 		})
 	}
+}
+
+func TestPostEditCommandsUseWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell command")
+	}
+	workspace := t.TempDir()
+	filePath := filepath.Join(workspace, "edited file.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("updated"), 0o600))
+
+	err := runPostEditCommands(t.Context(), workspace, []PostEditConfig{
+		{Path: "*.txt", Cmd: `cat "${file}" > hook-output.txt`},
+	}, filePath)
+	require.NoError(t, err)
+	content, err := os.ReadFile(filepath.Join(workspace, "hook-output.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "updated", string(content))
+}
+
+func TestPostEditCommandsHonorCancellation(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell command")
+	}
+	workspace := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	err := runPostEditCommands(ctx, workspace, []PostEditConfig{
+		{Path: "*.txt", Cmd: "printf unexpected > hook-output"},
+	}, filepath.Join(workspace, "file.txt"))
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NoFileExists(t, filepath.Join(workspace, "hook-output"))
+}
+
+func TestPostEditCommandsWithRelativeWorkingDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell command")
+	}
+	t.Chdir(t.TempDir())
+	require.NoError(t, os.Mkdir("workspace", 0o700))
+	filePath := filepath.Join("workspace", "file.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("updated"), 0o600))
+	err := runPostEditCommands(t.Context(), "workspace", []PostEditConfig{
+		{Path: "*.txt", Cmd: `cat "${file}" > hook-output.txt`},
+	}, filePath)
+	require.NoError(t, err)
+	data, err := os.ReadFile(filepath.Join("workspace", "hook-output.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "updated", string(data))
 }

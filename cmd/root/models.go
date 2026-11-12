@@ -20,7 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/httpclient"
-	"github.com/docker/docker-agent/pkg/model/provider"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/modelsgateway"
 	"github.com/docker/docker-agent/pkg/telemetry"
@@ -46,8 +46,9 @@ const listTimeout = 5 * time.Second
 // from the snapshot) prevents surprising side effects like `docker agent models
 // --provider ollama` issuing a real GET against localhost.
 var liveFetchProviders = map[string]bool{
-	"opencode-zen": true,
-	"opencode-go":  true,
+	"lunaroute":   true,
+	"opencode":    true,
+	"opencode-go": true,
 }
 
 // modelRow represents a single model entry for display or serialization.
@@ -129,11 +130,22 @@ func (f *modelsListFlags) runModelsListCommand(cmd *cobra.Command, args []string
 	out := cli.NewPrinter(cmd.OutOrStdout())
 	env := f.runConfig.EnvProvider()
 
-	// Normalize the provider filter to lowercase so case-sensitive map lookups
-	// in db.Providers and IsCatalogProvider all match the same way
-	// strings.EqualFold does in the outer row filter below.
+	isCustomProvider := func(name string) bool {
+		for customName := range f.runConfig.Providers {
+			if strings.EqualFold(customName, name) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Custom names take precedence over built-in aliases, regardless of case.
+	customFilter := isCustomProvider(f.providerFilter)
 	if f.providerFilter != "" {
 		f.providerFilter = strings.ToLower(f.providerFilter)
+		if !customFilter {
+			f.providerFilter = modelsdev.CanonicalProviderID(f.providerFilter)
+		}
 	}
 
 	// Determine which model auto-selection would pick. DMR discovery is left
@@ -158,10 +170,15 @@ func (f *modelsListFlags) runModelsListCommand(cmd *cobra.Command, args []string
 		rows = f.collectModels(ctx, env, availableProviders, autoModel)
 	}
 
-	// Apply provider filter
 	if f.providerFilter != "" {
 		rows = slices.DeleteFunc(rows, func(r modelRow) bool {
-			return !strings.EqualFold(r.Provider, f.providerFilter)
+			if strings.EqualFold(r.Provider, f.providerFilter) {
+				return false
+			}
+			if customFilter || isCustomProvider(r.Provider) {
+				return true
+			}
+			return modelsdev.CanonicalProviderID(strings.ToLower(r.Provider)) != f.providerFilter
 		})
 	}
 
@@ -187,7 +204,7 @@ func (f *modelsListFlags) runModelsListCommand(cmd *cobra.Command, args []string
 
 	switch f.format {
 	case "json":
-		return f.renderJSON(cmd, rows)
+		return encodeJSON(cmd, rows)
 	default:
 		f.renderTable(cmd, rows)
 	}
@@ -307,7 +324,7 @@ func (f *modelsListFlags) collectModels(ctx context.Context, env environment.Pro
 	}
 
 	for providerID, prov := range db.Providers {
-		if !provider.IsCatalogProvider(providerID) {
+		if !catalog.IsCatalogProvider(providerID) {
 			continue
 		}
 		if !f.all && !availableProviders[providerID] {
@@ -425,16 +442,18 @@ type openAIModelsResponse struct {
 //     provider that requires the API key on /v1/models.
 //   - Bounded by listTimeout (5s) so a slow endpoint cannot stall `models list`.
 func fetchProviderModels(ctx context.Context, providerName string, env environment.Provider) []string {
-	alias, ok := provider.LookupAlias(providerName)
-	if !ok || alias.BaseURL == "" {
+	alias, ok := catalog.Find(providerName)
+	if !ok || alias.BaseURL == "" || alias.APIType != "openai" {
 		return nil
 	}
 
 	var token string
 	// Send the alias's declared API key so providers that require it on
 	// /v1/models authenticate the request instead of returning 401/403.
-	if alias.TokenEnvVar != "" {
-		token, _ = env.Get(ctx, alias.TokenEnvVar)
+	for _, key := range alias.TokenEnvVars {
+		if token, _ = env.Get(ctx, key); token != "" {
+			break
+		}
 	}
 
 	return fetchOpenAICompatibleModels(ctx, alias.BaseURL, token)
@@ -534,10 +553,4 @@ func (f *modelsListFlags) renderTable(cmd *cobra.Command, rows []modelRow) {
 		fmt.Fprintf(w, "%s\t%s\t%s\n", r.Provider, r.Model, def)
 	}
 	w.Flush()
-}
-
-func (f *modelsListFlags) renderJSON(cmd *cobra.Command, rows []modelRow) error {
-	enc := json.NewEncoder(cmd.OutOrStdout())
-	enc.SetIndent("", "  ")
-	return enc.Encode(rows)
 }

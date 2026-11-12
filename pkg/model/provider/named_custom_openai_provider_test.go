@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 // captureNamedCustomProviderRequestBody starts a mock server that records the
@@ -283,4 +284,50 @@ func TestNamedCustomOpenAIProvider_SpoofedProviderOptsCannotSuppressNone(t *test
 	}
 	require.NoError(t, json.Unmarshal(body(), &req))
 	assert.Equal(t, "none", req.ReasoningEffort)
+}
+
+func TestNamedCustomOpenAIProvider_GPT6NoneEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, apiType := range []string{"openai_responses", "openai_chatcompletions"} {
+		for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
+			for _, mode := range []string{"explicit", "no_thinking"} {
+				t.Run(apiType+"/"+model+"/"+mode, func(t *testing.T) {
+					t.Parallel()
+					server, body := captureNamedCustomProviderRequestBody(t, apiType)
+					cfg := &latest.ModelConfig{Provider: "my_openai", Model: model}
+					opts := []options.Opt{options.WithProviders(map[string]latest.ProviderConfig{
+						"my_openai": {BaseURL: server.URL, TokenKey: "MY_TOKEN", APIType: apiType},
+					})}
+					if mode == "explicit" {
+						cfg.ThinkingBudget = &latest.ThinkingBudget{Effort: "none"}
+					} else {
+						opts = append(opts, options.WithNoThinking())
+					}
+					env := environment.NewMapEnvProvider(map[string]string{"MY_TOKEN": "secret"})
+					p, err := fullTestRegistry().New(t.Context(), cfg, env, opts...)
+					require.NoError(t, err)
+					stream, err := p.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, []tools.Tool{{
+						Name: "get_time", Description: "get the time",
+						Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+					}})
+					require.NoError(t, err)
+					defer stream.Close()
+					drainStream(t, stream)
+					var req struct {
+						ReasoningEffort string `json:"reasoning_effort"`
+						Reasoning       struct {
+							Effort string `json:"effort"`
+						} `json:"reasoning"`
+					}
+					require.NoError(t, json.Unmarshal(body(), &req))
+					if apiType == "openai_responses" {
+						assert.Equal(t, "none", req.Reasoning.Effort)
+					} else {
+						assert.Equal(t, "none", req.ReasoningEffort)
+					}
+				})
+			}
+		}
+	}
 }

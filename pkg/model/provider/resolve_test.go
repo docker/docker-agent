@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
 )
 
 func TestResolveEffectiveProvider(t *testing.T) {
@@ -54,7 +55,7 @@ func TestIsOpenAICompatibleProvider(t *testing.T) {
 	}
 
 	// Aliases that point to the openai api — the previously-uncovered tail.
-	for name, alias := range EachAlias() {
+	for name, alias := range catalog.Providers {
 		if alias.APIType == "openai" {
 			t.Run("alias/"+name, func(t *testing.T) {
 				t.Parallel()

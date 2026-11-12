@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/animation"
+	"github.com/docker/docker-agent/pkg/tui/components/tool/defaults"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/types"
 )
@@ -175,7 +176,7 @@ func TestReasoningBlockExpandedShowsFullToolRenderer(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("old line\n"), 0o644))
 
 	sessionState := &service.SessionState{}
-	block := New(animation.NewRuntime(), "test-expanded-tool-renderer", "root", sessionState)
+	block := New(animation.NewRuntime(), "test-expanded-tool-renderer", "root", sessionState, WithToolRenderers(defaults.NewRegistry()))
 	block.SetSize(100, 24)
 	block.SetExpanded(true)
 	block.SetReasoning("Need to edit the file.")
@@ -204,7 +205,7 @@ func TestReasoningBlockCollapsedUsesCollapsedToolRenderer(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("old line\n"), 0o644))
 
 	sessionState := &service.SessionState{}
-	block := New(animation.NewRuntime(), "test-collapsed-tool-renderer", "root", sessionState)
+	block := New(animation.NewRuntime(), "test-collapsed-tool-renderer", "root", sessionState, WithToolRenderers(defaults.NewRegistry()))
 	block.SetSize(100, 24)
 	block.SetExpanded(false)
 	block.SetReasoning("Need to edit the file.")

@@ -387,3 +387,88 @@ func TestComparison_IsJSONSerializable(t *testing.T) {
 	assert.True(t, round.Regressed)
 	assert.InDelta(t, 0.05, round.Tolerance, 1e-9)
 }
+
+func assertionOnlyResult(title string, pass bool) Result {
+	r := Result{
+		InputPath:       title + ".json",
+		Title:           title,
+		AssertionsTotal: 1,
+		AssertionResults: []AssertionResult{
+			{Name: "check", Type: "contains", Passed: pass, Reason: "reason"},
+		},
+		Session: &session.Session{Title: title},
+	}
+	if pass {
+		r.AssertionsPassed = 1
+	}
+	return r
+}
+
+func TestCompare_AssertionRateDropRegresses(t *testing.T) {
+	t.Parallel()
+
+	baseline := saveAndLoad(t, newRun(assertionOnlyResult("a", true), assertionOnlyResult("b", true)))
+	got, err := Compare(baseline, newRun(assertionOnlyResult("a", true), assertionOnlyResult("b", false)), 0)
+	require.NoError(t, err)
+	assert.True(t, got.Regressed)
+
+	var delta *MetricDelta
+	for i := range got.Deltas {
+		if got.Deltas[i].Name == "assertion rate" {
+			delta = &got.Deltas[i]
+		}
+	}
+	require.NotNil(t, delta)
+	assert.True(t, delta.Regressed)
+}
+
+func TestCompare_AssertionRateNoDropIsClean(t *testing.T) {
+	t.Parallel()
+
+	baseline := saveAndLoad(t, newRun(assertionOnlyResult("a", true)))
+	got, err := Compare(baseline, newRun(assertionOnlyResult("a", true)), 0)
+	require.NoError(t, err)
+	assert.False(t, got.Regressed)
+}
+
+func TestMetricsOf_AssertionsFlag(t *testing.T) {
+	t.Parallel()
+
+	got := MetricsOf(newRun(assertionOnlyResult("a", true)))
+	assert.True(t, got.HasAssertions)
+	assert.InDelta(t, 1.0, got.AssertionRate, 1e-9)
+
+	empty := MetricsOf(newRun(sizeResult("a", true)))
+	assert.False(t, empty.HasAssertions)
+}
+
+func TestMetricsOf_RepeatMetricsPopulated(t *testing.T) {
+	t.Parallel()
+
+	run := newRun(sizeResult("a", true), sizeResult("a", true))
+	run.Summary.RepeatMetrics = &RepeatMetrics{K: 2, PassK: 1.0, HatK: 1.0, Total: 1}
+	got := metricsOfSummary(run.Summary)
+	assert.True(t, got.HasRepeat)
+	assert.Equal(t, 2, got.RepeatK)
+	assert.InDelta(t, 1.0, got.PassK, 1e-9)
+}
+
+func TestCompare_PassKIsInformational(t *testing.T) {
+	t.Parallel()
+
+	baseRun := newRun(sizeResult("a", true), sizeResult("a", true))
+	baseRun.Summary.RepeatMetrics = &RepeatMetrics{K: 2, PassK: 1.0, HatK: 1.0, Total: 1}
+	baseline := saveAndLoad(t, baseRun)
+
+	curRun := newRun(sizeResult("a", true), sizeResult("a", false))
+	curRun.Summary.RepeatMetrics = &RepeatMetrics{K: 2, PassK: 1.0, HatK: 0.0, Total: 1}
+
+	got, err := Compare(baseline, curRun, 0)
+	require.NoError(t, err)
+
+	for _, d := range got.Deltas {
+		if d.Name == "pass@2" || d.Name == "pass^2" {
+			assert.True(t, d.Informational, "%s must be informational", d.Name)
+		}
+	}
+}

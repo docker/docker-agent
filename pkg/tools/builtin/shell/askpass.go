@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -481,7 +482,7 @@ func (h *shellHandler) applyAskpass(ctx context.Context, command string) (string
 	if srv == nil {
 		return command, h.env
 	}
-	env := append(append([]string(nil), h.env...), srv.env()...)
+	env := append(slices.Clone(h.env), srv.env()...)
 	return wrapSudoCommand(command, h.shell), env
 }
 

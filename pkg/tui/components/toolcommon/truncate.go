@@ -185,16 +185,13 @@ func WrapLinesWords(text string, width int) []string {
 			continue
 		}
 
-		words := strings.Fields(inputLine)
-		if len(words) == 0 {
-			lines = append(lines, inputLine)
-			continue
-		}
-
+		words := strings.FieldsSeq(inputLine)
 		var current strings.Builder
 		currentWidth := 0
+		seenWord := false
 
-		for _, word := range words {
+		for word := range words {
+			seenWord = true
 			wWidth := lipgloss.Width(word)
 
 			// Word itself exceeds width — split it at rune boundaries
@@ -233,6 +230,10 @@ func WrapLinesWords(text string, width int) []string {
 			currentWidth += wWidth
 		}
 
+		if !seenWord {
+			lines = append(lines, inputLine)
+			continue
+		}
 		if current.Len() > 0 {
 			lines = append(lines, current.String())
 		}

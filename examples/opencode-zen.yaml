@@ -10,7 +10,7 @@
 
 agents:
   root:
-    model: opencode-zen/deepseek-v4-flash-free
+    model: opencode/deepseek-v4-flash-free
     description: A helpful AI assistant powered by OpenCode Zen (free)
     instruction: |
       You are a helpful AI assistant powered by OpenCode Zen.

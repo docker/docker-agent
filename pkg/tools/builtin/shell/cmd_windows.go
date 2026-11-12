@@ -32,7 +32,8 @@ func createProcessGroup(proc *os.Process) (*processGroup, error) {
 		job,
 		windows.JobObjectExtendedLimitInformation,
 		uintptr(unsafe.Pointer(&info)), //nolint:gosec // Windows API requires unsafe.Pointer
-		uint32(unsafe.Sizeof(info))); err != nil {
+		uint32(unsafe.Sizeof(info)),
+	); err != nil {
 		_ = windows.CloseHandle(job)
 		return nil, err
 	}

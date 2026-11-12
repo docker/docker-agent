@@ -1,6 +1,8 @@
 package gemini
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,7 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/options"
+	"github.com/docker/docker-agent/pkg/testutil/geminiintegration"
 )
 
 // geminiCountingTransport wraps a base RoundTripper and counts RoundTrip calls.
@@ -40,6 +43,7 @@ func writeGeminiSSEResponse(w http.ResponseWriter) {
 }
 
 func TestNewClient_TransportWrapperInvokedDirectPath(t *testing.T) {
+	geminiintegration.Require(t)
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeGeminiSSEResponse(w)
@@ -82,6 +86,7 @@ func TestNewClient_TransportWrapperInvokedDirectPath(t *testing.T) {
 }
 
 func TestNewClient_TransportWrapperInvokedGatewayPath(t *testing.T) {
+	geminiintegration.Require(t)
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeGeminiSSEResponse(w)
@@ -130,6 +135,7 @@ func TestNewClient_TransportWrapperInvokedGatewayPath(t *testing.T) {
 // set, the client automatically falls back to BackendGeminiAPI so the wrapper
 // can be applied. This mirrors the WebSocket→SSE fallback in the OpenAI provider.
 func TestNewClient_TransportWrapperVertexAIFallsBackToGeminiAPI(t *testing.T) {
+	geminiintegration.Require(t)
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeGeminiSSEResponse(w)
@@ -174,4 +180,73 @@ func TestNewClient_TransportWrapperVertexAIFallsBackToGeminiAPI(t *testing.T) {
 	}
 
 	assert.Positive(t, counter.calls.Load(), "transport wrapper RoundTrip should have been called at least once (GeminiAPI fallback)")
+}
+
+// With an explicit token source, Vertex AI stays the backend even with a
+// transport wrapper: we own the HTTP client, no ADC lookup runs, and the
+// token is resolved per request.
+func TestNewClient_VertexAIExplicitTokenSource(t *testing.T) {
+	geminiintegration.Require(t)
+	t.Parallel()
+	var got []*http.Request
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Clone(r.Context()))
+		writeGeminiSSEResponse(w)
+	}))
+	defer server.Close()
+
+	cfg := &latest.ModelConfig{
+		Provider: "google",
+		Model:    "gemini-2.0-flash",
+		BaseURL:  server.URL,
+		ProviderOpts: map[string]any{
+			"project":  "test-project",
+			"location": "us-central1",
+		},
+	}
+	calls := 0
+	var counter geminiCountingTransport
+	client, err := NewClient(t.Context(), cfg, environment.NewNoEnvProvider(),
+		options.WithTokenSource(func(context.Context) (string, error) {
+			calls++
+			return fmt.Sprintf("token-%d", calls), nil
+		}),
+		options.WithHTTPTransportWrapper(func(base http.RoundTripper) http.RoundTripper {
+			counter.base = base
+			return &counter
+		}),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, apiSurfaceVertexAI, client.apiSurface)
+	assert.Equal(t, 1, calls, "the token is checked once at construction")
+
+	for range 2 {
+		stream, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, nil)
+		require.NoError(t, err)
+		for {
+			if _, err := stream.Recv(); err != nil {
+				break
+			}
+		}
+		stream.Close()
+	}
+
+	require.Len(t, got, 2)
+	for i, req := range got {
+		assert.Contains(t, req.URL.Path, "/projects/test-project/locations/us-central1/publishers/google/models/gemini-2.0-flash:")
+		assert.Equal(t, fmt.Sprintf("Bearer token-%d", i+2), req.Header.Get("Authorization"))
+	}
+	assert.EqualValues(t, 2, counter.calls.Load(), "transport wrapper applies on the Vertex AI path")
+}
+
+func TestNewClient_VertexAIExplicitTokenSourceFailsFast(t *testing.T) {
+	t.Parallel()
+	cfg := &latest.ModelConfig{
+		Provider:     "google",
+		Model:        "gemini-2.0-flash",
+		ProviderOpts: map[string]any{"project": "test-project", "location": "us-central1"},
+	}
+	_, err := NewClient(t.Context(), cfg, environment.NewNoEnvProvider(),
+		options.WithTokenSource(func(context.Context) (string, error) { return "", errors.New("no token") }))
+	require.ErrorContains(t, err, "resolving access token: no token")
 }

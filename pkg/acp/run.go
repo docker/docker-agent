@@ -2,20 +2,20 @@ package acp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 
-	acpsdk "github.com/coder/acp-go-sdk"
-
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/session/sqlitestore"
 )
 
-func Run(ctx context.Context, agentFilename string, stdin io.Reader, stdout io.Writer, runConfig *config.RuntimeConfig, sessionDB string) error {
+func Run(ctx context.Context, agentFilename string, stdin io.Reader, stdout io.Writer, runConfig *config.RuntimeConfig, sessionDB string) (retErr error) {
 	slog.DebugContext(ctx, "Starting ACP server", "agent", agentFilename, "session_db", sessionDB)
 
-	agentSource, err := config.Resolve(agentFilename, nil)
+	agentSource, err := sources.Resolve(agentFilename, nil)
 	if err != nil {
 		return err
 	}
@@ -27,14 +27,13 @@ func Run(ctx context.Context, agentFilename string, stdin io.Reader, stdout io.W
 	}
 	// Close the store on shutdown if it implements io.Closer
 	if closer, ok := sessStore.(io.Closer); ok {
-		defer closer.Close()
+		defer func() { retErr = errors.Join(retErr, closer.Close()) }()
 	}
 
 	acpAgent := NewAgent(agentSource, runConfig, sessStore)
-	conn := acpsdk.NewAgentSideConnection(acpAgent, stdout, stdin)
+	conn := acpAgent.NewConnection(stdout, stdin)
 	conn.SetLogger(slog.Default())
-	acpAgent.SetAgentConnection(conn)
-	defer acpAgent.Stop(ctx)
+	defer func() { retErr = errors.Join(retErr, acpAgent.Stop(ctx)) }()
 
 	slog.DebugContext(ctx, "acp started, waiting for conn")
 	select {

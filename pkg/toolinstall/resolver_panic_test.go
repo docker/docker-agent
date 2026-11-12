@@ -2,6 +2,7 @@ package toolinstall
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -37,6 +38,9 @@ func TestSafeInstall_RecoversFromStringPanic(t *testing.T) {
 // nil-pointer dereference, which is the failure mode described in the
 // original issue (downstream HTTP/YAML code dereferencing a nil result).
 func TestSafeInstall_RecoversFromNilDeref(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("recovered hardware faults can corrupt memory on Windows: golang/go#81238")
+	}
 	t.Parallel()
 
 	install := func(context.Context, string, string) (string, error) {

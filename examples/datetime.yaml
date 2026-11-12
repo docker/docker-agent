@@ -1,0 +1,13 @@
+agents:
+  root:
+    model: openai/gpt-5-mini
+    description: Reports the current date and time in your preferred format
+    instruction: |
+      Use get_datetime whenever the user asks for the current date or time.
+      Choose a Go time layout that matches the requested format, such as
+      2006-01-02 for a date, 15:04:05 for a time, or
+      2006-01-02T15:04:05Z07:00 for a full datetime.
+      Set timezone when the user requests a particular location or UTC;
+      otherwise use the host's local timezone. Return the result concisely.
+    toolsets:
+      - type: datetime

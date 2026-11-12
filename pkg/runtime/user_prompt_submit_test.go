@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -98,7 +99,11 @@ func TestUserSteeringMessagesSubmitFiresOnDrain(t *testing.T) {
 		counterName,
 		func(_ context.Context, in *hooks.Input, _ []string) (*hooks.Output, error) {
 			calls.Add(1)
-			seen.Store(append([]string(nil), in.SteeringMessages...))
+			messages := slices.Clone(in.SteeringMessages)
+			if len(messages) == 0 {
+				messages = nil
+			}
+			seen.Store(messages)
 			return nil, nil
 		},
 	))

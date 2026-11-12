@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -87,7 +88,7 @@ func (so *speculativeDecodingOpts) LogValue() slog.Value {
 // configureModel sends model configuration to Model Runner via POST /engines/_configure.
 func configureModel(ctx context.Context, httpClient *http.Client, baseURL, model string, backend configureBackendConfig, mode *string, rawRuntimeFlags string) error {
 	if httpClient == nil {
-		httpClient = &http.Client{}
+		httpClient = &http.Client{} //rubocop:disable Lint/HTTPClientTransport // DMR local service; default transport is appropriate
 	}
 
 	configureURL := buildConfigureURL(baseURL)
@@ -248,12 +249,18 @@ func parseBoolOpt(opts map[string]any, key string) (bool, error) {
 	}
 }
 
-// parseInt64Value parses an int64 from YAML/JSON-decoded values (int, float64, string).
+// parseInt64Value parses an int64 from YAML/JSON-decoded values.
+// goccy/go-yaml decodes a positive integer as uint64 (see #4522).
 func parseInt64Value(v any) (int64, bool) {
 	switch t := v.(type) {
 	case int64:
 		return t, true
 	case int:
+		return int64(t), true
+	case uint64:
+		if t > math.MaxInt64 {
+			return 0, false
+		}
 		return int64(t), true
 	case float64:
 		return int64(t), true
@@ -661,7 +668,10 @@ func parseRuntimeFlags(opts map[string]any) []string {
 		}
 		return flags
 	case []string:
-		return append([]string(nil), t...)
+		if len(t) == 0 {
+			return nil
+		}
+		return slices.Clone(t)
 	case string:
 		return strings.Fields(strings.ReplaceAll(t, ",", " "))
 	default:

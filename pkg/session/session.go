@@ -7,14 +7,14 @@ import (
 	"encoding/json"
 	"log/slog"
 	"maps"
+	"math"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/google/uuid"
+	"uuid"
 
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
@@ -22,7 +22,7 @@ import (
 )
 
 // defaultNewID returns a fresh random session ID.
-func defaultNewID() string { return uuid.New().String() }
+func defaultNewID() string { return uuid.NewV4().String() }
 
 const (
 	// toolContentPlaceholder is the text used to replace truncated tool content
@@ -133,7 +133,7 @@ func (p SafetyPolicy) IsValid() bool {
 	return false
 }
 
-// Item represents a message, a sub-session, a summary, or a recorded error.
+// Item represents a conversation entry or a recorded runtime operation.
 type Item struct {
 	// Message holds a regular conversation message
 	Message *Message `json:"message,omitempty"`
@@ -145,6 +145,13 @@ type Item struct {
 	// error survive a session reload and travel with a shared JSON export
 	// for diagnostics.
 	Error *Error `json:"error,omitempty"`
+
+	// Evaluation tracks evaluator usage separately from the conversation.
+	Evaluation *Evaluation `json:"evaluation,omitempty"`
+
+	// RoutingDecision records a hook-driven control decision without storing
+	// the task text supplied to the selector.
+	RoutingDecision *RoutingDecision `json:"routing_decision,omitempty"`
 
 	// Termination holds a structured, non-error run stop marker (e.g. a
 	// budget ceiling) recorded by the evaluation pipeline. Storing it as an
@@ -174,6 +181,13 @@ type Item struct {
 	// Usage records the token usage behind Cost for items that don't
 	// carry a regular message (e.g., compaction summaries).
 	Usage *chat.Usage `json:"usage,omitempty"`
+
+	// Compaction holds the provider-native compaction behind Summary, when
+	// the summary was produced server-side rather than by the LLM strategy.
+	// GetMessages attaches it to the synthetic summary message so the
+	// producing provider can replay its block; Summary stays readable for
+	// every other provider.
+	Compaction *chat.CompactionResult `json:"compaction,omitempty"`
 
 	// liveAttached marks a sub-session item appended by AddLiveSubSession
 	// in this process, i.e. a sub-session that ran live and reported its
@@ -255,10 +269,9 @@ type Session struct {
 	// read/write access. Shared-session readers must use the locked accessors.
 	mu sync.RWMutex `json:"-"`
 
-	// now and newID are per-session sources of time and identity. They are
-	// indirected (rather than calling time.Now/uuid.New directly) so that
-	// tests can inject a deterministic clock and ID generator via WithClock
-	// and WithIDGen without mutating any process-global state — which keeps
+	// clock and idgen are per-session sources of time and identity. They are
+	// indirected (rather than calling time.Now/uuid.NewV4 directly) so that
+	// tests can inject a deterministic clock and ID generator via test options without mutating any process-global state — which keeps
 	// such tests safe to run with t.Parallel(). Sessions created outside New
 	// (e.g. via JSON deserialization or struct literals) leave these nil; use
 	// the now() and newID() accessors which fall back to real implementations.
@@ -370,12 +383,11 @@ type Session struct {
 	Attributes map[string]string `json:"attributes,omitempty"`
 
 	// AgentModelOverrides stores per-agent model overrides for this session.
-	// Key is the agent name, value is the model reference (e.g., "openai/gpt-4o" or a named model from config).
-	// When a session is loaded, these overrides are reapplied to the runtime.
+	// Shared-session callers must use the model-state accessors below.
 	AgentModelOverrides map[string]string `json:"agent_model_overrides,omitempty"`
 
 	// CustomModelsUsed tracks custom models (provider/model format) used during this session.
-	// These are shown in the model picker for easy re-selection.
+	// Shared-session callers must use the model-state accessors below.
 	CustomModelsUsed []string `json:"custom_models_used,omitempty"`
 
 	// AttachedFiles records absolute paths of files the user attached to this
@@ -419,6 +431,15 @@ type Session struct {
 	// concurrently on different agents.
 	AgentName string `json:"-"`
 
+	// Skill forks route handoffs locally without changing their immutable initial pin.
+	allowAgentHandoffs bool
+	handoffAgent       string
+
+	// Hook-routed conversations switch agents per session, never through the
+	// shared runtime agent, so the shared entry agent survives every request.
+	routed     bool
+	routeAgent string
+
 	// ParentID indicates this is a sub-session created by task transfer.
 	// Sub-sessions are not persisted as standalone entries; they are embedded
 	// within the parent session's Messages array.
@@ -440,10 +461,14 @@ type Session struct {
 	// In remote mode, messages are managed server-side, so we track usage separately.
 	// This is not persisted (json:"-") as it's only needed for the current session display.
 	MessageUsageHistory []MessageUsageRecord `json:"-"`
+
+	// EvaluationUsageHistory includes remote child usage before its session is available locally.
+	EvaluationUsageHistory []*Evaluation `json:"-"`
 }
 
 // InstructionSource is one independently changing piece of trusted context.
 type InstructionSource struct {
+	Path           string
 	Key            string
 	Group          string
 	Label          string
@@ -458,6 +483,7 @@ type InstructionSource struct {
 
 // InstructionValue is a content-addressed instruction value.
 type InstructionValue struct {
+	Path           string `json:"path,omitempty"`
 	Hash           string `json:"hash"`
 	Group          string `json:"group,omitempty"`
 	Label          string `json:"label,omitempty"`
@@ -483,6 +509,7 @@ type InstructionContextState struct {
 // MessageUsageRecord stores usage data for a single assistant message.
 // Used in remote mode where messages aren't stored in the client-side session.
 type MessageUsageRecord struct {
+	SessionID string     `json:"session_id,omitempty"`
 	AgentName string     `json:"agent_name"`
 	Model     string     `json:"model"`
 	Cost      float64    `json:"cost"`
@@ -638,9 +665,10 @@ type EvalResult struct {
 // EvalResultChecks groups the individual check results.
 // Only checks that were evaluated will be present (omitted if nil).
 type EvalResultChecks struct {
-	Size      *SizeCheck      `json:"size,omitempty"`
-	ToolCalls *ToolCallsCheck `json:"tool_calls,omitempty"`
-	Relevance *RelevanceCheck `json:"relevance,omitempty"`
+	Size       *SizeCheck       `json:"size,omitempty"`
+	ToolCalls  *ToolCallsCheck  `json:"tool_calls,omitempty"`
+	Relevance  *RelevanceCheck  `json:"relevance,omitempty"`
+	Assertions *AssertionsCheck `json:"assertions,omitempty"`
 }
 
 // SizeCheck contains the result of the response size check.
@@ -656,7 +684,7 @@ type ToolCallsCheck struct {
 	Score  float64 `json:"score"`
 }
 
-// RelevanceCheck contains the result of the LLM judge relevance check.
+// RelevanceCheck contains the result of the judge relevance check.
 type RelevanceCheck struct {
 	Passed      bool                       `json:"passed"`
 	PassedCount float64                    `json:"passed_count"`
@@ -666,18 +694,49 @@ type RelevanceCheck struct {
 
 // RelevanceCriterionResult contains the judge's verdict on a single relevance criterion.
 type RelevanceCriterionResult struct {
-	Criterion string `json:"criterion"`
-	Passed    bool   `json:"passed"`
-	Reason    string `json:"reason,omitempty"`
+	Criterion   string   `json:"criterion"`
+	Passed      bool     `json:"passed"`
+	Reason      string   `json:"reason,omitempty"`
+	Probability *float64 `json:"probability,omitempty"`
+}
+
+// AssertionsCheck contains the results of code-based assertion evaluations.
+type AssertionsCheck struct {
+	Passed      bool              `json:"passed"`
+	PassedCount int               `json:"passed_count"`
+	Total       int               `json:"total"`
+	Results     []AssertionResult `json:"results"`
+}
+
+// AssertionResult records the outcome of a single assertion.
+type AssertionResult struct {
+	Name   string `json:"name"`
+	Type   string `json:"type"`
+	Passed bool   `json:"passed"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // EvalCriteria contains the evaluation criteria for a session.
 type EvalCriteria struct {
-	Relevance  []string `json:"relevance"`             // Statements that should be true about the response
-	WorkingDir string   `json:"working_dir,omitempty"` // Subdirectory under evals/working_dirs/
-	Size       string   `json:"size,omitempty"`        // Expected response size: S, M, L, XL
-	Setup      string   `json:"setup,omitempty"`       // Optional sh script to run in the container before docker agent run --exec
-	Image      string   `json:"image,omitempty"`       // Custom Docker image for this eval (overrides --base-image)
+	Relevance  []string    `json:"relevance"`             // Statements that should be true about the response
+	Assertions []Assertion `json:"assertions,omitempty"`  // Code-based assertions evaluated against the agent output
+	WorkingDir string      `json:"working_dir,omitempty"` // Subdirectory under evals/working_dirs/
+	Size       string      `json:"size,omitempty"`        // Expected response size: S, M, L, XL
+	Setup      string      `json:"setup,omitempty"`       // Optional sh script to run in the container before docker agent run --exec
+	Image      string      `json:"image,omitempty"`       // Custom Docker image for this eval (overrides --base-image)
+}
+
+// Assertion defines a single code-based grading check evaluated against agent output.
+type Assertion struct {
+	// Name identifies this assertion in logs and results.
+	Name string `json:"name"`
+	// Type selects the evaluator: "contains", "not_contains", "equals",
+	// "starts_with", "ends_with", "regex", "json_path", "cost_threshold",
+	// or "tool_called".
+	Type string `json:"type"`
+	// Value is the expected string, regex pattern, JSONPath expression, or
+	// threshold against which the agent output is checked.
+	Value string `json:"value"`
 }
 
 // UnmarshalJSON implements custom JSON unmarshaling for EvalCriteria that
@@ -704,11 +763,8 @@ func cloneMessage(m *Message) *Message {
 	return &cp
 }
 
-// snapshotItems returns a copy of s.Messages safe to use without holding
-// s.mu. Each Message value is deep-copied so concurrent UpdateMessage calls
-// cannot mutate the snapshot; the remaining non-value fields (Summary,
-// SubSession, Cost, FirstKeptEntry, Model) are shallow-copied since they are
-// not mutated in place.
+// snapshotItems copies mutable message, usage, and evaluation fields under
+// s.mu. Sub-sessions remain live references with their own locking.
 func (s *Session) snapshotItems() []Item {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -722,6 +778,9 @@ func (s *Session) snapshotItems() []Item {
 			usage := *item.Usage
 			items[i].Usage = &usage
 		}
+		items[i].Compaction = item.Compaction.Clone()
+		items[i].Evaluation = cloneEvaluation(item.Evaluation)
+		items[i].RoutingDecision = cloneRoutingDecision(item.RoutingDecision)
 	}
 	return items
 }
@@ -729,6 +788,7 @@ func (s *Session) snapshotItems() []Item {
 // cloneChatMessage returns a deep copy of a chat.Message, duplicating
 // all slice and pointer fields that would otherwise alias the original.
 func cloneChatMessage(m chat.Message) chat.Message {
+	m.OpenAIResponse = m.OpenAIResponse.Clone()
 	if m.MultiContent != nil {
 		orig := m.MultiContent
 		m.MultiContent = make([]chat.MessagePart, len(orig))
@@ -768,6 +828,8 @@ func cloneChatMessage(m chat.Message) chat.Message {
 	if m.ThoughtSignature != nil {
 		m.ThoughtSignature = slices.Clone(m.ThoughtSignature)
 	}
+	m.ProviderState = m.ProviderState.Clone()
+	m.Compaction = m.Compaction.Clone()
 	return m
 }
 
@@ -831,11 +893,12 @@ func (s *Session) AddMessage(msg *Message) int {
 	defer s.mu.Unlock()
 	if msg != nil {
 		capToolResultContent(&msg.Message, s.MaxToolResultTokens)
-		// Transcripts never carry cache checkpoint marks: CacheControl is
-		// request-assembly state (see chat.Message.CacheControl); a mark
-		// slipping in here (e.g. echoed back by an API client) would
-		// resurface on every future prompt assembly.
+		// Transcripts never carry request-assembly marks (see
+		// chat.Message.CacheControl and TurnScoped); one slipping in here
+		// (e.g. echoed back by an API client) would resurface on every
+		// future prompt assembly.
 		msg.Message.CacheControl = false
+		msg.Message.TurnScoped = false
 	}
 	s.Messages = append(s.Messages, NewMessageItem(msg))
 	return len(s.Messages) - 1
@@ -914,15 +977,25 @@ func (s *Session) TitleSnapshot() string {
 	return s.Title
 }
 
-// ApplyCompaction atomically resets the session's cumulative token
-// counts and appends a summary item under s.mu so concurrent readers
-// (e.g. the persistence observer's UpdateSession snapshot) cannot
-// observe the new tokens without the matching summary item.
+// ApplyCompaction atomically resets the session's cumulative token counts,
+// derives scalar cost from canonical item history including the new summary,
+// and appends that summary under s.mu.
 func (s *Session) ApplyCompaction(inputTokens, outputTokens int64, item Item) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.applyCompactionLocked(inputTokens, outputTokens, s.totalCostLocked()+item.Cost, item)
+}
+
+func (s *Session) applyCompaction(inputTokens, outputTokens int64, resultingCost float64, item Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.applyCompactionLocked(inputTokens, outputTokens, resultingCost, item)
+}
+
+func (s *Session) applyCompactionLocked(inputTokens, outputTokens int64, resultingCost float64, item Item) {
 	s.InputTokens = inputTokens
 	s.OutputTokens = outputTokens
+	s.Cost = resultingCost
 	s.Messages = append(s.Messages, item)
 }
 
@@ -968,7 +1041,7 @@ func (s *Session) PrepareInstructionContext(sources []InstructionSource) bool {
 	changed := false
 	if latestSummary > state.EpochStart {
 		state.EpochStart = latestSummary
-		state.Initial = cloneInstructionValues(state.Current)
+		state.Initial = maps.Clone(state.Current)
 		state.Updates = nil
 		changed = true
 	}
@@ -1046,6 +1119,7 @@ func instructionValue(source InstructionSource) InstructionValue {
 	sum := sha256.Sum256(encoded)
 	return InstructionValue{
 		Hash:           hex.EncodeToString(sum[:]),
+		Path:           source.Path,
 		Group:          source.Group,
 		Label:          sourceLabel(source),
 		Content:        source.Content,
@@ -1058,10 +1132,6 @@ func sourceLabel(source InstructionSource) string {
 		return source.Label
 	}
 	return source.Key
-}
-
-func cloneInstructionValues(values map[string]InstructionValue) map[string]InstructionValue {
-	return maps.Clone(values)
 }
 
 func appendMissing(values []string, value string) []string {
@@ -1078,8 +1148,8 @@ func cloneInstructionContext(state *InstructionContextState) *InstructionContext
 	return &InstructionContextState{
 		EpochStart: state.EpochStart,
 		Order:      slices.Clone(state.Order),
-		Initial:    cloneInstructionValues(state.Initial),
-		Current:    cloneInstructionValues(state.Current),
+		Initial:    maps.Clone(state.Initial),
+		Current:    maps.Clone(state.Current),
 		Updates:    slices.Clone(state.Updates),
 	}
 }
@@ -1130,8 +1200,7 @@ func (s *Session) Termination() *Termination {
 	defer s.mu.RUnlock()
 	for i := range s.Messages {
 		if s.Messages[i].Termination != nil {
-			t := *s.Messages[i].Termination
-			return &t
+			return new(*s.Messages[i].Termination)
 		}
 	}
 	return nil
@@ -1218,6 +1287,19 @@ func (s *Session) OwnMessages() []Message {
 	return messages
 }
 
+// OwnMessageCount returns len(OwnMessages()) without allocating a slice.
+func (s *Session) OwnMessageCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for _, item := range s.Messages {
+		if item.IsMessage() && item.Message.Message.Role != chat.MessageRoleSystem {
+			n++
+		}
+	}
+	return n
+}
+
 func (s *Session) GetLastAssistantMessageContent() string {
 	return s.getLastMessageContentByRole(chat.MessageRoleAssistant)
 }
@@ -1249,24 +1331,58 @@ func (s *Session) GetLastUserMessages(n int) []string {
 }
 
 func (s *Session) getLastMessageContentByRole(role chat.MessageRole) string {
-	messages := s.GetAllMessages()
-	for _, message := range slices.Backward(messages) {
-		if message.Message.Role == role {
-			return strings.TrimSpace(message.Message.Content)
+	content, _ := s.lastMessageContentByRole(role)
+	return content
+}
+
+// lastMessageContentByRole walks items newest-first under RLock, mirroring
+// GetAllMessages' selection: a non-system message item contributes its own
+// message; a sub-session item is recursed into. The bool distinguishes a
+// blank match (stops the search) from no match. Usage-only assistant records
+// must not mask the output returned to a delegating agent.
+func (s *Session) lastMessageContentByRole(role chat.MessageRole) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, item := range slices.Backward(s.Messages) {
+		switch {
+		case item.IsMessage() && item.Message.Message.Role != chat.MessageRoleSystem:
+			if isUsageOnlyMessage(&item.Message.Message) {
+				continue
+			}
+			if item.Message.Message.Role == role {
+				return strings.TrimSpace(item.Message.Message.Content), true
+			}
+		case item.IsSubSession():
+			if content, ok := item.SubSession.lastMessageContentByRole(role); ok {
+				return content, true
+			}
 		}
 	}
-	return ""
+	return "", false
+}
+
+// isUsageOnlyMessage identifies empty assistant turns retained only for accounting.
+func isUsageOnlyMessage(msg *chat.Message) bool {
+	return msg.Role == chat.MessageRoleAssistant && msg.Usage != nil &&
+		strings.TrimSpace(msg.Content) == "" && len(msg.MultiContent) == 0 &&
+		len(msg.ToolCalls) == 0 && msg.FunctionCall == nil
 }
 
 // AddMessageUsageRecord appends a usage record for remote mode where messages aren't stored locally.
 // This enables the /cost dialog to show per-message breakdown even when using a remote runtime.
 func (s *Session) AddMessageUsageRecord(agentName, model string, cost float64, usage *chat.Usage) {
+	s.AddMessageUsageRecordForSession(s.ID, agentName, model, cost, usage)
+}
+
+// AddMessageUsageRecordForSession retains provenance when child events reach a parent UI.
+func (s *Session) AddMessageUsageRecordForSession(sessionID, agentName, model string, cost float64, usage *chat.Usage) {
 	if usage == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.MessageUsageHistory = append(s.MessageUsageHistory, MessageUsageRecord{
+		SessionID: sessionID,
 		AgentName: agentName,
 		Model:     model,
 		Cost:      cost,
@@ -1515,6 +1631,88 @@ func WithPermissions(perms *PermissionsConfig) Opt {
 	}
 }
 
+// WithAgentHandoffs permits in-session routing for an otherwise pinned skill fork.
+func WithAgentHandoffs() Opt {
+	return func(s *Session) { s.allowAgentHandoffs = true }
+}
+
+// AllowsAgentHandoffs distinguishes routing-enabled forks from hard-pinned background tasks.
+func (s *Session) AllowsAgentHandoffs() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.allowAgentHandoffs
+}
+
+// HandoffAgent returns the session-local agent selected by an intentional handoff.
+func (s *Session) HandoffAgent() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.handoffAgent
+}
+
+// TryAgentHandoff changes only opted-in session routing, never the initial pin.
+func (s *Session) TryAgentHandoff(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.allowAgentHandoffs || name == "" {
+		return false
+	}
+	s.handoffAgent = name
+	return true
+}
+
+// VisibleExchanges returns the user-visible conversation, oldest first: real user
+// messages and assistant replies that are final (no tool calls). System messages,
+// tool transcripts, implicit messages, and sub-session contents are excluded.
+func (s *Session) VisibleExchanges() []chat.Message {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []chat.Message
+	for _, item := range s.Messages {
+		if !item.IsMessage() || item.Message.Implicit {
+			continue
+		}
+		msg := item.Message.Message
+		if strings.TrimSpace(msg.Content) == "" || len(msg.ToolCalls) > 0 {
+			continue
+		}
+		if msg.Role != chat.MessageRoleUser && msg.Role != chat.MessageRoleAssistant {
+			continue
+		}
+		out = append(out, chat.Message{Role: msg.Role, Content: msg.Content})
+	}
+	return out
+}
+
+// Routed reports whether hook routing owns this session's active agent.
+func (s *Session) Routed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.routed
+}
+
+// SetRouted opts the session into hook routing for its lifetime.
+func (s *Session) SetRouted() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routed = true
+}
+
+// RouteAgent returns the session-local agent selected by routing, or "" when
+// the conversation is at its entry agent.
+func (s *Session) RouteAgent() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.routeAgent
+}
+
+// SetRouteAgent selects the session-local active agent; "" returns to the entry agent.
+func (s *Session) SetRouteAgent(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routeAgent = name
+}
+
 // WithAgentName pins this session to a specific agent. When set, RunStream
 // resolves the agent from the session rather than the shared runtime state,
 // which is required for concurrent background agent tasks.
@@ -1549,28 +1747,6 @@ func WithID(id string) Opt {
 	}
 }
 
-// WithClock injects the time source used for the session's CreatedAt, for
-// timestamping messages it generates (summaries, compaction input), and for
-// messages added through WithUserMessage/WithSystemMessage/
-// WithImplicitUserMessage. Because those message options read the clock when
-// they run, WithClock must precede them in the option list (the natural
-// ordering). Primarily for tests that need a deterministic clock; production
-// code leaves it unset and falls back to time.Now.
-func WithClock(now func() time.Time) Opt {
-	return func(s *Session) {
-		s.clock = now
-	}
-}
-
-// WithIDGen injects the generator used to mint the session ID when no explicit
-// ID is provided. Primarily for tests that need deterministic IDs; production
-// code leaves it unset and falls back to a random UUID.
-func WithIDGen(gen func() string) Opt {
-	return func(s *Session) {
-		s.idgen = gen
-	}
-}
-
 // WithExcludedTools sets tool names that should be filtered out of the agent's
 // tool list for this session. This prevents recursive tool calls in skill
 // sub-sessions.
@@ -1591,7 +1767,10 @@ func WithAllowedTools(names []string) Opt {
 
 // WithExtraToolSets injects additional toolsets into the session on top of
 // the agent's own toolsets. Used by fork-mode skill sub-sessions that declare
-// assistive toolsets.
+// assistive toolsets. Raw Runnable workers are owned until runtime Close;
+// prewrapped toolsets remain owned by their team or embedder. Set extras before
+// execution. Shared workers require one owner: use an explicit NewStartable
+// wrapper to share across runtimes or for noncomparable runnable values.
 func WithExtraToolSets(toolSets []tools.ToolSet) Opt {
 	return func(s *Session) {
 		s.ExtraToolSets = toolSets
@@ -1637,6 +1816,23 @@ func (s *Session) MessageCount() int {
 	return n
 }
 
+// AllMessageCount returns len(GetAllMessages()) without cloning messages.
+func (s *Session) AllMessageCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	n := 0
+	for _, item := range s.Messages {
+		switch {
+		case item.IsMessage() && item.Message.Message.Role != chat.MessageRoleSystem:
+			n++
+		case item.IsSubSession():
+			n += item.SubSession.AllMessageCount()
+		}
+	}
+	return n
+}
+
 // ItemCount returns the total number of items in s.Messages — messages,
 // sub-sessions, summaries, and recorded errors alike. Unlike MessageCount,
 // it counts every item, matching what len(s.Messages) would return outside
@@ -1650,9 +1846,23 @@ func (s *Session) ItemCount() int {
 	return len(s.Messages)
 }
 
+// AllItemCount counts items recursively, including non-message accounting records.
+func (s *Session) AllItemCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	n := len(s.Messages)
+	for _, item := range s.Messages {
+		if item.IsSubSession() {
+			n += item.SubSession.AllItemCount()
+		}
+	}
+	return n
+}
+
 // MessagesSnapshot returns a lock-safe copy of the session's items, deep-
-// copying each Message so the result cannot alias a concurrent AddMessage /
-// UpdateMessage mutation. It is the exported counterpart of snapshotItems for
+// copying messages and evaluations so callers cannot mutate stored records.
+// It is the exported counterpart of snapshotItems for
 // callers outside this package (e.g. pkg/server's ForkSession) that need to
 // iterate Messages without racing session.mu; in-package callers should keep
 // using snapshotItems directly.
@@ -1661,12 +1871,15 @@ func (s *Session) MessagesSnapshot() []Item {
 }
 
 // TotalCost computes the total cost of a session by walking all messages,
-// sub-sessions, and summary items. It does not use the session-level Cost
+// sub-sessions, summaries, and evaluations. It does not use the session-level Cost
 // field, which exists only for backward-compatible persistence.
 func (s *Session) TotalCost() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.totalCostLocked()
+}
 
+func (s *Session) totalCostLocked() float64 {
 	var cost float64
 	for _, item := range s.Messages {
 		switch {
@@ -1675,13 +1888,16 @@ func (s *Session) TotalCost() float64 {
 		case item.IsSubSession():
 			cost += item.SubSession.TotalCost()
 		}
+		if item.Evaluation != nil && item.Evaluation.Cost != nil {
+			cost += *item.Evaluation.Cost
+		}
 		cost += item.Cost
 	}
-	return cost
+	return min(math.MaxFloat64, cost)
 }
 
 // OwnCost returns only this session's direct cost: its own messages and
-// item-level costs (e.g. compaction). It excludes sub-session costs.
+// item-level costs (e.g. compaction and evaluations). It excludes sub-session costs.
 // This is used for live event emissions where sub-sessions report their
 // own costs separately.
 func (s *Session) OwnCost() float64 {
@@ -1693,9 +1909,12 @@ func (s *Session) OwnCost() float64 {
 		if item.IsMessage() {
 			cost += item.Message.Message.Cost
 		}
+		if item.Evaluation != nil && item.Evaluation.Cost != nil {
+			cost += *item.Evaluation.Cost
+		}
 		cost += item.Cost
 	}
-	return cost
+	return min(math.MaxFloat64, cost)
 }
 
 // EmbeddedSubSessionCost returns the total cost of sub-sessions that were
@@ -1714,7 +1933,7 @@ func (s *Session) EmbeddedSubSessionCost() float64 {
 			cost += item.SubSession.TotalCost()
 		}
 	}
-	return cost
+	return min(math.MaxFloat64, cost)
 }
 
 // IsToolsApproved reports whether every tool call auto-approves. It is
@@ -1739,6 +1958,46 @@ func (s *Session) GetSafetyPolicy() SafetyPolicy {
 	return policy
 }
 
+// ModelStateSnapshot returns independent copies of the session's model state.
+func (s *Session) ModelStateSnapshot() (map[string]string, []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneStringMap(s.AgentModelOverrides), slices.Clone(s.CustomModelsUsed)
+}
+
+// AgentModelOverride returns the override for agentName, if present.
+func (s *Session) AgentModelOverride(agentName string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	modelRef, ok := s.AgentModelOverrides[agentName]
+	return modelRef, ok
+}
+
+// SetAgentModelOverride updates an override and custom-model history atomically.
+func (s *Session) SetAgentModelOverride(agentName, modelRef string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if modelRef == "" {
+		delete(s.AgentModelOverrides, agentName)
+		return
+	}
+	if s.AgentModelOverrides == nil {
+		s.AgentModelOverrides = make(map[string]string)
+	}
+	s.AgentModelOverrides[agentName] = modelRef
+	if strings.Contains(modelRef, "/") && !slices.Contains(s.CustomModelsUsed, modelRef) {
+		s.CustomModelsUsed = append(s.CustomModelsUsed, modelRef)
+	}
+}
+
+// ReplaceModelState atomically restores model state from independent copies.
+func (s *Session) ReplaceModelState(overrides map[string]string, customModels []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AgentModelOverrides = cloneStringMap(overrides)
+	s.CustomModelsUsed = slices.Clone(customModels)
+}
+
 // ClonePermissions returns a deep copy of the session's PermissionsConfig.
 // This is safe to call concurrently with session mutations.
 func (s *Session) ClonePermissions() *PermissionsConfig {
@@ -1751,7 +2010,7 @@ func (s *Session) ClonePermissions() *PermissionsConfig {
 func (s *Session) SetPermissions(perms *PermissionsConfig) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.Permissions = perms
+	s.Permissions = perms.Clone()
 }
 
 // SetToolsApproved is the legacy --yolo toggle. Prefer
@@ -1867,7 +2126,7 @@ func New(opts ...Opt) *Session {
 	}
 
 	// Generate the ID and creation time after options run so that
-	// WithClock/WithIDGen (and WithID) can influence them. WithID short-
+	// injected clock/ID sources (and WithID) can influence them. WithID short-
 	// circuits the generator when an explicit ID was provided.
 	if s.ID == "" {
 		s.ID = s.newID()
@@ -1963,18 +2222,14 @@ func buildInvariantSystemMessages(a *agent.Agent) []chat.Message {
 	return messages
 }
 
-// summaryMessagePrefix prefixes the synthetic user message that carries a
-// compaction summary into the prompt. Shared by buildSessionSummaryMessages
-// and CompactionInput; exposed to callers via SummaryMessageContent.
-const summaryMessagePrefix = "Session Summary: "
-
 // SummaryMessageContent returns the content of the synthetic user message
 // that GetMessages emits to carry a compaction summary into the prompt.
 // Callers that need to recognize that message in GetMessages output (e.g.
 // the runtime's context-window breakdown) match against this exact string
-// instead of duplicating the prefix.
+// instead of duplicating the prefix. The format is owned by [chat] so
+// [chat.Message.ReplayableCompaction] can verify it without this package.
 func SummaryMessageContent(summary string) string {
-	return summaryMessagePrefix + summary
+	return chat.SummaryMessageContent(summary)
 }
 
 // LastSummary returns the most recent compaction summary stored in the
@@ -1989,7 +2244,19 @@ func (s *Session) LastSummary() string {
 	return ""
 }
 
-// buildSessionSummaryMessages builds system messages containing the session summary
+// summaryMessage builds the synthetic user message that carries a summary
+// item into the prompt. A native compaction rides along so the producing
+// provider can replay its block; the text stays readable for all others.
+func (s *Session) summaryMessage(item Item) chat.Message {
+	return chat.Message{
+		Role:       chat.MessageRoleUser,
+		Content:    SummaryMessageContent(item.Summary),
+		CreatedAt:  s.now().Format(time.RFC3339),
+		Compaction: item.Compaction,
+	}
+}
+
+// buildSessionSummaryMessages builds the synthetic user message carrying the session summary
 // if one exists. Session summaries are context-specific per session and thus should not have a checkpoint (they will be cached alongside the first user message anyway)
 //
 // startIndex is the index in items from which conversation messages should be
@@ -2015,11 +2282,7 @@ func (s *Session) buildSessionSummaryMessages(items []Item) ([]chat.Message, int
 	summary := ""
 	if lastSummaryIndex >= 0 && lastSummaryIndex < len(items) {
 		summary = items[lastSummaryIndex].Summary
-		messages = append(messages, chat.Message{
-			Role:      chat.MessageRoleUser,
-			Content:   SummaryMessageContent(summary),
-			CreatedAt: s.now().Format(time.RFC3339),
-		})
+		messages = append(messages, s.summaryMessage(items[lastSummaryIndex]))
 	}
 
 	// Determine where conversation messages should start.
@@ -2088,11 +2351,11 @@ func (s *Session) CompactionInput() ([]chat.Message, []int, int) {
 	)
 
 	if lastSummaryIndex >= 0 {
-		messages = append(messages, chat.Message{
-			Role:      chat.MessageRoleUser,
-			Content:   SummaryMessageContent(items[lastSummaryIndex].Summary),
-			CreatedAt: s.now().Format(time.RFC3339),
-		})
+		summary := s.summaryMessage(items[lastSummaryIndex])
+		// The LLM strategy summarizes the readable text; a signed block
+		// replayed under the compaction prompt would be a foreign request.
+		summary.Compaction = nil
+		messages = append(messages, summary)
 		// The synthetic message stands in for the prior summary item;
 		// when this index lands inside the kept tail we want the
 		// summary item itself preserved so the next compaction round
@@ -2142,33 +2405,38 @@ func (s *Session) ClearInstructionContext() bool {
 	return true
 }
 
-func (s *Session) instructionMessages() ([]chat.Message, []InstructionUpdate) {
+// InstructionContextSnapshot copies retained instructions without holding a lock during checks.
+func (s *Session) InstructionContextSnapshot() *InstructionContextState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.InstructionContext == nil {
+	return cloneInstructionContext(s.InstructionContext)
+}
+
+func instructionMessages(state *InstructionContextState) ([]chat.Message, []InstructionUpdate) {
+	if state == nil {
 		return nil, nil
 	}
 
-	initial := make([]chat.Message, 0, len(s.InstructionContext.Initial))
-	for _, key := range s.InstructionContext.Order {
-		value, ok := s.InstructionContext.Initial[key]
+	initial := make([]chat.Message, 0, len(state.Initial))
+	for _, key := range state.Order {
+		value, ok := state.Initial[key]
 		if !ok || strings.TrimSpace(value.Content) == "" {
 			continue
 		}
 		initial = append(initial, chat.Message{Role: chat.MessageRoleSystem, Content: value.Content})
 	}
-	return initial, slices.Clone(s.InstructionContext.Updates)
+	return initial, slices.Clone(state.Updates)
 }
 
 func (s *Session) GetMessages(a *agent.Agent, extraSystemMessages ...chat.Message) []chat.Message {
-	messages, _ := s.getMessages(a, true, extraSystemMessages...)
+	messages, _, _ := s.getMessages(a, s.InstructionContextSnapshot(), extraSystemMessages...)
 	return messages
 }
 
 // GetMessagesWithoutInstructionContext assembles the legacy prompt where
 // dynamic context is supplied directly as extra system messages.
 func (s *Session) GetMessagesWithoutInstructionContext(a *agent.Agent, extraSystemMessages ...chat.Message) []chat.Message {
-	messages, _ := s.getMessages(a, false, extraSystemMessages...)
+	messages, _, _ := s.getMessages(a, nil, extraSystemMessages...)
 	return messages
 }
 
@@ -2181,10 +2449,26 @@ func (s *Session) GetMessagesWithoutInstructionContext(a *agent.Agent, extraSyst
 // guarantee covers only the session-history snapshot, not the other state
 // read during assembly (instruction context, agent configuration).
 func (s *Session) GetMessagesAndLastSummary(a *agent.Agent, extraSystemMessages ...chat.Message) ([]chat.Message, string) {
-	return s.getMessages(a, true, extraSystemMessages...)
+	messages, summary, _ := s.getMessages(a, s.InstructionContextSnapshot(), extraSystemMessages...)
+	return messages, summary
 }
 
-func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, extraSystemMessages ...chat.Message) ([]chat.Message, string) {
+// GetMessagesAndItemCount is GetMessages plus len(s.Messages) at the instant
+// the prompt's history snapshot was taken. A compaction that replaces the
+// whole prompt must record this count as FirstKeptEntry rather than a fresh
+// ItemCount(): the live count can already include an append that landed
+// after the snapshot, which the summary does not cover.
+func (s *Session) GetMessagesAndItemCount(a *agent.Agent) ([]chat.Message, int) {
+	return s.GetMessagesWithInstructionContext(a, s.InstructionContextSnapshot())
+}
+
+// GetMessagesWithInstructionContext assembles from an explicitly checked instruction snapshot.
+func (s *Session) GetMessagesWithInstructionContext(a *agent.Agent, state *InstructionContextState) ([]chat.Message, int) {
+	messages, _, itemCount := s.getMessages(a, state)
+	return messages, itemCount
+}
+
+func (s *Session) getMessages(a *agent.Agent, state *InstructionContextState, extraSystemMessages ...chat.Message) ([]chat.Message, string, int) {
 	slog.Debug("Getting messages for agent", "agent", a.Name(), "session_id", s.ID)
 
 	// Build invariant system messages (cacheable across sessions/users/projects)
@@ -2196,16 +2480,14 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 	items := s.snapshotItems()
 	var instructionInitial []chat.Message
 	var instructionUpdates []InstructionUpdate
-	if includeInstructionContext {
-		instructionInitial, instructionUpdates = s.instructionMessages()
+	if state != nil {
+		instructionInitial, instructionUpdates = instructionMessages(state)
 	}
 
 	// Build session summary messages (vary per session)
 	summaryMessages, startIndex, summary := s.buildSessionSummaryMessages(items)
 
-	var messages []chat.Message
-	messages = append(messages, invariantMessages...)
-	messages = append(messages, instructionInitial...)
+	messages := slices.Concat(invariantMessages, instructionInitial)
 	markLastMessageAsCacheControl(messages)
 	// extraSystemMessages are caller-supplied transient system messages
 	// (e.g. turn_start hook output) inserted after the invariant cache
@@ -2215,10 +2497,16 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 	// Volatile extras (the daily date) live behind the same marker, which
 	// is acceptable: the cache simply rotates when the date rolls over,
 	// matching the behavior of the previous inline
-	// buildContextSpecificSystemMessages path.
+	// buildContextSpecificSystemMessages path. The copies are marked
+	// TurnScoped so a provider that can keep them out of the cached
+	// prefix does; the caller's messages are left untouched.
 	if len(extraSystemMessages) > 0 {
+		start := len(messages)
 		messages = append(messages, extraSystemMessages...)
-		markLastMessageAsCacheControl(messages[len(messages)-len(extraSystemMessages):])
+		for i := start; i < len(messages); i++ {
+			messages[i].TurnScoped = true
+		}
+		markLastMessageAsCacheControl(messages[start:])
 	}
 	messages = append(messages, summaryMessages...)
 
@@ -2236,7 +2524,7 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 			})
 			updateIndex++
 		}
-		if i < len(items) && items[i].IsMessage() {
+		if i < len(items) && items[i].IsMessage() && !isUsageOnlyMessage(&items[i].Message.Message) {
 			messages = append(messages, items[i].Message.Message)
 		}
 	}
@@ -2284,7 +2572,7 @@ func (s *Session) getMessages(a *agent.Agent, includeInstructionContext bool, ex
 		"conversation_messages", conversationCount,
 		"max_history_items", maxItems)
 
-	return messages, summary
+	return messages, summary, len(items)
 }
 
 // trimMessages ensures we don't exceed the maximum number of messages while maintaining
@@ -2512,8 +2800,7 @@ func truncateOldToolContent(messages []chat.Message, maxTokens int) []chat.Messa
 		return messages
 	}
 
-	result := make([]chat.Message, len(messages))
-	copy(result, messages)
+	result := slices.Clip(slices.Clone(messages))
 
 	tokenBudget := maxTokens
 

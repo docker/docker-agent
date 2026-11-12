@@ -107,27 +107,36 @@ func TestExtractFieldKeepsLastValueWhenFragmentCannotParse(t *testing.T) {
 		Path string `json:"path"`
 	}
 
-	extractPath := ExtractField(func(a testArgs) string { return a.Path })
+	var calls []string
+	extractPath := ExtractField(func(a testArgs) string {
+		calls = append(calls, a.Path)
+		return a.Path
+	})
 
+	assert.Empty(t, extractPath(""))
+	assert.Empty(t, extractPath(`{}`))
 	assert.Equal(t, "/tmp/file", extractPath(`{"path": "/tmp/file"`))
 	assert.Equal(t, "/tmp/file", extractPath(`{"path": "/tmp/file",`))
+	assert.Empty(t, extractPath(`{"path": ""}`))
 	assert.Equal(t, "/tmp/file", extractPath(`{"path": "/tmp/file", "content": "hello\`))
 	assert.Equal(t, "/tmp/other", extractPath(`{"path": "/tmp/other"}`))
+	assert.Equal(t, []string{"", "/tmp/file", "", "/tmp/other"}, calls)
 }
 
 func TestStableExtractorKeepsLastNonEmptyValue(t *testing.T) {
 	t.Parallel()
 
+	var calls []string
 	extract := StableExtractor(func(args string) string {
-		if args == "bad" {
-			return ""
-		}
+		calls = append(calls, args)
 		return args
 	})
 
+	assert.Empty(t, extract(""))
 	assert.Equal(t, "first", extract("first"))
-	assert.Equal(t, "first", extract("bad"))
+	assert.Equal(t, "first", extract(""))
 	assert.Equal(t, "second", extract("second"))
+	assert.Equal(t, []string{"", "first", "", "second"}, calls)
 }
 
 func TestParsePartialArgs(t *testing.T) {
@@ -494,6 +503,42 @@ func TestWrapLinesWords(t *testing.T) {
 			text:     "héllo wörld",
 			width:    6,
 			expected: []string{"héllo", "wörld"},
+		},
+		{
+			name:     "over-width whitespace remains unchanged",
+			text:     "      ",
+			width:    2,
+			expected: []string{"      "},
+		},
+		{
+			name:     "over-width unicode whitespace remains unchanged",
+			text:     "\u2003\u2003\u2003",
+			width:    1,
+			expected: []string{"\u2003\u2003\u2003"},
+		},
+		{
+			name:     "unicode whitespace separates words",
+			text:     "alpha\u2003beta\txyz",
+			width:    5,
+			expected: []string{"alpha", "beta", "xyz"},
+		},
+		{
+			name:     "zero-width word is not an empty input",
+			text:     "\u0301      ",
+			width:    1,
+			expected: []string{"\u0301"},
+		},
+		{
+			name:     "ANSI-only word is not an empty input",
+			text:     "\x1b[31m\x1b[0m      ",
+			width:    1,
+			expected: []string{"\x1b[31m\x1b[0m"},
+		},
+		{
+			name:     "whitespace fallback among wrapped lines",
+			text:     "abcd\n     \nxy z",
+			width:    2,
+			expected: []string{"ab", "cd", "     ", "xy", "z"},
 		},
 		{
 			name:     "CJK word exceeds width",

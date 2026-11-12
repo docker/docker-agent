@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.opentelemetry.io/otel/attribute"
@@ -57,13 +58,15 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 				return nil, fmt.Errorf("working_dir is not supported for MCP toolset %q: ref %q resolves to a remote server (no local subprocess)",
 					toolset.Name, toolset.Ref)
 			}
-			return NewRemoteToolsetWithAllowPrivateIPs(
+			return newRemoteToolset(
 				toolset.Name,
 				serverSpec.Remote.URL,
 				serverSpec.Remote.TransportType,
 				nil,
 				nil,
 				toolset.AllowPrivateIPsEnabled(),
+				nil,
+				oauthTokenStoreFromContext(ctx),
 				lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
 			), nil
 		}
@@ -96,7 +99,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	case toolset.Command != "":
 		resolvedCommand, err := toolinstall.EnsureCommand(ctx, toolset.Command, toolset.Version)
 		if err != nil {
-			slog.WarnContext(ctx, "MCP command not yet available, will retry on next turn",
+			slog.WarnContext(ctx, "MCP command not yet available, will retry",
 				"command", toolset.Command, "error", err)
 			resolvedCommand = toolset.Command
 		}
@@ -105,7 +108,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		if err != nil {
 			return nil, fmt.Errorf("failed to expand the tool's environment variables: %w", err)
 		}
-		env = append(env, os.Environ()...)
+		env = mergeChildEnv(env)
 		env = toolinstall.PrependBinDirToEnv(env)
 
 		return NewToolsetCommand(toolset.Name, resolvedCommand, toolset.Args, env, cwd, lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle)), nil
@@ -118,7 +121,7 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 		// every HTTP request (see remoteMCPClient.expandHeaders).
 		remoteURL := js.NewJsExpander(envProvider).Expand(ctx, toolset.Remote.URL, nil)
 
-		return newRemoteToolset(
+		ts := newRemoteToolset(
 			toolset.Name,
 			remoteURL,
 			toolset.Remote.TransportType,
@@ -126,8 +129,11 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 			toolset.Remote.OAuth,
 			toolset.AllowPrivateIPsEnabled(),
 			envProvider,
+			oauthTokenStoreFromContext(ctx),
 			lifecycle.PolicyFromConfig(toolset.Name, toolset.Lifecycle),
-		), nil
+		)
+		ts.SetStandaloneSSE(toolset.Remote.StandaloneSSE)
+		return ts, nil
 
 	default:
 		return nil, errors.New("mcp toolset requires either ref, command, or remote configuration")
@@ -141,8 +147,6 @@ type mcpClient interface {
 	ListPrompts(ctx context.Context, request *mcp.ListPromptsParams) iter.Seq2[*mcp.Prompt, error]
 	GetPrompt(ctx context.Context, request *mcp.GetPromptParams) (*mcp.GetPromptResult, error)
 	SetElicitationHandler(handler tools.ElicitationHandler)
-	SetSamplingHandler(handler tools.SamplingHandler)
-	SetSamplingWithToolsHandler(handler tools.SamplingWithToolsHandler)
 	SetOAuthSuccessHandler(handler func())
 	SetManagedOAuth(managed bool)
 	SetUnmanagedOAuthRedirectURI(uri string)
@@ -177,6 +181,8 @@ type Toolset struct {
 	// callTimeout bounds an individual callTool invocation, including its
 	// one reconnect-retry. Zero means no timeout (use the caller's ctx).
 	callTimeout time.Duration
+	// sessionOwned connections are explicitly replaced, never auto-reconnected.
+	sessionOwned bool
 
 	mu sync.Mutex
 
@@ -188,10 +194,8 @@ type Toolset struct {
 	cachedPrompts []PromptInfo
 	cacheGen      uint64
 
-	// toolsChangedHandler is called after the tool cache is refreshed
-	// following a ToolListChanged notification from the server, or after
-	// a successful supervisor reconnect.
-	toolsChangedHandler func()
+	// Subscribers are notified after a tool-list refresh or successful reconnect.
+	toolsChangedSubs tools.ChangeSubscribers
 }
 
 // invalidateCache clears the cached tools and prompts and bumps the
@@ -213,12 +217,10 @@ var (
 
 // Verify that Toolset implements optional capability interfaces
 var (
-	_ tools.Instructable        = (*Toolset)(nil)
-	_ tools.Elicitable          = (*Toolset)(nil)
-	_ tools.Sampleable          = (*Toolset)(nil)
-	_ tools.SampleableWithTools = (*Toolset)(nil)
-	_ tools.OAuthCapable        = (*Toolset)(nil)
-	_ tools.ChangeNotifier      = (*Toolset)(nil)
+	_ tools.Instructable     = (*Toolset)(nil)
+	_ tools.Elicitable       = (*Toolset)(nil)
+	_ tools.OAuthCapable     = (*Toolset)(nil)
+	_ tools.ChangeSubscriber = (*Toolset)(nil)
 )
 
 // NewToolsetCommand creates a new MCP toolset from a command.
@@ -243,16 +245,32 @@ func NewToolsetCommand(name, command string, args, env []string, cwd string, pol
 	return ts
 }
 
+// NewSessionToolsetCommand creates an explicitly owned stdio connection with cancellable setup.
+// It never reconnects automatically; callers replace it with a fresh instance after failure.
+func NewSessionToolsetCommand(name, command string, args, env []string, cwd string) *Toolset {
+	client := newStdioCmdClient(command, slices.Clone(args), slices.Clone(env), cwd)
+	client.sessionOwned = true
+	ts := &Toolset{
+		name:         name,
+		mcpClient:    client,
+		logID:        command,
+		description:  buildStdioDescription(command, args),
+		sessionOwned: true,
+	}
+	ts.supervisor = newSupervisor(ts, lifecycle.Policy{Restart: lifecycle.RestartNever})
+	return ts
+}
+
 // NewRemoteToolset creates a new MCP toolset from a remote MCP Server.
 //
 // The optional policy lets callers tune restart/backoff behaviour;
 // see NewToolsetCommand for the semantics.
 func NewRemoteToolset(name, urlString, transport string, headers map[string]string, oauthConfig *latest.RemoteOAuthConfig, policy ...lifecycle.Policy) *Toolset {
-	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, false, nil, policy...)
+	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, false, nil, nil, policy...)
 }
 
 // NewRemoteToolsetWithAllowPrivateIPs creates a new remote MCP toolset and
-// optionally permits OAuth helper requests to dial non-public IP addresses.
+// optionally permits requests to dial non-public IP addresses.
 func NewRemoteToolsetWithAllowPrivateIPs(
 	name, urlString, transport string,
 	headers map[string]string,
@@ -260,19 +278,23 @@ func NewRemoteToolsetWithAllowPrivateIPs(
 	allowPrivateIPs bool,
 	policy ...lifecycle.Policy,
 ) *Toolset {
-	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, allowPrivateIPs, nil, policy...)
+	return newRemoteToolset(name, urlString, transport, headers, oauthConfig, allowPrivateIPs, nil, nil, policy...)
 }
 
 // newRemoteToolset is the shared constructor behind the exported remote
 // toolset variants. env is optional: when non-nil, ${env.X} placeholders in
 // header values are resolved against it on every outbound HTTP request; when
 // nil (programmatic callers), header values are used as configured.
+// tokenStore is optional too: nil selects the process-wide store, which is
+// only built when actually needed so a per-session override never triggers
+// the keyring.
 func newRemoteToolset(
 	name, urlString, transport string,
 	headers map[string]string,
 	oauthConfig *latest.RemoteOAuthConfig,
 	allowPrivateIPs bool,
 	env environment.Provider,
+	tokenStore OAuthTokenStore,
 	policy ...lifecycle.Policy,
 ) *Toolset {
 	slog.Debug("Creating Remote MCP toolset",
@@ -282,10 +304,14 @@ func newRemoteToolset(
 		"allow_private_ips", allowPrivateIPs,
 	)
 
+	if tokenStore == nil {
+		tokenStore = NewKeyringTokenStore()
+	}
+
 	desc := buildRemoteDescription(urlString, transport)
 	ts := &Toolset{
 		name:        name,
-		mcpClient:   newRemoteClient(urlString, transport, headers, NewKeyringTokenStore(), oauthConfig, allowPrivateIPs, env),
+		mcpClient:   newRemoteClient(urlString, transport, headers, tokenStore, oauthConfig, allowPrivateIPs, env),
 		logID:       sanitizeRemoteAddress(urlString),
 		description: desc,
 		callTimeout: firstOrZero(policy).CallTimeout,
@@ -326,7 +352,7 @@ func firstOrZero[T any](s []T) T {
 
 // newSupervisor constructs a Supervisor wired to the toolset's mcpClient
 // using the provided policy as a base. Internal callbacks (OnDisconnect,
-// OnRestart, Logger) are always overridden so the supervisor can
+// OnRestart, Shutdown, Logger) are always overridden so the supervisor can
 // invalidate caches and refresh tools/prompts on reconnect; any values
 // passed in for those fields are ignored.
 //
@@ -336,6 +362,10 @@ func firstOrZero[T any](s []T) T {
 func newSupervisor(ts *Toolset, base lifecycle.Policy) *lifecycle.Supervisor {
 	connector := &clientConnector{ts: ts}
 	policy := base
+	policy.Shutdown = nil
+	if ts.sessionOwned {
+		policy.Shutdown = ts.shutdown
+	}
 	policy.Logger = slog.With("component", "mcp.supervisor", "server", ts.logID)
 	policy.OnDisconnect = func(error) {
 		ts.mu.Lock()
@@ -499,12 +529,41 @@ func (ts *Toolset) Stop(ctx context.Context) error {
 	if ts.supervisor == nil {
 		return nil
 	}
+	if ts.sessionOwned {
+		return ts.supervisor.Stop(ctx)
+	}
 	if err := ts.supervisor.Stop(ctx); err != nil && ctx.Err() == nil {
 		slog.ErrorContext(ctx, "Failed to stop MCP toolset", "server", ts.logID, "error", err)
 		return err
 	}
 	slog.DebugContext(ctx, "Stopped MCP toolset successfully", "server", ts.logID)
 	return nil
+}
+
+// shutdown keeps session-owned transport cleanup inside the supervisor's stop barrier.
+func (ts *Toolset) shutdown(ctx context.Context, teardown func() error) error {
+	var forceClose func()
+	var finalize func(context.Context) error
+	switch client := ts.mcpClient.(type) {
+	case *stdioMCPClient:
+		forceClose = client.cancelProcess
+	case *sessionRemoteClient:
+		forceClose = client.forceClose
+		finalize = client.Close
+	}
+	forced := make(chan struct{})
+	stopForce := context.AfterFunc(ctx, func() { forceClose(); close(forced) })
+	defer func() {
+		if !stopForce() {
+			<-forced
+		}
+		forceClose()
+	}()
+	err := teardown()
+	if finalize != nil {
+		err = errors.Join(err, finalize(ctx))
+	}
+	return errors.Join(err, ctx.Err())
 }
 
 // clientConnector adapts an mcpClient to the lifecycle.Connector interface.
@@ -556,14 +615,18 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 		ts.invalidateCache()
 		ts.mu.Unlock()
 		slog.DebugContext(ctx, "MCP server notified tool list changed, refreshing", "server", ts.logID)
-		ts.refreshToolCache(ctx)
+		if !ts.sessionOwned {
+			ts.refreshToolCache(ctx)
+		}
 	})
 	ts.mcpClient.SetPromptListChangedHandler(func() {
 		ts.mu.Lock()
 		ts.invalidateCache()
 		ts.mu.Unlock()
 		slog.DebugContext(ctx, "MCP server notified prompt list changed, refreshing", "server", ts.logID)
-		ts.refreshPromptCache(ctx)
+		if !ts.sessionOwned {
+			ts.refreshPromptCache(ctx)
+		}
 	})
 
 	initRequest := &mcp.InitializeRequest{
@@ -576,9 +639,6 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 				Elicitation: &mcp.ElicitationCapabilities{
 					Form: &mcp.FormElicitationCapabilities{},
 					URL:  &mcp.URLElicitationCapabilities{},
-				},
-				Sampling: &mcp.SamplingCapabilities{
-					Tools: &mcp.SamplingToolsCapabilities{},
 				},
 			},
 		},
@@ -621,6 +681,7 @@ func (c *clientConnector) Connect(ctx context.Context) (lifecycle.Session, error
 	slog.DebugContext(ctx, "Started MCP toolset successfully", "server", ts.logID)
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
+	ts.invalidateCache()
 	ts.instructions = result.Instructions
 
 	return &clientSession{client: ts.mcpClient}, nil
@@ -710,13 +771,7 @@ func (ts *Toolset) refreshToolCache(ctx context.Context) {
 		return
 	}
 
-	ts.mu.Lock()
-	handler := ts.toolsChangedHandler
-	ts.mu.Unlock()
-
-	if handler != nil {
-		handler()
-	}
+	ts.toolsChangedSubs.Notify()
 }
 
 // refreshPromptCache fetches the prompt list from the server and populates
@@ -734,7 +789,7 @@ func (ts *Toolset) callTool(ctx context.Context, toolCall tools.ToolCall, _ tool
 
 	toolCall.Function.Arguments = cmp.Or(toolCall.Function.Arguments, "{}")
 	var args map[string]any
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &args); err != nil {
 		slog.ErrorContext(ctx, "Failed to parse tool arguments", "tool", toolCall.Function.Name, "error", err)
 		return nil, fmt.Errorf("failed to parse tool arguments: %w", err)
 	}
@@ -780,7 +835,7 @@ func (ts *Toolset) callTool(ctx context.Context, toolCall tools.ToolCall, _ tool
 	// If the call failed with a connection or session error (e.g. the
 	// server restarted), trigger or wait for a reconnection and retry
 	// the call once.
-	if err != nil && isConnectionError(err) && callCtx.Err() == nil {
+	if err != nil && !ts.sessionOwned && isConnectionError(err) && callCtx.Err() == nil {
 		slog.WarnContext(ctx, "MCP call failed, forcing reconnect and retrying", "tool", toolCall.Function.Name, "server", ts.logID, "error", err)
 		if waitErr := ts.supervisor.RestartAndWait(callCtx, sessionMissingRetryTimeout); waitErr != nil {
 			return nil, ts.classifyCallToolError(ctx, callCtx, toolCall, start, fmt.Errorf("failed to reconnect after call failure: %w", waitErr))
@@ -831,10 +886,28 @@ func processMCPContent(toolResult *mcp.CallToolResult) *tools.ToolCallResult {
 	var images, audios []tools.MediaContent
 	var documents []tools.DocumentContent
 
+	// Each content block is a separate item (FastMCP, for instance, returns
+	// one TextContent per element of a list result), so blocks must not run
+	// together: "a.txt" + "b.txt" would reach the model as "a.txtb.txt".
+	// A block that already ends or starts with whitespace ("See: ") is joined
+	// as is, so text followed by a link or resource still reads inline.
+	// Trade-off: a server that split one logical string across blocks would
+	// now get a newline at each split. The SDKs serialize a value into a
+	// single block, so no known server does this.
+	write := func(s string) {
+		if s == "" {
+			return
+		}
+		if cur := text.String(); cur != "" && !endsWithSpace(cur) && !startsWithSpace(s) {
+			text.WriteByte('\n')
+		}
+		text.WriteString(s)
+	}
+
 	for _, c := range toolResult.Content {
 		switch c := c.(type) {
 		case *mcp.TextContent:
-			text.WriteString(c.Text)
+			write(c.Text)
 		case *mcp.ImageContent:
 			images = append(images, encodeMedia(c.Data, c.MIMEType))
 		case *mcp.AudioContent:
@@ -844,16 +917,16 @@ func processMCPContent(toolResult *mcp.CallToolResult) *tools.ToolCallResult {
 				// Escape ] in name and ) in URI to prevent broken markdown links.
 				name := strings.ReplaceAll(c.Name, "]", "\\]")
 				uri := strings.ReplaceAll(c.URI, ")", "%29")
-				fmt.Fprintf(&text, "[%s](%s)", name, uri)
+				write(fmt.Sprintf("[%s](%s)", name, uri))
 			} else {
-				text.WriteString(c.URI)
+				write(c.URI)
 			}
 		case *mcp.EmbeddedResource:
 			if c.Resource == nil {
 				continue
 			}
 			if c.Resource.Text != "" {
-				text.WriteString(c.Resource.Text)
+				write(c.Resource.Text)
 				continue
 			}
 			if len(c.Resource.Blob) > 0 {
@@ -865,8 +938,8 @@ func processMCPContent(toolResult *mcp.CallToolResult) *tools.ToolCallResult {
 				case strings.HasPrefix(c.Resource.MIMEType, "audio/"):
 					audios = append(audios, encodeMedia(c.Resource.Blob, c.Resource.MIMEType))
 				default:
-					fmt.Fprintf(&text, "[embedded resource %s (%s, %d bytes)]",
-						c.Resource.URI, c.Resource.MIMEType, len(c.Resource.Blob))
+					write(fmt.Sprintf("[embedded resource %s (%s, %d bytes)]",
+						c.Resource.URI, c.Resource.MIMEType, len(c.Resource.Blob)))
 				}
 			}
 		}
@@ -880,6 +953,16 @@ func processMCPContent(toolResult *mcp.CallToolResult) *tools.ToolCallResult {
 		Documents:         documents,
 		StructuredContent: toolResult.StructuredContent,
 	}
+}
+
+func endsWithSpace(s string) bool {
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return unicode.IsSpace(r)
+}
+
+func startsWithSpace(s string) bool {
+	r, _ := utf8.DecodeRuneInString(s)
+	return unicode.IsSpace(r)
 }
 
 // encodeMedia re-encodes raw bytes (as decoded by the MCP SDK) back to base64
@@ -940,14 +1023,6 @@ func (ts *Toolset) SetElicitationHandler(handler tools.ElicitationHandler) {
 	ts.mcpClient.SetElicitationHandler(handler)
 }
 
-func (ts *Toolset) SetSamplingHandler(handler tools.SamplingHandler) {
-	ts.mcpClient.SetSamplingHandler(handler)
-}
-
-func (ts *Toolset) SetSamplingWithToolsHandler(handler tools.SamplingWithToolsHandler) {
-	ts.mcpClient.SetSamplingWithToolsHandler(handler)
-}
-
 func (ts *Toolset) SetOAuthSuccessHandler(handler func()) {
 	ts.mcpClient.SetOAuthSuccessHandler(handler)
 }
@@ -960,10 +1035,8 @@ func (ts *Toolset) SetUnmanagedOAuthRedirectURI(uri string) {
 	ts.mcpClient.SetUnmanagedOAuthRedirectURI(uri)
 }
 
-func (ts *Toolset) SetToolsChangedHandler(handler func()) {
-	ts.mu.Lock()
-	defer ts.mu.Unlock()
-	ts.toolsChangedHandler = handler
+func (ts *Toolset) SubscribeToolsChanged(handler func()) func() {
+	return ts.toolsChangedSubs.Subscribe(handler)
 }
 
 // ListPrompts retrieves available prompts from the MCP server.
@@ -1072,4 +1145,13 @@ func isConnectionError(err error) bool {
 	return errors.Is(classified, lifecycle.ErrTransport) ||
 		errors.Is(classified, lifecycle.ErrSessionMissing) ||
 		errors.Is(classified, lifecycle.ErrServerUnavailable)
+}
+
+// mergeChildEnv returns the child environment with the toolset's configured values taking
+// precedence over the host's. exec.Cmd dedupes duplicate keys by keeping the LAST entry, so the
+// host environment has to come first; appending os.Environ() last made every key the host also
+// exports win, which silently ran the toolset with the host's value (the opposite of what
+// shell/script toolsets document and of what tests pin for them).
+func mergeChildEnv(configured []string) []string {
+	return append(os.Environ(), configured...)
 }

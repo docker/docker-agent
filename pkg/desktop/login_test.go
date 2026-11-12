@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -17,210 +18,261 @@ import (
 )
 
 func TestGetToken(t *testing.T) {
-	valid := makeToken(t, time.Now().Add(time.Hour))
-	expired := makeToken(t, time.Now().Add(-time.Hour))
-
 	t.Run("valid token returned as-is", func(t *testing.T) {
-		backend := &fakeBackend{token: valid}
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			backend := &fakeBackend{token: valid}
+			installFakeBackend(t, backend)
 
-		assert.Equal(t, valid, GetToken(t.Context()))
-		assert.Equal(t, 0, backend.refreshes())
+			assert.Equal(t, valid, GetToken(t.Context()))
+			assert.Equal(t, 0, backend.refreshes())
+		})
 	})
 
 	t.Run("expired token replaced by a minted one", func(t *testing.T) {
-		backend := &fakeBackend{token: expired}
-		installFakeBackend(t, backend)
-		mintToken = func(context.Context) (string, error) { return valid, nil }
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			expired := makeToken(t, time.Now().Add(-time.Hour))
+			backend := &fakeBackend{token: expired}
+			installFakeBackend(t, backend)
+			mintToken = func(context.Context) (string, error) { return valid, nil }
 
-		token, source := GetTokenWithSource(t.Context())
-		assert.Equal(t, valid, token)
-		assert.Equal(t, SourceMinted, source)
-		assert.Equal(t, 0, backend.refreshes(), "minting makes nudging Desktop unnecessary")
+			token, source := GetTokenWithSource(t.Context())
+			assert.Equal(t, valid, token)
+			assert.Equal(t, SourceMinted, source)
+			assert.Equal(t, 0, backend.refreshes(), "minting makes nudging Desktop unnecessary")
+		})
 	})
 
 	t.Run("a usable token is served from memory", func(t *testing.T) {
-		backend := &fakeBackend{token: valid}
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			backend := &fakeBackend{token: valid}
+			installFakeBackend(t, backend)
 
-		token, source := GetTokenWithSource(t.Context())
-		assert.Equal(t, valid, token)
-		assert.Equal(t, SourceDesktop, source)
+			token, source := GetTokenWithSource(t.Context())
+			assert.Equal(t, valid, token)
+			assert.Equal(t, SourceDesktop, source)
 
-		// Desktop is not asked again: gateway clients call this per request.
-		backend.setFailTokenFetch(true)
-		assert.Equal(t, valid, GetToken(t.Context()))
+			// Desktop is not asked again: gateway clients call this per request.
+			backend.setFailTokenFetch(true)
+			assert.Equal(t, valid, GetToken(t.Context()))
+		})
 	})
 
 	t.Run("an invalidated token is fetched again", func(t *testing.T) {
-		backend := &fakeBackend{token: valid}
-		installFakeBackend(t, backend)
-		require.Equal(t, valid, GetToken(t.Context()))
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			backend := &fakeBackend{token: valid}
+			installFakeBackend(t, backend)
+			require.Equal(t, valid, GetToken(t.Context()))
 
-		other := makeToken(t, time.Now().Add(time.Hour))
-		backend.setToken(other)
-		InvalidateToken(valid)
+			other := makeToken(t, time.Now().Add(time.Hour))
+			backend.setToken(other)
+			InvalidateToken(valid)
 
-		assert.Equal(t, other, GetToken(t.Context()))
+			assert.Equal(t, other, GetToken(t.Context()))
+		})
 	})
 
 	t.Run("a refused token is not served again", func(t *testing.T) {
-		// Docker Desktop keeps serving the token Docker refused: it has no way
-		// of knowing, so minting is the only way out.
-		backend := &fakeBackend{token: valid}
-		installFakeBackend(t, backend)
-		require.Equal(t, valid, GetToken(t.Context()))
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			// Docker Desktop keeps serving the token Docker refused: it has no way
+			// of knowing, so minting is the only way out.
+			backend := &fakeBackend{token: valid}
+			installFakeBackend(t, backend)
+			require.Equal(t, valid, GetToken(t.Context()))
 
-		minted := makeToken(t, time.Now().Add(time.Hour))
-		mintToken = func(context.Context) (string, error) { return minted, nil }
-		InvalidateToken(valid)
+			minted := makeToken(t, time.Now().Add(time.Hour))
+			mintToken = func(context.Context) (string, error) { return minted, nil }
+			InvalidateToken(valid)
 
-		token, source := GetTokenWithSource(t.Context())
-		assert.Equal(t, minted, token)
-		assert.Equal(t, SourceMinted, source)
+			token, source := GetTokenWithSource(t.Context())
+			assert.Equal(t, minted, token)
+			assert.Equal(t, SourceMinted, source)
+		})
 	})
 
 	t.Run("a refused token is not served again when minting is unavailable", func(t *testing.T) {
-		// The forced refresh polls Docker Desktop, which serves the refused
-		// token until it renews its session: accepting it would send Docker a
-		// token it just refused, and pin it in the cache for its whole life.
-		backend := &fakeBackend{token: valid, loggedIn: true}
-		installFakeBackend(t, backend) // minting unavailable: no PAT, or Hub is down
-		require.Equal(t, valid, GetToken(t.Context()))
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			// The forced refresh polls Docker Desktop, which serves the refused
+			// token until it renews its session: accepting it would send Docker a
+			// token it just refused, and pin it in the cache for its whole life.
+			backend := &fakeBackend{token: valid, loggedIn: true}
+			installFakeBackend(t, backend) // minting unavailable: no PAT, or Hub is down
+			require.Equal(t, valid, GetToken(t.Context()))
 
-		InvalidateToken(valid)
+			InvalidateToken(valid)
 
-		token, source := GetTokenWithSource(t.Context())
-		assert.Empty(t, token, "a refused token must never be served again")
-		assert.Equal(t, SourceNone, source)
+			token, source := GetTokenWithSource(t.Context())
+			assert.Empty(t, token, "a refused token must never be served again")
+			assert.Equal(t, SourceNone, source)
 
-		// Desktop eventually renews its session: the next token is served.
-		fresh := makeToken(t, time.Now().Add(time.Hour))
-		backend.setToken(fresh)
-		assert.Equal(t, fresh, GetToken(t.Context()))
+			// Desktop eventually renews its session: the next token is served.
+			fresh := makeToken(t, time.Now().Add(time.Hour))
+			backend.setToken(fresh)
+			assert.Equal(t, fresh, GetToken(t.Context()))
+		})
 	})
 
 	t.Run("a refused token is not reused from the last refresh result", func(t *testing.T) {
-		// The refresh is rate-limited, and its result is reused while it lasts:
-		// not once Docker has refused that token.
-		backend := &fakeBackend{token: expired, loggedIn: true}
-		backend.onRefresh = func() { backend.setToken(valid) }
-		installFakeBackend(t, backend)
-		require.Equal(t, valid, GetToken(t.Context()))
-		require.Equal(t, 1, backend.refreshes())
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			expired := makeToken(t, time.Now().Add(-time.Hour))
+			// The refresh is rate-limited, and its result is reused while it lasts:
+			// not once Docker has refused that token.
+			backend := &fakeBackend{token: expired, loggedIn: true}
+			backend.onRefresh = func() { backend.setToken(valid) }
+			installFakeBackend(t, backend)
+			require.Equal(t, valid, GetToken(t.Context()))
+			require.Equal(t, 1, backend.refreshes())
 
-		backend.setToken(expired)
-		InvalidateToken(valid)
+			backend.setToken(expired)
+			InvalidateToken(valid)
 
-		// The last resort is the stale token Desktop still serves, never the
-		// refused one.
-		assert.Equal(t, expired, GetToken(t.Context()))
-		assert.Equal(t, 1, backend.refreshes(), "still rate-limited")
+			// The last resort is the stale token Desktop still serves, never the
+			// refused one.
+			assert.Equal(t, expired, GetToken(t.Context()))
+			assert.Equal(t, 1, backend.refreshes(), "still rate-limited")
+		})
 	})
 
 	t.Run("expired token triggers forced refresh", func(t *testing.T) {
-		backend := &fakeBackend{token: expired}
-		backend.onRefresh = func() { backend.setToken(valid) }
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			expired := makeToken(t, time.Now().Add(-time.Hour))
+			backend := &fakeBackend{token: expired}
+			backend.onRefresh = func() { backend.setToken(valid) }
+			installFakeBackend(t, backend)
 
-		assert.Equal(t, valid, GetToken(t.Context()))
-		assert.Equal(t, 1, backend.refreshes())
+			assert.Equal(t, valid, GetToken(t.Context()))
+			assert.Equal(t, 1, backend.refreshes())
+		})
 	})
 
 	t.Run("stale token returned when refresh does not help", func(t *testing.T) {
-		backend := &fakeBackend{token: expired}
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			expired := makeToken(t, time.Now().Add(-time.Hour))
+			backend := &fakeBackend{token: expired}
+			installFakeBackend(t, backend)
 
-		assert.Equal(t, expired, GetToken(t.Context()))
-		assert.Equal(t, 1, backend.refreshes())
+			assert.Equal(t, expired, GetToken(t.Context()))
+			assert.Equal(t, 1, backend.refreshes())
+		})
 	})
 
 	t.Run("backoff prevents repeated refresh nudges", func(t *testing.T) {
-		backend := &fakeBackend{token: expired}
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			expired := makeToken(t, time.Now().Add(-time.Hour))
+			backend := &fakeBackend{token: expired}
+			installFakeBackend(t, backend)
 
-		assert.Equal(t, expired, GetToken(t.Context()))
-		assert.Equal(t, expired, GetToken(t.Context()))
-		assert.Equal(t, 1, backend.refreshes())
+			assert.Equal(t, expired, GetToken(t.Context()))
+			assert.Equal(t, expired, GetToken(t.Context()))
+			assert.Equal(t, 1, backend.refreshes())
+		})
 	})
 
 	t.Run("rate-limited caller reuses last refresh result", func(t *testing.T) {
-		backend := &fakeBackend{token: expired}
-		backend.onRefresh = func() { backend.setToken(valid) }
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			expired := makeToken(t, time.Now().Add(-time.Hour))
+			backend := &fakeBackend{token: expired}
+			backend.onRefresh = func() { backend.setToken(valid) }
+			installFakeBackend(t, backend)
 
-		assert.Equal(t, valid, GetToken(t.Context()))
+			assert.Equal(t, valid, GetToken(t.Context()))
 
-		// Desktop regressed to an expired token, but a new nudge is
-		// rate-limited: the cached result of the last refresh is reused.
-		backend.setToken(makeToken(t, time.Now().Add(-time.Minute)))
-		assert.Equal(t, valid, GetToken(t.Context()))
-		assert.Equal(t, 1, backend.refreshes())
+			// Desktop regressed to an expired token, but a new nudge is
+			// rate-limited: the cached result of the last refresh is reused.
+			backend.setToken(makeToken(t, time.Now().Add(-time.Minute)))
+			assert.Equal(t, valid, GetToken(t.Context()))
+			assert.Equal(t, 1, backend.refreshes())
+		})
 	})
 
 	t.Run("concurrent callers share a single refresh", func(t *testing.T) {
-		backend := &fakeBackend{token: expired}
-		backend.onRefresh = func() { backend.setToken(valid) }
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			expired := makeToken(t, time.Now().Add(-time.Hour))
+			backend := &fakeBackend{token: expired}
+			backend.onRefresh = func() { backend.setToken(valid) }
+			installFakeBackend(t, backend)
 
-		var wg sync.WaitGroup
-		for range 8 {
-			wg.Go(func() {
-				assert.Equal(t, valid, GetToken(t.Context()))
-			})
-		}
-		wg.Wait()
-		assert.Equal(t, 1, backend.refreshes())
+			var wg sync.WaitGroup
+			for range 8 {
+				wg.Go(func() {
+					assert.Equal(t, valid, GetToken(t.Context()))
+				})
+			}
+			wg.Wait()
+			assert.Equal(t, 1, backend.refreshes())
+		})
 	})
 
 	t.Run("canceled caller returns promptly with stale token", func(t *testing.T) {
-		backend := &fakeBackend{token: expired}
-		installFakeBackend(t, backend)
-		refreshBudget = time.Second
+		synctest.Test(t, func(t *testing.T) {
+			expired := makeToken(t, time.Now().Add(-time.Hour))
+			backend := &fakeBackend{token: expired}
+			installFakeBackend(t, backend)
+			refreshBudget = time.Second
 
-		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-		defer cancel()
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+			defer cancel()
 
-		start := time.Now()
-		assert.Equal(t, expired, GetToken(ctx))
-		assert.Less(t, time.Since(start), 500*time.Millisecond)
+			start := time.Now()
+			assert.Equal(t, expired, GetToken(ctx))
+			assert.Less(t, time.Since(start), 500*time.Millisecond)
+		})
 	})
 
 	t.Run("non-JWT token returned as-is", func(t *testing.T) {
-		backend := &fakeBackend{token: "not-a-jwt"}
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			backend := &fakeBackend{token: "not-a-jwt"}
+			installFakeBackend(t, backend)
 
-		assert.Equal(t, "not-a-jwt", GetToken(t.Context()))
-		assert.Equal(t, 0, backend.refreshes())
+			assert.Equal(t, "not-a-jwt", GetToken(t.Context()))
+			assert.Equal(t, 0, backend.refreshes())
+		})
 	})
 
 	t.Run("empty token while signed out returns without refresh", func(t *testing.T) {
-		backend := &fakeBackend{}
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			backend := &fakeBackend{}
+			installFakeBackend(t, backend)
 
-		assert.Empty(t, GetToken(t.Context()))
-		assert.Equal(t, 0, backend.refreshes())
+			assert.Empty(t, GetToken(t.Context()))
+			assert.Equal(t, 0, backend.refreshes())
+		})
 	})
 
 	t.Run("empty token while signed in triggers forced refresh", func(t *testing.T) {
-		backend := &fakeBackend{loggedIn: true}
-		backend.onRefresh = func() { backend.setToken(valid) }
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			backend := &fakeBackend{loggedIn: true}
+			backend.onRefresh = func() { backend.setToken(valid) }
+			installFakeBackend(t, backend)
 
-		assert.Equal(t, valid, GetToken(t.Context()))
-		assert.Equal(t, 1, backend.refreshes())
+			assert.Equal(t, valid, GetToken(t.Context()))
+			assert.Equal(t, 1, backend.refreshes())
+		})
 	})
 
 	t.Run("failed token fetch while signed in triggers forced refresh", func(t *testing.T) {
-		backend := &fakeBackend{loggedIn: true, failTokenFetch: true}
-		backend.onRefresh = func() {
-			backend.setToken(valid)
-			backend.setFailTokenFetch(false)
-		}
-		installFakeBackend(t, backend)
+		synctest.Test(t, func(t *testing.T) {
+			valid := makeToken(t, time.Now().Add(time.Hour))
+			backend := &fakeBackend{loggedIn: true, failTokenFetch: true}
+			backend.onRefresh = func() {
+				backend.setToken(valid)
+				backend.setFailTokenFetch(false)
+			}
+			installFakeBackend(t, backend)
 
-		assert.Equal(t, valid, GetToken(t.Context()))
-		assert.Equal(t, 1, backend.refreshes())
+			assert.Equal(t, valid, GetToken(t.Context()))
+			assert.Equal(t, 1, backend.refreshes())
+		})
 	})
 }
 
@@ -267,55 +319,66 @@ func TestCachedTokenIsRecheckedPeriodically(t *testing.T) {
 // checking a token and caching it: another request's 401 lands in between, so
 // the token must not be handed out even though it looked fine when fetched.
 func TestTokenInvalidatedDuringLookupIsNotServed(t *testing.T) {
-	valid := makeToken(t, time.Now().Add(time.Hour))
-	installFakeBackend(t, &fakeBackend{token: valid, loggedIn: true})
+	synctest.Test(t, func(t *testing.T) {
+		valid := makeToken(t, time.Now().Add(time.Hour))
+		installFakeBackend(t, &fakeBackend{token: valid, loggedIn: true})
 
-	require.True(t, usable(valid))
-	InvalidateToken(valid) // the gateway answered 401 to a concurrent request
+		require.True(t, usable(valid))
+		InvalidateToken(valid) // the gateway answered 401 to a concurrent request
 
-	assert.False(t, remember(valid, SourceDesktop),
-		"a token refused while it was being looked up must not be served")
+		assert.False(t, remember(valid, SourceDesktop),
+			"a token refused while it was being looked up must not be served")
 
-	token, source := GetTokenWithSource(t.Context())
-	assert.Empty(t, token)
-	assert.Equal(t, SourceNone, source)
+		token, source := GetTokenWithSource(t.Context())
+		assert.Empty(t, token)
+		assert.Equal(t, SourceNone, source)
+	})
 }
 
 // TestEveryRefusedTokenStaysRefused covers Docker Desktop regressing to a token
 // refused before the one it serves now: a single tombstone would let the older
 // one back in.
 func TestEveryRefusedTokenStaysRefused(t *testing.T) {
-	first := makeToken(t, time.Now().Add(time.Hour))
-	second := makeToken(t, time.Now().Add(time.Hour))
+	synctest.Test(t, func(t *testing.T) {
+		first := makeToken(t, time.Now().Add(time.Hour))
+		second := makeToken(t, time.Now().Add(time.Hour))
 
-	backend := &fakeBackend{token: first, loggedIn: true}
-	installFakeBackend(t, backend)
+		backend := &fakeBackend{token: first, loggedIn: true}
+		installFakeBackend(t, backend)
 
-	require.Equal(t, first, GetToken(t.Context()))
-	InvalidateToken(first)
+		require.Equal(t, first, GetToken(t.Context()))
+		InvalidateToken(first)
 
-	backend.setToken(second)
-	require.Equal(t, second, GetToken(t.Context()))
-	InvalidateToken(second)
+		backend.setToken(second)
+		require.Equal(t, second, GetToken(t.Context()))
+		InvalidateToken(second)
 
-	backend.setToken(first)
-	assert.Empty(t, GetToken(t.Context()), "the first refused token must stay refused")
+		backend.setToken(first)
+		assert.Empty(t, GetToken(t.Context()), "the first refused token must stay refused")
+	})
 }
 
 func TestGetUserInfo(t *testing.T) {
+	desktopAccount := DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}
+
 	t.Run("prefers what Docker Desktop reports", func(t *testing.T) {
 		backend := &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")}
-		backend.info = &DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}
+		backend.info = &desktopAccount
 		installFakeBackend(t, backend)
 
-		assert.Equal(t, DockerHubInfo{Username: "desktop-user", Email: "desktop@example.com"}, GetUserInfo(t.Context()))
+		assert.Equal(t, desktopAccount, GetUserInfo(t.Context()))
+	})
+
+	t.Run("keeps Docker Desktop's email when the token carries none", func(t *testing.T) {
+		backend := &fakeBackend{token: makeIdentityToken(t, desktopAccount.Username, "")}
+		backend.info = &desktopAccount
+		installFakeBackend(t, backend)
+
+		assert.Equal(t, desktopAccount, GetUserInfo(t.Context()))
 	})
 
 	t.Run("falls back to the token claims", func(t *testing.T) {
-		// Docker Desktop is not around (or not signed in): the token itself
-		// says who we are.
-		backend := &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")}
-		installFakeBackend(t, backend)
+		installFakeBackend(t, &fakeBackend{token: makeIdentityToken(t, "claims-user", "claims@example.com")})
 
 		assert.Equal(t, DockerHubInfo{Username: "claims-user", Email: "claims@example.com"}, GetUserInfo(t.Context()))
 	})
@@ -443,6 +506,8 @@ func installFakeBackend(t *testing.T, backend *fakeBackend) {
 		return "", errors.New("no Docker access token in the credential store")
 	}
 	t.Cleanup(func() { mintToken = oldMint })
+
+	installNoSecretsEngine(t)
 
 	clearCache := func() {
 		cache.Lock()

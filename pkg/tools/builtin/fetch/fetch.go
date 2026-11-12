@@ -13,6 +13,7 @@ import (
 	"time"
 
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown/v2"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/k3a/html2text"
 	"github.com/temoto/robotstxt"
 	"go.opentelemetry.io/otel/attribute"
@@ -23,11 +24,16 @@ import (
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/js"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/tools/builtin/fetch/types"
 	"github.com/docker/docker-agent/pkg/useragent"
 )
 
+type headerExpander interface {
+	ExpandMap(ctx context.Context, values map[string]string) map[string]string
+}
+
 const (
-	ToolNameFetch = "fetch"
+	ToolNameFetch = types.ToolNameFetch
 )
 
 type ToolSet struct {
@@ -46,13 +52,14 @@ type fetchHandler struct {
 	blockedDomains  []string
 	headers         map[string]string
 	allowPrivateIPs bool
-	expander        *js.Expander
+	escapeHTML      bool
+	expander        headerExpander
 }
 
 type ToolArgs struct {
-	URLs    []string `json:"urls"`
-	Timeout int      `json:"timeout,omitempty"`
-	Format  string   `json:"format,omitempty"`
+	URLs    []string `json:"urls" jsonschema:"URLs to fetch"`
+	Format  string   `json:"format" jsonschema:"Output format"`
+	Timeout int      `json:"timeout,omitempty" jsonschema:"Request timeout in seconds (default: 30)"`
 }
 
 // sanitizeFetchURLs strips query strings and userinfo from each URL so
@@ -162,7 +169,7 @@ func (h *fetchHandler) CallTool(ctx context.Context, params ToolArgs) (*tools.To
 	}
 
 	// Multiple URLs - return structured results
-	return tools.ResultJSON(results), nil
+	return tools.ResultJSONWithOptions(results, tools.JSONResultOptions{EscapeHTML: h.escapeHTML}), nil
 }
 
 type Result struct {
@@ -467,7 +474,7 @@ var formatHandlers = map[string]formatHandler{
 	},
 	"text": {
 		accept:          "text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1",
-		convertFromHTML: htmlToText,
+		convertFromHTML: html2text.HTML2Text,
 	},
 }
 
@@ -493,10 +500,6 @@ func htmlToMarkdown(html string) string {
 	return markdown
 }
 
-func htmlToText(html string) string {
-	return html2text.HTML2Text(html)
-}
-
 // CreateToolSet is used by the tools registry.
 func CreateToolSet(toolset latest.Toolset, runConfig *config.RuntimeConfig) (tools.ToolSet, error) {
 	var opts []ToolOption
@@ -514,6 +517,9 @@ func CreateToolSet(toolset latest.Toolset, runConfig *config.RuntimeConfig) (too
 	if toolset.AllowPrivateIPsEnabled() {
 		opts = append(opts, WithAllowPrivateIPs(true))
 	}
+	if toolset.EscapeHTML != nil {
+		opts = append(opts, WithEscapeHTML(*toolset.EscapeHTML))
+	}
 	opts = append(opts, WithHeaders(toolset.Headers))
 	expander := js.NewJsExpander(runConfig.EnvProvider())
 	opts = append(opts, WithExpander(expander))
@@ -524,7 +530,8 @@ func CreateToolSet(toolset latest.Toolset, runConfig *config.RuntimeConfig) (too
 func New(options ...ToolOption) *ToolSet {
 	tool := &ToolSet{
 		handler: &fetchHandler{
-			timeout: httpclient.DefaultToolHTTPTimeout,
+			timeout:  httpclient.DefaultToolHTTPTimeout,
+			expander: (*js.Expander)(nil),
 		},
 	}
 
@@ -583,7 +590,18 @@ func WithHeaders(headers map[string]string) ToolOption {
 	}
 }
 
-func WithExpander(expander *js.Expander) ToolOption {
+// WithEscapeHTML controls legacy HTML escaping in multi-URL JSON results.
+// Single-URL results and fetched content are unaffected.
+func WithEscapeHTML(escape bool) ToolOption {
+	return func(t *ToolSet) {
+		t.handler.escapeHTML = escape
+	}
+}
+
+func WithExpander(expander headerExpander) ToolOption {
+	if expander == nil {
+		expander = (*js.Expander)(nil)
+	}
 	return func(t *ToolSet) {
 		t.handler.expander = expander
 	}
@@ -591,7 +609,7 @@ func WithExpander(expander *js.Expander) ToolOption {
 
 func (t *ToolSet) Instructions() string {
 	var b strings.Builder
-	b.WriteString("## Fetch Tool\n\nFetch content from HTTP/HTTPS URLs. Supports multiple URLs per call, output format selection (text, markdown, html), and respects robots.txt.")
+	b.WriteString("## Fetch Tool\n\nFetch HTTP/HTTPS URLs; respects robots.txt.")
 	if d := t.handler.allowedDomains; len(d) > 0 {
 		fmt.Fprintf(&b, "\n\nThis tool is restricted to these domains (and any subdomain): %s. Other hosts are rejected without a network call.", strings.Join(d, ", "))
 	}
@@ -606,32 +624,15 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 		{
 			Name:        ToolNameFetch,
 			Category:    "fetch",
-			Description: "Fetch content from one or more HTTP/HTTPS URLs. Returns the response body and metadata.",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"urls": map[string]any{
-						"type": "array",
-						"items": map[string]any{
-							"type": "string",
-						},
-						"description": "Array of URLs to fetch",
-						"minItems":    1,
-					},
-					"format": map[string]any{
-						"type":        "string",
-						"description": "The format to return the content in (text, markdown, or html)",
-						"enum":        []string{"text", "markdown", "html"},
-					},
-					"timeout": map[string]any{
-						"type":        "integer",
-						"description": "Request timeout in seconds (default: 30)",
-						"minimum":     1,
-						"maximum":     300,
-					},
-				},
-				"required": []string{"urls", "format"},
-			},
+			Description: "Fetch HTTP/HTTPS URLs; return response bodies and metadata.",
+			Parameters: tools.MustSchemaFor[ToolArgs](func(schema *jsonschema.Schema) {
+				schema.Properties["urls"].Type = "array"
+				schema.Properties["urls"].Types = nil
+				schema.Properties["urls"].MinItems = new(1)
+				schema.Properties["format"].Enum = []any{"text", "markdown", "html"}
+				schema.Properties["timeout"].Minimum = new(1.0)
+				schema.Properties["timeout"].Maximum = new(300.0)
+			}),
 			OutputSchema: tools.MustSchemaFor[string](),
 			Handler:      tools.NewHandler(t.handler.CallTool),
 			Annotations: tools.ToolAnnotations{

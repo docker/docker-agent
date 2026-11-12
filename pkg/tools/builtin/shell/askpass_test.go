@@ -111,9 +111,11 @@ func TestAskpass_CancelledWhenHelperDies(t *testing.T) {
 		t.Skip("sudo askpass unsupported on this platform")
 	}
 
+	started := make(chan struct{})
 	cancelled := make(chan struct{})
 	srv, err := startAskpassServer(t.Context(), func() tools.ElicitationHandler {
 		return func(ctx context.Context, _ *mcp.ElicitParams) (tools.ElicitationResult, error) {
+			close(started)
 			<-ctx.Done() // block like a real prompt until the context is cancelled
 			close(cancelled)
 			return tools.ElicitationResult{}, ctx.Err()
@@ -125,9 +127,16 @@ func TestAskpass_CancelledWhenHelperDies(t *testing.T) {
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(t.Context(), "unix", srv.socket)
 	require.NoError(t, err)
+	defer conn.Close()
 	req, _ := json.Marshal(askpassRequest{Token: srv.token, Prompt: "p"})
 	_, err = conn.Write(append(req, '\n'))
 	require.NoError(t, err)
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prompt did not start")
+	}
 
 	// Simulate the helper dying (killed with its command's process group).
 	require.NoError(t, conn.Close())

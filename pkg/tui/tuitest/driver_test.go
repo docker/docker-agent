@@ -10,6 +10,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // echoModel is a tiny model used to unit-test the harness without pulling in
@@ -91,6 +93,50 @@ func (m *quitModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func TestDriver_SendSyncReturnsWhenMessageQuitsProgram(t *testing.T) {
 	d := New(t, &quitModel{}, 80, 24, WithTimeout(2*time.Second))
 	d.Press('q') // must not hang or fail even though no frame follows
+}
+
+// shutdownModel records whether the harness released its resources, and
+// whether the program had already stopped when it did.
+type shutdownModel struct {
+	echoModel
+
+	shutdownCalls   int
+	programWasDone  bool
+	programDone     <-chan struct{}
+	shutdownEntered chan struct{}
+}
+
+func (m *shutdownModel) Shutdown() {
+	m.shutdownCalls++
+	select {
+	case <-m.programDone:
+		m.programWasDone = true
+	default:
+	}
+	close(m.shutdownEntered)
+}
+
+func TestDriver_CleanupShutsDownModelAfterProgramStops(t *testing.T) {
+	m := &shutdownModel{shutdownEntered: make(chan struct{})}
+	var d *Driver
+	t.Run("driven", func(t *testing.T) {
+		d = New(t, m, 80, 24)
+		m.programDone = d.runDone
+		d.Type("hi").Assert(Contains("echo: hi"))
+	})
+
+	// t.Run returns only after the subtest's cleanups ran.
+	select {
+	case <-m.shutdownEntered:
+	default:
+		t.Fatal("Shutdown was not called by the driver's cleanup")
+	}
+	if m.shutdownCalls != 1 {
+		t.Fatalf("Shutdown called %d times, want 1", m.shutdownCalls)
+	}
+	if !m.programWasDone {
+		t.Fatal("Shutdown ran before the program had stopped")
+	}
 }
 
 func TestDriver_MouseHelpers(t *testing.T) {
@@ -183,11 +229,14 @@ func TestDebugFramesDump(t *testing.T) {
 	*liveFrames = false
 	*dumpFrames = true
 
-	dir := filepath.Join(goldenDir, "frames", safeTestName(t.Name()))
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
 	d := New(t, &echoModel{}, 80, 24)
 	d.Type("x").WaitFor(Contains("later"))
+	d.stop()
+
+	sink, ok := d.sink.(*debugSink)
+	require.True(t, ok)
+	dir := sink.dumpDir
+	assert.Equal(t, t.ArtifactDir(), filepath.Dir(dir))
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -236,16 +285,41 @@ func TestDebugLiveFrames(t *testing.T) {
 	}
 }
 
-func TestSafeTestName(t *testing.T) {
-	t.Parallel()
+func TestDebugFrameDumpsAreIsolated(t *testing.T) {
+	origLive := *liveFrames
+	origDump := *dumpFrames
+	t.Cleanup(func() {
+		*liveFrames = origLive
+		*dumpFrames = origDump
+	})
+	*liveFrames = false
+	*dumpFrames = true
 
-	got := safeTestName(`TestFoo/bar baz:*`)
-	want := "TestFoo_bar_baz__"
-	if got != want {
-		t.Errorf("safeTestName = %q, want %q", got, want)
+	otherArtifact := filepath.Join(t.ArtifactDir(), "other.txt")
+	require.NoError(t, os.WriteFile(otherArtifact, []byte("keep"), 0o600))
+
+	first, ok := newDebugSink(t).(*debugSink)
+	require.True(t, ok)
+	first.frame("first frame")
+	require.NoError(t, first.err())
+
+	second, ok := newDebugSink(t).(*debugSink)
+	require.True(t, ok)
+	second.frame("second frame")
+	require.NoError(t, second.err())
+
+	assert.NotEqual(t, first.dumpDir, second.dumpDir)
+	for _, sink := range []*debugSink{first, second} {
+		assert.Equal(t, t.ArtifactDir(), filepath.Dir(sink.dumpDir))
 	}
-	if got := safeTestName(".."); got != "__" {
-		t.Errorf("safeTestName for dots = %q, want __", got)
+	for path, want := range map[string]string{
+		otherArtifact:                             "keep",
+		filepath.Join(first.dumpDir, "0001.txt"):  "first frame",
+		filepath.Join(second.dumpDir, "0001.txt"): "second frame",
+	} {
+		got, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, want, string(got))
 	}
 }
 

@@ -68,6 +68,35 @@ const (
 	RestartAlways
 )
 
+// CrashLoop configures the supervisor's crash-loop detector: Threshold
+// disconnects classified as ErrServerCrashed within Window stop the
+// supervisor (state -> Failed, wrapped in ErrCrashLooping) instead of
+// restarting again right away, so the caller's own backoff gate (e.g.
+// StartableToolSet) paces the next attempt. Zero values default to
+// Threshold=3, Window=1 minute.
+//
+// A single crash, or crashes spread out wider than Window apart, are
+// ordinary restarts handled entirely by Restart/Backoff above and never
+// trip this detector.
+type CrashLoop struct {
+	Threshold int
+	Window    time.Duration
+}
+
+func (c CrashLoop) threshold() int {
+	if c.Threshold <= 0 {
+		return 3
+	}
+	return c.Threshold
+}
+
+func (c CrashLoop) window() time.Duration {
+	if c.Window <= 0 {
+		return time.Minute
+	}
+	return c.Window
+}
+
 // Backoff parameters for restart attempts. Zero values default to
 // 1s..32s exponential (matching historical MCP behaviour).
 type Backoff struct {
@@ -108,7 +137,7 @@ type Policy struct {
 	MaxAttempts int     // 0 = default (5); negative = unlimited
 	Backoff     Backoff // zero fields use Backoff defaults
 
-	// StartupTimeout bounds the initial Connect performed by Start. Zero
+	// StartupTimeout bounds teardown waiting and the initial Connect in Start. Zero
 	// means no timeout. It is enforced by racing Connect against a timer
 	// rather than via a context deadline, so it still interrupts connectors
 	// (notably MCP) that detach the context they are handed with
@@ -120,6 +149,10 @@ type Policy struct {
 	// individual tool calls; the Supervisor itself does not use it.
 	CallTimeout time.Duration
 
+	// CrashLoop tunes the crash-loop detector (see CrashLoop's doc). Zero
+	// value uses the CrashLoop defaults.
+	CrashLoop CrashLoop
+
 	// OnDisconnect is called when the session ends, with Wait()'s result.
 	// Useful for cache invalidation.
 	OnDisconnect func(err error)
@@ -128,6 +161,11 @@ type Policy struct {
 	OnRestart func(ctx context.Context)
 	// OnFailed is called once when the supervisor enters StateFailed.
 	OnFailed func(err error)
+
+	// Shutdown wraps session close and watcher teardown during Stop. It must
+	// finish all transport cleanup before returning. Concurrent Stops share
+	// one invocation, and Start waits for it before reusing the connector.
+	Shutdown func(ctx context.Context, teardown func() error) error
 
 	// Logger is used for lifecycle logs. Defaults to slog.Default().
 	Logger *slog.Logger
@@ -167,12 +205,15 @@ type Supervisor struct {
 	startMu sync.Mutex
 
 	// mu guards the rest of the fields.
-	mu           sync.Mutex
-	session      Session
-	stopping     bool
-	watcherAlive bool
-	forceRestart bool          // set by RestartAndWait so the watcher reconnects
-	restarted    chan struct{} // closed and replaced on each successful restart
+	mu            sync.Mutex
+	session       Session
+	stopping      bool
+	stopDone      chan struct{}      // closed after session close and watcher exit
+	stopCancel    context.CancelFunc // lets concurrent Stops interrupt the same teardown
+	connectReaped chan struct{}      // closed after a stopped startup handshake is reaped
+	watcherAlive  bool
+	forceRestart  bool          // set by RestartAndWait so the watcher reconnects
+	restarted     chan struct{} // closed and replaced on each successful restart
 	// done is closed when the supervisor enters a terminal state (Stopped
 	// or Failed) so RestartAndWait can wake up promptly. Replaced with a
 	// fresh channel by Start when transitioning out of a terminal state.
@@ -187,6 +228,18 @@ type Supervisor struct {
 	// adopts it and Stop reaps it, so overlapping Connects never race on the
 	// shared MCP session.
 	inflightConnect *pendingConnect
+
+	// crashTimes holds the timestamps of recent ErrServerCrashed disconnects
+	// (watch), pruned to policy.CrashLoop.window() on every record. Cleared
+	// whenever crashLoopErr is consumed or set, and on Stop.
+	crashTimes []time.Time
+	// crashLoopErr is a one-shot report: set by watch when the crash-loop
+	// threshold is reached, and returned by the very next Start instead of
+	// reconnecting, then cleared so the Start after that attempts a genuine
+	// reconnect. The one-shot handshake exists because only the caller (the
+	// StartableToolSet backoff gate) knows when enough time has passed to
+	// retry for real.
+	crashLoopErr error
 
 	// randFloat is the jitter source; tests may override.
 	randFloat func() float64
@@ -213,6 +266,20 @@ func (s *Supervisor) State() StateInfo { return s.tracker.Snapshot() }
 // requests (Ready or Degraded).
 func (s *Supervisor) IsReady() bool { return s.tracker.State().IsUsable() }
 
+// PendingCrashLoopError returns the crash-loop report awaiting the next
+// Start, without consuming it — a peek, unlike Start's one-shot read.
+// Repeated calls keep returning the same error until the Start that
+// actually consumes it runs. Callers that reach the supervisor outside
+// their own backoff gate (e.g. a toolset's lazy per-request start) should
+// check this before calling Start, so they fail fast on a known crash
+// loop instead of being the one to consume — and reconnect on behalf of
+// — a one-shot report the gate hasn't paced yet.
+func (s *Supervisor) PendingCrashLoopError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.crashLoopErr
+}
+
 // MarkReadyForTesting forces the supervisor into StateReady without going
 // through Connect. Test-only backdoor; production code must not call this.
 func (s *Supervisor) MarkReadyForTesting() { s.tracker.Set(StateReady) }
@@ -231,8 +298,9 @@ func (s *Supervisor) Restarted() <-chan struct{} {
 // the watcher goroutine is launched (if not already alive) and state moves
 // to Ready. Concurrent Start calls serialize.
 //
-// When policy.StartupTimeout is non-zero the connect is bounded by it; on
+// When policy.StartupTimeout is non-zero teardown and connect share its budget; on
 // expiry Start returns ErrInitTimeout and stays in StateStopped.
+// After Stop, Start waits for teardown before reconnecting.
 func (s *Supervisor) Start(ctx context.Context) error {
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
@@ -242,15 +310,40 @@ func (s *Supervisor) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return nil
 	}
+	var timeout <-chan time.Time
+	if s.policy.StartupTimeout > 0 {
+		timer := time.NewTimer(s.policy.StartupTimeout)
+		defer timer.Stop()
+		timeout = timer.C
+	}
 	if s.stopping {
+		stopDone, connectReaped := s.stopDone, s.connectReaped
 		s.mu.Unlock()
-		return ErrNotStarted
+		// Do not reuse the connector until the old watcher and any late
+		// handshake have finished closing their shared transport.
+		if err := s.waitForTeardown(ctx, stopDone, timeout); err != nil {
+			return err
+		}
+		if err := s.waitForTeardown(ctx, connectReaped, timeout); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.stopping = false
+	}
+	// A crash loop detected by watch reports itself here exactly once
+	// (see crashLoopErr's doc): the very next Start after this one attempts
+	// a genuine reconnect rather than short-circuiting again.
+	if err := s.crashLoopErr; err != nil {
+		s.crashLoopErr = nil
+		s.crashTimes = nil
+		s.mu.Unlock()
+		return err
 	}
 	s.mu.Unlock()
 
 	s.tracker.Set(StateStarting)
 
-	sess, err := s.connect(ctx)
+	sess, err := s.connect(ctx, timeout)
 	if err != nil {
 		s.tracker.Fail(StateStopped, err)
 		return err
@@ -328,7 +421,7 @@ type pendingConnect struct {
 // spawning a new attempt per turn would accumulate orphaned handshakes and,
 // for stdio, leak subprocesses. A handshake that eventually completes is
 // adopted by the next Start.
-func (s *Supervisor) connect(ctx context.Context) (Session, error) {
+func (s *Supervisor) connect(ctx context.Context, timeout <-chan time.Time) (Session, error) {
 	if s.policy.StartupTimeout <= 0 {
 		return s.connector.Connect(ctx)
 	}
@@ -353,9 +446,6 @@ func (s *Supervisor) connect(ctx context.Context) (Session, error) {
 	}
 	s.mu.Unlock()
 
-	timer := time.NewTimer(s.policy.StartupTimeout)
-	defer timer.Stop()
-
 	select {
 	case <-p.done:
 		s.mu.Lock()
@@ -378,8 +468,8 @@ func (s *Supervisor) connect(ctx context.Context) (Session, error) {
 			return nil, res.err
 		}
 		return res.sess, res.err
-	case <-timer.C:
-		return nil, wrap(ErrInitTimeout, fmt.Errorf("%q did not connect within %s", s.name, s.policy.StartupTimeout))
+	case <-timeout:
+		return nil, s.initTimeoutError()
 	}
 }
 
@@ -402,20 +492,39 @@ func (s *Supervisor) reapPendingConnect(ctx context.Context, p *pendingConnect) 
 }
 
 // Stop tears the supervisor down. Idempotent. Blocks until the underlying
-// session is closed.
+// session is closed. Cancellation by any concurrent caller interrupts teardown.
 func (s *Supervisor) Stop(ctx context.Context) error {
 	s.mu.Lock()
 	if s.stopping {
-		watchDone := s.watchDone
+		stopDone, cancel := s.stopDone, s.stopCancel
 		s.mu.Unlock()
-		return waitForWatcher(ctx, watchDone)
+		err := waitForWatcher(ctx, stopDone)
+		if ctx.Err() != nil {
+			cancel()
+		}
+		return err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	s.stopCancel = cancel
 	s.stopping = true
+	stopDone := make(chan struct{})
+	s.stopDone = stopDone
 	sess := s.session
 	s.session = nil
 	watchDone := s.watchDone
 	pending := s.inflightConnect
 	s.inflightConnect = nil
+	var connectReaped chan struct{}
+	if pending != nil {
+		connectReaped = make(chan struct{})
+	}
+	s.connectReaped = connectReaped
+	// A deliberate Stop discards any pending crash-loop verdict and its
+	// history: a future Start begins a fresh window rather than resuming
+	// one that spans an intentional stop/start cycle.
+	s.crashLoopErr = nil
+	s.crashTimes = nil
 	s.mu.Unlock()
 
 	s.tracker.Set(StateStopped)
@@ -425,18 +534,56 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	// session is closed rather than leaked. Runs in the background: a wedged
 	// handshake must not block Stop.
 	if pending != nil {
-		go s.reapPendingConnect(context.WithoutCancel(ctx), pending)
+		go func() {
+			defer close(connectReaped)
+			s.reapPendingConnect(context.WithoutCancel(ctx), pending)
+		}()
 	}
 
-	var closeErr error
-	if sess != nil {
-		closeErr = sess.Close(context.WithoutCancel(ctx))
+	teardown := func() error {
+		var closeErr error
+		if sess != nil {
+			closeErr = sess.Close(context.WithoutCancel(ctx))
+		}
+		waitErr := waitForWatcher(ctx, watchDone)
+		if closeErr != nil && ctx.Err() == nil {
+			return closeErr
+		}
+		return waitErr
 	}
-	waitErr := waitForWatcher(ctx, watchDone)
-	if closeErr != nil && ctx.Err() == nil {
-		return closeErr
+	var err error
+	if shutdown := s.policy.Shutdown; shutdown != nil {
+		err = shutdown(ctx, teardown)
+	} else {
+		err = teardown()
 	}
-	return waitErr
+	if waitForWatcher(ctx, watchDone) == nil {
+		close(stopDone)
+	} else {
+		go func() {
+			_ = waitForWatcher(context.WithoutCancel(ctx), watchDone)
+			close(stopDone)
+		}()
+	}
+	return err
+}
+
+func (s *Supervisor) initTimeoutError() error {
+	return wrap(ErrInitTimeout, fmt.Errorf("%q did not connect within %s", s.name, s.policy.StartupTimeout))
+}
+
+func (s *Supervisor) waitForTeardown(ctx context.Context, done <-chan struct{}, timeout <-chan time.Time) error {
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timeout:
+		return s.initTimeoutError()
+	}
 }
 
 func waitForWatcher(ctx context.Context, done <-chan struct{}) error {
@@ -541,6 +688,10 @@ func (s *Supervisor) watch(ctx context.Context) {
 		forced := s.forceRestart
 		s.forceRestart = false
 		s.session = nil
+		// Only an actual crash (not a forced/deliberate close, not a clean
+		// exit) ever counts toward the loop: those are handled entirely by
+		// the ordinary restart policy below.
+		crashLooping := !forced && errors.Is(waitErr, ErrServerCrashed) && s.recordCrashLocked(time.Now())
 		s.mu.Unlock()
 
 		s.tracker.Fail(StateRestarting, waitErr)
@@ -548,6 +699,27 @@ func (s *Supervisor) watch(ctx context.Context) {
 
 		if cb := s.policy.OnDisconnect; cb != nil {
 			cb(waitErr)
+		}
+
+		if crashLooping {
+			err := wrap(ErrCrashLooping, waitErr)
+			s.mu.Lock()
+			if s.stopping {
+				// Stop won the race (landed between the unlock above and here)
+				// and already set StateStopped: let it own the terminal state
+				// rather than clobbering it back to Failed.
+				s.mu.Unlock()
+				return
+			}
+			s.crashLoopErr = err
+			s.mu.Unlock()
+			s.tracker.Fail(StateFailed, err)
+			log.Error("supervisor: crash-looping; giving up", "name", s.name, "threshold", s.policy.CrashLoop.threshold(), "window", s.policy.CrashLoop.window())
+			if cb := s.policy.OnFailed; cb != nil {
+				cb(err)
+			}
+			s.signalDone()
+			return
 		}
 
 		if !s.shouldRestart(waitErr, forced) {
@@ -567,6 +739,21 @@ func (s *Supervisor) watch(ctx context.Context) {
 			cb(ctx)
 		}
 	}
+}
+
+// recordCrashLocked appends a crash observed at now to the crash-loop
+// window, pruning entries older than policy.CrashLoop.window(), and
+// reports whether the loop threshold has been reached. s.mu must be held.
+func (s *Supervisor) recordCrashLocked(now time.Time) bool {
+	cutoff := now.Add(-s.policy.CrashLoop.window())
+	kept := s.crashTimes[:0]
+	for _, t := range s.crashTimes {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	s.crashTimes = append(kept, now)
+	return len(s.crashTimes) >= s.policy.CrashLoop.threshold()
 }
 
 // shouldRestart applies the supervisor's restart policy to decide whether

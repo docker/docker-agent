@@ -8,12 +8,11 @@ package chat
 // consume the Document at inference time — they never perform I/O or resizing.
 //
 //	producer (app.go / runner.go)
-//	  └─ ProcessAttachment(ctx, part) → Document
+//	  └─ ProcessAttachmentWithMetadata(part) → Document, resize metadata
 //	       └─ session.UserMessage(…, MessagePart{Type: MessagePartTypeDocument, Document: &doc})
 //	            └─ per-provider convertDocument(ctx, doc, modelID) → wire format
 
 import (
-	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -28,7 +27,7 @@ const (
 	MaxInlineBinarySize = 20 * 1024 * 1024 // 20 MB
 )
 
-// ProcessAttachment converts a raw [MessagePart] into a [Document] with fully
+// ProcessAttachmentWithMetadata converts a raw [MessagePart] into a [Document] with fully
 // resolved Source.InlineData or Source.InlineText. It is called once when a
 // message is assembled — never at inference time.
 //
@@ -47,18 +46,10 @@ const (
 //     already set, the document is returned as-is after applying image
 //     transcoding to any image/* InlineData. A Document with no inline content
 //     is an error.
-func ProcessAttachment(_ context.Context, part MessagePart) (Document, error) {
-	doc, _, err := ProcessAttachmentWithMetadata(part)
-	return doc, err
-}
-
-// ProcessAttachmentWithMetadata is like [ProcessAttachment] but also returns
-// the [ImageResizeResult] when the attachment was an image that went through
-// [ResizeImage]. The metadata is nil for non-image attachments.
 //
-// Callers that need to emit a dimension note (for model coordinate-mapping)
-// should use this variant and call [FormatDimensionNote] on the returned
-// metadata.
+// It also returns the [ImageResizeResult] when an image went through [ResizeImage].
+// The metadata is nil for non-image attachments. Call [FormatDimensionNote] on
+// image metadata to describe coordinate mapping for the model.
 func ProcessAttachmentWithMetadata(part MessagePart) (Document, *ImageResizeResult, error) {
 	switch part.Type {
 	case MessagePartTypeFile:
@@ -239,10 +230,10 @@ func parseDataURI(uri string) (mimeType string, data []byte, err error) {
 	}
 
 	// Header is "<mime>[;charset=…];base64" or "<mime>" (plain text, unsupported here).
-	if !strings.HasSuffix(header, ";base64") {
+	mimeType, ok = strings.CutSuffix(header, ";base64")
+	if !ok {
 		return "", nil, errors.New("data URI is not base64-encoded (only base64 data URIs are supported)")
 	}
-	mimeType = strings.TrimSuffix(header, ";base64")
 
 	// Strip any charset parameter (e.g. "image/png;charset=utf-8;base64" → "image/png").
 	if idx := strings.Index(mimeType, ";"); idx >= 0 {

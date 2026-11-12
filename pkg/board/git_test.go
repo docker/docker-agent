@@ -112,3 +112,32 @@ func TestCopyIndexMissingSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
+
+func TestUpstreamRemote(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		remotes []string
+		want    string
+	}{
+		{"no remotes", nil, "origin"},
+		{"origin only", []string{"origin"}, "origin"},
+		{"upstream only", []string{"upstream"}, "upstream"},
+		{"upstream after origin", []string{"origin", "upstream"}, "upstream"},
+		{"upstream before other remote", []string{"upstream", "zebra"}, "upstream"},
+		{"exact name required", []string{"not-upstream", "upstream-other"}, "origin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := newLocalRepo(t)
+			for _, remote := range tc.remotes {
+				git(t, dir, "remote", "add", remote, "https://example.com/repo.git")
+			}
+			assert.Equal(t, tc.want, upstreamRemote(t.Context(), dir))
+		})
+	}
+	t.Run("not a repository", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "origin", upstreamRemote(t.Context(), t.TempDir()))
+	})
+}

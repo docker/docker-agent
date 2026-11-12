@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	pathx "github.com/docker/docker-agent/pkg/path"
-	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"
@@ -20,7 +20,7 @@ func New(ar *animation.Runtime, msg *types.Message, sessionState service.Session
 }
 
 func extractResult(msg *types.Message) string {
-	if msg.ToolResult == nil || msg.ToolResult.Meta == nil {
+	if msg.ToolResult == nil {
 		return ""
 	}
 	meta, ok := msg.ToolResult.Meta.(filesystem.ReadFileMeta)

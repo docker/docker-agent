@@ -1,4 +1,5 @@
 {{ define "main" }}
+  {{ if .IsHome }}{{ partial "redirects.html" . }}{{ end }}
   {{/* Pages carry no body H1: like docs.docker.com, the layout renders
        the front matter title. The homepage has its own hero. */}}
   {{ if not .IsHome }}<h1>{{ .Title }}</h1>{{ end }}

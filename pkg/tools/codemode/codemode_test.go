@@ -3,12 +3,17 @@ package codemode
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/modelerrors"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -110,8 +115,82 @@ func TestCodeModeTool_TypeScriptDeclarationsInDescription(t *testing.T) {
 	assert.Contains(t, allTools[0].Description, "interface FindItemInput")
 	assert.Contains(t, allTools[0].Description, "id: string;")
 	assert.Contains(t, allTools[0].Description, "type FindItemOutput = boolean;")
-	assert.Contains(t, allTools[0].Description, "declare function FindItem(args: FindItemInput): FindItemOutput;")
+	assert.Contains(t, allTools[0].Description, "declare function FindItem(args: FindItemInput): Promise<FindItemOutput>;")
 	assert.NotContains(t, allTools[0].Description, "Where Input follows the following JSON schema")
+}
+
+func TestCodeModeTool_RuntimeHandledToolsStayDirect(t *testing.T) {
+	t.Parallel()
+
+	// transfer_task is declared with a RuntimeHandler and no in-process Handler;
+	// wrapping it into the script toolset made every delegation fail with
+	// "tool \"transfer_task\" is not available in code mode" (#4713).
+	runtimeTool := tools.Tool{
+		Name:           "transfer_task",
+		RuntimeHandler: "transfer_task",
+		Parameters:     tools.MustSchemaFor[map[string]any](),
+	}
+	ordinary := tools.Tool{
+		Name:       "ordinary_tool",
+		Parameters: tools.MustSchemaFor[map[string]any](),
+		Handler: tools.NewHandler(func(context.Context, map[string]any) (*tools.ToolCallResult, error) {
+			return tools.ResultSuccess("ok"), nil
+		}),
+	}
+	ts := Wrap(&testToolSet{tools: []tools.Tool{runtimeTool, ordinary}})
+	list, err := ts.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, list, 2)
+
+	script := list[0]
+	assert.Equal(t, "run_tools_with_javascript", script.Name)
+	assert.NotContains(t, script.Description, "TransferTask", "runtime-handled tools must not be declared as script functions")
+	assert.Contains(t, script.Description, "OrdinaryTool")
+
+	direct := list[1]
+	assert.Equal(t, "transfer_task", direct.Name)
+	assert.Equal(t, "transfer_task", direct.RuntimeHandler, "the runtime must still dispatch it")
+	assert.Nil(t, direct.Handler)
+}
+
+func TestCodeModeTool_RepeatableToolsStayDirect(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	repeatable := tools.Tool{
+		Name:               "draw_number",
+		AllowRepeatedCalls: true,
+		Parameters:         tools.MustSchemaFor[map[string]any](),
+		Handler: tools.NewHandler(func(context.Context, map[string]any) (*tools.ToolCallResult, error) {
+			calls++
+			return tools.ResultSuccess("4"), nil
+		}),
+	}
+	ts := Wrap(&testToolSet{tools: []tools.Tool{repeatable, {Name: "ordinary_tool"}}})
+	list, err := ts.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, list, 2)
+	assert.Equal(t, "draw_number", list[1].Name)
+	assert.True(t, list[1].AllowRepeatedCalls)
+	assert.False(t, list[0].AllowRepeatedCalls)
+	assert.NotContains(t, list[0].Description, "DrawNumber")
+	assert.Contains(t, list[0].Description, "OrdinaryTool")
+
+	result, err := list[1].Handler(t.Context(), tools.ToolCall{Function: tools.FunctionCall{Arguments: `{}`}}, tools.NopRuntime{})
+	require.NoError(t, err)
+	assert.Equal(t, "4", result.Output)
+	assert.Equal(t, 1, calls)
+
+	for _, name := range []string{"draw_number", "DrawNumber"} {
+		result, err := list[0].Handler(t.Context(), tools.ToolCall{Function: tools.FunctionCall{
+			Arguments: `{"script":"return await ` + name + `({});"}`,
+		}}, tools.NopRuntime{})
+		require.NoError(t, err)
+		var output ScriptResult
+		require.NoError(t, json.Unmarshal([]byte(result.Output), &output))
+		assert.Contains(t, output.Value, "is not defined")
+	}
+	assert.Equal(t, 1, calls, "scripts must not bypass direct-call loop detection")
 }
 
 func TestCodeModeTool_Instructions(t *testing.T) {
@@ -193,7 +272,7 @@ func TestCodeModeTool_CallToolWithNonIdentifierName(t *testing.T) {
 	allTools, err := tool.Tools(t.Context())
 	require.NoError(t, err)
 	require.Len(t, allTools, 1)
-	assert.Contains(t, allTools[0].Description, "declare function HelloWorld(args: HelloWorldInput): HelloWorldOutput;")
+	assert.Contains(t, allTools[0].Description, "declare function HelloWorld(args: HelloWorldInput): Promise<HelloWorldOutput>;")
 
 	result, err := allTools[0].Handler(t.Context(), tools.ToolCall{
 		Function: tools.FunctionCall{
@@ -245,9 +324,12 @@ func TestCodeModeTool_CallEcho(t *testing.T) {
 	require.Empty(t, scriptResult.StdOut)
 }
 
-// TestCodeModeTool_StartRollsBackOnError verifies that when one toolset fails
-// to start, all successfully-started toolsets are stopped (rolled back).
-func TestCodeModeTool_StartRollsBackOnError(t *testing.T) {
+// TestCodeModeTool_StartKeepsHealthyToolsetsOnError verifies that when one
+// toolset fails to start, its peers stay started (no rollback) and the
+// failure is reported as a tools.PartialStartError so the StartableToolSet
+// wrapper keeps run_tools_with_javascript available while still surfacing
+// the error (#3978).
+func TestCodeModeTool_StartKeepsHealthyToolsetsOnError(t *testing.T) {
 	t.Parallel()
 	failing := &testToolSet{startErr: assert.AnError}
 	healthy := &testToolSet{}
@@ -256,9 +338,380 @@ func TestCodeModeTool_StartRollsBackOnError(t *testing.T) {
 
 	err := tool.Start(t.Context())
 	require.ErrorIs(t, err, assert.AnError)
+	require.True(t, tools.IsPartialStart(err), "partial failure must be reported as PartialStartError")
 	assert.Equal(t, 1, failing.start, "failing toolset should have attempted start")
 	assert.Equal(t, 1, healthy.start, "healthy toolset should have attempted start")
-	assert.Equal(t, 1, healthy.stop, "healthy toolset should be rolled back after failure")
+	assert.Equal(t, 0, healthy.stop, "healthy toolset must not be rolled back on a peer's failure")
+}
+
+// TestCodeModeTool_PartialStartExposesHealthyTools verifies the degraded-mode
+// contract: after a partial start, Tools() still returns
+// run_tools_with_javascript with the healthy toolsets' declarations (the
+// failed toolset's are omitted), scripts can call the healthy tools, the
+// failed toolset alone is retried on the next Start, and a successful retry
+// restores its declarations.
+func TestCodeModeTool_PartialStartExposesHealthyTools(t *testing.T) {
+	t.Parallel()
+	healthy := &testToolSet{
+		tools: []tools.Tool{
+			{
+				Name: "fetch_url",
+				Handler: tools.NewHandler(func(ctx context.Context, args map[string]any) (*tools.ToolCallResult, error) {
+					return tools.ResultSuccess("fetched"), nil
+				}),
+			},
+			{Name: "todo_write", Category: "todo"},
+		},
+	}
+	failing := &testToolSet{
+		startErr: assert.AnError,
+		tools:    []tools.Tool{{Name: "broken_tool"}},
+	}
+
+	tool := Wrap(healthy, failing)
+	startable := tool.(tools.Startable)
+	reporter := tool.(tools.StartReporter)
+
+	require.Error(t, startable.Start(t.Context()))
+	assert.False(t, reporter.IsStarted(), "degraded wrapper must report unstarted so the failed toolset is retried")
+
+	allTools, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, allTools, 2)
+	assert.Equal(t, "run_tools_with_javascript", allTools[0].Name)
+	assert.Contains(t, allTools[0].Description, "declare function FetchUrl", "healthy toolset must stay declared")
+	assert.NotContains(t, allTools[0].Description, "BrokenTool", "failed toolset must be omitted")
+	assert.Equal(t, "todo_write", allTools[1].Name, "todo exclusion must be preserved in degraded mode")
+
+	result, err := allTools[0].Handler(t.Context(), tools.ToolCall{
+		Function: tools.FunctionCall{
+			Arguments: `{"script":"return fetch_url();"}`,
+		},
+	}, tools.NopRuntime{})
+	require.NoError(t, err)
+	var scriptResult ScriptResult
+	require.NoError(t, json.Unmarshal([]byte(result.Output), &scriptResult))
+	assert.Equal(t, "fetched", scriptResult.Value, "healthy tools must stay callable from scripts")
+
+	// Retry: only the failed toolset is started again.
+	require.Error(t, startable.Start(t.Context()))
+	assert.Equal(t, 1, healthy.start, "healthy toolset must not be restarted on retry")
+	assert.Equal(t, 2, failing.start, "failed toolset must be retried")
+
+	// Recovery: the toolset comes back and its declarations reappear.
+	failing.startErr = nil
+	require.NoError(t, startable.Start(t.Context()))
+	assert.True(t, reporter.IsStarted())
+
+	allTools, err = tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, allTools, 2)
+	assert.Contains(t, allTools[0].Description, "declare function BrokenTool", "recovered toolset must be declared again")
+}
+
+// reportingToolSet is a testToolSet that also reports its live lifecycle
+// state (tools.StartReporter) and supports in-place recovery
+// (tools.Restartable), like a supervisor-backed MCP toolset. A background
+// session death is simulated by flipping started to false.
+type reportingToolSet struct {
+	testToolSet
+
+	started    bool
+	restarts   int
+	restartErr error
+}
+
+var (
+	_ tools.StartReporter = (*reportingToolSet)(nil)
+	_ tools.Restartable   = (*reportingToolSet)(nil)
+)
+
+func (r *reportingToolSet) Start(ctx context.Context) error {
+	if err := r.testToolSet.Start(ctx); err != nil {
+		return err
+	}
+	r.started = true
+	return nil
+}
+
+func (r *reportingToolSet) Restart(context.Context) error {
+	r.restarts++
+	if r.restartErr != nil {
+		return r.restartErr
+	}
+	r.started = true
+	return nil
+}
+
+func (r *reportingToolSet) IsStarted() bool { return r.started }
+
+// TestCodeModeTool_InnerDeathIsDetectedAndRecoveredViaRestart covers the
+// "started successfully, then died" arc for a supervisor-backed inner
+// toolset (e.g. MCP): the composite must detect the death through the
+// inner's tools.StartReporter, degrade (omit the dead inner while keeping
+// the healthy one listed), and recover it via Restart — not Start, which
+// can be a no-op on a supervisor still holding the dead session. A failed
+// recovery surfaces as a PartialStartError and is retried.
+func TestCodeModeTool_InnerDeathIsDetectedAndRecoveredViaRestart(t *testing.T) {
+	t.Parallel()
+	healthy := &testToolSet{tools: []tools.Tool{{Name: "fetch_url"}}}
+	flaky := &reportingToolSet{testToolSet: testToolSet{tools: []tools.Tool{{Name: "flaky_tool"}}}}
+
+	tool := Wrap(healthy, flaky)
+	startable := tool.(tools.Startable)
+	reporter := tool.(tools.StartReporter)
+
+	// Initial start: everything up.
+	require.NoError(t, startable.Start(t.Context()))
+	assert.True(t, reporter.IsStarted())
+	assert.Equal(t, 1, flaky.start)
+
+	// The inner dies in the background: the composite reports degraded and
+	// omits the dead inner's declarations so listing keeps working.
+	flaky.started = false
+	assert.False(t, reporter.IsStarted(), "a dead inner must degrade the composite")
+
+	allTools, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, allTools, 1)
+	assert.Contains(t, allTools[0].Description, "FetchUrl", "healthy toolset must stay declared")
+	assert.NotContains(t, allTools[0].Description, "FlakyTool", "dead inner must be omitted")
+
+	// Failed recovery: the dead inner is recovered via Restart, its peers
+	// are left alone, and the composite stays degraded.
+	flaky.restartErr = assert.AnError
+	err = startable.Start(t.Context())
+	require.ErrorIs(t, err, assert.AnError)
+	assert.True(t, tools.IsPartialStart(err))
+	assert.Equal(t, 1, flaky.restarts, "dead inner must be recovered via Restart")
+	assert.Equal(t, 1, flaky.start, "dead inner must not be blindly re-Started")
+	assert.Equal(t, 1, healthy.start, "healthy peer must not be restarted")
+	assert.False(t, reporter.IsStarted())
+
+	// Successful Restart on the next recovery attempt brings the inner back.
+	flaky.restartErr = nil
+	flaky.startErr = assert.AnError // Start must not be used while recovering
+	require.NoError(t, startable.Start(t.Context()))
+	assert.Equal(t, 2, flaky.restarts)
+	assert.True(t, reporter.IsStarted())
+
+	allTools, err = tool.Tools(t.Context())
+	require.NoError(t, err)
+	assert.Contains(t, allTools[0].Description, "FlakyTool", "recovered inner must be declared again")
+}
+
+// blockingToolSet is an inner toolset whose Start wedges: it ignores ctx
+// and blocks until release is closed, like an unresponsive MCP server.
+// entered is closed once Start is inside the blocking section.
+type blockingToolSet struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+var (
+	_ tools.ToolSet   = (*blockingToolSet)(nil)
+	_ tools.Startable = (*blockingToolSet)(nil)
+)
+
+func newBlockingToolSet() *blockingToolSet {
+	return &blockingToolSet{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (b *blockingToolSet) Tools(context.Context) ([]tools.Tool, error) { return nil, nil }
+
+func (b *blockingToolSet) Start(context.Context) error {
+	close(b.entered)
+	<-b.release
+	return nil
+}
+
+func (b *blockingToolSet) Stop(context.Context) error { return nil }
+
+// TestCodeModeTool_ToolsNotBlockedByWedgedInnerStart pins the short-lock
+// contract behind #3978: c.mu is never held across inner lifecycle calls,
+// so while one inner's Start is wedged (ignoring its context), Tools() and
+// IsStarted() return promptly and run_tools_with_javascript keeps exposing
+// the healthy peer instead of queueing behind the mutex.
+func TestCodeModeTool_ToolsNotBlockedByWedgedInnerStart(t *testing.T) {
+	t.Parallel()
+	healthy := &testToolSet{tools: []tools.Tool{{Name: "fetch_url"}}}
+	wedged := newBlockingToolSet()
+	releaseWedged := sync.OnceFunc(func() { close(wedged.release) })
+	defer releaseWedged() // unblock the Start goroutine even if an assertion fails first
+
+	tool := Wrap(healthy, wedged)
+
+	// Capture the test context here: goroutines below may outlive a t.Fatal
+	// path and must not call t.Context() themselves.
+	ctx := t.Context()
+	startDone := make(chan error, 1)
+	go func() { startDone <- tool.(tools.Startable).Start(ctx) }()
+
+	select {
+	case <-wedged.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("wedged inner Start was never entered")
+	}
+
+	type listing struct {
+		started bool
+		tools   []tools.Tool
+		err     error
+	}
+	listed := make(chan listing, 1)
+	go func() {
+		started := tool.(tools.StartReporter).IsStarted()
+		allTools, err := tool.Tools(ctx)
+		listed <- listing{started: started, tools: allTools, err: err}
+	}()
+
+	select {
+	case res := <-listed:
+		require.NoError(t, res.err)
+		assert.False(t, res.started, "composite must report unstarted while an inner Start is in flight")
+		require.NotEmpty(t, res.tools)
+		assert.Equal(t, "run_tools_with_javascript", res.tools[0].Name)
+		assert.Contains(t, res.tools[0].Description, "FetchUrl", "healthy peer must stay declared")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Tools() blocked behind a wedged inner Start")
+	}
+
+	releaseWedged()
+	select {
+	case err := <-startDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after the wedged inner was released")
+	}
+}
+
+// TestCodeModeTool_PartialStartAuthClassification pins how a partial start
+// is classified for the authorization special-handling: a batch where every
+// failed inner deferred on OAuth is auth-only (silently deferrable), while a
+// mixed batch (auth + real failure) must NOT satisfy IsAuthorizationRequired
+// — otherwise the real failure would be hidden behind the silent deferral.
+// A healthy peer keeps each batch genuinely partial; total failures are
+// tools.TotalStartError (see TestCodeModeTool_TotalStartFailureIsNotPartial).
+func TestCodeModeTool_PartialStartAuthClassification(t *testing.T) {
+	t.Parallel()
+	authErr := &tools.AuthorizationRequiredError{URL: "https://example.test/mcp"}
+
+	authOnly := Wrap(&testToolSet{}, &testToolSet{startErr: authErr}).(tools.Startable)
+	err := authOnly.Start(t.Context())
+	require.True(t, tools.IsPartialStart(err))
+	assert.True(t, tools.IsAuthorizationRequired(err),
+		"an auth-only partial start must keep the silent OAuth-deferral handling")
+
+	mixed := Wrap(&testToolSet{}, &testToolSet{startErr: authErr}, &testToolSet{startErr: assert.AnError}).(tools.Startable)
+	err = mixed.Start(t.Context())
+	require.True(t, tools.IsPartialStart(err))
+	assert.False(t, tools.IsAuthorizationRequired(err),
+		"a mixed batch must not be classified auth-only: the non-auth failure needs surfacing")
+	require.ErrorIs(t, err, assert.AnError, "the non-auth cause must stay reachable via errors.Is")
+}
+
+// TestCodeModeTool_PartialStartLostAfterStartClassification pins how the
+// composite classifies partial failures for the wrapper's recovery notice:
+// an inner that never came up (initial failure) leaves LostAfterStart
+// false, while an inner that started successfully and was lost since sets
+// it, so only real post-start losses can mark the wrapper's recovery streak.
+func TestCodeModeTool_PartialStartLostAfterStartClassification(t *testing.T) {
+	t.Parallel()
+	healthy := &testToolSet{}
+	flaky := &reportingToolSet{testToolSet: testToolSet{startErr: assert.AnError}}
+
+	startable := Wrap(healthy, flaky).(tools.Startable)
+
+	// Initial failure: the inner never started, so nothing was lost.
+	var partial *tools.PartialStartError
+	require.ErrorAs(t, startable.Start(t.Context()), &partial)
+	assert.False(t, partial.LostAfterStart, "an initial inner failure is not a post-start loss")
+
+	// The inner recovers, then dies in the background and fails to restart.
+	flaky.startErr = nil
+	require.NoError(t, startable.Start(t.Context()))
+	flaky.started = false
+	flaky.restartErr = assert.AnError
+
+	require.ErrorAs(t, startable.Start(t.Context()), &partial)
+	assert.True(t, partial.LostAfterStart, "a started-then-lost inner must be classified as post-start loss")
+}
+
+// TestCodeModeTool_TotalStartFailureIsNotPartial pins the total-failure
+// contract: when every inner toolset fails and none is available, Start
+// returns a tools.TotalStartError instead of a tools.PartialStartError. A
+// PartialStartError would latch the StartableToolSet wrapper as started and
+// expose run_tools_with_javascript with an empty function list; the
+// non-partial error keeps the wrapper unlatched so the next Start is a cold
+// retry.
+func TestCodeModeTool_TotalStartFailureIsNotPartial(t *testing.T) {
+	t.Parallel()
+	failingA := &testToolSet{startErr: assert.AnError, tools: []tools.Tool{{Name: "tool_a"}}}
+	failingB := &testToolSet{startErr: assert.AnError, tools: []tools.Tool{{Name: "tool_b"}}}
+
+	tool := Wrap(failingA, failingB)
+	wrapper := tools.NewStartable(tool)
+
+	err := wrapper.Start(t.Context())
+	require.ErrorIs(t, err, assert.AnError)
+	assert.False(t, tools.IsPartialStart(err), "total failure must not be reported as partial")
+	assert.False(t, wrapper.IsStarted(), "total failure must not latch the wrapper")
+
+	// Cold retry: every inner is started again, and a successful retry
+	// exposes all declarations.
+	failingA.startErr = nil
+	failingB.startErr = nil
+	require.NoError(t, wrapper.Start(t.Context()))
+	assert.True(t, wrapper.IsStarted())
+	assert.Equal(t, 2, failingA.start)
+	assert.Equal(t, 2, failingB.start)
+
+	allTools, err := tool.Tools(t.Context())
+	require.NoError(t, err)
+	require.Len(t, allTools, 1)
+	assert.Contains(t, allTools[0].Description, "ToolA")
+	assert.Contains(t, allTools[0].Description, "ToolB")
+}
+
+// TestCodeModeTool_TotalMixedFailureIsNotAuthRequired pins the auth
+// classification of a mixed total failure (one inner deferred on OAuth, one
+// failed for real): it must be non-partial — so the wrapper does not latch
+// — and must NOT satisfy IsAuthorizationRequired, otherwise the real
+// failure would be suppressed behind the silent auth-deferral handling.
+// Both causes stay reachable via errors.Is/errors.As.
+func TestCodeModeTool_TotalMixedFailureIsNotAuthRequired(t *testing.T) {
+	t.Parallel()
+	authErr := &tools.AuthorizationRequiredError{URL: "https://example.test/mcp"}
+
+	tool := Wrap(&testToolSet{startErr: authErr}, &testToolSet{startErr: assert.AnError}).(tools.Startable)
+	err := tool.Start(t.Context())
+	require.Error(t, err)
+	assert.False(t, tools.IsPartialStart(err), "total failure must not be reported as partial")
+	assert.False(t, tools.IsAuthorizationRequired(err),
+		"a mixed total failure must not be classified auth-only: the real failure needs surfacing")
+	require.ErrorIs(t, err, assert.AnError, "the non-auth cause must stay reachable via errors.Is")
+	var target *tools.AuthorizationRequiredError
+	require.ErrorAs(t, err, &target, "the auth cause must stay reachable via errors.As")
+}
+
+// TestCodeModeTool_TotalAuthDeferralKeepsAuthClassification pins that a
+// total failure where every inner deferred on OAuth is still classified
+// authorization-required even though it is no longer a PartialStartError,
+// so the initial deferral stays silent and the dialog appears naturally on
+// the first interactive turn.
+func TestCodeModeTool_TotalAuthDeferralKeepsAuthClassification(t *testing.T) {
+	t.Parallel()
+	authErr := &tools.AuthorizationRequiredError{URL: "https://example.test/mcp"}
+
+	tool := Wrap(&testToolSet{startErr: authErr}).(tools.Startable)
+	err := tool.Start(t.Context())
+	require.Error(t, err)
+	assert.False(t, tools.IsPartialStart(err), "total failure must not be reported as partial")
+	assert.True(t, tools.IsAuthorizationRequired(err),
+		"an all-auth total failure must keep the silent OAuth-deferral handling")
 }
 
 // TestCodeModeTool_StartStopWrappedToolSet verifies that Start/Stop find
@@ -306,43 +759,27 @@ func (t *testToolSet) Stop(context.Context) error {
 	return nil
 }
 
-// capableToolSet is a testToolSet that also implements the capability
-// interfaces codeModeTool must forward (Elicitable, Sampleable,
-// SampleableWithTools, OAuthCapable, ChangeNotifier) so tests can assert
-// that codeModeTool actually forwards to inner toolsets instead of
-// silently dropping them (the regression this file guards against: an
-// MCP toolset wrapped by code_mode_tools never got its OAuth elicitation
-// handler wired up, so its authorization dialog never surfaced).
+// capableToolSet is a testToolSet that also implements capabilities discovered
+// through the Code Mode graph. It guards against silently dropping handlers
+// for MCP toolsets nested under code_mode_tools.
 type capableToolSet struct {
 	testToolSet
 
 	elicitationHandler        tools.ElicitationHandler
-	samplingHandler           tools.SamplingHandler
-	samplingWithToolsHandler  tools.SamplingWithToolsHandler
 	oauthSuccessHandler       func()
 	managedOAuth              bool
 	unmanagedOAuthRedirectURI string
-	toolsChangedHandler       func()
+	toolsChangedSubs          tools.ChangeSubscribers
 }
 
 var (
-	_ tools.Elicitable          = (*capableToolSet)(nil)
-	_ tools.Sampleable          = (*capableToolSet)(nil)
-	_ tools.SampleableWithTools = (*capableToolSet)(nil)
-	_ tools.OAuthCapable        = (*capableToolSet)(nil)
-	_ tools.ChangeNotifier      = (*capableToolSet)(nil)
+	_ tools.Elicitable       = (*capableToolSet)(nil)
+	_ tools.OAuthCapable     = (*capableToolSet)(nil)
+	_ tools.ChangeSubscriber = (*capableToolSet)(nil)
 )
 
 func (c *capableToolSet) SetElicitationHandler(handler tools.ElicitationHandler) {
 	c.elicitationHandler = handler
-}
-
-func (c *capableToolSet) SetSamplingHandler(handler tools.SamplingHandler) {
-	c.samplingHandler = handler
-}
-
-func (c *capableToolSet) SetSamplingWithToolsHandler(handler tools.SamplingWithToolsHandler) {
-	c.samplingWithToolsHandler = handler
 }
 
 func (c *capableToolSet) SetOAuthSuccessHandler(handler func()) {
@@ -357,23 +794,16 @@ func (c *capableToolSet) SetUnmanagedOAuthRedirectURI(uri string) {
 	c.unmanagedOAuthRedirectURI = uri
 }
 
-func (c *capableToolSet) SetToolsChangedHandler(handler func()) {
-	c.toolsChangedHandler = handler
+func (c *capableToolSet) SubscribeToolsChanged(handler func()) func() {
+	return c.toolsChangedSubs.Subscribe(handler)
 }
 
-// TestCodeModeTool_ForwardsCapabilityHandlers verifies that codeModeTool
-// forwards elicitation, sampling, OAuth, and tool-list-changed handlers to
-// every inner toolset that supports them. Before this fix, codeModeTool
-// implemented none of these capability interfaces, so
-// tools.ConfigureHandlers (called by the runtime once per turn) could never
-// reach an MCP toolset hidden behind code_mode_tools — its OAuth
-// elicitation handler stayed nil forever and the authorization dialog
-// never surfaced.
-func TestCodeModeTool_ForwardsCapabilityHandlers(t *testing.T) {
+// TestCodeModeTool_ConfiguresCapabilityHandlers verifies that generic graph
+// traversal configures every capable child without composite-specific forwarding.
+func TestCodeModeTool_ConfiguresCapabilityHandlers(t *testing.T) {
 	t.Parallel()
 	capable := &capableToolSet{}
-	// A plain toolset without any capability must be tolerated (As returns
-	// ok=false) rather than panicking.
+	// A plain toolset without any capability must be tolerated.
 	plain := &testToolSet{}
 
 	tool := Wrap(capable, plain)
@@ -381,24 +811,16 @@ func TestCodeModeTool_ForwardsCapabilityHandlers(t *testing.T) {
 	elicitHandler := func(context.Context, *mcp.ElicitParams) (tools.ElicitationResult, error) {
 		return tools.ElicitationResult{}, nil
 	}
-	samplingHandler := func(context.Context, *mcp.CreateMessageParams) (*mcp.CreateMessageResult, error) {
-		return nil, nil
-	}
-	samplingWithToolsHandler := func(context.Context, *mcp.CreateMessageWithToolsParams) (*mcp.CreateMessageWithToolsResult, error) {
-		return nil, nil
-	}
 	oauthCalled := false
 
 	// tools.ConfigureHandlers is the exact call the runtime makes once per
 	// turn (see configureToolsetHandlers in pkg/runtime/loop.go); routing
 	// through it here instead of casting to each capability interface
 	// directly keeps this test aligned with the real call site.
-	tools.ConfigureHandlers(tool, elicitHandler, samplingHandler, samplingWithToolsHandler,
+	tools.ConfigureHandlers(tool, elicitHandler,
 		func() { oauthCalled = true }, true, "http://127.0.0.1:1234/callback")
 
 	require.NotNil(t, capable.elicitationHandler)
-	require.NotNil(t, capable.samplingHandler)
-	require.NotNil(t, capable.samplingWithToolsHandler)
 	require.NotNil(t, capable.oauthSuccessHandler)
 	capable.oauthSuccessHandler()
 	assert.True(t, oauthCalled)
@@ -406,17 +828,16 @@ func TestCodeModeTool_ForwardsCapabilityHandlers(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1:1234/callback", capable.unmanagedOAuthRedirectURI)
 
 	changedCalled := false
-	tool.(tools.ChangeNotifier).SetToolsChangedHandler(func() { changedCalled = true })
-	require.NotNil(t, capable.toolsChangedHandler)
-	capable.toolsChangedHandler()
+	for _, notifier := range tools.FindAll[tools.ChangeSubscriber](tool) {
+		t.Cleanup(notifier.SubscribeToolsChanged(func() { changedCalled = true }))
+	}
+	capable.toolsChangedSubs.Notify()
 	assert.True(t, changedCalled)
 }
 
-// TestCodeModeTool_ForwardsCapabilityHandlersThroughStartableWrapper verifies
-// that the capability forwarding also finds an inner toolset wrapped in a
-// tools.StartableToolSet, matching how real MCP toolsets are wired
-// (tools.NewStartable(mcpToolset)) before being handed to codemode.Wrap.
-func TestCodeModeTool_ForwardsCapabilityHandlersThroughStartableWrapper(t *testing.T) {
+// TestCodeModeTool_ConfiguresCapabilitiesThroughStartableWrapper verifies
+// graph traversal through both composite and decorator edges.
+func TestCodeModeTool_ConfiguresCapabilitiesThroughStartableWrapper(t *testing.T) {
 	t.Parallel()
 	capable := &capableToolSet{}
 	wrapped := tools.NewStartable(capable)
@@ -426,7 +847,7 @@ func TestCodeModeTool_ForwardsCapabilityHandlersThroughStartableWrapper(t *testi
 	handler := func(context.Context, *mcp.ElicitParams) (tools.ElicitationResult, error) {
 		return tools.ElicitationResult{}, nil
 	}
-	tool.(tools.Elicitable).SetElicitationHandler(handler)
+	tools.ConfigureHandlers(tool, handler, nil, false, "")
 
 	assert.NotNil(t, capable.elicitationHandler)
 }
@@ -492,7 +913,7 @@ func TestCodeModeTool_FailureIncludesToolCalls(t *testing.T) {
 	// Script calls tools successfully but then throws a runtime error
 	result, err := allTools[0].Handler(t.Context(), tools.ToolCall{
 		Function: tools.FunctionCall{
-			Arguments: `{"script":"var a = first_tool(); var b = second_tool(); throw new Error('runtime error');"}`,
+			Arguments: `{"script":"var a = await first_tool(); var b = await second_tool(); throw new Error('runtime error');"}`,
 		},
 	}, tools.NopRuntime{})
 	require.NoError(t, err)
@@ -580,7 +1001,7 @@ func TestCodeModeTool_FailureIncludesToolArguments(t *testing.T) {
 
 	result, err := allTools[0].Handler(t.Context(), tools.ToolCall{
 		Function: tools.FunctionCall{
-			Arguments: `{"script":"tool_with_args({'value': 'test123'}); throw new Error('forced error');"}`,
+			Arguments: `{"script":"await tool_with_args({'value': 'test123'}); throw new Error('forced error');"}`,
 		},
 	}, tools.NopRuntime{})
 	require.NoError(t, err)
@@ -594,4 +1015,134 @@ func TestCodeModeTool_FailureIncludesToolArguments(t *testing.T) {
 	assert.Equal(t, "tool_with_args", scriptResult.ToolCalls[0].Name)
 	assert.Equal(t, map[string]any{"value": "test123"}, scriptResult.ToolCalls[0].Arguments)
 	assert.Equal(t, "result", scriptResult.ToolCalls[0].Result)
+}
+
+// TestCodeModeTool_RateLimitedInnerPacesRetry is the codemode-level
+// regression for #4067: when the composite degrades with a retryable inner
+// cause (e.g. a RAG toolset hitting 429s), the outer StartableToolSet gate
+// must pace the composite's own retry of the failed subset instead of
+// re-invoking every inner toolset's Start on every turn, while the healthy
+// subset's declarations stay listed throughout.
+func TestCodeModeTool_RateLimitedInnerPacesRetry(t *testing.T) {
+	t.Parallel()
+
+	healthy := &testToolSet{tools: []tools.Tool{{Name: "fetch_url"}}}
+	rateLimited := &testToolSet{
+		startErr: &modelerrors.StatusError{StatusCode: http.StatusTooManyRequests, Err: errors.New("rate limited")},
+		tools:    []tools.Tool{{Name: "rag_search"}},
+	}
+
+	composite := Wrap(healthy, rateLimited)
+
+	now := time.Now()
+	identityJitter := func(d time.Duration) time.Duration { return d }
+	s := tools.NewStartable(composite,
+		tools.WithStartRetryClock(func() time.Time { return now }),
+		tools.WithStartRetryJitter(identityJitter),
+	)
+
+	// Turn 1: partial start latches the wrapper (healthy subset stays
+	// listed) and arms the gate on the retryable inner cause.
+	_, err := s.TryStart(t.Context())
+	require.True(t, tools.IsPartialStart(err))
+	assert.True(t, s.IsStarted(), "healthy subset must be listed after a partial start")
+	assert.Equal(t, 1, healthy.start)
+	assert.Equal(t, 1, rateLimited.start)
+
+	allTools, terr := composite.Tools(t.Context())
+	require.NoError(t, terr)
+	require.Len(t, allTools, 1)
+	assert.Contains(t, allTools[0].Description, "FetchUrl")
+	assert.NotContains(t, allTools[0].Description, "RagSearch")
+
+	// Turn 2 (same instant): gated — neither inner is retried.
+	_, err = s.TryStart(t.Context())
+	require.Error(t, err)
+	assert.True(t, s.IsStarted(), "healthy subset must stay listed while gated")
+	assert.Equal(t, 1, healthy.start, "healthy inner must not be re-started while gated")
+	assert.Equal(t, 1, rateLimited.start, "degraded inner's retry must be paced, not re-attempted every turn")
+
+	// Advance comfortably past the (5-minute-capped) window: the next turn
+	// retries the degraded subset, which now recovers.
+	now = now.Add(6 * time.Minute)
+	rateLimited.startErr = nil
+	started, err := s.TryStart(t.Context())
+	require.NoError(t, err)
+	assert.True(t, started)
+	assert.Equal(t, 2, rateLimited.start, "degraded inner must be retried once the window elapses")
+
+	allTools, terr = composite.Tools(t.Context())
+	require.NoError(t, terr)
+	assert.Contains(t, allTools[0].Description, "RagSearch", "recovered inner's declarations must reappear")
+}
+
+type disposableRunnableToolSet struct {
+	started chan struct{}
+	done    chan struct{}
+	closed  chan struct{}
+}
+
+func (*disposableRunnableToolSet) Tools(context.Context) ([]tools.Tool, error) {
+	return nil, nil
+}
+
+func (r *disposableRunnableToolSet) Run(ctx context.Context) {
+	close(r.started)
+	<-ctx.Done()
+	close(r.done)
+}
+
+func (r *disposableRunnableToolSet) Close() error {
+	close(r.closed)
+	return nil
+}
+
+func TestCodeModeTool_DisposeCancelsCanonicalRunnable(t *testing.T) {
+	t.Parallel()
+	raw := &disposableRunnableToolSet{
+		started: make(chan struct{}), done: make(chan struct{}), closed: make(chan struct{}),
+	}
+	composite := Wrap(raw).(*codeModeTool)
+	owner := tools.NewStartable(composite)
+	children := composite.Children()
+	require.Len(t, children, 1)
+	assert.Same(t, composite.managed[0], children[0])
+	children[0] = nil
+	assert.Same(t, composite.managed[0], composite.Children()[0])
+
+	require.NoError(t, owner.Start(t.Context()))
+	<-raw.started
+	disposed := make(chan error, 1)
+	ctx := t.Context()
+	go func() { disposed <- owner.Dispose(ctx) }()
+	select {
+	case err := <-disposed:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("disposal did not cancel and join the Code Mode runnable")
+	}
+	select {
+	case <-raw.done:
+	default:
+		t.Fatal("disposal returned before the runnable stopped")
+	}
+	select {
+	case <-raw.closed:
+	default:
+		t.Fatal("disposal did not close the runnable")
+	}
+	require.NoError(t, owner.Dispose(ctx))
+	require.ErrorContains(t, owner.Start(ctx), "disposed")
+}
+
+func TestCodeModeTool_DisposeGatesChildListings(t *testing.T) {
+	t.Parallel()
+	composite := Wrap(&testToolSet{tools: []tools.Tool{{Name: "fetch_url"}}}).(*codeModeTool)
+	available := composite.availableToolsets()
+	require.Len(t, available, 1)
+	assert.Same(t, composite.managed[0], available[0])
+	require.NoError(t, tools.Dispose(t.Context(), composite))
+	_, err := available[0].Tools(t.Context())
+	require.ErrorContains(t, err, "disposed")
+	assert.Empty(t, composite.availableToolsets())
 }

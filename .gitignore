@@ -25,6 +25,10 @@ vendor
 /docker-mcp-*
 docker-agent
 
+# TypeScript SDK
+/sdk/typescript/node_modules/
+/sdk/typescript/dist/
+
 # Generated wasm artifacts (built locally; see cmd/wasm/README.md)
 /wasm
 cmd/wasm/web/docker-agent.wasm

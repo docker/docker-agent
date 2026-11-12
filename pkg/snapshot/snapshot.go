@@ -686,8 +686,7 @@ func command(ctx context.Context, args []string, opts gitOpts) gitResult {
 	err := cmd.Run()
 	res := gitResult{stdout: stdout.String(), stderr: stderr.String()}
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			res.code = exitErr.ExitCode()
 			return res
 		}

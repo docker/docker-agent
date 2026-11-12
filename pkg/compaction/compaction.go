@@ -209,9 +209,8 @@ func (e Estimator) EstimateMessageTokens(msg *chat.Message) int64 {
 //
 // OutputTokens is the provider's exact count of everything this message
 // contains (text, reasoning, tool-call arguments). Reasoning tokens are
-// subtracted only when no reasoning content was stored: reasoning that
-// providers never expose (e.g. OpenAI o-series) is not resent as input,
-// while stored reasoning (Anthropic thinking blocks) is — and keeping
+// subtracted only when neither reasoning content nor replayable OpenAI state
+// was stored: retained reasoning is resent as input, and keeping
 // it counted errs on the conservative side for providers that drop it.
 func reportedMessageTokens(msg *chat.Message) int64 {
 	u := msg.Usage
@@ -219,7 +218,7 @@ func reportedMessageTokens(msg *chat.Message) int64 {
 		return 0
 	}
 	reported := u.OutputTokens
-	if msg.ReasoningContent == "" {
+	if msg.ReasoningContent == "" && (msg.OpenAIResponse == nil || len(msg.OpenAIResponse.Output) == 0) {
 		reported -= u.ReasoningTokens
 	}
 	return reported
@@ -246,13 +245,28 @@ func promptAndTotalTokens(msg *chat.Message) (prompt, total int64) {
 // text), reasoning content and tool-call payloads, plus a flat charge
 // per binary attachment and a small per-message overhead for
 // role/metadata tokens.
+//
+// Runtime-generated assistant messages deliberately mirror Content into a
+// MultiContent text part with the exact same string (see
+// pkg/runtime.recordAssistantMessage and stripGeneratedMediaTransform's
+// doc comments) so that providers treating a non-empty MultiContent as
+// authoritative (e.g. pkg/model/provider/oaistream) don't silently lose
+// the text. Counting both would double the estimate for every such
+// message, so the first MultiContent text part that exactly matches
+// Content is skipped — it is the same content already counted above, not
+// additional text.
 func heuristicMessageTokens(msg *chat.Message) int64 {
 	var chars int
 	chars += len(msg.Content)
 	chars += len(msg.ReasoningContent)
 
 	var attachments int64
+	skippedContentMirror := msg.Content == ""
 	for _, part := range msg.MultiContent {
+		if !skippedContentMirror && part.Type == chat.MessagePartTypeText && part.Text == msg.Content {
+			skippedContentMirror = true
+			continue
+		}
 		chars += len(part.Text)
 		if part.Document != nil {
 			chars += len(part.Document.Source.InlineText)

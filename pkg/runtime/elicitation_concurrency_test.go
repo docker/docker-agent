@@ -6,6 +6,7 @@ import (
 	"maps"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -205,33 +206,35 @@ func TestElicitationWaiter_ResolveWinsWhenFirst(t *testing.T) {
 func TestElicitationWaiters_ConcurrentRegisterResolveDeregister(t *testing.T) {
 	t.Parallel()
 
-	var w elicitationWaiters
-	const n = 200
+	synctest.Test(t, func(t *testing.T) {
+		var w elicitationWaiters
+		const n = 200
 
-	var wg sync.WaitGroup
-	for i := range n {
-		wg.Go(func() {
-			id := fmt.Sprintf("req-%d", i)
-			wt := w.register(id)
-			defer w.abandon(id, wt)
+		var wg sync.WaitGroup
+		for i := range n {
+			wg.Go(func() {
+				id := fmt.Sprintf("req-%d", i)
+				wt := w.register(id)
+				defer w.abandon(id, wt)
 
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				ok := w.resolve(id, ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"i": i}})
-				assert.True(t, ok)
-			}()
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					ok := w.resolve(id, ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"i": i}})
+					assert.True(t, ok)
+				}()
 
-			select {
-			case result := <-wt.ch:
-				assert.Equal(t, map[string]any{"i": i}, result.Content, "response must route back to its own request")
-			case <-time.After(2 * time.Second):
-				t.Errorf("waiter %s never received its response", id)
-			}
-			<-done
-		})
-	}
-	wg.Wait()
+				select {
+				case result := <-wt.ch:
+					assert.Equal(t, map[string]any{"i": i}, result.Content, "response must route back to its own request")
+				case <-time.After(2 * time.Second):
+					t.Errorf("waiter %s never received its response", id)
+				}
+				<-done
+			})
+		}
+		wg.Wait()
+	})
 }
 
 // TestElicitationWaiters_ConcurrentResolveCancelRace hammers a single waiter
@@ -249,19 +252,16 @@ func TestElicitationWaiters_ConcurrentResolveCancelRace(t *testing.T) {
 
 		var wg sync.WaitGroup
 		var resolveWon, cancelWon atomicBool
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if w.resolve(id, ElicitationResult{Action: tools.ElicitationActionAccept}) {
 				resolveWon.set(true)
 			}
-		}()
-		go func() {
-			defer wg.Done()
+		})
+		wg.Go(func() {
 			if w.cancel(id, wt) {
 				cancelWon.set(true)
 			}
-		}()
+		})
 		wg.Wait()
 
 		require.NotEqual(t, resolveWon.get(), cancelWon.get(), "exactly one of resolve/cancel must win, never both or neither")
@@ -296,19 +296,21 @@ func (a *atomicBool) get() bool {
 func TestElicitationBridge_SendBlocksUntilCtxDone(t *testing.T) {
 	t.Parallel()
 
-	var b elicitationBridge
-	ch := make(chan Event) // unbuffered, nobody ever reads it
-	b.swap(ch)
+	synctest.Test(t, func(t *testing.T) {
+		var b elicitationBridge
+		ch := make(chan Event) // unbuffered, nobody ever reads it
+		b.swap(ch)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
 
-	start := time.Now()
-	err := b.send(ctx, Warning("hello", "agent"))
-	elapsed := time.Since(start)
+		start := time.Now()
+		err := b.send(ctx, Warning("hello", "agent"))
+		elapsed := time.Since(start)
 
-	require.ErrorIs(t, err, context.DeadlineExceeded, "send on a full/abandoned channel must release via ctx, not block forever")
-	assert.Less(t, elapsed, 2*time.Second, "send must not block substantially past the ctx deadline")
+		require.ErrorIs(t, err, context.DeadlineExceeded, "send on a full/abandoned channel must release via ctx, not block forever")
+		assert.Less(t, elapsed, 2*time.Second, "send must not block substantially past the ctx deadline")
+	})
 }
 
 // TestElicitationBridge_SendNeverBlocksReliableSink is the end-to-end version
@@ -320,47 +322,49 @@ func TestElicitationBridge_SendBlocksUntilCtxDone(t *testing.T) {
 func TestElicitationBridge_SendNeverBlocksReliableSink(t *testing.T) {
 	t.Parallel()
 
-	rt := newElicitationTestRuntime(t)
+	synctest.Test(t, func(t *testing.T) {
+		rt := newElicitationTestRuntime(t)
 
-	// Wedge the bridge: swap in an unbuffered channel with no reader, as if
-	// a concurrent RunStream's swap left a dead consumer behind.
-	wedged := make(chan Event)
-	rt.elicitation.swap(wedged)
+		// Wedge the bridge: swap in an unbuffered channel with no reader, as if
+		// a concurrent RunStream's swap left a dead consumer behind.
+		wedged := make(chan Event)
+		rt.elicitation.swap(wedged)
 
-	sinkCalled := make(chan Event, 1)
-	rt.OnElicitationRequest(func(ev Event) { sinkCalled <- ev })
+		sinkCalled := make(chan Event, 1)
+		rt.OnElicitationRequest(func(ev Event) { sinkCalled <- ev })
 
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
 
-	type handlerResult struct {
-		result tools.ElicitationResult
-		err    error
-	}
-	done := make(chan handlerResult, 1)
-	go func() {
-		result, err := rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "confirm?"})
-		done <- handlerResult{result, err}
-	}()
+		type handlerResult struct {
+			result tools.ElicitationResult
+			err    error
+		}
+		done := make(chan handlerResult, 1)
+		go func() {
+			result, err := rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "confirm?"})
+			done <- handlerResult{result, err}
+		}()
 
-	// The sink must fire almost immediately, regardless of the wedged bridge.
-	var ev *ElicitationRequestEvent
-	select {
-	case e := <-sinkCalled:
-		ev = e.(*ElicitationRequestEvent)
-	case <-time.After(1 * time.Second):
-		t.Fatal("the reliable sink must not be blocked by a wedged bridge channel")
-	}
+		// The sink must fire almost immediately, regardless of the wedged bridge.
+		var ev *ElicitationRequestEvent
+		select {
+		case e := <-sinkCalled:
+			ev = e.(*ElicitationRequestEvent)
+		case <-time.After(1 * time.Second):
+			t.Fatal("the reliable sink must not be blocked by a wedged bridge channel")
+		}
 
-	require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, nil, ev.ElicitationID))
+		require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, nil, ev.ElicitationID))
 
-	select {
-	case got := <-done:
-		require.NoError(t, got.err)
-		assert.Equal(t, tools.ElicitationActionAccept, got.result.Action)
-	case <-time.After(1 * time.Second):
-		t.Fatal("elicitationHandler must not be blocked by a wedged bridge channel")
-	}
+		select {
+		case got := <-done:
+			require.NoError(t, got.err)
+			assert.Equal(t, tools.ElicitationActionAccept, got.result.Action)
+		case <-time.After(1 * time.Second):
+			t.Fatal("elicitationHandler must not be blocked by a wedged bridge channel")
+		}
+	})
 }
 
 // --- elicitationHandler: headless fast-decline (#3584 item 5) ---
@@ -393,43 +397,45 @@ func TestElicitationHandler_HeadlessBackgroundFastDeclines(t *testing.T) {
 func TestElicitationHandler_BackgroundWithSinkStillWaitsForResponse(t *testing.T) {
 	t.Parallel()
 
-	rt := newElicitationTestRuntime(t)
+	synctest.Test(t, func(t *testing.T) {
+		rt := newElicitationTestRuntime(t)
 
-	received := make(chan Event, 1)
-	rt.OnElicitationRequest(func(ev Event) { received <- ev })
+		received := make(chan Event, 1)
+		rt.OnElicitationRequest(func(ev Event) { received <- ev })
 
-	ctx := mcptools.WithoutInteractivePrompts(t.Context())
-	ctx = genai.WithConversationID(ctx, "bg-sess-2")
+		ctx := mcptools.WithoutInteractivePrompts(t.Context())
+		ctx = genai.WithConversationID(ctx, "bg-sess-2")
 
-	type handlerResult struct {
-		result tools.ElicitationResult
-		err    error
-	}
-	done := make(chan handlerResult, 1)
-	go func() {
-		result, err := rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "confirm?"})
-		done <- handlerResult{result, err}
-	}()
+		type handlerResult struct {
+			result tools.ElicitationResult
+			err    error
+		}
+		done := make(chan handlerResult, 1)
+		go func() {
+			result, err := rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "confirm?"})
+			done <- handlerResult{result, err}
+		}()
 
-	var ev *ElicitationRequestEvent
-	select {
-	case e := <-received:
-		ev = e.(*ElicitationRequestEvent)
-	case <-time.After(2 * time.Second):
-		t.Fatal("sink never received the elicitation request")
-	}
-	assert.Equal(t, "bg-sess-2", ev.SessionID, "the event must carry the originating (sub-)session ID")
+		var ev *ElicitationRequestEvent
+		select {
+		case e := <-received:
+			ev = e.(*ElicitationRequestEvent)
+		case <-time.After(2 * time.Second):
+			t.Fatal("sink never received the elicitation request")
+		}
+		assert.Equal(t, "bg-sess-2", ev.SessionID, "the event must carry the originating (sub-)session ID")
 
-	require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, nil, ev.ElicitationID))
+		require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, nil, ev.ElicitationID))
 
-	select {
-	case got := <-done:
-		require.NoError(t, got.err)
-		assert.Equal(t, tools.ElicitationActionAccept, got.result.Action)
-	case <-time.After(2 * time.Second):
-		t.Fatal("elicitationHandler never returned")
-	}
-	assert.Empty(t, rt.elicitationDeclines.drain("bg-sess-2"), "must not fast-decline once a sink is registered")
+		select {
+		case got := <-done:
+			require.NoError(t, got.err)
+			assert.Equal(t, tools.ElicitationActionAccept, got.result.Action)
+		case <-time.After(2 * time.Second):
+			t.Fatal("elicitationHandler never returned")
+		}
+		assert.Empty(t, rt.elicitationDeclines.drain("bg-sess-2"), "must not fast-decline once a sink is registered")
+	})
 }
 
 // TestElicitationHandler_TOCTOU_ResolveImmediatelyAfterRegister promotes the
@@ -533,109 +539,109 @@ func (e *elicitingToolSet) Tools(context.Context) ([]tools.Tool, error) {
 func TestConcurrentBackgroundElicitations_AllSurfaceAndRouteToCorrectWaiter(t *testing.T) {
 	t.Parallel()
 
-	newWorker := func(name, question string) (*agent.Agent, *elicitingToolSet) {
-		ts := &elicitingToolSet{message: question}
-		toolCallStream := newStreamBuilder().AddToolCallWithStop("call_1", "ask_user", "{}").Build()
-		followUpStream := newStreamBuilder().AddContent("done").AddStopWithUsage(5, 5).Build()
-		prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{toolCallStream, followUpStream}}
-		a := agent.New(name, "worker", agent.WithModel(prov), agent.WithToolSets(ts))
-		return a, ts
-	}
+	synctest.Test(t, func(t *testing.T) {
+		newWorker := func(name, question string) (*agent.Agent, *elicitingToolSet) {
+			ts := &elicitingToolSet{message: question}
+			toolCallStream := newStreamBuilder().AddToolCallWithStop("call_1", "ask_user", "{}").Build()
+			followUpStream := newStreamBuilder().AddContent("done").AddStopWithUsage(5, 5).Build()
+			prov := &queueProvider{id: "test/mock-model", streams: []chat.MessageStream{toolCallStream, followUpStream}}
+			a := agent.New(name, "worker", agent.WithModel(prov), agent.WithToolSets(ts))
+			return a, ts
+		}
 
-	worker1, ts1 := newWorker("worker1", "worker1 needs input")
-	worker2, ts2 := newWorker("worker2", "worker2 needs input")
-	root := agent.New("root", "root", agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}))
-	agent.WithSubAgents(worker1, worker2)(root)
+		worker1, ts1 := newWorker("worker1", "worker1 needs input")
+		worker2, ts2 := newWorker("worker2", "worker2 needs input")
+		root := agent.New("root", "root", agent.WithModel(&mockProvider{id: "test/mock-model", stream: &mockStream{}}))
+		agent.WithSubAgents(worker1, worker2)(root)
 
-	tm := team.New(team.WithAgents(root, worker1, worker2))
-	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
-	require.NoError(t, err)
+		tm := team.New(team.WithAgents(root, worker1, worker2))
+		rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+		require.NoError(t, err)
 
-	// deliveries counts sink invocations per ElicitationID. Each ID must be
-	// delivered exactly once: any count > 1 means the exactly-once guarantee
-	// (elicitationHandler is the sole caller of emitElicitationRequest) has
-	// regressed, since nothing else in the App/runtime layer masks
-	// duplicates any more.
-	var mu sync.Mutex
-	deliveries := make(map[string]int)
-	requests := make(map[string]*ElicitationRequestEvent)
-	rt.OnElicitationRequest(func(ev Event) {
-		req := ev.(*ElicitationRequestEvent)
+		// deliveries counts sink invocations per ElicitationID. Each ID must be
+		// delivered exactly once: any count > 1 means the exactly-once guarantee
+		// (requestElicitation is the sole production caller of
+		// emitElicitationRequestContext) has
+		// regressed, since nothing else in the App/runtime layer masks
+		// duplicates any more.
+		var mu sync.Mutex
+		deliveries := make(map[string]int)
+		requests := make(map[string]*ElicitationRequestEvent)
+		rt.OnElicitationRequest(func(ev Event) {
+			req := ev.(*ElicitationRequestEvent)
+			mu.Lock()
+			defer mu.Unlock()
+			deliveries[req.ElicitationID]++
+			requests[req.ElicitationID] = req
+		})
+
+		results := make(chan *agenttool.RunResult, 2)
+		launch := func(agentName string) {
+			go func() {
+				parent := session.New(session.WithUserMessage("go"), session.WithToolsApproved(true))
+				res := rt.RunAgent(t.Context(), agenttool.RunParams{
+					AgentName:     agentName,
+					Task:          "do it",
+					ParentSession: parent,
+				})
+				results <- res
+			}()
+		}
+		launch("worker1")
+		launch("worker2")
+
+		// Wait until both elicitations have surfaced, then respond to each by
+		// its own ID with a distinguishable payload so a swapped response would
+		// be caught by the assertions below.
+		synctest.Wait()
 		mu.Lock()
-		defer mu.Unlock()
-		deliveries[req.ElicitationID]++
-		requests[req.ElicitationID] = req
+		reqs := maps.Clone(requests)
+		mu.Unlock()
+		require.Len(t, reqs, 2, "both concurrent background elicitations must surface via the sink")
+
+		mu.Lock()
+		for id, count := range deliveries {
+			assert.Equal(t, 1, count, "elicitation %s must be delivered to the sink exactly once", id)
+		}
+		mu.Unlock()
+
+		var worker1ID, worker2ID string
+		for id, ev := range reqs {
+			switch ev.Message {
+			case "worker1 needs input":
+				worker1ID = id
+			case "worker2 needs input":
+				worker2ID = id
+			}
+		}
+		require.NotEmpty(t, worker1ID, "worker1's elicitation must have surfaced")
+		require.NotEmpty(t, worker2ID, "worker2's elicitation must have surfaced")
+		require.NotEqual(t, worker1ID, worker2ID, "concurrent elicitations must get distinct correlation IDs")
+
+		require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, map[string]any{"answer": "1"}, worker1ID))
+		require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, map[string]any{"answer": "2"}, worker2ID))
+
+		var got []*agenttool.RunResult
+		for range 2 {
+			select {
+			case r := <-results:
+				got = append(got, r)
+			case <-time.After(5 * time.Second):
+				t.Fatal("a background job never completed after its elicitation was resumed")
+			}
+		}
+		for _, r := range got {
+			require.Empty(t, r.ErrMsg, "background job must not fail")
+		}
+
+		worker1Result, ok1 := ts1.snapshot()
+		require.True(t, ok1, "worker1's tool call must have received an elicitation result")
+		worker2Result, ok2 := ts2.snapshot()
+		require.True(t, ok2, "worker2's tool call must have received an elicitation result")
+
+		assert.Equal(t, map[string]any{"answer": "1"}, worker1Result.Content,
+			"worker1 must receive its own response, not worker2's (no swap)")
+		assert.Equal(t, map[string]any{"answer": "2"}, worker2Result.Content,
+			"worker2 must receive its own response, not worker1's (no swap)")
 	})
-
-	results := make(chan *agenttool.RunResult, 2)
-	launch := func(agentName string) {
-		go func() {
-			parent := session.New(session.WithUserMessage("go"), session.WithToolsApproved(true))
-			res := rt.RunAgent(t.Context(), agenttool.RunParams{
-				AgentName:     agentName,
-				Task:          "do it",
-				ParentSession: parent,
-			})
-			results <- res
-		}()
-	}
-	launch("worker1")
-	launch("worker2")
-
-	// Wait until both elicitations have surfaced, then respond to each by
-	// its own ID with a distinguishable payload so a swapped response would
-	// be caught by the assertions below.
-	var reqs map[string]*ElicitationRequestEvent
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		reqs = make(map[string]*ElicitationRequestEvent, len(requests))
-		maps.Copy(reqs, requests)
-		return len(reqs) == 2
-	}, 5*time.Second, 10*time.Millisecond, "both concurrent background elicitations must surface via the sink")
-
-	mu.Lock()
-	for id, count := range deliveries {
-		assert.Equal(t, 1, count, "elicitation %s must be delivered to the sink exactly once", id)
-	}
-	mu.Unlock()
-
-	var worker1ID, worker2ID string
-	for id, ev := range reqs {
-		switch ev.Message {
-		case "worker1 needs input":
-			worker1ID = id
-		case "worker2 needs input":
-			worker2ID = id
-		}
-	}
-	require.NotEmpty(t, worker1ID, "worker1's elicitation must have surfaced")
-	require.NotEmpty(t, worker2ID, "worker2's elicitation must have surfaced")
-	require.NotEqual(t, worker1ID, worker2ID, "concurrent elicitations must get distinct correlation IDs")
-
-	require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, map[string]any{"answer": "1"}, worker1ID))
-	require.NoError(t, rt.ResumeElicitation(t.Context(), tools.ElicitationActionAccept, map[string]any{"answer": "2"}, worker2ID))
-
-	var got []*agenttool.RunResult
-	for range 2 {
-		select {
-		case r := <-results:
-			got = append(got, r)
-		case <-time.After(5 * time.Second):
-			t.Fatal("a background job never completed after its elicitation was resumed")
-		}
-	}
-	for _, r := range got {
-		require.Empty(t, r.ErrMsg, "background job must not fail")
-	}
-
-	worker1Result, ok1 := ts1.snapshot()
-	require.True(t, ok1, "worker1's tool call must have received an elicitation result")
-	worker2Result, ok2 := ts2.snapshot()
-	require.True(t, ok2, "worker2's tool call must have received an elicitation result")
-
-	assert.Equal(t, map[string]any{"answer": "1"}, worker1Result.Content,
-		"worker1 must receive its own response, not worker2's (no swap)")
-	assert.Equal(t, map[string]any{"answer": "2"}, worker2Result.Content,
-		"worker2 must receive its own response, not worker1's (no swap)")
 }

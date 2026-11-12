@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker-agent/pkg/app"
 	"github.com/docker/docker-agent/pkg/cli"
+	"github.com/docker/docker-agent/pkg/httpsec"
 	"github.com/docker/docker-agent/pkg/runregistry"
 	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/server"
@@ -53,7 +54,7 @@ func (f *runExecFlags) recallCoordinatorOpt(ctx context.Context, rt runtime.Runt
 // plane's per-session event log (GET /api/sessions/:id/events).
 func registerAppEventSource(sm *server.SessionManager, sessionID string, a *app.App) {
 	sm.RegisterEventSource(sessionID, func(ctx context.Context, send func(any)) {
-		a.SubscribeWith(ctx, func(msg tea.Msg) {
+		a.SubscribeReliable(ctx, func(msg tea.Msg) {
 			if ev, ok := msg.(runtime.Event); ok {
 				send(ev)
 			}
@@ -82,6 +83,10 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", f.listenAddr, err)
 	}
+	if err := httpsec.ValidateListenerAuth(ln.Addr(), ""); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
 	context.AfterFunc(ctx, func() { _ = ln.Close() })
 
 	cleanup, err := runregistry.Default().Write(runregistry.Record{
@@ -98,7 +103,6 @@ func (f *runExecFlags) startSessionCoordinator(ctx context.Context, out *cli.Pri
 	}
 
 	out.Println("Control plane listening on", ln.Addr().String())
-	warnIfNotLoopback(out, ln.Addr())
 
 	srv := server.NewWithManager(sm, "")
 	go func() {

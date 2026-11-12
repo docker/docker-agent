@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"slices"
 	"sync"
 )
 
@@ -190,7 +191,7 @@ func (l *eventLog) backlogLocked(since *uint64) []seqEvent {
 		return nil
 	}
 	if since == nil {
-		return append([]seqEvent(nil), l.buf...)
+		return slices.Clone(l.buf)
 	}
 	out := make([]seqEvent, 0, len(l.buf))
 	for _, ev := range l.buf {

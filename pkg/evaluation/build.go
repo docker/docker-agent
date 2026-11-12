@@ -4,14 +4,18 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/template"
+
+	"github.com/google/go-containerregistry/pkg/name"
 
 	"github.com/docker/docker-agent/pkg/session"
 )
@@ -86,6 +90,7 @@ func (r *Runner) buildEvalImage(ctx context.Context, evals *session.EvalCriteria
 	var data struct {
 		CopyWorkingDir bool
 		BaseImage      string
+		AgentImage     string
 	}
 
 	if evals.WorkingDir == "" {
@@ -98,6 +103,8 @@ func (r *Runner) buildEvalImage(ctx context.Context, evals *session.EvalCriteria
 		}
 		data.CopyWorkingDir = true
 	}
+
+	data.AgentImage = r.localAgentImage(ctx, ResolvedAgentImage(r.Config))
 
 	// Choose template based on whether a custom base image is provided
 	tmpl := dockerfileTemplate
@@ -125,4 +132,32 @@ func (r *Runner) buildEvalImage(ctx context.Context, evals *session.EvalCriteria
 	}
 
 	return strings.TrimSpace(string(output)), nil
+}
+
+// Pin a locally available manifest so BuildKit cannot resolve a rebuilt tag to an older registry image.
+func (r *Runner) localAgentImage(ctx context.Context, image string) string {
+	if image == "" || strings.Contains(image, "@") {
+		return image
+	}
+	ref, err := name.ParseReference(image)
+	if err != nil {
+		return image
+	}
+	cmd := exec.CommandContext(ctx, r.containerRuntimeOrDefault(), "image", "inspect", "--format", "{{json .RepoDigests}}", image)
+	output, err := cmd.Output()
+	if err != nil {
+		return image
+	}
+	var digests []string
+	if json.Unmarshal(output, &digests) != nil {
+		return image
+	}
+	for _, candidate := range digests {
+		digest, err := name.NewDigest(candidate)
+		if err == nil && digest.Context().Name() == ref.Context().Name() {
+			slog.DebugContext(ctx, "Pinning local eval agent image", "image", image, "digest", candidate)
+			return candidate
+		}
+	}
+	return image
 }

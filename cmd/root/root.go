@@ -16,9 +16,12 @@ import (
 	"github.com/docker/cli/cli/command"
 	"github.com/spf13/cobra"
 
+	"github.com/docker/docker-agent/pkg/codingharness"
 	"github.com/docker/docker-agent/pkg/feedback"
 	"github.com/docker/docker-agent/pkg/logging"
+	pathx "github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/paths"
+	"github.com/docker/docker-agent/pkg/runtime"
 	"github.com/docker/docker-agent/pkg/runtime/jscommands"
 	"github.com/docker/docker-agent/pkg/selfupdate"
 	"github.com/docker/docker-agent/pkg/telemetry"
@@ -40,6 +43,7 @@ type rootFlags struct {
 const (
 	envConfigDir       = "DOCKER_AGENT_CONFIG_DIR"
 	cagentEnvConfigDir = "CAGENT_CONFIG_DIR"
+	envDataDir         = "DOCKER_AGENT_DATA_DIR"
 )
 
 // resolveConfigDir picks the config directory override with flag > env >
@@ -48,6 +52,10 @@ const (
 // its argv.
 func resolveConfigDir(flagValue string) string {
 	return cmp.Or(flagValue, os.Getenv(envConfigDir), os.Getenv(cagentEnvConfigDir))
+}
+
+func resolveDataDir(flagValue string) (string, error) {
+	return pathx.ExpandHomeDir(cmp.Or(flagValue, os.Getenv(envDataDir)))
 }
 
 func NewRootCmd() *cobra.Command {
@@ -70,8 +78,12 @@ New to docker agent? Take the hands-on tour: docker agent getting-started`,
 			if dir := resolveConfigDir(flags.configDir); dir != "" {
 				paths.SetConfigDir(dir)
 			}
-			if dir := flags.dataDir; dir != "" {
-				paths.SetDataDir(dir)
+			dataDir, err := resolveDataDir(flags.dataDir)
+			if err != nil {
+				return fmt.Errorf("resolving data directory: %w", err)
+			}
+			if dataDir != "" {
+				paths.SetDataDir(dataDir)
 			}
 
 			// Set the version for automatic telemetry initialization
@@ -162,7 +174,7 @@ We collect anonymous usage data to help improve docker agent. To disable:
 	cmd.PersistentFlags().StringVar(&flags.logFilePath, "log-file", "", "Path to debug log file (default: ~/.cagent/cagent.debug.log; only used with --debug)")
 	cmd.PersistentFlags().StringVar(&flags.cacheDir, "cache-dir", "", "Override the cache directory (default: ~/Library/Caches/cagent on macOS)")
 	cmd.PersistentFlags().StringVar(&flags.configDir, "config-dir", "", "Override the config directory (default: ~/.config/cagent)")
-	cmd.PersistentFlags().StringVar(&flags.dataDir, "data-dir", "", "Override the data directory (default: ~/.cagent)")
+	cmd.PersistentFlags().StringVar(&flags.dataDir, "data-dir", "", "Override the data directory (default: ~/.cagent; env: DOCKER_AGENT_DATA_DIR)")
 
 	// Define groups
 	cmd.AddGroup(
@@ -201,6 +213,8 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 	keyringstore.Register()
 	// Enable ${...} JavaScript expressions in slash-command instructions.
 	jscommands.Register()
+	// Enable `harness:` agents backed by external coding CLIs.
+	runtime.RegisterHarness(codingharness.Factory)
 
 	selfupdate.Cleanup(ctx)
 
@@ -219,6 +233,13 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 	rootCmd.SetArgs(args)
 
 	runningStandalone := plugin.RunningStandalone()
+	if runningStandalone {
+		var err error
+		ctx, err = withDMRDockerConnection(ctx, nil, nil)
+		if err != nil {
+			return err
+		}
+	}
 
 	visitAll(rootCmd, func(cmd *cobra.Command) {
 		cmd.SetContext(ctx)
@@ -236,7 +257,7 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 		return rootCmd.Execute()
 	}
 
-	plugin.Run(func(command.Cli) *cobra.Command {
+	plugin.Run(func(dockerCLI command.Cli) *cobra.Command {
 		// Force to the name of the docker command
 		rootCmd.Use = "agent"
 
@@ -248,6 +269,11 @@ func Execute(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, arg
 			if err := plugin.PersistentPreRunE(cmd, args); err != nil {
 				return err
 			}
+			dmrCtx, err := withDMRDockerConnection(cmd.Context(), dockerCLI, cmd.Root().Flags())
+			if err != nil {
+				return err
+			}
+			visitAll(rootCmd, func(c *cobra.Command) { c.SetContext(dmrCtx) })
 			if originalPreRun != nil {
 				return originalPreRun(cmd, args)
 			}

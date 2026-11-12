@@ -295,3 +295,128 @@ func TestClickOnCopyLabelFlashesCopied(t *testing.T) {
 	out = ansi.Strip(m.View())
 	assert.Contains(t, out, types.MessageCopyLabel)
 }
+
+func TestDoubleClickRenderedMarkdownWords(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		markdown string
+		word     string
+	}{
+		{"table first cell", "| First | Second | Third |\n| --- | --- | --- |\n| alpha | bravo | charlie |", "alpha"},
+		{"table middle cell", "| First | Second | Third |\n| --- | --- | --- |\n| alpha | bravo | charlie |", "bravo"},
+		{"table last cell", "| First | Second | Third |\n| --- | --- | --- |\n| alpha | bravo | charlie |", "charlie"},
+		{"bold", "A **bold** word.", "bold"},
+		{"inline code", "Run `command_name` now.", "command_name"},
+		{"blockquote", "> quoted text", "quoted"},
+		{"unicode quotes", "Say “hello” now.", "hello"},
+		{"unicode dash", "hello—world", "world"},
+		{"nonbreaking space", "hello\u00a0world", "hello"},
+		{"wide character", "界 next", "界"},
+		{"combining mark", "cafe\u0301 next", "cafe\u0301"},
+		{"emoji prefix", "👩‍💻hello next", "hello"},
+		{"emoji", "👩‍💻 next", "👩‍💻"},
+		{"emoji variation selector", "☀️ next", "☀️"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rendered, err := markdown.NewFastRenderer(80).Render(tt.markdown)
+			require.NoError(t, err)
+			lines := strings.Split(rendered, "\n")
+			for line, renderedLine := range lines {
+				before, _, ok := strings.Cut(ansi.Strip(renderedLine), tt.word)
+				if !ok {
+					continue
+				}
+				start := ansi.StringWidth(before)
+				for col := start; col < start+ansi.StringWidth(tt.word); col++ {
+					m := newSelectionModel(lines)
+					for range 2 {
+						m.handleMouseClick(tea.MouseClickMsg{X: col, Y: line, Button: tea.MouseLeft})
+						m.handleMouseRelease(tea.MouseReleaseMsg{X: col, Y: line, Button: tea.MouseLeft})
+					}
+					require.True(t, m.selection.anchored, "column %d", col)
+					assert.Equal(t, tt.word, m.extractSelectedText(), "column %d", col)
+					assert.Equal(t, start, m.selection.startCol, "column %d", col)
+					assert.Equal(t, start+ansi.StringWidth(tt.word), m.selection.endCol, "column %d", col)
+				}
+				return
+			}
+			t.Fatalf("word %q not found in rendered markdown %q", tt.word, ansi.Strip(rendered))
+		})
+	}
+}
+
+func TestSelectWordAtKeepsBorderCoordinates(t *testing.T) {
+	t.Parallel()
+
+	for _, line := range []string{"│alpha│bravo│charlie│", "┃ alpha ┃", "alpha │ bravo │ charlie"} {
+		for _, word := range []string{"alpha", "bravo", "charlie"} {
+			before, _, ok := strings.Cut(line, word)
+			if !ok {
+				continue
+			}
+			start := ansi.StringWidth(before)
+			for col := start; col < start+len(word); col++ {
+				m := newSelectionModel([]string{line})
+				require.True(t, m.selectWordAt(0, col))
+				assert.Equal(t, word, m.extractSelectedText(), "line %q column %d", line, col)
+				assert.Equal(t, start, m.selection.startCol)
+				assert.Equal(t, start+len(word), m.selection.endCol)
+			}
+		}
+	}
+}
+
+func TestMultiClickDragBackToPressCopiesSelection(t *testing.T) {
+	t.Parallel()
+
+	for _, clicks := range []int{2, 3} {
+		m := newSelectionModel([]string{"hello world"})
+		for range clicks - 1 {
+			m.handleMouseClick(tea.MouseClickMsg{X: 2, Y: 0, Button: tea.MouseLeft})
+			m.handleMouseRelease(tea.MouseReleaseMsg{X: 2, Y: 0, Button: tea.MouseLeft})
+		}
+		m.handleMouseClick(tea.MouseClickMsg{X: 2, Y: 0, Button: tea.MouseLeft})
+		pendingID := m.selection.pendingCopyID
+		m.handleMouseMotion(tea.MouseMotionMsg{X: 3, Y: 0})
+		m.handleMouseMotion(tea.MouseMotionMsg{X: 2, Y: 0})
+		_, cmd := m.handleMouseRelease(tea.MouseReleaseMsg{X: 2, Y: 0, Button: tea.MouseLeft})
+		require.NotNil(t, cmd, "click count %d", clicks)
+		assert.False(t, m.IsSelecting())
+		assert.Nil(t, m.handleDebouncedCopy(DebouncedCopyMsg{ClickID: pendingID}))
+		if clicks == 2 {
+			assert.Equal(t, "hello", m.extractSelectedText())
+		} else {
+			assert.Equal(t, "hello world", m.extractSelectedText())
+		}
+	}
+}
+
+func TestSelectionHighlightPreservesGraphemes(t *testing.T) {
+	t.Parallel()
+
+	for _, line := range []string{"界 next", "👩‍💻hello next", "☀️ next", "cafe\u0301 next"} {
+		m := newSelectionModel([]string{line})
+		require.True(t, m.selectWordAt(0, 1))
+		highlighted := m.highlightLine(line, m.selection.startCol, m.selection.endCol)
+		assert.Equal(t, line, ansi.Strip(highlighted))
+		assert.Equal(t, ansi.StringWidth(line), ansi.StringWidth(highlighted))
+	}
+}
+
+func TestSingleClickDragBackToPressDoesNotCopy(t *testing.T) {
+	t.Parallel()
+
+	for _, line := range []string{"hello world", "界 next", "👩‍💻 next"} {
+		m := newSelectionModel([]string{line})
+		m.handleMouseClick(tea.MouseClickMsg{X: 1, Y: 0, Button: tea.MouseLeft})
+		m.handleMouseMotion(tea.MouseMotionMsg{X: 3, Y: 0})
+		m.handleMouseMotion(tea.MouseMotionMsg{X: 1, Y: 0})
+		_, cmd := m.handleMouseRelease(tea.MouseReleaseMsg{X: 1, Y: 0, Button: tea.MouseLeft})
+		assert.Nil(t, cmd, "line %q", line)
+		assert.Empty(t, m.extractSelectedText(), "line %q", line)
+		assert.False(t, m.IsSelecting())
+	}
+}

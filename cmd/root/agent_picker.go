@@ -18,6 +18,8 @@ import (
 	"github.com/alecthomas/chroma/v2/lexers"
 
 	"github.com/docker/docker-agent/pkg/config"
+	"github.com/docker/docker-agent/pkg/config/legacy"
+	"github.com/docker/docker-agent/pkg/config/sources"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/path"
 	"github.com/docker/docker-agent/pkg/paths"
@@ -36,7 +38,7 @@ const agentPickerDefaultsSpec = "defaults"
 // the user doesn't pass --agent-picker with an explicit list: the built-in
 // agents plus any agent config files found in ~/.agents.
 func defaultAgentPickerRefs() []string {
-	refs := []string{"default", "coder"}
+	refs := sources.BuiltinAgentNames()
 	home := paths.GetHomeDir()
 	if home == "" {
 		return refs
@@ -106,7 +108,7 @@ func loadAgentChoices(ctx context.Context, refs []string, env environment.Provid
 	for _, ref := range refs {
 		choice := agentChoice{ref: ref}
 
-		source, err := config.Resolve(ref, env)
+		source, err := sources.Resolve(ref, env)
 		if err != nil {
 			choice.err = err
 			choices = append(choices, choice)
@@ -117,7 +119,7 @@ func loadAgentChoices(ctx context.Context, refs []string, env environment.Provid
 			choice.yaml = string(raw)
 		}
 
-		cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...))
+		cfg, err := config.Load(ctx, source, config.WithFlavors(flavors...), config.WithVersions(legacy.Register))
 		if err != nil {
 			choice.err = err
 			choices = append(choices, choice)

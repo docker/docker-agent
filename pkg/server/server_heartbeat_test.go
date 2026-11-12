@@ -23,6 +23,7 @@ import (
 // hung transport.
 func TestAttachedServer_EventStreamSendsHeartbeats(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -47,7 +48,7 @@ func TestAttachedServer_EventStreamSendsHeartbeats(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/events", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
@@ -103,6 +104,7 @@ func TestAttachedServer_SnapshotReportsAggregateCost(t *testing.T) {
 // clients can tell it apart from a route-less 404 (older binary).
 func TestAttachedServer_SnapshotUnknownSessionCarriesErrorCode(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -116,7 +118,7 @@ func TestAttachedServer_SnapshotUnknownSessionCarriesErrorCode(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/nope/snapshot", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 

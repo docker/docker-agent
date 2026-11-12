@@ -18,6 +18,6 @@ func createProcessGroup(_ *os.Process) (*processGroup, error) {
 	return &processGroup{}, nil
 }
 
-func kill(_ *os.Process, _ *processGroup) error {
+func terminateProcess(_ *os.Process, _ *processGroup, _ bool) error {
 	return errors.New("background_jobs: process termination not supported on js/wasm")
 }

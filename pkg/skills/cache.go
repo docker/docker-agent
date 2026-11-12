@@ -1,6 +1,7 @@
 package skills
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,11 +18,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker-agent/pkg/atomicfile"
 	"github.com/docker/docker-agent/pkg/httpclient"
 )
 
 // remoteHTTPTimeout caps each HTTP request made to a remote skills source.
-const remoteHTTPTimeout = 30 * time.Second
+const (
+	remoteHTTPTimeout = 30 * time.Second
+	maxCachedFileSize = 1 << 20
+)
 
 // skillsHTTPClient is used for outbound calls to remote skill registries.
 // The base URL is operator-supplied and the contents are fed to the model
@@ -136,9 +141,12 @@ func (c *diskCache) FetchAndStore(ctx context.Context, baseURL, skillName, fileP
 		return "", fmt.Errorf("fetching %s: HTTP %d", fileURL, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB per file
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCachedFileSize+1))
 	if err != nil {
 		return "", fmt.Errorf("reading %s: %w", fileURL, err)
+	}
+	if len(body) > maxCachedFileSize {
+		return "", fmt.Errorf("reading %s: file exceeds %d-byte limit", fileURL, maxCachedFileSize)
 	}
 
 	directive := parseCacheControl(resp.Header.Get("Cache-Control"))
@@ -161,7 +169,7 @@ func (c *diskCache) FetchAndStore(ctx context.Context, baseURL, skillName, fileP
 		ExpiresAt: directive.expiresAt(),
 	}
 	metaJSON, _ := json.Marshal(meta)
-	if err := os.WriteFile(metaPath, metaJSON, 0o600); err != nil {
+	if err := atomicfile.Write(metaPath, bytes.NewReader(metaJSON), 0o600); err != nil {
 		// Non-fatal: the content is cached, just the metadata isn't
 		slog.DebugContext(ctx, "Failed to write cache metadata", "path", metaPath, "error", err)
 	}

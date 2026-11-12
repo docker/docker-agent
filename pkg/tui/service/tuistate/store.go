@@ -84,9 +84,10 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the database connection.
+// Close closes the database connection, waiting for in-flight statements to
+// release it so the file can be removed immediately afterwards.
 func (s *Store) Close() error {
-	return s.db.Close()
+	return sqliteutil.CloseDB(s.db)
 }
 
 // AddTab adds a new tab to the store, placing it after all existing tabs.

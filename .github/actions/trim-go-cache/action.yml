@@ -1,0 +1,11 @@
+name: Trim Go cache
+description: Remove inherited build-cache entries that this job did not use before saving.
+inputs:
+  path:
+    description: Private GOCACHE directory. No Go processes may run during this action's main or post step.
+    required: true
+runs:
+  using: node24
+  main: mark.mjs
+  post: prune.mjs
+  post-if: success()

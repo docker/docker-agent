@@ -1,0 +1,23 @@
+# Download this small MLX model in Nativ and start its local server first.
+providers:
+  nativ:
+    api_type: openai_chatcompletions
+    base_url: http://127.0.0.1:8080/v1
+    # If server authentication is enabled, set NATIV_API_KEY and uncomment:
+    # token_key: NATIV_API_KEY
+    provider_opts:
+      extra_body:
+        enable_thinking: false
+
+models:
+  tiny:
+    provider: nativ
+    model: mlx-community/Qwen3-0.6B-4bit
+    temperature: 0
+    max_tokens: 256
+
+agents:
+  root:
+    model: tiny
+    description: Local chat assistant using Nativ on Apple Silicon
+    instruction: You are a concise helpful assistant. Answer directly.

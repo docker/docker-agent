@@ -101,6 +101,9 @@ func TestFileCache_dedupSkipsRedundantWrite(t *testing.T) {
 	require.NoError(t, err)
 
 	c.Store("q", "a")
+	// Separate the baseline from the next write even on coarse-grained filesystems.
+	baseline := time.Unix(946684800, 0)
+	require.NoError(t, os.Chtimes(path, baseline, baseline))
 	infoBefore, err := os.Stat(path)
 	require.NoError(t, err)
 
@@ -108,15 +111,18 @@ func TestFileCache_dedupSkipsRedundantWrite(t *testing.T) {
 	c.Store("q", "a")
 	infoAfter, err := os.Stat(path)
 	require.NoError(t, err)
-	assert.Equal(t, infoBefore.ModTime(), infoAfter.ModTime(),
+	assert.True(t, infoBefore.ModTime().Equal(infoAfter.ModTime()),
 		"identical Store must not rewrite the cache file")
 
 	// Different value: must rewrite.
 	c.Store("q", "b")
 	infoChanged, err := os.Stat(path)
 	require.NoError(t, err)
-	assert.True(t, infoChanged.ModTime().After(infoBefore.ModTime()) || infoChanged.Size() != infoBefore.Size(),
+	assert.True(t, infoChanged.ModTime().After(infoBefore.ModTime()),
 		"different Store must rewrite the cache file")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"q":"b"}`, string(data))
 }
 
 func TestFileCache_persists(t *testing.T) {

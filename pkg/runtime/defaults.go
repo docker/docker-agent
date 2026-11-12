@@ -16,17 +16,6 @@ import (
 // so the buffer size is set in exactly one place.
 const defaultEventChannelCapacity = 128
 
-// maxSSELineBytes bounds a single Server-Sent-Events line the client SSE
-// reader will accept. Each event is delivered as one `data: {json}` line, and
-// a tool result can be large (e.g. a big tool-response payload), so the default
-// bufio.Scanner cap of 64 KiB (bufio.MaxScanTokenSize) truncates the stream:
-// the oversized line trips bufio.ErrTooLong, the scan ends, and the run appears
-// to stop silently after the preceding event. The reader raises its buffer to
-// this ceiling and surfaces any remaining scanner error as an Error event
-// rather than closing the stream without a trace. Sized to comfortably hold a
-// large tool response while still bounding per-line memory.
-const maxSSELineBytes = 16 * 1024 * 1024
-
 // defaultMaxOverflowCompactions caps the number of consecutive
 // context-overflow auto-compactions that the run loop will attempt before
 // giving up and surfacing the error to the caller. The runtime's
@@ -45,6 +34,15 @@ const defaultMaxOverflowCompactions = 1
 // a notification from a server), so a slow or stuck server cannot be
 // allowed to wedge the caller indefinitely.
 const toolsChangedTimeout = 5 * time.Second
+
+// defaultStreamStoppedDeliveryTimeout bounds how long finalizeEventChannel
+// waits to deliver StreamStopped when the event buffer is full. 128 buffered
+// events at roughly a millisecond each for a synchronous per-delta SQLite
+// write (the common back-pressure source, see #4136) drain in ~130ms; 5s is
+// comfortably above that for any consumer still reading, while still bounding
+// teardown once a consumer has abandoned the channel (the #3070 deadlock this
+// replaces). Tests shrink it via the streamStoppedDeliveryTimeout field.
+const defaultStreamStoppedDeliveryTimeout = 5 * time.Second
 
 // defaultToolListTimeout bounds how long EmitStartupInfo waits for a single
 // toolset to enumerate its tools while populating the sidebar. A toolset

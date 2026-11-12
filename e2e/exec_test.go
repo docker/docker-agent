@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/docker/docker-agent/pkg/testutil/geminiintegration"
 )
 
 func TestExec_OpenAI(t *testing.T) {
@@ -29,9 +31,7 @@ func TestExec_OpenAI_WithThinkingBudget(t *testing.T) {
 	t.Parallel()
 	out := runCLI(t, "run", "--exec", "testdata/basic_with_thinking.yaml", "What's 2+2?")
 
-	// With thinking_budget explicitly configured, response should include reasoning
-	// The output format includes the reasoning summary when thinking is enabled
-	require.Contains(t, out, "4")
+	require.Contains(t, out, "\n\n4")
 }
 
 func TestExec_OpenAI_ToolCall(t *testing.T) {
@@ -99,6 +99,7 @@ func TestExec_Anthropic_AgentsMd(t *testing.T) {
 }
 
 func TestExec_Gemini(t *testing.T) {
+	geminiintegration.Require(t)
 	t.Parallel()
 	out := runCLI(t, "run", "--exec", "testdata/basic.yaml", "--model=google/gemini-2.5-flash", "What's 2+2?")
 
@@ -108,6 +109,7 @@ func TestExec_Gemini(t *testing.T) {
 }
 
 func TestExec_Gemini_ToolCall(t *testing.T) {
+	geminiintegration.Require(t)
 	t.Parallel()
 	out := runCLI(t, "run", "--exec", "testdata/fs_tools.yaml", "--model=google/gemini-2.5-flash", "How many files in testdata/working_dir? Only output the number.")
 

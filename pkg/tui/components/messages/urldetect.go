@@ -1,6 +1,7 @@
 package messages
 
 import (
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -246,13 +247,12 @@ func findURLSpans(text string) []urlSpan {
 	n := len(runes)
 
 	for i := 0; i < n; {
-		// Look for http:// or https://
-		remaining := string(runes[i:])
+		// Look for http:// or https:// without re-encoding the suffix at every position.
 		var prefixLen int
 		switch {
-		case strings.HasPrefix(remaining, "https://"):
+		case hasRunePrefix(runes[i:], "https://"):
 			prefixLen = len("https://")
-		case strings.HasPrefix(remaining, "http://"):
+		case hasRunePrefix(runes[i:], "http://"):
 			prefixLen = len("http://")
 		default:
 			i++
@@ -293,6 +293,20 @@ func findURLSpans(text string) []urlSpan {
 	return spans
 }
 
+// hasRunePrefix reports whether runes begins with the ASCII prefix, comparing
+// runes directly instead of re-encoding the slice to a string at every position.
+func hasRunePrefix(runes []rune, prefix string) bool {
+	if len(runes) < len(prefix) {
+		return false
+	}
+	for k := range len(prefix) {
+		if runes[k] != rune(prefix[k]) {
+			return false
+		}
+	}
+	return true
+}
+
 func runeSliceWidth(runes []rune) int {
 	w := 0
 	for _, r := range runes {
@@ -331,7 +345,7 @@ func balanceParens(url string) string {
 
 // urlAt returns the URL at the given global line and display column, or empty string.
 func (m *model) urlAt(line, col int) string {
-	m.ensureAllItemsRendered()
+	m.updateScrollState()
 	if line < 0 || line >= m.totalHeight {
 		return ""
 	}
@@ -346,7 +360,7 @@ func (m *model) urlAt(line, col int) string {
 
 // updateHoveredURL updates the hovered URL state based on mouse position.
 func (m *model) updateHoveredURL(line, col int) {
-	m.ensureAllItemsRendered()
+	m.updateScrollState()
 
 	if line >= 0 && line < m.totalHeight {
 		rendered := m.renderedLine(line)
@@ -379,8 +393,7 @@ func (m *model) applyURLUnderline(lines []string, viewportStartLine int) []strin
 		return lines
 	}
 
-	result := make([]string, len(lines))
-	copy(result, lines)
+	result := slices.Clip(slices.Clone(lines))
 	result[viewIdx] = styleLineSegment(lines[viewIdx], m.hoveredURL.startCol, m.hoveredURL.endCol, underlineStyle)
 	return result
 }

@@ -1,18 +1,31 @@
 package agent
 
 import (
+	"context"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/docker/docker-agent/pkg/cache"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/evaluator"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/structuredoutput"
 )
 
 type Opt func(a *Agent)
+
+// WithWorkingDirFactory installs a constructor for fresh workspace-local toolsets.
+// The factory must return a new agent without links to the original team.
+// Install it after tool options; changing tools invalidates the factory.
+func WithWorkingDirFactory(factory func(context.Context, string) (*Agent, error)) Opt {
+	return func(a *Agent) {
+		a.workingDirFactory = factory
+	}
+}
 
 func WithInstruction(instruction string) Opt {
 	return func(a *Agent) {
@@ -27,12 +40,34 @@ func WithToolSets(toolSet ...tools.ToolSet) Opt {
 	}
 
 	return func(a *Agent) {
+		a.workingDirFactory = nil
 		a.toolsets = startableToolSet
+	}
+}
+
+// WithOwnedToolSets registers lazily started toolsets for agent shutdown without
+// exposing or starting them with the agent's ordinary tools.
+func WithOwnedToolSets(toolsets ...*tools.StartableToolSet) Opt {
+	return func(a *Agent) {
+		a.workingDirFactory = nil
+		a.ownedToolsets = append(a.ownedToolsets, toolsets...)
+	}
+}
+
+// WithAdditionalToolSets appends toolsets without replacing existing lifecycle wrappers.
+// Like other options, apply it before the agent is used by a runtime.
+func WithAdditionalToolSets(toolsets ...tools.ToolSet) Opt {
+	return func(a *Agent) {
+		a.workingDirFactory = nil
+		for _, ts := range toolsets {
+			a.toolsets = append(a.toolsets, tools.NewStartable(ts))
+		}
 	}
 }
 
 func WithTools(allTools ...tools.Tool) Opt {
 	return func(a *Agent) {
+		a.workingDirFactory = nil
 		a.tools = allTools
 	}
 }
@@ -148,6 +183,14 @@ func WithForceHandoff(target *Agent) Opt {
 	}
 }
 
+// WithRouting sets the agents the agent's control hooks may route to.
+func WithRouting(routing Routing) Opt {
+	return func(a *Agent) {
+		routing.AllowedAgents = slices.Clone(routing.AllowedAgents)
+		a.routing = routing
+	}
+}
+
 func WithAddDate(addDate bool) Opt {
 	return func(a *Agent) {
 		a.addDate = addDate
@@ -187,6 +230,15 @@ func WithAddDescriptionParameter(addDescriptionParameter bool) Opt {
 func WithAddPromptFiles(addPromptFiles []string) Opt {
 	return func(a *Agent) {
 		a.addPromptFiles = addPromptFiles
+	}
+}
+
+// WithAddPromptFilesDepth sets how many directory levels below the working
+// directory are scanned for further prompt files to list by path. 0 disables
+// the scan.
+func WithAddPromptFilesDepth(depth int) Opt {
+	return func(a *Agent) {
+		a.addPromptFilesDepth = depth
 	}
 }
 
@@ -258,6 +310,15 @@ func WithLoadTimeWarnings(warnings []string) Opt {
 func WithHooks(hooks *latest.HooksConfig) Opt {
 	return func(a *Agent) {
 		a.hooks = hooks
+	}
+}
+
+// WithEvaluators snapshots the agent's source-scoped evaluator bindings.
+// A nil or empty map binds an empty scope, disabling team-level fallback.
+func WithEvaluators(evaluators map[string]evaluator.Evaluator) Opt {
+	return func(a *Agent) {
+		a.evaluators = make(map[string]evaluator.Evaluator, len(evaluators))
+		maps.Copy(a.evaluators, evaluators)
 	}
 }
 

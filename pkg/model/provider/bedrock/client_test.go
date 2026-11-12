@@ -1,10 +1,13 @@
 package bedrock
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
@@ -16,7 +19,10 @@ import (
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/environment"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/catalog"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
+	"github.com/docker/docker-agent/pkg/modelsdev/embedded"
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
@@ -83,6 +89,7 @@ func TestConvertMessages_AssistantWithToolCalls(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "tool-1", *toolUse.Value.ToolUseId)
 	assert.Equal(t, "get_weather", *toolUse.Value.Name)
+	assert.Equal(t, map[string]any{"location": "NYC"}, decodeRequestFields(t, toolUse.Value.Input))
 }
 
 func TestConvertMessages_ToolResult(t *testing.T) {
@@ -237,34 +244,80 @@ func TestConvertMessages_ConsecutiveToolResults(t *testing.T) {
 	assert.Equal(t, types.ConversationRoleUser, bedrockMsgs[3].Role)
 }
 
-func TestBearerTokenTransport(t *testing.T) {
+// The bearer token replaces SigV4: the SDK's bearer scheme sets the header
+// and no signature is computed. Requests are intercepted at the transport.
+func TestNewClient_BearerTokenRequest(t *testing.T) {
 	t.Parallel()
 
-	// Create a test server to capture the Authorization header
-	var capturedAuth string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedAuth = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	// Create transport with bearer token
-	transport := &bearerTokenTransport{
-		token: "test-api-key-12345",
-		base:  http.DefaultTransport,
+	var got *http.Request
+	cfg := &latest.ModelConfig{
+		Provider:     "amazon-bedrock",
+		Model:        "anthropic.claude-v2",
+		TokenKey:     "BEDROCK_TOKEN",
+		ProviderOpts: map[string]any{"region": "eu-west-1"},
 	}
-
-	// Make a request through the transport
-	client := &http.Client{Transport: transport}
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
+	client, err := NewClient(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"BEDROCK_TOKEN": "test-api-key-12345"}),
+		options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+			return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				got = req
+				return &http.Response{
+					StatusCode: http.StatusForbidden,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"message":"denied"}`)),
+					Request:    req,
+				}, nil
+			})
+		}))
 	require.NoError(t, err)
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
 
-	// Verify the Authorization header was set correctly
-	assert.Equal(t, "Bearer test-api-key-12345", capturedAuth)
+	_, err = client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, nil)
+	require.Error(t, err)
+	require.NotNil(t, got, "request must reach the transport")
+	assert.Equal(t, "bedrock-runtime.eu-west-1.amazonaws.com", got.URL.Host)
+	assert.Equal(t, "Bearer test-api-key-12345", got.Header.Get("Authorization"))
+	assert.Empty(t, got.Header.Get("X-Amz-Date"), "no SigV4 signing")
 }
+
+func TestNewClient_EndpointResolution(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, baseURL, endpointURL, wantHost string
+	}{
+		{"catalog default", catalog.Lookup("amazon-bedrock").BaseURL, "", "bedrock-runtime.eu-west-1.amazonaws.com"},
+		{"custom base URL", "https://custom.example", "", "custom.example"},
+		{"endpoint option wins", "https://custom.example", "https://vpc.example", "vpc.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got *http.Request
+			cfg := &latest.ModelConfig{
+				Provider: "amazon-bedrock", Model: "anthropic.claude-v2", BaseURL: tc.baseURL,
+				ProviderOpts: map[string]any{"region": "eu-west-1", "endpoint_url": tc.endpointURL},
+			}
+			client, err := NewClient(t.Context(), cfg, environment.NewMapEnvProvider(map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "test-token"}),
+				options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+					return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						got = req
+						return &http.Response{
+							StatusCode: http.StatusForbidden,
+							Header:     http.Header{"Content-Type": []string{"application/json"}},
+							Body:       io.NopCloser(strings.NewReader(`{"message":"denied"}`)), Request: req,
+						}, nil
+					})
+				}))
+			require.NoError(t, err)
+			_, err = client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hi"}}, nil)
+			require.Error(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, tc.wantHost, got.URL.Host)
+		})
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // Image URL conversion tests
 
@@ -485,28 +538,6 @@ func TestBuildAWSConfig_ProviderOptsOverridesEnv(t *testing.T) {
 
 	// provider_opts should take precedence
 	assert.Equal(t, "eu-central-1", awsCfg.Region)
-}
-
-// NewClient with valid config tests
-
-func TestNewClient_ValidConfig(t *testing.T) {
-	t.Parallel()
-
-	cfg := &latest.ModelConfig{
-		Provider: "amazon-bedrock",
-		Model:    "anthropic.claude-v2",
-		ProviderOpts: map[string]any{
-			"region": "us-east-1",
-		},
-	}
-
-	client, err := NewClient(t.Context(), cfg, environment.NewNoEnvProvider())
-	require.NoError(t, err)
-	require.NotNil(t, client)
-
-	// Verify client was configured correctly
-	assert.Equal(t, "anthropic.claude-v2", client.ModelConfig.Model)
-	assert.Equal(t, "amazon-bedrock", client.ModelConfig.Provider)
 }
 
 func TestNewClient_WithBearerToken(t *testing.T) {
@@ -1155,33 +1186,27 @@ func TestConvertAssistantContent_MissingSignature(t *testing.T) {
 	assert.Equal(t, "Here's my answer", textBlock.Value)
 }
 
-func TestConvertAssistantContent_RedactedThinking(t *testing.T) {
+func TestConvertAssistantContent_SignedEmptyIsNotRedacted(t *testing.T) {
 	t.Parallel()
 
-	// When only signature is present but no reasoning content,
-	// a redacted thinking block should be included to maintain
-	// conversation integrity for multi-turn extended thinking.
+	// Without native blocks, a signature with no text is signed thinking whose
+	// display was omitted (the Claude 5 default), not redacted content.
 	msg := &chat.Message{
 		Role:              chat.MessageRoleAssistant,
 		Content:           "Here's my answer",
-		ReasoningContent:  "", // Content redacted for safety
 		ThinkingSignature: "sig_abc123",
 	}
 
 	blocks := convertAssistantContent(msg)
 
-	// Should have redacted thinking block first, then text block
 	require.Len(t, blocks, 2)
-
-	// First block should be redacted reasoning content
 	reasoningBlock, ok := blocks[0].(*types.ContentBlockMemberReasoningContent)
 	require.True(t, ok, "first block should be ContentBlockMemberReasoningContent")
+	text, ok := reasoningBlock.Value.(*types.ReasoningContentBlockMemberReasoningText)
+	require.True(t, ok, "signed-empty thinking replays as reasoning text")
+	assert.Empty(t, *text.Value.Text)
+	assert.Equal(t, "sig_abc123", *text.Value.Signature)
 
-	redactedContent, ok := reasoningBlock.Value.(*types.ReasoningContentBlockMemberRedactedContent)
-	require.True(t, ok, "reasoning block should be ReasoningContentBlockMemberRedactedContent")
-	assert.Equal(t, []byte("sig_abc123"), redactedContent.Value)
-
-	// Second block should be text
 	textBlock, ok := blocks[1].(*types.ContentBlockMemberText)
 	require.True(t, ok)
 	assert.Equal(t, "Here's my answer", textBlock.Value)
@@ -1382,10 +1407,9 @@ func TestPromptCachingEnabled_TypeMismatch(t *testing.T) {
 func TestDetectCachingSupport_SupportedModel(t *testing.T) {
 	t.Parallel()
 
-	store, err := modelsdev.NewStore()
-	require.NoError(t, err)
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 
-	// Uses real models.dev lookup to verify Claude models support caching
+	// Uses the committed models.dev snapshot to verify Claude models support caching
 	supported := detectCachingSupport(t.Context(), "anthropic.claude-opus-4-7", store)
 	assert.True(t, supported)
 }
@@ -1393,8 +1417,7 @@ func TestDetectCachingSupport_SupportedModel(t *testing.T) {
 func TestDetectCachingSupport_UnsupportedModel(t *testing.T) {
 	t.Parallel()
 
-	store, err := modelsdev.NewStore()
-	require.NoError(t, err)
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 
 	// Llama doesn't have cache pricing in models.dev
 	supported := detectCachingSupport(t.Context(), "meta.llama3-8b-instruct-v1:0", store)
@@ -1404,8 +1427,7 @@ func TestDetectCachingSupport_UnsupportedModel(t *testing.T) {
 func TestDetectCachingSupport_UnknownModel(t *testing.T) {
 	t.Parallel()
 
-	store, err := modelsdev.NewStore()
-	require.NoError(t, err)
+	store := modelsdev.NewDatabaseStore(embedded.Snapshot())
 
 	// Unknown model should gracefully return false, not panic
 	supported := detectCachingSupport(t.Context(), "nonexistent.model.that.does.not.exist:v1", store)
@@ -1488,4 +1510,195 @@ func TestConvertMessages_ToolResultWithCaching(t *testing.T) {
 	secondLastContent := secondLastMsg.Content[len(secondLastMsg.Content)-1]
 	_, isCachePoint = secondLastContent.(*types.ContentBlockMemberCachePoint)
 	assert.True(t, isCachePoint, "assistant tool call message should have cache point")
+}
+
+func TestBuildRequest_Claude5(t *testing.T) {
+	t.Parallel()
+
+	adaptive := map[string]any{"type": "adaptive"}
+	bound := map[string]any{"type": "adaptive", "block_binding": map[string]any{"prefix_mismatch_behavior": "drop_block"}}
+	cases := []struct {
+		name             string
+		model            string
+		budget           *latest.ThinkingBudget
+		wantThinking     any
+		wantOutputConfig any
+		wantBindingBeta  bool
+	}{
+		{name: "no budget uses binding", model: "us.anthropic.claude-sonnet-5-5-v1:0", wantThinking: bound, wantBindingBeta: true},
+		{name: "effort is adaptive", model: "anthropic.claude-haiku-5-5", budget: &latest.ThinkingBudget{Effort: "high"}, wantThinking: bound, wantOutputConfig: map[string]any{"effort": "high"}, wantBindingBeta: true},
+		{name: "token budget uses model default effort", model: "anthropic.claude-sonnet-5", budget: &latest.ThinkingBudget{Tokens: 16000}, wantThinking: adaptive},
+		{name: "none is disabled when supported", model: "anthropic.claude-sonnet-5", budget: &latest.ThinkingBudget{Effort: "none"}, wantThinking: map[string]any{"type": "disabled"}},
+		{name: "none falls back to adaptive low", model: "anthropic.claude-fable-5", budget: &latest.ThinkingBudget{Effort: "none"}, wantThinking: adaptive, wantOutputConfig: map[string]any{"effort": "low"}},
+		{name: "explicit adaptive keeps high", model: "anthropic.claude-mythos-5-1", budget: &latest.ThinkingBudget{Effort: "adaptive"}, wantThinking: adaptive, wantOutputConfig: map[string]any{"effort": "high"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := bedrockThinkingClient(tc.model, tc.budget)
+			client.ModelConfig.Temperature = new(0.2)
+			client.ModelConfig.TopP = new(0.9)
+			client.ModelConfig.ProviderOpts = map[string]any{"top_k": 5}
+
+			fields := map[string]any{}
+			if result := client.buildAdditionalModelRequestFields(); result != nil {
+				fields = decodeRequestFields(t, result)
+			}
+			assert.Equal(t, tc.wantThinking, fields["thinking"])
+			assert.Equal(t, tc.wantOutputConfig, fields["output_config"])
+			assert.NotContains(t, fields, "top_k")
+			if tc.wantBindingBeta {
+				assert.Equal(t, []any{"thinking-binding-controls-2026-08-01"}, fields["anthropic_beta"])
+			} else {
+				assert.NotContains(t, fields, "anthropic_beta")
+			}
+
+			cfg := client.buildInferenceConfig(client.isThinkingEnabled())
+			assert.Nil(t, cfg.Temperature)
+			assert.Nil(t, cfg.TopP)
+		})
+	}
+}
+
+func TestCreateChatCompletionStream_Claude5RejectsFinalAssistantPrefill(t *testing.T) {
+	t.Parallel()
+
+	client := bedrockThinkingClient("us.anthropic.claude-opus-5-5", nil)
+	_, err := client.CreateChatCompletionStream(t.Context(), []chat.Message{
+		{Role: chat.MessageRoleUser, Content: "hello"},
+		{Role: chat.MessageRoleAssistant, Content: "Sure:"},
+	}, nil)
+	require.ErrorContains(t, err, "does not accept a final assistant message")
+}
+
+// Through the factory a configured none arrives as a nil budget plus
+// WithNoThinking (see provider.applyModelDefaults).
+func TestBuildAdditionalModelRequestFields_Claude5NoThinkingOption(t *testing.T) {
+	t.Parallel()
+
+	sonnet := bedrockThinkingClient("anthropic.claude-sonnet-5", nil)
+	sonnet.ModelOptions = options.Apply(options.WithNoThinking())
+	assert.Equal(t, map[string]any{"type": "disabled"}, decodeRequestFields(t, sonnet.buildAdditionalModelRequestFields())["thinking"])
+
+	fable := bedrockThinkingClient("anthropic.claude-fable-5", nil)
+	fable.ModelOptions = options.Apply(options.WithNoThinking())
+	fields := decodeRequestFields(t, fable.buildAdditionalModelRequestFields())
+	assert.Equal(t, map[string]any{"type": "adaptive"}, fields["thinking"])
+	assert.Equal(t, map[string]any{"effort": "low"}, fields["output_config"])
+}
+
+// Sequential on purpose: it swaps the default logger to observe the warning.
+func TestBuildAdditionalModelRequestFields_CoercedTokenBudgetWarnsCeilingIsLost(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	bedrockThinkingClient("anthropic.claude-sonnet-5", &latest.ThinkingBudget{Tokens: 16000}).buildAdditionalModelRequestFields()
+
+	assert.Contains(t, logs.String(), "the token ceiling is not enforced")
+}
+
+func TestNewClient_RefusesMythos5(t *testing.T) {
+	t.Parallel()
+
+	env := environment.NewMapEnvProvider(map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "token", "AWS_REGION": "us-east-1"})
+
+	_, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "amazon-bedrock", Model: "us.anthropic.claude-mythos-5"}, env)
+	require.EqualError(t, err, `amazon-bedrock: model "us.anthropic.claude-mythos-5" is only available on Bedrock Mantle, which docker-agent does not support`)
+
+	client, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "amazon-bedrock", Model: "anthropic.claude-mythos-5-1"}, env)
+	require.NoError(t, err)
+	assert.NotNil(t, client)
+}
+
+func TestNewClient_RejectsFallbacks(t *testing.T) {
+	t.Parallel()
+
+	env := environment.NewMapEnvProvider(map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "token", "AWS_REGION": "us-east-1"})
+	for _, fallbacks := range []any{"default", []any{"anthropic.claude-sonnet-4-6"}} {
+		_, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "amazon-bedrock", Model: "anthropic.claude-opus-4-8", ProviderOpts: map[string]any{"fallbacks": fallbacks}}, env)
+		require.ErrorContains(t, err, "requires the Claude API")
+	}
+
+	client, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "amazon-bedrock", Model: "anthropic.claude-opus-4-8", ProviderOpts: map[string]any{"fallbacks": []any{}}}, env)
+	require.NoError(t, err, "an empty list is no fallback")
+	assert.NotNil(t, client)
+}
+
+func TestConverseStream_ThinkingBinding(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		model    string
+		budget   *latest.ThinkingBudget
+		option   string
+		noThink  bool
+		thinking any
+		output   any
+		beta     any
+	}{
+		{name: "fable default", model: "global.anthropic.claude-fable-5-2", thinking: "drop_block", beta: []any{"thinking-binding-controls-2026-08-01"}},
+		{name: "mythos explicit error", model: "us.anthropic.claude-mythos-5-2", budget: &latest.ThinkingBudget{Effort: "high"}, option: "error", thinking: "error", output: map[string]any{"effort": "high"}, beta: []any{"thinking-binding-controls-2026-08-01"}},
+		{name: "older checking model explicit drop", model: "anthropic.claude-opus-5-5", option: "drop_block", thinking: "drop_block", beta: []any{"thinking-binding-controls-2026-08-01"}},
+		{name: "disabled budget", model: "anthropic.claude-haiku-5-5", budget: &latest.ThinkingBudget{Effort: "none"}, thinking: map[string]any{"type": "disabled"}},
+		{name: "disabled option", model: "anthropic.claude-haiku-5-5", noThink: true, thinking: map[string]any{"type": "disabled"}},
+		{name: "required thinking cannot be disabled", model: "anthropic.claude-mythos-5-2", noThink: true, thinking: "drop_block", output: map[string]any{"effort": "low"}, beta: []any{"thinking-binding-controls-2026-08-01"}},
+		{name: "nonchecking registry model", model: "anthropic.claude-mythos-5-1", option: "error"},
+		{name: "unlisted future model", model: "anthropic.claude-fable-5-3", option: "error"},
+		{name: "older claude keeps interleaved beta", model: "anthropic.claude-sonnet-4-5", budget: &latest.ThinkingBudget{Tokens: 2048}, option: "error", thinking: map[string]any{"type": "enabled", "budget_tokens": float64(2048)}, beta: []any{"interleaved-thinking-2025-05-14"}},
+		{name: "non claude", model: "amazon.nova-pro-v1:0", option: "error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var body []byte
+			cfg := &latest.ModelConfig{Provider: "amazon-bedrock", Model: tc.model, ThinkingBudget: tc.budget}
+			if tc.option != "" {
+				cfg.ProviderOpts = map[string]any{"thinking_prefix_mismatch": tc.option}
+			}
+			opts := []options.Opt{options.WithHTTPTransportWrapper(func(http.RoundTripper) http.RoundTripper {
+				return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					var err error
+					body, err = io.ReadAll(req.Body)
+					require.NoError(t, err)
+					return &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"message":"denied"}`)), Request: req}, nil
+				})
+			})}
+			if tc.noThink {
+				opts = append(opts, options.WithNoThinking())
+			}
+			env := environment.NewMapEnvProvider(map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "token", "AWS_REGION": "us-east-1"})
+			client, err := NewClient(t.Context(), cfg, env, opts...)
+			require.NoError(t, err)
+			_, err = client.CreateChatCompletionStream(t.Context(), []chat.Message{{Role: chat.MessageRoleUser, Content: "hello"}}, nil)
+			require.Error(t, err)
+			require.NotEmpty(t, body)
+			var request map[string]any
+			require.NoError(t, json.Unmarshal(body, &request))
+			fields, _ := request["additionalModelRequestFields"].(map[string]any)
+			wantThinking := tc.thinking
+			if behavior, ok := tc.thinking.(string); ok {
+				wantThinking = map[string]any{"type": "adaptive", "block_binding": map[string]any{"prefix_mismatch_behavior": behavior}}
+			}
+			assert.Equal(t, wantThinking, fields["thinking"])
+			assert.Equal(t, tc.output, fields["output_config"])
+			assert.Equal(t, tc.beta, fields["anthropic_beta"])
+		})
+	}
+}
+
+func TestNewClient_ThinkingPrefixMismatchValidation(t *testing.T) {
+	t.Parallel()
+	env := environment.NewMapEnvProvider(map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "token", "AWS_REGION": "us-east-1"})
+	for _, value := range []any{"invalid", "", 42, nil} {
+		_, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "amazon-bedrock", Model: "anthropic.claude-fable-5-2", ProviderOpts: map[string]any{"thinking_prefix_mismatch": value}}, env)
+		require.ErrorContains(t, err, "thinking_prefix_mismatch must be error or drop_block")
+	}
+	for _, value := range []string{"error", "drop_block"} {
+		_, err := NewClient(t.Context(), &latest.ModelConfig{Provider: "amazon-bedrock", Model: "anthropic.claude-fable-5-2", ProviderOpts: map[string]any{"thinking_prefix_mismatch": value}}, env)
+		require.NoError(t, err)
+	}
 }

@@ -1,9 +1,9 @@
-name: PR Review
+name: pr-review
 on:
   issue_comment:
     types: [created]
   workflow_run:
-    workflows: ["PR Review - Trigger"]
+    workflows: [pr-review-trigger]
     types: [completed]
 
 concurrency:
@@ -18,7 +18,7 @@ jobs:
     if: |
       github.event_name == 'issue_comment' ||
       github.event.workflow_run.conclusion == 'success'
-    uses: docker/docker-agent-action/.github/workflows/review-pr.yml@baf90543d81f5de59751dfd10e6cf45e21a5a982 # v2.0.3
+    uses: docker/docker-agent-action/.github/workflows/review-pr.yml@aaa657c53cc69ed15683cd8a985d86663a0e1594 # v2.1.0
     # Scoped to the job so other jobs in this workflow aren't over-permissioned
     permissions:
       contents: read # Read repository files and PR diffs

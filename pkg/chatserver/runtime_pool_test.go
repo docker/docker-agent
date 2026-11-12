@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRuntimePool_DisabledIsNotCached(t *testing.T) {
@@ -20,6 +21,20 @@ func TestRuntimePool_NegativeCapTreatedAsZero(t *testing.T) {
 	t.Parallel()
 	p := newRuntimePool(t.Context(), nil, -1)
 	assert.Equal(t, 0, p.maxIdle)
+}
+
+func TestRuntimePoolReusesRunner(t *testing.T) {
+	t.Parallel()
+	p := newRuntimePool(t.Context(), nil, 1)
+	first, second := &stubRunner{}, &stubRunner{}
+	p.Put("root", first)
+	p.Put("root", second)
+
+	runner, err := p.Get("root")
+	require.NoError(t, err)
+	assert.Same(t, first, runner, "a full pool must retain the first runner")
+	assert.Nil(t, p.takeIdle("root"), "acquired runners must leave the pool")
+	assert.Nil(t, p.takeIdle("other"), "runners must remain agent-scoped")
 }
 
 func TestRuntimePool_takeIdleNoChannel(t *testing.T) {

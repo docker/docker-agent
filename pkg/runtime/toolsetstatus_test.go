@@ -3,11 +3,15 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/docker/docker-agent/pkg/runtime/inspection"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/lifecycle"
 )
@@ -37,7 +41,7 @@ func TestToolsetStatusFor_StatableReportsState(t *testing.T) {
 		},
 	}
 
-	got := toolsetStatusFor(ts)
+	got := inspection.ToolsetStatus(ts)
 	assert.Equal(t, "mcp(stdio cmd=foo)", got.Description)
 	assert.Equal(t, lifecycle.StateRestarting, got.State)
 	require.ErrorIs(t, got.LastError, want)
@@ -54,7 +58,7 @@ func TestToolsetStatusFor_NoStatableMeansReady(t *testing.T) {
 	t.Parallel()
 
 	ts := &describerOnly{desc: "filesystem"}
-	got := toolsetStatusFor(ts)
+	got := inspection.ToolsetStatus(ts)
 	assert.Equal(t, lifecycle.StateReady, got.State)
 	assert.Equal(t, 0, got.RestartCount)
 	require.NoError(t, got.LastError)
@@ -66,7 +70,7 @@ func TestToolsetStatusFor_RestartableReportsTrue(t *testing.T) {
 	t.Parallel()
 
 	ts := &restartableToolset{desc: "mcp(stdio cmd=foo)", state: lifecycle.StateInfo{State: lifecycle.StateReady}}
-	got := toolsetStatusFor(ts)
+	got := inspection.ToolsetStatus(ts)
 	assert.True(t, got.Restartable)
 }
 
@@ -74,7 +78,7 @@ func TestToolsetStatusFor_NonRestartableReportsFalse(t *testing.T) {
 	t.Parallel()
 
 	ts := &statefulToolset{desc: "filesystem", info: lifecycle.StateInfo{State: lifecycle.StateReady}}
-	got := toolsetStatusFor(ts)
+	got := inspection.ToolsetStatus(ts)
 	assert.False(t, got.Restartable)
 }
 
@@ -91,9 +95,45 @@ func TestToolsetStatusFor_UnwrapsStartable(t *testing.T) {
 	}
 	wrapped := tools.NewStartable(inner)
 
-	got := toolsetStatusFor(wrapped)
+	got := inspection.ToolsetStatus(wrapped)
 	assert.Equal(t, lifecycle.StateFailed, got.State)
 	require.ErrorIs(t, got.LastError, want)
 	assert.Equal(t, 5, got.RestartCount)
 	assert.Equal(t, "mcp(remote host=example.com)", got.Description)
+}
+
+// TestToolsetStatusFor_UnsupervisedReportsStartingWithoutBlocking pins the
+// #4073 motivation for the non-blocking status probe: a toolset with no
+// Statable supervisor whose Start is still running (e.g. RAG indexing a
+// large knowledge base) must report lifecycle.StateStarting rather than
+// blocking toolsetStatusFor until Start settles.
+func TestToolsetStatusFor_UnsupervisedReportsStartingWithoutBlocking(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		releaseStart := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(releaseStart)
+		inner := &inFlightStartToolSet{entered: make(chan struct{}), release: release}
+		wrapped := tools.NewStartable(inner)
+
+		startDone := make(chan error, 1)
+		go func() { startDone <- wrapped.Start(t.Context()) }()
+		<-inner.entered
+
+		resultCh := make(chan tools.ToolsetStatus, 1)
+		go func() { resultCh <- inspection.ToolsetStatus(wrapped) }()
+
+		select {
+		case status := <-resultCh:
+			assert.Equal(t, lifecycle.StateStarting, status.State, "a mid-start toolset must report Starting, not block or misreport")
+		case <-time.After(5 * time.Second):
+			t.Fatal("toolsetStatusFor blocked behind an in-flight Start instead of reporting Starting")
+		}
+
+		releaseStart()
+		require.NoError(t, <-startDone)
+
+		assert.Equal(t, lifecycle.StateReady, inspection.ToolsetStatus(wrapped).State, "settled start reports Ready")
+	})
 }

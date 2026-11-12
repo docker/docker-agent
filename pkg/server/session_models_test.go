@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/docker/docker-agent/pkg/api"
 	"github.com/docker/docker-agent/pkg/config"
 	"github.com/docker/docker-agent/pkg/runtime"
+	"github.com/docker/docker-agent/pkg/runtime/modelcatalog"
 	"github.com/docker/docker-agent/pkg/session"
 )
 
@@ -27,7 +30,7 @@ type modelSwitchingRuntime struct {
 
 	mu              sync.Mutex
 	currentAgent    string
-	availableModels []runtime.ModelChoice
+	availableModels []modelcatalog.ModelChoice
 	overrides       map[string]string
 	setErr          error
 
@@ -47,7 +50,7 @@ type modelSwitchingRuntime struct {
 	setAgentModelDelay <-chan struct{}
 }
 
-func newModelSwitchingRuntime(models []runtime.ModelChoice) *modelSwitchingRuntime {
+func newModelSwitchingRuntime(models []modelcatalog.ModelChoice) *modelSwitchingRuntime {
 	return &modelSwitchingRuntime{
 		currentAgent:    "root",
 		availableModels: models,
@@ -59,12 +62,14 @@ func (m *modelSwitchingRuntime) CurrentAgentName(context.Context) string { retur
 
 func (m *modelSwitchingRuntime) SupportsModelSwitching() bool { return true }
 
-func (m *modelSwitchingRuntime) AvailableModels(_ context.Context) []runtime.ModelChoice {
+func (m *modelSwitchingRuntime) AvailableModels(_ context.Context) []modelcatalog.ModelChoice {
 	m.mu.Lock()
 	delay := m.availableModelsDelay
 	called := m.availableModelsCalled
-	out := make([]runtime.ModelChoice, len(m.availableModels))
-	copy(out, m.availableModels)
+	out := slices.Clone(m.availableModels)
+	if out == nil {
+		out = []modelcatalog.ModelChoice{}
+	}
 	m.mu.Unlock()
 
 	if called != nil {
@@ -165,7 +170,7 @@ func TestAttachedServer_GetSessionModels(t *testing.T) {
 	sess.AgentModelOverrides = map[string]string{"root": "openai/gpt-4o"}
 	require.NoError(t, store.AddSession(ctx, sess))
 
-	choices := []runtime.ModelChoice{
+	choices := []modelcatalog.ModelChoice{
 		{Name: "default", Ref: "openai/gpt-4o-mini", Provider: "openai", Model: "gpt-4o-mini", IsDefault: true},
 		{Name: "custom", Ref: "openai/gpt-4o", Provider: "openai", Model: "gpt-4o"},
 	}
@@ -177,7 +182,7 @@ func TestAttachedServer_GetSessionModels(t *testing.T) {
 	addr := startAttachedServer(t, ctx, sm)
 	resp := httpDoTCP(t, ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/models", nil)
 
-	var got runtime.SessionModelsResponse
+	var got modelcatalog.SessionModelsResponse
 	require.NoError(t, json.Unmarshal(resp, &got))
 
 	assert.Equal(t, "root", got.Agent)
@@ -201,7 +206,7 @@ func TestAttachedServer_GetSessionModels_DefaultMarkedCurrent(t *testing.T) {
 	sess := session.New()
 	require.NoError(t, store.AddSession(ctx, sess))
 
-	choices := []runtime.ModelChoice{
+	choices := []modelcatalog.ModelChoice{
 		{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true},
 		{Name: "other", Ref: "openai/gpt-4o"},
 	}
@@ -213,7 +218,7 @@ func TestAttachedServer_GetSessionModels_DefaultMarkedCurrent(t *testing.T) {
 	addr := startAttachedServer(t, ctx, sm)
 	resp := httpDoTCP(t, ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/models", nil)
 
-	var got runtime.SessionModelsResponse
+	var got modelcatalog.SessionModelsResponse
 	require.NoError(t, json.Unmarshal(resp, &got))
 
 	assert.Empty(t, got.CurrentModelRef)
@@ -234,7 +239,7 @@ func TestAttachedServer_GetSessionModels_AppendsCustomModels(t *testing.T) {
 	sess.CustomModelsUsed = []string{"openai/gpt-4o"}
 	require.NoError(t, store.AddSession(ctx, sess))
 
-	choices := []runtime.ModelChoice{
+	choices := []modelcatalog.ModelChoice{
 		{Name: "default", Ref: "openai/gpt-4o-mini", IsDefault: true},
 	}
 	fake := newModelSwitchingRuntime(choices)
@@ -245,7 +250,7 @@ func TestAttachedServer_GetSessionModels_AppendsCustomModels(t *testing.T) {
 	addr := startAttachedServer(t, ctx, sm)
 	resp := httpDoTCP(t, ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/models", nil)
 
-	var got runtime.SessionModelsResponse
+	var got modelcatalog.SessionModelsResponse
 	require.NoError(t, json.Unmarshal(resp, &got))
 
 	require.Len(t, got.Models, 2)
@@ -298,8 +303,8 @@ func TestAttachedServer_SetSessionModel_PersistsViaRunAgent(t *testing.T) {
 
 func TestAttachedServer_RunAgent_EmptyModelLeavesOverrideUntouched(t *testing.T) {
 	// An empty model field on the runAgent body must be a no-op for the
-	// override (it is not a request to clear it). The TUI relies on this
-	// when it sends a regular user turn after a previous /model PATCH.
+	// override (it is not a request to clear it). Clients rely on this to
+	// send regular turns without resetting a previously applied override.
 	t.Parallel()
 
 	ctx := t.Context()
@@ -333,6 +338,7 @@ func TestAttachedServer_RunAgent_EmptyModelLeavesOverrideUntouched(t *testing.T)
 
 func TestAttachedServer_GetSessionModels_NotSupported(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx := t.Context()
 	store := session.NewInMemorySessionStore()
@@ -346,7 +352,7 @@ func TestAttachedServer_GetSessionModels_NotSupported(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/models", http.NoBody)
 	require.NoError(t, err)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
@@ -369,6 +375,488 @@ func (s *failingStore) UpdateSession(ctx context.Context, sess *session.Session)
 		return errors.New("synthetic store failure")
 	}
 	return s.Store.UpdateSession(ctx, sess)
+}
+
+type blockingUpdateStore struct {
+	session.Store
+
+	mu      sync.Mutex
+	started chan int
+	release []chan struct{}
+	fail    map[int]error
+	updates int
+}
+
+func (s *blockingUpdateStore) UpdateSession(ctx context.Context, sess *session.Session) error {
+	s.mu.Lock()
+	index := s.updates
+	s.updates++
+	var release chan struct{}
+	if index < len(s.release) {
+		release = s.release[index]
+	}
+	fail := s.fail[index]
+	s.mu.Unlock()
+
+	if s.started != nil {
+		s.started <- index
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if fail != nil {
+		return fail
+	}
+	return s.Store.UpdateSession(ctx, sess)
+}
+
+type deleteBarrierStore struct {
+	session.Store
+
+	deleted chan struct{}
+	release chan struct{}
+}
+
+func (s *deleteBarrierStore) DeleteSession(ctx context.Context, sessionID string) error {
+	if err := s.Store.DeleteSession(ctx, sessionID); err != nil {
+		return err
+	}
+	close(s.deleted)
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestSessionManager_DeleteDuringRecallPersistenceDoesNotResurrect(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("batch=%t", batch), func(t *testing.T) {
+			ctx := t.Context()
+			sess := session.New()
+			base := session.NewInMemorySessionStore()
+			require.NoError(t, base.AddSession(ctx, sess))
+			store := &deleteBarrierStore{
+				Store:   base,
+				deleted: make(chan struct{}),
+				release: make(chan struct{}),
+			}
+			fake := &fakeRuntime{release: make(chan struct{})}
+			sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+			sm.AttachRuntime(ctx, sess.ID, fake, sess)
+			rs, ok := sm.runtimeSessions.Load(sess.ID)
+			require.True(t, ok)
+
+			persistEntered := make(chan struct{})
+			persistProceed := make(chan struct{})
+			sm.beforePersistActiveSession = func() {
+				close(persistEntered)
+				<-persistProceed
+			}
+
+			require.NoError(t, sm.recallSession(ctx, sess.ID, runtime.QueuedMessage{Content: "wake up"}))
+			require.Eventually(t, func() bool {
+				return fake.concurrentStreams.Load() == 1
+			}, time.Second, time.Millisecond)
+
+			type deleteResult struct {
+				deleted int
+				failed  []string
+				err     error
+			}
+			deleteDone := make(chan deleteResult, 1)
+			go func() {
+				if batch {
+					deleted, failed := sm.BatchDeleteSessions(ctx, []string{sess.ID})
+					deleteDone <- deleteResult{deleted: deleted, failed: failed}
+					return
+				}
+				deleteDone <- deleteResult{err: sm.DeleteSession(ctx, sess.ID)}
+			}()
+
+			select {
+			case <-store.deleted:
+			case <-time.After(time.Second):
+				t.Fatal("delete did not reach the post-store barrier")
+			}
+			close(fake.release)
+			select {
+			case <-persistEntered:
+			case <-time.After(time.Second):
+				t.Fatal("recall did not reach final persistence")
+			}
+
+			// Keep deletion cleanup waiting on sm.mux while allowing its
+			// modelSwitch lock to go. Recall persistence must reject the
+			// deleting runtime without taking sm.mux first.
+			sm.mux.Lock()
+			close(persistProceed)
+			close(store.release)
+			recallFinished := assert.Eventually(t, func() bool {
+				if !rs.streaming.TryLock() {
+					return false
+				}
+				rs.streaming.Unlock()
+				return true
+			}, time.Second, time.Millisecond)
+			sm.mux.Unlock()
+			require.True(t, recallFinished)
+
+			result := <-deleteDone
+			if batch {
+				assert.Equal(t, 1, result.deleted)
+				assert.Empty(t, result.failed)
+			} else {
+				require.NoError(t, result.err)
+			}
+			_, err := store.GetSession(ctx, sess.ID)
+			assert.ErrorIs(t, err, session.ErrNotFound)
+		})
+	}
+}
+
+func TestSessionManager_SetSessionAgentModel_SerializesSuccessfulSwitches(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	base := session.NewInMemorySessionStore()
+	firstRelease := make(chan struct{})
+	store := &blockingUpdateStore{
+		Store:   base,
+		started: make(chan int, 2),
+		release: []chan struct{}{firstRelease},
+		fail:    make(map[int]error),
+	}
+	sess := session.New()
+	sess.AddMessage(session.UserMessage("history"))
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	fake := newModelSwitchingRuntime(nil)
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, fake, sess)
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, _, err := sm.SetSessionAgentModel(ctx, sess.ID, "openai/first")
+		firstDone <- err
+	}()
+	require.Equal(t, 0, <-store.started)
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, _, err := sm.SetSessionAgentModel(ctx, sess.ID, "openai/second")
+		secondDone <- err
+	}()
+
+	select {
+	case index := <-store.started:
+		t.Fatalf("second switch reached persistence before first committed: update %d", index)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(firstRelease)
+	require.NoError(t, <-firstDone)
+	require.Equal(t, 1, <-store.started)
+	require.NoError(t, <-secondDone)
+
+	stored, err := store.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "openai/second", stored.AgentModelOverrides["root"])
+	require.Len(t, stored.GetAllMessages(), 1)
+	assert.Equal(t, "history", stored.GetAllMessages()[0].Message.Content)
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Equal(t, "openai/second", fake.overrides["root"])
+}
+
+func TestSessionManager_SetSessionAgentModel_FailedRollbackCannotRaceSuccess(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	base := session.NewInMemorySessionStore()
+	firstRelease := make(chan struct{})
+	store := &blockingUpdateStore{
+		Store:   base,
+		started: make(chan int, 2),
+		release: []chan struct{}{firstRelease},
+		fail:    map[int]error{0: errors.New("synthetic first update failure")},
+	}
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	fake := newModelSwitchingRuntime(nil)
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, fake, sess)
+
+	failedDone := make(chan error, 1)
+	go func() {
+		_, _, err := sm.SetSessionAgentModel(ctx, sess.ID, "openai/failed")
+		failedDone <- err
+	}()
+	require.Equal(t, 0, <-store.started)
+
+	successDone := make(chan error, 1)
+	go func() {
+		_, _, err := sm.SetSessionAgentModel(ctx, sess.ID, "openai/success")
+		successDone <- err
+	}()
+
+	select {
+	case index := <-store.started:
+		t.Fatalf("successful switch overtook failed transaction: update %d", index)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(firstRelease)
+	require.Error(t, <-failedDone)
+	require.Equal(t, 1, <-store.started)
+	require.NoError(t, <-successDone)
+
+	stored, err := store.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "openai/success", stored.AgentModelOverrides["root"])
+	assert.Equal(t, "openai/success", sess.AgentModelOverrides["root"])
+
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Equal(t, "openai/success", fake.overrides["root"])
+}
+
+func TestSessionManager_RunSessionWaitsForModelSwitch(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	base := session.NewInMemorySessionStore()
+	release := make(chan struct{})
+	store := &blockingUpdateStore{
+		Store:   base,
+		started: make(chan int, 2),
+		release: []chan struct{}{release},
+		fail:    make(map[int]error),
+	}
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+
+	fake := newModelSwitchingRuntime(nil)
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, fake, sess)
+
+	switchDone := make(chan error, 1)
+	go func() {
+		_, _, err := sm.SetSessionAgentModel(ctx, sess.ID, "openai/switch")
+		switchDone <- err
+	}()
+	require.Equal(t, 0, <-store.started)
+
+	runDone := make(chan error, 1)
+	go func() {
+		stream, err := sm.RunSession(ctx, sess.ID, "agent", "root", []api.Message{{Content: "after switch"}}, "openai/run")
+		if err == nil {
+			for range stream {
+			}
+		}
+		runDone <- err
+	}()
+
+	select {
+	case index := <-store.started:
+		t.Fatalf("run persisted before model switch committed: update %d", index)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	require.NoError(t, <-switchDone)
+	require.Equal(t, 1, <-store.started)
+	require.NoError(t, <-runDone)
+
+	rs, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok)
+	live := rs.session.GetAllMessages()
+	require.Len(t, live, 1)
+	assert.Equal(t, "after switch", live[0].Message.Content)
+
+	stored, err := store.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "openai/run", stored.AgentModelOverrides["root"])
+}
+
+func TestSessionManager_ModelSwitchConcurrentSessionSaves(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	fake := newModelSwitchingRuntime(nil)
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, fake, sess)
+
+	const iterations = 100
+	errs := make(chan error, 3)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := range iterations {
+			_, _, err := sm.SetSessionAgentModel(ctx, sess.ID, fmt.Sprintf("openai/model-%d", i))
+			if err != nil {
+				errs <- err
+				return
+			}
+		}
+	})
+	wg.Go(func() {
+		for i := range iterations {
+			if err := sm.UpdateSessionPermissions(ctx, sess.ID, &session.PermissionsConfig{
+				Allow: []string{fmt.Sprintf("tool-%d", i)},
+			}); err != nil {
+				errs <- err
+				return
+			}
+		}
+	})
+	wg.Go(func() {
+		for i := range iterations {
+			policy := session.SafetyPolicyStrict
+			if i%2 == 0 {
+				policy = session.SafetyPolicyBalanced
+			}
+			if err := sm.SetSessionSafetyPolicy(ctx, sess.ID, policy); err != nil {
+				errs <- err
+				return
+			}
+		}
+	})
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	stored, err := store.GetSession(ctx, sess.ID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, stored.AgentModelOverrides["root"])
+	assert.NotNil(t, stored.Permissions)
+}
+
+func TestSessionManager_RunSessionDeletedWhileWaitingForModelSwitch(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	fake := newModelSwitchingRuntime(nil)
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, fake, sess)
+
+	rs, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok)
+	rs.modelSwitch.Lock()
+
+	reachedModelSwitch := make(chan struct{})
+	sm.beforeRunModelSwitch = func() { close(reachedModelSwitch) }
+	runDone := make(chan error, 1)
+	go func() {
+		_, err := sm.RunSession(ctx, sess.ID, "agent", "root", []api.Message{{Content: "must not persist"}}, "openai/new")
+		runDone <- err
+	}()
+	<-reachedModelSwitch
+
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- sm.DeleteSession(ctx, sess.ID) }()
+	require.Eventually(t, rs.deleting.Load, 2*time.Second, 10*time.Millisecond)
+	rs.modelSwitch.Unlock()
+
+	require.ErrorIs(t, <-runDone, ErrSessionNotRunning)
+	require.NoError(t, <-deleteDone)
+	_, err := store.GetSession(ctx, sess.ID)
+	require.ErrorIs(t, err, session.ErrNotFound)
+	assert.Empty(t, sess.GetAllMessages())
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	assert.Empty(t, fake.overrides)
+}
+
+func TestSessionManager_SetSessionAgentModelDeletedDuringProviderCall(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	called := make(chan struct{}, 1)
+	release := make(chan struct{})
+	fake := newModelSwitchingRuntime(nil)
+	fake.setAgentModelCalled = called
+	fake.setAgentModelDelay = release
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, fake, sess)
+
+	switchDone := make(chan error, 1)
+	go func() {
+		_, _, err := sm.SetSessionAgentModel(ctx, sess.ID, "openai/new")
+		switchDone <- err
+	}()
+	require.Eventually(t, func() bool { return len(called) == 1 }, 2*time.Second, 10*time.Millisecond)
+
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- sm.DeleteSession(ctx, sess.ID) }()
+	require.Eventually(t, func() bool {
+		rs, ok := sm.runtimeSessions.Load(sess.ID)
+		return ok && rs.deleting.Load()
+	}, 2*time.Second, 10*time.Millisecond)
+	close(release)
+
+	require.ErrorIs(t, <-switchDone, ErrSessionNotRunning)
+	require.NoError(t, <-deleteDone)
+	_, err := store.GetSession(ctx, sess.ID)
+	require.ErrorIs(t, err, session.ErrNotFound)
+	_, exists := sess.AgentModelOverride("root")
+	assert.False(t, exists)
+}
+
+func TestSessionManager_BatchDeleteWhileModelSwitchWaits(t *testing.T) {
+	t.Parallel()
+
+	ctx := t.Context()
+	store := session.NewInMemorySessionStore()
+	sess := session.New()
+	require.NoError(t, store.AddSession(ctx, sess))
+	fake := newModelSwitchingRuntime(nil)
+	sm := NewSessionManager(ctx, config.Sources{}, store, 0, &config.RuntimeConfig{})
+	sm.AttachRuntime(ctx, sess.ID, fake, sess)
+
+	rs, ok := sm.runtimeSessions.Load(sess.ID)
+	require.True(t, ok)
+	rs.modelSwitch.Lock()
+
+	switchDone := make(chan error, 1)
+	go func() {
+		_, _, err := sm.SetSessionAgentModel(ctx, sess.ID, "openai/new")
+		switchDone <- err
+	}()
+
+	batchDone := make(chan struct{})
+	var deleted int
+	var failed []string
+	go func() {
+		deleted, failed = sm.BatchDeleteSessions(ctx, []string{sess.ID})
+		close(batchDone)
+	}()
+	require.Eventually(t, rs.deleting.Load, 2*time.Second, 10*time.Millisecond)
+	rs.modelSwitch.Unlock()
+
+	require.ErrorIs(t, <-switchDone, ErrSessionNotRunning)
+	<-batchDone
+	assert.Equal(t, 1, deleted)
+	assert.Empty(t, failed)
+	_, err := store.GetSession(ctx, sess.ID)
+	require.ErrorIs(t, err, session.ErrNotFound)
 }
 
 // When the session store rejects the persistence write, the in-memory
@@ -470,6 +958,7 @@ func TestSessionManager_SetSessionAgentModel_PreservesSafetyPolicy(t *testing.T)
 // reserved for client-side mistakes like an invalid request body.
 func TestAttachedServer_RunAgent_StoreFailureReturns500(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx := t.Context()
 	store := &failingStore{Store: session.NewInMemorySessionStore()}
@@ -490,7 +979,7 @@ func TestAttachedServer_RunAgent_StoreFailureReturns500(t *testing.T) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, addr+"/api/sessions/"+sess.ID+"/agent/agent.yaml/root", body)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
@@ -505,6 +994,7 @@ func TestAttachedServer_RunAgent_StoreFailureReturns500(t *testing.T) {
 // from an actual server-side problem.
 func TestAttachedServer_ModelEndpoints_404WhenNotRunning(t *testing.T) {
 	t.Parallel()
+	client := newTestHTTPClient(t)
 
 	ctx := t.Context()
 	store := session.NewInMemorySessionStore()
@@ -519,7 +1009,7 @@ func TestAttachedServer_ModelEndpoints_404WhenNotRunning(t *testing.T) {
 	t.Run("GET", func(t *testing.T) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, addr+"/api/sessions/"+sess.ID+"/models", http.NoBody)
 		require.NoError(t, err)
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
 		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -642,9 +1132,8 @@ func TestSessionManager_SetSessionAgentModel_DoesNotHoldMuxDuringRuntimeIO(t *te
 }
 
 // applyStoredOverrides is the helper called by runtimeForSession to
-// re-apply persisted overrides on a freshly-built runtime. We can't
-// drive runtimeForSession with a fake runtime (it constructs a real
-// LocalRuntime), so we cover the helper's contract directly here.
+// re-apply persisted overrides on a freshly-built runtime. These cases
+// cover the helper's contract directly.
 func TestApplyStoredOverrides(t *testing.T) {
 	t.Parallel()
 

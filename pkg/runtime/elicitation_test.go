@@ -2,10 +2,13 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -14,6 +17,7 @@ import (
 	"github.com/docker/docker-agent/pkg/hooks"
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/team"
+	"github.com/docker/docker-agent/pkg/tools"
 )
 
 func TestElicitationError_Error(t *testing.T) {
@@ -158,35 +162,37 @@ func TestElicitationBridge_RestoreAndCloseWaitsForInflightSenders(t *testing.T) 
 func TestElicitationBridge_ConcurrentSendsAndCloseAreSerializedSafely(t *testing.T) {
 	t.Parallel()
 
-	var b elicitationBridge
-	ch := make(chan Event, 64)
-	parent := make(chan Event, 1)
-	b.swap(ch)
+	synctest.Test(t, func(t *testing.T) {
+		var b elicitationBridge
+		ch := make(chan Event, 64)
+		parent := make(chan Event, 1)
+		b.swap(ch)
 
-	var wg sync.WaitGroup
-	for range 10 {
-		wg.Go(func() {
-			for range 5 {
-				_ = b.send(t.Context(), Error("x"))
-			}
-		})
-	}
-
-	received := make(chan struct{})
-	go func() {
-		defer close(received)
-		for range ch {
+		var wg sync.WaitGroup
+		for range 10 {
+			wg.Go(func() {
+				for range 5 {
+					_ = b.send(t.Context(), Error("x"))
+				}
+			})
 		}
-	}()
 
-	wg.Wait()
-	b.restoreAndClose(ch, parent)
+		received := make(chan struct{})
+		go func() {
+			defer close(received)
+			for range ch {
+			}
+		}()
 
-	select {
-	case <-received:
-	case <-time.After(time.Second):
-		t.Fatal("reader did not observe channel close")
-	}
+		wg.Wait()
+		b.restoreAndClose(ch, parent)
+
+		select {
+		case <-received:
+		case <-time.After(time.Second):
+			t.Fatal("reader did not observe channel close")
+		}
+	})
 }
 
 func TestLocalRuntime_FinalizeEventChannelEmitsStreamStoppedOnce(t *testing.T) {
@@ -198,7 +204,7 @@ func TestLocalRuntime_FinalizeEventChannelEmitsStreamStoppedOnce(t *testing.T) {
 	parent := make(chan Event, 1)
 	rt.elicitation.swap(events)
 
-	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events)
+	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, "", parent, events)
 
 	var stopped int
 	for ev := range events {
@@ -209,35 +215,49 @@ func TestLocalRuntime_FinalizeEventChannelEmitsStreamStoppedOnce(t *testing.T) {
 	assert.Equal(t, 1, stopped, "StreamStopped should be emitted exactly once")
 }
 
-func TestLocalRuntime_FinalizeEventChannelDoesNotDeadlockWhenBufferFullAndConsumerGone(t *testing.T) {
+// TestLocalRuntime_FinalizeEventChannelDropsStreamStoppedAfterBoundedTimeout
+// pins the #4136 fix's bound: the StreamStopped send waits for the
+// abandoned-consumer timeout (proving it is a bounded blocking send, not the
+// old plain non-blocking one) but still returns — and still drops the event
+// — rather than hanging forever when nothing ever drains the buffer.
+func TestLocalRuntime_FinalizeEventChannelDropsStreamStoppedAfterBoundedTimeout(t *testing.T) {
 	t.Parallel()
 
-	rt := newElicitationTestRuntime(t)
-	sess := session.New()
-	events := make(chan Event, 1)
-	parent := make(chan Event, 1)
-	events <- Error("buffer already full")
-	rt.elicitation.swap(events)
+	synctest.Test(t, func(t *testing.T) {
+		rt := newElicitationTestRuntime(t)
+		const timeout = 50 * time.Millisecond
+		rt.streamStoppedDeliveryTimeout = timeout
+		sess := session.New()
+		events := make(chan Event, 1)
+		parent := make(chan Event, 1)
+		events <- Error("buffer already full")
+		rt.elicitation.swap(events)
 
-	done := make(chan struct{})
-	go func() {
-		rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events)
-		close(done)
-	}()
+		done := make(chan struct{})
+		start := time.Now()
+		go func() {
+			rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, "", parent, events)
+			close(done)
+		}()
 
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("finalizeEventChannel deadlocked with a full buffer and no consumer")
-	}
-
-	var stopped int
-	for ev := range events {
-		if _, ok := ev.(*StreamStoppedEvent); ok {
-			stopped++
+		select {
+		case <-done:
+		case <-time.After(timeout + 2*time.Second):
+			t.Fatal("finalizeEventChannel deadlocked with a full buffer and no consumer")
 		}
-	}
-	assert.Zero(t, stopped, "StreamStopped should be dropped instead of blocking when the buffer is full")
+		elapsed := time.Since(start)
+
+		assert.GreaterOrEqual(t, elapsed, timeout, "the send should wait out the full deadline before giving up")
+		assert.Less(t, elapsed, timeout+2*time.Second, "finalizeEventChannel should return shortly after the deadline, not hang")
+
+		var stopped int
+		for ev := range events {
+			if _, ok := ev.(*StreamStoppedEvent); ok {
+				stopped++
+			}
+		}
+		assert.Zero(t, stopped, "StreamStopped should be dropped instead of blocking forever when the buffer is full and abandoned")
+	})
 }
 
 // TestLocalRuntime_FinalizeEventChannelStreamStoppedIsLastBeforeClose pins the
@@ -263,7 +283,7 @@ func TestLocalRuntime_FinalizeEventChannelStreamStoppedIsLastBeforeClose(t *test
 	events <- Error("prior stream output 2")
 	rt.elicitation.swap(events)
 
-	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, parent, events)
+	rt.finalizeEventChannel(t.Context(), sess, turnEndReasonNormal, "", parent, events)
 
 	var delivered []Event
 	for ev := range events {
@@ -298,55 +318,57 @@ func TestLocalRuntime_FinalizeEventChannelStreamStoppedIsLastBeforeClose(t *test
 func TestRunStreamClosesChannelAndRestoresElicitationOnEarlyReturn(t *testing.T) {
 	t.Parallel()
 
-	const hookName = "test-stop-user-prompt-submit"
-	dontContinue := false
+	synctest.Test(t, func(t *testing.T) {
+		const hookName = "test-stop-user-prompt-submit"
+		dontContinue := false
 
-	root := agent.New("root", "test agent",
-		agent.WithModel(&mockProvider{id: "test/mock-model"}),
-		agent.WithHooks(&latest.HooksConfig{
-			UserPromptSubmit: []latest.HookDefinition{
-				{Type: "builtin", Command: hookName},
+		root := agent.New("root", "test agent",
+			agent.WithModel(&mockProvider{id: "test/mock-model"}),
+			agent.WithHooks(&latest.HooksConfig{
+				UserPromptSubmit: []latest.HookDefinition{
+					{Type: "builtin", Command: hookName},
+				},
+			}),
+		)
+		rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
+			WithSessionCompaction(false),
+			WithModelStore(mockModelStore{}),
+		)
+		require.NoError(t, err)
+
+		require.NoError(t, rt.hooksRegistry.RegisterBuiltin(
+			hookName,
+			func(_ context.Context, _ *hooks.Input, _ []string) (*hooks.Output, error) {
+				return &hooks.Output{Continue: &dontContinue, StopReason: "stop the run"}, nil
 			},
-		}),
-	)
-	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)),
-		WithSessionCompaction(false),
-		WithModelStore(mockModelStore{}),
-	)
-	require.NoError(t, err)
+		))
 
-	require.NoError(t, rt.hooksRegistry.RegisterBuiltin(
-		hookName,
-		func(_ context.Context, _ *hooks.Input, _ []string) (*hooks.Output, error) {
-			return &hooks.Output{Continue: &dontContinue, StopReason: "stop the run"}, nil
-		},
-	))
+		// Seed a sentinel "parent" elicitation channel. After the stream tears
+		// down, the bridge must be restored to this channel — not left pointing
+		// at the stream's own (now closed) events channel.
+		parent := make(chan Event, 1)
+		rt.elicitation.swap(parent)
 
-	// Seed a sentinel "parent" elicitation channel. After the stream tears
-	// down, the bridge must be restored to this channel — not left pointing
-	// at the stream's own (now closed) events channel.
-	parent := make(chan Event, 1)
-	rt.elicitation.swap(parent)
+		sess := session.New(session.WithUserMessage("hi"))
+		sess.Title = "Unit Test"
 
-	sess := session.New(session.WithUserMessage("hi"))
-	sess.Title = "Unit Test"
+		drained := make(chan struct{})
+		go func() {
+			defer close(drained)
+			for range rt.RunStream(t.Context(), sess) {
+			}
+		}()
 
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		for range rt.RunStream(t.Context(), sess) {
+		select {
+		case <-drained:
+		case <-time.After(5 * time.Second):
+			t.Fatal("RunStream consumer hung: events channel was never closed on the hook-driven early return")
 		}
-	}()
 
-	select {
-	case <-drained:
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunStream consumer hung: events channel was never closed on the hook-driven early return")
-	}
-
-	restored := rt.elicitation.swap(nil)
-	assert.Equal(t, parent, restored,
-		"the previous elicitation channel must be restored on the early-return path")
+		restored := rt.elicitation.swap(nil)
+		assert.Equal(t, parent, restored,
+			"the previous elicitation channel must be restored on the early-return path")
+	})
 }
 
 func newElicitationTestRuntime(t *testing.T) *LocalRuntime {
@@ -357,4 +379,77 @@ func newElicitationTestRuntime(t *testing.T) *LocalRuntime {
 	rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(root)), WithModelStore(mockModelStore{}))
 	require.NoError(t, err)
 	return rt
+}
+
+func TestDirectElicitationHandlerBypassesEventsAndHonorsHeadless(t *testing.T) {
+	t.Parallel()
+	for _, headless := range []bool{false, true} {
+		calls := 0
+		rt, err := NewLocalRuntime(t.Context(), team.New(team.WithAgents(agent.New("root", "test", agent.WithModel(&mockProvider{id: "test/model", stream: &mockStream{}})))),
+			WithNonInteractive(headless), WithElicitationHandler(func(ctx context.Context, req *mcp.ElicitParams) (tools.ElicitationResult, error) {
+				calls++
+				assert.Equal(t, "ask", req.Message)
+				return tools.ElicitationResult{Action: tools.ElicitationActionAccept, Content: map[string]any{"answer": "yes"}}, nil
+			}))
+		require.NoError(t, err)
+		rt.OnElicitationRequest(func(Event) { t.Error("direct handler must not also emit a request") })
+		result, err := rt.elicitationHandler(tools.WithoutInteractivePrompts(t.Context()), &mcp.ElicitParams{Message: "ask"})
+		require.NoError(t, err)
+		if headless {
+			assert.Equal(t, 0, calls)
+			assert.Equal(t, tools.ElicitationActionDecline, result.Action)
+		} else {
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, tools.ElicitationActionAccept, result.Action)
+		}
+		require.NoError(t, rt.Close())
+	}
+}
+
+func TestContextualElicitationPreservesProducerContext(t *testing.T) {
+	t.Parallel()
+	rt := &LocalRuntime{}
+	type ownerKey struct{}
+	origin := context.WithValue(t.Context(), ownerKey{}, "original-conversation")
+	var observed string
+	rt.OnElicitationRequestWithContext(func(ctx context.Context, event Event) { observed = ctx.Value(ownerKey{}).(string) })
+	rt.emitElicitationRequestContext(origin, ElicitationRequest("request", "form", nil, "", "id", "", "child", nil, "root"))
+	require.Equal(t, "original-conversation", observed)
+	require.True(t, rt.hasElicitationSink())
+}
+
+func TestElicitationClosureDelivery(t *testing.T) {
+	t.Parallel()
+	for _, cancelRequest := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cancel=%t", cancelRequest), func(t *testing.T) {
+			t.Parallel()
+			rt := newElicitationTestRuntime(t)
+			defer rt.Close()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var request *ElicitationRequestEvent
+			rt.OnElicitationRequest(func(event Event) {
+				request = event.(*ElicitationRequestEvent)
+				if cancelRequest {
+					cancel()
+				} else {
+					require.NoError(t, rt.ResumeElicitation(ctx, tools.ElicitationActionAccept, nil, request.ElicitationID))
+				}
+			})
+			var closed *ElicitationClosedEvent
+			rt.OnBackgroundEventWithContext(func(origin context.Context, event Event) {
+				require.NoError(t, origin.Err(), "closure survives producer cancellation")
+				closed = event.(*ElicitationClosedEvent)
+			})
+			_, err := rt.elicitationHandler(ctx, &mcp.ElicitParams{Message: "Question"})
+			if cancelRequest {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NotNil(t, closed)
+			assert.Equal(t, request.ElicitationID, closed.ElicitationID)
+			assert.Equal(t, "elicitation_closed", closed.Type)
+		})
+	}
 }

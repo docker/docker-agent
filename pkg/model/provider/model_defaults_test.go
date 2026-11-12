@@ -231,6 +231,46 @@ func TestApplyModelDefaults(t *testing.T) {
 	}
 }
 
+func TestApplyModelDefaults_GPT6NoneEffort(t *testing.T) {
+	t.Parallel()
+
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna", "gpt-6-astra"} {
+		for _, tc := range []struct {
+			provider string
+			prefix   string
+			apiType  string
+			vendor   bool
+		}{
+			{provider: "openai", vendor: true},
+			{provider: "azure", vendor: true},
+			{provider: "chatgpt", vendor: true},
+			{provider: "vercel", prefix: "openai/", vendor: true},
+			{provider: "custom", apiType: "openai_responses", vendor: true},
+			{provider: "vercel"},
+			{provider: "xai"},
+			{provider: "mistral"},
+		} {
+			t.Run(tc.provider+"/"+tc.prefix+model, func(t *testing.T) {
+				t.Parallel()
+				for _, budget := range []*latest.ThinkingBudget{
+					{Effort: "none"}, {Effort: "NONE"}, {Tokens: 0}, nil,
+				} {
+					cfg := &latest.ModelConfig{
+						Provider: tc.provider, Model: tc.prefix + model,
+						ProviderOpts: map[string]any{"api_type": tc.apiType}, ThinkingBudget: budget,
+					}
+					applyModelDefaults(cfg)
+					if tc.vendor && model != "gpt-6-astra" && budget != nil && budget.Effort != "" {
+						assert.Equal(t, budget, cfg.ThinkingBudget)
+					} else {
+						assert.Nil(t, cfg.ThinkingBudget)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestApplyProviderDefaults(t *testing.T) {
 	t.Parallel()
 

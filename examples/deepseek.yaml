@@ -3,7 +3,7 @@
 models:
   deepseek_model:
     provider: deepseek
-    model: deepseek-chat
+    model: deepseek-v4-pro
 
 agents:
   root:

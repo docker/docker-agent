@@ -68,15 +68,12 @@ func (m *failingInitClient) GetPrompt(context.Context, *gomcp.GetPromptParams) (
 }
 
 func (m *failingInitClient) SetElicitationHandler(tools.ElicitationHandler) {}
-func (m *failingInitClient) SetSamplingHandler(tools.SamplingHandler)       {}
-func (m *failingInitClient) SetSamplingWithToolsHandler(tools.SamplingWithToolsHandler) {
-}
-func (m *failingInitClient) SetOAuthSuccessHandler(func())       {}
-func (m *failingInitClient) SetManagedOAuth(bool)                {}
-func (m *failingInitClient) SetUnmanagedOAuthRedirectURI(string) {}
-func (m *failingInitClient) SetToolListChangedHandler(func())    {}
-func (m *failingInitClient) SetPromptListChangedHandler(func())  {}
-func (m *failingInitClient) ServerAddress() string               { return "mock://failing" }
+func (m *failingInitClient) SetOAuthSuccessHandler(func())                  {}
+func (m *failingInitClient) SetManagedOAuth(bool)                           {}
+func (m *failingInitClient) SetUnmanagedOAuthRedirectURI(string)            {}
+func (m *failingInitClient) SetToolListChangedHandler(func())               {}
+func (m *failingInitClient) SetPromptListChangedHandler(func())             {}
+func (m *failingInitClient) ServerAddress() string                          { return "mock://failing" }
 
 func (m *failingInitClient) Wait() error {
 	m.mu.Lock()

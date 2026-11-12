@@ -1,7 +1,7 @@
 package handoff
 
 import (
-	"github.com/docker/docker-agent/pkg/tools/builtin/handoff"
+	handoff "github.com/docker/docker-agent/pkg/tools/builtin/handoff/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"

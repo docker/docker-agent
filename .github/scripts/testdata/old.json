@@ -1,0 +1,32 @@
+{
+  "acme": {
+    "models": {
+      "model-a": {
+        "name": "Model A",
+        "limit": { "context": 128000, "output": 4096 },
+        "cost": { "input": 1, "output": 2 }
+      },
+      "model-b": {
+        "name": "Model B",
+        "limit": { "context": 8000, "output": 1000 }
+      }
+    }
+  },
+  "unchanged": {
+    "models": {
+      "model-z": {
+        "name": "Model Z",
+        "limit": { "context": 100000, "output": 4096 }
+      }
+    }
+  },
+  "legacy": {
+    "models": {
+      "old-model|`removed": {
+        "name": "Old Model | Removed `soon`",
+        "limit": { "context": 4096, "output": 1024 },
+        "cost": { "input": 2, "output": 4 }
+      }
+    }
+  }
+}

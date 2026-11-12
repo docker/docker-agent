@@ -396,3 +396,213 @@ func TestDatePattern(t *testing.T) {
 		})
 	}
 }
+
+func TestStore_GetModel_CatalogProviderAliases(t *testing.T) {
+	t.Parallel()
+
+	catalogModel := Model{
+		Name: "Vision model", Family: "vision", Reasoning: true, ToolCall: true,
+		Temperature: true, Attachment: true, OpenWeights: true, ReleaseDate: "2026-09-01",
+		Cost: &Cost{
+			Input: 1.2, Output: 3.4, CacheRead: 0.1, CacheWrite: 0.2,
+			Tiers: []CostTier{{Rates: Rates{Input: 2.4, Output: 6.8}, Tier: TierSpec{Type: "context", Size: 100000}}},
+		},
+		Limit:      Limit{Context: 262144, Output: 65536},
+		Modalities: Modalities{Input: []string{"text", "image"}, Output: []string{"text"}},
+	}
+	directModel := Model{Name: "Direct entry", Limit: Limit{Context: 1000, Output: 500}}
+	for _, alias := range []struct{ configured, catalog string }{
+		{"fireworks", "fireworks-ai"},
+		{"together", "togetherai"},
+		{"moonshot", "moonshotai"},
+		{"opencode-zen", "opencode"},
+	} {
+		for _, mode := range []string{"catalog only", "direct entry wins", "direct provider missing model"} {
+			t.Run(alias.configured+"/"+mode, func(t *testing.T) {
+				t.Parallel()
+				providers := map[string]Provider{alias.catalog: {Models: map[string]Model{"MixedModel": catalogModel}}}
+				want := catalogModel
+				switch mode {
+				case "direct entry wins":
+					providers[alias.configured] = Provider{Models: map[string]Model{"MixedModel": directModel}}
+					want = directModel
+				case "direct provider missing model":
+					providers[alias.configured] = Provider{Models: map[string]Model{"other": directModel}}
+				}
+				store := NewDatabaseStore(&Database{Providers: providers})
+				got, err := store.GetModel(t.Context(), NewID(alias.configured, "MixedModel"))
+				require.NoError(t, err)
+				assert.Equal(t, &want, got)
+				canonicalModel, err := store.GetModel(t.Context(), NewID(alias.catalog, "MixedModel"))
+				require.NoError(t, err)
+				assert.Equal(t, &catalogModel, canonicalModel)
+				_, err = store.GetModel(t.Context(), NewID(alias.configured, "missing"))
+				require.EqualError(t, err, `model "missing" not found in provider "`+alias.configured+`"`)
+				_, err = store.GetModel(t.Context(), NewID(alias.configured, "mixedmodel"))
+				require.EqualError(t, err, `model "mixedmodel" not found in provider "`+alias.configured+`"`)
+			})
+		}
+	}
+}
+
+func TestStore_GetModel_CatalogLookupBoundaries(t *testing.T) {
+	t.Parallel()
+
+	lower := Model{Name: "Lowercase catalog model", Modalities: Modalities{Input: []string{"text", "image"}}}
+	direct := Model{Name: "Exact catalog model"}
+	for _, tc := range []struct {
+		name      string
+		id        ID
+		providers map[string]Provider
+		want      *Model
+		wantErr   string
+	}{
+		{
+			name: "OVH lowercase fallback", id: NewID("ovhcloud", "Qwen3.5-397B-A17B"),
+			providers: map[string]Provider{"ovhcloud": {Models: map[string]Model{"qwen3.5-397b-a17b": lower}}}, want: &lower,
+		},
+		{
+			name: "OVH direct precedence", id: NewID("ovhcloud", "Qwen3.5-397B-A17B"),
+			providers: map[string]Provider{"ovhcloud": {Models: map[string]Model{"qwen3.5-397b-a17b": lower, "Qwen3.5-397B-A17B": direct}}}, want: &direct,
+		},
+		{
+			name: "OVH unknown preserves spelling", id: NewID("ovhcloud", "MissingModel"),
+			providers: map[string]Provider{"ovhcloud": {}}, wantErr: `model "MissingModel" not found in provider "ovhcloud"`,
+		},
+		{
+			name: "other providers case sensitive", id: NewID("openai", "MixedModel"),
+			providers: map[string]Provider{"openai": {Models: map[string]Model{"mixedmodel": lower}}}, wantErr: `model "MixedModel" not found in provider "openai"`,
+		},
+		{
+			name: "ChatGPT is not a full OpenAI alias", id: NewID("chatgpt", "vision"),
+			providers: map[string]Provider{"openai": {Models: map[string]Model{"vision": lower}}}, wantErr: `provider "chatgpt" not found`,
+		},
+		{
+			name: "alias missing provider", id: NewID("fireworks", "MissingModel"),
+			providers: map[string]Provider{}, wantErr: `provider "fireworks" not found`,
+		},
+		{
+			name: "custom provider missing", id: NewID("custom", "MissingModel"),
+			providers: map[string]Provider{}, wantErr: `provider "custom" not found`,
+		},
+		{
+			name: "Bedrock direct precedence", id: NewID("amazon-bedrock", "us.model"),
+			providers: map[string]Provider{"amazon-bedrock": {Models: map[string]Model{"model": lower, "us.model": direct}}}, want: &direct,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := NewDatabaseStore(&Database{Providers: tc.providers}).GetModel(t.Context(), tc.id)
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+				assert.Nil(t, got)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestStore_GetModel_CatalogAliasFetchPolicy(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name      string
+		known     bool
+		fail      bool
+		cancel    bool
+		missing   bool
+		wantFetch int
+	}{
+		{name: "known success", known: true, wantFetch: 1},
+		{name: "known missing model", known: true, missing: true, wantFetch: 1},
+		{name: "known fetch failure", known: true, fail: true, wantFetch: 1},
+		{name: "known canceled fetch", known: true, cancel: true, wantFetch: 1},
+		{name: "custom never fetches"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls int
+			var checked []string
+			model := "catalog-fetch-test"
+			store, err := NewStore(
+				WithCache(filepath.Join(t.TempDir(), CacheFileName)),
+				WithKnownProvider(func(provider string) bool {
+					checked = append(checked, provider)
+					return tc.known && provider == "moonshot"
+				}),
+				WithFetcher(func(ctx context.Context, _ string) (*Database, string, error) {
+					calls++
+					if tc.cancel {
+						require.ErrorIs(t, ctx.Err(), context.Canceled)
+						return nil, "", ctx.Err()
+					}
+					if tc.fail {
+						return nil, "", errors.New("offline")
+					}
+					models := map[string]Model{}
+					if !tc.missing {
+						models[model] = Model{Name: "Fetched model"}
+					}
+					return &Database{Providers: map[string]Provider{"moonshotai": {Models: models}}}, "", nil
+				}),
+			)
+			require.NoError(t, err)
+			ctx := t.Context()
+			if tc.cancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			provider := "moonshot"
+			if !tc.known {
+				provider = "custom"
+			}
+			got, err := store.GetModel(ctx, NewID(provider, model))
+			if tc.known && !tc.fail && !tc.cancel && !tc.missing {
+				require.NoError(t, err)
+				assert.Equal(t, &Model{Name: "Fetched model"}, got)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), provider)
+				assert.Nil(t, got)
+			}
+			assert.Equal(t, tc.wantFetch, calls)
+			assert.Equal(t, []string{provider}, checked, "fetch policy uses only the configured provider")
+		})
+	}
+}
+
+func TestCanonicalProviderID(t *testing.T) {
+	t.Parallel()
+	for legacy, canonical := range legacyProviderIDs {
+		assert.Equal(t, canonical, CanonicalProviderID(legacy))
+		assert.Equal(t, canonical, CanonicalProviderID(canonical))
+	}
+	for _, id := range []string{"", "chatgpt", "openai", "custom", "FIREWORKS"} {
+		assert.Equal(t, id, CanonicalProviderID(id))
+	}
+}
+
+func TestStore_ResolveModelAlias_LegacyProviders(t *testing.T) {
+	t.Parallel()
+	for legacy, canonical := range legacyProviderIDs {
+		t.Run(legacy, func(t *testing.T) {
+			t.Parallel()
+			catalog := Provider{Models: map[string]Model{
+				"latest":         {Name: "Model (latest)"},
+				"model-20260101": {Name: "Model"},
+			}}
+			db := &Database{Providers: map[string]Provider{canonical: catalog}}
+			store := NewDatabaseStore(db)
+			assert.Equal(t, "model-20260101", store.ResolveModelAlias(t.Context(), legacy, "latest"))
+			assert.Equal(t, "model-20260101", store.ResolveModelAlias(t.Context(), canonical, "latest"))
+			assert.Equal(t, "unknown", store.ResolveModelAlias(t.Context(), legacy, "unknown"))
+			db.Providers[legacy] = Provider{Models: map[string]Model{"latest": {Name: "Direct model"}}}
+			assert.Equal(t, "latest", store.ResolveModelAlias(t.Context(), legacy, "latest"), "direct provider wins")
+			_, err := store.GetModel(t.Context(), NewID(canonical, "latest"))
+			require.NoError(t, err)
+		})
+	}
+}

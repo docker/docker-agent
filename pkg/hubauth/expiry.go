@@ -33,7 +33,13 @@ func Expiring(token string) bool {
 	if !ok {
 		return false
 	}
-	return exp.Before(now().Add(ExpiryLeeway))
+	return ExpiringAt(exp)
+}
+
+// ExpiringAt reports whether expiresAt is zero, has passed, or is less than
+// [ExpiryLeeway] away, using the issuer's clock.
+func ExpiringAt(expiresAt time.Time) bool {
+	return expiresAt.IsZero() || expiresAt.Before(now().Add(ExpiryLeeway))
 }
 
 // renewAt returns the time from which token must be replaced.

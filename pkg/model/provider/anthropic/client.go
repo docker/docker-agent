@@ -1,12 +1,14 @@
 package anthropic
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
+	"os"
+	"slices"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -56,12 +58,23 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		return nil, errors.New("environment provider is required")
 	}
 
-	if err := validateThinkingDisplay(cfg); err != nil {
+	if err := validateThinkingOptions(cfg); err != nil {
 		slog.ErrorContext(ctx, "Anthropic client creation failed", "error", err)
 		return nil, err
 	}
 
+	if err := validateCachePreservingUpdates(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateSpeed(cfg); err != nil {
+		slog.ErrorContext(ctx, "Anthropic client creation failed", "error", err)
+		return nil, err
+	}
 	globalOptions := options.Apply(opts...)
+	if err := validateFallbackHost(cfg, globalOptions.Gateway()); err != nil {
+		slog.ErrorContext(ctx, "Anthropic client creation failed", "error", err)
+		return nil, err
+	}
 
 	anthropicClient := &Client{
 		Config: base.Config{
@@ -79,12 +92,15 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 		}
 		httpClient := httpclient.NewHTTPClient(ctx)
 		globalOptions.WrapTransport(ctx, httpClient)
+		base.WrapOpenCodeSession(cfg, httpClient)
 		requestOptions := append([]option.RequestOption{
 			option.WithHTTPClient(httpClient),
 		}, authOpts...)
 		if cfg.BaseURL != "" {
 			requestOptions = append(requestOptions, option.WithBaseURL(cfg.BaseURL))
 		}
+		// The SDK itself honors ANTHROPIC_BASE_URL; record it so endpoint checks, such as pricing, see it.
+		anthropicClient.BaseURL = cmp.Or(cfg.BaseURL, os.Getenv("ANTHROPIC_BASE_URL"))
 		client := anthropic.NewClient(requestOptions...)
 		anthropicClient.clientFn = func(context.Context) (anthropic.Client, error) {
 			return client, nil
@@ -102,30 +118,17 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 
 		// When using a Gateway, tokens are short-lived.
 		anthropicClient.clientFn = func(ctx context.Context) (anthropic.Client, error) {
-			// Query a fresh auth token each time the client is used.
-			authToken, err := base.GatewayAuthToken(ctx, env, gateway)
+			connection, err := base.NewGatewayClient(ctx, env, gateway, "https://api.anthropic.com/", "/", cfg, &globalOptions)
 			if err != nil {
 				return anthropic.Client{}, err
 			}
 
-			url, err := url.Parse(gateway)
-			if err != nil {
-				return anthropic.Client{}, fmt.Errorf("invalid gateway URL: %w", err)
-			}
-			baseURL := fmt.Sprintf("%s://%s%s/", url.Scheme, url.Host, url.Path)
-
-			// Configure a custom HTTP client to inject headers and query params used by the Gateway.
-			httpOptions := base.GatewayHTTPOptions(url, "https://api.anthropic.com/", cfg, &globalOptions)
-			httpOptions = append(httpOptions, base.GatewayAuthRetry(env, gateway)...)
-
-			gatewayHTTPClient := httpclient.NewHTTPClient(ctx, httpOptions...)
-			globalOptions.WrapTransport(ctx, gatewayHTTPClient)
 			clientOptions := []option.RequestOption{
-				option.WithBaseURL(baseURL),
-				option.WithHTTPClient(gatewayHTTPClient),
+				option.WithBaseURL(connection.BaseURL),
+				option.WithHTTPClient(connection.HTTPClient),
 			}
-			if authToken != "" {
-				clientOptions = append(clientOptions, option.WithAuthToken(authToken), option.WithAPIKey(authToken))
+			if connection.AuthToken != "" {
+				clientOptions = append(clientOptions, option.WithAuthToken(connection.AuthToken), option.WithAPIKey(connection.AuthToken))
 			}
 			client := anthropic.NewClient(clientOptions...)
 
@@ -145,6 +148,19 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 // alternative endpoints, such as
 // [github.com/docker/docker-agent/pkg/model/provider/anthropic/vertex].
 func NewClientFromFactory(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, factory func(context.Context) (anthropic.Client, error), opts ...options.Opt) (*Client, error) {
+	var withOptions func(context.Context, options.ModelOptions) (anthropic.Client, error)
+	if factory != nil {
+		withOptions = func(ctx context.Context, _ options.ModelOptions) (anthropic.Client, error) {
+			return factory(ctx)
+		}
+	}
+	return NewClientFromFactoryWithOptions(ctx, cfg, env, withOptions, opts...)
+}
+
+// NewClientFromFactoryWithOptions is NewClientFromFactory for factories that
+// need the applied options (e.g. options.TokenSource). Options are applied
+// exactly once, before the factory runs, and the factory receives the result.
+func NewClientFromFactoryWithOptions(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider, factory func(context.Context, options.ModelOptions) (anthropic.Client, error), opts ...options.Opt) (*Client, error) {
 	if cfg == nil {
 		return nil, errors.New("model configuration is required")
 	}
@@ -154,15 +170,21 @@ func NewClientFromFactory(ctx context.Context, cfg *latest.ModelConfig, env envi
 	if factory == nil {
 		return nil, errors.New("client factory is required")
 	}
-	if err := validateThinkingDisplay(cfg); err != nil {
+	if err := validateThinkingOptions(cfg); err != nil {
 		return nil, err
 	}
 
 	// Apply options before invoking the factory so option side effects keep
 	// their pre-refactor ordering relative to credential discovery.
+	if err := validateCachePreservingUpdates(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateSpeed(cfg); err != nil {
+		return nil, err
+	}
 	globalOptions := options.Apply(opts...)
 
-	client, err := factory(ctx)
+	client, err := factory(ctx, globalOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +203,8 @@ func NewClientFromFactory(ctx context.Context, cfg *latest.ModelConfig, env envi
 
 // buildDirectAuthOptions returns the SDK request options that authenticate
 // a direct (non-gateway) Anthropic client. It picks between Workload
-// Identity Federation and the legacy ANTHROPIC_API_KEY path based on cfg.
+// Identity Federation and an API key read from the model's token_key, or
+// ANTHROPIC_API_KEY when no token_key is set.
 func buildDirectAuthOptions(ctx context.Context, cfg *latest.ModelConfig, env environment.Provider) ([]option.RequestOption, error) {
 	if cfg.Auth != nil {
 		if cfg.Auth.Type != latest.AuthTypeWorkloadIdentityFederation {
@@ -200,11 +223,12 @@ func buildDirectAuthOptions(ctx context.Context, cfg *latest.ModelConfig, env en
 		}
 		return opts, nil
 	}
-	apiKey, _ := env.Get(ctx, "ANTHROPIC_API_KEY")
+	tokenKey := cmp.Or(cfg.TokenKey, "ANTHROPIC_API_KEY")
+	apiKey, _ := env.Get(ctx, tokenKey)
 	if apiKey == "" {
-		return nil, errors.New("ANTHROPIC_API_KEY environment variable is required")
+		return nil, fmt.Errorf("%s environment variable is required", tokenKey)
 	}
-	slog.DebugContext(ctx, "Anthropic API key found")
+	slog.DebugContext(ctx, "Anthropic API key found", "token_key", tokenKey)
 	return []option.RequestOption{option.WithAPIKey(apiKey)}, nil
 }
 
@@ -218,6 +242,10 @@ func (c *Client) CreateChatCompletionStream(
 		"model", c.ModelConfig.Model,
 		"message_count", len(messages),
 		"tool_count", len(requestTools))
+
+	if _, ok := modelinfo.LookupClaude5(c.ModelConfig.Model); ok && providerutil.FinalAssistantPrefill(messages) {
+		return nil, fmt.Errorf("%s does not accept a final assistant message (prefill)", c.ModelConfig.Model)
+	}
 
 	// Default to 8192 if maxTokens is not set (0)
 	// This is a safe default that works for all Anthropic models
@@ -244,17 +272,30 @@ func (c *Client) CreateChatCompletionStream(
 	//  - interleaved thinking
 	//  - structured output (requires beta header)
 	//  - task_budget (requires the task-budgets beta header)
+	//  - server-side fallbacks (only the beta types carry fallback blocks)
+	//  - fast mode (the speed parameter only exists on the beta types)
 	if c.interleavedThinkingEnabled() ||
 		c.ModelOptions.StructuredOutput() != nil ||
-		!c.ModelConfig.TaskBudget.IsZero() {
+		!c.ModelConfig.TaskBudget.IsZero() || c.thinkingBindingBehavior() != "" ||
+		c.progressUpdatesEnabled() ||
+		cacheDiagnosticsEnabled(c.ModelConfig.ProviderOpts) || cachePreservingUpdatesEnabled(c.ModelConfig.ProviderOpts) || c.hasNativeCompaction(messages) ||
+		fallbacksEnabled(c.ModelConfig.ProviderOpts) ||
+		fastModeEnabled(c.ModelConfig.ProviderOpts) {
 		return c.createBetaStream(ctx, client, messages, requestTools, maxTokens)
 	}
 
-	requestTools = c.toolsWithSupportedDeferral(requestTools)
+	requestTools = c.toolsWithSupportedDeferral(ctx, requestTools, messages)
 	allTools, err := convertTools(requestTools)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to convert tools for Anthropic request", "error", err)
 		return nil, err
+	}
+
+	if sel, enabled := strictToolsOpt(c.ModelConfig.ProviderOpts); enabled {
+		restoreStrictToolSchemas(allTools, requestTools)
+		if err := sel.apply(allTools); err != nil {
+			return nil, err
+		}
 	}
 
 	converted, err := c.convertMessagesWithDeferred(ctx, messages, requestTools)
@@ -280,7 +321,7 @@ func (c *Client) CreateChatCompletionStream(
 
 	// Temperature and TopP cannot be set when extended thinking is enabled
 	// (Anthropic requires temperature=1.0 which is the default when thinking is on)
-	if !thinkingEnabled {
+	if !thinkingEnabled && !rejectsSampling(c.ModelConfig.Model) {
 		if c.ModelConfig.Temperature != nil {
 			params.Temperature = param.NewOpt(*c.ModelConfig.Temperature)
 		}
@@ -292,7 +333,7 @@ func (c *Client) CreateChatCompletionStream(
 	}
 
 	// Forward top_k from provider_opts (Anthropic natively supports it)
-	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok {
+	if topK, ok := providerutil.GetProviderOptInt64(c.ModelConfig.ProviderOpts, "top_k"); ok && !rejectsSampling(c.ModelConfig.Model) {
 		params.TopK = param.NewOpt(topK)
 		slog.DebugContext(ctx, "Anthropic provider_opts: set top_k", "value", topK)
 	}
@@ -318,12 +359,7 @@ func (c *Client) CreateChatCompletionStream(
 	// Add fine-grained tool streaming beta header; the standard Messages API
 	// composes the anthropic-beta header manually (no params.Betas field).
 	betas := "fine-grained-tool-streaming-2025-05-14"
-	var requestOpts []option.RequestOption
-	if fallbacks := fallbackModels(c.ModelConfig.ProviderOpts); len(fallbacks) > 0 {
-		betas += "," + serverSideFallbackBeta
-		requestOpts = append(requestOpts, fallbacksBody(fallbacks))
-	}
-	requestOpts = append(requestOpts, option.WithHeader("anthropic-beta", betas))
+	requestOpts := []option.RequestOption{option.WithHeader("anthropic-beta", betas)}
 
 	stream := client.Messages.NewStreaming(ctx, params, requestOpts...)
 	trackUsage := c.TrackUsageEnabled()
@@ -367,6 +403,7 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 	// Track whether the last appended assistant message included tool_use blocks
 	// so we can ensure the immediate next message is the grouped tool_result user message.
 	pendingAssistantToolUse := false
+	loopStart := chat.ActiveToolLoopStart(messages)
 
 	for i := 0; i < len(messages); i++ {
 		msg := &messages[i]
@@ -390,13 +427,25 @@ func (c *Client) convertMessagesWithDeferred(ctx context.Context, messages []cha
 			continue
 		}
 		if msg.Role == chat.MessageRoleAssistant {
+			if blocks, ok, err := replayContent(msg); err != nil {
+				return nil, err
+			} else if ok {
+				anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(blocks...))
+				pendingAssistantToolUse = len(msg.ToolCalls) > 0
+				continue
+			}
+			if blocks, ok := recoveredParams(msg); ok {
+				anthropicMessages = append(anthropicMessages, anthropic.NewAssistantMessage(blocks...))
+				pendingAssistantToolUse = len(msg.ToolCalls) > 0
+				continue
+			}
 			contentBlocks := make([]anthropic.ContentBlockParamUnion, 0)
 
 			// Include thinking blocks when present to preserve extended thinking context
-			if msg.ReasoningContent != "" && msg.ThinkingSignature != "" {
+			if include, err := c.flattenedThinking(i, loopStart, msg); err != nil {
+				return nil, err
+			} else if include {
 				contentBlocks = append(contentBlocks, anthropic.NewThinkingBlock(msg.ThinkingSignature, msg.ReasoningContent))
-			} else if msg.ThinkingSignature != "" {
-				contentBlocks = append(contentBlocks, anthropic.NewRedactedThinkingBlock(msg.ThinkingSignature))
 			}
 
 			if len(msg.ToolCalls) > 0 {
@@ -677,17 +726,46 @@ func (c *Client) supportsDeferredTools() bool {
 	return modelinfo.SupportsDeferredTools(c.ModelConfig.Provider, c.ModelConfig.Model)
 }
 
-func (c *Client) toolsWithSupportedDeferral(requestTools []tools.Tool) []tools.Tool {
-	if c.supportsDeferredTools() {
+// toolsWithSupportedDeferral sends deferred tools as regular tools when the
+// request can't load them: the model lacks tool search, or the load point is
+// an error result, where Anthropic rejects tool_reference content.
+func (c *Client) toolsWithSupportedDeferral(ctx context.Context, requestTools []tools.Tool, messages []chat.Message) []tools.Tool {
+	if !c.supportsDeferredTools() {
+		return withoutDeferral(requestTools, func(tools.Tool) bool { return true })
+	}
+	errorResults := errorToolResultIDs(messages)
+	atErrorResult := func(tool tools.Tool) bool {
+		return tool.Deferred && errorResults[tool.DeferredAtToolCallID]
+	}
+	if !slices.ContainsFunc(requestTools, atErrorResult) {
 		return requestTools
 	}
-	result := make([]tools.Tool, len(requestTools))
-	copy(result, requestTools)
+	slog.WarnContext(ctx, "Anthropic: deferred tools are anchored at an error tool result, loading them upfront")
+	return withoutDeferral(requestTools, atErrorResult)
+}
+
+func withoutDeferral(requestTools []tools.Tool, undefer func(tools.Tool) bool) []tools.Tool {
+	result := slices.Clip(slices.Clone(requestTools))
+	if result == nil {
+		result = []tools.Tool{}
+	}
 	for i := range result {
-		result[i].Deferred = false
-		result[i].DeferredAtToolCallID = ""
+		if undefer(result[i]) {
+			result[i].Deferred = false
+			result[i].DeferredAtToolCallID = ""
+		}
 	}
 	return result
+}
+
+func errorToolResultIDs(messages []chat.Message) map[string]bool {
+	ids := make(map[string]bool)
+	for i := range messages {
+		if messages[i].Role == chat.MessageRoleTool && messages[i].IsError && messages[i].ToolCallID != "" {
+			ids[messages[i].ToolCallID] = true
+		}
+	}
+	return ids
 }
 
 func convertTools(tooles []tools.Tool) ([]anthropic.ToolUnionParam, error) {
@@ -760,6 +838,12 @@ func ConvertParametersToSchema(params any) (anthropic.ToolInputSchemaParam, erro
 		return anthropic.ToolInputSchemaParam{}, err
 	}
 
+	m, err := tools.SchemaToMap(params)
+	if err != nil {
+		return anthropic.ToolInputSchemaParam{}, err
+	}
+	tools.OrderedSchemaProperties(m)
+	schema.Properties = m["properties"]
 	return schema, nil
 }
 
@@ -776,15 +860,6 @@ func marshalToMap(v any) (map[string]any, bool) {
 		return nil, false
 	}
 	return m, true
-}
-
-// contentArray extracts the content array from a marshaled message map.
-// Used by both standard and Beta API validation/repair code.
-func contentArray(m map[string]any) []any {
-	if a, ok := m["content"].([]any); ok {
-		return a
-	}
-	return nil
 }
 
 // contextLimit returns the context window for this client's model, sourced

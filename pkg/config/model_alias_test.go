@@ -355,7 +355,7 @@ func TestHasCustomBaseURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			result := hasCustomBaseURL(tt.modelCfg, tt.providers)
+			result := latest.HasCustomBaseURL(*tt.modelCfg, tt.providers)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

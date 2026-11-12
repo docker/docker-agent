@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/todo"
+	todo "github.com/docker/docker-agent/pkg/tools/builtin/todo/types"
 )
 
 func todoResult(descriptions ...string) *tools.ToolCallResult {

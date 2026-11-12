@@ -1,0 +1,23 @@
+{{ range $old, $new := hugo.Data.redirects }}
+  {{ with site.GetPage $new }}
+    {{ $html := printf `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="robots" content="noindex">
+  <link rel="canonical" href="%s">
+  <meta http-equiv="refresh" content="0; url=%s">
+  <title>Page moved</title>
+</head>
+<body>
+  <p>This page has moved to <a href="%s">%s</a>.</p>
+  <script>window.location.replace(%s + window.location.search + window.location.hash);</script>
+</body>
+</html>
+` (htmlEscape .Params.canonical) (htmlEscape .RelPermalink) (htmlEscape .RelPermalink) (htmlEscape .Title) (.RelPermalink | jsonify) }}
+    {{ $resource := resources.FromString (printf "%sindex.html" (strings.TrimPrefix "/" $old)) $html }}
+    {{ $resource.Publish }}
+  {{ else }}
+    {{ errorf "redirect %s points to missing page %s" $old $new }}
+  {{ end }}
+{{ end }}

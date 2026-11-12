@@ -3,6 +3,7 @@ package reasoningblock
 import (
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,6 +107,7 @@ type expandedToolView interface {
 
 // Model represents a collapsible reasoning + tool calls block.
 type Model struct {
+	toolRenderers    *tool.Registry
 	ar               *animation.Runtime
 	id               string
 	agentName        string
@@ -125,20 +127,35 @@ type Model struct {
 	now func() time.Time
 }
 
+type Option func(*Model)
+
+func WithToolRenderers(registry *tool.Registry) Option {
+	return func(m *Model) {
+		if registry != nil {
+			m.toolRenderers = registry
+		}
+	}
+}
+
 // New creates a new reasoning block.
-func New(ar *animation.Runtime, id, agentName string, sessionState service.SessionStateReader) *Model {
+func New(ar *animation.Runtime, id, agentName string, sessionState service.SessionStateReader, opts ...Option) *Model {
 	if ar == nil {
 		panic("reasoningblock: nil animation runtime")
 	}
-	return &Model{
-		ar:           ar,
-		animationSub: ar.Subscribe(), id: id,
+	m := &Model{
+		toolRenderers: tool.NewRegistry(),
+		ar:            ar,
+		animationSub:  ar.Subscribe(), id: id,
 		agentName:    agentName,
 		expanded:     sessionState == nil || sessionState.ExpandThinking(),
 		width:        80,
 		sessionState: sessionState,
 		now:          defaultNow,
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // ID returns the block's unique identifier.
@@ -165,6 +182,15 @@ func (m *Model) SetReasoning(content string) {
 	m.contentItems = []contentItem{{kind: contentItemReasoning, reasoning: content}}
 	m.reasoningVersion++
 	m.cache = nil // invalidate cache
+}
+
+// ClearReasoning retains embedded tools and their content-item indices.
+func (m *Model) ClearReasoning() {
+	m.contentItems = slices.DeleteFunc(m.contentItems, func(item contentItem) bool {
+		return item.kind == contentItemReasoning
+	})
+	m.reasoningVersion++
+	m.cache = nil
 }
 
 // AppendReasoning appends to the reasoning content.
@@ -210,14 +236,14 @@ func (m *Model) AddToolCall(msg *types.Message) tea.Cmd {
 	for i, entry := range m.toolEntries {
 		if entry.msg.ToolCall.ID == msg.ToolCall.ID {
 			m.toolEntries[i].msg = msg
-			m.toolEntries[i].view = tool.New(m.ar, msg, m.sessionState)
+			m.toolEntries[i].view = m.toolRenderers.New(m.ar, msg, m.sessionState)
 			m.toolEntries[i].view.SetSize(m.contentWidth(), 0)
 			return m.toolEntries[i].view.Init()
 		}
 	}
 
 	// New tool call - add to entries and track position in content sequence
-	view := tool.New(m.ar, msg, m.sessionState)
+	view := m.toolRenderers.New(m.ar, msg, m.sessionState)
 	view.SetSize(m.contentWidth(), 0)
 	toolIndex := len(m.toolEntries)
 	m.toolEntries = append(m.toolEntries, toolEntry{msg: msg, view: view})
@@ -231,11 +257,7 @@ func (m *Model) UpdateToolCall(toolCallID string, status types.ToolStatus, args 
 		if entry.msg.ToolCall.ID != toolCallID {
 			continue
 		}
-		entry.msg.ToolStatus = status
-		if status == types.ToolStatusRunning && entry.msg.StartedAt == nil {
-			now := time.Now()
-			entry.msg.StartedAt = &now
-		}
+		entry.msg.SetToolStatus(status)
 		if args != "" {
 			if status == types.ToolStatusPending {
 				entry.msg.ToolCall.Function.Arguments += args
@@ -256,11 +278,7 @@ func (m *Model) AppendToolOutput(toolCallID, output string) bool {
 		}
 		entry.msg.AppendToolOutput(output)
 		if entry.msg.ToolStatus == types.ToolStatusPending {
-			entry.msg.ToolStatus = types.ToolStatusRunning
-			if entry.msg.StartedAt == nil {
-				now := time.Now()
-				entry.msg.StartedAt = &now
-			}
+			entry.msg.SetToolStatus(types.ToolStatusRunning)
 		}
 		m.toolEntries[i] = entry
 		return true
@@ -280,7 +298,7 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		isCompleted := status == types.ToolStatusCompleted || status == types.ToolStatusError
 
 		entry.msg.Content = strings.ReplaceAll(content, "\t", "    ")
-		entry.msg.ToolStatus = status
+		entry.msg.SetToolStatus(status)
 		entry.msg.ToolResult = result.WithoutPayload()
 		entry.msg.Images = tuiimage.FromToolResult(result)
 
@@ -299,7 +317,7 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		}
 
 		// Recreate view to pick up new state
-		view := tool.New(m.ar, entry.msg, m.sessionState)
+		view := m.toolRenderers.New(m.ar, entry.msg, m.sessionState)
 		view.SetSize(m.contentWidth(), 0)
 		m.toolEntries[i] = entry
 		m.toolEntries[i].view = view
@@ -320,6 +338,32 @@ func (m *Model) UpdateToolResult(toolCallID, content string, status types.ToolSt
 		return initCmd
 	}
 	return nil
+}
+
+// RemoveToolCall drops a tool call that will never run. It reports whether
+// the block held it.
+func (m *Model) RemoveToolCall(toolCallID string) bool {
+	k := slices.IndexFunc(m.toolEntries, func(e toolEntry) bool { return e.msg.ToolCall.ID == toolCallID })
+	if k < 0 {
+		return false
+	}
+	animation.StopView(m.toolEntries[k].view)
+	m.toolEntries = slices.Delete(m.toolEntries, k, k+1)
+	items := m.contentItems[:0]
+	for _, item := range m.contentItems {
+		if item.kind == contentItemTool {
+			if item.toolIndex == k {
+				continue
+			}
+			if item.toolIndex > k {
+				item.toolIndex--
+			}
+		}
+		items = append(items, item)
+	}
+	m.contentItems = items
+	m.cache = nil
+	return true
 }
 
 // HasToolCall returns true if the block contains the given tool call ID.

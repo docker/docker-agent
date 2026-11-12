@@ -1,13 +1,11 @@
 package hooks
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"text/template"
 
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config/latest"
@@ -99,7 +97,7 @@ func lookupSchema(name string) *latest.StructuredOutput {
 }
 
 // defaultShape passes the model's reply through as additional_context.
-// Useful for turn_start summarizers, post_tool_use commentary, etc. —
+// Useful for turn_start summarizers and other context events. —
 // any event where the runtime consumes AdditionalContext.
 func defaultShape(raw string, in *Input) (*Output, error) {
 	if in == nil {
@@ -134,42 +132,23 @@ func NewModelFactory(client ModelClient) HandlerFactory {
 		if !ok {
 			return nil, fmt.Errorf("model hook: unknown schema %q (register one with hooks.RegisterResponseShape)", hook.Schema)
 		}
-		tpl, err := template.New("hook-prompt").Funcs(promptFuncs).Parse(hook.Prompt)
+		render, err := parsePrompt(hook.Prompt)
 		if err != nil {
-			return nil, fmt.Errorf("model hook: parse prompt template: %w", err)
+			return nil, fmt.Errorf("model hook: %w", err)
+		}
+		system := hook.SystemPrompt
+		if system == "" {
+			system = modelSystemPrompt
 		}
 		return &modelHandler{
+			system: system,
 			client: client,
 			model:  hook.Model,
-			tpl:    tpl,
+			render: render,
 			schema: lookupSchema(hook.Schema),
 			shape:  shape,
 		}, nil
 	}
-}
-
-// promptFuncs is the [text/template] FuncMap exposed to model-hook
-// prompts. Kept small on purpose: anything more elaborate belongs in
-// the prompt itself.
-var promptFuncs = template.FuncMap{
-	// toJSON renders any value as compact JSON. Useful for embedding
-	// .ToolInput / .ToolResponse in the user prompt without writing
-	// custom Go-template formatting.
-	"toJSON": func(v any) (string, error) {
-		b, err := json.Marshal(v)
-		if err != nil {
-			return "", err
-		}
-		return string(b), nil
-	},
-	// truncate caps a string at n bytes, appending "…" when cut. A
-	// safety net for prompts that interpolate large tool inputs.
-	"truncate": func(n int, s string) string {
-		if n <= 0 || len(s) <= n {
-			return s
-		}
-		return s[:n] + "…"
-	},
 }
 
 // modelSystemPrompt is the fixed system message paired with every
@@ -185,7 +164,8 @@ as additional context.`
 type modelHandler struct {
 	client ModelClient
 	model  string
-	tpl    *template.Template
+	system string
+	render func(*Input) (string, error)
 	schema *latest.StructuredOutput
 	shape  ResponseShape
 }
@@ -198,11 +178,11 @@ func (h *modelHandler) Run(ctx context.Context, input []byte) (HandlerResult, er
 	if err := json.Unmarshal(input, &in); err != nil {
 		return HandlerResult{ExitCode: -1}, fmt.Errorf("decode hook input: %w", err)
 	}
-	var buf bytes.Buffer
-	if err := h.tpl.Execute(&buf, &in); err != nil {
+	prompt, err := h.render(&in)
+	if err != nil {
 		return HandlerResult{ExitCode: -1}, fmt.Errorf("render prompt: %w", err)
 	}
-	raw, err := h.client.Ask(ctx, h.model, modelSystemPrompt, buf.String(), h.schema)
+	raw, err := h.client.Ask(ctx, h.model, h.system, prompt, h.schema)
 	if err != nil {
 		return HandlerResult{ExitCode: -1}, fmt.Errorf("model %s: %w", h.model, err)
 	}

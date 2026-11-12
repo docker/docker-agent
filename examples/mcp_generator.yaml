@@ -41,7 +41,7 @@ agents:
 models:
   gpt:
     provider: openai
-    model: gpt-4o
+    model: gpt-5.6-sol
     temperature: 0.7
     max_tokens: 1500
     top_p: 1.0

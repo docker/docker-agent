@@ -49,8 +49,7 @@ func BenchmarkRenderRepeated(b *testing.B) {
 	mv.SetSize(100, 0)
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		_ = mv.Render(100)
 		_ = mv.Render(100)
 	}
@@ -66,8 +65,7 @@ func BenchmarkRenderRepeatedUncached(b *testing.B) {
 	mv.SetSize(100, 0)
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
+	for b.Loop() {
 		_ = mv.render(100)
 		_ = mv.render(100)
 	}

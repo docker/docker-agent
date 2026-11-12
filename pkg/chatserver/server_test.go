@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -66,7 +67,7 @@ func TestBuildSession_RequiresUserMessage(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sess := buildSession(tc.messages)
+			sess := buildSession(tc.messages, "")
 			if tc.wantNil {
 				assert.Nil(t, sess)
 				return
@@ -77,6 +78,15 @@ func TestBuildSession_RequiresUserMessage(t *testing.T) {
 	}
 }
 
+func TestBuildSession_StampsWorkspaceProvenance(t *testing.T) {
+	t.Parallel()
+	sess := buildSession([]ChatCompletionMessage{
+		{Role: "user", Content: "hello"},
+	}, "/srv/workspace")
+	require.NotNil(t, sess)
+	assert.Equal(t, "/srv/workspace", sess.WorkingDir)
+}
+
 func TestBuildSession_PreservesHistory(t *testing.T) {
 	t.Parallel()
 	sess := buildSession([]ChatCompletionMessage{
@@ -84,7 +94,7 @@ func TestBuildSession_PreservesHistory(t *testing.T) {
 		{Role: "user", Content: "hello"},
 		{Role: "assistant", Content: "hi there"},
 		{Role: "user", Content: "how are you?"},
-	})
+	}, "")
 	require.NotNil(t, sess)
 
 	// GetAllMessages omits system messages.
@@ -111,7 +121,7 @@ func TestBuildSession_PreservesToolMessage(t *testing.T) {
 		{Role: "user", Content: "compute 2+2"},
 		{Role: "assistant", Content: ""}, // dropped: empty content
 		{Role: "tool", Content: "4", ToolCallID: "call_1"},
-	})
+	}, "")
 	require.NotNil(t, sess)
 
 	all := sess.GetAllMessages()
@@ -127,7 +137,7 @@ func TestBuildSession_UnknownRoleTreatedAsUser(t *testing.T) {
 	t.Parallel()
 	sess := buildSession([]ChatCompletionMessage{
 		{Role: "developer", Content: "do this"},
-	})
+	}, "")
 	require.NotNil(t, sess)
 
 	all := sess.GetAllMessages()
@@ -436,7 +446,7 @@ func TestBuildSession_AcceptsImageParts(t *testing.T) {
 			{Type: "text", Text: "What is this?"},
 			{Type: "image_url", ImageURL: &ContentImageURL{URL: "https://example.com/x.png"}},
 		},
-	}})
+	}}, "")
 	require.NotNil(t, sess)
 
 	all := sess.GetAllMessages()
@@ -448,6 +458,17 @@ func TestBuildSession_AcceptsImageParts(t *testing.T) {
 	assert.Equal(t, chat.MessagePartTypeImageURL, last.MultiContent[1].Type)
 	require.NotNil(t, last.MultiContent[1].ImageURL)
 	assert.Equal(t, "https://example.com/x.png", last.MultiContent[1].ImageURL.URL)
+}
+
+func TestBuildSession_PartsRouting(t *testing.T) {
+	t.Parallel()
+	parts := []ContentPart{{Type: "text", Text: "hi"}}
+	for role, wantMulti := range map[string]bool{"": true, "user": true, "custom": true, "assistant": false, "system": false, "tool": false} {
+		sess := buildSession([]ChatCompletionMessage{{Role: role, Content: "body", Parts: parts}, {Role: "user", Content: "prompt"}}, "")
+		require.NotNil(t, sess)
+		first := sess.GetAllMessages()[0].Message
+		assert.Equal(t, wantMulti, len(first.MultiContent) > 0, "role %q", role)
+	}
 }
 
 func TestStopSequences_UnmarshalJSON(t *testing.T) {
@@ -546,24 +567,27 @@ func TestSSEStream_SendError(t *testing.T) {
 
 func TestRequestTimeoutMiddleware_AppliesDeadline(t *testing.T) {
 	t.Parallel()
-	e := echo.New()
-	e.Use(requestTimeoutMiddleware(5 * time.Millisecond))
 
-	var gotErr error
-	e.GET("/sleep", func(c echo.Context) error {
-		select {
-		case <-c.Request().Context().Done():
-			gotErr = c.Request().Context().Err()
-			return c.String(http.StatusOK, "ok")
-		case <-time.After(time.Second):
-			return c.String(http.StatusOK, "too slow")
-		}
+	synctest.Test(t, func(t *testing.T) {
+		e := echo.New()
+		e.Use(requestTimeoutMiddleware(5 * time.Millisecond))
+
+		var gotErr error
+		e.GET("/sleep", func(c echo.Context) error {
+			select {
+			case <-c.Request().Context().Done():
+				gotErr = c.Request().Context().Err()
+				return c.String(http.StatusOK, "ok")
+			case <-time.After(time.Second):
+				return c.String(http.StatusOK, "too slow")
+			}
+		})
+
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/sleep", http.NoBody)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+
+		require.Error(t, gotErr)
+		assert.ErrorIs(t, gotErr, context.DeadlineExceeded)
 	})
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/sleep", http.NoBody)
-	rec := httptest.NewRecorder()
-	e.ServeHTTP(rec, req)
-
-	require.Error(t, gotErr)
-	assert.ErrorIs(t, gotErr, context.DeadlineExceeded)
 }

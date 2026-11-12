@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -51,124 +52,128 @@ func TestDesktopRunningOverrideBypassesMemoizedDetection(t *testing.T) {
 }
 
 func TestDesktopRunningRefreshesStaleValueWithoutBlocking(t *testing.T) {
-	refresh := make(chan struct{})
-	startedRefresh := make(chan struct{})
-	refreshDone := make(chan struct{})
-	desktopRunningOverrideMu.Lock()
-	previous := desktopRunning
-	desktopRunning = func(context.Context) (bool, error) {
-		close(startedRefresh)
-		<-refresh
-		close(refreshDone)
-		return true, nil
-	}
-	desktopRunningOverrideMu.Unlock()
-	resetDesktopDetectionForTest()
-	desktopDetection.mu.Lock()
-	desktopDetection.value = false
-	desktopDetection.hasValue = true
-	desktopDetection.expires = time.Now().Add(-time.Second)
-	desktopDetection.mu.Unlock()
-	t.Cleanup(func() {
-		close(refresh)
-		<-refreshDone
+	synctest.Test(t, func(t *testing.T) {
+		refresh := make(chan struct{})
+		startedRefresh := make(chan struct{})
+		refreshDone := make(chan struct{})
 		desktopRunningOverrideMu.Lock()
-		desktopRunning = previous
+		previous := desktopRunning
+		desktopRunning = func(context.Context) (bool, error) {
+			close(startedRefresh)
+			<-refresh
+			close(refreshDone)
+			return true, nil
+		}
 		desktopRunningOverrideMu.Unlock()
 		resetDesktopDetectionForTest()
+		desktopDetection.mu.Lock()
+		desktopDetection.value = false
+		desktopDetection.hasValue = true
+		desktopDetection.expires = time.Now().Add(-time.Second)
+		desktopDetection.mu.Unlock()
+		t.Cleanup(func() {
+			close(refresh)
+			<-refreshDone
+			desktopRunningOverrideMu.Lock()
+			desktopRunning = previous
+			desktopRunningOverrideMu.Unlock()
+			resetDesktopDetectionForTest()
+		})
+
+		started := make(chan struct{})
+		go func() {
+			_, _ = DesktopRunning(t.Context())
+			close(started)
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("stale desktop detection blocked")
+		}
+
+		select {
+		case <-startedRefresh:
+		case <-time.After(time.Second):
+			t.Fatal("stale desktop detection did not refresh")
+		}
+
+		running, err := DesktopRunning(t.Context())
+		require.NoError(t, err)
+		assert.False(t, running)
 	})
-
-	started := make(chan struct{})
-	go func() {
-		_, _ = DesktopRunning(t.Context())
-		close(started)
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("stale desktop detection blocked")
-	}
-
-	select {
-	case <-startedRefresh:
-	case <-time.After(time.Second):
-		t.Fatal("stale desktop detection did not refresh")
-	}
-
-	running, err := DesktopRunning(t.Context())
-	require.NoError(t, err)
-	assert.False(t, running)
 }
 
 func TestResetDesktopDetectionForTestDiscardsInFlightDetection(t *testing.T) {
-	firstStarted := make(chan struct{})
-	firstRelease := make(chan struct{})
-	firstDone := make(chan struct{})
-	var calls atomic.Int32
+	synctest.Test(t, func(t *testing.T) {
+		firstStarted := make(chan struct{})
+		firstRelease := make(chan struct{})
+		firstDone := make(chan struct{})
+		var calls atomic.Int32
 
-	desktopRunningOverrideMu.Lock()
-	previous := desktopRunning
-	desktopRunning = func(context.Context) (bool, error) {
-		if calls.Add(1) == 1 {
-			close(firstStarted)
-			<-firstRelease
-			close(firstDone)
-			return true, errors.New("stale detection error")
-		}
-		return false, nil
-	}
-	desktopRunningOverrideMu.Unlock()
-	resetDesktopDetectionForTest()
-	t.Cleanup(func() {
-		if firstRelease != nil {
-			close(firstRelease)
-		}
-		if firstDone != nil {
-			<-firstDone
-		}
 		desktopRunningOverrideMu.Lock()
-		desktopRunning = previous
+		previous := desktopRunning
+		desktopRunning = func(context.Context) (bool, error) {
+			if calls.Add(1) == 1 {
+				close(firstStarted)
+				<-firstRelease
+				close(firstDone)
+				return true, errors.New("stale detection error")
+			}
+			return false, nil
+		}
 		desktopRunningOverrideMu.Unlock()
 		resetDesktopDetectionForTest()
-	})
+		t.Cleanup(func() {
+			if firstRelease != nil {
+				close(firstRelease)
+			}
+			if firstDone != nil {
+				<-firstDone
+			}
+			desktopRunningOverrideMu.Lock()
+			desktopRunning = previous
+			desktopRunningOverrideMu.Unlock()
+			resetDesktopDetectionForTest()
+		})
 
-	result := make(chan struct {
-		running bool
-		err     error
-	}, 1)
-	go func() {
-		running, err := DesktopRunning(t.Context())
-		result <- struct {
+		result := make(chan struct {
 			running bool
 			err     error
-		}{running, err}
-	}()
+		}, 1)
+		go func() {
+			running, err := DesktopRunning(t.Context())
+			result <- struct {
+				running bool
+				err     error
+			}{running, err}
+		}()
 
-	select {
-	case <-firstStarted:
-	case <-time.After(time.Second):
-		t.Fatal("desktop detection did not start")
-	}
+		select {
+		case <-firstStarted:
+		case <-time.After(time.Second):
+			t.Fatal("desktop detection did not start")
+		}
 
-	resetDesktopDetectionForTest()
+		resetDesktopDetectionForTest()
 
-	select {
-	case result := <-result:
-		require.NoError(t, result.err)
-		assert.False(t, result.running)
-	case <-time.After(time.Second):
-		t.Fatal("desktop detection remained blocked after reset")
-	}
+		select {
+		case result := <-result:
+			require.NoError(t, result.err)
+			assert.False(t, result.running)
+		case <-time.After(time.Second):
+			t.Fatal("desktop detection remained blocked after reset")
+		}
 
-	close(firstRelease)
-	<-firstDone
-	firstRelease = nil
-	firstDone = nil
+		close(firstRelease)
+		<-firstDone
+		firstRelease = nil
+		firstDone = nil
 
-	running, err := DesktopRunning(t.Context())
-	require.NoError(t, err)
-	assert.False(t, running)
-	assert.Equal(t, int32(2), calls.Load())
+		running, err := DesktopRunning(t.Context())
+		require.NoError(t, err)
+		assert.False(t, running)
+		assert.Equal(t, int32(2), calls.Load())
+	})
 }
 
 func TestNew_UsesDesktopProxyWhenAvailable(t *testing.T) {

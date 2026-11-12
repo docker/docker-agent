@@ -8,9 +8,8 @@ import (
 )
 
 // ConfigVersionImport enforces that config version packages (pkg/config/vN
-// and pkg/config/latest) only import their immediate predecessor and the
-// shared types package, preserving the strict migration chain:
-// v0 → v1 → v2 → … → latest.
+// and pkg/config/latest) preserve the frozen migration chain. Latest only
+// imports shared types; the optional legacy package bridges the final hop.
 var ConfigVersionImport = &cop.Func{
 	Meta: cop.Meta{
 		Name:        "Lint/ConfigVersionImport",
@@ -56,13 +55,7 @@ var ConfigVersionImport = &cop.Func{
 // dirVersion is the importing package's N (only meaningful when isVersioned).
 func importViolation(path string, dirVersion int, isVersioned, isLatest bool) string {
 	if isLatest {
-		// pkg/config/latest may only import other config-version packages.
-		// (The "must be the immediate predecessor" rule lives in the
-		// LatestImportsPredecessor cop.)
-		if _, ok := versionFromImport(path); ok {
-			return ""
-		}
-		return "pkg/config/latest must only import config version or types packages, not " + path
+		return "pkg/config/latest must only import shared config types, not " + path
 	}
 
 	if !isVersioned {

@@ -50,20 +50,41 @@ type MessageImageURL struct {
 }
 
 type Message struct {
+	// MessageID identifies a conversation message independently of provider and database IDs.
+	MessageID    string        `json:"message_id,omitempty"`
 	Role         MessageRole   `json:"role"`
 	Content      string        `json:"content"`
 	MultiContent []MessagePart `json:"multi_content,omitempty"`
 
-	// This property is used for the "reasoning" feature supported by deepseek-reasoner
-	// which is not in the official documentation.
-	// the doc from deepseek:
-	// - https://api-docs.deepseek.com/api/create-chat-completion#responses
+	// ReasoningContent carries the reasoning text of a reasoning model. It is a
+	// generic internal field, not one wire field: it is filled from
+	// delta.reasoning_content / delta.reasoning on OpenAI-compatible streams
+	// (DeepSeek, Qwen, vLLM, llama.cpp, ...), from Anthropic and Bedrock thinking
+	// blocks, from Gemini reasoning parts, and from the OpenAI Responses API.
+	// Providers that keep reasoning signed or encrypted of their own store that
+	// alongside in ThinkingSignature or ThoughtSignature.
+	//
+	// Replaying it on later turns stops a reasoning model from re-deriving work it
+	// already produced. Chat Completions replay defaults on and can be disabled
+	// with provider_opts.replay_reasoning for incompatible endpoints.
 	ReasoningContent string `json:"reasoning_content,omitempty"`
 
 	// ThinkingSignature is used for Anthropic's extended thinking feature
 	ThinkingSignature string `json:"thinking_signature,omitempty"`
 
 	ThoughtSignature []byte `json:"thought_signature,omitempty"`
+
+	OpenAIResponse *OpenAIResponse `json:"openai_response,omitempty"`
+
+	// ProviderState is the raw provider response this assistant message was
+	// built from, replayed verbatim when still valid. See [ProviderState].
+	ProviderState *ProviderState `json:"provider_state,omitempty"`
+
+	// Compaction is set on the synthetic message that carries a compaction
+	// summary into the prompt when that summary came from a provider-native
+	// compaction. Content stays the readable summary; the producing provider
+	// may replay Compaction.Block instead. See [CompactionResult].
+	Compaction *CompactionResult `json:"compaction,omitempty"`
 
 	FunctionCall *tools.FunctionCall `json:"function_call,omitempty"`
 
@@ -108,6 +129,18 @@ type Message struct {
 	// round-trip through before_llm_call hooks as JSON and the marks
 	// must survive hook rewrites.
 	CacheControl bool `json:"cache_control,omitempty"`
+
+	// TurnScoped marks a system message as a reminder for this turn only,
+	// resent on every request rather than part of the stable instructions.
+	// Providers that can express that (Anthropic cache_preserving_updates)
+	// send it after the conversation instead of in the top-level system
+	// prompt, so it never invalidates the cached prefix. Ignored on
+	// non-system messages so user or tool content is never promoted.
+	//
+	// Same contract as CacheControl: request-assembly state that the
+	// session sets on assembled copies, strips on ingestion and keeps
+	// JSON-serialized so it survives before_llm_call hook rewrites.
+	TurnScoped bool `json:"turn_scoped,omitempty"`
 }
 
 // MessageFile is the legacy file attachment shape kept for stored sessions.
@@ -151,8 +184,30 @@ type MessageDelta struct {
 	ReasoningContent  string              `json:"reasoning_content,omitempty"`
 	ThinkingSignature string              `json:"thinking_signature,omitempty"`
 	ThoughtSignature  []byte              `json:"thought_signature,omitempty"`
+	OpenAIResponse    *OpenAIResponse     `json:"openai_response,omitempty"`
 	FunctionCall      *tools.FunctionCall `json:"function_call,omitempty"`
 	ToolCalls         []tools.ToolCall    `json:"tool_calls,omitempty"`
+	// ProviderState carries the completed raw response, sent once on the
+	// terminal chunk by providers that need verbatim replay. See
+	// [ProviderState].
+	ProviderState *ProviderState `json:"provider_state,omitempty"`
+	// Media carries provider-generated binary content (e.g. inline image
+	// blobs) streamed alongside or instead of text. A single chunk can carry
+	// more than one blob (e.g. Gemini returning multiple inline parts across
+	// candidates in one chunk), so this is a slice rather than a single
+	// pointer — a scalar field silently dropped every blob but the last. See
+	// [MediaDelta].
+	Media []MediaDelta `json:"media,omitempty"`
+	// ServerFallback marks the point where the provider handed the turn to
+	// a fallback model: work streamed before it is superseded.
+	ServerFallback *ServerFallback `json:"server_fallback,omitempty"`
+}
+
+// ServerFallback is a provider-side handoff from one model to the next
+// within a single response.
+type ServerFallback struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // MessageStreamChoice represents a choice in a streaming response
@@ -170,6 +225,9 @@ type MessageStreamResponse struct {
 	Model   string                `json:"model"`
 	Choices []MessageStreamChoice `json:"choices"`
 	Usage   *Usage                `json:"usage,omitempty"`
+	// UsageAttempts lists each model that ran when a server fallback spread
+	// the response across models; Usage describes only the last one.
+	UsageAttempts []UsageAttempt `json:"usage_attempts,omitempty"`
 }
 
 type Usage struct {
@@ -178,9 +236,35 @@ type Usage struct {
 	CachedInputTokens int64 `json:"cached_input_tokens"`
 	CacheWriteTokens  int64 `json:"cached_write_tokens"`
 	ReasoningTokens   int64 `json:"reasoning_tokens,omitempty"`
+	// ServiceTier is the actual processing tier reported by the provider, not the requested tier.
+	ServiceTier string `json:"service_tier,omitempty"`
 }
 
-// Add accumulates other's token counts into u. A nil other is a no-op so
+// UsageAttempt is one attempt of a response a server fallback spread across
+// models, billed at that model's rates unless Billed is false.
+type UsageAttempt struct {
+	Model  string `json:"model"`
+	Billed bool   `json:"billed"`
+	// Dispatched marks the attempt of the requested model, whose reported ID
+	// may be a resolved form of the configured one.
+	Dispatched        bool  `json:"dispatched,omitempty"`
+	InputTokens       int64 `json:"input_tokens"`
+	OutputTokens      int64 `json:"output_tokens"`
+	CachedInputTokens int64 `json:"cached_input_tokens"`
+	CacheWriteTokens  int64 `json:"cached_write_tokens"`
+}
+
+// Usage returns the attempt's token counts as a Usage.
+func (a UsageAttempt) Usage() *Usage {
+	return &Usage{InputTokens: a.InputTokens, OutputTokens: a.OutputTokens, CachedInputTokens: a.CachedInputTokens, CacheWriteTokens: a.CacheWriteTokens}
+}
+
+// PromptTokens sums the disjoint fresh, cache-read, and cache-write input buckets.
+func (u *Usage) PromptTokens() int64 {
+	return u.InputTokens + u.CachedInputTokens + u.CacheWriteTokens
+}
+
+// Add accumulates other's token counts into u, not per-request service tiers. A nil other is a no-op so
 // callers can pass a message's optional usage without checking.
 func (u *Usage) Add(other *Usage) {
 	if other == nil {

@@ -8,7 +8,7 @@
 models:
   smart:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     description: High-quality reasoning model for complex, multi-step tasks.
   fast:
     provider: anthropic

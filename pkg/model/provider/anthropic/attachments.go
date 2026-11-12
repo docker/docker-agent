@@ -28,7 +28,7 @@ func convertDocument(ctx context.Context, doc chat.Document, id modelsdev.ID, st
 	// An explicit config override is authoritative; only fall back to the
 	// "any Claude model supports image+PDF" heuristic when none was declared.
 	if override == nil && !mc.Supports(doc.MimeType) && modelinfo.IsClaude(ctx, store, id) {
-		mc = modelinfo.CapsWith(true, true)
+		mc = modelinfo.CapsWith(true, true, false, false)
 	}
 	return convertDocumentWithCaps(ctx, doc, mc)
 }

@@ -335,11 +335,9 @@ func TestBranchSessionCopiesPrefix(t *testing.T) {
 func TestBranchSessionClonesSubSession(t *testing.T) {
 	t.Parallel()
 
-	tempDB := filepath.Join(t.TempDir(), "test_branch_subsession.db")
-
-	store, err := newSQLiteStoreForTest(t, tempDB)
+	store := openMemoryStore(t)
+	_, err := store.db.ExecContext(t.Context(), "PRAGMA foreign_keys = ON")
 	require.NoError(t, err)
-	defer store.(*SQLiteSessionStore).Close()
 
 	subSession := &Session{
 		ID:        "sub-session",
@@ -1219,4 +1217,18 @@ func TestAddSessionTerminationRoundTrip(t *testing.T) {
 
 	// Termination markers are not conversation messages.
 	assert.Len(t, retrieved.GetAllMessages(), 2)
+}
+
+func TestAddSession_PreservesStarred(t *testing.T) {
+	store, err := newSQLiteStoreForTest(t, filepath.Join(t.TempDir(), "sessions.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+
+	sess := New(WithID("starred-session"))
+	sess.Starred = true
+	require.NoError(t, store.AddSession(t.Context(), sess))
+
+	loaded, err := store.GetSession(t.Context(), "starred-session")
+	require.NoError(t, err)
+	assert.True(t, loaded.Starred)
 }

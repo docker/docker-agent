@@ -11,7 +11,9 @@ import (
 	"github.com/docker/docker-agent/pkg/agent"
 	"github.com/docker/docker-agent/pkg/chat"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/model/provider/base"
+	"github.com/docker/docker-agent/pkg/model/provider/options"
 	"github.com/docker/docker-agent/pkg/modelsdev"
 	"github.com/docker/docker-agent/pkg/team"
 	"github.com/docker/docker-agent/pkg/tools"
@@ -32,9 +34,11 @@ func (p *providerOptsProvider) CreateChatCompletionStream(context.Context, []cha
 }
 
 func (p *providerOptsProvider) BaseConfig() base.Config {
-	return base.Config{
+	cfg := base.Config{
 		ModelConfig: latest.ModelConfig{ProviderOpts: p.opts},
 	}
+	cfg.RebuildProvider = func(context.Context, *latest.ModelConfig, ...options.Opt) (provider.Provider, error) { return p, nil }
+	return cfg
 }
 
 func (p *providerOptsProvider) MaxTokens() int { return 0 }

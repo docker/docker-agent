@@ -1,6 +1,9 @@
 package styles
 
-import "sync"
+import (
+	"slices"
+	"sync"
+)
 
 // themeChangeHooks are run at the end of every ApplyTheme, after all style
 // variables have been rebuilt. Packages that memoize rendering derived from
@@ -23,8 +26,7 @@ func OnThemeChange(fn func()) {
 // runThemeChangeHooks runs all registered theme-change hooks.
 func runThemeChangeHooks() {
 	themeChangeHooksMu.Lock()
-	hooks := make([]func(), len(themeChangeHooks))
-	copy(hooks, themeChangeHooks)
+	hooks := slices.Clone(themeChangeHooks)
 	themeChangeHooksMu.Unlock()
 	for _, fn := range hooks {
 		fn()

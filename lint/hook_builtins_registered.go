@@ -8,10 +8,8 @@ import (
 
 // HookBuiltinsRegistered enforces that every builtin-name constant declared
 // under pkg/hooks/builtins/ is wired into the package's Register() function
-// in pkg/hooks/builtins/builtins.go — with one exception: the snapshot
-// builtin ships its own entry point ([builtins.RegisterSnapshot]) because
-// it returns a [SnapshotController] for embedders, so its declaration in
-// snapshot.go is intentionally not registered through Register().
+// in pkg/hooks/builtins/builtins.go. Stateful embedder-owned builtins
+// (snapshot and keep_awake) have separate registration entry points.
 //
 // Each in-process builtin lives in its own file with a name constant and an
 // implementation:
@@ -74,12 +72,12 @@ var HookBuiltinsRegistered = &cop.Func{
 }
 
 // exportedBuiltinNames returns the identifiers of every exported `const Name = "..."`
-// declaration in pkg/hooks/builtins/, excluding builtins.go itself, snapshot.go
-// (which has its own RegisterSnapshot entry point), and any test files.
+// declaration in pkg/hooks/builtins/, excluding builtins.go, stateful builtins
+// with separate registration entry points, and test files.
 func exportedBuiltinNames(p *cop.Pass) ([]string, error) {
 	declared, err := p.DirStringConsts(".", cop.ParseDirOptions{
 		SkipTests: true,
-		SkipFiles: []string{"builtins.go", "snapshot.go"},
+		SkipFiles: []string{"builtins.go", "snapshot.go", "keep_awake.go"},
 	}, ast.IsExported)
 	if err != nil {
 		return nil, err

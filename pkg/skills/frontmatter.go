@@ -11,16 +11,15 @@ func parseFrontmatter(content string) (Skill, bool) {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = strings.ReplaceAll(content, "\r", "\n")
 
-	if !strings.HasPrefix(content, "---") {
+	rest, found := strings.CutPrefix(content, "---\n")
+	if !found {
 		return Skill{}, false
 	}
 
-	endIndex := strings.Index(content[3:], "\n---")
-	if endIndex == -1 {
+	block, _, found := strings.Cut("\n"+rest+"\n", "\n---\n")
+	if !found {
 		return Skill{}, false
 	}
-
-	block := content[4 : endIndex+3]
 
 	var skill Skill
 	var currentKey string // tracks multi-line keys like "metadata" or "allowed-tools"
@@ -120,8 +119,8 @@ func splitKeyValue(line string) (string, string, bool) {
 	if key, value, ok := strings.Cut(line, ": "); ok {
 		return key, value, true
 	}
-	if strings.HasSuffix(line, ":") {
-		return line[:len(line)-1], "", true
+	if key, ok := strings.CutSuffix(line, ":"); ok {
+		return key, "", true
 	}
 	return "", "", false
 }

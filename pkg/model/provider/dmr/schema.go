@@ -15,5 +15,6 @@ func ConvertParametersToSchema(params any) (any, error) {
 	// e.g. ai/qwen3 and ai/gpt-oss
 	delete(m, "additionalProperties")
 
+	tools.OrderedSchemaProperties(m)
 	return m, nil
 }

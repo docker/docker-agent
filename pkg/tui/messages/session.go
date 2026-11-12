@@ -25,8 +25,10 @@ type Attachment struct {
 
 // Session lifecycle messages control session state and persistence.
 type (
-	// NewSessionMsg requests creation of a new session.
-	NewSessionMsg struct{}
+	// NewSessionMsg requests creation of a new session. WorkingDir, when
+	// non-empty, is the user-requested directory (/new <dir>) and wins over
+	// any configured default; empty keeps the generic new-session behavior.
+	NewSessionMsg struct{ WorkingDir string }
 
 	// ClearSessionMsg resets the current tab and starts a new session
 	// in the same working directory.
@@ -99,6 +101,9 @@ type (
 
 	// ClearQueueMsg clears all queued messages.
 	ClearQueueMsg struct{}
+
+	// RestorePendingMessagesMsg restores canceled pending messages to the editor.
+	RestorePendingMessagesMsg struct{ Content string }
 
 	// ToggleSplitDiffMsg toggles split diff view mode.
 	ToggleSplitDiffMsg struct{}

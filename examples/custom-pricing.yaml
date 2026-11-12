@@ -19,7 +19,7 @@ models:
   # Custom endpoint: without `cost` every call would be recorded at $0.
   internal-gpt:
     provider: internal-llm
-    model: gpt-4o
+    model: gpt-5.6-sol
     cost:
       input: 1.25 # USD per 1M input tokens
       output: 5.00 # USD per 1M output tokens
@@ -30,7 +30,7 @@ models:
   # replaces the models.dev list price so recorded spend matches the invoice.
   discounted-sonnet:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-4-6
     cost:
       input: 2.4
       output: 12.0

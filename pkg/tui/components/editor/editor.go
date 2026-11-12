@@ -268,10 +268,7 @@ func stripANSI(s string) string {
 // lineHasContent reports whether the rendered line has user input after the
 // prompt has been stripped.
 func lineHasContent(line, prompt string) bool {
-	plain := stripANSI(line)
-	if prompt != "" && strings.HasPrefix(plain, prompt) {
-		plain = strings.TrimPrefix(plain, prompt)
-	}
+	plain := strings.TrimPrefix(stripANSI(line), prompt)
 
 	return strings.TrimSpace(plain) != ""
 }
@@ -279,10 +276,7 @@ func lineHasContent(line, prompt string) bool {
 // extractLineText extracts the user input text from a rendered view line,
 // stripping ANSI codes and the prompt prefix.
 func extractLineText(line, prompt string) string {
-	plain := stripANSI(line)
-	if prompt != "" && strings.HasPrefix(plain, prompt) {
-		plain = strings.TrimPrefix(plain, prompt)
-	}
+	plain := strings.TrimPrefix(stripANSI(line), prompt)
 	return strings.TrimRight(plain, " ")
 }
 
@@ -685,6 +679,15 @@ func (e *editor) configureNewlineKeybinding() {
 	e.textarea.KeyMap.InsertNewline.SetEnabled(true)
 }
 
+var (
+	editorHistoryUp    = key.NewBinding(key.WithKeys("up"))
+	editorHistoryDown  = key.NewBinding(key.WithKeys("down"))
+	editorSpace        = key.NewBinding(key.WithKeys("space"))
+	editorFollowUp     = key.NewBinding(key.WithKeys("alt+enter"))
+	historySearchApply = key.NewBinding(key.WithKeys("enter"))
+	historySearchClose = key.NewBinding(key.WithKeys("esc", "ctrl+g"))
+)
+
 // Update handles messages and updates the component state
 func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	defer e.updateAttachmentBanner()
@@ -840,8 +843,8 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		e.clearSuggestion()
 		if msg.Value != "" && e.currentCompletion != nil {
 			currentText := e.textarea.Value()
-			if strings.HasPrefix(msg.Value, currentText) {
-				e.suggestion = msg.Value[len(currentText):]
+			if suggestion, ok := strings.CutPrefix(msg.Value, currentText); ok {
+				e.suggestion = suggestion
 				e.hasSuggestion = e.suggestion != ""
 			}
 		}
@@ -865,7 +868,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		// Alt+Enter submits an end-of-turn follow-up. It is handled before the
 		// configurable newline binding so the two delivery modes are always
 		// available independently.
-		if msg.String() == "alt+enter" {
+		if key.Matches(msg, editorFollowUp) {
 			if !e.textarea.Focused() {
 				return e, nil
 			}
@@ -918,8 +921,8 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 		}
 
 		// Handle other special keys
-		switch msg.String() {
-		case "up":
+		switch {
+		case key.Matches(msg, editorHistoryUp):
 			// Only navigate history if the user hasn't manually typed content
 			if !e.userTyped {
 				e.textarea.SetValue(e.hist.Previous())
@@ -928,7 +931,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 				return e, nil
 			}
 			// Otherwise, let the textarea handle cursor navigation
-		case "down":
+		case key.Matches(msg, editorHistoryDown):
 			// Only navigate history if the user hasn't manually typed content
 			if !e.userTyped {
 				e.textarea.SetValue(e.hist.Next())
@@ -957,7 +960,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 	// If the value changed due to user input (not history navigation), mark as user typed
 	if keyMsg, ok := msg.(tea.KeyPressMsg); ok {
 		// Check if content changed and it wasn't a history navigation key
-		if e.textarea.Value() != prevValue && keyMsg.String() != "up" && keyMsg.String() != "down" {
+		if e.textarea.Value() != prevValue && !key.Matches(keyMsg, editorHistoryUp, editorHistoryDown) {
 			e.userTyped = true
 		}
 
@@ -982,7 +985,7 @@ func (e *editor) Update(msg tea.Msg) (layout.Model, tea.Cmd) {
 			e.pendingFileRef = currentWord
 		}
 
-		if keyMsg.String() == "space" {
+		if key.Matches(keyMsg, editorSpace) {
 			e.currentCompletion = nil
 		}
 
@@ -1791,14 +1794,14 @@ func (e *editor) EnterHistorySearch() (layout.Model, tea.Cmd) {
 func (e *editor) handleHistorySearchKey(msg tea.KeyPressMsg) (layout.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, e.searchInput.KeyMap.PrevSuggestion):
-		e.cycleMatch(e.hist.FindPrevContains, len(e.hist.Messages))
+		e.cycleMatch(e.hist.FindPrevContains, e.hist.Len())
 		return e, nil
 
 	case key.Matches(msg, e.searchInput.KeyMap.NextSuggestion):
 		e.cycleMatch(e.hist.FindNextContains, -1)
 		return e, nil
 
-	case msg.String() == "enter":
+	case key.Matches(msg, historySearchApply):
 		value := e.textarea.Value()
 		matchIdx := e.historySearch.matchIndex
 		cmd := e.exitHistorySearch()
@@ -1813,7 +1816,7 @@ func (e *editor) handleHistorySearchKey(msg tea.KeyPressMsg) (layout.Model, tea.
 		e.refreshSuggestion()
 		return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}))
 
-	case msg.String() == "esc" || msg.String() == "ctrl+g":
+	case key.Matches(msg, historySearchClose):
 		cmd := e.exitHistorySearch()
 		e.refreshSuggestion()
 		return e, tea.Batch(cmd, core.CmdHandler(completion.CloseMsg{}))
@@ -1860,7 +1863,7 @@ func (e *editor) historySearchComputeMatch() {
 		return
 	}
 
-	m, idx, ok := e.hist.FindPrevContains(e.historySearch.query, len(e.hist.Messages))
+	m, idx, ok := e.hist.FindPrevContains(e.historySearch.query, e.hist.Len())
 	if ok {
 		e.historySearch.match = m
 		e.historySearch.matchIndex = idx

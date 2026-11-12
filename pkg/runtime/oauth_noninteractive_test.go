@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -170,44 +171,46 @@ func (s *oauthGateToolSet) release() {
 func TestRunAgent_BackgroundOAuthMCP_FailsFastAndNotifiesModel(t *testing.T) {
 	t.Parallel()
 
-	gate := newOAuthGateToolSet()
-	t.Cleanup(gate.release)
+	synctest.Test(t, func(t *testing.T) {
+		gate := newOAuthGateToolSet()
+		t.Cleanup(gate.release)
 
-	workerStream := newStreamBuilder().AddContent("partial work done").AddStopWithUsage(10, 5).Build()
-	workerProv := &mockProvider{id: "test/mock-model", stream: workerStream}
-	parentProv := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
+		workerStream := newStreamBuilder().AddContent("partial work done").AddStopWithUsage(10, 5).Build()
+		workerProv := &mockProvider{id: "test/mock-model", stream: workerStream}
+		parentProv := &mockProvider{id: "test/mock-model", stream: &mockStream{}}
 
-	worker := agent.New("worker", "Worker agent",
-		agent.WithModel(workerProv), agent.WithToolSets(gate))
-	root := agent.New("root", "Root agent", agent.WithModel(parentProv))
-	agent.WithSubAgents(worker)(root)
-	tm := team.New(team.WithAgents(root, worker))
+		worker := agent.New("worker", "Worker agent",
+			agent.WithModel(workerProv), agent.WithToolSets(gate))
+		root := agent.New("root", "Root agent", agent.WithModel(parentProv))
+		agent.WithSubAgents(worker)(root)
+		tm := team.New(team.WithAgents(root, worker))
 
-	// Interactive runtime: r.nonInteractive is false. Only the background
-	// sub-session is non-interactive — exactly the issue #3200 setup where the
-	// runtime-level check at elicitationHandler does not save us.
-	rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
-	require.NoError(t, err)
+		// Interactive runtime: r.nonInteractive is false. Only the background
+		// sub-session is non-interactive — exactly the issue #3200 setup where the
+		// runtime-level check at elicitationHandler does not save us.
+		rt, err := NewLocalRuntime(t.Context(), tm, WithSessionCompaction(false), WithModelStore(mockModelStore{}))
+		require.NoError(t, err)
 
-	sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
+		sess := session.New(session.WithUserMessage("Test"), session.WithToolsApproved(true))
 
-	done := make(chan *agenttool.RunResult, 1)
-	go func() {
-		done <- rt.RunAgent(t.Context(), agenttool.RunParams{
-			AgentName:     "worker",
-			Task:          "use the remote MCP server",
-			ParentSession: sess,
-		})
-	}()
+		done := make(chan *agenttool.RunResult, 1)
+		go func() {
+			done <- rt.RunAgent(t.Context(), agenttool.RunParams{
+				AgentName:     "worker",
+				Task:          "use the remote MCP server",
+				ParentSession: sess,
+			})
+		}()
 
-	select {
-	case res := <-done:
-		require.Empty(t, res.ErrMsg, "background run must complete, not error")
-		assert.Contains(t, res.Result, "interactive OAuth authorization",
-			"the model must be told the MCP server needs interactive OAuth (issue #3200)")
-		assert.Contains(t, res.Result, "partial work done",
-			"the note must be prepended to the sub-agent's own output, not replace it")
-	case <-time.After(5 * time.Second):
-		t.Fatal("background agent hung on an OAuth elicitation it cannot answer (issue #3200)")
-	}
+		select {
+		case res := <-done:
+			require.Empty(t, res.ErrMsg, "background run must complete, not error")
+			assert.Contains(t, res.Result, "interactive OAuth authorization",
+				"the model must be told the MCP server needs interactive OAuth (issue #3200)")
+			assert.Contains(t, res.Result, "partial work done",
+				"the note must be prepended to the sub-agent's own output, not replace it")
+		case <-time.After(5 * time.Second):
+			t.Fatal("background agent hung on an OAuth elicitation it cannot answer (issue #3200)")
+		}
+	})
 }

@@ -1,6 +1,7 @@
 package evaluation
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -25,10 +26,8 @@ type progressBar struct {
 	relevanceFailed atomic.Int32                     // count of evals with relevance failures
 	sizeFailed      atomic.Int32                     // count of evals with size failures
 	toolCallsFailed atomic.Int32                     // count of evals with tool call failures
+	assertionFailed atomic.Int32                     // count of evals with assertion failures
 	running         concurrent.Map[string, struct{}] // titles of currently running evals
-	done            chan struct{}
-	stopped         chan struct{} // signals that the goroutine has finished
-	ticker          *time.Ticker
 	isTTY           bool
 	mu              sync.Mutex // protects output
 }
@@ -39,33 +38,23 @@ func newProgressBar(ttyOut, resultOut io.Writer, fd, total int, isTTY bool) *pro
 		resultOut: resultOut,
 		fd:        fd,
 		total:     total,
-		done:      make(chan struct{}),
-		stopped:   make(chan struct{}),
 		isTTY:     isTTY,
 	}
 }
 
-func (p *progressBar) start() {
-	p.ticker = time.NewTicker(100 * time.Millisecond)
-	go func() {
-		defer close(p.stopped)
-		for {
-			select {
-			case <-p.done:
-				p.ticker.Stop()
-				p.render(true)
-				return
-			case <-p.ticker.C:
-				p.render(false)
-			}
-		}
-	}()
-}
+func (p *progressBar) run(ctx context.Context) {
+	defer p.render(true)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
 
-// stop signals the progress bar to stop and waits for it to finish.
-func (p *progressBar) stop() {
-	close(p.done)
-	<-p.stopped // wait for goroutine to finish
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			p.render(false)
+		}
+	}
 }
 
 func (p *progressBar) setRunning(title string) {
@@ -104,6 +93,8 @@ func (p *progressBar) printResult(result Result) {
 				p.sizeFailed.Add(1)
 			case strings.HasPrefix(f, "tool calls"):
 				p.toolCallsFailed.Add(1)
+			case strings.HasPrefix(f, "assertion"):
+				p.assertionFailed.Add(1)
 			}
 		}
 	}
@@ -160,6 +151,7 @@ func (p *progressBar) render(final bool) {
 	relevanceFailed := int(p.relevanceFailed.Load())
 	sizeFailed := int(p.sizeFailed.Load())
 	toolCallsFailed := int(p.toolCallsFailed.Load())
+	assertionFailed := int(p.assertionFailed.Load())
 
 	// Get current terminal width for dynamic sizing
 	termWidth := p.getTerminalWidth()
@@ -204,6 +196,9 @@ func (p *progressBar) render(final bool) {
 		}
 		if toolCallsFailed > 0 {
 			breakdown = append(breakdown, "tools "+p.red(fmt.Sprintf("✗%d", toolCallsFailed)))
+		}
+		if assertionFailed > 0 {
+			breakdown = append(breakdown, "assert "+p.red(fmt.Sprintf("✗%d", assertionFailed)))
 		}
 		if len(breakdown) > 0 {
 			counts += fmt.Sprintf(" (%s)", strings.Join(breakdown, ", "))

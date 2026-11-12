@@ -20,15 +20,3 @@ func MapSlice[T, R any](items []T, f func(T) R) []R {
 	wg.Wait()
 	return results
 }
-
-// ForEach calls f on every element of items concurrently and blocks until
-// every call has returned. Same parallelism caveats as [MapSlice].
-func ForEach[T any](items []T, f func(T)) {
-	var wg sync.WaitGroup
-	for _, item := range items {
-		wg.Go(func() {
-			f(item)
-		})
-	}
-	wg.Wait()
-}

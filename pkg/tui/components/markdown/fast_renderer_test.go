@@ -2079,3 +2079,17 @@ func TestIncrementalRendererCodeBlocksAggregate(t *testing.T) {
 		assert.Contains(t, stripANSI(lines[b.Line]), CodeBlockCopyIcon)
 	}
 }
+
+func TestRenderLiteralCodeBlock(t *testing.T) {
+	t.Parallel()
+	code := "const text = `hello\n```\n~~~\nworld`;\nconsole.log(text);"
+	rendered := NewFastRenderer(80).RenderCodeBlock(code, "javascript")
+	text := ansi.Strip(rendered)
+	assert.Contains(t, text, "const text = `hello")
+	assert.Contains(t, text, "```")
+	assert.Contains(t, text, "~~~")
+	assert.Contains(t, text, "world`;")
+	assert.Contains(t, text, "console.log(text);")
+	assert.NotContains(t, text, CodeBlockCopyIcon)
+	assert.NotContains(t, rendered, "const text", "syntax styling should separate the keyword from the variable")
+}

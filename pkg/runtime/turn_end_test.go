@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 
@@ -38,8 +39,10 @@ func (r *turnEndRecorder) record(reason string) {
 func (r *turnEndRecorder) snapshot() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]string, len(r.reasons))
-	copy(out, r.reasons)
+	out := slices.Clone(r.reasons)
+	if out == nil {
+		out = []string{}
+	}
 	return out
 }
 

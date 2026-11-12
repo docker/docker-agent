@@ -2,14 +2,18 @@ package ui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/docker/docker-agent/pkg/tools"
+	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
-	toolcomponent "github.com/docker/docker-agent/pkg/tui/components/tool"
+	"github.com/docker/docker-agent/pkg/tui/components/tool"
+	tooldefaults "github.com/docker/docker-agent/pkg/tui/components/tool/defaults"
+	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/service"
 	"github.com/docker/docker-agent/pkg/tui/styles"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
@@ -19,10 +23,13 @@ import (
 // the same TUI message shape used by the full-screen TUI so the lean renderer
 // can delegate the visual representation to pkg/tui/components/tool.
 type ToolView struct {
-	message   *tuitypes.Message
-	images    []InlineImage
-	lastWidth int
-	lastLines []string
+	renderers       *tool.Registry
+	message         *tuitypes.Message
+	images          []InlineImage
+	lastWidth       int
+	lastLines       []string
+	fullFilePreview bool
+	writeArgs       filesystem.WriteFileArgs
 }
 
 func (t *ToolView) Message() *tuitypes.Message {
@@ -43,7 +50,8 @@ const MaxToolOutputLines = 12
 // NewToolView creates a tool call render model.
 func NewToolView(agentName string, toolCall tools.ToolCall, toolDef tools.Tool, status tuitypes.ToolStatus) *ToolView {
 	return &ToolView{
-		message: tuitypes.ToolCallMessage(agentName, toolCall, EnsureToolDefinition(toolCall, toolDef), status),
+		message:   tuitypes.ToolCallMessage(agentName, toolCall, EnsureToolDefinition(toolCall, toolDef), status),
+		renderers: tooldefaults.NewRegistry(),
 	}
 }
 
@@ -55,9 +63,7 @@ func EnsureToolDefinition(toolCall tools.ToolCall, toolDef tools.Tool) tools.Too
 	return toolDef
 }
 
-// RenderTool renders a tool call with the same renderer registry used by the
-// full TUI. This keeps built-in tools and registered custom renderers visually
-// consistent between the normal and lean interfaces.
+// RenderTool uses the full builtin renderer bundle, like the normal TUI.
 func RenderTool(t ToolView, width int) []string {
 	return RenderToolWithState(&t, width, 0, service.StaticSessionState{})
 }
@@ -78,23 +84,34 @@ func RenderToolWithState(t *ToolView, width, frame int, sessionState service.Ses
 	innerWidth := max(width-boxStyle.GetHorizontalFrameSize(), 1)
 
 	ar := animation.NewSnapshotRuntime(time.Duration(frame) * animation.ChatSpinnerFrameDuration)
-	view := toolcomponent.New(ar, t.message, sessionState)
-	view.SetSize(innerWidth, 0)
-	if t.message.ToolStatus == tuitypes.ToolStatusPending || t.message.ToolStatus == tuitypes.ToolStatusRunning {
-		defer animation.StopView(view)
+	if t.renderers == nil {
+		t.renderers = tooldefaults.NewRegistry()
 	}
-
-	lines := splitRenderedTool(renderToolBox(view.View(), width), width)
+	msg := *t.message
+	msg.HideToolProgress = true
+	var content string
+	if msg.ToolCall.Function.Name == filesystem.ToolNameWriteFile {
+		content = t.renderWriteFile(&msg, ar, sessionState, innerWidth)
+	} else {
+		view := t.renderers.New(ar, &msg, sessionState)
+		view.SetSize(innerWidth, 0)
+		if msg.ToolStatus == tuitypes.ToolStatusPending || msg.ToolStatus == tuitypes.ToolStatusRunning {
+			defer animation.StopView(view)
+		}
+		content = view.View()
+	}
+	content = toolcommon.WithRunningTime(content, &msg, innerWidth)
+	lines := splitRenderedLines(renderToolBox(content, width), width)
 	for _, img := range t.images {
 		lines = append(lines, RenderInlineImage(img, width)...)
 	}
 
-	if t.shouldKeepLastPendingLines(width, lines) {
-		return cloneLines(t.lastLines)
+	if msg.ToolCall.Function.Name != filesystem.ToolNameWriteFile && t.shouldKeepLastPendingLines(width, lines) {
+		return slices.Clone(t.lastLines)
 	}
 	if t.message.ToolStatus == tuitypes.ToolStatusPending && len(lines) > 0 {
 		t.lastWidth = width
-		t.lastLines = cloneLines(lines)
+		t.lastLines = slices.Clone(lines)
 	} else if t.message.ToolStatus != tuitypes.ToolStatusPending {
 		t.lastLines = nil
 		t.lastWidth = 0
@@ -120,10 +137,6 @@ func (t *ToolView) shouldKeepLastPendingLines(width int, lines []string) bool {
 	return len(lines) == len(t.lastLines) && totalContentWidth(lines) < totalContentWidth(t.lastLines)
 }
 
-func cloneLines(lines []string) []string {
-	return append([]string(nil), lines...)
-}
-
 func totalContentWidth(lines []string) int {
 	total := 0
 	for _, line := range lines {
@@ -132,7 +145,7 @@ func totalContentWidth(lines []string) int {
 	return total
 }
 
-func splitRenderedTool(rendered string, width int) []string {
+func splitRenderedLines(rendered string, width int) []string {
 	if width < 1 {
 		width = 1
 	}

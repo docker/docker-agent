@@ -60,9 +60,11 @@ type ToolSet struct {
 
 // Verify interface compliance
 var (
-	_ tools.ToolSet      = (*ToolSet)(nil)
-	_ tools.Startable    = (*ToolSet)(nil)
-	_ tools.Instructable = (*ToolSet)(nil)
+	_ tools.ToolSet          = (*ToolSet)(nil)
+	_ tools.Startable        = (*ToolSet)(nil)
+	_ tools.Instructable     = (*ToolSet)(nil)
+	_ tools.StartReporter    = (*ToolSet)(nil)
+	_ tools.ChangeSubscriber = (*ToolSet)(nil)
 )
 
 type lspHandler struct {
@@ -79,11 +81,8 @@ type lspHandler struct {
 	// it via ensureInitialized to lazy-start on first use.
 	supervisor *lifecycle.Supervisor
 
-	// toolsChangedHandler is called after the supervisor's Connect has
-	// populated h.capabilities, so the runtime can re-fetch the (now
-	// capability-filtered) tool list. nil until SetToolsChangedHandler is
-	// called.
-	toolsChangedHandler func()
+	// Subscribers refresh the capability-filtered tool list after Connect.
+	toolsChangedSubs tools.ChangeSubscribers
 
 	// Configuration
 	command    string
@@ -359,7 +358,9 @@ func CreateToolSet(ctx context.Context, toolset latest.Toolset, runConfig *confi
 	if err != nil {
 		return nil, fmt.Errorf("failed to expand the tool's environment variables: %w", err)
 	}
-	env = append(env, os.Environ()...)
+	// Host first so the configured env wins: exec.Cmd keeps the last value for a duplicate
+	// key, which is the layering shell/script toolsets document.
+	env = append(os.Environ(), env...)
 	env = toolinstall.PrependBinDirToEnv(env)
 
 	cwd := workingdir.Resolve(toolset.WorkingDir, runConfig.WorkingDir)
@@ -429,6 +430,20 @@ func (t *ToolSet) Start(ctx context.Context) error {
 
 func (t *ToolSet) Stop(ctx context.Context) error {
 	return t.handler.supervisor.Stop(ctx)
+}
+
+// IsStarted implements tools.StartReporter: reports whether the supervisor
+// requires external action (Start/Restart) to serve requests again.
+// Deliberately looser than the MCP toolset's IsStarted (which tracks
+// Ready/Degraded only): a transient Restarting still reports true here,
+// since the supervisor already self-heals a one-off crash on its own
+// watcher goroutine and every per-request call (ensureInitialized) retries
+// eagerly regardless. Only a give-up — Failed (crash loop, exhausted
+// restarts) or Stopped — reports false, so StartableToolSet gets involved
+// (via Restart) exactly when the supervisor needs a caller-paced retry, not
+// on every ordinary transient reconnect.
+func (t *ToolSet) IsStarted() bool {
+	return !t.handler.supervisor.State().State.IsTerminal()
 }
 
 // State returns a snapshot of the underlying supervisor's lifecycle state,
@@ -535,7 +550,7 @@ func (t *ToolSet) Tools(context.Context) ([]tools.Tool, error) {
 	if caps == nil {
 		// The server has not been initialised yet. Advertise the full
 		// catalogue: the runtime will refresh after the first Connect
-		// completes (via toolsChangedHandler), at which point we filter.
+		// completes (via tools-changed subscriptions), at which point we filter.
 		return all, nil
 	}
 	return filterByCapabilities(all, caps), nil
@@ -549,14 +564,9 @@ func (h *lspHandler) snapshotCapabilities() *lspServerCapabilities {
 	return h.capabilities
 }
 
-// SetToolsChangedHandler registers a callback that is invoked after the
-// supervisor reaches Ready and the server's capability matrix becomes
-// available. The runtime uses this to re-query Tools() and pick up the
-// capability-filtered list.
-func (t *ToolSet) SetToolsChangedHandler(handler func()) {
-	t.handler.mu.Lock()
-	defer t.handler.mu.Unlock()
-	t.handler.toolsChangedHandler = handler
+// SubscribeToolsChanged registers a callback for capability-filtered tool-list changes.
+func (t *ToolSet) SubscribeToolsChanged(handler func()) func() {
+	return t.handler.toolsChangedSubs.Subscribe(handler)
 }
 
 // allLSPTools returns the full catalogue of LSP tools backed by h. It is
@@ -712,7 +722,17 @@ func (h *lspHandler) ensureInitialized(ctx context.Context) error {
 
 	// Lazy-start through the supervisor. Concurrent ensureInitialized
 	// callers serialize inside Supervisor.Start.
+	//
+	// A pending crash-loop report is checked first and, if present,
+	// returned as-is without calling Start: this per-request path bypasses
+	// StartableToolSet's backoff gate entirely (it isn't the wrapper's
+	// paced TryStart), so it must not be the one to consume — and thereby
+	// reconnect on behalf of — a one-shot report meant for the gate to
+	// pace. Only the gate's own eventual Start call clears it.
 	if !h.supervisor.IsReady() {
+		if err := h.supervisor.PendingCrashLoopError(); err != nil {
+			return fmt.Errorf("failed to start LSP server: %w", err)
+		}
 		if err := h.supervisor.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start LSP server: %w", err)
 		}
@@ -1416,8 +1436,7 @@ func applyTextEditsToFile(filePath string, edits []lspTextEdit) error {
 
 	lines := strings.Split(string(content), "\n")
 
-	sortedEdits := make([]lspTextEdit, len(edits))
-	copy(sortedEdits, edits)
+	sortedEdits := slices.Clone(edits)
 	slices.SortFunc(sortedEdits, func(a, b lspTextEdit) int {
 		if a.Range.Start.Line != b.Range.Start.Line {
 			return cmp.Compare(b.Range.Start.Line, a.Range.Start.Line)
@@ -1466,14 +1485,7 @@ func applyTextEdit(lines []string, edit lspTextEdit) []string {
 	newText := prefix + edit.NewText + suffix
 	newLines := strings.Split(newText, "\n")
 
-	result := make([]string, 0, len(lines)-(endLine-startLine)+len(newLines)-1)
-	result = append(result, lines[:startLine]...)
-	result = append(result, newLines...)
-	if endLine+1 < len(lines) {
-		result = append(result, lines[endLine+1:]...)
-	}
-
-	return result
+	return slices.Concat(lines[:startLine], newLines, lines[endLine+1:])
 }
 
 func formatCodeActions(file string, line int, data json.RawMessage) string {
@@ -1776,10 +1788,10 @@ func pathToURI(path string) string {
 	path = filepath.ToSlash(path)
 
 	u := url.URL{Scheme: "file"}
-	switch {
-	case strings.HasPrefix(path, "//"):
+	switch unc, found := strings.CutPrefix(path, "//"); {
+	case found:
 		// UNC path //host/share/...: the host is the URI authority.
-		host, rest, _ := strings.Cut(strings.TrimPrefix(path, "//"), "/")
+		host, rest, _ := strings.Cut(unc, "/")
 		u.Host = host
 		u.Path = "/" + rest
 	case !strings.HasPrefix(path, "/"):

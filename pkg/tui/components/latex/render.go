@@ -2,7 +2,6 @@
 package latex
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 	"unicode"
@@ -520,9 +519,4 @@ func normalize(s string) string {
 		lines[i] = regexp.MustCompile(`\s*([=<>])\s*`).ReplaceAllString(lines[i], " $1 ")
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
-}
-
-func ExampleRender() {
-	rendered, _ := Render(`\mathbb{C}^3 \to \mathbb{C}^3`, false)
-	fmt.Println(rendered) // Output: ℂ³ → ℂ³
 }

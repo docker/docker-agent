@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -68,10 +70,6 @@ func (m *mockMCPClient) GetPrompt(context.Context, *mcp.GetPromptParams) (*mcp.G
 }
 
 func (m *mockMCPClient) SetElicitationHandler(tools.ElicitationHandler) {}
-
-func (m *mockMCPClient) SetSamplingHandler(tools.SamplingHandler) {}
-
-func (m *mockMCPClient) SetSamplingWithToolsHandler(tools.SamplingWithToolsHandler) {}
 
 func (m *mockMCPClient) SetOAuthSuccessHandler(func()) {}
 
@@ -373,6 +371,34 @@ func TestProcessMCPContent(t *testing.T) {
 			input:      &mcp.CallToolResult{},
 			wantOutput: "no output",
 		},
+		{
+			// FastMCP returns one TextContent per element of a list result.
+			name:       "separate text blocks do not run together",
+			input:      callToolResult(&mcp.TextContent{Text: "alpha.txt"}, &mcp.TextContent{Text: "beta.txt"}, &mcp.TextContent{Text: "gamma.txt"}),
+			wantOutput: "alpha.txt\nbeta.txt\ngamma.txt",
+		},
+		{
+			name:       "text block already ending in a newline is not doubled",
+			input:      callToolResult(&mcp.TextContent{Text: "line one\n"}, &mcp.TextContent{Text: "line two"}),
+			wantOutput: "line one\nline two",
+		},
+		{
+			name:       "empty text block adds no separator",
+			input:      callToolResult(&mcp.TextContent{Text: "a"}, &mcp.TextContent{Text: ""}, &mcp.TextContent{Text: "b"}),
+			wantOutput: "a\nb",
+		},
+		{
+			name:       "separate resource links do not run together",
+			input:      callToolResult(&mcp.ResourceLink{Name: "a", URI: "file:///a"}, &mcp.ResourceLink{Name: "b", URI: "file:///b"}),
+			wantOutput: "[a](file:///a)\n[b](file:///b)",
+		},
+		{
+			// Documents the trade-off: blocks are separate items, so a string
+			// split across blocks is not reassembled.
+			name:       "one string split across text blocks gets a newline at the split",
+			input:      callToolResult(&mcp.TextContent{Text: `{"id":"abc`}, &mcp.TextContent{Text: `def"}`}),
+			wantOutput: "{\"id\":\"abc\ndef\"}",
+		},
 
 		// --- images ---
 		{
@@ -608,62 +634,66 @@ func callToolResult(content ...mcp.Content) *mcp.CallToolResult {
 func TestCallToolRecoversFromErrSessionMissing(t *testing.T) {
 	t.Parallel()
 
-	var callCount atomic.Int32
+	synctest.Test(t, func(t *testing.T) {
+		var callCount atomic.Int32
 
-	mock := newReconnectableMock()
-	mock.callToolFn = func(_ context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-		n := callCount.Add(1)
-		if n == 1 {
-			// First call: simulate server restart by returning ErrSessionMissing.
-			return nil, fmt.Errorf("tools/call: %w", mcp.ErrSessionMissing)
+		mock := newReconnectableMock()
+		mock.callToolFn = func(_ context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+			n := callCount.Add(1)
+			if n == 1 {
+				// First call: simulate server restart by returning ErrSessionMissing.
+				return nil, fmt.Errorf("tools/call: %w", mcp.ErrSessionMissing)
+			}
+			// Second call (after reconnect): succeed.
+			return &mcp.CallToolResult{
+				Content: []mcp.Content{&mcp.TextContent{Text: "recovered"}},
+			}, nil
 		}
-		// Second call (after reconnect): succeed.
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "recovered"}},
-		}, nil
-	}
 
-	ts := newTestToolset("test-server", "test-server", mock)
-	require.NoError(t, ts.Start(t.Context()))
-	t.Cleanup(func() { _ = ts.Stop(t.Context()) })
+		ts := newTestToolset("test-server", "test-server", mock)
+		require.NoError(t, ts.Start(t.Context()))
+		t.Cleanup(func() { _ = ts.Stop(context.WithoutCancel(t.Context())) })
 
-	result, err := ts.callTool(t.Context(), tools.ToolCall{
-		Function: tools.FunctionCall{
-			Name:      "test_tool",
-			Arguments: `{"key": "value"}`,
-		},
-	}, tools.NopRuntime{})
+		result, err := ts.callTool(t.Context(), tools.ToolCall{
+			Function: tools.FunctionCall{
+				Name:      "test_tool",
+				Arguments: `{"key": "value"}`,
+			},
+		}, tools.NopRuntime{})
 
-	require.NoError(t, err)
-	assert.Equal(t, "recovered", result.Output)
-	assert.Equal(t, int32(2), callCount.Load(), "expected exactly 2 CallTool invocations (1 failed + 1 retry)")
+		require.NoError(t, err)
+		assert.Equal(t, "recovered", result.Output)
+		assert.Equal(t, int32(2), callCount.Load(), "expected exactly 2 CallTool invocations (1 failed + 1 retry)")
+	})
 }
 
 func TestCallToolTimeoutFires(t *testing.T) {
 	t.Parallel()
 
-	mock := &mockMCPClient{
-		callToolFn: func(ctx context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-	}
+	synctest.Test(t, func(t *testing.T) {
+		mock := &mockMCPClient{
+			callToolFn: func(ctx context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
 
-	ts := newTestToolset("test-server", "test-server", mock)
-	ts.callTimeout = 50 * time.Millisecond
-	ts.markStartedForTesting()
+		ts := newTestToolset("test-server", "test-server", mock)
+		ts.callTimeout = 50 * time.Millisecond
+		ts.markStartedForTesting()
 
-	start := time.Now()
-	_, err := ts.callTool(t.Context(), tools.ToolCall{
-		Function: tools.FunctionCall{Name: "test_tool", Arguments: `{}`},
-	}, tools.NopRuntime{})
-	elapsed := time.Since(start)
+		start := time.Now()
+		_, err := ts.callTool(t.Context(), tools.ToolCall{
+			Function: tools.FunctionCall{Name: "test_tool", Arguments: `{}`},
+		}, tools.NopRuntime{})
+		elapsed := time.Since(start)
 
-	require.Error(t, err)
-	require.ErrorIs(t, err, tools.ErrCallTimeout, "expected ErrCallTimeout, got: %v", err)
-	assert.Contains(t, err.Error(), "timed out")
-	assert.Less(t, elapsed, 5*time.Second, "the call_timeout should have fired promptly")
-	assert.Equal(t, lifecycle.StateReady, ts.State().State, "a fired call_timeout must not disturb the toolset's lifecycle state")
+		require.Error(t, err)
+		require.ErrorIs(t, err, tools.ErrCallTimeout, "expected ErrCallTimeout, got: %v", err)
+		assert.Contains(t, err.Error(), "timed out")
+		assert.Less(t, elapsed, 5*time.Second, "the call_timeout should have fired promptly")
+		assert.Equal(t, lifecycle.StateReady, ts.State().State, "a fired call_timeout must not disturb the toolset's lifecycle state")
+	})
 }
 
 func TestCallToolNoTimeoutWhenCallTimeoutUnset(t *testing.T) {
@@ -693,62 +723,66 @@ func TestCallToolNoTimeoutWhenCallTimeoutUnset(t *testing.T) {
 func TestCallToolParentCancelWinsOverTimeout(t *testing.T) {
 	t.Parallel()
 
-	started := make(chan struct{})
-	mock := &mockMCPClient{
-		callToolFn: func(ctx context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-			close(started)
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-	}
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		mock := &mockMCPClient{
+			callToolFn: func(ctx context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+				close(started)
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}
 
-	ts := newTestToolset("test-server", "test-server", mock)
-	ts.callTimeout = time.Hour // large enough that only the parent cancel can fire first
-	ts.markStartedForTesting()
+		ts := newTestToolset("test-server", "test-server", mock)
+		ts.callTimeout = time.Hour // large enough that only the parent cancel can fire first
+		ts.markStartedForTesting()
 
-	ctx, cancel := context.WithCancel(t.Context())
-	go func() {
-		<-started
-		cancel()
-	}()
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() {
+			<-started
+			cancel()
+		}()
 
-	_, err := ts.callTool(ctx, tools.ToolCall{
-		Function: tools.FunctionCall{Name: "test_tool", Arguments: `{}`},
-	}, tools.NopRuntime{})
+		_, err := ts.callTool(ctx, tools.ToolCall{
+			Function: tools.FunctionCall{Name: "test_tool", Arguments: `{}`},
+		}, tools.NopRuntime{})
 
-	require.Error(t, err)
-	require.ErrorIs(t, err, context.Canceled, "expected context.Canceled, got: %v", err)
-	assert.NotErrorIs(t, err, tools.ErrCallTimeout, "a parent cancel must not be misreported as a call_timeout")
+		require.Error(t, err)
+		require.ErrorIs(t, err, context.Canceled, "expected context.Canceled, got: %v", err)
+		assert.NotErrorIs(t, err, tools.ErrCallTimeout, "a parent cancel must not be misreported as a call_timeout")
+	})
 }
 
 func TestCallToolTimeoutCoversReconnectRetry(t *testing.T) {
 	t.Parallel()
 
-	var callCount, initCount atomic.Int32
-	mock := newReconnectableMock()
-	mock.callToolFn = func(_ context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
-		callCount.Add(1)
-		// Always fail with a connection error, forcing a reconnect attempt.
-		return nil, fmt.Errorf("tools/call: %w", mcp.ErrSessionMissing)
-	}
-	slowInit := &slowReconnectClient{reconnectableMockClient: mock, reconnectDelay: 300 * time.Millisecond, initCount: &initCount}
+	synctest.Test(t, func(t *testing.T) {
+		var callCount, initCount atomic.Int32
+		mock := newReconnectableMock()
+		mock.callToolFn = func(_ context.Context, _ *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+			callCount.Add(1)
+			// Always fail with a connection error, forcing a reconnect attempt.
+			return nil, fmt.Errorf("tools/call: %w", mcp.ErrSessionMissing)
+		}
+		slowInit := &slowReconnectClient{reconnectableMockClient: mock, reconnectDelay: 300 * time.Millisecond, initCount: &initCount}
 
-	ts := newTestToolset("test-server", "test-server", slowInit)
-	ts.callTimeout = 50 * time.Millisecond
-	require.NoError(t, ts.Start(t.Context()))
-	t.Cleanup(func() { _ = ts.Stop(t.Context()) })
+		ts := newTestToolset("test-server", "test-server", slowInit)
+		ts.callTimeout = 50 * time.Millisecond
+		require.NoError(t, ts.Start(t.Context()))
+		t.Cleanup(func() { _ = ts.Stop(context.WithoutCancel(t.Context())) })
 
-	start := time.Now()
-	_, err := ts.callTool(t.Context(), tools.ToolCall{
-		Function: tools.FunctionCall{Name: "test_tool", Arguments: `{}`},
-	}, tools.NopRuntime{})
-	elapsed := time.Since(start)
+		start := time.Now()
+		_, err := ts.callTool(t.Context(), tools.ToolCall{
+			Function: tools.FunctionCall{Name: "test_tool", Arguments: `{}`},
+		}, tools.NopRuntime{})
+		elapsed := time.Since(start)
 
-	require.Error(t, err)
-	require.ErrorIs(t, err, tools.ErrCallTimeout, "expected ErrCallTimeout, got: %v", err)
-	assert.Less(t, elapsed, sessionMissingRetryTimeout,
-		"the call_timeout must cover the reconnect-retry as one budget, not stack on top of the 35s retry wait")
-	assert.GreaterOrEqual(t, callCount.Load(), int32(1))
+		require.Error(t, err)
+		require.ErrorIs(t, err, tools.ErrCallTimeout, "expected ErrCallTimeout, got: %v", err)
+		assert.Less(t, elapsed, sessionMissingRetryTimeout,
+			"the call_timeout must cover the reconnect-retry as one budget, not stack on top of the 35s retry wait")
+		assert.GreaterOrEqual(t, callCount.Load(), int32(1))
+	})
 }
 
 // slowReconnectClient blocks the second-and-later Initialize call for
@@ -819,37 +853,55 @@ func TestRemotePolicyPreservesRestartAlways(t *testing.T) {
 func TestRemoteToolsetReconnectsAfterCleanClose(t *testing.T) {
 	t.Parallel()
 
-	pingTool := &mcp.Tool{Name: "ping"}
-	mock := &failingInitClient{
-		toolsToList: []*mcp.Tool{pingTool},
-		waitCh:      make(chan struct{}),
-	}
+	synctest.Test(t, func(t *testing.T) {
+		pingTool := &mcp.Tool{Name: "ping"}
+		mock := &failingInitClient{
+			toolsToList: []*mcp.Tool{pingTool},
+			waitCh:      make(chan struct{}),
+		}
 
-	ts := newTestToolset("test-remote", "remote-server", mock)
-	ts.supervisor = newSupervisor(ts, lifecycle.Policy{
-		Restart: lifecycle.RestartAlways,
-		Backoff: lifecycle.Backoff{
-			Initial:    time.Millisecond,
-			Max:        2 * time.Millisecond,
-			Multiplier: 2,
-		},
+		ts := newTestToolset("test-remote", "remote-server", mock)
+		ts.supervisor = newSupervisor(ts, lifecycle.Policy{
+			Restart: lifecycle.RestartAlways,
+			Backoff: lifecycle.Backoff{
+				Initial:    time.Millisecond,
+				Max:        2 * time.Millisecond,
+				Multiplier: 2,
+			},
+		})
+
+		require.NoError(t, ts.Start(t.Context()))
+		defer func() { _ = ts.Stop(t.Context()) }()
+		require.True(t, ts.IsStarted())
+
+		require.NoError(t, mock.Close(t.Context()))
+		require.Eventually(t, func() bool {
+			mock.mu.Lock()
+			initCalls := mock.initCalls
+			mock.mu.Unlock()
+			return initCalls >= 2 && ts.IsStarted()
+		}, 2*time.Second, 10*time.Millisecond, "remote toolset did not reconnect after clean close")
+
+		toolList, err := ts.Tools(t.Context())
+		require.NoError(t, err)
+		require.Len(t, toolList, 1)
+		assert.Equal(t, "test-remote_ping", toolList[0].Name)
 	})
+}
 
-	require.NoError(t, ts.Start(t.Context()))
-	require.True(t, ts.IsStarted())
+func TestMergeChildEnv_ToolsetEnvWins(t *testing.T) {
+	t.Setenv("DOCKER_AGENT_ENV_PRECEDENCE_PROBE", "host")
 
-	require.NoError(t, mock.Close(t.Context()))
-	require.Eventually(t, func() bool {
-		mock.mu.Lock()
-		initCalls := mock.initCalls
-		mock.mu.Unlock()
-		return initCalls >= 2 && ts.IsStarted()
-	}, 2*time.Second, 10*time.Millisecond, "remote toolset did not reconnect after clean close")
+	env := mergeChildEnv([]string{"DOCKER_AGENT_ENV_PRECEDENCE_PROBE=toolset"})
 
-	toolList, err := ts.Tools(t.Context())
-	require.NoError(t, err)
-	require.Len(t, toolList, 1)
-	assert.Equal(t, "test-remote_ping", toolList[0].Name)
-
-	_ = ts.Stop(t.Context())
+	var got []string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "DOCKER_AGENT_ENV_PRECEDENCE_PROBE=") {
+			got = append(got, entry)
+		}
+	}
+	// exec.Cmd keeps the last duplicate, so the configured value must be the last one.
+	if len(got) != 2 || got[len(got)-1] != "DOCKER_AGENT_ENV_PRECEDENCE_PROBE=toolset" {
+		t.Fatalf("configured env must come last for exec.Cmd to prefer it, got %v", got)
+	}
 }

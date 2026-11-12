@@ -12,9 +12,8 @@ import (
 	"github.com/docker/docker-agent/pkg/tools"
 )
 
-// runRuntimeContract exercises every non-streaming method on the Runtime
-// interface. It runs against any factory so that LocalRuntime and (in a
-// future commit) RemoteRuntime can be checked against the same expectations.
+// runRuntimeContract exercises the shared non-streaming Runtime expectations
+// against any factory. pkg/runtime/remote has a mirrored copy for its Runtime.
 //
 // Streaming methods (RunStream, Run, Summarize) are exercised by the
 // type-specific test files because they need real models or providers.

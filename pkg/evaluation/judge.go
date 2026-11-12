@@ -2,93 +2,60 @@ package evaluation
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
-	"strings"
 	"sync"
 
-	"github.com/docker/docker-agent/pkg/chat"
-	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 )
 
-// relevancePrompt is the prompt template for the judge model to evaluate responses.
-const relevancePrompt = `You are an evaluation judge. Check if the response matches the given relevance criteria.
-
-Response to evaluate:
-<response>
-%s
-</response>
-
-Criteria to check:
-<criteria>
-%s
-</criteria>
-
-Evaluate whether the response satisfies the criteria and respond with your judgment.`
-
-// judgeResponseSchema defines the JSON schema for structured output from the judge model.
-var judgeResponseSchema = &latest.StructuredOutput{
-	Name:        "judge_response",
-	Description: "Evaluation result for a relevance criterion",
-	Schema: map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"result": map[string]any{
-				"type":        "string",
-				"enum":        []string{"pass", "fail"},
-				"description": "Whether the response satisfies the criterion",
-			},
-			"reason": map[string]any{
-				"type":        "string",
-				"description": "Brief explanation of why the criterion passed or failed",
-			},
-		},
-		"required":             []string{"result", "reason"},
-		"additionalProperties": false,
-	},
-	Strict: true,
+// JudgeBackend assesses one relevance criterion against a transcript.
+// Implementations must support concurrent calls.
+type JudgeBackend interface {
+	Check(ctx context.Context, transcript, criterion string) (Judgment, error)
 }
 
-// Judge runs LLM-as-a-judge relevance checks concurrently.
+// Judgment is a backend-independent relevance verdict.
+type Judgment struct {
+	Passed      bool
+	Reason      string
+	Probability *float64
+}
+
+// Judge runs relevance checks concurrently using a shared backend.
 type Judge struct {
-	model       provider.Provider
+	backend     JudgeBackend
 	concurrency int
 }
 
 // NewJudge creates a new Judge that runs relevance checks with the given concurrency.
 // Concurrency defaults to 1 if n < 1.
 func NewJudge(model provider.Provider, concurrency int) *Judge {
+	return NewJudgeWithBackend(&llmJudge{model: model}, concurrency)
+}
+
+// NewJudgeWithBackend creates a judge with an interchangeable assessment backend.
+func NewJudgeWithBackend(backend JudgeBackend, concurrency int) *Judge {
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	return &Judge{
-		model:       model,
-		concurrency: concurrency,
-	}
+	return &Judge{backend: backend, concurrency: concurrency}
 }
 
-// Validate performs an end-to-end check of the judge model by sending a
-// trivial relevance prompt and verifying the response is valid structured
-// JSON. This catches configuration errors (bad API key, unsupported model,
-// missing structured-output support, etc.) before running any evaluations,
-// allowing the framework to fail fast.
+// Validate checks the backend end-to-end before any evaluations run.
 func (j *Judge) Validate(ctx context.Context) error {
 	const (
 		testResponse  = "The sky is blue."
 		testCriterion = "The response mentions a color."
 	)
 
-	passed, _, err := j.checkSingle(ctx, testResponse, testCriterion)
+	verdict, err := j.backend.Check(ctx, testResponse, testCriterion)
 	if err != nil {
 		return fmt.Errorf("judge model validation failed: %w", err)
 	}
 
-	if !passed {
+	if !verdict.Passed {
 		return errors.New("judge model validation failed: expected the test criterion to pass but the judge returned 'fail'")
 	}
 
@@ -97,9 +64,10 @@ func (j *Judge) Validate(ctx context.Context) error {
 
 // RelevanceResult contains the result of a single relevance check.
 type RelevanceResult struct {
-	Criterion string `json:"criterion"`
-	Passed    bool   `json:"passed"`
-	Reason    string `json:"reason"`
+	Criterion   string   `json:"criterion"`
+	Passed      bool     `json:"passed"`
+	Reason      string   `json:"reason"`
+	Probability *float64 `json:"probability,omitempty"`
 }
 
 // CheckRelevance runs all relevance checks concurrently with the configured concurrency.
@@ -125,9 +93,8 @@ func (j *Judge) CheckRelevance(ctx context.Context, response string, criteria []
 
 	// Results slice preserves order
 	type rawResult struct {
-		passed bool
-		reason string
-		err    error
+		verdict Judgment
+		err     error
 	}
 	rawResults := make([]rawResult, len(criteria))
 
@@ -139,8 +106,8 @@ func (j *Judge) CheckRelevance(ctx context.Context, response string, criteria []
 					rawResults[item.index] = rawResult{err: fmt.Errorf("context cancelled: %w", ctx.Err())}
 					continue
 				}
-				pass, reason, checkErr := j.checkSingle(ctx, response, item.criterion)
-				rawResults[item.index] = rawResult{passed: pass, reason: reason, err: checkErr}
+				verdict, checkErr := j.backend.Check(ctx, response, item.criterion)
+				rawResults[item.index] = rawResult{verdict: verdict, err: checkErr}
 			}
 		})
 	}
@@ -168,12 +135,13 @@ func (j *Judge) CheckRelevance(ctx context.Context, response string, criteria []
 			})
 			continue
 		}
-		results[i].Passed = r.passed
-		results[i].Reason = r.reason
+		results[i].Passed = r.verdict.Passed
+		results[i].Reason = r.verdict.Reason
+		results[i].Probability = r.verdict.Probability
 
 		score := 0.0
 		label := "failed"
-		if r.passed {
+		if r.verdict.Passed {
 			score = 1.0
 			label = "passed"
 		}
@@ -182,90 +150,9 @@ func (j *Judge) CheckRelevance(ctx context.Context, response string, criteria []
 			ScoreLabel:    label,
 			ScoreValue:    score,
 			HasScoreValue: true,
-			Explanation:   r.reason,
+			Explanation:   r.verdict.Reason,
 		})
 	}
 
-	if len(errs) > 0 {
-		return results, errors.Join(errs...)
-	}
-
-	return results, nil
-}
-
-// checkSingle checks a single relevance criterion against the response.
-// It returns whether the check passed, the reason provided by the judge, and any error.
-func (j *Judge) checkSingle(ctx context.Context, response, criterion string) (passed bool, reason string, err error) {
-	prompt := fmt.Sprintf(relevancePrompt, response, criterion)
-	messages := []chat.Message{{Role: chat.MessageRoleUser, Content: prompt}}
-
-	stream, err := j.model.CreateChatCompletionStream(ctx, messages, nil)
-	if err != nil {
-		return false, "", fmt.Errorf("creating chat completion: %w", err)
-	}
-	defer stream.Close()
-
-	var fullResponse strings.Builder
-	var streamErr error
-	for {
-		resp, err := stream.Recv()
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				streamErr = err
-			}
-			break
-		}
-		for _, choice := range resp.Choices {
-			fullResponse.WriteString(choice.Delta.Content)
-		}
-	}
-
-	if streamErr != nil {
-		return false, "", fmt.Errorf("streaming judge response: %w", streamErr)
-	}
-
-	raw := fullResponse.String()
-	passed, reason, err = parseJudgeResponse(raw)
-	if err != nil {
-		slog.WarnContext(ctx, "Failed to parse judge response",
-			"criterion", criterion,
-			"raw_response", raw,
-			"error", err,
-		)
-		return false, "", fmt.Errorf("parsing judge response (length=%d): %w", len(raw), err)
-	}
-
-	slog.DebugContext(ctx, "Judge response parsed successfully",
-		"criterion", criterion,
-		"passed", passed,
-		"reason", reason,
-	)
-
-	return passed, reason, nil
-}
-
-// judgeResponse represents the structured response from the judge model.
-type judgeResponse struct {
-	Result string `json:"result"`
-	Reason string `json:"reason"`
-}
-
-// parseJudgeResponse parses a JSON judge response and returns whether the check
-// passed, the reason, and any parse error.
-func parseJudgeResponse(text string) (passed bool, reason string, err error) {
-	text = strings.TrimSpace(text)
-
-	var resp judgeResponse
-	if err := json.Unmarshal([]byte(text), &resp); err != nil {
-		return false, "", fmt.Errorf("invalid JSON: %w", err)
-	}
-
-	if resp.Result == "" {
-		slog.Warn("Judge response has empty result field",
-			"raw_response", text,
-			"reason_field", resp.Reason,
-		)
-	}
-
-	return strings.EqualFold(resp.Result, "pass"), resp.Reason, nil
+	return results, errors.Join(errs...)
 }

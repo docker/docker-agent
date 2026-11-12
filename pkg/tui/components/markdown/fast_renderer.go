@@ -32,7 +32,6 @@ type ansiStyle struct {
 	suffix    string // ANSI codes to end the style (reset)
 	hasBold   bool   // Whether this style includes bold
 	hasStrike bool   // Whether this style includes strikethrough
-	hasItalic bool   // Whether this style includes italic
 }
 
 func (s ansiStyle) render(text string) string {
@@ -80,15 +79,12 @@ func (s ansiStyle) withBold() ansiStyle {
 }
 
 func (s ansiStyle) withItalic() ansiStyle {
-	r := s.withAttribute("\x1b[3m", "\x1b[23m")
-	r.hasItalic = true
-	return r
+	return s.withAttribute("\x1b[3m", "\x1b[23m")
 }
 
 func (s ansiStyle) withBoldItalic() ansiStyle {
 	r := s.withAttribute("\x1b[1;3m", "\x1b[22;23m")
 	r.hasBold = true
-	r.hasItalic = true
 	return r
 }
 
@@ -122,9 +118,6 @@ type cachedStyles struct {
 
 	// ANSI styles (for fast inline rendering)
 	ansiBold              ansiStyle
-	ansiItalic            ansiStyle
-	ansiBoldItal          ansiStyle
-	ansiStrike            ansiStyle
 	ansiCode              ansiStyle
 	ansiLink              ansiStyle
 	ansiLinkText          ansiStyle
@@ -140,7 +133,6 @@ type cachedStyles struct {
 	styledHeadingPrefixes   [6]string // ANSI-styled prefix used at start of heading
 	styledHeadingContIndent [6]string // ANSI-styled spaces for heading continuation lines
 	styledHR                string    // pre-rendered horizontal rule (with trailing blank line)
-	styledTableSep          string    // styled " │ " for table columns
 
 	styleTaskTicked  string
 	styleTaskUntick  string
@@ -187,7 +179,6 @@ func getGlobalStyles() *cachedStyles {
 		mdStyle := styles.MarkdownStyle()
 
 		styleBold := buildStylePrimitive(mdStyle.Strong)
-		styleItalic := buildStylePrimitive(mdStyle.Emph)
 
 		textStyle := buildStylePrimitive(mdStyle.Document.StylePrimitive)
 
@@ -242,9 +233,6 @@ func getGlobalStyles() *cachedStyles {
 		globalStyles = &cachedStyles{
 			styleCodeBg:             codeBg,
 			ansiBold:                buildAnsiStyle(styleBold),
-			ansiItalic:              buildAnsiStyle(styleItalic),
-			ansiBoldItal:            buildAnsiStyle(styleBold.Inherit(styleItalic)),
-			ansiStrike:              buildAnsiStyle(buildStylePrimitive(mdStyle.Strikethrough)),
 			ansiCode:                buildAnsiStyle(buildStylePrimitive(mdStyle.Code.StylePrimitive)),
 			ansiLink:                buildAnsiStyle(buildStylePrimitive(mdStyle.Link)),
 			ansiLinkText:            buildAnsiStyle(buildStylePrimitive(mdStyle.LinkText)),
@@ -258,7 +246,6 @@ func getGlobalStyles() *cachedStyles {
 			styledHeadingPrefixes:   styledPrefixes,
 			styledHeadingContIndent: styledContIndents,
 			styledHR:                buildAnsiStyle(buildStylePrimitive(mdStyle.HorizontalRule)).render("--------") + "\n\n",
-			styledTableSep:          ansiText.render(" │ "),
 			styleTaskTicked:         mdStyle.Task.Ticked,
 			styleTaskUntick:         mdStyle.Task.Unticked,
 			listIndent:              int(mdStyle.List.LevelIndent),
@@ -304,6 +291,17 @@ var parserPool = sync.Pool{
 func (r *FastRenderer) Render(input string) (string, error) {
 	out, _, err := r.RenderWithCodeBlocks(input)
 	return out, err
+}
+
+// RenderCodeBlock renders literal code without interpreting Markdown fences.
+func (r *FastRenderer) RenderCodeBlock(code, language string) string {
+	p := parserPool.Get().(*parser)
+	p.reset("", r.width)
+	p.hideCopyIcon = true
+	p.renderCodeBlock(sanitizeForTerminal(code), language)
+	result := finalizeOutput(p.out.String(), r.width)
+	parserPool.Put(p)
+	return result
 }
 
 // RenderWithCodeBlocks renders markdown content and returns both the styled
@@ -581,11 +579,11 @@ func (p *parser) tryBlockquote(line string) bool {
 	var quoteLines []string
 	for p.lineIdx < len(p.lines) {
 		l := strings.TrimLeft(p.lines[p.lineIdx], " \t")
-		if !strings.HasPrefix(l, ">") {
+		content, found := strings.CutPrefix(l, ">")
+		if !found {
 			break
 		}
-		// Remove the > and optional space
-		content := strings.TrimPrefix(l, ">")
+		// Remove the optional space.
 		content = strings.TrimPrefix(content, " ")
 		quoteLines = append(quoteLines, content)
 		p.lineIdx++
@@ -612,11 +610,11 @@ func (p *parser) renderBlockquoteContent(lines []string, indent string, availabl
 			var nestedLines []string
 			for i < len(lines) {
 				l := strings.TrimSpace(lines[i])
-				if !strings.HasPrefix(l, ">") {
+				content, found := strings.CutPrefix(l, ">")
+				if !found {
 					break
 				}
-				// Strip the > and optional space
-				content := strings.TrimPrefix(l, ">")
+				// Remove the optional space.
 				content = strings.TrimPrefix(content, " ")
 				nestedLines = append(nestedLines, content)
 				i++
@@ -1454,13 +1452,12 @@ func (p *parser) renderListBlockquote(bulletWidth int) {
 		line := p.lines[p.lineIdx]
 		ltrimmed := strings.TrimLeft(line, " \t")
 
-		// Check if this line is part of the blockquote
-		if !strings.HasPrefix(ltrimmed, ">") {
+		content, found := strings.CutPrefix(ltrimmed, ">")
+		if !found {
 			break
 		}
 
-		// Remove the > and optional space
-		content := strings.TrimPrefix(ltrimmed, ">")
+		// Remove the optional space.
 		content = strings.TrimPrefix(content, " ")
 		quoteLines = append(quoteLines, content)
 		p.lineIdx++

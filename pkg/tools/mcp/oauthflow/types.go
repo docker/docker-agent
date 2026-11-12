@@ -15,6 +15,11 @@ type OAuthToken struct {
 	ClientSecret string    `json:"client_secret,omitempty"`
 	AuthServer   string    `json:"auth_server,omitempty"`
 
+	// TokenEndpointAuthMethod is the RFC 7591 method agreed at registration.
+	// Empty means client_secret_post, which is what tokens stored before
+	// this field used.
+	TokenEndpointAuthMethod string `json:"token_endpoint_auth_method,omitempty"`
+
 	// RequestedScopes records the scope list actually requested when this
 	// token was obtained: the configured scopes, or — on a successful
 	// dynamic client registration with no configured override — the

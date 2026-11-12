@@ -14,12 +14,11 @@ package transcript
 import (
 	"slices"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/docker/docker-agent/pkg/tools"
-	"github.com/docker/docker-agent/pkg/tools/builtin/transfertask"
+	transfertask "github.com/docker/docker-agent/pkg/tools/builtin/transfertask/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/message"
 	"github.com/docker/docker-agent/pkg/tui/components/tool"
@@ -32,18 +31,33 @@ import (
 // with New. It is not safe for concurrent use: like every Bubble Tea model,
 // it must only be touched from the program's update loop.
 type Transcript struct {
-	ar    *animation.Runtime
-	state service.SessionStateReader
-	msgs  []*types.Message
-	views []layout.Model
-	width int
+	toolRenderers *tool.Registry
+	ar            *animation.Runtime
+	state         service.SessionStateReader
+	msgs          []*types.Message
+	views         []layout.Model
+	width         int
+}
+
+type Option func(*Transcript)
+
+func WithToolRenderers(registry *tool.Registry) Option {
+	return func(t *Transcript) {
+		if registry != nil {
+			t.toolRenderers = registry
+		}
+	}
 }
 
 // New creates an empty transcript. The session state is consulted by the
 // tool views for rendering preferences; embedders without one should pass
 // a service.StaticSessionState.
-func New(ar *animation.Runtime, state service.SessionStateReader) *Transcript {
-	return &Transcript{ar: ar, state: state, width: 80}
+func New(ar *animation.Runtime, state service.SessionStateReader, opts ...Option) *Transcript {
+	t := &Transcript{ar: ar, state: state, width: 80, toolRenderers: tool.NewRegistry()}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // Append adds a message and returns the new view's Init command (spinner
@@ -60,7 +74,7 @@ func (t *Transcript) Append(msg *types.Message) tea.Cmd {
 func (t *Transcript) newView(msg, prev *types.Message) layout.Model {
 	var v layout.Model
 	if msg.Type == types.MessageTypeToolCall {
-		v = tool.New(t.ar, msg, t.state)
+		v = t.toolRenderers.New(t.ar, msg, t.state)
 	} else {
 		v = message.New(t.ar, msg, prev)
 	}
@@ -154,11 +168,7 @@ func (t *Transcript) FinalizeToolCalls(status types.ToolStatus) {
 // refreshToolView applies a status to tool message i and recreates its view.
 func (t *Transcript) refreshToolView(i int, status types.ToolStatus) tea.Cmd {
 	msg := t.msgs[i]
-	msg.ToolStatus = status
-	if status == types.ToolStatusRunning && msg.StartedAt == nil {
-		now := time.Now()
-		msg.StartedAt = &now
-	}
+	msg.SetToolStatus(status)
 	animation.StopView(t.views[i])
 	var prev *types.Message
 	if i > 0 {

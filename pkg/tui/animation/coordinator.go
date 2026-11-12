@@ -71,6 +71,7 @@ type Runtime struct {
 	runtimeIdentity *runtimeIdentity
 	elapsed         time.Duration
 	active          int32
+	paused          bool
 	generation      int
 
 	tickScheduled   bool
@@ -182,6 +183,32 @@ func (r *Runtime) Now() time.Duration {
 	return r.elapsed
 }
 
+// Pause freezes the animation clock and invalidates queued ticks without
+// releasing subscriptions. New animations can register but cannot schedule work.
+func (r *Runtime) Pause() {
+	r.mustExist()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.paused = true
+	r.abandonLeaseLocked()
+	r.lastDeliveredAt = time.Time{}
+}
+
+// Resume restarts at most one tick chain, excluding time spent paused.
+func (r *Runtime) Resume() tea.Cmd {
+	r.mustExist()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.paused {
+		return nil
+	}
+	r.paused = false
+	if r.active == 0 {
+		return nil
+	}
+	return r.tickLocked()
+}
+
 // EnsureRunning replaces a potentially lost outstanding tick command.
 func (r *Runtime) EnsureRunning() tea.Cmd {
 	r.mustExist()
@@ -241,7 +268,7 @@ func (r *Runtime) abandonLeaseLocked() {
 }
 
 func (r *Runtime) tickLocked() tea.Cmd {
-	if r.tickScheduled {
+	if r.paused || r.tickScheduled {
 		return nil
 	}
 	r.tickScheduled = true

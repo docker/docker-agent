@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker-agent/pkg/concurrent"
 	"github.com/docker/docker-agent/pkg/config/latest"
 	"github.com/docker/docker-agent/pkg/config/types"
+	"github.com/docker/docker-agent/pkg/evaluator"
 	"github.com/docker/docker-agent/pkg/model/provider"
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tools/builtin/structuredoutput"
@@ -27,6 +28,7 @@ type Agent struct {
 	welcomeMessage          string
 	instruction             string
 	toolsets                []*tools.StartableToolSet
+	ownedToolsets           []*tools.StartableToolSet
 	models                  []provider.Provider
 	fallbackModels          []provider.Provider                 // Fallback models to try if primary fails
 	fallbackRetries         int                                 // Number of retries per fallback model with exponential backoff
@@ -39,6 +41,7 @@ type Agent struct {
 	subAgents               []*Agent
 	handoffs                []*Agent
 	forceHandoff            *Agent
+	routing                 Routing
 	parents                 []*Agent
 	addDate                 bool
 	addEnvironmentInfo      bool
@@ -51,11 +54,15 @@ type Agent struct {
 	maxToolResultTokens     int
 	numHistoryItems         int
 	addPromptFiles          []string
+	addPromptFilesDepth     int
 	tools                   []tools.Tool
 	commands                types.Commands
 	harness                 *latest.HarnessConfig
+	harnessEffort           atomic.Pointer[string] // Optional harness effort override set at runtime
 	hooks                   *latest.HooksConfig
+	evaluators              map[string]evaluator.Evaluator
 	cache                   *cache.Cache
+	workingDirFactory       func(context.Context, string) (*Agent, error)
 	structuredOutput        *latest.StructuredOutput
 	// structuredOutputTool lazily compiles the tool-mode output tool once
 	// per agent (sync.OnceValues over structuredoutput.New); nil when the
@@ -152,6 +159,12 @@ func (a *Agent) AddPromptFiles() []string {
 	return a.addPromptFiles
 }
 
+// AddPromptFilesDepth returns how many directory levels below the working
+// directory are scanned for prompt files to list by path (0 = disabled).
+func (a *Agent) AddPromptFilesDepth() int {
+	return a.addPromptFilesDepth
+}
+
 // Description returns the agent's description
 func (a *Agent) Description() string {
 	return a.description
@@ -177,6 +190,11 @@ func (a *Agent) Handoffs() []*Agent {
 // no forced handoff is configured.
 func (a *Agent) ForceHandoff() *Agent {
 	return a.forceHandoff
+}
+
+// Routing returns the agents this agent's control hooks may route to.
+func (a *Agent) Routing() Routing {
+	return a.routing
 }
 
 // Parents returns the list of parent agent names
@@ -376,9 +394,24 @@ func (a *Agent) Commands() types.Commands {
 	return a.commands
 }
 
-// Harness returns the external coding harness configuration for this agent.
+// Harness returns the external coding harness configuration for this agent,
+// with the runtime effort override applied.
 func (a *Agent) Harness() *latest.HarnessConfig {
+	if a.harness == nil {
+		return nil
+	}
+	if effort := a.harnessEffort.Load(); effort != nil {
+		cfg := *a.harness
+		cfg.Effort = *effort
+		return &cfg
+	}
 	return a.harness
+}
+
+// SetHarnessEffort overrides the configured harness effort, as
+// SetModelOverride does for a model's thinking level.
+func (a *Agent) SetHarnessEffort(effort string) {
+	a.harnessEffort.Store(&effort)
 }
 
 func (a *Agent) HasHarness() bool {
@@ -398,6 +431,18 @@ func (a *Agent) HarnessType() string {
 // Hooks returns the hooks configuration for this agent.
 func (a *Agent) Hooks() *latest.HooksConfig {
 	return a.hooks
+}
+
+// Evaluator returns an evaluator from the agent's source configuration.
+func (a *Agent) Evaluator(name string) (evaluator.Evaluator, bool) {
+	e, ok := a.evaluators[name]
+	return e, ok
+}
+
+// HasEvaluatorScope distinguishes a bound (possibly empty) source scope from
+// a programmatic agent that may use team-level evaluators.
+func (a *Agent) HasEvaluatorScope() bool {
+	return a.evaluators != nil
 }
 
 // StructuredOutput returns the agent's structured-output configuration, or
@@ -428,7 +473,23 @@ func (a *Agent) Cache() *cache.Cache {
 // Tools returns the tools available to this agent
 func (a *Agent) Tools(ctx context.Context) ([]tools.Tool, error) {
 	a.ensureToolSetsAreStarted(ctx)
-	return a.collectTools(ctx)
+	return a.collectTools(ctx, false)
+}
+
+// ToolsWithCatalog is Tools plus every started [tools.Catalog] toolset's
+// catalog, marked [tools.Tool.InCatalog], for providers with hosted tool
+// search. Catalogs are read from the toolsets directly, not through
+// composites such as Code Mode, whose children stay reachable only through
+// the composite's own tool. Dedup follows Tools: a regular tool from another
+// toolset wins over a same-named catalog tool, while the catalog toolset's
+// own regular listing of a catalog tool (e.g. one activated through
+// add_tool) is marked InCatalog in place so the native declaration never
+// changes with activation state, yet stays a regular tool for providers
+// without hosted search. Catalog tools no toolset lists are also marked
+// [tools.Tool.SearchOnly].
+func (a *Agent) ToolsWithCatalog(ctx context.Context) ([]tools.Tool, error) {
+	a.ensureToolSetsAreStarted(ctx)
+	return a.collectTools(ctx, true)
 }
 
 // StartedTools returns tools only from toolsets that have already been started,
@@ -436,7 +497,7 @@ func (a *Agent) Tools(ctx context.Context) ([]tools.Tool, error) {
 // notifications (e.g. MCP tool list changes) that should not block on slow
 // toolset startup such as RAG file indexing.
 func (a *Agent) StartedTools(ctx context.Context) ([]tools.Tool, error) {
-	return a.collectTools(ctx)
+	return a.collectTools(ctx, false)
 }
 
 // collectTools gathers tools from all started toolsets plus static tools.
@@ -446,17 +507,28 @@ func (a *Agent) StartedTools(ctx context.Context) ([]tools.Tool, error) {
 // the first toolset in configuration order wins, as documented in the MCP
 // toolset docs. Each collision is surfaced to the user once per streak via
 // reportCollisions. See #2251.
-func (a *Agent) collectTools(ctx context.Context) ([]tools.Tool, error) {
+func (a *Agent) collectTools(ctx context.Context, withCatalog bool) ([]tools.Tool, error) {
 	var agentTools []tools.Tool
-	origins := make(map[string]string)
+	// origins maps each kept tool name to the index of the toolset that
+	// contributed it; staticOrigin stands for the agent's static tools.
+	staticOrigin := len(a.toolsets)
+	origins := make(map[string]int)
 	collisions := make(map[string]string)
 
-	collect := func(candidates []tools.Tool, origin string) {
+	describe := func(origin int) string {
+		if origin == staticOrigin {
+			return "agent static tools"
+		}
+		return tools.DescribeToolSet(a.toolsets[origin])
+	}
+	collect := func(candidates []tools.Tool, origin int) {
 		for _, tool := range candidates {
 			if firstOrigin, exists := origins[tool.Name]; exists {
-				collisions[collisionKey(tool.Name, firstOrigin, origin)] = fmt.Sprintf(
+				kept, ignored := describe(firstOrigin), describe(origin)
+				collisions[collisionKey(tool.Name, kept, ignored)] = fmt.Sprintf(
 					"duplicate tool %q: kept from %s, ignored from %s (first toolset in config wins) — set a unique 'name:' on the MCP toolset or use its 'tools:' filter to disambiguate",
-					tool.Name, firstOrigin, origin)
+					tool.Name, kept, ignored,
+				)
 				continue
 			}
 			origins[tool.Name] = origin
@@ -502,12 +574,36 @@ func (a *Agent) collectTools(ctx context.Context) ([]tools.Tool, error) {
 			}
 			continue
 		}
-		collect(ta, tools.DescribeToolSet(toolSet))
+		collect(ta, i)
 	}
 
-	collect(a.tools, "agent static tools")
+	collect(a.tools, staticOrigin)
 
 	a.reportCollisions(ctx, collisions)
+
+	if withCatalog {
+		for i, toolSet := range a.toolsets {
+			catalog, ok := tools.As[tools.Catalog](toolSet)
+			if !ok || !results[i].started || results[i].err != nil {
+				continue
+			}
+			catalogTools, err := catalog.CatalogTools(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("%s catalog: %w", describe(i), err)
+			}
+			for _, tool := range catalogTools {
+				switch origin, exists := origins[tool.Name]; {
+				case !exists:
+					tool.InCatalog, tool.SearchOnly = true, true
+					origins[tool.Name] = i
+					agentTools = append(agentTools, tool)
+				case origin == i:
+					idx := slices.IndexFunc(agentTools, func(t tools.Tool) bool { return t.Name == tool.Name })
+					agentTools[idx].InCatalog = true
+				}
+			}
+		}
+	}
 
 	if a.addDescriptionParameter {
 		agentTools = tools.AddDescriptionParameter(agentTools)
@@ -562,92 +658,35 @@ func (a *Agent) ToolSets() []tools.ToolSet {
 	return toolSets
 }
 
-// tryStartToolSet starts one toolset without ever letting it stall the turn
-// (#4001). It runs the toolset's bounded, non-blocking TryStartWithTimeout
-// with the shared tools.DefaultStartTimeout budget — the same grace period
-// as the runtime's startup probe — and translates the outcome:
-//
-//   - A Start already in flight (e.g. a startup probe that timed out upstream
-//     but kept going) is skipped silently — TryStart never joins an in-flight
-//     attempt — so the turn proceeds with the toolsets that are ready.
-//   - A start initiated here that outlives the budget (a wedged toolset can
-//     ignore cancellation) is abandoned to finish in the background and the
-//     toolset is skipped for this turn — silently, since the failure
-//     reporters share the toolset's single-flight lock and consulting them
-//     would block on the very start we just abandoned. Its outcome is picked
-//     up on a later turn.
-func (a *Agent) tryStartToolSet(ctx context.Context, toolSet *tools.StartableToolSet) error {
-	started, err := toolSet.TryStartWithTimeout(ctx, tools.DefaultStartTimeout)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-			slog.DebugContext(ctx, "Toolset start still running; skipping for this turn", "agent", a.Name(), "toolset", tools.DescribeToolSet(toolSet), "cause", err)
-			return nil
-		}
-		return err
-	}
-	if !started {
-		slog.DebugContext(ctx, "Toolset start already in flight; skipping for this turn", "agent", a.Name(), "toolset", tools.DescribeToolSet(toolSet))
-	}
-	return nil
+// StartToolSets starts every toolset and returns independently consumable
+// outcomes in configuration order.
+func (a *Agent) StartToolSets(ctx context.Context, timeout time.Duration) []<-chan tools.StartOutcome {
+	return tools.StartToolSets(ctx, a.toolsets, timeout)
 }
 
-// ensureToolSetsAreStarted starts every toolset, surfacing the first
-// failure of each streak as a user-visible warning and silently retrying
-// on every subsequent turn. A successful Start() automatically resets the
-// streak inside StartableToolSet, so a future failure is again reported
-// as fresh — no recovery callback is needed here, and we deliberately do
-// not surface a "now available" notice (the OAuth dialog completing or
-// the model just using the tool already makes a successful start
-// obvious; a follow-up notification just reads as a spurious warning).
-//
-// Starts run concurrently so one slow toolset (e.g. an MCP server
-// handshake) doesn't delay the others; each start is non-blocking and
-// bounded via tryStartToolSet, so neither a start already in flight nor a
-// wedged start initiated here can stall the turn, and warnings are
-// recorded in configuration order afterwards. Peer-dependent toolsets
-// (e.g. the deferred aggregator, whose Start lists its source toolsets'
-// tools) start in a second wave, after the toolsets they depend on have
-// settled.
+// ensureToolSetsAreStarted starts every toolset, surfacing the first failure
+// of each streak as a warning. Scheduling and classification are shared with
+// the startup UI through tools.StartToolSets.
 func (a *Agent) ensureToolSetsAreStarted(ctx context.Context) {
-	var independent, dependent []int
-	for i, toolSet := range a.toolsets {
-		if _, ok := tools.As[tools.PeerDependent](toolSet); ok {
-			dependent = append(dependent, i)
-		} else {
-			independent = append(independent, i)
-		}
-	}
-
-	errs := make([]error, len(a.toolsets))
-	for _, wave := range [][]int{independent, dependent} {
-		concurrent.ForEach(wave, func(i int) {
-			errs[i] = a.tryStartToolSet(ctx, a.toolsets[i])
-		})
-	}
-
-	for i, toolSet := range a.toolsets {
-		err := errs[i]
-		if err == nil {
-			continue
-		}
-		desc := tools.DescribeToolSet(toolSet)
-		if tools.IsAuthorizationRequired(err) {
-			// Recovery: previously-working toolset lost its OAuth token in the
-			// background. Emit the targeted re-auth notice once per streak so the
-			// user knows a dialog will appear on their next message.
-			// Initial-startup auth deferral (ShouldReportRecoveryFailure==false)
-			// stays silent — the dialog appears naturally on the first turn.
-			if toolSet.ShouldReportRecoveryFailure() {
+	for _, result := range a.StartToolSets(ctx, tools.DefaultStartTimeout) {
+		outcome := <-result
+		desc := tools.DescribeToolSet(outcome.ToolSet)
+		switch outcome.Kind {
+		case tools.StartAuthorizationRequired:
+			if outcome.ReportRecovery {
 				slog.WarnContext(ctx, "Toolset needs re-authentication after background token rejection", "agent", a.Name(), "toolset", desc)
 				a.AddToolWarning(desc + " needs re-authentication — it will prompt on your next message, or use /toolset-restart")
 			}
-			continue
-		}
-		if toolSet.ShouldReportFailure() {
-			slog.WarnContext(ctx, "Toolset start failed; will retry on next turn", "agent", a.Name(), "toolset", desc, "error", err)
-			a.AddToolWarning(fmt.Sprintf("%s start failed: %v", desc, err))
-		} else {
-			slog.DebugContext(ctx, "Toolset still unavailable; retrying next turn", "agent", a.Name(), "toolset", desc, "error", err)
+		case tools.StartFailed, tools.StartPartial:
+			if outcome.ReportFailure {
+				slog.WarnContext(ctx, "Toolset start failed; will retry (backoff may apply)", "agent", a.Name(), "toolset", desc, "error", outcome.Err)
+				a.AddToolWarning(fmt.Sprintf("%s start failed: %v", desc, outcome.Err))
+			} else {
+				slog.DebugContext(ctx, "Toolset still unavailable; will retry (backoff may apply)", "agent", a.Name(), "toolset", desc, "error", outcome.Err)
+			}
+		case tools.StartInFlight, tools.StartTimedOut, tools.StartCanceled:
+			slog.DebugContext(ctx, "Toolset start still running; skipping for this turn", "agent", a.Name(), "toolset", desc, "cause", outcome.Err)
+		case tools.StartReady:
 		}
 	}
 }
@@ -678,7 +717,7 @@ func (a *Agent) DrainWarnings() []string {
 
 func (a *Agent) StopToolSets(ctx context.Context) error {
 	var errs []error
-	for _, toolSet := range a.toolsets {
+	for _, toolSet := range slices.Concat(a.toolsets, a.ownedToolsets) {
 		// StopIfStarted checks-and-stops atomically under the toolset's
 		// lifecycle lock, so a toolset that was never started is left
 		// untouched, an in-flight Start that settles in time is stopped
@@ -693,4 +732,16 @@ func (a *Agent) StopToolSets(ctx context.Context) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// Routing declares the routing targets of an agent's before_agent_run and
+// after_agent_complete hooks.
+type Routing struct {
+	AllowedAgents []string
+	DefaultAgent  string
+}
+
+// Allows reports whether name is a permitted route target.
+func (r Routing) Allows(name string) bool {
+	return slices.Contains(r.AllowedAgents, name)
 }

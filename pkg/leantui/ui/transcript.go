@@ -1,10 +1,12 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/docker/docker-agent/pkg/tools"
 	"github.com/docker/docker-agent/pkg/tui/service"
+	"github.com/docker/docker-agent/pkg/tui/streamcontent"
 	tuitypes "github.com/docker/docker-agent/pkg/tui/types"
 )
 
@@ -25,6 +27,7 @@ const (
 )
 
 type PendingUserMessage struct {
+	ID      string
 	Display string
 	Content string
 	Kind    PendingUserKind
@@ -32,18 +35,22 @@ type PendingUserMessage struct {
 
 // pendingBlock accumulates the text of the block currently being streamed.
 type pendingBlock struct {
-	kind blockKind
-	text strings.Builder
+	kind     blockKind
+	identity streamcontent.Identity
+	text     strings.Builder
 }
 
 // block is a finalized piece of the conversation. Its lines are rendered lazily
 // and cached per width, so finalized content is not re-rendered every frame and
 // only reflows when the terminal is resized.
 type block struct {
-	render func(width int) []string
-	cacheW int
-	cache  []string
-	cached bool
+	render   func(width int) []string
+	identity streamcontent.Identity
+	kind     blockKind
+	text     string
+	cacheW   int
+	cache    []string
+	cached   bool
 }
 
 func (b *block) lines(width int) []string {
@@ -60,9 +67,12 @@ func (b *block) lines(width int) []string {
 // blocks are immutable scrollback; the pending block and tool calls are the
 // live region that changes each frame until they finalize into blocks.
 type Transcript struct {
-	blocks  []*block
-	pending *pendingBlock
-	toolz   *ToolTracker
+	fullFilePreview bool
+	blocks          []*block
+	pending         *pendingBlock
+	toolz           *ToolTracker
+
+	liveToolRows [2]int
 }
 
 // NewTranscript creates an empty transcript.
@@ -83,22 +93,26 @@ func (t *Transcript) AddBlock(render func(width int) []string) {
 	t.blocks = append(t.blocks, &block{render: render})
 }
 
-func (t *Transcript) appendPending(kind blockKind, content string) {
+func (t *Transcript) appendPending(kind blockKind, identity streamcontent.Identity, content string) {
 	if content == "" {
 		return
 	}
-	if t.pending == nil || t.pending.kind != kind {
+	if t.pending == nil || t.pending.kind != kind || t.pending.identity != identity {
 		t.FlushPending()
-		t.pending = &pendingBlock{kind: kind}
+		t.pending = &pendingBlock{kind: kind, identity: identity}
 	}
 	t.pending.text.WriteString(content)
 }
 
 // AppendReasoning appends streamed reasoning text.
-func (t *Transcript) AppendReasoning(content string) { t.appendPending(blockReasoning, content) }
+func (t *Transcript) AppendReasoning(content string) {
+	t.appendPending(blockReasoning, streamcontent.Identity{}, content)
+}
 
 // AppendAssistant appends streamed assistant text.
-func (t *Transcript) AppendAssistant(content string) { t.appendPending(blockAssistant, content) }
+func (t *Transcript) AppendAssistant(content string) {
+	t.appendPending(blockAssistant, streamcontent.Identity{}, content)
+}
 
 // FlushPending finalizes the in-progress streamed block into the conversation.
 func (t *Transcript) FlushPending() {
@@ -107,13 +121,89 @@ func (t *Transcript) FlushPending() {
 	}
 	text := t.pending.text.String()
 	kind := t.pending.kind
+	identity := t.pending.identity
 	t.pending = nil
 
-	switch kind {
-	case blockReasoning:
-		t.AddBlock(func(w int) []string { return RenderReasoningLines(text, w) })
-	case blockAssistant:
-		t.AddBlock(func(w int) []string { return RenderAssistantLines(text, w) })
+	t.blocks = append(t.blocks, textBlock(kind, identity, text))
+}
+
+func textBlock(kind blockKind, identity streamcontent.Identity, text string) *block {
+	b := &block{kind: kind, identity: identity, text: text}
+	b.render = func(w int) []string {
+		if kind == blockReasoning {
+			return RenderReasoningLines(b.text, w)
+		}
+		return RenderAssistantLines(b.text, w)
+	}
+	return b
+}
+
+// AppendAssistantContent separates logical messages even within one stream.
+func (t *Transcript) AppendAssistantContent(identity streamcontent.Identity, content string) {
+	t.appendPending(blockAssistant, identity, content)
+}
+
+// AppendReasoningContent shares the assistant message's logical identity.
+func (t *Transcript) AppendReasoningContent(identity streamcontent.Identity, content string) {
+	t.appendPending(blockReasoning, identity, content)
+}
+
+// ResetReasoningContent removes both live reasoning and segments flushed by tools.
+func (t *Transcript) ResetReasoningContent(identity streamcontent.Identity) {
+	if t.pending != nil && t.pending.kind == blockReasoning && t.pending.identity == identity {
+		t.pending = nil
+	}
+	t.blocks = slices.DeleteFunc(t.blocks, func(b *block) bool {
+		return b.kind == blockReasoning && b.identity == identity
+	})
+}
+
+// ReconcileAssistantContent repairs incomplete live text from the saved message.
+func (t *Transcript) ReconcileAssistantContent(identity streamcontent.Identity, content string) {
+	if content == "" {
+		return
+	}
+	var matching []*block
+	var delivered strings.Builder
+	for _, b := range t.blocks {
+		if b.identity == identity && b.kind == blockAssistant {
+			matching = append(matching, b)
+			delivered.WriteString(b.text)
+		}
+	}
+	pending := t.pending != nil && t.pending.kind == blockAssistant && t.pending.identity == identity
+	if pending {
+		delivered.WriteString(t.pending.text.String())
+	}
+	if delivered.String() == content {
+		return
+	}
+	if len(matching) == 0 && !pending {
+		t.AppendAssistantContent(identity, content)
+		return
+	}
+	if suffix, ok := strings.CutPrefix(content, delivered.String()); ok {
+		if pending {
+			t.pending.text.WriteString(suffix)
+		} else {
+			b := matching[len(matching)-1]
+			b.text += suffix
+			b.cached = false
+		}
+		return
+	}
+	for i, b := range matching {
+		b.text = ""
+		if i == 0 {
+			b.text = content
+		}
+		b.cached = false
+	}
+	if pending {
+		t.pending.text.Reset()
+		if len(matching) == 0 {
+			t.pending.text.WriteString(content)
+		}
 	}
 }
 
@@ -128,20 +218,32 @@ func (t *Transcript) Tool(id string) *ToolView { return t.toolz.Get(id) }
 // RemoveTool removes an in-flight tool call by id.
 func (t *Transcript) RemoveTool(id string) { t.toolz.Remove(id) }
 
-// FinishTool commits a completed tool call as an immutable block.
+// FinishTool commits completed calls in invocation order, keeping later results
+// in the live region until earlier calls finish.
 func (t *Transcript) FinishTool(id string, result ToolResult, sessionState service.SessionStateReader) {
-	view := t.toolz.Finish(id, result)
-	if view == nil {
-		return
+	t.toolz.Complete(id, result)
+	for _, view := range t.toolz.DrainCompleted() {
+		t.AddBlock(func(w int) []string {
+			view.fullFilePreview = t.fullFilePreview
+			return RenderToolWithState(view, w, 0, sessionState)
+		})
 	}
-	t.AddBlock(func(w int) []string { return RenderToolWithState(view, w, 0, sessionState) })
+}
+
+// FinalizeTools commits every in-flight tool with the given terminal status.
+func (t *Transcript) FinalizeTools(status tuitypes.ToolStatus, sessionState service.SessionStateReader) {
+	for _, view := range t.toolz.FinalizeAll(status) {
+		t.AddBlock(func(w int) []string {
+			view.fullFilePreview = t.fullFilePreview
+			return RenderToolWithState(view, w, 0, sessionState)
+		})
+	}
 }
 
 // Lines renders everything that scrolls: finalized blocks, the in-progress
 // streamed block, running tool calls, and user messages waiting to be accepted
-// by the runtime. A blank line separates each entry. The spinner is shown only
-// while busy with nothing yet streaming.
-func (t *Transcript) Lines(width, spinnerFrame int, busy bool, sessionState service.SessionStateReader, pendingUsers []PendingUserMessage) []string {
+// by the runtime. A blank line separates each entry.
+func (t *Transcript) Lines(width, spinnerFrame int, _ bool, sessionState service.SessionStateReader, pendingUsers []PendingUserMessage) []string {
 	var lines []string
 	for _, b := range t.blocks {
 		lines = append(lines, b.lines(width)...)
@@ -151,19 +253,22 @@ func (t *Transcript) Lines(width, spinnerFrame int, busy bool, sessionState serv
 		lines = append(lines, t.pendingLines(width)...)
 		lines = append(lines, "")
 	}
+	t.liveToolRows[0] = len(lines)
 	t.toolz.ForEach(func(tv *ToolView) {
+		tv.fullFilePreview = t.fullFilePreview
 		lines = append(lines, RenderToolWithState(tv, width, spinnerFrame, sessionState)...)
 		lines = append(lines, "")
 	})
-	if busy && t.pending == nil && t.toolz.Empty() {
-		lines = append(lines, spinnerLine(spinnerFrame), "")
-	}
+	t.liveToolRows[1] = len(lines)
 	for _, msg := range pendingUsers {
-		lines = append(lines, RenderPendingUserLines(msg.Display, width)...)
+		lines = append(lines, RenderPendingUserLines(msg, width)...)
 		lines = append(lines, "")
 	}
 	return lines
 }
+
+// LiveToolRows returns the half-open live tool range in the last rendered frame.
+func (t *Transcript) LiveToolRows() [2]int { return t.liveToolRows }
 
 // BlockCount reports the number of committed transcript blocks.
 func (t *Transcript) BlockCount() int { return len(t.blocks) }
@@ -200,4 +305,17 @@ func (t *Transcript) pendingLines(width int) []string {
 func spinnerLine(frame int) string {
 	f := spinnerFrames[frame%len(spinnerFrames)]
 	return StAccent().Render(f) + " " + StMuted().Render("Working…")
+}
+
+// SetFullFilePreview switches written-file previews between all lines and the last ten.
+func (t *Transcript) SetFullFilePreview(full bool) {
+	t.fullFilePreview = full
+	for _, b := range t.blocks {
+		b.cached = false
+	}
+}
+
+// FullFilePreview reports whether written-file previews show all lines.
+func (t *Transcript) FullFilePreview() bool {
+	return t.fullFilePreview
 }

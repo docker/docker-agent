@@ -1,0 +1,376 @@
+[
+  {
+    "name": "anthropic",
+    "api_type": "anthropic",
+    "default_model": "claude-sonnet-5",
+    "base_url": "https://api.anthropic.com",
+    "token_env_vars": [
+      "ANTHROPIC_API_KEY"
+    ]
+  },
+  {
+    "name": "openai",
+    "api_type": "openai",
+    "auto_responses": true,
+    "openai_vendor": true,
+    "default_model": "gpt-5.6",
+    "base_url": "https://api.openai.com/v1",
+    "token_env_vars": [
+      "OPENAI_API_KEY"
+    ]
+  },
+  {
+    "name": "chatgpt",
+    "auto_responses": true,
+    "openai_vendor": true,
+    "api_type": "openai",
+    "base_url": "https://chatgpt.com/backend-api/codex",
+    "default_model": "gpt-5.6",
+    "hint": "sign in with your ChatGPT account: `docker agent setup`",
+    "token_env_vars": [
+      "CHATGPT_OAUTH_TOKEN"
+    ]
+  },
+  {
+    "name": "github-copilot",
+    "auto_responses": true,
+    "headers": {
+      "Copilot-Integration-Id": "copilot-developer-cli"
+    },
+    "api_type": "openai",
+    "base_url": "https://api.githubcopilot.com",
+    "default_model": "gpt-5.6-sol",
+    "token_env_vars": [
+      "GITHUB_TOKEN",
+      "GH_TOKEN"
+    ]
+  },
+  {
+    "name": "google",
+    "api_type": "google",
+    "default_model": "gemini-3.8-flash",
+    "base_url": "https://generativelanguage.googleapis.com",
+    "token_env_vars": [
+      "GOOGLE_API_KEY",
+      "GEMINI_API_KEY"
+    ]
+  },
+  {
+    "name": "mistral",
+    "api_type": "openai",
+    "base_url": "https://api.mistral.ai/v1",
+    "default_model": "mistral-small-latest",
+    "token_env_vars": [
+      "MISTRAL_API_KEY"
+    ]
+  },
+  {
+    "name": "openrouter",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://openrouter.ai/api/v1",
+    "default_model": "meta-llama/llama-4-maverick",
+    "token_env_vars": [
+      "OPENROUTER_API_KEY"
+    ]
+  },
+  {
+    "name": "api-route",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://global.api-route.com/v1",
+    "default_model": "gpt-6.1-sol",
+    "token_env_vars": [
+      "API_ROUTE_API_KEY"
+    ]
+  },
+  {
+    "name": "lunaroute",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://gw.lunaroute.com/v1",
+    "default_model": "glm-5.3",
+    "token_env_vars": [
+      "LUNAROUTE_API_KEY"
+    ]
+  },
+  {
+    "name": "orcarouter",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.orcarouter.ai/v1",
+    "default_model": "orcarouter/auto",
+    "token_env_vars": [
+      "ORCAROUTER_API_KEY"
+    ]
+  },
+  {
+    "name": "atlascloud",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.atlascloud.ai/v1",
+    "default_model": "qwen/qwen3.8-max",
+    "token_env_vars": [
+      "ATLASCLOUD_API_KEY"
+    ]
+  },
+  {
+    "name": "opper",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.opper.ai/v3/compat",
+    "default_model": "claude-sonnet-4-6",
+    "token_env_vars": [
+      "OPPER_API_KEY"
+    ]
+  },
+  {
+    "name": "runcrate",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.runcrate.ai/v1",
+    "default_model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "token_env_vars": [
+      "RUNCRATE_API_KEY"
+    ]
+  },
+  {
+    "name": "cloudgpu",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://cloudgpu.app/v1",
+    "default_model": "deepseek-v4.1-flash",
+    "token_env_vars": [
+      "CLOUDGPU_API_KEY"
+    ]
+  },
+  {
+    "name": "obscurify",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://obscurify.ai/v1",
+    "default_model": "deepseek/deepseek-v4-flash",
+    "token_env_vars": [
+      "OBSCURIFY_API_KEY"
+    ]
+  },
+  {
+    "name": "baseten",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://inference.baseten.co/v1",
+    "default_model": "deepseek-ai/DeepSeek-V4-Pro-0813",
+    "token_env_vars": [
+      "BASETEN_API_KEY"
+    ]
+  },
+  {
+    "name": "ovhcloud",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+    "default_model": "Qwen3.5-397B-A17B",
+    "token_env_vars": [
+      "OVH_AI_ENDPOINTS_ACCESS_TOKEN"
+    ]
+  },
+  {
+    "name": "daoxe",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.daoxe.com/v1",
+    "default_model": "claude-sonnet-4-6",
+    "token_env_vars": [
+      "DAOXE_API_KEY"
+    ]
+  },
+  {
+    "name": "groq",
+    "api_type": "openai",
+    "base_url": "https://api.groq.com/openai/v1",
+    "default_model": "llama-3.3-70b-versatile",
+    "token_env_vars": [
+      "GROQ_API_KEY"
+    ]
+  },
+  {
+    "name": "fireworks-ai",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.fireworks.ai/inference/v1",
+    "default_model": "accounts/fireworks/models/kimi-k3",
+    "token_env_vars": [
+      "FIREWORKS_API_KEY"
+    ]
+  },
+  {
+    "name": "deepseek",
+    "api_type": "openai",
+    "base_url": "https://api.deepseek.com/v1",
+    "default_model": "deepseek-v4-pro",
+    "token_env_vars": [
+      "DEEPSEEK_API_KEY"
+    ]
+  },
+  {
+    "name": "cerebras",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.cerebras.ai/v1",
+    "default_model": "gpt-oss-120b",
+    "token_env_vars": [
+      "CEREBRAS_API_KEY"
+    ]
+  },
+  {
+    "name": "togetherai",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.together.xyz/v1",
+    "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "token_env_vars": [
+      "TOGETHER_API_KEY"
+    ]
+  },
+  {
+    "name": "huggingface",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://router.huggingface.co/v1",
+    "default_model": "meta-llama/Llama-3.3-70B-Instruct",
+    "token_env_vars": [
+      "HF_TOKEN"
+    ]
+  },
+  {
+    "name": "moonshotai",
+    "api_type": "openai",
+    "base_url": "https://api.moonshot.ai/v1",
+    "default_model": "kimi-k3",
+    "token_env_vars": [
+      "MOONSHOT_API_KEY"
+    ]
+  },
+  {
+    "name": "vercel",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://ai-gateway.vercel.sh/v1",
+    "default_model": "openai/gpt-5.6-sol",
+    "token_env_vars": [
+      "AI_GATEWAY_API_KEY"
+    ]
+  },
+  {
+    "name": "amazon-bedrock",
+    "api_type": "amazon-bedrock",
+    "default_model": "global.anthropic.claude-sonnet-5",
+    "hint": "AWS_ACCESS_KEY_ID (or AWS_PROFILE, AWS_ROLE_ARN, AWS_BEARER_TOKEN_BEDROCK)",
+    "base_url": "https://bedrock-runtime.{region}.amazonaws.com",
+    "token_env_vars": [
+      "AWS_BEARER_TOKEN_BEDROCK"
+    ]
+  },
+  {
+    "name": "opencode",
+    "auto_responses": true,
+    "api_type": "openai",
+    "base_url": "https://opencode.ai/zen/v1",
+    "default_model": "deepseek-v4-flash-free",
+    "token_env_vars": [
+      "OPENCODE_API_KEY"
+    ]
+  },
+  {
+    "name": "opencode-go",
+    "api_type": "openai",
+    "base_url": "https://opencode.ai/zen/go/v1",
+    "default_model": "deepseek-v4.1-flash",
+    "token_env_vars": [
+      "OPENCODE_API_KEY"
+    ]
+  },
+  {
+    "name": "azure",
+    "requires_configuration": true,
+    "openai_vendor": true,
+    "query_params": {
+      "api_version": "api-version"
+    },
+    "api_type": "openai",
+    "token_env_vars": [
+      "AZURE_API_KEY"
+    ]
+  },
+  {
+    "name": "cloudflare-ai-gateway",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://gateway.ai.cloudflare.com/v1/${CLOUDFLARE_ACCOUNT_ID}/${CLOUDFLARE_GATEWAY_ID}/compat",
+    "token_env_vars": [
+      "CLOUDFLARE_API_TOKEN"
+    ]
+  },
+  {
+    "name": "cloudflare-workers-ai",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1",
+    "token_env_vars": [
+      "CLOUDFLARE_API_TOKEN"
+    ]
+  },
+  {
+    "name": "minimax",
+    "api_type": "openai",
+    "base_url": "https://api.minimax.io/v1",
+    "token_env_vars": [
+      "MINIMAX_API_KEY"
+    ]
+  },
+  {
+    "name": "nebius",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://api.tokenfactory.nebius.com/v1",
+    "token_env_vars": [
+      "NEBIUS_API_KEY"
+    ]
+  },
+  {
+    "name": "nvidia",
+    "merge_consecutive_messages": true,
+    "api_type": "openai",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "token_env_vars": [
+      "NVIDIA_API_KEY"
+    ]
+  },
+  {
+    "name": "ollama",
+    "api_type": "openai",
+    "base_url": "http://localhost:11434/v1"
+  },
+  {
+    "name": "requesty",
+    "api_type": "openai",
+    "base_url": "https://router.requesty.ai/v1",
+    "token_env_vars": [
+      "REQUESTY_API_KEY"
+    ]
+  },
+  {
+    "name": "xai",
+    "api_type": "openai",
+    "base_url": "https://api.x.ai/v1",
+    "token_env_vars": [
+      "XAI_API_KEY"
+    ]
+  },
+  {
+    "name": "dmr",
+    "api_type": "dmr",
+    "default_model": "ai/qwen3:latest",
+    "base_url": "http://model-runner.docker.internal/engines/v1/"
+  }
+]

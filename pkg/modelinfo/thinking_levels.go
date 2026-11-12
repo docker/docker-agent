@@ -3,6 +3,7 @@ package modelinfo
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/docker/docker-agent/pkg/effort"
 )
@@ -42,8 +43,10 @@ func thinkingLevelMap(provider, modelID string) effort.LevelMap {
 		for _, top := range openAITopEfforts(modelID) {
 			m[top] = true
 		}
-		if OpenAISupportsNoneEffort(modelID) {
-			// gpt-5.6 dropped minimal from its accepted efforts.
+		if openAIDropsMinimalEffort(modelID) {
+			// gpt-5.6+ (including every later generation, e.g. gpt-6) dropped
+			// minimal from its accepted efforts; offering it would make the
+			// TUI's Shift+Tab cycle land on a value the API 400s on.
 			m[effort.Minimal] = false
 		}
 		if len(m) == 0 {
@@ -109,6 +112,9 @@ func anthropicTopEfforts(modelID string) []effort.Level {
 // accepts the xhigh and max effort tiers. The capability matrix it encodes is
 // quoted in [anthropicTopEfforts]'s authoritative reference.
 func anthropicTopTierSupport(m string) (hasXHigh, hasMax bool) {
+	if _, ok := LookupClaude5(m); ok {
+		return true, true
+	}
 	if bare, ok := bedrockClaudeModelName(m); ok {
 		m = bare
 	}
@@ -200,42 +206,94 @@ func gptFiveMinor(modelID string) (minor int, ok bool) {
 // openAITopEfforts returns the explicit-only effort tiers (xhigh and/or max)
 // an OpenAI model accepts beyond the universal minimal/low/medium/high
 // ladder. OpenAI's ladder is cumulative (unlike Anthropic's independent
-// tiers), so a single minor-version parse suffices: gpt-5.2+ adds xhigh,
-// gpt-5.6+ (Sol/Terra/Luna) adds max on top. The o-series and gpt-5/5.0/5.1
+// tiers): gpt-5.2+ adds xhigh, gpt-5.6+ adds max on top — and gpt-6 and every
+// later generation inherit the full gpt-5.6+ ladder via [atLeastGPT], so a
+// new GPT generation needs no code change here. The o-series and gpt-5/5.0/5.1
 // top out at high.
 func openAITopEfforts(modelID string) []effort.Level {
-	minor, ok := gptFiveMinor(modelID)
 	switch {
-	case !ok || minor < 2:
-		return nil
-	case minor >= 6:
+	case atLeastGPT(modelID, 5, 6):
 		return []effort.Level{effort.XHigh, effort.Max}
-	default:
+	case atLeastGPT(modelID, 5, 2):
 		return []effort.Level{effort.XHigh}
+	default:
+		return nil
 	}
 }
 
-// OpenAISupportsNoneEffort reports whether an OpenAI model accepts reasoning
-// effort "none" as a real, honored value rather than a config-level "turn
-// thinking off" sentinel. gpt-5.6 (Sol/Terra/Luna) is the first OpenAI
-// family to do so; it is also the first to drop "minimal" from its accepted
-// efforts, so callers use this predicate to gate both changes. Exported: the
-// defaults pipeline (pkg/model/provider) and the OpenAI client need the same
-// gate to decide whether "none" survives normalization and is sent on the
-// wire.
+// OpenAISupportsNoneEffort reports whether "none" is an API-level effort
+// rather than a local disabled-thinking sentinel. GPT-6 support is variant-specific:
+// Sol and Luna accept it; Astra does not.
+// https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort
 func OpenAISupportsNoneEffort(modelID string) bool {
-	minor, ok := gptFiveMinor(modelID)
-	return ok && minor >= 6
+	if minor, ok := gptFiveMinor(modelID); ok && minor >= 6 {
+		return true
+	}
+	return isGPT6SolOrLuna(modelID)
+}
+
+func isGPT6SolOrLuna(modelID string) bool {
+	m := normalizeOpenAI(modelID)
+	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
+		if m == model {
+			return true
+		}
+		if snapshot, ok := strings.CutPrefix(m, model+"-"); ok {
+			_, err := time.Parse(time.DateOnly, snapshot)
+			return len(snapshot) == len(time.DateOnly) && err == nil
+		}
+	}
+	return false
+}
+
+// OpenAISupportsChatToolsWithNoneEffort reports whether Chat Completions accepts
+// function tools with explicit "none" effort. Other efforts remain unsupported.
+func OpenAISupportsChatToolsWithNoneEffort(modelID string) bool {
+	return isGPT6SolOrLuna(modelID)
+}
+
+// openAIDropsMinimalEffort reports whether an OpenAI model rejects "minimal".
+// Unlike "none", this restriction applies to every GPT generation from 5.6 on.
+func openAIDropsMinimalEffort(modelID string) bool {
+	return atLeastGPT(modelID, 5, 6)
+}
+
+// OpenAIRejectsToolsWithReasoningEffort reports whether an OpenAI model
+// rejects an explicit `reasoning_effort` sent alongside function tools on the
+// Chat Completions endpoint (HTTP 400: "Function tools with reasoning_effort
+// are not supported for <model> in /v1/chat/completions. To use function
+// tools, use /v1/responses or set reasoning_effort to 'none'."). Verified
+// live against api.openai.com (2026-09):
+//
+//   - gpt-5, gpt-5.1, gpt-5.2, and the o-series still accept an explicit
+//     effort together with tools on this endpoint.
+//   - gpt-5.4, gpt-5.4-mini, and gpt-5.5 reject an *explicit* effort with
+//     tools, but accept the combination when the field is omitted entirely
+//     (the model falls back to its implicit default effort).
+//   - gpt-5.6 and every later generation (including gpt-6+, via
+//     [atLeastGPT]) reject tools+reasoning on this endpoint outright, even
+//     with the field omitted; only the Responses API supports the
+//     combination for them.
+//
+// [OpenAISupportsChatToolsWithNoneEffort] identifies the Sol/Luna exception for
+// explicit "none". Other tools+effort combinations use the Responses API.
+//
+// The OpenAI client uses this to drop reasoning_effort rather than send a
+// value guaranteed to 400 when a Responses-capable model is forced onto
+// Chat Completions (an explicit api_type or custom-provider override) with
+// tools in the request.
+func OpenAIRejectsToolsWithReasoningEffort(modelID string) bool {
+	return atLeastGPT(modelID, 5, 4)
 }
 
 // OpenAISupportsExplicitPromptCache reports whether an OpenAI model accepts
 // explicit prompt-cache breakpoints (`prompt_cache_breakpoint` content
 // markers). gpt-5.6 (Sol/Terra/Luna) is the first OpenAI family to support
-// them; older models reject the field with HTTP 400, so the OpenAI client
-// gates on this before putting breakpoints on the wire.
+// them; gpt-6 and every later generation inherit the capability via
+// [atLeastGPT]. Older models reject the field with HTTP 400, so the OpenAI
+// client gates on this before putting breakpoints on the wire.
 func OpenAISupportsExplicitPromptCache(modelID string) bool {
-	minor, ok := gptFiveMinor(modelID)
-	return ok && minor >= 6
+	return atLeastGPT(modelID, 5, 6)
 }
 
 // leadingInt parses the run of decimal digits at the start of s, returning

@@ -57,6 +57,21 @@ func TestGenerateBranchTitle(t *testing.T) {
 			expected:    "My Session (branch 1) (branched)",
 		},
 		{
+			name:        "suffix alone",
+			parentTitle: "(branched)",
+			expected:    " (branch 2)",
+		},
+		{
+			name:        "suffix in middle is not removed",
+			parentTitle: "My (branched) Session",
+			expected:    "My (branched) Session (branched)",
+		},
+		{
+			name:        "unicode title with trailing tabs",
+			parentTitle: "会話\t (branched)",
+			expected:    "会話 (branch 2)",
+		},
+		{
 			name:        "trims whitespace before suffix",
 			parentTitle: "My Session  (branched)",
 			expected:    "My Session (branch 2)",

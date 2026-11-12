@@ -1,7 +1,7 @@
 package writefile
 
 import (
-	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"
 	"github.com/docker/docker-agent/pkg/tui/core/layout"

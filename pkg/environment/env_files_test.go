@@ -109,10 +109,11 @@ func TestAbsolutePath(t *testing.T) {
 
 func TestReadEnvFilesEmpty(t *testing.T) {
 	t.Parallel()
-	lines, err := ReadEnvFiles([]string{})
-
-	require.NoError(t, err)
-	assert.Empty(t, lines)
+	for _, paths := range [][]string{nil, {}} {
+		lines, err := ReadEnvFiles(paths)
+		require.NoError(t, err)
+		assert.Nil(t, lines)
+	}
 }
 
 func TestReadEnvFiles(t *testing.T) {
@@ -138,6 +139,25 @@ func TestReadEnvFiles(t *testing.T) {
 	assert.Equal(t, "VALUE3", lines[2].Value)
 	assert.Equal(t, "KEY4", lines[3].Key)
 	assert.Equal(t, "VALUE4", lines[3].Value)
+}
+
+func TestReadEnvFileUTF8BOM(t *testing.T) {
+	t.Parallel()
+	temp := t.TempDir()
+	const bom = "\xef\xbb\xbf"
+	write(t, filepath.Join(temp, ".env"), bom+"OPENAI_API_KEY=sk-test\r\nOTHER=1\r\n")
+	write(t, filepath.Join(temp, ".env-comment"), bom+"# keys\nOPENAI_API_KEY=sk-test\n")
+
+	lines, err := ReadEnvFile(filepath.Join(temp, ".env"))
+	require.NoError(t, err)
+	require.Len(t, lines, 2)
+	assert.Equal(t, "OPENAI_API_KEY", lines[0].Key)
+	assert.Equal(t, "sk-test", lines[0].Value)
+
+	lines, err = ReadEnvFile(filepath.Join(temp, ".env-comment"))
+	require.NoError(t, err)
+	require.Len(t, lines, 1)
+	assert.Equal(t, "OPENAI_API_KEY", lines[0].Key)
 }
 
 func TestReadEnvFileNotFound(t *testing.T) {

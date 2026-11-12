@@ -22,24 +22,21 @@ func rootFrameWidths(frame string) []int {
 }
 
 func TestActualProgramScrolledUpStreamDefersOffscreenTail(t *testing.T) {
-	root, _, _ := wallClockRoot(t, 120, 40)
+	root, _, _ := frozenClockRoot(t, 120, 40)
 	sess, _, _ := mixedHistorySession(1000)
 	root.application.Session().Messages = sess.Messages
-	_ = root.chatPage.Init()
+	_ = root.activeTab.chatPage.Init()
 	root.handleWindowResize(120, 40)
 	_, _ = root.Update(messages.RoutedMsg{SessionID: "profile", Inner: agentruntime.StreamStarted("profile", "root")})
 	_, _ = root.Update(messages.RoutedMsg{SessionID: "profile", Inner: agentruntime.AgentChoice("root", "profile", "start\n\n")})
 	_ = root.View()
-	root.chatPage.ScrollToBottom()
+	root.activeTab.chatPage.ScrollToBottom()
 	_, _ = root.Update(messages.WheelCoalescedMsg{Delta: -3, X: 30, Y: 15})
 	stable := root.View().Content
 
 	model := &streamingMotionModel{root: root, ready: make(chan struct{})}
 	writer := &wallClockCountingWriter{}
-	program := tea.NewProgram(model, tea.WithInput(nil), tea.WithOutput(writer), tea.WithWindowSize(120, 40))
-	done := make(chan error, 1)
-	go func() { _, err := program.Run(); done <- err }()
-	<-model.ready
+	program := startStreamingMotionProgram(t, model, tea.WithOutput(writer))
 	waitForProgramQuiescence(t, model, writer)
 	baselineWrites := writer.writes.Load()
 	baselineCompositions := model.compositions.Load()
@@ -85,7 +82,4 @@ func TestActualProgramScrolledUpStreamDefersOffscreenTail(t *testing.T) {
 	content = make(chan string)
 	program.Send(streamingMotionRead{content: content})
 	require.Contains(t, <-content, "offscreen", "End must reveal exact content finalized at stream stop")
-	root.ar.Stop()
-	program.Quit()
-	require.NoError(t, <-done)
 }

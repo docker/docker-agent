@@ -10,20 +10,19 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	"go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 
 	"github.com/docker/docker-agent/pkg/httpclient"
 	"github.com/docker/docker-agent/pkg/version"
@@ -64,7 +63,7 @@ func initOTelSDK(ctx context.Context) (err error) {
 		_ = shutdownTracerProvider(ctx, tp)
 		return fmt.Errorf("failed to create logger provider: %w", err)
 	}
-	global.SetLoggerProvider(lp)
+	otel.SetLoggerProvider(lp)
 
 	// Set the global text-map propagator unconditionally so otelhttp
 	// (and any other propagation-aware instrumentation) injects W3C
@@ -119,7 +118,7 @@ func newTracerProvider(ctx context.Context, res *resource.Resource, endpoint str
 		return trace.NewTracerProvider(opts...), nil
 	}
 
-	exp, err := otlptracehttp.New(ctx, traceExporterOptions(endpoint)...)
+	exp, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/traces")))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create trace exporter: %w", err)
 	}
@@ -137,7 +136,7 @@ func newMeterProvider(ctx context.Context, res *resource.Resource, endpoint stri
 	opts := []metric.Option{metric.WithResource(res)}
 
 	if endpoint != "" {
-		exp, err := otlpmetrichttp.New(ctx, metricExporterOptions(endpoint)...)
+		exp, err := otlpmetrichttp.New(ctx, otlpmetrichttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/metrics")))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create metric exporter: %w", err)
 		}
@@ -156,7 +155,7 @@ func newLoggerProvider(ctx context.Context, res *resource.Resource, endpoint str
 	opts := []log.LoggerProviderOption{log.WithResource(res)}
 
 	if endpoint != "" {
-		exp, err := otlploghttp.New(ctx, logExporterOptions(endpoint)...)
+		exp, err := otlploghttp.New(ctx, otlploghttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/logs")))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create log exporter: %w", err)
 		}
@@ -213,18 +212,6 @@ func signalEndpointURL(endpoint, signalPath string) string {
 	return u.String()
 }
 
-func traceExporterOptions(endpoint string) []otlptracehttp.Option {
-	return []otlptracehttp.Option{otlptracehttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/traces"))}
-}
-
-func metricExporterOptions(endpoint string) []otlpmetrichttp.Option {
-	return []otlpmetrichttp.Option{otlpmetrichttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/metrics"))}
-}
-
-func logExporterOptions(endpoint string) []otlploghttp.Option {
-	return []otlploghttp.Option{otlploghttp.WithEndpointURL(signalEndpointURL(endpoint, "/v1/logs"))}
-}
-
 func shutdownTracerProvider(ctx context.Context, tp *trace.TracerProvider) error {
 	// Detach from ctx's cancellation but keep its trace context so the
 	// final flush still runs when ctx is already done.
@@ -240,7 +227,7 @@ func newOTelResource() (*resource.Resource, error) {
 	attrs := []attribute.KeyValue{
 		semconv.ServiceName(AppName),
 		semconv.ServiceVersion(version.Version),
-		semconv.ServiceInstanceID(uuid.NewString()),
+		semconv.ServiceInstanceID(uuid.NewV4().String()),
 		semconv.ProcessPID(os.Getpid()),
 		semconv.ProcessRuntimeName("go"),
 		semconv.OSTypeKey.String(runtime.GOOS),

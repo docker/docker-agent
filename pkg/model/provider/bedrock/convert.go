@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 
@@ -72,7 +71,7 @@ func convertMessages(ctx context.Context, messages []chat.Message, id modelsdev.
 				if messages[j].ToolCallID != "" {
 					toolResultBlocks = append(toolResultBlocks, &types.ContentBlockMemberToolResult{
 						Value: types.ToolResultBlock{
-							ToolUseId: aws.String(messages[j].ToolCallID),
+							ToolUseId: new(messages[j].ToolCallID),
 							Content:   convertToolResultContent(ctx, &messages[j], id, store, override),
 						},
 					})
@@ -248,23 +247,29 @@ func convertImageURL(imageURL *chat.MessageImageURL) types.ContentBlock {
 }
 
 func convertAssistantContent(msg *chat.Message) []types.ContentBlock {
+	if blocks, ok := replayNativeBlocks(msg); ok {
+		return blocks
+	}
+
 	var blocks []types.ContentBlock
 
-	// Add thinking blocks first (order: thinking, text, tool_use)
-	if msg.ReasoningContent != "" && msg.ThinkingSignature != "" {
+	// Flattened fallback (order: thinking, text, tool_use). A signature without
+	// text is signed thinking whose display was omitted, not redacted content.
+	// A turn whose reasoning changed since it was recorded loses it.
+	if recovered, ok := recoveredNativeBlocks(msg); ok {
+		return recovered
+	}
+	recorded := msg.HasOwnRawContent(providerName)
+	if recorded && recordedReasoning(msg) {
+		slog.Warn("Bedrock: omitting thinking that changed after it was recorded")
+	}
+	if msg.ThinkingSignature != "" && !recorded {
 		blocks = append(blocks, &types.ContentBlockMemberReasoningContent{
 			Value: &types.ReasoningContentBlockMemberReasoningText{
 				Value: types.ReasoningTextBlock{
-					Text:      aws.String(msg.ReasoningContent),
-					Signature: aws.String(msg.ThinkingSignature),
+					Text:      new(msg.ReasoningContent),
+					Signature: new(msg.ThinkingSignature),
 				},
-			},
-		})
-	} else if msg.ThinkingSignature != "" {
-		// Redacted thinking block (signature only)
-		blocks = append(blocks, &types.ContentBlockMemberReasoningContent{
-			Value: &types.ReasoningContentBlockMemberRedactedContent{
-				Value: []byte(msg.ThinkingSignature),
 			},
 		})
 	}
@@ -287,22 +292,18 @@ func convertAssistantContent(msg *chat.Message) []types.ContentBlock {
 		}
 
 		// Convert input map to document (required by Bedrock)
-		inputDoc := mapToDocument(input)
+		inputDoc := document.NewLazyDocument(input)
 
 		blocks = append(blocks, &types.ContentBlockMemberToolUse{
 			Value: types.ToolUseBlock{
-				ToolUseId: aws.String(tc.ID),
-				Name:      aws.String(tc.Function.Name),
+				ToolUseId: new(tc.ID),
+				Name:      new(tc.Function.Name),
 				Input:     inputDoc,
 			},
 		})
 	}
 
 	return blocks
-}
-
-func mapToDocument(m map[string]any) document.Interface {
-	return document.NewLazyDocument(m)
 }
 
 func convertToolConfig(requestTools []tools.Tool, enableCaching bool) *types.ToolConfiguration {
@@ -315,8 +316,8 @@ func convertToolConfig(requestTools []tools.Tool, enableCaching bool) *types.Too
 		schema := convertToolSchema(tool.Parameters)
 		toolSpecs = append(toolSpecs, &types.ToolMemberToolSpec{
 			Value: types.ToolSpecification{
-				Name:        aws.String(tool.Name),
-				Description: aws.String(tool.Description),
+				Name:        new(tool.Name),
+				Description: new(tool.Description),
 				InputSchema: &types.ToolInputSchemaMemberJson{
 					Value: schema,
 				},
@@ -346,5 +347,18 @@ func convertToolSchema(params any) document.Interface {
 			"properties": map[string]any{},
 		}
 	}
-	return document.NewLazyDocument(schema)
+	tools.OrderedSchemaProperties(schema)
+	return orderedToolSchema{Interface: document.NewLazyDocument(schema), schema: schema}
+}
+
+// orderedToolSchema supplies JSON bytes directly; Smithy's map encoder does not
+// honor encoding/json.Marshaler and would discard the declaration order.
+type orderedToolSchema struct {
+	document.Interface
+
+	schema map[string]any
+}
+
+func (s orderedToolSchema) MarshalSmithyDocument() ([]byte, error) {
+	return json.Marshal(s.schema)
 }

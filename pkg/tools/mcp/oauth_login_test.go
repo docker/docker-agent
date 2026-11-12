@@ -1,8 +1,12 @@
 package mcp
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/tools/mcp/oauthflow"
 )
 
 // TestProbeUnauthenticated characterizes probeUnauthenticated: it makes one
@@ -190,7 +195,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 		}
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: srv.URL}
 
-		clientID, clientSecret, scopes, err := resolveStandaloneClientCredentials(
+		clientID, clientSecret, scopes, _, err := resolveStandaloneClientCredentials(
 			t.Context(), srv.Client(), oauthConfig, authMeta, "http://127.0.0.1/callback",
 			[]string{"challenge-scope"}, []string{"prm-scope"},
 		)
@@ -207,7 +212,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 		oauthConfig := &latest.RemoteOAuthConfig{ClientID: "explicit-client"}
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: "http://unused.invalid"}
 
-		clientID, clientSecret, scopes, err := resolveStandaloneClientCredentials(
+		clientID, clientSecret, scopes, _, err := resolveStandaloneClientCredentials(
 			t.Context(), http.DefaultClient, oauthConfig, authMeta, "http://127.0.0.1/callback",
 			[]string{"challenge-scope"}, []string{"prm-scope"},
 		)
@@ -222,7 +227,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 
 		authMeta := &AuthorizationServerMetadata{}
 
-		_, _, _, err := resolveStandaloneClientCredentials(
+		_, _, _, _, err := resolveStandaloneClientCredentials(
 			t.Context(), http.DefaultClient, nil, authMeta, "http://127.0.0.1/callback", nil, nil,
 		)
 		require.Error(t, err)
@@ -239,7 +244,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: srv.URL}
 
-		_, _, _, err := resolveStandaloneClientCredentials(
+		_, _, _, _, err := resolveStandaloneClientCredentials(
 			t.Context(), srv.Client(), nil, authMeta, "http://127.0.0.1/callback", nil, nil,
 		)
 		require.Error(t, err)
@@ -264,7 +269,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: srv.URL}
 		oauthConfig := &latest.RemoteOAuthConfig{Scopes: []string{"configured-scope"}}
 
-		clientID, clientSecret, scopes, err := resolveStandaloneClientCredentials(
+		clientID, clientSecret, scopes, _, err := resolveStandaloneClientCredentials(
 			t.Context(), srv.Client(), oauthConfig, authMeta, "http://127.0.0.1/callback",
 			[]string{"challenge-scope"}, []string{"prm-scope"},
 		)
@@ -285,7 +290,7 @@ func TestResolveStandaloneClientCredentials(t *testing.T) {
 		defer srv.Close()
 		authMeta := &AuthorizationServerMetadata{RegistrationEndpoint: srv.URL}
 
-		_, _, scopes, err := resolveStandaloneClientCredentials(
+		_, _, scopes, _, err := resolveStandaloneClientCredentials(
 			t.Context(), srv.Client(), nil, authMeta, "http://127.0.0.1/callback",
 			nil, []string{"prm-scope"},
 		)
@@ -312,19 +317,51 @@ func TestCallbackConfigAccessors(t *testing.T) {
 	assert.Equal(t, "https://proxy.example.test/cb", callbackRedirectURLFrom(configured))
 }
 
-// reserveFreeLoopbackPort returns a TCP port free on 127.0.0.1 at the time
-// of the call, for tests that need to pin RemoteOAuthConfig.CallbackPort to
-// a specific, real, bindable port. The listener is closed immediately so
-// the test's own call to NewCallbackServerOnPort can bind it.
-func reserveFreeLoopbackPort(t *testing.T) int {
+// Keep the listener bound until the flow takes ownership; no close/rebind race.
+func reserveCallbackListener(t *testing.T) (int, func(context.Context, int, PrepareAuthorization) (string, string, error)) {
 	t.Helper()
-
-	var lc net.ListenConfig
-	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	port := l.Addr().(*net.TCPAddr).Port
-	require.NoError(t, l.Close())
-	return port
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+	var claimed atomic.Bool
+	return port, func(ctx context.Context, requested int, prepare PrepareAuthorization) (string, string, error) {
+		if requested != port {
+			return "", "", fmt.Errorf("callback port = %d, want %d", requested, port)
+		}
+		if !claimed.CompareAndSwap(false, true) {
+			return "", "", errors.New("callback listener already claimed")
+		}
+		return oauthflow.RequestAuthorizationCodeOnListenerForTesting(ctx, listener, prepare)
+	}
+}
+
+func TestReserveCallbackListener(t *testing.T) {
+	t.Parallel()
+	port, request := reserveCallbackListener(t)
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if listener != nil {
+		listener.Close()
+	}
+	require.Error(t, err, "the callback port must stay reserved")
+	_, _, err = request(t.Context(), 0, nil)
+	require.Error(t, err, "the factory must reject an unexpected port")
+	expected := errors.New("preparation stopped")
+	_, _, err = request(t.Context(), port, func(_ context.Context, address CallbackAddress) (AuthorizationRequest, error) {
+		assert.Equal(t, port, address.Port())
+		return AuthorizationRequest{}, expected
+	})
+	require.ErrorIs(t, err, expected)
+}
+
+func startOAuthLogin(t *testing.T, remote latest.Remote, request func(context.Context, int, PrepareAuthorization) (string, string, error)) <-chan error {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+	go func() { defer close(done); errCh <- performOAuthLogin(ctx, remote, request) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return errCh
 }
 
 // TestPerformOAuthLogin_DefaultCallback_UsesLoopbackRedirect_EndToEnd drives
@@ -402,14 +439,14 @@ func TestPerformOAuthLogin_DefaultCallback_UsesLoopbackRedirect_EndToEnd(t *test
 // PerformOAuthLogin end to end with RemoteOAuthConfig.CallbackPort set: the
 // local callback server must bind that exact port, and the redirect URI
 // used for /authorize and the token exchange must carry it — the same
-// contract NewCallbackServerOnPort gives the runtime's managed OAuth flow.
+// contract RequestAuthorizationCode gives the runtime's managed OAuth flow.
 func TestPerformOAuthLogin_CallbackPort_UsesConfiguredPort_EndToEnd(t *testing.T) {
 	resetDefaultStore(t)
 	store := NewInMemoryTokenStore()
 	SetDefaultTokenStoreFactory(func() OAuthTokenStore { return store })
 
 	urlCh := fakeBrowserOpener(t)
-	port := reserveFreeLoopbackPort(t)
+	port, startCallback := reserveCallbackListener(t)
 
 	const mcpPath = "/mcp"
 	var tokenRedirectURI string
@@ -455,10 +492,9 @@ func TestPerformOAuthLogin_CallbackPort_UsesConfiguredPort_EndToEnd(t *testing.T
 		OAuth: &latest.RemoteOAuthConfig{CallbackPort: port},
 	}
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- PerformOAuthLogin(t.Context(), remote) }()
+	errCh := startOAuthLogin(t, remote, startCallback)
 
-	authURL := requireCapturedAuthorizeURL(t, urlCh)
+	authURL := requireCapturedAuthorizeURL(t, urlCh, errCh)
 	deliverFakeCallback(t, authURL, "code-configured-port")
 
 	require.NoError(t, <-errCh)
@@ -475,7 +511,7 @@ func TestPerformOAuthLogin_CallbackPort_UsesConfiguredPort_EndToEnd(t *testing.T
 // TestPerformOAuthLogin_CallbackPortAlreadyInUse_HardErrors proves that a
 // configured CallbackPort docker-agent cannot bind is a hard error (no
 // fallback to a random port, no browser, no token stored) — the same
-// failure mode NewCallbackServerOnPort gives the runtime's managed flow.
+// failure mode RequestAuthorizationCode gives the runtime's managed flow.
 func TestPerformOAuthLogin_CallbackPortAlreadyInUse_HardErrors(t *testing.T) {
 	resetDefaultStore(t)
 	store := NewInMemoryTokenStore()
@@ -523,7 +559,7 @@ func TestPerformOAuthLogin_CallbackPortAlreadyInUse_HardErrors(t *testing.T) {
 
 	err = PerformOAuthLogin(t.Context(), remote)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create callback server")
+	assert.Contains(t, err.Error(), "failed to start callback server")
 
 	require.Empty(t, urlCh, "no browser must be opened when the configured callback port cannot be bound")
 	_, err = store.GetToken(remote.URL)
@@ -626,7 +662,7 @@ func TestPerformOAuthLogin_CallbackPortWithExplicitClient_EndToEnd(t *testing.T)
 	SetDefaultTokenStoreFactory(func() OAuthTokenStore { return store })
 
 	urlCh := fakeBrowserOpener(t)
-	port := reserveFreeLoopbackPort(t)
+	port, startCallback := reserveCallbackListener(t)
 
 	const mcpPath = "/mcp"
 	var registerCalls int
@@ -677,10 +713,9 @@ func TestPerformOAuthLogin_CallbackPortWithExplicitClient_EndToEnd(t *testing.T)
 		},
 	}
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- PerformOAuthLogin(t.Context(), remote) }()
+	errCh := startOAuthLogin(t, remote, startCallback)
 
-	authURL := requireCapturedAuthorizeURL(t, urlCh)
+	authURL := requireCapturedAuthorizeURL(t, urlCh, errCh)
 	deliverFakeCallback(t, authURL, "code-explicit-client-port")
 
 	require.NoError(t, <-errCh)
@@ -1240,6 +1275,9 @@ func TestPerformOAuthLogin_DCRSuccess_EndToEndScopeEquality(t *testing.T) {
 	const mcpPath = "/mcp"
 	var registerScope string
 	var haveRegisterScope bool
+	var registerMethod string
+	var tokenAuth string
+	var tokenForm url.Values
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -1270,14 +1308,19 @@ func TestPerformOAuthLogin_DCRSuccess_EndToEndScopeEquality(t *testing.T) {
 	})
 	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Scope string `json:"scope"`
+			Scope                   string `json:"scope"`
+			TokenEndpointAuthMethod string `json:"token_endpoint_auth_method"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		registerScope, haveRegisterScope = body.Scope, true
+		registerMethod = body.TokenEndpointAuthMethod
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"client_id":"registered-client-id","client_secret":"registered-secret"}`))
 	})
-	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		tokenAuth = r.Header.Get("Authorization")
+		body, _ := io.ReadAll(r.Body)
+		tokenForm, _ = url.ParseQuery(string(body))
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"access_token":"exchanged-at","token_type":"Bearer","expires_in":3600}`))
 	})
@@ -1309,6 +1352,12 @@ func TestPerformOAuthLogin_DCRSuccess_EndToEndScopeEquality(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"configured-scope"}, tok.RequestedScopes,
 		"the stored token's RequestedScopes must match the scope sent to DCR and /authorize")
+	assert.Equal(t, "client_secret_basic", registerMethod)
+	assert.Equal(t, "client_secret_basic", tok.TokenEndpointAuthMethod)
+	wantBasic := "Basic " + base64.StdEncoding.EncodeToString([]byte("registered-client-id:registered-secret"))
+	assert.Equal(t, wantBasic, tokenAuth)
+	assert.Empty(t, tokenForm.Get("client_secret"))
+	assert.Empty(t, tokenForm.Get("client_id"))
 }
 
 // TestPerformOAuthLogin_ChallengeScopePrecedenceOverDistinctPRMScopes_EndToEnd

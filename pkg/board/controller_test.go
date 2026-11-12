@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -73,138 +74,177 @@ func waitForStatus(t *testing.T, store *Store, want CardStatus) {
 func TestControllerRunningThenWaiting(t *testing.T) {
 	t.Parallel()
 
-	store, _ := watchCard(t, snapshot{}, []event{
-		{Type: eventUserMessage},
-		{Type: eventStreamStarted},
-		{Type: eventStreamStopped, Reason: reasonNormal},
+	synctest.Test(t, func(t *testing.T) {
+		store, _ := watchCard(t, snapshot{}, []event{
+			{Type: eventUserMessage},
+			{Type: eventStreamStarted},
+			{Type: eventStreamStopped, Reason: reasonNormal},
+		})
+		synctest.Wait()
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusWaiting, card.Status)
 	})
-	waitForStatus(t, store, StatusWaiting)
 }
 
 func TestControllerExpectedTurnSkipsReadyFlash(t *testing.T) {
 	t.Parallel()
 
-	// A fresh card launches with an initial prompt: the control plane
-	// answers before the first event, but the card must not flash "ready"
-	// before its first turn (starting → running → ready).
-	store := testStore(t)
-	require.NoError(t, store.InsertCard(&Card{ID: "c1", Title: "Task", Column: "dev", Status: StatusStarting}))
+	synctest.Test(t, func(t *testing.T) {
+		// A fresh card launches with an initial prompt: the control plane
+		// answers before the first event, but the card must not flash "ready"
+		// before its first turn (starting → running → ready).
+		store := testStore(t)
+		require.NoError(t, store.InsertCard(&Card{ID: "c1", Title: "Task", Column: "dev", Status: StatusStarting}))
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
 
-	c := newController(ctx, store, fakeSessions{}, func() {})
-	c.clientFor = func(_, _ string) sessionClient {
-		return &fakeClient{}
-	}
-	card, err := store.GetCard("c1")
-	require.NoError(t, err)
-	c.ExpectTurn("c1")
-	c.Start(card)
-	t.Cleanup(func() { c.Stop("c1") })
-
-	// With no events yet, the card stays "starting" instead of "ready".
-	assert.Never(t, func() bool {
+		c := newController(ctx, store, fakeSessions{}, func() {})
+		c.clientFor = func(_, _ string) sessionClient {
+			return &fakeClient{}
+		}
 		card, err := store.GetCard("c1")
-		return err == nil && card.Status != StatusStarting
-	}, 300*time.Millisecond, 10*time.Millisecond)
+		require.NoError(t, err)
+		c.ExpectTurn("c1")
+		c.Start(card)
+		t.Cleanup(func() { c.Stop("c1") })
+
+		// With no events yet, the card stays "starting" instead of "ready".
+		assert.Never(t, func() bool {
+			card, err := store.GetCard("c1")
+			return err == nil && card.Status != StatusStarting
+		}, 300*time.Millisecond, 10*time.Millisecond)
+	})
 }
 
 func TestControllerExpectedTurnRunsThenWaits(t *testing.T) {
 	t.Parallel()
 
-	store := testStore(t)
-	require.NoError(t, store.InsertCard(&Card{ID: "c1", Title: "Task", Column: "dev", Status: StatusStarting}))
+	synctest.Test(t, func(t *testing.T) {
+		store := testStore(t)
+		require.NoError(t, store.InsertCard(&Card{ID: "c1", Title: "Task", Column: "dev", Status: StatusStarting}))
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
 
-	c := newController(ctx, store, fakeSessions{}, func() {})
-	c.clientFor = func(_, _ string) sessionClient {
-		return &fakeClient{events: []event{
-			{Type: eventUserMessage},
-			{Type: eventStreamStarted},
-			{Type: eventStreamStopped, Reason: reasonNormal},
-		}}
-	}
-	card, err := store.GetCard("c1")
-	require.NoError(t, err)
-	c.ExpectTurn("c1")
-	c.Start(card)
-	t.Cleanup(func() { c.Stop("c1") })
+		c := newController(ctx, store, fakeSessions{}, func() {})
+		c.clientFor = func(_, _ string) sessionClient {
+			return &fakeClient{events: []event{
+				{Type: eventUserMessage},
+				{Type: eventStreamStarted},
+				{Type: eventStreamStopped, Reason: reasonNormal},
+			}}
+		}
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		c.ExpectTurn("c1")
+		c.Start(card)
+		t.Cleanup(func() { c.Stop("c1") })
 
-	// The first turn runs and completes: only then is the card ready.
-	waitForStatus(t, store, StatusWaiting)
-	assert.False(t, c.turnExpected("c1"), "expectation should be cleared by the first turn")
+		// The first turn runs and completes: only then is the card ready.
+		synctest.Wait()
+		card, err = store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusWaiting, card.Status)
+		assert.False(t, c.turnExpected("c1"), "expectation should be cleared by the first turn")
+	})
 }
 
 func TestControllerStaysRunningWithNestedStreams(t *testing.T) {
 	t.Parallel()
 
-	store, _ := watchCard(t, snapshot{}, []event{
-		{Type: eventStreamStarted},
-		{Type: eventStreamStarted}, // sub-agent
-		{Type: eventStreamStopped, Reason: reasonNormal},
+	synctest.Test(t, func(t *testing.T) {
+		store, _ := watchCard(t, snapshot{}, []event{
+			{Type: eventStreamStarted},
+			{Type: eventStreamStarted}, // sub-agent
+			{Type: eventStreamStopped, Reason: reasonNormal},
+		})
+		// The outer stream is still open: the card stays running.
+		synctest.Wait()
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusRunning, card.Status)
 	})
-	// The outer stream is still open: the card stays running.
-	waitForStatus(t, store, StatusRunning)
 }
 
 func TestControllerErrorIsSticky(t *testing.T) {
 	t.Parallel()
 
-	store, _ := watchCard(t, snapshot{}, []event{
-		{Type: eventStreamStarted},
-		{Type: eventError},
-		{Type: eventStreamStopped, Reason: "error"},
+	synctest.Test(t, func(t *testing.T) {
+		store, _ := watchCard(t, snapshot{}, []event{
+			{Type: eventStreamStarted},
+			{Type: eventError},
+			{Type: eventStreamStopped, Reason: "error"},
+		})
+		synctest.Wait()
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusError, card.Status)
 	})
-	waitForStatus(t, store, StatusError)
 }
 
 func TestControllerNormalStopClearsSubAgentError(t *testing.T) {
 	t.Parallel()
 
-	// A sub-agent error the parent recovered from: the outermost stop's
-	// "normal" reason is authoritative.
-	store, _ := watchCard(t, snapshot{}, []event{
-		{Type: eventStreamStarted},
-		{Type: eventError},
-		{Type: eventStreamStopped, Reason: reasonNormal},
+	synctest.Test(t, func(t *testing.T) {
+		// A sub-agent error the parent recovered from: the outermost stop's
+		// "normal" reason is authoritative.
+		store, _ := watchCard(t, snapshot{}, []event{
+			{Type: eventStreamStarted},
+			{Type: eventError},
+			{Type: eventStreamStopped, Reason: reasonNormal},
+		})
+		synctest.Wait()
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusWaiting, card.Status)
 	})
-	waitForStatus(t, store, StatusWaiting)
 }
 
 func TestControllerPause(t *testing.T) {
 	t.Parallel()
 
-	store, _ := watchCard(t, snapshot{}, []event{
-		{Type: eventStreamStarted},
-		{Type: eventRuntimePaused},
+	synctest.Test(t, func(t *testing.T) {
+		store, _ := watchCard(t, snapshot{}, []event{
+			{Type: eventStreamStarted},
+			{Type: eventRuntimePaused},
+		})
+		synctest.Wait()
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusPaused, card.Status)
 	})
-	waitForStatus(t, store, StatusPaused)
 }
 
 func TestControllerReplayAppliesFinalStatusOnly(t *testing.T) {
 	t.Parallel()
 
-	// Replayed history contains a long-resolved error: only the state at the
-	// snapshot's seq lands in the store.
-	store, _ := watchCard(t, snapshot{LastEventSeq: 3}, []event{
-		{Type: eventStreamStarted, Seq: 1},
-		{Type: eventError, Seq: 2},
-		{Type: eventStreamStopped, Reason: reasonNormal, Seq: 3},
+	synctest.Test(t, func(t *testing.T) {
+		// Replayed history contains a long-resolved error: only the state at the
+		// snapshot's seq lands in the store.
+		store, _ := watchCard(t, snapshot{LastEventSeq: 3}, []event{
+			{Type: eventStreamStarted, Seq: 1},
+			{Type: eventError, Seq: 2},
+			{Type: eventStreamStopped, Reason: reasonNormal, Seq: 3},
+		})
+		synctest.Wait()
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusWaiting, card.Status)
 	})
-	waitForStatus(t, store, StatusWaiting)
 }
 
 func TestControllerTitleFromSnapshot(t *testing.T) {
 	t.Parallel()
 
-	store, _ := watchCard(t, snapshot{Title: "Real title"}, nil)
-	assert.Eventually(t, func() bool {
+	synctest.Test(t, func(t *testing.T) {
+		store, _ := watchCard(t, snapshot{Title: "Real title"}, nil)
+		synctest.Wait()
 		card, err := store.GetCard("c1")
-		return err == nil && card.Title == "Real title"
-	}, 3*time.Second, 10*time.Millisecond)
+		require.NoError(t, err)
+		assert.Equal(t, "Real title", card.Title)
+	})
 }
 
 // recordingSessions counts session creations so tests can assert whether a
@@ -255,13 +295,18 @@ func TestRelaunchSkipsResurrectedSession(t *testing.T) {
 func TestControllerStopWaits(t *testing.T) {
 	t.Parallel()
 
-	store, c := watchCard(t, snapshot{}, []event{{Type: eventStreamStarted}})
-	waitForStatus(t, store, StatusRunning)
+	synctest.Test(t, func(t *testing.T) {
+		store, c := watchCard(t, snapshot{}, []event{{Type: eventStreamStarted}})
+		synctest.Wait()
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusRunning, card.Status)
 
-	c.Stop("c1")
-	// Stopping twice (or a never-watched card) is safe.
-	c.Stop("c1")
-	c.Stop("unknown")
+		c.Stop("c1")
+		// Stopping twice (or a never-watched card) is safe.
+		c.Stop("c1")
+		c.Stop("unknown")
+	})
 }
 
 // downClient simulates an agent whose control plane never comes up.
@@ -316,29 +361,36 @@ func watchCrashingCard(t *testing.T, sessions *crashingSessions) (*Store, *contr
 func TestControllerStartupCrashLoopGoesRed(t *testing.T) {
 	t.Parallel()
 
-	// The agent dies before its control plane ever answers, relaunch after
-	// relaunch: the watcher must surface the failure instead of silently
-	// relaunching forever with the card stuck "starting".
-	sessions := &crashingSessions{}
-	store, c := watchCrashingCard(t, sessions)
-	waitForStatus(t, store, StatusError)
-	// Relaunches stop at the cap, preserving the dead pane's error output.
-	assert.Equal(t, int32(maxLaunchFailures-1), sessions.newSessions.Load())
-	// The relaunches themselves worked: the dead pane is the record, not a
-	// launch error.
-	assert.NoError(t, c.LaunchError("c1"))
+	synctest.Test(t, func(t *testing.T) {
+		// The agent dies before its control plane ever answers, relaunch after
+		// relaunch: the watcher must surface the failure instead of silently
+		// relaunching forever with the card stuck "starting".
+		sessions := &crashingSessions{}
+		store, c := watchCrashingCard(t, sessions)
+		waitForStatus(t, store, StatusError)
+		// Relaunches stop at the cap, preserving the dead pane's error output.
+		assert.Equal(t, int32(maxLaunchFailures-1), sessions.newSessions.Load())
+		// The relaunches themselves worked: the dead pane is the record, not a
+		// launch error.
+		assert.NoError(t, c.LaunchError("c1"))
+	})
 }
 
 func TestControllerFailedRelaunchGoesRed(t *testing.T) {
 	t.Parallel()
 
-	// The session cannot even be recreated (e.g. tmux new-session fails):
-	// the card must go red, not stay "starting" forever, and the failure
-	// must be recorded — there is no pane left to read it from.
-	sessions := &crashingSessions{newErr: errors.New("tmux: bad working directory")}
-	store, c := watchCrashingCard(t, sessions)
-	waitForStatus(t, store, StatusError)
-	assert.ErrorContains(t, c.LaunchError("c1"), "bad working directory")
+	synctest.Test(t, func(t *testing.T) {
+		// The session cannot even be recreated (e.g. tmux new-session fails):
+		// the card must go red, not stay "starting" forever, and the failure
+		// must be recorded — there is no pane left to read it from.
+		sessions := &crashingSessions{newErr: errors.New("tmux: bad working directory")}
+		store, c := watchCrashingCard(t, sessions)
+		synctest.Wait()
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusError, card.Status)
+		assert.ErrorContains(t, c.LaunchError("c1"), "bad working directory")
+	})
 }
 
 // flakyClient fails its first snapshots, then behaves like a healthy agent
@@ -366,57 +418,64 @@ func (f *flakyClient) Followup(ctx context.Context, key, msg string) error {
 func TestControllerCrashCapToleratesTransientFailures(t *testing.T) {
 	t.Parallel()
 
-	// The agent dies fewer times than the cap before its control plane
-	// answers: the card must recover, not go red.
-	store := testStore(t)
-	require.NoError(t, store.InsertCard(&Card{ID: "c1", Column: "dev", Status: StatusStarting, Session: "s", Worktree: t.TempDir()}))
+	synctest.Test(t, func(t *testing.T) {
+		// The agent dies fewer times than the cap before its control plane
+		// answers: the card must recover, not go red.
+		store := testStore(t)
+		require.NoError(t, store.InsertCard(&Card{ID: "c1", Column: "dev", Status: StatusStarting, Session: "s", Worktree: t.TempDir()}))
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
 
-	client := &flakyClient{healthy: fakeClient{events: []event{
-		{Type: eventUserMessage},
-		{Type: eventStreamStarted},
-		{Type: eventStreamStopped, Reason: reasonNormal},
-	}}}
-	client.failures.Store(int32(maxLaunchFailures - 1))
+		client := &flakyClient{healthy: fakeClient{events: []event{
+			{Type: eventUserMessage},
+			{Type: eventStreamStarted},
+			{Type: eventStreamStopped, Reason: reasonNormal},
+		}}}
+		client.failures.Store(int32(maxLaunchFailures - 1))
 
-	sessions := &crashingSessions{}
-	c := newController(ctx, store, sessions, func() {})
-	c.clientFor = func(_, _ string) sessionClient { return client }
-	card, err := store.GetCard("c1")
-	require.NoError(t, err)
-	c.Start(card)
-	t.Cleanup(func() { c.Stop("c1") })
+		sessions := &crashingSessions{}
+		c := newController(ctx, store, sessions, func() {})
+		c.clientFor = func(_, _ string) sessionClient { return client }
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		c.Start(card)
+		t.Cleanup(func() { c.Stop("c1") })
 
-	waitForStatus(t, store, StatusWaiting)
-	// The successful snapshot reset the count: a later death gets fresh
-	// relaunch attempts instead of tripping the cap immediately.
-	assert.Equal(t, 1, c.launchFailed("c1"), "count should have been reset by the successful snapshot")
+		waitForStatus(t, store, StatusWaiting)
+		// The successful snapshot reset the count: a later death gets fresh
+		// relaunch attempts instead of tripping the cap immediately.
+		assert.Equal(t, 1, c.launchFailed("c1"), "count should have been reset by the successful snapshot")
+	})
 }
 
 func TestControllerExitedResumeFailureGoesRed(t *testing.T) {
 	t.Parallel()
 
-	// The agent reports session_exited and the resume cannot recreate the
-	// session: the failure must be surfaced.
-	store := testStore(t)
-	require.NoError(t, store.InsertCard(&Card{ID: "c1", Column: "dev", Status: StatusStarting, Session: "s", Worktree: t.TempDir()}))
+	synctest.Test(t, func(t *testing.T) {
+		// The agent reports session_exited and the resume cannot recreate the
+		// session: the failure must be surfaced.
+		store := testStore(t)
+		require.NoError(t, store.InsertCard(&Card{ID: "c1", Column: "dev", Status: StatusStarting, Session: "s", Worktree: t.TempDir()}))
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
 
-	sessions := &crashingSessions{newErr: errors.New("tmux: server exited")}
-	c := newController(ctx, store, sessions, func() {})
-	c.clientFor = func(_, _ string) sessionClient {
-		return &fakeClient{events: []event{{Type: eventSessionExited}}}
-	}
-	card, err := store.GetCard("c1")
-	require.NoError(t, err)
-	c.Start(card)
-	t.Cleanup(func() { c.Stop("c1") })
+		sessions := &crashingSessions{newErr: errors.New("tmux: server exited")}
+		c := newController(ctx, store, sessions, func() {})
+		c.clientFor = func(_, _ string) sessionClient {
+			return &fakeClient{events: []event{{Type: eventSessionExited}}}
+		}
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		c.Start(card)
+		t.Cleanup(func() { c.Stop("c1") })
 
-	waitForStatus(t, store, StatusError)
+		synctest.Wait()
+		card, err = store.GetCard("c1")
+		require.NoError(t, err)
+		assert.Equal(t, StatusError, card.Status)
+	})
 }
 
 func TestRelaunchWithPromptResetsCrashCap(t *testing.T) {
@@ -540,29 +599,31 @@ func TestStartupPhase(t *testing.T) {
 func TestControllerStartupPhaseProgression(t *testing.T) {
 	t.Parallel()
 
-	session := "progress-" + newID()
-	store := testStore(t)
-	wt := filepath.Join(t.TempDir(), "wt")
-	require.NoError(t, store.InsertCard(&Card{ID: "c1", Column: "dev", Status: StatusStarting, Session: "s", AgentSession: session, Worktree: wt}))
+	synctest.Test(t, func(t *testing.T) {
+		session := "progress-" + newID()
+		store := testStore(t)
+		wt := filepath.Join(t.TempDir(), "wt")
+		require.NoError(t, store.InsertCard(&Card{ID: "c1", Column: "dev", Status: StatusStarting, Session: "s", AgentSession: session, Worktree: wt}))
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
 
-	// The pane is alive but the control plane never answers.
-	c := newController(ctx, store, fakeSessions{}, func() {})
-	c.clientFor = func(_, _ string) sessionClient { return downClient{} }
-	card, err := store.GetCard("c1")
-	require.NoError(t, err)
-	c.Start(card)
-	t.Cleanup(func() { c.Stop("c1") })
+		// The pane is alive but the control plane never answers.
+		c := newController(ctx, store, fakeSessions{}, func() {})
+		c.clientFor = func(_, _ string) sessionClient { return downClient{} }
+		card, err := store.GetCard("c1")
+		require.NoError(t, err)
+		c.Start(card)
+		t.Cleanup(func() { c.Stop("c1") })
 
-	require.NoError(t, os.MkdirAll(wt, 0o755))
-	waitForStatus(t, store, StatusLoading)
+		require.NoError(t, os.MkdirAll(wt, 0o755))
+		waitForStatus(t, store, StatusLoading)
 
-	socket := socketPath(session)
-	require.NoError(t, os.WriteFile(socket, nil, 0o600))
-	t.Cleanup(func() { _ = os.Remove(socket) })
-	waitForStatus(t, store, StatusAttaching)
+		socket := socketPath(session)
+		require.NoError(t, os.WriteFile(socket, nil, 0o600))
+		t.Cleanup(func() { _ = os.Remove(socket) })
+		waitForStatus(t, store, StatusAttaching)
+	})
 }
 
 // TestControllerNoDowngradeToStartupPhase proves a card mid-turn is not
@@ -571,21 +632,23 @@ func TestControllerStartupPhaseProgression(t *testing.T) {
 func TestControllerNoDowngradeToStartupPhase(t *testing.T) {
 	t.Parallel()
 
-	store := testStore(t)
-	require.NoError(t, store.InsertCard(&Card{ID: "c1", Column: "dev", Status: StatusRunning, Session: "s", Worktree: t.TempDir()}))
+	synctest.Test(t, func(t *testing.T) {
+		store := testStore(t)
+		require.NoError(t, store.InsertCard(&Card{ID: "c1", Column: "dev", Status: StatusRunning, Session: "s", Worktree: t.TempDir()}))
 
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
+		ctx, cancel := context.WithCancel(t.Context())
+		t.Cleanup(cancel)
 
-	c := newController(ctx, store, fakeSessions{}, func() {})
-	c.clientFor = func(_, _ string) sessionClient { return downClient{} }
-	card, err := store.GetCard("c1")
-	require.NoError(t, err)
-	c.Start(card)
-	t.Cleanup(func() { c.Stop("c1") })
-
-	assert.Never(t, func() bool {
+		c := newController(ctx, store, fakeSessions{}, func() {})
+		c.clientFor = func(_, _ string) sessionClient { return downClient{} }
 		card, err := store.GetCard("c1")
-		return err == nil && card.Status != StatusRunning
-	}, 300*time.Millisecond, 10*time.Millisecond)
+		require.NoError(t, err)
+		c.Start(card)
+		t.Cleanup(func() { c.Stop("c1") })
+
+		assert.Never(t, func() bool {
+			card, err := store.GetCard("c1")
+			return err == nil && card.Status != StatusRunning
+		}, 300*time.Millisecond, 10*time.Millisecond)
+	})
 }

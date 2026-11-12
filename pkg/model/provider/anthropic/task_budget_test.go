@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -120,9 +121,7 @@ func TestTaskBudget_RoutesToBetaAPIWithBetaHeader(t *testing.T) {
 	)
 	srv := anthropicTestServer(t, func(r *http.Request, body []byte) {
 		gotPath = r.URL.Path
-		// The SDK emits one `anthropic-beta` header per beta via
-		// WithHeaderAdd, so use Values (not Get) to see every entry.
-		gotBetas = r.Header.Values("anthropic-beta")
+		gotBetas = strings.Split(r.Header.Get("anthropic-beta"), ",")
 		gotBody = body
 	})
 
@@ -165,7 +164,7 @@ func TestNoTaskBudget_UsesStandardPath(t *testing.T) {
 	)
 	srv := anthropicTestServer(t, func(r *http.Request, _ []byte) {
 		gotPath = r.URL.Path
-		gotBetas = r.Header.Values("anthropic-beta")
+		gotBetas = strings.Split(r.Header.Get("anthropic-beta"), ",")
 	})
 
 	client := newTestClient(srv, latest.ModelConfig{
@@ -193,7 +192,7 @@ func TestZeroTaskBudget_DisablesFeature(t *testing.T) {
 	var gotBetas []string
 	var gotBody []byte
 	srv := anthropicTestServer(t, func(r *http.Request, body []byte) {
-		gotBetas = r.Header.Values("anthropic-beta")
+		gotBetas = strings.Split(r.Header.Get("anthropic-beta"), ",")
 		gotBody = body
 	})
 

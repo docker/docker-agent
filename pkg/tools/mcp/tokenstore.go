@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -65,6 +66,24 @@ func defaultTokenStore() OAuthTokenStore {
 // registered by pkg/tools/mcp/keyringstore, it falls back to an in-memory store.
 func NewKeyringTokenStore() OAuthTokenStore {
 	return defaultTokenStore()
+}
+
+type tokenStoreContextKey struct{}
+
+// WithOAuthTokenStore returns a context whose remote MCP toolsets (built via
+// CreateToolSet / Creator) keep their OAuth tokens in store instead of the
+// process-wide one. Embedders hosting several isolated sessions in one
+// process use it so sessions never see each other's tokens. A nil store
+// restores the default.
+func WithOAuthTokenStore(ctx context.Context, store OAuthTokenStore) context.Context {
+	return context.WithValue(ctx, tokenStoreContextKey{}, store)
+}
+
+// oauthTokenStoreFromContext returns the store installed by
+// WithOAuthTokenStore, or nil when the process-wide default applies.
+func oauthTokenStoreFromContext(ctx context.Context) OAuthTokenStore {
+	store, _ := ctx.Value(tokenStoreContextKey{}).(OAuthTokenStore)
+	return store
 }
 
 // OAuthTokenEntry pairs a stored OAuth token with its resource URL.

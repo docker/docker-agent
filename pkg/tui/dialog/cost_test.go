@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"fmt"
 	"image/color"
 	"strings"
 	"sync"
@@ -862,4 +863,330 @@ func TestCostDialogRefreshesOnLiveSessionUpdates(t *testing.T) {
 
 	view = dialog.View()
 	assert.Contains(t, view, "#2")
+}
+
+func TestCostDialogUsageOnlyResponses(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	usage := chat.Usage{InputTokens: 100, OutputTokens: 50, ReasoningTokens: 50}
+	sess.AddMessage(&session.Message{
+		AgentName: "worker",
+		Message: chat.Message{
+			Role: chat.MessageRoleAssistant, ReasoningContent: "thinking",
+			Model: "test/model", Cost: 0.004, Usage: &usage,
+		},
+	})
+
+	data := (&costDialog{session: sess}).gatherCostData()
+	assert.InDelta(t, 0.004, data.total.cost, 1e-9)
+	assert.Equal(t, usage, data.total.Usage)
+	require.Len(t, data.agents, 1)
+	assert.Equal(t, "worker", data.agents[0].label)
+	assert.InDelta(t, 0.004, data.agents[0].cost, 1e-9)
+	require.Len(t, data.models, 1)
+	assert.Equal(t, "test/model", data.models[0].label)
+	assert.InDelta(t, 0.004, data.models[0].cost, 1e-9)
+	require.Len(t, data.messages, 1)
+	assert.InDelta(t, 0.004, data.messages[0].cost, 1e-9)
+}
+
+func TestCostDialogEvaluatorBreakdown(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	sess.AddMessage(&session.Message{AgentName: "root", Message: chat.Message{
+		Role: chat.MessageRoleAssistant, Content: "answer", Model: "chat-model", Cost: 0.5,
+		Usage: &chat.Usage{InputTokens: 100, OutputTokens: 20},
+	}})
+	cost := 0.25
+	sess.AddEvaluation(&session.Evaluation{
+		ID: "request", Evaluator: "judge", AgentName: "root", Model: "judge-model", Cost: &cost,
+		Usage: &chat.Usage{InputTokens: 10, CachedInputTokens: 20, CacheWriteTokens: 30, OutputTokens: 5, ReasoningTokens: 2},
+	})
+	d := &costDialog{session: sess}
+	data := d.gatherCostData()
+	assert.InDelta(t, 0.75, data.total.cost, 1e-9)
+	assert.Equal(t, int64(160), data.total.totalInput())
+	assert.Equal(t, int64(25), data.total.OutputTokens)
+	assert.Equal(t, int64(2), data.total.ReasoningTokens)
+	require.Len(t, data.agents, 1)
+	assert.Equal(t, "root", data.agents[0].label)
+	assert.InDelta(t, 0.5, data.agents[0].cost, 1e-9)
+	require.Len(t, data.evaluators, 1)
+	assert.Equal(t, "evaluator: judge [root]", data.evaluators[0].label)
+	assert.InDelta(t, 0.25, data.evaluators[0].cost, 1e-9)
+	require.Len(t, data.models, 2)
+	assert.Equal(t, "judge-model", data.models[1].label)
+	assert.InDelta(t, 0.25, data.models[1].cost, 1e-9)
+	require.Len(t, data.messages, 2)
+	assert.True(t, data.messages[1].evaluation)
+	assert.Equal(t, "judge-model", data.messages[1].model)
+
+	for _, rendered := range []string{d.renderPlainText(), strings.Join(d.buildLines(120), "\n")} {
+		assert.Contains(t, rendered, "By Evaluator")
+		assert.Contains(t, rendered, "evaluator: judge [root]")
+		assert.Contains(t, rendered, "(judge-model)")
+	}
+}
+
+func TestCostDialogEvaluatorUnknownAndZeroCost(t *testing.T) {
+	t.Parallel()
+
+	for _, known := range []bool{false, true} {
+		name := "unknown"
+		if known {
+			name = "zero"
+		}
+		t.Run(name, func(t *testing.T) {
+			sess := session.New()
+			e := &session.Evaluation{ID: "request", Evaluator: "judge", Model: "judge-model"}
+			if known {
+				e.Cost = new(float64)
+			}
+			sess.AddEvaluation(e)
+			d := &costDialog{session: sess}
+			data := d.gatherCostData()
+			require.Len(t, data.messages, 1)
+			assert.Equal(t, !known, data.messages[0].unknownCost)
+			assert.Equal(t, !known, data.models[0].unknownCost)
+			assert.Equal(t, !known, data.evaluators[0].unknownCost)
+			if known {
+				assert.Equal(t, "$0.0000", data.messages[0].costText(true))
+				assert.NotContains(t, d.renderPlainText(), "unknown")
+			} else {
+				assert.Equal(t, "unknown", data.messages[0].costText(true))
+				assert.Contains(t, d.renderPlainText(), "Total  unknown")
+				assert.Contains(t, strings.Join(d.buildLines(120), "\n"), "unknown")
+				assert.NotContains(t, d.renderPlainText(), "$0")
+			}
+		})
+	}
+}
+
+func TestCostDialogEvaluatorPartialCost(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	cost := 0.25
+	sess.AddEvaluation(&session.Evaluation{ID: "known", Evaluator: "judge", Model: "judge-model", Cost: &cost, Usage: &chat.Usage{InputTokens: 10}})
+	sess.AddEvaluation(&session.Evaluation{ID: "unknown", Evaluator: "judge", Model: "judge-model", Usage: &chat.Usage{InputTokens: 20}})
+	d := &costDialog{session: sess}
+	data := d.gatherCostData()
+	assert.Equal(t, "$0.25 + unknown", data.total.costText(false))
+	assert.Equal(t, "$0.25 + unknown", data.models[0].costText(true))
+	assert.Equal(t, "$0.25 + unknown", data.evaluators[0].costText(true))
+	assert.Equal(t, int64(30), data.total.InputTokens)
+	assert.NotContains(t, d.renderPlainText(), "avg cost")
+}
+
+func TestCostDialogEvaluatorRemoteChatFallback(t *testing.T) {
+	t.Parallel()
+
+	parent, child := session.New(), session.New()
+	cost := 0.25
+	parent.AddEvaluation(&session.Evaluation{ID: "parent", Evaluator: "judge", Model: "judge-model", Cost: &cost, Usage: &chat.Usage{InputTokens: 10}})
+	parent.AddMessageUsageRecord("root", "chat-model", 0.5, &chat.Usage{InputTokens: 100, OutputTokens: 20})
+	child.AddEvaluation(&session.Evaluation{ID: "child", Evaluator: "judge", Model: "judge-model", Cost: &cost, Usage: &chat.Usage{InputTokens: 10}})
+	child.AddMessageUsageRecord("child", "chat-model", 0.5, &chat.Usage{InputTokens: 100, OutputTokens: 20})
+	parent.AddSubSession(child)
+
+	data := (&costDialog{session: parent}).gatherCostData()
+	assert.InDelta(t, 1.5, data.total.cost, 1e-9)
+	assert.Equal(t, int64(220), data.total.InputTokens)
+	assert.Equal(t, int64(40), data.total.OutputTokens)
+	assert.Equal(t, 4, data.actualMessageCount())
+	require.Len(t, data.agents, 2)
+
+	parent.AddMessage(&session.Message{AgentName: "root", Message: chat.Message{
+		Role: chat.MessageRoleAssistant, Content: "answer", Model: "chat-model", Cost: 0.5,
+		Usage: &chat.Usage{InputTokens: 100, OutputTokens: 20},
+	}})
+	data = (&costDialog{session: parent}).gatherCostData()
+	assert.InDelta(t, 1.5, data.total.cost, 1e-9, "local chat items replace remote history without hiding child history")
+	assert.Equal(t, int64(220), data.total.InputTokens)
+}
+
+func TestCostDialogCacheIncludesUnknownSubSessionEvaluation(t *testing.T) {
+	t.Parallel()
+
+	parent, child := session.New(), session.New()
+	parent.AddSubSession(child)
+	d := &costDialog{session: parent}
+	before := d.cacheKey(120)
+	child.AddEvaluation(&session.Evaluation{ID: "unknown", Evaluator: "judge", Model: "judge-model"})
+	assert.NotEqual(t, before, d.cacheKey(120), "unknown-cost child usage must invalidate the cached breakdown")
+	assert.Contains(t, strings.Join(d.buildLines(120), "\n"), "By Evaluator")
+}
+
+func TestCostDialogEvaluationHistoryOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, price := range []string{"paid", "free", "unknown"} {
+		t.Run(price, func(t *testing.T) {
+			sess := session.New()
+			e := &session.Evaluation{
+				ID: "child-request", Evaluator: "judge", AgentName: "remote-child", Model: "judge-model",
+				Usage: &chat.Usage{InputTokens: 10, CachedInputTokens: 20, CacheWriteTokens: 30, OutputTokens: 5, ReasoningTokens: 2},
+			}
+			wantCost := 0.0
+			if price != "unknown" {
+				if price == "paid" {
+					wantCost = 0.25
+				}
+				e.Cost = &wantCost
+			}
+			sess.AddEvaluationUsageRecord(e)
+			sess.AddEvaluationUsageRecord(e)
+			d := &costDialog{session: sess}
+			data := d.gatherCostData()
+			assert.True(t, data.hasPerMessageData)
+			assert.InDelta(t, wantCost, data.total.cost, 1e-9)
+			assert.Equal(t, *e.Usage, data.total.Usage)
+			assert.Equal(t, price == "unknown", data.total.unknownCost)
+			assert.Empty(t, data.agents)
+			require.Len(t, data.messages, 1)
+			require.Len(t, data.models, 1)
+			require.Len(t, data.evaluators, 1)
+			assert.Equal(t, "judge-model", data.models[0].label)
+			assert.Equal(t, "evaluator: judge [remote-child]", data.evaluators[0].label)
+			assert.True(t, data.messages[0].evaluation)
+			assert.Zero(t, sess.ItemCount())
+			assert.Contains(t, d.renderPlainText(), "evaluator: judge [remote-child]")
+		})
+	}
+}
+
+func TestCostDialogEvaluationHistoryDeduplicatesTree(t *testing.T) {
+	t.Parallel()
+
+	parent, child := session.New(), session.New()
+	cost := 0.25
+	rootRecord := &session.Evaluation{ID: "root-request", Evaluator: "root-judge", Cost: &cost, Usage: &chat.Usage{InputTokens: 10}}
+	childRecord := &session.Evaluation{ID: "child-request", Evaluator: "child-judge", Cost: &cost, Usage: &chat.Usage{InputTokens: 20}}
+	remoteRecord := &session.Evaluation{ID: "remote-request", Evaluator: "remote-judge", Cost: &cost, Usage: &chat.Usage{InputTokens: 30}}
+	parent.AddEvaluation(rootRecord)
+	parent.AddEvaluationUsageRecord(rootRecord)
+	// Root history arrives before the persisted child and must not take precedence.
+	parent.AddEvaluationUsageRecord(&session.Evaluation{ID: childRecord.ID, Evaluator: "stale"})
+	parent.AddEvaluationUsageRecord(remoteRecord)
+	child.AddEvaluation(childRecord)
+	child.AddEvaluationUsageRecord(rootRecord)
+	child.AddEvaluationUsageRecord(childRecord)
+	child.AddEvaluationUsageRecord(remoteRecord)
+	parent.AddSubSession(child)
+
+	d := &costDialog{session: parent}
+	data := d.gatherCostData()
+	assert.InDelta(t, 0.75, data.total.cost, 1e-9)
+	assert.Equal(t, int64(60), data.total.InputTokens)
+	assert.False(t, data.total.unknownCost)
+	assert.Equal(t, 3, data.actualMessageCount())
+	require.Len(t, data.evaluators, 3)
+	assert.Equal(t, "evaluator: root-judge", data.messages[0].label)
+	assert.Equal(t, "evaluator: child-judge", data.messages[2].label)
+	assert.Equal(t, "evaluator: remote-judge", data.messages[4].label)
+	assert.NotContains(t, d.renderPlainText(), "stale")
+
+	child.AddEvaluation(remoteRecord)
+	data = d.gatherCostData()
+	assert.InDelta(t, 0.75, data.total.cost, 1e-9, "persisting a previously remote record does not double count")
+	assert.Equal(t, 3, data.actualMessageCount())
+}
+
+func TestCostDialogEvaluationHistoryKeepsChatFallback(t *testing.T) {
+	t.Parallel()
+
+	sess := session.New()
+	cost := 0.25
+	sess.AddEvaluationUsageRecord(&session.Evaluation{ID: "remote", Evaluator: "judge", Cost: &cost, Usage: &chat.Usage{InputTokens: 10}})
+	sess.AddMessageUsageRecord("root", "chat-model", 0.5, &chat.Usage{InputTokens: 100, OutputTokens: 20})
+	d := &costDialog{session: sess}
+	data := d.gatherCostData()
+	assert.InDelta(t, 0.75, data.total.cost, 1e-9)
+	assert.Equal(t, int64(110), data.total.InputTokens)
+	assert.Equal(t, int64(20), data.total.OutputTokens)
+	assert.Equal(t, 2, data.actualMessageCount())
+	require.Len(t, data.agents, 1)
+	assert.InDelta(t, 0.5, data.agents[0].cost, 1e-9)
+
+	sess.AddMessage(&session.Message{AgentName: "root", Message: chat.Message{
+		Role: chat.MessageRoleAssistant, Content: "answer", Model: "chat-model", Cost: 0.5,
+		Usage: &chat.Usage{InputTokens: 100, OutputTokens: 20},
+	}})
+	data = d.gatherCostData()
+	assert.InDelta(t, 0.75, data.total.cost, 1e-9)
+	assert.Equal(t, 2, data.actualMessageCount())
+}
+
+func TestCostDialogCacheIncludesEvaluationHistory(t *testing.T) {
+	t.Parallel()
+
+	for _, location := range []string{"root", "child"} {
+		t.Run(location, func(t *testing.T) {
+			parent, target := session.New(), session.New()
+			if location == "child" {
+				parent.AddSubSession(target)
+			} else {
+				target = parent
+			}
+			d := NewCostDialog(parent).(*costDialog)
+			d.SetSize(140, 100)
+			assert.NotContains(t, d.View(), "By Evaluator")
+			before := d.cacheKey(120)
+			target.AddEvaluationUsageRecord(&session.Evaluation{ID: "remote", Evaluator: "judge", Model: "judge-model"})
+			after := d.cacheKey(120)
+			assert.NotEqual(t, before, after)
+			before.evaluationHistoryCount = after.evaluationHistoryCount
+			assert.Equal(t, before, after, "history alone invalidates the cache, without cost or token changes")
+			assert.Contains(t, d.View(), "By Evaluator")
+			target.AddEvaluationUsageRecord(&session.Evaluation{ID: "remote", Evaluator: "duplicate"})
+			assert.Equal(t, after, d.cacheKey(120))
+		})
+	}
+}
+
+func TestGatherCostDataConcurrentEvaluationHistory(t *testing.T) {
+	t.Parallel()
+
+	parent, child := session.New(), session.New()
+	parent.AddSubSession(child)
+	d := &costDialog{session: parent}
+	var wg sync.WaitGroup
+	for i := range 50 {
+		cost := 0.25
+		e := &session.Evaluation{ID: fmt.Sprintf("request-%d", i), Cost: &cost, Usage: &chat.Usage{InputTokens: 10}}
+		wg.Go(func() { parent.AddEvaluationUsageRecord(e) })
+		wg.Go(func() { child.AddEvaluationUsageRecord(e) })
+		wg.Go(func() { child.AddEvaluation(e) })
+		wg.Go(func() {
+			_ = d.gatherCostData()
+			_ = d.cacheKey(120)
+		})
+	}
+	wg.Wait()
+	data := d.gatherCostData()
+	assert.Equal(t, 50, data.actualMessageCount())
+	assert.InDelta(t, 12.5, data.total.cost, 1e-9)
+	assert.Equal(t, int64(500), data.total.InputTokens)
+}
+
+func TestCostDialogEvaluatorDoesNotDuplicateChildChat(t *testing.T) {
+	t.Parallel()
+	root, child := session.New(), session.New()
+	root.AddEvaluation(&session.Evaluation{ID: "evaluation", Cost: new(0.25)})
+	usage := &chat.Usage{InputTokens: 100, OutputTokens: 20}
+	child.AddMessage(&session.Message{AgentName: "child", Message: chat.Message{
+		Role: chat.MessageRoleAssistant, Model: "chat-model", Cost: 0.5, Usage: usage,
+	}})
+	root.AddSubSession(child)
+	root.AddMessageUsageRecordForSession(child.ID, "child", "chat-model", 0.5, usage)
+	data := (&costDialog{session: root}).gatherCostData()
+	assert.InDelta(t, 0.75, data.total.cost, 1e-9)
+	assert.Equal(t, int64(20), data.total.OutputTokens)
+
+	root.AddMessageUsageRecord("root", "chat-model", 0.1, &chat.Usage{OutputTokens: 10})
+	data = (&costDialog{session: root}).gatherCostData()
+	assert.InDelta(t, 0.85, data.total.cost, 1e-9, "remote root records still count alongside persisted child records")
+	assert.Equal(t, int64(30), data.total.OutputTokens)
 }

@@ -7,7 +7,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	pathx "github.com/docker/docker-agent/pkg/path"
-	"github.com/docker/docker-agent/pkg/tools/builtin/filesystem"
+	filesystem "github.com/docker/docker-agent/pkg/tools/builtin/filesystem/types"
 	"github.com/docker/docker-agent/pkg/tui/animation"
 	"github.com/docker/docker-agent/pkg/tui/components/spinner"
 	"github.com/docker/docker-agent/pkg/tui/components/toolcommon"

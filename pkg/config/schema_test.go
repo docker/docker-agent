@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	hclconv "github.com/docker/docker-agent/pkg/config/hcl"
 	"github.com/docker/docker-agent/pkg/config/latest"
+	"github.com/docker/docker-agent/pkg/config/legacy"
 )
 
 // schemaFile is the path to the JSON schema file relative to the repo root.
@@ -101,6 +103,286 @@ agents: {}
 	}
 }
 
+// TestJsonSchemaRejectsMalformedCapabilities pins that the capabilities
+// override fields are strictly boolean: a non-boolean value (e.g. a string)
+// for image/pdf/audio/video must fail schema validation rather than silently
+// coercing, since a malformed override would otherwise reach the provider
+// and surface as a confusing runtime error instead of an early config error.
+func TestJsonSchemaRejectsMalformedCapabilities(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	const base = `version: "15"
+models:
+  m:
+    provider: openai
+    model: gpt-4o
+    capabilities:
+%s
+agents:
+  root:
+    model: m
+    instruction: hi
+`
+
+	tests := []struct {
+		name  string
+		field string
+	}{
+		{name: "image not boolean", field: "      image: \"yes\"\n"},
+		{name: "pdf not boolean", field: "      pdf: \"yes\"\n"},
+		{name: "audio not boolean", field: "      audio: \"yes\"\n"},
+		{name: "video not boolean", field: "      video: \"yes\"\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var rawJSON any
+			require.NoError(t, yaml.Unmarshal(fmt.Appendf(nil, base, tt.field), &rawJSON))
+
+			result, err := schema.Validate(gojsonschema.NewRawLoader(rawJSON))
+			require.NoError(t, err)
+			assert.False(t, result.Valid(), "expected schema to reject a non-boolean %s", tt.name)
+		})
+	}
+}
+
+// TestJsonSchemaAcceptsAudioVideoCapabilities confirms the audio/video
+// capability override fields validate against the schema, both individually
+// and together with image/pdf, mirroring how the runtime resolves them.
+func TestJsonSchemaAcceptsAudioVideoCapabilities(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	const in = `version: "15"
+models:
+  m:
+    provider: openai
+    model: gpt-4o
+    capabilities:
+      image: true
+      pdf: true
+      audio: true
+      video: true
+agents:
+  root:
+    model: m
+    instruction: hi
+`
+
+	var rawJSON any
+	require.NoError(t, yaml.Unmarshal([]byte(in), &rawJSON))
+
+	result, err := schema.Validate(gojsonschema.NewRawLoader(rawJSON))
+	require.NoError(t, err)
+	assert.True(t, result.Valid(), "expected schema to accept audio/video capabilities: %v", result.Errors())
+}
+
+// TestJsonSchemaRejectsMalformedOutputCapabilities mirrors
+// TestJsonSchemaRejectsMalformedCapabilities for output_capabilities.image: a
+// non-boolean value must fail schema validation rather than silently
+// coercing.
+func TestJsonSchemaRejectsMalformedOutputCapabilities(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	const in = `version: "15"
+models:
+  m:
+    provider: google
+    model: gemini-2.5-flash-image
+    output_capabilities:
+      image: "yes"
+agents:
+  root:
+    model: m
+    instruction: hi
+`
+
+	var rawJSON any
+	require.NoError(t, yaml.Unmarshal([]byte(in), &rawJSON))
+
+	result, err := schema.Validate(gojsonschema.NewRawLoader(rawJSON))
+	require.NoError(t, err)
+	assert.False(t, result.Valid(), "expected schema to reject a non-boolean output_capabilities.image")
+}
+
+// TestJsonSchemaAcceptsOutputCapabilities confirms output_capabilities.image
+// validates against the schema, both true and false, and that an unknown
+// key under output_capabilities is rejected (additionalProperties: false),
+// mirroring the strictness of CapabilitiesConfig.
+func TestJsonSchemaAcceptsOutputCapabilities(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	const base = `version: "15"
+models:
+  m:
+    provider: google
+    model: gemini-2.5-flash-image
+    output_capabilities:
+%s
+agents:
+  root:
+    model: m
+    instruction: hi
+`
+
+	tests := []struct {
+		name  string
+		field string
+		valid bool
+	}{
+		{name: "image true", field: "      image: true\n", valid: true},
+		{name: "image false", field: "      image: false\n", valid: true},
+		{name: "image omitted (empty block)", field: "      {}\n", valid: true},
+		{name: "unknown key", field: "      video: true\n", valid: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var rawJSON any
+			require.NoError(t, yaml.Unmarshal(fmt.Appendf(nil, base, tt.field), &rawJSON))
+
+			result, err := schema.Validate(gojsonschema.NewRawLoader(rawJSON))
+			require.NoError(t, err)
+			assert.Equal(t, tt.valid, result.Valid(), "output_capabilities %s: %v", tt.name, result.Errors())
+		})
+	}
+}
+
+func TestJsonSchemaOpenAPIMaxOutputBytes(t *testing.T) {
+	t.Parallel()
+
+	schemaBytes, err := os.ReadFile(schemaFile)
+	require.NoError(t, err)
+	schema, err := gojsonschema.NewSchema(gojsonschema.NewBytesLoader(schemaBytes))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		toolType string
+		value    any
+		valid    bool
+	}{
+		{name: "omitted", toolType: "openapi", valid: true},
+		{name: "disabled", toolType: "openapi", value: 0, valid: true},
+		{name: "positive", toolType: "openapi", value: 1024, valid: true},
+		{name: "negative", toolType: "openapi", value: -1},
+		{name: "fractional", toolType: "openapi", value: 1.5},
+		{name: "string", toolType: "openapi", value: "1024"},
+		{name: "shell zero", toolType: "shell", value: 0},
+		{name: "fetch positive", toolType: "fetch", value: 1024},
+		{name: "missing type", value: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			toolset := map[string]any{}
+			if tt.toolType != "" {
+				toolset["type"] = tt.toolType
+			}
+			if tt.toolType == "openapi" {
+				toolset["url"] = "https://api.example.com/spec.yaml"
+			}
+			if tt.value != nil {
+				toolset["max_output_bytes"] = tt.value
+			}
+			configs := map[string]any{
+				"inline": map[string]any{
+					"agents": map[string]any{"root": map[string]any{"toolsets": []any{toolset}}},
+				},
+				"named": map[string]any{
+					"agents":   map[string]any{"root": map[string]any{"use_toolsets": []any{"api"}}},
+					"toolsets": map[string]any{"api": toolset},
+				},
+			}
+			for name, config := range configs {
+				data, err := json.Marshal(config)
+				require.NoError(t, err)
+				result, err := schema.Validate(gojsonschema.NewBytesLoader(data))
+				require.NoError(t, err)
+				assert.Equal(t, tt.valid, result.Valid(), "%s: %v", name, result.Errors())
+			}
+		})
+	}
+}
+
+func TestLoadOpenAPIMaxOutputBytes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		version string
+		field   string
+		value   *int
+		wantErr string
+	}{
+		{name: "latest omitted"},
+		{name: "legacy omitted", version: "15"},
+		{name: "disabled", field: "max_output_bytes: 0", value: new(0)},
+		{name: "positive", field: "max_output_bytes: 1024", value: new(1024)},
+		{name: "negative", field: "max_output_bytes: -1", wantErr: "max_output_bytes must not be negative"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			data := fmt.Appendf(nil, `agents:
+  root:
+    model: openai/gpt-4o
+    toolsets:
+      - type: openapi
+        url: https://api.example.com/spec.yaml
+        %s
+`, tt.field)
+			if tt.version != "" {
+				data = fmt.Appendf(data, "version: %q\n", tt.version)
+			}
+			var opts []LoadOption
+			if tt.version != "" {
+				opts = append(opts, WithVersions(legacy.Register))
+			}
+			cfg, err := Load(t.Context(), NewBytesSource("openapi.yaml", data), opts...)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, cfg.Agents, 1)
+			require.Len(t, cfg.Agents[0].Toolsets, 1)
+			assert.Equal(t, tt.value, cfg.Agents[0].Toolsets[0].MaxOutputBytes)
+		})
+	}
+}
+
 // TestSchemaMatchesGoTypes verifies that every JSON-tagged field in the Go
 // config structs has a corresponding property in agent-schema.json (and
 // vice-versa). This prevents the schema from silently drifting out of sync
@@ -135,6 +417,8 @@ func TestSchemaMatchesGoTypes(t *testing.T) {
 		"AgentConfig":           reflect.TypeFor[latest.AgentConfig](),
 		"FallbackConfig":        reflect.TypeFor[latest.FallbackConfig](),
 		"HarnessConfig":         reflect.TypeFor[latest.HarnessConfig](),
+		"EvaluatorConfig":       reflect.TypeFor[latest.EvaluatorConfig](),
+		"EvaluatorPolicy":       reflect.TypeFor[latest.EvaluatorPolicy](),
 		"ModelConfig":           reflect.TypeFor[latest.ModelConfig](),
 		"Metadata":              reflect.TypeFor[latest.Metadata](),
 		"ProviderConfig":        reflect.TypeFor[latest.ProviderConfig](),

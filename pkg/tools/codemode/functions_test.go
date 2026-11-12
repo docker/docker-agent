@@ -2,6 +2,7 @@ package codemode
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,7 +39,7 @@ interface CreateTodoInput {
 
 type CreateTodoOutput = string;
 
-declare function CreateTodo(args: CreateTodoInput): CreateTodoOutput;
+declare function CreateTodo(args: CreateTodoInput): Promise<CreateTodoOutput>;
 `, declaration)
 }
 
@@ -46,27 +47,26 @@ func TestToolToTypeScriptExamples(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		parameters map[string]any
-		output     map[string]any
-		want       string
+		name        string
+		description string
+		parameters  map[string]any
+		output      map[string]any
+		want        string
 	}{
 		{
-			name:       "primitive aliases",
+			name:       "primitive aliases and empty description",
 			parameters: map[string]any{"type": "string"},
 			output:     map[string]any{"type": "boolean"},
-			want: `/**
- * Example tool
- */
-type ExampleToolInput = string;
+			want: "/**\n * \n */\n" + `type ExampleToolInput = string;
 
 type ExampleToolOutput = boolean;
 
-declare function ExampleTool(args: ExampleToolInput): ExampleToolOutput;
+declare function ExampleTool(args: ExampleToolInput): Promise<ExampleToolOutput>;
 `,
 		},
 		{
-			name: "nested object, enum, nullable array, and property comments",
+			name:        "nested object, enum, nullable array, and property comments",
+			description: "\n \tExample tool */\r\n\n",
 			parameters: map[string]any{
 				"type":     "object",
 				"required": []string{"filter"},
@@ -85,10 +85,7 @@ declare function ExampleTool(args: ExampleToolInput): ExampleToolOutput;
 				"type":  []any{"array", "null"},
 				"items": map[string]any{"type": "number"},
 			},
-			want: `/**
- * Example tool
- */
-interface ExampleToolInput {
+			want: "/**\n * \n * Example tool *\\/\n * \n * \n */\n" + `interface ExampleToolInput {
   // Filter to apply
   // before searching
   filter: {
@@ -98,11 +95,12 @@ interface ExampleToolInput {
 
 type ExampleToolOutput = number[] | null;
 
-declare function ExampleTool(args: ExampleToolInput): ExampleToolOutput;
+declare function ExampleTool(args: ExampleToolInput): Promise<ExampleToolOutput>;
 `,
 		},
 		{
-			name: "unions and intersections",
+			name:        "unions and intersections",
+			description: "Example tool",
 			parameters: map[string]any{
 				"oneOf": []any{
 					map[string]any{"type": "string"},
@@ -126,11 +124,12 @@ type ExampleToolOutput = {
   active?: boolean;
 };
 
-declare function ExampleTool(args: ExampleToolInput): ExampleToolOutput;
+declare function ExampleTool(args: ExampleToolInput): Promise<ExampleToolOutput>;
 `,
 		},
 		{
-			name: "references and typed additional properties",
+			name:        "references and typed additional properties",
+			description: "Example tool",
 			parameters: map[string]any{
 				"type": "object",
 				"$defs": map[string]any{
@@ -152,7 +151,7 @@ interface ExampleToolInput {
 
 type ExampleToolOutput = "ok";
 
-declare function ExampleTool(args: ExampleToolInput): ExampleToolOutput;
+declare function ExampleTool(args: ExampleToolInput): Promise<ExampleToolOutput>;
 `,
 		},
 	}
@@ -162,7 +161,7 @@ declare function ExampleTool(args: ExampleToolInput): ExampleToolOutput;
 			t.Parallel()
 			tool := tools.Tool{
 				Name:         "example_tool",
-				Description:  "Example tool",
+				Description:  tt.description,
 				Parameters:   tt.parameters,
 				OutputSchema: tt.output,
 			}
@@ -194,12 +193,16 @@ func TestSchemaType(t *testing.T) {
 		{name: "array of union", schema: map[string]any{"type": "array", "items": map[string]any{"type": []any{"string", "null"}}}, want: "(string | null)[]"},
 		{name: "inferred array", schema: map[string]any{"items": map[string]any{"type": "boolean"}}, want: "boolean[]"},
 		{name: "unknown", schema: map[string]any{}, want: "unknown"},
+		{name: "nil schema", schema: nil, want: "unknown"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tt.want, schemaType(tt.schema, tt.schema, 0))
+			if tt.name == "nullable" {
+				assert.Equal(t, map[string]any{"type": []any{"string", "null"}}, tt.schema)
+			}
 		})
 	}
 }
@@ -324,5 +327,15 @@ func TestToolToTypeScriptNestedAndNullableTypes(t *testing.T) {
   };
 }`)
 	assert.Contains(t, declaration, "type SearchItemsOutput = number[] | null;")
-	assert.Contains(t, declaration, "declare function SearchItems(args: SearchItemsInput): SearchItemsOutput;")
+	assert.Contains(t, declaration, "declare function SearchItems(args: SearchItemsInput): Promise<SearchItemsOutput>;")
+}
+
+func TestTypeScriptArgumentsFollowDeclarationOrder(t *testing.T) {
+	t.Parallel()
+	type args struct {
+		Zulu  string `json:"zulu,omitempty"`
+		Alpha string `json:"alpha"`
+	}
+	declaration := toolToTypeScript(tools.Tool{Name: "ordered", Parameters: tools.MustSchemaFor[args]()})
+	assert.Less(t, strings.Index(declaration, "zulu?:"), strings.Index(declaration, "alpha:"))
 }

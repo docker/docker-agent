@@ -33,7 +33,7 @@ models:
 
   capable:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
 
   fast:
     provider: anthropic

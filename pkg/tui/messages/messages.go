@@ -13,3 +13,9 @@
 // messages by the domain they affect, making it easier to understand
 // which components handle which messages.
 package messages
+
+// ToggleDiffViewMsg invalidates views after changing the diff layout.
+type ToggleDiffViewMsg struct{}
+
+// ImageRenderingChangedMsg invalidates cached image rows after capability or preference changes.
+type ImageRenderingChangedMsg struct{}

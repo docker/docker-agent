@@ -27,7 +27,7 @@
 models:
   primary:
     provider: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     # Summarize the conversation with the cheaper Haiku model instead of Sonnet.
     compaction_model: fast
   fast:
@@ -35,7 +35,7 @@ models:
     model: claude-haiku-4-5
   budget:
     provider: my_anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-4-6
 
 providers:
   my_anthropic:
@@ -50,7 +50,7 @@ agents:
     description: An assistant that compacts its sessions with a cheaper model.
     instruction: You are a helpful assistant.
   reviewer:
-    model: anthropic/claude-sonnet-4-5
+    model: anthropic/claude-sonnet-5
     description: An assistant configuring its compaction model at the agent level.
     instruction: You are a helpful code reviewer.
     # Agent-level value: wins over any model- or provider-level setting.

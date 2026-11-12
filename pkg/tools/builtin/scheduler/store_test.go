@@ -47,46 +47,95 @@ func TestStoreCancel(t *testing.T) {
 	require.False(t, s.cancel(sc.ID))
 }
 
-func TestStorePopDueOneShot(t *testing.T) {
+func TestStoreClaimDueOneShot(t *testing.T) {
 	t.Parallel()
 
 	s := newStore()
 	sc, err := s.add("once", "do once", "in:10m", testNow)
 	require.NoError(t, err)
 
-	require.Empty(t, s.popDue(testNow.Add(9*time.Minute)))
-	fired := s.popDue(testNow.Add(10 * time.Minute))
-	require.Len(t, fired, 1)
-	require.Equal(t, sc.ID, fired[0].ID)
+	require.Empty(t, s.claimDue(testNow.Add(9*time.Minute)))
+	due := s.claimDue(testNow.Add(10 * time.Minute))
+	require.Len(t, due, 1)
+	require.Equal(t, sc.ID, due[0].ID)
+	require.Empty(t, s.claimDue(testNow.Add(10*time.Minute)))
+
+	s.finishFire(sc.ID, testNow.Add(10*time.Minute), true)
 	require.Empty(t, s.list())
 }
 
-func TestStorePopDueRecurringReArms(t *testing.T) {
+func TestStoreFinishFireRecurringReArms(t *testing.T) {
 	t.Parallel()
 
 	s := newStore()
-	_, err := s.add("loop", "tick", "every:1h", testNow)
+	sc, err := s.add("loop", "tick", "every:1h", testNow)
 	require.NoError(t, err)
 
-	fired := s.popDue(testNow.Add(time.Hour))
-	require.Len(t, fired, 1)
+	due := s.claimDue(testNow.Add(time.Hour))
+	require.Len(t, due, 1)
+	s.finishFire(sc.ID, testNow.Add(time.Hour), true)
 
-	require.Empty(t, s.popDue(testNow.Add(time.Hour)))
+	require.Empty(t, s.claimDue(testNow.Add(time.Hour)))
 	list := s.list()
 	require.Len(t, list, 1)
 	require.Equal(t, testNow.Add(2*time.Hour), list[0].NextFire)
 }
 
-func TestStorePopDueSkipsMissedSlots(t *testing.T) {
+func TestStoreFinishFireRecurringSkipsMissedSlots(t *testing.T) {
 	t.Parallel()
 
 	s := newStore()
-	_, err := s.add("loop", "tick", "every:1h", testNow)
+	sc, err := s.add("loop", "tick", "every:1h", testNow)
 	require.NoError(t, err)
 
-	fired := s.popDue(testNow.Add(3*time.Hour + 30*time.Minute))
-	require.Len(t, fired, 1)
+	due := s.claimDue(testNow.Add(3*time.Hour + 30*time.Minute))
+	require.Len(t, due, 1)
+	s.finishFire(sc.ID, testNow.Add(3*time.Hour+30*time.Minute), true)
 	require.Equal(t, testNow.Add(4*time.Hour), s.list()[0].NextFire)
+}
+
+func TestStoreFinishFireFailureRetriesWithoutChangingRecurringCadence(t *testing.T) {
+	t.Parallel()
+
+	s := newStore()
+	sc, err := s.add("loop", "tick", "every:1h", testNow)
+	require.NoError(t, err)
+
+	due := s.claimDue(testNow.Add(time.Hour))
+	require.Len(t, due, 1)
+	s.finishFire(sc.ID, testNow.Add(time.Hour), false)
+	require.Equal(t, testNow.Add(time.Hour+recallRetryDelay), s.list()[0].NextFire)
+
+	retryAt := testNow.Add(time.Hour + recallRetryDelay)
+	due = s.claimDue(retryAt)
+	require.Len(t, due, 1)
+	s.finishFire(sc.ID, retryAt, true)
+	require.Equal(t, testNow.Add(2*time.Hour), s.list()[0].NextFire)
+}
+
+func TestStoreCancelWhileFiring(t *testing.T) {
+	t.Parallel()
+
+	s := newStore()
+	sc, err := s.add("once", "do once", "in:10m", testNow)
+	require.NoError(t, err)
+	require.Len(t, s.claimDue(testNow.Add(10*time.Minute)), 1)
+
+	require.True(t, s.cancel(sc.ID))
+	s.finishFire(sc.ID, testNow.Add(10*time.Minute), false)
+	require.Empty(t, s.list())
+}
+
+func TestStoreUntilNextIgnoresInFlightSchedules(t *testing.T) {
+	t.Parallel()
+
+	s := newStore()
+	_, err := s.add("x", "do x", "in:5m", testNow)
+	require.NoError(t, err)
+	require.Len(t, s.claimDue(testNow.Add(5*time.Minute)), 1)
+
+	_, ok := s.untilNext(testNow.Add(5 * time.Minute))
+	require.False(t, ok)
 }
 
 func TestStoreUntilNext(t *testing.T) {

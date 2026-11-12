@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -10,8 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"uuid"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -21,6 +20,7 @@ import (
 	"github.com/docker/docker-agent/pkg/session"
 	"github.com/docker/docker-agent/pkg/telemetry/genai"
 	"github.com/docker/docker-agent/pkg/tools"
+	"github.com/docker/docker-agent/pkg/worktree"
 )
 
 const (
@@ -28,6 +28,7 @@ const (
 	ToolNameListBackgroundAgents = "list_background_agents"
 	ToolNameViewBackgroundAgent  = "view_background_agent"
 	ToolNameStopBackgroundAgent  = "stop_background_agent"
+	ToolNameWaitBackgroundAgents = "wait_background_agents"
 )
 
 const (
@@ -46,6 +47,7 @@ func CreateToolSet() (tools.ToolSet, error) {
 
 // RunBackgroundAgentArgs specifies the parameters for dispatching a sub-agent task asynchronously.
 type RunBackgroundAgentArgs struct {
+	Worktree       bool   `json:"worktree,omitempty" jsonschema:"Run in a new isolated git worktree branched from the calling session current HEAD. Uncommitted changes are not copied. The worktree and branch are retained for the caller to inspect and merge."`
 	Agent          string `json:"agent" jsonschema:"The name of the sub-agent to run in the background."`
 	Task           string `json:"task" jsonschema:"A clear and concise description of the task the agent should achieve."`
 	ExpectedOutput string `json:"expected_output,omitempty" jsonschema:"The expected output from the agent (optional)."`
@@ -63,6 +65,8 @@ type StopBackgroundAgentArgs struct {
 
 // RunParams holds the parameters for running a sub-agent.
 type RunParams struct {
+	Worktree       bool
+	OnWorktree     func(*worktree.Worktree)
 	AgentName      string
 	Task           string
 	ExpectedOutput string
@@ -135,12 +139,14 @@ type task struct {
 	taskDesc  string
 
 	cancel    context.CancelFunc
+	done      chan struct{} // Closed after execution and cleanup, not when cancellation is requested.
 	startTime time.Time
 	status    atomic.Int32
 	result    string
 	errMsg    string
 
 	// outputMu protects output, outputBytes, viewCount, and lastViewedOutputBytes.
+	worktree              *worktree.Worktree // guarded by outputMu
 	outputMu              sync.RWMutex
 	output                strings.Builder
 	outputBytes           int
@@ -156,8 +162,8 @@ func (t *task) storeStatus(s taskStatus) {
 	t.status.Store(int32(s))
 }
 
-func (t *task) casStatus(old, next taskStatus) bool {
-	return t.status.CompareAndSwap(int32(old), int32(next))
+func (t *task) finish(next taskStatus) bool {
+	return t.status.CompareAndSwap(int32(taskRunning), int32(next))
 }
 
 // writeOutput appends content to the task's live output buffer, respecting the
@@ -181,6 +187,7 @@ func (t *task) formatView(status taskStatus, elapsed time.Duration) string {
 	fmt.Fprintf(&out, "Agent:   %s\n", t.agentName)
 	fmt.Fprintf(&out, "Status:  %s\n", status)
 	fmt.Fprintf(&out, "Runtime: %s\n", elapsed)
+	out.WriteString(t.worktreeSummary())
 	out.WriteString("\n--- Output ---\n")
 
 	switch status {
@@ -233,11 +240,44 @@ func (t *task) formatView(status taskStatus, elapsed time.Duration) string {
 	return out.String()
 }
 
+func (t *task) setWorktree(wt *worktree.Worktree) {
+	t.outputMu.Lock()
+	defer t.outputMu.Unlock()
+	if wt != nil {
+		t.worktree = new(*wt)
+	}
+}
+
+func (t *task) worktreeSnapshot() *worktree.Worktree {
+	t.outputMu.RLock()
+	defer t.outputMu.RUnlock()
+	if t.worktree == nil {
+		return nil
+	}
+	return new(*t.worktree)
+}
+
+func (t *task) worktreeSummary() string {
+	if wt := t.worktreeSnapshot(); wt != nil {
+		var summary strings.Builder
+		fmt.Fprintf(&summary, "Worktree: %s\nBranch:   %s\nBase:     %s\nRetained for inspection and merging; only committed changes can be merged.\n", wt.Dir, wt.Branch, wt.BaseCommit)
+		for _, warning := range wt.Warnings {
+			fmt.Fprintf(&summary, "Warning: %s\n", warning)
+		}
+		return summary.String()
+	}
+	return ""
+}
+
 // Handler owns all background agent tasks and provides tool handlers.
 type Handler struct {
 	runner Runner
 	wg     sync.WaitGroup
 	tasks  *concurrent.Map[string, *task]
+
+	admissionMu sync.Mutex
+	activeTasks int
+	stopping    bool
 }
 
 // NewHandler creates a new Handler with the given Runner.
@@ -249,7 +289,7 @@ func NewHandler(runner Runner) *Handler {
 }
 
 func newTaskID() string {
-	return "agent_task_" + uuid.New().String()
+	return "agent_task_" + uuid.NewV4().String()
 }
 
 func (h *Handler) runningTaskCount() int {
@@ -268,10 +308,18 @@ func (h *Handler) totalTaskCount() int {
 }
 
 func (h *Handler) pruneCompleted() {
+	h.admissionMu.Lock()
+	defer h.admissionMu.Unlock()
+	h.pruneCompletedLocked()
+}
+
+func (h *Handler) pruneCompletedLocked() {
 	var toDelete []string
 	h.tasks.Range(func(id string, t *task) bool {
-		if s := t.loadStatus(); s != taskRunning {
+		select {
+		case <-t.done:
 			toDelete = append(toDelete, id)
+		default:
 		}
 		return true
 	})
@@ -296,7 +344,7 @@ func (h *Handler) subAgentNames(sess *session.Session) []string {
 // HandleRun starts a sub-agent task asynchronously and returns a task ID immediately.
 func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
 	var params RunBackgroundAgentArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
@@ -315,18 +363,25 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 		return tools.ResultError(fmt.Sprintf("agent %q is not in the sub-agents list. This agent has no sub-agents configured.", params.Agent)), nil
 	}
 
-	// Enforce concurrency cap.
-	if h.runningTaskCount() >= maxConcurrentTasks {
+	// Admission, insertion, and pruning are one transaction. StopAll uses the
+	// same lock to prevent Wait racing a new WaitGroup task.
+	h.admissionMu.Lock()
+	if h.stopping {
+		h.admissionMu.Unlock()
+		return tools.ResultError("background agent handler is stopping"), nil
+	}
+	if h.activeTasks >= maxConcurrentTasks {
+		h.admissionMu.Unlock()
 		return tools.ResultError(fmt.Sprintf("maximum concurrent background agent tasks (%d) reached; stop or wait for existing tasks to complete", maxConcurrentTasks)), nil
 	}
-
-	// Enforce total cap, pruning finished tasks first.
 	if h.totalTaskCount() >= maxTotalTasks {
-		h.pruneCompleted()
+		h.pruneCompletedLocked()
 		if h.totalTaskCount() >= maxTotalTasks {
+			h.admissionMu.Unlock()
 			return tools.ResultError(fmt.Sprintf("maximum total background agent tasks (%d) reached; view and discard old tasks first", maxTotalTasks)), nil
 		}
 	}
+	h.activeTasks++
 
 	taskID := newTaskID()
 
@@ -348,12 +403,15 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 		agentName: params.Agent,
 		taskDesc:  params.Task,
 		cancel:    cancel,
+		done:      make(chan struct{}),
 		startTime: time.Now(),
 	}
 	t.storeStatus(taskRunning)
 	h.tasks.Store(taskID, t)
 
 	h.wg.Go(func() {
+		defer close(t.done)
+		defer h.releaseAdmission()
 		defer cancel()
 
 		// Each background task starts its own trace (WithNewRoot)
@@ -400,6 +458,8 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 		slog.DebugContext(tracedCtx, "Starting background agent task", "task_id", taskID, "agent", params.Agent)
 
 		result := h.runner.RunAgent(tracedCtx, RunParams{
+			Worktree:       params.Worktree,
+			OnWorktree:     t.setWorktree,
 			AgentName:      params.Agent,
 			Task:           params.Task,
 			ExpectedOutput: params.ExpectedOutput,
@@ -409,7 +469,9 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 
 		if result.ErrMsg != "" {
 			t.errMsg = result.ErrMsg
-			t.storeStatus(taskFailed)
+			if !t.finish(taskFailed) {
+				return
+			}
 			span.SetStatus(codes.Error, result.ErrMsg)
 			span.SetAttributes(
 				attribute.String("error.type", "agent_error"),
@@ -429,14 +491,28 @@ func (h *Handler) HandleRun(ctx context.Context, sess *session.Session, toolCall
 		// Write result before CAS so readers who observe taskCompleted
 		// always see the populated result field.
 		t.result = result.Result
-		if t.casStatus(taskRunning, taskCompleted) {
+		if t.finish(taskCompleted) {
 			span.SetAttributes(attribute.String("cagent.background_agent.outcome", "completed"))
 			slog.DebugContext(tracedCtx, "Background agent task completed", "task_id", taskID, "agent", params.Agent)
 		}
 	})
+	h.admissionMu.Unlock()
 
 	return tools.ResultSuccess(fmt.Sprintf("Background agent task started with ID: %s\nAgent: %s\nTask: %s",
 		taskID, params.Agent, params.Task)), nil
+}
+
+// HasActiveTasks includes admitted tasks that have not started or finished draining.
+func (h *Handler) HasActiveTasks() bool {
+	h.admissionMu.Lock()
+	defer h.admissionMu.Unlock()
+	return h.activeTasks != 0
+}
+
+func (h *Handler) releaseAdmission() {
+	h.admissionMu.Lock()
+	defer h.admissionMu.Unlock()
+	h.activeTasks--
 }
 
 // HandleList lists all background agent tasks.
@@ -452,6 +528,7 @@ func (h *Handler) HandleList(_ context.Context, _ *session.Session, _ tools.Tool
 		fmt.Fprintf(&out, "  Agent:   %s\n", t.agentName)
 		fmt.Fprintf(&out, "  Status:  %s\n", t.loadStatus())
 		fmt.Fprintf(&out, "  Runtime: %s\n", elapsed)
+		out.WriteString(t.worktreeSummary())
 		out.WriteString("\n")
 		return true
 	})
@@ -464,9 +541,9 @@ func (h *Handler) HandleList(_ context.Context, _ *session.Session, _ tools.Tool
 }
 
 // HandleView returns the output and status of a specific background agent task.
-func (h *Handler) HandleView(_ context.Context, _ *session.Session, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
+func (h *Handler) HandleView(ctx context.Context, _ *session.Session, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
 	var params ViewBackgroundAgentArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
@@ -482,9 +559,9 @@ func (h *Handler) HandleView(_ context.Context, _ *session.Session, toolCall too
 }
 
 // HandleStop cancels a running background agent task.
-func (h *Handler) HandleStop(_ context.Context, _ *session.Session, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
+func (h *Handler) HandleStop(ctx context.Context, _ *session.Session, toolCall tools.ToolCall) (*tools.ToolCallResult, error) {
 	var params StopBackgroundAgentArgs
-	if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &params); err != nil {
+	if err := tools.UnmarshalToolArguments(ctx, toolCall, &params); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
 	}
 
@@ -493,7 +570,7 @@ func (h *Handler) HandleStop(_ context.Context, _ *session.Session, toolCall too
 		return tools.ResultError("task not found: " + params.TaskID), nil
 	}
 
-	if !t.casStatus(taskRunning, taskStopped) {
+	if !t.finish(taskStopped) {
 		return tools.ResultError(fmt.Sprintf("task %s is not running (status: %s)", params.TaskID, t.loadStatus())), nil
 	}
 
@@ -505,12 +582,20 @@ func (h *Handler) HandleStop(_ context.Context, _ *session.Session, toolCall too
 // StopAll cancels all running tasks and waits for their goroutines to exit.
 // Called during runtime shutdown to ensure clean teardown.
 func (h *Handler) StopAll() {
+	var cancels []context.CancelFunc
+	h.admissionMu.Lock()
+	h.stopping = true
 	h.tasks.Range(func(_ string, t *task) bool {
-		if t.casStatus(taskRunning, taskStopped) {
-			t.cancel()
+		if t.finish(taskStopped) {
+			cancels = append(cancels, t.cancel)
 		}
 		return true
 	})
+	h.admissionMu.Unlock()
+
+	for _, cancel := range cancels {
+		cancel()
+	}
 	h.wg.Wait()
 }
 
@@ -521,6 +606,7 @@ func (h *Handler) RegisterHandlers(register func(name string, fn func(context.Co
 	register(ToolNameListBackgroundAgents, h.HandleList)
 	register(ToolNameViewBackgroundAgent, h.HandleView)
 	register(ToolNameStopBackgroundAgent, h.HandleStop)
+	register(ToolNameWaitBackgroundAgents, h.HandleWait)
 }
 
 // New returns a lightweight ToolSet for registering background agent
@@ -546,6 +632,9 @@ Use background agent tasks to dispatch work to sub-agents concurrently.
 - **list_background_agents**: Show all tasks with status and runtime
 - **view_background_agent**: Get output and status of a task by task_id
 - **stop_background_agent**: Terminate a task by task_id
+- **wait_background_agents**: Join specified tasks and collect their results. Prefer this over polling; a timeout leaves the tasks running.
+
+**Worktree isolation**: Use worktree: true for concurrent coding tasks in a git repository or an existing git worktree. Each task gets a separate checkout and branch from the caller's current HEAD; uncommitted changes are not copied. Relative paths resolve inside the new checkout. For isolated tasks, describe files relative to the repository rather than passing paths into the original checkout. Have each agent commit its changes (respecting the project's signing policy), then wait for all tasks, inspect the reported branches, and merge them one at a time in the parent checkout. Resolve conflicts and run tests at the top level. No automatic commit or merge is performed. Worktrees are retained even on failure or cancellation; remove them only after integrating or deliberately discarding their work. This is checkout isolation, not a security sandbox. Dispatch all background worktree tasks from the top-level orchestrator; nested background dispatch is not supported inside isolated tasks. External harness agents do not currently support this option.
 
 **Notes**: Output capped at 10MB per task. All tasks auto-terminate when the agent stops.`
 }
@@ -553,40 +642,57 @@ Use background agent tasks to dispatch work to sub-agents concurrently.
 func backgroundAgentTools() []tools.Tool {
 	return []tools.Tool{
 		{
-			Name:     ToolNameRunBackgroundAgent,
-			Category: "transfer",
+			Name:           ToolNameRunBackgroundAgent,
+			RuntimeHandler: ToolNameRunBackgroundAgent,
+			Category:       "transfer",
 			Description: `Start a sub-agent task in the background and return immediately with a task ID.
 Use this to dispatch work to multiple sub-agents concurrently. Native sub-agents inherit the current
 session's safety policy and permissions; calls requiring confirmation are denied because background
 tasks are non-interactive. External harnesses enforce their own permission model. Check progress with
-view_background_agent and collect results once the task is complete.`,
+view_background_agent, or join tasks and collect results with wait_background_agents instead of polling.
+Set worktree to true to isolate coding changes on a separate git branch and checkout. The caller must
+inspect and merge committed changes explicitly; worktrees are retained. External harnesses are not supported.`,
 			Parameters:  tools.MustSchemaFor[RunBackgroundAgentArgs](),
 			Annotations: tools.ToolAnnotations{Title: "Run Background Agent"},
 		},
 		{
-			Name:        ToolNameListBackgroundAgents,
-			Category:    "transfer",
-			Description: `List all background agent tasks with their status and runtime.`,
+			Name:           ToolNameListBackgroundAgents,
+			RuntimeHandler: ToolNameListBackgroundAgents,
+			Category:       "transfer",
+			Description:    `List all background agent tasks with their status and runtime.`,
 			Annotations: tools.ToolAnnotations{
 				Title:        "List Background Agents",
 				ReadOnlyHint: true,
 			},
 		},
 		{
-			Name:        ToolNameViewBackgroundAgent,
-			Category:    "transfer",
-			Description: `View the output and status of a specific background agent task by task ID. Returns live buffered output if still running, or the final result if complete.`,
-			Parameters:  tools.MustSchemaFor[ViewBackgroundAgentArgs](),
+			Name:           ToolNameViewBackgroundAgent,
+			RuntimeHandler: ToolNameViewBackgroundAgent,
+			Category:       "transfer",
+			Description:    `View the output and status of a specific background agent task by task ID. Returns live buffered output if still running, or the final result if complete.`,
+			Parameters:     tools.MustSchemaFor[ViewBackgroundAgentArgs](),
 			Annotations: tools.ToolAnnotations{
 				Title:        "View Background Agent",
 				ReadOnlyHint: true,
 			},
 		},
 		{
-			Name:        ToolNameStopBackgroundAgent,
-			Category:    "transfer",
-			Description: `Stop a running background agent task by task ID.`,
-			Parameters:  tools.MustSchemaFor[StopBackgroundAgentArgs](),
+			Name:           ToolNameWaitBackgroundAgents,
+			RuntimeHandler: ToolNameWaitBackgroundAgents,
+			Category:       "transfer",
+			Description:    `Wait for all specified background agent tasks to finish and return their statuses and bounded outputs in task_ids order. Use this to join concurrent tasks instead of polling. Failed or stopped tasks do not end the wait early. Already-finished tasks return immediately. The timeout is shared by the whole group; timeout or cancellation of the wait does not stop the tasks. Check all_done before continuing dependent work; use view_background_agent for truncated output.`,
+			Parameters:     tools.MustSchemaFor[WaitBackgroundAgentsArgs](),
+			Annotations: tools.ToolAnnotations{
+				Title:        "Wait for Background Agents",
+				ReadOnlyHint: true,
+			},
+		},
+		{
+			Name:           ToolNameStopBackgroundAgent,
+			RuntimeHandler: ToolNameStopBackgroundAgent,
+			Category:       "transfer",
+			Description:    `Stop a running background agent task by task ID.`,
+			Parameters:     tools.MustSchemaFor[StopBackgroundAgentArgs](),
 			Annotations: tools.ToolAnnotations{
 				Title: "Stop Background Agent",
 			},

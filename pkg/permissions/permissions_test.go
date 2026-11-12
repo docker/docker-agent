@@ -1,6 +1,7 @@
 package permissions
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -545,6 +546,10 @@ func TestMatchGlob(t *testing.T) {
 
 		// Wildcards
 		{"*", "anything", true},
+		{"*", "", true},
+		{"sudo*", "sudo rm -rf /", true},
+		{"sudo*", "su rm -rf /", false},
+		{"foo**", "foobar", true},
 		{"???", "abc", true},
 		{"???", "abcd", false},
 
@@ -709,6 +714,11 @@ func TestArgToString(t *testing.T) {
 		{"bool false", false, "false"},
 		{"float64 integer", float64(42), "42"},
 		{"float64 decimal", float64(3.14), "3.14"},
+		{"float64 negative zero", math.Copysign(0, -1), "-0"},
+		{"float64 infinity", math.Inf(1), "+Inf"},
+		{"float64 negative infinity", math.Inf(-1), "-Inf"},
+		{"float64 NaN", math.NaN(), "NaN"},
+		{"float64 exponent", float64(1e20), "1e+20"},
 		{"int", 42, "42"},
 		{"int64", int64(42), "42"},
 		{"nil", nil, "<nil>"},

@@ -7,10 +7,11 @@ import (
 	ragtypes "github.com/docker/docker-agent/pkg/rag/types"
 )
 
-// ragEventForwarder returns a callback that converts RAG manager events to runtime events.
-func ragEventForwarder(ragName string, r *LocalRuntime, sendEvent func(Event)) ragtypes.EventCallback {
+// forwardRAGEvents returns a callback that converts RAG manager events to
+// runtime events attributed to the agent named by owner().
+func forwardRAGEvents(ragName string, owner func() string, sendEvent func(Event)) ragtypes.EventCallback {
 	return func(ragEvent ragtypes.Event) {
-		agentName := r.currentAgentName()
+		agentName := owner()
 		slog.Debug("Forwarding RAG event", "type", ragEvent.Type, "rag", ragName, "agent", agentName)
 
 		switch ragEvent.Type {
