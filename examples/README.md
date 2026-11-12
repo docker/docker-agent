@@ -221,6 +221,7 @@ remote MCP endpoints.
 | [`together.yaml`](together.yaml) | Together AI open-model inference (`togetherai`). |
 | [`huggingface.yaml`](huggingface.yaml) | Hugging Face Inference Providers open-model router. |
 | [`moonshot.yaml`](moonshot.yaml) | Moonshot AI Kimi provider (`moonshotai`). |
+| [`nebius.yaml`](nebius.yaml) | Nebius Token Factory open-model inference (`nebius`). |
 | [`vercel.yaml`](vercel.yaml) | Vercel AI Gateway multi-provider router. |
 | [`cloudgpu.yaml`](cloudgpu.yaml) | CloudGPU OpenAI-compatible provider (`cloudgpu`). |
 | [`obscurify.yaml`](obscurify.yaml) | Obscurify.ai multi-model provider (`obscurify`). |

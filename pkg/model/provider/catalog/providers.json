@@ -332,7 +332,7 @@
     "name": "nebius",
     "merge_consecutive_messages": true,
     "api_type": "openai",
-    "base_url": "https://api.studio.nebius.com/v1",
+    "base_url": "https://api.tokenfactory.nebius.com/v1",
     "token_env_vars": [
       "NEBIUS_API_KEY"
     ]
