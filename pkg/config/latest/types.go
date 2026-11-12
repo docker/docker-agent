@@ -2336,8 +2336,14 @@ func (s *RAGStrategyConfig) UnmarshalJSON(data []byte) error {
 		delete(raw, "chunking")
 	}
 
-	if limit, ok := raw["limit"]; ok {
-		n, err := parseRAGStrategyLimit(limit)
+	if _, ok := raw["limit"]; ok {
+		// Read the limit from its token, as a float64 rounds large numbers
+		// and some fractions.
+		var tokens map[string]json.RawMessage
+		if err := json.Unmarshal(data, &tokens); err != nil {
+			return err
+		}
+		n, err := parseRAGStrategyLimit(tokens["limit"])
 		if err != nil {
 			return err
 		}
@@ -2441,11 +2447,13 @@ func coerceToInt(v any) int {
 	}
 }
 
-// parseRAGStrategyLimit reads a strategy limit from a decoded YAML or JSON
-// value. The schema declares an integer of at least 1, and a smaller value
-// panics when the results are sliced to the limit. YAML decodes a whole
-// number as uint64 (int64 when negative, int with a !!int tag), JSON as
-// float64. An empty value is unset and gives 0.
+// parseRAGStrategyLimit reads a strategy limit from a decoded YAML value or a
+// raw JSON token. The schema declares an integer of at least 1, and a smaller
+// value panics when the results are sliced to the limit. YAML decodes an
+// integer as uint64 (int64 when negative, int with a !!int tag), and a decimal
+// as float64, which may already be rounded, so a decimal is rejected. JSON
+// passes the raw token, so a large number or a fraction is not rounded before
+// the check. An empty value is unset and gives 0.
 func parseRAGStrategyLimit(v any) (int, error) {
 	switch val := v.(type) {
 	case nil:
@@ -2458,14 +2466,21 @@ func parseRAGStrategyLimit(v any) (int, error) {
 		if val >= 1 && val <= math.MaxInt {
 			return int(val), nil
 		}
-	case float64:
-		if val == math.Trunc(val) && val >= 1 && val < math.MaxInt {
-			return int(val), nil
+	case json.RawMessage:
+		token := string(val)
+		if token == "null" {
+			return 0, nil
 		}
+		if n, err := strconv.ParseInt(token, 10, 64); err == nil && n >= 1 && n <= math.MaxInt {
+			return int(n), nil
+		}
+		v = token
+	case float64:
+		v = "a decimal number" // its value may be rounded, e.g. 1.0000000000000001
 	case string:
 		v = strconv.Quote(val) // keeps "10" from reading as a number in the error
 	}
-	return 0, fmt.Errorf("limit must be a whole number of at least 1, got %v", v)
+	return 0, fmt.Errorf("limit must be an integer of at least 1, got %v", v)
 }
 
 // RAGDatabaseConfig represents database configuration for RAG strategies.
